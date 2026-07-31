@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mft.protocol import MessageEnvelope
+from mft.protocol import UntypedEnvelope
 from mft.strategy import Strategy
 
 
@@ -15,5 +15,5 @@ class NoopStrategy(Strategy):
     async def on_stop(self) -> None:
         await self.log("NoopStrategy stopped")
 
-    async def on_ticker(self, msg: MessageEnvelope) -> None:
+    async def on_ticker(self, msg: UntypedEnvelope) -> None:
         await self.log(f"ticker: {msg.payload}", level="debug")

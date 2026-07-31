@@ -6,7 +6,7 @@ import os
 import signal
 
 from mft import configure_logging
-from mft.broker import BrokerClient
+from mft.broker import Broker
 from mft.strategy import Strategy
 
 SOURCE = "sts"
@@ -24,7 +24,7 @@ async def amain(strategy: Strategy | None = None) -> None:
         except NotImplementedError:
             pass
 
-    async with BrokerClient() as broker:
+    async with Broker() as broker:
         strat = strategy or NoopStrategy(
             broker, session_id=os.getenv("SESSION_ID")
         )

@@ -15,7 +15,7 @@ def configure_logging(name: str) -> logging.Logger:
 
 
 async def run_heartbeat_service(source: str) -> None:
-    from mft.broker import BrokerClient
+    from mft.broker import Broker
 
     logger = logging.getLogger(source)
     stop = asyncio.Event()
@@ -26,7 +26,7 @@ async def run_heartbeat_service(source: str) -> None:
         except NotImplementedError:
             pass
 
-    async with BrokerClient() as broker:
+    async with Broker() as broker:
         logger.info("%s started; heartbeat → Redis", source)
         await broker.heartbeat_loop(
             source,

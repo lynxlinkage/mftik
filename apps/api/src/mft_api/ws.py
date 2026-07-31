@@ -4,8 +4,8 @@ import asyncio
 import logging
 
 from fastapi import WebSocket, WebSocketDisconnect
-from mft.broker import BrokerClient
-from mft.protocol import MessageEnvelope, Topics
+from mft.broker import Broker
+from mft.protocol import Log, LogEnvelope, Topics
 
 logger = logging.getLogger(__name__)
 
@@ -16,18 +16,18 @@ async def session_log_bridge(websocket: WebSocket, session_id: str) -> None:
     channel = Topics.log_session(session_id)
     stop = asyncio.Event()
 
-    welcome = MessageEnvelope(
+    welcome = LogEnvelope.wrap(
+        Log(level="info", message=f"Session {session_id} connected"),
         type="log",
         source="api",
         session_id=session_id,
-        payload={"level": "info", "message": f"Session {session_id} connected"},
     )
     await websocket.send_text(welcome.to_json())
 
-    async with BrokerClient() as broker:
+    async with Broker() as broker:
 
         async def forward() -> None:
-            async for envelope in broker.listen([channel], stop=stop):
+            async for envelope in broker.subscribe(channel, stop=stop):
                 try:
                     await websocket.send_text(envelope.to_json())
                 except Exception:
@@ -43,11 +43,11 @@ async def session_log_bridge(websocket: WebSocket, session_id: str) -> None:
                 data = await websocket.receive_text()
                 await broker.publish(
                     channel,
-                    MessageEnvelope(
+                    LogEnvelope.wrap(
+                        Log(level="debug", message=data),
                         type="log",
                         source="api.client",
                         session_id=session_id,
-                        payload={"level": "debug", "message": data},
                     ),
                 )
         except WebSocketDisconnect:

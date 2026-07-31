@@ -1,65 +1,113 @@
+"""Async Redis broker — pub/sub and request-reply IPC."""
+
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable, Sequence
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from typing import Any
 
 import redis.asyncio as redis
-from redis.asyncio.client import PubSub
 
 from mft.broker.config import BrokerConfig
-from mft.protocol import MessageEnvelope
+from mft.broker.errors import BrokerNotConnectedError, RequestTimeoutError
+from mft.broker.request import IncomingRequest
+from mft.protocol import (
+    Envelope,
+    Heartbeat,
+    HeartbeatEnvelope,
+    Topics,
+    UntypedEnvelope,
+)
 
 logger = logging.getLogger(__name__)
 
+Handler = Callable[[IncomingRequest], Awaitable[None]]
 
-class BrokerClient:
-    """Async Redis broker: Pub/Sub + Streams (point-to-point)."""
 
-    def __init__(self, config: BrokerConfig | None = None) -> None:
+class Broker:
+    """Async Redis IPC client.
+
+    Two primitives:
+
+    1. **Pub/Sub** — fan-out broadcast via Redis Pub/Sub
+       (``publish`` / ``subscribe``).
+    2. **Request-reply** — 1:1 RPC via Redis lists
+       (``request`` / ``serve``).
+    """
+
+    def __init__(
+        self,
+        config: BrokerConfig | None = None,
+        *,
+        redis_client: redis.Redis | None = None,
+    ) -> None:
         self.config = config or BrokerConfig.from_env()
-        self._redis: redis.Redis | None = None
+        self._redis = redis_client
+        self._owns_redis = redis_client is None
+
+    # --- lifecycle ---------------------------------------------------------
 
     @property
     def redis(self) -> redis.Redis:
         if self._redis is None:
-            raise RuntimeError("BrokerClient is not connected; call connect() first")
+            raise BrokerNotConnectedError(
+                "Broker is not connected; call connect() first"
+            )
         return self._redis
 
     async def connect(self) -> None:
-        self._redis = redis.from_url(self.config.redis_url, decode_responses=True)
+        if self._redis is None:
+            self._redis = redis.from_url(
+                self.config.redis_url, decode_responses=True
+            )
+            self._owns_redis = True
         await self._redis.ping()
         logger.info("Connected to Redis at %s", self.config.redis_url)
 
     async def close(self) -> None:
-        if self._redis is not None:
+        if self._redis is not None and self._owns_redis:
             await self._redis.aclose()
             self._redis = None
 
-    async def __aenter__(self) -> BrokerClient:
+    async def __aenter__(self) -> Broker:
         await self.connect()
         return self
 
     async def __aexit__(self, *args: object) -> None:
         await self.close()
 
+    # --- key helpers -------------------------------------------------------
+
+    def _rpc_queue(self, subject: str) -> str:
+        return f"{self.config.key_prefix}:rpc:{subject}"
+
+    def _rpc_reply(self, request_id: str) -> str:
+        return f"{self.config.key_prefix}:rpc:reply:{request_id}"
+
     # --- Pub/Sub -----------------------------------------------------------
 
-    async def publish(self, channel: str, envelope: MessageEnvelope) -> int:
-        return int(await self.redis.publish(channel, envelope.to_json()))
+    async def publish(self, topic: str, envelope: Envelope[Any]) -> int:
+        """Publish an envelope to a pub/sub topic (fan-out)."""
+        return int(await self.redis.publish(topic, envelope.to_json()))
 
-    async def subscribe(self, channels: Sequence[str]) -> PubSub:
-        pubsub = self.redis.pubsub()
-        await pubsub.subscribe(*channels)
-        return pubsub
-
-    async def listen(
+    async def subscribe(
         self,
-        channels: Sequence[str],
+        topics: str | Sequence[str],
         *,
         stop: asyncio.Event | None = None,
-    ) -> AsyncIterator[MessageEnvelope]:
-        pubsub = await self.subscribe(channels)
+    ) -> AsyncIterator[UntypedEnvelope]:
+        """Yield envelopes from one or more pub/sub topics until ``stop``.
+
+        Uses Redis Pub/Sub. Messages published while not subscribed are lost.
+        """
+        channel_list = (topics,) if isinstance(topics, str) else tuple(topics)
+        if not channel_list:
+            raise ValueError("subscribe requires at least one topic")
+
+        pubsub = self.redis.pubsub()
+        await pubsub.subscribe(*channel_list)
         try:
             while stop is None or not stop.is_set():
                 message = await pubsub.get_message(
@@ -71,51 +119,87 @@ class BrokerClient:
                 data = message.get("data")
                 if data is None:
                     continue
-                yield MessageEnvelope.from_json(data)
+                yield UntypedEnvelope.from_json(data)
         finally:
-            await pubsub.unsubscribe(*channels)
+            await pubsub.unsubscribe(*channel_list)
             await pubsub.aclose()
 
-    # --- Point-to-point (Redis Streams) ------------------------------------
+    # --- Request-reply -----------------------------------------------------
 
-    async def send(self, stream: str, envelope: MessageEnvelope) -> str:
-        return str(await self.redis.xadd(stream, {"data": envelope.to_json()}))
-
-    async def ensure_group(self, stream: str, group: str) -> None:
-        try:
-            await self.redis.xgroup_create(stream, group, id="0", mkstream=True)
-        except redis.ResponseError as exc:
-            if "BUSYGROUP" not in str(exc):
-                raise
-
-    async def receive(
+    async def request(
         self,
-        stream: str,
-        group: str,
-        consumer: str,
+        subject: str,
+        envelope: Envelope[Any],
         *,
-        count: int = 10,
-        block_ms: int = 1000,
-    ) -> list[MessageEnvelope]:
-        await self.ensure_group(stream, group)
-        results = await self.redis.xreadgroup(
-            groupname=group,
-            consumername=consumer,
-            streams={stream: ">"},
-            count=count,
-            block=block_ms,
+        timeout: float | None = None,
+    ) -> UntypedEnvelope:
+        """Send a request and wait for a single reply.
+
+        The envelope's ``id`` is used as the correlation id. A temporary
+        reply list key is written into ``reply_to`` before enqueueing.
+        """
+        wait = self.config.request_timeout if timeout is None else timeout
+        reply_key = self._rpc_reply(envelope.id)
+        outbound = (
+            envelope
+            if envelope.reply_to == reply_key
+            else envelope.model_copy(update={"reply_to": reply_key})
         )
-        envelopes: list[MessageEnvelope] = []
-        if not results:
-            return envelopes
-        for _stream_name, messages in results:
-            for msg_id, fields in messages:
-                raw = fields.get("data")
-                if raw is None:
+
+        queue = self._rpc_queue(subject)
+        await self.redis.rpush(queue, outbound.to_json())
+
+        # BLPOP timeout is whole seconds; poll until the deadline for accuracy.
+        deadline = time.monotonic() + wait
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RequestTimeoutError(subject, outbound.id, wait)
+                result = await self.redis.blpop(reply_key, timeout=1)
+                if result is None:
                     continue
-                envelopes.append(MessageEnvelope.from_json(raw))
-                await self.redis.xack(stream, group, msg_id)
-        return envelopes
+                _key, data = result
+                return UntypedEnvelope.from_json(data)
+        finally:
+            await self.redis.delete(reply_key)
+
+    async def serve(
+        self,
+        subject: str,
+        *,
+        stop: asyncio.Event | None = None,
+    ) -> AsyncIterator[IncomingRequest]:
+        """Yield incoming requests on a request-reply subject.
+
+        Call ``await req.reply(envelope)`` to respond. Competing consumers
+        on the same subject share work via Redis list ``BLPOP``.
+        """
+        queue = self._rpc_queue(subject)
+        while stop is None or not stop.is_set():
+            result = await self.redis.blpop(queue, timeout=1)
+            if result is None:
+                continue
+            _key, data = result
+            envelope = UntypedEnvelope.from_json(data)
+            yield IncomingRequest(self, envelope)
+
+    async def serve_handler(
+        self,
+        subject: str,
+        handler: Handler,
+        *,
+        stop: asyncio.Event | None = None,
+    ) -> None:
+        """Run ``handler`` for each incoming request until ``stop``."""
+        async for req in self.serve(subject, stop=stop):
+            await handler(req)
+
+    async def _send_reply(self, reply_to: str, envelope: Envelope[Any]) -> None:
+        await self.redis.rpush(reply_to, envelope.to_json())
+        await self.redis.expire(reply_to, self.config.reply_ttl_seconds)
+
+    # --- convenience -------------------------------------------------------
 
     async def heartbeat_loop(
         self,
@@ -125,14 +209,12 @@ class BrokerClient:
         stop: asyncio.Event | None = None,
         on_tick: Callable[[], None] | None = None,
     ) -> None:
-        """Publish periodic heartbeats until stop is set."""
-        from mft.protocol import Topics
-
+        """Publish periodic heartbeats on the heartbeat pub/sub topic."""
         while stop is None or not stop.is_set():
-            envelope = MessageEnvelope(
+            envelope = HeartbeatEnvelope.wrap(
+                Heartbeat(),
                 type="heartbeat",
                 source=source,
-                payload={"status": "ok"},
             )
             await self.publish(Topics.HEARTBEAT, envelope)
             if on_tick is not None:
@@ -144,3 +226,7 @@ class BrokerClient:
                     await asyncio.sleep(interval)
             except TimeoutError:
                 continue
+
+
+# Back-compat alias used during the rename.
+BrokerClient = Broker

@@ -6,8 +6,18 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class BrokerConfig:
+    """Redis broker connection and IPC defaults."""
+
     redis_url: str = "redis://localhost:6379/0"
+    key_prefix: str = "mft"
+    request_timeout: float = 5.0
+    reply_ttl_seconds: int = 60
 
     @classmethod
     def from_env(cls) -> BrokerConfig:
-        return cls(redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+        return cls(
+            redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+            key_prefix=os.getenv("BROKER_KEY_PREFIX", "mft"),
+            request_timeout=float(os.getenv("BROKER_REQUEST_TIMEOUT", "5")),
+            reply_ttl_seconds=int(os.getenv("BROKER_REPLY_TTL", "60")),
+        )
