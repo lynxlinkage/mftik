@@ -1,0 +1,36 @@
+:root {
+	--bg: #0f1419;
+	--surface: #1a2332;
+	--border: #2a3544;
+	--text: #e7ecf3;
+	--muted: #8b9bb4;
+	--accent: #3d9cf0;
+	--ok: #3ecf8e;
+	--warn: #f0b429;
+	--err: #f07178;
+	--font: "IBM Plex Mono", "SF Mono", "Menlo", monospace;
+	--display: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	min-height: 100%;
+	background: radial-gradient(ellipse at top, #1a2740 0%, var(--bg) 55%);
+	color: var(--text);
+	font-family: var(--display);
+}
+
+body {
+	min-height: 100vh;
+}
+
+a {
+	color: var(--accent);
+}
