@@ -1,245 +1,147 @@
 <script lang="ts">
-	import { onDestroy } from 'svelte';
-	import { connectSessionLog, newSessionId, type LogEntry } from '$lib/logging/session';
+	import { onMount } from 'svelte';
+	import { api, type DomainStats } from '$lib/api';
 
-	let sessionId = $state(newSessionId());
-	let status = $state<'idle' | 'connecting' | 'open' | 'closed' | 'error'>('idle');
-	let logs = $state<LogEntry[]>([]);
-	let disconnect: (() => void) | null = null;
+	let domains = $state<DomainStats[]>([]);
+	let error = $state<string | null>(null);
+	let loading = $state(true);
 
-	function start() {
-		stop();
-		logs = [];
-		disconnect = connectSessionLog(
-			sessionId,
-			(entry) => {
-				logs = [...logs, entry].slice(-500);
-			},
-			(s) => {
-				status = s;
-			}
-		);
-	}
-
-	function stop() {
-		disconnect?.();
-		disconnect = null;
-		if (status !== 'idle') status = 'closed';
-	}
-
-	function regenerate() {
-		stop();
-		sessionId = newSessionId();
-		logs = [];
-		status = 'idle';
-	}
-
-	onDestroy(stop);
-
-	function formatTs(ts: number): string {
-		return new Date(ts * 1000).toLocaleTimeString();
-	}
-
-	function levelClass(level: string): string {
-		switch (level) {
-			case 'error':
-				return 'err';
-			case 'warn':
-			case 'warning':
-				return 'warn';
-			case 'debug':
-				return 'muted';
-			default:
-				return 'ok';
+	async function refresh() {
+		loading = true;
+		error = null;
+		try {
+			const res = await api.stats();
+			domains = res.domains;
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			loading = false;
 		}
+	}
+
+	onMount(refresh);
+
+	function healthLabel(h: boolean | null): string {
+		if (h === true) return 'up';
+		if (h === false) return 'down';
+		return 'n/a';
 	}
 </script>
 
-<main>
-	<header>
-		<h1>MFT</h1>
-		<p>Live logging session</p>
-	</header>
+<div class="page-head">
+	<div>
+		<h1>Home</h1>
+		<p>Live and historical session counts across STS, TD, and MD.</p>
+	</div>
+	<button type="button" class="secondary" onclick={refresh} disabled={loading}>
+		{loading ? 'Loading…' : 'Refresh'}
+	</button>
+</div>
 
-	<section class="controls">
-		<label>
-			Session ID
-			<input bind:value={sessionId} disabled={status === 'open' || status === 'connecting'} />
-		</label>
-		<div class="actions">
-			<button type="button" onclick={start} disabled={status === 'open' || status === 'connecting'}>
-				Connect
-			</button>
-			<button type="button" class="secondary" onclick={stop} disabled={status !== 'open' && status !== 'connecting'}>
-				Disconnect
-			</button>
-			<button type="button" class="secondary" onclick={regenerate}>New session</button>
-		</div>
-		<span class="status" data-status={status}>status: {status}</span>
-	</section>
+{#if error}
+	<div class="error-banner">{error}</div>
+{/if}
 
-	<section class="log-panel" aria-live="polite">
-		{#if logs.length === 0}
-			<p class="empty">Connect to stream logs from <code>ws/&lt;session_id&gt;</code></p>
-		{:else}
-			<ul>
-				{#each logs as entry (entry.id)}
-					<li>
-						<span class="ts">{formatTs(entry.ts)}</span>
-						<span class="level {levelClass(entry.level)}">{entry.level}</span>
-						<span class="source">{entry.source}</span>
-						<span class="msg">{entry.message}</span>
-					</li>
-				{/each}
-			</ul>
+<div class="stats">
+	{#each domains as d (d.domain)}
+		<a class="stat" href={`/${d.domain}`} data-sveltekit-preload-data="hover">
+			<header>
+				<span class="domain">{d.domain}</span>
+				<span class="badge" class:live={d.healthy === true} class:down={d.healthy === false}>
+					{healthLabel(d.healthy)}
+				</span>
+			</header>
+			<div class="nums">
+				<div>
+					<span class="n">{d.live}</span>
+					<span class="l">live</span>
+				</div>
+				<div>
+					<span class="n muted-n">{d.done}</span>
+					<span class="l">history</span>
+				</div>
+			</div>
+		</a>
+	{:else}
+		{#if !loading && !error}
+			<p class="empty-state">No domain stats yet.</p>
 		{/if}
-	</section>
-</main>
+	{/each}
+</div>
 
 <style>
-	main {
-		max-width: 960px;
-		margin: 0 auto;
-		padding: 2.5rem 1.25rem 3rem;
-	}
-
-	header h1 {
-		font-family: var(--font);
-		font-size: 2.75rem;
-		letter-spacing: 0.08em;
-		margin: 0;
-	}
-
-	header p {
-		margin: 0.35rem 0 0;
-		color: var(--muted);
-	}
-
-	.controls {
-		margin-top: 2rem;
+	.stats {
 		display: grid;
-		gap: 0.85rem;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 1rem;
 	}
 
-	label {
+	.stat {
 		display: grid;
-		gap: 0.35rem;
-		font-size: 0.85rem;
-		color: var(--muted);
-	}
-
-	input {
-		font-family: var(--font);
-		background: var(--surface);
+		gap: 1.25rem;
+		padding: 1.25rem 1.2rem 1.15rem;
 		border: 1px solid var(--border);
-		color: var(--text);
-		padding: 0.65rem 0.75rem;
-		border-radius: 4px;
-		font-size: 1rem;
+		border-radius: var(--radius);
+		background:
+			linear-gradient(135deg, rgba(61, 156, 240, 0.08), transparent 45%),
+			linear-gradient(180deg, rgba(24, 32, 43, 0.95), rgba(14, 18, 26, 0.9));
+		color: inherit;
+		text-decoration: none;
+		transition:
+			border-color 180ms ease,
+			transform 180ms ease,
+			box-shadow 180ms ease;
 	}
 
-	.actions {
+	.stat:hover {
+		border-color: rgba(61, 156, 240, 0.45);
+		transform: translateY(-2px);
+		box-shadow: 0 10px 28px rgba(0, 0, 0, 0.25);
+		text-decoration: none;
+	}
+
+	header {
 		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
+		justify-content: space-between;
+		align-items: center;
 	}
 
-	button {
-		font-family: var(--display);
-		background: var(--accent);
-		color: #041018;
-		border: none;
-		padding: 0.55rem 1rem;
-		border-radius: 4px;
-		font-weight: 600;
-		cursor: pointer;
-	}
-
-	button:disabled {
-		opacity: 0.45;
-		cursor: not-allowed;
-	}
-
-	button.secondary {
-		background: transparent;
-		color: var(--text);
-		border: 1px solid var(--border);
-	}
-
-	.status {
+	.domain {
 		font-family: var(--font);
-		font-size: 0.8rem;
-		color: var(--muted);
+		font-size: 1.1rem;
+		letter-spacing: 0.16em;
+		text-transform: uppercase;
 	}
 
-	.status[data-status='open'] {
-		color: var(--ok);
-	}
-
-	.status[data-status='error'] {
-		color: var(--err);
-	}
-
-	.log-panel {
-		margin-top: 1.5rem;
-		background: linear-gradient(180deg, rgba(26, 35, 50, 0.95), rgba(15, 20, 25, 0.9));
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		min-height: 360px;
-		max-height: 60vh;
-		overflow: auto;
-		padding: 0.75rem;
-	}
-
-	.empty {
-		color: var(--muted);
-		font-family: var(--font);
-		font-size: 0.85rem;
-		padding: 1rem;
-	}
-
-	ul {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		font-family: var(--font);
-		font-size: 0.8rem;
-	}
-
-	li {
+	.nums {
 		display: grid;
-		grid-template-columns: 5.5rem 3.5rem 7rem 1fr;
-		gap: 0.6rem;
-		padding: 0.35rem 0.4rem;
-		border-bottom: 1px solid rgba(42, 53, 68, 0.6);
+		grid-template-columns: 1fr 1fr;
+		gap: 0.75rem;
 	}
 
-	.ts,
-	.source {
+	.n {
+		display: block;
+		font-family: var(--font);
+		font-size: 2rem;
+		line-height: 1;
+	}
+
+	.muted-n {
 		color: var(--muted);
 	}
 
-	.level.ok {
-		color: var(--ok);
-	}
-	.level.warn {
-		color: var(--warn);
-	}
-	.level.err {
-		color: var(--err);
-	}
-	.level.muted {
+	.l {
+		display: block;
+		margin-top: 0.35rem;
 		color: var(--muted);
+		font-size: 0.78rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
 	}
 
-	.msg {
-		word-break: break-word;
-	}
-
-	@media (max-width: 720px) {
-		li {
+	@media (max-width: 900px) {
+		.stats {
 			grid-template-columns: 1fr;
-			gap: 0.15rem;
 		}
 	}
 </style>

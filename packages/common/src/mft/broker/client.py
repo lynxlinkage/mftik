@@ -13,6 +13,7 @@ import redis.asyncio as redis
 from mft.broker.config import BrokerConfig
 from mft.broker.errors import BrokerNotConnectedError, RequestTimeoutError
 from mft.broker.request import IncomingRequest
+from mft.broker.stream import BidirectionalStream
 from mft.protocol import (
     Envelope,
     Heartbeat,
@@ -29,12 +30,14 @@ Handler = Callable[[IncomingRequest], Awaitable[None]]
 class Broker:
     """Async Redis IPC client.
 
-    Two primitives:
+    Three primitives:
 
     1. **Pub/Sub** — fan-out broadcast via Redis Pub/Sub
        (``publish`` / ``subscribe``).
     2. **Request-reply** — 1:1 RPC via Redis lists
        (``request`` / ``serve``).
+    3. **Bidirectional stream** — duplex channel = pub + sub
+       (``bistream``).
     """
 
     def __init__(
@@ -86,11 +89,42 @@ class Broker:
     def _rpc_reply(self, request_id: str) -> str:
         return f"{self.config.key_prefix}:rpc:reply:{request_id}"
 
+    def _log_buffer_key(self, topic: str) -> str:
+        return f"{self.config.key_prefix}:logbuf:{topic}"
+
     # --- Pub/Sub -----------------------------------------------------------
 
     async def publish(self, topic: str, envelope: Envelope[Any]) -> int:
         """Publish an envelope to a pub/sub topic (fan-out)."""
         return int(await self.redis.publish(topic, envelope.to_json()))
+
+    async def publish_log(
+        self,
+        topic: str,
+        envelope: Envelope[Any],
+        *,
+        maxlen: int = 500,
+        ttl_seconds: int = 86_400,
+    ) -> int:
+        """Publish a log line and append it to a Redis list for late subscribers.
+
+        Redis Pub/Sub alone drops messages when nobody is listening (e.g. UI
+        opens ``/ws/sts/...`` after deploy). The buffer is replayed on connect.
+        """
+        raw = envelope.to_json()
+        key = self._log_buffer_key(topic)
+        pipe = self.redis.pipeline()
+        pipe.rpush(key, raw)
+        pipe.ltrim(key, -maxlen, -1)
+        pipe.expire(key, ttl_seconds)
+        pipe.publish(topic, raw)
+        results = await pipe.execute()
+        return int(results[-1])
+
+    async def fetch_log_buffer(self, topic: str) -> list[str]:
+        """Return buffered log JSON lines for ``topic`` (oldest → newest)."""
+        rows = await self.redis.lrange(self._log_buffer_key(topic), 0, -1)
+        return list(rows)
 
     async def subscribe(
         self,
@@ -100,7 +134,8 @@ class Broker:
     ) -> AsyncIterator[UntypedEnvelope]:
         """Yield envelopes from one or more pub/sub topics until ``stop``.
 
-        Uses Redis Pub/Sub. Messages published while not subscribed are lost.
+        Uses Redis Pub/Sub. Messages published while not subscribed are lost
+        unless they were also written via :meth:`publish_log`.
         """
         channel_list = (topics,) if isinstance(topics, str) else tuple(topics)
         if not channel_list:
@@ -123,6 +158,29 @@ class Broker:
         finally:
             await pubsub.unsubscribe(*channel_list)
             await pubsub.aclose()
+
+    def bistream(
+        self,
+        *,
+        tx: str,
+        rx: str,
+    ) -> BidirectionalStream:
+        """Open a bidirectional stream (publish on ``tx``, subscribe on ``rx``)."""
+        return BidirectionalStream(self, tx=tx, rx=rx)
+
+    def bistream_pair(
+        self,
+        name: str,
+    ) -> tuple[BidirectionalStream, BidirectionalStream]:
+        """Open both ends of a named bistream: ``(up, down)``.
+
+        ``up`` publishes ``bistream.{name}.up`` and receives ``.down``;
+        ``down`` is the complement.
+        """
+        up_topic, down_topic = BidirectionalStream.topics(name)
+        up = self.bistream(tx=up_topic, rx=down_topic)
+        down = self.bistream(tx=down_topic, rx=up_topic)
+        return up, down
 
     # --- Request-reply -----------------------------------------------------
 

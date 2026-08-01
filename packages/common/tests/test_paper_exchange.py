@@ -8,6 +8,7 @@ from mft.exchange import (
     ExchangeNotConnectedError,
     OrderStatus,
     OrderType,
+    PaperAuthError,
     PaperExchange,
     PlaceOrderRequest,
     Side,
@@ -22,6 +23,10 @@ async def exchange() -> PaperExchange:
         seed=42,
     ) as ex:
         yield ex
+
+
+def _private(exchange: PaperExchange, key: str = "key-a"):
+    return exchange.private(api_key=key, api_secret=f"secret-for-{key}")
 
 
 @pytest.mark.asyncio
@@ -63,7 +68,7 @@ async def test_public_stream_ticker(exchange: PaperExchange) -> None:
 
 @pytest.mark.asyncio
 async def test_private_market_order_and_streams(exchange: PaperExchange) -> None:
-    private = exchange.private()
+    private = _private(exchange)
     await private.connect()
 
     fills: asyncio.Queue = asyncio.Queue()
@@ -111,11 +116,10 @@ async def test_private_market_order_and_streams(exchange: PaperExchange) -> None
 
 @pytest.mark.asyncio
 async def test_limit_rest_cancel(exchange: PaperExchange) -> None:
-    private = exchange.private()
+    private = _private(exchange)
     await private.connect()
 
     ticker = exchange.get_ticker("BTCUSDT")
-    # Far-away buy limit should rest.
     order = await private.place_order(
         PlaceOrderRequest(
             symbol="BTCUSDT",
@@ -146,7 +150,7 @@ async def test_requires_connect() -> None:
 @pytest.mark.asyncio
 async def test_public_and_private_share_engine(exchange: PaperExchange) -> None:
     public = exchange.public()
-    private = exchange.private()
+    private = _private(exchange)
     await public.connect()
     await private.connect()
 
@@ -169,3 +173,31 @@ async def test_public_and_private_share_engine(exchange: PaperExchange) -> None:
     await task
     await public.close()
     await private.close()
+
+
+@pytest.mark.asyncio
+async def test_api_key_isolates_accounts(exchange: PaperExchange) -> None:
+    a = exchange.private(api_key="alice", api_secret="sa")
+    b = exchange.private(api_key="bob", api_secret="sb")
+    await a.connect()
+    await b.connect()
+
+    await a.place_market_order(
+        symbol="BTCUSDT", side=Side.BUY, qty=Decimal("0.01")
+    )
+    bal_a = {x.asset: x.free for x in await a.fetch_balances()}
+    bal_b = {x.asset: x.free for x in await b.fetch_balances()}
+    assert bal_a["BTC"] != bal_b["BTC"]
+    assert bal_b["BTC"] == Decimal("1")
+    await a.close()
+    await b.close()
+
+
+@pytest.mark.asyncio
+async def test_paper_auth_rejects_bad_secret(exchange: PaperExchange) -> None:
+    exchange.register_api("k1", "correct")
+    client = exchange.private(
+        api_key="k1", api_secret="wrong", auto_register=False
+    )
+    with pytest.raises(PaperAuthError):
+        await client.connect()

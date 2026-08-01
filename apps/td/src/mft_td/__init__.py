@@ -1,12 +1,5 @@
-from __future__ import annotations
+"""MFT trading domain — API control-plane RPC (session/algo later)."""
 
-import asyncio
+from mft_td.app import main
 
-from mft import configure_logging, run_heartbeat_service
-
-SOURCE = "td"
-
-
-def main() -> None:
-    configure_logging(SOURCE)
-    asyncio.run(run_heartbeat_service(SOURCE))
+__all__ = ["main"]

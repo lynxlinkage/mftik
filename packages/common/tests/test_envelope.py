@@ -68,4 +68,6 @@ def test_envelope_is_frozen() -> None:
 
 
 def test_log_session_topic() -> None:
-    assert Topics.log_session("abc") == "log.session.abc"
+    assert Topics.log_sts("abc") == "log.sts.abc"
+    assert Topics.log_td(7) == "log.td.7"
+    assert Topics.log_session("abc") == "log.sts.abc"

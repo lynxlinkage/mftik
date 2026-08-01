@@ -10,6 +10,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 COPY packages ./packages
 COPY apps ./apps
+COPY scripts ./scripts
 
 RUN uv sync --package mft-db --frozen --no-dev
 

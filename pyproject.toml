@@ -31,4 +31,12 @@ ignore = ["UP046"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages", "apps"]
-pythonpath = ["packages/common/src", "packages/db/src"]
+pythonpath = [
+    "packages/common/src",
+    "packages/db/src",
+    "apps/td/src",
+    "apps/api/src",
+    "apps/md/src",
+    "apps/sts/src",
+    "apps/md/src",
+]

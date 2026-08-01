@@ -2,19 +2,45 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from mft.broker import Broker
 
-from mft_api.routes.health import router as health_router
-from mft_api.ws import session_log_bridge
+from mft_api.routes import (
+    apis_router,
+    audits_router,
+    health_router,
+    md_router,
+    stats_router,
+    sts_router,
+    td_router,
+)
+from mft_api.ws import sts_log_bridge, td_log_bridge
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
+logger = logging.getLogger("mft_api")
 
-app = FastAPI(title="MFT API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    broker = Broker()
+    await broker.connect()
+    app.state.broker = broker
+    logger.info("API broker connected")
+    try:
+        yield
+    finally:
+        await broker.close()
+        app.state.broker = None
+        logger.info("API broker closed")
+
+
+app = FastAPI(title="MFT API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,11 +49,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(health_router)
+app.include_router(stats_router)
+app.include_router(apis_router)
+app.include_router(sts_router)
+app.include_router(td_router)
+app.include_router(md_router)
+app.include_router(audits_router)
 
 
-@app.websocket("/ws/{session_id}")
-async def ws_session(websocket: WebSocket, session_id: str) -> None:
-    await session_log_bridge(websocket, session_id)
+@app.websocket("/ws/sts/{session_id}")
+async def ws_sts_session(websocket: WebSocket, session_id: str) -> None:
+    await sts_log_bridge(websocket, session_id)
+
+
+@app.websocket("/ws/td/{api_id}")
+async def ws_td_session(websocket: WebSocket, api_id: int) -> None:
+    await td_log_bridge(websocket, api_id)
 
 
 def run() -> None:

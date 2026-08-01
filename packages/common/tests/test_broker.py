@@ -4,7 +4,13 @@ import asyncio
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig, IncomingRequest, RequestTimeoutError
+from mft.broker import (
+    BidirectionalStream,
+    Broker,
+    BrokerConfig,
+    IncomingRequest,
+    RequestTimeoutError,
+)
 from mft.protocol import Envelope, UntypedEnvelope
 
 
@@ -51,6 +57,48 @@ async def test_pubsub_roundtrip(broker: Broker) -> None:
     assert got.type == "demo"
     assert got.payload == {"n": 1}
     assert got.id == sent.id
+
+
+@pytest.mark.asyncio
+async def test_publish_log_buffers_for_late_subscribers(broker: Broker) -> None:
+    topic = "log.sts.late"
+    first = Envelope[dict].wrap(
+        {"level": "info", "message": "before connect"},
+        type="log",
+        source="sts",
+        session_id="late",
+    )
+    await broker.publish_log(topic, first)
+
+    buffered = await broker.fetch_log_buffer(topic)
+    assert len(buffered) == 1
+    assert '"before connect"' in buffered[0]
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    received: asyncio.Future[UntypedEnvelope] = loop.create_future()
+
+    async def reader() -> None:
+        async for env in broker.subscribe(topic, stop=stop):
+            if not received.done():
+                received.set_result(env)
+            break
+        stop.set()
+
+    task = asyncio.create_task(reader())
+    await asyncio.sleep(0.05)
+
+    second = Envelope[dict].wrap(
+        {"level": "info", "message": "live"},
+        type="log",
+        source="sts",
+        session_id="late",
+    )
+    await broker.publish_log(topic, second)
+    got = await asyncio.wait_for(received, timeout=2)
+    await task
+    assert got.payload == {"level": "info", "message": "live"}
+    assert len(await broker.fetch_log_buffer(topic)) == 2
 
 
 @pytest.mark.asyncio
@@ -127,3 +175,44 @@ async def test_serve_handler(broker: Broker) -> None:
     await task
 
     assert response.payload == {"pong": True}
+
+
+@pytest.mark.asyncio
+async def test_bistream_roundtrip(broker: Broker) -> None:
+    up, down = broker.bistream_pair("session-1")
+    loop = asyncio.get_running_loop()
+    got: asyncio.Future[UntypedEnvelope] = loop.create_future()
+
+    async def reader() -> None:
+        async with down:
+            async for env in down:
+                if not got.done():
+                    got.set_result(env)
+                break
+
+    task = asyncio.create_task(reader())
+    await asyncio.sleep(0.05)
+
+    async with up:
+        sent = Envelope[dict].wrap(
+            {"hello": "sts"},
+            type="session.msg",
+            source="td",
+        )
+        await up.send(sent)
+
+    received = await asyncio.wait_for(got, timeout=2)
+    await task
+
+    assert received.type == "session.msg"
+    assert received.payload == {"hello": "sts"}
+    assert received.id == sent.id
+
+
+@pytest.mark.asyncio
+async def test_bistream_peer_swap(broker: Broker) -> None:
+    up_topic, down_topic = BidirectionalStream.topics("x")
+    a = broker.bistream(tx=up_topic, rx=down_topic)
+    b = a.peer()
+    assert b.tx == a.rx
+    assert b.rx == a.tx

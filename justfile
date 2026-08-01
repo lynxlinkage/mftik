@@ -21,6 +21,10 @@ lint:
 migrate revision="head":
     uv run --all-packages mft-db-migrate {{revision}}
 
+# Seed dev user + two paper APIs (idempotent)
+seed:
+    uv run --all-packages python scripts/seed_paper_apis.py
+
 # Autogenerate a migration (message required)
 makemigration message:
     uv run --all-packages alembic -c packages/db/alembic.ini revision --autogenerate -m "{{message}}"

@@ -89,18 +89,20 @@ class PaperExchange:
                 )
                 self._mid[symbol] = mid
 
-        self._balances: dict[str, dict[str, Decimal]] = {
-            "default": dict(
-                initial_balances
-                or {
-                    "USDT": Decimal("100000"),
-                    "BTC": Decimal("1"),
-                    "ETH": Decimal("10"),
-                }
-            )
-        }
+        self._default_balances = dict(
+            initial_balances
+            or {
+                "USDT": Decimal("100000"),
+                "BTC": Decimal("1"),
+                "ETH": Decimal("10"),
+            }
+        )
+        # api_key → secret (paper accounts are keyed by api_key)
+        self._api_secrets: dict[str, str] = {}
+        self._api_passphrases: dict[str, str | None] = {}
+        self._balances: dict[str, dict[str, Decimal]] = {}
         self._orders: dict[str, Order] = {}
-        self._open_by_account: dict[str, set[str]] = {"default": set()}
+        self._open_by_account: dict[str, set[str]] = {}
 
         self._ticker_subs: dict[str, set[EventStream[Ticker]]] = {}
         self._trade_subs: dict[str, set[EventStream[Trade]]] = {}
@@ -156,14 +158,71 @@ class PaperExchange:
 
         return PaperPublicClient(self)
 
-    def private(self, account: str = "default") -> PaperPrivateClient:
+    def register_api(
+        self,
+        api_key: str,
+        api_secret: str,
+        *,
+        passphrase: str | None = None,
+        balances: dict[str, Decimal] | None = None,
+    ) -> None:
+        """Register / upsert a paper API credential → isolated account."""
+        if not api_key or not api_secret:
+            raise OrderError("api_key and api_secret are required")
+        self._api_secrets[api_key] = api_secret
+        self._api_passphrases[api_key] = passphrase
+        self._ensure_account(api_key, balances)
+
+    def authenticate(
+        self,
+        api_key: str,
+        api_secret: str,
+        *,
+        passphrase: str | None = None,
+    ) -> None:
+        """Validate paper credentials (called from private client connect)."""
+        from mft.exchange.paper.private import PaperAuthError
+
+        expected = self._api_secrets.get(api_key)
+        if expected is None:
+            raise PaperAuthError(f"unknown paper api_key={api_key!r}")
+        if expected != api_secret:
+            raise PaperAuthError("invalid paper api_secret")
+        if self._api_passphrases.get(api_key) != passphrase:
+            raise PaperAuthError("invalid paper passphrase")
+
+    def private(
+        self,
+        *,
+        api_key: str,
+        api_secret: str,
+        passphrase: str | None = None,
+        auto_register: bool = True,
+    ) -> PaperPrivateClient:
+        """Create a private client for ``api_key`` (isolated paper account)."""
         from mft.exchange.paper.private import PaperPrivateClient
 
-        if account not in self._balances:
-            # Clone default balances for new accounts.
-            self._balances[account] = dict(self._balances["default"])
-            self._open_by_account[account] = set()
-        return PaperPrivateClient(self, account=account)
+        if api_key not in self._api_secrets:
+            if not auto_register:
+                from mft.exchange.paper.private import PaperAuthError
+
+                raise PaperAuthError(f"unknown paper api_key={api_key!r}")
+            self.register_api(api_key, api_secret, passphrase=passphrase)
+        return PaperPrivateClient(
+            self,
+            api_key=api_key,
+            api_secret=api_secret,
+            passphrase=passphrase,
+        )
+
+    def _ensure_account(
+        self,
+        api_key: str,
+        balances: dict[str, Decimal] | None = None,
+    ) -> None:
+        if api_key not in self._balances:
+            self._balances[api_key] = dict(balances or self._default_balances)
+            self._open_by_account[api_key] = set()
 
     # --- market data (req-reply) -------------------------------------------
 

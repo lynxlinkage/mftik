@@ -24,7 +24,7 @@ just up     # docker compose up --build
 ```
 
 - API health: http://localhost:8000/health
-- Live logs UI: http://localhost:5173
+- Control UI: http://localhost:5173 (Home / STS / TD / MD / Audit)
 
 ## Common tasks
 
@@ -33,6 +33,7 @@ just sync              # install Python workspace + frontend
 just test              # pytest
 just lint              # ruff
 just migrate           # alembic upgrade head
+just seed              # dev user + two paper APIs (idempotent)
 just openapi           # regenerate contracts/openapi.json
 just check-contracts   # fail if OpenAPI is stale
 just frontend-check

@@ -19,6 +19,7 @@ from mft.exchange.models import (
     Ticker,
     Trade,
 )
+from mft.exchange.oms import Position
 
 
 class BaseClient(ABC):
@@ -149,6 +150,10 @@ class PrivateClient(BaseClient):
     @abstractmethod
     async def fetch_balances(self) -> list[Balance]:
         """Snapshot account balances."""
+
+    async def fetch_positions(self) -> list[Position]:
+        """Snapshot positions when the venue supports it; default empty."""
+        return []
 
     # --- streams -----------------------------------------------------------
 

@@ -20,6 +20,8 @@ export type SessionLogMessage = {
 	};
 };
 
+export type LogDomain = 'sts' | 'td';
+
 function wsBaseUrl(): string {
 	const api = import.meta.env.PUBLIC_API_URL as string | undefined;
 	if (api) {
@@ -31,12 +33,13 @@ function wsBaseUrl(): string {
 	return `${proto}//${window.location.hostname}:8000`;
 }
 
-export function connectSessionLog(
-	sessionId: string,
+export function connectDomainLog(
+	domain: LogDomain,
+	id: string,
 	onMessage: (entry: LogEntry) => void,
 	onStatus: (status: 'connecting' | 'open' | 'closed' | 'error') => void
 ): () => void {
-	const url = `${wsBaseUrl()}/ws/${encodeURIComponent(sessionId)}`;
+	const url = `${wsBaseUrl()}/ws/${domain}/${encodeURIComponent(id)}`;
 	onStatus('connecting');
 	const ws = new WebSocket(url);
 
@@ -70,6 +73,15 @@ export function connectSessionLog(
 	return () => {
 		ws.close();
 	};
+}
+
+/** @deprecated Use connectDomainLog('sts', sessionId, ...) */
+export function connectSessionLog(
+	sessionId: string,
+	onMessage: (entry: LogEntry) => void,
+	onStatus: (status: 'connecting' | 'open' | 'closed' | 'error') => void
+): () => void {
+	return connectDomainLog('sts', sessionId, onMessage, onStatus);
 }
 
 export function newSessionId(): string {

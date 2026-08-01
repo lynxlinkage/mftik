@@ -22,7 +22,13 @@ from mft.exchange.models import (
     Ticker,
     Trade,
 )
-from mft.exchange.paper import PaperExchange, PaperPrivateClient, PaperPublicClient
+from mft.exchange.oms import OmsView, Position
+from mft.exchange.paper import (
+    PaperAuthError,
+    PaperExchange,
+    PaperPrivateClient,
+    PaperPublicClient,
+)
 
 __all__ = [
     "Balance",
@@ -39,10 +45,13 @@ __all__ = [
     "OrderError",
     "OrderStatus",
     "OrderType",
+    "OmsView",
+    "PaperAuthError",
     "PaperExchange",
     "PaperPrivateClient",
     "PaperPublicClient",
     "PlaceOrderRequest",
+    "Position",
     "PrivateClient",
     "PublicClient",
     "Side",

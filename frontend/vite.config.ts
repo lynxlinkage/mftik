@@ -1,6 +1,9 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
+// In Docker, point at the compose service name (api). Locally, hit the published port.
+const apiProxyTarget = process.env.API_PROXY_TARGET || 'http://localhost:8000';
+
 export default defineConfig({
 	plugins: [sveltekit()],
 	server: {
@@ -8,7 +11,7 @@ export default defineConfig({
 		port: 5173,
 		proxy: {
 			'/api': {
-				target: process.env.PUBLIC_API_URL || 'http://localhost:8000',
+				target: apiProxyTarget,
 				changeOrigin: true,
 				rewrite: (path) => path.replace(/^\/api/, '')
 			}

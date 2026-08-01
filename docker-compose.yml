@@ -7,6 +7,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-mft}
     ports:
       - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mft} -d ${POSTGRES_DB:-mft}"]
       interval: 5s
@@ -36,6 +38,21 @@ services:
       postgres:
         condition: service_healthy
 
+  seed:
+    build:
+      context: .
+      dockerfile: packages/db/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mft}:${POSTGRES_PASSWORD:-mft}@postgres:5432/${POSTGRES_DB:-mft}
+    command: ["python", "scripts/seed_paper_apis.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   api:
     build:
       context: .
@@ -55,6 +72,8 @@ services:
       postgres:
         condition: service_healthy
       migrate:
+        condition: service_completed_successfully
+      seed:
         condition: service_completed_successfully
 
   md:
@@ -98,8 +117,14 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     environment:
+      # Browser → host-published API (WebSocket logs)
       PUBLIC_API_URL: http://localhost:8000
+      # Vite proxy inside the frontend container → api service
+      API_PROXY_TARGET: http://api:8000
     ports:
       - "5173:5173"
     depends_on:
       - api
+
+volumes:
+  postgres_data:

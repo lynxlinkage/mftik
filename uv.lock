@@ -425,10 +425,14 @@ version = "0.1.0"
 source = { editable = "apps/sts" }
 dependencies = [
     { name = "mft-common" },
+    { name = "mft-db" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "mft-common", editable = "packages/common" }]
+requires-dist = [
+    { name = "mft-common", editable = "packages/common" },
+    { name = "mft-db", editable = "packages/db" },
+]
 
 [[package]]
 name = "mft-td"
