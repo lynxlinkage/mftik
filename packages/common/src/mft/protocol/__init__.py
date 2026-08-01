@@ -129,6 +129,14 @@ from mft.protocol.session_log import (
     publish_sts_log,
     publish_td_log,
 )
+from mft.protocol.strategy_yml import (
+    DEFAULT_STRATEGY_YML,
+    StrategySpec,
+    StrategyStsSpec,
+    StrategyYamlError,
+    dump_strategy_yml,
+    parse_strategy_yml,
+)
 from mft.protocol.topics import Topics
 
 __all__ = [
@@ -189,6 +197,8 @@ __all__ = [
     "CreateSessionRequestEnvelope",
     "CreateSessionResult",
     "CreateSessionResultEnvelope",
+    "DEFAULT_STRATEGY_YML",
+    "dump_strategy_yml",
     "Envelope",
     "HealthCheck",
     "HealthCheckEnvelope",
@@ -232,6 +242,7 @@ __all__ = [
     "PaperFetchOrderRequest",
     "PaperFetchTickerRequest",
     "PaperPlaceOrderRequest",
+    "parse_strategy_yml",
     "publish_md_log",
     "publish_session_log",
     "publish_sts_log",
@@ -243,6 +254,9 @@ __all__ = [
     "RpcError",
     "RpcErrorEnvelope",
     "SessionInfo",
+    "StrategySpec",
+    "StrategyStsSpec",
+    "StrategyYamlError",
     "StsCreateSessionRequest",
     "StsCreateSessionRequestEnvelope",
     "StsCreateSessionResult",

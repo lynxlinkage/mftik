@@ -42,3 +42,10 @@ class Api(Base):
     )
 
     owner = relationship("User", back_populates="apis")
+    account = relationship(
+        "Account",
+        back_populates="api",
+        uselist=False,
+        cascade="all, delete-orphan",
+        single_parent=True,
+    )

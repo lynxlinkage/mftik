@@ -1,4 +1,5 @@
 from mft_db.models import (
+    Account,
     Api,
     ApiType,
     Audit,
@@ -6,6 +7,7 @@ from mft_db.models import (
     MdSessionRow,
     SessionDomain,
     SessionStatus,
+    StrategyRow,
     StsSessionRow,
     TdSessionRow,
     User,
@@ -17,10 +19,12 @@ def test_metadata_includes_split_session_tables() -> None:
     assert {
         "users",
         "apis",
+        "accounts",
         "audits",
         "sts_sessions",
         "td_sessions",
         "md_sessions",
+        "strategies",
     } <= tables
     assert "sessions" not in tables
 
@@ -48,6 +52,38 @@ def test_user_relationships() -> None:
     assert "sts_sessions" in User.__mapper__.relationships
     assert "td_sessions" in User.__mapper__.relationships
     assert "md_sessions" in User.__mapper__.relationships
+    assert "strategies" in User.__mapper__.relationships
+    assert "accounts" in User.__mapper__.relationships
+
+
+def test_account_api_one_to_one() -> None:
+    assert Account.__tablename__ == "accounts"
+    cols = set(Account.__table__.c.keys())
+    assert {"id", "name", "api_id", "created_by", "created_at"} <= cols
+    api_fk = Account.__table__.c.api_id
+    assert "apis.id" in {str(fk.column) for fk in api_fk.foreign_keys}
+    assert api_fk.unique
+    assert Account.__table__.c.name.unique
+    assert "account" in Api.__mapper__.relationships
+    assert "api" in Account.__mapper__.relationships
+
+
+def test_strategy_row_columns() -> None:
+    assert StrategyRow.__tablename__ == "strategies"
+    cols = set(StrategyRow.__table__.c.keys())
+    assert {
+        "id",
+        "type",
+        "config",
+        "created_by",
+        "created_at",
+        "sts_session",
+    } <= cols
+    sts_fk = StrategyRow.__table__.c.sts_session
+    assert "sts_sessions.session_id" in {
+        str(fk.column) for fk in sts_fk.foreign_keys
+    }
+    assert "strategy_row" in StsSessionRow.__mapper__.relationships
 
 
 def test_session_row_columns() -> None:

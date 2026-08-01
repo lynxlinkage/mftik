@@ -69,7 +69,7 @@ class StsSession:
         self._on_exit = on_exit
 
         strategy.bind(self)
-        self.strategy.paras = strategy.validate_paras(self.st_paras)
+        self.strategy.paras = type(strategy).on_initialized(self.st_paras)
 
         self._tasks: list[asyncio.Task[Any]] = []
         self._stop = asyncio.Event()

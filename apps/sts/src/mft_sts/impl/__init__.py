@@ -5,28 +5,46 @@ from __future__ import annotations
 from mft_sts.impl.noop import NoopStrategy
 from mft_sts.strategy import Strategy
 
-_REGISTRY: dict[str, type[Strategy]] = {
-    NoopStrategy.name: NoopStrategy,
-}
-
+# Keys: short ``name`` (e.g. noop) and class ``__name__`` (e.g. NoopStrategy).
+_REGISTRY: dict[str, type[Strategy]] = {}
 DEFAULT_STRATEGY = NoopStrategy.name
 
 
 def register(cls: type[Strategy]) -> type[Strategy]:
-    """Register a strategy class by its ``name`` (decorator or direct call)."""
+    """Register a strategy class by ``name`` and ``__name__``."""
     _REGISTRY[cls.name] = cls
+    _REGISTRY[cls.__name__] = cls
     return cls
 
 
+register(NoopStrategy)
+
+
 def resolve(name: str | None) -> Strategy:
-    """Build a strategy instance for the given registered name."""
+    """Build a strategy instance for a registered name or class type."""
     key = name or DEFAULT_STRATEGY
     cls = _REGISTRY.get(key)
     if cls is None:
-        known = ", ".join(sorted(_REGISTRY)) or "(none)"
+        known = ", ".join(sorted(set(_REGISTRY))) or "(none)"
         raise KeyError(f"unknown strategy {key!r}; known: {known}")
     return cls()
 
 
+def resolve_class(name: str | None) -> type[Strategy]:
+    """Return the strategy class for a registered name or class type."""
+    key = name or DEFAULT_STRATEGY
+    cls = _REGISTRY.get(key)
+    if cls is None:
+        known = ", ".join(sorted(set(_REGISTRY))) or "(none)"
+        raise KeyError(f"unknown strategy {key!r}; known: {known}")
+    return cls
+
+
 def known_strategies() -> list[str]:
-    return sorted(_REGISTRY)
+    """Return distinct short names (prefer ``Strategy.name`` over class name)."""
+    return sorted({cls.name for cls in _REGISTRY.values()})
+
+
+def known_strategy_types() -> list[str]:
+    """Return distinct class type names for strategy.yml ``sts.type``."""
+    return sorted({cls.__name__ for cls in _REGISTRY.values()})

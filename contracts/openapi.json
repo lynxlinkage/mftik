@@ -67,6 +67,134 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": [
+          "apis"
+        ],
+        "summary": "Create Api",
+        "operationId": "create_api_apis_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiCreateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/apis/{api_id}": {
+      "delete": {
+        "tags": [
+          "apis"
+        ],
+        "summary": "Delete Api",
+        "operationId": "delete_api_apis__api_id__delete",
+        "parameters": [
+          {
+            "name": "api_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Api Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiDeleteResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sts/template": {
+      "get": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "Strategy Template",
+        "description": "Default strategy.yml snippet for the live editor.",
+        "operationId": "strategy_template_sts_template_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Strategy Template Sts Template Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sts/types": {
+      "get": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "List Strategy Types",
+        "operationId": "list_strategy_types_sts_types_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrategyTypesResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/sts/strategies": {
@@ -75,14 +203,37 @@
           "sts"
         ],
         "summary": "List Strategies",
+        "description": "List deployed strategy.yml rows, joined to sts session status.",
         "operationId": "list_strategies_sts_strategies_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StrategiesResponse"
+                  "$ref": "#/components/schemas/StrategyListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -266,34 +417,23 @@
         }
       }
     },
-    "/sts/{strategy_id}": {
+    "/sts": {
       "post": {
         "tags": [
           "sts"
         ],
         "summary": "Deploy",
-        "description": "Deploy a strategy; API orchestrates STS create + MD/TD attach.",
-        "operationId": "deploy_sts__strategy_id__post",
-        "parameters": [
-          {
-            "name": "strategy_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Strategy Id"
-            }
-          }
-        ],
+        "description": "Deploy a strategy.yml document; API orchestrates STS create + MD/TD attach.",
+        "operationId": "deploy_sts_post",
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/DeployBody"
+                "$ref": "#/components/schemas/StrategyDeployBody"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -465,6 +605,92 @@
   },
   "components": {
     "schemas": {
+      "ApiCreateBody": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "venue": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Venue"
+          },
+          "api_key": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Api Key"
+          },
+          "api_secret": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Api Secret"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "default": "HMAC"
+          },
+          "passphrase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passphrase"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "venue",
+          "api_key",
+          "api_secret"
+        ],
+        "title": "ApiCreateBody",
+        "description": "Create a venue API credential and its 1-1 trading account."
+      },
+      "ApiDeleteResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "account_id": {
+            "type": "integer",
+            "title": "Account Id"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "account_id"
+        ],
+        "title": "ApiDeleteResponse"
+      },
       "ApiListResponse": {
         "properties": {
           "apis": {
@@ -484,6 +710,14 @@
             "type": "integer",
             "title": "Id"
           },
+          "account_id": {
+            "type": "integer",
+            "title": "Account Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
           "venue": {
             "type": "string",
             "title": "Venue"
@@ -495,14 +729,26 @@
           "type": {
             "type": "string",
             "title": "Type"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          },
+          "created_by": {
+            "type": "integer",
+            "title": "Created By"
           }
         },
         "type": "object",
         "required": [
           "id",
+          "account_id",
+          "name",
           "venue",
           "api_key",
-          "type"
+          "type",
+          "created_at",
+          "created_by"
         ],
         "title": "ApiOut"
       },
@@ -558,57 +804,24 @@
         ],
         "title": "AuditOut"
       },
-      "DeployBody": {
-        "properties": {
-          "td": {
-            "items": {
-              "type": "integer"
-            },
-            "type": "array",
-            "title": "Td"
-          },
-          "md": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Md"
-          },
-          "st_paras": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "St Paras"
-          },
-          "created_by": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Created By"
-          },
-          "timeout": {
-            "type": "number",
-            "title": "Timeout",
-            "default": 30.0
-          }
-        },
-        "type": "object",
-        "title": "DeployBody",
-        "description": "Deployment spec for ``POST /sts/{strategy_id}`` (like deployment.yml)."
-      },
       "DeployResponse": {
         "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
           "session_id": {
             "type": "string",
             "title": "Session Id"
           },
-          "strategy": {
+          "type": {
             "type": "string",
-            "title": "Strategy"
+            "title": "Type"
+          },
+          "config": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Config"
           },
           "td": {
             "items": {
@@ -632,8 +845,9 @@
         },
         "type": "object",
         "required": [
+          "id",
           "session_id",
-          "strategy"
+          "type"
         ],
         "title": "DeployResponse"
       },
@@ -741,6 +955,17 @@
             ],
             "title": "Api Id"
           },
+          "api_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Name"
+          },
           "sts_session_id": {
             "anyOf": [
               {
@@ -812,21 +1037,124 @@
         ],
         "title": "StatsResponse"
       },
-      "StrategiesResponse": {
+      "StrategyDeployBody": {
+        "properties": {
+          "yaml": {
+            "type": "string",
+            "title": "Yaml",
+            "description": "strategy.yml contents"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "timeout": {
+            "type": "number",
+            "title": "Timeout",
+            "default": 30.0
+          }
+        },
+        "type": "object",
+        "required": [
+          "yaml"
+        ],
+        "title": "StrategyDeployBody",
+        "description": "Deploy from a strategy.yml document (live editor / API)."
+      },
+      "StrategyListResponse": {
         "properties": {
           "strategies": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/StrategyOut"
             },
             "type": "array",
             "title": "Strategies"
           }
         },
         "type": "object",
+        "title": "StrategyListResponse"
+      },
+      "StrategyOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "config": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Config"
+          },
+          "created_by": {
+            "type": "integer",
+            "title": "Created By"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          },
+          "sts_session": {
+            "type": "string",
+            "title": "Sts Session"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "paused": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paused"
+          }
+        },
+        "type": "object",
         "required": [
-          "strategies"
+          "id",
+          "type",
+          "created_by",
+          "created_at",
+          "sts_session"
         ],
-        "title": "StrategiesResponse"
+        "title": "StrategyOut",
+        "description": "Deployed strategy.yml row joined to sts_sessions for status."
+      },
+      "StrategyTypesResponse": {
+        "properties": {
+          "types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Types"
+          }
+        },
+        "type": "object",
+        "title": "StrategyTypesResponse",
+        "description": "Registered STS strategy class names for strategy.yml ``sts.type``."
       },
       "StsControlResponse": {
         "properties": {

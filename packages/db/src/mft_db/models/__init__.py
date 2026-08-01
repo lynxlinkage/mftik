@@ -1,3 +1,4 @@
+from mft_db.models.account import Account
 from mft_db.models.api import Api, ApiType
 from mft_db.models.audit import Audit
 from mft_db.models.base import Base
@@ -8,9 +9,11 @@ from mft_db.models.session import (
     StsSessionRow,
     TdSessionRow,
 )
+from mft_db.models.strategy import StrategyRow
 from mft_db.models.user import User
 
 __all__ = [
+    "Account",
     "Api",
     "ApiType",
     "Audit",
@@ -18,6 +21,7 @@ __all__ = [
     "MdSessionRow",
     "SessionDomain",
     "SessionStatus",
+    "StrategyRow",
     "StsSessionRow",
     "TdSessionRow",
     "User",

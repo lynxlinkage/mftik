@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 from mft.exchange.models import Balance, OrderBook, OrderType, Side
 from mft.protocol import ReconDone, UntypedEnvelope
@@ -30,8 +31,9 @@ class NoopStrategy(Strategy):
         self._last_bid: Decimal | None = None
         self._last_ask: Decimal | None = None
 
-    def validate_paras(self, paras: dict) -> dict:
-        out = dict(paras)
+    @classmethod
+    def on_initialized(cls, params: Any) -> dict[str, Any]:
+        out = super().on_initialized(params)
         mid = Decimal(str(out.get("mid", _DEFAULT_MID)))
         out["mid"] = mid
         return out

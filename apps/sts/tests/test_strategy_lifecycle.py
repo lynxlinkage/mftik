@@ -146,6 +146,7 @@ async def test_default_strategy_is_noop(broker: Broker) -> None:
     assert session is not None
     assert session.strategy.name == "noop"
     assert resolve("noop").name == "noop"
+    assert resolve("NoopStrategy").name == "noop"
     await manager.close_all()
 
 

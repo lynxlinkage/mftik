@@ -13,6 +13,7 @@ export type Session = {
 	finished_at: number | null;
 	status: string;
 	api_id: number | null;
+	api_name: string | null;
 	sts_session_id: string | null;
 	strategy: string | null;
 	paused: boolean | null;
@@ -26,19 +27,30 @@ export type StsControl = {
 	strategy: string | null;
 };
 
-export type DeployBody = {
-	td?: number[];
-	md?: string[];
-	st_paras?: Record<string, unknown>;
+export type StrategyDeployBody = {
+	yaml: string;
 	timeout?: number;
 };
 
 export type DeployResponse = {
+	id: number;
 	session_id: string;
-	strategy: string;
+	type: string;
+	config: Record<string, unknown>;
 	td: { api_id: number; refcount: number }[];
 	md: string[];
 	status: string;
+};
+
+export type StrategyRow = {
+	id: number;
+	type: string;
+	config: Record<string, unknown>;
+	created_by: number;
+	created_at: number;
+	sts_session: string;
+	status: string | null;
+	paused: boolean | null;
 };
 
 export type Audit = {
@@ -51,10 +63,33 @@ export type Audit = {
 
 export type ApiCredential = {
 	id: number;
+	account_id: number;
+	name: string;
 	venue: string;
 	api_key: string;
 	type: string;
+	created_at: number;
+	created_by: number;
 };
+
+export type ApiCreateBody = {
+	name: string;
+	venue: string;
+	api_key: string;
+	api_secret: string;
+	type?: string;
+	passphrase?: string;
+};
+
+const DEFAULT_STRATEGY_YML = `td:
+  - paper trader
+md:
+  - paper.orderbook.BTCUSDT
+sts:
+  type: NoopStrategy
+  config:
+    mid: 50000
+`;
 
 function apiBase(): string {
 	// Always go through the Vite `/api` proxy so Docker (frontend → api service)
@@ -86,18 +121,35 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
 	stats: () => request<{ domains: DomainStats[] }>('/stats'),
 	apis: () => request<{ apis: ApiCredential[] }>('/apis'),
-	strategies: () => request<{ strategies: string[] }>('/sts/strategies'),
+	createApi: (body: ApiCreateBody) =>
+		request<ApiCredential>('/apis', {
+			method: 'POST',
+			body: JSON.stringify({
+				name: body.name,
+				venue: body.venue,
+				api_key: body.api_key,
+				api_secret: body.api_secret,
+				type: body.type ?? 'HMAC',
+				passphrase: body.passphrase
+			})
+		}),
+	deleteApi: (id: number) =>
+		request<{ id: number; account_id: number; deleted: boolean }>(
+			`/apis/${encodeURIComponent(String(id))}`,
+			{ method: 'DELETE' }
+		),
+	strategyTemplate: () => request<{ yaml: string }>('/sts/template'),
+	strategyTypes: () => request<{ types: string[] }>('/sts/types'),
+	strategies: () => request<{ strategies: StrategyRow[] }>('/sts/strategies'),
 	stsSessions: (status: string | null = 'live') =>
 		request<{ sessions: Session[] }>(
 			`/sts/sessions${status ? `?status=${encodeURIComponent(status)}` : ''}`
 		),
-	deploySts: (strategy: string, body: DeployBody) =>
-		request<DeployResponse>(`/sts/${encodeURIComponent(strategy)}`, {
+	deploySts: (body: StrategyDeployBody) =>
+		request<DeployResponse>('/sts', {
 			method: 'POST',
 			body: JSON.stringify({
-				td: body.td ?? [],
-				md: body.md ?? [],
-				st_paras: body.st_paras ?? {},
+				yaml: body.yaml,
 				timeout: body.timeout ?? 30
 			})
 		}),
@@ -125,6 +177,10 @@ export const api = {
 		request<{ audits: Audit[] }>(`/audits?limit=${limit}`)
 };
 
+export function defaultStrategyYml(): string {
+	return DEFAULT_STRATEGY_YML;
+}
+
 export function shortId(id: string): string {
 	return id.length > 12 ? `${id.slice(0, 8)}…` : id;
 }
@@ -132,4 +188,19 @@ export function shortId(id: string): string {
 export function formatTs(ts: number | null | undefined): string {
 	if (ts == null || ts === 0) return '—';
 	return new Date(ts * 1000).toLocaleString();
+}
+
+/** Display label for a TD api: ``venue/name`` (falls back to api_id). */
+export function apiLabel(opts: {
+	api_id?: number | null;
+	venue?: string | null;
+	api_name?: string | null;
+	name?: string | null;
+}): string {
+	const venue = opts.venue?.trim();
+	const name = (opts.api_name ?? opts.name)?.trim();
+	if (venue && name) return `${venue}/${name}`;
+	if (name) return name;
+	if (opts.api_id != null) return String(opts.api_id);
+	return '—';
 }

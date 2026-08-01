@@ -18,7 +18,7 @@ import sys
 
 from mft_db.models.api import Api, ApiType
 from mft_db.models.user import User
-from mft_db.repositories import ApiRepository, UserRepository
+from mft_db.repositories import AccountRepository, ApiRepository, UserRepository
 from mft_db.session import session_scope
 
 logging.basicConfig(
@@ -30,14 +30,16 @@ logger = logging.getLogger("seed")
 DEV_EMAIL = "dev@mft.local"
 DEV_DISPLAY_NAME = "Dev"
 
-# Two isolated paper accounts for testing.
+# Two isolated paper accounts for testing (api ↔ account is 1-1).
 PAPER_APIS: tuple[dict[str, str], ...] = (
     {
+        "name": "paper trader",
         "api_key": "paper-key-1",
         "api_secret": "paper-secret-1",
         "venue": "paper",
     },
     {
+        "name": "paper liquidity",
         "api_key": "paper-key-2",
         "api_secret": "paper-secret-2",
         "venue": "paper",
@@ -50,6 +52,7 @@ async def seed() -> None:
     async with session_scope() as db:
         users = UserRepository(db)
         apis = ApiRepository(db)
+        accounts = AccountRepository(db)
 
         user = await users.get_by_email(DEV_EMAIL)
         if user is None:
@@ -88,8 +91,42 @@ async def seed() -> None:
                     row.api_key,
                     row.venue,
                 )
+
+            account = await accounts.get_by_api_id(row.id)
+            if account is None:
+                account = await accounts.create(
+                    name=spec["name"],
+                    api_id=row.id,
+                    created_by=user.id,
+                )
+                logger.info(
+                    "created account id=%s api_id=%s name=%s",
+                    account.id,
+                    row.id,
+                    account.name,
+                )
+            else:
+                if account.name != spec["name"]:
+                    # Prefer seed display names used by strategy.yml td refs.
+                    account.name = spec["name"]
+                    await db.flush()
+                    logger.info(
+                        "renamed account id=%s api_id=%s name=%s",
+                        account.id,
+                        row.id,
+                        account.name,
+                    )
+                else:
+                    logger.info(
+                        "account exists id=%s api_id=%s name=%s",
+                        account.id,
+                        row.id,
+                        account.name,
+                    )
+
             summary.append(
-                f"  api_id={row.id} venue={row.venue} "
+                f"  api_id={row.id} account_id={account.id} "
+                f"name={account.name} venue={row.venue} "
                 f"api_key={row.api_key} api_secret={row.api_secret}"
             )
 

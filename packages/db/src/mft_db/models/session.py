@@ -62,6 +62,11 @@ class StsSessionRow(Base):
     st_paras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     creator = relationship("User", back_populates="sts_sessions")
+    strategy_row = relationship(
+        "StrategyRow",
+        back_populates="session",
+        uselist=False,
+    )
 
 
 class TdSessionRow(Base):

@@ -30,3 +30,9 @@ class User(Base):
     md_sessions = relationship(
         "MdSessionRow", back_populates="creator", cascade="all, delete-orphan"
     )
+    strategies = relationship(
+        "StrategyRow", back_populates="creator", cascade="all, delete-orphan"
+    )
+    accounts = relationship(
+        "Account", back_populates="creator", cascade="all, delete-orphan"
+    )

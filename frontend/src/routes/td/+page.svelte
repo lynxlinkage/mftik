@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, formatTs, shortId, type Session } from '$lib/api';
+	import { api, apiLabel, formatTs, shortId, type Session } from '$lib/api';
 
 	let tab = $state<'live' | 'history'>('live');
 	let sessions = $state<Session[]>([]);
@@ -29,13 +29,21 @@
 		return `${s.api_id ?? 'x'}:${s.session_id}`;
 	}
 
+	function label(s: Session): string {
+		return apiLabel({
+			api_id: s.api_id,
+			venue: s.venue,
+			api_name: s.api_name
+		});
+	}
+
 	onMount(refresh);
 </script>
 
 <div class="page-head">
 	<div>
 		<h1>TD</h1>
-		<p>Trading accounts (api_id). Open logs for the account stream — STS links are separate.</p>
+		<p>Trading accounts (venue/name). Paths stay keyed by api_id; labels resolve from accounts.</p>
 	</div>
 	<button type="button" class="secondary" onclick={refresh} disabled={loading}>Refresh</button>
 </div>
@@ -60,7 +68,7 @@
 		<table class="data">
 			<thead>
 				<tr>
-					<th>API</th>
+					<th>Account</th>
 					<th>STS session</th>
 					<th>Status</th>
 					<th>Created</th>
@@ -73,7 +81,7 @@
 						<td>
 							{#if s.api_id != null}
 								<a href={`/td/${s.api_id}`} title={`api_id=${s.api_id}`}>
-									{s.api_id}
+									{label(s)}
 								</a>
 							{:else}
 								—

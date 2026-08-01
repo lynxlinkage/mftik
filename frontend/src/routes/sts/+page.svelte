@@ -1,47 +1,35 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { api, formatTs, shortId, type ApiCredential, type Session } from '$lib/api';
+	import {
+		api,
+		defaultStrategyYml,
+		formatTs,
+		shortId,
+		type StrategyRow
+	} from '$lib/api';
 
-	/** Only paper venue is wired for MD today. */
-	const MD_VENUES = ['paper'] as const;
-	const MD_TOPICS = ['orderbook'] as const;
-	const MD_SYMBOLS = ['BTCUSDT'] as const;
-
-	let sessions = $state<Session[]>([]);
-	let strategies = $state<string[]>(['noop']);
-	let apis = $state<ApiCredential[]>([]);
-	let selected = $state('noop');
-	/** Select value as string (HTML); parsed to int on deploy. */
-	let selectedApiId = $state('');
-	let selectedMdVenue = $state<(typeof MD_VENUES)[number]>('paper');
-	let selectedMdTopic = $state<(typeof MD_TOPICS)[number]>('orderbook');
-	let selectedMdSymbol = $state<(typeof MD_SYMBOLS)[number]>('BTCUSDT');
+	let strategies = $state<StrategyRow[]>([]);
+	let yamlText = $state(defaultStrategyYml());
+	let types = $state<string[]>(['NoopStrategy']);
 	let error = $state<string | null>(null);
 	let busy = $state(false);
 	let loading = $state(true);
 
-	const mdFeed = $derived(
-		`${selectedMdVenue}.${selectedMdTopic}.${selectedMdSymbol}`
-	);
+	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
 
 	async function refresh() {
 		loading = true;
 		error = null;
 		try {
-			const [s, st, a] = await Promise.all([
-				api.stsSessions('live'),
+			const [list, tpl, t] = await Promise.all([
 				api.strategies(),
-				api.apis()
+				api.strategyTemplate().catch(() => ({ yaml: defaultStrategyYml() })),
+				api.strategyTypes().catch(() => ({ types: ['NoopStrategy'] }))
 			]);
-			sessions = s.sessions;
-			strategies = st.strategies.length ? st.strategies : ['noop'];
-			apis = a.apis;
-			if (!strategies.includes(selected)) selected = strategies[0];
-			const ids = new Set(apis.map((x) => String(x.id)));
-			if (!ids.has(selectedApiId)) {
-				selectedApiId = apis[0] ? String(apis[0].id) : '';
-			}
+			strategies = list.strategies;
+			types = t.types.length ? t.types : ['NoopStrategy'];
+			if (!yamlText.trim()) yamlText = tpl.yaml || defaultStrategyYml();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -53,17 +41,7 @@
 		busy = true;
 		error = null;
 		try {
-			const apiId = Number(selectedApiId);
-			if (!Number.isFinite(apiId) || apiId <= 0) {
-				throw new Error('Select a TD API credential');
-			}
-			if (selectedMdVenue !== 'paper') {
-				throw new Error('Only paper venue is allowed for MD');
-			}
-			const created = await api.deploySts(selected, {
-				td: [apiId],
-				md: [mdFeed]
-			});
+			const created = await api.deploySts({ yaml: yamlText });
 			await refresh();
 			await goto(`/sts/${created.session_id}`);
 		} catch (e) {
@@ -73,12 +51,16 @@
 		}
 	}
 
-	async function togglePause(s: Session) {
+	function resetTemplate() {
+		yamlText = defaultStrategyYml();
+	}
+
+	async function togglePause(s: StrategyRow) {
 		busy = true;
 		error = null;
 		try {
-			if (s.paused) await api.resumeSts(s.session_id);
-			else await api.pauseSts(s.session_id);
+			if (s.paused) await api.resumeSts(s.sts_session);
+			else await api.pauseSts(s.sts_session);
 			await refresh();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -87,11 +69,11 @@
 		}
 	}
 
-	async function stop(s: Session) {
+	async function stop(s: StrategyRow) {
 		busy = true;
 		error = null;
 		try {
-			await api.stopSts(s.session_id);
+			await api.stopSts(s.sts_session);
 			await refresh();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -106,7 +88,10 @@
 <div class="page-head">
 	<div>
 		<h1>STS</h1>
-		<p>Deploy a strategy with TD + MD (paper orderbook), then open its log stream.</p>
+		<p>
+			Edit <code>strategy.yml</code> to deploy TD + MD infra with a customized STS
+			strategy. <code>td</code> uses account names (not api ids). Types: {types.join(', ')}.
+		</p>
 	</div>
 	<button type="button" class="secondary" onclick={refresh} disabled={loading}>Refresh</button>
 </div>
@@ -115,105 +100,84 @@
 	<div class="error-banner">{error}</div>
 {/if}
 
-<section class="panel create">
-	<label>
-		Strategy
-		<select bind:value={selected} disabled={busy}>
-			{#each strategies as name}
-				<option value={name}>{name}</option>
-			{/each}
-		</select>
-	</label>
-	<label>
-		TD API
-		<select bind:value={selectedApiId} disabled={busy || apis.length === 0}>
-			{#if apis.length === 0}
-				<option value="">No APIs seeded</option>
-			{:else}
-				{#each apis as a}
-					<option value={String(a.id)}>{a.id} — {a.venue} / {a.api_key}</option>
-				{/each}
-			{/if}
-		</select>
-	</label>
-	<label>
-		MD venue
-		<select bind:value={selectedMdVenue} disabled={busy}>
-			{#each MD_VENUES as venue}
-				<option value={venue}>{venue}</option>
-			{/each}
-		</select>
-	</label>
-	<label>
-		MD topic
-		<select bind:value={selectedMdTopic} disabled={busy}>
-			{#each MD_TOPICS as topic}
-				<option value={topic}>{topic}</option>
-			{/each}
-		</select>
-	</label>
-	<label>
-		MD symbol
-		<select bind:value={selectedMdSymbol} disabled={busy}>
-			{#each MD_SYMBOLS as symbol}
-				<option value={symbol}>{symbol}</option>
-			{/each}
-		</select>
-	</label>
-	<div class="feed-hint" title="Feed key sent to MD attach">
-		<span class="muted">Feed</span>
-		<code>{mdFeed}</code>
+<section class="panel editor">
+	<div class="editor-head">
+		<div>
+			<strong>strategy.yml</strong>
+			<span class="muted">Live editor — td / md / sts.type + config</span>
+		</div>
+		<div class="editor-actions">
+			<button type="button" class="secondary" onclick={resetTemplate} disabled={busy}>
+				Reset template
+			</button>
+			<button type="button" onclick={deploy} disabled={busy || !yamlText.trim()}>
+				Deploy
+			</button>
+		</div>
 	</div>
-	<button type="button" onclick={deploy} disabled={busy || !selectedApiId}>
-		Deploy
-	</button>
+	<textarea
+		class="yml"
+		bind:value={yamlText}
+		rows={lineCount}
+		spellcheck="false"
+		disabled={busy}
+		aria-label="strategy.yml editor"
+	></textarea>
 </section>
 
 <section class="panel table-wrap">
-	{#if sessions.length === 0}
-		<p class="empty-state">{loading ? 'Loading…' : 'No live STS sessions.'}</p>
+	{#if strategies.length === 0}
+		<p class="empty-state">{loading ? 'Loading…' : 'No strategies deployed yet.'}</p>
 	{:else}
 		<table class="data">
 			<thead>
 				<tr>
+					<th>ID</th>
+					<th>Type</th>
 					<th>Session</th>
-					<th>Strategy</th>
-					<th>State</th>
+					<th>Status</th>
 					<th>Created</th>
 					<th></th>
 				</tr>
 			</thead>
 			<tbody>
-				{#each sessions as s (s.session_id)}
+				{#each strategies as s (s.id)}
 					<tr>
+						<td>{s.id}</td>
+						<td><code>{s.type}</code></td>
 						<td>
-							<a href={`/sts/${s.session_id}`} title={s.session_id}>
-								{shortId(s.session_id)}
+							<a href={`/sts/${s.sts_session}`} title={s.sts_session}>
+								{shortId(s.sts_session)}
 							</a>
 						</td>
-						<td>{s.strategy ?? '—'}</td>
 						<td>
-							{#if s.paused}
+							{#if s.status === 'done'}
+								<span class="badge done">done</span>
+							{:else if s.paused}
 								<span class="badge paused">paused</span>
-							{:else}
+							{:else if s.status === 'live'}
 								<span class="badge live">running</span>
+							{:else}
+								<span class="badge">{s.status ?? '—'}</span>
 							{/if}
 						</td>
 						<td class="muted">{formatTs(s.created_at)}</td>
 						<td>
 							<div class="actions">
-								<button
-									type="button"
-									class="secondary"
-									disabled={busy}
-									onclick={() => togglePause(s)}
-								>
-									{s.paused ? 'Resume' : 'Pause'}
-								</button>
-								<button type="button" class="danger" disabled={busy} onclick={() => stop(s)}>
-									Stop
-								</button>
-								<a class="link-btn" href={`/sts/${s.session_id}`}>Logs</a>
+								{#if s.status === 'live'}
+									<button
+										type="button"
+										class="secondary"
+										disabled={busy}
+										onclick={() => togglePause(s)}
+									>
+										{s.paused ? 'Resume' : 'Pause'}
+									</button>
+									<button type="button" class="danger" disabled={busy} onclick={() => stop(s)}>
+										Stop
+									</button>
+								{/if}
+								<a class="link-btn" href={`/sts/${s.sts_session}`}>Logs</a>
 							</div>
 						</td>
 					</tr>
@@ -224,49 +188,61 @@
 </section>
 
 <style>
-	.create {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: end;
-		gap: 0.85rem;
+	.editor {
+		display: grid;
+		gap: 0.75rem;
 		margin-bottom: 1rem;
 	}
 
-	label {
-		display: grid;
-		gap: 0.35rem;
-		font-size: 0.8rem;
-		color: var(--muted);
-		min-width: 10rem;
+	.editor-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
 	}
 
-	select {
-		background: var(--bg);
-		border: 1px solid var(--border);
-		color: var(--text);
-		padding: 0.55rem 0.65rem;
-		border-radius: var(--radius);
-	}
-
-	.feed-hint {
-		display: grid;
-		gap: 0.35rem;
-		font-size: 0.8rem;
-		min-width: 14rem;
-	}
-
-	.feed-hint code {
+	.editor-head strong {
 		display: block;
-		padding: 0.55rem 0.65rem;
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--bg);
-		color: var(--text);
+		font-size: 0.95rem;
+	}
+
+	.editor-head .muted {
+		font-size: 0.8rem;
+	}
+
+	.editor-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+	}
+
+	.yml {
+		width: 100%;
+		min-height: 16rem;
+		resize: vertical;
+		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 		font-size: 0.85rem;
+		line-height: 1.45;
+		tab-size: 2;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		color: var(--text);
+		border-radius: var(--radius);
+		padding: 0.85rem 1rem;
+	}
+
+	.yml:focus {
+		outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+		outline-offset: 1px;
 	}
 
 	.table-wrap {
 		overflow-x: auto;
+	}
+
+	.badge.done {
+		opacity: 0.75;
 	}
 
 	.link-btn {

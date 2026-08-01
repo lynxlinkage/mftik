@@ -18,12 +18,10 @@ class StatsResponse(BaseModel):
     domains: list[DomainStats]
 
 
-class DeployBody(BaseModel):
-    """Deployment spec for ``POST /sts/{strategy_id}`` (like deployment.yml)."""
+class StrategyDeployBody(BaseModel):
+    """Deploy from a strategy.yml document (live editor / API)."""
 
-    td: list[int] = Field(default_factory=list)
-    md: list[str] = Field(default_factory=list)
-    st_paras: dict[str, Any] = Field(default_factory=dict)
+    yaml: str = Field(..., description="strategy.yml contents")
     created_by: int | None = None
     timeout: float = 30.0
 
@@ -34,11 +32,36 @@ class TdAttachOut(BaseModel):
 
 
 class DeployResponse(BaseModel):
+    id: int
     session_id: str
-    strategy: str
+    type: str
+    config: dict[str, Any] = Field(default_factory=dict)
     td: list[TdAttachOut] = Field(default_factory=list)
     md: list[str] = Field(default_factory=list)
     status: str = "live"
+
+
+class StrategyOut(BaseModel):
+    """Deployed strategy.yml row joined to sts_sessions for status."""
+
+    id: int
+    type: str
+    config: dict[str, Any] = Field(default_factory=dict)
+    created_by: int
+    created_at: float
+    sts_session: str
+    status: str | None = None
+    paused: bool | None = None
+
+
+class StrategyListResponse(BaseModel):
+    strategies: list[StrategyOut] = Field(default_factory=list)
+
+
+class StrategyTypesResponse(BaseModel):
+    """Registered STS strategy class names for strategy.yml ``sts.type``."""
+
+    types: list[str] = Field(default_factory=list)
 
 
 class SessionOut(BaseModel):
@@ -49,6 +72,7 @@ class SessionOut(BaseModel):
     finished_at: float | None = None
     status: str
     api_id: int | None = None
+    api_name: str | None = None
     sts_session_id: str | None = None
     strategy: str | None = None
     paused: bool | None = None
@@ -66,19 +90,37 @@ class StsControlResponse(BaseModel):
     strategy: str | None = None
 
 
-class StrategiesResponse(BaseModel):
-    strategies: list[str]
+class ApiCreateBody(BaseModel):
+    """Create a venue API credential and its 1-1 trading account."""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    venue: str = Field(..., min_length=1, max_length=64)
+    api_key: str = Field(..., min_length=1, max_length=256)
+    api_secret: str = Field(..., min_length=1)
+    type: str = "HMAC"
+    passphrase: str | None = None
+    created_by: int | None = None
 
 
 class ApiOut(BaseModel):
     id: int
+    account_id: int
+    name: str
     venue: str
     api_key: str
     type: str
+    created_at: float
+    created_by: int
 
 
 class ApiListResponse(BaseModel):
     apis: list[ApiOut] = Field(default_factory=list)
+
+
+class ApiDeleteResponse(BaseModel):
+    id: int
+    account_id: int
+    deleted: bool = True
 
 
 class AuditOut(BaseModel):

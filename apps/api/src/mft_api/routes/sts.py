@@ -1,9 +1,12 @@
-"""STS HTTP facade — deploy + list/control."""
+"""STS HTTP facade — strategy.yml deploy + list/control."""
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 from mft.protocol import (
+    DEFAULT_STRATEGY_YML,
     STS_SESSION_LIST,
     STS_SESSION_PAUSE,
     STS_SESSION_RESUME,
@@ -11,34 +14,93 @@ from mft.protocol import (
     ListSessionsRequest,
     ListSessionsRequestEnvelope,
     ListSessionsResult,
+    StrategyYamlError,
     StsSessionControlRequest,
     StsSessionControlRequestEnvelope,
     StsSessionControlResult,
     Topics,
+    parse_strategy_yml,
 )
+from mft_db.repositories import AccountRepository, StrategyRepository
+from mft_db.session import session_scope
 
 from mft_api.audit_util import record_audit
 from mft_api.broker_rpc import DomainRpcError, request_domain
 from mft_api.deps import DEFAULT_USER_ID, BrokerDep
 from mft_api.orchestrate import deploy_strategy
 from mft_api.schemas import (
-    DeployBody,
     DeployResponse,
     SessionListResponse,
     SessionOut,
-    StrategiesResponse,
+    StrategyDeployBody,
+    StrategyListResponse,
+    StrategyOut,
+    StrategyTypesResponse,
     StsControlResponse,
     TdAttachOut,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/sts", tags=["sts"])
 
-_KNOWN_STRATEGIES = ["noop"]
+# Class names accepted in strategy.yml ``sts.type`` (must match STS registry).
+_KNOWN_STRATEGY_TYPES = ["NoopStrategy"]
 
 
-@router.get("/strategies", response_model=StrategiesResponse)
-async def list_strategies() -> StrategiesResponse:
-    return StrategiesResponse(strategies=list(_KNOWN_STRATEGIES))
+@router.get("/template")
+async def strategy_template() -> dict[str, str]:
+    """Default strategy.yml snippet for the live editor."""
+    return {"yaml": DEFAULT_STRATEGY_YML}
+
+
+@router.get("/types", response_model=StrategyTypesResponse)
+async def list_strategy_types() -> StrategyTypesResponse:
+    return StrategyTypesResponse(types=list(_KNOWN_STRATEGY_TYPES))
+
+
+@router.get("/strategies", response_model=StrategyListResponse)
+async def list_strategies(
+    broker: BrokerDep, limit: int = 100
+) -> StrategyListResponse:
+    """List deployed strategy.yml rows, joined to sts session status."""
+    paused_by_session: dict[str, bool] = {}
+    try:
+        live = await request_domain(
+            broker,
+            Topics.STS,
+            ListSessionsRequestEnvelope.wrap(
+                ListSessionsRequest(domain="sts", status="live"),
+                type=STS_SESSION_LIST,
+                source="api",
+            ),
+            result_type=ListSessionsResult,
+        )
+        for s in live.sessions:
+            if s.paused is not None:
+                paused_by_session[s.session_id] = s.paused
+    except DomainRpcError:
+        logger.exception("failed to fetch live STS pause state for strategies list")
+
+    async with session_scope() as db:
+        rows = await StrategyRepository(db).list_with_session(limit=limit)
+
+    out: list[StrategyOut] = []
+    for row in rows:
+        session = row.session
+        out.append(
+            StrategyOut(
+                id=row.id,
+                type=row.type,
+                config=dict(row.config or {}),
+                created_by=row.created_by,
+                created_at=row.created_at.timestamp() if row.created_at else 0.0,
+                sts_session=row.sts_session,
+                status=session.status if session is not None else None,
+                paused=paused_by_session.get(row.sts_session),
+            )
+        )
+    return StrategyListResponse(strategies=out)
 
 
 @router.get("/sessions", response_model=SessionListResponse)
@@ -78,22 +140,29 @@ async def stop_session(session_id: str, broker: BrokerDep) -> StsControlResponse
     return await _control(broker, session_id, STS_SESSION_STOP, "sts.session.stop")
 
 
-@router.post("/{strategy_id}", response_model=DeployResponse)
-async def deploy(
-    strategy_id: str, body: DeployBody, broker: BrokerDep
-) -> DeployResponse:
-    """Deploy a strategy; API orchestrates STS create + MD/TD attach."""
-    if strategy_id not in _KNOWN_STRATEGIES:
-        raise HTTPException(status_code=404, detail=f"unknown strategy: {strategy_id}")
+@router.post("", response_model=DeployResponse)
+@router.post("/", response_model=DeployResponse, include_in_schema=False)
+async def deploy(body: StrategyDeployBody, broker: BrokerDep) -> DeployResponse:
+    """Deploy a strategy.yml document; API orchestrates STS create + MD/TD attach."""
+    try:
+        spec = parse_strategy_yml(body.yaml)
+    except StrategyYamlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if spec.sts.type not in _KNOWN_STRATEGY_TYPES:
+        raise HTTPException(
+            status_code=404, detail=f"unknown strategy type: {spec.sts.type}"
+        )
 
     created_by = body.created_by if body.created_by is not None else DEFAULT_USER_ID
+    td_api_ids = await _resolve_td_names(list(spec.td))
     try:
         result = await deploy_strategy(
             broker,
-            strategy_id=strategy_id,
-            td=list(body.td),
-            md=list(body.md),
-            st_paras=dict(body.st_paras),
+            strategy_id=spec.sts.type,
+            td=td_api_ids,
+            md=list(spec.md),
+            st_paras=dict(spec.sts.config),
             created_by=created_by,
             timeout=body.timeout,
         )
@@ -103,21 +172,52 @@ async def deploy(
             code = 504
         raise HTTPException(status_code=code, detail=exc.message) from exc
 
+    session_id = result["session_id"]
+    async with session_scope() as db:
+        row = await StrategyRepository(db).create(
+            type=spec.sts.type,
+            config=dict(spec.sts.config),
+            created_by=created_by,
+            sts_session=session_id,
+        )
+        strategy_id = row.id
+
     await record_audit(
         user_id=created_by,
         operation="sts.deploy",
         result=(
-            f"session_id={result['session_id']} strategy={result['strategy']} "
+            f"id={strategy_id} session_id={session_id} type={spec.sts.type} "
+            f"td_names={list(spec.td)} "
             f"td={[a['api_id'] for a in result['td']]} md={result['md']}"
         ),
     )
     return DeployResponse(
-        session_id=result["session_id"],
-        strategy=result["strategy"],
+        id=strategy_id,
+        session_id=session_id,
+        type=spec.sts.type,
+        config=dict(spec.sts.config),
         td=[TdAttachOut(**a) for a in result["td"]],
         md=result["md"],
         status=result["status"],
     )
+
+
+async def _resolve_td_names(names: list[str]) -> list[int]:
+    """Map strategy.yml account names → api ids (order preserved)."""
+    if not names:
+        return []
+    async with session_scope() as db:
+        accounts = AccountRepository(db)
+        api_ids: list[int] = []
+        for name in names:
+            account = await accounts.get_by_name(name)
+            if account is None or account.api is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"unknown td account name: {name!r}",
+                )
+            api_ids.append(account.api_id)
+        return api_ids
 
 
 async def _control(

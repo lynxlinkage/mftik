@@ -72,9 +72,24 @@ class Strategy:
         self.oms.bind(self)
         self.timer.bind(self)
 
+    @classmethod
+    def on_initialized(cls, params: Any) -> dict[str, Any]:
+        """Deserialize ``strategy.yml`` ``sts.config`` into runtime paras.
+
+        Called once before the session starts. Override per strategy class.
+        """
+        if params is None:
+            return {}
+        if not isinstance(params, dict):
+            raise TypeError(
+                f"{cls.__name__}.on_initialized expects a mapping, "
+                f"got {type(params).__name__}"
+            )
+        return dict(params)
+
     def validate_paras(self, paras: dict[str, Any]) -> dict[str, Any]:
-        """Validate / normalize deploy ``st_paras``. Override per strategy."""
-        return dict(paras)
+        """Backward-compatible alias for :meth:`on_initialized`."""
+        return type(self).on_initialized(paras)
 
     @property
     def session_id(self) -> str | None:
