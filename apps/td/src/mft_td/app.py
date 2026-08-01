@@ -8,7 +8,6 @@ import signal
 
 from mft import configure_logging
 from mft.broker import Broker
-from mft.exchange import PaperExchange
 from mft.protocol import Topics
 
 from mft_td import db as td_db
@@ -46,11 +45,9 @@ async def amain() -> None:
         except NotImplementedError:
             pass
 
-    paper = PaperExchange()
-    await paper.start()
-
     async with Broker() as broker:
-        factory = PaperSessionFactory(broker, paper)
+        # Paper venue lives in the paper-engine container; TD is a remote client.
+        factory = PaperSessionFactory(broker)
         sessions = SessionManager(
             factory,
             broker,
@@ -58,7 +55,7 @@ async def amain() -> None:
             mark_done=td_db.mark_session_done,
             list_db_sessions=td_db.list_sessions,
         )
-        logger.info("TD started (paper session factory)")
+        logger.info("TD started (remote paper session factory)")
         rpc_task = asyncio.create_task(
             run_rpc(broker, sessions, stop), name="td-rpc"
         )
@@ -79,7 +76,6 @@ async def amain() -> None:
                 task.cancel()
             await asyncio.gather(rpc_task, hb_task, return_exceptions=True)
             await sessions.close_all()
-            await paper.stop()
     logger.info("TD stopped")
 
 

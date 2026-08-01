@@ -72,6 +72,12 @@ class PaperPrivateClient(PrivateClient):
         self._ensure_connected()
         return await self._exchange.cancel_order(self.api_key, order_id)
 
+    async def cancel_by_client_order_id(self, client_order_id: str) -> Order:
+        self._ensure_connected()
+        return await self._exchange.cancel_by_client_order_id(
+            self.api_key, client_order_id
+        )
+
     async def fetch_order(self, order_id: str) -> Order:
         self._ensure_connected()
         return self._exchange.get_order(order_id)

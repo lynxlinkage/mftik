@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import uuid
+from collections.abc import Callable
 from decimal import ROUND_HALF_UP, Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mft.exchange.errors import (
     InstrumentNotFoundError,
@@ -35,15 +37,40 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SYMBOLS: dict[str, tuple[str, str, Decimal]] = {
-    # symbol: (base, quote, mid)
-    "BTCUSDT": ("BTC", "USDT", Decimal("50000")),
-    "ETHUSDT": ("ETH", "USDT", Decimal("3000")),
+# symbol: (base, quote, mid, bid_px, bid_qty, ask_px, ask_qty)
+_DEFAULT_SYMBOLS: dict[
+    str, tuple[str, str, Decimal, Decimal, Decimal, Decimal, Decimal]
+] = {
+    "BTCUSDT": (
+        "BTC",
+        "USDT",
+        Decimal("50000"),
+        Decimal("49999"),
+        Decimal("1"),
+        Decimal("50001"),
+        Decimal("1"),
+    ),
+    "ETHUSDT": (
+        "ETH",
+        "USDT",
+        Decimal("3000"),
+        Decimal("2999"),
+        Decimal("1"),
+        Decimal("3001"),
+        Decimal("1"),
+    ),
 }
+
+# Optional hooks for the paper-engine Redis bridge (sync; may schedule work).
+OrderSink = Callable[[str, Order], Any]
+FillSink = Callable[[str, Fill], Any]
+BalanceSink = Callable[[str, Balance], Any]
 
 
 class PaperExchange:
     """Fake exchange engine used by paper public/private clients.
+
+    Default BTCUSDT top of book: bid ``[[49999, 1]]``, ask ``[[50001, 1]]``.
 
     Lifecycle::
 
@@ -61,26 +88,41 @@ class PaperExchange:
         *,
         symbols: dict[str, Decimal] | None = None,
         tick_interval: float = 0.2,
-        spread_bps: Decimal = Decimal("5"),
         fee_bps: Decimal = Decimal("5"),
-        volatility_bps: Decimal = Decimal("8"),
+        volatility_bps: Decimal = Decimal("0"),
         initial_balances: dict[str, Decimal] | None = None,
         seed: int | None = 1,
+        on_order: OrderSink | None = None,
+        on_fill: FillSink | None = None,
+        on_balance: BalanceSink | None = None,
     ) -> None:
         self.tick_interval = tick_interval
-        self.spread_bps = spread_bps
         self.fee_bps = fee_bps
         self.volatility_bps = volatility_bps
         self._rng = random.Random(seed)
+        self._on_order = on_order
+        self._on_fill = on_fill
+        self._on_balance = on_balance
 
         self._instruments: dict[str, Instrument] = {}
         self._mid: dict[str, Decimal] = {}
+        # symbol → (bid_px, bid_qty, ask_px, ask_qty)
+        self._books: dict[str, tuple[Decimal, Decimal, Decimal, Decimal]] = {}
         if symbols is None:
-            for symbol, (base, quote, mid) in _DEFAULT_SYMBOLS.items():
+            for symbol, (
+                base,
+                quote,
+                mid,
+                bid_px,
+                bid_qty,
+                ask_px,
+                ask_qty,
+            ) in _DEFAULT_SYMBOLS.items():
                 self._instruments[symbol] = Instrument(
                     symbol=symbol, base=base, quote=quote
                 )
                 self._mid[symbol] = mid
+                self._books[symbol] = (bid_px, bid_qty, ask_px, ask_qty)
         else:
             for symbol, mid in symbols.items():
                 base, quote = _split_symbol(symbol)
@@ -88,6 +130,14 @@ class PaperExchange:
                     symbol=symbol, base=base, quote=quote
                 )
                 self._mid[symbol] = mid
+                # 1-tick book around mid when custom symbols are supplied
+                tick = Decimal("1")
+                self._books[symbol] = (
+                    mid - tick,
+                    Decimal("1"),
+                    mid + tick,
+                    Decimal("1"),
+                )
 
         self._default_balances = dict(
             initial_balances
@@ -100,9 +150,14 @@ class PaperExchange:
         # api_key → secret (paper accounts are keyed by api_key)
         self._api_secrets: dict[str, str] = {}
         self._api_passphrases: dict[str, str | None] = {}
-        self._balances: dict[str, dict[str, Decimal]] = {}
+        # account → asset → free / locked
+        self._free: dict[str, dict[str, Decimal]] = {}
+        self._locked: dict[str, dict[str, Decimal]] = {}
         self._orders: dict[str, Order] = {}
+        self._order_account: dict[str, str] = {}
         self._open_by_account: dict[str, set[str]] = {}
+        # account → client_order_id → order_id
+        self._client_order_ids: dict[str, dict[str, str]] = {}
 
         self._ticker_subs: dict[str, set[EventStream[Ticker]]] = {}
         self._trade_subs: dict[str, set[EventStream[Trade]]] = {}
@@ -220,9 +275,11 @@ class PaperExchange:
         api_key: str,
         balances: dict[str, Decimal] | None = None,
     ) -> None:
-        if api_key not in self._balances:
-            self._balances[api_key] = dict(balances or self._default_balances)
+        if api_key not in self._free:
+            self._free[api_key] = dict(balances or self._default_balances)
+            self._locked[api_key] = {}
             self._open_by_account[api_key] = set()
+            self._client_order_ids[api_key] = {}
 
     # --- market data (req-reply) -------------------------------------------
 
@@ -230,23 +287,32 @@ class PaperExchange:
         return list(self._instruments.values())
 
     def get_ticker(self, symbol: str) -> Ticker:
-        inst = self._require_instrument(symbol)
+        self._require_instrument(symbol)
+        bid_px, ask_px = self._bbo_prices(symbol)
         mid = self._mid[symbol]
-        half = mid * self.spread_bps / Decimal("10000") / Decimal("2")
-        bid = _round_price(mid - half, inst.tick_size)
-        ask = _round_price(mid + half, inst.tick_size)
-        return Ticker(symbol=symbol, bid=bid, ask=ask, last=mid)
+        return Ticker(symbol=symbol, bid=bid_px, ask=ask_px, last=mid)
 
     def get_order_book(self, symbol: str, *, depth: int = 10) -> OrderBook:
-        inst = self._require_instrument(symbol)
-        ticker = self.get_ticker(symbol)
-        bids: list[BookLevel] = []
-        asks: list[BookLevel] = []
-        for i in range(depth):
-            step = inst.tick_size * Decimal(i + 1) * Decimal("5")
-            qty = Decimal("0.1") * Decimal(depth - i)
-            bids.append(BookLevel(price=ticker.bid - step, qty=qty))
-            asks.append(BookLevel(price=ticker.ask + step, qty=qty))
+        self._require_instrument(symbol)
+        bids_map: dict[Decimal, Decimal] = {}
+        asks_map: dict[Decimal, Decimal] = {}
+        for _account, order, remaining in self._resting(symbol):
+            assert order.price is not None
+            book = bids_map if order.side is Side.BUY else asks_map
+            book[order.price] = book.get(order.price, Decimal("0")) + remaining
+        if not bids_map and not asks_map:
+            # Empty book fallback around mid (display only; no synthetic liquidity).
+            bid_px, _bq, ask_px, _aq = self._books[symbol]
+            bids_map[bid_px] = Decimal("1")
+            asks_map[ask_px] = Decimal("1")
+        bids = [
+            BookLevel(price=p, qty=q)
+            for p, q in sorted(bids_map.items(), reverse=True)[:depth]
+        ]
+        asks = [
+            BookLevel(price=p, qty=q)
+            for p, q in sorted(asks_map.items())[:depth]
+        ]
         return OrderBook(symbol=symbol, bids=bids, asks=asks)
 
     # --- trading (req-reply) -----------------------------------------------
@@ -262,146 +328,123 @@ class PaperExchange:
         if request.type is OrderType.LIMIT and request.price is None:
             raise OrderError("limit orders require price")
 
-        ticker = self.get_ticker(request.symbol)
-
-        if request.type is OrderType.MARKET:
-            fill_price = ticker.ask if request.side is Side.BUY else ticker.bid
-            self._reserve_and_settle(
-                account,
-                inst,
-                request.side,
-                request.qty,
-                fill_price,
-                lock_only=False,
-            )
-            order = Order(
-                client_order_id=request.client_order_id,
-                symbol=request.symbol,
-                side=request.side,
-                type=request.type,
-                status=OrderStatus.FILLED,
-                qty=request.qty,
-                price=None,
-                filled_qty=request.qty,
-                avg_price=fill_price,
-            )
-            fill = Fill(
-                order_id=order.order_id,
-                symbol=order.symbol,
-                side=order.side,
-                price=fill_price,
-                qty=request.qty,
-                fee=_fee(fill_price, request.qty, self.fee_bps),
-                fee_asset=inst.quote,
-            )
-            self._orders[order.order_id] = order
-            self._emit_order(account, order)
-            self._emit_fill(account, fill)
-            self._emit_balances(account)
-            self._emit_public_trade(
-                Trade(
-                    symbol=order.symbol,
-                    price=fill_price,
-                    qty=request.qty,
-                    side=request.side,
-                )
-            )
-            return order
-
-        # LIMIT
-        assert request.price is not None
-        price = _round_price(request.price, inst.tick_size)
-        crosses = (request.side is Side.BUY and price >= ticker.ask) or (
-            request.side is Side.SELL and price <= ticker.bid
+        client_order_id = self._allocate_client_order_id(
+            account, request.client_order_id
         )
-        if crosses:
-            fill_price = ticker.ask if request.side is Side.BUY else ticker.bid
-            self._reserve_and_settle(
-                account,
-                inst,
-                request.side,
-                request.qty,
-                fill_price,
-                lock_only=False,
-            )
-            order = Order(
-                client_order_id=request.client_order_id,
-                symbol=request.symbol,
-                side=request.side,
-                type=request.type,
-                status=OrderStatus.FILLED,
-                qty=request.qty,
-                price=price,
-                filled_qty=request.qty,
-                avg_price=fill_price,
-            )
-            fill = Fill(
-                order_id=order.order_id,
-                symbol=order.symbol,
-                side=order.side,
-                price=fill_price,
-                qty=request.qty,
-                fee=_fee(fill_price, request.qty, self.fee_bps),
-                fee_asset=inst.quote,
-            )
-            self._orders[order.order_id] = order
-            self._emit_order(account, order)
-            self._emit_fill(account, fill)
-            self._emit_balances(account)
-            self._emit_public_trade(
-                Trade(
-                    symbol=order.symbol,
-                    price=fill_price,
-                    qty=request.qty,
-                    side=request.side,
-                )
-            )
-            return order
+        limit_price: Decimal | None = None
+        if request.type is OrderType.LIMIT:
+            assert request.price is not None
+            limit_price = _round_price(request.price, inst.tick_size)
 
-        # Resting order — lock funds
-        self._reserve_and_settle(
-            account, inst, request.side, request.qty, price, lock_only=True
-        )
         order = Order(
-            client_order_id=request.client_order_id,
+            client_order_id=client_order_id,
             symbol=request.symbol,
             side=request.side,
             type=request.type,
-            status=OrderStatus.OPEN,
+            status=OrderStatus.NEW,
             qty=request.qty,
-            price=price,
+            price=limit_price,
             filled_qty=Decimal("0"),
             avg_price=None,
         )
+        self._register_order(account, order)
+
+        filled_qty, notional = self._match_taker_locked(
+            account,
+            order,
+            limit_price=limit_price,
+        )
+        remaining = request.qty - filled_qty
+
+        if remaining > 0 and request.type is OrderType.MARKET:
+            raise OrderError("insufficient liquidity for market order")
+
+        if remaining > 0:
+            # Rest unfilled size — lock at limit price.
+            assert limit_price is not None
+            self._reserve_and_settle(
+                account,
+                inst,
+                request.side,
+                remaining,
+                limit_price,
+                lock_only=True,
+            )
+            status = (
+                OrderStatus.PARTIALLY_FILLED
+                if filled_qty > 0
+                else OrderStatus.OPEN
+            )
+            avg = (notional / filled_qty) if filled_qty > 0 else None
+            order = order.model_copy(
+                update={
+                    "status": status,
+                    "filled_qty": filled_qty,
+                    "avg_price": avg,
+                }
+            )
+            self._orders[order.order_id] = order
+            self._open_by_account.setdefault(account, set()).add(order.order_id)
+            self._emit_order(account, order)
+            self._emit_balances(account)
+            return order
+
+        avg = notional / filled_qty if filled_qty > 0 else None
+        order = order.model_copy(
+            update={
+                "status": OrderStatus.FILLED,
+                "filled_qty": filled_qty,
+                "avg_price": avg,
+            }
+        )
         self._orders[order.order_id] = order
-        self._open_by_account.setdefault(account, set()).add(order.order_id)
         self._emit_order(account, order)
         self._emit_balances(account)
         return order
 
     async def cancel_order(self, account: str, order_id: str) -> Order:
         async with self._lock:
-            order = self._orders.get(order_id)
-            if order is None:
-                raise OrderError(f"unknown order_id={order_id}")
-            open_ids = self._open_by_account.get(account, set())
-            if order_id not in open_ids:
-                raise OrderError(f"order {order_id} is not open for account={account}")
-            inst = self._require_instrument(order.symbol)
-            assert order.price is not None
-            self._unlock(account, inst, order.side, order.qty, order.price)
-            canceled = order.model_copy(update={"status": OrderStatus.CANCELED})
-            self._orders[order_id] = canceled
-            open_ids.remove(order_id)
-            self._emit_order(account, canceled)
-            self._emit_balances(account)
-            return canceled
+            return self._cancel_order_locked(account, order_id)
+
+    async def cancel_by_client_order_id(
+        self, account: str, client_order_id: str
+    ) -> Order:
+        async with self._lock:
+            order_id = self._client_order_ids.get(account, {}).get(client_order_id)
+            if order_id is None:
+                raise OrderError(f"unknown client_order_id={client_order_id}")
+            return self._cancel_order_locked(account, order_id)
+
+    def _cancel_order_locked(self, account: str, order_id: str) -> Order:
+        order = self._orders.get(order_id)
+        if order is None:
+            raise OrderError(f"unknown order_id={order_id}")
+        open_ids = self._open_by_account.get(account, set())
+        if order_id not in open_ids:
+            raise OrderError(f"order {order_id} is not open for account={account}")
+        inst = self._require_instrument(order.symbol)
+        assert order.price is not None
+        remaining = order.qty - order.filled_qty
+        if remaining > 0:
+            self._unlock(account, inst, order.side, remaining, order.price)
+        canceled = order.model_copy(update={"status": OrderStatus.CANCELED})
+        self._orders[order_id] = canceled
+        open_ids.remove(order_id)
+        self._emit_order(account, canceled)
+        self._emit_balances(account)
+        return canceled
 
     def get_order(self, order_id: str) -> Order:
         order = self._orders.get(order_id)
         if order is None:
             raise OrderError(f"unknown order_id={order_id}")
         return order
+
+    def get_order_by_client_id(self, account: str, client_order_id: str) -> Order:
+        order_id = self._client_order_ids.get(account, {}).get(client_order_id)
+        if order_id is None:
+            raise OrderError(f"unknown client_order_id={client_order_id}")
+        return self.get_order(order_id)
 
     def list_open_orders(
         self, account: str, symbol: str | None = None
@@ -413,11 +456,16 @@ class PaperExchange:
         return orders
 
     def list_balances(self, account: str) -> list[Balance]:
-        bal = self._balances.get(account, {})
-        # locked tracked implicitly via free-only store; expose free for paper
+        free = self._free.get(account, {})
+        locked = self._locked.get(account, {})
+        assets = sorted(set(free) | set(locked))
         return [
-            Balance(asset=asset, free=free, locked=Decimal("0"))
-            for asset, free in sorted(bal.items())
+            Balance(
+                asset=asset,
+                free=free.get(asset, Decimal("0")),
+                locked=locked.get(asset, Decimal("0")),
+            )
+            for asset in assets
         ]
 
     # --- subscriptions -----------------------------------------------------
@@ -479,6 +527,179 @@ class PaperExchange:
             raise InstrumentNotFoundError(symbol)
         return inst
 
+    def _allocate_client_order_id(
+        self, account: str, client_order_id: str | None
+    ) -> str:
+        cid = client_order_id or uuid.uuid4().hex
+        index = self._client_order_ids.setdefault(account, {})
+        if cid in index:
+            raise OrderError(f"duplicate client_order_id={cid}")
+        return cid
+
+    def _register_order(self, account: str, order: Order) -> None:
+        assert order.client_order_id is not None
+        self._orders[order.order_id] = order
+        self._order_account[order.order_id] = account
+        self._client_order_ids.setdefault(account, {})[
+            order.client_order_id
+        ] = order.order_id
+
+    def _resting(
+        self, symbol: str
+    ) -> list[tuple[str, Order, Decimal]]:
+        out: list[tuple[str, Order, Decimal]] = []
+        for account, ids in self._open_by_account.items():
+            for order_id in ids:
+                order = self._orders[order_id]
+                if order.symbol != symbol or order.price is None:
+                    continue
+                remaining = order.qty - order.filled_qty
+                if remaining > 0:
+                    out.append((account, order, remaining))
+        return out
+
+    def _bbo_prices(self, symbol: str) -> tuple[Decimal, Decimal]:
+        bids = [o.price for _a, o, _r in self._resting(symbol) if o.side is Side.BUY]
+        asks = [o.price for _a, o, _r in self._resting(symbol) if o.side is Side.SELL]
+        bid_px, _bq, ask_px, _aq = self._books[symbol]
+        if bids:
+            bid_px = max(bids)  # type: ignore[arg-type]
+        if asks:
+            ask_px = min(asks)  # type: ignore[arg-type]
+        return bid_px, ask_px
+
+    def _match_taker_locked(
+        self,
+        taker_account: str,
+        taker: Order,
+        *,
+        limit_price: Decimal | None,
+    ) -> tuple[Decimal, Decimal]:
+        """Match ``taker`` against opposite resting orders. Returns (filled_qty, notional)."""
+        inst = self._instruments[taker.symbol]
+        remaining = taker.qty - taker.filled_qty
+        filled = Decimal("0")
+        notional = Decimal("0")
+        makers = self._sorted_makers(
+            taker.symbol,
+            taker.side,
+            exclude_account=taker_account,
+            limit_price=limit_price,
+        )
+        for maker_account, maker, maker_rem in makers:
+            if remaining <= 0:
+                break
+            qty = min(remaining, maker_rem)
+            assert maker.price is not None
+            fill_price = maker.price
+            # Maker: unlock locked size then settle at trade price.
+            self._unlock(
+                maker_account, inst, maker.side, qty, maker.price
+            )
+            self._reserve_and_settle(
+                maker_account,
+                inst,
+                maker.side,
+                qty,
+                fill_price,
+                lock_only=False,
+            )
+            # Taker: settle immediately (no prior lock on matched size).
+            self._reserve_and_settle(
+                taker_account,
+                inst,
+                taker.side,
+                qty,
+                fill_price,
+                lock_only=False,
+            )
+            maker_filled = maker.filled_qty + qty
+            if maker_filled >= maker.qty:
+                maker_status = OrderStatus.FILLED
+                self._open_by_account.get(maker_account, set()).discard(
+                    maker.order_id
+                )
+            else:
+                maker_status = OrderStatus.PARTIALLY_FILLED
+            maker_avg = (
+                ((maker.avg_price or Decimal("0")) * maker.filled_qty)
+                + fill_price * qty
+            ) / maker_filled
+            maker_updated = maker.model_copy(
+                update={
+                    "status": maker_status,
+                    "filled_qty": maker_filled,
+                    "avg_price": maker_avg,
+                }
+            )
+            self._orders[maker.order_id] = maker_updated
+            maker_fill = Fill(
+                order_id=maker.order_id,
+                client_order_id=maker.client_order_id,
+                symbol=maker.symbol,
+                side=maker.side,
+                price=fill_price,
+                qty=qty,
+                fee=_fee(fill_price, qty, self.fee_bps),
+                fee_asset=inst.quote,
+            )
+            taker_fill = Fill(
+                order_id=taker.order_id,
+                client_order_id=taker.client_order_id,
+                symbol=taker.symbol,
+                side=taker.side,
+                price=fill_price,
+                qty=qty,
+                fee=_fee(fill_price, qty, self.fee_bps),
+                fee_asset=inst.quote,
+            )
+            self._emit_order(maker_account, maker_updated)
+            self._emit_fill(maker_account, maker_fill)
+            self._emit_balances(maker_account)
+            self._emit_fill(taker_account, taker_fill)
+            self._emit_public_trade(
+                Trade(
+                    symbol=taker.symbol,
+                    price=fill_price,
+                    qty=qty,
+                    side=taker.side,
+                )
+            )
+            filled += qty
+            notional += fill_price * qty
+            remaining -= qty
+        return filled, notional
+
+    def _sorted_makers(
+        self,
+        symbol: str,
+        taker_side: Side,
+        *,
+        exclude_account: str,
+        limit_price: Decimal | None,
+    ) -> list[tuple[str, Order, Decimal]]:
+        maker_side = Side.SELL if taker_side is Side.BUY else Side.BUY
+        out: list[tuple[str, Order, Decimal]] = []
+        for account, order, remaining in self._resting(symbol):
+            if account == exclude_account or order.side is not maker_side:
+                continue
+            assert order.price is not None
+            if limit_price is not None:
+                if taker_side is Side.BUY and order.price > limit_price:
+                    continue
+                if taker_side is Side.SELL and order.price < limit_price:
+                    continue
+            out.append((account, order, remaining))
+        # BUY taker: lowest ask first; SELL taker: highest bid first.
+        if taker_side is Side.BUY:
+            out.sort(key=lambda row: (row[1].price or Decimal("0"), row[1].ts))
+        else:
+            out.sort(
+                key=lambda row: (row[1].price or Decimal("0"), row[1].ts),
+                reverse=True,
+            )
+        return out
+
     async def _run(self) -> None:
         try:
             while self._started:
@@ -490,12 +711,19 @@ class PaperExchange:
 
     def _tick_locked(self) -> None:
         for symbol, mid in list(self._mid.items()):
-            # Random-walk mid price.
-            move = mid * self.volatility_bps / Decimal("10000")
-            delta = Decimal(str(self._rng.uniform(-1.0, 1.0))) * move
-            inst = self._instruments[symbol]
-            new_mid = max(mid + delta, inst.tick_size)
-            self._mid[symbol] = _round_price(new_mid, inst.tick_size)
+            if self.volatility_bps > 0:
+                move = mid * self.volatility_bps / Decimal("10000")
+                delta = Decimal(str(self._rng.uniform(-1.0, 1.0))) * move
+                inst = self._instruments[symbol]
+                new_mid = max(mid + delta, inst.tick_size)
+                self._mid[symbol] = _round_price(new_mid, inst.tick_size)
+                tick = inst.tick_size
+                self._books[symbol] = (
+                    self._mid[symbol] - tick,
+                    Decimal("1"),
+                    self._mid[symbol] + tick,
+                    Decimal("1"),
+                )
             ticker = self.get_ticker(symbol)
             for stream in list(self._ticker_subs.get(symbol, ())):
                 stream.push(ticker)
@@ -503,68 +731,12 @@ class PaperExchange:
             for stream in list(self._book_subs.get(symbol, ())):
                 stream.push(book)
 
-            # Occasionally emit a synthetic public trade.
-            if self._rng.random() < 0.35:
+            if self.volatility_bps > 0 and self._rng.random() < 0.35:
                 side = Side.BUY if self._rng.random() < 0.5 else Side.SELL
                 px = ticker.ask if side is Side.BUY else ticker.bid
                 qty = Decimal("0.001") * Decimal(self._rng.randint(1, 20))
                 self._emit_public_trade(
                     Trade(symbol=symbol, price=px, qty=qty, side=side)
-                )
-
-            self._match_resting_locked(symbol, ticker)
-
-    def _match_resting_locked(self, symbol: str, ticker: Ticker) -> None:
-        for account, open_ids in list(self._open_by_account.items()):
-            for order_id in list(open_ids):
-                order = self._orders[order_id]
-                if order.symbol != symbol or order.price is None:
-                    continue
-                should_fill = (
-                    order.side is Side.BUY and order.price >= ticker.ask
-                ) or (order.side is Side.SELL and order.price <= ticker.bid)
-                if not should_fill:
-                    continue
-                fill_price = ticker.ask if order.side is Side.BUY else ticker.bid
-                inst = self._instruments[symbol]
-                # Convert lock → settle
-                self._unlock(account, inst, order.side, order.qty, order.price)
-                self._reserve_and_settle(
-                    account,
-                    inst,
-                    order.side,
-                    order.qty,
-                    fill_price,
-                    lock_only=False,
-                )
-                filled = order.model_copy(
-                    update={
-                        "status": OrderStatus.FILLED,
-                        "filled_qty": order.qty,
-                        "avg_price": fill_price,
-                    }
-                )
-                fill = Fill(
-                    order_id=filled.order_id,
-                    symbol=filled.symbol,
-                    side=filled.side,
-                    price=fill_price,
-                    qty=filled.qty,
-                    fee=_fee(fill_price, filled.qty, self.fee_bps),
-                    fee_asset=inst.quote,
-                )
-                self._orders[order_id] = filled
-                open_ids.remove(order_id)
-                self._emit_order(account, filled)
-                self._emit_fill(account, fill)
-                self._emit_balances(account)
-                self._emit_public_trade(
-                    Trade(
-                        symbol=filled.symbol,
-                        price=fill_price,
-                        qty=filled.qty,
-                        side=filled.side,
-                    )
                 )
 
     def _reserve_and_settle(
@@ -577,33 +749,50 @@ class PaperExchange:
         *,
         lock_only: bool,
     ) -> None:
-        bal = self._balances.setdefault(account, {})
+        free = self._free.setdefault(account, {})
+        locked = self._locked.setdefault(account, {})
         if side is Side.BUY:
             cost = price * qty
-            fee = _fee(price, qty, self.fee_bps)
-            need = cost + fee
-            free = bal.get(inst.quote, Decimal("0"))
-            if free < need:
-                raise InsufficientBalanceError(
-                    f"need {need} {inst.quote}, free={free}"
-                )
-            bal[inst.quote] = free - need
-            if not lock_only:
-                bal[inst.base] = bal.get(inst.base, Decimal("0")) + qty
+            if lock_only:
+                # Resting buy: move notional free → locked (fee on fill).
+                have = free.get(inst.quote, Decimal("0"))
+                if have < cost:
+                    raise InsufficientBalanceError(
+                        f"need {cost} {inst.quote}, free={have}"
+                    )
+                free[inst.quote] = have - cost
+                locked[inst.quote] = locked.get(inst.quote, Decimal("0")) + cost
             else:
-                # For paper simplicity locks are deducted from free; unlock restores.
-                pass
+                fee = _fee(price, qty, self.fee_bps)
+                need = cost + fee
+                have = free.get(inst.quote, Decimal("0"))
+                if have < need:
+                    raise InsufficientBalanceError(
+                        f"need {need} {inst.quote}, free={have}"
+                    )
+                free[inst.quote] = have - need
+                free[inst.base] = free.get(inst.base, Decimal("0")) + qty
         else:
-            free = bal.get(inst.base, Decimal("0"))
-            if free < qty:
-                raise InsufficientBalanceError(
-                    f"need {qty} {inst.base}, free={free}"
-                )
-            bal[inst.base] = free - qty
-            if not lock_only:
+            if lock_only:
+                have = free.get(inst.base, Decimal("0"))
+                if have < qty:
+                    raise InsufficientBalanceError(
+                        f"need {qty} {inst.base}, free={have}"
+                    )
+                free[inst.base] = have - qty
+                locked[inst.base] = locked.get(inst.base, Decimal("0")) + qty
+            else:
+                have = free.get(inst.base, Decimal("0"))
+                if have < qty:
+                    raise InsufficientBalanceError(
+                        f"need {qty} {inst.base}, free={have}"
+                    )
+                free[inst.base] = have - qty
                 proceeds = price * qty
                 fee = _fee(price, qty, self.fee_bps)
-                bal[inst.quote] = bal.get(inst.quote, Decimal("0")) + proceeds - fee
+                free[inst.quote] = (
+                    free.get(inst.quote, Decimal("0")) + proceeds - fee
+                )
 
     def _unlock(
         self,
@@ -613,26 +802,43 @@ class PaperExchange:
         qty: Decimal,
         price: Decimal,
     ) -> None:
-        bal = self._balances.setdefault(account, {})
+        """Release a resting lock: locked → free (cancel or before maker settle)."""
+        free = self._free.setdefault(account, {})
+        locked = self._locked.setdefault(account, {})
         if side is Side.BUY:
             cost = price * qty
-            fee = _fee(price, qty, self.fee_bps)
-            bal[inst.quote] = bal.get(inst.quote, Decimal("0")) + cost + fee
+            have = locked.get(inst.quote, Decimal("0"))
+            if have < cost:
+                raise OrderError(
+                    f"unlock {cost} {inst.quote} but locked={have}"
+                )
+            locked[inst.quote] = have - cost
+            free[inst.quote] = free.get(inst.quote, Decimal("0")) + cost
         else:
-            bal[inst.base] = bal.get(inst.base, Decimal("0")) + qty
+            have = locked.get(inst.base, Decimal("0"))
+            if have < qty:
+                raise OrderError(f"unlock {qty} {inst.base} but locked={have}")
+            locked[inst.base] = have - qty
+            free[inst.base] = free.get(inst.base, Decimal("0")) + qty
 
     def _emit_order(self, account: str, order: Order) -> None:
         for stream in list(self._order_subs.get(account, ())):
             stream.push(order)
+        if self._on_order is not None:
+            self._on_order(account, order)
 
     def _emit_fill(self, account: str, fill: Fill) -> None:
         for stream in list(self._fill_subs.get(account, ())):
             stream.push(fill)
+        if self._on_fill is not None:
+            self._on_fill(account, fill)
 
     def _emit_balances(self, account: str) -> None:
         for bal in self.list_balances(account):
             for stream in list(self._balance_subs.get(account, ())):
                 stream.push(bal)
+            if self._on_balance is not None:
+                self._on_balance(account, bal)
 
     def _emit_public_trade(self, trade: Trade) -> None:
         for stream in list(self._trade_subs.get(trade.symbol, ())):

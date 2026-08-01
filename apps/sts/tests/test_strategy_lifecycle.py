@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
@@ -32,6 +34,25 @@ class RecordingStrategy(Strategy):
     async def on_resume(self) -> None:
         await super().on_resume()
         self.events.append("on_resume")
+
+
+class ExitSoonStrategy(Strategy):
+    name = "exit_soon"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[str] = []
+        self.exit_reason: str | None = None
+
+    async def on_start(self) -> None:
+        self.events.append("on_start")
+
+    async def on_ready(self) -> None:
+        self.events.append("on_ready")
+        self.exit("natural_end")
+
+    async def on_stop(self) -> None:
+        self.events.append("on_stop")
 
 
 @pytest.fixture
@@ -125,4 +146,59 @@ async def test_default_strategy_is_noop(broker: Broker) -> None:
     assert session is not None
     assert session.strategy.name == "noop"
     assert resolve("noop").name == "noop"
+    await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_strategy_exit_triggers_on_stop(broker: Broker) -> None:
+    register(ExitSoonStrategy)
+    instances: list[ExitSoonStrategy] = []
+
+    def factory(name: str | None) -> Strategy:
+        s = ExitSoonStrategy()
+        instances.append(s)
+        return s
+
+    manager = SessionManager(
+        broker, heartbeat_interval=0.1, strategy_factory=factory
+    )
+    await manager.create_session(
+        StsCreateSessionRequest(
+            session_id="exit-1",
+            created_by=1,
+            strategy="exit_soon",
+        )
+    )
+    strat = instances[0]
+    for _ in range(50):
+        if manager.get("exit-1") is None and "on_stop" in strat.events:
+            break
+        await asyncio.sleep(0.02)
+    assert manager.get("exit-1") is None
+    assert strat.events == ["on_start", "on_ready", "on_stop"]
+
+
+@pytest.mark.asyncio
+async def test_noop_pause_cancels_and_resume_rearms(broker: Broker) -> None:
+    manager = SessionManager(broker, heartbeat_interval=0.1)
+    await manager.create_session(
+        StsCreateSessionRequest(
+            session_id="noop-pause",
+            created_by=1,
+            strategy="noop",
+            td=[1],
+        )
+    )
+    session = manager.get("noop-pause")
+    assert session is not None
+    strat = session.strategy
+    assert strat._tick_token is not None  # type: ignore[attr-defined]
+    assert strat._tick_token.active  # type: ignore[attr-defined]
+
+    await manager.pause("noop-pause")
+    assert not strat._tick_token.active  # type: ignore[attr-defined]
+
+    await manager.resume("noop-pause")
+    assert strat._tick_token.active  # type: ignore[attr-defined]
+
     await manager.close_all()

@@ -6,6 +6,19 @@ class Topics:
     TD = "td"
     STS = "sts"
     MD = "md"
+    PAPER = "paper"
+
+    @staticmethod
+    def paper_orders(api_key: str) -> str:
+        return f"paper.{api_key}.orders"
+
+    @staticmethod
+    def paper_fills(api_key: str) -> str:
+        return f"paper.{api_key}.fills"
+
+    @staticmethod
+    def paper_balances(api_key: str) -> str:
+        return f"paper.{api_key}.balances"
 
     # Legacy / reserved command subjects
     CMD_TRADING = "cmd.trading"

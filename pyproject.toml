@@ -38,5 +38,5 @@ pythonpath = [
     "apps/api/src",
     "apps/md/src",
     "apps/sts/src",
-    "apps/md/src",
+    "apps/paper/src",
 ]

@@ -72,8 +72,15 @@ class SessionManager:
             md_ids=list(request.md),
             st_paras=dict(request.st_paras),
             heartbeat_interval=self._heartbeat_interval,
+            on_exit=self._on_session_exit,
         )
-        await session.start()
+        # Register before start so Strategy.exit() during on_start/on_ready works.
+        self._sessions[request.session_id] = session
+        try:
+            await session.start()
+        except Exception:
+            self._sessions.pop(request.session_id, None)
+            raise
 
         if self._persist_live is not None:
             await self._persist_live(
@@ -85,7 +92,6 @@ class SessionManager:
                 st_paras=dict(request.st_paras),
             )
 
-        self._sessions[request.session_id] = session
         logger.info(
             "STS session created id=%s strategy=%s td=%s",
             request.session_id,
@@ -205,6 +211,13 @@ class SessionManager:
         if self._mark_done is not None:
             await self._mark_done(session_id)
         logger.info("STS session closed id=%s", session_id)
+
+    async def _on_session_exit(self, session_id: str, reason: str) -> None:
+        """Handle :meth:`Strategy.exit` — tear down and mark the session done."""
+        logger.info(
+            "STS strategy exit id=%s reason=%s", session_id, reason or "—"
+        )
+        await self.close(session_id)
 
     async def close_all(self) -> None:
         for session_id in list(self._sessions):

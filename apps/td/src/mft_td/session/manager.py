@@ -9,9 +9,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from mft.broker import Broker
+from mft.exchange.errors import ExchangeError
+from mft.exchange.models import PlaceOrderRequest
 from mft.protocol import (
     STS_DETACH,
     STS_LEASE_HEARTBEAT,
+    STS_ORDER_CANCEL,
+    STS_ORDER_SUBMIT,
     STS_RECON,
     TD_LEASE_ACK,
     TD_RECON_DONE,
@@ -19,6 +23,8 @@ from mft.protocol import (
     LeaseAck,
     LeaseHeartbeat,
     ListSessionsRequest,
+    OrderCancel,
+    OrderSubmit,
     Recon,
     ReconDone,
     SessionInfo,
@@ -390,6 +396,14 @@ class SessionManager:
                     await self._handle_recon(acct, link, td_topic, env.payload)
                     continue
 
+                if env.type == STS_ORDER_SUBMIT:
+                    await self._handle_order_submit(acct, link, env.payload)
+                    continue
+
+                if env.type == STS_ORDER_CANCEL:
+                    await self._handle_order_cancel(acct, link, env.payload)
+                    continue
+
                 if env.type == STS_DETACH:
                     try:
                         det = StsDetach.model_validate(env.payload)
@@ -435,6 +449,7 @@ class SessionManager:
                     ReconDone(
                         session_id=link.session_id,
                         api_id=link.api_id,
+                        oms=view,
                     ),
                     type=TD_RECON_DONE,
                     source="td",
@@ -469,4 +484,127 @@ class SessionManager:
                 f"recon failed sts={link.session_id}: {exc}",
                 source="td",
                 level="error",
+            )
+
+    async def _handle_order_submit(
+        self,
+        acct: TradingAccount,
+        link: StsLink,
+        payload: object,
+    ) -> None:
+        try:
+            req = OrderSubmit.model_validate(payload)
+        except Exception:
+            logger.warning(
+                "TD ignore invalid order submit session=%s api_id=%s",
+                link.session_id,
+                link.api_id,
+            )
+            return
+        if req.api_id != link.api_id or req.session_id != link.session_id:
+            return
+        try:
+            await acct.trading.private.place_order(
+                PlaceOrderRequest(
+                    symbol=req.symbol,
+                    side=req.side,
+                    type=req.type,
+                    qty=req.qty,
+                    price=req.price,
+                    client_order_id=req.client_order_id,
+                )
+            )
+            await publish_td_log(
+                self._broker,
+                link.api_id,
+                (
+                    f"order submitted sts={link.session_id} "
+                    f"cid={req.client_order_id} {req.side} {req.qty} {req.symbol}"
+                ),
+                source="td",
+            )
+        except ExchangeError as exc:
+            await acct.trading.publish_order_reject(
+                reason=str(exc),
+                client_order_id=req.client_order_id,
+                symbol=req.symbol,
+            )
+            await publish_td_log(
+                self._broker,
+                link.api_id,
+                (
+                    f"order rejected sts={link.session_id} "
+                    f"cid={req.client_order_id}: {exc}"
+                ),
+                source="td",
+                level="warn",
+            )
+        except Exception as exc:
+            logger.exception(
+                "TD order submit failed session=%s api_id=%s cid=%s",
+                link.session_id,
+                link.api_id,
+                req.client_order_id,
+            )
+            await acct.trading.publish_order_reject(
+                reason=str(exc),
+                client_order_id=req.client_order_id,
+                symbol=req.symbol,
+            )
+
+    async def _handle_order_cancel(
+        self,
+        acct: TradingAccount,
+        link: StsLink,
+        payload: object,
+    ) -> None:
+        try:
+            req = OrderCancel.model_validate(payload)
+        except Exception:
+            logger.warning(
+                "TD ignore invalid order cancel session=%s api_id=%s",
+                link.session_id,
+                link.api_id,
+            )
+            return
+        if req.api_id != link.api_id or req.session_id != link.session_id:
+            return
+        try:
+            await acct.trading.private.cancel_by_client_order_id(
+                req.client_order_id
+            )
+            await publish_td_log(
+                self._broker,
+                link.api_id,
+                (
+                    f"order canceled sts={link.session_id} "
+                    f"cid={req.client_order_id}"
+                ),
+                source="td",
+            )
+        except ExchangeError as exc:
+            await acct.trading.publish_cancel_reject(
+                reason=str(exc),
+                client_order_id=req.client_order_id,
+            )
+            await publish_td_log(
+                self._broker,
+                link.api_id,
+                (
+                    f"cancel rejected sts={link.session_id} "
+                    f"cid={req.client_order_id}: {exc}"
+                ),
+                source="td",
+                level="warn",
+            )
+        except Exception as exc:
+            logger.exception(
+                "TD order cancel failed session=%s api_id=%s cid=%s",
+                link.session_id,
+                link.api_id,
+                req.client_order_id,
+            )
+            await acct.trading.publish_cancel_reject(
+                reason=str(exc),
+                client_order_id=req.client_order_id,
             )

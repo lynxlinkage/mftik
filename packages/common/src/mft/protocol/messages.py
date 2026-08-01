@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from mft.exchange.models import OrderType, Side
+from mft.exchange.oms import OmsView
 from mft.protocol.envelope import Envelope
 
 
@@ -190,6 +193,7 @@ class ReconDone(BaseModel):
 
     session_id: str
     api_id: int
+    oms: OmsView = Field(default_factory=OmsView)
 
 
 class StsDetach(BaseModel):
@@ -199,6 +203,54 @@ class StsDetach(BaseModel):
 
     session_id: str
     api_id: int
+
+
+class OrderSubmit(BaseModel):
+    """STS → TD: place an order for ``api_id`` (keyed by ``client_order_id``)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    api_id: int
+    symbol: str
+    side: Side
+    type: OrderType
+    qty: Decimal
+    price: Decimal | None = None
+    client_order_id: str
+
+
+class OrderCancel(BaseModel):
+    """STS → TD: cancel an open order by ``client_order_id``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    api_id: int
+    client_order_id: str
+
+
+class OrderReject(BaseModel):
+    """TD → STS: submit rejected (publish on ``td.{api_id}.global``)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    client_order_id: str | None = None
+    order_id: str | None = None
+    symbol: str | None = None
+    reason: str
+
+
+class CancelReject(BaseModel):
+    """TD → STS: cancel rejected (publish on ``td.{api_id}.global``)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    client_order_id: str | None = None
+    order_id: str | None = None
+    reason: str
 
 
 HeartbeatEnvelope = Envelope[Heartbeat]
@@ -221,6 +273,10 @@ LeaseAckEnvelope = Envelope[LeaseAck]
 ReconEnvelope = Envelope[Recon]
 ReconDoneEnvelope = Envelope[ReconDone]
 StsDetachEnvelope = Envelope[StsDetach]
+OrderSubmitEnvelope = Envelope[OrderSubmit]
+OrderCancelEnvelope = Envelope[OrderCancel]
+OrderRejectEnvelope = Envelope[OrderReject]
+CancelRejectEnvelope = Envelope[CancelReject]
 
 # Envelope.type constants for control-plane RPC
 TD_HEALTH = "td.health"
@@ -231,6 +287,75 @@ TD_SESSION_LIST = "td.session.list"
 TD_LEASE_ACK = "td.lease.ack"
 TD_RECON_DONE = "td.recon.done"
 TD_OMS_VIEW = "td.oms.view"
+TD_ORDER_UPDATE = "td.order.update"
+TD_FILL = "td.fill"
+TD_ORDER_REJECT = "td.order.reject"
+TD_CANCEL_REJECT = "td.cancel.reject"
+TD_BALANCE_UPDATE = "td.balance.update"
+
+# Paper engine RPC / streams
+PAPER = "paper"
+PAPER_ERROR = "paper.error"
+PAPER_AUTH = "paper.auth"
+PAPER_PLACE_ORDER = "paper.place_order"
+PAPER_CANCEL_ORDER = "paper.cancel_order"
+PAPER_CANCEL_BY_CLIENT_ORDER_ID = "paper.cancel_by_client_order_id"
+PAPER_FETCH_ORDER = "paper.fetch_order"
+PAPER_FETCH_OPEN_ORDERS = "paper.fetch_open_orders"
+PAPER_FETCH_BALANCES = "paper.fetch_balances"
+PAPER_ORDER = "paper.order"
+PAPER_FILL = "paper.fill"
+PAPER_BALANCE = "paper.balance"
+
+
+class PaperCredentials(BaseModel):
+    """Auth material for paper-engine private RPCs."""
+
+    model_config = ConfigDict(frozen=True)
+
+    api_key: str
+    api_secret: str
+    passphrase: str | None = None
+
+
+class PaperPlaceOrderRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    credentials: PaperCredentials
+    symbol: str
+    side: Side
+    type: OrderType
+    qty: Decimal
+    price: Decimal | None = None
+    client_order_id: str | None = None
+
+
+class PaperCancelRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    credentials: PaperCredentials
+    order_id: str | None = None
+    client_order_id: str | None = None
+
+
+class PaperFetchOrderRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    credentials: PaperCredentials
+    order_id: str
+
+
+class PaperFetchOpenOrdersRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    credentials: PaperCredentials
+    symbol: str | None = None
+
+
+class PaperFetchBalancesRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    credentials: PaperCredentials
 
 STS_HEALTH = "sts.health"
 STS_ERROR = "sts.error"
@@ -243,3 +368,5 @@ STS_LEASE_HEARTBEAT = "sts.lease.heartbeat"
 STS_HEARTBEAT = STS_LEASE_HEARTBEAT  # alias for older names
 STS_RECON = "sts.recon"
 STS_DETACH = "sts.detach"
+STS_ORDER_SUBMIT = "sts.order.submit"
+STS_ORDER_CANCEL = "sts.order.cancel"

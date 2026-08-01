@@ -117,6 +117,7 @@ class Fill(BaseModel):
 
     fill_id: str = Field(default_factory=_id)
     order_id: str
+    client_order_id: str | None = None
     symbol: str
     side: Side
     price: Decimal

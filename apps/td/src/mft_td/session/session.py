@@ -9,9 +9,22 @@ from typing import Any
 
 from mft.broker import Broker
 from mft.exchange.base import PrivateClient
-from mft.exchange.models import Balance, Fill, Order
+from mft.exchange.models import Balance, Fill, Order, OrderStatus
 from mft.exchange.oms import OmsView, Position
-from mft.protocol import TD_OMS_VIEW, Envelope, Topics
+from mft.protocol import (
+    TD_BALANCE_UPDATE,
+    TD_CANCEL_REJECT,
+    TD_FILL,
+    TD_OMS_VIEW,
+    TD_ORDER_REJECT,
+    TD_ORDER_UPDATE,
+    CancelReject,
+    Envelope,
+    OrderReject,
+    Topics,
+    UntypedEnvelope,
+)
+from pydantic import BaseModel
 
 from mft_td.oms import Oms
 
@@ -28,7 +41,8 @@ class Session:
     Lifecycle:
     1. Created / started when first STS attaches (refcount 0→1).
     2. Further STS sessions attach via lease; OMS publishes on ``td.oms.{api_id}``.
-    3. Last detach destroys the trading session.
+    3. Private events fan out on ``td.{api_id}.global``.
+    4. Last detach destroys the trading session.
     """
 
     def __init__(
@@ -125,6 +139,44 @@ class Session:
             ),
         )
 
+    async def publish_order_reject(
+        self,
+        *,
+        reason: str,
+        client_order_id: str | None = None,
+        order_id: str | None = None,
+        symbol: str | None = None,
+    ) -> None:
+        """Publish a submit reject on ``td.{api_id}.global``."""
+        await self._publish_global(
+            TD_ORDER_REJECT,
+            OrderReject(
+                api_id=self.api_id,
+                client_order_id=client_order_id,
+                order_id=order_id,
+                symbol=symbol,
+                reason=reason,
+            ),
+        )
+
+    async def publish_cancel_reject(
+        self,
+        *,
+        reason: str,
+        client_order_id: str | None = None,
+        order_id: str | None = None,
+    ) -> None:
+        """Publish a cancel reject on ``td.{api_id}.global``."""
+        await self._publish_global(
+            TD_CANCEL_REJECT,
+            CancelReject(
+                api_id=self.api_id,
+                client_order_id=client_order_id,
+                order_id=order_id,
+                reason=reason,
+            ),
+        )
+
     async def destroy(self) -> None:
         """Tear down exchange pumps and private client."""
         if self._destroyed:
@@ -154,26 +206,66 @@ class Session:
     def _dispatch_order(self, order: Order) -> None:
         for cb in list(self._order_cbs):
             cb(order)
+        if order.status is OrderStatus.REJECTED:
+            self._schedule_publish(
+                self.publish_order_reject(
+                    reason="rejected",
+                    client_order_id=order.client_order_id,
+                    order_id=order.order_id,
+                    symbol=order.symbol,
+                )
+            )
+        else:
+            self._schedule_publish(
+                self._publish_global(TD_ORDER_UPDATE, order)
+            )
 
     def _dispatch_fill(self, fill: Fill) -> None:
         for cb in list(self._fill_cbs):
             cb(fill)
+        self._schedule_publish(self._publish_global(TD_FILL, fill))
 
     def _dispatch_balance(self, balance: Balance) -> None:
         for cb in list(self._balance_cbs):
             cb(balance)
+        self._schedule_publish(
+            self._publish_global(TD_BALANCE_UPDATE, balance)
+        )
 
     def _on_oms_update(self, view: OmsView) -> None:
         if self._destroyed or not self._started:
+            return
+        self._schedule_publish(self._safe_publish_oms(view))
+
+    def _schedule_publish(self, coro: Any) -> None:
+        if self._destroyed:
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._safe_publish(view))
+        loop.create_task(coro)
 
-    async def _safe_publish(self, view: OmsView) -> None:
+    async def _safe_publish_oms(self, view: OmsView) -> None:
         try:
             await self.publish_oms(view)
         except Exception:
             logger.exception("failed to publish OMS view api_id=%s", self.api_id)
+
+    async def _publish_global(self, type_: str, payload: BaseModel) -> None:
+        if self._destroyed:
+            return
+        try:
+            await self.broker.publish(
+                Topics.td_global(self.api_id),
+                UntypedEnvelope.wrap(
+                    payload.model_dump(mode="json"),
+                    type=type_,
+                    source="td",
+                    session_id=str(self.api_id),
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "failed to publish %s on td.%s.global", type_, self.api_id
+            )

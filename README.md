@@ -7,7 +7,8 @@ Async, broker-centric trading platform. Domains talk through Redis (Streams + Pu
 | Path | Role |
 |------|------|
 | `apps/api` | FastAPI gateway |
-| `apps/td` | Trading domain |
+| `apps/td` | Trading domain (remote paper client) |
+| `apps/paper` | Paper exchange engine (Redis RPC + streams) |
 | `apps/md` | Market-data domain |
 | `apps/sts` | Strategy domain |
 | `packages/common` | Shared library (`mft`) — protocol, broker, runtime, exchange |

@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 from mft.exchange import (
     ExchangeNotConnectedError,
+    OrderError,
     OrderStatus,
     OrderType,
     PaperAuthError,
@@ -29,6 +30,32 @@ def _private(exchange: PaperExchange, key: str = "key-a"):
     return exchange.private(api_key=key, api_secret=f"secret-for-{key}")
 
 
+async def _seed_book(exchange: PaperExchange) -> None:
+    """Resting bid/ask from a maker account so takers can match."""
+    exchange.register_api(
+        "maker",
+        "secret-for-maker",
+        balances={"BTC": Decimal("10"), "USDT": Decimal("500000")},
+    )
+    maker = exchange.private(
+        api_key="maker", api_secret="secret-for-maker", auto_register=False
+    )
+    await maker.connect()
+    await maker.place_limit_order(
+        symbol="BTCUSDT",
+        side=Side.BUY,
+        qty=Decimal("10"),
+        price=Decimal("49999"),
+    )
+    await maker.place_limit_order(
+        symbol="BTCUSDT",
+        side=Side.SELL,
+        qty=Decimal("10"),
+        price=Decimal("50001"),
+    )
+    await maker.close()
+
+
 @pytest.mark.asyncio
 async def test_public_req_reply(exchange: PaperExchange) -> None:
     public = exchange.public()
@@ -43,9 +70,12 @@ async def test_public_req_reply(exchange: PaperExchange) -> None:
     assert ticker.last > 0
 
     book = await public.fetch_order_book("BTCUSDT", depth=5)
-    assert len(book.bids) == 5
-    assert len(book.asks) == 5
-    assert book.bids[0].price < book.asks[0].price
+    assert len(book.bids) == 1
+    assert len(book.asks) == 1
+    assert book.bids[0].price == Decimal("49999")
+    assert book.asks[0].price == Decimal("50001")
+    assert book.bids[0].qty == Decimal("1")
+    assert book.asks[0].qty == Decimal("1")
 
     await public.close()
 
@@ -68,6 +98,7 @@ async def test_public_stream_ticker(exchange: PaperExchange) -> None:
 
 @pytest.mark.asyncio
 async def test_private_market_order_and_streams(exchange: PaperExchange) -> None:
+    await _seed_book(exchange)
     private = _private(exchange)
     await private.connect()
 
@@ -120,6 +151,45 @@ async def test_limit_rest_cancel(exchange: PaperExchange) -> None:
     await private.connect()
 
     ticker = exchange.get_ticker("BTCUSDT")
+    price = ticker.bid / Decimal("2")
+    qty = Decimal("0.01")
+    before = {b.asset: b for b in await private.fetch_balances()}
+
+    order = await private.place_order(
+        PlaceOrderRequest(
+            symbol="BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            qty=qty,
+            price=price,
+        )
+    )
+    assert order.status is OrderStatus.OPEN
+    assert order.client_order_id  # auto-assigned
+    open_orders = await private.fetch_open_orders("BTCUSDT")
+    assert any(o.order_id == order.order_id for o in open_orders)
+
+    locked_cost = price * qty
+    mid = {b.asset: b for b in await private.fetch_balances()}
+    assert mid["USDT"].locked == locked_cost
+    assert mid["USDT"].free == before["USDT"].free - locked_cost
+    assert mid["BTC"].locked == Decimal("0")
+
+    canceled = await private.cancel_order(order.order_id)
+    assert canceled.status is OrderStatus.CANCELED
+    assert await private.fetch_open_orders("BTCUSDT") == []
+    after = {b.asset: b for b in await private.fetch_balances()}
+    assert after["USDT"].locked == Decimal("0")
+    assert after["USDT"].free == before["USDT"].free
+    await private.close()
+
+
+@pytest.mark.asyncio
+async def test_client_order_id_roundtrip_and_cancel(exchange: PaperExchange) -> None:
+    private = _private(exchange)
+    await private.connect()
+
+    ticker = exchange.get_ticker("BTCUSDT")
     order = await private.place_order(
         PlaceOrderRequest(
             symbol="BTCUSDT",
@@ -127,15 +197,46 @@ async def test_limit_rest_cancel(exchange: PaperExchange) -> None:
             type=OrderType.LIMIT,
             qty=Decimal("0.01"),
             price=ticker.bid / Decimal("2"),
+            client_order_id="cid-abc",
         )
     )
-    assert order.status is OrderStatus.OPEN
-    open_orders = await private.fetch_open_orders("BTCUSDT")
-    assert any(o.order_id == order.order_id for o in open_orders)
+    assert order.client_order_id == "cid-abc"
+    looked_up = exchange.get_order_by_client_id(private.api_key, "cid-abc")
+    assert looked_up.order_id == order.order_id
 
-    canceled = await private.cancel_order(order.order_id)
+    canceled = await private.cancel_by_client_order_id("cid-abc")
     assert canceled.status is OrderStatus.CANCELED
-    assert await private.fetch_open_orders("BTCUSDT") == []
+    assert canceled.client_order_id == "cid-abc"
+    assert await private.fetch_open_orders() == []
+    await private.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_client_order_id_rejected(exchange: PaperExchange) -> None:
+    private = _private(exchange)
+    await private.connect()
+    ticker = exchange.get_ticker("BTCUSDT")
+    await private.place_order(
+        PlaceOrderRequest(
+            symbol="BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            qty=Decimal("0.01"),
+            price=ticker.bid / Decimal("2"),
+            client_order_id="dup-1",
+        )
+    )
+    with pytest.raises(OrderError, match="duplicate client_order_id"):
+        await private.place_order(
+            PlaceOrderRequest(
+                symbol="BTCUSDT",
+                side=Side.BUY,
+                type=OrderType.LIMIT,
+                qty=Decimal("0.01"),
+                price=ticker.bid / Decimal("2"),
+                client_order_id="dup-1",
+            )
+        )
     await private.close()
 
 
@@ -149,6 +250,7 @@ async def test_requires_connect() -> None:
 
 @pytest.mark.asyncio
 async def test_public_and_private_share_engine(exchange: PaperExchange) -> None:
+    await _seed_book(exchange)
     public = exchange.public()
     private = _private(exchange)
     await public.connect()
@@ -176,7 +278,30 @@ async def test_public_and_private_share_engine(exchange: PaperExchange) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cross_account_match(exchange: PaperExchange) -> None:
+    await _seed_book(exchange)
+    book = exchange.get_order_book("BTCUSDT")
+    assert book.asks[0].price == Decimal("50001")
+    assert book.asks[0].qty == Decimal("10")
+
+    taker = _private(exchange, "taker")
+    await taker.connect()
+    order = await taker.place_limit_order(
+        symbol="BTCUSDT",
+        side=Side.BUY,
+        qty=Decimal("1"),
+        price=Decimal("50001"),
+    )
+    assert order.status is OrderStatus.FILLED
+    assert order.avg_price == Decimal("50001")
+    bals = {b.asset: b.free for b in await taker.fetch_balances()}
+    assert bals["BTC"] > Decimal("1")
+    await taker.close()
+
+
+@pytest.mark.asyncio
 async def test_api_key_isolates_accounts(exchange: PaperExchange) -> None:
+    await _seed_book(exchange)
     a = exchange.private(api_key="alice", api_secret="sa")
     b = exchange.private(api_key="bob", api_secret="sb")
     await a.connect()

@@ -104,6 +104,8 @@ async def test_recon_handshake_and_strategy_oms(broker: Broker) -> None:
     assert strat.last is not None
     assert strat.last.api_id == 1
     assert strat.last.session_id == "recon-1"
+    assert strat.last.oms.balances
+    assert len(strat.last.oms.orders) >= 1
 
     # OMS mirror populated from td.oms.{api_id}
     for _ in range(20):
@@ -114,6 +116,13 @@ async def test_recon_handshake_and_strategy_oms(broker: Broker) -> None:
     view = strat.oms[1]
     assert len(view.orders) >= 1
     assert view.balances  # paper seeds quote/base balances
+    # Local mirror should match ReconDone snapshot balances.
+    assert {
+        a: (str(b.free), str(b.locked)) for a, b in view.balances.items()
+    } == {
+        a: (str(b.free), str(b.locked))
+        for a, b in strat.last.oms.balances.items()
+    }
 
     await td.close_all()
     await sts.close_all()

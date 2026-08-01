@@ -15,6 +15,7 @@ from mft.protocol import (
 )
 
 from mft_sts.oms import StrategyOms
+from mft_sts.timer import Timer
 
 if TYPE_CHECKING:
     from mft_sts.session.session import StsSession
@@ -27,23 +28,38 @@ class Strategy:
 
     Process control (wired):
         on_start, on_ready, on_stop, on_pause, on_resume
+        exit() — natural end → session stop → on_stop
 
     TD recon (wired):
         send_recon (auto on first lease ACK), on_recon_done
-        self.oms — read OMS snapshots from ``td.oms.{api_id}``
+        self.oms — read OMS snapshots from ``td.oms.{api_id}``;
+        submit_order mints uint64 client_order_id
+        (strategy.id | ms since 2026-01-01 | seq++) / cancel by that id
 
-    Private / public events (stubs for later wiring):
-        on_order_update, on_fill, on_reject
+    Private events from ``td.{api_id}.global`` (wired):
+        on_order_update, on_fill, on_balance_update
+        on_order_reject (submit fail), on_cancel_reject (cancel fail)
+        submit → on_order_update | on_order_reject
+        cancel → on_order_update | on_cancel_reject
+
+    Timer tokens (wired):
+        self.timer.token().register(first_ms, interval_ms, func)
+        token.cancel()  — timestamps are unix ms
+
+    Public events (stubs for later wiring):
         on_kline, on_order_book
     """
 
     name: str = "base"
+    #: Numeric strategy id packed into uint64 ``client_order_id`` (16-bit).
+    id: int = 0
 
     def __init__(self) -> None:
         self.session: StsSession | None = None
         self._paused = False
         self.paras: dict[str, Any] = {}
         self.oms = StrategyOms()
+        self.timer = Timer()
 
     def bind(self, session: StsSession) -> None:
         """Attach this strategy to its session (called once by the session)."""
@@ -53,6 +69,8 @@ class Strategy:
                 f"{self.session.session_id}"
             )
         self.session = session
+        self.oms.bind(self)
+        self.timer.bind(self)
 
     def validate_paras(self, paras: dict[str, Any]) -> dict[str, Any]:
         """Validate / normalize deploy ``st_paras``. Override per strategy."""
@@ -104,16 +122,22 @@ class Strategy:
     async def on_recon_done(self, msg: ReconDone) -> None:
         """Handle reconciliation-complete from TD. OMS is in ``self.oms``."""
 
-    # --- private events (not wired yet) ------------------------------------
+    # --- private events (td.{api_id}.global) --------------------------------
 
-    async def on_order_update(self, msg: UntypedEnvelope) -> None:
+    async def on_order_update(self, api_id: int, msg: UntypedEnvelope) -> None:
         """Handle order status updates from TD."""
 
-    async def on_fill(self, msg: UntypedEnvelope) -> None:
+    async def on_fill(self, api_id: int, msg: UntypedEnvelope) -> None:
         """Handle fill / execution reports from TD."""
 
-    async def on_reject(self, msg: UntypedEnvelope) -> None:
-        """Handle order rejects from TD."""
+    async def on_order_reject(self, api_id: int, msg: UntypedEnvelope) -> None:
+        """Handle submit rejects from TD."""
+
+    async def on_cancel_reject(self, api_id: int, msg: UntypedEnvelope) -> None:
+        """Handle cancel rejects from TD."""
+
+    async def on_balance_update(self, api_id: int, msg: UntypedEnvelope) -> None:
+        """Handle balance updates from TD."""
 
     # --- public events (not wired yet) -------------------------------------
 
@@ -124,6 +148,12 @@ class Strategy:
         """Handle order book updates from MD."""
 
     # --- helpers -----------------------------------------------------------
+
+    def exit(self, reason: str = "strategy_exit") -> None:
+        """Naturally end this strategy session (triggers ``on_stop`` via manager)."""
+        if self.session is None:
+            raise RuntimeError("strategy is not bound to a session")
+        self.session.request_exit(reason)
 
     async def log(self, message: str, *, level: str = "info", **extra: Any) -> None:
         if self.session is None:

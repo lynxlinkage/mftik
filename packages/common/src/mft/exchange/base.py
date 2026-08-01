@@ -137,7 +137,13 @@ class PrivateClient(BaseClient):
 
     @abstractmethod
     async def cancel_order(self, order_id: str) -> Order:
-        """Cancel an open order."""
+        """Cancel an open order by exchange ``order_id``."""
+
+    async def cancel_by_client_order_id(self, client_order_id: str) -> Order:
+        """Cancel an open order by ``client_order_id``."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support cancel_by_client_order_id"
+        )
 
     @abstractmethod
     async def fetch_order(self, order_id: str) -> Order:

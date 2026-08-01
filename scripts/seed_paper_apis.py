@@ -3,8 +3,11 @@
 
 Intended for local / docker-compose testing. Re-running is safe.
 
-Credentials match ``PaperSessionFactory`` defaults when api ids are 1 and 2:
-  paper-key-{id} / paper-secret-{id}
+Credentials match ``PaperSessionFactory`` / paper-engine seeds:
+  paper-key-1 / paper-secret-1  → 1 BTC + 100000 USDT  (strategy trading)
+  paper-key-2 / paper-secret-2  → 10 BTC + 500000 USDT (liquidity maker)
+
+Paper engine seeds resting book from key-2: bid [[49999, 10]], ask [[50001, 10]].
 """
 
 from __future__ import annotations

@@ -19,7 +19,13 @@
 	let stickToBottom = true;
 
 	function formatTime(ts: number): string {
-		return new Date(ts * 1000).toLocaleTimeString('en-GB', { hour12: false });
+		return new Date(ts * 1000).toLocaleTimeString('en-GB', {
+			hour12: false,
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit',
+			fractionalSecondDigits: 3
+		});
 	}
 
 	function formatLine(entry: LogEntry): string {

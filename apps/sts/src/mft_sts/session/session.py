@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mft.broker import Broker
@@ -11,8 +12,13 @@ from mft.exchange.oms import OmsView
 from mft.protocol import (
     STS_DETACH,
     STS_LEASE_HEARTBEAT,
+    TD_BALANCE_UPDATE,
+    TD_CANCEL_REJECT,
+    TD_FILL,
     TD_LEASE_ACK,
     TD_OMS_VIEW,
+    TD_ORDER_REJECT,
+    TD_ORDER_UPDATE,
     TD_RECON_DONE,
     Envelope,
     LeaseAck,
@@ -27,6 +33,8 @@ from mft.protocol import (
 from mft_sts.strategy import Strategy
 
 logger = logging.getLogger(__name__)
+
+ExitHandler = Callable[[str, str], Awaitable[None]]
 
 
 class StsSession:
@@ -43,6 +51,7 @@ class StsSession:
         md_ids: list[str] | None = None,
         st_paras: dict[str, Any] | None = None,
         heartbeat_interval: float = 1.0,
+        on_exit: ExitHandler | None = None,
     ) -> None:
         self.session_id = session_id
         self.broker = broker
@@ -52,6 +61,7 @@ class StsSession:
         self.md_ids = list(md_ids or [])
         self.st_paras = dict(st_paras or {})
         self.heartbeat_interval = heartbeat_interval
+        self._on_exit = on_exit
 
         strategy.bind(self)
         self.strategy.paras = strategy.validate_paras(self.st_paras)
@@ -60,6 +70,7 @@ class StsSession:
         self._stop = asyncio.Event()
         self._started = False
         self._destroyed = False
+        self._exit_requested = False
         self._token = 0
         self._ack_tokens: dict[int, int] = {}
         self._recon_sent: set[int] = set()
@@ -87,9 +98,7 @@ class StsSession:
         for api_id in self.td_api_ids:
             self._tasks.append(
                 asyncio.create_task(
-                    self._pump_topic(
-                        Topics.td_global(api_id), f"global-{api_id}"
-                    ),
+                    self._pump_td_global(api_id),
                     name=f"sts-{self.session_id}-g-{api_id}",
                 )
             )
@@ -135,10 +144,34 @@ class StsSession:
             return
         await self.strategy.on_resume()
 
+    def request_exit(self, reason: str = "strategy_exit") -> None:
+        """Ask the session manager to end this session (natural strategy exit).
+
+        Scheduled on the event loop so it is safe to call from a timer callback.
+        """
+        if self._destroyed or self._exit_requested:
+            return
+        self._exit_requested = True
+        logger.info(
+            "STS session exit requested id=%s reason=%s",
+            self.session_id,
+            reason,
+        )
+        if self._on_exit is not None:
+            asyncio.create_task(
+                self._on_exit(self.session_id, reason),
+                name=f"sts-{self.session_id}-exit",
+            )
+        else:
+            asyncio.create_task(
+                self.stop(), name=f"sts-{self.session_id}-exit-stop"
+            )
+
     async def stop(self) -> None:
         if self._destroyed:
             return
         self._destroyed = True
+        self._exit_requested = True
         # Tell TD to drop attaches before heartbeats stop (refcount N→N-1).
         await self._publish_detaches()
         self._stop.set()
@@ -148,6 +181,7 @@ class StsSession:
             logger.exception(
                 "strategy on_stop failed session=%s", self.session_id
             )
+        self.strategy.timer.close()
         for task in self._tasks:
             task.cancel()
         if self._tasks:
@@ -264,15 +298,44 @@ class StsSession:
                 api_id,
             )
 
-    async def _pump_topic(self, topic: str, label: str) -> None:
+    async def _pump_td_global(self, api_id: int) -> None:
+        topic = Topics.td_global(api_id)
         try:
             async for env in self.broker.subscribe(topic, stop=self._stop):
-                self._on_message(label, env)
+                await self._on_td_global(api_id, env)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception(
-                "STS pump failed session=%s topic=%s", self.session_id, topic
+                "STS td global pump failed session=%s api_id=%s",
+                self.session_id,
+                api_id,
+            )
+
+    async def _on_td_global(self, api_id: int, env: UntypedEnvelope) -> None:
+        handler = None
+        if env.type == TD_ORDER_UPDATE:
+            handler = self.strategy.on_order_update
+        elif env.type == TD_FILL:
+            handler = self.strategy.on_fill
+        elif env.type == TD_ORDER_REJECT:
+            handler = self.strategy.on_order_reject
+        elif env.type == TD_CANCEL_REJECT:
+            handler = self.strategy.on_cancel_reject
+        elif env.type == TD_BALANCE_UPDATE:
+            handler = self.strategy.on_balance_update
+        else:
+            self._on_message(f"global-{api_id}", env)
+            return
+        try:
+            await handler(api_id, env)
+        except Exception:
+            logger.exception(
+                "strategy %s failed session=%s api_id=%s type=%s",
+                handler.__name__,
+                self.session_id,
+                api_id,
+                env.type,
             )
 
     async def _on_lease_ack(self, api_id: int, env: UntypedEnvelope) -> None:

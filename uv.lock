@@ -8,6 +8,7 @@ members = [
     "mft-common",
     "mft-db",
     "mft-md",
+    "mft-paper",
     "mft-sts",
     "mft-td",
     "mft-workspace",
@@ -412,6 +413,17 @@ requires-dist = [
 name = "mft-md"
 version = "0.1.0"
 source = { editable = "apps/md" }
+dependencies = [
+    { name = "mft-common" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "mft-common", editable = "packages/common" }]
+
+[[package]]
+name = "mft-paper"
+version = "0.1.0"
+source = { editable = "apps/paper" }
 dependencies = [
     { name = "mft-common" },
 ]
