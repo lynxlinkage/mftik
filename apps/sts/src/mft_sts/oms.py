@@ -82,7 +82,7 @@ class StrategyOms:
             raise RuntimeError("strategy OMS is not bound to a session")
         cid = self._cid_factory.next()
         await session.broker.publish(
-            Topics.sts_session(session.session_id),
+            Topics.sts_td_session(session.session_id),
             Envelope[OrderSubmit].wrap(
                 OrderSubmit(
                     session_id=session.session_id,
@@ -105,7 +105,7 @@ class StrategyOms:
         """Cancel an open order by ``client_order_id`` via TD."""
         session = self._require_session()
         await session.broker.publish(
-            Topics.sts_session(session.session_id),
+            Topics.sts_td_session(session.session_id),
             Envelope[OrderCancel].wrap(
                 OrderCancel(
                     session_id=session.session_id,

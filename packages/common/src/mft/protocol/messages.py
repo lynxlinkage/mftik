@@ -129,6 +129,7 @@ class SessionInfo(BaseModel):
     sts_session_id: str | None = None
     strategy: str | None = None
     paused: bool | None = None
+    venue: str | None = None
 
 
 class ListSessionsResult(BaseModel):
@@ -159,7 +160,7 @@ class StsSessionControlResult(BaseModel):
 
 
 class LeaseHeartbeat(BaseModel):
-    """STS → TD fencing lease heartbeat on ``sts.{session_id}``."""
+    """STS fencing lease heartbeat on ``sts.td.*`` / ``sts.md.*``."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -175,6 +176,62 @@ class LeaseAck(BaseModel):
     api_id: int
     session_id: str
     token: int
+
+
+class MdLeaseAck(BaseModel):
+    """MD → STS fencing lease ACK on ``md.{session_id}``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    token: int
+
+
+class MdAttachRequest(BaseModel):
+    """API → MD: attach STS session with market-data subscriptions."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    created_by: int
+    subscriptions: list[str] = Field(default_factory=list)
+    timeout: float = 30.0
+
+
+class MdAttachResult(BaseModel):
+    """MD → API: attach succeeded (lease heartbeat observed)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    subscriptions: list[str] = Field(default_factory=list)
+    refcounts: dict[str, int] = Field(default_factory=dict)
+
+
+class MdSubscribe(BaseModel):
+    """STS → MD: add a feed subscription on the session stream."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    feed: str
+
+
+class MdUnsubscribe(BaseModel):
+    """STS → MD: drop a feed subscription on the session stream."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    feed: str
+
+
+class MdDetach(BaseModel):
+    """STS → MD: strategy session stopping; drop all MD attaches."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
 
 
 class Recon(BaseModel):
@@ -277,6 +334,12 @@ OrderSubmitEnvelope = Envelope[OrderSubmit]
 OrderCancelEnvelope = Envelope[OrderCancel]
 OrderRejectEnvelope = Envelope[OrderReject]
 CancelRejectEnvelope = Envelope[CancelReject]
+MdLeaseAckEnvelope = Envelope[MdLeaseAck]
+MdAttachRequestEnvelope = Envelope[MdAttachRequest]
+MdAttachResultEnvelope = Envelope[MdAttachResult]
+MdSubscribeEnvelope = Envelope[MdSubscribe]
+MdUnsubscribeEnvelope = Envelope[MdUnsubscribe]
+MdDetachEnvelope = Envelope[MdDetach]
 
 # Envelope.type constants for control-plane RPC
 TD_HEALTH = "td.health"
@@ -306,6 +369,10 @@ PAPER_FETCH_BALANCES = "paper.fetch_balances"
 PAPER_ORDER = "paper.order"
 PAPER_FILL = "paper.fill"
 PAPER_BALANCE = "paper.balance"
+PAPER_FETCH_ORDER_BOOK = "paper.fetch_order_book"
+PAPER_FETCH_INSTRUMENTS = "paper.fetch_instruments"
+PAPER_FETCH_TICKER = "paper.fetch_ticker"
+PAPER_ORDER_BOOK = "paper.orderbook"
 
 
 class PaperCredentials(BaseModel):
@@ -357,6 +424,20 @@ class PaperFetchBalancesRequest(BaseModel):
 
     credentials: PaperCredentials
 
+
+class PaperFetchOrderBookRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    depth: int = 10
+
+
+class PaperFetchTickerRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+
+
 STS_HEALTH = "sts.health"
 STS_ERROR = "sts.error"
 STS_SESSION_CREATE = "sts.session.create"
@@ -370,3 +451,13 @@ STS_RECON = "sts.recon"
 STS_DETACH = "sts.detach"
 STS_ORDER_SUBMIT = "sts.order.submit"
 STS_ORDER_CANCEL = "sts.order.cancel"
+
+MD_HEALTH = "md.health"
+MD_ERROR = "md.error"
+MD_SESSION_ATTACH = "md.session.attach"
+MD_SESSION_LIST = "md.session.list"
+MD_LEASE_ACK = "md.lease.ack"
+MD_ORDERBOOK = "md.orderbook"
+MD_SUBSCRIBE = "md.subscribe"
+MD_UNSUBSCRIBE = "md.unsubscribe"
+MD_DETACH = "md.detach"

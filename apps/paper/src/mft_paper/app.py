@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from typing import Any
 
 from mft import configure_logging
 from mft.broker import Broker
 from mft.exchange import PaperExchange
-from mft.exchange.models import Balance, Fill, Order
+from mft.exchange.models import Balance, Fill, Order, OrderBook
 from mft.protocol import (
     PAPER_BALANCE,
     PAPER_FILL,
     PAPER_ORDER,
+    PAPER_ORDER_BOOK,
     Topics,
     UntypedEnvelope,
 )
@@ -69,6 +71,37 @@ class RedisEventBridge:
             logger.exception("paper stream publish failed topic=%s", topic)
 
 
+async def _pump_order_book(
+    broker: Broker,
+    public: Any,
+    symbol: str,
+    stop: asyncio.Event,
+) -> None:
+    """Bridge in-process public order-book stream → Redis."""
+    from mft.exchange.paper.public import PaperPublicClient
+
+    assert isinstance(public, PaperPublicClient)
+    topic = Topics.paper_order_book(symbol)
+    async for book in public.stream_order_book(symbol):
+        if stop.is_set():
+            return
+        assert isinstance(book, OrderBook)
+        try:
+            await broker.publish(
+                topic,
+                UntypedEnvelope.wrap(
+                    book.model_dump(mode="json"),
+                    type=PAPER_ORDER_BOOK,
+                    source="paper",
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "paper orderbook publish failed symbol=%s", symbol
+            )
+            return
+
+
 async def run_rpc(
     broker: Broker, exchange: PaperExchange, stop: asyncio.Event
 ) -> None:
@@ -119,6 +152,8 @@ async def amain() -> None:
                 order.status.value,
             )
         await exchange.start()
+        public = exchange.public()
+        await public.connect()
 
         rpc_task = asyncio.create_task(
             run_rpc(broker, exchange, stop), name="paper-rpc"
@@ -132,19 +167,29 @@ async def amain() -> None:
             ),
             name="paper-heartbeat",
         )
+        book_tasks = [
+            asyncio.create_task(
+                _pump_order_book(broker, public, inst.symbol, stop),
+                name=f"paper-book-{inst.symbol}",
+            )
+            for inst in exchange.list_instruments()
+        ]
         book = exchange.get_order_book("BTCUSDT")
         logger.info(
             "Paper engine started BTCUSDT bids=%s asks=%s",
-            [(str(l.price), str(l.qty)) for l in book.bids],
-            [(str(l.price), str(l.qty)) for l in book.asks],
+            [(str(lvl.price), str(lvl.qty)) for lvl in book.bids],
+            [(str(lvl.price), str(lvl.qty)) for lvl in book.asks],
         )
         try:
             await stop.wait()
         finally:
             stop.set()
-            for task in (rpc_task, hb_task):
+            for task in (rpc_task, hb_task, *book_tasks):
                 task.cancel()
-            await asyncio.gather(rpc_task, hb_task, return_exceptions=True)
+            await asyncio.gather(
+                rpc_task, hb_task, *book_tasks, return_exceptions=True
+            )
+            await public.close()
             await exchange.stop()
     logger.info("Paper engine stopped")
 

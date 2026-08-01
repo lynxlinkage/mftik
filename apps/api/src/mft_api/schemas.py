@@ -52,6 +52,7 @@ class SessionOut(BaseModel):
     sts_session_id: str | None = None
     strategy: str | None = None
     paused: bool | None = None
+    venue: str | None = None
 
 
 class SessionListResponse(BaseModel):

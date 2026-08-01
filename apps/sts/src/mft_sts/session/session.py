@@ -1,4 +1,4 @@
-"""STS session — pub/sub lease + TD OMS / recon wiring."""
+"""STS session — pub/sub lease + TD OMS / recon + MD wiring."""
 
 from __future__ import annotations
 
@@ -10,6 +10,9 @@ from typing import Any
 from mft.broker import Broker
 from mft.exchange.oms import OmsView
 from mft.protocol import (
+    MD_DETACH,
+    MD_LEASE_ACK,
+    MD_ORDERBOOK,
     STS_DETACH,
     STS_LEASE_HEARTBEAT,
     TD_BALANCE_UPDATE,
@@ -23,6 +26,8 @@ from mft.protocol import (
     Envelope,
     LeaseAck,
     LeaseHeartbeat,
+    MdDetach,
+    MdLeaseAck,
     ReconDone,
     StsDetach,
     Topics,
@@ -38,7 +43,7 @@ ExitHandler = Callable[[str, str], Awaitable[None]]
 
 
 class StsSession:
-    """Strategy session with TD pub/sub links and fencing lease heartbeat."""
+    """Strategy session with TD/MD pub/sub links and fencing lease heartbeat."""
 
     def __init__(
         self,
@@ -73,6 +78,8 @@ class StsSession:
         self._exit_requested = False
         self._token = 0
         self._ack_tokens: dict[int, int] = {}
+        self._md_ack_token: int | None = None
+        self._md_lease_logged = False
         self._recon_sent: set[int] = set()
 
     @property
@@ -95,6 +102,13 @@ class StsSession:
                 name=f"sts-{self.session_id}-lease",
             )
         ]
+        if self.md_ids:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._pump_md_session(),
+                    name=f"sts-{self.session_id}-md",
+                )
+            )
         for api_id in self.td_api_ids:
             self._tasks.append(
                 asyncio.create_task(
@@ -120,14 +134,18 @@ class StsSession:
         await publish_sts_log(
             self.broker,
             self.session_id,
-            f"session started strategy={self.strategy_name} td={self.td_api_ids}",
+            (
+                f"session started strategy={self.strategy_name} "
+                f"td={self.td_api_ids} md={self.md_ids}"
+            ),
             source="sts",
         )
         logger.info(
-            "STS session started id=%s strategy=%s td=%s",
+            "STS session started id=%s strategy=%s td=%s md=%s",
             self.session_id,
             self.strategy_name,
             self.td_api_ids,
+            self.md_ids,
         )
 
     async def pause(self) -> None:
@@ -172,7 +190,7 @@ class StsSession:
             return
         self._destroyed = True
         self._exit_requested = True
-        # Tell TD to drop attaches before heartbeats stop (refcount N→N-1).
+        # Tell TD/MD to drop attaches before heartbeats stop.
         await self._publish_detaches()
         self._stop.set()
         try:
@@ -200,11 +218,11 @@ class StsSession:
         logger.info("STS session stopped id=%s", self.session_id)
 
     async def _publish_detaches(self) -> None:
-        topic = Topics.sts_session(self.session_id)
+        td_topic = Topics.sts_td_session(self.session_id)
         for api_id in self.td_api_ids:
             try:
                 await self.broker.publish(
-                    topic,
+                    td_topic,
                     Envelope[StsDetach].wrap(
                         StsDetach(session_id=self.session_id, api_id=api_id),
                         type=STS_DETACH,
@@ -224,23 +242,49 @@ class StsSession:
                     self.session_id,
                     api_id,
                 )
-
-    async def _lease_heartbeat_loop(self) -> None:
-        topic = Topics.sts_session(self.session_id)
-        while not self._stop.is_set():
-            self._token += 1
+        if self.md_ids:
             try:
                 await self.broker.publish(
-                    topic,
-                    Envelope[LeaseHeartbeat].wrap(
-                        LeaseHeartbeat(
-                            session_id=self.session_id, token=self._token
-                        ),
-                        type=STS_LEASE_HEARTBEAT,
+                    Topics.sts_md_session(self.session_id),
+                    Envelope[MdDetach].wrap(
+                        MdDetach(session_id=self.session_id),
+                        type=MD_DETACH,
                         source="sts",
                         session_id=self.session_id,
                     ),
                 )
+                await publish_sts_log(
+                    self.broker,
+                    self.session_id,
+                    "MD detach requested",
+                    source="sts",
+                )
+            except Exception:
+                logger.exception(
+                    "STS MD detach publish failed session=%s",
+                    self.session_id,
+                )
+
+    async def _lease_heartbeat_loop(self) -> None:
+        """Publish fencing heartbeats on sts.td.* and/or sts.md.*."""
+        while not self._stop.is_set():
+            self._token += 1
+            hb = LeaseHeartbeat(session_id=self.session_id, token=self._token)
+            env = Envelope[LeaseHeartbeat].wrap(
+                hb,
+                type=STS_LEASE_HEARTBEAT,
+                source="sts",
+                session_id=self.session_id,
+            )
+            try:
+                if self.td_api_ids:
+                    await self.broker.publish(
+                        Topics.sts_td_session(self.session_id), env
+                    )
+                if self.md_ids:
+                    await self.broker.publish(
+                        Topics.sts_md_session(self.session_id), env
+                    )
             except Exception:
                 logger.exception(
                     "STS lease heartbeat failed session=%s", self.session_id
@@ -252,6 +296,49 @@ class StsSession:
                 )
             except TimeoutError:
                 continue
+
+    async def _pump_md_session(self) -> None:
+        topic = Topics.md_session(self.session_id)
+        try:
+            async for env in self.broker.subscribe(topic, stop=self._stop):
+                if env.type == MD_LEASE_ACK:
+                    await self._on_md_lease_ack(env)
+                    continue
+                if env.type == MD_ORDERBOOK:
+                    await self._on_order_book(env)
+                    continue
+                self._on_message("md", env)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "STS md session pump failed session=%s", self.session_id
+            )
+
+    async def _on_md_lease_ack(self, env: UntypedEnvelope) -> None:
+        try:
+            ack = MdLeaseAck.model_validate(env.payload)
+            self._md_ack_token = ack.token
+        except Exception:
+            return
+        if self._md_lease_logged:
+            return
+        self._md_lease_logged = True
+        await publish_sts_log(
+            self.broker,
+            self.session_id,
+            "MD lease established",
+            source="sts",
+        )
+
+    async def _on_order_book(self, env: UntypedEnvelope) -> None:
+        try:
+            await self.strategy.on_order_book(env)
+        except Exception:
+            logger.exception(
+                "strategy on_order_book failed session=%s",
+                self.session_id,
+            )
 
     async def _pump_td_session(self, api_id: int) -> None:
         topic = Topics.td_session(api_id, self.session_id)

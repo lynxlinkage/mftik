@@ -11,22 +11,27 @@ from mft.exchange import (
     PaperAuthError,
     PaperExchange,
 )
-from mft.exchange.models import Balance, Order
+from mft.exchange.models import Balance, Order, OrderBook, Ticker
 from mft.protocol import (
     PAPER_AUTH,
     PAPER_CANCEL_BY_CLIENT_ORDER_ID,
     PAPER_CANCEL_ORDER,
     PAPER_ERROR,
     PAPER_FETCH_BALANCES,
+    PAPER_FETCH_INSTRUMENTS,
     PAPER_FETCH_OPEN_ORDERS,
     PAPER_FETCH_ORDER,
+    PAPER_FETCH_ORDER_BOOK,
+    PAPER_FETCH_TICKER,
     PAPER_PLACE_ORDER,
     Envelope,
     PaperCancelRequest,
     PaperCredentials,
     PaperFetchBalancesRequest,
     PaperFetchOpenOrdersRequest,
+    PaperFetchOrderBookRequest,
     PaperFetchOrderRequest,
+    PaperFetchTickerRequest,
     PaperPlaceOrderRequest,
     RpcError,
     UntypedEnvelope,
@@ -51,6 +56,12 @@ async def dispatch(req: IncomingRequest, *, exchange: PaperExchange) -> None:
             await _fetch_open(req, exchange)
         elif req.envelope.type == PAPER_FETCH_BALANCES:
             await _fetch_balances(req, exchange)
+        elif req.envelope.type == PAPER_FETCH_INSTRUMENTS:
+            await _fetch_instruments(req, exchange)
+        elif req.envelope.type == PAPER_FETCH_TICKER:
+            await _fetch_ticker(req, exchange)
+        elif req.envelope.type == PAPER_FETCH_ORDER_BOOK:
+            await _fetch_order_book(req, exchange)
         else:
             await _error(req, "unknown_type", f"unknown type: {req.envelope.type}")
     except Exception:
@@ -209,7 +220,40 @@ async def _fetch_balances(req: IncomingRequest, exchange: PaperExchange) -> None
     )
 
 
-def _model_reply(model: Order | Balance, type_: str) -> UntypedEnvelope:
+async def _fetch_instruments(req: IncomingRequest, exchange: PaperExchange) -> None:
+    instruments = exchange.list_instruments()
+    await req.reply(
+        UntypedEnvelope.wrap(
+            {"instruments": [i.model_dump(mode="json") for i in instruments]},
+            type=PAPER_FETCH_INSTRUMENTS,
+            source="paper",
+        )
+    )
+
+
+async def _fetch_ticker(req: IncomingRequest, exchange: PaperExchange) -> None:
+    try:
+        body = PaperFetchTickerRequest.model_validate(req.envelope.payload)
+        ticker = exchange.get_ticker(body.symbol)
+    except Exception as exc:
+        await _error(req, "order", str(exc))
+        return
+    await req.reply(_model_reply(ticker, PAPER_FETCH_TICKER))
+
+
+async def _fetch_order_book(req: IncomingRequest, exchange: PaperExchange) -> None:
+    try:
+        body = PaperFetchOrderBookRequest.model_validate(req.envelope.payload)
+        book = exchange.get_order_book(body.symbol, depth=body.depth)
+    except Exception as exc:
+        await _error(req, "order", str(exc))
+        return
+    await req.reply(_model_reply(book, PAPER_FETCH_ORDER_BOOK))
+
+
+def _model_reply(
+    model: Order | Balance | OrderBook | Ticker, type_: str
+) -> UntypedEnvelope:
     return UntypedEnvelope.wrap(
         model.model_dump(mode="json"),
         type=type_,

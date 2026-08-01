@@ -1,10 +1,10 @@
-"""Example strategy — timer-driven place/cancel demo, then natural exit."""
+"""Example strategy — MD orderbook + timer-driven place/cancel demo."""
 
 from __future__ import annotations
 
 from decimal import Decimal
 
-from mft.exchange.models import Balance, OrderType, Side
+from mft.exchange.models import Balance, OrderBook, OrderType, Side
 from mft.protocol import ReconDone, UntypedEnvelope
 
 from mft_sts.strategy import Strategy
@@ -26,6 +26,9 @@ class NoopStrategy(Strategy):
         self._step = 0
         self._last_cid: str | None = None
         self._plan: list[tuple[str, Side | None, Decimal | None]] = []
+        self._book_updates = 0
+        self._last_bid: Decimal | None = None
+        self._last_ask: Decimal | None = None
 
     def validate_paras(self, paras: dict) -> dict:
         out = dict(paras)
@@ -34,21 +37,47 @@ class NoopStrategy(Strategy):
         return out
 
     async def on_start(self) -> None:
-        mid = Decimal(str(self.paras.get("mid", _DEFAULT_MID)))
-        prices = (mid - 1, mid, mid + 1)
-        self._plan = []
-        for side in (Side.BUY, Side.SELL):
-            for price in prices:
-                self._plan.append(("place", side, price))
-                self._plan.append(("cancel", None, None))
+        md = list(self.session.md_ids) if self.session is not None else []
         await self.log(
-            f"NoopStrategy started mid={mid} prices={list(prices)}"
+            f"NoopStrategy started md={md} "
+            f"mid={self.paras.get('mid', _DEFAULT_MID)}"
         )
+        # Prefer live book mid once MD delivers; fall back to paras mid.
+        self._rebuild_plan(Decimal(str(self.paras.get("mid", _DEFAULT_MID))))
         self._tick_token = self.timer.token()
         self._arm_timer()
 
     async def on_ready(self) -> None:
         await self.log("NoopStrategy ready")
+
+    async def on_order_book(self, msg: UntypedEnvelope) -> None:
+        try:
+            book = OrderBook.model_validate(msg.payload)
+        except Exception:
+            await self.log(
+                "NoopStrategy on_order_book invalid payload", level="warn"
+            )
+            return
+        if not book.bids or not book.asks:
+            return
+        bid = book.bids[0].price
+        ask = book.asks[0].price
+        self._last_bid = bid
+        self._last_ask = ask
+        self._book_updates += 1
+        mid = (bid + ask) / 2
+        # Rebuild place prices once from the first live book.
+        if self._book_updates == 1:
+            self._rebuild_plan(mid)
+            await self.log(
+                f"NoopStrategy orderbook live {book.symbol} "
+                f"bid={bid} ask={ask} mid={mid} — plan rebuilt"
+            )
+            return
+        await self.log(
+            f"NoopStrategy orderbook {book.symbol} "
+            f"bid={bid} ask={ask} mid={mid} updates={self._book_updates}"
+        )
 
     async def on_stop(self) -> None:
         self._cancel_timer()
@@ -193,6 +222,15 @@ class NoopStrategy(Strategy):
         if self._step >= len(self._plan):
             await self.log("NoopStrategy sequence complete — exiting")
             self.exit("noop_sequence_done")
+
+    def _rebuild_plan(self, mid: Decimal) -> None:
+        prices = (mid - 1, mid, mid + 1)
+        self._plan = []
+        for side in (Side.BUY, Side.SELL):
+            for price in prices:
+                self._plan.append(("place", side, price))
+                self._plan.append(("cancel", None, None))
+        self._step = 0
 
     def _primary_api_id(self) -> int | None:
         if self.session is None or not self.session.td_api_ids:

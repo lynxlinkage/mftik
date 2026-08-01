@@ -272,7 +272,7 @@
           "sts"
         ],
         "summary": "Deploy",
-        "description": "Deploy a strategy; API orchestrates STS create + TD attach.",
+        "description": "Deploy a strategy; API orchestrates STS create + MD/TD attach.",
         "operationId": "deploy_sts__strategy_id__post",
         "parameters": [
           {
@@ -773,6 +773,17 @@
               }
             ],
             "title": "Paused"
+          },
+          "venue": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Venue"
           }
         },
         "type": "object",

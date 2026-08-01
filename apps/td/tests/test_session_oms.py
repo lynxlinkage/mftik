@@ -50,7 +50,7 @@ async def _lease_publisher(
     broker: Broker, session_id: str, stop: asyncio.Event
 ) -> None:
     token = 0
-    topic = Topics.sts_session(session_id)
+    topic = Topics.sts_td_session(session_id)
     while not stop.is_set():
         token += 1
         await broker.publish(

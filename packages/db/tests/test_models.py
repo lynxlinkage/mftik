@@ -84,12 +84,16 @@ def test_session_row_columns() -> None:
 
     md_cols = set(MdSessionRow.__table__.c.keys())
     assert {
+        "id",
+        "venue",
         "session_id",
         "created_by",
         "created_at",
         "finished_at",
         "status",
     } <= md_cols
+    assert MdSessionRow.__table__.c.id.primary_key
+    assert not MdSessionRow.__table__.c.session_id.primary_key
 
     assert SessionDomain.TD.value == "td"
     assert SessionStatus.LIVE.value == "live"

@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter
 from mft.protocol import (
+    MD_HEALTH,
     STS_HEALTH,
     TD_HEALTH,
     HealthCheck,
@@ -31,6 +32,7 @@ router = APIRouter(tags=["stats"])
 _HEALTH_PROBES = {
     SessionDomain.STS.value: (Topics.STS, STS_HEALTH),
     SessionDomain.TD.value: (Topics.TD, TD_HEALTH),
+    SessionDomain.MD.value: (Topics.MD, MD_HEALTH),
 }
 
 

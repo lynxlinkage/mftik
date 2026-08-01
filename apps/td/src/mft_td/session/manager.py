@@ -340,8 +340,8 @@ class SessionManager:
         link: StsLink,
         ready: asyncio.Event,
     ) -> None:
-        """Sub sts.{session_id}; ACK on td.{api_id}.{session_id}; enforce grace."""
-        sts_topic = Topics.sts_session(link.session_id)
+        """Sub sts.td.{session_id}; ACK on td.{api_id}.{session_id}; enforce grace."""
+        sts_topic = Topics.sts_td_session(link.session_id)
         td_topic = Topics.td_session(link.api_id, link.session_id)
         last_seen = asyncio.get_running_loop().time()
 

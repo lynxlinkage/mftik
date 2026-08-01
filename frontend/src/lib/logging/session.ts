@@ -20,7 +20,7 @@ export type SessionLogMessage = {
 	};
 };
 
-export type LogDomain = 'sts' | 'td';
+export type LogDomain = 'sts' | 'td' | 'md';
 
 function wsBaseUrl(): string {
 	const api = import.meta.env.PUBLIC_API_URL as string | undefined;

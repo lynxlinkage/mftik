@@ -140,27 +140,56 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, MdSessionRow)
 
-    async def get_by_session_id(self, session_id: str) -> MdSessionRow | None:
-        return await self.session.get(MdSessionRow, session_id)
+    async def get_live(
+        self, *, venue: str, session_id: str
+    ) -> MdSessionRow | None:
+        result = await self.session.execute(
+            select(MdSessionRow).where(
+                MdSessionRow.venue == venue,
+                MdSessionRow.session_id == session_id,
+                MdSessionRow.status == SessionStatus.LIVE.value,
+            )
+        )
+        return result.scalar_one_or_none()
 
     async def create_live(
         self,
         *,
+        venue: str,
         session_id: str,
         created_by: int,
     ) -> MdSessionRow:
         row = MdSessionRow(
+            venue=venue,
             session_id=session_id,
             created_by=created_by,
             status=SessionStatus.LIVE.value,
         )
         return await self.add(row)
 
-    async def mark_done(self, session_id: str) -> MdSessionRow | None:
-        row = await self.get_by_session_id(session_id)
+    async def mark_done(
+        self, *, venue: str, session_id: str
+    ) -> MdSessionRow | None:
+        row = await self.get_live(venue=venue, session_id=session_id)
         if row is None:
             return None
         row.status = SessionStatus.DONE.value
         row.finished_at = datetime.now(UTC)
         await self.session.flush()
         return row
+
+    async def mark_done_session(self, session_id: str) -> list[MdSessionRow]:
+        result = await self.session.execute(
+            select(MdSessionRow).where(
+                MdSessionRow.session_id == session_id,
+                MdSessionRow.status == SessionStatus.LIVE.value,
+            )
+        )
+        rows = list(result.scalars().all())
+        now = datetime.now(UTC)
+        for row in rows:
+            row.status = SessionStatus.DONE.value
+            row.finished_at = now
+        if rows:
+            await self.session.flush()
+        return rows

@@ -84,9 +84,16 @@ services:
       - .env
     environment:
       REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mft}:${POSTGRES_PASSWORD:-mft}@postgres:5432/${POSTGRES_DB:-mft}
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      paper:
+        condition: service_started
 
   paper:
     build:

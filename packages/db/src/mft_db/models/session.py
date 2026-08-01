@@ -6,7 +6,15 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from mft_db.models.base import Base
@@ -89,11 +97,18 @@ class TdSessionRow(Base):
 
 
 class MdSessionRow(Base):
-    """MD market-data session record (placeholder until MD sessions exist)."""
+    """MD attach record — one row per (venue, STS session_id)."""
 
     __tablename__ = "md_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "venue", "session_id", name="uq_md_sessions_venue_session"
+        ),
+    )
 
-    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    venue: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
     created_by: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,

@@ -17,7 +17,7 @@ from mft_api.routes import (
     sts_router,
     td_router,
 )
-from mft_api.ws import sts_log_bridge, td_log_bridge
+from mft_api.ws import md_log_bridge, sts_log_bridge, td_log_bridge
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -65,6 +65,11 @@ async def ws_sts_session(websocket: WebSocket, session_id: str) -> None:
 @app.websocket("/ws/td/{api_id}")
 async def ws_td_session(websocket: WebSocket, api_id: int) -> None:
     await td_log_bridge(websocket, api_id)
+
+
+@app.websocket("/ws/md/{venue}")
+async def ws_md_venue(websocket: WebSocket, venue: str) -> None:
+    await md_log_bridge(websocket, venue)
 
 
 def run() -> None:

@@ -1,4 +1,4 @@
-"""Deploy orchestrator — API sequences STS then TD (MD later)."""
+"""Deploy orchestrator — API sequences STS then MD then TD."""
 
 from __future__ import annotations
 
@@ -8,9 +8,13 @@ from uuid import uuid4
 
 from mft.broker import Broker
 from mft.protocol import (
+    MD_SESSION_ATTACH,
     STS_SESSION_CREATE,
     STS_SESSION_STOP,
     TD_SESSION_ATTACH,
+    MdAttachRequest,
+    MdAttachRequestEnvelope,
+    MdAttachResult,
     StsCreateSessionRequest,
     StsCreateSessionRequestEnvelope,
     StsCreateSessionResult,
@@ -21,6 +25,7 @@ from mft.protocol import (
     TdAttachRequestEnvelope,
     TdAttachResult,
     Topics,
+    publish_md_log,
     publish_sts_log,
 )
 
@@ -39,11 +44,12 @@ async def deploy_strategy(
     created_by: int,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
-    """Mint session_id, create STS, attach each TD api_id. Fail-closed on error."""
+    """Mint session_id, create STS, attach MD then each TD api_id. Fail-closed."""
     session_id = uuid4().hex
     md = list(md or [])
     st_paras = dict(st_paras or {})
-    attached: list[dict[str, Any]] = []
+    attached_td: list[dict[str, Any]] = []
+    attached_md: dict[str, Any] | None = None
 
     await publish_sts_log(
         broker,
@@ -89,6 +95,58 @@ async def deploy_strategy(
         raise
 
     try:
+        if md:
+            await publish_sts_log(
+                broker,
+                session_id,
+                f"MD attach starting feeds={md}",
+                source="api",
+            )
+            for venue in _md_venues(md):
+                await publish_md_log(
+                    broker,
+                    venue,
+                    f"attach starting sts={session_id} feeds={md}",
+                    source="api",
+                )
+            md_result = await request_domain(
+                broker,
+                Topics.MD,
+                MdAttachRequestEnvelope.wrap(
+                    MdAttachRequest(
+                        session_id=session_id,
+                        created_by=created_by,
+                        subscriptions=md,
+                        timeout=timeout,
+                    ),
+                    type=MD_SESSION_ATTACH,
+                    source="api",
+                    session_id=session_id,
+                ),
+                result_type=MdAttachResult,
+                timeout=timeout + 5.0,
+            )
+            attached_md = {
+                "subscriptions": list(md_result.subscriptions),
+                "refcounts": dict(md_result.refcounts),
+            }
+            await publish_sts_log(
+                broker,
+                session_id,
+                f"MD attached feeds={md_result.subscriptions}",
+                source="api",
+            )
+            for venue in _md_venues(md_result.subscriptions):
+                await publish_md_log(
+                    broker,
+                    venue,
+                    (
+                        f"attach complete sts={session_id} "
+                        f"feeds={md_result.subscriptions}"
+                    ),
+                    source="api",
+                )
+
         for api_id in td:
             await publish_sts_log(
                 broker,
@@ -113,7 +171,7 @@ async def deploy_strategy(
                 result_type=TdAttachResult,
                 timeout=timeout + 5.0,
             )
-            attached.append(
+            attached_td.append(
                 {
                     "api_id": result.api_id,
                     "refcount": result.refcount,
@@ -127,12 +185,12 @@ async def deploy_strategy(
             )
     except Exception as exc:
         logger.exception(
-            "TD attach failed — rolling back STS session=%s", session_id
+            "MD/TD attach failed — rolling back STS session=%s", session_id
         )
         await publish_sts_log(
             broker,
             session_id,
-            f"TD attach failed — rolling back STS: {exc}",
+            f"attach failed — rolling back STS: {exc}",
             source="api",
             level="error",
         )
@@ -160,16 +218,32 @@ async def deploy_strategy(
             logger.exception("rollback STS stop failed session=%s", session_id)
         raise
 
+    md_out = (
+        list(attached_md["subscriptions"])
+        if attached_md is not None
+        else list(md)
+    )
     await publish_sts_log(
         broker,
         session_id,
-        f"deploy complete strategy={sts.strategy} td={attached}",
+        f"deploy complete strategy={sts.strategy} td={attached_td} md={md_out}",
         source="api",
     )
     return {
         "session_id": session_id,
         "strategy": sts.strategy,
-        "td": attached,
-        "md": md,
+        "td": attached_td,
+        "md": md_out,
         "status": "live",
     }
+
+
+def _md_venues(feeds: list[str]) -> set[str]:
+    venues: set[str] = set()
+    for feed in feeds:
+        try:
+            venue, _topic, _symbol = Topics.parse_md_feed(feed)
+        except ValueError:
+            continue
+        venues.add(venue)
+    return venues

@@ -16,6 +16,7 @@ export type Session = {
 	sts_session_id: string | null;
 	strategy: string | null;
 	paused: boolean | null;
+	venue: string | null;
 };
 
 export type StsControl = {

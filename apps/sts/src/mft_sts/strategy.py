@@ -46,8 +46,8 @@ class Strategy:
         self.timer.token().register(first_ms, interval_ms, func)
         token.cancel()  — timestamps are unix ms
 
-    Public events (stubs for later wiring):
-        on_kline, on_order_book
+    Public events from ``md.{session_id}`` (orderbook wired):
+        on_order_book, on_kline (stub)
     """
 
     name: str = "base"
@@ -110,7 +110,7 @@ class Strategy:
         if self.session is None:
             raise RuntimeError("strategy is not bound to a session")
         await self.session.broker.publish(
-            Topics.sts_session(self.session.session_id),
+            Topics.sts_td_session(self.session.session_id),
             Envelope[Recon].wrap(
                 Recon(session_id=self.session.session_id, api_id=api_id),
                 type=STS_RECON,
@@ -139,10 +139,10 @@ class Strategy:
     async def on_balance_update(self, api_id: int, msg: UntypedEnvelope) -> None:
         """Handle balance updates from TD."""
 
-    # --- public events (not wired yet) -------------------------------------
+    # --- public events (md.{session_id}) -----------------------------------
 
     async def on_kline(self, msg: UntypedEnvelope) -> None:
-        """Handle kline / candle updates from MD."""
+        """Handle kline / candle updates from MD (not wired yet)."""
 
     async def on_order_book(self, msg: UntypedEnvelope) -> None:
         """Handle order book updates from MD."""

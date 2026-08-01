@@ -82,7 +82,7 @@ async def stop_session(session_id: str, broker: BrokerDep) -> StsControlResponse
 async def deploy(
     strategy_id: str, body: DeployBody, broker: BrokerDep
 ) -> DeployResponse:
-    """Deploy a strategy; API orchestrates STS create + TD attach."""
+    """Deploy a strategy; API orchestrates STS create + MD/TD attach."""
     if strategy_id not in _KNOWN_STRATEGIES:
         raise HTTPException(status_code=404, detail=f"unknown strategy: {strategy_id}")
 
@@ -108,7 +108,7 @@ async def deploy(
         operation="sts.deploy",
         result=(
             f"session_id={result['session_id']} strategy={result['strategy']} "
-            f"td={[a['api_id'] for a in result['td']]}"
+            f"td={[a['api_id'] for a in result['td']]} md={result['md']}"
         ),
     )
     return DeployResponse(

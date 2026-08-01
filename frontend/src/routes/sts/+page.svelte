@@ -3,15 +3,27 @@
 	import { onMount } from 'svelte';
 	import { api, formatTs, shortId, type ApiCredential, type Session } from '$lib/api';
 
+	/** Only paper venue is wired for MD today. */
+	const MD_VENUES = ['paper'] as const;
+	const MD_TOPICS = ['orderbook'] as const;
+	const MD_SYMBOLS = ['BTCUSDT'] as const;
+
 	let sessions = $state<Session[]>([]);
 	let strategies = $state<string[]>(['noop']);
 	let apis = $state<ApiCredential[]>([]);
 	let selected = $state('noop');
 	/** Select value as string (HTML); parsed to int on deploy. */
 	let selectedApiId = $state('');
+	let selectedMdVenue = $state<(typeof MD_VENUES)[number]>('paper');
+	let selectedMdTopic = $state<(typeof MD_TOPICS)[number]>('orderbook');
+	let selectedMdSymbol = $state<(typeof MD_SYMBOLS)[number]>('BTCUSDT');
 	let error = $state<string | null>(null);
 	let busy = $state(false);
 	let loading = $state(true);
+
+	const mdFeed = $derived(
+		`${selectedMdVenue}.${selectedMdTopic}.${selectedMdSymbol}`
+	);
 
 	async function refresh() {
 		loading = true;
@@ -45,7 +57,13 @@
 			if (!Number.isFinite(apiId) || apiId <= 0) {
 				throw new Error('Select a TD API credential');
 			}
-			const created = await api.deploySts(selected, { td: [apiId] });
+			if (selectedMdVenue !== 'paper') {
+				throw new Error('Only paper venue is allowed for MD');
+			}
+			const created = await api.deploySts(selected, {
+				td: [apiId],
+				md: [mdFeed]
+			});
 			await refresh();
 			await goto(`/sts/${created.session_id}`);
 		} catch (e) {
@@ -88,7 +106,7 @@
 <div class="page-head">
 	<div>
 		<h1>STS</h1>
-		<p>Deploy a strategy (API attaches TD), pause / resume, or stop — then open its log stream.</p>
+		<p>Deploy a strategy with TD + MD (paper orderbook), then open its log stream.</p>
 	</div>
 	<button type="button" class="secondary" onclick={refresh} disabled={loading}>Refresh</button>
 </div>
@@ -118,6 +136,34 @@
 			{/if}
 		</select>
 	</label>
+	<label>
+		MD venue
+		<select bind:value={selectedMdVenue} disabled={busy}>
+			{#each MD_VENUES as venue}
+				<option value={venue}>{venue}</option>
+			{/each}
+		</select>
+	</label>
+	<label>
+		MD topic
+		<select bind:value={selectedMdTopic} disabled={busy}>
+			{#each MD_TOPICS as topic}
+				<option value={topic}>{topic}</option>
+			{/each}
+		</select>
+	</label>
+	<label>
+		MD symbol
+		<select bind:value={selectedMdSymbol} disabled={busy}>
+			{#each MD_SYMBOLS as symbol}
+				<option value={symbol}>{symbol}</option>
+			{/each}
+		</select>
+	</label>
+	<div class="feed-hint" title="Feed key sent to MD attach">
+		<span class="muted">Feed</span>
+		<code>{mdFeed}</code>
+	</div>
 	<button type="button" onclick={deploy} disabled={busy || !selectedApiId}>
 		Deploy
 	</button>
@@ -191,7 +237,7 @@
 		gap: 0.35rem;
 		font-size: 0.8rem;
 		color: var(--muted);
-		min-width: 12rem;
+		min-width: 10rem;
 	}
 
 	select {
@@ -200,6 +246,23 @@
 		color: var(--text);
 		padding: 0.55rem 0.65rem;
 		border-radius: var(--radius);
+	}
+
+	.feed-hint {
+		display: grid;
+		gap: 0.35rem;
+		font-size: 0.8rem;
+		min-width: 14rem;
+	}
+
+	.feed-hint code {
+		display: block;
+		padding: 0.55rem 0.65rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		background: var(--bg);
+		color: var(--text);
+		font-size: 0.85rem;
 	}
 
 	.table-wrap {

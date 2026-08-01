@@ -133,5 +133,15 @@ async def td_log_bridge(websocket: WebSocket, api_id: int) -> None:
     )
 
 
+async def md_log_bridge(websocket: WebSocket, venue: str) -> None:
+    """Bridge ``log.md.{venue}`` → ``/ws/md/{venue}``."""
+    await _log_bridge(
+        websocket,
+        channel=Topics.log_md(venue),
+        stream_id=venue,
+        source="md",
+    )
+
+
 # Backward-compatible name used by older imports.
 session_log_bridge = sts_log_bridge

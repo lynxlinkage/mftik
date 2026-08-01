@@ -20,6 +20,11 @@ class Topics:
     def paper_balances(api_key: str) -> str:
         return f"paper.{api_key}.balances"
 
+    @staticmethod
+    def paper_order_book(symbol: str) -> str:
+        """Paper engine → MD public order-book stream."""
+        return f"paper.public.orderbook.{symbol}"
+
     # Legacy / reserved command subjects
     CMD_TRADING = "cmd.trading"
     CMD_STRATEGY = "cmd.strategy"
@@ -39,6 +44,11 @@ class Topics:
         return f"log.td.{api_id}"
 
     @staticmethod
+    def log_md(venue: str) -> str:
+        """Pub/sub channel for MD venue logs (``/ws/md/{venue}``)."""
+        return f"log.md.{venue}"
+
+    @staticmethod
     def log_session(session_id: str) -> str:
         """Deprecated alias for :meth:`log_sts`."""
         return Topics.log_sts(session_id)
@@ -54,9 +64,19 @@ class Topics:
         return f"td.{api_id}.{session_id}"
 
     @staticmethod
-    def sts_session(session_id: str) -> str:
+    def sts_td_session(session_id: str) -> str:
         """STS → TD per-session channel (lease heartbeat + cmds)."""
-        return f"sts.{session_id}"
+        return f"sts.td.{session_id}"
+
+    @staticmethod
+    def sts_md_session(session_id: str) -> str:
+        """STS → MD per-session channel (lease heartbeat + subscribe/detach)."""
+        return f"sts.md.{session_id}"
+
+    @staticmethod
+    def md_session(session_id: str) -> str:
+        """MD → STS per-session channel (lease ACK + market data)."""
+        return f"md.{session_id}"
 
     @staticmethod
     def td_oms(api_id: int) -> str:
@@ -64,12 +84,19 @@ class Topics:
         return f"td.oms.{api_id}"
 
     @staticmethod
-    def md_ticker(exchange: str, symbol: str) -> str:
-        return f"md.ticker.{exchange}.{symbol}"
+    def md_feed(venue: str, topic: str, symbol: str) -> str:
+        """Logical feed key for attach payloads / refcount (not a Redis subject)."""
+        return f"{venue}.{topic}.{symbol}"
 
     @staticmethod
-    def md_kline(exchange: str, symbol: str, interval: str) -> str:
-        return f"md.kline.{exchange}.{symbol}.{interval}"
+    def parse_md_feed(feed: str) -> tuple[str, str, str]:
+        """Parse ``venue.topic.symbol`` feed key into components."""
+        parts = feed.split(".", 2)
+        if len(parts) != 3 or not all(parts):
+            raise ValueError(
+                f"invalid md feed key {feed!r}; expected venue.topic.symbol"
+            )
+        return parts[0], parts[1], parts[2]
 
     @staticmethod
     def private_order(account: str) -> str:

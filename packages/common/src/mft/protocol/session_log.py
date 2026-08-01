@@ -65,6 +65,33 @@ async def publish_td_log(
         await broker.publish(topic, envelope)
 
 
+async def publish_md_log(
+    broker: _LogPublisher,
+    venue: str,
+    message: str,
+    *,
+    source: str,
+    level: str = "info",
+    **extra: Any,
+) -> None:
+    """Fan out a log line for ``/ws/md/{venue}`` (buffered + live)."""
+    from mft.protocol.messages import Log, LogEnvelope
+    from mft.protocol.topics import Topics
+
+    topic = Topics.log_md(venue)
+    envelope = LogEnvelope.wrap(
+        Log(level=level, message=message, **extra),
+        type="log",
+        source=source,
+        session_id=venue,
+    )
+    publish_log = getattr(broker, "publish_log", None)
+    if publish_log is not None:
+        await publish_log(topic, envelope)
+    else:
+        await broker.publish(topic, envelope)
+
+
 # Backward-compatible alias (STS session logs).
 async def publish_session_log(
     broker: _LogPublisher,

@@ -5,10 +5,12 @@ description = "MFT market-data domain"
 requires-python = ">=3.12"
 dependencies = [
     "mft-common",
+    "mft-db",
 ]
 
 [tool.uv.sources]
 mft-common = { workspace = true }
+mft-db = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
