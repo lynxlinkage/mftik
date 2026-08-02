@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+from mft.exchange import venues
 from mft_db.models.api import Api, ApiType
 from mft_db.repositories import (
     AccountRepository,
@@ -18,11 +19,30 @@ from mft_api.schemas import (
     ApiDeleteResponse,
     ApiListResponse,
     ApiOut,
+    VenueListResponse,
+    VenueOut,
 )
 
 router = APIRouter(tags=["apis"])
 
 _ALLOWED_TYPES = {ApiType.HMAC.value, ApiType.ED25519.value}
+
+
+def _venue_out(venue: venues.Venue) -> VenueOut:
+    return VenueOut(
+        name=venue.name,
+        label=venue.label,
+        api_types=sorted(venue.api_types),
+        requires_passphrase=venue.requires_passphrase,
+        simulated=venue.simulated,
+        symbol_example=venue.symbol_example,
+    )
+
+
+@router.get("/venues", response_model=VenueListResponse)
+async def list_venues() -> VenueListResponse:
+    """Venues a credential can be registered against."""
+    return VenueListResponse(venues=[_venue_out(v) for v in venues.all_venues()])
 
 
 def _to_out(*, account_id: int, name: str, api: Api) -> ApiOut:
@@ -64,11 +84,23 @@ async def create_api(body: ApiCreateBody) -> ApiOut:
 
     created_by = body.created_by if body.created_by is not None else DEFAULT_USER_ID
     name = body.name.strip()
-    venue = body.venue.strip()
     api_key = body.api_key.strip()
-    if not name or not venue or not api_key:
+    if not name or not body.venue.strip() or not api_key:
         raise HTTPException(
             status_code=400, detail="name, venue, and api_key are required"
+        )
+
+    # Resolve against the registry so the row stores the canonical spelling and
+    # an unusable venue is rejected here rather than at deploy time.
+    try:
+        resolved = venues.validate_credential(body.venue, api_type)
+    except (venues.UnknownVenueError, venues.UnsupportedApiTypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    venue = resolved.name
+    if resolved.requires_passphrase and not body.passphrase:
+        raise HTTPException(
+            status_code=400,
+            detail=f"venue {venue!r} requires a passphrase",
         )
 
     async with session_scope() as db:

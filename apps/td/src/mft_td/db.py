@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from mft_db.models.api import Api
 from mft_db.models.session import TdSessionRow
-from mft_db.repositories import TdSessionRepository
+from mft_db.repositories import ApiRepository, TdSessionRepository
 from mft_db.session import session_scope
 
 
@@ -49,3 +50,9 @@ async def count_live_for_api(api_id: int) -> int:
     async with session_scope() as db:
         repo = TdSessionRepository(db)
         return await repo.count_live_for_api(api_id)
+
+
+async def get_api(api_id: int) -> Api | None:
+    """Load the venue credential row backing ``api_id``."""
+    async with session_scope() as db:
+        return await ApiRepository(db).get(api_id)

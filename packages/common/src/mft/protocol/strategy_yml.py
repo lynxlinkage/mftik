@@ -17,7 +17,12 @@ md:
 sts:
   type: NoopStrategy
   config:
-    mid: 50000
+    # Quote every second at mid and +/- 10bps, 100 of the quote currency
+    # (USDT here) per level.
+    # There is no mid here — it comes from the order book above.
+    exec_interval_ms: 1000
+    gap_bps: 10
+    qty_quote: 100
 """
 
 

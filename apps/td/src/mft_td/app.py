@@ -1,4 +1,4 @@
-"""TD process bootstrap — RPC, paper session factory, heartbeat."""
+"""TD process bootstrap — RPC, venue session factory, heartbeat."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from mft.protocol import Topics
 
 from mft_td import db as td_db
 from mft_td.rpc import dispatch
-from mft_td.session import PaperSessionFactory, SessionManager
+from mft_td.session import SessionManager, VenueSessionFactory
 
 SOURCE = "td"
 logger = logging.getLogger(SOURCE)
@@ -46,8 +46,9 @@ async def amain() -> None:
             pass
 
     async with Broker() as broker:
-        # Paper venue lives in the paper-engine container; TD is a remote client.
-        factory = PaperSessionFactory(broker)
+        # Venue comes from the apis row: paper goes to the paper-engine
+        # container, gate_spot connects to Gate directly.
+        factory = VenueSessionFactory(broker, load_api=td_db.get_api)
         sessions = SessionManager(
             factory,
             broker,
@@ -55,7 +56,7 @@ async def amain() -> None:
             mark_done=td_db.mark_session_done,
             list_db_sessions=td_db.list_sessions,
         )
-        logger.info("TD started (remote paper session factory)")
+        logger.info("TD started (venue session factory)")
         rpc_task = asyncio.create_task(
             run_rpc(broker, sessions, stop), name="td-rpc"
         )

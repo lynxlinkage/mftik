@@ -6,6 +6,7 @@ class Topics:
     TD = "td"
     STS = "sts"
     MD = "md"
+    SYM = "sym"
     PAPER = "paper"
 
     @staticmethod

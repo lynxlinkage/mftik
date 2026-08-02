@@ -9,6 +9,7 @@ from mft.exchange.errors import (
     OrderError,
 )
 from mft.exchange.gate.spot import (
+    GATE_SPOT_REST_URL,
     GATE_SPOT_WS_URL,
     GateApiError,
     GateBalance,
@@ -18,6 +19,9 @@ from mft.exchange.gate.spot import (
     GateOrderBook,
     GateOrderBookUpdate,
     GateOrderUpdate,
+    GateRestError,
+    GateSpotPrivateClient,
+    GateSpotRest,
     GateSpotWebSocket,
     GateTicker,
     GateTrade,
@@ -45,9 +49,22 @@ from mft.exchange.paper import (
     PaperPrivateClient,
     PaperPublicClient,
 )
+from mft.exchange.symbols import SymbolResolver, canonical_symbol
+from mft.exchange.venues import (
+    GATE_SPOT,
+    PAPER,
+    VENUES,
+    UnknownVenueError,
+    UnsupportedApiTypeError,
+    Venue,
+)
 
 __all__ = [
+    "GATE_SPOT",
+    "GATE_SPOT_REST_URL",
     "GATE_SPOT_WS_URL",
+    "PAPER",
+    "VENUES",
     "Balance",
     "BaseClient",
     "BookLevel",
@@ -62,6 +79,9 @@ __all__ = [
     "GateOrderBook",
     "GateOrderBookUpdate",
     "GateOrderUpdate",
+    "GateRestError",
+    "GateSpotPrivateClient",
+    "GateSpotRest",
     "GateSpotWebSocket",
     "GateTicker",
     "GateTrade",
@@ -87,4 +107,9 @@ __all__ = [
     "Side",
     "Ticker",
     "Trade",
+    "UnknownVenueError",
+    "UnsupportedApiTypeError",
+    "SymbolResolver",
+    "Venue",
+    "canonical_symbol",
 ]

@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import logging
-from typing import Protocol
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol
 
 from mft.broker import Broker
-from mft.exchange import PaperExchange
+from mft.exchange import PaperExchange, venues
+from mft.exchange.errors import ExchangeError
+from mft.exchange.gate.spot.private import GateSpotPrivateClient
 from mft.exchange.paper.remote import PaperRemotePrivateClient
+from mft.symbols import SymbolClient
 
 from mft_td.session.session import Session
 
 logger = logging.getLogger(__name__)
+
+#: Loads the ``apis`` row for an api_id (``mft_td.db.get_api`` in production).
+LoadApi = Callable[[int], Awaitable[Any]]
 
 
 class SessionFactory(Protocol):
@@ -100,3 +107,64 @@ class PaperSessionFactory:
                 passphrase=passphrase,
             )
         return Session(api_id=api_id, broker=self._broker, private=private)
+
+
+class VenueSessionFactory:
+    """Dispatches on ``apis.venue`` to build the right private client.
+
+    ``paper`` keeps the existing behaviour (in-process or paper-engine remote);
+    ``gate_spot`` builds a real Gate client from the credential row. Unknown or
+    unregistered venues fail here rather than producing a session that silently
+    trades somewhere else.
+    """
+
+    def __init__(
+        self,
+        broker: Broker,
+        *,
+        load_api: LoadApi,
+        paper: PaperSessionFactory | None = None,
+        symbols: SymbolClient | None = None,
+    ) -> None:
+        self._broker = broker
+        self._load_api = load_api
+        self._paper = paper or PaperSessionFactory(broker)
+        # One client per TD process: its cache is what keeps symbol resolution
+        # off the wire on the order path.
+        self._symbols = symbols or SymbolClient(broker)
+
+    @property
+    def paper(self) -> PaperSessionFactory:
+        return self._paper
+
+    async def create(self, api_id: int) -> Session:
+        row = await self._load_api(api_id)
+        if row is None:
+            raise ExchangeError(f"no api credential for api_id={api_id}")
+
+        venue = venues.require(row.venue)
+        if venue is venues.PAPER:
+            self._paper.bind_api(
+                api_id,
+                row.api_key,
+                row.api_secret,
+                passphrase=row.passphrase,
+            )
+            return await self._paper.create(api_id)
+
+        if venue is venues.GATE_SPOT:
+            private = GateSpotPrivateClient(
+                api_key=row.api_key,
+                api_secret=row.api_secret,
+                symbols=self._symbols,
+            )
+            logger.info(
+                "TD building gate_spot session api_id=%s key=%s…",
+                api_id,
+                row.api_key[:6],
+            )
+            return Session(api_id=api_id, broker=self._broker, private=private)
+
+        raise ExchangeError(
+            f"venue {venue.name!r} is registered but TD has no client for it"
+        )

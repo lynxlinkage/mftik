@@ -90,6 +90,21 @@ class StsControlResponse(BaseModel):
     strategy: str | None = None
 
 
+class VenueOut(BaseModel):
+    """A venue credentials can be registered against."""
+
+    name: str
+    label: str
+    api_types: list[str] = Field(default_factory=list)
+    requires_passphrase: bool = False
+    simulated: bool = False
+    symbol_example: str = ""
+
+
+class VenueListResponse(BaseModel):
+    venues: list[VenueOut] = Field(default_factory=list)
+
+
 class ApiCreateBody(BaseModel):
     """Create a venue API credential and its 1-1 trading account."""
 

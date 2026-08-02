@@ -6,6 +6,7 @@ import time
 import uuid
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -38,6 +39,13 @@ class OrderStatus(StrEnum):
 
 
 class Instrument(BaseModel):
+    """A tradeable instrument and the restrictions on trading it.
+
+    ``tick_size`` / ``lot_size`` are the price and quantity steps; ``min_qty``
+    and ``min_notional`` are floors an order has to clear. ``None`` means the
+    venue publishes no such floor.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     symbol: str
@@ -45,6 +53,8 @@ class Instrument(BaseModel):
     quote: str
     tick_size: Decimal = Decimal("0.01")
     lot_size: Decimal = Decimal("0.0001")
+    min_qty: Decimal | None = None
+    min_notional: Decimal | None = None
 
 
 class Ticker(BaseModel):
@@ -128,6 +138,15 @@ class Fill(BaseModel):
 
 
 class PlaceOrderRequest(BaseModel):
+    """Common order fields, plus venue-specific extras in ``params``.
+
+    ``symbol`` is canonical (``BTCUSDT``); the adapter renders the venue's
+    spelling. ``params`` carries what has no cross-venue meaning — Gate's
+    ``account`` / ``time_in_force`` / ``iceberg`` / ``stp_act``, for instance.
+    Each adapter reads the keys it understands and ignores the rest, so a
+    request stays portable even when it carries hints for one venue.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     symbol: str
@@ -136,3 +155,4 @@ class PlaceOrderRequest(BaseModel):
     qty: Decimal
     price: Decimal | None = None
     client_order_id: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)

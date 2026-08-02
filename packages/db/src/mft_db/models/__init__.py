@@ -10,6 +10,12 @@ from mft_db.models.session import (
     TdSessionRow,
 )
 from mft_db.models.strategy import StrategyRow
+from mft_db.models.symbol import (
+    FilterName,
+    SymbolCategory,
+    SymbolFilter,
+    SymbolTicker,
+)
 from mft_db.models.user import User
 
 __all__ = [
@@ -21,8 +27,12 @@ __all__ = [
     "MdSessionRow",
     "SessionDomain",
     "SessionStatus",
+    "FilterName",
     "StrategyRow",
     "StsSessionRow",
+    "SymbolCategory",
+    "SymbolFilter",
+    "SymbolTicker",
     "TdSessionRow",
     "User",
 ]

@@ -16,7 +16,11 @@ def test_parse_default_template() -> None:
     assert spec.td == ["paper trader"]
     assert spec.md == ["paper.orderbook.BTCUSDT"]
     assert spec.sts.type == "NoopStrategy"
-    assert spec.sts.config["mid"] == 50000
+    # No mid: the strategy reads one from the order book feed above.
+    assert "mid" not in spec.sts.config
+    assert spec.sts.config["exec_interval_ms"] == 1000
+    assert spec.sts.config["gap_bps"] == 10
+    assert spec.sts.config["qty_quote"] == 100
 
 
 def test_roundtrip_dump() -> None:

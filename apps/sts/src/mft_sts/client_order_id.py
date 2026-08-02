@@ -18,7 +18,7 @@ Wire form is the decimal string of the packed ``uint64``.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 SLOT_BITS = 16
 TS_BITS = 40
@@ -34,7 +34,7 @@ SEQ_MASK = (1 << SEQ_BITS) - 1
 #: Slot values wrap at this many allocations; see ``SessionManager``.
 SLOT_SPACE = 1 << SLOT_BITS
 
-EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
+EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 EPOCH_MS = int(EPOCH.timestamp() * 1000)
 
 

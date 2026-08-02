@@ -17,6 +17,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.9",
     "fakeredis>=2.26",
+    "aiosqlite>=0.20",
 ]
 
 [tool.ruff]
@@ -38,5 +39,6 @@ pythonpath = [
     "apps/api/src",
     "apps/md/src",
     "apps/sts/src",
+    "apps/sym/src",
     "apps/paper/src",
 ]

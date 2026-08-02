@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -461,3 +461,154 @@ MD_ORDERBOOK = "md.orderbook"
 MD_SUBSCRIBE = "md.subscribe"
 MD_UNSUBSCRIBE = "md.unsubscribe"
 MD_DETACH = "md.detach"
+
+
+# --- symbol plane (sym) ----------------------------------------------------
+
+
+class SymbolFilterInfo(BaseModel):
+    """One trading restriction. ``value`` is None when the venue set no bound."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    value: Decimal | None = None
+
+
+class SymbolInfo(BaseModel):
+    """One instrument as the symbol plane knows it.
+
+    ``symbol`` is canonical; ``exch_ticker`` is what the venue wants on the
+    wire. Adapters resolve one to the other through this rather than guessing.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    venue: str
+    symbol: str
+    category: str = "spot"
+    base: str
+    quote: str
+    exch_ticker: str
+    contract_size: Decimal | None = None
+    settlement_asset: str | None = None
+    expiry: float | None = None
+    is_active: bool = True
+    filters: list[SymbolFilterInfo] = Field(default_factory=list)
+    updated_at: float | None = None
+
+    def filter(self, name: str) -> Decimal | None:
+        """Bound for ``name``. None also means "published with no bound" —
+        use :meth:`has_filter` when that distinction matters."""
+        for row in self.filters:
+            if row.name == name:
+                return row.value
+        return None
+
+    def has_filter(self, name: str) -> bool:
+        """Whether the venue publishes this restriction at all."""
+        return any(row.name == name for row in self.filters)
+
+    # --- rounding ----------------------------------------------------------
+    #
+    # TD does not validate orders against these filters, so a strategy must
+    # round before it submits. Putting the arithmetic here keeps every
+    # strategy from reimplementing it slightly differently.
+
+    @property
+    def price_tick(self) -> Decimal | None:
+        return self.filter("price_tick")
+
+    @property
+    def qty_step(self) -> Decimal | None:
+        return self.filter("qty_step")
+
+    def round_price(self, price: Decimal) -> Decimal:
+        """Snap ``price`` down to the venue's tick."""
+        return _floor_to_step(price, self.price_tick)
+
+    def round_qty(self, qty: Decimal) -> Decimal:
+        """Snap ``qty`` down to the venue's lot step.
+
+        Always down: rounding a size up can breach a balance or a risk limit,
+        while rounding down only trades slightly less than intended.
+        """
+        return _floor_to_step(qty, self.qty_step)
+
+    def qty_for_notional(self, notional: Decimal, price: Decimal) -> Decimal:
+        """Size in base currency for a target quote-currency spend."""
+        if price <= 0:
+            raise ValueError(f"price must be positive, got {price}")
+        return self.round_qty(notional / price)
+
+    def meets_minimums(self, qty: Decimal, price: Decimal) -> bool:
+        """Whether ``qty`` at ``price`` clears ``min_qty`` and ``min_notional``."""
+        min_qty = self.filter("min_qty")
+        if min_qty is not None and qty < min_qty:
+            return False
+        min_notional = self.filter("min_notional")
+        if min_notional is not None and qty * price < min_notional:
+            return False
+        return True
+
+
+class SymListRequest(BaseModel):
+    """Query the plane. Omitted filters widen the result."""
+
+    model_config = ConfigDict(frozen=True)
+
+    venue: str | None = None
+    category: str | None = None
+    symbol: str | None = None
+    active_only: bool = True
+
+
+class SymListResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    symbols: list[SymbolInfo] = Field(default_factory=list)
+
+
+class SymVenuesResult(BaseModel):
+    """Venues the plane is configured to track, and what it has for each."""
+
+    model_config = ConfigDict(frozen=True)
+
+    venues: list[str] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+
+
+class SymRefreshRequest(BaseModel):
+    """Force a refresh. Omit ``venue`` to refresh every configured source."""
+
+    model_config = ConfigDict(frozen=True)
+
+    venue: str | None = None
+
+
+class SymRefreshResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    refreshed: dict[str, int] = Field(default_factory=dict)
+    deactivated: dict[str, int] = Field(default_factory=dict)
+    failed: dict[str, str] = Field(default_factory=dict)
+
+
+def _floor_to_step(value: Decimal, step: Decimal | None) -> Decimal:
+    """Largest multiple of ``step`` not exceeding ``value``."""
+    if step is None or step <= 0:
+        return value
+    return (value / step).to_integral_value(rounding=ROUND_FLOOR) * step
+
+
+SYM_HEALTH = "sym.health"
+SYM_ERROR = "sym.error"
+SYM_LIST = "sym.list"
+SYM_VENUES = "sym.venues"
+SYM_REFRESH = "sym.refresh"
+
+SymListRequestEnvelope = Envelope[SymListRequest]
+SymListResultEnvelope = Envelope[SymListResult]
+SymVenuesResultEnvelope = Envelope[SymVenuesResult]
+SymRefreshRequestEnvelope = Envelope[SymRefreshRequest]
+SymRefreshResultEnvelope = Envelope[SymRefreshResult]

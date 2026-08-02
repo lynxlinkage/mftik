@@ -1,0 +1,161 @@
+"""Symbol plane persistence — upsert, filter reconciliation, delisting."""
+
+from __future__ import annotations
+
+from decimal import Decimal
+
+import pytest
+from mft_db.models import Base, SymbolCategory
+from mft_db.repositories import SymbolRepository
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+SPOT = SymbolCategory.SPOT.value
+
+
+@pytest.fixture
+async def db():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as session:
+        yield session
+    await engine.dispose()
+
+
+async def _btc(repo: SymbolRepository, **overrides):
+    payload = {
+        "venue": "gate_spot",
+        "symbol": "BTCUSDT",
+        "category": SPOT,
+        "base": "BTC",
+        "quote": "USDT",
+        "exch_ticker": "BTC_USDT",
+        "filters": {
+            "price_tick": Decimal("0.0001"),
+            "qty_step": Decimal("1"),
+            "min_qty": Decimal("1"),
+            "max_qty": Decimal("100000"),
+            "min_notional": None,
+        },
+    }
+    payload.update(overrides)
+    return await repo.upsert(**payload)
+
+
+async def test_upsert_creates_ticker_and_filter_rows(db) -> None:
+    repo = SymbolRepository(db)
+    ticker = await _btc(repo)
+
+    assert ticker.venue == "gate_spot"
+    assert ticker.symbol == "BTCUSDT"
+    assert ticker.exch_ticker == "BTC_USDT"
+    assert ticker.base == "BTC"
+    assert ticker.is_active
+
+    filters = {f.name: f.value for f in await repo.list_filters(ticker.id)}
+    assert filters["price_tick"] == Decimal("0.0001")
+    assert filters["max_qty"] == Decimal("100000")
+    # A published filter with no bound is a row with a NULL value — which is
+    # not the same as the venue never publishing it.
+    assert "min_notional" in filters
+    assert filters["min_notional"] is None
+
+
+async def test_upsert_is_idempotent(db) -> None:
+    repo = SymbolRepository(db)
+    first = await _btc(repo)
+    second = await _btc(repo)
+
+    assert first.id == second.id
+    assert len(await repo.list_filters(second.id)) == 5
+    assert len(await repo.list_tickers()) == 1
+
+
+async def test_upsert_reconciles_changed_and_dropped_filters(db) -> None:
+    repo = SymbolRepository(db)
+    ticker = await _btc(repo)
+    rows = await repo.list_filters(ticker.id)
+    tick_row_id = {f.name: f.id for f in rows}["price_tick"]
+
+    ticker = await _btc(
+        repo,
+        filters={
+            "price_tick": Decimal("0.01"),  # changed
+            "qty_step": Decimal("1"),  # unchanged
+            # min_qty / max_qty / min_notional dropped by the venue
+        },
+    )
+    filters = {f.name: f for f in await repo.list_filters(ticker.id)}
+    assert set(filters) == {"price_tick", "qty_step"}
+    assert filters["price_tick"].value == Decimal("0.01")
+    # Updated in place, so anything referencing the row still resolves.
+    assert filters["price_tick"].id == tick_row_id
+
+
+async def test_same_symbol_in_two_categories_is_two_instruments(db) -> None:
+    repo = SymbolRepository(db)
+    await _btc(repo)
+    await _btc(
+        repo,
+        category=SymbolCategory.PERP.value,
+        exch_ticker="BTC_USDT",
+        contract_size=Decimal("0.0001"),
+        settlement_asset="USDT",
+        filters={"price_tick": Decimal("0.1")},
+    )
+
+    tickers = await repo.list_tickers()
+    assert len(tickers) == 2
+    perp = await repo.get_ticker(
+        venue="gate_spot", symbol="BTCUSDT", category="perp"
+    )
+    assert perp is not None
+    assert perp.contract_size == Decimal("0.0001")
+    assert perp.settlement_asset == "USDT"
+    spot = await repo.get_ticker(
+        venue="gate_spot", symbol="BTCUSDT", category=SPOT
+    )
+    assert spot is not None
+    assert spot.contract_size is None
+
+
+async def test_delisting_deactivates_rather_than_deletes(db) -> None:
+    """Orders and sessions still reference instruments that got delisted."""
+    repo = SymbolRepository(db)
+    await _btc(repo)
+    await _btc(repo, symbol="ETHUSDT", base="ETH", exch_ticker="ETH_USDT")
+
+    dropped = await repo.deactivate_missing(
+        venue="gate_spot", category=SPOT, keep={"BTCUSDT"}
+    )
+
+    assert dropped == 1
+    active = await repo.list_tickers()
+    assert [t.symbol for t in active] == ["BTCUSDT"]
+    everything = await repo.list_tickers(active_only=False)
+    assert len(everything) == 2
+    eth = await repo.get_ticker(
+        venue="gate_spot", symbol="ETHUSDT", category=SPOT
+    )
+    assert eth is not None and not eth.is_active
+
+
+async def test_relisting_reactivates(db) -> None:
+    repo = SymbolRepository(db)
+    await _btc(repo)
+    await repo.deactivate_missing(venue="gate_spot", category=SPOT, keep=set())
+    assert not (await repo.list_tickers())
+
+    await _btc(repo)
+    assert [t.symbol for t in await repo.list_tickers()] == ["BTCUSDT"]
+
+
+async def test_list_filters_by_venue_and_category(db) -> None:
+    repo = SymbolRepository(db)
+    await _btc(repo)
+    await _btc(repo, venue="paper", exch_ticker="BTCUSDT")
+
+    assert len(await repo.list_tickers(venue="gate_spot")) == 1
+    assert len(await repo.list_tickers(category=SPOT)) == 2
+    assert await repo.venues() == ["gate_spot", "paper"]

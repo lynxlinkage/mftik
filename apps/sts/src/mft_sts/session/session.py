@@ -34,6 +34,7 @@ from mft.protocol import (
     UntypedEnvelope,
     publish_sts_log,
 )
+from mft.symbols import SymbolClient
 
 from mft_sts.strategy import Strategy
 
@@ -57,6 +58,7 @@ class StsSession:
         st_paras: dict[str, Any] | None = None,
         heartbeat_interval: float = 1.0,
         cid_slot: int = 0,
+        symbols: SymbolClient | None = None,
         on_exit: ExitHandler | None = None,
     ) -> None:
         self.session_id = session_id
@@ -70,6 +72,9 @@ class StsSession:
         #: 16-bit id packed into every client_order_id this session mints.
         #: Unique among concurrently live sessions (see ``SessionManager``).
         self.cid_slot = cid_slot
+        #: Symbol plane reads. Strategies round their own prices and sizes,
+        #: so they need tick/step/notional at hand — TD does not check.
+        self.symbols = symbols or SymbolClient(broker)
         self._on_exit = on_exit
 
         # Must follow cid_slot: bind() builds the client_order_id factory.

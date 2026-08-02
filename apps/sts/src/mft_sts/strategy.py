@@ -45,6 +45,9 @@ class Strategy:
         NOTE: account-wide fan-out — other sessions on the same api_id show
         up here too. Filter with ``self.owns(cid)``.
 
+    Symbol plane (wired):
+        self.symbols — exch_ticker / filters per (venue, symbol)
+
     Timer tokens (wired):
         self.timer.token().register(first_ms, interval_ms, func)
         token.cancel()  — timestamps are unix ms
@@ -102,6 +105,20 @@ class Strategy:
     @property
     def paused(self) -> bool:
         return self._paused
+
+    @property
+    def symbols(self):
+        """Symbol plane reads — instrument spelling and trading filters.
+
+        TD does not validate orders against these; rounding price and size to
+        the venue's ``price_tick`` / ``qty_step`` and clearing ``min_notional``
+        is the strategy's job::
+
+            info = await self.symbols.get("gate_spot", "BTCUSDT")
+            tick = info.filter("price_tick")
+            price = (price / tick).quantize(Decimal(1)) * tick
+        """
+        return self.session.symbols if self.session is not None else None
 
     @property
     def cid_slot(self) -> int | None:

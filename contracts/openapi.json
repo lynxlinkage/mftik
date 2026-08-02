@@ -48,6 +48,28 @@
         }
       }
     },
+    "/venues": {
+      "get": {
+        "tags": [
+          "apis"
+        ],
+        "summary": "List Venues",
+        "description": "Venues a credential can be registered against.",
+        "operationId": "list_venues_venues_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VenueListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/apis": {
       "get": {
         "tags": [
@@ -1247,6 +1269,60 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "VenueListResponse": {
+        "properties": {
+          "venues": {
+            "items": {
+              "$ref": "#/components/schemas/VenueOut"
+            },
+            "type": "array",
+            "title": "Venues"
+          }
+        },
+        "type": "object",
+        "title": "VenueListResponse"
+      },
+      "VenueOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "api_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Api Types"
+          },
+          "requires_passphrase": {
+            "type": "boolean",
+            "title": "Requires Passphrase",
+            "default": false
+          },
+          "simulated": {
+            "type": "boolean",
+            "title": "Simulated",
+            "default": false
+          },
+          "symbol_example": {
+            "type": "string",
+            "title": "Symbol Example",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "label"
+        ],
+        "title": "VenueOut",
+        "description": "A venue credentials can be registered against."
       }
     }
   }

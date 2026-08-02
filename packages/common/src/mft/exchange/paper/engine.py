@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # symbol: (base, quote, mid, bid_px, bid_qty, ask_px, ask_qty)
+#: symbol → base, quote, mid, bid_px, bid_qty, ask_px, ask_qty
 _DEFAULT_SYMBOLS: dict[
     str, tuple[str, str, Decimal, Decimal, Decimal, Decimal, Decimal]
 ] = {
@@ -60,6 +61,49 @@ _DEFAULT_SYMBOLS: dict[
         Decimal("1"),
     ),
 }
+
+#: symbol → tick_size, lot_size, min_qty, min_notional. Real venues publish
+#: these per instrument; paper does too so the symbol plane has something
+#: truthful to serve and strategies exercise the same rounding path.
+_DEFAULT_FILTERS: dict[
+    str, tuple[Decimal, Decimal, Decimal, Decimal]
+] = {
+    "BTCUSDT": (
+        Decimal("0.01"),
+        Decimal("0.00001"),
+        Decimal("0.00001"),
+        Decimal("5"),
+    ),
+    "ETHUSDT": (
+        Decimal("0.01"),
+        Decimal("0.0001"),
+        Decimal("0.0001"),
+        Decimal("5"),
+    ),
+}
+
+_FALLBACK_FILTERS = (
+    Decimal("0.01"),
+    Decimal("0.0001"),
+    Decimal("0.0001"),
+    Decimal("5"),
+)
+
+
+def _instrument(symbol: str, base: str, quote: str) -> Instrument:
+    tick, lot, min_qty, min_notional = _DEFAULT_FILTERS.get(
+        symbol, _FALLBACK_FILTERS
+    )
+    return Instrument(
+        symbol=symbol,
+        base=base,
+        quote=quote,
+        tick_size=tick,
+        lot_size=lot,
+        min_qty=min_qty,
+        min_notional=min_notional,
+    )
+
 
 # Optional hooks for the paper-engine Redis bridge (sync; may schedule work).
 OrderSink = Callable[[str, Order], Any]
@@ -118,17 +162,13 @@ class PaperExchange:
                 ask_px,
                 ask_qty,
             ) in _DEFAULT_SYMBOLS.items():
-                self._instruments[symbol] = Instrument(
-                    symbol=symbol, base=base, quote=quote
-                )
+                self._instruments[symbol] = _instrument(symbol, base, quote)
                 self._mid[symbol] = mid
                 self._books[symbol] = (bid_px, bid_qty, ask_px, ask_qty)
         else:
             for symbol, mid in symbols.items():
                 base, quote = _split_symbol(symbol)
-                self._instruments[symbol] = Instrument(
-                    symbol=symbol, base=base, quote=quote
-                )
+                self._instruments[symbol] = _instrument(symbol, base, quote)
                 self._mid[symbol] = mid
                 # 1-tick book around mid when custom symbols are supplied
                 tick = Decimal("1")

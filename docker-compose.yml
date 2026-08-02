@@ -133,6 +133,27 @@ services:
       redis:
         condition: service_healthy
 
+  # Symbol plane. Lifecycle is independent of td/md/sts — it is up whenever
+  # the stack is, so an instrument can be resolved before anything trades.
+  sym:
+    build:
+      context: .
+      dockerfile: apps/sym/Dockerfile
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mft}:${POSTGRES_PASSWORD:-mft}@postgres:5432/${POSTGRES_DB:-mft}
+      # Listings are near-static; an hourly re-pull is plenty.
+      SYM_REFRESH_INTERVAL: "3600"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   frontend:
     build:
       context: ./frontend

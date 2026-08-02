@@ -7,6 +7,7 @@ from mft_db.repositories.session import (
     TdSessionRepository,
 )
 from mft_db.repositories.strategy import StrategyRepository
+from mft_db.repositories.symbol import SymbolRepository
 from mft_db.repositories.user import UserRepository
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "MdSessionRepository",
     "StrategyRepository",
     "StsSessionRepository",
+    "SymbolRepository",
     "TdSessionRepository",
     "UserRepository",
 ]

@@ -23,6 +23,7 @@ from mft.exchange.gate.spot.models import (
     from_text,
     to_text,
 )
+from mft.exchange.gate.spot.private import GateSpotPrivateClient
 from mft.exchange.gate.spot.protocol import (
     GateApiError,
     GateResponse,
@@ -33,8 +34,15 @@ from mft.exchange.gate.spot.protocol import (
     request_frame,
     sign,
 )
+from mft.exchange.gate.spot.rest import (
+    GATE_SPOT_REST_URL,
+    GateRestError,
+    GateSpotRest,
+    sign_rest,
+)
 
 __all__ = [
+    "GATE_SPOT_REST_URL",
     "GATE_SPOT_WS_URL",
     "TEXT_PREFIX",
     "GateApiError",
@@ -47,6 +55,9 @@ __all__ = [
     "GateOrderBookUpdate",
     "GateOrderUpdate",
     "GateResponse",
+    "GateRestError",
+    "GateSpotPrivateClient",
+    "GateSpotRest",
     "GateSpotWebSocket",
     "GateTicker",
     "GateTrade",
@@ -59,5 +70,6 @@ __all__ = [
     "ping_frame",
     "request_frame",
     "sign",
+    "sign_rest",
     "to_text",
 ]

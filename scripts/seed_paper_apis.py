@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
-"""Seed a dev user and two paper venue API credentials (idempotent).
+"""Seed a dev user and its venue API credentials (idempotent).
 
 Intended for local / docker-compose testing. Re-running is safe.
 
-Credentials match ``PaperSessionFactory`` / paper-engine seeds:
+Paper credentials match ``PaperSessionFactory`` / paper-engine seeds:
   paper-key-1 / paper-secret-1  → 1 BTC + 100000 USDT  (strategy trading)
   paper-key-2 / paper-secret-2  → 10 BTC + 500000 USDT (liquidity maker)
 
 Paper engine seeds resting book from key-2: bid [[49999, 10]], ask [[50001, 10]].
+
+A ``gate_spot`` credential is registered too when ``GATE_SPOT_API_KEY`` and
+``GATE_SPOT_API_SECRET`` are set — real venue keys cannot be hard-coded, so
+this is opt-in::
+
+    GATE_SPOT_API_KEY=... GATE_SPOT_API_SECRET=... just seed
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 
+from mft.exchange import venues
 from mft_db.models.api import Api, ApiType
 from mft_db.models.user import User
 from mft_db.repositories import AccountRepository, ApiRepository, UserRepository
@@ -36,15 +44,31 @@ PAPER_APIS: tuple[dict[str, str], ...] = (
         "name": "paper trader",
         "api_key": "paper-key-1",
         "api_secret": "paper-secret-1",
-        "venue": "paper",
+        "venue": venues.PAPER.name,
     },
     {
         "name": "paper liquidity",
         "api_key": "paper-key-2",
         "api_secret": "paper-secret-2",
-        "venue": "paper",
+        "venue": venues.PAPER.name,
     },
 )
+
+
+def live_venue_apis() -> tuple[dict[str, str], ...]:
+    """Credentials for real venues, from env. Empty unless both vars are set."""
+    key = os.getenv("GATE_SPOT_API_KEY", "").strip()
+    secret = os.getenv("GATE_SPOT_API_SECRET", "").strip()
+    if not key or not secret:
+        return ()
+    return (
+        {
+            "name": os.getenv("GATE_SPOT_ACCOUNT_NAME", "gate spot").strip(),
+            "api_key": key,
+            "api_secret": secret,
+            "venue": venues.GATE_SPOT.name,
+        },
+    )
 
 
 async def seed() -> None:
@@ -65,7 +89,7 @@ async def seed() -> None:
 
         summary.append(f"  user_id={user.id} email={DEV_EMAIL}")
 
-        for spec in PAPER_APIS:
+        for spec in (*PAPER_APIS, *live_venue_apis()):
             existing = await apis.get_by_api_key(spec["api_key"])
             if existing is not None:
                 logger.info(
@@ -124,10 +148,16 @@ async def seed() -> None:
                         account.name,
                     )
 
+            simulated = venues.get(row.venue)
+            secret = (
+                row.api_secret
+                if simulated is not None and simulated.simulated
+                else "***"
+            )
             summary.append(
                 f"  api_id={row.id} account_id={account.id} "
                 f"name={account.name} venue={row.venue} "
-                f"api_key={row.api_key} api_secret={row.api_secret}"
+                f"api_key={row.api_key} api_secret={secret}"
             )
 
     print("seed complete:")
