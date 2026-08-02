@@ -10,9 +10,13 @@ from typing import Any
 from mft.broker import Broker
 from mft.exchange.oms import OmsView
 from mft.protocol import (
+    MD_BEST_QUOTE,
     MD_DETACH,
+    MD_KLINE,
     MD_LEASE_ACK,
     MD_ORDERBOOK,
+    MD_TICKER,
+    MD_TRADE,
     STS_DETACH,
     STS_LEASE_HEARTBEAT,
     TD_BALANCE_UPDATE,
@@ -41,6 +45,16 @@ from mft_sts.strategy import Strategy
 logger = logging.getLogger(__name__)
 
 ExitHandler = Callable[[str, str], Awaitable[None]]
+
+#: MD message type → the strategy hook it feeds. One entry per feed topic MD
+#: publishes; anything else on ``md.{session_id}`` is logged and dropped.
+MD_HANDLERS: dict[str, str] = {
+    MD_TICKER: "on_ticker",
+    MD_ORDERBOOK: "on_order_book",
+    MD_KLINE: "on_kline",
+    MD_TRADE: "on_trade",
+    MD_BEST_QUOTE: "on_best_quote",
+}
 
 
 class StsSession:
@@ -314,8 +328,8 @@ class StsSession:
                 if env.type == MD_LEASE_ACK:
                     await self._on_md_lease_ack(env)
                     continue
-                if env.type == MD_ORDERBOOK:
-                    await self._on_order_book(env)
+                if env.type in MD_HANDLERS:
+                    await self._on_market_data(env)
                     continue
                 self._on_message("md", env)
         except asyncio.CancelledError:
@@ -341,13 +355,17 @@ class StsSession:
             source="sts",
         )
 
-    async def _on_order_book(self, env: UntypedEnvelope) -> None:
+    async def _on_market_data(self, env: UntypedEnvelope) -> None:
+        name = MD_HANDLERS[env.type]
+        handler = getattr(self.strategy, name)
         try:
-            await self.strategy.on_order_book(env)
+            await handler(env)
         except Exception:
             logger.exception(
-                "strategy on_order_book failed session=%s",
+                "strategy %s failed session=%s type=%s",
+                name,
                 self.session_id,
+                env.type,
             )
 
     async def _pump_td_session(self, api_id: int) -> None:

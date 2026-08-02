@@ -345,6 +345,75 @@ async def test_sts_on_order_book_from_md(
     await md.close_all()
 
 
+@pytest.mark.asyncio
+async def test_sts_ticker_and_order_book_from_md(
+    broker: Broker, paper: PaperExchange
+) -> None:
+    """Two feed topics on one session land in their own strategy hooks."""
+    from mft_sts.session.session import StsSession
+
+    class FeedStrategy(Strategy):
+        name = "feeds"
+        id = 97
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.books: list = []
+            self.tickers: list = []
+
+        async def on_order_book(self, msg) -> None:  # noqa: ANN001
+            self.books.append(msg.payload)
+
+        async def on_ticker(self, msg) -> None:  # noqa: ANN001
+            self.tickers.append(msg.payload)
+
+    store = FakeMdStore()
+    factory = PaperPublicFactory(broker, paper)
+    md = SessionManager(
+        factory,
+        broker,
+        persist_live=store.persist_live,
+        mark_done=store.mark_done,
+        lease_grace=2.0,
+    )
+    feeds = ["paper.orderbook.BTCUSDT", "paper.ticker.BTCUSDT"]
+    session_id = "sts-feeds"
+    strategy = FeedStrategy()
+    sts = StsSession(
+        session_id=session_id,
+        broker=broker,
+        created_by=1,
+        strategy=strategy,
+        md_ids=feeds,
+        heartbeat_interval=0.1,
+    )
+    await sts.start()
+    await asyncio.sleep(0.05)
+    result = await md.attach(
+        MdAttachRequest(
+            session_id=session_id,
+            created_by=1,
+            subscriptions=feeds,
+            timeout=3.0,
+        )
+    )
+    assert sorted(result.subscriptions) == sorted(feeds)
+
+    await asyncio.wait_for(
+        _wait_until(
+            lambda: bool(strategy.books) and bool(strategy.tickers)
+        ),
+        timeout=3.0,
+    )
+    assert strategy.books[0]["symbol"] == "BTCUSDT"
+    assert strategy.tickers[0]["symbol"] == "BTCUSDT"
+    assert "bids" in strategy.books[0]
+    assert "last" in strategy.tickers[0]
+
+    await sts.stop()
+    await md.close_all()
+
+
 async def _wait_until(pred, *, timeout: float = 3.0) -> None:  # noqa: ANN001
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:

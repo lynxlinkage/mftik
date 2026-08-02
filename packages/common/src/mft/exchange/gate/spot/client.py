@@ -614,11 +614,18 @@ class GateSpotWebSocket:
                     if not pending.future.done():
                         pending.future.set_result(resp)
                     return
+        # A subscribe ack carries nothing to correlate on but channel+event, so
+        # concurrent subscribes to one channel are told apart by arrival order:
+        # the Nth ack answers the Nth waiter still outstanding. Skipping the
+        # ones already resolved matters — a caller that has been given its ack
+        # but has not resumed to remove itself is still in this list, and
+        # stopping there would strand every later waiter until its timeout.
         for pending in self._pending:
             if pending.channel != resp.channel or pending.event != resp.event:
                 continue
-            if not pending.future.done():
-                pending.future.set_result(resp)
+            if pending.future.done():
+                continue
+            pending.future.set_result(resp)
             return
         logger.debug("gate.spot unmatched reply %s/%s", resp.channel, resp.event)
 

@@ -34,9 +34,11 @@ from mft.exchange.gate.spot.protocol import (
     request_frame,
     sign,
 )
+from mft.exchange.gate.spot.public import GateSpotPublicClient
 from mft.exchange.gate.spot.rest import (
     GATE_SPOT_REST_URL,
     GateRestError,
+    GateSpotPublicRest,
     GateSpotRest,
     sign_rest,
 )
@@ -57,6 +59,8 @@ __all__ = [
     "GateResponse",
     "GateRestError",
     "GateSpotPrivateClient",
+    "GateSpotPublicClient",
+    "GateSpotPublicRest",
     "GateSpotRest",
     "GateSpotWebSocket",
     "GateTicker",

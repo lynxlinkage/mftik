@@ -1,0 +1,237 @@
+"""Gate spot as an MD :class:`PublicClient`.
+
+Composes the two transports, same split as the private client:
+
+* **WebSocket** — every live feed. Gate pushes ticker, tape, book snapshots,
+  candles and best quote on one socket, so all five streams share it.
+* **REST** — the three on-demand snapshots. A caller asking for "the book right
+  now" cannot wait for the channel's next scheduled push, and Gate has no
+  request-reply for these over the WebSocket.
+
+Gate supports all five feeds MD knows about, which is not a promise the shared
+interface makes — :meth:`~mft.exchange.base.PublicClient.stream_kline` and
+``stream_best_quote`` are optional precisely because most venues cover a
+different subset. Here they are all real.
+
+Symbols cross this boundary canonical (``BTCUSDT``) and are resolved to Gate's
+``BTC_USDT`` through the symbol plane, never by string surgery — see
+:mod:`mft.exchange.symbols`.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import AsyncIterator
+from typing import TypeVar
+
+from mft.exchange.base import PublicClient
+from mft.exchange.gate.spot.client import GATE_SPOT_WS_URL, GateSpotWebSocket
+from mft.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
+from mft.exchange.models import (
+    BestQuote,
+    Instrument,
+    Kline,
+    OrderBook,
+    Ticker,
+    Trade,
+)
+from mft.exchange.stream import EventStream
+from mft.exchange.symbols import SymbolResolver, canonical
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+#: ``spot.order_book`` arguments. Gate caps this channel at 5/10/20/50/100
+#: levels on a fixed timer, and every push is a whole book — which is what MD
+#: wants. The diff channel (``spot.order_book_update``) would need snapshot
+#: folding and sequence tracking to produce the same thing.
+DEFAULT_BOOK_LEVEL = "20"
+DEFAULT_BOOK_INTERVAL = "1000ms"
+
+
+class GateSpotPublicClient(PublicClient):
+    """Gate spot market data for MD.
+
+    All five feeds are live::
+
+        client = GateSpotPublicClient(symbols=symbol_client)
+        async with client:
+            async for book in client.stream_order_book("BTCUSDT"):
+                ...
+    """
+
+    name = "gate_spot"
+
+    def __init__(
+        self,
+        *,
+        symbols: SymbolResolver,
+        ws_url: str = GATE_SPOT_WS_URL,
+        rest_url: str = GATE_SPOT_REST_URL,
+        ws: GateSpotWebSocket | None = None,
+        rest: GateSpotPublicRest | None = None,
+        book_level: str = DEFAULT_BOOK_LEVEL,
+        book_interval: str = DEFAULT_BOOK_INTERVAL,
+    ) -> None:
+        super().__init__()
+        # No credentials: every channel used here is public, and the socket
+        # only needs keys for private subscribes and trading calls.
+        self.ws = ws or GateSpotWebSocket(url=ws_url)
+        self.rest = rest or GateSpotPublicRest(base_url=rest_url)
+        self.symbols = symbols
+        self.book_level = book_level
+        self.book_interval = book_interval
+
+    # --- lifecycle ---------------------------------------------------------
+
+    async def connect(self) -> None:
+        await self.ws.connect()
+        await self.rest.connect()
+        self._connected = True
+        logger.info("gate_spot public connected")
+
+    async def close(self) -> None:
+        self._connected = False
+        await self.ws.close()
+        await self.rest.close()
+
+    # --- snapshots (REST) --------------------------------------------------
+
+    async def fetch_instruments(self) -> list[Instrument]:
+        """Tradeable pairs, in Gate's own ``BTC_USDT`` spelling.
+
+        Left native on purpose: this is what the symbol plane ingests to *build*
+        the canonical mapping, so it cannot depend on that mapping existing.
+        """
+        self._ensure_connected()
+        return await self.rest.fetch_instruments()
+
+    async def fetch_ticker(self, symbol: str) -> Ticker:
+        self._ensure_connected()
+        symbol, pair = await self._resolve(symbol)
+        ticker = await self.rest.fetch_ticker(pair)
+        return ticker.model_copy(update={"symbol": symbol})
+
+    async def fetch_order_book(self, symbol: str, *, depth: int = 10) -> OrderBook:
+        self._ensure_connected()
+        symbol, pair = await self._resolve(symbol)
+        book = await self.rest.fetch_order_book(pair, depth=depth)
+        return book.model_copy(update={"symbol": symbol})
+
+    # --- streams (WebSocket) -----------------------------------------------
+
+    def stream_ticker(self, symbol: str) -> AsyncIterator[Ticker]:
+        self._ensure_connected()
+        return self._tickers(symbol)
+
+    def stream_trades(self, symbol: str) -> AsyncIterator[Trade]:
+        self._ensure_connected()
+        return self._trades(symbol)
+
+    def stream_order_book(self, symbol: str) -> AsyncIterator[OrderBook]:
+        self._ensure_connected()
+        return self._order_books(symbol)
+
+    def stream_kline(self, symbol: str, interval: str) -> AsyncIterator[Kline]:
+        self._ensure_connected()
+        return self._klines(symbol, interval)
+
+    def stream_best_quote(self, symbol: str) -> AsyncIterator[BestQuote]:
+        self._ensure_connected()
+        return self._best_quotes(symbol)
+
+    async def _tickers(self, symbol: str) -> AsyncIterator[Ticker]:
+        symbol, pair = await self._resolve(symbol)
+        stream = await self.ws.subscribe_tickers(pair)
+        async for row in self._rows(stream):
+            if row.currency_pair != pair:
+                continue
+            yield row.to_ticker().model_copy(update={"symbol": symbol})
+
+    async def _trades(self, symbol: str) -> AsyncIterator[Trade]:
+        symbol, pair = await self._resolve(symbol)
+        stream = await self.ws.subscribe_trades(pair)
+        async for row in self._rows(stream):
+            if row.currency_pair != pair:
+                continue
+            yield row.to_trade().model_copy(update={"symbol": symbol})
+
+    async def _order_books(self, symbol: str) -> AsyncIterator[OrderBook]:
+        symbol, pair = await self._resolve(symbol)
+        stream = await self.ws.subscribe_order_book(
+            pair, level=self.book_level, interval=self.book_interval
+        )
+        async for row in self._rows(stream):
+            if row.s != pair:
+                continue
+            yield row.to_order_book().model_copy(update={"symbol": symbol})
+
+    async def _klines(self, symbol: str, interval: str) -> AsyncIterator[Kline]:
+        symbol, pair = await self._resolve(symbol)
+        stream = await self.ws.subscribe_candlesticks(interval, pair)
+        async for row in self._rows(stream):
+            if row.currency_pair != pair or row.interval != interval:
+                continue
+            yield Kline(
+                symbol=symbol,
+                interval=interval,
+                # ``t`` is the window's open time, in seconds.
+                open_time=float(row.t),
+                open=row.o,
+                high=row.h,
+                low=row.low,
+                close=row.c,
+                # Gate splits the two: ``a`` is base amount, ``v`` is turnover
+                # in the quote currency.
+                volume=row.a,
+                quote_volume=row.v,
+                closed=row.w,
+            )
+
+    async def _best_quotes(self, symbol: str) -> AsyncIterator[BestQuote]:
+        symbol, pair = await self._resolve(symbol)
+        stream = await self.ws.subscribe_book_ticker(pair)
+        async for row in self._rows(stream):
+            if row.s != pair:
+                continue
+            yield BestQuote(
+                symbol=symbol,
+                bid=row.bid,
+                bid_qty=row.bid_size,
+                ask=row.ask,
+                ask_qty=row.ask_size,
+                ts=row.ts,
+            )
+
+    # --- stream plumbing ---------------------------------------------------
+
+    @staticmethod
+    async def _rows(stream: EventStream[T]) -> AsyncIterator[T]:
+        """Iterate a subscription and unhook it when the consumer stops.
+
+        MD ends a feed by cancelling its pump task, which leaves the stream
+        registered on the socket still receiving pushes. Closing it here drops
+        it from the socket's fan-out on the way out.
+        """
+        try:
+            async for row in stream:
+                yield row
+        finally:
+            stream.close()
+
+    # --- symbols -----------------------------------------------------------
+
+    async def _resolve(self, symbol: str) -> tuple[str, str]:
+        """``(canonical, venue pair)`` for one instrument.
+
+        Resolved once per stream rather than per message: the pair we
+        subscribed with is the pair every message we keep carries, so there is
+        nothing left to look up on the hot path.
+        """
+        symbol = canonical(symbol)
+        pair = await self.symbols.exch_ticker(self.name, symbol, category="spot")
+        return symbol, pair
+
+
+__all__ = ["GateSpotPublicClient"]

@@ -1,13 +1,20 @@
 """Gate spot REST v4 — only the reads the WebSocket API cannot serve.
 
-Gate's spot WebSocket API has ``spot.order_status`` for a single order, but no
-``spot.order_list`` (futures has one; spot does not) and no balance query. TD's
-recon needs both: open orders and balances at attach time. Returning nothing
-there would leave the OMS believing the account is flat, which is worse than
-not reconciling at all — so those two reads come over REST.
+Two clients, split by whether the call is signed:
 
-Deliberately not a general REST client. Order entry stays on the WebSocket,
-where it belongs latency-wise; this exists for the two recon calls only.
+* :class:`GateSpotRest` — TD's recon reads. Gate's spot WebSocket API has
+  ``spot.order_status`` for a single order, but no ``spot.order_list`` (futures
+  has one; spot does not) and no balance query, and recon needs both at attach
+  time. Returning nothing there would leave the OMS believing the account is
+  flat, which is worse than not reconciling at all.
+* :class:`GateSpotPublicRest` — MD's snapshot reads. Instruments, ticker and
+  order book have no WebSocket equivalent Gate will answer on demand: the
+  channels push on their own schedule, and a caller asking for "the book right
+  now" cannot wait for the next tick.
+
+Deliberately not a general REST client. Order entry and every live feed stay on
+the WebSocket, where they belong latency-wise; this covers the request-reply
+holes only.
 """
 
 from __future__ import annotations
@@ -22,8 +29,8 @@ from typing import Any
 import httpx
 
 from mft.exchange.errors import ExchangeError
-from mft.exchange.gate.spot.models import GateOrderAck
-from mft.exchange.models import Balance, Order
+from mft.exchange.gate.spot.models import GateOrderAck, GateTicker
+from mft.exchange.models import Balance, BookLevel, Instrument, Order, OrderBook, Ticker
 
 logger = logging.getLogger(__name__)
 
@@ -65,20 +72,16 @@ def sign_rest(
     return signature, str(ts)
 
 
-class GateSpotRest:
-    """Signed GETs for the two snapshots recon needs."""
+class _GateRestTransport:
+    """httpx lifecycle and error decoding, shared by the signed/public pair."""
 
     def __init__(
         self,
         *,
-        api_key: str,
-        api_secret: str,
         base_url: str = GATE_SPOT_REST_URL,
         timeout: float = 10.0,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        self.api_key = api_key
-        self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._client = client
@@ -96,21 +99,19 @@ class GateSpotRest:
             await self._client.aclose()
             self._client = None
 
+    def _headers(self, path: str, query: str) -> dict[str, str]:
+        """Per-request headers. Public calls send none beyond ``Accept``."""
+        return {"Accept": "application/json"}
+
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         await self.connect()
         assert self._client is not None
         full_path = f"{API_PREFIX}{path}"
         query = "&".join(f"{k}={v}" for k, v in (params or {}).items())
-        signature, ts = sign_rest(self.api_secret, "GET", full_path, query)
         response = await self._client.get(
             full_path,
             params=params,
-            headers={
-                "KEY": self.api_key,
-                "Timestamp": ts,
-                "SIGN": signature,
-                "Accept": "application/json",
-            },
+            headers=self._headers(full_path, query),
         )
         return self._parse(response)
 
@@ -129,6 +130,32 @@ class GateSpotRest:
                 message = str(payload.get("message", message))
             raise GateRestError(response.status_code, label, message)
         return payload
+
+
+class GateSpotRest(_GateRestTransport):
+    """Signed GETs for the two snapshots recon needs."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        api_secret: str,
+        base_url: str = GATE_SPOT_REST_URL,
+        timeout: float = 10.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        super().__init__(base_url=base_url, timeout=timeout, client=client)
+        self.api_key = api_key
+        self.api_secret = api_secret
+
+    def _headers(self, path: str, query: str) -> dict[str, str]:
+        signature, ts = sign_rest(self.api_secret, "GET", path, query)
+        return {
+            "KEY": self.api_key,
+            "Timestamp": ts,
+            "SIGN": signature,
+            "Accept": "application/json",
+        }
 
     async def fetch_open_orders(
         self, currency_pair: str | None = None
@@ -173,6 +200,88 @@ class GateSpotRest:
         return _to_order(row)
 
 
+class GateSpotPublicRest(_GateRestTransport):
+    """Unsigned GETs for the market-data snapshots MD asks for on demand.
+
+    Takes no credentials: Gate serves all three of these to anyone, and
+    requiring keys for public data would mean MD could not run a feed without
+    a trading account.
+    """
+
+    async def fetch_instruments(self) -> list[Instrument]:
+        """``GET /spot/currency_pairs`` — tradeable pairs and their filters."""
+        rows = await self._get("/spot/currency_pairs")
+        return [
+            _to_instrument(row)
+            for row in rows or []
+            # The endpoint also lists delisted and pre-launch pairs; the shared
+            # contract is "tradeable", and Instrument has nowhere to say
+            # otherwise, so a non-tradable pair is dropped rather than returned
+            # looking live.
+            if row.get("trade_status") == "tradable"
+        ]
+
+    async def fetch_ticker(self, currency_pair: str) -> Ticker:
+        """``GET /spot/tickers`` — the same row shape ``spot.tickers`` pushes."""
+        rows = await self._get("/spot/tickers", {"currency_pair": currency_pair})
+        if not rows:
+            raise GateRestError(200, "not_found", f"no ticker for {currency_pair}")
+        return GateTicker.model_validate(rows[0]).to_ticker()
+
+    async def fetch_order_book(
+        self, currency_pair: str, *, depth: int = 10
+    ) -> OrderBook:
+        """``GET /spot/order_book`` — a full snapshot, capped at ``depth``.
+
+        The reply carries no pair, so the caller's is stamped back on.
+        """
+        row = await self._get(
+            "/spot/order_book", {"currency_pair": currency_pair, "limit": depth}
+        )
+        return OrderBook(
+            symbol=currency_pair,
+            bids=_book_levels(row.get("bids")),
+            asks=_book_levels(row.get("asks")),
+            # ``current`` is when Gate built the snapshot, in ms.
+            ts=float(row.get("current", 0) or 0) / 1000.0,
+        )
+
+
+def _book_levels(rows: list[Any] | None) -> list[BookLevel]:
+    return [
+        BookLevel(price=Decimal(str(row[0])), qty=Decimal(str(row[1])))
+        for row in rows or []
+        if len(row) >= 2
+    ]
+
+
+def _to_instrument(row: dict[str, Any]) -> Instrument:
+    """Gate publishes precision as decimal places; Instrument wants a step."""
+    return Instrument(
+        symbol=str(row.get("id", "")),
+        base=str(row.get("base", "")),
+        quote=str(row.get("quote", "")),
+        tick_size=_step(row.get("precision")),
+        lot_size=_step(row.get("amount_precision")),
+        min_qty=_opt_dec(row.get("min_base_amount")),
+        min_notional=_opt_dec(row.get("min_quote_amount")),
+    )
+
+
+def _step(precision: Any) -> Decimal:
+    """``6`` → ``0.000001``. Gate omits it on a few pairs; assume whole units."""
+    if precision is None or precision == "":
+        return Decimal("1")
+    return Decimal(1).scaleb(-int(precision))
+
+
+def _opt_dec(value: Any) -> Decimal | None:
+    """``None`` where Gate publishes no bound, so the filter reads as absent."""
+    if value is None or value == "":
+        return None
+    return Decimal(str(value))
+
+
 def _dec(value: Any) -> Decimal:
     if value is None or value == "":
         return Decimal("0")
@@ -188,6 +297,7 @@ __all__ = [
     "API_PREFIX",
     "GATE_SPOT_REST_URL",
     "GateRestError",
+    "GateSpotPublicRest",
     "GateSpotRest",
     "sign_rest",
 ]

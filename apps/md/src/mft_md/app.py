@@ -8,11 +8,12 @@ import signal
 
 from mft import configure_logging
 from mft.broker import Broker
+from mft.exchange import venues
 from mft.protocol import Topics
 
 from mft_md import db as md_db
 from mft_md.rpc import dispatch
-from mft_md.session import PaperPublicFactory, SessionManager
+from mft_md.session import SessionManager, VenuePublicFactory
 
 SOURCE = "md"
 logger = logging.getLogger(SOURCE)
@@ -46,7 +47,7 @@ async def amain() -> None:
             pass
 
     async with Broker() as broker:
-        factory = PaperPublicFactory(broker)
+        factory = VenuePublicFactory(broker)
         sessions = SessionManager(
             factory,
             broker,
@@ -54,7 +55,7 @@ async def amain() -> None:
             mark_done=md_db.mark_session_done,
             list_db_sessions=md_db.list_sessions,
         )
-        logger.info("MD started (remote paper public factory)")
+        logger.info("MD started (venue public factory: %s)", venues.names())
         rpc_task = asyncio.create_task(
             run_rpc(broker, sessions, stop), name="md-rpc"
         )

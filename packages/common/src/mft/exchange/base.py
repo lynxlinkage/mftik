@@ -9,8 +9,10 @@ from decimal import Decimal
 from mft.exchange.errors import ExchangeNotConnectedError
 from mft.exchange.models import (
     Balance,
+    BestQuote,
     Fill,
     Instrument,
+    Kline,
     Order,
     OrderBook,
     OrderType,
@@ -85,7 +87,28 @@ class PublicClient(BaseClient):
 
     @abstractmethod
     def stream_order_book(self, symbol: str) -> AsyncIterator[OrderBook]:
-        """Push order-book snapshots/diffs for ``symbol``."""
+        """Push full order-book snapshots for ``symbol``.
+
+        Every item is a self-contained book. Venues that only push depth diffs
+        must fold them onto a snapshot inside the adapter — a consumer of this
+        stream never has to sequence anything.
+        """
+
+    # Optional streams: not every venue publishes these, and the ones that do
+    # do not all agree on the shape, so they default to unsupported rather
+    # than forcing every adapter to carry a stub.
+
+    def stream_kline(self, symbol: str, interval: str) -> AsyncIterator[Kline]:
+        """Push candles for ``symbol`` at ``interval`` (venue interval spelling)."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support stream_kline"
+        )
+
+    def stream_best_quote(self, symbol: str) -> AsyncIterator[BestQuote]:
+        """Push top-of-book quote changes for ``symbol``."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support stream_best_quote"
+        )
 
 
 class PrivateClient(BaseClient):

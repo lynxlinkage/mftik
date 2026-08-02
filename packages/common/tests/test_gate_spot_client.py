@@ -159,6 +159,44 @@ async def test_subscribe_error_is_raised(gate: FakeGate) -> None:
     assert exc.value.channel == ch.TICKERS
 
 
+async def test_concurrent_subscribes_to_one_channel_all_get_acked(
+    gate: FakeGate,
+) -> None:
+    """A subscribe ack has nothing to correlate on but channel+event.
+
+    MD opens one feed per symbol, so two subscribes to ``spot.trades`` can be
+    in flight at once. Both have to come back — matching the second ack against
+    the first, already-resolved waiter would strand it until its ack timeout.
+    """
+    async with await _client(gate, ack_timeout=1.0) as ws:
+        btc, eth = await asyncio.gather(
+            ws.subscribe_trades("BTC_USDT"),
+            ws.subscribe_trades("ETH_USDT"),
+        )
+
+        assert btc is not eth
+        assert len(gate.frames_for(ch.TRADES)) == 2
+
+        # Both are live: the channel fans out to every stream on it.
+        await gate.push(
+            ch.TRADES,
+            [
+                {
+                    "id": 1,
+                    "create_time": 1648725035,
+                    "create_time_ms": "1648725035923.0",
+                    "side": "buy",
+                    "currency_pair": "ETH_USDT",
+                    "amount": "1",
+                    "price": "3000",
+                }
+            ],
+        )
+        for stream in (btc, eth):
+            row = await asyncio.wait_for(anext(stream), timeout=2.0)
+            assert row.currency_pair == "ETH_USDT"
+
+
 async def test_subscribe_before_connect_raises(gate: FakeGate) -> None:
     ws = await _client(gate)
     with pytest.raises(ExchangeNotConnectedError):
