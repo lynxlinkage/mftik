@@ -1,4 +1,4 @@
-"""NoopStrategy — book-driven mid, plane-driven rounding."""
+"""NoopStrategy — book-driven mid, sequential place/cancel cycle."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 from mft.exchange.models import BookLevel, OrderBook, Side
 from mft.protocol import SymbolInfo, UntypedEnvelope
-from mft_sts.impl.noop import NoopStrategy
+from mft_sts.impl.noop import NoopStrategy, _fmt
 
 PAPER_BTC = SymbolInfo(
     venue="paper",
@@ -71,6 +71,10 @@ class FakeSession:
         self.session_id = "noop-test"
         self.cid_slot = 1
         self.symbols = FakePlane()
+        self.exit_reasons: list[str] = []
+
+    def request_exit(self, reason: str = "strategy_exit") -> None:
+        self.exit_reasons.append(reason)
 
 
 def _strategy(**paras) -> NoopStrategy:
@@ -98,6 +102,24 @@ async def _book(strat: NoopStrategy, bid: str, ask: str) -> None:
         UntypedEnvelope.wrap(book.model_dump(mode="json"), type="md.orderbook",
                              source="md")
     )
+
+
+async def _run_steps(strat: NoopStrategy, n: int) -> None:
+    for _ in range(n):
+        await strat._on_tick()
+
+
+# --- log formatting --------------------------------------------------------
+
+
+def test_fmt_strips_numeric_trailing_zeros() -> None:
+    """DB Numeric(38, 18) pads filters; logs should stay readable."""
+    assert _fmt(Decimal("0.010000000000000000")) == "0.01"
+    assert _fmt(Decimal("0.000010000000000000")) == "0.00001"
+    assert _fmt(Decimal("5.000000000000000000")) == "5"
+    assert _fmt(Decimal("49950.000000000000000")) == "49950"
+    assert _fmt(Decimal("0.002000000000000000")) == "0.002"
+    assert _fmt(None) == "?"
 
 
 # --- params ----------------------------------------------------------------
@@ -147,29 +169,62 @@ async def test_no_orders_until_the_book_arrives() -> None:
     assert strat.oms.submitted == []
 
 
-async def test_quotes_three_levels_around_the_live_mid() -> None:
+async def test_twelve_step_buy_then_sell_then_exit() -> None:
+    """BUY three levels (place→cancel), SELL the same, then exit once."""
     strat = _strategy(gap_bps=10, qty_quote=100)
     await _book(strat, "49999", "50001")  # mid 50000
-    await strat._on_tick()
+    prices = [Decimal("49950.00"), Decimal("50000"), Decimal("50050.00")]
 
-    orders = strat.oms.submitted
-    assert len(orders) == 3
-    assert [o["side"] for o in orders] == [Side.BUY, Side.BUY, Side.SELL]
-    # 10bps either side of 50000.
-    assert [o["price"] for o in orders] == [
-        Decimal("49950.00"),
-        Decimal("50000"),
-        Decimal("50050.00"),
+    await _run_steps(strat, 12)
+
+    assert [o["side"] for o in strat.oms.submitted] == [
+        Side.BUY,
+        Side.BUY,
+        Side.BUY,
+        Side.SELL,
+        Side.SELL,
+        Side.SELL,
     ]
+    assert [o["price"] for o in strat.oms.submitted] == prices * 2
+    assert strat.oms.cancelled == [f"cid-{i}" for i in range(1, 7)]
+    assert strat._open_cid is None
+    assert strat._step == 12
+    assert strat.session.exit_reasons == ["noop_done"]
+
+
+async def test_on_stop_cancels_remaining_order() -> None:
+    strat = _strategy(gap_bps=10, qty_quote=100)
+    await _book(strat, "49999", "50001")
+    await strat._on_tick()  # place, leave resting
+    assert strat._open_cid == "cid-1"
+
+    await strat.on_stop()
+
+    assert strat.oms.cancelled == ["cid-1"]
+    assert strat._open_cid is None
+
+
+async def test_one_order_per_place_step() -> None:
+    strat = _strategy(gap_bps=10, qty_quote=100)
+    await _book(strat, "49999", "50001")
+
+    await strat._on_tick()  # place BUY gap
+    assert len(strat.oms.submitted) == 1
+    assert strat.oms.cancelled == []
+
+    await strat._on_tick()  # cancel
+    assert len(strat.oms.submitted) == 1
+    assert strat.oms.cancelled == ["cid-1"]
 
 
 async def test_prices_are_rounded_to_the_venue_tick() -> None:
     """A mid off-tick must not go out as-is; TD would not catch it."""
     strat = _strategy(gap_bps=7, qty_quote=100)
     await _book(strat, "49999.995", "50000.005")  # mid 50000.000
-    await strat._on_tick()
+    await _run_steps(strat, 5)  # three BUY places (+ intervening cancels)
 
     tick = PAPER_BTC.price_tick
+    assert len(strat.oms.submitted) == 3
     for order in strat.oms.submitted:
         assert order["price"] % tick == 0, order["price"]
 
@@ -177,7 +232,7 @@ async def test_prices_are_rounded_to_the_venue_tick() -> None:
 async def test_qty_comes_from_qty_quote_at_the_rounded_price() -> None:
     strat = _strategy(gap_bps=10, qty_quote=100)
     await _book(strat, "49999", "50001")
-    await strat._on_tick()
+    await _run_steps(strat, 5)  # three BUY places
 
     step = PAPER_BTC.qty_step
     for order in strat.oms.submitted:
@@ -198,27 +253,12 @@ async def test_orders_below_the_venue_minimum_are_skipped() -> None:
     assert strat.oms.submitted == []
 
 
-async def test_each_tick_cancels_the_previous_quotes() -> None:
-    strat = _strategy()
-    await _book(strat, "49999", "50001")
-
-    await strat._on_tick()
-    first = [o["cid"] for o in strat.oms.submitted]
-    assert strat.oms.cancelled == []
-
-    await strat._on_tick()
-    assert strat.oms.cancelled == first
-    assert len(strat.oms.submitted) == 6
-
-
 async def test_instrument_is_resolved_once_per_session() -> None:
     """Filters are near-static; re-asking the plane per tick would be waste."""
     strat = _strategy()
     await _book(strat, "49999", "50001")
 
-    await strat._on_tick()
-    await strat._on_tick()
-    await strat._on_tick()
+    await _run_steps(strat, 12)
 
     assert strat.session.symbols.calls == 1
 
@@ -239,9 +279,10 @@ async def test_mid_tracks_the_book() -> None:
     await strat._on_tick()
     assert strat.oms.submitted[0]["price"] == Decimal("50000")
 
+    await strat._on_tick()  # cancel
     strat.oms.submitted.clear()
     await _book(strat, "59999", "60001")
-    await strat._on_tick()
+    await strat._on_tick()  # place BUY mid (step 2 with gap=0 is also mid)
     assert strat.oms.submitted[0]["price"] == Decimal("60000")
 
 

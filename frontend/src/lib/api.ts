@@ -88,7 +88,11 @@ md:
 sts:
   type: NoopStrategy
   config:
-    mid: 50000
+    # BUY mid-gap/mid/mid+gap (place→cancel each), flip to SELL, then exit.
+    # 100 of the quote currency (USDT here) per order; mid from the book.
+    exec_interval_ms: 1000
+    gap_bps: 10
+    qty_quote: 100
 `;
 
 function apiBase(): string {

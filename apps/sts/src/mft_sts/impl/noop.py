@@ -1,9 +1,24 @@
-"""Example strategy — quote three levels around the live mid, on a timer.
+"""Example strategy — walk three quote levels per side, then exit.
 
-Every tick it places at ``mid * (1 - gap)``, ``mid``, and ``mid * (1 + gap)``,
-each sized to ``qty_quote`` of the pair's quote currency, then cancels them on
-the next tick. There is no configured mid: the price comes from the order book
-subscription, which is the only thing that knows what the market is doing.
+A twelve-step sequence, one action per ``exec_interval_ms`` tick. First as BUY,
+then the same three prices as SELL; after the last step the strategy exits.
+``on_stop`` cancels any order still resting (e.g. if stopped mid-cycle).
+
+1. PLACE BUY  at ``mid * (1 - gap)``
+2. CANCEL
+3. PLACE BUY  at ``mid``
+4. CANCEL
+5. PLACE BUY  at ``mid * (1 + gap)``
+6. CANCEL
+7. PLACE SELL at ``mid * (1 - gap)``
+8. CANCEL
+9. PLACE SELL at ``mid``
+10. CANCEL
+11. PLACE SELL at ``mid * (1 + gap)``
+12. CANCEL → exit
+
+Size is ``qty_quote / price`` of the pair's quote currency. There is no
+configured mid: the price comes from the order book subscription.
 
 Prices and sizes are rounded through the symbol plane before submission. TD
 does not validate orders against venue filters, so that is this strategy's job.
@@ -11,6 +26,7 @@ does not validate orders against venue filters, so that is this strategy's job.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
@@ -26,6 +42,36 @@ DEFAULT_QTY_QUOTE = Decimal("100")
 
 BPS = Decimal("10000")
 
+_PriceFn = Callable[[Decimal, Decimal], Decimal]
+
+
+def _fmt(value: object) -> str:
+    """Compact Decimal for logs — drop trailing zeros from Numeric(38, 18)."""
+    if value is None:
+        return "?"
+    d = value if isinstance(value, Decimal) else Decimal(str(value))
+    return format(d.normalize(), "f")
+
+_PRICE_LEVELS: tuple[_PriceFn, ...] = (
+    lambda mid, gap: mid * (1 - gap),
+    lambda mid, gap: mid,
+    lambda mid, gap: mid * (1 + gap),
+)
+
+
+def _build_steps() -> tuple[tuple[Side, _PriceFn] | None, ...]:
+    """PLACE/CANCEL for each level as BUY, then again as SELL."""
+    steps: list[tuple[Side, _PriceFn] | None] = []
+    for side in (Side.BUY, Side.SELL):
+        for price_fn in _PRICE_LEVELS:
+            steps.append((side, price_fn))
+            steps.append(None)  # cancel
+    return tuple(steps)
+
+
+# PLACE steps carry (side, price_fn); CANCEL steps are None.
+_STEPS = _build_steps()
+
 
 class NoopStrategy(Strategy):
     name = "noop"
@@ -39,7 +85,8 @@ class NoopStrategy(Strategy):
         self._info: SymbolInfo | None = None
         self._mid: Decimal | None = None
         self._book_updates = 0
-        self._open_cids: list[str] = []
+        self._step = 0
+        self._open_cid: str | None = None
 
     @classmethod
     def on_initialized(cls, params: Any) -> dict[str, Any]:
@@ -79,7 +126,8 @@ class NoopStrategy(Strategy):
         await self.log(
             f"NoopStrategy started venue={self._venue} symbol={self._symbol} "
             f"exec_interval_ms={self.paras['exec_interval_ms']} "
-            f"gap_bps={self.paras['gap_bps']} qty_quote={self.paras['qty_quote']}"
+            f"gap_bps={_fmt(self.paras['gap_bps'])} "
+            f"qty_quote={_fmt(self.paras['qty_quote'])}"
         )
         self._tick_token = self.timer.token()
         self._arm_timer()
@@ -89,6 +137,9 @@ class NoopStrategy(Strategy):
 
     async def on_stop(self) -> None:
         self._cancel_timer()
+        api_id = self._primary_api_id()
+        if api_id is not None:
+            await self._cancel_open(api_id)
         await self.log("NoopStrategy stopped")
 
     async def on_pause(self) -> None:
@@ -121,8 +172,8 @@ class NoopStrategy(Strategy):
         if self._book_updates == 1:
             await self.log(
                 f"NoopStrategy first book {book.symbol} "
-                f"bid={book.bids[0].price} ask={book.asks[0].price} "
-                f"mid={self._mid} — quoting starts"
+                f"bid={_fmt(book.bids[0].price)} ask={_fmt(book.asks[0].price)} "
+                f"mid={_fmt(self._mid)} — quoting starts"
             )
 
     # --- execution ---------------------------------------------------------
@@ -138,22 +189,27 @@ class NoopStrategy(Strategy):
         if self._mid is None:
             await self.log("NoopStrategy tick skipped — no book yet")
             return
-
-        await self._cancel_open(api_id)
-
-        info = await self._instrument()
-        if info is None:
+        if self._step >= len(_STEPS):
+            self.exit("noop_done")
             return
 
-        gap = self.paras["gap_bps"] / BPS
-        mid = self._mid
-        levels = (
-            (Side.BUY, mid * (1 - gap)),
-            (Side.BUY, mid),
-            (Side.SELL, mid * (1 + gap)),
-        )
-        for side, raw_price in levels:
-            await self._quote(api_id, info, side, raw_price)
+        step = self._step
+        action = _STEPS[step]
+        if action is None:
+            await self._cancel_open(api_id)
+        else:
+            side, price_fn = action
+            info = await self._instrument()
+            if info is None:
+                return
+            gap = self.paras["gap_bps"] / BPS
+            await self._quote(api_id, info, side, price_fn(self._mid, gap))
+
+        self._step = step + 1
+        if self._step >= len(_STEPS):
+            await self.log("NoopStrategy cycle complete — exiting")
+            self._cancel_timer()
+            self.exit("noop_done")
 
     async def _quote(
         self,
@@ -169,7 +225,7 @@ class NoopStrategy(Strategy):
         qty = info.qty_for_notional(self.paras["qty_quote"], price)
         if qty <= 0 or not info.meets_minimums(qty, price):
             await self.log(
-                f"NoopStrategy skip {side.value} {price}@{qty} — "
+                f"NoopStrategy skip {side.value} {_fmt(price)}@{_fmt(qty)} — "
                 f"below venue minimums",
                 level="warn",
             )
@@ -183,23 +239,24 @@ class NoopStrategy(Strategy):
             type=OrderType.LIMIT,
             price=price,
         )
-        self._open_cids.append(cid)
+        self._open_cid = cid
         await self.log(
             f"NoopStrategy PLACE {side.value.upper()} {info.symbol} "
-            f"{price}@{qty} cid={cid}"
+            f"{_fmt(price)}@{_fmt(qty)} cid={cid} step={self._step}"
         )
 
     async def _cancel_open(self, api_id: int) -> None:
-        for cid in self._open_cids:
-            try:
-                await self.oms.cancel_order(api_id, cid)
-            except Exception:
-                await self.log(
-                    f"NoopStrategy cancel failed cid={cid}", level="warn"
-                )
-        if self._open_cids:
-            await self.log(f"NoopStrategy CANCEL {len(self._open_cids)} orders")
-        self._open_cids.clear()
+        cid = self._open_cid
+        if cid is None:
+            return
+        try:
+            await self.oms.cancel_order(api_id, cid)
+            await self.log(f"NoopStrategy CANCEL cid={cid} step={self._step}")
+        except Exception:
+            await self.log(
+                f"NoopStrategy cancel failed cid={cid}", level="warn"
+            )
+        self._open_cid = None
 
     async def _instrument(self) -> SymbolInfo | None:
         """Instrument metadata, fetched once and cached for the session."""
@@ -222,8 +279,8 @@ class NoopStrategy(Strategy):
             return None
         await self.log(
             f"NoopStrategy instrument {self._venue}/{self._symbol} "
-            f"tick={self._info.price_tick} step={self._info.qty_step} "
-            f"min_notional={self._info.filter('min_notional')}"
+            f"tick={_fmt(self._info.price_tick)} step={_fmt(self._info.qty_step)} "
+            f"min_notional={_fmt(self._info.filter('min_notional'))}"
         )
         return self._info
 
@@ -248,20 +305,20 @@ class NoopStrategy(Strategy):
 
         def _bal_key(bals: dict[str, Balance]) -> dict[str, tuple[str, str]]:
             return {
-                a: (str(b.free), str(b.locked))
+                a: (_fmt(b.free), _fmt(b.locked))
                 for a, b in sorted(bals.items())
             }
 
         await self.log(
             f"NoopStrategy recon done api_id={msg.api_id} "
             f"orders={len(msg.oms.orders)} "
-            f"balances={ {a: str(b.free) for a, b in recon_bals.items()} }"
+            f"balances={ {a: _fmt(b.free) for a, b in recon_bals.items()} }"
         )
         if _bal_key(local_bals) != _bal_key(recon_bals):
             await self.log(
                 f"NoopStrategy OMS balance mismatch "
-                f"local={ {a: str(b.free) for a, b in local_bals.items()} } "
-                f"recon={ {a: str(b.free) for a, b in recon_bals.items()} }",
+                f"local={ {a: _fmt(b.free) for a, b in local_bals.items()} } "
+                f"recon={ {a: _fmt(b.free) for a, b in recon_bals.items()} }",
                 level="warn",
             )
 
@@ -272,7 +329,8 @@ class NoopStrategy(Strategy):
         await self.log(
             f"NoopStrategy on_order_update api_id={api_id} "
             f"cid={p.get('client_order_id')} status={p.get('status')} "
-            f"{p.get('side')} {p.get('symbol')} {p.get('price')}@{p.get('qty')}"
+            f"{p.get('side')} {p.get('symbol')} "
+            f"{_fmt(p.get('price'))}@{_fmt(p.get('qty'))}"
         )
 
     async def on_fill(self, api_id: int, msg: UntypedEnvelope) -> None:
@@ -282,7 +340,7 @@ class NoopStrategy(Strategy):
         await self.log(
             f"NoopStrategy on_fill api_id={api_id} "
             f"cid={p.get('client_order_id')} {p.get('side')} "
-            f"{p.get('symbol')} {p.get('price')}@{p.get('qty')}"
+            f"{p.get('symbol')} {_fmt(p.get('price'))}@{_fmt(p.get('qty'))}"
         )
 
     async def on_order_reject(self, api_id: int, msg: UntypedEnvelope) -> None:
@@ -305,7 +363,8 @@ class NoopStrategy(Strategy):
         p = msg.payload
         await self.log(
             f"NoopStrategy on_balance_update api_id={api_id} "
-            f"{p.get('asset')} free={p.get('free')} locked={p.get('locked')}"
+            f"{p.get('asset')} free={_fmt(p.get('free'))} "
+            f"locked={_fmt(p.get('locked'))}"
         )
 
     # --- timer -------------------------------------------------------------

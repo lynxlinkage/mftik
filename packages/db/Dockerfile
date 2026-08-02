@@ -12,7 +12,8 @@ COPY packages ./packages
 COPY apps ./apps
 COPY scripts ./scripts
 
-RUN uv sync --package mft-db --frozen --no-dev
+# Seed (scripts/seed_paper_apis.py) needs mft.exchange.venues from mft-common.
+RUN uv sync --package mft-db --package mft-common --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
 
