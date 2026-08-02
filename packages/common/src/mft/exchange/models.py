@@ -78,11 +78,52 @@ class Trade(BaseModel):
     ts: float = Field(default_factory=_ts)
 
 
+class Kline(BaseModel):
+    """One candle. ``closed`` marks the final tick of the window.
+
+    Venues re-push the in-progress candle on every change, so an unclosed
+    ``Kline`` for the same ``open_time`` supersedes the one before it — only
+    ``closed`` candles are safe to append to a series.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    interval: str
+    open_time: float
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal = Decimal("0")
+    quote_volume: Decimal = Decimal("0")
+    closed: bool = False
+    ts: float = Field(default_factory=_ts)
+
+
 class BookLevel(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     price: Decimal
     qty: Decimal
+
+
+class BestQuote(BaseModel):
+    """Top of book with sizes — pushed on every best bid/ask change.
+
+    Distinct from :class:`Ticker`, which carries 24h stats on a venue-chosen
+    cadence: this is the quote alone, at book speed, and it has the resting
+    sizes a :class:`Ticker` does not.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    bid: Decimal
+    bid_qty: Decimal
+    ask: Decimal
+    ask_qty: Decimal
+    ts: float = Field(default_factory=_ts)
 
 
 class OrderBook(BaseModel):

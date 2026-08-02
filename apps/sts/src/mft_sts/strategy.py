@@ -52,8 +52,11 @@ class Strategy:
         self.timer.token().register(first_ms, interval_ms, func)
         token.cancel()  — timestamps are unix ms
 
-    Public events from ``md.{session_id}`` (orderbook wired):
-        on_order_book, on_kline (stub)
+    Public events from ``md.{session_id}`` (wired):
+        on_ticker, on_order_book, on_kline, on_trade, on_best_quote
+        One hook per feed topic subscribed in ``md_ids``
+        (``venue.topic.symbol``; kline carries its interval in the topic,
+        e.g. ``paper.kline_1m.BTCUSDT``).
     """
 
     name: str = "base"
@@ -199,12 +202,44 @@ class Strategy:
         """Handle balance updates from TD."""
 
     # --- public events (md.{session_id}) -----------------------------------
+    #
+    # One hook per md feed topic. A session only receives what it subscribed
+    # to in ``md_ids`` (``venue.topic.symbol``), and every hook is fed from the
+    # same ``md.{session_id}`` stream, so the payloads are the shared
+    # ``mft.exchange.models`` shapes — parse with ``Model.model_validate``.
 
-    async def on_kline(self, msg: UntypedEnvelope) -> None:
-        """Handle kline / candle updates from MD (not wired yet)."""
+    async def on_ticker(self, msg: UntypedEnvelope) -> None:
+        """Handle ticker updates from MD — ``Ticker`` (24h stats + top of book).
+
+        Feed topic ``ticker``.
+        """
 
     async def on_order_book(self, msg: UntypedEnvelope) -> None:
-        """Handle order book updates from MD."""
+        """Handle order book updates from MD — ``OrderBook``.
+
+        Feed topic ``orderbook``. Every message is a full snapshot; MD does not
+        forward depth diffs, so there is no sequencing to do here.
+        """
+
+    async def on_kline(self, msg: UntypedEnvelope) -> None:
+        """Handle candle updates from MD — ``Kline``.
+
+        Feed topic ``kline_{interval}`` (e.g. ``paper.kline_1m.BTCUSDT``). The
+        in-progress candle is re-pushed as it moves; only ``closed`` candles
+        are final.
+        """
+
+    async def on_trade(self, msg: UntypedEnvelope) -> None:
+        """Handle public tape updates from MD — ``Trade``.
+
+        Feed topic ``trade``. ``side`` is the taker's.
+        """
+
+    async def on_best_quote(self, msg: UntypedEnvelope) -> None:
+        """Handle top-of-book updates from MD — ``BestQuote``.
+
+        Feed topic ``bestquote``. Best bid/ask with sizes, at book speed.
+        """
 
     # --- helpers -----------------------------------------------------------
 

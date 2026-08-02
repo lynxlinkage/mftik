@@ -4,16 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from mft.exchange.base import PublicClient
-from mft.exchange.models import OrderBook
-from mft.protocol import MD_ORDERBOOK, UntypedEnvelope
+from mft.protocol import (
+    MD_BEST_QUOTE,
+    MD_KLINE,
+    MD_ORDERBOOK,
+    MD_TICKER,
+    MD_TRADE,
+    UntypedEnvelope,
+)
 
 logger = logging.getLogger(__name__)
 
 TOPIC_ORDERBOOK = "orderbook"
+TOPIC_TICKER = "ticker"
+TOPIC_TRADE = "trade"
+TOPIC_BEST_QUOTE = "bestquote"
+#: Klines need an interval, and a feed key is only ``venue.topic.symbol`` — so
+#: the interval rides in the topic: ``paper.kline_1m.BTCUSDT``.
+KLINE_PREFIX = "kline_"
 
 OnUpdate = Callable[[str, str, str, UntypedEnvelope], Awaitable[None]]
 
@@ -67,11 +80,13 @@ class VenueSession:
         key = (topic, symbol)
         if key in self._feeds:
             return
-        if topic != TOPIC_ORDERBOOK:
-            raise ValueError(f"unsupported md topic: {topic!r}")
+        # Opened here rather than inside the task so an unsupported topic or a
+        # venue that does not publish this feed fails the subscribe call
+        # instead of dying silently in a background pump.
+        source, msg_type = self._open(topic, symbol)
         feed = Feed(topic=topic, symbol=symbol)
         feed.task = asyncio.create_task(
-            self._pump_order_book(feed),
+            self._pump(feed, source, msg_type),
             name=f"md-{self.venue}-{topic}-{symbol}",
         )
         self._feeds[key] = feed
@@ -97,25 +112,48 @@ class VenueSession:
             symbol,
         )
 
-    async def _pump_order_book(self, feed: Feed) -> None:
+    def _open(self, topic: str, symbol: str) -> tuple[AsyncIterator[Any], str]:
+        """Resolve a feed topic to its venue stream and wire message type."""
+        if topic == TOPIC_ORDERBOOK:
+            return self.public.stream_order_book(symbol), MD_ORDERBOOK
+        if topic == TOPIC_TICKER:
+            return self.public.stream_ticker(symbol), MD_TICKER
+        if topic == TOPIC_TRADE:
+            return self.public.stream_trades(symbol), MD_TRADE
+        if topic == TOPIC_BEST_QUOTE:
+            return self.public.stream_best_quote(symbol), MD_BEST_QUOTE
+        if topic.startswith(KLINE_PREFIX):
+            interval = topic[len(KLINE_PREFIX) :]
+            if not interval:
+                raise ValueError(
+                    f"md kline topic needs an interval, got {topic!r} "
+                    f"(expected e.g. {KLINE_PREFIX}1m)"
+                )
+            return self.public.stream_kline(symbol, interval), MD_KLINE
+        raise ValueError(f"unsupported md topic: {topic!r}")
+
+    async def _pump(
+        self,
+        feed: Feed,
+        source: AsyncIterator[Any],
+        msg_type: str,
+    ) -> None:
         try:
-            async for book in self.public.stream_order_book(feed.symbol):
+            async for item in source:
                 if feed.stop.is_set():
                     return
-                assert isinstance(book, OrderBook)
                 env = UntypedEnvelope.wrap(
-                    book.model_dump(mode="json"),
-                    type=MD_ORDERBOOK,
+                    item.model_dump(mode="json"),
+                    type=msg_type,
                     source="md",
                 )
-                await self._on_update(
-                    self.venue, feed.topic, feed.symbol, env
-                )
+                await self._on_update(self.venue, feed.topic, feed.symbol, env)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception(
-                "MD orderbook pump failed venue=%s symbol=%s",
+                "MD %s pump failed venue=%s symbol=%s",
+                feed.topic,
                 self.venue,
                 feed.symbol,
             )
