@@ -383,6 +383,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "redis" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -390,6 +391,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", specifier = ">=5.0" },
+    { name = "websockets", specifier = ">=14.0" },
 ]
 
 [[package]]

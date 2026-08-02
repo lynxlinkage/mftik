@@ -177,9 +177,10 @@ async def test_private_events_from_td_global(broker: Broker) -> None:
         qty=Decimal("0.01"),
         type=OrderType.MARKET,
     )
-    sid, _ts, seq = unpack(cid)
-    assert sid == PrivateEventsStrategy.id
+    slot, _ts, seq = unpack(cid)
+    assert slot == strat.cid_slot
     assert seq == 1
+    assert strat.owns(cid)
 
     order_env = await asyncio.wait_for(strat.order_updates.get(), timeout=3.0)
     fill_env = await asyncio.wait_for(strat.fills.get(), timeout=3.0)

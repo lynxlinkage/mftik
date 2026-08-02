@@ -30,7 +30,7 @@ class StrategyOms:
 
     ``submit_order`` always mints a uint64 ``client_order_id``::
 
-        [strategy_id 16][ts_ms_from_2026-01-01 40][seq 8]
+        [session slot 16][ts_ms_from_2026-01-01 40][seq 8]
     """
 
     def __init__(self) -> None:
@@ -38,9 +38,9 @@ class StrategyOms:
         self._strategy: Strategy | None = None
         self._cid_factory: ClientOrderIdFactory | None = None
 
-    def bind(self, strategy: Strategy) -> None:
+    def bind(self, strategy: Strategy, *, cid_slot: int) -> None:
         self._strategy = strategy
-        self._cid_factory = ClientOrderIdFactory(strategy.id)
+        self._cid_factory = ClientOrderIdFactory(cid_slot)
 
     def update(self, api_id: int, view: OmsView) -> None:
         self._views[api_id] = view

@@ -14,6 +14,7 @@ from mft.protocol import (
     publish_sts_log,
 )
 
+from mft_sts.client_order_id import slot_of
 from mft_sts.oms import StrategyOms
 from mft_sts.timer import Timer
 
@@ -34,13 +35,15 @@ class Strategy:
         send_recon (auto on first lease ACK), on_recon_done
         self.oms — read OMS snapshots from ``td.oms.{api_id}``;
         submit_order mints uint64 client_order_id
-        (strategy.id | ms since 2026-01-01 | seq++) / cancel by that id
+        (session cid_slot | ms since 2026-01-01 | seq++) / cancel by that id
 
     Private events from ``td.{api_id}.global`` (wired):
         on_order_update, on_fill, on_balance_update
         on_order_reject (submit fail), on_cancel_reject (cancel fail)
         submit → on_order_update | on_order_reject
         cancel → on_order_update | on_cancel_reject
+        NOTE: account-wide fan-out — other sessions on the same api_id show
+        up here too. Filter with ``self.owns(cid)``.
 
     Timer tokens (wired):
         self.timer.token().register(first_ms, interval_ms, func)
@@ -51,7 +54,8 @@ class Strategy:
     """
 
     name: str = "base"
-    #: Numeric strategy id packed into uint64 ``client_order_id`` (16-bit).
+    #: Numeric id for this strategy *class*. Not packed into client_order_id —
+    #: that carries the per-session slot; see :mod:`mft_sts.client_order_id`.
     id: int = 0
 
     def __init__(self) -> None:
@@ -69,7 +73,7 @@ class Strategy:
                 f"{self.session.session_id}"
             )
         self.session = session
-        self.oms.bind(self)
+        self.oms.bind(self, cid_slot=session.cid_slot)
         self.timer.bind(self)
 
     @classmethod
@@ -98,6 +102,29 @@ class Strategy:
     @property
     def paused(self) -> bool:
         return self._paused
+
+    @property
+    def cid_slot(self) -> int | None:
+        """This session's 16-bit ``client_order_id`` slot."""
+        return self.session.cid_slot if self.session is not None else None
+
+    def owns(self, client_order_id: str | int | None) -> bool:
+        """Whether ``client_order_id`` was minted by this session.
+
+        ``td.{api_id}.global`` is account-wide: every session attached to the
+        same api_id sees the other sessions' order updates and fills. Filter
+        with this before feeding an event into your own position tracking::
+
+            async def on_fill(self, api_id, msg):
+                if not self.owns(msg.payload.get("client_order_id")):
+                    return
+        """
+        if client_order_id is None or self.session is None:
+            return False
+        try:
+            return slot_of(client_order_id) == self.session.cid_slot
+        except (TypeError, ValueError):
+            return False
 
     # --- process control ---------------------------------------------------
 

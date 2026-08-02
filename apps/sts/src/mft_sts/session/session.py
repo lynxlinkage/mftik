@@ -56,6 +56,7 @@ class StsSession:
         md_ids: list[str] | None = None,
         st_paras: dict[str, Any] | None = None,
         heartbeat_interval: float = 1.0,
+        cid_slot: int = 0,
         on_exit: ExitHandler | None = None,
     ) -> None:
         self.session_id = session_id
@@ -66,8 +67,12 @@ class StsSession:
         self.md_ids = list(md_ids or [])
         self.st_paras = dict(st_paras or {})
         self.heartbeat_interval = heartbeat_interval
+        #: 16-bit id packed into every client_order_id this session mints.
+        #: Unique among concurrently live sessions (see ``SessionManager``).
+        self.cid_slot = cid_slot
         self._on_exit = on_exit
 
+        # Must follow cid_slot: bind() builds the client_order_id factory.
         strategy.bind(self)
         self.strategy.paras = type(strategy).on_initialized(self.st_paras)
 

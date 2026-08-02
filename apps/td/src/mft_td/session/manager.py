@@ -6,11 +6,12 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from mft.broker import Broker
 from mft.exchange.errors import ExchangeError
-from mft.exchange.models import PlaceOrderRequest
+from mft.exchange.models import Order, OrderStatus, PlaceOrderRequest
 from mft.protocol import (
     STS_DETACH,
     STS_LEASE_HEARTBEAT,
@@ -47,6 +48,10 @@ ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
 
 LEASE_GRACE_S = 3.0
 
+TERMINAL_STATUSES = frozenset(
+    {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED}
+)
+
 
 @dataclass
 class StsLink:
@@ -69,6 +74,11 @@ class TradingAccount:
     links: dict[str, StsLink] = field(default_factory=dict)
     global_task: asyncio.Task[Any] | None = None
     global_stop: asyncio.Event = field(default_factory=asyncio.Event)
+    #: ``client_order_id`` → the STS ``session_id`` that submitted it, kept
+    #: until the order reaches a terminal state. Advisory only: a cancel from
+    #: another session is logged, never blocked. Recon-discovered orders have
+    #: no entry and are cancelled silently.
+    cid_owner: dict[str, str] = field(default_factory=dict)
 
     @property
     def refcount(self) -> int:
@@ -112,6 +122,7 @@ class SessionManager:
             await trading.start()
             acct = TradingAccount(api_id=request.api_id, trading=trading)
             self._accounts[request.api_id] = acct
+            trading.on_order(partial(self._prune_cid_owner, acct))
             acct.global_task = asyncio.create_task(
                 self._global_keepalive(acct),
                 name=f"td-global-{request.api_id}",
@@ -423,6 +434,17 @@ class SessionManager:
             watchdog.cancel()
             await asyncio.gather(watchdog, return_exceptions=True)
 
+    def _prune_cid_owner(self, acct: TradingAccount, order: Order) -> None:
+        """Drop cid ownership once an order reaches a terminal state.
+
+        Registered on the trading session's order callbacks so the map does
+        not grow without bound.
+        """
+        if order.status not in TERMINAL_STATUSES:
+            return
+        if order.client_order_id:
+            acct.cid_owner.pop(order.client_order_id, None)
+
     async def _handle_recon(
         self,
         acct: TradingAccount,
@@ -503,6 +525,9 @@ class SessionManager:
             return
         if req.api_id != link.api_id or req.session_id != link.session_id:
             return
+        # Claim ownership before awaiting the venue: another session's lease
+        # loop can interleave here, and an unclaimed cid is cancelable by all.
+        acct.cid_owner[req.client_order_id] = link.session_id
         try:
             await acct.trading.private.place_order(
                 PlaceOrderRequest(
@@ -524,6 +549,7 @@ class SessionManager:
                 source="td",
             )
         except ExchangeError as exc:
+            acct.cid_owner.pop(req.client_order_id, None)
             await acct.trading.publish_order_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,
@@ -540,6 +566,7 @@ class SessionManager:
                 level="warn",
             )
         except Exception as exc:
+            acct.cid_owner.pop(req.client_order_id, None)
             logger.exception(
                 "TD order submit failed session=%s api_id=%s cid=%s",
                 link.session_id,
@@ -569,6 +596,30 @@ class SessionManager:
             return
         if req.api_id != link.api_id or req.session_id != link.session_id:
             return
+        owner = acct.cid_owner.get(req.client_order_id)
+        if owner is not None and owner != link.session_id:
+            # Warn, but let it through. Blocking would strand any order whose
+            # owning session is gone or wedged with nobody able to clear it,
+            # which costs more than the occasional cross-session cancel.
+            live = "live" if owner in acct.links else "detached"
+            logger.warning(
+                "TD cross-session cancel session=%s api_id=%s cid=%s owner=%s (%s)",
+                link.session_id,
+                link.api_id,
+                req.client_order_id,
+                owner,
+                live,
+            )
+            await publish_td_log(
+                self._broker,
+                link.api_id,
+                (
+                    f"cross-session cancel sts={link.session_id} "
+                    f"cid={req.client_order_id} owner={owner} ({live})"
+                ),
+                source="td",
+                level="warn",
+            )
         try:
             await acct.trading.private.cancel_by_client_order_id(
                 req.client_order_id

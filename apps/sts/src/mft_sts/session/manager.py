@@ -16,11 +16,15 @@ from mft.protocol import (
 )
 from mft_db.models.session import SessionDomain, SessionStatus
 
+from mft_sts.client_order_id import SLOT_SPACE
 from mft_sts.impl import resolve as resolve_strategy
 from mft_sts.session.session import StsSession
 from mft_sts.strategy import Strategy
 
 logger = logging.getLogger(__name__)
+
+#: Redis counter backing cid slot allocation (suffixed onto the key prefix).
+CID_SLOT_KEY = "cid:slot"
 
 PersistLive = Callable[..., Awaitable[Any]]
 MarkDone = Callable[[str], Awaitable[Any]]
@@ -56,6 +60,21 @@ class SessionManager:
     def active_session_ids(self) -> list[str]:
         return list(self._sessions)
 
+    async def _allocate_cid_slot(self) -> int:
+        """Reserve the 16-bit ``client_order_id`` slot for a new session.
+
+        Allocation goes through Redis, not a process-local counter: STS serves
+        RPC via ``BLPOP`` competing consumers, so several STS processes may be
+        creating sessions at once.
+
+        The counter is monotonic and wraps at :data:`SLOT_SPACE`, so two live
+        sessions share a slot only if 65536 sessions were created while one of
+        them was still running. Reuse after that is harmless — TD keys order
+        ownership on the whole cid, whose ``ts_ms`` differs.
+        """
+        key = f"{self._broker.config.key_prefix}:{CID_SLOT_KEY}"
+        return int(await self._broker.redis.incr(key)) % SLOT_SPACE
+
     async def create_session(
         self, request: StsCreateSessionRequest
     ) -> StsCreateSessionResult:
@@ -68,6 +87,7 @@ class SessionManager:
             broker=self._broker,
             created_by=request.created_by,
             strategy=strategy,
+            cid_slot=await self._allocate_cid_slot(),
             td_api_ids=list(request.td),
             md_ids=list(request.md),
             st_paras=dict(request.st_paras),
