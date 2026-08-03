@@ -7,13 +7,23 @@ from collections.abc import Callable, Sequence
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from mft.exchange.models import Balance, Fill, Order, OrderStatus, Side
+from mft.exchange.models import Balance, Fill, Order, Side, is_open, is_terminal
 from mft.exchange.oms import OmsView, Position
 
 if TYPE_CHECKING:
     from mft_td.session.session import Session
 
 logger = logging.getLogger(__name__)
+
+
+def order_key(order: Order) -> str:
+    """Book key for an order: its ``client_order_id`` when it has one.
+
+    Recon turns up orders TD never sent (placed elsewhere, or before a
+    restart); those fall back to the venue id so they stay visible instead of
+    collapsing onto a single entry.
+    """
+    return order.client_order_id or order.order_id
 
 UpdateHook = Callable[[OmsView], None]
 
@@ -60,16 +70,7 @@ class Oms:
         positions: Sequence[Position] | None = None,
     ) -> OmsView:
         """Replace OMS books from venue snapshots (full recon)."""
-        self._orders = {
-            o.order_id: o
-            for o in orders
-            if o.status
-            not in (
-                OrderStatus.FILLED,
-                OrderStatus.CANCELED,
-                OrderStatus.REJECTED,
-            )
-        }
+        self._orders = {order_key(o): o for o in orders if is_open(o.status)}
         self._balances = {b.asset: b for b in balances}
         if positions is not None:
             self._positions = {
@@ -83,15 +84,18 @@ class Oms:
         )
         return self._emit()
 
+    def get_order(self, key: str) -> Order | None:
+        """Look an order up by ``client_order_id``, falling back to order_id."""
+        return self._orders.get(key)
+
     def handle_order(self, order: Order) -> None:
-        if order.status in (
-            OrderStatus.FILLED,
-            OrderStatus.CANCELED,
-            OrderStatus.REJECTED,
-        ):
-            self._orders.pop(order.order_id, None)
+        # Keyed by client_order_id so an order we minted is findable from the
+        # moment it is created — before the venue has given it an id at all.
+        key = order_key(order)
+        if is_terminal(order.status):
+            self._orders.pop(key, None)
         else:
-            self._orders[order.order_id] = order
+            self._orders[key] = order
 
         logger.debug("OMS order id=%s status=%s", order.order_id, order.status)
         self._emit()

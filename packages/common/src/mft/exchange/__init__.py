@@ -31,6 +31,10 @@ from mft.exchange.gate.spot import (
     GateWsError,
 )
 from mft.exchange.models import (
+    OPEN_STATUSES,
+    PENDING_STATUSES,
+    TERMINAL_STATUSES,
+    WORKING_STATUSES,
     Balance,
     BestQuote,
     BookLevel,
@@ -45,8 +49,14 @@ from mft.exchange.models import (
     Side,
     Ticker,
     Trade,
+    can_transition,
+    is_open,
+    is_pending,
+    is_terminal,
+    is_working,
+    next_statuses,
 )
-from mft.exchange.oms import OmsView, Position
+from mft.exchange.oms import LedgerView, OmsView, Position
 from mft.exchange.paper import (
     PaperAuthError,
     PaperExchange,
@@ -101,8 +111,19 @@ __all__ = [
     "Order",
     "OrderBook",
     "OrderError",
+    "OPEN_STATUSES",
+    "PENDING_STATUSES",
+    "TERMINAL_STATUSES",
+    "WORKING_STATUSES",
     "OrderStatus",
+    "can_transition",
+    "is_open",
+    "is_pending",
+    "is_terminal",
+    "is_working",
+    "next_statuses",
     "OrderType",
+    "LedgerView",
     "OmsView",
     "PaperAuthError",
     "PaperExchange",

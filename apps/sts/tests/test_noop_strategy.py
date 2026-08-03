@@ -25,14 +25,23 @@ PAPER_BTC = SymbolInfo(
 
 
 class FakeOms:
-    def __init__(self) -> None:
+    """Stands in for StrategyOms: mints cids, acks every request."""
+
+    def __init__(self, *, accept: bool = True) -> None:
         self.submitted: list[dict] = []
         self.cancelled: list[str] = []
+        self.accept = accept
         self._n = 0
+        self._last_cid: str | None = None
+
+    @property
+    def last_client_order_id(self) -> str | None:
+        return self._last_cid
 
     async def submit_order(self, api_id, *, symbol, side, qty, type, price):
         self._n += 1
         cid = f"cid-{self._n}"
+        self._last_cid = cid
         self.submitted.append(
             {
                 "api_id": api_id,
@@ -43,10 +52,11 @@ class FakeOms:
                 "cid": cid,
             }
         )
-        return cid
+        return self.accept
 
     async def cancel_order(self, api_id, cid):
         self.cancelled.append(cid)
+        return self.accept
 
     def get(self, api_id):
         return None

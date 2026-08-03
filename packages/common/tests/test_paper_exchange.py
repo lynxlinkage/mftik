@@ -164,7 +164,7 @@ async def test_limit_rest_cancel(exchange: PaperExchange) -> None:
             price=price,
         )
     )
-    assert order.status is OrderStatus.OPEN
+    assert order.status is OrderStatus.NEW
     assert order.client_order_id  # auto-assigned
     open_orders = await private.fetch_open_orders("BTCUSDT")
     assert any(o.order_id == order.order_id for o in open_orders)

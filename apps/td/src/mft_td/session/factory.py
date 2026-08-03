@@ -44,10 +44,14 @@ class PaperSessionFactory:
         exchange: PaperExchange | None = None,
         *,
         key_prefix: str = "paper",
+        symbols: SymbolClient | None = None,
     ) -> None:
         self._broker = broker
         self._exchange = exchange
         self._key_prefix = key_prefix
+        # Optional: without a symbol plane the session simply cannot pre-lock,
+        # which keeps paper usable in tests that run no `sym` service.
+        self._symbols = symbols
         # api_id → (api_key, api_secret, passphrase)
         self._credentials: dict[int, tuple[str, str, str | None]] = {}
 
@@ -106,7 +110,12 @@ class PaperSessionFactory:
                 api_secret=api_secret,
                 passphrase=passphrase,
             )
-        return Session(api_id=api_id, broker=self._broker, private=private)
+        return Session(
+            api_id=api_id,
+            broker=self._broker,
+            private=private,
+            symbols=self._symbols,
+        )
 
 
 class VenueSessionFactory:
@@ -128,10 +137,10 @@ class VenueSessionFactory:
     ) -> None:
         self._broker = broker
         self._load_api = load_api
-        self._paper = paper or PaperSessionFactory(broker)
         # One client per TD process: its cache is what keeps symbol resolution
         # off the wire on the order path.
         self._symbols = symbols or SymbolClient(broker)
+        self._paper = paper or PaperSessionFactory(broker, symbols=self._symbols)
 
     @property
     def paper(self) -> PaperSessionFactory:
@@ -163,7 +172,12 @@ class VenueSessionFactory:
                 api_id,
                 row.api_key[:6],
             )
-            return Session(api_id=api_id, broker=self._broker, private=private)
+            return Session(
+                api_id=api_id,
+                broker=self._broker,
+                private=private,
+                symbols=self._symbols,
+            )
 
         raise ExchangeError(
             f"venue {venue.name!r} is registered but TD has no client for it"

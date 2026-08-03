@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 from mft.exchange.base import PrivateClient
-from mft.exchange.errors import ExchangeError
+from mft.exchange.errors import ExchangeError, OrderError
 from mft.exchange.models import Balance, Fill, Order, PlaceOrderRequest
 from mft.exchange.stream import EventStream
 
@@ -71,6 +71,19 @@ class PaperPrivateClient(PrivateClient):
     async def cancel_order(self, order_id: str) -> Order:
         self._ensure_connected()
         return await self._exchange.cancel_order(self.api_key, order_id)
+
+    async def fetch_order_by_client_order_id(
+        self, client_order_id: str, *, symbol: str | None = None
+    ) -> Order | None:
+        """Look the order up in the engine, or None if it never landed."""
+        self._ensure_connected()
+        try:
+            return self._exchange.get_order_by_client_id(
+                self.api_key, client_order_id
+            )
+        except OrderError:
+            # The engine never saw it — the submit did not land.
+            return None
 
     async def cancel_by_client_order_id(self, client_order_id: str) -> Order:
         self._ensure_connected()

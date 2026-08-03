@@ -79,19 +79,40 @@ class FakeGate:
     async def _answer_api(self, websocket: Any, msg: dict[str, Any]) -> None:
         self.api_calls.append(msg)
         channel = msg["channel"]
+        req_id = msg["payload"]["req_id"]
+        header = {
+            "response_time": str(int(time.time() * 1000)),
+            "status": "200",
+            "channel": channel,
+            "event": ch.API,
+        }
+        # Real Gate emits an ack-with-data echo before the order reply.
+        # Login is a single shot; trading channels get the two-step shape.
+        if channel != ch.LOGIN:
+            await websocket.send(
+                json.dumps(
+                    {
+                        "request_id": req_id,
+                        "ack": True,
+                        "header": header,
+                        "data": {
+                            "result": {
+                                "req_id": req_id,
+                                "req_param": msg["payload"].get("req_param"),
+                            }
+                        },
+                    }
+                )
+            )
         reply = json.dumps(
             {
-                "request_id": msg["payload"]["req_id"],
-                "header": {
-                    "response_time": str(int(time.time() * 1000)),
-                    "status": "200",
-                    "channel": channel,
-                    "event": ch.API,
-                },
+                "request_id": req_id,
+                "header": header,
                 "data": self.api_data.get(channel, {"result": {}}),
             }
         )
-        if self.hold_api_replies > 0:
+        # Login must complete before the client starts trading; never hold it.
+        if channel != ch.LOGIN and self.hold_api_replies > 0:
             self._held.append((websocket, reply))
             self.hold_api_replies -= 1
             if self.hold_api_replies == 0:

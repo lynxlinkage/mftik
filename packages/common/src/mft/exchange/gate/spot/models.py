@@ -280,11 +280,11 @@ class GateOrderUpdate(GateMessage):
             # No explicit finish_as: a fully consumed order is a fill.
             return OrderStatus.FILLED if self.left == 0 else OrderStatus.CANCELED
         if self.event == "put":
-            return OrderStatus.OPEN
+            return OrderStatus.NEW
         return (
             OrderStatus.PARTIALLY_FILLED
             if self.filled_qty > 0
-            else OrderStatus.OPEN
+            else OrderStatus.NEW
         )
 
     def to_order(self) -> Order:
@@ -389,7 +389,7 @@ class GateOrderAck(GateMessage):
         return (
             OrderStatus.PARTIALLY_FILLED
             if self.filled_qty > 0
-            else OrderStatus.OPEN
+            else OrderStatus.NEW
         )
 
     def to_order(self) -> Order:

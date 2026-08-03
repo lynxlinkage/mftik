@@ -30,8 +30,10 @@ from mft.exchange.gate.spot.protocol import (
     GateWsError,
     api_frame,
     api_sign,
+    login_frame,
     ping_frame,
     request_frame,
+    session_api_frame,
     sign,
 )
 from mft.exchange.gate.spot.public import GateSpotPublicClient
@@ -71,8 +73,10 @@ __all__ = [
     "api_sign",
     "channels",
     "from_text",
+    "login_frame",
     "ping_frame",
     "request_frame",
+    "session_api_frame",
     "sign",
     "sign_rest",
     "to_text",

@@ -30,12 +30,136 @@ class OrderType(StrEnum):
 
 
 class OrderStatus(StrEnum):
+    """One order's position in its lifecycle.
+
+    Two of these are transient states the *local* side owns, and they are the
+    reason this enum is not just a mirror of what the venue reports:
+
+    ``PENDING_NEW`` — handed to the gateway, no venue answer yet. Nothing can
+    be cancelled here (there is no venue order id), and a second submit for
+    the same intent would be a duplicate.
+
+    ``PENDING_CANCEL`` — a cancel went out, the venue has not confirmed. The
+    order may still be resting and may still trade, so risk has to keep
+    counting its exposure while refusing to treat it as cancellable capacity.
+
+    ``UNKNOWN`` is the honest answer when the connection drops mid-flight:
+    the order may or may not exist at the venue, and only a recovery query
+    can say which.
+    """
+
+    PENDING_NEW = "pending_new"
     NEW = "new"
-    OPEN = "open"
     PARTIALLY_FILLED = "partially_filled"
+    PENDING_CANCEL = "pending_cancel"
     FILLED = "filled"
     CANCELED = "canceled"
     REJECTED = "rejected"
+    UNKNOWN = "unknown"
+
+
+#: No transitions out — the order is done and its reservations are released.
+TERMINAL_STATUSES: frozenset[OrderStatus] = frozenset(
+    {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED}
+)
+
+#: In flight locally: we are waiting on the venue to answer.
+PENDING_STATUSES: frozenset[OrderStatus] = frozenset(
+    {OrderStatus.PENDING_NEW, OrderStatus.PENDING_CANCEL}
+)
+
+#: Known to be resting at the venue and able to trade.
+WORKING_STATUSES: frozenset[OrderStatus] = frozenset(
+    {OrderStatus.NEW, OrderStatus.PARTIALLY_FILLED}
+)
+
+#: Holding exposure: anything not finished, including the states we are unsure
+#: about. Reservations stay in place for all of these.
+OPEN_STATUSES: frozenset[OrderStatus] = (
+    PENDING_STATUSES | WORKING_STATUSES | {OrderStatus.UNKNOWN}
+)
+
+_S = OrderStatus
+
+#: Legal successor states. Beyond the venue-driven path this also allows the
+#: two shortcuts a real venue takes but a diagram usually omits: an order that
+#: fills completely on arrival never passes through PARTIALLY_FILLED, and a
+#: recovery query can find an UNKNOWN order still working rather than finished.
+_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
+    _S.PENDING_NEW: frozenset(
+        {_S.NEW, _S.PARTIALLY_FILLED, _S.FILLED, _S.REJECTED, _S.UNKNOWN}
+    ),
+    _S.NEW: frozenset(
+        {
+            _S.PARTIALLY_FILLED,
+            _S.FILLED,
+            _S.PENDING_CANCEL,
+            _S.CANCELED,
+            _S.REJECTED,
+            _S.UNKNOWN,
+        }
+    ),
+    _S.PARTIALLY_FILLED: frozenset(
+        {
+            _S.PARTIALLY_FILLED,
+            _S.FILLED,
+            _S.PENDING_CANCEL,
+            _S.CANCELED,
+            _S.UNKNOWN,
+        }
+    ),
+    # A cancel can lose the race: the order fills, or the venue refuses the
+    # cancel and the order goes back to resting.
+    _S.PENDING_CANCEL: frozenset(
+        {
+            _S.CANCELED,
+            _S.FILLED,
+            _S.PARTIALLY_FILLED,
+            _S.NEW,
+            _S.UNKNOWN,
+        }
+    ),
+    _S.UNKNOWN: frozenset(
+        {
+            _S.NEW,
+            _S.PARTIALLY_FILLED,
+            _S.FILLED,
+            _S.CANCELED,
+            _S.REJECTED,
+        }
+    ),
+    _S.FILLED: frozenset(),
+    _S.CANCELED: frozenset(),
+    _S.REJECTED: frozenset(),
+}
+
+
+def is_terminal(status: OrderStatus) -> bool:
+    return status in TERMINAL_STATUSES
+
+
+def is_pending(status: OrderStatus) -> bool:
+    """Waiting on the venue to answer a submit or a cancel."""
+    return status in PENDING_STATUSES
+
+
+def is_working(status: OrderStatus) -> bool:
+    """Confirmed resting at the venue and able to trade."""
+    return status in WORKING_STATUSES
+
+
+def is_open(status: OrderStatus) -> bool:
+    """Not finished — still holding exposure and reservations."""
+    return status in OPEN_STATUSES
+
+
+def can_transition(current: OrderStatus, nxt: OrderStatus) -> bool:
+    """Whether ``current → nxt`` is a move this lifecycle allows."""
+    return nxt in _TRANSITIONS[current]
+
+
+def next_statuses(current: OrderStatus) -> frozenset[OrderStatus]:
+    return _TRANSITIONS[current]
 
 
 class Instrument(BaseModel):
@@ -136,15 +260,36 @@ class OrderBook(BaseModel):
 
 
 class Balance(BaseModel):
+    """One asset's balance, as the venue reports it plus what we reserved.
+
+    ``free`` and ``locked`` are the venue's numbers. ``prelock`` is ours: funds
+    committed to an order that has been sent but not yet acknowledged, so the
+    venue still counts them as free. Without it, two orders placed in the same
+    round-trip would each see the full balance and together overspend it.
+
+    ``available`` is therefore what a strategy may actually still commit.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     asset: str
     free: Decimal
     locked: Decimal = Decimal("0")
+    prelock: Decimal = Decimal("0")
 
     @property
     def total(self) -> Decimal:
         return self.free + self.locked
+
+    @property
+    def available(self) -> Decimal:
+        """Spendable right now — venue-free minus our own reservations.
+
+        Clamped at zero: a venue snapshot can land before the fill that
+        justified a prelock, which would otherwise read as negative money.
+        """
+        spendable = self.free - self.prelock
+        return spendable if spendable > 0 else Decimal("0")
 
 
 class Order(BaseModel):

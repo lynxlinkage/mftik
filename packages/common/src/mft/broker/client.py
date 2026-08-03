@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 import redis.asyncio as redis
+from pydantic import BaseModel
 
 from mft.broker.config import BrokerConfig
 from mft.broker.errors import BrokerNotConnectedError, RequestTimeoutError
@@ -25,6 +27,12 @@ from mft.protocol import (
 logger = logging.getLogger(__name__)
 
 Handler = Callable[[IncomingRequest], Awaitable[None]]
+
+
+def _to_json(value: BaseModel | dict[str, Any]) -> str:
+    if isinstance(value, BaseModel):
+        return value.model_dump_json()
+    return json.dumps(value, default=str)
 
 
 class Broker:
@@ -91,6 +99,76 @@ class Broker:
 
     def _log_buffer_key(self, topic: str) -> str:
         return f"{self.config.key_prefix}:logbuf:{topic}"
+
+    def state_key(self, name: str) -> str:
+        """Redis key backing a shared state hash (e.g. ``td.ledger.7``)."""
+        return f"{self.config.key_prefix}:state:{name}"
+
+    # --- shared state (hashes) ---------------------------------------------
+    #
+    # Pub/Sub tells a reader that something changed; these hold what it
+    # changed *to*. A late subscriber, a restarted process and a strategy that
+    # missed a message all read the same current answer here, which is what
+    # makes "the writer's state and the reader's state agree" true by
+    # construction rather than by both sides keeping their own copy in sync.
+
+    async def state_put(
+        self, name: str, field: str, value: BaseModel | dict[str, Any]
+    ) -> None:
+        """Write one field of a state hash."""
+        await self.redis.hset(  # type: ignore[misc]
+            self.state_key(name), field, _to_json(value)
+        )
+
+    async def state_put_many(
+        self, name: str, values: Mapping[str, BaseModel | dict[str, Any]]
+    ) -> None:
+        """Write several fields in one round trip."""
+        if not values:
+            return
+        await self.redis.hset(  # type: ignore[misc]
+            self.state_key(name),
+            mapping={k: _to_json(v) for k, v in values.items()},
+        )
+
+    async def state_replace(
+        self, name: str, values: Mapping[str, BaseModel | dict[str, Any]]
+    ) -> None:
+        """Make the hash exactly ``values`` — the recon path.
+
+        Delete and rewrite run in one transaction so a reader never observes
+        the empty gap between them.
+        """
+        key = self.state_key(name)
+        pipe = self.redis.pipeline(transaction=True)
+        pipe.delete(key)
+        if values:
+            pipe.hset(key, mapping={k: _to_json(v) for k, v in values.items()})
+        await pipe.execute()
+
+    async def state_get(self, name: str, field: str) -> dict[str, Any] | None:
+        raw = await self.redis.hget(self.state_key(name), field)  # type: ignore[misc]
+        return None if raw is None else json.loads(raw)
+
+    async def state_all(self, name: str) -> dict[str, dict[str, Any]]:
+        rows = await self.redis.hgetall(self.state_key(name))  # type: ignore[misc]
+        return {field: json.loads(raw) for field, raw in rows.items()}
+
+    async def state_drop(self, name: str, *fields: str) -> int:
+        if not fields:
+            return 0
+        return int(
+            await self.redis.hdel(self.state_key(name), *fields)  # type: ignore[misc]
+        )
+
+    async def state_clear(self, *names: str) -> None:
+        """Delete whole state hashes — call when their owner goes away.
+
+        State that outlives its writer is worse than no state: a reader cannot
+        tell a stale answer from a current one.
+        """
+        if names:
+            await self.redis.delete(*(self.state_key(n) for n in names))
 
     # --- Pub/Sub -----------------------------------------------------------
 

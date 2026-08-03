@@ -263,6 +263,49 @@
         }
       }
     },
+    "/sts/strategies/{strategy_id}/yaml": {
+      "get": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "Strategy Yaml",
+        "description": "Rebuild a past deploy as strategy.yml.\n\nThe submitted document is not stored, so this is a reconstruction from the\nspec that was persisted: ``strategies`` for the sts block and the session\nrow for the td/md attach lists. It parses back to the same spec, but the\noriginal comments and formatting are gone.",
+        "operationId": "strategy_yaml_sts_strategies__strategy_id__yaml_get",
+        "parameters": [
+          {
+            "name": "strategy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Strategy Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrategyYamlResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/sts/sessions": {
       "get": {
         "tags": [
@@ -564,6 +607,120 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SessionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sym/venues": {
+      "get": {
+        "tags": [
+          "sym"
+        ],
+        "summary": "List Venues",
+        "description": "Every venue the plane is configured to track, with instrument counts.\n\nUnlike ``GET /venues`` (the credential registry) this reflects what the\nplane has actually loaded, so a venue with a count of 0 has not refreshed.",
+        "operationId": "list_venues_sym_venues_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SymVenueListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sym/symbols": {
+      "get": {
+        "tags": [
+          "sym"
+        ],
+        "summary": "List Symbols",
+        "description": "Instruments from the golden tables. Omitted filters widen the result.",
+        "operationId": "list_symbols_sym_symbols_get",
+        "parameters": [
+          {
+            "name": "venue",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Venue"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Symbol"
+            }
+          },
+          {
+            "name": "active_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true,
+              "title": "Active Only"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SymSymbolListResponse"
                 }
               }
             }
@@ -1178,6 +1335,37 @@
         "title": "StrategyTypesResponse",
         "description": "Registered STS strategy class names for strategy.yml ``sts.type``."
       },
+      "StrategyYamlResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "sts_session": {
+            "type": "string",
+            "title": "Sts Session"
+          },
+          "yaml": {
+            "type": "string",
+            "title": "Yaml"
+          },
+          "unresolved_td": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Unresolved Td"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "sts_session",
+          "yaml"
+        ],
+        "title": "StrategyYamlResponse",
+        "description": "A past deploy rebuilt as strategy.yml.\n\n``yaml`` is reconstructed from the stored spec, not the original document:\ncomments, key order and formatting are gone. ``unresolved_td`` lists api\nids whose account name could not be recovered \u2014 their ``td`` entries are\nplaceholders that will not redeploy."
+      },
       "StsControlResponse": {
         "properties": {
           "session_id": {
@@ -1211,6 +1399,162 @@
           "status"
         ],
         "title": "StsControlResponse"
+      },
+      "SymSymbolListResponse": {
+        "properties": {
+          "symbols": {
+            "items": {
+              "$ref": "#/components/schemas/SymbolInfo"
+            },
+            "type": "array",
+            "title": "Symbols"
+          }
+        },
+        "type": "object",
+        "title": "SymSymbolListResponse"
+      },
+      "SymVenueListResponse": {
+        "properties": {
+          "venues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Venues"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Counts"
+          }
+        },
+        "type": "object",
+        "title": "SymVenueListResponse",
+        "description": "Venues the symbol plane tracks, and how many instruments it holds."
+      },
+      "SymbolFilterInfo": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "SymbolFilterInfo",
+        "description": "One trading restriction. ``value`` is None when the venue set no bound."
+      },
+      "SymbolInfo": {
+        "properties": {
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category",
+            "default": "spot"
+          },
+          "base": {
+            "type": "string",
+            "title": "Base"
+          },
+          "quote": {
+            "type": "string",
+            "title": "Quote"
+          },
+          "exch_ticker": {
+            "type": "string",
+            "title": "Exch Ticker"
+          },
+          "contract_size": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Size"
+          },
+          "settlement_asset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Settlement Asset"
+          },
+          "expiry": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active",
+            "default": true
+          },
+          "filters": {
+            "items": {
+              "$ref": "#/components/schemas/SymbolFilterInfo"
+            },
+            "type": "array",
+            "title": "Filters"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "venue",
+          "symbol",
+          "base",
+          "quote",
+          "exch_ticker"
+        ],
+        "title": "SymbolInfo",
+        "description": "One instrument as the symbol plane knows it.\n\n``symbol`` is canonical; ``exch_ticker`` is what the venue wants on the\nwire. Adapters resolve one to the other through this rather than guessing."
       },
       "TdAttachOut": {
         "properties": {

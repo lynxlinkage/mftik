@@ -27,10 +27,10 @@ from mft.exchange.gate.spot.models import to_text
 from mft.exchange.gate.spot.protocol import GateApiError
 from mft.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotRest
 from mft.exchange.models import (
+    TERMINAL_STATUSES,
     Balance,
     Fill,
     Order,
-    OrderStatus,
     OrderType,
     PlaceOrderRequest,
     Side,
@@ -39,9 +39,7 @@ from mft.exchange.symbols import SymbolResolver, canonical
 
 logger = logging.getLogger(__name__)
 
-TERMINAL = frozenset(
-    {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED}
-)
+TERMINAL = TERMINAL_STATUSES
 
 #: params keys that would collide with a common field on the wire.
 _RESERVED_PARAMS = (
@@ -134,9 +132,10 @@ class GateSpotPrivateClient(PrivateClient):
                 )
         # Market orders must not rest; Gate only takes ioc/fok there.
         default_tif = "ioc" if request.type is OrderType.MARKET else None
+        pair = await self._venue_symbol(request.symbol)
         try:
             ack = await self.ws.place_order(
-                currency_pair=await self._venue_symbol(request.symbol),
+                currency_pair=pair,
                 side=request.side,
                 amount=request.qty,
                 price=request.price,
@@ -150,7 +149,11 @@ class GateSpotPrivateClient(PrivateClient):
             # Surface as OrderError so TD publishes an order reject instead of
             # treating a venue rejection as a transport failure.
             raise OrderError(str(exc)) from exc
-        return await self._inbound(ack.to_order())
+        order = ack.to_order()
+        # Thin ``action_mode=ACK`` replies omit the pair; keep the one we sent.
+        if not order.symbol:
+            order = order.model_copy(update={"symbol": pair})
+        return await self._inbound(order)
 
     async def cancel_order(self, order_id: str) -> Order:
         self._ensure_connected()
@@ -160,6 +163,37 @@ class GateSpotPrivateClient(PrivateClient):
         """Gate accepts a cancel by ``text`` when the id is in ``t-`` form."""
         self._ensure_connected()
         return await self._cancel(to_text(client_order_id))
+
+    async def fetch_order_by_client_order_id(
+        self, client_order_id: str, *, symbol: str | None = None
+    ) -> Order | None:
+        """Ask REST what happened to an order the WebSocket never reported.
+
+        Gate takes the ``t-`` text form where an order id goes. The pair is
+        required, and for an order we never got an ack for there is nothing
+        cached to look it up by — hence the ``symbol`` hint.
+        """
+        self._ensure_connected()
+        text = to_text(client_order_id)
+        pair = self._pairs.get(text)
+        if pair is None and symbol is not None:
+            pair = await self._venue_symbol(symbol)
+        if pair is None:
+            raise OrderError(
+                f"cannot resolve gate_spot order {client_order_id!r} "
+                "without its symbol"
+            )
+        try:
+            order = await self.rest.fetch_order(text, currency_pair=pair)
+        except GateApiError as exc:
+            # ORDER_NOT_FOUND is an answer: the submit never landed.
+            if "NOT_FOUND" in str(exc).upper():
+                return None
+            raise OrderError(str(exc)) from exc
+        return await self._inbound(order)
+
+    def on_reconnect(self, callback) -> None:
+        self.ws.on_reconnect(callback)
 
     async def _cancel(self, order_id: str) -> Order:
         currency_pair = await self._pair_for(order_id)

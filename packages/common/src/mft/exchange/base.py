@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from decimal import Decimal
+from typing import Any
 
 from mft.exchange.errors import ExchangeNotConnectedError
 from mft.exchange.models import (
@@ -171,6 +172,34 @@ class PrivateClient(BaseClient):
     @abstractmethod
     async def fetch_order(self, order_id: str) -> Order:
         """Fetch a single order by id."""
+
+    async def fetch_order_by_client_order_id(
+        self, client_order_id: str, *, symbol: str | None = None
+    ) -> Order | None:
+        """Resolve an order we sent but never heard back about.
+
+        This is the way out of ``UNKNOWN``: the order stream said nothing, so
+        ask the venue directly. ``symbol`` is a hint for venues that cannot
+        look an order up without its instrument.
+
+        Returns None when the venue has no such order — which is itself an
+        answer, and means the submit never landed. Adapters that cannot query
+        by client id raise :class:`NotImplementedError`, leaving the order
+        ``UNKNOWN`` until recon sweeps it.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot fetch by client_order_id"
+        )
+
+    def on_reconnect(self, callback: Callable[[], Any]) -> None:
+        """Register a callback for when the venue connection comes back.
+
+        A silent order stream is indistinguishable from a dead socket, so the
+        reconnect is TD's cue to re-run recon and rebuild state from the venue
+        rather than trusting what it had. Adapters without reconnection ignore
+        this.
+        """
+        return None
 
     @abstractmethod
     async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:

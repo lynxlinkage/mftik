@@ -231,7 +231,7 @@ class NoopStrategy(Strategy):
             )
             return
 
-        cid = await self.oms.submit_order(
+        accepted = await self.oms.submit_order(
             api_id,
             symbol=info.symbol,
             side=side,
@@ -239,6 +239,14 @@ class NoopStrategy(Strategy):
             type=OrderType.LIMIT,
             price=price,
         )
+        cid = self.oms.last_client_order_id
+        if not accepted:
+            # TD never took it, so there is no order to cancel on the next step.
+            await self.log(
+                f"NoopStrategy PLACE rejected by TD cid={cid} step={self._step}",
+                level="warn",
+            )
+            return
         self._open_cid = cid
         await self.log(
             f"NoopStrategy PLACE {side.value.upper()} {info.symbol} "
@@ -250,8 +258,13 @@ class NoopStrategy(Strategy):
         if cid is None:
             return
         try:
-            await self.oms.cancel_order(api_id, cid)
-            await self.log(f"NoopStrategy CANCEL cid={cid} step={self._step}")
+            if await self.oms.cancel_order(api_id, cid):
+                await self.log(f"NoopStrategy CANCEL cid={cid} step={self._step}")
+            else:
+                await self.log(
+                    f"NoopStrategy cancel not accepted by TD cid={cid}",
+                    level="warn",
+                )
         except Exception:
             await self.log(
                 f"NoopStrategy cancel failed cid={cid}", level="warn"
@@ -299,9 +312,9 @@ class NoopStrategy(Strategy):
     # --- reporting ---------------------------------------------------------
 
     async def on_recon_done(self, msg: ReconDone) -> None:
-        local = self.oms.get(msg.api_id)
         recon_bals = dict(msg.oms.balances)
-        local_bals = dict(local.balances) if local is not None else {}
+        # TD's ledger is the authority; read it rather than keeping a copy.
+        local_bals = await self.ledger.balances(msg.api_id)
 
         def _bal_key(bals: dict[str, Balance]) -> dict[str, tuple[str, str]]:
             return {

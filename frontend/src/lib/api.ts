@@ -53,6 +53,16 @@ export type StrategyRow = {
 	paused: boolean | null;
 };
 
+/** A past deploy rebuilt as strategy.yml (`GET /sts/strategies/{id}/yaml`). */
+export type StrategyYaml = {
+	id: number;
+	sts_session: string;
+	yaml: string;
+	/** api ids whose account name could not be recovered — their `td` entries
+	 * are placeholders that will not redeploy. */
+	unresolved_td: number[];
+};
+
 export type Audit = {
 	id: number;
 	user_id: number;
@@ -70,6 +80,40 @@ export type ApiCredential = {
 	type: string;
 	created_at: number;
 	created_by: number;
+};
+
+/** A venue a credential can be registered against (`GET /venues`). */
+export type Venue = {
+	name: string;
+	label: string;
+	api_types: string[];
+	requires_passphrase: boolean;
+	simulated: boolean;
+	symbol_example: string;
+};
+
+/** What the symbol plane actually tracks (`GET /sym/venues`). */
+export type SymVenues = {
+	venues: string[];
+	counts: Record<string, number>;
+};
+
+export type SymbolFilter = {
+	name: string;
+	/** Decimal on the wire: a string, so exact scale survives the round trip. */
+	value: string | null;
+};
+
+export type SymbolInfo = {
+	venue: string;
+	symbol: string;
+	category: string;
+	base: string;
+	quote: string;
+	exch_ticker: string;
+	is_active: boolean;
+	filters: SymbolFilter[];
+	updated_at: number | null;
 };
 
 export type ApiCreateBody = {
@@ -124,6 +168,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
 	stats: () => request<{ domains: DomainStats[] }>('/stats'),
+	venues: () => request<{ venues: Venue[] }>('/venues'),
+	symVenues: () => request<SymVenues>('/sym/venues'),
+	symbols: (opts: { venue?: string; activeOnly?: boolean } = {}) => {
+		const q = new URLSearchParams();
+		if (opts.venue) q.set('venue', opts.venue);
+		if (opts.activeOnly === false) q.set('active_only', 'false');
+		const qs = q.toString();
+		return request<{ symbols: SymbolInfo[] }>(`/sym/symbols${qs ? `?${qs}` : ''}`);
+	},
 	apis: () => request<{ apis: ApiCredential[] }>('/apis'),
 	createApi: (body: ApiCreateBody) =>
 		request<ApiCredential>('/apis', {
@@ -145,6 +198,8 @@ export const api = {
 	strategyTemplate: () => request<{ yaml: string }>('/sts/template'),
 	strategyTypes: () => request<{ types: string[] }>('/sts/types'),
 	strategies: () => request<{ strategies: StrategyRow[] }>('/sts/strategies'),
+	strategyYaml: (id: number) =>
+		request<StrategyYaml>(`/sts/strategies/${encodeURIComponent(String(id))}/yaml`),
 	stsSessions: (status: string | null = 'live') =>
 		request<{ sessions: Session[] }>(
 			`/sts/sessions${status ? `?status=${encodeURIComponent(status)}` : ''}`
@@ -187,6 +242,20 @@ export function defaultStrategyYml(): string {
 
 export function shortId(id: string): string {
 	return id.length > 12 ? `${id.slice(0, 8)}…` : id;
+}
+
+/** Trim a wire decimal for display: ``0.000100000000000000`` → ``0.0001``.
+ *
+ * Done on the string rather than via ``Number`` so an 8-decimal tick size does
+ * not come back as ``1e-8``, and so nothing is rounded on the way through.
+ */
+export function formatDecimal(value: string | number | null | undefined): string | null {
+	if (value == null) return null;
+	const s = String(value).trim();
+	// Anything not plain fixed-point (exponent form, junk) is shown as-is.
+	if (!/^-?\d+\.\d+$/.test(s)) return s || null;
+	const trimmed = s.replace(/0+$/, '').replace(/\.$/, '');
+	return trimmed === '' || trimmed === '-' ? '0' : trimmed;
 }
 
 export function formatTs(ts: number | null | undefined): string {

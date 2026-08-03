@@ -209,7 +209,7 @@ def _order(**overrides: object) -> dict[str, object]:
 
 def test_order_put_is_open() -> None:
     o = GateOrderUpdate.model_validate(_order())
-    assert o.status is OrderStatus.OPEN
+    assert o.status is OrderStatus.NEW
     assert o.client_order_id == "289865223110657"
 
     order = o.to_order()
@@ -335,6 +335,30 @@ def test_models_tolerate_unknown_fields() -> None:
 # --- trading call replies ---------------------------------------------------
 
 
+def test_api_ack_with_data_is_still_preliminary() -> None:
+    """Gate's ack frame echoes ``req_param`` under ``data`` — not the order."""
+    from mft.exchange.gate.spot.protocol import GateResponse
+
+    resp = GateResponse(
+        {
+            "request_id": "r1",
+            "ack": True,
+            "header": {
+                "status": "200",
+                "channel": "spot.order_place",
+                "event": "api",
+            },
+            "data": {
+                "result": {
+                    "req_id": "r1",
+                    "req_param": {"currency_pair": "ETH_USDT"},
+                }
+            },
+        }
+    )
+    assert resp.ack is True
+
+
 def test_order_ack_uses_status_not_event() -> None:
     """A call reply reports ``status``; the push channel reports ``event``."""
     ack = GateOrderAck.model_validate(
@@ -353,7 +377,7 @@ def test_order_ack_uses_status_not_event() -> None:
         }
     )
     assert ack.client_order_id == "42"
-    assert ack.order_status is OrderStatus.OPEN
+    assert ack.order_status is OrderStatus.NEW
 
     order = ack.to_order()
     assert order.order_id == "1852454420"
@@ -365,7 +389,7 @@ def test_order_ack_uses_status_not_event() -> None:
 @pytest.mark.parametrize(
     ("status", "left", "expected"),
     [
-        ("open", "0.001", OrderStatus.OPEN),
+        ("open", "0.001", OrderStatus.NEW),
         ("open", "0.0004", OrderStatus.PARTIALLY_FILLED),
         ("closed", "0", OrderStatus.FILLED),
         ("cancelled", "0.001", OrderStatus.CANCELED),

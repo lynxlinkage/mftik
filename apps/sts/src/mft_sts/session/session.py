@@ -8,7 +8,6 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mft.broker import Broker
-from mft.exchange.oms import OmsView
 from mft.protocol import (
     MD_BEST_QUOTE,
     MD_DETACH,
@@ -23,7 +22,6 @@ from mft.protocol import (
     TD_CANCEL_REJECT,
     TD_FILL,
     TD_LEASE_ACK,
-    TD_OMS_VIEW,
     TD_ORDER_REJECT,
     TD_ORDER_UPDATE,
     TD_RECON_DONE,
@@ -144,12 +142,6 @@ class StsSession:
                 asyncio.create_task(
                     self._pump_td_session(api_id),
                     name=f"sts-{self.session_id}-s-{api_id}",
-                )
-            )
-            self._tasks.append(
-                asyncio.create_task(
-                    self._pump_oms(api_id),
-                    name=f"sts-{self.session_id}-oms-{api_id}",
                 )
             )
 
@@ -384,31 +376,6 @@ class StsSession:
         except Exception:
             logger.exception(
                 "STS td session pump failed session=%s api_id=%s",
-                self.session_id,
-                api_id,
-            )
-
-    async def _pump_oms(self, api_id: int) -> None:
-        topic = Topics.td_oms(api_id)
-        try:
-            async for env in self.broker.subscribe(topic, stop=self._stop):
-                if env.type != TD_OMS_VIEW:
-                    continue
-                try:
-                    view = OmsView.model_validate(env.payload)
-                except Exception:
-                    logger.warning(
-                        "STS bad OMS view session=%s api_id=%s",
-                        self.session_id,
-                        api_id,
-                    )
-                    continue
-                self.strategy.oms.update(api_id, view)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "STS OMS pump failed session=%s api_id=%s",
                 self.session_id,
                 api_id,
             )

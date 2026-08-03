@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from mft.protocol import SymbolInfo
 from pydantic import BaseModel, Field
 
 
@@ -90,6 +91,21 @@ class StsControlResponse(BaseModel):
     strategy: str | None = None
 
 
+class StrategyYamlResponse(BaseModel):
+    """A past deploy rebuilt as strategy.yml.
+
+    ``yaml`` is reconstructed from the stored spec, not the original document:
+    comments, key order and formatting are gone. ``unresolved_td`` lists api
+    ids whose account name could not be recovered — their ``td`` entries are
+    placeholders that will not redeploy.
+    """
+
+    id: int
+    sts_session: str
+    yaml: str
+    unresolved_td: list[int] = Field(default_factory=list)
+
+
 class VenueOut(BaseModel):
     """A venue credentials can be registered against."""
 
@@ -103,6 +119,17 @@ class VenueOut(BaseModel):
 
 class VenueListResponse(BaseModel):
     venues: list[VenueOut] = Field(default_factory=list)
+
+
+class SymVenueListResponse(BaseModel):
+    """Venues the symbol plane tracks, and how many instruments it holds."""
+
+    venues: list[str] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+
+
+class SymSymbolListResponse(BaseModel):
+    symbols: list[SymbolInfo] = Field(default_factory=list)
 
 
 class ApiCreateBody(BaseModel):

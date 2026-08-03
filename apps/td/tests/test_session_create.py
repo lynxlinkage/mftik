@@ -184,6 +184,62 @@ async def test_attach_timeout(broker: Broker, manager: SessionManager) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lease_expiry_marks_done_and_destroys(
+    broker: Broker, manager: SessionManager, store: FakeStore
+) -> None:
+    """Watchdog detach must not RecursionError / leave a live DB row."""
+    stop = asyncio.Event()
+    pub = asyncio.create_task(
+        _lease_publisher(broker, "lease-die", stop, interval=0.05)
+    )
+    await manager.attach(
+        TdAttachRequest(
+            session_id="lease-die", api_id=9, timeout=2.0, created_by=1
+        )
+    )
+    assert store.rows[("lease-die", 9)].status == "live"
+    assert manager.get(9) is not None
+
+    # Stop heartbeats; grace is 2.0s on the test manager.
+    stop.set()
+    await pub
+
+    for _ in range(40):
+        if manager.get(9) is None:
+            break
+        await asyncio.sleep(0.1)
+
+    assert manager.get(9) is None
+    assert store.rows[("lease-die", 9)].status == "done"
+
+
+@pytest.mark.asyncio
+async def test_detach_retry_cleans_orphan_account(
+    broker: Broker, manager: SessionManager, store: FakeStore
+) -> None:
+    """A partial detach that already popped the link must still destroy."""
+    stop = asyncio.Event()
+    pub = asyncio.create_task(_lease_publisher(broker, "orphan", stop))
+    await manager.attach(
+        TdAttachRequest(
+            session_id="orphan", api_id=11, timeout=2.0, created_by=1
+        )
+    )
+    acct = manager._accounts[11]
+    link = acct.links.pop("orphan")
+    assert acct.refcount == 0
+    assert manager.get(11) is not None
+
+    await manager.detach(session_id="orphan", api_id=11, reason="sts_stop")
+    assert manager.get(11) is None
+    assert store.rows[("orphan", 11)].status == "done"
+
+    link.stop.set()
+    stop.set()
+    await pub
+
+
+@pytest.mark.asyncio
 async def test_attach_refcount_same_api(
     broker: Broker, manager: SessionManager
 ) -> None:
