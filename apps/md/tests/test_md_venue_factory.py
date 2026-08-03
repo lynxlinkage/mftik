@@ -44,7 +44,9 @@ async def test_paper_venue_keeps_the_paper_factory(
     assert isinstance(client, PaperPublicClient)
 
 
-async def test_gate_spot_venue_builds_a_gate_client(broker: Broker) -> None:
+async def test_gate_spot_venue_builds_a_gate_public_client(
+    broker: Broker,
+) -> None:
     factory = VenuePublicFactory(broker)
     client = await factory.create("gate_spot")
     assert isinstance(client, GateSpotPublicClient)

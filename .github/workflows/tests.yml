@@ -1,7 +1,10 @@
 name: Tests
 
 on:
+  # Scoped to main: a bare `push` would also fire for branches with an open
+  # PR, running the same suite twice for every push to that PR.
   push:
+    branches: [main]
   pull_request:
 
 jobs:
