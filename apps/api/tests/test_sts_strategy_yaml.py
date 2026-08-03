@@ -99,14 +99,15 @@ async def test_rebuilt_yaml_round_trips_to_the_stored_spec(
     result = await sts_routes.strategy_yaml(7)
 
     assert result.id == 7
+    # The type is reported alongside, not baked into the document.
+    assert result.type == "NoopStrategy"
     assert result.sts_session == "sess-abc"
     assert result.unresolved_td == []
 
     spec = parse_strategy_yml(result.yaml)
     assert spec.td == ["paper trader"]
     assert spec.md == ["paper.orderbook.BTCUSDT"]
-    assert spec.sts.type == "NoopStrategy"
-    assert spec.sts.config == {"exec_interval_ms": 1000, "gap_bps": 10}
+    assert spec.sts == {"exec_interval_ms": 1000, "gap_bps": 10}
 
 
 async def test_td_order_is_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,7 +151,7 @@ async def test_missing_session_yields_an_empty_attach_list(
     spec = parse_strategy_yml(result.yaml)
     assert spec.td == []
     assert spec.md == []
-    assert spec.sts.type == "NoopStrategy"
+    assert result.type == "NoopStrategy"
 
 
 async def test_unknown_strategy_is_404(monkeypatch: pytest.MonkeyPatch) -> None:

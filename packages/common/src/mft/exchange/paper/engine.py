@@ -27,6 +27,7 @@ from mft.exchange.models import (
     PlaceOrderRequest,
     Side,
     Ticker,
+    TimeInForce,
     Trade,
 )
 from mft.exchange.stream import EventStream
@@ -376,6 +377,44 @@ class PaperExchange:
             assert request.price is not None
             limit_price = _round_price(request.price, inst.tick_size)
 
+        if request.tif is TimeInForce.FOK:
+            # All-or-nothing has to be decided before anything trades, so it
+            # is depth that is checked, not the result of a partial match.
+            available = sum(
+                (
+                    row[2]
+                    for row in self._sorted_makers(
+                        request.symbol,
+                        request.side,
+                        exclude_account=account,
+                        limit_price=limit_price,
+                    )
+                ),
+                Decimal("0"),
+            )
+            if available < request.qty:
+                raise OrderError(
+                    f"fill-or-kill needs {request.qty}, book has {available}"
+                )
+
+        if request.tif is TimeInForce.POST_ONLY:
+            # Refuse before the order exists rather than matching and undoing
+            # it: post-only is the venue promising it will never take, and a
+            # strategy chasing the book relies on that refusal to know its
+            # price crossed. Checked against the same makers the taker pass
+            # would have hit, so the two can never disagree.
+            crossable = self._sorted_makers(
+                request.symbol,
+                request.side,
+                exclude_account=account,
+                limit_price=limit_price,
+            )
+            if crossable:
+                raise OrderError(
+                    f"post-only order would cross at {limit_price} "
+                    f"(best opposite {crossable[0][1].price})"
+                )
+
         order = Order(
             client_order_id=client_order_id,
             symbol=request.symbol,
@@ -400,35 +439,36 @@ class PaperExchange:
         if remaining > 0 and request.type is OrderType.MARKET:
             raise OrderError("insufficient liquidity for market order")
 
-        if remaining > 0:
-            # Rest unfilled size — lock at limit price.
-            assert limit_price is not None
-            self._reserve_and_settle(
-                account,
-                inst,
-                request.side,
-                remaining,
-                limit_price,
-                lock_only=True,
-            )
-            status = (
-                OrderStatus.PARTIALLY_FILLED
-                if filled_qty > 0
-                else OrderStatus.NEW
-            )
+        if remaining > 0 and request.tif is TimeInForce.IOC:
+            # IOC keeps what crossed and drops the rest. The remainder never
+            # rests, so it is never reserved — locking funds for it would fail
+            # orders the account can perfectly well afford to have filled.
+            # Acknowledged before being cancelled because PENDING_NEW →
+            # CANCELED is not a legal transition.
             avg = (notional / filled_qty) if filled_qty > 0 else None
-            order = order.model_copy(
+            acked = order.model_copy(
                 update={
-                    "status": status,
+                    "status": (
+                        OrderStatus.PARTIALLY_FILLED
+                        if filled_qty > 0
+                        else OrderStatus.NEW
+                    ),
                     "filled_qty": filled_qty,
                     "avg_price": avg,
                 }
             )
-            self._orders[order.order_id] = order
-            self._open_by_account.setdefault(account, set()).add(order.order_id)
-            self._emit_order(account, order)
+            self._orders[acked.order_id] = acked
+            self._emit_order(account, acked)
+            done = acked.model_copy(update={"status": OrderStatus.CANCELED})
+            self._orders[done.order_id] = done
+            self._emit_order(account, done)
             self._emit_balances(account)
-            return order
+            return done
+
+        if remaining > 0:
+            return self._rest_order_locked(
+                account, inst, request, order, filled_qty, notional, remaining
+            )
 
         avg = notional / filled_qty if filled_qty > 0 else None
         order = order.model_copy(
@@ -439,6 +479,44 @@ class PaperExchange:
             }
         )
         self._orders[order.order_id] = order
+        self._emit_order(account, order)
+        self._emit_balances(account)
+        return order
+
+    def _rest_order_locked(
+        self,
+        account: str,
+        inst,
+        request: PlaceOrderRequest,
+        order: Order,
+        filled_qty: Decimal,
+        notional: Decimal,
+        remaining: Decimal,
+    ) -> Order:
+        """Put the unfilled size on the book — locked at the limit price."""
+        limit_price = order.price
+        assert limit_price is not None
+        self._reserve_and_settle(
+            account,
+            inst,
+            request.side,
+            remaining,
+            limit_price,
+            lock_only=True,
+        )
+        status = (
+            OrderStatus.PARTIALLY_FILLED if filled_qty > 0 else OrderStatus.NEW
+        )
+        avg = (notional / filled_qty) if filled_qty > 0 else None
+        order = order.model_copy(
+            update={
+                "status": status,
+                "filled_qty": filled_qty,
+                "avg_price": avg,
+            }
+        )
+        self._orders[order.order_id] = order
+        self._open_by_account.setdefault(account, set()).add(order.order_id)
         self._emit_order(account, order)
         self._emit_balances(account)
         return order

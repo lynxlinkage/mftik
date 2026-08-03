@@ -13,6 +13,7 @@ from mft.exchange import (
     PaperExchange,
     PlaceOrderRequest,
     Side,
+    TimeInForce,
 )
 
 
@@ -326,3 +327,172 @@ async def test_paper_auth_rejects_bad_secret(exchange: PaperExchange) -> None:
     )
     with pytest.raises(PaperAuthError):
         await client.connect()
+
+
+@pytest.mark.asyncio
+async def test_post_only_rests_when_it_does_not_cross(
+    exchange: PaperExchange,
+) -> None:
+    await _seed_book(exchange)
+    private = _private(exchange)
+    await private.connect()
+
+    # Book is 49999 / 50001; a bid at 50000 sits inside the spread.
+    order = await private.place_order(
+        PlaceOrderRequest(
+            symbol="BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            qty=Decimal("0.01"),
+            price=Decimal("50000"),
+            tif=TimeInForce.POST_ONLY,
+        )
+    )
+    assert order.status is OrderStatus.NEW
+    assert order.filled_qty == Decimal("0")
+    await private.close()
+
+
+@pytest.mark.asyncio
+async def test_post_only_is_refused_rather_than_filled(
+    exchange: PaperExchange,
+) -> None:
+    """The refusal is the point: a chaser reprices off it instead of paying."""
+    await _seed_book(exchange)
+    private = _private(exchange)
+    await private.connect()
+
+    with pytest.raises(OrderError, match="would cross"):
+        await private.place_order(
+            PlaceOrderRequest(
+                symbol="BTCUSDT",
+                side=Side.BUY,
+                type=OrderType.LIMIT,
+                qty=Decimal("0.01"),
+                # At the ask, so it would take.
+                price=Decimal("50001"),
+                tif=TimeInForce.POST_ONLY,
+            )
+        )
+    # Refused before it existed — nothing left resting or half-filled.
+    assert await private.fetch_open_orders() == []
+    await private.close()
+
+
+@pytest.mark.asyncio
+async def test_a_crossing_limit_without_post_only_still_fills(
+    exchange: PaperExchange,
+) -> None:
+    """The guard is opt-in; default limit behaviour is untouched."""
+    await _seed_book(exchange)
+    private = _private(exchange)
+    await private.connect()
+
+    order = await private.place_order(
+        PlaceOrderRequest(
+            symbol="BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            qty=Decimal("0.01"),
+            price=Decimal("50001"),
+        )
+    )
+    assert order.filled_qty == Decimal("0.01")
+    await private.close()
+
+
+async def _seed_thin_ask(
+    exchange: PaperExchange, qty: str = "0.5", price: str = "50001"
+) -> None:
+    """A book with less depth than the taker wants, and cheap enough to hit."""
+    exchange.register_api(
+        "thin",
+        "secret-for-thin",
+        balances={"BTC": Decimal("5"), "USDT": Decimal("1000")},
+    )
+    maker = exchange.private(
+        api_key="thin", api_secret="secret-for-thin", auto_register=False
+    )
+    await maker.connect()
+    await maker.place_limit_order(
+        symbol="BTCUSDT",
+        side=Side.SELL,
+        qty=Decimal(qty),
+        price=Decimal(price),
+    )
+    await maker.close()
+
+
+@pytest.mark.asyncio
+async def test_ioc_keeps_what_crossed_and_cancels_the_rest(
+    exchange: PaperExchange,
+) -> None:
+    """Resting the remainder would turn a sweep slice into a passive order."""
+    await _seed_thin_ask(exchange, qty="0.5")
+    private = _private(exchange)
+    await private.connect()
+
+    order = await private.place_order(
+        PlaceOrderRequest(
+            symbol="BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            qty=Decimal("0.8"),
+            price=Decimal("50001"),
+            tif=TimeInForce.IOC,
+        )
+    )
+    assert order.status is OrderStatus.CANCELED
+    assert order.filled_qty == Decimal("0.5")
+    # The 0.3 it could not fill is gone, not resting.
+    assert await private.fetch_open_orders() == []
+    await private.close()
+
+
+@pytest.mark.asyncio
+async def test_an_ioc_that_crosses_fully_just_fills(
+    exchange: PaperExchange,
+) -> None:
+    await _seed_thin_ask(exchange, qty="0.5")
+    private = _private(exchange)
+    await private.connect()
+
+    order = await private.place_order(
+        PlaceOrderRequest(
+            symbol="BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            qty=Decimal("0.2"),
+            price=Decimal("50001"),
+            tif=TimeInForce.IOC,
+        )
+    )
+    assert order.status is OrderStatus.FILLED
+    assert order.filled_qty == Decimal("0.2")
+    await private.close()
+
+
+@pytest.mark.asyncio
+async def test_fill_or_kill_is_refused_when_the_book_is_too_thin(
+    exchange: PaperExchange,
+) -> None:
+    """All-or-nothing is decided on depth, before anything trades."""
+    await _seed_thin_ask(exchange, qty="0.5")
+    private = _private(exchange)
+    await private.connect()
+
+    with pytest.raises(OrderError, match="fill-or-kill"):
+        await private.place_order(
+            PlaceOrderRequest(
+                symbol="BTCUSDT",
+                side=Side.BUY,
+                type=OrderType.LIMIT,
+                qty=Decimal("0.8"),
+                price=Decimal("50001"),
+                tif=TimeInForce.FOK,
+            )
+        )
+    # Nothing traded: the whole order was refused, not partly done.
+    bal = {x.asset: x.free for x in await private.fetch_balances()}
+    assert bal["BTC"] == Decimal("1")
+    await private.close()

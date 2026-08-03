@@ -7,12 +7,16 @@ from typing import Any
 from mft.broker import Broker
 from mft.broker.errors import RequestTimeoutError
 from mft.protocol import (
+    MD_ERROR,
     STS_ERROR,
     TD_ERROR,
     RpcError,
     UntypedEnvelope,
 )
 from pydantic import BaseModel
+
+# Domains the API orchestrates by default. SYM passes its own set.
+_DEFAULT_ERROR_TYPES = frozenset({STS_ERROR, TD_ERROR, MD_ERROR})
 
 
 class DomainRpcError(Exception):
@@ -32,7 +36,7 @@ async def request_domain[T: BaseModel](
     timeout: float = 5.0,
 ) -> T:
     """Send a control-plane request and parse a typed success payload."""
-    errors = error_types or frozenset({STS_ERROR, TD_ERROR})
+    errors = error_types or _DEFAULT_ERROR_TYPES
     try:
         reply = await broker.request(subject, envelope, timeout=timeout)
     except RequestTimeoutError as exc:

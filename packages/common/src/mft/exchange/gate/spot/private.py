@@ -34,6 +34,7 @@ from mft.exchange.models import (
     OrderType,
     PlaceOrderRequest,
     Side,
+    TimeInForce,
 )
 from mft.exchange.symbols import SymbolResolver, canonical
 
@@ -51,6 +52,17 @@ _RESERVED_PARAMS = (
     "type",
     "text",
 )
+
+#: Canonical time-in-force → Gate's spelling. Gate puts post-only in the same
+#: field as the durations and calls it ``poc`` ("pending or cancelled"), so the
+#: whole enum maps onto one wire key here. Venues that expose post-only as a
+#: separate MakerOnly flag translate it in their own adapter instead.
+_TIF: dict[TimeInForce, str] = {
+    TimeInForce.GTC: "gtc",
+    TimeInForce.IOC: "ioc",
+    TimeInForce.FOK: "fok",
+    TimeInForce.POST_ONLY: "poc",
+}
 
 
 class GateSpotPrivateClient(PrivateClient):
@@ -132,6 +144,8 @@ class GateSpotPrivateClient(PrivateClient):
                 )
         # Market orders must not rest; Gate only takes ioc/fok there.
         default_tif = "ioc" if request.type is OrderType.MARKET else None
+        if request.tif is not None:
+            default_tif = _TIF[request.tif]
         pair = await self._venue_symbol(request.symbol)
         try:
             ack = await self.ws.place_order(

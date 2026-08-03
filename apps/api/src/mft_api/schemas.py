@@ -59,10 +59,26 @@ class StrategyListResponse(BaseModel):
     strategies: list[StrategyOut] = Field(default_factory=list)
 
 
+class StrategyTemplateOut(BaseModel):
+    """One deployable strategy and the document it starts from."""
+
+    type: str
+    label: str
+    description: str
+    yaml: str
+
+
 class StrategyTypesResponse(BaseModel):
-    """Registered STS strategy class names for strategy.yml ``sts.type``."""
+    """Deployable strategies for the deploy picker.
+
+    ``types`` is the bare list kept for callers that only need the names;
+    ``templates`` carries what the UI needs to render the picker and swap the
+    editor contents when the selection changes.
+    """
 
     types: list[str] = Field(default_factory=list)
+    templates: list[StrategyTemplateOut] = Field(default_factory=list)
+    default: str = ""
 
 
 class SessionOut(BaseModel):
@@ -101,6 +117,8 @@ class StrategyYamlResponse(BaseModel):
     """
 
     id: int
+    #: Strategy class this was deployed as — the document no longer carries it.
+    type: str = ""
     sts_session: str
     yaml: str
     unresolved_td: list[int] = Field(default_factory=list)

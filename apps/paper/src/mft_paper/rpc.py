@@ -125,6 +125,7 @@ async def _place(req: IncomingRequest, exchange: PaperExchange) -> None:
                 type=body.type,
                 qty=body.qty,
                 price=body.price,
+                tif=body.tif,
                 client_order_id=body.client_order_id,
             ),
         )

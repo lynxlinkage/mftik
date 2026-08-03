@@ -1,30 +1,53 @@
-"""strategy.yml parse / dump tests."""
+"""strategy.yml parse / dump tests.
+
+The document describes *where* a strategy runs (td / md) and *how* it is
+configured (sts) — but not *which* strategy. That is chosen at deploy time, so
+the two shapes that used to carry it are now errors with a message saying so.
+"""
 
 from __future__ import annotations
 
 import pytest
 from mft.protocol import (
-    DEFAULT_STRATEGY_YML,
     StrategyYamlError,
+    all_templates,
+    default_template,
     dump_strategy_yml,
+    get_template,
     parse_strategy_yml,
+    strategy_types,
 )
 
 
 def test_parse_default_template() -> None:
-    spec = parse_strategy_yml(DEFAULT_STRATEGY_YML)
+    spec = parse_strategy_yml(default_template().yaml)
     assert spec.td == ["paper trader"]
     assert spec.md == ["paper.orderbook.BTCUSDT"]
-    assert spec.sts.type == "NoopStrategy"
     # No mid: the strategy reads one from the order book feed above.
-    assert "mid" not in spec.sts.config
-    assert spec.sts.config["exec_interval_ms"] == 1000
-    assert spec.sts.config["gap_bps"] == 10
-    assert spec.sts.config["qty_quote"] == 100
+    assert "mid" not in spec.sts
+    assert spec.sts["exec_interval_ms"] == 1000
+    assert spec.sts["gap_bps"] == 10
+    assert spec.sts["qty_quote"] == 100
+
+
+@pytest.mark.parametrize("type_name", strategy_types())
+def test_every_template_parses(type_name: str) -> None:
+    """A template that does not parse is a broken starting point for the UI."""
+    template = get_template(type_name)
+    assert template is not None
+    spec = parse_strategy_yml(template.yaml)
+    assert spec.td, f"{type_name} template has no td account"
+    assert spec.md, f"{type_name} template has no md feed"
+    assert spec.sts, f"{type_name} template has no sts config"
+
+
+def test_templates_are_keyed_by_their_own_type() -> None:
+    for template in all_templates():
+        assert get_template(template.type) is template
 
 
 def test_roundtrip_dump() -> None:
-    spec = parse_strategy_yml(DEFAULT_STRATEGY_YML)
+    spec = parse_strategy_yml(default_template().yaml)
     again = parse_strategy_yml(dump_strategy_yml(spec))
     assert again == spec
 
@@ -35,9 +58,7 @@ def test_rejects_bad_md_feed() -> None:
             """
 td: [paper trader]
 md: [not-a-feed]
-sts:
-  type: NoopStrategy
-  config: {}
+sts: {}
 """
         )
 
@@ -48,9 +69,7 @@ def test_rejects_td_api_id() -> None:
             """
 td: [1]
 md: []
-sts:
-  type: NoopStrategy
-  config: {}
+sts: {}
 """
         )
 
@@ -63,29 +82,54 @@ td:
   - paper trader
   - paper trader
 md: []
-sts:
-  type: NoopStrategy
+sts: {}
 """
         )
 
 
-def test_rejects_missing_sts() -> None:
-    with pytest.raises(StrategyYamlError):
+def test_a_type_in_the_document_is_refused_with_a_pointer() -> None:
+    """The old shape must fail loudly, not deploy the wrong strategy."""
+    with pytest.raises(StrategyYamlError, match="chosen at deploy time"):
         parse_strategy_yml(
             """
 td: [paper trader]
 md: []
+sts:
+  type: NoopStrategy
 """
         )
 
 
-def test_config_defaults_empty() -> None:
+def test_a_nested_config_block_is_refused_with_a_pointer() -> None:
+    with pytest.raises(StrategyYamlError, match="directly under sts"):
+        parse_strategy_yml(
+            """
+td: [paper trader]
+md: []
+sts:
+  config:
+    gap_bps: 10
+"""
+        )
+
+
+def test_sts_may_be_omitted_entirely() -> None:
+    """A strategy with no parameters still deploys."""
     spec = parse_strategy_yml(
         """
 td: []
 md: []
-sts:
-  type: NoopStrategy
 """
     )
-    assert spec.sts.config == {}
+    assert spec.sts == {}
+
+
+def test_sts_must_be_a_mapping() -> None:
+    with pytest.raises(StrategyYamlError, match="mapping"):
+        parse_strategy_yml(
+            """
+td: []
+md: []
+sts: [1, 2]
+"""
+        )

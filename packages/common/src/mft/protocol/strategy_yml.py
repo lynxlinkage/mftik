@@ -9,46 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from mft.protocol.topics import Topics
 
-DEFAULT_STRATEGY_YML = """\
-td:
-  - paper trader
-md:
-  - paper.orderbook.BTCUSDT
-sts:
-  type: NoopStrategy
-  config:
-    # BUY mid-gap/mid/mid+gap (place→cancel each), flip to SELL, then exit.
-    # 100 of the quote currency (USDT here) per order; mid from the book.
-    exec_interval_ms: 1000
-    gap_bps: 10
-    qty_quote: 100
-"""
-
-
-class StrategyStsSpec(BaseModel):
-    """STS section of strategy.yml — strategy class + config blob."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    type: str
-    config: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("type")
-    @classmethod
-    def _nonempty_type(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("sts.type must be a non-empty strategy class name")
-        return text
-
-    @field_validator("config", mode="before")
-    @classmethod
-    def _config_dict(cls, value: Any) -> dict[str, Any]:
-        if value is None:
-            return {}
-        if not isinstance(value, dict):
-            raise ValueError("sts.config must be a mapping")
-        return dict(value)
+#: The document carries no strategy type. Which strategy runs is chosen at
+#: deploy time (``POST /sts/deploy/{type}``), because the type decides what
+#: ``sts:`` may contain — a config written for one strategy is meaningless to
+#: another, so pairing them in one editable blob invites documents that parse
+#: but cannot run. See :mod:`mft.protocol.strategy_catalog` for per-type
+#: templates.
 
 
 class StrategySpec(BaseModel):
@@ -61,7 +27,28 @@ class StrategySpec(BaseModel):
 
     td: list[str] = Field(default_factory=list)
     md: list[str] = Field(default_factory=list)
-    sts: StrategyStsSpec
+    #: Flat config for whichever strategy is being deployed. Its keys are the
+    #: strategy's own; validation happens in that class's ``on_initialized``.
+    sts: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("sts", mode="before")
+    @classmethod
+    def _sts_mapping(cls, value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("sts must be a mapping of strategy parameters")
+        if "config" in value and isinstance(value.get("config"), dict):
+            raise ValueError(
+                "sts no longer nests a config block — put the parameters "
+                "directly under sts:"
+            )
+        if "type" in value:
+            raise ValueError(
+                "sts no longer carries a type — the strategy is chosen at "
+                "deploy time (POST /sts/deploy/{type})"
+            )
+        return dict(value)
 
     @field_validator("td", mode="before")
     @classmethod
@@ -107,8 +94,8 @@ class StrategySpec(BaseModel):
         return out
 
     @model_validator(mode="after")
-    def _require_sts(self) -> StrategySpec:
-        # sts is required by the model; keep hook for future cross-field rules.
+    def _cross_field(self) -> StrategySpec:
+        # Hook for future cross-field rules.
         return self
 
 
@@ -137,9 +124,6 @@ def dump_strategy_yml(spec: StrategySpec) -> str:
     payload = {
         "td": list(spec.td),
         "md": list(spec.md),
-        "sts": {
-            "type": spec.sts.type,
-            "config": dict(spec.sts.config),
-        },
+        "sts": dict(spec.sts),
     }
     return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)

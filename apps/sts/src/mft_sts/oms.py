@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from mft.broker.errors import RequestTimeoutError
-from mft.exchange.models import Order, OrderType, Side
+from mft.exchange.models import Order, OrderType, Side, TimeInForce
 from mft.exchange.oms import OmsView
 from mft.protocol import (
     STS_ORDER_CANCEL,
@@ -60,6 +60,7 @@ class StrategyOms:
         self._cid_factory: ClientOrderIdFactory | None = None
         self._ack_timeout = ack_timeout
         self._last_cid: str | None = None
+        self._last_reason: str = ""
 
     def bind(self, strategy: Strategy, *, cid_slot: int) -> None:
         self._strategy = strategy
@@ -123,6 +124,17 @@ class StrategyOms:
         """
         return self._last_cid
 
+    @property
+    def last_reject_reason(self) -> str:
+        """Why TD refused the most recent request, or ``""`` if it took it.
+
+        TD's refusals are standing conditions, not transient ones — no TD
+        serving the account, the session not attached, the balance not there.
+        A strategy that retries one on a timer will retry it forever, so read
+        this and stop rather than re-submitting.
+        """
+        return self._last_reason
+
     def _next_client_order_id(self) -> str:
         if self._cid_factory is None:
             raise RuntimeError("strategy OMS is not bound to a session")
@@ -137,6 +149,7 @@ class StrategyOms:
         qty: Decimal,
         type: OrderType = OrderType.LIMIT,
         price: Decimal | None = None,
+        tif: TimeInForce | None = None,
     ) -> bool:
         """Submit an order via TD. True if TD accepted the request.
 
@@ -144,6 +157,11 @@ class StrategyOms:
         no TD holding ``api_id``. It says nothing about whether the venue
         would have filled it. The minted id is in
         :attr:`last_client_order_id` either way.
+
+        ``tif`` left at ``None`` takes the adapter's default for this order
+        type. :attr:`TimeInForce.POST_ONLY` asks the venue to refuse rather
+        than cross, which arrives as a rejection, not a fill — so a caller
+        using it has to handle being turned down as a normal outcome.
         """
         session = self._require_session()
         cid = self._next_client_order_id()
@@ -159,6 +177,7 @@ class StrategyOms:
                     type=type,
                     qty=qty,
                     price=price,
+                    tif=tif,
                     client_order_id=cid,
                 ),
                 type=STS_ORDER_SUBMIT,
@@ -199,6 +218,9 @@ class StrategyOms:
     ) -> bool:
         """Round-trip an order request to TD and report whether it was taken."""
         session = self._require_session()
+        # Cleared up front so a stale reason cannot outlive the refusal it
+        # described and be read against a later, accepted request.
+        self._last_reason = ""
         try:
             reply = await session.broker.request(
                 Topics.td_order(api_id), envelope, timeout=self._ack_timeout
@@ -213,6 +235,7 @@ class StrategyOms:
                 cid,
                 envelope.type,
             )
+            self._last_reason = "no ack from TD"
             return False
 
         try:
@@ -224,12 +247,14 @@ class StrategyOms:
                 cid,
                 reply.type,
             )
+            self._last_reason = "unreadable ack from TD"
             return False
 
         if not ack.accepted:
             logger.warning(
                 "TD refused order api_id=%s cid=%s: %s", api_id, cid, ack.reason
             )
+            self._last_reason = ack.reason
         return ack.accepted
 
     def _require_session(self):
