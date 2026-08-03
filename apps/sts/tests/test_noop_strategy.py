@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 from mft.exchange.models import BookLevel, OrderBook, Side
-from mft.protocol import SymbolInfo, UntypedEnvelope
+from mft.protocol import SymbolInfo
 from mft_sts.impl.noop import NoopStrategy, _fmt
 
 PAPER_BTC = SymbolInfo(
@@ -108,10 +108,7 @@ async def _book(strat: NoopStrategy, bid: str, ask: str) -> None:
         bids=[BookLevel(price=Decimal(bid), qty=Decimal("1"))],
         asks=[BookLevel(price=Decimal(ask), qty=Decimal("1"))],
     )
-    await strat.on_order_book(
-        UntypedEnvelope.wrap(book.model_dump(mode="json"), type="md.orderbook",
-                             source="md")
-    )
+    await strat.on_order_book(book)
 
 
 async def _run_steps(strat: NoopStrategy, n: int) -> None:

@@ -9,6 +9,7 @@ from mft_db.models.session import (
     StsSessionRow,
     TdSessionRow,
 )
+from mft_db.models.session_log import SessionLog
 from mft_db.models.strategy import StrategyRow
 from mft_db.models.symbol import (
     FilterName,
@@ -26,6 +27,7 @@ __all__ = [
     "Base",
     "MdSessionRow",
     "SessionDomain",
+    "SessionLog",
     "SessionStatus",
     "FilterName",
     "StrategyRow",

@@ -8,6 +8,16 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mft.broker import Broker
+from mft.exchange.models import (
+    Balance,
+    BestQuote,
+    Fill,
+    Kline,
+    Order,
+    OrderBook,
+    Ticker,
+    Trade,
+)
 from mft.protocol import (
     MD_BEST_QUOTE,
     MD_DETACH,
@@ -25,11 +35,13 @@ from mft.protocol import (
     TD_ORDER_REJECT,
     TD_ORDER_UPDATE,
     TD_RECON_DONE,
+    CancelReject,
     Envelope,
     LeaseAck,
     LeaseHeartbeat,
     MdDetach,
     MdLeaseAck,
+    OrderReject,
     ReconDone,
     StsDetach,
     Topics,
@@ -37,6 +49,7 @@ from mft.protocol import (
     publish_sts_log,
 )
 from mft.symbols import SymbolClient
+from pydantic import BaseModel
 
 from mft_sts.strategy import Strategy
 
@@ -44,14 +57,23 @@ logger = logging.getLogger(__name__)
 
 ExitHandler = Callable[[str, str], Awaitable[None]]
 
-#: MD message type → the strategy hook it feeds. One entry per feed topic MD
-#: publishes; anything else on ``md.{session_id}`` is logged and dropped.
-MD_HANDLERS: dict[str, str] = {
-    MD_TICKER: "on_ticker",
-    MD_ORDERBOOK: "on_order_book",
-    MD_KLINE: "on_kline",
-    MD_TRADE: "on_trade",
-    MD_BEST_QUOTE: "on_best_quote",
+#: MD message type → (strategy hook, payload model). One entry per feed topic
+#: MD publishes; anything else on ``md.{session_id}`` is logged and dropped.
+MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
+    MD_TICKER: ("on_ticker", Ticker),
+    MD_ORDERBOOK: ("on_order_book", OrderBook),
+    MD_KLINE: ("on_kline", Kline),
+    MD_TRADE: ("on_trade", Trade),
+    MD_BEST_QUOTE: ("on_best_quote", BestQuote),
+}
+
+#: TD global message type → (strategy hook, payload model).
+TD_GLOBAL_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
+    TD_ORDER_UPDATE: ("on_order_update", Order),
+    TD_FILL: ("on_fill", Fill),
+    TD_ORDER_REJECT: ("on_order_reject", OrderReject),
+    TD_CANCEL_REJECT: ("on_cancel_reject", CancelReject),
+    TD_BALANCE_UPDATE: ("on_balance_update", Balance),
 }
 
 
@@ -348,10 +370,19 @@ class StsSession:
         )
 
     async def _on_market_data(self, env: UntypedEnvelope) -> None:
-        name = MD_HANDLERS[env.type]
+        name, model = MD_HANDLERS[env.type]
+        try:
+            payload = model.model_validate(env.payload)
+        except Exception:
+            logger.exception(
+                "invalid md payload session=%s type=%s",
+                self.session_id,
+                env.type,
+            )
+            return
         handler = getattr(self.strategy, name)
         try:
-            await handler(env)
+            await handler(payload)
         except Exception:
             logger.exception(
                 "strategy %s failed session=%s type=%s",
@@ -395,26 +426,28 @@ class StsSession:
             )
 
     async def _on_td_global(self, api_id: int, env: UntypedEnvelope) -> None:
-        handler = None
-        if env.type == TD_ORDER_UPDATE:
-            handler = self.strategy.on_order_update
-        elif env.type == TD_FILL:
-            handler = self.strategy.on_fill
-        elif env.type == TD_ORDER_REJECT:
-            handler = self.strategy.on_order_reject
-        elif env.type == TD_CANCEL_REJECT:
-            handler = self.strategy.on_cancel_reject
-        elif env.type == TD_BALANCE_UPDATE:
-            handler = self.strategy.on_balance_update
-        else:
+        entry = TD_GLOBAL_HANDLERS.get(env.type)
+        if entry is None:
             self._on_message(f"global-{api_id}", env)
             return
+        name, model = entry
         try:
-            await handler(api_id, env)
+            payload = model.model_validate(env.payload)
+        except Exception:
+            logger.exception(
+                "invalid td global payload session=%s api_id=%s type=%s",
+                self.session_id,
+                api_id,
+                env.type,
+            )
+            return
+        handler = getattr(self.strategy, name)
+        try:
+            await handler(api_id, payload)
         except Exception:
             logger.exception(
                 "strategy %s failed session=%s api_id=%s type=%s",
-                handler.__name__,
+                name,
                 self.session_id,
                 api_id,
                 env.type,

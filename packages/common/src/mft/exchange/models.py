@@ -291,6 +291,10 @@ class Balance(BaseModel):
         spendable = self.free - self.prelock
         return spendable if spendable > 0 else Decimal("0")
 
+    @property
+    def locked(self) -> Decimal:
+        return self.locked + self.prelock
+
 
 class Order(BaseModel):
     model_config = ConfigDict(frozen=True)

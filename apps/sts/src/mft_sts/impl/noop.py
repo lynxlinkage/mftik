@@ -30,8 +30,21 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
-from mft.exchange.models import Balance, OrderBook, OrderType, Side
-from mft.protocol import ReconDone, SymbolInfo, Topics, UntypedEnvelope
+from mft.exchange.models import (
+    Balance,
+    Fill,
+    Order,
+    OrderBook,
+    OrderType,
+    Side,
+)
+from mft.protocol import (
+    CancelReject,
+    OrderReject,
+    ReconDone,
+    SymbolInfo,
+    Topics,
+)
 
 from mft_sts.strategy import Strategy
 from mft_sts.timer import TimerToken
@@ -156,14 +169,7 @@ class NoopStrategy(Strategy):
 
     # --- market data -------------------------------------------------------
 
-    async def on_order_book(self, msg: UntypedEnvelope) -> None:
-        try:
-            book = OrderBook.model_validate(msg.payload)
-        except Exception:
-            await self.log(
-                "NoopStrategy on_order_book invalid payload", level="warn"
-            )
-            return
+    async def on_order_book(self, book: OrderBook) -> None:
         if not book.bids or not book.asks:
             return
 
@@ -335,49 +341,44 @@ class NoopStrategy(Strategy):
                 level="warn",
             )
 
-    async def on_order_update(self, api_id: int, msg: UntypedEnvelope) -> None:
-        p = msg.payload
-        if not self.owns(p.get("client_order_id")):
+    async def on_order_update(self, api_id: int, order: Order) -> None:
+        if not self.owns(order.client_order_id):
             return
         await self.log(
             f"NoopStrategy on_order_update api_id={api_id} "
-            f"cid={p.get('client_order_id')} status={p.get('status')} "
-            f"{p.get('side')} {p.get('symbol')} "
-            f"{_fmt(p.get('price'))}@{_fmt(p.get('qty'))}"
+            f"cid={order.client_order_id} status={order.status} "
+            f"{order.side} {order.symbol} "
+            f"{_fmt(order.price)}@{_fmt(order.qty)}"
         )
 
-    async def on_fill(self, api_id: int, msg: UntypedEnvelope) -> None:
-        p = msg.payload
-        if not self.owns(p.get("client_order_id")):
+    async def on_fill(self, api_id: int, fill: Fill) -> None:
+        if not self.owns(fill.client_order_id):
             return
         await self.log(
             f"NoopStrategy on_fill api_id={api_id} "
-            f"cid={p.get('client_order_id')} {p.get('side')} "
-            f"{p.get('symbol')} {_fmt(p.get('price'))}@{_fmt(p.get('qty'))}"
+            f"cid={fill.client_order_id} {fill.side} "
+            f"{fill.symbol} {_fmt(fill.price)}@{_fmt(fill.qty)}"
         )
 
-    async def on_order_reject(self, api_id: int, msg: UntypedEnvelope) -> None:
-        p = msg.payload
+    async def on_order_reject(self, api_id: int, reject: OrderReject) -> None:
         await self.log(
             f"NoopStrategy on_order_reject api_id={api_id} "
-            f"cid={p.get('client_order_id')} reason={p.get('reason')}",
+            f"cid={reject.client_order_id} reason={reject.reason}",
             level="warn",
         )
 
-    async def on_cancel_reject(self, api_id: int, msg: UntypedEnvelope) -> None:
-        p = msg.payload
+    async def on_cancel_reject(self, api_id: int, reject: CancelReject) -> None:
         await self.log(
             f"NoopStrategy on_cancel_reject api_id={api_id} "
-            f"cid={p.get('client_order_id')} reason={p.get('reason')}",
+            f"cid={reject.client_order_id} reason={reject.reason}",
             level="warn",
         )
 
-    async def on_balance_update(self, api_id: int, msg: UntypedEnvelope) -> None:
-        p = msg.payload
+    async def on_balance_update(self, api_id: int, balance: Balance) -> None:
         await self.log(
             f"NoopStrategy on_balance_update api_id={api_id} "
-            f"{p.get('asset')} free={_fmt(p.get('free'))} "
-            f"locked={_fmt(p.get('locked'))}"
+            f"{balance.asset} free={_fmt(balance.free)} "
+            f"locked={_fmt(balance.locked)}"
         )
 
     # --- timer -------------------------------------------------------------

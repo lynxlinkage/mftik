@@ -237,6 +237,42 @@ class Broker:
             await pubsub.unsubscribe(*channel_list)
             await pubsub.aclose()
 
+    async def psubscribe(
+        self,
+        patterns: str | Sequence[str],
+        *,
+        stop: asyncio.Event | None = None,
+    ) -> AsyncIterator[tuple[str, UntypedEnvelope]]:
+        """Yield ``(channel, envelope)`` from pattern subscriptions until ``stop``.
+
+        Uses Redis ``PSUBSCRIBE``. Messages published while not subscribed are
+        lost unless they were also written via :meth:`publish_log`.
+        """
+        pattern_list = (patterns,) if isinstance(patterns, str) else tuple(patterns)
+        if not pattern_list:
+            raise ValueError("psubscribe requires at least one pattern")
+
+        pubsub = self.redis.pubsub()
+        await pubsub.psubscribe(*pattern_list)
+        try:
+            while stop is None or not stop.is_set():
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=1.0
+                )
+                if message is None:
+                    await asyncio.sleep(0.01)
+                    continue
+                if message.get("type") != "pmessage":
+                    continue
+                data = message.get("data")
+                channel = message.get("channel")
+                if data is None or channel is None:
+                    continue
+                yield str(channel), UntypedEnvelope.from_json(data)
+        finally:
+            await pubsub.punsubscribe(*pattern_list)
+            await pubsub.aclose()
+
     def bistream(
         self,
         *,

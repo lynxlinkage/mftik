@@ -5,6 +5,8 @@ export type LogEntry = {
 	level: string;
 	message: string;
 	raw: string;
+	/** Postgres row id when loaded from REST history; absent for live WS lines. */
+	dbId?: number;
 };
 
 export type SessionLogMessage = {

@@ -177,6 +177,22 @@ class AuditListResponse(BaseModel):
     audits: list[AuditOut] = Field(default_factory=list)
 
 
+class SessionLogOut(BaseModel):
+    """One persisted log line. ``id`` is the envelope id (WS-compatible)."""
+
+    id: str
+    db_id: int
+    ts: float
+    source: str
+    level: str
+    message: str
+
+
+class SessionLogListResponse(BaseModel):
+    logs: list[SessionLogOut] = Field(default_factory=list)
+    has_more: bool = False
+
+
 class ErrorBody(BaseModel):
     code: str
     message: str

@@ -71,6 +71,20 @@ export type Audit = {
 	created_at: number | null;
 };
 
+export type SessionLog = {
+	id: string;
+	db_id: number;
+	ts: number;
+	source: string;
+	level: string;
+	message: string;
+};
+
+export type SessionLogList = {
+	logs: SessionLog[];
+	has_more: boolean;
+};
+
 export type ApiCredential = {
 	id: number;
 	account_id: number;
@@ -233,7 +247,21 @@ export const api = {
 			`/md/sessions${status ? `?status=${encodeURIComponent(status)}` : ''}`
 		),
 	audits: (limit = 100) =>
-		request<{ audits: Audit[] }>(`/audits?limit=${limit}`)
+		request<{ audits: Audit[] }>(`/audits?limit=${limit}`),
+	logs: (
+		domain: 'sts' | 'td' | 'md',
+		streamId: string,
+		opts: { beforeTs?: number; beforeId?: number; limit?: number } = {}
+	) => {
+		const q = new URLSearchParams();
+		if (opts.beforeTs != null) q.set('before_ts', String(opts.beforeTs));
+		if (opts.beforeId != null) q.set('before_id', String(opts.beforeId));
+		if (opts.limit != null) q.set('limit', String(opts.limit));
+		const qs = q.toString();
+		return request<SessionLogList>(
+			`/logs/${encodeURIComponent(domain)}/${encodeURIComponent(streamId)}${qs ? `?${qs}` : ''}`
+		);
+	}
 };
 
 export function defaultStrategyYml(): string {

@@ -49,20 +49,20 @@ class RecordingStrategy(Strategy):
             "best_quote": [],
         }
 
-    async def on_ticker(self, msg: UntypedEnvelope) -> None:
-        self.seen["ticker"].append(Ticker.model_validate(msg.payload))
+    async def on_ticker(self, ticker: Ticker) -> None:
+        self.seen["ticker"].append(ticker)
 
-    async def on_order_book(self, msg: UntypedEnvelope) -> None:
-        self.seen["order_book"].append(OrderBook.model_validate(msg.payload))
+    async def on_order_book(self, book: OrderBook) -> None:
+        self.seen["order_book"].append(book)
 
-    async def on_kline(self, msg: UntypedEnvelope) -> None:
-        self.seen["kline"].append(Kline.model_validate(msg.payload))
+    async def on_kline(self, kline: Kline) -> None:
+        self.seen["kline"].append(kline)
 
-    async def on_trade(self, msg: UntypedEnvelope) -> None:
-        self.seen["trade"].append(Trade.model_validate(msg.payload))
+    async def on_trade(self, trade: Trade) -> None:
+        self.seen["trade"].append(trade)
 
-    async def on_best_quote(self, msg: UntypedEnvelope) -> None:
-        self.seen["best_quote"].append(BestQuote.model_validate(msg.payload))
+    async def on_best_quote(self, quote: BestQuote) -> None:
+        self.seen["best_quote"].append(quote)
 
 
 def _payloads() -> list[tuple[str, str, dict]]:
@@ -170,7 +170,7 @@ async def test_md_hook_failure_does_not_kill_the_pump(broker: Broker) -> None:
     session_id = "sts-md-raise"
 
     class BrokenStrategy(RecordingStrategy):
-        async def on_ticker(self, msg: UntypedEnvelope) -> None:
+        async def on_ticker(self, ticker: Ticker) -> None:
             raise RuntimeError("boom")
 
     strategy = BrokenStrategy()

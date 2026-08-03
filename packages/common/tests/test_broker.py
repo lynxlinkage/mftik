@@ -216,3 +216,36 @@ async def test_bistream_peer_swap(broker: Broker) -> None:
     b = a.peer()
     assert b.tx == a.rx
     assert b.rx == a.tx
+
+
+@pytest.mark.asyncio
+async def test_psubscribe_receives_channel_and_envelope(broker: Broker) -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    received: asyncio.Future[tuple[str, UntypedEnvelope]] = loop.create_future()
+
+    async def reader() -> None:
+        async for channel, env in broker.psubscribe("log.*", stop=stop):
+            if not received.done():
+                received.set_result((channel, env))
+            break
+        stop.set()
+
+    task = asyncio.create_task(reader())
+    await asyncio.sleep(0.05)
+
+    sent = Envelope[dict].wrap(
+        {"level": "info", "message": "pattern"},
+        type="log",
+        source="sts",
+        session_id="abc",
+    )
+    await broker.publish("log.sts.abc", sent)
+
+    channel, got = await asyncio.wait_for(received, timeout=2)
+    stop.set()
+    await task
+
+    assert channel == "log.sts.abc"
+    assert got.id == sent.id
+    assert got.payload == {"level": "info", "message": "pattern"}

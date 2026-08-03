@@ -303,8 +303,8 @@ async def test_sts_on_order_book_from_md(
             super().__init__()
             self.books: list = []
 
-        async def on_order_book(self, msg) -> None:  # noqa: ANN001
-            self.books.append(msg.payload)
+        async def on_order_book(self, book) -> None:  # noqa: ANN001
+            self.books.append(book)
 
     store = FakeMdStore()
     factory = PaperPublicFactory(broker, paper)
@@ -339,7 +339,7 @@ async def test_sts_on_order_book_from_md(
     await asyncio.wait_for(
         _wait_until(lambda: len(strategy.books) >= 1), timeout=3.0
     )
-    assert strategy.books[0]["symbol"] == "BTCUSDT"
+    assert strategy.books[0].symbol == "BTCUSDT"
 
     await sts.stop()
     await md.close_all()
@@ -361,11 +361,11 @@ async def test_sts_ticker_and_order_book_from_md(
             self.books: list = []
             self.tickers: list = []
 
-        async def on_order_book(self, msg) -> None:  # noqa: ANN001
-            self.books.append(msg.payload)
+        async def on_order_book(self, book) -> None:  # noqa: ANN001
+            self.books.append(book)
 
-        async def on_ticker(self, msg) -> None:  # noqa: ANN001
-            self.tickers.append(msg.payload)
+        async def on_ticker(self, ticker) -> None:  # noqa: ANN001
+            self.tickers.append(ticker)
 
     store = FakeMdStore()
     factory = PaperPublicFactory(broker, paper)
@@ -405,10 +405,10 @@ async def test_sts_ticker_and_order_book_from_md(
         ),
         timeout=3.0,
     )
-    assert strategy.books[0]["symbol"] == "BTCUSDT"
-    assert strategy.tickers[0]["symbol"] == "BTCUSDT"
-    assert "bids" in strategy.books[0]
-    assert "last" in strategy.tickers[0]
+    assert strategy.books[0].symbol == "BTCUSDT"
+    assert strategy.tickers[0].symbol == "BTCUSDT"
+    assert strategy.books[0].bids
+    assert strategy.tickers[0].last is not None
 
     await sts.stop()
     await md.close_all()

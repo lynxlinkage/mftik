@@ -7,17 +7,18 @@ import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange, Side
-from mft.exchange.models import OrderStatus, OrderType
+from mft.exchange.models import Balance, Fill, Order, OrderStatus, OrderType
 from mft.protocol import (
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
     TD_FILL,
     TD_ORDER_REJECT,
     TD_ORDER_UPDATE,
+    CancelReject,
+    OrderReject,
     ReconDone,
     StsCreateSessionRequest,
     TdAttachRequest,
-    UntypedEnvelope,
 )
 from mft_sts.client_order_id import unpack
 from mft_sts.impl import register
@@ -35,34 +36,34 @@ class PrivateEventsStrategy(Strategy):
         super().__init__()
         self.recon_done = asyncio.Event()
         self.events: list[tuple[str, int, str]] = []
-        self.order_updates: asyncio.Queue[UntypedEnvelope] = asyncio.Queue()
-        self.fills: asyncio.Queue[UntypedEnvelope] = asyncio.Queue()
-        self.order_rejects: asyncio.Queue[UntypedEnvelope] = asyncio.Queue()
-        self.cancel_rejects: asyncio.Queue[UntypedEnvelope] = asyncio.Queue()
-        self.balances: asyncio.Queue[UntypedEnvelope] = asyncio.Queue()
+        self.order_updates: asyncio.Queue[Order] = asyncio.Queue()
+        self.fills: asyncio.Queue[Fill] = asyncio.Queue()
+        self.order_rejects: asyncio.Queue[OrderReject] = asyncio.Queue()
+        self.cancel_rejects: asyncio.Queue[CancelReject] = asyncio.Queue()
+        self.balances: asyncio.Queue[Balance] = asyncio.Queue()
 
     async def on_recon_done(self, msg: ReconDone) -> None:
         self.recon_done.set()
 
-    async def on_order_update(self, api_id: int, msg: UntypedEnvelope) -> None:
-        self.events.append(("order", api_id, msg.type))
-        await self.order_updates.put(msg)
+    async def on_order_update(self, api_id: int, order: Order) -> None:
+        self.events.append(("order", api_id, TD_ORDER_UPDATE))
+        await self.order_updates.put(order)
 
-    async def on_fill(self, api_id: int, msg: UntypedEnvelope) -> None:
-        self.events.append(("fill", api_id, msg.type))
-        await self.fills.put(msg)
+    async def on_fill(self, api_id: int, fill: Fill) -> None:
+        self.events.append(("fill", api_id, TD_FILL))
+        await self.fills.put(fill)
 
-    async def on_order_reject(self, api_id: int, msg: UntypedEnvelope) -> None:
-        self.events.append(("order_reject", api_id, msg.type))
-        await self.order_rejects.put(msg)
+    async def on_order_reject(self, api_id: int, reject: OrderReject) -> None:
+        self.events.append(("order_reject", api_id, TD_ORDER_REJECT))
+        await self.order_rejects.put(reject)
 
-    async def on_cancel_reject(self, api_id: int, msg: UntypedEnvelope) -> None:
-        self.events.append(("cancel_reject", api_id, msg.type))
-        await self.cancel_rejects.put(msg)
+    async def on_cancel_reject(self, api_id: int, reject: CancelReject) -> None:
+        self.events.append(("cancel_reject", api_id, TD_CANCEL_REJECT))
+        await self.cancel_rejects.put(reject)
 
-    async def on_balance_update(self, api_id: int, msg: UntypedEnvelope) -> None:
-        self.events.append(("balance", api_id, msg.type))
-        await self.balances.put(msg)
+    async def on_balance_update(self, api_id: int, balance: Balance) -> None:
+        self.events.append(("balance", api_id, TD_BALANCE_UPDATE))
+        await self.balances.put(balance)
 
 
 @pytest.fixture
@@ -164,9 +165,9 @@ async def _await_status(strat, status: OrderStatus, timeout: float = 3.0):
     """
     async def _scan():
         while True:
-            env = await strat.order_updates.get()
-            if env.payload["status"] == status.value:
-                return env
+            order = await strat.order_updates.get()
+            if order.status == status:
+                return order
 
     return await asyncio.wait_for(_scan(), timeout=timeout)
 
@@ -199,21 +200,17 @@ async def test_private_events_from_td_global(broker: Broker) -> None:
     assert strat.owns(cid)
 
     # TD books it locally first, then the venue answers.
-    pending_env = await _await_status(strat, OrderStatus.PENDING_NEW)
-    assert pending_env.payload["client_order_id"] == cid
-    order_env = await _await_status(strat, OrderStatus.FILLED)
-    fill_env = await asyncio.wait_for(strat.fills.get(), timeout=3.0)
-    bal_env = await asyncio.wait_for(strat.balances.get(), timeout=3.0)
+    pending = await _await_status(strat, OrderStatus.PENDING_NEW)
+    assert pending.client_order_id == cid
+    order = await _await_status(strat, OrderStatus.FILLED)
+    fill = await asyncio.wait_for(strat.fills.get(), timeout=3.0)
+    bal = await asyncio.wait_for(strat.balances.get(), timeout=3.0)
 
-    assert order_env.type == TD_ORDER_UPDATE
-    assert order_env.payload["client_order_id"] == cid
-    assert order_env.payload["status"] == OrderStatus.FILLED.value
+    assert order.client_order_id == cid
+    assert order.status == OrderStatus.FILLED
 
-    assert fill_env.type == TD_FILL
-    assert fill_env.payload["client_order_id"] == cid
-
-    assert bal_env.type == TD_BALANCE_UPDATE
-    assert "asset" in bal_env.payload
+    assert fill.client_order_id == cid
+    assert bal.asset
 
     assert ("order", 7, TD_ORDER_UPDATE) in strat.events
     assert ("fill", 7, TD_FILL) in strat.events
@@ -245,17 +242,15 @@ async def test_order_and_cancel_reject_paths(broker: Broker) -> None:
         type=OrderType.MARKET,
     )
     bad_cid = strat.oms.last_client_order_id
-    reject_env = await asyncio.wait_for(strat.order_rejects.get(), timeout=3.0)
-    assert reject_env.type == TD_ORDER_REJECT
-    assert reject_env.payload["client_order_id"] == bad_cid
-    assert reject_env.payload["api_id"] == 7
+    reject = await asyncio.wait_for(strat.order_rejects.get(), timeout=3.0)
+    assert reject.client_order_id == bad_cid
+    assert reject.api_id == 7
     assert unpack(bad_cid)[2] == 1
 
     # Cancel unknown cid → on_cancel_reject
     assert await strat.oms.cancel_order(7, bad_cid)
     cancel_rej = await asyncio.wait_for(strat.cancel_rejects.get(), timeout=3.0)
-    assert cancel_rej.type == TD_CANCEL_REJECT
-    assert cancel_rej.payload["client_order_id"] == bad_cid
+    assert cancel_rej.client_order_id == bad_cid
 
     # Resting limit + cancel by client_order_id → on_order_update
     assert await strat.oms.submit_order(
@@ -268,12 +263,12 @@ async def test_order_and_cancel_reject_paths(broker: Broker) -> None:
     )
     cid = strat.oms.last_client_order_id
     assert unpack(cid)[2] == 2
-    open_env = await _await_status(strat, OrderStatus.NEW)
-    assert open_env.payload["client_order_id"] == cid
+    open_order = await _await_status(strat, OrderStatus.NEW)
+    assert open_order.client_order_id == cid
 
     assert await strat.oms.cancel_order(7, cid)
-    cancel_env = await _await_status(strat, OrderStatus.CANCELED)
-    assert cancel_env.payload["client_order_id"] == cid
+    canceled = await _await_status(strat, OrderStatus.CANCELED)
+    assert canceled.client_order_id == cid
 
     await td.close_all()
     await sts.close_all()

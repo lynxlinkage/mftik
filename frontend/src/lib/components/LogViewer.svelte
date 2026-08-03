@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount, tick } from 'svelte';
+	import { api } from '$lib/api';
 	import { connectDomainLog, type LogDomain, type LogEntry } from '$lib/logging/session';
 
 	interface Props {
@@ -17,6 +18,14 @@
 	let preEl = $state<HTMLPreElement | null>(null);
 	let disconnect: (() => void) | null = null;
 	let stickToBottom = true;
+	let loadingOlder = $state(false);
+	let hasMoreHistory = $state(true);
+	let historyLoaded = $state(false);
+	let historyHint = $state('');
+
+	const HISTORY_PAGE = 100;
+	const SCROLL_TOP_THRESHOLD = 40;
+	const LIVE_CAP = 500;
 
 	function formatTime(ts: number): string {
 		return new Date(ts * 1000).toLocaleTimeString('en-GB', {
@@ -46,10 +55,60 @@
 		}
 	}
 
+	async function loadOlder() {
+		if (loadingOlder || !hasMoreHistory || logs.length === 0) return;
+		loadingOlder = true;
+		historyHint = 'Loading older…';
+		const oldest = logs[0];
+		const prevHeight = preEl?.scrollHeight ?? 0;
+		const prevTop = preEl?.scrollTop ?? 0;
+		try {
+			const page = await api.logs(domain, streamId, {
+				beforeTs: oldest.ts,
+				beforeId: oldest.dbId,
+				limit: HISTORY_PAGE
+			});
+			const seen = new Set(logs.map((e) => e.id));
+			// API returns newest-first; reverse so oldest is first when prepending.
+			const older: LogEntry[] = page.logs
+				.slice()
+				.reverse()
+				.filter((row) => !seen.has(row.id))
+				.map((row) => ({
+					id: row.id,
+					ts: row.ts,
+					source: row.source,
+					level: row.level,
+					message: row.message,
+					raw: '',
+					dbId: row.db_id
+				}));
+			hasMoreHistory = page.has_more;
+			if (older.length === 0) {
+				historyHint = hasMoreHistory ? '' : 'Beginning of history';
+				return;
+			}
+			historyLoaded = true;
+			logs = [...older, ...logs];
+			historyHint = hasMoreHistory ? '' : 'Beginning of history';
+			await tick();
+			if (preEl) {
+				preEl.scrollTop = prevTop + (preEl.scrollHeight - prevHeight);
+			}
+		} catch {
+			historyHint = 'Failed to load older logs';
+		} finally {
+			loadingOlder = false;
+		}
+	}
+
 	function onScroll() {
 		if (!preEl) return;
 		const gap = preEl.scrollHeight - preEl.scrollTop - preEl.clientHeight;
 		stickToBottom = gap < 40;
+		if (preEl.scrollTop < SCROLL_TOP_THRESHOLD) {
+			void loadOlder();
+		}
 	}
 
 	async function copyAll() {
@@ -79,7 +138,9 @@
 			domain,
 			streamId,
 			(entry) => {
-				logs = [...logs, entry].slice(-500);
+				const next = [...logs, entry];
+				// Cap the live/Redis window only until the user has pulled DB history.
+				logs = historyLoaded ? next : next.slice(-LIVE_CAP);
 				void scrollIfNeeded();
 			},
 			(s) => {
@@ -103,6 +164,9 @@
 			<p class="meta">
 				<code>/ws/{domain}/{streamId}</code>
 				<span class="status" data-status={status}>{status}</span>
+				{#if historyHint}
+					<span class="hint">{historyHint}</span>
+				{/if}
 			</p>
 		</div>
 		<div class="actions">
@@ -171,6 +235,10 @@
 	}
 	.status[data-status='error'] {
 		color: var(--err);
+	}
+
+	.hint {
+		color: var(--muted);
 	}
 
 	.actions {

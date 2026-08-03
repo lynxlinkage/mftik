@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -8,10 +9,12 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from mft.broker import Broker
 
+from mft_api.log_persist import run_log_persist
 from mft_api.routes import (
     apis_router,
     audits_router,
     health_router,
+    logs_router,
     md_router,
     stats_router,
     sts_router,
@@ -33,9 +36,21 @@ async def lifespan(app: FastAPI):
     await broker.connect()
     app.state.broker = broker
     logger.info("API broker connected")
+
+    persist_stop = asyncio.Event()
+    persist_task = asyncio.create_task(run_log_persist(persist_stop))
     try:
         yield
     finally:
+        persist_stop.set()
+        try:
+            await asyncio.wait_for(persist_task, timeout=10)
+        except (TimeoutError, asyncio.CancelledError):
+            persist_task.cancel()
+            try:
+                await persist_task
+            except asyncio.CancelledError:
+                pass
         await broker.close()
         app.state.broker = None
         logger.info("API broker closed")
@@ -57,6 +72,7 @@ app.include_router(td_router)
 app.include_router(md_router)
 app.include_router(sym_router)
 app.include_router(audits_router)
+app.include_router(logs_router)
 
 
 @app.websocket("/ws/sts/{session_id}")
