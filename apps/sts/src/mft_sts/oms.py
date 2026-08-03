@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from mft.exchange.models import OrderType, Side
+from mft.broker.errors import RequestTimeoutError
+from mft.exchange.models import Order, OrderType, Side
 from mft.exchange.oms import OmsView
 from mft.protocol import (
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
     Envelope,
+    OrderAck,
     OrderCancel,
     OrderSubmit,
     Topics,
@@ -21,50 +24,109 @@ from mft_sts.client_order_id import ClientOrderIdFactory
 if TYPE_CHECKING:
     from mft_sts.strategy import Strategy
 
+logger = logging.getLogger(__name__)
+
+#: An ack is answered before TD touches the venue, so it should come back in
+#: about one Redis round-trip. Generous enough to ride out a GC pause without
+#: leaving a strategy blocked for long.
+ORDER_ACK_TIMEOUT_S = 2.0
+
 
 class StrategyOms:
-    """Read API for reconciled / live OMS state, keyed by TD ``api_id``.
+    """Order entry, and reads of TD's book out of Redis.
 
-    Order entry publishes STS → TD commands on ``sts.{session_id}``; venue
-    events return on ``td.{api_id}.global``.
+    There is no local copy of the book here. TD writes ``td.oms.{api_id}``
+    (client_order_id → Order) and every read below goes to it, so what a
+    strategy sees is always what TD sees. ``on_order_update`` and friends are
+    the cue to go and look, not a stream to fold into a private mirror —
+    rebuilding state from a fan-out that other sessions also feed is how the
+    two sides drift apart.
 
-    ``submit_order`` always mints a uint64 ``client_order_id``::
+    Order entry is request-reply on ``td.order.{api_id}``: submit and cancel
+    both wait for TD's ack and return whether it took the request. Venue
+    outcomes are separate and still arrive asynchronously on
+    ``td.{api_id}.global`` as order updates, fills or rejects — a ``True`` here
+    does **not** mean the venue accepted anything.
+
+    ``submit_order`` mints the uint64 ``client_order_id`` itself::
 
         [session slot 16][ts_ms_from_2026-01-01 40][seq 8]
+
+    and leaves it in :attr:`last_client_order_id` for the caller to keep.
     """
 
-    def __init__(self) -> None:
-        self._views: dict[int, OmsView] = {}
+    def __init__(self, *, ack_timeout: float = ORDER_ACK_TIMEOUT_S) -> None:
         self._strategy: Strategy | None = None
         self._cid_factory: ClientOrderIdFactory | None = None
+        self._ack_timeout = ack_timeout
+        self._last_cid: str | None = None
 
     def bind(self, strategy: Strategy, *, cid_slot: int) -> None:
         self._strategy = strategy
         self._cid_factory = ClientOrderIdFactory(cid_slot)
 
-    def update(self, api_id: int, view: OmsView) -> None:
-        self._views[api_id] = view
+    async def view(self, api_id: int | None = None) -> OmsView:
+        """Read TD's live book for ``api_id`` out of ``td.oms.{api_id}``.
 
-    def get(self, api_id: int) -> OmsView | None:
-        return self._views.get(api_id)
+        Always a read: STS keeps no copy. TD is the only writer, so whatever
+        comes back here is what TD believes right now, and two strategies on
+        the same account cannot drift apart by each maintaining their own.
+        """
+        resolved = self._resolve(api_id)
+        if resolved is None:
+            return OmsView()
+        rows = await self._session_broker().state_all(Topics.td_oms(resolved))
+        orders = {
+            cid: Order.model_validate(row) for cid, row in rows.items()
+        }
+        return OmsView(orders=orders)
 
-    def __getitem__(self, api_id: int) -> OmsView:
-        return self._views[api_id]
+    async def orders(self, api_id: int | None = None) -> dict[str, Order]:
+        """Live orders keyed by ``client_order_id``."""
+        return dict((await self.view(api_id)).orders)
 
-    def __contains__(self, api_id: object) -> bool:
-        return isinstance(api_id, int) and api_id in self._views
+    async def order(
+        self, client_order_id: str | int, api_id: int | None = None
+    ) -> Order | None:
+        """One order by ``client_order_id``, or None if it is not live."""
+        resolved = self._resolve(api_id)
+        if resolved is None:
+            return None
+        row = await self._session_broker().state_get(
+            Topics.td_oms(resolved), str(client_order_id)
+        )
+        return None if row is None else Order.model_validate(row)
+
+    def _resolve(self, api_id: int | None) -> int | None:
+        """Pick the account: the one asked for, or the only one attached."""
+        if api_id is not None:
+            return api_id
+        attached = self.api_ids
+        return attached[0] if len(attached) == 1 else None
+
+    def _session_broker(self):
+        return self._require_session().broker
 
     @property
     def api_ids(self) -> list[int]:
-        return list(self._views)
+        session = self._strategy.session if self._strategy is not None else None
+        return list(session.td_api_ids) if session is not None else []
 
-    def view(self, api_id: int | None = None) -> OmsView | None:
-        """Return OMS for ``api_id``, or the sole account if only one is present."""
-        if api_id is not None:
-            return self._views.get(api_id)
-        if len(self._views) == 1:
-            return next(iter(self._views.values()))
-        return None
+    @property
+    def last_client_order_id(self) -> str | None:
+        """The ``client_order_id`` minted by the most recent submit.
+
+        Set just before :meth:`submit_order` returns, on refusals too — the id
+        is what correlates a failure with the venue events that may still show
+        up. Read it on the line after the submit: there is no await in between,
+        so a concurrent submit cannot interleave and clobber it.
+        """
+        return self._last_cid
+
+    def _next_client_order_id(self) -> str:
+        if self._cid_factory is None:
+            raise RuntimeError("strategy OMS is not bound to a session")
+        return self._cid_factory.next()
 
     async def submit_order(
         self,
@@ -75,14 +137,19 @@ class StrategyOms:
         qty: Decimal,
         type: OrderType = OrderType.LIMIT,
         price: Decimal | None = None,
-    ) -> str:
-        """Submit an order via TD; returns the minted uint64 ``client_order_id``."""
+    ) -> bool:
+        """Submit an order via TD. True if TD accepted the request.
+
+        False means the order never reached the venue — no ack, a refusal, or
+        no TD holding ``api_id``. It says nothing about whether the venue
+        would have filled it. The minted id is in
+        :attr:`last_client_order_id` either way.
+        """
         session = self._require_session()
-        if self._cid_factory is None:
-            raise RuntimeError("strategy OMS is not bound to a session")
-        cid = self._cid_factory.next()
-        await session.broker.publish(
-            Topics.sts_td_session(session.session_id),
+        cid = self._next_client_order_id()
+        accepted = await self._request_ack(
+            api_id,
+            cid,
             Envelope[OrderSubmit].wrap(
                 OrderSubmit(
                     session_id=session.session_id,
@@ -99,24 +166,71 @@ class StrategyOms:
                 session_id=session.session_id,
             ),
         )
-        return cid
+        # After the await, not before: a submit that overlapped ours would
+        # otherwise leave its cid here for our caller to read.
+        self._last_cid = cid
+        return accepted
 
-    async def cancel_order(self, api_id: int, client_order_id: str | int) -> None:
-        """Cancel an open order by ``client_order_id`` via TD."""
+    async def cancel_order(self, api_id: int, client_order_id: str | int) -> bool:
+        """Cancel an open order by ``client_order_id`` via TD.
+
+        True if TD accepted the request; the venue's answer still arrives
+        asynchronously as an order update or a cancel reject.
+        """
         session = self._require_session()
-        await session.broker.publish(
-            Topics.sts_td_session(session.session_id),
+        cid = str(client_order_id)
+        return await self._request_ack(
+            api_id,
+            cid,
             Envelope[OrderCancel].wrap(
                 OrderCancel(
                     session_id=session.session_id,
                     api_id=api_id,
-                    client_order_id=str(client_order_id),
+                    client_order_id=cid,
                 ),
                 type=STS_ORDER_CANCEL,
                 source=f"strategy.{session.strategy.name}",
                 session_id=session.session_id,
             ),
         )
+
+    async def _request_ack(
+        self, api_id: int, cid: str, envelope: Envelope[Any]
+    ) -> bool:
+        """Round-trip an order request to TD and report whether it was taken."""
+        session = self._require_session()
+        try:
+            reply = await session.broker.request(
+                Topics.td_order(api_id), envelope, timeout=self._ack_timeout
+            )
+        except RequestTimeoutError:
+            # No TD is serving this account, or it is wedged. Either way the
+            # request did not land: say so rather than letting the strategy
+            # wait on venue events that will never arrive.
+            logger.warning(
+                "TD order ack timed out api_id=%s cid=%s type=%s",
+                api_id,
+                cid,
+                envelope.type,
+            )
+            return False
+
+        try:
+            ack = OrderAck.model_validate(reply.payload)
+        except Exception:
+            logger.warning(
+                "TD order ack unreadable api_id=%s cid=%s reply=%s",
+                api_id,
+                cid,
+                reply.type,
+            )
+            return False
+
+        if not ack.accepted:
+            logger.warning(
+                "TD refused order api_id=%s cid=%s: %s", api_id, cid, ack.reason
+            )
+        return ack.accepted
 
     def _require_session(self):
         if self._strategy is None or self._strategy.session is None:

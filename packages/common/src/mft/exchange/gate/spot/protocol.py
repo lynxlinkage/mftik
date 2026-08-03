@@ -9,13 +9,10 @@ Two request styles share the socket.
 signed — for private channels — with HMAC-SHA512 over
 ``channel=<channel>&event=<event>&time=<time>`` in an ``auth`` block.
 
-**Trading calls** (``event: api``) use a nested envelope with its own signature
-scheme, over ``api\\n<channel>\\n<req_param JSON>\\n<time>``, and carry a
-``req_id`` that the response echoes back. Each call is signed on its own, so
-``spot.login`` is not required.
-
-Either way there is no separate endpoint and no login round-trip: one
-connection carries public data, private data, and order entry.
+**Trading calls** (``event: api``) need a prior ``spot.login`` on the socket.
+Login is signed with an empty ``req_param`` string; after that, order entry
+frames carry only ``req_id`` / ``req_param`` (session auth). One connection
+still carries public data, private pushes, and order entry.
 """
 
 from __future__ import annotations
@@ -108,6 +105,32 @@ def api_sign(api_secret: str, channel: str, param_json: str, ts: int) -> str:
     ).hexdigest()
 
 
+def login_frame(
+    *,
+    api_key: str,
+    api_secret: str,
+    req_id: str | None = None,
+    ts: int | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Build a ``spot.login`` frame. Returns ``(frame, req_id)``.
+
+    Gate signs login with an empty ``req_param`` string and omits ``req_param``
+    from the payload entirely.
+    """
+    ts = int(time.time()) if ts is None else ts
+    req_id = req_id or uuid.uuid4().hex
+    payload: dict[str, Any] = {
+        "api_key": api_key,
+        "timestamp": str(ts),
+        "signature": api_sign(api_secret, "spot.login", "", ts),
+        "req_id": req_id,
+    }
+    return (
+        {"time": ts, "channel": "spot.login", "event": "api", "payload": payload},
+        req_id,
+    )
+
+
 def api_frame(
     channel: str,
     req_param: Any,
@@ -118,9 +141,10 @@ def api_frame(
     channel_id: str = "",
     ts: int | None = None,
 ) -> tuple[dict[str, Any], str]:
-    """Build a trading-call frame. Returns ``(frame, req_id)``.
+    """Build a signed trading-call frame. Returns ``(frame, req_id)``.
 
-    Every call carries its own signature, so no ``spot.login`` is needed.
+    Prefer :func:`session_api_frame` after ``spot.login``; this form is kept
+    for callers that need a fully signed ``event: api`` payload.
     """
     ts = int(time.time()) if ts is None else ts
     req_id = req_id or uuid.uuid4().hex
@@ -130,6 +154,33 @@ def api_frame(
         "api_key": api_key,
         "timestamp": str(ts),
         "signature": api_sign(api_secret, channel, param_json, ts),
+        "req_id": req_id,
+        "req_param": req_param,
+    }
+    if channel_id:
+        payload["req_header"] = {"X-Gate-Channel-Id": channel_id}
+    return (
+        {"time": ts, "channel": channel, "event": "api", "payload": payload},
+        req_id,
+    )
+
+
+def session_api_frame(
+    channel: str,
+    req_param: Any,
+    *,
+    req_id: str | None = None,
+    channel_id: str = "",
+    ts: int | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Build a trading-call frame for a socket that has already ``spot.login``'d.
+
+    After login Gate authenticates the connection; subsequent ``event: api``
+    calls carry only ``req_id`` / ``req_param`` (no per-call signature).
+    """
+    ts = int(time.time()) if ts is None else ts
+    req_id = req_id or uuid.uuid4().hex
+    payload: dict[str, Any] = {
         "req_id": req_id,
         "req_param": req_param,
     }
@@ -176,8 +227,12 @@ class GateResponse:
         self.time_ms: int | None = message.get("time_ms")
         self.status: str = str(header.get("status", ""))
         self.req_id: str | None = message.get("request_id") or message.get("req_id")
-        # Gate may send a bare acknowledgement before the real reply.
-        self.ack: bool = bool(message.get("ack")) and "data" not in message
+        # Gate sends a preliminary ``ack: true`` frame before the real trading
+        # reply. That frame often still carries ``data`` (an echo of the
+        # request's ``req_param``), so presence of ``data`` must not clear the
+        # ack flag — otherwise we treat the echo as the order and see an empty
+        # ``currency_pair``.
+        self.ack: bool = bool(message.get("ack"))
 
         data = message.get("data") or {}
         self.result: Any = (

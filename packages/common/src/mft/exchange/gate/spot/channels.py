@@ -33,7 +33,7 @@ ORDER_STATUS = "spot.order_status"
 #: Channels that require the ``auth`` block on subscribe.
 PRIVATE = frozenset({ORDERS, USER_TRADES, BALANCES})
 
-#: Trading calls; these are signed per request instead.
+#: Trading calls; require a prior ``spot.login`` on the socket.
 TRADING = frozenset(
     {
         ORDER_PLACE,

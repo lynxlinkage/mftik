@@ -8,7 +8,6 @@ end-to-end over a real socket without touching the venue.
 from __future__ import annotations
 
 import asyncio
-import json
 from decimal import Decimal
 from typing import Any
 
@@ -59,9 +58,24 @@ async def test_public_subscribe_streams_typed_trades(gate: FakeGate) -> None:
     assert trade.to_trade().qty == Decimal("0.5")
 
 
+async def test_connect_with_credentials_logs_in(gate: FakeGate) -> None:
+    async with await _client(gate, api_key=API_KEY, api_secret=API_SECRET) as ws:
+        assert ws.authenticated
+        assert ws.logged_in
+
+    login = gate.api_call(ch.LOGIN)
+    payload = login["payload"]
+    assert "req_param" not in payload
+    assert payload["api_key"] == API_KEY
+    assert payload["signature"] == api_sign(
+        API_SECRET, ch.LOGIN, "", int(payload["timestamp"])
+    )
+
+
 async def test_private_subscribe_is_signed(gate: FakeGate) -> None:
     async with await _client(gate, api_key=API_KEY, api_secret=API_SECRET) as ws:
         assert ws.authenticated
+        assert ws.logged_in
         orders = await ws.subscribe_orders()
 
         frame = gate.frames_for(ch.ORDERS)[0]
@@ -290,9 +304,17 @@ ORDER_RESULT = {
 }
 
 
-async def test_place_order_is_signed_and_returns_the_ack(gate: FakeGate) -> None:
+async def test_place_order_skips_ack_echo_and_returns_the_order(
+    gate: FakeGate,
+) -> None:
+    """Gate's first frame is ``ack: true`` with a req_param echo (no pair).
+
+    We must wait for the real order reply — otherwise ``currency_pair`` is
+    empty and symbol resolution blows up with ``spelled ''``.
+    """
     gate.api_data[ch.ORDER_PLACE] = {"result": ORDER_RESULT}
     async with await _client(gate, api_key=API_KEY, api_secret=API_SECRET) as ws:
+        assert ws.logged_in
         ack = await ws.place_order(
             currency_pair="BTC_USDT",
             side="buy",
@@ -302,6 +324,9 @@ async def test_place_order_is_signed_and_returns_the_ack(gate: FakeGate) -> None
             text="42",
         )
 
+    # Login must precede trading; order entry rides the session, not a
+    # per-call signature.
+    assert gate.api_call(ch.LOGIN)["channel"] == ch.LOGIN
     call = gate.api_call(ch.ORDER_PLACE)
     payload = call["payload"]
     param = payload["req_param"]
@@ -313,16 +338,12 @@ async def test_place_order_is_signed_and_returns_the_ack(gate: FakeGate) -> None
     assert param["amount"] == "0.001"
     assert param["price"] == "60000"
     assert param["account"] == "spot"
-
-    # Signature covers exactly the req_param serialization that was sent.
-    assert payload["signature"] == api_sign(
-        API_SECRET, ch.ORDER_PLACE, json.dumps(param), int(payload["timestamp"])
-    )
-    assert payload["api_key"] == API_KEY
+    assert "signature" not in payload
+    assert "api_key" not in payload
 
     assert ack.id == "1852454420"
     assert ack.client_order_id == "42"
-    assert ack.to_order().status is OrderStatus.OPEN
+    assert ack.to_order().status is OrderStatus.NEW
     assert ack.to_order().symbol == "BTC_USDT"
 
 
@@ -434,7 +455,11 @@ async def test_concurrent_calls_correlate_by_req_id(gate: FakeGate) -> None:
         )
 
     assert first.id == second.id == "1852454420"
-    req_ids = {c["payload"]["req_id"] for c in gate.api_calls}
+    req_ids = {
+        c["payload"]["req_id"]
+        for c in gate.api_calls
+        if c["channel"] == ch.ORDER_CANCEL
+    }
     assert len(req_ids) == 2, "each call must carry its own req_id"
 
 

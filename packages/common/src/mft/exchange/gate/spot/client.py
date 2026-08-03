@@ -1,11 +1,10 @@
 """Gate spot WebSocket v4 client — one socket for public and private channels.
 
-Gate serves everything from ``wss://api.gateio.ws/ws/v4/`` with one envelope
-and one auth mechanism, so this adapter is one class rather than the usual
-public/private split. Credentials are optional: supply them and the private
-channels unlock on the same connection, omit them and the public channels work
-unchanged. There is no login round-trip — the signature rides on each private
-subscribe frame.
+Gate serves everything from ``wss://api.gateio.ws/ws/v4/`` with one envelope,
+so this adapter is one class rather than the usual public/private split.
+Credentials are optional: supply them and private channel subscribe frames
+are signed, plus ``spot.login`` runs so trading API calls can proceed. Omit
+them and the public channels work unchanged.
 
 This is an adapter, not a normalized venue interface. Pairs stay in Gate's
 ``BTC_USDT`` spelling, streams are typed with Gate's own message models, and
@@ -45,9 +44,10 @@ from mft.exchange.gate.spot.models import (
 from mft.exchange.gate.spot.protocol import (
     GateResponse,
     GateWsError,
-    api_frame,
+    login_frame,
     ping_frame,
     request_frame,
+    session_api_frame,
 )
 from mft.exchange.models import OrderType, Side
 from mft.exchange.stream import EventStream
@@ -146,6 +146,8 @@ class GateSpotWebSocket:
         self._tasks: list[asyncio.Task[Any]] = []
         self._connected = False
         self._closing = False
+        self._reconnect_cbs: list = []
+        self._logged_in = False
         self.stats = _Stats()
 
     # --- lifecycle ---------------------------------------------------------
@@ -156,26 +158,40 @@ class GateSpotWebSocket:
 
     @property
     def authenticated(self) -> bool:
-        """Whether private channels are available on this connection."""
+        """Whether credentials are configured (private channels + trading)."""
         return bool(self.api_key and self.api_secret)
+
+    @property
+    def logged_in(self) -> bool:
+        """Whether ``spot.login`` has succeeded on the current socket."""
+        return self._logged_in
 
     async def connect(self) -> None:
         if self._connected:
             return
         self._closing = False
-        await self._open()
-        self._tasks = [
-            asyncio.create_task(self._read_loop(), name="gate-spot-read"),
-        ]
-        if self.ping_interval > 0:
-            self._tasks.append(
-                asyncio.create_task(self._ping_loop(), name="gate-spot-ping")
-            )
-        self._connected = True
+        try:
+            await self._open()
+            # Login before the read loop starts so reconnect can reuse the
+            # same inline recv path (no concurrent pump yet).
+            if self.authenticated:
+                await self._authenticate_socket()
+            self._tasks = [
+                asyncio.create_task(self._read_loop(), name="gate-spot-read"),
+            ]
+            if self.ping_interval > 0:
+                self._tasks.append(
+                    asyncio.create_task(self._ping_loop(), name="gate-spot-ping")
+                )
+            self._connected = True
+        except Exception:
+            await self.close()
+            raise
 
     async def close(self) -> None:
         self._closing = True
         self._connected = False
+        self._logged_in = False
         for task in self._tasks:
             task.cancel()
         if self._tasks:
@@ -200,8 +216,69 @@ class GateSpotWebSocket:
     async def __aexit__(self, *args: object) -> None:
         await self.close()
 
+    def on_reconnect(self, callback) -> None:
+        """Register a callback fired after the socket is back and resubscribed."""
+        self._reconnect_cbs.append(callback)
+
+    def _fire_reconnect(self) -> None:
+        for cb in list(self._reconnect_cbs):
+            try:
+                result = cb()
+            except Exception:
+                logger.exception("gate.spot reconnect callback failed")
+                continue
+            if asyncio.iscoroutine(result):
+                asyncio.create_task(result, name="gate-spot-reconnect-cb")
+
     async def _open(self) -> None:
         self._conn = await connect(self.url)
+
+    async def _authenticate_socket(self) -> None:
+        """Run ``spot.login`` on the current socket (no concurrent reader).
+
+        Used from :meth:`connect` and the reconnect path, both of which call
+        this while the pump is stopped so the login reply can be read inline.
+        """
+        if self._conn is None or not self.api_key or not self.api_secret:
+            raise ExchangeError("spot.login requires a live socket and credentials")
+        frame, req_id = login_frame(api_key=self.api_key, api_secret=self.api_secret)
+        await self._conn.send(json.dumps(frame))
+        deadline = asyncio.get_running_loop().time() + self.ack_timeout
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise GateWsError(
+                    None,
+                    f"no reply to {ch.LOGIN} within {self.ack_timeout}s",
+                    channel=ch.LOGIN,
+                )
+            raw = await asyncio.wait_for(self._conn.recv(), timeout=remaining)
+            self.stats.frames += 1
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                logger.warning("gate.spot non-JSON frame during login: %r", raw[:200])
+                continue
+            if not isinstance(message, dict):
+                continue
+            resp = GateResponse(message)
+            if resp.channel == ch.PONG:
+                self.stats.last_pong_at = asyncio.get_running_loop().time()
+                continue
+            if resp.ack:
+                continue
+            if resp.is_api and (
+                resp.req_id == req_id or resp.channel == ch.LOGIN
+            ):
+                resp.raise_for_error()
+                self._logged_in = True
+                logger.info("gate.spot logged in")
+                return
+            logger.warning(
+                "gate.spot dropping pre-login frame channel=%s event=%s",
+                resp.channel,
+                resp.event,
+            )
 
     def _ensure_connected(self) -> None:
         if not self._connected or self._conn is None:
@@ -394,20 +471,23 @@ class GateSpotWebSocket:
         *,
         timeout: float | None = None,
     ) -> Any:
-        """Make a signed trading call and return ``data.result``.
+        """Make a session-authenticated trading call and return ``data.result``.
 
-        The escape hatch for calls not wrapped below (``spot.order_amend``,
-        ``spot.order_status``, ``spot.order_cancel_cp``): pass the channel and
-        its ``req_param`` object straight through.
+        Requires a prior ``spot.login`` (done automatically by :meth:`connect`
+        when credentials are set). The escape hatch for calls not wrapped below
+        (``spot.order_amend``, ``spot.order_status``, ``spot.order_cancel_cp``):
+        pass the channel and its ``req_param`` object straight through.
         """
         self._ensure_connected()
         self._ensure_auth(channel)
-        assert self.api_key and self.api_secret
-        frame, req_id = api_frame(
+        if not self._logged_in:
+            raise ExchangeError(
+                f"{channel} requires spot.login; reconnect or call connect() "
+                "with api_key/api_secret"
+            )
+        frame, req_id = session_api_frame(
             channel,
             req_param,
-            api_key=self.api_key,
-            api_secret=self.api_secret,
             channel_id=self.channel_id,
         )
         loop = asyncio.get_running_loop()
@@ -558,11 +638,18 @@ class GateSpotWebSocket:
             await asyncio.sleep(delay)
             try:
                 await self._open()
+                self._logged_in = False
+                if self.authenticated:
+                    await self._authenticate_socket()
                 await self._resubscribe()
             except Exception:
                 logger.exception("gate.spot reconnect failed")
                 continue
             self.stats.reconnects += 1
+            # Whatever happened while the socket was down was not reported.
+            # Tell the owner so it can rebuild state instead of trusting a
+            # book that stopped being updated at some unknown point.
+            self._fire_reconnect()
             retries = 0
 
     async def _pump(self) -> None:
@@ -644,6 +731,7 @@ class GateSpotWebSocket:
 
     def _fail_streams(self) -> None:
         self._connected = False
+        self._logged_in = False
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()

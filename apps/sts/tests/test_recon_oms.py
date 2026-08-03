@@ -7,7 +7,7 @@ import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange
-from mft.exchange.models import Side
+from mft.exchange.models import Side, is_terminal
 from mft.protocol import (
     ReconDone,
     StsCreateSessionRequest,
@@ -107,18 +107,23 @@ async def test_recon_handshake_and_strategy_oms(broker: Broker) -> None:
     assert strat.last.oms.balances
     assert len(strat.last.oms.orders) >= 1
 
-    # OMS mirror populated from td.oms.{api_id}
+    # STS reads TD's state out of Redis; it keeps no mirror of its own.
     for _ in range(20):
-        view = strat.oms.get(1)
-        if view is not None and view.orders:
+        orders = await strat.oms.orders(1)
+        if orders:
             break
         await asyncio.sleep(0.05)
-    view = strat.oms[1]
-    assert len(view.orders) >= 1
-    assert view.balances  # paper seeds quote/base balances
-    # Local mirror should match ReconDone snapshot balances.
+    assert len(orders) >= 1
+    # Keyed by client_order_id, and every entry still live.
+    for cid, order in orders.items():
+        assert cid == (order.client_order_id or order.order_id)
+        assert not is_terminal(order.status)
+
+    balances = await strat.ledger.balances(1)
+    assert balances  # paper seeds quote/base balances
+    # What STS reads must equal what TD reported in ReconDone.
     assert {
-        a: (str(b.free), str(b.locked)) for a, b in view.balances.items()
+        a: (str(b.free), str(b.locked)) for a, b in balances.items()
     } == {
         a: (str(b.free), str(b.locked))
         for a, b in strat.last.oms.balances.items()

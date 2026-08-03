@@ -1,33 +1,76 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { api, formatTs, type ApiCredential } from '$lib/api';
-
-	const VENUES = ['paper'] as const;
-	const TYPES = ['HMAC', 'ED25519'] as const;
+	import { onMount, untrack } from 'svelte';
+	import { api, formatTs, type ApiCredential, type Venue } from '$lib/api';
 
 	let rows = $state<ApiCredential[]>([]);
+	let venues = $state<Venue[]>([]);
+	// Instruments the symbol plane holds per venue. Advisory only — sym being
+	// down must not block registering a credential.
+	let symCounts = $state<Record<string, number>>({});
 	let error = $state<string | null>(null);
 	let busy = $state(false);
 	let loading = $state(true);
 
 	let name = $state('');
-	let venue = $state<(typeof VENUES)[number]>('paper');
+	let venue = $state('');
 	let apiKey = $state('');
 	let apiSecret = $state('');
-	let type = $state<(typeof TYPES)[number]>('HMAC');
+	let type = $state('HMAC');
 	let passphrase = $state('');
+
+	const selected = $derived(venues.find((v) => v.name === venue) ?? null);
+	const types = $derived(selected?.api_types ?? []);
+	const needsPassphrase = $derived(selected?.requires_passphrase ?? false);
+	const canSubmit = $derived(
+		!busy &&
+			!!venue &&
+			!!name.trim() &&
+			!!apiKey.trim() &&
+			!!apiSecret &&
+			(!needsPassphrase || !!passphrase.trim())
+	);
+
+	// Venues differ in which algorithms they sign with, so a type carried over
+	// from a previous selection can be one this venue would reject with a 400.
+	// Clamp it here rather than letting the form submit something invalid.
+	$effect(() => {
+		const allowed = types;
+		untrack(() => {
+			if (!allowed.includes(type)) type = allowed[0] ?? 'HMAC';
+			if (!needsPassphrase) passphrase = '';
+		});
+	});
+
+	async function loadVenues() {
+		const res = await api.venues();
+		venues = res.venues;
+		// Keep the selection valid across reloads; default to the first venue.
+		if (!venues.some((v) => v.name === venue)) {
+			venue = venues[0]?.name ?? '';
+		}
+	}
+
+	async function loadSymCounts() {
+		try {
+			const res = await api.symVenues();
+			symCounts = res.counts;
+		} catch {
+			symCounts = {};
+		}
+	}
 
 	async function refresh() {
 		loading = true;
 		error = null;
 		try {
-			const res = await api.apis();
+			const [res] = await Promise.all([api.apis(), loadVenues()]);
 			rows = res.apis;
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			loading = false;
 		}
+		await loadSymCounts();
 	}
 
 	async function create() {
@@ -40,7 +83,7 @@
 				api_key: apiKey.trim(),
 				api_secret: apiSecret,
 				type,
-				passphrase: passphrase.trim() || undefined
+				passphrase: needsPassphrase ? passphrase.trim() : undefined
 			});
 			name = '';
 			apiKey = '';
@@ -95,16 +138,16 @@
 	</label>
 	<label>
 		Venue
-		<select bind:value={venue} disabled={busy}>
-			{#each VENUES as v}
-				<option value={v}>{v}</option>
+		<select bind:value={venue} disabled={busy || venues.length === 0}>
+			{#each venues as v (v.name)}
+				<option value={v.name}>{v.label}{v.simulated ? ' (simulated)' : ''}</option>
 			{/each}
 		</select>
 	</label>
 	<label>
 		Type
-		<select bind:value={type} disabled={busy}>
-			{#each TYPES as t}
+		<select bind:value={type} disabled={busy || types.length < 2}>
+			{#each types as t}
 				<option value={t}>{t}</option>
 			{/each}
 		</select>
@@ -123,17 +166,31 @@
 			autocomplete="new-password"
 		/>
 	</label>
-	<label>
-		Passphrase
-		<input bind:value={passphrase} disabled={busy} placeholder="optional" />
-	</label>
-	<button
-		type="button"
-		onclick={create}
-		disabled={busy || !name.trim() || !apiKey.trim() || !apiSecret}
-	>
-		Add
-	</button>
+	{#if needsPassphrase}
+		<label>
+			Passphrase
+			<input
+				bind:value={passphrase}
+				disabled={busy}
+				type="password"
+				placeholder="required"
+				autocomplete="new-password"
+			/>
+		</label>
+	{/if}
+	<button type="button" onclick={create} disabled={!canSubmit}>Add</button>
+	{#if selected}
+		<p class="venue-hint">
+			<code>{selected.name}</code>
+			· signs with {selected.api_types.join(' / ')}
+			{#if selected.symbol_example}
+				· symbols like <code>{selected.symbol_example}</code>
+			{/if}
+			{#if symCounts[selected.name] != null}
+				· {symCounts[selected.name]} tracked by sym
+			{/if}
+		</p>
+	{/if}
 </section>
 
 <section class="panel table-wrap">
@@ -207,6 +264,13 @@
 		padding: 0.55rem 0.65rem;
 		border-radius: var(--radius);
 		min-width: 10rem;
+	}
+
+	.venue-hint {
+		flex-basis: 100%;
+		margin: 0;
+		font-size: 0.78rem;
+		color: var(--muted);
 	}
 
 	.table-wrap {

@@ -377,9 +377,15 @@ class SessionManager:
                         "MD lease expired session=%s", link.session_id
                     )
                     if self._links.get(link.session_id) is link:
-                        await self.detach(
-                            session_id=link.session_id,
-                            reason="lease_expired",
+                        # Detach on a sibling task — awaiting it here cancels
+                        # this lease loop from inside its own watchdog and can
+                        # recurse into RecursionError.
+                        asyncio.create_task(
+                            self.detach(
+                                session_id=link.session_id,
+                                reason="lease_expired",
+                            ),
+                            name=f"md-detach-{link.session_id}",
                         )
                     return
 

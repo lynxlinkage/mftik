@@ -9,9 +9,14 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
-from mft.broker import Broker
+from mft.broker import Broker, IncomingRequest
 from mft.exchange.errors import ExchangeError
-from mft.exchange.models import Order, OrderStatus, PlaceOrderRequest
+from mft.exchange.models import (
+    Order,
+    OrderStatus,
+    PlaceOrderRequest,
+    is_terminal,
+)
 from mft.protocol import (
     STS_DETACH,
     STS_LEASE_HEARTBEAT,
@@ -19,11 +24,14 @@ from mft.protocol import (
     STS_ORDER_SUBMIT,
     STS_RECON,
     TD_LEASE_ACK,
+    TD_ORDER_ACK,
     TD_RECON_DONE,
     Envelope,
     LeaseAck,
     LeaseHeartbeat,
     ListSessionsRequest,
+    OrderAck,
+    OrderAckEnvelope,
     OrderCancel,
     OrderSubmit,
     Recon,
@@ -46,11 +54,10 @@ PersistLive = Callable[..., Awaitable[Any]]
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
 
-LEASE_GRACE_S = 3.0
+#: STS heartbeats every ~1s; grace must tolerate brief lease-loop stalls
+#: (e.g. a slow venue round-trip) without false expiry.
+LEASE_GRACE_S = 5.0
 
-TERMINAL_STATUSES = frozenset(
-    {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED}
-)
 
 
 @dataclass
@@ -74,6 +81,9 @@ class TradingAccount:
     links: dict[str, StsLink] = field(default_factory=dict)
     global_task: asyncio.Task[Any] | None = None
     global_stop: asyncio.Event = field(default_factory=asyncio.Event)
+    #: Serves STS order entry on ``td.order.{api_id}``. Shares ``global_stop``
+    #: — both live exactly as long as the account does.
+    order_task: asyncio.Task[Any] | None = None
     #: ``client_order_id`` → the STS ``session_id`` that submitted it, kept
     #: until the order reaches a terminal state. Advisory only: a cancel from
     #: another session is logged, never blocked. Recon-discovered orders have
@@ -122,10 +132,14 @@ class SessionManager:
             await trading.start()
             acct = TradingAccount(api_id=request.api_id, trading=trading)
             self._accounts[request.api_id] = acct
-            trading.on_order(partial(self._prune_cid_owner, acct))
+            trading.on_order(partial(self._on_order_settled, acct))
             acct.global_task = asyncio.create_task(
                 self._global_keepalive(acct),
                 name=f"td-global-{request.api_id}",
+            )
+            acct.order_task = asyncio.create_task(
+                self._serve_orders(acct),
+                name=f"td-orders-{request.api_id}",
             )
             logger.info("TD trading started api_id=%s (refcount 0→1)", request.api_id)
             await publish_td_log(
@@ -255,30 +269,62 @@ class SessionManager:
     ) -> None:
         acct = self._accounts.get(api_id)
         if acct is None:
+            # Process may have already dropped the account; still close the
+            # DB row so the UI cannot show a live TD with no STS.
+            if self._mark_done is not None:
+                await self._mark_done(session_id=session_id, api_id=api_id)
             return
+
         link = acct.links.pop(session_id, None)
-        if link is None:
-            return
-        before = acct.refcount + 1  # just popped
+        before = acct.refcount + (1 if link is not None else 0)
         after = acct.refcount
-        await self._stop_link(link)
+
+        if link is not None:
+            try:
+                await self._stop_link(link)
+            except Exception:
+                logger.exception(
+                    "TD stop_link failed session=%s api_id=%s",
+                    session_id,
+                    api_id,
+                )
+
+        # Always mark done — even on a retry after a partial detach — so a
+        # crashed lease teardown cannot leave a permanent live DB row.
         if self._mark_done is not None:
-            await self._mark_done(session_id=session_id, api_id=api_id)
-        await publish_td_log(
-            self._broker,
-            api_id,
-            f"{reason} sts={session_id} refcount {before}→{after}",
-            source="td",
-        )
-        logger.info(
-            "TD detached session=%s api_id=%s refcount %s→%s (%s)",
-            session_id,
-            api_id,
-            before,
-            after,
-            reason,
-        )
-        if after == 0:
+            try:
+                await self._mark_done(session_id=session_id, api_id=api_id)
+            except Exception:
+                logger.exception(
+                    "TD mark_done failed session=%s api_id=%s",
+                    session_id,
+                    api_id,
+                )
+
+        if link is not None:
+            await publish_td_log(
+                self._broker,
+                api_id,
+                f"{reason} sts={session_id} refcount {before}→{after}",
+                source="td",
+            )
+            logger.info(
+                "TD detached session=%s api_id=%s refcount %s→%s (%s)",
+                session_id,
+                api_id,
+                before,
+                after,
+                reason,
+            )
+        elif after == 0:
+            logger.info(
+                "TD orphan cleanup session=%s api_id=%s reason=%s",
+                session_id,
+                api_id,
+                reason,
+            )
+
+        if after == 0 and api_id in self._accounts:
             await self._destroy_account(api_id)
             await publish_td_log(
                 self._broker,
@@ -313,6 +359,12 @@ class SessionManager:
         if acct.global_task is not None and acct.global_task is not current:
             acct.global_task.cancel()
             await asyncio.gather(acct.global_task, return_exceptions=True)
+        # The order loop parks in a blocking BLPOP. Cancelling it there leaves
+        # the unread reply on the pooled connection and corrupts whatever runs
+        # next on it, so let it retire on its own: ``serve`` rechecks the stop
+        # event between polls, which bounds this to about a second.
+        if acct.order_task is not None and acct.order_task is not current:
+            await asyncio.gather(acct.order_task, return_exceptions=True)
         for link in list(acct.links.values()):
             await self._stop_link(link)
             if self._mark_done is not None:
@@ -367,10 +419,19 @@ class SessionManager:
                         link.api_id,
                     )
                     if acct.links.get(link.session_id) is link:
-                        await self.detach(
-                            session_id=link.session_id,
-                            api_id=link.api_id,
-                            reason="lease_expired",
+                        # Detach on a sibling task — awaiting it here cancels
+                        # this lease loop from inside its own watchdog and
+                        # previously blew up with RecursionError, leaving the
+                        # DB row live forever.
+                        asyncio.create_task(
+                            self.detach(
+                                session_id=link.session_id,
+                                api_id=link.api_id,
+                                reason="lease_expired",
+                            ),
+                            name=(
+                                f"td-detach-{link.api_id}-{link.session_id}"
+                            ),
                         )
                     return
 
@@ -403,17 +464,18 @@ class SessionManager:
                     )
                     continue
 
+                # Venue I/O must not stall heartbeat reads — otherwise the
+                # watchdog false-expires a still-live STS.
                 if env.type == STS_RECON:
-                    await self._handle_recon(acct, link, td_topic, env.payload)
+                    asyncio.create_task(
+                        self._handle_recon(acct, link, td_topic, env.payload),
+                        name=f"td-recon-{link.api_id}-{link.session_id}",
+                    )
                     continue
 
-                if env.type == STS_ORDER_SUBMIT:
-                    await self._handle_order_submit(acct, link, env.payload)
-                    continue
-
-                if env.type == STS_ORDER_CANCEL:
-                    await self._handle_order_cancel(acct, link, env.payload)
-                    continue
+                # Order entry does not come through here: it is request-reply
+                # on td.order.{api_id} so the strategy learns whether TD took
+                # the order. This loop carries lease/recon/detach only.
 
                 if env.type == STS_DETACH:
                     try:
@@ -434,16 +496,29 @@ class SessionManager:
             watchdog.cancel()
             await asyncio.gather(watchdog, return_exceptions=True)
 
-    def _prune_cid_owner(self, acct: TradingAccount, order: Order) -> None:
-        """Drop cid ownership once an order reaches a terminal state.
+    def _on_order_settled(self, acct: TradingAccount, order: Order) -> None:
+        """Release what an order was holding once the venue owns the outcome.
 
-        Registered on the trading session's order callbacks so the map does
-        not grow without bound.
+        Registered on the trading session's order callbacks. Two things end
+        here: cid ownership (so the map does not grow without bound) and the
+        pre-lock (so the funds go back to available).
+
+        The release happens as soon as the venue acknowledges the order at
+        all, not only at a terminal state: from ``NEW`` onward the venue is
+        reporting the money as locked itself, and keeping our reservation too
+        would double-count it. Releasing on a cid we no longer hold is a
+        no-op, so repeated updates for the same order are harmless.
         """
-        if order.status not in TERMINAL_STATUSES:
+        cid = order.client_order_id
+        if not cid:
             return
-        if order.client_order_id:
-            acct.cid_owner.pop(order.client_order_id, None)
+        if order.status is not OrderStatus.PENDING_NEW:
+            asyncio.create_task(
+                acct.trading.release(cid),
+                name=f"td-release-{acct.api_id}-{cid}",
+            )
+        if is_terminal(order.status):
+            acct.cid_owner.pop(cid, None)
 
     async def _handle_recon(
         self,
@@ -508,6 +583,161 @@ class SessionManager:
                 level="error",
             )
 
+    async def _serve_orders(self, acct: TradingAccount) -> None:
+        """Answer STS order entry on ``td.order.{api_id}`` while the account lives."""
+        subject = Topics.td_order(acct.api_id)
+        logger.info("TD order RPC listening api_id=%s subject=%s", acct.api_id, subject)
+        try:
+            async for req in self._broker.serve(subject, stop=acct.global_stop):
+                await self._handle_order_rpc(acct, req)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("TD order RPC loop failed api_id=%s", acct.api_id)
+
+    async def _handle_order_rpc(
+        self, acct: TradingAccount, req: IncomingRequest
+    ) -> None:
+        """Ack an order request, then run the venue call out of band.
+
+        The reply goes out before any venue I/O on purpose: this is the same
+        constraint the pub/sub path has — a slow round-trip must not stall the
+        loop — and it is what makes the ack cheap enough to be synchronous.
+        ``accepted`` therefore says TD took the request, nothing about the
+        venue's answer, which still comes back on ``td.{api_id}.global``.
+        """
+        env = req.envelope
+        if env.type == STS_ORDER_SUBMIT:
+            model: type[OrderSubmit] | type[OrderCancel] = OrderSubmit
+            handler = self._handle_order_submit
+        elif env.type == STS_ORDER_CANCEL:
+            model = OrderCancel
+            handler = self._handle_order_cancel
+        else:
+            await self._reply_order_ack(
+                req, acct.api_id, "", False, f"unsupported request {env.type!r}"
+            )
+            return
+
+        try:
+            payload = model.model_validate(env.payload or {})
+        except Exception as exc:
+            await self._reply_order_ack(
+                req, acct.api_id, "", False, f"invalid payload: {exc}"
+            )
+            return
+
+        cid = payload.client_order_id
+        if payload.api_id != acct.api_id:
+            await self._reply_order_ack(
+                req, acct.api_id, cid, False, f"wrong api_id {payload.api_id}"
+            )
+            return
+
+        link = acct.links.get(payload.session_id)
+        if link is None:
+            await self._reply_order_ack(
+                req,
+                acct.api_id,
+                cid,
+                False,
+                f"session {payload.session_id!r} not attached to "
+                f"api_id={acct.api_id}",
+            )
+            return
+
+        # A submit commits funds. Pre-lock them before the ack so the caller
+        # cannot be told True for an order the account cannot afford, and so a
+        # second submit in the same round-trip sees the money already spoken
+        # for. A refusal here means nothing was sent and no order event will
+        # ever follow — the False is the whole story.
+        if isinstance(payload, OrderSubmit):
+            request = PlaceOrderRequest(
+                symbol=payload.symbol,
+                side=payload.side,
+                type=payload.type,
+                qty=payload.qty,
+                price=payload.price,
+                client_order_id=cid,
+            )
+            refusal = await acct.trading.reserve(request)
+            if refusal is not None:
+                await self._reply_order_ack(
+                    req, acct.api_id, cid, False, f"insufficient balance: {refusal}"
+                )
+                return
+            # Book it PENDING_NEW and get it into Redis before the ack. A
+            # strategy told True can then read the order it just placed; if
+            # this write fails the ack is False and no order event follows,
+            # so False stays a complete answer.
+            try:
+                await acct.trading.record_pending_new(request)
+            except Exception as exc:
+                await acct.trading.release(cid)
+                logger.exception(
+                    "TD could not record PENDING_NEW api_id=%s cid=%s",
+                    acct.api_id,
+                    cid,
+                )
+                await self._reply_order_ack(
+                    req, acct.api_id, cid, False, f"state write failed: {exc}"
+                )
+                return
+        else:
+            # A cancel has no funds to commit, but it does have a state the
+            # order must legally be in. PENDING_NEW has no venue id to cancel
+            # against and a finished order has nothing left to cancel, so both
+            # are refused here rather than sent and rejected by the venue.
+            try:
+                refusal = await acct.trading.record_pending_cancel(cid)
+            except Exception as exc:
+                logger.exception(
+                    "TD could not record PENDING_CANCEL api_id=%s cid=%s",
+                    acct.api_id,
+                    cid,
+                )
+                await self._reply_order_ack(
+                    req, acct.api_id, cid, False, f"state write failed: {exc}"
+                )
+                return
+            if refusal is not None:
+                await self._reply_order_ack(req, acct.api_id, cid, False, refusal)
+                return
+
+        await self._reply_order_ack(req, acct.api_id, cid, True, "")
+        asyncio.create_task(
+            handler(acct, link, env.payload),
+            name=f"td-order-{acct.api_id}-{link.session_id}",
+        )
+
+    async def _reply_order_ack(
+        self,
+        req: IncomingRequest,
+        api_id: int,
+        client_order_id: str,
+        accepted: bool,
+        reason: str,
+    ) -> None:
+        if not accepted:
+            logger.warning(
+                "TD order request refused api_id=%s cid=%s: %s",
+                api_id,
+                client_order_id,
+                reason,
+            )
+        await req.reply(
+            OrderAckEnvelope.wrap(
+                OrderAck(
+                    api_id=api_id,
+                    client_order_id=client_order_id,
+                    accepted=accepted,
+                    reason=reason,
+                ),
+                type=TD_ORDER_ACK,
+                source="td",
+            )
+        )
+
     async def _handle_order_submit(
         self,
         acct: TradingAccount,
@@ -550,6 +780,8 @@ class SessionManager:
             )
         except ExchangeError as exc:
             acct.cid_owner.pop(req.client_order_id, None)
+            # Settle the PENDING_NEW we booked before announcing the refusal.
+            await acct.trading.record_rejected(req.client_order_id)
             await acct.trading.publish_order_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,
@@ -573,6 +805,7 @@ class SessionManager:
                 link.api_id,
                 req.client_order_id,
             )
+            await acct.trading.record_rejected(req.client_order_id)
             await acct.trading.publish_order_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,
@@ -634,6 +867,9 @@ class SessionManager:
                 source="td",
             )
         except ExchangeError as exc:
+            # The venue refused it, so the order is still working: put it back
+            # before telling anyone, or PENDING_CANCEL sticks forever.
+            await acct.trading.revert_pending_cancel(req.client_order_id)
             await acct.trading.publish_cancel_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,
@@ -655,6 +891,7 @@ class SessionManager:
                 link.api_id,
                 req.client_order_id,
             )
+            await acct.trading.revert_pending_cancel(req.client_order_id)
             await acct.trading.publish_cancel_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,

@@ -381,7 +381,8 @@ class PaperExchange:
             symbol=request.symbol,
             side=request.side,
             type=request.type,
-            status=OrderStatus.NEW,
+            # Not yet matched — the engine overwrites this before it emits.
+            status=OrderStatus.PENDING_NEW,
             qty=request.qty,
             price=limit_price,
             filled_qty=Decimal("0"),
@@ -413,7 +414,7 @@ class PaperExchange:
             status = (
                 OrderStatus.PARTIALLY_FILLED
                 if filled_qty > 0
-                else OrderStatus.OPEN
+                else OrderStatus.NEW
             )
             avg = (notional / filled_qty) if filled_qty > 0 else None
             order = order.model_copy(

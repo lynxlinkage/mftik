@@ -6,7 +6,8 @@
 		defaultStrategyYml,
 		formatTs,
 		shortId,
-		type StrategyRow
+		type StrategyRow,
+		type StrategyYaml
 	} from '$lib/api';
 
 	let strategies = $state<StrategyRow[]>([]);
@@ -15,6 +16,11 @@
 	let error = $state<string | null>(null);
 	let busy = $state(false);
 	let loading = $state(true);
+
+	// The strategy.yml of a past deploy, rebuilt on demand from the stored spec.
+	let viewing = $state<StrategyYaml | null>(null);
+	let viewingId = $state<number | null>(null);
+	let copied = $state(false);
 
 	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
 
@@ -53,6 +59,43 @@
 
 	function resetTemplate() {
 		yamlText = defaultStrategyYml();
+	}
+
+	async function showYaml(s: StrategyRow) {
+		// Second click on the same row closes the panel.
+		if (viewingId === s.id) {
+			viewing = null;
+			viewingId = null;
+			return;
+		}
+		viewingId = s.id;
+		viewing = null;
+		error = null;
+		try {
+			viewing = await api.strategyYaml(s.id);
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+			viewingId = null;
+		}
+	}
+
+	async function copyYaml() {
+		if (viewing === null) return;
+		try {
+			await navigator.clipboard.writeText(viewing.yaml);
+			copied = true;
+			setTimeout(() => (copied = false), 1500);
+		} catch {
+			error = 'Clipboard unavailable — select the text and copy manually.';
+		}
+	}
+
+	function loadIntoEditor() {
+		if (viewing === null) return;
+		yamlText = viewing.yaml;
+		viewing = null;
+		viewingId = null;
+		window.scrollTo({ top: 0, behavior: 'smooth' });
 	}
 
 	async function togglePause(s: StrategyRow) {
@@ -177,10 +220,50 @@
 										Stop
 									</button>
 								{/if}
+								<button
+									type="button"
+									class="secondary"
+									class:active={viewingId === s.id}
+									onclick={() => showYaml(s)}
+								>
+									YAML
+								</button>
 								<a class="link-btn" href={`/sts/${s.sts_session}`}>Logs</a>
 							</div>
 						</td>
 					</tr>
+					{#if viewingId === s.id}
+						<tr class="yaml-row">
+							<td colspan="6">
+								{#if viewing === null}
+									<p class="muted small">Rebuilding…</p>
+								{:else}
+									<div class="yaml-head">
+										<span class="muted small">
+											Rebuilt from the stored spec — the submitted document is not kept, so
+											comments and formatting are gone.
+										</span>
+										<div class="actions">
+											<button type="button" class="secondary" onclick={copyYaml}>
+												{copied ? 'Copied' : 'Copy'}
+											</button>
+											<button type="button" class="secondary" onclick={loadIntoEditor}>
+												Load into editor
+											</button>
+										</div>
+									</div>
+									{#if viewing.unresolved_td.length > 0}
+										<p class="warn small">
+											api {viewing.unresolved_td.join(', ')} no longer exists — the account name
+											could not be recovered, so those <code>td</code> entries are placeholders and
+											will not redeploy as-is.
+										</p>
+									{/if}
+									<pre class="yml-view">{viewing.yaml}</pre>
+								{/if}
+							</td>
+						</tr>
+					{/if}
 				{/each}
 			</tbody>
 		</table>
@@ -239,6 +322,46 @@
 
 	.table-wrap {
 		overflow-x: auto;
+	}
+
+	.actions button.active {
+		border-color: var(--accent);
+		color: var(--text);
+	}
+
+	.yaml-row td {
+		background: var(--bg);
+	}
+
+	.yaml-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		margin-bottom: 0.6rem;
+	}
+
+	.small {
+		font-size: 0.78rem;
+	}
+
+	.warn {
+		margin: 0 0 0.6rem;
+		color: var(--warn);
+	}
+
+	.yml-view {
+		margin: 0;
+		padding: 0.85rem 1rem;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+		font-size: 0.82rem;
+		line-height: 1.45;
+		overflow-x: auto;
+		white-space: pre;
 	}
 
 	.badge.done {

@@ -80,6 +80,23 @@ class Topics:
         return f"md.{session_id}"
 
     @staticmethod
+    def td_order(api_id: int) -> str:
+        """STS → TD request-reply subject for order entry.
+
+        Per-account on purpose: ``serve`` is a competing-consumer BLPOP, so a
+        shared subject would let a TD process that does not hold this account
+        take the request. One subject per api_id makes the account's owner the
+        only consumer — and a request sent while nobody owns it waits in the
+        list rather than vanishing the way a pub/sub message would.
+        """
+        return f"td.order.{api_id}"
+
+    @staticmethod
+    def td_ledger(api_id: int) -> str:
+        """TD → STS balance-ledger fan-out (venue balances + TD pre-locks)."""
+        return f"td.ledger.{api_id}"
+
+    @staticmethod
     def td_oms(api_id: int) -> str:
         """TD → STS OMS snapshot fan-out for a trading account."""
         return f"td.oms.{api_id}"

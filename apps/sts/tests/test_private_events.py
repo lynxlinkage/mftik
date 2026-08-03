@@ -156,6 +156,21 @@ async def _boot(
     return strat, sts, td, paper
 
 
+async def _await_status(strat, status: OrderStatus, timeout: float = 3.0):
+    """Next order_update carrying ``status``.
+
+    TD now books an order PENDING_NEW before it reaches the venue, so every
+    submit raises two updates: the local one, then the venue's.
+    """
+    async def _scan():
+        while True:
+            env = await strat.order_updates.get()
+            if env.payload["status"] == status.value:
+                return env
+
+    return await asyncio.wait_for(_scan(), timeout=timeout)
+
+
 @pytest.mark.asyncio
 async def test_private_events_from_td_global(broker: Broker) -> None:
     strat, sts, td, paper = await _boot(broker)
@@ -170,19 +185,23 @@ async def test_private_events_from_td_global(broker: Broker) -> None:
         strat.fills.get_nowait()
     strat.events.clear()
 
-    cid = await strat.oms.submit_order(
+    assert await strat.oms.submit_order(
         7,
         symbol="BTCUSDT",
         side=Side.BUY,
         qty=Decimal("0.01"),
         type=OrderType.MARKET,
     )
+    cid = strat.oms.last_client_order_id
     slot, _ts, seq = unpack(cid)
     assert slot == strat.cid_slot
     assert seq == 1
     assert strat.owns(cid)
 
-    order_env = await asyncio.wait_for(strat.order_updates.get(), timeout=3.0)
+    # TD books it locally first, then the venue answers.
+    pending_env = await _await_status(strat, OrderStatus.PENDING_NEW)
+    assert pending_env.payload["client_order_id"] == cid
+    order_env = await _await_status(strat, OrderStatus.FILLED)
     fill_env = await asyncio.wait_for(strat.fills.get(), timeout=3.0)
     bal_env = await asyncio.wait_for(strat.balances.get(), timeout=3.0)
 
@@ -216,14 +235,16 @@ async def test_order_and_cancel_reject_paths(broker: Broker) -> None:
     while not strat.order_updates.empty():
         strat.order_updates.get_nowait()
 
-    # Insufficient balance → on_order_reject
-    bad_cid = await strat.oms.submit_order(
+    # Insufficient balance → on_order_reject. TD still acks: the ack means it
+    # took the request, the venue's refusal comes back separately.
+    assert await strat.oms.submit_order(
         7,
         symbol="BTCUSDT",
         side=Side.BUY,
         qty=Decimal("1000"),
         type=OrderType.MARKET,
     )
+    bad_cid = strat.oms.last_client_order_id
     reject_env = await asyncio.wait_for(strat.order_rejects.get(), timeout=3.0)
     assert reject_env.type == TD_ORDER_REJECT
     assert reject_env.payload["client_order_id"] == bad_cid
@@ -231,13 +252,13 @@ async def test_order_and_cancel_reject_paths(broker: Broker) -> None:
     assert unpack(bad_cid)[2] == 1
 
     # Cancel unknown cid → on_cancel_reject
-    await strat.oms.cancel_order(7, bad_cid)
+    assert await strat.oms.cancel_order(7, bad_cid)
     cancel_rej = await asyncio.wait_for(strat.cancel_rejects.get(), timeout=3.0)
     assert cancel_rej.type == TD_CANCEL_REJECT
     assert cancel_rej.payload["client_order_id"] == bad_cid
 
     # Resting limit + cancel by client_order_id → on_order_update
-    cid = await strat.oms.submit_order(
+    assert await strat.oms.submit_order(
         7,
         symbol="BTCUSDT",
         side=Side.BUY,
@@ -245,15 +266,14 @@ async def test_order_and_cancel_reject_paths(broker: Broker) -> None:
         type=OrderType.LIMIT,
         price=Decimal("1000"),
     )
+    cid = strat.oms.last_client_order_id
     assert unpack(cid)[2] == 2
-    open_env = await asyncio.wait_for(strat.order_updates.get(), timeout=3.0)
+    open_env = await _await_status(strat, OrderStatus.NEW)
     assert open_env.payload["client_order_id"] == cid
-    assert open_env.payload["status"] == OrderStatus.OPEN.value
 
-    await strat.oms.cancel_order(7, cid)
-    cancel_env = await asyncio.wait_for(strat.order_updates.get(), timeout=3.0)
+    assert await strat.oms.cancel_order(7, cid)
+    cancel_env = await _await_status(strat, OrderStatus.CANCELED)
     assert cancel_env.payload["client_order_id"] == cid
-    assert cancel_env.payload["status"] == OrderStatus.CANCELED.value
 
     await td.close_all()
     await sts.close_all()

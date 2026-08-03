@@ -15,6 +15,7 @@ from mft_api.routes import (
     md_router,
     stats_router,
     sts_router,
+    sym_router,
     td_router,
 )
 from mft_api.ws import md_log_bridge, sts_log_bridge, td_log_bridge
@@ -54,6 +55,7 @@ app.include_router(apis_router)
 app.include_router(sts_router)
 app.include_router(td_router)
 app.include_router(md_router)
+app.include_router(sym_router)
 app.include_router(audits_router)
 
 

@@ -14,11 +14,14 @@ from mft.protocol import (
     ListSessionsRequest,
     ListSessionsRequestEnvelope,
     ListSessionsResult,
+    StrategySpec,
+    StrategyStsSpec,
     StrategyYamlError,
     StsSessionControlRequest,
     StsSessionControlRequestEnvelope,
     StsSessionControlResult,
     Topics,
+    dump_strategy_yml,
     parse_strategy_yml,
 )
 from mft_db.repositories import AccountRepository, StrategyRepository
@@ -36,6 +39,7 @@ from mft_api.schemas import (
     StrategyListResponse,
     StrategyOut,
     StrategyTypesResponse,
+    StrategyYamlResponse,
     StsControlResponse,
     TdAttachOut,
 )
@@ -101,6 +105,58 @@ async def list_strategies(
             )
         )
     return StrategyListResponse(strategies=out)
+
+
+#: Stand-in for a ``td`` account whose credential has since been deleted. The
+#: name is unrecoverable, so emit something that fails loudly at deploy rather
+#: than something that silently deploys against fewer accounts.
+def _deleted_td_placeholder(api_id: int) -> str:
+    return f"<deleted api_id={api_id}>"
+
+
+@router.get("/strategies/{strategy_id}/yaml", response_model=StrategyYamlResponse)
+async def strategy_yaml(strategy_id: int) -> StrategyYamlResponse:
+    """Rebuild a past deploy as strategy.yml.
+
+    The submitted document is not stored, so this is a reconstruction from the
+    spec that was persisted: ``strategies`` for the sts block and the session
+    row for the td/md attach lists. It parses back to the same spec, but the
+    original comments and formatting are gone.
+    """
+    async with session_scope() as db:
+        row = await StrategyRepository(db).get_with_session(strategy_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"strategy not found: {strategy_id}"
+            )
+
+        session = row.session
+        td_api_ids = [int(v) for v in (session.td_api_ids or [])] if session else []
+        md_ids = [str(v) for v in (session.md_ids or [])] if session else []
+
+        # strategy.yml names accounts; the session stores api ids. Map back.
+        accounts = AccountRepository(db)
+        td_names: list[str] = []
+        unresolved: list[int] = []
+        for api_id in td_api_ids:
+            account = await accounts.get_by_api_id(api_id)
+            if account is None:
+                unresolved.append(api_id)
+                td_names.append(_deleted_td_placeholder(api_id))
+                continue
+            td_names.append(account.name)
+
+    spec = StrategySpec(
+        td=td_names,
+        md=md_ids,
+        sts=StrategyStsSpec(type=row.type, config=dict(row.config or {})),
+    )
+    return StrategyYamlResponse(
+        id=row.id,
+        sts_session=row.sts_session,
+        yaml=dump_strategy_yml(spec),
+        unresolved_td=unresolved,
+    )
 
 
 @router.get("/sessions", response_model=SessionListResponse)

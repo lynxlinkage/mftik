@@ -73,7 +73,7 @@ async def test_remote_private_place_cancel(broker: Broker) -> None:
         qty=Decimal("1"),
         price=Decimal("50000"),
     )
-    assert order.status is OrderStatus.OPEN
+    assert order.status is OrderStatus.NEW
     assert order.client_order_id
 
     canceled = await private.cancel_by_client_order_id(order.client_order_id)

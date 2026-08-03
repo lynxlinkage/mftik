@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from decimal import Decimal
+from typing import Any
 
 import fakeredis.aioredis
 import pytest
@@ -17,6 +18,7 @@ from mft.protocol import (
     STS_ORDER_SUBMIT,
     Envelope,
     LeaseHeartbeat,
+    OrderAck,
     OrderCancel,
     OrderSubmit,
     TdAttachRequest,
@@ -77,9 +79,17 @@ async def _lease_publisher(
             continue
 
 
-async def _submit(broker: Broker, session_id: str, cid: str) -> None:
-    await broker.publish(
-        Topics.sts_td_session(session_id),
+async def _order_rpc(broker: Broker, envelope: Envelope[Any]) -> bool:
+    """Send an order request the way StrategyOms does and return the ack."""
+    reply = await broker.request(
+        Topics.td_order(API_ID), envelope, timeout=2.0
+    )
+    return OrderAck.model_validate(reply.payload).accepted
+
+
+async def _submit(broker: Broker, session_id: str, cid: str) -> bool:
+    return await _order_rpc(
+        broker,
         Envelope[OrderSubmit].wrap(
             OrderSubmit(
                 session_id=session_id,
@@ -98,9 +108,9 @@ async def _submit(broker: Broker, session_id: str, cid: str) -> None:
     )
 
 
-async def _cancel(broker: Broker, session_id: str, cid: str) -> None:
-    await broker.publish(
-        Topics.sts_td_session(session_id),
+async def _cancel(broker: Broker, session_id: str, cid: str) -> bool:
+    return await _order_rpc(
+        broker,
         Envelope[OrderCancel].wrap(
             OrderCancel(
                 session_id=session_id, api_id=API_ID, client_order_id=cid

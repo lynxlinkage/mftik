@@ -10,6 +10,7 @@
 		{ href: '/sts', label: 'STS' },
 		{ href: '/td', label: 'TD' },
 		{ href: '/md', label: 'MD' },
+		{ href: '/sym', label: 'Sym' },
 		{ href: '/audit', label: 'Audit' }
 	] as const;
 

@@ -287,6 +287,22 @@ class OrderCancel(BaseModel):
     client_order_id: str
 
 
+class OrderAck(BaseModel):
+    """TD → STS: reply to a submit/cancel request on ``td.order.{api_id}``.
+
+    ``accepted`` means TD took the request, not that the venue accepted it.
+    The venue outcome still arrives asynchronously on ``td.{api_id}.global``
+    as an order update or a reject.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    client_order_id: str
+    accepted: bool
+    reason: str = ""
+
+
 class OrderReject(BaseModel):
     """TD → STS: submit rejected (publish on ``td.{api_id}.global``)."""
 
@@ -332,6 +348,7 @@ ReconDoneEnvelope = Envelope[ReconDone]
 StsDetachEnvelope = Envelope[StsDetach]
 OrderSubmitEnvelope = Envelope[OrderSubmit]
 OrderCancelEnvelope = Envelope[OrderCancel]
+OrderAckEnvelope = Envelope[OrderAck]
 OrderRejectEnvelope = Envelope[OrderReject]
 CancelRejectEnvelope = Envelope[CancelReject]
 MdLeaseAckEnvelope = Envelope[MdLeaseAck]
@@ -350,8 +367,10 @@ TD_SESSION_LIST = "td.session.list"
 TD_LEASE_ACK = "td.lease.ack"
 TD_RECON_DONE = "td.recon.done"
 TD_OMS_VIEW = "td.oms.view"
+TD_LEDGER_VIEW = "td.ledger.view"
 TD_ORDER_UPDATE = "td.order.update"
 TD_FILL = "td.fill"
+TD_ORDER_ACK = "td.order.ack"
 TD_ORDER_REJECT = "td.order.reject"
 TD_CANCEL_REJECT = "td.cancel.reject"
 TD_BALANCE_UPDATE = "td.balance.update"

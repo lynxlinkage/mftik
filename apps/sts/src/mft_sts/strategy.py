@@ -15,6 +15,7 @@ from mft.protocol import (
 )
 
 from mft_sts.client_order_id import slot_of
+from mft_sts.ledger import StrategyLedger
 from mft_sts.oms import StrategyOms
 from mft_sts.timer import Timer
 
@@ -33,9 +34,17 @@ class Strategy:
 
     TD recon (wired):
         send_recon (auto on first lease ACK), on_recon_done
-        self.oms — read OMS snapshots from ``td.oms.{api_id}``;
-        submit_order mints uint64 client_order_id
-        (session cid_slot | ms since 2026-01-01 | seq++) / cancel by that id
+        self.oms — read OMS snapshots from ``td.oms.{api_id}``
+        self.ledger — read balances from ``td.ledger.{api_id}``; TD owns
+        them, so this is a view: available() is free minus TD's pre-locks
+
+    Order entry — request-reply on ``td.order.{api_id}`` (wired):
+        submit_order / cancel_order return True once TD acks the request.
+        False means it never reached the venue (no ack, or TD refused it).
+        A True says nothing about the venue's answer — that arrives below.
+        submit_order mints the uint64 client_order_id
+        (session cid_slot | ms since 2026-01-01 | seq++) and leaves it in
+        oms.last_client_order_id; cancel_order takes that id.
 
     Private events from ``td.{api_id}.global`` (wired):
         on_order_update, on_fill, on_balance_update
@@ -69,6 +78,8 @@ class Strategy:
         self._paused = False
         self.paras: dict[str, Any] = {}
         self.oms = StrategyOms()
+        #: Read-only balances from TD's ledger (available / free / prelock).
+        self.ledger = StrategyLedger()
         self.timer = Timer()
 
     def bind(self, session: StsSession) -> None:
@@ -80,6 +91,7 @@ class Strategy:
             )
         self.session = session
         self.oms.bind(self, cid_slot=session.cid_slot)
+        self.ledger.bind(self)
         self.timer.bind(self)
 
     @classmethod

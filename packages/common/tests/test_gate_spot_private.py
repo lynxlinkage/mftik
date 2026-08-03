@@ -181,7 +181,7 @@ async def test_rest_flattens_grouped_open_orders(
     # The REST layer stays venue-native; the private client translates.
     assert orders[0].symbol == "BTC_USDT"
     assert orders[0].client_order_id == "42"
-    assert orders[0].status is OrderStatus.OPEN
+    assert orders[0].status is OrderStatus.NEW
 
 
 async def test_rest_errors_surface_the_label(rest_stub: FakeGateRest) -> None:
@@ -234,7 +234,7 @@ async def test_place_order_goes_over_the_websocket(
     assert param["text"] == "t-42"
     assert param["account"] == "spot"
     assert order.order_id == "1852454420"
-    assert order.status is OrderStatus.OPEN
+    assert order.status is OrderStatus.NEW
     # Order entry must not have touched REST.
     assert rest_stub.requests == []
 
@@ -254,7 +254,7 @@ async def test_market_buy_is_refused(
                     qty=Decimal("0.001"),
                 )
             )
-    assert gate.api_calls == []
+    assert not any(c["channel"] == ch.ORDER_PLACE for c in gate.api_calls)
 
 
 async def test_market_sell_is_ioc(

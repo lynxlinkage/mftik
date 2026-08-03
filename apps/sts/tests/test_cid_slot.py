@@ -93,14 +93,25 @@ async def test_lockstep_sessions_mint_distinct_cids(
 async def test_submitted_cid_carries_the_session_slot(
     manager: SessionManager,
 ) -> None:
-    """The live order-entry path must use the session's slot, not the class."""
+    """The live order-entry path must use the session's slot, not the class.
+
+    No TD is attached, so the submit goes unacked — which also pins down the
+    other half of the contract: the minted id is recorded even when the order
+    never lands.
+    """
     a = await _create(manager, "submit-a")
     b = await _create(manager, "submit-b")
 
-    cid = await a.strategy.oms.submit_order(
+    # Nothing will answer; keep the wait short rather than sitting out the
+    # full ack timeout.
+    a.strategy.oms._ack_timeout = 0.2
+
+    assert not await a.strategy.oms.submit_order(
         7, symbol="BTCUSDT", side=Side.BUY, qty=Decimal("0.01"),
         price=Decimal("1000"),
     )
+    cid = a.strategy.oms.last_client_order_id
+    assert cid is not None
     assert slot_of(cid) == a.cid_slot
     assert a.strategy.owns(cid)
     assert not b.strategy.owns(cid)

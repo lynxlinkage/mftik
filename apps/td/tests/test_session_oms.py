@@ -86,8 +86,9 @@ async def test_oms_updates_from_session_callbacks(
     await asyncio.sleep(0.05)
 
     view = session.oms.view()
-    assert order.order_id in view.orders
-    assert view.orders[order.order_id].status is OrderStatus.OPEN
+    # The book is keyed by client_order_id, not the venue's id.
+    assert order.client_order_id in view.orders
+    assert view.orders[order.client_order_id].status is OrderStatus.NEW
     assert private.api_key == "key-1"
 
     await session.destroy()
