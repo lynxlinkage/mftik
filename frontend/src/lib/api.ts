@@ -28,8 +28,24 @@ export type StsControl = {
 };
 
 export type StrategyDeployBody = {
+	/** Strategy class to run. The document no longer carries it. */
+	type: string;
 	yaml: string;
 	timeout?: number;
+};
+
+/** A deployable strategy and the document it starts from. */
+export type StrategyTemplate = {
+	type: string;
+	label: string;
+	description: string;
+	yaml: string;
+};
+
+export type StrategyTypes = {
+	types: string[];
+	templates: StrategyTemplate[];
+	default: string;
 };
 
 export type DeployResponse = {
@@ -56,6 +72,8 @@ export type StrategyRow = {
 /** A past deploy rebuilt as strategy.yml (`GET /sts/strategies/{id}/yaml`). */
 export type StrategyYaml = {
 	id: number;
+	/** Strategy class this was deployed as. */
+	type: string;
 	sts_session: string;
 	yaml: string;
 	/** api ids whose account name could not be recovered — their `td` entries
@@ -144,13 +162,11 @@ const DEFAULT_STRATEGY_YML = `td:
 md:
   - paper.orderbook.BTCUSDT
 sts:
-  type: NoopStrategy
-  config:
-    # BUY mid-gap/mid/mid+gap (place→cancel each), flip to SELL, then exit.
-    # 100 of the quote currency (USDT here) per order; mid from the book.
-    exec_interval_ms: 1000
-    gap_bps: 10
-    qty_quote: 100
+  # BUY mid-gap/mid/mid+gap (place→cancel each), flip to SELL, then exit.
+  # 100 of the quote currency (USDT here) per order; mid from the book.
+  exec_interval_ms: 1000
+  gap_bps: 10
+  qty_quote: 100
 `;
 
 function apiBase(): string {
@@ -210,7 +226,9 @@ export const api = {
 			{ method: 'DELETE' }
 		),
 	strategyTemplate: () => request<{ yaml: string }>('/sts/template'),
-	strategyTypes: () => request<{ types: string[] }>('/sts/types'),
+	strategyTypes: () => request<StrategyTypes>('/sts/types'),
+	strategyTypeTemplate: (type: string) =>
+		request<StrategyTemplate>(`/sts/types/${encodeURIComponent(type)}/template`),
 	strategies: () => request<{ strategies: StrategyRow[] }>('/sts/strategies'),
 	strategyYaml: (id: number) =>
 		request<StrategyYaml>(`/sts/strategies/${encodeURIComponent(String(id))}/yaml`),
@@ -219,7 +237,7 @@ export const api = {
 			`/sts/sessions${status ? `?status=${encodeURIComponent(status)}` : ''}`
 		),
 	deploySts: (body: StrategyDeployBody) =>
-		request<DeployResponse>('/sts', {
+		request<DeployResponse>(`/sts/deploy/${encodeURIComponent(body.type)}`, {
 			method: 'POST',
 			body: JSON.stringify({
 				yaml: body.yaml,

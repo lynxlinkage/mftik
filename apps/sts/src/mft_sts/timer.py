@@ -70,12 +70,24 @@ class TimerToken:
         return self
 
     def cancel(self) -> None:
-        """Cancel this token's scheduled function (no-op if idle)."""
+        """Cancel this token's scheduled function (no-op if idle).
+
+        Safe to call from inside the callback: cancelling the task there would
+        throw ``CancelledError`` into the coroutine doing the cancelling, at
+        its next await, and the rest of that caller's work would silently never
+        run — a strategy that cancels its timer and then places a closing order
+        would cancel itself instead. The ``_cancelled`` event alone stops the
+        loop once the callback returns, so self-cancellation only sets it.
+        """
         self._cancelled.set()
         task = self._task
         self._task = None
         self._func = None
-        if task is not None and not task.done():
+        if (
+            task is not None
+            and not task.done()
+            and task is not asyncio.current_task()
+        ):
             task.cancel()
         self._timer._untrack(self)
 

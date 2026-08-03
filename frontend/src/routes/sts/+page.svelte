@@ -7,12 +7,17 @@
 		formatTs,
 		shortId,
 		type StrategyRow,
+		type StrategyTemplate,
 		type StrategyYaml
 	} from '$lib/api';
 
 	let strategies = $state<StrategyRow[]>([]);
 	let yamlText = $state(defaultStrategyYml());
-	let types = $state<string[]>(['NoopStrategy']);
+	let templates = $state<StrategyTemplate[]>([]);
+	let selectedType = $state('NoopStrategy');
+	// Tracks whether the editor still holds the selected type's template
+	// untouched, so switching type can only discard what nobody typed.
+	let pristineYaml = $state(defaultStrategyYml());
 	let error = $state<string | null>(null);
 	let busy = $state(false);
 	let loading = $state(true);
@@ -23,19 +28,31 @@
 	let copied = $state(false);
 
 	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
+	const selected = $derived(
+		templates.find((t) => t.type === selectedType) ?? null
+	);
+	const dirty = $derived(yamlText !== pristineYaml);
 
 	async function refresh() {
 		loading = true;
 		error = null;
 		try {
-			const [list, tpl, t] = await Promise.all([
+			const [list, t] = await Promise.all([
 				api.strategies(),
-				api.strategyTemplate().catch(() => ({ yaml: defaultStrategyYml() })),
-				api.strategyTypes().catch(() => ({ types: ['NoopStrategy'] }))
+				api.strategyTypes().catch(() => ({
+					types: [],
+					templates: [],
+					default: 'NoopStrategy'
+				}))
 			]);
 			strategies = list.strategies;
-			types = t.types.length ? t.types : ['NoopStrategy'];
-			if (!yamlText.trim()) yamlText = tpl.yaml || defaultStrategyYml();
+			templates = t.templates;
+			if (!templates.some((x) => x.type === selectedType)) {
+				selectedType = t.default || templates[0]?.type || selectedType;
+			}
+			// Only seed the editor while it is untouched — a refresh must not
+			// throw away a document someone is in the middle of writing.
+			if (!dirty || !yamlText.trim()) applyTemplate(selectedType);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -43,11 +60,29 @@
 		}
 	}
 
+	/** Load a type's template into the editor, replacing what is there. */
+	function applyTemplate(type: string) {
+		const tpl = templates.find((t) => t.type === type);
+		const next = tpl?.yaml || defaultStrategyYml();
+		yamlText = next;
+		pristineYaml = next;
+	}
+
+	function changeType(next: string) {
+		// The config schema belongs to the type, so a document written for the
+		// old one cannot be carried over — swap rather than try to merge.
+		if (dirty && !confirm(`Replace the editor with the ${next} template?`)) {
+			return;
+		}
+		selectedType = next;
+		applyTemplate(next);
+	}
+
 	async function deploy() {
 		busy = true;
 		error = null;
 		try {
-			const created = await api.deploySts({ yaml: yamlText });
+			const created = await api.deploySts({ type: selectedType, yaml: yamlText });
 			await refresh();
 			await goto(`/sts/${created.session_id}`);
 		} catch (e) {
@@ -58,7 +93,7 @@
 	}
 
 	function resetTemplate() {
-		yamlText = defaultStrategyYml();
+		applyTemplate(selectedType);
 	}
 
 	async function showYaml(s: StrategyRow) {
@@ -92,7 +127,10 @@
 
 	function loadIntoEditor() {
 		if (viewing === null) return;
+		// Restore the type too, or Deploy would re-run it as something else.
+		if (viewing.type) selectedType = viewing.type;
 		yamlText = viewing.yaml;
+		pristineYaml = viewing.yaml;
 		viewing = null;
 		viewingId = null;
 		window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -132,8 +170,9 @@
 	<div>
 		<h1>STS</h1>
 		<p>
-			Edit <code>strategy.yml</code> to deploy TD + MD infra with a customized STS
-			strategy. <code>td</code> uses account names (not api ids). Types: {types.join(', ')}.
+			Pick a strategy, then edit its <code>strategy.yml</code> to deploy TD + MD infra.
+			<code>td</code> uses account names (not api ids); <code>sts</code> holds that
+			strategy's own parameters.
 		</p>
 	</div>
 	<button type="button" class="secondary" onclick={refresh} disabled={loading}>Refresh</button>
@@ -147,8 +186,20 @@
 	<div class="editor-head">
 		<div>
 			<strong>strategy.yml</strong>
-			<span class="muted">Live editor — td / md / sts.type + config</span>
+			<span class="muted">Live editor — td / md / sts</span>
 		</div>
+		<label class="type-pick">
+			Strategy
+			<select
+				value={selectedType}
+				disabled={busy || templates.length === 0}
+				onchange={(e) => changeType((e.currentTarget as HTMLSelectElement).value)}
+			>
+				{#each templates as t (t.type)}
+					<option value={t.type}>{t.label}</option>
+				{/each}
+			</select>
+		</label>
 		<div class="editor-actions">
 			<button type="button" class="secondary" onclick={resetTemplate} disabled={busy}>
 				Reset template
@@ -158,6 +209,12 @@
 			</button>
 		</div>
 	</div>
+	{#if selected}
+		<p class="type-note">
+			<code>{selected.type}</code> · {selected.description}
+			{#if dirty}<span class="edited">edited</span>{/if}
+		</p>
+	{/if}
 	<textarea
 		class="yml"
 		bind:value={yamlText}
@@ -292,6 +349,33 @@
 
 	.editor-head .muted {
 		font-size: 0.8rem;
+	}
+
+	.type-pick {
+		display: grid;
+		gap: 0.3rem;
+		font-size: 0.75rem;
+		color: var(--muted);
+	}
+
+	.type-pick select {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		color: var(--text);
+		padding: 0.45rem 0.6rem;
+		border-radius: var(--radius);
+		min-width: 11rem;
+	}
+
+	.type-note {
+		margin: 0;
+		font-size: 0.78rem;
+		color: var(--muted);
+	}
+
+	.edited {
+		margin-left: 0.4rem;
+		color: var(--warn);
 	}
 
 	.editor-actions {

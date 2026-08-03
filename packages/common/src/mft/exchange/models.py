@@ -8,7 +8,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _id() -> str:
@@ -27,6 +27,30 @@ class Side(StrEnum):
 class OrderType(StrEnum):
     MARKET = "market"
     LIMIT = "limit"
+
+
+class TimeInForce(StrEnum):
+    """How long an order stays live, and whether it may take liquidity.
+
+    Post-only is a time-in-force here because that is the one place every
+    adapter can read it from. Venues disagree on where it lives — Gate spells
+    it as the ``poc`` time-in-force, others expose a ``MakerOnly`` /
+    ``MakerOrder`` flag beside the type — so the translation belongs in each
+    adapter rather than in every strategy that wants to rest passively.
+
+    ``POST_ONLY`` is a promise about *not crossing*, not about duration: an
+    order that would take is refused by the venue rather than repriced or
+    filled. A strategy asking for it must be ready for that refusal.
+    """
+
+    #: Rest until filled or cancelled.
+    GTC = "gtc"
+    #: Fill what crosses now, cancel the rest.
+    IOC = "ioc"
+    #: Fill in full now, or not at all.
+    FOK = "fok"
+    #: Rest as maker; refused outright if it would cross the book.
+    POST_ONLY = "post_only"
 
 
 class OrderStatus(StrEnum):
@@ -292,7 +316,13 @@ class Balance(BaseModel):
         return spendable if spendable > 0 else Decimal("0")
 
     @property
-    def locked(self) -> Decimal:
+    def held(self) -> Decimal:
+        """Everything committed: the venue's hold plus ours.
+
+        Deliberately not called ``locked`` — that name is the venue's own
+        number, and a property of the same name would shadow the field it is
+        built from.
+        """
         return self.locked + self.prelock
 
 
@@ -332,9 +362,14 @@ class PlaceOrderRequest(BaseModel):
 
     ``symbol`` is canonical (``BTCUSDT``); the adapter renders the venue's
     spelling. ``params`` carries what has no cross-venue meaning — Gate's
-    ``account`` / ``time_in_force`` / ``iceberg`` / ``stp_act``, for instance.
-    Each adapter reads the keys it understands and ignores the rest, so a
-    request stays portable even when it carries hints for one venue.
+    ``account`` / ``iceberg`` / ``stp_act``, for instance. Each adapter reads
+    the keys it understands and ignores the rest, so a request stays portable
+    even when it carries hints for one venue.
+
+    ``tif`` is *not* one of those: it is a common field precisely because
+    every venue has the concept under some spelling. A raw
+    ``params["time_in_force"]`` still wins where an adapter supports it, for
+    venue-only values this enum has no name for.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -345,4 +380,17 @@ class PlaceOrderRequest(BaseModel):
     qty: Decimal
     price: Decimal | None = None
     client_order_id: str | None = None
+    tif: TimeInForce | None = None
     params: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _post_only_must_rest(self) -> PlaceOrderRequest:
+        # A market order exists to take; post-only exists to never take. No
+        # venue can honour both, so catch it here rather than let each
+        # adapter discover it as a rejection.
+        if self.tif is TimeInForce.POST_ONLY and self.type is not OrderType.LIMIT:
+            raise ValueError(
+                f"{TimeInForce.POST_ONLY} requires a limit order, "
+                f"got {self.type}"
+            )
+        return self

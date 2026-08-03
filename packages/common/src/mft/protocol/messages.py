@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from mft.exchange.models import OrderType, Side
+from mft.exchange.models import OrderType, Side, TimeInForce
 from mft.exchange.oms import OmsView
 from mft.protocol.envelope import Envelope
 
@@ -274,6 +274,8 @@ class OrderSubmit(BaseModel):
     type: OrderType
     qty: Decimal
     price: Decimal | None = None
+    #: ``None`` leaves it to the adapter's default for this order type.
+    tif: TimeInForce | None = None
     client_order_id: str
 
 
@@ -413,6 +415,7 @@ class PaperPlaceOrderRequest(BaseModel):
     type: OrderType
     qty: Decimal
     price: Decimal | None = None
+    tif: TimeInForce | None = None
     client_order_id: str | None = None
 
 

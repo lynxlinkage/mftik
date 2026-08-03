@@ -6,7 +6,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 from mft.protocol import (
-    DEFAULT_STRATEGY_YML,
+    DEFAULT_STRATEGY_TYPE,
     STS_SESSION_LIST,
     STS_SESSION_PAUSE,
     STS_SESSION_RESUME,
@@ -15,14 +15,17 @@ from mft.protocol import (
     ListSessionsRequestEnvelope,
     ListSessionsResult,
     StrategySpec,
-    StrategyStsSpec,
     StrategyYamlError,
     StsSessionControlRequest,
     StsSessionControlRequestEnvelope,
     StsSessionControlResult,
     Topics,
+    all_templates,
+    default_template,
     dump_strategy_yml,
+    get_template,
     parse_strategy_yml,
+    strategy_types,
 )
 from mft_db.repositories import AccountRepository, StrategyRepository
 from mft_db.session import session_scope
@@ -38,6 +41,7 @@ from mft_api.schemas import (
     StrategyDeployBody,
     StrategyListResponse,
     StrategyOut,
+    StrategyTemplateOut,
     StrategyTypesResponse,
     StrategyYamlResponse,
     StsControlResponse,
@@ -48,19 +52,38 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sts", tags=["sts"])
 
-# Class names accepted in strategy.yml ``sts.type`` (must match STS registry).
-_KNOWN_STRATEGY_TYPES = ["NoopStrategy"]
-
-
 @router.get("/template")
 async def strategy_template() -> dict[str, str]:
-    """Default strategy.yml snippet for the live editor."""
-    return {"yaml": DEFAULT_STRATEGY_YML}
+    """Template for the default strategy — the editor's starting document."""
+    return {"yaml": default_template().yaml}
 
 
 @router.get("/types", response_model=StrategyTypesResponse)
 async def list_strategy_types() -> StrategyTypesResponse:
-    return StrategyTypesResponse(types=list(_KNOWN_STRATEGY_TYPES))
+    """Deployable strategies, with the template each one starts from."""
+    return StrategyTypesResponse(
+        types=strategy_types(),
+        templates=[
+            StrategyTemplateOut.model_validate(t.model_dump())
+            for t in all_templates()
+        ],
+        default=DEFAULT_STRATEGY_TYPE,
+    )
+
+
+@router.get("/types/{strategy_type}/template", response_model=StrategyTemplateOut)
+async def strategy_type_template(strategy_type: str) -> StrategyTemplateOut:
+    """The starting document for one strategy type."""
+    template = get_template(strategy_type)
+    if template is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"unknown strategy type: {strategy_type}; "
+                f"known: {', '.join(strategy_types())}"
+            ),
+        )
+    return StrategyTemplateOut.model_validate(template.model_dump())
 
 
 @router.get("/strategies", response_model=StrategyListResponse)
@@ -146,13 +169,10 @@ async def strategy_yaml(strategy_id: int) -> StrategyYamlResponse:
                 continue
             td_names.append(account.name)
 
-    spec = StrategySpec(
-        td=td_names,
-        md=md_ids,
-        sts=StrategyStsSpec(type=row.type, config=dict(row.config or {})),
-    )
+    spec = StrategySpec(td=td_names, md=md_ids, sts=dict(row.config or {}))
     return StrategyYamlResponse(
         id=row.id,
+        type=row.type,
         sts_session=row.sts_session,
         yaml=dump_strategy_yml(spec),
         unresolved_td=unresolved,
@@ -196,29 +216,38 @@ async def stop_session(session_id: str, broker: BrokerDep) -> StsControlResponse
     return await _control(broker, session_id, STS_SESSION_STOP, "sts.session.stop")
 
 
-@router.post("", response_model=DeployResponse)
-@router.post("/", response_model=DeployResponse, include_in_schema=False)
-async def deploy(body: StrategyDeployBody, broker: BrokerDep) -> DeployResponse:
-    """Deploy a strategy.yml document; API orchestrates STS create + MD/TD attach."""
+@router.post("/deploy/{strategy_type}", response_model=DeployResponse)
+async def deploy(
+    strategy_type: str, body: StrategyDeployBody, broker: BrokerDep
+) -> DeployResponse:
+    """Deploy ``strategy_type`` with the td / md / sts document in ``body``.
+
+    The type is in the path rather than the document because it decides what
+    ``sts:`` is allowed to contain — keeping them together let a user edit one
+    into disagreement with the other.
+    """
+    if get_template(strategy_type) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"unknown strategy type: {strategy_type}; "
+                f"known: {', '.join(strategy_types())}"
+            ),
+        )
     try:
         spec = parse_strategy_yml(body.yaml)
     except StrategyYamlError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if spec.sts.type not in _KNOWN_STRATEGY_TYPES:
-        raise HTTPException(
-            status_code=404, detail=f"unknown strategy type: {spec.sts.type}"
-        )
 
     created_by = body.created_by if body.created_by is not None else DEFAULT_USER_ID
     td_api_ids = await _resolve_td_names(list(spec.td))
     try:
         result = await deploy_strategy(
             broker,
-            strategy_id=spec.sts.type,
+            strategy_id=strategy_type,
             td=td_api_ids,
             md=list(spec.md),
-            st_paras=dict(spec.sts.config),
+            st_paras=dict(spec.sts),
             created_by=created_by,
             timeout=body.timeout,
         )
@@ -226,13 +255,13 @@ async def deploy(body: StrategyDeployBody, broker: BrokerDep) -> DeployResponse:
         code = 404 if exc.code in {"unknown_strategy", "not_found"} else 502
         if exc.code == "timeout":
             code = 504
-        raise HTTPException(status_code=code, detail=exc.message) from exc
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
 
     session_id = result["session_id"]
     async with session_scope() as db:
         row = await StrategyRepository(db).create(
-            type=spec.sts.type,
-            config=dict(spec.sts.config),
+            type=strategy_type,
+            config=dict(spec.sts),
             created_by=created_by,
             sts_session=session_id,
         )
@@ -242,7 +271,7 @@ async def deploy(body: StrategyDeployBody, broker: BrokerDep) -> DeployResponse:
         user_id=created_by,
         operation="sts.deploy",
         result=(
-            f"id={strategy_id} session_id={session_id} type={spec.sts.type} "
+            f"id={strategy_id} session_id={session_id} type={strategy_type} "
             f"td_names={list(spec.td)} "
             f"td={[a['api_id'] for a in result['td']]} md={result['md']}"
         ),
@@ -250,8 +279,8 @@ async def deploy(body: StrategyDeployBody, broker: BrokerDep) -> DeployResponse:
     return DeployResponse(
         id=strategy_id,
         session_id=session_id,
-        type=spec.sts.type,
-        config=dict(spec.sts.config),
+        type=strategy_type,
+        config=dict(spec.sts),
         td=[TdAttachOut(**a) for a in result["td"]],
         md=result["md"],
         status=result["status"],

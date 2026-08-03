@@ -178,7 +178,7 @@
           "sts"
         ],
         "summary": "Strategy Template",
-        "description": "Default strategy.yml snippet for the live editor.",
+        "description": "Template for the default strategy \u2014 the editor's starting document.",
         "operationId": "strategy_template_sts_template_get",
         "responses": {
           "200": {
@@ -204,6 +204,7 @@
           "sts"
         ],
         "summary": "List Strategy Types",
+        "description": "Deployable strategies, with the template each one starts from.",
         "operationId": "list_strategy_types_sts_types_get",
         "responses": {
           "200": {
@@ -212,6 +213,49 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/StrategyTypesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sts/types/{strategy_type}/template": {
+      "get": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "Strategy Type Template",
+        "description": "The starting document for one strategy type.",
+        "operationId": "strategy_type_template_sts_types__strategy_type__template_get",
+        "parameters": [
+          {
+            "name": "strategy_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Strategy Type"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrategyTemplateOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -482,23 +526,34 @@
         }
       }
     },
-    "/sts": {
+    "/sts/deploy/{strategy_type}": {
       "post": {
         "tags": [
           "sts"
         ],
         "summary": "Deploy",
-        "description": "Deploy a strategy.yml document; API orchestrates STS create + MD/TD attach.",
-        "operationId": "deploy_sts_post",
+        "description": "Deploy ``strategy_type`` with the td / md / sts document in ``body``.\n\nThe type is in the path rather than the document because it decides what\n``sts:`` is allowed to contain \u2014 keeping them together let a user edit one\ninto disagreement with the other.",
+        "operationId": "deploy_sts_deploy__strategy_type__post",
+        "parameters": [
+          {
+            "name": "strategy_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Strategy Type"
+            }
+          }
+        ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/StrategyDeployBody"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -1473,6 +1528,35 @@
         "title": "StrategyOut",
         "description": "Deployed strategy.yml row joined to sts_sessions for status."
       },
+      "StrategyTemplateOut": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "yaml": {
+            "type": "string",
+            "title": "Yaml"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "label",
+          "description",
+          "yaml"
+        ],
+        "title": "StrategyTemplateOut",
+        "description": "One deployable strategy and the document it starts from."
+      },
       "StrategyTypesResponse": {
         "properties": {
           "types": {
@@ -1481,17 +1565,34 @@
             },
             "type": "array",
             "title": "Types"
+          },
+          "templates": {
+            "items": {
+              "$ref": "#/components/schemas/StrategyTemplateOut"
+            },
+            "type": "array",
+            "title": "Templates"
+          },
+          "default": {
+            "type": "string",
+            "title": "Default",
+            "default": ""
           }
         },
         "type": "object",
         "title": "StrategyTypesResponse",
-        "description": "Registered STS strategy class names for strategy.yml ``sts.type``."
+        "description": "Deployable strategies for the deploy picker.\n\n``types`` is the bare list kept for callers that only need the names;\n``templates`` carries what the UI needs to render the picker and swap the\neditor contents when the selection changes."
       },
       "StrategyYamlResponse": {
         "properties": {
           "id": {
             "type": "integer",
             "title": "Id"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "default": ""
           },
           "sts_session": {
             "type": "string",

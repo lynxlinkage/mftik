@@ -17,6 +17,7 @@ from mft.exchange.models import (
     OrderType,
     PlaceOrderRequest,
     Side,
+    TimeInForce,
 )
 
 
@@ -276,6 +277,72 @@ async def test_market_sell_is_ioc(
     assert param["type"] == "market"
     assert param["time_in_force"] == "ioc"
     assert "price" not in param
+
+
+@pytest.mark.parametrize(
+    ("tif", "wire"),
+    [
+        (TimeInForce.GTC, "gtc"),
+        (TimeInForce.IOC, "ioc"),
+        (TimeInForce.FOK, "fok"),
+        (TimeInForce.POST_ONLY, "poc"),
+    ],
+)
+async def test_tif_translates_to_gates_spelling(
+    gate: FakeGate, rest_stub: FakeGateRest, tif: TimeInForce, wire: str
+) -> None:
+    """Post-only is a tif here; Gate calls it ``poc`` in the same field."""
+    gate.api_data[ch.ORDER_PLACE] = {"result": OPEN_ORDER}
+    client = await _private(gate, rest_stub)
+    async with client:
+        await client.place_order(
+            PlaceOrderRequest(
+                symbol="BTCUSDT",
+                side=Side.BUY,
+                type=OrderType.LIMIT,
+                qty=Decimal("0.001"),
+                price=Decimal("60000"),
+                tif=tif,
+            )
+        )
+
+    param = gate.api_call(ch.ORDER_PLACE)["payload"]["req_param"]
+    assert param["time_in_force"] == wire
+
+
+async def test_raw_params_still_beat_the_translated_tif(
+    gate: FakeGate, rest_stub: FakeGateRest
+) -> None:
+    """The escape hatch stays open for values the enum has no name for."""
+    gate.api_data[ch.ORDER_PLACE] = {"result": OPEN_ORDER}
+    client = await _private(gate, rest_stub)
+    async with client:
+        await client.place_order(
+            PlaceOrderRequest(
+                symbol="BTCUSDT",
+                side=Side.BUY,
+                type=OrderType.LIMIT,
+                qty=Decimal("0.001"),
+                price=Decimal("60000"),
+                tif=TimeInForce.POST_ONLY,
+                params={"time_in_force": "fok"},
+            )
+        )
+
+    param = gate.api_call(ch.ORDER_PLACE)["payload"]["req_param"]
+    assert param["time_in_force"] == "fok"
+
+
+def test_post_only_market_order_is_refused_before_any_venue_sees_it() -> None:
+    """No venue can both never-take and always-take. Caught in the model."""
+    with pytest.raises(ValueError, match="requires a limit order"):
+        PlaceOrderRequest(
+            symbol="BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.MARKET,
+            qty=Decimal("0.001"),
+            tif=TimeInForce.POST_ONLY,
+        )
 
 
 async def test_limit_order_without_price_is_refused(

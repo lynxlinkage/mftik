@@ -93,3 +93,31 @@ async def test_skips_while_paused() -> None:
     await asyncio.sleep(0.08)
     assert len(hits) >= 1
     token.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_callback_can_cancel_its_own_token_and_keep_going() -> None:
+    """Self-cancel must not kill the coroutine that asked for it.
+
+    A strategy ending itself cancels the timer and then still has work to do —
+    cancelling the resting order, sending a closing order, exiting the session.
+    Cancelling the token's task from inside the callback would throw
+    CancelledError into that very coroutine at its next await, and all of it
+    would be skipped in silence.
+    """
+    timer = Timer()
+    token = timer.token()
+    done: list[str] = []
+
+    async def _tick() -> None:
+        token.cancel()
+        # An await that actually suspends is where the cancellation would land.
+        await asyncio.sleep(0.01)
+        done.append("finished")
+
+    token.register(now_ms(), 30, _tick)
+    await asyncio.sleep(0.15)
+
+    assert done == ["finished"]
+    # And it really did stop: no second tick.
+    assert not token.active

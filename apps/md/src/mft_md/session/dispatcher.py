@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 
 FeedKey = tuple[str, str, str]  # (venue, topic, symbol)
 
+#: Dispatches between log lines on a feed. One line per message buries every
+#: other md event at book speed, and the interesting part of a dispatch line —
+#: how many sessions it reached — only changes when subscriptions do.
+LOG_EVERY = 20
+
 
 class Dispatcher:
     """Route venue market-data updates to subscribed STS session streams."""
@@ -23,6 +28,10 @@ class Dispatcher:
         self._broker = broker
         self._subs: dict[FeedKey, set[str]] = {}
         self._links: dict[str, StsLink] = {}
+        #: Messages dispatched per feed since it last had no subscribers.
+        #: Drives the log sampling; reset with the subscription so a feed that
+        #: comes back announces its first message again.
+        self._dispatched: dict[FeedKey, int] = {}
 
     def register_link(self, link: StsLink) -> None:
         self._links[link.session_id] = link
@@ -51,6 +60,7 @@ class Dispatcher:
         subs.discard(session_id)
         if not subs:
             del self._subs[key]
+            self._dispatched.pop(key, None)
             return True, 0
         return False, len(subs)
 
@@ -109,13 +119,20 @@ class Dispatcher:
                     topic,
                     symbol,
                 )
+        key = (venue, topic, symbol)
+        count = self._dispatched.get(key, 0) + 1
+        self._dispatched[key] = count
+        # A partial fan-out means a session missed data, so it is never
+        # sampled away — only the healthy repeats are.
+        if sent == len(targets) and count > 1 and count % LOG_EVERY:
+            return
         feed = Topics.md_feed(venue, topic, symbol)
         await publish_md_log(
             self._broker,
             venue,
             (
                 f"dispatch {envelope.type} {feed} "
-                f"→ {sent}/{len(targets)} sessions"
+                f"→ {sent}/{len(targets)} sessions (#{count})"
             ),
             source="md",
         )

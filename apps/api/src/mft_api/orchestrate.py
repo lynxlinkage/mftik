@@ -184,9 +184,16 @@ async def deploy_strategy(
                 source="api",
             )
     except Exception as exc:
-        logger.exception(
-            "MD/TD attach failed — rolling back STS session=%s", session_id
-        )
+        if isinstance(exc, DomainRpcError):
+            logger.error(
+                "MD/TD attach failed — rolling back STS session=%s: %s",
+                session_id,
+                exc,
+            )
+        else:
+            logger.exception(
+                "MD/TD attach failed — rolling back STS session=%s", session_id
+            )
         await publish_sts_log(
             broker,
             session_id,

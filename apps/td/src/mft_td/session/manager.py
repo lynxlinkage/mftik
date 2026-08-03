@@ -658,6 +658,7 @@ class SessionManager:
                 type=payload.type,
                 qty=payload.qty,
                 price=payload.price,
+                tif=payload.tif,
                 client_order_id=cid,
             )
             refusal = await acct.trading.reserve(request)
@@ -766,6 +767,7 @@ class SessionManager:
                     type=req.type,
                     qty=req.qty,
                     price=req.price,
+                    tif=req.tif,
                     client_order_id=req.client_order_id,
                 )
             )

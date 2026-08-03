@@ -90,6 +90,7 @@ class PaperRemotePrivateClient(PrivateClient):
                     type=request.type,
                     qty=request.qty,
                     price=request.price,
+                    tif=request.tif,
                     client_order_id=request.client_order_id,
                 ),
                 type=PAPER_PLACE_ORDER,
