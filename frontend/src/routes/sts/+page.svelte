@@ -32,6 +32,11 @@
 	let viewingId = $state<number | null>(null);
 	let copied = $state(false);
 
+	// Matches mft.protocol.STS_REASON_OPERATOR_STOP. A stopped session is
+	// `done` like any other, so this string is the only thing telling the two
+	// apart — keep it in step with the backend constant.
+	const OPERATOR_STOP = 'operator_stop';
+
 	let connection = $state<StatusConnection>('connecting');
 	// Envelope ts of the newest event applied per session, so a replayed event
 	// cannot overwrite a newer one we already have.
@@ -333,6 +338,21 @@
 	></textarea>
 </section>
 
+<!-- The reason is detail, not headline: a row is scanned for its status, and
+     256 characters of it inline would bury that. No `title` attribute — the
+     tooltip replaces it, and having both would show two of them. -->
+{#snippet why(reason: string | null)}
+	<button
+		type="button"
+		class="why"
+		aria-label={`Why it ended: ${reason ?? 'no reason recorded'}`}
+		onmouseenter={(e) => showTip(e, reason)}
+		onmouseleave={hideTip}
+		onfocus={(e) => showTip(e, reason)}
+		onblur={hideTip}
+	>i</button>
+{/snippet}
+
 <section class="panel table-wrap" onscroll={hideTip}>
 	{#if strategies.length === 0}
 		<p class="empty-state">{loading ? 'Loading…' : 'No strategies deployed yet.'}</p>
@@ -359,28 +379,26 @@
 							</a>
 						</td>
 						<td>
-							<!-- The terminal-with-a-reason statuses come first: they are
-							     final, and a stale `paused` from the live-session probe must
-							     never mask them. -->
+							<!-- The terminal statuses come first: they are final, and a
+							     stale `paused` from the live-session probe must never mask
+							     them. -->
 							{#if s.status === 'failed' || s.status === 'interrupted'}
 								<div class="status-cell">
 									<span class="badge {s.status}">{s.status}</span>
-									<!-- The reason is detail, not headline: a row is scanned for
-									     its status, and 256 characters of it inline would bury
-									     that. No `title` here — the tooltip below replaces it, and
-									     having both would show two of them. -->
-									<button
-										type="button"
-										class="why"
-										aria-label={`Why it ended: ${s.reason ?? 'no reason recorded'}`}
-										onmouseenter={(e) => showTip(e, s.reason)}
-										onmouseleave={hideTip}
-										onfocus={(e) => showTip(e, s.reason)}
-										onblur={hideTip}
-									>i</button>
+									{@render why(s.reason)}
 								</div>
+							{:else if s.status === 'done' && s.reason === OPERATOR_STOP}
+								<!-- Someone pulled this one. Same status as a strategy that
+								     finished, but a different thing to have happened, and the
+								     badge is where that should be readable. -->
+								<span class="badge stopped">stopped</span>
 							{:else if s.status === 'done'}
-								<span class="badge done">done</span>
+								<div class="status-cell">
+									<span class="badge done">done</span>
+									<!-- Sessions that ended before reasons were recorded have
+									     none; there is nothing to offer for those. -->
+									{#if s.reason}{@render why(s.reason)}{/if}
+								</div>
 							{:else if s.paused}
 								<span class="badge paused">paused</span>
 							{:else if s.status === 'live'}

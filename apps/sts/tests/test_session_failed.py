@@ -176,9 +176,12 @@ async def test_strategy_fail_marks_the_session_failed_with_its_reason(
 
 
 @pytest.mark.asyncio
-async def test_a_natural_exit_stays_done_and_carries_no_reason(
-    broker: Broker,
-) -> None:
+async def test_a_natural_exit_keeps_the_reason_it_gave(broker: Broker) -> None:
+    """`done` says a strategy reached its own end, not which end.
+
+    `oco_filled` and `chase_expired` are both done and mean very different
+    things, so the reason has to survive the trip to the row.
+    """
     store = FakeStsStore()
     manager, _ = _manager(broker, store, ExitingStrategy)
     await manager.create_session(
@@ -188,12 +191,13 @@ async def test_a_natural_exit_stays_done_and_carries_no_reason(
     )
     row = await _until_closed(manager, store, "e-1")
     assert row.status == "done"
-    assert row.reason is None
+    assert row.reason == "work_done"
 
 
 @pytest.mark.asyncio
-async def test_an_operator_stop_stays_done(broker: Broker) -> None:
-    """Stopping a healthy session is not a failure, however it is spelled."""
+async def test_an_operator_stop_is_done_and_says_so(broker: Broker) -> None:
+    """Stopping a healthy session is not a failure — but it is not the
+    strategy finishing either, and the status alone cannot say which."""
     store = FakeStsStore()
     manager, _ = _manager(broker, store, ExitingStrategy)
 
@@ -210,8 +214,9 @@ async def test_an_operator_stop_stays_done(broker: Broker) -> None:
     result = await manager.stop_session("s-1")
 
     assert result.status == "done"
-    assert result.reason is None
+    assert result.reason == "operator_stop"
     assert store.rows["s-1"].status == "done"
+    assert store.rows["s-1"].reason == "operator_stop"
 
 
 @pytest.mark.asyncio
@@ -235,7 +240,7 @@ async def test_the_first_ending_wins(broker: Broker) -> None:
     row = await _until_closed(manager, store, "r-1")
 
     assert row.status == "done"
-    assert row.reason is None
+    assert row.reason == "work_done"
 
 
 @pytest.mark.asyncio

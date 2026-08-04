@@ -536,7 +536,10 @@ class OneCancelOther(Strategy):
         )
         if loser is not None:
             await self._cancel(api_id, loser, "the other leg filled")
-        self.exit("oco_filled")
+        # Which leg won is the whole result of an OCO, so it goes on the row
+        # rather than only in the log: `oco_filled` alone leaves the reader
+        # asking the one question the strategy exists to answer.
+        self.exit(f"oco_filled: {self._legs[winner]}")
 
     async def _abort(self, reason: str) -> None:
         """End the pair without a winner, leaving nothing resting behind.

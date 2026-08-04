@@ -153,6 +153,12 @@ table.data tr:hover td {
 	background: rgba(240, 113, 120, 0.08);
 }
 
+/* Muted like `done`, because it is one — the word is the whole difference. */
+.badge.stopped {
+	color: var(--muted);
+	border-style: dashed;
+}
+
 /* Amber, not red: nothing went wrong with the strategy, it was cut short. */
 .badge.interrupted {
 	color: var(--warn);

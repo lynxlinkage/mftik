@@ -520,6 +520,13 @@ STS_SESSION_PAUSE = "sts.session.pause"
 STS_SESSION_RESUME = "sts.session.resume"
 STS_SESSION_STOP = "sts.session.stop"
 STS_SESSION_STATUS = "sts.session.status"
+
+#: ``reason`` written when an operator stopped a session from the UI. A fixed
+#: sentinel rather than prose because it is matched, not just displayed: it is
+#: the only thing separating "someone pulled this" from "the strategy finished"
+#: — both of which are ``done``. The frontend compares against this exact
+#: string, so changing it changes the wire contract.
+STS_REASON_OPERATOR_STOP = "operator_stop"
 STS_LEASE_HEARTBEAT = "sts.lease.heartbeat"
 STS_HEARTBEAT = STS_LEASE_HEARTBEAT  # alias for older names
 STS_RECON = "sts.recon"

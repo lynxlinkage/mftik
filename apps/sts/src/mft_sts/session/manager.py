@@ -9,6 +9,7 @@ from typing import Any
 
 from mft.broker import Broker
 from mft.protocol import (
+    STS_REASON_OPERATOR_STOP,
     STS_SESSION_STATUS,
     ListSessionsRequest,
     SessionInfo,
@@ -330,12 +331,16 @@ class SessionManager:
         if session is None:
             raise KeyError(f"no active sts session {session_id}")
         strategy = session.strategy_name
-        await self.close(session_id)
+        # Still `done` — a deliberate stop is not a failure and not an
+        # interruption. The reason is what separates it from a strategy that
+        # reached its own end, which the status alone cannot say.
+        await self.close(session_id, reason=STS_REASON_OPERATOR_STOP)
         return StsSessionControlResult(
             session_id=session_id,
             status=SessionStatus.DONE.value,
             paused=False,
             strategy=strategy,
+            reason=STS_REASON_OPERATOR_STOP,
         )
 
     async def close(
@@ -404,7 +409,10 @@ class SessionManager:
                 session_id, status=SessionStatus.FAILED.value, reason=reason
             )
         else:
-            await self.close(session_id)
+            # Kept rather than dropped: `done` says a strategy reached its own
+            # end, not which end. `oco_filled` and `chase_expired` are both
+            # done and mean very different things to whoever reads the row.
+            await self.close(session_id, reason=reason)
 
     async def reap_orphans(self) -> list[str]:
         """Fail rows left ``live`` by a process that died without a word.
