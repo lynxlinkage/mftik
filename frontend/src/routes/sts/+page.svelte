@@ -359,11 +359,12 @@
 							</a>
 						</td>
 						<td>
-							<!-- failed is checked first: it is terminal, and a stale `paused`
-							     from the live-session probe must never mask it. -->
-							{#if s.status === 'failed'}
+							<!-- The terminal-with-a-reason statuses come first: they are
+							     final, and a stale `paused` from the live-session probe must
+							     never mask them. -->
+							{#if s.status === 'failed' || s.status === 'interrupted'}
 								<div class="status-cell">
-									<span class="badge failed">failed</span>
+									<span class="badge {s.status}">{s.status}</span>
 									<!-- The reason is detail, not headline: a row is scanned for
 									     its status, and 256 characters of it inline would bury
 									     that. No `title` here — the tooltip below replaces it, and
@@ -371,7 +372,7 @@
 									<button
 										type="button"
 										class="why"
-										aria-label={`Why it failed: ${s.reason ?? 'no reason recorded'}`}
+										aria-label={`Why it ended: ${s.reason ?? 'no reason recorded'}`}
 										onmouseenter={(e) => showTip(e, s.reason)}
 										onmouseleave={hideTip}
 										onfocus={(e) => showTip(e, s.reason)}

@@ -15,6 +15,8 @@ class DomainStats(BaseModel):
     #: Sessions that ended badly. Only ``sts`` records these — td/md rows
     #: follow their strategy session and are only ever live or done.
     failed: int = 0
+    #: Sessions STS cut short when it went down. Also sts-only.
+    interrupted: int = 0
     healthy: bool | None = None
 
 

@@ -4,6 +4,8 @@ export type DomainStats = {
 	done: number;
 	/** Sessions that ended badly. Always 0 outside `sts`. */
 	failed: number;
+	/** Sessions STS cut short when it went down. Always 0 outside `sts`. */
+	interrupted: number;
 	healthy: boolean | null;
 };
 

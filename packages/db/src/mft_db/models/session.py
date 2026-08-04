@@ -30,11 +30,31 @@ class SessionDomain(StrEnum):
 
 class SessionStatus(StrEnum):
     LIVE = "live"
+    #: The session reached its own end — the strategy decided it was finished.
     DONE = "done"
     #: Terminal, but not a natural end — the session stopped because something
     #: went wrong. Only ``sts_sessions`` records this; td/md rows follow their
     #: owning strategy session and stay live/done.
     FAILED = "failed"
+    #: Cut short by STS going down, with nothing wrong with the strategy
+    #: itself. Kept apart from ``done`` because it answers a question no other
+    #: status can: *this one did not choose to stop*, so it is the set a
+    #: rebuild-on-restart would draw from. Recording it is all this does —
+    #: rebuilding is per-strategy work that does not exist yet.
+    INTERRUPTED = "interrupted"
+
+    @classmethod
+    def terminal(cls) -> frozenset[str]:
+        """Statuses a session never leaves.
+
+        Exists so "has it ended" is asked in one place rather than spelled as
+        ``!= live`` or, worse, ``== done`` — the latter silently skips every
+        status added later, which is how ``failed`` sessions first went
+        missing from the dashboard.
+        """
+        return frozenset(
+            {cls.DONE.value, cls.FAILED.value, cls.INTERRUPTED.value}
+        )
 
 
 class StsSessionRow(Base):

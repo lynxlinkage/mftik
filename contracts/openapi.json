@@ -1201,6 +1201,11 @@
             "title": "Failed",
             "default": 0
           },
+          "interrupted": {
+            "type": "integer",
+            "title": "Interrupted",
+            "default": 0
+          },
           "healthy": {
             "anyOf": [
               {

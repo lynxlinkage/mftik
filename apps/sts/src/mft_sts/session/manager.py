@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 #: Redis counter backing cid slot allocation (suffixed onto the key prefix).
 CID_SLOT_KEY = "cid:slot"
 
+#: Why a session in ``interrupted`` stopped. A constant because it is the
+#: same event for every session in the process, not a per-session diagnosis.
+_SHUTDOWN_REASON = "STS shut down while this was running"
+
 #: How many status events the replay buffer keeps, and for how long. Sized for
 #: "what happened recently", not history — the DB is the record, this only has
 #: to cover the gap between a page loading and its socket being live.
@@ -482,16 +486,26 @@ class SessionManager:
         Writing the row up front costs one redundant update per session (the
         ``close`` below repeats it) and is the difference between a wrong row
         and a slow one.
+
+        These land in ``interrupted``, not ``done``: nothing about the
+        strategy ended, STS did. Telling the two apart is what lets a future
+        rebuild know which sessions it would be putting back.
         """
         for session_id in list(self._sessions):
             if self._mark_done is not None:
                 try:
                     await self._mark_done(
-                        session_id, status=SessionStatus.DONE.value, reason=None
+                        session_id,
+                        status=SessionStatus.INTERRUPTED.value,
+                        reason=_SHUTDOWN_REASON,
                     )
                 except Exception:
                     logger.exception(
                         "STS shutdown pre-mark failed session=%s", session_id
                     )
         for session_id in list(self._sessions):
-            await self.close(session_id)
+            await self.close(
+                session_id,
+                status=SessionStatus.INTERRUPTED.value,
+                reason=_SHUTDOWN_REASON,
+            )

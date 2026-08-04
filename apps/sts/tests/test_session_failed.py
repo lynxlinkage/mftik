@@ -333,4 +333,54 @@ async def test_shutdown_records_the_row_before_the_slow_teardown(
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert store.rows["kill-1"].status == "done"
+    assert store.rows["kill-1"].status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_is_interrupted_not_done(broker: Broker) -> None:
+    """A session STS cut short did not reach its own end.
+
+    Recording it as ``done`` would say the strategy finished, which is the one
+    thing that did not happen — and would hide it from anything asking which
+    sessions were still running when the process went away.
+    """
+    store = FakeStsStore()
+    manager, _ = _manager(broker, store, ExitingStrategy)
+
+    class Idle(Strategy):
+        name = "idle_shutdown"
+
+    register(Idle)
+    manager._strategy_factory = lambda name: Idle()  # noqa: SLF001
+    await manager.create_session(
+        StsCreateSessionRequest(
+            session_id="sd-1", created_by=1, strategy="idle_shutdown"
+        )
+    )
+    await manager.close_all()
+
+    row = store.rows["sd-1"]
+    assert row.status == "interrupted"
+    assert row.reason
+    assert row.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_an_operator_stop_is_not_interrupted(broker: Broker) -> None:
+    """Only STS going down is an interruption. A deliberate stop is a done."""
+    store = FakeStsStore()
+    manager, _ = _manager(broker, store, ExitingStrategy)
+
+    class Idle(Strategy):
+        name = "idle_operator"
+
+    register(Idle)
+    manager._strategy_factory = lambda name: Idle()  # noqa: SLF001
+    await manager.create_session(
+        StsCreateSessionRequest(
+            session_id="op-1", created_by=1, strategy="idle_operator"
+        )
+    )
+    await manager.stop_session("op-1")
+
+    assert store.rows["op-1"].status == "done"

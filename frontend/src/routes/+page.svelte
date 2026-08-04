@@ -68,6 +68,12 @@
 						<span class="l">failed</span>
 					</div>
 				{/if}
+				{#if d.interrupted > 0}
+					<div>
+						<span class="n stopped-n">{d.interrupted}</span>
+						<span class="l">interrupted</span>
+					</div>
+				{/if}
 			</div>
 		</a>
 	{:else}
@@ -144,6 +150,10 @@
 
 	.failed-n {
 		color: var(--err);
+	}
+
+	.stopped-n {
+		color: var(--warn);
 	}
 
 	.l {

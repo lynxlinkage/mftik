@@ -153,6 +153,13 @@ table.data tr:hover td {
 	background: rgba(240, 113, 120, 0.08);
 }
 
+/* Amber, not red: nothing went wrong with the strategy, it was cut short. */
+.badge.interrupted {
+	color: var(--warn);
+	border-color: rgba(240, 180, 41, 0.35);
+	background: rgba(240, 180, 41, 0.08);
+}
+
 .page-head {
 	display: flex;
 	flex-wrap: wrap;
