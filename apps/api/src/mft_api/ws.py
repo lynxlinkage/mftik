@@ -143,5 +143,80 @@ async def md_log_bridge(websocket: WebSocket, venue: str) -> None:
     )
 
 
+async def sts_status_bridge(websocket: WebSocket) -> None:
+    """Bridge ``status.sts`` → ``/ws/status/sts``. Read-only, on purpose.
+
+    Unlike the log bridges this never publishes what a client sends. A log
+    channel echoing a browser back to itself is a debugging convenience; on
+    the status channel it would let any connected page forge session states
+    for every other viewer, and nothing here authenticates the caller.
+
+    Replays the buffer before going live so a page that loads just after a
+    session ended still learns about it, and dedupes by envelope id across
+    the seam. Consumers apply the newest event per ``session_id``: replayed
+    history and live events can overlap, and each event is a full snapshot.
+    """
+    await websocket.accept()
+    stop = asyncio.Event()
+    seen: set[str] = set()
+    channel = Topics.status_sts()
+
+    async def send_raw(raw: str) -> bool:
+        try:
+            env = UntypedEnvelope.from_json(raw)
+            if env.id in seen:
+                return True
+            seen.add(env.id)
+        except Exception:
+            pass
+        try:
+            await websocket.send_text(raw)
+            return True
+        except Exception:
+            stop.set()
+            return False
+
+    async with Broker() as broker:
+        live: asyncio.Queue[UntypedEnvelope | None] = asyncio.Queue()
+
+        async def pump_pubsub() -> None:
+            try:
+                async for envelope in broker.subscribe(channel, stop=stop):
+                    await live.put(envelope)
+            finally:
+                await live.put(None)
+
+        sub_task = asyncio.create_task(pump_pubsub())
+        await asyncio.sleep(0.05)
+
+        for raw in await broker.fetch_log_buffer(channel):
+            if not await send_raw(raw):
+                break
+
+        async def pump_live() -> None:
+            while not stop.is_set():
+                env = await live.get()
+                if env is None:
+                    break
+                if not await send_raw(env.to_json()):
+                    break
+
+        live_task = asyncio.create_task(pump_live())
+        try:
+            # Receive only to notice the client going away — whatever it sends
+            # is discarded rather than published.
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            logger.info("STS status stream disconnected")
+        except Exception:
+            logger.exception("STS status stream failed")
+        finally:
+            stop.set()
+            for t in (sub_task, live_task):
+                t.cancel()
+            await asyncio.gather(sub_task, live_task, return_exceptions=True)
+
+
 # Backward-compatible name used by older imports.
 session_log_bridge = sts_log_bridge

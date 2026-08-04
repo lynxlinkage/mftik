@@ -147,6 +147,25 @@ table.data tr:hover td {
 	border-color: rgba(240, 113, 120, 0.35);
 }
 
+.badge.failed {
+	color: var(--err);
+	border-color: rgba(240, 113, 120, 0.35);
+	background: rgba(240, 113, 120, 0.08);
+}
+
+/* Muted like `done`, because it is one — the word is the whole difference. */
+.badge.stopped {
+	color: var(--muted);
+	border-style: dashed;
+}
+
+/* Amber, not red: nothing went wrong with the strategy, it was cut short. */
+.badge.interrupted {
+	color: var(--warn);
+	border-color: rgba(240, 180, 41, 0.35);
+	background: rgba(240, 180, 41, 0.08);
+}
+
 .page-head {
 	display: flex;
 	flex-wrap: wrap;

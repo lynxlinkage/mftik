@@ -82,9 +82,14 @@ class FakeSession:
         self.cid_slot = 1
         self.symbols = FakePlane()
         self.exit_reasons: list[str] = []
+        self.failures: list[str] = []
 
-    def request_exit(self, reason: str = "strategy_exit") -> None:
+    def request_exit(
+        self, reason: str = "strategy_exit", *, failed: bool = False
+    ) -> None:
         self.exit_reasons.append(reason)
+        if failed:
+            self.failures.append(reason)
 
 
 def _strategy(**paras) -> NoopStrategy:

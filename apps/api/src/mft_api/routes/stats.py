@@ -56,6 +56,19 @@ async def get_stats(broker: BrokerDep) -> StatsResponse:
             SessionDomain.TD.value: await td.count(status=SessionStatus.DONE.value),
             SessionDomain.MD.value: await md.count(status=SessionStatus.DONE.value),
         }
+        # Counted apart from done: these are finished, but lumping them in
+        # with it is how a run that died — or one STS cut short and someone
+        # may want back — stops being noticed.
+        failed = {
+            SessionDomain.STS.value: await sts.count(
+                status=SessionStatus.FAILED.value
+            ),
+        }
+        interrupted = {
+            SessionDomain.STS.value: await sts.count(
+                status=SessionStatus.INTERRUPTED.value
+            ),
+        }
 
     domains: list[DomainStats] = []
     for domain in (
@@ -89,6 +102,8 @@ async def get_stats(broker: BrokerDep) -> StatsResponse:
                 domain=domain,
                 live=live.get(domain, 0),
                 done=done.get(domain, 0),
+                failed=failed.get(domain, 0),
+                interrupted=interrupted.get(domain, 0),
                 healthy=healthy,
             )
         )

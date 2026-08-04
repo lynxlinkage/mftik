@@ -41,7 +41,9 @@ class Strategy:
 
     Process control (wired):
         on_start, on_ready, on_stop, on_pause, on_resume
-        exit() — natural end → session stop → on_stop
+        exit() — natural end → session stop → on_stop → status "done"
+        fail(reason) — same teardown, but status "failed" and reason is
+        persisted for the UI
 
     TD recon (wired):
         send_recon (auto on first lease ACK), on_recon_done
@@ -268,10 +270,26 @@ class Strategy:
     # --- helpers -----------------------------------------------------------
 
     def exit(self, reason: str = "strategy_exit") -> None:
-        """Naturally end this strategy session (triggers ``on_stop`` via manager)."""
+        """Naturally end this strategy session (triggers ``on_stop`` via manager).
+
+        The session lands in ``done``. Use :meth:`fail` for an end that the
+        operator needs to see as a problem.
+        """
         if self.session is None:
             raise RuntimeError("strategy is not bound to a session")
         self.session.request_exit(reason)
+
+    def fail(self, reason: str) -> None:
+        """End this session as ``failed``, recording ``reason``.
+
+        Teardown is identical to :meth:`exit` — orders are not unwound for
+        you, so cancel what must not outlive the session before calling this.
+        ``reason`` is persisted and shown in the UI, so make it something an
+        operator can act on rather than an internal code.
+        """
+        if self.session is None:
+            raise RuntimeError("strategy is not bound to a session")
+        self.session.request_exit(reason, failed=True)
 
     async def log(self, message: str, *, level: str = "info", **extra: Any) -> None:
         if self.session is None:

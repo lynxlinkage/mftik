@@ -1,3 +1,5 @@
+import { wsBaseUrl } from '$lib/ws';
+
 export type LogEntry = {
 	id: string;
 	ts: number;
@@ -23,17 +25,6 @@ export type SessionLogMessage = {
 };
 
 export type LogDomain = 'sts' | 'td' | 'md';
-
-function wsBaseUrl(): string {
-	const api = import.meta.env.PUBLIC_API_URL as string | undefined;
-	if (api) {
-		const u = new URL(api);
-		u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
-		return u.origin;
-	}
-	const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-	return `${proto}//${window.location.hostname}:8000`;
-}
 
 export function connectDomainLog(
 	domain: LogDomain,

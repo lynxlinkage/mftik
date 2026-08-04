@@ -2,6 +2,10 @@ export type DomainStats = {
 	domain: string;
 	live: number;
 	done: number;
+	/** Sessions that ended badly. Always 0 outside `sts`. */
+	failed: number;
+	/** Sessions STS cut short when it went down. Always 0 outside `sts`. */
+	interrupted: number;
 	healthy: boolean | null;
 };
 
@@ -18,6 +22,8 @@ export type Session = {
 	strategy: string | null;
 	paused: boolean | null;
 	venue: string | null;
+	/** Why a `failed` session ended. Null for live sessions and clean exits. */
+	reason: string | null;
 };
 
 export type StsControl = {
@@ -25,6 +31,7 @@ export type StsControl = {
 	status: string;
 	paused: boolean;
 	strategy: string | null;
+	reason: string | null;
 };
 
 export type StrategyDeployBody = {
@@ -67,6 +74,8 @@ export type StrategyRow = {
 	sts_session: string;
 	status: string | null;
 	paused: boolean | null;
+	/** Why a `failed` session ended. Null for live sessions and clean exits. */
+	reason: string | null;
 };
 
 /** A past deploy rebuilt as strategy.yml (`GET /sts/strategies/{id}/yaml`). */

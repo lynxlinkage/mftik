@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from mft_db.models.session import StsSessionRow
+from mft_db.models.session import SessionStatus, StsSessionRow
 from mft_db.repositories import StsSessionRepository
 from mft_db.session import session_scope
 
@@ -34,10 +34,20 @@ async def persist_live_session(
         )
 
 
-async def mark_session_done(session_id: str) -> StsSessionRow | None:
+async def mark_session_finished(
+    session_id: str,
+    *,
+    status: str = SessionStatus.DONE.value,
+    reason: str | None = None,
+) -> StsSessionRow | None:
     async with session_scope() as db:
         repo = StsSessionRepository(db)
-        return await repo.mark_done(session_id)
+        return await repo.mark_finished(session_id, status=status, reason=reason)
+
+
+async def mark_session_done(session_id: str) -> StsSessionRow | None:
+    """Natural end. Failures go through :func:`mark_session_finished`."""
+    return await mark_session_finished(session_id)
 
 
 async def list_sessions(

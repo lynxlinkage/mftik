@@ -76,14 +76,40 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         )
         return await self.add(row)
 
-    async def mark_done(self, session_id: str) -> StsSessionRow | None:
+    async def mark_finished(
+        self,
+        session_id: str,
+        *,
+        status: str = SessionStatus.DONE.value,
+        reason: str | None = None,
+    ) -> StsSessionRow | None:
+        """Move a session to a terminal status, recording why it ended.
+
+        ``reason`` is kept for any terminal status, but only ``failed`` is
+        expected to carry one — a natural exit has nothing to explain.
+        """
         row = await self.get_by_session_id(session_id)
         if row is None:
             return None
-        row.status = SessionStatus.DONE.value
+        row.status = status
+        row.reason = reason[:256] if reason else None
         row.finished_at = datetime.now(UTC)
         await self.session.flush()
         return row
+
+    async def mark_done(self, session_id: str) -> StsSessionRow | None:
+        """Natural end — see :meth:`mark_finished` for the failed path."""
+        return await self.mark_finished(
+            session_id, status=SessionStatus.DONE.value
+        )
+
+    async def mark_failed(
+        self, session_id: str, reason: str
+    ) -> StsSessionRow | None:
+        """Terminal end that was not a natural one."""
+        return await self.mark_finished(
+            session_id, status=SessionStatus.FAILED.value, reason=reason
+        )
 
 
 class TdSessionRepository(_SessionListMixin[TdSessionRow]):

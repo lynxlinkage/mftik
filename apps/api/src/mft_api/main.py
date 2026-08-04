@@ -21,7 +21,12 @@ from mft_api.routes import (
     sym_router,
     td_router,
 )
-from mft_api.ws import md_log_bridge, sts_log_bridge, td_log_bridge
+from mft_api.ws import (
+    md_log_bridge,
+    sts_log_bridge,
+    sts_status_bridge,
+    td_log_bridge,
+)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -73,6 +78,12 @@ app.include_router(md_router)
 app.include_router(sym_router)
 app.include_router(audits_router)
 app.include_router(logs_router)
+
+
+@app.websocket("/ws/status/sts")
+async def ws_sts_status(websocket: WebSocket) -> None:
+    """Every STS session's state changes, for the strategies list."""
+    await sts_status_bridge(websocket)
 
 
 @app.websocket("/ws/sts/{session_id}")

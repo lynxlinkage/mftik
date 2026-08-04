@@ -298,7 +298,7 @@ class ChaseOrder(Strategy):
             f"{_fmt(self.paras['expiry_s'])}s — exiting without placing",
             level="error",
         )
-        self.exit("chase_no_recon")
+        self.fail("chase_no_recon")
 
     async def on_stop(self) -> None:
         self._cancel_timer()
@@ -388,7 +388,7 @@ class ChaseOrder(Strategy):
         api_id = self._primary_api_id()
         if api_id is None:
             await self.log("ChaseOrder has no TD api_id — exiting", level="warn")
-            self.exit("chase_no_td")
+            self.fail("chase_no_td")
             return
 
         # Checked before the quote guard: a feed that never arrives must still
@@ -423,10 +423,10 @@ class ChaseOrder(Strategy):
 
         info = await self._instrument()
         if info is None:
-            self.exit("chase_no_instrument")
+            self.fail("chase_no_instrument")
             return
         if self._target_qty is None and not await self._set_target(info):
-            self.exit("chase_unsizeable")
+            self.fail("chase_unsizeable")
             return
 
         if self._remaining() <= 0:
@@ -504,7 +504,7 @@ class ChaseOrder(Strategy):
             )
             self._done = True
             self._cancel_timer()
-            self.exit("chase_insufficient_balance")
+            self.fail("chase_insufficient_balance")
             return
 
         accepted = await self.oms.submit_order(
@@ -531,7 +531,7 @@ class ChaseOrder(Strategy):
             )
             self._done = True
             self._cancel_timer()
-            self.exit(_refusal_reason(code, reason))
+            self.fail(_refusal_reason(code, reason))
             return
         self._open_cid = cid
         self._open_price = price

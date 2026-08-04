@@ -60,6 +60,20 @@
 					<span class="n muted-n">{d.done}</span>
 					<span class="l">history</span>
 				</div>
+				<!-- Only shown when there is something to see: a permanent zero
+				     trains people to stop reading it. -->
+				{#if d.failed > 0}
+					<div>
+						<span class="n failed-n">{d.failed}</span>
+						<span class="l">failed</span>
+					</div>
+				{/if}
+				{#if d.interrupted > 0}
+					<div>
+						<span class="n stopped-n">{d.interrupted}</span>
+						<span class="l">interrupted</span>
+					</div>
+				{/if}
 			</div>
 		</a>
 	{:else}
@@ -113,9 +127,13 @@
 		text-transform: uppercase;
 	}
 
+	/* Auto-fit rather than a fixed 1fr 1fr: only sts ever shows a third
+	   number, and a hard two-column grid would drop it onto its own row and
+	   leave that card taller than the others. */
 	.nums {
 		display: grid;
-		grid-template-columns: 1fr 1fr;
+		grid-auto-flow: column;
+		grid-auto-columns: 1fr;
 		gap: 0.75rem;
 	}
 
@@ -128,6 +146,14 @@
 
 	.muted-n {
 		color: var(--muted);
+	}
+
+	.failed-n {
+		color: var(--err);
+	}
+
+	.stopped-n {
+		color: var(--warn);
 	}
 
 	.l {

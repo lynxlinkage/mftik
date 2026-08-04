@@ -51,11 +51,14 @@ from mft.protocol import (
 from mft.symbols import SymbolClient
 from pydantic import BaseModel
 
+from mft_sts.liveness import mark_alive
 from mft_sts.strategy import Strategy
 
 logger = logging.getLogger(__name__)
 
-ExitHandler = Callable[[str, str], Awaitable[None]]
+#: ``(session_id, reason, failed)`` — the manager tears the session down and
+#: records the terminal status.
+ExitHandler = Callable[[str, str, bool], Awaitable[None]]
 
 #: MD message type → (strategy hook, payload model). One entry per feed topic
 #: MD publishes; anything else on ``md.{session_id}`` is logged and dropped.
@@ -200,8 +203,15 @@ class StsSession:
             return
         await self.strategy.on_resume()
 
-    def request_exit(self, reason: str = "strategy_exit") -> None:
-        """Ask the session manager to end this session (natural strategy exit).
+    def request_exit(
+        self, reason: str = "strategy_exit", *, failed: bool = False
+    ) -> None:
+        """Ask the session manager to end this session.
+
+        ``failed`` marks the session ``failed`` rather than ``done`` and keeps
+        ``reason`` on the row. First call wins: a session already on its way
+        out is not re-labelled, so cancel-then-fail sequences keep the reason
+        that started the teardown.
 
         Scheduled on the event loop so it is safe to call from a timer callback.
         """
@@ -209,19 +219,30 @@ class StsSession:
             return
         self._exit_requested = True
         logger.info(
-            "STS session exit requested id=%s reason=%s",
+            "STS session exit requested id=%s failed=%s reason=%s",
             self.session_id,
+            failed,
             reason,
         )
         if self._on_exit is not None:
             asyncio.create_task(
-                self._on_exit(self.session_id, reason),
+                self._on_exit(self.session_id, reason, failed),
                 name=f"sts-{self.session_id}-exit",
             )
         else:
             asyncio.create_task(
                 self.stop(), name=f"sts-{self.session_id}-exit-stop"
             )
+
+    def _fail_from_infrastructure(self, what: str) -> None:
+        """End the session as ``failed`` after a pump or lease loop died.
+
+        These loops do not come back: once ``subscribe`` or the heartbeat
+        publish raises, the session keeps its row marked live while receiving
+        nothing and holding no lease. Ending it makes that visible instead of
+        leaving a session that looks running and is not.
+        """
+        self.request_exit(f"{what} stopped: session can no longer run", failed=True)
 
     async def stop(self) -> None:
         if self._destroyed:
@@ -306,6 +327,15 @@ class StsSession:
     async def _lease_heartbeat_loop(self) -> None:
         """Publish fencing heartbeats on sts.td.* and/or sts.md.*."""
         while not self._stop.is_set():
+            # Renewed here rather than on its own timer: this loop is what
+            # stops when the session stops, so the key expiring means the
+            # session really is gone and not merely quiet.
+            try:
+                await mark_alive(self.broker, self.session_id)
+            except Exception:
+                logger.exception(
+                    "STS liveness refresh failed session=%s", self.session_id
+                )
             self._token += 1
             hb = LeaseHeartbeat(session_id=self.session_id, token=self._token)
             env = Envelope[LeaseHeartbeat].wrap(
@@ -327,6 +357,7 @@ class StsSession:
                 logger.exception(
                     "STS lease heartbeat failed session=%s", self.session_id
                 )
+                self._fail_from_infrastructure("lease heartbeat")
                 return
             try:
                 await asyncio.wait_for(
@@ -352,6 +383,7 @@ class StsSession:
             logger.exception(
                 "STS md session pump failed session=%s", self.session_id
             )
+            self._fail_from_infrastructure("md feed")
 
     async def _on_md_lease_ack(self, env: UntypedEnvelope) -> None:
         try:
@@ -410,6 +442,7 @@ class StsSession:
                 self.session_id,
                 api_id,
             )
+            self._fail_from_infrastructure(f"td session feed api_id={api_id}")
 
     async def _pump_td_global(self, api_id: int) -> None:
         topic = Topics.td_global(api_id)
@@ -424,6 +457,7 @@ class StsSession:
                 self.session_id,
                 api_id,
             )
+            self._fail_from_infrastructure(f"td global feed api_id={api_id}")
 
     async def _on_td_global(self, api_id: int, env: UntypedEnvelope) -> None:
         entry = TD_GLOBAL_HANDLERS.get(env.type)

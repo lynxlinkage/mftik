@@ -55,6 +55,17 @@ class Topics:
         return Topics.log_sts(session_id)
 
     @staticmethod
+    def status_sts() -> str:
+        """STS session state changes, every session (``/ws/status/sts``).
+
+        One channel rather than one per session: the strategies list renders
+        every session at once and does not know the id of a session that has
+        not been deployed yet, so per-session channels would mean N sockets
+        and a blind spot for anything new.
+        """
+        return "status.sts"
+
+    @staticmethod
     def td_global(api_id: int) -> str:
         """TD → STS fan-out for a trading account (refcount 0→1)."""
         return f"td.{api_id}.global"

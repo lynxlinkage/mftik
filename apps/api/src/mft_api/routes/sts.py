@@ -125,6 +125,7 @@ async def list_strategies(
                 sts_session=row.sts_session,
                 status=session.status if session is not None else None,
                 paused=paused_by_session.get(row.sts_session),
+                reason=session.reason if session is not None else None,
             )
         )
     return StrategyListResponse(strategies=out)

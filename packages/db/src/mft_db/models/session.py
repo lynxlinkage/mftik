@@ -30,7 +30,31 @@ class SessionDomain(StrEnum):
 
 class SessionStatus(StrEnum):
     LIVE = "live"
+    #: The session reached its own end — the strategy decided it was finished.
     DONE = "done"
+    #: Terminal, but not a natural end — the session stopped because something
+    #: went wrong. Only ``sts_sessions`` records this; td/md rows follow their
+    #: owning strategy session and stay live/done.
+    FAILED = "failed"
+    #: Cut short by STS going down, with nothing wrong with the strategy
+    #: itself. Kept apart from ``done`` because it answers a question no other
+    #: status can: *this one did not choose to stop*, so it is the set a
+    #: rebuild-on-restart would draw from. Recording it is all this does —
+    #: rebuilding is per-strategy work that does not exist yet.
+    INTERRUPTED = "interrupted"
+
+    @classmethod
+    def terminal(cls) -> frozenset[str]:
+        """Statuses a session never leaves.
+
+        Exists so "has it ended" is asked in one place rather than spelled as
+        ``!= live`` or, worse, ``== done`` — the latter silently skips every
+        status added later, which is how ``failed`` sessions first went
+        missing from the dashboard.
+        """
+        return frozenset(
+            {cls.DONE.value, cls.FAILED.value, cls.INTERRUPTED.value}
+        )
 
 
 class StsSessionRow(Base):
@@ -56,6 +80,9 @@ class StsSessionRow(Base):
         default=SessionStatus.LIVE.value,
         index=True,
     )
+    #: Why the session ended. Carries the exit reason for ``failed``; left
+    #: null for a session that is still live or ended naturally.
+    reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     strategy: Mapped[str | None] = mapped_column(String(128), nullable=True)
     td_api_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
     md_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)

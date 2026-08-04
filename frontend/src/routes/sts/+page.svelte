@@ -10,6 +10,11 @@
 		type StrategyTemplate,
 		type StrategyYaml
 	} from '$lib/api';
+	import {
+		connectStsStatus,
+		type StatusConnection,
+		type StsSessionStatusEvent
+	} from '$lib/logging/status';
 
 	let strategies = $state<StrategyRow[]>([]);
 	let yamlText = $state(defaultStrategyYml());
@@ -26,6 +31,19 @@
 	let viewing = $state<StrategyYaml | null>(null);
 	let viewingId = $state<number | null>(null);
 	let copied = $state(false);
+
+	// Matches mft.protocol.STS_REASON_OPERATOR_STOP. A stopped session is
+	// `done` like any other, so this string is the only thing telling the two
+	// apart — keep it in step with the backend constant.
+	const OPERATOR_STOP = 'operator_stop';
+
+	let connection = $state<StatusConnection>('connecting');
+	// Envelope ts of the newest event applied per session, so a replayed event
+	// cannot overwrite a newer one we already have.
+	let lastEventTs = new Map<string, number>();
+	// Sessions we are already fetching a row for, so a burst of events for the
+	// same new session does not fan out into a burst of list fetches.
+	let pendingSessions = new Set<string>();
 
 	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
 	const selected = $derived(
@@ -163,7 +181,93 @@
 		}
 	}
 
-	onMount(refresh);
+	/**
+	 * Fetch the list because `sessionId` is not in it yet, and try once more if
+	 * it still is not.
+	 *
+	 * Deploy creates the STS session — which announces itself as live straight
+	 * away — before the API writes the `strategies` row this table is built
+	 * from. So the first fetch legitimately races the row into existence and
+	 * can come back without it. One retry closes that window; beyond that the
+	 * session simply has no strategy row (nothing deployed it) and asking
+	 * again forever would just be a poll.
+	 */
+	async function fetchUnknownSession(sessionId: string) {
+		if (pendingSessions.has(sessionId)) return;
+		pendingSessions.add(sessionId);
+		try {
+			await refresh();
+			if (strategies.some((s) => s.sts_session === sessionId)) return;
+			await new Promise((r) => setTimeout(r, 1500));
+			await refresh();
+		} finally {
+			pendingSessions.delete(sessionId);
+		}
+	}
+
+	// One shared tooltip node, positioned in viewport coordinates. It lives
+	// outside the table on purpose: `.table-wrap` scrolls horizontally, which
+	// makes it a clipping container, and anything absolutely positioned inside
+	// it gets cut off at its edges.
+	let tip = $state<{ text: string; x: number; y: number; below: boolean } | null>(
+		null
+	);
+	let tipEl = $state<HTMLDivElement | null>(null);
+
+	function showTip(event: MouseEvent | FocusEvent, reason: string | null) {
+		const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+		// Flip below the icon when there is no room above it.
+		const below = rect.top < 90;
+		tip = {
+			text: reason ?? 'no reason recorded',
+			x: rect.left + rect.width / 2,
+			y: below ? rect.bottom + 8 : rect.top - 8,
+			below
+		};
+	}
+
+	function hideTip() {
+		tip = null;
+	}
+
+	// Nudge back into view when the icon sits near a viewport edge. Done after
+	// render because it needs the tooltip's real width, which depends on how
+	// long the reason is.
+	$effect(() => {
+		if (tip === null || tipEl === null) return;
+		const rect = tipEl.getBoundingClientRect();
+		const margin = 8;
+		const overflowLeft = margin - rect.left;
+		const overflowRight = rect.right - (window.innerWidth - margin);
+		if (overflowLeft > 0) tipEl.style.marginLeft = `${overflowLeft}px`;
+		else if (overflowRight > 0) tipEl.style.marginLeft = `${-overflowRight}px`;
+	});
+
+	/** Apply one live status event to the table. */
+	function applyStatus(ev: StsSessionStatusEvent) {
+		const previous = lastEventTs.get(ev.session_id);
+		if (previous !== undefined && ev.ts < previous) return;
+		lastEventTs.set(ev.session_id, ev.ts);
+
+		const row = strategies.find((s) => s.sts_session === ev.session_id);
+		if (row === undefined) {
+			// A session this page has never seen — a deploy from another tab, or
+			// this one. The event alone cannot build a row (it carries no strategy
+			// id, config or deploy time), so go and fetch one.
+			fetchUnknownSession(ev.session_id);
+			return;
+		}
+		strategies = strategies.map((s) =>
+			s.sts_session === ev.session_id
+				? { ...s, status: ev.status, paused: ev.paused, reason: ev.reason }
+				: s
+		);
+	}
+
+	onMount(() => {
+		refresh();
+		return connectStsStatus(applyStatus, (state) => (connection = state));
+	});
 </script>
 
 <div class="page-head">
@@ -175,7 +279,16 @@
 			strategy's own parameters.
 		</p>
 	</div>
-	<button type="button" class="secondary" onclick={refresh} disabled={loading}>Refresh</button>
+	<div class="head-actions">
+		<!-- A silently dead socket is the failure this whole stream exists to
+		     avoid, so say when the table has stopped updating itself. -->
+		{#if connection !== 'open'}
+			<span class="live-state" title="Session states are not updating live">
+				{connection === 'connecting' ? 'connecting…' : 'not live'}
+			</span>
+		{/if}
+		<button type="button" class="secondary" onclick={refresh} disabled={loading}>Refresh</button>
+	</div>
 </div>
 
 {#if error}
@@ -225,7 +338,22 @@
 	></textarea>
 </section>
 
-<section class="panel table-wrap">
+<!-- The reason is detail, not headline: a row is scanned for its status, and
+     256 characters of it inline would bury that. No `title` attribute — the
+     tooltip replaces it, and having both would show two of them. -->
+{#snippet why(reason: string | null)}
+	<button
+		type="button"
+		class="why"
+		aria-label={`Why it ended: ${reason ?? 'no reason recorded'}`}
+		onmouseenter={(e) => showTip(e, reason)}
+		onmouseleave={hideTip}
+		onfocus={(e) => showTip(e, reason)}
+		onblur={hideTip}
+	>i</button>
+{/snippet}
+
+<section class="panel table-wrap" onscroll={hideTip}>
 	{#if strategies.length === 0}
 		<p class="empty-state">{loading ? 'Loading…' : 'No strategies deployed yet.'}</p>
 	{:else}
@@ -251,8 +379,26 @@
 							</a>
 						</td>
 						<td>
-							{#if s.status === 'done'}
-								<span class="badge done">done</span>
+							<!-- The terminal statuses come first: they are final, and a
+							     stale `paused` from the live-session probe must never mask
+							     them. -->
+							{#if s.status === 'failed' || s.status === 'interrupted'}
+								<div class="status-cell">
+									<span class="badge {s.status}">{s.status}</span>
+									{@render why(s.reason)}
+								</div>
+							{:else if s.status === 'done' && s.reason === OPERATOR_STOP}
+								<!-- Someone pulled this one. Same status as a strategy that
+								     finished, but a different thing to have happened, and the
+								     badge is where that should be readable. -->
+								<span class="badge stopped">stopped</span>
+							{:else if s.status === 'done'}
+								<div class="status-cell">
+									<span class="badge done">done</span>
+									<!-- Sessions that ended before reasons were recorded have
+									     none; there is nothing to offer for those. -->
+									{#if s.reason}{@render why(s.reason)}{/if}
+								</div>
 							{:else if s.paused}
 								<span class="badge paused">paused</span>
 							{:else if s.status === 'live'}
@@ -326,6 +472,23 @@
 		</table>
 	{/if}
 </section>
+
+<!-- Rendered outside the scrolling table, in viewport coordinates, so the
+     container that clips its own overflow cannot clip this too. Hidden from
+     assistive tech: the trigger's aria-label already carries the reason, and
+     announcing it twice helps nobody. -->
+<svelte:window onscroll={hideTip} onresize={hideTip} />
+{#if tip}
+	<div
+		class="tip"
+		class:below={tip.below}
+		style={`left: ${tip.x}px; top: ${tip.y}px;`}
+		bind:this={tipEl}
+		aria-hidden="true"
+	>
+		{tip.text}
+	</div>
+{/if}
 
 <style>
 	.editor {
@@ -450,6 +613,75 @@
 
 	.badge.done {
 		opacity: 0.75;
+	}
+
+	.head-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+	}
+
+	.live-state {
+		font-size: 0.78rem;
+		color: var(--warn);
+	}
+
+	.status-cell {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		min-width: 0;
+	}
+
+	/* A button so it is focusable and announced; it has no click behaviour of
+	   its own — hovering it is the whole interaction. */
+	.why {
+		padding: 0;
+		background: none;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.05rem;
+		height: 1.05rem;
+		border: 1px solid var(--border);
+		border-radius: 50%;
+		color: var(--muted);
+		font-size: 0.68rem;
+		font-style: italic;
+		line-height: 1;
+		cursor: help;
+	}
+
+	.why:hover,
+	.why:focus-visible {
+		color: var(--err);
+		border-color: rgba(240, 113, 120, 0.5);
+		outline: none;
+	}
+
+	.tip {
+		position: fixed;
+		z-index: 50;
+		/* Sits above the icon; `below` flips it under when there is no room. */
+		transform: translate(-50%, -100%);
+		max-width: min(30rem, calc(100vw - 2rem));
+		padding: 0.45rem 0.6rem;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		color: var(--text);
+		font-size: 0.78rem;
+		line-height: 1.45;
+		/* Reasons can be one long unbroken token — break rather than overflow. */
+		overflow-wrap: anywhere;
+		box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+		/* Never let the tooltip take the pointer: hovering it must not count as
+		   leaving the icon, or it would flicker. */
+		pointer-events: none;
+	}
+
+	.tip.below {
+		transform: translate(-50%, 0);
 	}
 
 	.link-btn {

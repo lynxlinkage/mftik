@@ -131,9 +131,21 @@ class FakeSession:
         self.td_api_ids = [API_ID]
         self.md_ids = ["paper.bestquote.BTCUSDT"]
         self.exits: list[str] = []
+        #: Reasons the strategy ended as ``failed`` rather than ``done``.
+        self.failures: list[str] = []
 
-    def request_exit(self, reason: str) -> None:
+    def request_exit(self, reason: str, *, failed: bool = False) -> None:
         self.exits.append(reason)
+        if failed:
+            self.failures.append(reason)
+
+
+def _filled_leg(strat) -> str | None:
+    """The leg named in an `oco_filled` exit, or None if it did not fill."""
+    for reason in strat.session.exits:
+        if reason.startswith("oco_filled:"):
+            return reason.split(":", 1)[1].strip()
+    return None
 
 
 class FakeTimer:
@@ -320,6 +332,8 @@ async def test_nothing_arriving_at_all_ends_the_session() -> None:
 
     assert strat.oms.submitted == []
     assert strat.session.exits == ["oco_not_armed"]
+    # Nothing was placed and nothing will be — that is a failure.
+    assert strat.session.failures == ["oco_not_armed"]
 
 
 async def test_a_recon_for_another_account_does_not_arm_it() -> None:
@@ -531,7 +545,9 @@ async def test_a_complete_fill_cancels_the_other_and_exits() -> None:
     )
 
     assert strat.oms.cancelled == ["cid-2"]
-    assert strat.session.exits == ["oco_filled"]
+    assert _filled_leg(strat) is not None
+    # A pair that resolved the way an OCO should is a natural end.
+    assert strat.session.failures == []
 
 
 async def test_the_second_leg_can_be_the_winner_too() -> None:
@@ -542,7 +558,7 @@ async def test_the_second_leg_can_be_the_winner_too() -> None:
     )
 
     assert strat.oms.cancelled == ["cid-1"]
-    assert strat.session.exits == ["oco_filled"]
+    assert _filled_leg(strat) is not None
 
 
 async def test_a_partial_fill_decides_nothing() -> None:
@@ -577,7 +593,7 @@ async def test_the_losers_cancel_coming_back_does_not_re_trigger() -> None:
     )
 
     assert strat.oms.cancelled == ["cid-2"]
-    assert strat.session.exits == ["oco_filled"]
+    assert _filled_leg(strat) is not None
 
 
 async def test_a_leg_lost_without_filling_takes_the_other_with_it() -> None:
@@ -642,7 +658,7 @@ async def test_a_refused_cancel_is_not_an_error() -> None:
         ),
     )
 
-    assert strat.session.exits == ["oco_filled"]
+    assert _filled_leg(strat) is not None
 
 
 # --- pause and stop --------------------------------------------------------
