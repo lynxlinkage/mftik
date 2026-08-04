@@ -29,6 +29,7 @@ from mft.protocol import (
     TD_ORDER_UPDATE,
     CancelReject,
     OrderReject,
+    RejectCode,
     Topics,
     UntypedEnvelope,
 )
@@ -109,6 +110,15 @@ class Session:
     @property
     def destroyed(self) -> bool:
         return self._destroyed
+
+    @property
+    def venue(self) -> str:
+        """Canonical venue name, which is what the client calls itself.
+
+        Adapters name themselves after their entry in ``mft.exchange.venues``,
+        so this is also the key error normalization looks the venue up by.
+        """
+        return self.private.name
 
     def on_order(self, cb: OrderCallback) -> None:
         self._order_cbs.append(cb)
@@ -543,8 +553,14 @@ class Session:
         client_order_id: str | None = None,
         order_id: str | None = None,
         symbol: str | None = None,
+        error_code: int | str = RejectCode.NONE,
     ) -> None:
-        """Publish a submit reject on ``td.{api_id}.global``."""
+        """Publish a submit reject on ``td.{api_id}.global``.
+
+        ``reason`` is what a human reads; ``error_code`` is what a strategy
+        branches on. Callers that have an exception should run it through
+        :func:`mft_td.errors.normalize` rather than picking a code by hand.
+        """
         await self._publish_global(
             TD_ORDER_REJECT,
             OrderReject(
@@ -553,6 +569,7 @@ class Session:
                 order_id=order_id,
                 symbol=symbol,
                 reason=reason,
+                error_code=error_code,
             ),
         )
 
@@ -562,6 +579,7 @@ class Session:
         reason: str,
         client_order_id: str | None = None,
         order_id: str | None = None,
+        error_code: int | str = RejectCode.NONE,
     ) -> None:
         """Publish a cancel reject on ``td.{api_id}.global``."""
         await self._publish_global(
@@ -571,6 +589,7 @@ class Session:
                 client_order_id=client_order_id,
                 order_id=order_id,
                 reason=reason,
+                error_code=error_code,
             ),
         )
 
@@ -625,11 +644,16 @@ class Session:
                 order.client_order_id,
             )
         if order.status is OrderStatus.REJECTED:
+            # A reject that arrived on the order stream, not as a failed call:
+            # the venue said no after accepting the request, and the stream
+            # carries no reason with it. VENUE_REJECTED is the honest code —
+            # the venue refused it, and that is all anyone knows.
             await self.publish_order_reject(
                 reason="rejected",
                 client_order_id=order.client_order_id,
                 order_id=order.order_id,
                 symbol=order.symbol,
+                error_code=RejectCode.VENUE_REJECTED,
             )
         else:
             await self._publish_global(TD_ORDER_UPDATE, order)

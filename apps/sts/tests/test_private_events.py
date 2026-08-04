@@ -17,6 +17,7 @@ from mft.protocol import (
     CancelReject,
     OrderReject,
     ReconDone,
+    RejectCode,
     StsCreateSessionRequest,
     TdAttachRequest,
 )
@@ -246,11 +247,18 @@ async def test_order_and_cancel_reject_paths(broker: Broker) -> None:
     assert reject.client_order_id == bad_cid
     assert reject.api_id == 7
     assert unpack(bad_cid)[2] == 1
+    # The venue's refusal arrives normalized, with its own words kept in
+    # ``reason``.
+    assert reject.error_code == RejectCode.VENUE_INSUFFICIENT_BALANCE
+    assert reject.reason
 
     # Cancel unknown cid → on_cancel_reject
     assert await strat.oms.cancel_order(7, bad_cid)
     cancel_rej = await asyncio.wait_for(strat.cancel_rejects.get(), timeout=3.0)
     assert cancel_rej.client_order_id == bad_cid
+    # The venue knows this order — it rejected it a moment ago — so "not open"
+    # is the sharper answer than "not found".
+    assert cancel_rej.error_code == RejectCode.VENUE_ORDER_ALREADY_CLOSED
 
     # Resting limit + cancel by client_order_id → on_order_update
     assert await strat.oms.submit_order(

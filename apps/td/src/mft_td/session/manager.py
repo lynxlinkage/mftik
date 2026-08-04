@@ -36,6 +36,7 @@ from mft.protocol import (
     OrderSubmit,
     Recon,
     ReconDone,
+    RejectCode,
     SessionInfo,
     StsDetach,
     TdAttachRequest,
@@ -43,8 +44,10 @@ from mft.protocol import (
     Topics,
     publish_td_log,
 )
+from mft.protocol.reject_codes import describe
 from mft_db.models.session import SessionDomain, SessionStatus
 
+from mft_td.errors import normalize
 from mft_td.session.factory import SessionFactory
 from mft_td.session.session import Session
 
@@ -615,7 +618,12 @@ class SessionManager:
             handler = self._handle_order_cancel
         else:
             await self._reply_order_ack(
-                req, acct.api_id, "", False, f"unsupported request {env.type!r}"
+                req,
+                acct.api_id,
+                "",
+                False,
+                f"unsupported request {env.type!r}",
+                RejectCode.TD_UNSUPPORTED_REQUEST,
             )
             return
 
@@ -623,14 +631,24 @@ class SessionManager:
             payload = model.model_validate(env.payload or {})
         except Exception as exc:
             await self._reply_order_ack(
-                req, acct.api_id, "", False, f"invalid payload: {exc}"
+                req,
+                acct.api_id,
+                "",
+                False,
+                f"invalid payload: {exc}",
+                RejectCode.TD_INVALID_REQUEST,
             )
             return
 
         cid = payload.client_order_id
         if payload.api_id != acct.api_id:
             await self._reply_order_ack(
-                req, acct.api_id, cid, False, f"wrong api_id {payload.api_id}"
+                req,
+                acct.api_id,
+                cid,
+                False,
+                f"wrong api_id {payload.api_id}",
+                RejectCode.TD_WRONG_API_ID,
             )
             return
 
@@ -643,6 +661,7 @@ class SessionManager:
                 False,
                 f"session {payload.session_id!r} not attached to "
                 f"api_id={acct.api_id}",
+                RejectCode.TD_SESSION_NOT_ATTACHED,
             )
             return
 
@@ -664,7 +683,12 @@ class SessionManager:
             refusal = await acct.trading.reserve(request)
             if refusal is not None:
                 await self._reply_order_ack(
-                    req, acct.api_id, cid, False, f"insufficient balance: {refusal}"
+                    req,
+                    acct.api_id,
+                    cid,
+                    False,
+                    f"insufficient balance: {refusal}",
+                    RejectCode.TD_INSUFFICIENT_BALANCE,
                 )
                 return
             # Book it PENDING_NEW and get it into Redis before the ack. A
@@ -681,7 +705,12 @@ class SessionManager:
                     cid,
                 )
                 await self._reply_order_ack(
-                    req, acct.api_id, cid, False, f"state write failed: {exc}"
+                    req,
+                    acct.api_id,
+                    cid,
+                    False,
+                    f"state write failed: {exc}",
+                    RejectCode.TD_STATE_WRITE_FAILED,
                 )
                 return
         else:
@@ -698,11 +727,23 @@ class SessionManager:
                     cid,
                 )
                 await self._reply_order_ack(
-                    req, acct.api_id, cid, False, f"state write failed: {exc}"
+                    req,
+                    acct.api_id,
+                    cid,
+                    False,
+                    f"state write failed: {exc}",
+                    RejectCode.TD_STATE_WRITE_FAILED,
                 )
                 return
             if refusal is not None:
-                await self._reply_order_ack(req, acct.api_id, cid, False, refusal)
+                await self._reply_order_ack(
+                    req,
+                    acct.api_id,
+                    cid,
+                    False,
+                    refusal,
+                    RejectCode.TD_NOT_CANCELABLE,
+                )
                 return
 
         await self._reply_order_ack(req, acct.api_id, cid, True, "")
@@ -718,12 +759,19 @@ class SessionManager:
         client_order_id: str,
         accepted: bool,
         reason: str,
+        error_code: int | str = RejectCode.NONE,
     ) -> None:
+        """Answer an order request.
+
+        Every refusal on this path is TD's own — the venue has not been asked
+        yet — so ``error_code`` is always in the ``1xx`` band.
+        """
         if not accepted:
             logger.warning(
-                "TD order request refused api_id=%s cid=%s: %s",
+                "TD order request refused api_id=%s cid=%s code=%s: %s",
                 api_id,
                 client_order_id,
+                describe(error_code),
                 reason,
             )
         await req.reply(
@@ -733,6 +781,7 @@ class SessionManager:
                     client_order_id=client_order_id,
                     accepted=accepted,
                     reason=reason,
+                    error_code=error_code,
                 ),
                 type=TD_ORDER_ACK,
                 source="td",
@@ -782,19 +831,21 @@ class SessionManager:
             )
         except ExchangeError as exc:
             acct.cid_owner.pop(req.client_order_id, None)
+            code = normalize(exc, venue=acct.trading.venue)
             # Settle the PENDING_NEW we booked before announcing the refusal.
             await acct.trading.record_rejected(req.client_order_id)
             await acct.trading.publish_order_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,
                 symbol=req.symbol,
+                error_code=code,
             )
             await publish_td_log(
                 self._broker,
                 link.api_id,
                 (
                     f"order rejected sts={link.session_id} "
-                    f"cid={req.client_order_id}: {exc}"
+                    f"cid={req.client_order_id} [{describe(code)}]: {exc}"
                 ),
                 source="td",
                 level="warn",
@@ -807,11 +858,15 @@ class SessionManager:
                 link.api_id,
                 req.client_order_id,
             )
+            # Not the venue refusing — the send itself broke. TD settles the
+            # order as rejected on the assumption it never landed, so the code
+            # says so too; recon is what corrects it if the venue saw it.
             await acct.trading.record_rejected(req.client_order_id)
             await acct.trading.publish_order_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,
                 symbol=req.symbol,
+                error_code=RejectCode.TD_SEND_FAILED,
             )
 
     async def _handle_order_cancel(
@@ -871,17 +926,19 @@ class SessionManager:
         except ExchangeError as exc:
             # The venue refused it, so the order is still working: put it back
             # before telling anyone, or PENDING_CANCEL sticks forever.
+            code = normalize(exc, venue=acct.trading.venue)
             await acct.trading.revert_pending_cancel(req.client_order_id)
             await acct.trading.publish_cancel_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,
+                error_code=code,
             )
             await publish_td_log(
                 self._broker,
                 link.api_id,
                 (
                     f"cancel rejected sts={link.session_id} "
-                    f"cid={req.client_order_id}: {exc}"
+                    f"cid={req.client_order_id} [{describe(code)}]: {exc}"
                 ),
                 source="td",
                 level="warn",
@@ -897,4 +954,5 @@ class SessionManager:
             await acct.trading.publish_cancel_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,
+                error_code=RejectCode.TD_SEND_FAILED,
             )

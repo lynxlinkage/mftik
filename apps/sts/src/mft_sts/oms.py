@@ -16,8 +16,10 @@ from mft.protocol import (
     OrderAck,
     OrderCancel,
     OrderSubmit,
+    RejectCode,
     Topics,
 )
+from mft.protocol.reject_codes import describe
 
 from mft_sts.client_order_id import ClientOrderIdFactory
 
@@ -61,6 +63,7 @@ class StrategyOms:
         self._ack_timeout = ack_timeout
         self._last_cid: str | None = None
         self._last_reason: str = ""
+        self._last_code: int | str = RejectCode.NONE
 
     def bind(self, strategy: Strategy, *, cid_slot: int) -> None:
         self._strategy = strategy
@@ -134,6 +137,18 @@ class StrategyOms:
         this and stop rather than re-submitting.
         """
         return self._last_reason
+
+    @property
+    def last_reject_code(self) -> int | str:
+        """:attr:`last_reject_reason` as a code — see
+        :mod:`mft.protocol.reject_codes`.
+
+        ``RejectCode.NONE`` when the last request was taken. Everything on
+        this path is a TD refusal, so the code is always in the ``1xx`` band:
+        branch on it rather than matching on the reason text, which is
+        free-form and will drift.
+        """
+        return self._last_code
 
     def _next_client_order_id(self) -> str:
         if self._cid_factory is None:
@@ -221,6 +236,7 @@ class StrategyOms:
         # Cleared up front so a stale reason cannot outlive the refusal it
         # described and be read against a later, accepted request.
         self._last_reason = ""
+        self._last_code = RejectCode.NONE
         try:
             reply = await session.broker.request(
                 Topics.td_order(api_id), envelope, timeout=self._ack_timeout
@@ -236,6 +252,7 @@ class StrategyOms:
                 envelope.type,
             )
             self._last_reason = "no ack from TD"
+            self._last_code = RejectCode.TD_NO_ACK
             return False
 
         try:
@@ -248,13 +265,19 @@ class StrategyOms:
                 reply.type,
             )
             self._last_reason = "unreadable ack from TD"
+            self._last_code = RejectCode.TD_UNREADABLE_ACK
             return False
 
         if not ack.accepted:
             logger.warning(
-                "TD refused order api_id=%s cid=%s: %s", api_id, cid, ack.reason
+                "TD refused order api_id=%s cid=%s code=%s: %s",
+                api_id,
+                cid,
+                describe(ack.error_code),
+                ack.reason,
             )
             self._last_reason = ack.reason
+            self._last_code = ack.error_code
         return ack.accepted
 
     def _require_session(self):

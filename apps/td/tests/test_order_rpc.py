@@ -32,6 +32,7 @@ from mft.protocol import (
     OrderAck,
     OrderCancel,
     OrderSubmit,
+    RejectCode,
     TdAttachRequest,
     Topics,
     UntypedEnvelope,
@@ -160,6 +161,7 @@ async def test_unattached_session_is_refused(
 
     assert ack.accepted is False
     assert "not attached" in ack.reason
+    assert ack.error_code == RejectCode.TD_SESSION_NOT_ATTACHED
     # The cid still comes back so the caller can correlate the refusal.
     assert ack.client_order_id == "c2"
 
@@ -171,6 +173,7 @@ async def test_wrong_api_id_is_refused(
 
     assert ack.accepted is False
     assert "wrong api_id" in ack.reason
+    assert ack.error_code == RejectCode.TD_WRONG_API_ID
 
 
 async def test_unparseable_payload_is_refused(
@@ -187,6 +190,7 @@ async def test_unparseable_payload_is_refused(
 
     assert ack.accepted is False
     assert "invalid payload" in ack.reason
+    assert ack.error_code == RejectCode.TD_INVALID_REQUEST
 
 
 async def test_unsupported_request_type_is_refused(
@@ -199,6 +203,7 @@ async def test_unsupported_request_type_is_refused(
 
     assert ack.accepted is False
     assert "unsupported" in ack.reason
+    assert ack.error_code == RejectCode.TD_UNSUPPORTED_REQUEST
 
 
 async def test_no_td_serving_times_out(broker: Broker) -> None:
@@ -257,6 +262,7 @@ async def test_an_unaffordable_order_is_refused_and_reserves_nothing(
 
     assert ack.accepted is False
     assert "insufficient balance" in ack.reason
+    assert ack.error_code == RejectCode.TD_INSUFFICIENT_BALANCE
     assert not session.ledger.has_reservation("cid-broke")
 
 
@@ -432,6 +438,7 @@ async def test_cancelling_a_pending_new_order_is_refused(
 
     assert ack.accepted is False
     assert "pending_new" in ack.reason
+    assert ack.error_code == RejectCode.TD_NOT_CANCELABLE
     row = await broker.state_get(Topics.td_oms(API_ID), "cid-inflight")
     assert row["status"] == OrderStatus.PENDING_NEW.value
 

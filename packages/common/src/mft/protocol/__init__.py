@@ -148,6 +148,11 @@ from mft.protocol.messages import (
     TdAttachResult,
     TdAttachResultEnvelope,
 )
+
+# Only the enum is re-exported: ``is_td_internal`` and friends are too
+# generically named to live in this namespace, so they stay one import away in
+# ``mft.protocol.reject_codes``.
+from mft.protocol.reject_codes import RejectCode
 from mft.protocol.session_log import (
     publish_md_log,
     publish_session_log,
@@ -314,6 +319,7 @@ __all__ = [
     "ReconDone",
     "ReconDoneEnvelope",
     "ReconEnvelope",
+    "RejectCode",
     "RpcError",
     "RpcErrorEnvelope",
     "SessionInfo",

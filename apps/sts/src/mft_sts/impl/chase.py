@@ -69,9 +69,11 @@ from mft.protocol import (
     CancelReject,
     OrderReject,
     ReconDone,
+    RejectCode,
     SymbolInfo,
     Topics,
 )
+from mft.protocol.reject_codes import describe, is_normalized
 
 from mft_sts.strategy import Strategy
 from mft_sts.timer import TimerToken
@@ -119,15 +121,18 @@ def _positive(paras: dict[str, Any], name: str) -> Decimal:
     return value
 
 
-#: What TD prefixes a pre-lock refusal with. Matching it only sharpens the
-#: exit reason — anything unrecognised still ends the session, just under the
-#: generic name, so drifting out of sync here degrades rather than breaks.
+#: What TD prefixed a pre-lock refusal with before it carried a code. Kept as
+#: a fallback so an older TD, or one whose ack we could not read, still lands
+#: on the sharper exit reason. Anything unrecognised still ends the session,
+#: just under the generic name — drifting out of sync degrades, not breaks.
 _NO_FUNDS = "insufficient balance"
 
 
-def _refusal_reason(reason: str) -> str:
+def _refusal_reason(code: int | str, reason: str) -> str:
     """Exit reason for a TD refusal, naming the one cause worth singling out."""
-    if _NO_FUNDS in reason.lower():
+    if code == RejectCode.TD_INSUFFICIENT_BALANCE:
+        return "chase_insufficient_balance"
+    if not is_normalized(code) and _NO_FUNDS in reason.lower():
         return "chase_insufficient_balance"
     return "chase_refused"
 
@@ -518,14 +523,15 @@ class ChaseOrder(Strategy):
             # (no funds, no TD, not attached), so the next tick would be
             # refused identically: stop instead of retrying until expiry.
             reason = self.oms.last_reject_reason
+            code = self.oms.last_reject_code
             await self.log(
-                f"ChaseOrder place refused by TD cid={cid}: "
-                f"{reason or 'no reason given'} — exiting",
+                f"ChaseOrder place refused by TD cid={cid} "
+                f"[{describe(code)}]: {reason or 'no reason given'} — exiting",
                 level="error",
             )
             self._done = True
             self._cancel_timer()
-            self.exit(_refusal_reason(reason))
+            self.exit(_refusal_reason(code, reason))
             return
         self._open_cid = cid
         self._open_price = price
@@ -696,7 +702,7 @@ class ChaseOrder(Strategy):
                 # rest of the budget being told no.
                 await self.log(
                     f"ChaseOrder must_exec slice {slice_no} refused by TD "
-                    f"cid={cid}: "
+                    f"cid={cid} [{describe(self.oms.last_reject_code)}]: "
                     f"{self.oms.last_reject_reason or 'no reason given'} — "
                     f"{_fmt(remaining)} left unfilled",
                     level="error",
@@ -753,10 +759,15 @@ class ChaseOrder(Strategy):
         if not self.owns(reject.client_order_id):
             return
         # Expected, not exceptional: post-only is refused whenever the price
-        # crossed. The next tick reprices off a fresher quote.
+        # crossed. The next tick reprices off a fresher quote — which is also
+        # the right move for a reject that is not a crossed post-only, since
+        # the tick re-reads the book and the balance before it tries again.
+        crossed = reject.error_code == RejectCode.VENUE_POST_ONLY_WOULD_CROSS
         await self.log(
-            f"ChaseOrder post-only refused cid={reject.client_order_id} "
-            f"reason={reject.reason} — repricing"
+            f"ChaseOrder {'post-only' if crossed else 'order'} refused "
+            f"cid={reject.client_order_id} "
+            f"[{describe(reject.error_code)}] {reject.reason} — repricing",
+            level="info" if crossed else "warn",
         )
         self._clear_open(str(reject.client_order_id))
 
@@ -769,7 +780,7 @@ class ChaseOrder(Strategy):
         # not ours to wait on any more; the order update carries the truth.
         await self.log(
             f"ChaseOrder cancel refused cid={reject.client_order_id} "
-            f"reason={reject.reason}",
+            f"[{describe(reject.error_code)}] {reject.reason}",
             level="warn",
         )
         self._clear_open(str(reject.client_order_id))

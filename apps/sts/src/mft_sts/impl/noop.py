@@ -45,6 +45,7 @@ from mft.protocol import (
     SymbolInfo,
     Topics,
 )
+from mft.protocol.reject_codes import describe
 
 from mft_sts.strategy import Strategy
 from mft_sts.timer import TimerToken
@@ -363,14 +364,16 @@ class NoopStrategy(Strategy):
     async def on_order_reject(self, api_id: int, reject: OrderReject) -> None:
         await self.log(
             f"NoopStrategy on_order_reject api_id={api_id} "
-            f"cid={reject.client_order_id} reason={reject.reason}",
+            f"cid={reject.client_order_id} "
+            f"[{describe(reject.error_code)}] reason={reject.reason}",
             level="warn",
         )
 
     async def on_cancel_reject(self, api_id: int, reject: CancelReject) -> None:
         await self.log(
             f"NoopStrategy on_cancel_reject api_id={api_id} "
-            f"cid={reject.client_order_id} reason={reject.reason}",
+            f"cid={reject.client_order_id} "
+            f"[{describe(reject.error_code)}] reason={reject.reason}",
             level="warn",
         )
 

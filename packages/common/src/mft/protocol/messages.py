@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mft.exchange.models import OrderType, Side, TimeInForce
 from mft.exchange.oms import OmsView
 from mft.protocol.envelope import Envelope
+from mft.protocol.reject_codes import RejectCode
 
 
 class Heartbeat(BaseModel):
@@ -295,6 +296,9 @@ class OrderAck(BaseModel):
     ``accepted`` means TD took the request, not that the venue accepted it.
     The venue outcome still arrives asynchronously on ``td.{api_id}.global``
     as an order update or a reject.
+
+    A refusal here is always TD's own, so ``error_code`` is always in the
+    ``1xx`` band: the request never left the process.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -302,11 +306,19 @@ class OrderAck(BaseModel):
     api_id: int
     client_order_id: str
     accepted: bool
+    #: Human-readable, for logs and the UI. Free-form; do not branch on it.
     reason: str = ""
+    #: Machine-readable — see :mod:`mft.protocol.reject_codes`. Branch on this.
+    error_code: int | str = RejectCode.NONE
 
 
 class OrderReject(BaseModel):
-    """TD → STS: submit rejected (publish on ``td.{api_id}.global``)."""
+    """TD → STS: submit rejected (publish on ``td.{api_id}.global``).
+
+    ``error_code`` says who refused it and why in terms that hold across
+    venues; ``reason`` keeps the venue's own words. See
+    :mod:`mft.protocol.reject_codes`.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -314,18 +326,28 @@ class OrderReject(BaseModel):
     client_order_id: str | None = None
     order_id: str | None = None
     symbol: str | None = None
+    #: Human-readable, for logs and the UI. Free-form; do not branch on it.
     reason: str
+    #: Machine-readable — see :mod:`mft.protocol.reject_codes`. Branch on this.
+    error_code: int | str = RejectCode.NONE
 
 
 class CancelReject(BaseModel):
-    """TD → STS: cancel rejected (publish on ``td.{api_id}.global``)."""
+    """TD → STS: cancel rejected (publish on ``td.{api_id}.global``).
+
+    Same fields as :class:`OrderReject`, and the same rule: read
+    ``error_code``, show ``reason``.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     api_id: int
     client_order_id: str | None = None
     order_id: str | None = None
+    #: Human-readable, for logs and the UI. Free-form; do not branch on it.
     reason: str
+    #: Machine-readable — see :mod:`mft.protocol.reject_codes`. Branch on this.
+    error_code: int | str = RejectCode.NONE
 
 
 HeartbeatEnvelope = Envelope[Heartbeat]

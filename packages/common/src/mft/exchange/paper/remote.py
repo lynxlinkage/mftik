@@ -7,7 +7,11 @@ from typing import Any
 
 from mft.broker import Broker
 from mft.exchange.base import PrivateClient
-from mft.exchange.errors import ExchangeError, OrderError
+from mft.exchange.errors import (
+    ExchangeError,
+    InsufficientBalanceError,
+    OrderError,
+)
 from mft.exchange.models import Balance, Fill, Order, PlaceOrderRequest
 from mft.exchange.paper.private import PaperAuthError
 from mft.protocol import (
@@ -208,6 +212,11 @@ class PaperRemotePrivateClient(PrivateClient):
         message = str(reply.payload.get("message", "paper engine error"))
         if code == "auth":
             raise PaperAuthError(message)
-        if code in ("insufficient_balance", "order"):
+        # The engine distinguishes these, so the client raises them apart too:
+        # collapsing both onto ``OrderError`` would cost the caller — and TD's
+        # error normalization — the one thing the wire still knows.
+        if code == "insufficient_balance":
+            raise InsufficientBalanceError(message)
+        if code == "order":
             raise OrderError(message)
         raise ExchangeError(message)

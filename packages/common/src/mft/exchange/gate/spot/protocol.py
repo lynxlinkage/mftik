@@ -28,7 +28,12 @@ from mft.exchange.errors import ExchangeError
 
 
 class GateWsError(ExchangeError):
-    """An ``error`` block came back on a Gate WebSocket frame."""
+    """An ``error`` block came back on a Gate WebSocket frame.
+
+    ``code`` is kept unformatted as well as folded into the string form: TD
+    normalizes on it, and should not have to parse it back out of
+    ``str(exc)``.
+    """
 
     def __init__(self, code: int | None, message: str, *, channel: str = "") -> None:
         self.code = code
@@ -41,7 +46,8 @@ class GateApiError(ExchangeError):
     """A trading call came back with ``data.errs``.
 
     Gate reports these as a ``label`` (machine-readable, e.g.
-    ``BALANCE_NOT_ENOUGH``, ``ORDER_NOT_FOUND``) plus a human message.
+    ``BALANCE_NOT_ENOUGH``, ``ORDER_NOT_FOUND``) plus a human message. The
+    label is kept unformatted for the same reason as :class:`GateWsError`.
     """
 
     def __init__(self, label: str, message: str, *, channel: str = "") -> None:

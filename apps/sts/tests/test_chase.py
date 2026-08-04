@@ -22,7 +22,13 @@ from mft.exchange.models import (
     TimeInForce,
 )
 from mft.exchange.oms import OmsView
-from mft.protocol import CancelReject, OrderReject, ReconDone, SymbolInfo
+from mft.protocol import (
+    CancelReject,
+    OrderReject,
+    ReconDone,
+    RejectCode,
+    SymbolInfo,
+)
 from mft_sts.impl.chase import IOC_MAX_SLICES, ChaseOrder
 
 BTCUSDT = SymbolInfo(
@@ -52,6 +58,7 @@ class FakeOms:
     def __init__(self, *, accept: bool = True, accept_cancel: bool = True) -> None:
         self.submitted: list[dict] = []
         self.reject_reason = ""
+        self.reject_code: int | str = RejectCode.NONE
         self.cancelled: list[str] = []
         self.accept = accept
         self.accept_cancel = accept_cancel
@@ -70,6 +77,10 @@ class FakeOms:
     @property
     def last_reject_reason(self) -> str:
         return "" if self.accept else self.reject_reason
+
+    @property
+    def last_reject_code(self) -> int | str:
+        return RejectCode.NONE if self.accept else self.reject_code
 
     @property
     def ioc_slices(self) -> list[dict]:
@@ -637,6 +648,7 @@ async def test_a_balance_refusal_ends_the_chase_at_once() -> None:
     """TD refuses the pre-lock; the next tick would be refused identically."""
     strat = _strategy()
     strat.oms.accept = False
+    strat.oms.reject_code = RejectCode.TD_INSUFFICIENT_BALANCE
     strat.oms.reject_reason = "insufficient balance: need 0.000469 BTC, free=0"
     await strat.on_best_quote(_quote("63901", "63902"))
     await strat._on_tick()
@@ -651,9 +663,36 @@ async def test_a_balance_refusal_ends_the_chase_at_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_balance_refusal_is_recognised_by_code_not_wording() -> None:
+    """The code decides, so TD can reword the reason without breaking this."""
+    strat = _strategy()
+    strat.oms.accept = False
+    strat.oms.reject_code = RejectCode.TD_INSUFFICIENT_BALANCE
+    strat.oms.reject_reason = "pre-lock short by 0.000469 BTC"
+    await strat.on_best_quote(_quote("63901", "63902"))
+    await strat._on_tick()
+
+    assert strat.session.exits == ["chase_insufficient_balance"]
+
+
+@pytest.mark.asyncio
+async def test_an_uncoded_balance_refusal_still_reads_as_one() -> None:
+    """No code at all — an ack we could not read — falls back to the wording."""
+    strat = _strategy()
+    strat.oms.accept = False
+    strat.oms.reject_code = RejectCode.NONE
+    strat.oms.reject_reason = "insufficient balance: need 0.000469 BTC, free=0"
+    await strat.on_best_quote(_quote("63901", "63902"))
+    await strat._on_tick()
+
+    assert strat.session.exits == ["chase_insufficient_balance"]
+
+
+@pytest.mark.asyncio
 async def test_any_other_td_refusal_also_stops() -> None:
     strat = _strategy()
     strat.oms.accept = False
+    strat.oms.reject_code = RejectCode.TD_SESSION_NOT_ATTACHED
     strat.oms.reject_reason = "session not attached to api_id=3"
     await strat.on_best_quote(_quote("63901", "63902"))
     await strat._on_tick()
@@ -670,6 +709,7 @@ async def test_the_sweep_stops_on_a_refusal_instead_of_burning_its_budget() -> N
 
     # The account runs dry before the sweep starts.
     strat.oms.accept = False
+    strat.oms.reject_code = RejectCode.TD_INSUFFICIENT_BALANCE
     strat.oms.reject_reason = "insufficient balance: need 0.1 BTC, free=0"
     strat.timer.advance_s(31)
     await strat._on_tick()
