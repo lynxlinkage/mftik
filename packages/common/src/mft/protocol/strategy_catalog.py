@@ -84,9 +84,38 @@ sts:
 """,
 )
 
+OCO = StrategyTemplate(
+    type="OneCancelOther",
+    label="One-cancel-other",
+    description=(
+        "Rests two orders at once and keeps whichever fills first, cancelling "
+        "the other. Needs a bestquote feed, and reads one message from it."
+    ),
+    yaml="""\
+td:
+  - paper trader
+md:
+  # One quote is read — the pair is checked against it, then it is ignored.
+  - paper.bestquote.BTCUSDT
+sts:
+  # Exactly two legs. Neither may be able to trade on arrival: a BUY at or
+  # above the ask, or a SELL at or below the bid, is refused before anything
+  # is sent. Both legs on the same side is fine.
+  orders:
+    - side: buy
+      price: 49000
+      qty: 0.001
+    - side: sell
+      price: 51000
+      qty: 0.001
+  # Give up if TD recon or the first quote never arrives.
+  arm_timeout_s: 30
+""",
+)
+
 #: Every deployable strategy, keyed by the type used on the wire.
 TEMPLATES: dict[str, StrategyTemplate] = {
-    t.type: t for t in (NOOP, CHASE)
+    t.type: t for t in (NOOP, CHASE, OCO)
 }
 
 #: Type offered when the caller does not choose one.

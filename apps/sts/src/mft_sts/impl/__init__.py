@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mft_sts.impl.chase import ChaseOrder
 from mft_sts.impl.noop import NoopStrategy
+from mft_sts.impl.oco import OneCancelOther
 from mft_sts.strategy import Strategy
 
 # Keys: short ``name`` (e.g. noop) and class ``__name__`` (e.g. NoopStrategy).
@@ -20,6 +21,7 @@ def register(cls: type[Strategy]) -> type[Strategy]:
 
 register(NoopStrategy)
 register(ChaseOrder)
+register(OneCancelOther)
 
 
 def resolve(name: str | None) -> Strategy:
