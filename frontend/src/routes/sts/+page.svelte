@@ -200,6 +200,44 @@
 		}
 	}
 
+	// One shared tooltip node, positioned in viewport coordinates. It lives
+	// outside the table on purpose: `.table-wrap` scrolls horizontally, which
+	// makes it a clipping container, and anything absolutely positioned inside
+	// it gets cut off at its edges.
+	let tip = $state<{ text: string; x: number; y: number; below: boolean } | null>(
+		null
+	);
+	let tipEl = $state<HTMLDivElement | null>(null);
+
+	function showTip(event: MouseEvent | FocusEvent, reason: string | null) {
+		const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+		// Flip below the icon when there is no room above it.
+		const below = rect.top < 90;
+		tip = {
+			text: reason ?? 'no reason recorded',
+			x: rect.left + rect.width / 2,
+			y: below ? rect.bottom + 8 : rect.top - 8,
+			below
+		};
+	}
+
+	function hideTip() {
+		tip = null;
+	}
+
+	// Nudge back into view when the icon sits near a viewport edge. Done after
+	// render because it needs the tooltip's real width, which depends on how
+	// long the reason is.
+	$effect(() => {
+		if (tip === null || tipEl === null) return;
+		const rect = tipEl.getBoundingClientRect();
+		const margin = 8;
+		const overflowLeft = margin - rect.left;
+		const overflowRight = rect.right - (window.innerWidth - margin);
+		if (overflowLeft > 0) tipEl.style.marginLeft = `${overflowLeft}px`;
+		else if (overflowRight > 0) tipEl.style.marginLeft = `${-overflowRight}px`;
+	});
+
 	/** Apply one live status event to the table. */
 	function applyStatus(ev: StsSessionStatusEvent) {
 		const previous = lastEventTs.get(ev.session_id);
@@ -295,7 +333,7 @@
 	></textarea>
 </section>
 
-<section class="panel table-wrap">
+<section class="panel table-wrap" onscroll={hideTip}>
 	{#if strategies.length === 0}
 		<p class="empty-state">{loading ? 'Loading…' : 'No strategies deployed yet.'}</p>
 	{:else}
@@ -326,9 +364,19 @@
 							{#if s.status === 'failed'}
 								<div class="status-cell">
 									<span class="badge failed">failed</span>
-									<span class="reason" title={s.reason ?? ''}>
-										{s.reason ?? 'no reason recorded'}
-									</span>
+									<!-- The reason is detail, not headline: a row is scanned for
+									     its status, and 256 characters of it inline would bury
+									     that. No `title` here — the tooltip below replaces it, and
+									     having both would show two of them. -->
+									<button
+										type="button"
+										class="why"
+										aria-label={`Why it failed: ${s.reason ?? 'no reason recorded'}`}
+										onmouseenter={(e) => showTip(e, s.reason)}
+										onmouseleave={hideTip}
+										onfocus={(e) => showTip(e, s.reason)}
+										onblur={hideTip}
+									>i</button>
 								</div>
 							{:else if s.status === 'done'}
 								<span class="badge done">done</span>
@@ -405,6 +453,23 @@
 		</table>
 	{/if}
 </section>
+
+<!-- Rendered outside the scrolling table, in viewport coordinates, so the
+     container that clips its own overflow cannot clip this too. Hidden from
+     assistive tech: the trigger's aria-label already carries the reason, and
+     announcing it twice helps nobody. -->
+<svelte:window onscroll={hideTip} onresize={hideTip} />
+{#if tip}
+	<div
+		class="tip"
+		class:below={tip.below}
+		style={`left: ${tip.x}px; top: ${tip.y}px;`}
+		bind:this={tipEl}
+		aria-hidden="true"
+	>
+		{tip.text}
+	</div>
+{/if}
 
 <style>
 	.editor {
@@ -549,15 +614,55 @@
 		min-width: 0;
 	}
 
-	/* The reason can run to 256 chars; clamp it and keep the full text in the
-	   title so a long one cannot push the actions column off screen. */
-	.reason {
-		font-size: 0.78rem;
+	/* A button so it is focusable and announced; it has no click behaviour of
+	   its own — hovering it is the whole interaction. */
+	.why {
+		padding: 0;
+		background: none;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.05rem;
+		height: 1.05rem;
+		border: 1px solid var(--border);
+		border-radius: 50%;
 		color: var(--muted);
-		max-width: 22rem;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		font-size: 0.68rem;
+		font-style: italic;
+		line-height: 1;
+		cursor: help;
+	}
+
+	.why:hover,
+	.why:focus-visible {
+		color: var(--err);
+		border-color: rgba(240, 113, 120, 0.5);
+		outline: none;
+	}
+
+	.tip {
+		position: fixed;
+		z-index: 50;
+		/* Sits above the icon; `below` flips it under when there is no room. */
+		transform: translate(-50%, -100%);
+		max-width: min(30rem, calc(100vw - 2rem));
+		padding: 0.45rem 0.6rem;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		color: var(--text);
+		font-size: 0.78rem;
+		line-height: 1.45;
+		/* Reasons can be one long unbroken token — break rather than overflow. */
+		overflow-wrap: anywhere;
+		box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+		/* Never let the tooltip take the pointer: hovering it must not count as
+		   leaving the icon, or it would flicker. */
+		pointer-events: none;
+	}
+
+	.tip.below {
+		transform: translate(-50%, 0);
 	}
 
 	.link-btn {
