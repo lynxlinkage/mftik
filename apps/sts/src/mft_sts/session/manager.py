@@ -24,6 +24,7 @@ from mft_db.models.session import SessionDomain, SessionStatus
 
 from mft_sts.client_order_id import SLOT_SPACE
 from mft_sts.impl import resolve as resolve_strategy
+from mft_sts.liveness import clear_alive, is_alive, mark_alive
 from mft_sts.session.session import StsSession
 from mft_sts.strategy import Strategy
 
@@ -161,6 +162,10 @@ class SessionManager:
         )
         # Register before start so Strategy.exit() during on_start/on_ready works.
         self._sessions[request.session_id] = session
+        # Claim liveness before the row exists, not after: a reaper that saw a
+        # live row with no key would read it as an orphan and fail a session
+        # that is only a moment old.
+        await mark_alive(self._broker, request.session_id)
         # Persist before start, not after: a strategy that ends inside
         # on_start / on_ready reaches close() before start() returns, and a
         # row written afterwards would resurrect it as live forever.
@@ -184,6 +189,7 @@ class SessionManager:
                     status=SessionStatus.FAILED.value,
                     reason=reason,
                 )
+            await clear_alive(self._broker, request.session_id)
             await self._publish_status(
                 request.session_id,
                 status=SessionStatus.FAILED.value,
@@ -344,6 +350,12 @@ class SessionManager:
         await session.stop()
         if self._mark_done is not None:
             await self._mark_done(session_id, status=status, reason=reason)
+        try:
+            await clear_alive(broker, session_id)
+        except Exception:
+            logger.exception(
+                "STS liveness release failed session=%s", session_id
+            )
         await self._publish_status(
             session_id,
             status=status,
@@ -389,6 +401,71 @@ class SessionManager:
             )
         else:
             await self.close(session_id)
+
+    async def reap_orphans(self) -> list[str]:
+        """Fail rows left ``live`` by a process that died without a word.
+
+        Every other ending writes its own row. This covers only the one that
+        cannot: the process vanishing outright, where the row keeps claiming a
+        session is running and nothing else will ever say otherwise.
+
+        A row is an orphan when nobody holds its liveness key. That test is
+        what makes this safe to run in every STS process at once — several
+        serve the same RPC subject, so "not mine" says nothing about whether a
+        peer is running it, while "no key" is true for all of them at once.
+
+        Returns the session ids reaped, for logging and tests.
+        """
+        if self._list_db_sessions is None or self._mark_done is None:
+            return []
+        try:
+            rows = await self._list_db_sessions(
+                status=SessionStatus.LIVE.value, created_by=None
+            )
+        except Exception:
+            logger.exception("STS orphan scan failed to list sessions")
+            return []
+
+        reaped: list[str] = []
+        for row in rows:
+            session_id = getattr(row, "session_id", None)
+            if session_id is None or session_id in self._sessions:
+                continue
+            try:
+                if await is_alive(self._broker, session_id):
+                    continue
+            except Exception:
+                # Unreadable liveness is not evidence of death. Leaving a
+                # stale row is recoverable; failing a running strategy is not.
+                logger.exception(
+                    "STS liveness check failed session=%s", session_id
+                )
+                continue
+
+            reason = "process died: no session heartbeat"
+            try:
+                await self._mark_done(
+                    session_id,
+                    status=SessionStatus.FAILED.value,
+                    reason=reason,
+                )
+            except Exception:
+                logger.exception("STS orphan reap failed session=%s", session_id)
+                continue
+            await self._publish_status(
+                session_id,
+                status=SessionStatus.FAILED.value,
+                strategy=getattr(row, "strategy", None),
+                reason=reason,
+                created_by=getattr(row, "created_by", None),
+            )
+            reaped.append(session_id)
+            logger.warning(
+                "STS reaped orphaned session id=%s strategy=%s",
+                session_id,
+                getattr(row, "strategy", None),
+            )
+        return reaped
 
     async def close_all(self) -> None:
         """Shut every session down, recording the terminal status first.

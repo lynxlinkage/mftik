@@ -51,6 +51,7 @@ from mft.protocol import (
 from mft.symbols import SymbolClient
 from pydantic import BaseModel
 
+from mft_sts.liveness import mark_alive
 from mft_sts.strategy import Strategy
 
 logger = logging.getLogger(__name__)
@@ -326,6 +327,15 @@ class StsSession:
     async def _lease_heartbeat_loop(self) -> None:
         """Publish fencing heartbeats on sts.td.* and/or sts.md.*."""
         while not self._stop.is_set():
+            # Renewed here rather than on its own timer: this loop is what
+            # stops when the session stops, so the key expiring means the
+            # session really is gone and not merely quiet.
+            try:
+                await mark_alive(self.broker, self.session_id)
+            except Exception:
+                logger.exception(
+                    "STS liveness refresh failed session=%s", self.session_id
+                )
             self._token += 1
             hb = LeaseHeartbeat(session_id=self.session_id, token=self._token)
             env = Envelope[LeaseHeartbeat].wrap(
