@@ -48,7 +48,7 @@ async def amain() -> None:
         sessions = SessionManager(
             broker,
             persist_live=sts_db.persist_live_session,
-            mark_done=sts_db.mark_session_done,
+            mark_done=sts_db.mark_session_finished,
             list_db_sessions=sts_db.list_sessions,
         )
         logger.info("STS started")

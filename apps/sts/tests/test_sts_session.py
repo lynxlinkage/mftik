@@ -59,15 +59,23 @@ class FakeStsStore:
             td_api_ids=list(td_api_ids or []),
             md_ids=list(md_ids or []),
             st_paras=dict(st_paras or {}),
+            reason=None,
         )
         self.rows[session_id] = row
         return row
 
-    async def mark_done(self, session_id: str) -> SimpleNamespace | None:
+    async def mark_done(
+        self,
+        session_id: str,
+        *,
+        status: str = "done",
+        reason: str | None = None,
+    ) -> SimpleNamespace | None:
         row = self.rows.get(session_id)
         if row is None:
             return None
-        row.status = "done"
+        row.status = status
+        row.reason = reason
         row.finished_at = datetime.now(UTC)
         return row
 

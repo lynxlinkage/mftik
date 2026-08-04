@@ -131,6 +131,8 @@ class SessionInfo(BaseModel):
     strategy: str | None = None
     paused: bool | None = None
     venue: str | None = None
+    #: Why a ``failed`` session ended. Null for live and natural ends.
+    reason: str | None = None
 
 
 class ListSessionsResult(BaseModel):
@@ -158,6 +160,33 @@ class StsSessionControlResult(BaseModel):
     status: str
     paused: bool = False
     strategy: str | None = None
+    #: Set when the action left the session in ``failed``.
+    reason: str | None = None
+
+
+class StsSessionStatus(BaseModel):
+    """STS → UI: one session's control-plane state, as a full snapshot.
+
+    Deliberately not a delta (``{"event": "paused"}``): pub/sub drops messages
+    whenever nobody is subscribed, and a consumer that has to replay
+    transitions to know where it stands ends up permanently wrong after one
+    missed line. A snapshot is idempotent — apply the newest one per
+    ``session_id`` and the state is right no matter what was missed.
+
+    Every field here is also on :class:`SessionInfo`, so the REST snapshot the
+    UI loads first and the events it applies afterwards agree by construction.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    #: live | done | failed
+    status: str
+    paused: bool = False
+    strategy: str | None = None
+    reason: str | None = None
+    created_by: int | None = None
+    finished_at: float | None = None
 
 
 class LeaseHeartbeat(BaseModel):
@@ -363,6 +392,7 @@ StsCreateSessionRequestEnvelope = Envelope[StsCreateSessionRequest]
 StsCreateSessionResultEnvelope = Envelope[StsCreateSessionResult]
 StsSessionControlRequestEnvelope = Envelope[StsSessionControlRequest]
 StsSessionControlResultEnvelope = Envelope[StsSessionControlResult]
+StsSessionStatusEnvelope = Envelope[StsSessionStatus]
 ListSessionsRequestEnvelope = Envelope[ListSessionsRequest]
 ListSessionsResultEnvelope = Envelope[ListSessionsResult]
 LeaseHeartbeatEnvelope = Envelope[LeaseHeartbeat]
@@ -489,6 +519,7 @@ STS_SESSION_LIST = "sts.session.list"
 STS_SESSION_PAUSE = "sts.session.pause"
 STS_SESSION_RESUME = "sts.session.resume"
 STS_SESSION_STOP = "sts.session.stop"
+STS_SESSION_STATUS = "sts.session.status"
 STS_LEASE_HEARTBEAT = "sts.lease.heartbeat"
 STS_HEARTBEAT = STS_LEASE_HEARTBEAT  # alias for older names
 STS_RECON = "sts.recon"

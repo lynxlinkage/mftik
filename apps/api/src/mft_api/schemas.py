@@ -12,6 +12,9 @@ class DomainStats(BaseModel):
     domain: str
     live: int = 0
     done: int = 0
+    #: Sessions that ended badly. Only ``sts`` records these — td/md rows
+    #: follow their strategy session and are only ever live or done.
+    failed: int = 0
     healthy: bool | None = None
 
 
@@ -53,6 +56,8 @@ class StrategyOut(BaseModel):
     sts_session: str
     status: str | None = None
     paused: bool | None = None
+    #: Why a ``failed`` session ended. Null otherwise.
+    reason: str | None = None
 
 
 class StrategyListResponse(BaseModel):
@@ -94,6 +99,7 @@ class SessionOut(BaseModel):
     strategy: str | None = None
     paused: bool | None = None
     venue: str | None = None
+    reason: str | None = None
 
 
 class SessionListResponse(BaseModel):
@@ -105,6 +111,7 @@ class StsControlResponse(BaseModel):
     status: str
     paused: bool = False
     strategy: str | None = None
+    reason: str | None = None
 
 
 class StrategyYamlResponse(BaseModel):

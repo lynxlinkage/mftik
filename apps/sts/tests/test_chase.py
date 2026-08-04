@@ -164,9 +164,13 @@ class FakeSession:
         self.td_api_ids = [7]
         self.md_ids = ["paper.bestquote.BTCUSDT"]
         self.exits: list[str] = []
+        #: Reasons the strategy ended as ``failed`` rather than ``done``.
+        self.failures: list[str] = []
 
-    def request_exit(self, reason: str) -> None:
+    def request_exit(self, reason: str, *, failed: bool = False) -> None:
         self.exits.append(reason)
+        if failed:
+            self.failures.append(reason)
 
 
 class FakeTimer:
@@ -436,6 +440,7 @@ async def test_a_full_fill_ends_the_session() -> None:
 
     await strat.on_order_update(7, _update(cid, "0.1", OrderStatus.FILLED))
     assert strat.session.exits == ["chase_filled"]
+    assert strat.session.failures == []
 
 
 @pytest.mark.asyncio
@@ -465,6 +470,8 @@ async def test_expiry_ends_the_session() -> None:
     strat.timer.advance_s(31)
     await strat._on_tick()
     assert strat.session.exits == ["chase_expired"]
+    # Expiry is the chase running its course, not a failure.
+    assert strat.session.failures == []
     # must_exec is false, so the remainder is left undone.
     assert all(o["type"] is OrderType.LIMIT for o in strat.oms.submitted)
 
@@ -698,6 +705,7 @@ async def test_any_other_td_refusal_also_stops() -> None:
     await strat._on_tick()
 
     assert strat.session.exits == ["chase_refused"]
+    assert strat.session.failures == ["chase_refused"]
 
 
 @pytest.mark.asyncio
@@ -822,6 +830,7 @@ async def test_a_recon_that_never_comes_ends_the_session() -> None:
     strat._armed = False
     await strat._on_recon_timeout()
     assert strat.session.exits == ["chase_no_recon"]
+    assert strat.session.failures == ["chase_no_recon"]
 
 
 @pytest.mark.asyncio

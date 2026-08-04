@@ -266,7 +266,7 @@ class OneCancelOther(Strategy):
             f"{_fmt(self.paras['arm_timeout_s'])}s — exiting without placing",
             level="error",
         )
-        self.exit("oco_not_armed")
+        self.fail("oco_not_armed")
 
     async def on_stop(self) -> None:
         self._cancel_timer()
@@ -338,13 +338,13 @@ class OneCancelOther(Strategy):
         if api_id is None:
             await self.log("OneCancelOther has no TD api_id", level="error")
             self._done = True
-            self.exit("oco_no_td")
+            self.fail("oco_no_td")
             return
 
         info = await self._instrument()
         if info is None:
             self._done = True
-            self.exit("oco_no_instrument")
+            self.fail("oco_no_instrument")
             return
 
         legs = [leg.rounded(info) for leg in self.paras["orders"]]
@@ -356,7 +356,7 @@ class OneCancelOther(Strategy):
                 level="error",
             )
             self._done = True
-            self.exit("oco_illegal")
+            self.fail("oco_illegal")
             return
 
         short = await self._shortfall(api_id, info, legs)
@@ -366,7 +366,7 @@ class OneCancelOther(Strategy):
                 level="error",
             )
             self._done = True
-            self.exit("oco_insufficient_balance")
+            self.fail("oco_insufficient_balance")
             return
 
         self._cancel_timer()
@@ -539,7 +539,11 @@ class OneCancelOther(Strategy):
         self.exit("oco_filled")
 
     async def _abort(self, reason: str) -> None:
-        """End the pair without a winner, leaving nothing resting behind."""
+        """End the pair without a winner, leaving nothing resting behind.
+
+        Every caller got here because the pair could not be run as asked, so
+        this is a failure: the session ends ``failed`` with ``reason``.
+        """
         if self._done:
             return
         self._done = True
@@ -548,7 +552,7 @@ class OneCancelOther(Strategy):
         if api_id is not None:
             for cid in list(self._open):
                 await self._cancel(api_id, cid, reason)
-        self.exit(reason)
+        self.fail(reason)
 
     async def _cancel(self, api_id: int, cid: str, why: str) -> None:
         try:

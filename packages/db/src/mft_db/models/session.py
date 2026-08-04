@@ -31,6 +31,10 @@ class SessionDomain(StrEnum):
 class SessionStatus(StrEnum):
     LIVE = "live"
     DONE = "done"
+    #: Terminal, but not a natural end — the session stopped because something
+    #: went wrong. Only ``sts_sessions`` records this; td/md rows follow their
+    #: owning strategy session and stay live/done.
+    FAILED = "failed"
 
 
 class StsSessionRow(Base):
@@ -56,6 +60,9 @@ class StsSessionRow(Base):
         default=SessionStatus.LIVE.value,
         index=True,
     )
+    #: Why the session ended. Carries the exit reason for ``failed``; left
+    #: null for a session that is still live or ended naturally.
+    reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     strategy: Mapped[str | None] = mapped_column(String(128), nullable=True)
     td_api_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
     md_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)

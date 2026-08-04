@@ -147,6 +147,12 @@ table.data tr:hover td {
 	border-color: rgba(240, 113, 120, 0.35);
 }
 
+.badge.failed {
+	color: var(--err);
+	border-color: rgba(240, 113, 120, 0.35);
+	background: rgba(240, 113, 120, 0.08);
+}
+
 .page-head {
 	display: flex;
 	flex-wrap: wrap;

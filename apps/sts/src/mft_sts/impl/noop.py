@@ -191,7 +191,7 @@ class NoopStrategy(Strategy):
             await self.log(
                 "NoopStrategy has no TD api_id — exiting", level="warn"
             )
-            self.exit("noop_no_td")
+            self.fail("noop_no_td")
             return
         if self._mid is None:
             await self.log("NoopStrategy tick skipped — no book yet")

@@ -10,6 +10,11 @@
 		type StrategyTemplate,
 		type StrategyYaml
 	} from '$lib/api';
+	import {
+		connectStsStatus,
+		type StatusConnection,
+		type StsSessionStatusEvent
+	} from '$lib/logging/status';
 
 	let strategies = $state<StrategyRow[]>([]);
 	let yamlText = $state(defaultStrategyYml());
@@ -26,6 +31,14 @@
 	let viewing = $state<StrategyYaml | null>(null);
 	let viewingId = $state<number | null>(null);
 	let copied = $state(false);
+
+	let connection = $state<StatusConnection>('connecting');
+	// Envelope ts of the newest event applied per session, so a replayed event
+	// cannot overwrite a newer one we already have.
+	let lastEventTs = new Map<string, number>();
+	// Sessions we are already fetching a row for, so a burst of events for the
+	// same new session does not fan out into a burst of list fetches.
+	let pendingSessions = new Set<string>();
 
 	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
 	const selected = $derived(
@@ -163,7 +176,55 @@
 		}
 	}
 
-	onMount(refresh);
+	/**
+	 * Fetch the list because `sessionId` is not in it yet, and try once more if
+	 * it still is not.
+	 *
+	 * Deploy creates the STS session — which announces itself as live straight
+	 * away — before the API writes the `strategies` row this table is built
+	 * from. So the first fetch legitimately races the row into existence and
+	 * can come back without it. One retry closes that window; beyond that the
+	 * session simply has no strategy row (nothing deployed it) and asking
+	 * again forever would just be a poll.
+	 */
+	async function fetchUnknownSession(sessionId: string) {
+		if (pendingSessions.has(sessionId)) return;
+		pendingSessions.add(sessionId);
+		try {
+			await refresh();
+			if (strategies.some((s) => s.sts_session === sessionId)) return;
+			await new Promise((r) => setTimeout(r, 1500));
+			await refresh();
+		} finally {
+			pendingSessions.delete(sessionId);
+		}
+	}
+
+	/** Apply one live status event to the table. */
+	function applyStatus(ev: StsSessionStatusEvent) {
+		const previous = lastEventTs.get(ev.session_id);
+		if (previous !== undefined && ev.ts < previous) return;
+		lastEventTs.set(ev.session_id, ev.ts);
+
+		const row = strategies.find((s) => s.sts_session === ev.session_id);
+		if (row === undefined) {
+			// A session this page has never seen — a deploy from another tab, or
+			// this one. The event alone cannot build a row (it carries no strategy
+			// id, config or deploy time), so go and fetch one.
+			fetchUnknownSession(ev.session_id);
+			return;
+		}
+		strategies = strategies.map((s) =>
+			s.sts_session === ev.session_id
+				? { ...s, status: ev.status, paused: ev.paused, reason: ev.reason }
+				: s
+		);
+	}
+
+	onMount(() => {
+		refresh();
+		return connectStsStatus(applyStatus, (state) => (connection = state));
+	});
 </script>
 
 <div class="page-head">
@@ -175,7 +236,16 @@
 			strategy's own parameters.
 		</p>
 	</div>
-	<button type="button" class="secondary" onclick={refresh} disabled={loading}>Refresh</button>
+	<div class="head-actions">
+		<!-- A silently dead socket is the failure this whole stream exists to
+		     avoid, so say when the table has stopped updating itself. -->
+		{#if connection !== 'open'}
+			<span class="live-state" title="Session states are not updating live">
+				{connection === 'connecting' ? 'connecting…' : 'not live'}
+			</span>
+		{/if}
+		<button type="button" class="secondary" onclick={refresh} disabled={loading}>Refresh</button>
+	</div>
 </div>
 
 {#if error}
@@ -251,7 +321,16 @@
 							</a>
 						</td>
 						<td>
-							{#if s.status === 'done'}
+							<!-- failed is checked first: it is terminal, and a stale `paused`
+							     from the live-session probe must never mask it. -->
+							{#if s.status === 'failed'}
+								<div class="status-cell">
+									<span class="badge failed">failed</span>
+									<span class="reason" title={s.reason ?? ''}>
+										{s.reason ?? 'no reason recorded'}
+									</span>
+								</div>
+							{:else if s.status === 'done'}
 								<span class="badge done">done</span>
 							{:else if s.paused}
 								<span class="badge paused">paused</span>
@@ -450,6 +529,35 @@
 
 	.badge.done {
 		opacity: 0.75;
+	}
+
+	.head-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+	}
+
+	.live-state {
+		font-size: 0.78rem;
+		color: var(--warn);
+	}
+
+	.status-cell {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		min-width: 0;
+	}
+
+	/* The reason can run to 256 chars; clamp it and keep the full text in the
+	   title so a long one cannot push the actions column off screen. */
+	.reason {
+		font-size: 0.78rem;
+		color: var(--muted);
+		max-width: 22rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.link-btn {

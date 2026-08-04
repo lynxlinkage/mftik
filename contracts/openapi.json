@@ -1196,6 +1196,11 @@
             "title": "Done",
             "default": 0
           },
+          "failed": {
+            "type": "integer",
+            "title": "Failed",
+            "default": 0
+          },
           "healthy": {
             "anyOf": [
               {
@@ -1395,6 +1400,17 @@
               }
             ],
             "title": "Venue"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           }
         },
         "type": "object",
@@ -1515,6 +1531,17 @@
               }
             ],
             "title": "Paused"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           }
         },
         "type": "object",
@@ -1644,6 +1671,17 @@
               }
             ],
             "title": "Strategy"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           }
         },
         "type": "object",
