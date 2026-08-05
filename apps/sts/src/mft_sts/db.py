@@ -19,6 +19,7 @@ async def persist_live_session(
     md_ids: list[str] | None = None,
     st_paras: dict[str, Any] | None = None,
     cid_slot: int | None = None,
+    restart: str = "always",
 ) -> StsSessionRow:
     async with session_scope() as db:
         repo = StsSessionRepository(db)
@@ -33,6 +34,7 @@ async def persist_live_session(
             md_ids=md_ids,
             st_paras=st_paras,
             cid_slot=cid_slot,
+            restart=restart,
         )
 
 
@@ -72,9 +74,18 @@ async def list_sessions(
     *,
     status: str | None = "live",
     created_by: int | None = None,
+    limit: int = 100,
 ) -> Sequence[StsSessionRow]:
     async with session_scope() as db:
         repo = StsSessionRepository(db)
         return list(
-            await repo.list_sessions(status=status, created_by=created_by)
+            await repo.list_sessions(
+                status=status, created_by=created_by, limit=limit
+            )
         )
+
+
+async def bump_rebuild_count(session_id: str) -> int:
+    async with session_scope() as db:
+        repo = StsSessionRepository(db)
+        return await repo.bump_rebuild_count(session_id)

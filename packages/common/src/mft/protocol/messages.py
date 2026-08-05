@@ -93,6 +93,8 @@ class StsCreateSessionRequest(BaseModel):
     td: list[int] = Field(default_factory=list)
     md: list[str] = Field(default_factory=list)
     st_paras: dict[str, Any] = Field(default_factory=dict)
+    #: ``always`` | ``never`` — see ``StrategySpec.restart``.
+    restart: str = "always"
 
 
 class StsCreateSessionResult(BaseModel):

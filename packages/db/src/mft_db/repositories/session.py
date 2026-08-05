@@ -31,6 +31,9 @@ class _SessionListMixin(BaseRepository[RowT], Generic[RowT]):
         created_by: int | None = None,
         limit: int = 100,
     ) -> Sequence[RowT]:
+        # Callers that need to see everything in a status must pass a limit
+        # large enough to say so — the default silently truncates.
+
         stmt = select(self.model).order_by(self.model.created_at.desc())  # type: ignore[attr-defined]
         if status is not None:
             stmt = stmt.where(self.model.status == status)  # type: ignore[attr-defined]
@@ -65,6 +68,7 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         md_ids: list[str] | None = None,
         st_paras: dict[str, Any] | None = None,
         cid_slot: int | None = None,
+        restart: str = "always",
     ) -> StsSessionRow:
         row = StsSessionRow(
             session_id=session_id,
@@ -74,6 +78,8 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
             md_ids=list(md_ids or []),
             st_paras=dict(st_paras or {}),
             cid_slot=cid_slot,
+            restart=restart,
+            rebuild_count=0,
             st_facts={},
             status=SessionStatus.LIVE.value,
         )
@@ -121,6 +127,20 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         row.reason = None
         await self.session.flush()
         return row
+
+    async def bump_rebuild_count(self, session_id: str) -> int:
+        """Count one rebuild attempt and return the new total.
+
+        Written before the attempt, not after: a rebuild that takes the
+        process down with it has to count, because that is precisely the loop
+        the cap exists to break.
+        """
+        row = await self.get_by_session_id(session_id)
+        if row is None:
+            return 0
+        row.rebuild_count = int(row.rebuild_count or 0) + 1
+        await self.session.flush()
+        return row.rebuild_count
 
     async def remember(
         self, session_id: str, key: str, value: str

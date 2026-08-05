@@ -90,6 +90,14 @@ class StsSessionRow(Base):
     #: recognise the orders it placed before the restart. Null for rows
     #: written before this was recorded.
     cid_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: ``always`` | ``never`` — whether this run asked to be restored after an
+    #: STS restart. A property of the deploy, not of the strategy class or of
+    #: whoever configured the process.
+    restart: Mapped[str] = mapped_column(String(8), default="always")
+    #: How many times a rebuild has been attempted. Counted before the attempt
+    #: rather than after it, so a rebuild that takes the process down with it
+    #: still counts — that is the loop the cap exists to break.
+    rebuild_count: Mapped[int] = mapped_column(Integer, default=0)
     td_api_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
     md_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
     st_paras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

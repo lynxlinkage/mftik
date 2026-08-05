@@ -31,6 +31,7 @@ class FakeStsStore:
         session_id: str,
         strategy: str = "oco",
         cid_slot: int | None = None,
+        restart: str = "always",
     ) -> SimpleNamespace:
         row = SimpleNamespace(
             session_id=session_id,
@@ -40,6 +41,8 @@ class FakeStsStore:
             status="live",
             strategy=strategy,
             cid_slot=cid_slot,
+            restart=restart,
+            rebuild_count=0,
             reason=None,
         )
         self.rows[session_id] = row
@@ -55,8 +58,11 @@ class FakeStsStore:
         md_ids: list[str] | None = None,
         st_paras: dict | None = None,
         cid_slot: int | None = None,
+        restart: str = "always",
     ) -> SimpleNamespace:
-        return self.seed_live(session_id, strategy or "unknown", cid_slot)
+        return self.seed_live(
+            session_id, strategy or "unknown", cid_slot, restart
+        )
 
     async def mark_finished(
         self,

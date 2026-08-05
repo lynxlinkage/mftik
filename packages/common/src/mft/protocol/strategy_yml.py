@@ -17,6 +17,12 @@ from mft.protocol.topics import Topics
 #: templates.
 
 
+#: Resume this run after an STS restart, or leave it ended.
+RESTART_ALWAYS = "always"
+RESTART_NEVER = "never"
+RESTART_MODES = frozenset({RESTART_ALWAYS, RESTART_NEVER})
+
+
 class StrategySpec(BaseModel):
     """Parsed strategy.yml document.
 
@@ -27,9 +33,28 @@ class StrategySpec(BaseModel):
 
     td: list[str] = Field(default_factory=list)
     md: list[str] = Field(default_factory=list)
+    #: Whether this run wants to be restored if STS restarts under it.
+    #: ``always`` by default: two gates already stand in front of a rebuild —
+    #: the operator has to enable it and the strategy class has to support it
+    #: — so a deploy that reaches this question is one whose run was cut short
+    #: and would rather continue. Set ``never`` for a one-shot that would be
+    #: wrong to resume.
+    restart: str = "always"
     #: Flat config for whichever strategy is being deployed. Its keys are the
     #: strategy's own; validation happens in that class's ``on_initialized``.
     sts: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("restart", mode="before")
+    @classmethod
+    def _restart_mode(cls, value: Any) -> str:
+        if value is None:
+            return RESTART_ALWAYS
+        mode = str(value).strip().lower()
+        if mode not in RESTART_MODES:
+            raise ValueError(
+                f"restart must be one of {sorted(RESTART_MODES)}, got {value!r}"
+            )
+        return mode
 
     @field_validator("sts", mode="before")
     @classmethod
@@ -124,6 +149,7 @@ def dump_strategy_yml(spec: StrategySpec) -> str:
     payload = {
         "td": list(spec.td),
         "md": list(spec.md),
+        "restart": spec.restart,
         "sts": dict(spec.sts),
     }
     return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)

@@ -289,19 +289,69 @@ written; do not leave it to be discovered.
 
 ## Phase 3 — Deliberate rebuild, not automatic
 
-Open, and not required for phases 1–2 to be useful.
+Three questions the earlier phases deliberately left open, answered once
+there was a working rebuild to answer them about.
 
-- **Intent.** Should everything be rebuilt, or only what asked to be? A
-  `restart: always | never` field in `strategy.yml`, stored on the row, makes
-  rebuild a property of the deploy rather than a property of STS. A one-shot
-  experiment and a resting OCO both get interrupted; only one of them wants to
-  come back.
-- **Attempt cap.** A strategy that crashes the process would otherwise be
-  rebuilt into the same crash forever.
-- **Age.** A session interrupted a week ago probably should not be resumed
-  against today's market.
+### 3.1 Age
+
+Restoring is for a restart, where the gap is seconds to minutes. Beyond that a
+session comes back to a market that has moved on and to orders the venue may
+have expired, which is a decision for a person rather than something to do to
+them at boot. Default 30 minutes, `STS_REBUILD_MAX_AGE_S` to widen.
+
+This was not hypothetical: the first run of the rebuild against the real stack
+restored a session left over from a SIGKILL test hours earlier, alongside the
+one that had just stopped.
+
+Out of window is not an error and is not treated as one. Nothing failed — it
+is the configured policy — so the session is skipped with a warning and its
+row is left exactly as it was, still saying what happened to it.
+
+### 3.2 Intent — `restart: always | never`
+
+A field in `strategy.yml`, beside `td` / `md` / `sts` rather than inside them,
+because it describes the deploy and not the strategy's parameters. Stored on
+the row at create time.
+
+Default `always`. Two gates already stand in front of a rebuild — the operator
+enabling it and the strategy class supporting it — so a deploy that reaches
+this question is one whose run was cut short and would rather continue.
+`never` is for the one-shot that would be wrong to resume.
+
+An unrecognised value is refused rather than read as `always`. Resuming a run
+that asked not to be resumed is the one direction this must not fail in.
+
+### 3.3 Attempt cap
+
+`rebuild_count` on the row, three attempts. Counted *before* the attempt: a
+strategy that takes the process down with it is exactly the loop this exists
+to break, and a count written afterwards would never record it.
+
+### 3.4 Scan limit
+
+The listing helper defaults to 100 rows, which the rebuild scan was silently
+inheriting. It now asks for 1000 and warns when it hits that, because a
+truncated scan leaves sessions looking exactly like sessions nobody asked to
+restore.
 
 ---
+
+## Where this ended up
+
+Phases 1–3 are implemented. What is deliberately still not done:
+
+- **The flag defaults to off.** `STS_REBUILD_ON_BOOT=1` opts in. Turning it on
+  is safe — `Strategy.rebuildable` keeps sessions of classes that have not
+  implemented `on_rebuild` out of it — but it is a decision for whoever runs
+  the stack, and `docker-compose.yml` does not set it.
+- **Adoption is unit-tested only.** The paper venue has no bestquote stream,
+  so neither ChaseOrder nor OneCancelOther can quote or place on this stack.
+  Everything around adoption was exercised end to end — the claim, the window,
+  the intent, the cid slot, the remembered facts, the restore path itself —
+  but taking back orders that are genuinely resting at a venue has never run
+  outside a test. That is the largest remaining gap, and closing it needs
+  either a simulated venue with a bestquote stream or a real venue test
+  account.
 
 ## Order of work
 

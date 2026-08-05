@@ -71,6 +71,16 @@ _ATTACH_TIMEOUT_S = 20.0
 #: something to do to them at boot. Anything older is left alone.
 _REBUILD_MAX_AGE_S = 1800.0
 
+#: How many times one session may be rebuilt before it is left alone. A
+#: strategy that takes the process down with it would otherwise be restored
+#: into the same crash on every boot, for as long as the age window holds.
+_REBUILD_MAX_ATTEMPTS = 3
+
+#: How many interrupted rows one scan will consider. Well above any plausible
+#: number of sessions running at once — the point is that hitting it is
+#: reported rather than silently dropping the rest.
+_REBUILD_SCAN_LIMIT = 1000
+
 def _age_seconds(finished_at: Any, now: datetime) -> float | None:
     """Seconds since a session ended, or None when that cannot be told.
 
@@ -92,6 +102,8 @@ PersistLive = Callable[..., Awaitable[Any]]
 RememberFact = Callable[..., Awaitable[Any]]
 #: ``(session_id)`` — put a terminal row back to live when rebuilding it.
 MarkLive = Callable[..., Awaitable[Any]]
+#: ``(session_id)`` — count one rebuild attempt, returning the new total.
+BumpRebuildCount = Callable[..., Awaitable[Any]]
 #: ``(session_id, *, status, reason)`` — move the row to a terminal status.
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
@@ -110,7 +122,9 @@ class SessionManager:
         list_db_sessions: ListDbSessions | None = None,
         remember_fact: RememberFact | None = None,
         mark_live: MarkLive | None = None,
+        bump_rebuild_count: BumpRebuildCount | None = None,
         rebuild_max_age_s: float = _REBUILD_MAX_AGE_S,
+        rebuild_max_attempts: int = _REBUILD_MAX_ATTEMPTS,
         heartbeat_interval: float = 1.0,
         strategy_factory: StrategyFactory | None = None,
     ) -> None:
@@ -120,7 +134,9 @@ class SessionManager:
         self._list_db_sessions = list_db_sessions
         self._remember = remember_fact
         self._mark_live = mark_live
+        self._bump_rebuild_count = bump_rebuild_count
         self._rebuild_max_age_s = rebuild_max_age_s
+        self._rebuild_max_attempts = rebuild_max_attempts
         self._heartbeat_interval = heartbeat_interval
         self._strategy_factory = strategy_factory or resolve_strategy
         self._sessions: dict[str, StsSession] = {}
@@ -254,6 +270,7 @@ class SessionManager:
                 md_ids=list(request.md),
                 st_paras=dict(request.st_paras),
                 cid_slot=cid_slot,
+                restart=request.restart,
             )
         try:
             await session.start()
@@ -571,11 +588,22 @@ class SessionManager:
             return []
         try:
             rows = await self._list_db_sessions(
-                status=SessionStatus.INTERRUPTED.value, created_by=None
+                status=SessionStatus.INTERRUPTED.value,
+                created_by=None,
+                limit=_REBUILD_SCAN_LIMIT,
             )
         except Exception:
             logger.exception("STS rebuild scan failed to list sessions")
             return []
+        if len(rows) >= _REBUILD_SCAN_LIMIT:
+            # Truncation is the one thing a scan must not do quietly: the
+            # sessions past the limit look exactly like sessions nobody asked
+            # to restore.
+            logger.warning(
+                "STS rebuild scan hit its %d-row limit — there may be "
+                "interrupted sessions it did not consider",
+                _REBUILD_SCAN_LIMIT,
+            )
 
         rebuilt: list[str] = []
         now = datetime.now(UTC)
@@ -594,6 +622,23 @@ class SessionManager:
                     session_id,
                     "an unknown time" if age is None else f"{age:.0f}s",
                     self._rebuild_max_age_s,
+                )
+                continue
+            if str(getattr(row, "restart", "always")) != "always":
+                # This run said it would rather stay ended. Nothing to warn
+                # about — it is doing what it was deployed to do.
+                logger.info(
+                    "STS not rebuilding session=%s: deployed with restart=%s",
+                    session_id,
+                    getattr(row, "restart", None),
+                )
+                continue
+            attempts = int(getattr(row, "rebuild_count", 0) or 0)
+            if attempts >= self._rebuild_max_attempts:
+                logger.warning(
+                    "STS not rebuilding session=%s: already tried %d times",
+                    session_id,
+                    attempts,
                 )
                 continue
             if getattr(row, "cid_slot", None) is None:
@@ -625,6 +670,13 @@ class SessionManager:
                 continue
             if not await claim_alive(self._broker, session_id):
                 continue
+            if self._bump_rebuild_count is not None:
+                try:
+                    await self._bump_rebuild_count(session_id)
+                except Exception:
+                    logger.exception(
+                        "STS rebuild count bump failed session=%s", session_id
+                    )
             try:
                 await self._rebuild_one(row, strategy)
             except Exception:

@@ -49,6 +49,8 @@ class FakeStsStore:
         md_ids: list[str] | None = None,
         st_facts: dict[str, str] | None = None,
         finished_ago_s: float = 0.0,
+        restart: str = "always",
+        rebuild_count: int = 0,
     ) -> SimpleNamespace:
         row = SimpleNamespace(
             session_id=session_id,
@@ -59,6 +61,8 @@ class FakeStsStore:
             reason="STS shut down while this was running",
             strategy=strategy,
             cid_slot=cid_slot,
+            restart=restart,
+            rebuild_count=rebuild_count,
             td_api_ids=list(td_api_ids or []),
             md_ids=list(md_ids or []),
             st_paras={},
@@ -95,7 +99,11 @@ class FakeStsStore:
         return row
 
     async def list_sessions(
-        self, *, status: str | None = "live", created_by: int | None = None
+        self,
+        *,
+        status: str | None = "live",
+        created_by: int | None = None,
+        limit: int = 100,
     ) -> list[SimpleNamespace]:
         return [
             r for r in self.rows.values() if status is None or r.status == status
@@ -407,3 +415,51 @@ async def test_a_strategy_that_cannot_be_rebuilt_is_left_alone(
     assert store.rows["r-noimpl"].status == "interrupted"
     # No claim taken, so nothing has to release one.
     assert not await is_alive(broker, "r-noimpl")
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_asked_not_to_come_back_stays_ended(
+    broker: Broker,
+) -> None:
+    """Two gates already stand in front of a rebuild — the operator enabling
+    it and the class supporting it. This is the third, and the only one the
+    person who deployed the run controls."""
+    store = FakeStsStore()
+    store.seed("r-oneshot", restart="never")
+    manager = _manager(broker, store, [])
+
+    assert await manager.rebuild_interrupted() == []
+    assert store.rows["r-oneshot"].status == "interrupted"
+    assert not await is_alive(broker, "r-oneshot")
+
+
+@pytest.mark.asyncio
+async def test_a_session_rebuilt_too_often_is_left_alone(broker: Broker) -> None:
+    """A strategy that takes the process down with it would otherwise be
+    restored into the same crash on every boot."""
+    store = FakeStsStore()
+    store.seed("r-loop", rebuild_count=3)
+    manager = _manager(broker, store, [])
+
+    assert await manager.rebuild_interrupted() == []
+    assert store.rows["r-loop"].status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_the_attempt_is_counted_before_it_is_made(broker: Broker) -> None:
+    """Counted first, because a rebuild that never returns still has to
+    count — that is the loop the cap exists to break."""
+    store = FakeStsStore()
+    store.seed("r-count")
+    counted: list[str] = []
+
+    async def bump(session_id: str) -> int:
+        counted.append(session_id)
+        return len(counted)
+
+    manager = _manager(broker, store, [])
+    manager._bump_rebuild_count = bump  # noqa: SLF001
+
+    assert await manager.rebuild_interrupted() == ["r-count"]
+    assert counted == ["r-count"]
+    await manager.close_all()

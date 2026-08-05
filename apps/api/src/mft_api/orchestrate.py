@@ -43,6 +43,7 @@ async def deploy_strategy(
     st_paras: dict[str, Any] | None = None,
     created_by: int,
     timeout: float = 30.0,
+    restart: str = "always",
 ) -> dict[str, Any]:
     """Mint session_id, create STS, attach MD then each TD api_id. Fail-closed."""
     session_id = uuid4().hex
@@ -70,6 +71,7 @@ async def deploy_strategy(
                     td=list(td),
                     md=md,
                     st_paras=st_paras,
+                    restart=restart,
                 ),
                 type=STS_SESSION_CREATE,
                 source="api",

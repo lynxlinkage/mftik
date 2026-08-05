@@ -137,6 +137,7 @@ async def amain() -> None:
             list_db_sessions=sts_db.list_sessions,
             remember_fact=sts_db.remember_fact,
             mark_live=sts_db.mark_session_live,
+            bump_rebuild_count=sts_db.bump_rebuild_count,
             rebuild_max_age_s=_rebuild_max_age_s(),
         )
         logger.info("STS started")

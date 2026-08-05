@@ -182,3 +182,18 @@ async def test_md_attach_survives_a_detach_and_reattach(db) -> None:
     assert again.id == first.id
     assert again.status == SessionStatus.LIVE.value
     assert again.finished_at is None
+
+
+async def test_rebuild_count_accumulates(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-count")
+
+    assert await repo.bump_rebuild_count("s-count") == 1
+    assert await repo.bump_rebuild_count("s-count") == 2
+
+    db.expire_all()
+    row = await repo.get_by_session_id("s-count")
+    assert row is not None
+    assert row.rebuild_count == 2
+    # Deploys say whether they want to come back; the default is that they do.
+    assert row.restart == "always"
