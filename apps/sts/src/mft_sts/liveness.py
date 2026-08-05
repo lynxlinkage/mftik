@@ -39,6 +39,28 @@ async def mark_alive(
     )
 
 
+async def claim_alive(
+    broker: Any, session_id: str, *, ttl: int = ALIVE_TTL_SECONDS
+) -> bool:
+    """Take ownership of ``session_id`` only if nobody else holds it.
+
+    ``SET NX`` rather than :func:`mark_alive`'s plain ``SET``, because this
+    asks a question instead of stating a fact: several STS processes rebuild
+    on boot at once, and without the atomic test they would each restore the
+    same session and run two of it.
+
+    Returns whether the claim was taken.
+    """
+    return bool(
+        await broker.redis.set(
+            alive_key(broker.config.key_prefix, session_id),
+            "1",
+            ex=ttl,
+            nx=True,
+        )
+    )
+
+
 async def clear_alive(broker: Any, session_id: str) -> None:
     """Release ownership. Safe to call for a session that never claimed one."""
     await broker.redis.delete(alive_key(broker.config.key_prefix, session_id))

@@ -2,22 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from mft.broker import Broker
+from mft.broker.errors import RequestTimeoutError
 from mft.protocol import (
+    MD_ERROR,
+    MD_SESSION_ATTACH,
     STS_REASON_OPERATOR_STOP,
     STS_SESSION_STATUS,
+    TD_ERROR,
+    TD_SESSION_ATTACH,
     ListSessionsRequest,
+    MdAttachRequest,
+    MdAttachRequestEnvelope,
+    RpcError,
     SessionInfo,
     StsCreateSessionRequest,
     StsCreateSessionResult,
     StsSessionControlResult,
     StsSessionStatus,
     StsSessionStatusEnvelope,
+    TdAttachRequest,
+    TdAttachRequestEnvelope,
     Topics,
     publish_sts_log,
 )
@@ -25,7 +36,7 @@ from mft_db.models.session import SessionDomain, SessionStatus
 
 from mft_sts.client_order_id import SLOT_SPACE
 from mft_sts.impl import resolve as resolve_strategy
-from mft_sts.liveness import clear_alive, is_alive, mark_alive
+from mft_sts.liveness import claim_alive, clear_alive, is_alive, mark_alive
 from mft_sts.session.session import StsSession
 from mft_sts.strategy import Strategy
 
@@ -44,9 +55,19 @@ _SHUTDOWN_REASON = "STS shut down while this was running"
 _STATUS_BUFFER = 200
 _STATUS_TTL_SECONDS = 3600
 
+#: Attach retries while rebuilding. TD and MD may still be starting — nothing
+#: makes them come up before STS — and their RPC requests queue in Redis
+#: rather than vanishing, so waiting is the whole strategy. Attach is
+#: idempotent on both sides, which is what makes re-sending safe.
+_ATTACH_ATTEMPTS = 5
+_ATTACH_BACKOFF_S = 2.0
+_ATTACH_TIMEOUT_S = 20.0
+
 PersistLive = Callable[..., Awaitable[Any]]
 #: ``(session_id, key, value)`` — persist one fact a strategy established.
 RememberFact = Callable[..., Awaitable[Any]]
+#: ``(session_id)`` — put a terminal row back to live when rebuilding it.
+MarkLive = Callable[..., Awaitable[Any]]
 #: ``(session_id, *, status, reason)`` — move the row to a terminal status.
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
@@ -64,6 +85,7 @@ class SessionManager:
         mark_done: MarkDone | None = None,
         list_db_sessions: ListDbSessions | None = None,
         remember_fact: RememberFact | None = None,
+        mark_live: MarkLive | None = None,
         heartbeat_interval: float = 1.0,
         strategy_factory: StrategyFactory | None = None,
     ) -> None:
@@ -72,6 +94,7 @@ class SessionManager:
         self._mark_done = mark_done
         self._list_db_sessions = list_db_sessions
         self._remember = remember_fact
+        self._mark_live = mark_live
         self._heartbeat_interval = heartbeat_interval
         self._strategy_factory = strategy_factory or resolve_strategy
         self._sessions: dict[str, StsSession] = {}
@@ -505,6 +528,218 @@ class SessionManager:
                 getattr(row, "strategy", None),
             )
         return reaped
+
+    # --- rebuild -----------------------------------------------------------
+
+    async def rebuild_interrupted(self) -> list[str]:
+        """Restore sessions that were running when STS last went away.
+
+        Candidates are exactly ``status = interrupted``: a shutdown or a
+        process killed outright, neither of which is the strategy deciding to
+        stop. Returns the session ids restored.
+
+        Runs in every STS process at once without coordination beyond the
+        liveness key — see :func:`claim_alive`.
+        """
+        if self._list_db_sessions is None:
+            return []
+        try:
+            rows = await self._list_db_sessions(
+                status=SessionStatus.INTERRUPTED.value, created_by=None
+            )
+        except Exception:
+            logger.exception("STS rebuild scan failed to list sessions")
+            return []
+
+        rebuilt: list[str] = []
+        for row in rows:
+            session_id = getattr(row, "session_id", None)
+            if session_id is None or session_id in self._sessions:
+                continue
+            if getattr(row, "cid_slot", None) is None:
+                # Predates the slot being recorded. Rebuilding would mint
+                # order ids in a different slot, leaving the strategy unable
+                # to recognise anything it placed before — worse than leaving
+                # the session where it is.
+                logger.warning(
+                    "STS cannot rebuild session=%s: no recorded cid_slot",
+                    session_id,
+                )
+                continue
+            if not await claim_alive(self._broker, session_id):
+                continue
+            try:
+                await self._rebuild_one(row)
+            except Exception:
+                logger.exception("STS rebuild failed session=%s", session_id)
+                await self._abandon_rebuild(session_id)
+                continue
+            rebuilt.append(session_id)
+            logger.info(
+                "STS rebuilt session=%s strategy=%s",
+                session_id,
+                getattr(row, "strategy", None),
+            )
+        return rebuilt
+
+    async def _rebuild_one(self, row: Any) -> None:
+        """Restore one session, in the order a deploy uses and for the reason.
+
+        TD blocks its attach until it sees the session's lease heartbeat, so
+        the session has to be running before anything can be attached to it.
+        """
+        session_id = row.session_id
+        strategy = self._strategy_factory(getattr(row, "strategy", None))
+        td_api_ids = [int(v) for v in (getattr(row, "td_api_ids", None) or [])]
+        md_ids = [str(v) for v in (getattr(row, "md_ids", None) or [])]
+        created_by = int(getattr(row, "created_by", 0) or 0)
+
+        session = StsSession(
+            session_id=session_id,
+            broker=self._broker,
+            created_by=created_by,
+            strategy=strategy,
+            cid_slot=int(row.cid_slot),
+            td_api_ids=td_api_ids,
+            md_ids=md_ids,
+            st_paras=dict(getattr(row, "st_paras", None) or {}),
+            heartbeat_interval=self._heartbeat_interval,
+            on_exit=self._on_session_exit,
+            remember=self._remember_fact,
+        )
+        self._sessions[session_id] = session
+
+        # Before on_start, so every hook that follows already sees whatever
+        # the strategy restored — including on_recon_done, which is where a
+        # strategy has to know these orders are its own.
+        remembered = {
+            str(k): str(v)
+            for k, v in (getattr(row, "st_facts", None) or {}).items()
+        }
+        await strategy.on_rebuild(remembered)
+
+        if self._mark_live is not None:
+            await self._mark_live(session_id)
+        await publish_sts_log(
+            self._broker,
+            session_id,
+            f"rebuilding session strategy={session.strategy_name} "
+            f"td={td_api_ids} md={md_ids}",
+            source="sts",
+        )
+        await session.start()
+
+        try:
+            if md_ids:
+                await self._attach_md(session_id, created_by, md_ids)
+            for api_id in td_api_ids:
+                await self._attach_td(session_id, created_by, api_id)
+        except Exception:
+            # A session with half its attaches is worse than one still marked
+            # interrupted: it heartbeats and looks alive while blind to a feed
+            # or an account. Put it back for the next boot to try.
+            await self.close(
+                session_id,
+                status=SessionStatus.INTERRUPTED.value,
+                reason="rebuild failed to attach",
+            )
+            raise
+
+        await self._publish_status(
+            session_id,
+            status=SessionStatus.LIVE.value,
+            strategy=session.strategy_name,
+            created_by=created_by,
+        )
+
+    async def _abandon_rebuild(self, session_id: str) -> None:
+        """Drop a claim so the next boot — or another process — may retry."""
+        self._sessions.pop(session_id, None)
+        try:
+            await clear_alive(self._broker, session_id)
+        except Exception:
+            logger.exception(
+                "STS rebuild claim release failed session=%s", session_id
+            )
+
+    async def _attach_md(
+        self, session_id: str, created_by: int, md_ids: list[str]
+    ) -> None:
+        await self._attach_with_retry(
+            what=f"md feeds={md_ids}",
+            subject=Topics.MD,
+            envelope=MdAttachRequestEnvelope.wrap(
+                MdAttachRequest(
+                    session_id=session_id,
+                    created_by=created_by,
+                    subscriptions=md_ids,
+                    timeout=_ATTACH_TIMEOUT_S,
+                ),
+                type=MD_SESSION_ATTACH,
+                source="sts",
+                session_id=session_id,
+            ),
+            error_type=MD_ERROR,
+        )
+
+    async def _attach_td(
+        self, session_id: str, created_by: int, api_id: int
+    ) -> None:
+        await self._attach_with_retry(
+            what=f"td api_id={api_id}",
+            subject=Topics.TD,
+            envelope=TdAttachRequestEnvelope.wrap(
+                TdAttachRequest(
+                    api_id=api_id,
+                    session_id=session_id,
+                    created_by=created_by,
+                    timeout=_ATTACH_TIMEOUT_S,
+                ),
+                type=TD_SESSION_ATTACH,
+                source="sts",
+                session_id=session_id,
+            ),
+            error_type=TD_ERROR,
+        )
+
+    async def _attach_with_retry(
+        self,
+        *,
+        what: str,
+        subject: str,
+        envelope: Any,
+        error_type: str,
+    ) -> None:
+        """Send an attach until it lands, or give up and say so.
+
+        Retried rather than gated on a readiness probe: the domain may simply
+        not be up yet, its request waits in the Redis list rather than being
+        lost, and both attaches are idempotent — a request that was served
+        after we stopped waiting for the reply makes the next attempt a no-op.
+        """
+        last: Exception | None = None
+        for attempt in range(1, _ATTACH_ATTEMPTS + 1):
+            try:
+                reply = await self._broker.request(
+                    subject, envelope, timeout=_ATTACH_TIMEOUT_S
+                )
+            except RequestTimeoutError as exc:
+                last = exc
+            else:
+                if reply.type != error_type:
+                    return
+                err = RpcError.model_validate(reply.payload)
+                last = RuntimeError(f"{err.code}: {err.message}")
+            logger.warning(
+                "STS rebuild attach %s failed (attempt %d/%d): %s",
+                what,
+                attempt,
+                _ATTACH_ATTEMPTS,
+                last,
+            )
+            if attempt < _ATTACH_ATTEMPTS:
+                await asyncio.sleep(_ATTACH_BACKOFF_S * attempt)
+        raise RuntimeError(f"rebuild could not attach {what}: {last}")
 
     async def close_all(self) -> None:
         """Shut every session down, recording the terminal status first.

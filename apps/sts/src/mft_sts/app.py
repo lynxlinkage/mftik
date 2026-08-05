@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
+from typing import Any
 
 from mft import configure_logging
 from mft.broker import Broker
@@ -33,6 +35,21 @@ async def run_rpc(
                 req.envelope.type,
                 req.envelope.id,
             )
+
+
+def _rebuild_enabled() -> bool:
+    """Whether to restore interrupted sessions on boot.
+
+    Off by default. Restoring a session puts a strategy back in front of a
+    live account, and until at least one strategy has implemented
+    ``on_rebuild`` that is a strategy which does not know it was ever away.
+    Opt in per deployment with ``STS_REBUILD_ON_BOOT=1``.
+    """
+    return os.getenv("STS_REBUILD_ON_BOOT", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 #: How often to look for sessions whose process died. Well under the window
@@ -66,6 +83,18 @@ async def reap_loop(
             continue
 
 
+async def _rebuild_on_boot(sessions: SessionManager) -> None:
+    try:
+        rebuilt = await sessions.rebuild_interrupted()
+    except Exception:
+        logger.exception("STS rebuild on boot failed")
+        return
+    if rebuilt:
+        logger.warning("STS rebuilt %d interrupted session(s)", len(rebuilt))
+    else:
+        logger.info("STS found no interrupted sessions to rebuild")
+
+
 async def amain() -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -82,6 +111,7 @@ async def amain() -> None:
             mark_done=sts_db.mark_session_finished,
             list_db_sessions=sts_db.list_sessions,
             remember_fact=sts_db.remember_fact,
+            mark_live=sts_db.mark_session_live,
         )
         logger.info("STS started")
         rpc_task = asyncio.create_task(
@@ -99,15 +129,27 @@ async def amain() -> None:
         reaper_task = asyncio.create_task(
             reap_loop(sessions, stop), name="sts-reaper"
         )
+        if _rebuild_enabled():
+            # A task, not awaited: rebuilding waits on TD and MD, which may
+            # not be up yet, and RPC service must not be held up behind it.
+            rebuild_task: asyncio.Task[Any] | None = asyncio.create_task(
+                _rebuild_on_boot(sessions), name="sts-rebuild"
+            )
+        else:
+            rebuild_task = None
+            logger.info(
+                "STS rebuild on boot disabled (set STS_REBUILD_ON_BOOT=1)"
+            )
         try:
             await stop.wait()
         finally:
             stop.set()
-            for task in (rpc_task, hb_task, reaper_task):
+            tasks = [rpc_task, hb_task, reaper_task]
+            if rebuild_task is not None:
+                tasks.append(rebuild_task)
+            for task in tasks:
                 task.cancel()
-            await asyncio.gather(
-                rpc_task, hb_task, reaper_task, return_exceptions=True
-            )
+            await asyncio.gather(*tasks, return_exceptions=True)
             await sessions.close_all()
     logger.info("STS stopped")
 
