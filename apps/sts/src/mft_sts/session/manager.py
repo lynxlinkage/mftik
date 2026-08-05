@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from mft.broker import Broker
@@ -63,6 +64,29 @@ _ATTACH_ATTEMPTS = 5
 _ATTACH_BACKOFF_S = 2.0
 _ATTACH_TIMEOUT_S = 20.0
 
+#: How long after being interrupted a session may still be rebuilt.
+#: Restoring is for a restart, where the gap is seconds to minutes. A session
+#: interrupted days ago would come back to a market that has moved on and to
+#: orders the venue may have expired, which is a decision for a person, not
+#: something to do to them at boot. Anything older is left alone.
+_REBUILD_MAX_AGE_S = 1800.0
+
+def _age_seconds(finished_at: Any, now: datetime) -> float | None:
+    """Seconds since a session ended, or None when that cannot be told.
+
+    An unknown age is treated as too old by the caller: a row that says it is
+    interrupted without saying when is not evidence that it stopped recently.
+    """
+    if finished_at is None:
+        return None
+    stamped = (
+        finished_at
+        if finished_at.tzinfo is not None
+        else finished_at.replace(tzinfo=UTC)
+    )
+    return (now - stamped).total_seconds()
+
+
 PersistLive = Callable[..., Awaitable[Any]]
 #: ``(session_id, key, value)`` — persist one fact a strategy established.
 RememberFact = Callable[..., Awaitable[Any]]
@@ -86,6 +110,7 @@ class SessionManager:
         list_db_sessions: ListDbSessions | None = None,
         remember_fact: RememberFact | None = None,
         mark_live: MarkLive | None = None,
+        rebuild_max_age_s: float = _REBUILD_MAX_AGE_S,
         heartbeat_interval: float = 1.0,
         strategy_factory: StrategyFactory | None = None,
     ) -> None:
@@ -95,6 +120,7 @@ class SessionManager:
         self._list_db_sessions = list_db_sessions
         self._remember = remember_fact
         self._mark_live = mark_live
+        self._rebuild_max_age_s = rebuild_max_age_s
         self._heartbeat_interval = heartbeat_interval
         self._strategy_factory = strategy_factory or resolve_strategy
         self._sessions: dict[str, StsSession] = {}
@@ -552,9 +578,23 @@ class SessionManager:
             return []
 
         rebuilt: list[str] = []
+        now = datetime.now(UTC)
         for row in rows:
             session_id = getattr(row, "session_id", None)
             if session_id is None or session_id in self._sessions:
+                continue
+            age = _age_seconds(getattr(row, "finished_at", None), now)
+            if age is None or age > self._rebuild_max_age_s:
+                # Not an error — nothing failed, this is the policy. The row
+                # keeps its status and its reason, so it stays visible and a
+                # person can still decide to do something with it.
+                logger.warning(
+                    "STS not rebuilding session=%s: interrupted %s ago, "
+                    "past the %.0fs window",
+                    session_id,
+                    "an unknown time" if age is None else f"{age:.0f}s",
+                    self._rebuild_max_age_s,
+                )
                 continue
             if getattr(row, "cid_slot", None) is None:
                 # Predates the slot being recorded. Rebuilding would mint

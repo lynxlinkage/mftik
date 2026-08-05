@@ -19,6 +19,10 @@ from mft_sts.session import SessionManager
 SOURCE = "sts"
 logger = logging.getLogger(SOURCE)
 
+#: Mirrors the manager's own default; kept here so the env override has
+#: something to fall back to without importing a private name.
+_DEFAULT_REBUILD_MAX_AGE_S = 1800.0
+
 
 async def run_rpc(
     broker: Broker,
@@ -50,6 +54,27 @@ def _rebuild_enabled() -> bool:
         "true",
         "yes",
     }
+
+
+def _rebuild_max_age_s() -> float:
+    """How stale an interrupted session may be and still be restored.
+
+    Sized for a restart, where the gap is seconds to minutes. Widen it with
+    ``STS_REBUILD_MAX_AGE_S`` if a deploy routinely takes longer than the
+    default; do not widen it to cover sessions nobody meant to resume.
+    """
+    raw = os.getenv("STS_REBUILD_MAX_AGE_S", "").strip()
+    if not raw:
+        return _DEFAULT_REBUILD_MAX_AGE_S
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "ignoring STS_REBUILD_MAX_AGE_S=%r — not a number, using %.0fs",
+            raw,
+            _DEFAULT_REBUILD_MAX_AGE_S,
+        )
+        return _DEFAULT_REBUILD_MAX_AGE_S
 
 
 #: How often to look for sessions whose process died. Well under the window
@@ -112,6 +137,7 @@ async def amain() -> None:
             list_db_sessions=sts_db.list_sessions,
             remember_fact=sts_db.remember_fact,
             mark_live=sts_db.mark_session_live,
+            rebuild_max_age_s=_rebuild_max_age_s(),
         )
         logger.info("STS started")
         rpc_task = asyncio.create_task(
@@ -140,6 +166,9 @@ async def amain() -> None:
             logger.info(
                 "STS rebuild on boot disabled (set STS_REBUILD_ON_BOOT=1)"
             )
+        logger.info(
+            "STS rebuild window is %.0fs", _rebuild_max_age_s()
+        )
         try:
             await stop.wait()
         finally:

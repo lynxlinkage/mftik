@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -48,12 +48,13 @@ class FakeStsStore:
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_facts: dict[str, str] | None = None,
+        finished_ago_s: float = 0.0,
     ) -> SimpleNamespace:
         row = SimpleNamespace(
             session_id=session_id,
             created_by=1,
             created_at=datetime.now(UTC),
-            finished_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC) - timedelta(seconds=finished_ago_s),
             status=status,
             reason="STS shut down while this was running",
             strategy=strategy,
@@ -324,3 +325,59 @@ async def test_a_failed_attach_puts_the_session_back(
     assert manager.get("r-5") is None
     # The claim is released, so the next boot may try again.
     assert not await is_alive(broker, "r-5")
+
+
+@pytest.mark.asyncio
+async def test_a_stale_session_is_left_where_it_is(broker: Broker) -> None:
+    """Restoring is for a restart, where the gap is seconds to minutes.
+
+    A session interrupted long ago would come back to a market that moved on
+    and to orders the venue may have expired. Not an error and not a status
+    change — the row keeps saying what happened to it, and a person can still
+    decide to do something about it.
+    """
+    store = FakeStsStore()
+    store.seed("r-stale", finished_ago_s=4000.0)
+    manager = _manager(broker, store, [])
+
+    assert await manager.rebuild_interrupted() == []
+    row = store.rows["r-stale"]
+    assert row.status == "interrupted"
+    assert row.reason == "STS shut down while this was running"
+    assert not await is_alive(broker, "r-stale")
+
+
+@pytest.mark.asyncio
+async def test_a_session_inside_the_window_still_comes_back(
+    broker: Broker,
+) -> None:
+    store = FakeStsStore()
+    store.seed("r-fresh", finished_ago_s=60.0)
+    manager = _manager(broker, store, [])
+
+    assert await manager.rebuild_interrupted() == ["r-fresh"]
+    await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_age_counts_as_too_old(broker: Broker) -> None:
+    """A row that says it is interrupted without saying when is not evidence
+    that it stopped recently."""
+    store = FakeStsStore()
+    row = store.seed("r-nodate")
+    row.finished_at = None
+    manager = _manager(broker, store, [])
+
+    assert await manager.rebuild_interrupted() == []
+    assert store.rows["r-nodate"].status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_the_window_is_configurable(broker: Broker) -> None:
+    store = FakeStsStore()
+    store.seed("r-wide", finished_ago_s=4000.0)
+    manager = _manager(broker, store, [])
+    manager._rebuild_max_age_s = 5000.0  # noqa: SLF001
+
+    assert await manager.rebuild_interrupted() == ["r-wide"]
+    await manager.close_all()
