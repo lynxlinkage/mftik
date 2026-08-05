@@ -60,6 +60,9 @@ logger = logging.getLogger(__name__)
 #: records the terminal status.
 ExitHandler = Callable[[str, str, bool], Awaitable[None]]
 
+#: ``(session_id, key, value)`` — persist one fact for a later rebuild.
+RememberHandler = Callable[[str, str, str], Awaitable[None]]
+
 #: MD message type → (strategy hook, payload model). One entry per feed topic
 #: MD publishes; anything else on ``md.{session_id}`` is logged and dropped.
 MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
@@ -97,6 +100,7 @@ class StsSession:
         cid_slot: int = 0,
         symbols: SymbolClient | None = None,
         on_exit: ExitHandler | None = None,
+        remember: RememberHandler | None = None,
     ) -> None:
         self.session_id = session_id
         self.broker = broker
@@ -113,6 +117,7 @@ class StsSession:
         #: so they need tick/step/notional at hand — TD does not check.
         self.symbols = symbols or SymbolClient(broker)
         self._on_exit = on_exit
+        self._remember = remember
 
         # Must follow cid_slot: bind() builds the client_order_id factory.
         strategy.bind(self)
@@ -188,6 +193,12 @@ class StsSession:
             self.td_api_ids,
             self.md_ids,
         )
+
+    async def remember(self, key: str, value: str) -> None:
+        """Persist one fact for this session — see ``Strategy.remember``."""
+        if self._remember is None:
+            return
+        await self._remember(self.session_id, key, value)
 
     async def pause(self) -> None:
         if self._destroyed or not self._started:

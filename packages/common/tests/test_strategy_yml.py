@@ -133,3 +133,25 @@ md: []
 sts: [1, 2]
 """
         )
+
+
+def test_restart_defaults_to_always() -> None:
+    """Two gates already stand in front of a rebuild — the operator enabling
+    it and the strategy class supporting it. A deploy that reaches this
+    question is one whose run was cut short and would rather continue.
+    """
+    spec = parse_strategy_yml("td: []\nmd: []\nsts: {}\n")
+    assert spec.restart == "always"
+
+
+def test_restart_never_is_kept_through_a_round_trip() -> None:
+    spec = parse_strategy_yml("td: []\nmd: []\nrestart: never\nsts: {}\n")
+    assert spec.restart == "never"
+    assert parse_strategy_yml(dump_strategy_yml(spec)).restart == "never"
+
+
+def test_an_unknown_restart_mode_is_refused() -> None:
+    """Silently treating a typo as `always` would resume a run that asked not
+    to be, which is the one direction this must not fail in."""
+    with pytest.raises(StrategyYamlError, match="restart must be one of"):
+        parse_strategy_yml("td: []\nmd: []\nrestart: maybe\nsts: {}\n")

@@ -36,6 +36,8 @@ class FakeStsStore:
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_paras: dict | None = None,
+        cid_slot: int | None = None,
+        restart: str = "always",
     ) -> SimpleNamespace:
         row = SimpleNamespace(
             session_id=session_id,
@@ -44,6 +46,9 @@ class FakeStsStore:
             finished_at=None,
             status="live",
             strategy=strategy,
+            cid_slot=cid_slot,
+            restart=restart,
+            rebuild_count=0,
             reason=None,
         )
         self.rows[session_id] = row
@@ -389,3 +394,99 @@ async def test_an_operator_stop_is_not_interrupted(broker: Broker) -> None:
     await manager.stop_session("op-1")
 
     assert store.rows["op-1"].status == "done"
+
+
+@pytest.mark.asyncio
+async def test_the_cid_slot_is_recorded_with_the_session(broker: Broker) -> None:
+    """Without it on the row, a rebuilt session cannot keep its slot, and
+    `owns()` would disown every order placed before the restart."""
+    store = FakeStsStore()
+    manager, _ = _manager(broker, store, ExitingStrategy)
+
+    class Idle(Strategy):
+        name = "idle_slot"
+
+    register(Idle)
+    manager._strategy_factory = lambda name: Idle()  # noqa: SLF001
+    await manager.create_session(
+        StsCreateSessionRequest(
+            session_id="slot-1", created_by=1, strategy="idle_slot"
+        )
+    )
+
+    session = manager.get("slot-1")
+    assert session is not None
+    assert store.rows["slot-1"].cid_slot == session.cid_slot
+    await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_remember_reaches_the_store(broker: Broker) -> None:
+    store = FakeStsStore()
+    facts: list[tuple[str, str, str]] = []
+
+    async def remember(session_id: str, key: str, value: str) -> None:
+        facts.append((session_id, key, value))
+
+    class Anchoring(Strategy):
+        name = "anchoring"
+
+        async def on_ready(self) -> None:
+            await self.remember("ref_start", "50000")
+
+    register(Anchoring)
+    manager = SessionManager(
+        broker,
+        heartbeat_interval=0.1,
+        strategy_factory=lambda name: Anchoring(),
+        persist_live=store.persist_live,
+        mark_done=store.mark_finished,
+        list_db_sessions=store.list_sessions,
+        remember_fact=remember,
+    )
+    await manager.create_session(
+        StsCreateSessionRequest(
+            session_id="mem-1", created_by=1, strategy="anchoring"
+        )
+    )
+
+    assert facts == [("mem-1", "ref_start", "50000")]
+    await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_remember_does_not_stop_the_strategy(
+    broker: Broker,
+) -> None:
+    """Everything remembered is a nicety for a rebuild that may never happen;
+    the strategy calling it is in the middle of trading."""
+    store = FakeStsStore()
+
+    async def exploding_remember(session_id: str, key: str, value: str) -> None:
+        raise RuntimeError("db gone")
+
+    class Anchoring(Strategy):
+        name = "anchoring_broken"
+
+        async def on_ready(self) -> None:
+            await self.remember("ref_start", "50000")
+
+    register(Anchoring)
+    manager = SessionManager(
+        broker,
+        heartbeat_interval=0.1,
+        strategy_factory=lambda name: Anchoring(),
+        persist_live=store.persist_live,
+        mark_done=store.mark_finished,
+        list_db_sessions=store.list_sessions,
+        remember_fact=exploding_remember,
+    )
+    result = await manager.create_session(
+        StsCreateSessionRequest(
+            session_id="mem-2", created_by=1, strategy="anchoring_broken"
+        )
+    )
+
+    assert result.session_id == "mem-2"
+    assert manager.get("mem-2") is not None
+    await manager.close_all()

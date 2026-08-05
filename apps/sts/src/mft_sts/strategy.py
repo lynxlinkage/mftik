@@ -44,6 +44,8 @@ class Strategy:
         exit() — natural end → session stop → on_stop → status "done"
         fail(reason) — same teardown, but status "failed" and reason is
         persisted for the UI
+        remember(key, value) — keep a fact a rebuilt session could not
+        re-derive; handed back to on_rebuild (not wired yet)
 
     TD recon (wired):
         send_recon (auto on first lease ACK), on_recon_done
@@ -82,6 +84,13 @@ class Strategy:
     """
 
     name: str = "base"
+    #: Whether a session running this strategy may be restored after STS
+    #: restarts. Off until the class implements :meth:`on_rebuild`: a rebuilt
+    #: strategy that does not know it was ever away treats recon as a clean
+    #: account and starts over, placing orders alongside the ones it left
+    #: resting at the venue. Readiness is a property of the strategy, not of
+    #: whoever set the environment variable.
+    rebuildable: bool = False
     #: Numeric id for this strategy *class*. Not packed into client_order_id —
     #: that carries the per-session slot; see :mod:`mft_sts.client_order_id`.
     id: int = 0
@@ -181,6 +190,24 @@ class Strategy:
 
     async def on_stop(self) -> None:
         """Called when the session is shutting down."""
+
+    async def on_rebuild(self, remembered: dict[str, str]) -> None:
+        """Called when this session ran before and is being restored.
+
+        Not wired to anything yet — rebuilding sessions is not implemented.
+        The contract it will have:
+
+        Recon follows as usual, and what it brings is *yours*: the orders it
+        reports are the ones this session placed before the restart, not
+        another session's. ``remembered`` carries whatever was written with
+        :meth:`remember`.
+
+        Restore from those two, not from a saved copy of your own attributes.
+        Anything the venue can tell you (resting orders, fills, position) must
+        come from recon, because between the restart and now an order can have
+        filled, been cancelled or been rejected, and a stale copy would have
+        you act on something that is no longer true.
+        """
 
     async def on_pause(self) -> None:
         """Called when the strategy is paused."""
@@ -290,6 +317,24 @@ class Strategy:
         if self.session is None:
             raise RuntimeError("strategy is not bound to a session")
         self.session.request_exit(reason, failed=True)
+
+    async def remember(self, key: str, value: str) -> None:
+        """Persist one fact so a rebuilt session can have it back.
+
+        For what a restart destroys and nothing else can supply — the price a
+        chase anchored its slippage guard on, the moment a clock started.
+        Configuration is already kept (``st_paras``) and anything the venue
+        knows comes back through recon; this is for neither.
+
+        Write at the moment the fact becomes true, not on the way out: a
+        process that is killed outright runs no shutdown code, and that is
+        exactly the case a rebuild exists for. Facts written here are expected
+        to be established once and never change — re-``remember``ing a moving
+        value stores something that will be wrong by the time it is read.
+        """
+        if self.session is None:
+            raise RuntimeError("strategy is not bound to a session")
+        await self.session.remember(key, value)
 
     async def log(self, message: str, *, level: str = "info", **extra: Any) -> None:
         if self.session is None:

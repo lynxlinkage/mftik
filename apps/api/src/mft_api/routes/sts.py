@@ -251,6 +251,7 @@ async def deploy(
             st_paras=dict(spec.sts),
             created_by=created_by,
             timeout=body.timeout,
+            restart=spec.restart,
         )
     except DomainRpcError as exc:
         code = 404 if exc.code in {"unknown_strategy", "not_found"} else 502

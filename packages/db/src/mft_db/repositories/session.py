@@ -31,6 +31,9 @@ class _SessionListMixin(BaseRepository[RowT], Generic[RowT]):
         created_by: int | None = None,
         limit: int = 100,
     ) -> Sequence[RowT]:
+        # Callers that need to see everything in a status must pass a limit
+        # large enough to say so — the default silently truncates.
+
         stmt = select(self.model).order_by(self.model.created_at.desc())  # type: ignore[attr-defined]
         if status is not None:
             stmt = stmt.where(self.model.status == status)  # type: ignore[attr-defined]
@@ -64,6 +67,8 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_paras: dict[str, Any] | None = None,
+        cid_slot: int | None = None,
+        restart: str = "always",
     ) -> StsSessionRow:
         row = StsSessionRow(
             session_id=session_id,
@@ -72,6 +77,10 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
             td_api_ids=list(td_api_ids or []),
             md_ids=list(md_ids or []),
             st_paras=dict(st_paras or {}),
+            cid_slot=cid_slot,
+            restart=restart,
+            rebuild_count=0,
+            st_facts={},
             status=SessionStatus.LIVE.value,
         )
         return await self.add(row)
@@ -102,6 +111,52 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         return await self.mark_finished(
             session_id, status=SessionStatus.DONE.value
         )
+
+    async def mark_live(self, session_id: str) -> StsSessionRow | None:
+        """Put a terminal session back to ``live`` — the rebuild path.
+
+        Clears ``finished_at`` and ``reason`` along with the status: a session
+        that is running again has no end and no reason for one, and leaving
+        either behind would describe a row that ended and is also live.
+        """
+        row = await self.get_by_session_id(session_id)
+        if row is None:
+            return None
+        row.status = SessionStatus.LIVE.value
+        row.finished_at = None
+        row.reason = None
+        await self.session.flush()
+        return row
+
+    async def bump_rebuild_count(self, session_id: str) -> int:
+        """Count one rebuild attempt and return the new total.
+
+        Written before the attempt, not after: a rebuild that takes the
+        process down with it has to count, because that is precisely the loop
+        the cap exists to break.
+        """
+        row = await self.get_by_session_id(session_id)
+        if row is None:
+            return 0
+        row.rebuild_count = int(row.rebuild_count or 0) + 1
+        await self.session.flush()
+        return row.rebuild_count
+
+    async def remember(
+        self, session_id: str, key: str, value: str
+    ) -> StsSessionRow | None:
+        """Record one fact a strategy established while running.
+
+        Reassigns the dict rather than mutating it: a plain JSON column does
+        not track in-place changes, so an update written through the existing
+        object would be silently dropped.
+        """
+        row = await self.get_by_session_id(session_id)
+        if row is None:
+            return None
+        row.st_facts = {**(row.st_facts or {}), key: value}
+        await self.session.flush()
+        return row
 
     async def mark_failed(
         self, session_id: str, reason: str
@@ -142,6 +197,33 @@ class TdSessionRepository(_SessionListMixin[TdSessionRow]):
             status=SessionStatus.LIVE.value,
         )
         return await self.add(row)
+
+    async def attach_live(
+        self, *, session_id: str, created_by: int, api_id: int
+    ) -> TdSessionRow:
+        """Record this attach as live, reusing the row if the pair had one.
+
+        ``(session_id, api_id)`` is unique and detaching only marks the row
+        done, so a pair that attaches, detaches and attaches again cannot
+        insert a second row. That sequence never came up while every deploy
+        minted a fresh session id; rebuilding one reuses it, and the insert
+        fails on the unique constraint.
+        """
+        result = await self.session.execute(
+            select(TdSessionRow).where(
+                TdSessionRow.session_id == session_id,
+                TdSessionRow.api_id == api_id,
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return await self.create_live(
+                session_id=session_id, created_by=created_by, api_id=api_id
+            )
+        row.status = SessionStatus.LIVE.value
+        row.finished_at = None
+        await self.session.flush()
+        return row
 
     async def mark_done(self, *, session_id: str, api_id: int) -> TdSessionRow | None:
         row = await self.get_live(session_id=session_id, api_id=api_id)
@@ -192,6 +274,30 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
             status=SessionStatus.LIVE.value,
         )
         return await self.add(row)
+
+    async def attach_live(
+        self, *, venue: str, session_id: str, created_by: int
+    ) -> MdSessionRow:
+        """Record this attach as live, reusing the row if the pair had one.
+
+        Same reason as :meth:`TdSessionRepository.attach_live` — ``(venue,
+        session_id)`` is unique and a detach only marks the row done.
+        """
+        result = await self.session.execute(
+            select(MdSessionRow).where(
+                MdSessionRow.venue == venue,
+                MdSessionRow.session_id == session_id,
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return await self.create_live(
+                venue=venue, session_id=session_id, created_by=created_by
+            )
+        row.status = SessionStatus.LIVE.value
+        row.finished_at = None
+        await self.session.flush()
+        return row
 
     async def mark_done(
         self, *, venue: str, session_id: str

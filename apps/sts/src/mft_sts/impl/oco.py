@@ -172,6 +172,9 @@ def _positive(raw: dict[str, Any], name: str, where: str) -> Decimal:
 class OneCancelOther(Strategy):
     name = "oco"
     id = 3
+    #: Restorable. Nothing has to be remembered: the pair is in ``st_paras``
+    #: and what became of it is in recon — see :meth:`on_rebuild`.
+    rebuildable = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -191,6 +194,9 @@ class OneCancelOther(Strategy):
         #: cid → filled qty, so a complete fill is recognisable.
         self._filled: dict[str, Decimal] = {}
         self._placed = False
+        #: Set when this session ran before. Recon then reports the pair this
+        #: session left at the venue, not somebody else's orders.
+        self._restoring = False
         self._done = False
 
     # --- parameters --------------------------------------------------------
@@ -242,9 +248,111 @@ class OneCancelOther(Strategy):
             "OneCancelOther ready — waiting for TD recon and the first quote"
         )
 
+    async def on_rebuild(self, remembered: dict[str, str]) -> None:
+        """This pair ran before. Nothing to take back — recon has all of it.
+
+        ``remembered`` is empty by design. An OCO's whole state is either
+        configuration, which ``st_paras`` still holds, or the fate of two
+        orders, which only the venue knows: recon reports what is resting,
+        what filled and what is gone. There is no third kind of fact here the
+        way there is in a chase, whose clock and slippage anchor no order
+        carries.
+
+        What this does change is the meaning of what recon brings. Any order
+        of ours in it is one *this session* left behind, to be taken back
+        rather than watched from the outside.
+        """
+        self._restoring = True
+        await self.log("OneCancelOther restoring — waiting for recon")
+
+    async def _adopt(self, api_id: int, msg: ReconDone) -> bool:
+        """Take back the pair this session left at the venue.
+
+        Returns whether the pair is still live and being watched. False means
+        nothing of ours survived and placement should run as usual — which is
+        the ordinary case, because ``on_stop`` cancels both legs and a
+        shutdown that got that far leaves nothing behind.
+        """
+        info = await self._instrument()
+        if info is None:
+            # Matching an order back to a leg needs the rounded leg prices,
+            # so without the instrument there is no way to tell what is ours.
+            # That is not the same as finding nothing: placing again could
+            # double a pair still resting at the venue. Stop and say so.
+            self._done = True
+            await self.log(
+                "OneCancelOther cannot be restored: no instrument to match "
+                "resting orders against, and placing again might double the "
+                "pair",
+                level="error",
+            )
+            self.fail("oco_restore_no_instrument")
+            return True
+        by_leg = {
+            (leg.side, leg.price): leg
+            for leg in (raw.rounded(info) for raw in self.paras["orders"])
+        }
+
+        for cid, order in msg.oms.orders.items():
+            if not self.owns(cid):
+                continue
+            leg = by_leg.get((order.side, order.price))
+            if leg is None:
+                # Ours by slot but not one of these legs — an earlier session
+                # of the same strategy, or a leg whose config has since
+                # changed. Not something this pair can reason about.
+                continue
+            # Restoring `_legs` is what makes the rest work: every order
+            # handler ignores a cid it has no leg for.
+            self._legs[cid] = leg
+            self._filled[cid] = order.filled_qty
+            if order.status not in _TERMINAL:
+                self._open.add(cid)
+
+        if not self._legs:
+            return False
+
+        self._placed = True
+        await self.log(
+            f"OneCancelOther adopted {len(self._legs)} leg(s), "
+            f"{len(self._open)} still resting"
+        )
+
+        # A leg that filled while STS was away has already decided the pair.
+        for cid, filled in self._filled.items():
+            if filled >= self._legs[cid].qty:
+                await self._settle(api_id, cid)
+                return True
+
+        if not self._open:
+            # Both gone without either filling — cancelled while we were away,
+            # or rejected. There is nothing left to cancel and nothing to win.
+            await self._abort("oco_legs_lost_while_away")
+            return True
+
+        if len(self._open) < LEG_COUNT:
+            # A lone survivor is not an OCO, exactly as it is not at runtime.
+            await self._abort("oco_leg_lost")
+            return True
+        return False
+
     async def on_recon_done(self, msg: ReconDone) -> None:
         """TD's ledger is real now — half of what placement waits for."""
-        if msg.api_id != self._primary_api_id() or self._armed:
+        if msg.api_id != self._primary_api_id():
+            return
+        if self._restoring and not self._armed:
+            self._armed = True
+            if await self._adopt(msg.api_id, msg):
+                return
+            # Nothing survived, so this is an ordinary placement again: wait
+            # for a quote and judge the pair against the market as it is now.
+            await self.log(
+                "OneCancelOther found nothing of its own resting — "
+                "placing again once a quote arrives"
+            )
+            await self._maybe_place()
+            return
+        if self._armed:
             # Recon runs again after a venue reconnect. By then the pair is
             # placed, and re-running placement would double it.
             return
@@ -350,12 +458,24 @@ class OneCancelOther(Strategy):
         legs = [leg.rounded(info) for leg in self.paras["orders"]]
         illegal = self._illegal(legs, info)
         if illegal is not None:
+            self._done = True
+            if self._restoring:
+                # Not the pair's fault. It was legal when it was placed; the
+                # market moved through a leg while STS was down, and posting
+                # it now would be refused by the venue anyway. Said plainly,
+                # because "my OCO failed because you restarted" is a surprise.
+                await self.log(
+                    f"OneCancelOther cannot be restored: {illegal} — the "
+                    f"market moved through the pair while STS was away",
+                    level="error",
+                )
+                self.fail("oco_illegal_on_restart")
+                return
             await self.log(
                 f"OneCancelOther pair is not placeable: {illegal} — exiting "
                 f"without placing anything",
                 level="error",
             )
-            self._done = True
             self.fail("oco_illegal")
             return
 

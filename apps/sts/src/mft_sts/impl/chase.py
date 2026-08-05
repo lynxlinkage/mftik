@@ -100,6 +100,12 @@ CANCEL_POLL_S = 0.05
 IOC_MAX_SLICES = 10
 IOC_SLICE_PAUSE_S = 0.25
 
+#: Keys the two unrecoverable facts are kept under. Both are set once and
+#: never change, which is what makes keeping them safe: neither has a version
+#: that can go stale between being written and being read.
+_FACT_STARTED_MS = "started_ms"
+_FACT_REF_START = "ref_start"
+
 #: Statuses that mean the venue is done with an order and it is safe to place
 #: its replacement.
 _TERMINAL = frozenset(
@@ -155,6 +161,9 @@ def _bps(value: Decimal | None) -> str:
 class ChaseOrder(Strategy):
     name = "chase"
     id = 2
+    #: Restorable: `on_rebuild` takes back the clock and the slippage anchor,
+    #: and recon says what is still resting.
+    rebuildable = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -182,6 +191,12 @@ class ChaseOrder(Strategy):
         self._filled: dict[str, Decimal] = {}
         #: Set once TD recon has landed and the tick timer is really running.
         self._armed = False
+        #: ``ts`` of the order adopted on rebuild, so a recon snapshot holding
+        #: both an order and its replacement keeps the newer one.
+        self._adopted_ts = 0.0
+        #: Set when this session ran before. Recon then means "here is what
+        #: you left resting", not "here is a clean account".
+        self._restoring = False
         self._done = False
 
     # --- parameters --------------------------------------------------------
@@ -274,15 +289,107 @@ class ChaseOrder(Strategy):
     async def on_ready(self) -> None:
         await self.log("ChaseOrder ready — waiting for TD recon to arm")
 
+    async def on_rebuild(self, remembered: dict[str, str]) -> None:
+        """This chase ran before. Take back the two facts it cannot re-derive.
+
+        Everything else waits for recon, which is the only thing that knows
+        what is actually resting at the venue now — an order can have filled
+        or been cancelled while STS was away, and acting on a remembered copy
+        of it would be acting on something that is no longer true.
+
+        The clock and the anchor are different: nothing outside the process
+        ever saw them, and neither changes once set. Without them a rebuilt
+        chase restarts its expiry budget and re-anchors its slippage guard on
+        wherever the market has since moved to — quietly granting itself a
+        fresh allowance of both.
+        """
+        self._restoring = True
+        started = remembered.get(_FACT_STARTED_MS)
+        if started is not None:
+            try:
+                self._started_ms = int(started)
+            except ValueError:
+                await self.log(
+                    f"ChaseOrder ignoring unreadable {_FACT_STARTED_MS}="
+                    f"{started!r} — the expiry budget restarts",
+                    level="warn",
+                )
+        anchor = remembered.get(_FACT_REF_START)
+        if anchor is not None:
+            try:
+                self._ref_start = Decimal(anchor)
+            except ArithmeticError:
+                await self.log(
+                    f"ChaseOrder ignoring unreadable {_FACT_REF_START}="
+                    f"{anchor!r} — slippage re-anchors on the next quote",
+                    level="warn",
+                )
+        await self.log(
+            f"ChaseOrder restoring — anchor={_fmt(self._ref_start)} "
+            f"elapsed={self._elapsed_s()}s of {_fmt(self.paras['expiry_s'])}s"
+        )
+
+    def _elapsed_s(self) -> str:
+        if self._started_ms is None:
+            return "?"
+        return str(int((self.timer.now_ms() - self._started_ms) / 1000))
+
+    async def _adopt(self, msg: ReconDone) -> None:
+        """Take back the orders this session left resting at the venue.
+
+        Read from recon rather than from anything remembered: this is the one
+        account of the world that is current. An order this chase placed may
+        have filled or been cancelled while STS was away, and only the venue
+        knows which.
+        """
+        adopted = 0
+        for cid, order in msg.oms.orders.items():
+            if not self.owns(cid):
+                continue
+            if order.filled_qty > 0:
+                self._filled[cid] = order.filled_qty
+            if order.status in _TERMINAL:
+                continue
+            # Only one order rests at a time, but recon is a snapshot and a
+            # replacement may have crossed with a cancel. Keep the newest and
+            # let the tick reconcile the rest.
+            if self._open_cid is None or order.ts >= self._adopted_ts:
+                self._open_cid = cid
+                self._open_price = order.price
+                self._adopted_ts = order.ts
+            adopted += 1
+        await self.log(
+            f"ChaseOrder adopted {adopted} resting order(s) "
+            f"cid={self._open_cid} at {_fmt(self._open_price)}, "
+            f"filled={_fmt(self._filled_qty())}"
+        )
+
     async def on_recon_done(self, msg: ReconDone) -> None:
         """TD's ledger is real now: start chasing, and start the clock."""
-        if msg.api_id != self._primary_api_id() or self._armed:
+        if msg.api_id != self._primary_api_id():
+            return
+        if self._restoring and not self._armed:
+            # Restored, so the clock and the anchor are already set and must
+            # not be reset. What recon adds is what is actually resting.
+            self._armed = True
+            await self._adopt(msg)
+            self._arm_timer()
+            await self.log(
+                f"ChaseOrder resumed by recon api_id={msg.api_id} — "
+                f"{self._elapsed_s()}s already spent"
+            )
+            return
+        if self._armed:
             # Recon runs again after a venue reconnect. The chase is already
             # under way by then, and re-anchoring would hand it a fresh
             # expiry budget it did not earn.
             return
         self._armed = True
         self._started_ms = self.timer.now_ms()
+        # Written now, not on the way out: a process killed outright runs no
+        # shutdown code, and this is the number a rebuilt chase cannot work
+        # out for itself — the expiry budget it has already spent.
+        await self.remember(_FACT_STARTED_MS, str(self._started_ms))
         self._arm_timer()
         await self.log(
             f"ChaseOrder armed by recon api_id={msg.api_id} — "
@@ -338,6 +445,11 @@ class ChaseOrder(Strategy):
 
         if self._ref_start is None:
             self._ref_start = price
+            # The anchor `_slippage_bps` measures against. Nothing outside
+            # this process ever sees it, so without keeping it a rebuilt chase
+            # would re-anchor on wherever the market is now and forget how far
+            # it has already run — silently widening its own guard.
+            await self.remember(_FACT_REF_START, _fmt(price))
             await self.log(
                 f"ChaseOrder armed at {_fmt(price)} — "
                 f"target {_fmt(self._target_price())}"

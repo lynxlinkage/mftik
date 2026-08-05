@@ -45,6 +45,8 @@ class FakeStsStore:
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_paras: dict | None = None,
+        cid_slot: int | None = None,
+        restart: str = "always",
     ) -> SimpleNamespace:
         existing = self.rows.get(session_id)
         if existing is not None:
@@ -59,6 +61,9 @@ class FakeStsStore:
             td_api_ids=list(td_api_ids or []),
             md_ids=list(md_ids or []),
             st_paras=dict(st_paras or {}),
+            cid_slot=cid_slot,
+            restart=restart,
+            rebuild_count=0,
             reason=None,
         )
         self.rows[session_id] = row

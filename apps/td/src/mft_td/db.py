@@ -18,10 +18,7 @@ async def persist_live_session(
 ) -> TdSessionRow:
     async with session_scope() as db:
         repo = TdSessionRepository(db)
-        existing = await repo.get_live(session_id=session_id, api_id=api_id)
-        if existing is not None:
-            return existing
-        return await repo.create_live(
+        return await repo.attach_live(
             session_id=session_id,
             created_by=created_by,
             api_id=api_id,

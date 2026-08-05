@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 from mft_db.models import Base
 from mft_db.models.session import SessionStatus
-from mft_db.repositories import StsSessionRepository
+from mft_db.repositories import (
+    MdSessionRepository,
+    StsSessionRepository,
+    TdSessionRepository,
+)
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
@@ -88,3 +92,108 @@ async def test_failed_sessions_are_listed_under_their_own_status(db) -> None:
     assert [r.session_id for r in live] == []
     assert [r.session_id for r in done] == ["s-a"]
     assert [r.session_id for r in failed] == ["s-b"]
+
+
+async def test_the_cid_slot_is_kept(db) -> None:
+    """A rebuilt session has to mint order ids in the same slot.
+
+    `Strategy.owns()` matches orders by slot, so a session that came back with
+    a new one would not recognise the orders it placed before the restart.
+    """
+    repo = StsSessionRepository(db)
+    await repo.create_live(
+        session_id="s-slot", created_by=1, strategy="oco", cid_slot=4242
+    )
+
+    row = await repo.get_by_session_id("s-slot")
+    assert row is not None
+    assert row.cid_slot == 4242
+    assert row.st_facts == {}
+
+
+async def test_mark_live_undoes_the_ending(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-back")
+    await repo.mark_finished(
+        "s-back",
+        status=SessionStatus.INTERRUPTED.value,
+        reason="STS shut down while this was running",
+    )
+
+    row = await repo.mark_live("s-back")
+    assert row is not None
+    assert row.status == SessionStatus.LIVE.value
+    # A session that is running again has no end and no reason for one.
+    assert row.finished_at is None
+    assert row.reason is None
+
+
+async def test_remember_accumulates_facts(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-facts")
+
+    await repo.remember("s-facts", "ref_start", "50000")
+    await repo.remember("s-facts", "started_ms", "1785000000000")
+    await repo.remember("s-facts", "ref_start", "50001")
+
+    # Read it back from the database, not from the object we just wrote
+    # through: a plain JSON column does not track in-place mutation, so an
+    # implementation that updated the dict in place would pass any assertion
+    # made against the live instance and still persist nothing.
+    db.expire_all()
+    row = await repo.get_by_session_id("s-facts")
+    assert row is not None
+    assert row.st_facts == {"ref_start": "50001", "started_ms": "1785000000000"}
+
+
+async def test_remembering_for_an_unknown_session_is_a_no_op(db) -> None:
+    repo = StsSessionRepository(db)
+    assert await repo.remember("nope", "k", "v") is None
+
+
+async def test_td_attach_survives_a_detach_and_reattach(db) -> None:
+    """Rebuilding a session re-attaches the same (session_id, api_id) pair.
+
+    The pair is unique and a detach only marks the row done, so the second
+    attach has to revive that row rather than insert beside it.
+    """
+    repo = TdSessionRepository(db)
+    first = await repo.attach_live(session_id="s-td", created_by=1, api_id=9)
+    await repo.mark_done(session_id="s-td", api_id=9)
+
+    again = await repo.attach_live(session_id="s-td", created_by=1, api_id=9)
+
+    assert again.id == first.id
+    assert again.status == SessionStatus.LIVE.value
+    assert again.finished_at is None
+
+
+async def test_md_attach_survives_a_detach_and_reattach(db) -> None:
+    repo = MdSessionRepository(db)
+    first = await repo.attach_live(
+        venue="paper", session_id="s-md", created_by=1
+    )
+    await repo.mark_done(venue="paper", session_id="s-md")
+
+    again = await repo.attach_live(
+        venue="paper", session_id="s-md", created_by=1
+    )
+
+    assert again.id == first.id
+    assert again.status == SessionStatus.LIVE.value
+    assert again.finished_at is None
+
+
+async def test_rebuild_count_accumulates(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-count")
+
+    assert await repo.bump_rebuild_count("s-count") == 1
+    assert await repo.bump_rebuild_count("s-count") == 2
+
+    db.expire_all()
+    row = await repo.get_by_session_id("s-count")
+    assert row is not None
+    assert row.rebuild_count == 2
+    # Deploys say whether they want to come back; the default is that they do.
+    assert row.restart == "always"
