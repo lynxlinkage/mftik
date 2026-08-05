@@ -21,8 +21,9 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
+from mft.exchange.oms import OmsView
 from mft.protocol import CancelReject, OrderReject, ReconDone, RejectCode, SymbolInfo
-from mft_sts.impl.oco import OneCancelOther
+from mft_sts.impl.oco import LEG_COUNT, OneCancelOther
 
 BTCUSDT = SymbolInfo(
     venue="paper",
@@ -717,3 +718,184 @@ async def test_our_own_slot_but_not_our_order_is_ignored() -> None:
 
     assert strat.oms.cancelled == []
     assert strat.session.exits == []
+
+
+# --- rebuild ---------------------------------------------------------------
+
+
+def _restorable(**overrides) -> OneCancelOther:
+    """A pair that has not been armed — as one is when it is rebuilt."""
+    strat = _strategy(**overrides)
+    strat.owns = lambda cid: str(cid).startswith("mine-")  # type: ignore[method-assign]
+    return strat
+
+
+def _leg_order(
+    cid: str,
+    status: OrderStatus,
+    *,
+    side: Side,
+    price: str,
+    filled: str = "0",
+) -> Order:
+    return Order(
+        client_order_id=cid,
+        symbol="BTCUSDT",
+        side=side,
+        type=OrderType.LIMIT,
+        status=status,
+        qty=Decimal("0.001"),
+        filled_qty=Decimal(filled),
+        price=Decimal(price),
+    )
+
+
+async def _restore(strat: OneCancelOther, *orders: Order) -> None:
+    await strat.on_rebuild({})
+    await strat.on_start()
+    await strat.on_recon_done(
+        ReconDone(
+            session_id="s",
+            api_id=API_ID,
+            oms=OmsView(orders={str(o.client_order_id): o for o in orders}),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_restored_pair_takes_both_legs_back() -> None:
+    """Adoption has to rebuild the cid→leg map: every order handler ignores a
+    cid it has no leg for, so without it the pair would rest unwatched."""
+    strat = _restorable()
+    buy = _leg_order("mine-buy", OrderStatus.NEW, side=Side.BUY, price="49000")
+    sell = _leg_order("mine-sell", OrderStatus.NEW, side=Side.SELL, price="51000")
+
+    await _restore(strat, buy, sell)
+
+    assert strat._open == {"mine-buy", "mine-sell"}
+    assert set(strat._legs) == {"mine-buy", "mine-sell"}
+    assert strat._placed is True
+    assert strat.session.exits == []
+
+
+@pytest.mark.asyncio
+async def test_a_restored_pair_still_settles_on_a_fill() -> None:
+    """The adopted legs behave like placed ones — the point of restoring the
+    mapping rather than only counting them."""
+    strat = _restorable()
+    buy = _leg_order("mine-buy", OrderStatus.NEW, side=Side.BUY, price="49000")
+    sell = _leg_order("mine-sell", OrderStatus.NEW, side=Side.SELL, price="51000")
+    await _restore(strat, buy, sell)
+
+    await strat.on_order_update(
+        API_ID,
+        _leg_order(
+            "mine-buy", OrderStatus.FILLED, side=Side.BUY, price="49000",
+            filled="0.001",
+        ),
+    )
+
+    assert _filled_leg(strat) is not None
+    assert strat.oms.cancelled == ["mine-sell"]
+
+
+@pytest.mark.asyncio
+async def test_a_leg_that_filled_while_away_decides_the_pair() -> None:
+    strat = _restorable()
+    buy = _leg_order(
+        "mine-buy", OrderStatus.FILLED, side=Side.BUY, price="49000",
+        filled="0.001",
+    )
+    sell = _leg_order("mine-sell", OrderStatus.NEW, side=Side.SELL, price="51000")
+
+    await _restore(strat, buy, sell)
+
+    assert _filled_leg(strat) is not None
+    assert strat.oms.cancelled == ["mine-sell"]
+
+
+@pytest.mark.asyncio
+async def test_a_lone_survivor_is_not_an_oco() -> None:
+    """Same rule as at runtime: one leg left offers no choice, so it goes."""
+    strat = _restorable()
+    buy = _leg_order("mine-buy", OrderStatus.NEW, side=Side.BUY, price="49000")
+    sell = _leg_order(
+        "mine-sell", OrderStatus.CANCELED, side=Side.SELL, price="51000"
+    )
+
+    await _restore(strat, buy, sell)
+
+    assert strat.session.failures == ["oco_leg_lost"]
+    assert strat.oms.cancelled == ["mine-buy"]
+
+
+@pytest.mark.asyncio
+async def test_both_legs_gone_while_away_ends_the_pair() -> None:
+    strat = _restorable()
+    buy = _leg_order("mine-buy", OrderStatus.CANCELED, side=Side.BUY, price="49000")
+    sell = _leg_order(
+        "mine-sell", OrderStatus.CANCELED, side=Side.SELL, price="51000"
+    )
+
+    await _restore(strat, buy, sell)
+
+    assert strat.session.failures == ["oco_legs_lost_while_away"]
+
+
+@pytest.mark.asyncio
+async def test_nothing_resting_means_placing_again() -> None:
+    """The ordinary case: `on_stop` cancels both legs, so a shutdown that got
+    that far leaves nothing behind and the pair is simply placed again."""
+    strat = _restorable()
+    await _restore(strat)
+    assert strat._placed is False
+
+    await strat.on_best_quote(_quote())
+
+    assert strat._placed is True
+    assert len(strat.oms.submitted) == LEG_COUNT
+    assert strat.session.exits == []
+
+
+@pytest.mark.asyncio
+async def test_another_sessions_orders_are_not_adopted() -> None:
+    strat = _restorable()
+    theirs = _leg_order("theirs-1", OrderStatus.NEW, side=Side.BUY, price="49000")
+
+    await _restore(strat, theirs)
+
+    assert strat._legs == {}
+    assert strat._placed is False
+
+
+@pytest.mark.asyncio
+async def test_a_market_that_moved_through_a_leg_says_why() -> None:
+    """The known cost of re-placing: legality is judged against the market as
+    it is now, and a restart can land in one that moved through a leg. Posting
+    it would be refused by the venue anyway — but the reason has to say that
+    the restart is what exposed it, not the pair."""
+    strat = _restorable()
+    await _restore(strat)
+
+    # The buy leg at 49000 is now at or above the ask.
+    await strat.on_best_quote(_quote(bid="48000", ask="48500"))
+
+    assert strat.session.failures == ["oco_illegal_on_restart"]
+    assert strat.oms.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_restoring_without_an_instrument_refuses_to_place() -> None:
+    """Not knowing what is resting is not the same as nothing resting.
+
+    Without the rounded leg prices there is no way to match an order back to
+    a leg, so placing again could put a second pair beside one still live.
+    """
+    strat = _restorable()
+    strat._info = None
+    strat._venue = strat._symbol = None
+
+    await _restore(strat)
+
+    assert strat.session.failures == ["oco_restore_no_instrument"]
+    assert strat.oms.submitted == []
