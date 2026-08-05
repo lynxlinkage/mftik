@@ -1,0 +1,126 @@
+# Production stack for mft.lynkora.com. Lives at /opt/mft/deploy on the host.
+#
+# CI rewrites only MFT_VERSION in .env and runs `docker compose up -d`; the rest
+# of .env (secrets, venue keys) is never touched by a deploy.
+#
+# Nothing here publishes a port. Traefik (/opt/traefik, compose project
+# `traefik`) owns :80/:443 and discovers containers on the external `web`
+# network. Postgres and Redis are long-lived substrate on DB_HOST and are
+# not managed by this file.
+#
+# Routing on the single host mft.lynkora.com, by priority:
+#   /api/*  -> api:8000    (StripPrefix /api — the routers have no prefix)
+#   /ws/*   -> api:8000    (no strip — WebSocket paths are literal)
+#   /*      -> frontend:3000
+# Every router sits behind discord-auth-chain@docker. That chain is fail-closed:
+# with no host policy for mft.lynkora.com, only the `admin` group gets in.
+
+# Fixed project name so containers are mft-api-1 etc. regardless of the
+# directory CI runs compose from.
+name: mft
+
+x-mft: &mft
+  image: ghcr.io/lynxlinkage/mft:${MFT_VERSION:-latest}
+  restart: unless-stopped
+  env_file: .env
+  networks: [web]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # One-shot: alembic upgrade head. CI runs this with `run --rm` before `up -d`,
+  # so it is deliberately not part of the running set.
+  migrate:
+    <<: *mft
+    restart: "no"
+    command: ["mft-db-migrate"]
+    profiles: ["tools"]
+
+  # One-shot: dev user (MFT_DEFAULT_USER_ID=1) + the two paper API rows, plus a
+  # gate_spot row when GATE_SPOT_API_KEY/SECRET are set. Idempotent.
+  seed:
+    <<: *mft
+    restart: "no"
+    command: ["python", "scripts/seed_paper_apis.py"]
+    profiles: ["tools"]
+
+  api:
+    <<: *mft
+    command: ["mft-api"]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.services.mft-api.loadbalancer.server.port=8000"
+      # Strip /api: the FastAPI routers are mounted at the root, and the
+      # frontend calls /api/... because that is what the Vite dev proxy did.
+      - "traefik.http.middlewares.mft-strip-api.stripprefix.prefixes=/api"
+      - "traefik.http.routers.mft-api.rule=Host(`mft.lynkora.com`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.mft-api.entrypoints=websecure"
+      - "traefik.http.routers.mft-api.tls.certresolver=le"
+      - "traefik.http.routers.mft-api.priority=100"
+      - "traefik.http.routers.mft-api.middlewares=discord-auth-chain@docker,mft-strip-api"
+      # WebSockets (/ws/status/sts, /ws/sts/{id}, /ws/td/{id}, /ws/md/{venue}).
+      # Separate router because these paths are NOT stripped — the browser opens
+      # them directly at the origin, so they must arrive at the API verbatim.
+      - "traefik.http.routers.mft-ws.rule=Host(`mft.lynkora.com`) && PathPrefix(`/ws`)"
+      - "traefik.http.routers.mft-ws.entrypoints=websecure"
+      - "traefik.http.routers.mft-ws.tls.certresolver=le"
+      - "traefik.http.routers.mft-ws.priority=100"
+      - "traefik.http.routers.mft-ws.service=mft-api"
+      - "traefik.http.routers.mft-ws.middlewares=discord-auth-chain@docker"
+
+  # Symbol plane. Independent lifecycle — up whenever the stack is, so an
+  # instrument can be resolved before anything trades.
+  sym:
+    <<: *mft
+    command: ["sym"]
+
+  md:
+    <<: *mft
+    command: ["md"]
+
+  td:
+    <<: *mft
+    command: ["td"]
+
+  sts:
+    <<: *mft
+    command: ["sts"]
+
+  # Paper exchange engine. Kept in production so the `paper` venue works
+  # end-to-end and mft.lynkora.com can be smoke-tested without real money.
+  paper:
+    <<: *mft
+    command: ["paper"]
+
+  frontend:
+    image: ghcr.io/lynxlinkage/mft-frontend:${MFT_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      # Same origin as the UI: wsBaseUrl() turns this into wss://mft.lynkora.com
+      # and the /ws router above carries it to the API.
+      PUBLIC_API_URL: https://mft.lynkora.com
+      ORIGIN: https://mft.lynkora.com
+    networks: [web]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.mft-frontend.rule=Host(`mft.lynkora.com`)"
+      - "traefik.http.routers.mft-frontend.entrypoints=websecure"
+      - "traefik.http.routers.mft-frontend.tls.certresolver=le"
+      - "traefik.http.routers.mft-frontend.priority=1"
+      - "traefik.http.routers.mft-frontend.middlewares=discord-auth-chain@docker"
+      - "traefik.http.services.mft-frontend.loadbalancer.server.port=3000"
+
+networks:
+  web:
+    name: web
+    external: true

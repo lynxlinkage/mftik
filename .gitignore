@@ -32,3 +32,6 @@ frontend/package-lock.json
 
 # Docker
 *.pid
+
+# Live API tokens (Hostinger, GitHub, Discord). Never commit.
+credentials/

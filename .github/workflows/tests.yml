@@ -1,10 +1,9 @@
 name: Tests
 
 on:
-  # Scoped to main: a bare `push` would also fire for branches with an open
-  # PR, running the same suite twice for every push to that PR.
-  push:
-    branches: [main]
+  # PRs only. The same suite runs as the first job of deploy.yml on push to
+  # main, where it gates the release — running it here too would just duplicate
+  # every main build.
   pull_request:
 
 jobs:

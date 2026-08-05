@@ -15,17 +15,27 @@ Async, broker-centric trading platform. Domains talk through Redis (Streams + Pu
 | `packages/db` | Schema + Alembic migrations (`mft_db`) |
 | `contracts/` | OpenAPI contract (Python ↔ JS) |
 | `frontend/` | SvelteKit UI (outside uv workspace) |
+| `Dockerfile` | One image for every Python process — they differ only by `command:` |
+| `deploy/` | Production stack for mft.lynkora.com (see [docs/CICD.md](docs/CICD.md)) |
 
 ## Quick start
 
 ```bash
 cp .env.example .env
 just sync   # uv sync --all-packages + frontend npm install
-just up     # docker compose up --build
+just up     # build the shared image, then docker compose up
 ```
 
 - API health: http://localhost:8000/health
 - Control UI: http://localhost:5173 (Home / STS / TD / MD / Audit)
+
+Use `just up` rather than `docker compose up --build`: every Python service
+shares one image tag, so building them all at once races.
+
+## Deployment
+
+Merging to `main` builds, tags and ships to https://mft.lynkora.com.
+See [docs/CICD.md](docs/CICD.md).
 
 ## Common tasks
 

@@ -1,3 +1,20 @@
+# Local development stack. Production lives in deploy/docker-compose.yml.
+#
+# Every Python service is the same image (see Dockerfile) and differs only in
+# `command`. Compose builds it once — the services share one `image:` tag — so
+# adding a domain costs a five-line block, not another Dockerfile.
+#
+# REDIS_URL / DATABASE_URL / DATABASE_URL_SYNC come from .env (see .env.example),
+# where they already point at the `redis` and `postgres` service names.
+
+x-mft: &mft
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: mft:dev
+  env_file:
+    - .env
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -26,26 +43,14 @@ services:
       retries: 10
 
   migrate:
-    build:
-      context: .
-      dockerfile: packages/db/Dockerfile
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL_SYNC: postgresql+psycopg://${POSTGRES_USER:-mft}:${POSTGRES_PASSWORD:-mft}@postgres:5432/${POSTGRES_DB:-mft}
-      ALEMBIC_CONFIG: /app/packages/db/alembic.ini
+    <<: *mft
+    command: ["mft-db-migrate"]
     depends_on:
       postgres:
         condition: service_healthy
 
   seed:
-    build:
-      context: .
-      dockerfile: packages/db/Dockerfile
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mft}:${POSTGRES_PASSWORD:-mft}@postgres:5432/${POSTGRES_DB:-mft}
+    <<: *mft
     command: ["python", "scripts/seed_paper_apis.py"]
     depends_on:
       postgres:
@@ -54,16 +59,8 @@ services:
         condition: service_completed_successfully
 
   api:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
-    env_file:
-      - .env
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mft}:${POSTGRES_PASSWORD:-mft}@postgres:5432/${POSTGRES_DB:-mft}
-      API_HOST: 0.0.0.0
-      API_PORT: 8000
+    <<: *mft
+    command: ["mft-api"]
     ports:
       - "8000:8000"
     depends_on:
@@ -77,14 +74,8 @@ services:
         condition: service_completed_successfully
 
   md:
-    build:
-      context: .
-      dockerfile: apps/md/Dockerfile
-    env_file:
-      - .env
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mft}:${POSTGRES_PASSWORD:-mft}@postgres:5432/${POSTGRES_DB:-mft}
+    <<: *mft
+    command: ["md"]
     depends_on:
       redis:
         condition: service_healthy
@@ -96,25 +87,15 @@ services:
         condition: service_started
 
   paper:
-    build:
-      context: .
-      dockerfile: apps/paper/Dockerfile
-    env_file:
-      - .env
-    environment:
-      REDIS_URL: redis://redis:6379/0
+    <<: *mft
+    command: ["paper"]
     depends_on:
       redis:
         condition: service_healthy
 
   td:
-    build:
-      context: .
-      dockerfile: apps/td/Dockerfile
-    env_file:
-      - .env
-    environment:
-      REDIS_URL: redis://redis:6379/0
+    <<: *mft
+    command: ["td"]
     depends_on:
       redis:
         condition: service_healthy
@@ -122,13 +103,8 @@ services:
         condition: service_started
 
   sts:
-    build:
-      context: .
-      dockerfile: apps/sts/Dockerfile
-    env_file:
-      - .env
-    environment:
-      REDIS_URL: redis://redis:6379/0
+    <<: *mft
+    command: ["sts"]
     depends_on:
       redis:
         condition: service_healthy
@@ -136,14 +112,9 @@ services:
   # Symbol plane. Lifecycle is independent of td/md/sts — it is up whenever
   # the stack is, so an instrument can be resolved before anything trades.
   sym:
-    build:
-      context: .
-      dockerfile: apps/sym/Dockerfile
-    env_file:
-      - .env
+    <<: *mft
+    command: ["sym"]
     environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mft}:${POSTGRES_PASSWORD:-mft}@postgres:5432/${POSTGRES_DB:-mft}
       # Listings are near-static; an hourly re-pull is plenty.
       SYM_REFRESH_INTERVAL: "3600"
     depends_on:
@@ -158,6 +129,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      target: dev
     environment:
       # Browser → host-published API (WebSocket logs)
       PUBLIC_API_URL: http://localhost:8000

@@ -53,7 +53,11 @@ frontend-check:
 
 # Docker compose
 up *args:
-    docker compose up --build {{args}}
+    # Build the two images explicitly first. Every Python service shares the
+    # `mft:dev` tag, so letting `up --build` build them all would have seven
+    # concurrent builds racing to write the same tag ("image already exists").
+    docker compose build migrate frontend
+    docker compose up {{args}}
 
 down:
     docker compose down

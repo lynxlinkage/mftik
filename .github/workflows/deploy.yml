@@ -1,0 +1,169 @@
+name: Build, Deploy, Notify
+
+# Every merge to main ships. Tests run here rather than in tests.yml (which is
+# PR-only) so a red suite blocks the deploy instead of racing it.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  APP_IMAGE: ghcr.io/${{ github.repository_owner }}/mft
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/mft-frontend
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Sync
+        run: uv sync --all-packages
+      - name: Test
+        run: uv run --all-packages pytest packages apps -q
+      - name: Contracts up to date
+        run: |
+          uv run --all-packages python -c \
+            "import json; from mft_api.main import app; print(json.dumps(app.openapi(), indent=2))" \
+            > /tmp/openapi.json
+          diff -u contracts/openapi.json /tmp/openapi.json \
+            || { echo "contracts/openapi.json is stale — run: just openapi" >&2; exit 1; }
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # One image for api, td, md, sts, sym, paper and the migrator — they
+      # differ only by `command:` in deploy/docker-compose.yml.
+      - name: Build and push app image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.APP_IMAGE }}:latest
+            ${{ env.APP_IMAGE }}:sha-${{ github.sha }}
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          target: prod
+          push: true
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:latest
+            ${{ env.FRONTEND_IMAGE }}:sha-${{ github.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The host pulls the images with this job's GITHUB_TOKEN.
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # The compose file is versioned here and synced on every deploy; .env on
+      # the host holds the secrets and is never overwritten.
+      - name: Sync compose file to production
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: deploy/docker-compose.yml
+          # strip_components drops the leading `deploy/`, so the file lands at
+          # /opt/mft/deploy/docker-compose.yml — next to the .env it reads.
+          target: /opt/mft/deploy
+          strip_components: 1
+
+      - name: Pin version, migrate, restart
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          VERSION: sha-${{ github.sha }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: VERSION
+          script: |
+            set -euo pipefail
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            # Shared reverse-proxy network, owned by the standalone Traefik in
+            # /opt/traefik (not this stack). Ensure it exists so the external
+            # network reference in docker-compose.yml resolves.
+            docker network inspect web >/dev/null 2>&1 || docker network create web
+            cd /opt/mft/deploy
+            # Rewrite only the version line; every secret in .env survives.
+            if grep -q '^MFT_VERSION=' .env; then
+              sed -i "s|^MFT_VERSION=.*|MFT_VERSION=${VERSION}|" .env
+            else
+              echo "MFT_VERSION=${VERSION}" >> .env
+            fi
+            docker compose pull
+            # Schema first: the new images assume the new schema.
+            docker compose run --rm migrate
+            docker compose run --rm seed
+            docker compose up -d --remove-orphans
+            docker image prune -f
+
+  notify:
+    needs: [test, build, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [ "${{ needs.test.result }}" = "success" ] \
+            && [ "${{ needs.build.result }}" = "success" ] \
+            && [ "${{ needs.deploy.result }}" = "success" ]; then
+            echo "status=✅ Success" >> "$GITHUB_OUTPUT"
+            echo "color=3066993" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=❌ Failed" >> "$GITHUB_OUTPUT"
+            echo "color=15158332" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Notify Discord
+        if: ${{ secrets.DISCORD_WEBHOOK_URL != '' }}
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS_TEXT: ${{ steps.status.outputs.status }}
+          STATUS_COLOR: ${{ steps.status.outputs.color }}
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          DESC="Commit \`${COMMIT_SHA}\` by ${ACTOR} on \`main\`"$'\n'"${COMMIT_MSG}"
+          curl -sf -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg title "mft deploy: ${STATUS_TEXT}" \
+              --arg url "$RUN_URL" \
+              --arg desc "$DESC" \
+              --argjson color "$STATUS_COLOR" \
+              '{embeds: [{title: $title, url: $url, description: $desc, color: $color}]}')"
