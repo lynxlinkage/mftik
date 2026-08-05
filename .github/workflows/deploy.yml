@@ -133,6 +133,10 @@ jobs:
     needs: [test, build, deploy]
     if: always()
     runs-on: ubuntu-latest
+    # Job level, not step level: the `secrets` context is not available in a
+    # step's `if`, but `env` is — and job-level env may read secrets.
+    env:
+      WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
       - name: Determine status
         id: status
@@ -148,7 +152,7 @@ jobs:
           fi
 
       - name: Notify Discord
-        if: ${{ secrets.DISCORD_WEBHOOK_URL != '' }}
+        if: ${{ env.WEBHOOK_URL != '' }}
         env:
           COMMIT_SHA: ${{ github.sha }}
           ACTOR: ${{ github.actor }}
@@ -156,7 +160,6 @@ jobs:
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           STATUS_TEXT: ${{ steps.status.outputs.status }}
           STATUS_COLOR: ${{ steps.status.outputs.color }}
-          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           DESC="Commit \`${COMMIT_SHA}\` by ${ACTOR} on \`main\`"$'\n'"${COMMIT_MSG}"
           curl -sf -X POST "$WEBHOOK_URL" \
