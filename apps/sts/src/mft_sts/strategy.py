@@ -84,6 +84,13 @@ class Strategy:
     """
 
     name: str = "base"
+    #: Whether a session running this strategy may be restored after STS
+    #: restarts. Off until the class implements :meth:`on_rebuild`: a rebuilt
+    #: strategy that does not know it was ever away treats recon as a clean
+    #: account and starts over, placing orders alongside the ones it left
+    #: resting at the venue. Readiness is a property of the strategy, not of
+    #: whoever set the environment variable.
+    rebuildable: bool = False
     #: Numeric id for this strategy *class*. Not packed into client_order_id —
     #: that carries the per-session slot; see :mod:`mft_sts.client_order_id`.
     id: int = 0

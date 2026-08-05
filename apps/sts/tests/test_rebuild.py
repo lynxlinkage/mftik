@@ -104,6 +104,7 @@ class FakeStsStore:
 
 class Rebuildable(Strategy):
     name = "rebuildable"
+    rebuildable = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -381,3 +382,28 @@ async def test_the_window_is_configurable(broker: Broker) -> None:
 
     assert await manager.rebuild_interrupted() == ["r-wide"]
     await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_a_strategy_that_cannot_be_rebuilt_is_left_alone(
+    broker: Broker,
+) -> None:
+    """Readiness belongs to the strategy, not to whoever set the env var.
+
+    A class without `on_rebuild` reads recon as a clean account and starts
+    over, placing orders beside the ones the session left resting.
+    """
+
+    class NotReady(Strategy):
+        name = "not_ready"
+
+    register(NotReady)
+    store = FakeStsStore()
+    store.seed("r-noimpl", strategy="not_ready")
+    manager = _manager(broker, store, [])
+    manager._strategy_factory = lambda name: NotReady()  # noqa: SLF001
+
+    assert await manager.rebuild_interrupted() == []
+    assert store.rows["r-noimpl"].status == "interrupted"
+    # No claim taken, so nothing has to release one.
+    assert not await is_alive(broker, "r-noimpl")

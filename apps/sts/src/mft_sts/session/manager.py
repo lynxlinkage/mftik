@@ -606,10 +606,27 @@ class SessionManager:
                     session_id,
                 )
                 continue
+            try:
+                strategy = self._strategy_factory(getattr(row, "strategy", None))
+            except Exception:
+                logger.exception(
+                    "STS cannot rebuild session=%s: unknown strategy", session_id
+                )
+                continue
+            if not strategy.rebuildable:
+                # The class has not implemented on_rebuild, so it would treat
+                # recon as a clean account and start over — placing orders
+                # beside the ones this session left resting.
+                logger.warning(
+                    "STS not rebuilding session=%s: %s does not support it",
+                    session_id,
+                    strategy.name,
+                )
+                continue
             if not await claim_alive(self._broker, session_id):
                 continue
             try:
-                await self._rebuild_one(row)
+                await self._rebuild_one(row, strategy)
             except Exception:
                 logger.exception("STS rebuild failed session=%s", session_id)
                 await self._abandon_rebuild(session_id)
@@ -622,14 +639,13 @@ class SessionManager:
             )
         return rebuilt
 
-    async def _rebuild_one(self, row: Any) -> None:
+    async def _rebuild_one(self, row: Any, strategy: Strategy) -> None:
         """Restore one session, in the order a deploy uses and for the reason.
 
         TD blocks its attach until it sees the session's lease heartbeat, so
         the session has to be running before anything can be attached to it.
         """
         session_id = row.session_id
-        strategy = self._strategy_factory(getattr(row, "strategy", None))
         td_api_ids = [int(v) for v in (getattr(row, "td_api_ids", None) or [])]
         md_ids = [str(v) for v in (getattr(row, "md_ids", None) or [])]
         created_by = int(getattr(row, "created_by", 0) or 0)

@@ -167,10 +167,16 @@ class FakeSession:
         #: Reasons the strategy ended as ``failed`` rather than ``done``.
         self.failures: list[str] = []
 
+        #: What the strategy asked to have kept for a rebuild.
+        self.remembered: dict[str, str] = {}
+
     def request_exit(self, reason: str, *, failed: bool = False) -> None:
         self.exits.append(reason)
         if failed:
             self.failures.append(reason)
+
+    async def remember(self, key: str, value: str) -> None:
+        self.remembered[key] = value
 
 
 class FakeTimer:
@@ -838,3 +844,128 @@ async def test_the_recon_deadline_is_a_no_op_once_armed() -> None:
     strat = _strategy()
     await strat._on_recon_timeout()
     assert strat.session.exits == []
+
+
+# --- rebuild ---------------------------------------------------------------
+
+
+def _restorable(**paras) -> ChaseOrder:
+    """A chase that has not been armed — as one is when it is rebuilt.
+
+    ``owns`` discriminates here, unlike in :func:`_strategy`: adopting orders
+    on rebuild rests entirely on it, and a stub that says yes to everything
+    would hide the one thing these tests are checking.
+    """
+    strat = _strategy(**paras)
+    strat._armed = False
+    strat._started_ms = None
+    strat._ref_start = None
+    strat.owns = lambda cid: str(cid).startswith("mine-")  # type: ignore[method-assign]
+    return strat
+
+
+@pytest.mark.asyncio
+async def test_arming_keeps_the_clock_and_the_anchor() -> None:
+    """Both are set once and seen by nothing outside the process, so they are
+    written when they become true rather than on the way out."""
+    strat = _restorable()
+    await strat.on_recon_done(ReconDone(session_id="s1", api_id=7, oms=OmsView()))
+    await strat.on_best_quote(_quote("49999", "50000"))
+
+    assert strat.session.remembered["started_ms"] == str(strat._started_ms)
+    assert strat.session.remembered["ref_start"] == "50000"
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_chase_does_not_restart_its_expiry_budget() -> None:
+    strat = _restorable(expiry_s=30)
+    started = strat.timer.now_ms() - 25_000
+
+    await strat.on_rebuild(
+        {"started_ms": str(started), "ref_start": "50000"}
+    )
+    await strat.on_recon_done(ReconDone(session_id="s1", api_id=7, oms=OmsView()))
+
+    assert strat._started_ms == started
+    # 25 of the 30 seconds are already gone; five more end it.
+    assert not strat._expired()
+    strat.timer.advance_s(6)
+    assert strat._expired()
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_chase_keeps_the_slippage_it_already_ran() -> None:
+    """Re-anchoring on the current quote would forget how far the market has
+    already moved against it and grant a fresh allowance."""
+    strat = _restorable(extreme_bps=50)
+    await strat.on_rebuild({"started_ms": "1", "ref_start": "50000"})
+    await strat.on_recon_done(ReconDone(session_id="s1", api_id=7, oms=OmsView()))
+
+    # The market moved 40bps away while STS was down.
+    await strat.on_best_quote(_quote("50199", "50200"))
+
+    assert strat._ref_start == Decimal("50000")
+    assert strat._slippage_bps() == pytest.approx(Decimal("40"), abs=Decimal("0.5"))
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_chase_adopts_what_it_left_resting() -> None:
+    """The resting order comes from recon, not from anything remembered: only
+    the venue knows whether it survived the outage."""
+    strat = _restorable()
+    cid = "mine-1"
+    resting = _update(cid, "0.03", OrderStatus.PARTIALLY_FILLED)
+
+    await strat.on_rebuild({"started_ms": "1", "ref_start": "50000"})
+    await strat.on_recon_done(
+        ReconDone(session_id="s1", api_id=7, oms=OmsView(orders={cid: resting}))
+    )
+
+    assert strat._open_cid == cid
+    assert strat._open_price == Decimal("50000")
+    assert strat._filled_qty() == Decimal("0.03")
+
+
+@pytest.mark.asyncio
+async def test_an_order_that_finished_while_away_is_counted_not_adopted() -> None:
+    strat = _restorable()
+    cid = "mine-2"
+    filled = _update(cid, "0.1", OrderStatus.FILLED)
+
+    await strat.on_rebuild({"started_ms": "1", "ref_start": "50000"})
+    await strat.on_recon_done(
+        ReconDone(session_id="s1", api_id=7, oms=OmsView(orders={cid: filled}))
+    )
+
+    assert strat._open_cid is None
+    assert strat._filled_qty() == Decimal("0.1")
+
+
+@pytest.mark.asyncio
+async def test_another_sessions_orders_are_not_adopted() -> None:
+    """`owns()` is what makes this safe, and it works because the rebuild kept
+    the session's cid slot."""
+    strat = _restorable()
+    theirs = _update("theirs-1", "0.05", OrderStatus.NEW)
+
+    await strat.on_rebuild({"started_ms": "1", "ref_start": "50000"})
+    await strat.on_recon_done(
+        ReconDone(
+            session_id="s1", api_id=7, oms=OmsView(orders={"theirs-1": theirs})
+        )
+    )
+
+    assert strat._open_cid is None
+    assert strat._filled_qty() == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_unreadable_facts_do_not_stop_the_rebuild() -> None:
+    """A fact that cannot be parsed is worth a warning, not a dead session."""
+    strat = _restorable()
+    await strat.on_rebuild({"started_ms": "not-a-number", "ref_start": "junk"})
+    await strat.on_recon_done(ReconDone(session_id="s1", api_id=7, oms=OmsView()))
+
+    assert strat._armed
+    # Fell back to arming fresh rather than refusing to come back.
+    assert strat._ref_start is None
