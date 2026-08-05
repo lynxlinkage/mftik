@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 from mft_db.models import Base
 from mft_db.models.session import SessionStatus
-from mft_db.repositories import StsSessionRepository
+from mft_db.repositories import (
+    MdSessionRepository,
+    StsSessionRepository,
+    TdSessionRepository,
+)
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
@@ -145,3 +149,36 @@ async def test_remember_accumulates_facts(db) -> None:
 async def test_remembering_for_an_unknown_session_is_a_no_op(db) -> None:
     repo = StsSessionRepository(db)
     assert await repo.remember("nope", "k", "v") is None
+
+
+async def test_td_attach_survives_a_detach_and_reattach(db) -> None:
+    """Rebuilding a session re-attaches the same (session_id, api_id) pair.
+
+    The pair is unique and a detach only marks the row done, so the second
+    attach has to revive that row rather than insert beside it.
+    """
+    repo = TdSessionRepository(db)
+    first = await repo.attach_live(session_id="s-td", created_by=1, api_id=9)
+    await repo.mark_done(session_id="s-td", api_id=9)
+
+    again = await repo.attach_live(session_id="s-td", created_by=1, api_id=9)
+
+    assert again.id == first.id
+    assert again.status == SessionStatus.LIVE.value
+    assert again.finished_at is None
+
+
+async def test_md_attach_survives_a_detach_and_reattach(db) -> None:
+    repo = MdSessionRepository(db)
+    first = await repo.attach_live(
+        venue="paper", session_id="s-md", created_by=1
+    )
+    await repo.mark_done(venue="paper", session_id="s-md")
+
+    again = await repo.attach_live(
+        venue="paper", session_id="s-md", created_by=1
+    )
+
+    assert again.id == first.id
+    assert again.status == SessionStatus.LIVE.value
+    assert again.finished_at is None

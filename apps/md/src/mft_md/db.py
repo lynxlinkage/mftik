@@ -23,14 +23,8 @@ async def persist_live_session(
     async with session_scope() as db:
         repo = MdSessionRepository(db)
         for venue in venue_list:
-            existing = await repo.get_live(
-                venue=venue, session_id=session_id
-            )
-            if existing is not None:
-                out.append(existing)
-                continue
             out.append(
-                await repo.create_live(
+                await repo.attach_live(
                     venue=venue,
                     session_id=session_id,
                     created_by=created_by,

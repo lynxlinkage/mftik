@@ -178,6 +178,33 @@ class TdSessionRepository(_SessionListMixin[TdSessionRow]):
         )
         return await self.add(row)
 
+    async def attach_live(
+        self, *, session_id: str, created_by: int, api_id: int
+    ) -> TdSessionRow:
+        """Record this attach as live, reusing the row if the pair had one.
+
+        ``(session_id, api_id)`` is unique and detaching only marks the row
+        done, so a pair that attaches, detaches and attaches again cannot
+        insert a second row. That sequence never came up while every deploy
+        minted a fresh session id; rebuilding one reuses it, and the insert
+        fails on the unique constraint.
+        """
+        result = await self.session.execute(
+            select(TdSessionRow).where(
+                TdSessionRow.session_id == session_id,
+                TdSessionRow.api_id == api_id,
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return await self.create_live(
+                session_id=session_id, created_by=created_by, api_id=api_id
+            )
+        row.status = SessionStatus.LIVE.value
+        row.finished_at = None
+        await self.session.flush()
+        return row
+
     async def mark_done(self, *, session_id: str, api_id: int) -> TdSessionRow | None:
         row = await self.get_live(session_id=session_id, api_id=api_id)
         if row is None:
@@ -227,6 +254,30 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
             status=SessionStatus.LIVE.value,
         )
         return await self.add(row)
+
+    async def attach_live(
+        self, *, venue: str, session_id: str, created_by: int
+    ) -> MdSessionRow:
+        """Record this attach as live, reusing the row if the pair had one.
+
+        Same reason as :meth:`TdSessionRepository.attach_live` — ``(venue,
+        session_id)`` is unique and a detach only marks the row done.
+        """
+        result = await self.session.execute(
+            select(MdSessionRow).where(
+                MdSessionRow.venue == venue,
+                MdSessionRow.session_id == session_id,
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return await self.create_live(
+                venue=venue, session_id=session_id, created_by=created_by
+            )
+        row.status = SessionStatus.LIVE.value
+        row.finished_at = None
+        await self.session.flush()
+        return row
 
     async def mark_done(
         self, *, venue: str, session_id: str
