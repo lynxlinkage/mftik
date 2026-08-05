@@ -84,9 +84,20 @@ class StsSessionRow(Base):
     #: null for a session that is still live or ended naturally.
     reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     strategy: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: The 16-bit slot packed into every ``client_order_id`` this session
+    #: mints. Persisted so a rebuilt session can keep it: ``Strategy.owns()``
+    #: matches orders by slot, so a new one would leave the strategy unable to
+    #: recognise the orders it placed before the restart. Null for rows
+    #: written before this was recorded.
+    cid_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
     td_api_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
     md_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
     st_paras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    #: What ``Strategy.remember()`` wrote — facts established while running
+    #: that cannot be re-derived from ``st_paras`` or from TD reconciliation,
+    #: like the price a chase anchored its slippage guard on. Kept apart from
+    #: ``st_paras`` so configuration and runtime facts do not blur together.
+    st_facts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     creator = relationship("User", back_populates="sts_sessions")
     strategy_row = relationship(

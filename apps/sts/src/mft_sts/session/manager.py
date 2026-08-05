@@ -45,6 +45,8 @@ _STATUS_BUFFER = 200
 _STATUS_TTL_SECONDS = 3600
 
 PersistLive = Callable[..., Awaitable[Any]]
+#: ``(session_id, key, value)`` — persist one fact a strategy established.
+RememberFact = Callable[..., Awaitable[Any]]
 #: ``(session_id, *, status, reason)`` — move the row to a terminal status.
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
@@ -61,6 +63,7 @@ class SessionManager:
         persist_live: PersistLive | None = None,
         mark_done: MarkDone | None = None,
         list_db_sessions: ListDbSessions | None = None,
+        remember_fact: RememberFact | None = None,
         heartbeat_interval: float = 1.0,
         strategy_factory: StrategyFactory | None = None,
     ) -> None:
@@ -68,12 +71,29 @@ class SessionManager:
         self._persist_live = persist_live
         self._mark_done = mark_done
         self._list_db_sessions = list_db_sessions
+        self._remember = remember_fact
         self._heartbeat_interval = heartbeat_interval
         self._strategy_factory = strategy_factory or resolve_strategy
         self._sessions: dict[str, StsSession] = {}
 
     def get(self, session_id: str) -> StsSession | None:
         return self._sessions.get(session_id)
+
+    async def _remember_fact(self, session_id: str, key: str, value: str) -> None:
+        """Persist one fact for ``session_id``, or drop it if nothing can.
+
+        Losing a fact must not take the strategy down with it: everything
+        written here is a nicety for a rebuild that may never happen, while
+        the strategy calling it is in the middle of trading.
+        """
+        if self._remember is None:
+            return
+        try:
+            await self._remember(session_id, key, value)
+        except Exception:
+            logger.exception(
+                "STS remember failed session=%s key=%s", session_id, key
+            )
 
     async def _publish_status(
         self,
@@ -153,12 +173,14 @@ class SessionManager:
             raise KeyError(f"sts session already exists: {request.session_id}")
 
         strategy = self._strategy_factory(request.strategy)
+        cid_slot = await self._allocate_cid_slot()
         session = StsSession(
             session_id=request.session_id,
             broker=self._broker,
             created_by=request.created_by,
             strategy=strategy,
-            cid_slot=await self._allocate_cid_slot(),
+            cid_slot=cid_slot,
+            remember=self._remember_fact,
             td_api_ids=list(request.td),
             md_ids=list(request.md),
             st_paras=dict(request.st_paras),
@@ -182,6 +204,7 @@ class SessionManager:
                 td_api_ids=list(request.td),
                 md_ids=list(request.md),
                 st_paras=dict(request.st_paras),
+                cid_slot=cid_slot,
             )
         try:
             await session.start()
@@ -454,11 +477,15 @@ class SessionManager:
                 )
                 continue
 
+            # `interrupted`, not `failed`: nothing was wrong with the
+            # strategy and it did not choose to stop — the same category as a
+            # shutdown, which is what makes the rebuild candidate set exactly
+            # `status = interrupted` rather than a reason-string match.
             reason = "process died: no session heartbeat"
             try:
                 await self._mark_done(
                     session_id,
-                    status=SessionStatus.FAILED.value,
+                    status=SessionStatus.INTERRUPTED.value,
                     reason=reason,
                 )
             except Exception:
@@ -466,7 +493,7 @@ class SessionManager:
                 continue
             await self._publish_status(
                 session_id,
-                status=SessionStatus.FAILED.value,
+                status=SessionStatus.INTERRUPTED.value,
                 strategy=getattr(row, "strategy", None),
                 reason=reason,
                 created_by=getattr(row, "created_by", None),

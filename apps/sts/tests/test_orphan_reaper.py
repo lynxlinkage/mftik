@@ -26,7 +26,12 @@ from mft_sts.strategy import Strategy
 class FakeStsStore:
     rows: dict[str, SimpleNamespace] = field(default_factory=dict)
 
-    def seed_live(self, session_id: str, strategy: str = "oco") -> SimpleNamespace:
+    def seed_live(
+        self,
+        session_id: str,
+        strategy: str = "oco",
+        cid_slot: int | None = None,
+    ) -> SimpleNamespace:
         row = SimpleNamespace(
             session_id=session_id,
             created_by=1,
@@ -34,6 +39,7 @@ class FakeStsStore:
             finished_at=None,
             status="live",
             strategy=strategy,
+            cid_slot=cid_slot,
             reason=None,
         )
         self.rows[session_id] = row
@@ -48,8 +54,9 @@ class FakeStsStore:
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_paras: dict | None = None,
+        cid_slot: int | None = None,
     ) -> SimpleNamespace:
-        return self.seed_live(session_id, strategy or "unknown")
+        return self.seed_live(session_id, strategy or "unknown", cid_slot)
 
     async def mark_finished(
         self,
@@ -104,14 +111,20 @@ def _manager(broker: Broker, store: FakeStsStore) -> SessionManager:
 
 
 @pytest.mark.asyncio
-async def test_a_row_with_no_owner_is_failed(broker: Broker) -> None:
+async def test_a_row_with_no_owner_is_interrupted(broker: Broker) -> None:
+    """Interrupted rather than failed: nothing was wrong with the strategy
+    and it did not choose to stop, which is the same category as a shutdown.
+
+    It is also what makes the rebuild candidate set `status = interrupted`
+    rather than a match on the reason string.
+    """
     store = FakeStsStore()
     store.seed_live("ghost-1")
     manager = _manager(broker, store)
 
     assert await manager.reap_orphans() == ["ghost-1"]
     row = store.rows["ghost-1"]
-    assert row.status == "failed"
+    assert row.status == "interrupted"
     assert row.reason == "process died: no session heartbeat"
     assert row.finished_at is not None
 
@@ -247,7 +260,7 @@ async def test_reaping_is_safe_to_repeat(broker: Broker) -> None:
     assert await manager.reap_orphans() == ["ghost-2"]
     # Already terminal, so it is no longer in the live listing.
     assert await manager.reap_orphans() == []
-    assert store.rows["ghost-2"].status == "failed"
+    assert store.rows["ghost-2"].status == "interrupted"
 
 
 @pytest.mark.asyncio

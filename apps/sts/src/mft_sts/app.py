@@ -81,6 +81,7 @@ async def amain() -> None:
             persist_live=sts_db.persist_live_session,
             mark_done=sts_db.mark_session_finished,
             list_db_sessions=sts_db.list_sessions,
+            remember_fact=sts_db.remember_fact,
         )
         logger.info("STS started")
         rpc_task = asyncio.create_task(

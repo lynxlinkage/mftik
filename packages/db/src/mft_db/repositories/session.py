@@ -64,6 +64,7 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_paras: dict[str, Any] | None = None,
+        cid_slot: int | None = None,
     ) -> StsSessionRow:
         row = StsSessionRow(
             session_id=session_id,
@@ -72,6 +73,8 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
             td_api_ids=list(td_api_ids or []),
             md_ids=list(md_ids or []),
             st_paras=dict(st_paras or {}),
+            cid_slot=cid_slot,
+            st_facts={},
             status=SessionStatus.LIVE.value,
         )
         return await self.add(row)
@@ -102,6 +105,38 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         return await self.mark_finished(
             session_id, status=SessionStatus.DONE.value
         )
+
+    async def mark_live(self, session_id: str) -> StsSessionRow | None:
+        """Put a terminal session back to ``live`` — the rebuild path.
+
+        Clears ``finished_at`` and ``reason`` along with the status: a session
+        that is running again has no end and no reason for one, and leaving
+        either behind would describe a row that ended and is also live.
+        """
+        row = await self.get_by_session_id(session_id)
+        if row is None:
+            return None
+        row.status = SessionStatus.LIVE.value
+        row.finished_at = None
+        row.reason = None
+        await self.session.flush()
+        return row
+
+    async def remember(
+        self, session_id: str, key: str, value: str
+    ) -> StsSessionRow | None:
+        """Record one fact a strategy established while running.
+
+        Reassigns the dict rather than mutating it: a plain JSON column does
+        not track in-place changes, so an update written through the existing
+        object would be silently dropped.
+        """
+        row = await self.get_by_session_id(session_id)
+        if row is None:
+            return None
+        row.st_facts = {**(row.st_facts or {}), key: value}
+        await self.session.flush()
+        return row
 
     async def mark_failed(
         self, session_id: str, reason: str

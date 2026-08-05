@@ -88,3 +88,60 @@ async def test_failed_sessions_are_listed_under_their_own_status(db) -> None:
     assert [r.session_id for r in live] == []
     assert [r.session_id for r in done] == ["s-a"]
     assert [r.session_id for r in failed] == ["s-b"]
+
+
+async def test_the_cid_slot_is_kept(db) -> None:
+    """A rebuilt session has to mint order ids in the same slot.
+
+    `Strategy.owns()` matches orders by slot, so a session that came back with
+    a new one would not recognise the orders it placed before the restart.
+    """
+    repo = StsSessionRepository(db)
+    await repo.create_live(
+        session_id="s-slot", created_by=1, strategy="oco", cid_slot=4242
+    )
+
+    row = await repo.get_by_session_id("s-slot")
+    assert row is not None
+    assert row.cid_slot == 4242
+    assert row.st_facts == {}
+
+
+async def test_mark_live_undoes_the_ending(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-back")
+    await repo.mark_finished(
+        "s-back",
+        status=SessionStatus.INTERRUPTED.value,
+        reason="STS shut down while this was running",
+    )
+
+    row = await repo.mark_live("s-back")
+    assert row is not None
+    assert row.status == SessionStatus.LIVE.value
+    # A session that is running again has no end and no reason for one.
+    assert row.finished_at is None
+    assert row.reason is None
+
+
+async def test_remember_accumulates_facts(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-facts")
+
+    await repo.remember("s-facts", "ref_start", "50000")
+    await repo.remember("s-facts", "started_ms", "1785000000000")
+    await repo.remember("s-facts", "ref_start", "50001")
+
+    # Read it back from the database, not from the object we just wrote
+    # through: a plain JSON column does not track in-place mutation, so an
+    # implementation that updated the dict in place would pass any assertion
+    # made against the live instance and still persist nothing.
+    db.expire_all()
+    row = await repo.get_by_session_id("s-facts")
+    assert row is not None
+    assert row.st_facts == {"ref_start": "50001", "started_ms": "1785000000000"}
+
+
+async def test_remembering_for_an_unknown_session_is_a_no_op(db) -> None:
+    repo = StsSessionRepository(db)
+    assert await repo.remember("nope", "k", "v") is None

@@ -18,6 +18,7 @@ async def persist_live_session(
     td_api_ids: list[int] | None = None,
     md_ids: list[str] | None = None,
     st_paras: dict[str, Any] | None = None,
+    cid_slot: int | None = None,
 ) -> StsSessionRow:
     async with session_scope() as db:
         repo = StsSessionRepository(db)
@@ -31,7 +32,24 @@ async def persist_live_session(
             td_api_ids=td_api_ids,
             md_ids=md_ids,
             st_paras=st_paras,
+            cid_slot=cid_slot,
         )
+
+
+async def mark_session_live(session_id: str) -> StsSessionRow | None:
+    """Put a session back to ``live`` — used when rebuilding one."""
+    async with session_scope() as db:
+        repo = StsSessionRepository(db)
+        return await repo.mark_live(session_id)
+
+
+async def remember_fact(
+    session_id: str, key: str, value: str
+) -> StsSessionRow | None:
+    """Persist one fact a strategy cannot re-derive after a restart."""
+    async with session_scope() as db:
+        repo = StsSessionRepository(db)
+        return await repo.remember(session_id, key, value)
 
 
 async def mark_session_finished(
