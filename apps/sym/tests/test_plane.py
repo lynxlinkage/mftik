@@ -93,16 +93,16 @@ def plane_factory(sessionmaker_):
             async with sessionmaker_() as db:
                 return list(await SymbolRepository(db).list_tickers(**payload))
 
-        async def list_filters(ticker_id):
+        async def list_filters_for(ticker_ids):
             async with sessionmaker_() as db:
-                return list(await SymbolRepository(db).list_filters(ticker_id))
+                return await SymbolRepository(db).list_filters_for(ticker_ids)
 
         return SymbolPlane(
             sources,
             upsert=upsert,
             deactivate_missing=deactivate,
             list_tickers=list_tickers,
-            list_filters=list_filters,
+            list_filters_for=list_filters_for,
             **kwargs,
         )
 
@@ -140,6 +140,32 @@ async def test_refresh_writes_the_golden_record(plane_factory) -> None:
     assert btc.filter("price_tick") == Decimal("0.01")
     assert btc.has_filter("min_notional")
     assert btc.filter("min_notional") is None
+
+
+async def test_list_symbols_loads_filters_in_one_query(plane_factory) -> None:
+    """Regression: this used to be one query per instrument.
+
+    gate_spot lists 2200+ pairs, so a per-instrument fan-out to a database on
+    another host took ~14s and every td/md caller hit the 5s RPC timeout. The
+    count is what matters here, not the timing.
+    """
+    plane = plane_factory([StubSource([_inst("BTC"), _inst("ETH"), _inst("SOL")])])
+    await plane.refresh()
+
+    inner = plane._list_filters_for
+    calls: list[list[int]] = []
+
+    async def counting(ticker_ids):
+        calls.append(list(ticker_ids))
+        return await inner(ticker_ids)
+
+    plane._list_filters_for = counting
+    symbols = await plane.list_symbols(venue=VENUE)
+
+    assert len(symbols) == 3
+    assert len(calls) == 1
+    assert len(calls[0]) == 3
+    assert symbols[0].filter("price_tick") == Decimal("0.01")
 
 
 async def test_refresh_deactivates_delisted_instruments(plane_factory) -> None:

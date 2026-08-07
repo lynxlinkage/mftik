@@ -43,9 +43,17 @@ async def list_filters(ticker_id: int) -> Sequence[SymbolFilter]:
         return list(await SymbolRepository(db).list_filters(ticker_id))
 
 
+async def list_filters_for(
+    ticker_ids: Sequence[int],
+) -> dict[int, list[SymbolFilter]]:
+    async with session_scope() as db:
+        return await SymbolRepository(db).list_filters_for(ticker_ids)
+
+
 __all__ = [
     "deactivate_missing",
     "list_filters",
+    "list_filters_for",
     "list_tickers",
     "upsert_instrument",
 ]

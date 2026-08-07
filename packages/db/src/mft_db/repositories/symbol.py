@@ -67,6 +67,29 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
         )
         return result.scalars().all()
 
+    async def list_filters_for(
+        self, ticker_ids: Sequence[int]
+    ) -> dict[int, list[SymbolFilter]]:
+        """Filter rows for many instruments at once, grouped by ticker id.
+
+        Building a whole venue table must use this rather than looping over
+        ``list_filters``: gate_spot lists 2200+ pairs, and one round trip per
+        instrument to a database on another host takes tens of seconds — well
+        past the caller's RPC timeout. Ids absent from the result simply have
+        no filters.
+        """
+        if not ticker_ids:
+            return {}
+        result = await self.session.execute(
+            select(SymbolFilter)
+            .where(SymbolFilter.ticker_id.in_(ticker_ids))
+            .order_by(SymbolFilter.ticker_id.asc(), SymbolFilter.name.asc())
+        )
+        grouped: dict[int, list[SymbolFilter]] = {}
+        for row in result.scalars().all():
+            grouped.setdefault(row.ticker_id, []).append(row)
+        return grouped
+
     async def venues(self) -> list[str]:
         result = await self.session.execute(
             select(SymbolTicker.venue).distinct().order_by(SymbolTicker.venue)

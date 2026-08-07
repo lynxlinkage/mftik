@@ -40,7 +40,7 @@ def build_plane(broker: Broker) -> SymbolPlane:
         upsert=sym_db.upsert_instrument,
         deactivate_missing=sym_db.deactivate_missing,
         list_tickers=sym_db.list_tickers,
-        list_filters=sym_db.list_filters,
+        list_filters_for=sym_db.list_filters_for,
         refresh_interval=refresh_interval(),
     )
 

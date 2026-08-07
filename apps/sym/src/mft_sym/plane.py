@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from mft.protocol import SymbolFilterInfo, SymbolInfo
@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 Upsert = Callable[..., Awaitable[Any]]
 Deactivate = Callable[..., Awaitable[int]]
 ListTickers = Callable[..., Awaitable[Sequence[Any]]]
-ListFilters = Callable[[int], Awaitable[Sequence[Any]]]
+# Batched deliberately: see list_symbols.
+ListFiltersFor = Callable[[Sequence[int]], Awaitable[Mapping[int, Sequence[Any]]]]
 
 
 class SymbolPlane:
@@ -36,14 +37,14 @@ class SymbolPlane:
         upsert: Upsert,
         deactivate_missing: Deactivate,
         list_tickers: ListTickers,
-        list_filters: ListFilters,
+        list_filters_for: ListFiltersFor,
         refresh_interval: float = 3600.0,
     ) -> None:
         self._sources = list(sources)
         self._upsert = upsert
         self._deactivate = deactivate_missing
         self._list_tickers = list_tickers
-        self._list_filters = list_filters
+        self._list_filters_for = list_filters_for
         self.refresh_interval = refresh_interval
         self._lock = asyncio.Lock()
 
@@ -141,12 +142,14 @@ class SymbolPlane:
         rows = await self._list_tickers(
             venue=venue, category=category, active_only=active_only
         )
-        out: list[SymbolInfo] = []
-        for row in rows:
-            if symbol is not None and row.symbol != symbol:
-                continue
-            out.append(await self._to_info(row))
-        return out
+        if symbol is not None:
+            rows = [row for row in rows if row.symbol == symbol]
+        # One query for every instrument's filters rather than one per
+        # instrument. A gate_spot table is 2200+ rows; fanning that out to a
+        # database on another host costs ~14s, and the RPC client gives up
+        # after 5s — so the venue was simply unusable from td/md.
+        filters = await self._list_filters_for([row.id for row in rows])
+        return [self._to_info(row, filters.get(row.id, ())) for row in rows]
 
     async def counts(self) -> dict[str, int]:
         """Active instrument count per venue, for a health read."""
@@ -156,11 +159,8 @@ class SymbolPlane:
             totals[row.venue] = totals.get(row.venue, 0) + 1
         return totals
 
-    async def _to_info(self, row: Any) -> SymbolInfo:
-        filters = [
-            SymbolFilterInfo(name=f.name, value=f.value)
-            for f in await self._list_filters(row.id)
-        ]
+    def _to_info(self, row: Any, rows: Sequence[Any]) -> SymbolInfo:
+        filters = [SymbolFilterInfo(name=f.name, value=f.value) for f in rows]
         return SymbolInfo(
             venue=row.venue,
             symbol=row.symbol,
