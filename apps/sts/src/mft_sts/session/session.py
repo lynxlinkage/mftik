@@ -62,6 +62,12 @@ from mft_sts.strategy import Strategy
 
 logger = logging.getLogger(__name__)
 
+#: How long a strategy's ``on_stop`` may take before the session detaches
+#: without it. Generous enough for a couple of order cancels, each of which is
+#: an ack round-trip; short enough that a wedged strategy cannot hold a trading
+#: attach open behind it.
+ON_STOP_TIMEOUT_S = 10.0
+
 #: ``(session_id, reason, failed)`` — the manager tears the session down and
 #: records the terminal status.
 ExitHandler = Callable[[str, str, bool], Awaitable[None]]
@@ -148,6 +154,7 @@ class StsSession:
         self._ack_tokens: dict[int, int] = {}
         self._md_ack_token: int | None = None
         self._md_lease_logged = False
+        self._on_stop_task: asyncio.Task[Any] | None = None
         self._recon_sent: set[int] = set()
 
     @property
@@ -284,15 +291,16 @@ class StsSession:
             return
         self._destroyed = True
         self._exit_requested = True
-        # Tell TD/MD to drop attaches before heartbeats stop.
+        # The strategy goes first. ``on_stop`` is where a resting order gets
+        # cancelled, and that cancel reaches TD as this session — which stops
+        # being true the moment the detach below lands, leaving the order
+        # resting at the venue with nothing left to manage it.
+        await self._run_on_stop()
+        # Then the detaches, still ahead of the heartbeat stopping: TD and MD
+        # expire a lease that goes quiet, and being told is a cleaner ending
+        # than being timed out.
         await self._publish_detaches()
         self._stop.set()
-        try:
-            await self.strategy.on_stop()
-        except Exception:
-            logger.exception(
-                "strategy on_stop failed session=%s", self.session_id
-            )
         self.strategy.timer.close()
         for task in self._tasks:
             task.cancel()
@@ -310,6 +318,37 @@ class StsSession:
         except Exception:
             pass
         logger.info("STS session stopped id=%s", self.session_id)
+
+    async def _run_on_stop(self) -> None:
+        """Let the strategy clean up, bounded, before its attaches go away.
+
+        Waited on rather than cancelled when it overruns. ``on_stop`` typically
+        parks in an order ack, which is a blocking Redis read; cancelling one
+        mid-command hands the connection back with its reply unread and breaks
+        whatever borrows it next. So a slow strategy is left running and the
+        detach goes out anyway — its cancel will be refused, but a stuck
+        strategy must not hold an attach open indefinitely either.
+        """
+        self._on_stop_task = asyncio.create_task(
+            self.strategy.on_stop(), name=f"sts-{self.session_id}-on-stop"
+        )
+        done, _ = await asyncio.wait(
+            {self._on_stop_task}, timeout=ON_STOP_TIMEOUT_S
+        )
+        if not done:
+            logger.warning(
+                "STS on_stop still running after %ss session=%s — detaching "
+                "anyway; anything it still had to cancel will be refused",
+                ON_STOP_TIMEOUT_S,
+                self.session_id,
+            )
+            return
+        exc = self._on_stop_task.exception()
+        if exc is not None:
+            logger.error(
+                "strategy on_stop failed session=%s", self.session_id,
+                exc_info=exc,
+            )
 
     async def _publish_detaches(self) -> None:
         td_topic = Topics.sts_td_session(self.session_id)

@@ -662,7 +662,9 @@ class ChaseOrder(Strategy):
         try:
             if not await self.oms.cancel_order(api_id, cid):
                 await self.log(
-                    f"ChaseOrder cancel not accepted by TD cid={cid}",
+                    f"ChaseOrder cancel not accepted by TD cid={cid} "
+                    f"[{describe(self.oms.last_reject_code)}]: "
+                    f"{self.oms.last_reject_reason or 'no reason given'}",
                     level="warn",
                 )
                 self._clear_open(cid)
