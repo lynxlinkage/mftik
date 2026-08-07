@@ -91,6 +91,34 @@ class Topics:
         return f"md.{session_id}"
 
     @staticmethod
+    def md_fetch() -> str:
+        """Request-reply subject for market-data queries. One, for everyone.
+
+        Not keyed by anything, unlike :meth:`td_order`. That subject names an
+        account because ``serve`` is a competing-consumer BLPOP and only the
+        process holding the account may answer for it — an order is owned. A
+        read is not: any MD can serve any venue over REST, and the same answer
+        comes back whoever produced it. So competing consumers stop being the
+        hazard the key exists to avoid and become the point, spreading queries
+        across whatever MD processes are up and surviving the loss of any one.
+
+        Where the answer goes is the request's business, not the subject's; see
+        ``MdFetchKlines.reply_channel``.
+        """
+        return "md.fetch"
+
+    @staticmethod
+    def md_fetch_reply(caller: str) -> str:
+        """Pub/sub channel a caller listens on for its own query results.
+
+        Separate from :meth:`md_session`, which only exists while a strategy
+        holds a market-data attach and carries the feeds it subscribed. A
+        caller that wants history and no feeds has no such channel, and should
+        not have to acquire one to ask a question.
+        """
+        return f"md.fetch.reply.{caller}"
+
+    @staticmethod
     def td_order(api_id: int) -> str:
         """STS → TD request-reply subject for order entry.
 

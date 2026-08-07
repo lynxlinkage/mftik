@@ -18,6 +18,7 @@ from mft.protocol import (
     STS_RECON,
     CancelReject,
     Envelope,
+    MdKlinesResult,
     OrderReject,
     Recon,
     ReconDone,
@@ -27,6 +28,7 @@ from mft.protocol import (
 
 from mft_sts.client_order_id import slot_of
 from mft_sts.ledger import StrategyLedger
+from mft_sts.mds import StrategyMds
 from mft_sts.oms import StrategyOms
 from mft_sts.timer import Timer
 
@@ -81,6 +83,18 @@ class Strategy:
         One hook per feed topic subscribed in ``md_ids``
         (``venue.topic.symbol``; kline carries its interval in the topic,
         e.g. ``paper.kline_1m.BTCUSDT``).
+
+    Market-data queries — request-reply on ``md.fetch`` (wired):
+        self.mds.fetch_klines(venue, symbol, interval, limit=...) returns a
+        query_id once MD acks the query, or None if it never left (refused, or
+        no MD running — mds.last_reject_reason says which). The candles arrive
+        later at on_fetch_klines, carrying that query_id.
+        Independent of md_ids: a session that subscribes to nothing can still
+        query, and any venue is reachable whether or not it is streaming.
+        NOTE: on_fetch_klines is not on_kline. The feed pushes the window in
+        progress; the query returns history, in a batch, only when asked.
+        ``interval`` is canonical (``1m``, ``4h``, ``1mo``) — see
+        ``mft.exchange.intervals``; the month is ``1mo``, never ``1M``.
     """
 
     name: str = "base"
@@ -100,6 +114,8 @@ class Strategy:
         self._paused = False
         self.paras: dict[str, Any] = {}
         self.oms = StrategyOms()
+        #: On-demand market-data reads — history the feeds do not carry.
+        self.mds = StrategyMds()
         #: Read-only balances from TD's ledger (available / free / prelock).
         self.ledger = StrategyLedger()
         self.timer = Timer()
@@ -113,6 +129,7 @@ class Strategy:
             )
         self.session = session
         self.oms.bind(self, cid_slot=session.cid_slot)
+        self.mds.bind(self)
         self.ledger.bind(self)
         self.timer.bind(self)
 
@@ -292,6 +309,25 @@ class Strategy:
         """Handle top-of-book updates from MD.
 
         Feed topic ``bestquote``. Best bid/ask with sizes, at book speed.
+        """
+
+    async def on_fetch_klines(self, result: MdKlinesResult) -> None:
+        """Handle the answer to a ``self.mds.fetch_klines(...)`` query.
+
+        Not a feed: this fires once per query, carrying the ``query_id`` that
+        :meth:`~mft_sts.mds.StrategyMds.fetch_klines` returned. Nothing here is
+        subscribed to and nothing arrives unasked.
+
+        Distinct from :meth:`on_kline`, which is the live ``kline_{interval}``
+        feed pushing the window in progress. This one carries history, as a
+        batch, on ``result.klines``.
+
+        It fires on failure too, with ``result.ok`` False, ``klines`` empty and
+        the reason in ``result.error_code`` — see
+        :mod:`mft.protocol.query_codes`, and use ``is_retryable`` rather than
+        the band to decide whether asking again could help. An ``ok`` result
+        with no candles is not a failure: the venue has no history that far
+        back for this instrument.
         """
 
     # --- helpers -----------------------------------------------------------

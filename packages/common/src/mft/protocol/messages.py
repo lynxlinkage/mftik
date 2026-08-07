@@ -268,14 +268,19 @@ class MdDetach(BaseModel):
 
 
 class MdFetchKlines(BaseModel):
-    """Ask MD for recent candles.
+    """Ask MD for recent candles, on the fetch subject.
 
-    The payload only; which subject carries it is not settled yet, and neither
-    is where the answer is delivered. What is settled is the shape: a query
-    names its venue, instrument and window, and carries a ``query_id`` that the
-    ack and the later result both quote back — the answer is asynchronous under
-    every routing being considered, so a caller always needs something to
-    correlate on.
+    The request carries where its answer goes. MD's fetch plane has no notion
+    of who is asking and holds no attachment to them — it reads
+    ``reply_channel`` and publishes there, which is what lets anything ask
+    without first becoming a market-data session. ``session_id`` is absent for
+    the same reason: a caller that is not a strategy has none, and the fetch
+    plane would have nothing to do with it if it did.
+
+    ``query_id`` is quoted back by both the ack and the result. The answer is
+    asynchronous, so a caller always needs something to correlate on, and the
+    reply channel alone will not do it — one channel carries every answer that
+    caller asked for.
 
     ``interval`` is canonical spelling (:mod:`mft.exchange.intervals`); the
     venue's own vocabulary never reaches the wire.
@@ -283,7 +288,9 @@ class MdFetchKlines(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    session_id: str
+    #: Pub/sub channel for the :class:`MdKlinesResult`. The caller's to choose
+    #: and to be listening on before it asks.
+    reply_channel: str
     query_id: str
     venue: str
     symbol: str
@@ -305,7 +312,6 @@ class MdQueryAck(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    session_id: str
     query_id: str
     accepted: bool
     #: Human-readable, for logs and the UI. Free-form; do not branch on it.
@@ -328,7 +334,6 @@ class MdKlinesResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    session_id: str
     query_id: str
     venue: str
     symbol: str

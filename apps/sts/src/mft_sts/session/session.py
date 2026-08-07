@@ -22,6 +22,7 @@ from mft.protocol import (
     MD_BEST_QUOTE,
     MD_DETACH,
     MD_KLINE,
+    MD_KLINES_RESULT,
     MD_LEASE_ACK,
     MD_ORDERBOOK,
     MD_TICKER,
@@ -40,6 +41,7 @@ from mft.protocol import (
     LeaseAck,
     LeaseHeartbeat,
     MdDetach,
+    MdKlinesResult,
     MdLeaseAck,
     OrderReject,
     ReconDone,
@@ -152,7 +154,15 @@ class StsSession:
             asyncio.create_task(
                 self._lease_heartbeat_loop(),
                 name=f"sts-{self.session_id}-lease",
-            )
+            ),
+            # Unconditional, unlike the feed pump below. A query needs no
+            # subscription and no attach, so a session that asked for no market
+            # data can still make one — and its answer has to have somewhere to
+            # land before it does.
+            asyncio.create_task(
+                self._pump_fetch_replies(),
+                name=f"sts-{self.session_id}-fetch",
+            ),
         ]
         if self.md_ids:
             self._tasks.append(
@@ -395,6 +405,53 @@ class StsSession:
                 "STS md session pump failed session=%s", self.session_id
             )
             self._fail_from_infrastructure("md feed")
+
+    async def _pump_fetch_replies(self) -> None:
+        """Deliver query answers to ``on_fetch_klines``.
+
+        Its own channel and its own task, not a branch of the feed pump. The
+        two have different lifetimes — this one runs whether or not the session
+        subscribed to anything — and a failure here should not read as the
+        market data having died, so it does not fail the session the way a
+        broken feed does. A strategy that only queries is not receiving
+        anything it can be starved of.
+        """
+        topic = Topics.md_fetch_reply(self.session_id)
+        try:
+            async for env in self.broker.subscribe(topic, stop=self._stop):
+                if env.type == MD_KLINES_RESULT:
+                    await self._on_klines_result(env)
+                    continue
+                self._on_message("md-fetch", env)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "STS md fetch pump failed session=%s", self.session_id
+            )
+
+    async def _on_klines_result(self, env: UntypedEnvelope) -> None:
+        """Hand one query answer to the strategy.
+
+        Kept out of :data:`MD_HANDLERS`, which maps a feed message onto a hook
+        taking one model. This payload is a batch plus the outcome of the query
+        that asked for it, and it reaches a hook the feeds never touch.
+        """
+        try:
+            result = MdKlinesResult.model_validate(env.payload)
+        except Exception:
+            logger.exception(
+                "invalid md klines result session=%s", self.session_id
+            )
+            return
+        try:
+            await self.strategy.on_fetch_klines(result)
+        except Exception:
+            logger.exception(
+                "strategy on_fetch_klines failed session=%s query_id=%s",
+                self.session_id,
+                result.query_id,
+            )
 
     async def _on_md_lease_ack(self, env: UntypedEnvelope) -> None:
         try:

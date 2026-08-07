@@ -18,6 +18,7 @@ from mft.protocol import (
     MdQueryAck,
     MdQueryAckEnvelope,
     QueryCode,
+    Topics,
 )
 from mft.protocol.query_codes import (
     BAND_END,
@@ -133,7 +134,7 @@ def test_describe_passes_native_codes_through() -> None:
 def test_fetch_klines_request_roundtrip() -> None:
     env = MdFetchKlinesEnvelope.wrap(
         MdFetchKlines(
-            session_id="sess-1",
+            reply_channel="md.fetch.reply.sess-1",
             query_id="sess-1:7",
             venue="gate_spot",
             symbol="BTCUSDT",
@@ -154,7 +155,7 @@ def test_fetch_klines_request_roundtrip() -> None:
 
 
 def test_ack_defaults_to_no_error() -> None:
-    ack = MdQueryAck(session_id="sess-1", query_id="q1", accepted=True)
+    ack = MdQueryAck(query_id="q1", accepted=True)
     assert ack.error_code == QueryCode.NONE
     assert ack.reason == ""
 
@@ -162,7 +163,6 @@ def test_ack_defaults_to_no_error() -> None:
 def test_ack_refusal_roundtrip_keeps_the_code_machine_readable() -> None:
     env = MdQueryAckEnvelope.wrap(
         MdQueryAck(
-            session_id="sess-1",
             query_id="q1",
             accepted=False,
             reason="no connected client for gate_spot",
@@ -183,7 +183,6 @@ def test_ack_refusal_roundtrip_keeps_the_code_machine_readable() -> None:
 def test_klines_result_roundtrip() -> None:
     env = MdKlinesResultEnvelope.wrap(
         MdKlinesResult(
-            session_id="sess-1",
             query_id="q1",
             venue="gate_spot",
             symbol="BTCUSDT",
@@ -220,7 +219,6 @@ def test_klines_result_roundtrip() -> None:
 
 def test_failed_result_carries_no_klines_but_a_code() -> None:
     result = MdKlinesResult(
-        session_id="sess-1",
         query_id="q1",
         venue="gate_spot",
         symbol="BTCUSDT",
@@ -237,7 +235,6 @@ def test_empty_success_is_not_a_failure() -> None:
     """``ok`` True with no candles is a real answer — the venue has no
     history that far back — and must not read as an error."""
     result = MdKlinesResult(
-        session_id="sess-1",
         query_id="q1",
         venue="gate_spot",
         symbol="BTCUSDT",
@@ -252,7 +249,7 @@ def test_untyped_envelope_still_reads_the_payload() -> None:
     """MD's serve loop dispatches on ``type`` before it knows the model."""
     env = Envelope[MdFetchKlines].wrap(
         MdFetchKlines(
-            session_id="sess-1",
+            reply_channel="md.fetch.reply.sess-1",
             query_id="q1",
             venue="gate_spot",
             symbol="BTCUSDT",
@@ -266,3 +263,31 @@ def test_untyped_envelope_still_reads_the_payload() -> None:
     )
     assert restored.symbol == "BTCUSDT"
     assert restored.limit == 100
+
+
+def test_the_fetch_subject_is_not_keyed() -> None:
+    """One subject for everyone: a read is not owned the way an order is, so
+    competing consumers spread the work instead of stealing it."""
+    assert Topics.md_fetch() == "md.fetch"
+
+
+def test_a_caller_gets_its_own_reply_channel() -> None:
+    """Distinct from ``md.{session_id}``, which only exists while a strategy
+    holds a market-data attach."""
+    assert Topics.md_fetch_reply("sess-1") == "md.fetch.reply.sess-1"
+    assert Topics.md_fetch_reply("sess-1") != Topics.md_session("sess-1")
+
+
+def test_the_request_carries_where_its_answer_goes() -> None:
+    """The fetch plane holds no attachment to its callers, so routing has to
+    ride on the request."""
+    req = MdFetchKlines(
+        reply_channel=Topics.md_fetch_reply("anyone"),
+        query_id="q1",
+        venue="gate_spot",
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+    assert req.reply_channel == "md.fetch.reply.anyone"
+    # Nothing identifies the caller beyond where it wants the answer sent.
+    assert not hasattr(req, "session_id")
