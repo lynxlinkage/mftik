@@ -1,4 +1,10 @@
-"""Gate spot as an MD :class:`PublicClient`.
+"""The gate_spot market-data connector.
+
+Not an implementation of a shared public interface — there is none; see
+:mod:`mft.exchange.base`. The methods here resemble the other venues' because
+the same questions get asked of every venue, not because anything enforces it,
+and where Gate differs the difference shows up in this file rather than being
+flattened away.
 
 Composes the two transports, same split as the private client:
 
@@ -10,10 +16,9 @@ Composes the two transports, same split as the private client:
   in progress and never what came before it. Gate has no request-reply for any
   of these over the WebSocket.
 
-Gate supports all five feeds MD knows about, which is not a promise the shared
-interface makes — :meth:`~mft.exchange.base.PublicClient.stream_kline` and
-``stream_best_quote`` are optional precisely because most venues cover a
-different subset. Here they are all real.
+Gate serves all five feeds MD knows about. Most venues cover a different
+subset, and a venue that does not publish one simply has no method for it here
+rather than a stub that raises.
 
 Symbols cross this boundary canonical (``BTCUSDT``) and are resolved to Gate's
 ``BTC_USDT`` through the symbol plane, never by string surgery — see
@@ -26,7 +31,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import TypeVar
 
-from mft.exchange.base import PublicClient
+from mft.exchange.base import BaseClient
 from mft.exchange.gate.spot.client import GATE_SPOT_WS_URL, GateSpotWebSocket
 from mft.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
 from mft.exchange.intervals import InvalidIntervalError, normalize_interval
@@ -81,7 +86,7 @@ GATE_INTERVALS: dict[str, str] = {
 }
 
 
-class GateSpotPublicClient(PublicClient):
+class GateSpotPublicClient(BaseClient):
     """Gate spot market data for MD.
 
     All five feeds are live::

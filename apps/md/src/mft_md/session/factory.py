@@ -1,4 +1,4 @@
-"""Venue public-client factories for MD."""
+"""Venue connector factories for MD — the only place venue names appear."""
 
 from __future__ import annotations
 
@@ -7,20 +7,26 @@ from typing import Protocol
 
 from mft.broker import Broker
 from mft.exchange import PaperExchange, venues
-from mft.exchange.base import PublicClient
 from mft.exchange.errors import ExchangeError
 from mft.exchange.gate.spot.public import GateSpotPublicClient
 from mft.exchange.paper.remote_public import PaperRemotePublicClient
 from mft.symbols import SymbolClient
 
+from mft_md.session.venue import MarketDataConnector
+
 logger = logging.getLogger(__name__)
 
 
-class PublicClientFactory(Protocol):
-    """Creates a :class:`PublicClient` for a venue name."""
+class ConnectorFactory(Protocol):
+    """Builds the market-data connector for a venue name.
 
-    async def create(self, venue: str) -> PublicClient:
-        """Build (but do not connect) a public client for ``venue``."""
+    The only place in MD that knows venue names. Every venue difference —
+    which transports it needs, which feeds it has — is settled by picking a
+    connector here, so nothing downstream has to branch on the venue again.
+    """
+
+    async def create(self, venue: str) -> MarketDataConnector:
+        """Build (but do not connect) the connector for ``venue``."""
 
 
 class PaperPublicFactory:
@@ -44,7 +50,7 @@ class PaperPublicFactory:
     def remote(self) -> bool:
         return self._exchange is None
 
-    async def create(self, venue: str) -> PublicClient:
+    async def create(self, venue: str) -> MarketDataConnector:
         if venue != self.venue:
             raise ValueError(f"unsupported md venue: {venue!r}")
         if self._exchange is not None:
@@ -84,7 +90,7 @@ class VenuePublicFactory:
     def paper(self) -> PaperPublicFactory:
         return self._paper
 
-    async def create(self, venue: str) -> PublicClient:
+    async def create(self, venue: str) -> MarketDataConnector:
         resolved = venues.require(venue)
         if resolved is venues.PAPER:
             return await self._paper.create(resolved.name)

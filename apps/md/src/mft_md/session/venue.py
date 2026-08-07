@@ -1,4 +1,4 @@
-"""Per-venue public client + feed pumps."""
+"""Per-venue connector + feed pumps."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
-from mft.exchange.base import PublicClient
+from mft.exchange.models import OrderBook, Ticker, Trade
 from mft.protocol import (
     MD_BEST_QUOTE,
     MD_KLINE,
@@ -19,6 +19,33 @@ from mft.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class MarketDataConnector(Protocol):
+    """What MD needs of a venue, stated by MD rather than by the venue.
+
+    ``mft.exchange`` has no shared public interface on purpose — venues differ
+    too much for one to be honest (see :mod:`mft.exchange.base`). So the shape
+    lives here, with the consumer, and holds only what every venue really does
+    provide: a lifecycle and the three feeds nobody lacks.
+
+    ``stream_kline`` and ``stream_best_quote`` are deliberately absent. Gate
+    serves them and paper does not, and a venue that cannot should have no such
+    method rather than one that raises — :meth:`VenueSession._open` looks for
+    them and refuses the subscribe when they are missing, which is the same
+    answer one venue short of the full set was always going to give.
+    """
+
+    async def connect(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    def stream_ticker(self, symbol: str) -> AsyncIterator[Ticker]: ...
+
+    def stream_trades(self, symbol: str) -> AsyncIterator[Trade]: ...
+
+    def stream_order_book(self, symbol: str) -> AsyncIterator[OrderBook]: ...
+
 
 TOPIC_ORDERBOOK = "orderbook"
 TOPIC_TICKER = "ticker"
@@ -42,12 +69,12 @@ class Feed:
 
 
 class VenueSession:
-    """Owns one :class:`PublicClient` and running feed pumps."""
+    """Owns one venue connector and its running feed pumps."""
 
     def __init__(
         self,
         venue: str,
-        public: PublicClient,
+        public: MarketDataConnector,
         *,
         on_update: OnUpdate,
     ) -> None:
@@ -112,6 +139,19 @@ class VenueSession:
             symbol,
         )
 
+    def _stream(self, name: str) -> Any:
+        """The connector's ``name`` stream, or a refusal naming the venue.
+
+        Only the three universal feeds are on
+        :class:`MarketDataConnector`; the rest a venue either has or has not.
+        Absent reads as "this venue does not publish it", which is what the
+        subscribe has to be told either way.
+        """
+        stream = getattr(self.public, name, None)
+        if stream is None:
+            raise ValueError(f"venue {self.venue!r} does not publish {name}")
+        return stream
+
     def _open(self, topic: str, symbol: str) -> tuple[AsyncIterator[Any], str]:
         """Resolve a feed topic to its venue stream and wire message type."""
         if topic == TOPIC_ORDERBOOK:
@@ -121,7 +161,7 @@ class VenueSession:
         if topic == TOPIC_TRADE:
             return self.public.stream_trades(symbol), MD_TRADE
         if topic == TOPIC_BEST_QUOTE:
-            return self.public.stream_best_quote(symbol), MD_BEST_QUOTE
+            return self._stream("stream_best_quote")(symbol), MD_BEST_QUOTE
         if topic.startswith(KLINE_PREFIX):
             interval = topic[len(KLINE_PREFIX) :]
             if not interval:
@@ -129,7 +169,7 @@ class VenueSession:
                     f"md kline topic needs an interval, got {topic!r} "
                     f"(expected e.g. {KLINE_PREFIX}1m)"
                 )
-            return self.public.stream_kline(symbol, interval), MD_KLINE
+            return self._stream("stream_kline")(symbol, interval), MD_KLINE
         raise ValueError(f"unsupported md topic: {topic!r}")
 
     async def _pump(

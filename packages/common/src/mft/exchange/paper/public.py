@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from mft.exchange.base import PublicClient
+from mft.exchange.base import BaseClient
 from mft.exchange.models import Instrument, OrderBook, Ticker, Trade
 from mft.exchange.stream import EventStream
 
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from mft.exchange.paper.engine import PaperExchange
 
 
-class PaperPublicClient(PublicClient):
+class PaperPublicClient(BaseClient):
     """Fake public venue client backed by :class:`PaperExchange`."""
 
     name = "paper"

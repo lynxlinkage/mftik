@@ -1,4 +1,4 @@
-"""Gate spot as a PublicClient — five live feeds over WS, snapshots over REST."""
+"""The gate_spot connector — five live feeds over WS, reads over REST."""
 
 from __future__ import annotations
 

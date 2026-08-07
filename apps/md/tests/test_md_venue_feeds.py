@@ -7,11 +7,9 @@ from collections.abc import AsyncIterator
 from decimal import Decimal
 
 import pytest
-from mft.exchange.base import PublicClient
 from mft.exchange.models import (
     BestQuote,
     BookLevel,
-    Instrument,
     Kline,
     OrderBook,
     Ticker,
@@ -28,31 +26,24 @@ from mft.protocol import (
 from mft_md.session.venue import VenueSession
 
 
-class FakePublic(PublicClient):
-    """Publishes one item per stream, then holds the stream open."""
+class FakePublic:
+    """A venue connector: publishes one item per stream, then holds it open.
+
+    Inherits nothing. That is the point of the shape MD declares — a connector
+    satisfies it by having the methods, not by being registered anywhere.
+    """
 
     name = "fake"
 
     def __init__(self) -> None:
-        super().__init__()
         self.kline_calls: list[tuple[str, str]] = []
+        self.connected = False
 
     async def connect(self) -> None:
-        self._connected = True
+        self.connected = True
 
     async def close(self) -> None:
-        self._connected = False
-
-    async def fetch_instruments(self) -> list[Instrument]:
-        return []
-
-    async def fetch_ticker(self, symbol: str) -> Ticker:
-        raise NotImplementedError
-
-    async def fetch_order_book(
-        self, symbol: str, *, depth: int = 10
-    ) -> OrderBook:
-        raise NotImplementedError
+        self.connected = False
 
     async def _once(self, item) -> AsyncIterator:  # noqa: ANN001
         yield item
@@ -171,12 +162,13 @@ async def test_unsupported_stream_is_rejected_at_subscribe() -> None:
     """A venue that does not publish the feed fails the subscribe, not a task."""
 
     class NoKlines(FakePublic):
-        def stream_kline(self, symbol, interval):  # noqa: ANN001, ANN202
-            return PublicClient.stream_kline(self, symbol, interval)
+        """Does not publish candles, so it simply has no method for them."""
+
+        stream_kline = None
 
     sess = VenueSession("fake", NoKlines(), on_update=_noop_update)
     await sess.start()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="does not publish stream_kline"):
         await sess.ensure_feed("kline_1m", "BTCUSDT")
     assert sess.feed_count == 0
     await sess.stop()

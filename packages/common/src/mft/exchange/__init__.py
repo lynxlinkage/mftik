@@ -1,6 +1,6 @@
 """Exchange connectivity — venue adapters with public/private clients."""
 
-from mft.exchange.base import BaseClient, PrivateClient, PublicClient
+from mft.exchange.base import BaseClient, PrivateClient
 from mft.exchange.errors import (
     ExchangeError,
     ExchangeNotConnectedError,
@@ -143,7 +143,6 @@ __all__ = [
     "PlaceOrderRequest",
     "Position",
     "PrivateClient",
-    "PublicClient",
     "Side",
     "Ticker",
     "TimeInForce",
