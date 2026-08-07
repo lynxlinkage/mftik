@@ -82,6 +82,23 @@ async def test_public_req_reply(exchange: PaperExchange) -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_has_no_candle_history(exchange: PaperExchange) -> None:
+    """The paper engine invents prices tick by tick and keeps no past.
+
+    Pinned as an absence: an adapter says what its venue can do by which
+    methods it has, so "this venue cannot answer" is a fact a caller can check
+    before asking, and stays distinct from "asked, and there is no history that
+    far back".
+    """
+    public = exchange.public()
+    await public.connect()
+
+    assert not hasattr(public, "fetch_klines")
+
+    await public.close()
+
+
+@pytest.mark.asyncio
 async def test_public_stream_ticker(exchange: PaperExchange) -> None:
     public = exchange.public()
     await public.connect()

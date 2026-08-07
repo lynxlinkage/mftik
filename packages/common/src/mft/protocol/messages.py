@@ -7,9 +7,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from mft.exchange.models import OrderType, Side, TimeInForce
+from mft.exchange.models import Kline, OrderType, Side, TimeInForce
 from mft.exchange.oms import OmsView
 from mft.protocol.envelope import Envelope
+from mft.protocol.query_codes import QueryCode
 from mft.protocol.reject_codes import RejectCode
 
 
@@ -266,6 +267,81 @@ class MdDetach(BaseModel):
     session_id: str
 
 
+class MdFetchKlines(BaseModel):
+    """Ask MD for recent candles.
+
+    The payload only; which subject carries it is not settled yet, and neither
+    is where the answer is delivered. What is settled is the shape: a query
+    names its venue, instrument and window, and carries a ``query_id`` that the
+    ack and the later result both quote back — the answer is asynchronous under
+    every routing being considered, so a caller always needs something to
+    correlate on.
+
+    ``interval`` is canonical spelling (:mod:`mft.exchange.intervals`); the
+    venue's own vocabulary never reaches the wire.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    query_id: str
+    venue: str
+    symbol: str
+    interval: str
+    limit: int = 100
+
+
+class MdQueryAck(BaseModel):
+    """MD → caller: the immediate reply to a query request.
+
+    ``accepted`` means MD took the query and will run it, not that the venue
+    answered. The data arrives separately, and can fail after being accepted
+    here — the ack is cheap and the venue round trip is not, and holding the
+    reply open for the second would stall every query behind it.
+
+    A refusal at this stage is always MD's own, so ``error_code`` is in the
+    ``1xx`` band: the venue was never asked.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    query_id: str
+    accepted: bool
+    #: Human-readable, for logs and the UI. Free-form; do not branch on it.
+    reason: str = ""
+    #: Machine-readable — see :mod:`mft.protocol.query_codes`. Branch on this.
+    error_code: int | str = QueryCode.NONE
+
+
+class MdKlinesResult(BaseModel):
+    """MD → caller: the answer to :class:`MdFetchKlines`, quoting its id.
+
+    Sent whether or not the query worked: a strategy waiting on ``query_id``
+    has no other way to learn that it never will, and a hook that only fires
+    on success leaves the caller unable to tell failure from delay.
+
+    ``ok`` False leaves ``klines`` empty and puts the reason in ``error_code``.
+    ``ok`` True with an empty ``klines`` is a real answer — the venue has no
+    history that far back for this instrument.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    query_id: str
+    venue: str
+    symbol: str
+    interval: str
+    ok: bool = True
+    klines: list[Kline] = Field(default_factory=list)
+    #: Human-readable, and the venue's own words when it was the venue that
+    #: refused. Free-form; do not branch on it.
+    reason: str = ""
+    #: Machine-readable — see :mod:`mft.protocol.query_codes`. Branch on this.
+    error_code: int | str = QueryCode.NONE
+
+
 class Recon(BaseModel):
     """STS → TD: request OMS reconciliation for ``api_id``."""
 
@@ -413,6 +489,9 @@ MdAttachResultEnvelope = Envelope[MdAttachResult]
 MdSubscribeEnvelope = Envelope[MdSubscribe]
 MdUnsubscribeEnvelope = Envelope[MdUnsubscribe]
 MdDetachEnvelope = Envelope[MdDetach]
+MdFetchKlinesEnvelope = Envelope[MdFetchKlines]
+MdQueryAckEnvelope = Envelope[MdQueryAck]
+MdKlinesResultEnvelope = Envelope[MdKlinesResult]
 
 # Envelope.type constants for control-plane RPC
 TD_HEALTH = "td.health"
@@ -549,6 +628,9 @@ MD_BEST_QUOTE = "md.bestquote"
 MD_SUBSCRIBE = "md.subscribe"
 MD_UNSUBSCRIBE = "md.unsubscribe"
 MD_DETACH = "md.detach"
+MD_FETCH_KLINES = "md.fetch.klines"
+MD_QUERY_ACK = "md.query.ack"
+MD_KLINES_RESULT = "md.klines.result"
 
 
 # --- symbol plane (sym) ----------------------------------------------------

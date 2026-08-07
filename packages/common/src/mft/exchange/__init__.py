@@ -30,6 +30,12 @@ from mft.exchange.gate.spot import (
     GateUserTrade,
     GateWsError,
 )
+from mft.exchange.intervals import (
+    UNIT_SECONDS,
+    InvalidIntervalError,
+    interval_seconds,
+    normalize_interval,
+)
 from mft.exchange.models import (
     OPEN_STATUSES,
     PENDING_STATUSES,
@@ -108,7 +114,11 @@ __all__ = [
     "Instrument",
     "InstrumentNotFoundError",
     "InsufficientBalanceError",
+    "InvalidIntervalError",
     "Kline",
+    "UNIT_SECONDS",
+    "interval_seconds",
+    "normalize_interval",
     "Order",
     "OrderBook",
     "OrderError",

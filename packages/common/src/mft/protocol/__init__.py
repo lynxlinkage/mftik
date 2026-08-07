@@ -5,10 +5,13 @@ from mft.protocol.messages import (
     MD_BEST_QUOTE,
     MD_DETACH,
     MD_ERROR,
+    MD_FETCH_KLINES,
     MD_HEALTH,
     MD_KLINE,
+    MD_KLINES_RESULT,
     MD_LEASE_ACK,
     MD_ORDERBOOK,
+    MD_QUERY_ACK,
     MD_SESSION_ATTACH,
     MD_SESSION_LIST,
     MD_SUBSCRIBE,
@@ -94,8 +97,14 @@ from mft.protocol.messages import (
     MdAttachResultEnvelope,
     MdDetach,
     MdDetachEnvelope,
+    MdFetchKlines,
+    MdFetchKlinesEnvelope,
+    MdKlinesResult,
+    MdKlinesResultEnvelope,
     MdLeaseAck,
     MdLeaseAckEnvelope,
+    MdQueryAck,
+    MdQueryAckEnvelope,
     MdSubscribe,
     MdSubscribeEnvelope,
     MdUnsubscribe,
@@ -153,9 +162,10 @@ from mft.protocol.messages import (
     TdAttachResultEnvelope,
 )
 
-# Only the enum is re-exported: ``is_td_internal`` and friends are too
-# generically named to live in this namespace, so they stay one import away in
-# ``mft.protocol.reject_codes``.
+# Only the enums are re-exported: ``is_td_internal``, ``is_retryable`` and
+# friends are too generically named to live in this namespace, so they stay one
+# import away in ``mft.protocol.reject_codes`` / ``mft.protocol.query_codes``.
+from mft.protocol.query_codes import QueryCode
 from mft.protocol.reject_codes import RejectCode
 from mft.protocol.session_log import (
     publish_md_log,
@@ -201,10 +211,13 @@ __all__ = [
     "MD_BEST_QUOTE",
     "MD_DETACH",
     "MD_ERROR",
+    "MD_FETCH_KLINES",
     "MD_HEALTH",
     "MD_KLINE",
+    "MD_KLINES_RESULT",
     "MD_LEASE_ACK",
     "MD_ORDERBOOK",
+    "MD_QUERY_ACK",
     "MD_SESSION_ATTACH",
     "MD_SESSION_LIST",
     "MD_SUBSCRIBE",
@@ -294,8 +307,14 @@ __all__ = [
     "MdAttachResultEnvelope",
     "MdDetach",
     "MdDetachEnvelope",
+    "MdFetchKlines",
+    "MdFetchKlinesEnvelope",
+    "MdKlinesResult",
+    "MdKlinesResultEnvelope",
     "MdLeaseAck",
     "MdLeaseAckEnvelope",
+    "MdQueryAck",
+    "MdQueryAckEnvelope",
     "MdSubscribe",
     "MdSubscribeEnvelope",
     "MdUnsubscribe",
@@ -321,6 +340,7 @@ __all__ = [
     "publish_session_log",
     "publish_sts_log",
     "publish_td_log",
+    "QueryCode",
     "Recon",
     "ReconDone",
     "ReconDoneEnvelope",
