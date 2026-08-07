@@ -8,9 +8,14 @@ from typing import TYPE_CHECKING, Any
 from mft.broker.errors import RequestTimeoutError
 from mft.exchange.intervals import InvalidIntervalError, normalize_interval
 from mft.protocol import (
+    MD_FETCH_BESTQUOTE,
     MD_FETCH_KLINES,
+    MD_FETCH_ORDERBOOK,
     Envelope,
+    MdFetchBestQuote,
     MdFetchKlines,
+    MdFetchOrderBook,
+    MdFetchRequest,
     MdQueryAck,
     QueryCode,
     Topics,
@@ -30,11 +35,14 @@ QUERY_ACK_TIMEOUT_S = 2.0
 
 
 class StrategyMds:
-    """On-demand reads from MD, for the history the feeds do not carry.
+    """On-demand reads from MD, for what the feeds cannot answer.
 
-    A subscribed feed pushes what is happening now; nothing on the session
-    channel carries what happened before the session started.
-    :meth:`fetch_klines` is how a strategy asks for that.
+    Three reads: :meth:`fetch_klines` for history the feeds never carry, and
+    :meth:`fetch_order_book` / :meth:`fetch_best_quote` for a snapshot *now*
+    rather than a subscription to every change. The second pair overlaps feeds
+    that exist, and is the right tool when a strategy needs the book once —
+    subscribing to a stream to read its first message and drop the rest costs a
+    feed for the life of the session and gets a staler answer.
 
     Independent of the feeds in both directions, which is the point. The
     request goes to one subject MD serves for everyone rather than to anything
@@ -44,11 +52,10 @@ class StrategyMds:
 
     Order entry's two-step, for the same reason: the ack is cheap and the venue
     round trip is not, and holding the reply open for the second would stall
-    every query behind it. So a ``query_id`` back from :meth:`fetch_klines`
-    means MD accepted the query, and says nothing about whether the venue will
-    answer it. Correlate on that id — which is why this returns one rather than
-    a bool — and read the answer in
-    :meth:`~mft_sts.strategy.Strategy.on_fetch_klines`.
+    every query behind it. So a ``query_id`` back from any of these means MD
+    accepted the query, and says nothing about whether the venue will answer
+    it. Correlate on that id — which is why they return one rather than a bool
+    — and read the answer in the matching ``on_fetch_*`` hook.
     """
 
     def __init__(self, *, ack_timeout: float = QUERY_ACK_TIMEOUT_S) -> None:
@@ -120,7 +127,6 @@ class StrategyMds:
         does not have comes back as ``MD_INTERVAL_NOT_SUPPORTED`` on the
         result.
         """
-        session = self._require_session()
         try:
             canonical = normalize_interval(interval)
         except InvalidIntervalError as exc:
@@ -130,19 +136,59 @@ class StrategyMds:
             self._refuse(str(exc), QueryCode.MD_INVALID_REQUEST)
             return None
 
+        return await self._send(
+            MD_FETCH_KLINES,
+            MdFetchKlines,
+            venue=venue,
+            symbol=symbol,
+            interval=canonical,
+            limit=limit,
+        )
+
+    async def fetch_order_book(
+        self, venue: str, symbol: str, *, depth: int = 10
+    ) -> str | None:
+        """Ask MD for a book snapshot. Returns the query id, or ``None``.
+
+        A snapshot, not a subscription: the answer arrives once, at
+        ``on_fetch_orderbook``, and nothing follows it. A strategy that wants
+        the book as it moves subscribes to the ``orderbook`` feed instead.
+        """
+        return await self._send(
+            MD_FETCH_ORDERBOOK,
+            MdFetchOrderBook,
+            venue=venue,
+            symbol=symbol,
+            depth=depth,
+        )
+
+    async def fetch_best_quote(self, venue: str, symbol: str) -> str | None:
+        """Ask MD for the touch with its resting sizes. Returns the query id.
+
+        The answer reaches ``on_fetch_bestquote``. Its ``quote`` is None when
+        a side of the book was empty — not an error, but nothing to price
+        against either, so a caller checking whether its own order can rest
+        should ask again rather than treat it as a quote of zero.
+        """
+        return await self._send(
+            MD_FETCH_BESTQUOTE, MdFetchBestQuote, venue=venue, symbol=symbol
+        )
+
+    async def _send(
+        self, msg_type: str, model: type[MdFetchRequest], **fields: Any
+    ) -> str | None:
+        """Mint an id, ask, and hand the id back if MD took the query."""
+        session = self._require_session()
         query_id = self._next_query_id()
         accepted = await self._request_ack(
             query_id,
-            Envelope[MdFetchKlines].wrap(
-                MdFetchKlines(
+            Envelope[model].wrap(
+                model(
                     reply_channel=Topics.md_fetch_reply(session.session_id),
                     query_id=query_id,
-                    venue=venue,
-                    symbol=symbol,
-                    interval=canonical,
-                    limit=limit,
+                    **fields,
                 ),
-                type=MD_FETCH_KLINES,
+                type=msg_type,
                 source=f"strategy.{session.strategy.name}",
                 session_id=session.session_id,
             ),

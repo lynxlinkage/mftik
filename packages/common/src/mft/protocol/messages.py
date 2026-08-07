@@ -7,7 +7,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from mft.exchange.models import Kline, OrderType, Side, TimeInForce
+from mft.exchange.models import (
+    BestQuote,
+    Kline,
+    OrderBook,
+    OrderType,
+    Side,
+    TimeInForce,
+)
 from mft.exchange.oms import OmsView
 from mft.protocol.envelope import Envelope
 from mft.protocol.query_codes import QueryCode
@@ -267,35 +274,62 @@ class MdDetach(BaseModel):
     session_id: str
 
 
-class MdFetchKlines(BaseModel):
-    """Ask MD for recent candles, on the fetch subject.
+class MdFetchRequest(BaseModel):
+    """What every market-data query carries, whatever it is asking for.
 
-    The request carries where its answer goes. MD's fetch plane has no notion
-    of who is asking and holds no attachment to them — it reads
-    ``reply_channel`` and publishes there, which is what lets anything ask
-    without first becoming a market-data session. ``session_id`` is absent for
-    the same reason: a caller that is not a strategy has none, and the fetch
-    plane would have nothing to do with it if it did.
+    The request says where its answer goes. MD's fetch plane has no notion of
+    who is asking and holds no attachment to them — it reads ``reply_channel``
+    and publishes there, which is what lets anything ask without first
+    becoming a market-data session. There is no ``session_id`` for the same
+    reason: a caller that is not a strategy has none, and the fetch plane
+    would have nothing to do with it if it did.
 
     ``query_id`` is quoted back by both the ack and the result. The answer is
     asynchronous, so a caller always needs something to correlate on, and the
     reply channel alone will not do it — one channel carries every answer that
-    caller asked for.
+    caller asked for, of every kind.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Pub/sub channel for the result. The caller's to choose, and to be
+    #: listening on before it asks.
+    reply_channel: str
+    query_id: str
+    venue: str
+    symbol: str
+
+
+class MdFetchKlines(MdFetchRequest):
+    """Ask for recent candles, oldest first.
 
     ``interval`` is canonical spelling (:mod:`mft.exchange.intervals`); the
     venue's own vocabulary never reaches the wire.
     """
 
-    model_config = ConfigDict(frozen=True)
-
-    #: Pub/sub channel for the :class:`MdKlinesResult`. The caller's to choose
-    #: and to be listening on before it asks.
-    reply_channel: str
-    query_id: str
-    venue: str
-    symbol: str
     interval: str
     limit: int = 100
+
+
+class MdFetchOrderBook(MdFetchRequest):
+    """Ask for a book snapshot, capped at ``depth`` levels a side.
+
+    A snapshot, not a subscription. The ``orderbook`` feed pushes whole books
+    on the venue's own schedule, which is what a strategy watching the book
+    wants; this is for one that needs the book *now* and then not again.
+    """
+
+    depth: int = 10
+
+
+class MdFetchBestQuote(MdFetchRequest):
+    """Ask for the top of the book with its resting sizes.
+
+    The same read as :class:`MdFetchOrderBook` at ``depth`` 1, in the shape a
+    caller that only cares about the touch actually wants — no venue serves a
+    separate endpoint for it, and unpacking a book to reach two levels is work
+    every such caller would otherwise repeat.
+    """
 
 
 class MdQueryAck(BaseModel):
@@ -320,16 +354,16 @@ class MdQueryAck(BaseModel):
     error_code: int | str = QueryCode.NONE
 
 
-class MdKlinesResult(BaseModel):
-    """MD → caller: the answer to :class:`MdFetchKlines`, quoting its id.
+class MdFetchResult(BaseModel):
+    """What every query answer carries, quoting the id that asked for it.
 
-    Sent whether or not the query worked: a strategy waiting on ``query_id``
-    has no other way to learn that it never will, and a hook that only fires
-    on success leaves the caller unable to tell failure from delay.
+    Sent whether or not the query worked: a caller waiting on ``query_id`` has
+    no other way to learn that it never will, and a hook that only fires on
+    success leaves it unable to tell failure from delay.
 
-    ``ok`` False leaves ``klines`` empty and puts the reason in ``error_code``.
-    ``ok`` True with an empty ``klines`` is a real answer — the venue has no
-    history that far back for this instrument.
+    ``ok`` False means the payload is absent or empty and the reason is in
+    ``error_code``. ``ok`` True with nothing in it is a real answer — the venue
+    had none to give — and must not be read as a failure.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -337,14 +371,45 @@ class MdKlinesResult(BaseModel):
     query_id: str
     venue: str
     symbol: str
-    interval: str
     ok: bool = True
-    klines: list[Kline] = Field(default_factory=list)
     #: Human-readable, and the venue's own words when it was the venue that
     #: refused. Free-form; do not branch on it.
     reason: str = ""
     #: Machine-readable — see :mod:`mft.protocol.query_codes`. Branch on this.
     error_code: int | str = QueryCode.NONE
+
+
+class MdKlinesResult(MdFetchResult):
+    """The answer to :class:`MdFetchKlines`.
+
+    An ``ok`` result with no candles means the venue has no history that far
+    back for this instrument.
+    """
+
+    interval: str
+    klines: list[Kline] = Field(default_factory=list)
+
+
+class MdOrderBookResult(MdFetchResult):
+    """The answer to :class:`MdFetchOrderBook`.
+
+    ``book`` is None only when the query failed. An ``ok`` result with an empty
+    side is a real book: nothing is resting there.
+    """
+
+    book: OrderBook | None = None
+
+
+class MdBestQuoteResult(MdFetchResult):
+    """The answer to :class:`MdFetchBestQuote`.
+
+    ``quote`` is None when the query failed **or** when the book had no resting
+    order on one side, which is not an error and not a quote either — a caller
+    checking whether its price can rest has nothing to check against, and
+    should treat it as "ask again", not as "the book is empty at zero".
+    """
+
+    quote: BestQuote | None = None
 
 
 class Recon(BaseModel):
@@ -495,8 +560,12 @@ MdSubscribeEnvelope = Envelope[MdSubscribe]
 MdUnsubscribeEnvelope = Envelope[MdUnsubscribe]
 MdDetachEnvelope = Envelope[MdDetach]
 MdFetchKlinesEnvelope = Envelope[MdFetchKlines]
+MdFetchOrderBookEnvelope = Envelope[MdFetchOrderBook]
+MdFetchBestQuoteEnvelope = Envelope[MdFetchBestQuote]
 MdQueryAckEnvelope = Envelope[MdQueryAck]
 MdKlinesResultEnvelope = Envelope[MdKlinesResult]
+MdOrderBookResultEnvelope = Envelope[MdOrderBookResult]
+MdBestQuoteResultEnvelope = Envelope[MdBestQuoteResult]
 
 # Envelope.type constants for control-plane RPC
 TD_HEALTH = "td.health"
@@ -634,8 +703,12 @@ MD_SUBSCRIBE = "md.subscribe"
 MD_UNSUBSCRIBE = "md.unsubscribe"
 MD_DETACH = "md.detach"
 MD_FETCH_KLINES = "md.fetch.klines"
+MD_FETCH_ORDERBOOK = "md.fetch.orderbook"
+MD_FETCH_BESTQUOTE = "md.fetch.bestquote"
 MD_QUERY_ACK = "md.query.ack"
 MD_KLINES_RESULT = "md.klines.result"
+MD_ORDERBOOK_RESULT = "md.orderbook.result"
+MD_BESTQUOTE_RESULT = "md.bestquote.result"
 
 
 # --- symbol plane (sym) ----------------------------------------------------

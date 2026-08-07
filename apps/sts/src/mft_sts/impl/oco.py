@@ -6,12 +6,18 @@ cancelled on the spot. Then the session ends. There is no repricing, no
 expiry and no second attempt: an OCO states a pair of prices it is willing to
 trade at and waits.
 
-**The single quote.** The strategy subscribes to ``bestquote`` but reads
-exactly one message from it — the first usable quote, which is what the pair
-is checked against. Later quotes are dropped without being looked at. That is
-deliberate: an OCO is not chasing the market, and a check that kept updating
-would turn a pair that was legal when it was placed into one that is not,
-with two live orders already resting on it.
+**The single quote.** The pair is checked against one quote, asked for once —
+``self.mds.fetch_best_quote`` — rather than taken from a feed. An OCO is not
+chasing the market: it needs the touch at one moment and never again, and a
+check that kept updating would turn a pair that was legal when it was placed
+into one that is not, with two live orders already resting on it.
+
+It is asked for *after* recon arms, which is as late as it can be had and
+still be before the orders go out. Subscribing to ``bestquote`` for this
+bought a feed for the life of the session, read its first message, dropped
+every one after it — and that first message was the oldest quote available
+rather than the newest. This strategy needs no market-data subscription at
+all.
 
 **What makes a pair illegal.** A leg must be able to rest. A BUY at or above
 the ask, or a SELL at or below the bid, would execute the moment it arrived —
@@ -24,6 +30,11 @@ sent. Nothing is placed and the session exits.
 Both legs may sit on the same side — two entries at different prices, taking
 whichever the market reaches first, is a normal use. What is checked is that
 neither can trade immediately, not which way they point.
+
+**Configuring it.** ``venue`` and ``symbol`` in ``st_paras`` name the
+instrument. Leaving them out falls back to the first key in ``md_ids``, which
+is how this was configured when the quote came from a feed — but no
+subscription is needed now, and a session running this can have none at all.
 
 **Post-only, on purpose.** The legality check reads a quote from a moment
 before the orders go out. Sending them post-only is what makes that check
@@ -64,6 +75,7 @@ from mft.exchange.models import (
 )
 from mft.protocol import (
     CancelReject,
+    MdBestQuoteResult,
     OrderReject,
     ReconDone,
     SymbolInfo,
@@ -78,6 +90,11 @@ from mft_sts.timer import TimerToken
 #: first quote. Past this nothing has been placed and nothing will be, so the
 #: session ends rather than sitting on a feed that is not coming.
 DEFAULT_ARM_TIMEOUT_S = Decimal("30")
+
+#: How long to wait before re-asking when the book had nothing on a side. Short
+#: because the arm timeout is what really bounds this, and a pair waiting on a
+#: quote is a session doing nothing.
+QUOTE_RETRY_MS = 500
 
 #: An OCO has exactly two legs. One is an order; three is not an OCO.
 LEG_COUNT = 2
@@ -179,11 +196,11 @@ class OneCancelOther(Strategy):
     def __init__(self) -> None:
         super().__init__()
         self._arm_token: TimerToken | None = None
+        self._quote_token: TimerToken | None = None
         self._venue: str | None = None
         self._symbol: str | None = None
         self._info: SymbolInfo | None = None
-        #: The one quote the pair is judged against. Set once; later quotes
-        #: are dropped without being read.
+        #: The one quote the pair is judged against. Asked for once armed.
         self._quote: BestQuote | None = None
         #: Set once TD recon has landed and its ledger is real.
         self._armed = False
@@ -217,6 +234,13 @@ class OneCancelOther(Strategy):
             )
         out["orders"] = [_leg(row, i) for i, row in enumerate(raw)]
 
+        venue, symbol = out.get("venue"), out.get("symbol")
+        if bool(venue) != bool(symbol):
+            # Half of a market is worse than none: the other half would come
+            # from a feed key, and the pair would trade an instrument nobody
+            # named on purpose.
+            raise ValueError("venue and symbol must be given together, or neither")
+
         timeout = Decimal(str(out.get("arm_timeout_s", DEFAULT_ARM_TIMEOUT_S)))
         if timeout <= 0:
             raise ValueError(f"arm_timeout_s must be positive, got {timeout}")
@@ -226,16 +250,16 @@ class OneCancelOther(Strategy):
     # --- lifecycle ---------------------------------------------------------
 
     async def on_start(self) -> None:
-        self._resolve_feed()
+        self._resolve_market()
         first, second = self.paras["orders"]
         await self.log(
             f"OneCancelOther started venue={self._venue} "
             f"symbol={self._symbol} A=[{first}] B=[{second}] "
             f"arm_timeout_s={_fmt(self.paras['arm_timeout_s'])}"
         )
-        # A one-shot deadline, not a tick: the pair is placed once, by
-        # whichever of recon and the first quote lands second. If one of them
-        # never does, this is what ends the session instead of hanging it.
+        # A one-shot deadline, not a tick: recon arms the pair, the quote is
+        # asked for once armed, and placement follows. If either never lands,
+        # this is what ends the session instead of hanging it.
         self._arm_token = self.timer.token()
         self._arm_token.register(
             self.timer.now_ms() + int(self.paras["arm_timeout_s"] * 1000),
@@ -244,9 +268,7 @@ class OneCancelOther(Strategy):
         )
 
     async def on_ready(self) -> None:
-        await self.log(
-            "OneCancelOther ready — waiting for TD recon and the first quote"
-        )
+        await self.log("OneCancelOther ready — waiting for TD recon")
 
     async def on_rebuild(self, remembered: dict[str, str]) -> None:
         """This pair ran before. Nothing to take back — recon has all of it.
@@ -350,7 +372,7 @@ class OneCancelOther(Strategy):
                 "OneCancelOther found nothing of its own resting — "
                 "placing again once a quote arrives"
             )
-            await self._maybe_place()
+            await self._request_quote()
             return
         if self._armed:
             # Recon runs again after a venue reconnect. By then the pair is
@@ -358,7 +380,9 @@ class OneCancelOther(Strategy):
             return
         self._armed = True
         await self.log(f"OneCancelOther armed by recon api_id={msg.api_id}")
-        await self._maybe_place()
+        # Asked for only now: this is the last moment before the orders go
+        # out, so it is the freshest the legality check can be.
+        await self._request_quote()
 
     async def _on_arm_timeout(self) -> None:
         if self._placed or self._done:
@@ -406,21 +430,59 @@ class OneCancelOther(Strategy):
 
     # --- market data -------------------------------------------------------
 
-    async def on_best_quote(self, quote: BestQuote) -> None:
-        """Keep the first usable quote and ignore every one after it."""
-        if self._quote is not None:
+    async def _request_quote(self) -> None:
+        """Ask for the touch the pair will be judged against."""
+        if self._done or self._placed or self._quote is not None:
             return
-        if quote.bid <= 0 or quote.ask <= 0:
+        if self._venue is None or self._symbol is None:
+            await self.log(
+                "OneCancelOther has no venue/symbol to quote", level="error"
+            )
+            self._done = True
+            self.fail("oco_no_market")
+            return
+        query_id = await self.mds.fetch_best_quote(self._venue, self._symbol)
+        if query_id is None:
+            # The query never left. Nothing will arrive to place against, and
+            # the arm timeout would only turn that into a slower failure.
+            await self.log(
+                f"OneCancelOther could not ask for a quote: "
+                f"{self.mds.last_reject_reason}",
+                level="error",
+            )
+            self._done = True
+            self.fail("oco_no_quote")
+
+    async def on_fetch_bestquote(self, result: MdBestQuoteResult) -> None:
+        """Take the quote the pair is judged against, and place on it."""
+        if self._quote is not None or self._done or self._placed:
+            return
+        quote = result.quote
+        if not result.ok or quote is None or quote.bid <= 0 or quote.ask <= 0:
             # A one-sided or empty book says nothing about whether a leg can
-            # rest. Wait for a real one rather than judging the pair on it.
+            # rest, and a failed read says nothing at all. Ask again rather
+            # than judging the pair on it; the arm timeout bounds this.
+            await self.log(
+                f"OneCancelOther has no usable quote yet "
+                f"({result.reason or 'one side empty'}) — asking again"
+            )
+            self._retry_quote()
             return
         self._quote = quote
         await self.log(
             f"OneCancelOther took its reference quote "
-            f"bid={_fmt(quote.bid)} ask={_fmt(quote.ask)} — "
-            f"later quotes are ignored"
+            f"bid={_fmt(quote.bid)} ask={_fmt(quote.ask)}"
         )
         await self._maybe_place()
+
+    def _retry_quote(self) -> None:
+        """Re-ask shortly. Bounded by the arm timeout, which still runs."""
+        if self._done or self._placed:
+            return
+        self._quote_token = self.timer.token()
+        self._quote_token.register(
+            self.timer.now_ms() + QUOTE_RETRY_MS, 0, self._request_quote
+        )
 
     # --- placement ---------------------------------------------------------
 
@@ -724,17 +786,29 @@ class OneCancelOther(Strategy):
             return None
         return self._info
 
-    def _resolve_feed(self) -> None:
-        """Venue and symbol come from the md feed key in strategy.yml."""
+    def _resolve_market(self) -> None:
+        """Which instrument this pair trades.
+
+        ``venue`` and ``symbol`` in ``st_paras`` say it outright. A feed key in
+        ``md_ids`` is still read when they are absent, which is how this was
+        configured before the quote came from a query — but a subscription is
+        no longer needed for anything here, and naming the market directly is
+        the honest way to say so.
+        """
+        venue = self.paras.get("venue")
+        symbol = self.paras.get("symbol")
+        if venue and symbol:
+            self._venue, self._symbol = str(venue), str(symbol)
+            return
         md_ids = list(self.session.md_ids) if self.session is not None else []
         if not md_ids:
             return
         try:
-            venue, _topic, symbol = Topics.parse_md_feed(md_ids[0])
+            feed_venue, _topic, feed_symbol = Topics.parse_md_feed(md_ids[0])
         except ValueError:
             return
-        self._venue = venue
-        self._symbol = symbol
+        self._venue = feed_venue
+        self._symbol = feed_symbol
 
     def _primary_api_id(self) -> int | None:
         if self.session is None or not self.session.td_api_ids:
@@ -744,3 +818,5 @@ class OneCancelOther(Strategy):
     def _cancel_timer(self) -> None:
         if self._arm_token is not None:
             self._arm_token.cancel()
+        if self._quote_token is not None:
+            self._quote_token.cancel()

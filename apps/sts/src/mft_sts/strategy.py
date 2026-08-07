@@ -18,7 +18,9 @@ from mft.protocol import (
     STS_RECON,
     CancelReject,
     Envelope,
+    MdBestQuoteResult,
     MdKlinesResult,
+    MdOrderBookResult,
     OrderReject,
     Recon,
     ReconDone,
@@ -85,14 +87,18 @@ class Strategy:
         e.g. ``paper.kline_1m.BTCUSDT``).
 
     Market-data queries — request-reply on ``md.fetch`` (wired):
-        self.mds.fetch_klines(venue, symbol, interval, limit=...) returns a
-        query_id once MD acks the query, or None if it never left (refused, or
-        no MD running — mds.last_reject_reason says which). The candles arrive
-        later at on_fetch_klines, carrying that query_id.
+        self.mds.fetch_klines(venue, symbol, interval, limit=...)
+        self.mds.fetch_order_book(venue, symbol, depth=...)
+        self.mds.fetch_best_quote(venue, symbol)
+        Each returns a query_id once MD acks, or None if it never left
+        (refused, or no MD running — mds.last_reject_reason says which). The
+        answer arrives later at on_fetch_klines / on_fetch_orderbook /
+        on_fetch_bestquote, carrying that query_id.
         Independent of md_ids: a session that subscribes to nothing can still
         query, and any venue is reachable whether or not it is streaming.
-        NOTE: on_fetch_klines is not on_kline. The feed pushes the window in
-        progress; the query returns history, in a batch, only when asked.
+        NOTE: these are not the feed hooks. A feed pushes every change for as
+        long as the session lives; a query answers once, when asked. Needing
+        the book at one moment is a query, not a subscription.
         ``interval`` is canonical (``1m``, ``4h``, ``1mo``) — see
         ``mft.exchange.intervals``; the month is ``1mo``, never ``1M``.
     """
@@ -311,23 +317,53 @@ class Strategy:
         Feed topic ``bestquote``. Best bid/ask with sizes, at book speed.
         """
 
-    async def on_fetch_klines(self, result: MdKlinesResult) -> None:
-        """Handle the answer to a ``self.mds.fetch_klines(...)`` query.
+    # --- query answers -----------------------------------------------------
+    #
+    # One hook per kind of query, each firing once per ``mds.fetch_*`` call and
+    # carrying the ``query_id`` that call returned. Nothing here is subscribed
+    # to and nothing arrives unasked.
+    #
+    # Every one of them fires on failure too, with ``ok`` False, the payload
+    # empty and the reason in ``error_code`` — see
+    # :mod:`mft.protocol.query_codes`, and use ``is_retryable`` rather than the
+    # band to decide whether asking again could help. A strategy holding a
+    # query_id always learns its fate; a hook that only fired on success would
+    # leave failure indistinguishable from delay.
 
-        Not a feed: this fires once per query, carrying the ``query_id`` that
-        :meth:`~mft_sts.mds.StrategyMds.fetch_klines` returned. Nothing here is
-        subscribed to and nothing arrives unasked.
+    async def on_fetch_klines(self, result: MdKlinesResult) -> None:
+        """Handle the answer to ``self.mds.fetch_klines(...)``.
 
         Distinct from :meth:`on_kline`, which is the live ``kline_{interval}``
         feed pushing the window in progress. This one carries history, as a
         batch, on ``result.klines``.
 
-        It fires on failure too, with ``result.ok`` False, ``klines`` empty and
-        the reason in ``result.error_code`` — see
-        :mod:`mft.protocol.query_codes`, and use ``is_retryable`` rather than
-        the band to decide whether asking again could help. An ``ok`` result
-        with no candles is not a failure: the venue has no history that far
-        back for this instrument.
+        An ``ok`` result with no candles is not a failure: the venue has no
+        history that far back for this instrument.
+        """
+
+    async def on_fetch_orderbook(self, result: MdOrderBookResult) -> None:
+        """Handle the answer to ``self.mds.fetch_order_book(...)``.
+
+        ``result.book`` is a whole book, capped at the depth asked for, as it
+        stood when the venue answered. Distinct from :meth:`on_order_book`,
+        which pushes a new one on the venue's own schedule for as long as the
+        feed is subscribed — this is the book at one moment, because that is
+        what was asked for.
+
+        ``book`` is None only on failure; an ``ok`` result with an empty side
+        is a real book with nothing resting there.
+        """
+
+    async def on_fetch_bestquote(self, result: MdBestQuoteResult) -> None:
+        """Handle the answer to ``self.mds.fetch_best_quote(...)``.
+
+        ``result.quote`` carries the touch with its resting sizes. Distinct
+        from :meth:`on_best_quote`, which pushes one on every change.
+
+        ``quote`` is None when the query failed **or** when a side of the book
+        was empty. The second is not an error and not a quote either: a
+        strategy checking whether its own price can rest has nothing to check
+        against, and should ask again rather than read it as a quote of zero.
         """
 
     # --- helpers -----------------------------------------------------------

@@ -11,18 +11,26 @@ import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange.errors import ExchangeError
 from mft.exchange.intervals import InvalidIntervalError
-from mft.exchange.models import Kline
+from mft.exchange.models import BestQuote, BookLevel, Kline, OrderBook
 from mft.protocol import (
+    MD_BESTQUOTE_RESULT,
+    MD_FETCH_BESTQUOTE,
     MD_FETCH_KLINES,
+    MD_FETCH_ORDERBOOK,
     MD_KLINES_RESULT,
+    MD_ORDERBOOK_RESULT,
     Envelope,
+    MdBestQuoteResult,
+    MdFetchBestQuote,
     MdFetchKlines,
+    MdFetchOrderBook,
     MdKlinesResult,
+    MdOrderBookResult,
     MdQueryAck,
     QueryCode,
     Topics,
 )
-from mft_md.fetch import FetchSession, NoHistoryError
+from mft_md.fetch import FetchSession, NoReaderError
 
 VENUE = "gate_spot"
 SYMBOL = "BTCUSDT"
@@ -53,6 +61,9 @@ class FakeReader:
         self.gate: asyncio.Event | None = None
         self.raises: BaseException | None = None
         self.klines: list[Kline] = [_kline()]
+        self.book_calls: list[tuple[str, int]] = []
+        self.book: OrderBook | None = None
+        self.quote: BestQuote | None = None
 
     async def connect(self) -> None:
         self.connects += 1
@@ -70,6 +81,21 @@ class FakeReader:
             raise self.raises
         return list(self.klines)
 
+    async def fetch_order_book(self, symbol: str, *, depth: int) -> OrderBook:
+        self.book_calls.append((symbol, depth))
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.raises is not None:
+            raise self.raises
+        return self.book or OrderBook(symbol=symbol, bids=[], asks=[])
+
+    async def fetch_best_quote(self, symbol: str) -> BestQuote | None:
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.raises is not None:
+            raise self.raises
+        return self.quote
+
 
 class FakeFactory:
     def __init__(self, reader: FakeReader) -> None:
@@ -79,9 +105,9 @@ class FakeFactory:
     async def create(self, venue: str) -> FakeReader:
         self.built.append(venue)
         if venue == "paper":
-            raise NoHistoryError("paper keeps no past")
+            raise NoReaderError("the paper venue serves no on-demand reads")
         if venue != VENUE:
-            raise NoHistoryError(f"no candle reader for venue {venue!r}")
+            raise NoReaderError(f"no reader for venue {venue!r}")
         return self.reader
 
 
@@ -117,15 +143,22 @@ class Caller:
     def __init__(self, broker: Broker, channel: str = REPLY) -> None:
         self.broker = broker
         self.channel = channel
-        self.results: list[MdKlinesResult] = []
+        self.results: list[Any] = []
         self._stop = asyncio.Event()
         self._task: asyncio.Task[Any] | None = None
 
     async def listen(self) -> None:
+        models = {
+            MD_KLINES_RESULT: MdKlinesResult,
+            MD_ORDERBOOK_RESULT: MdOrderBookResult,
+            MD_BESTQUOTE_RESULT: MdBestQuoteResult,
+        }
+
         async def _pump() -> None:
             async for env in self.broker.subscribe(self.channel, stop=self._stop):
-                if env.type == MD_KLINES_RESULT:
-                    self.results.append(MdKlinesResult.model_validate(env.payload))
+                model = models.get(env.type)
+                if model is not None:
+                    self.results.append(model.model_validate(env.payload))
 
         self._task = asyncio.create_task(_pump())
         await asyncio.sleep(0.05)
@@ -168,13 +201,16 @@ class Caller:
         )
         return MdQueryAck.model_validate(reply.payload)
 
-    async def next_result(self, timeout: float = 2.0) -> MdKlinesResult:
+    async def next_result(self, timeout: float = 2.0, model: Any = None) -> Any:
         deadline = asyncio.get_running_loop().time() + timeout
         while not self.results:
             if asyncio.get_running_loop().time() > deadline:
                 raise AssertionError("no result arrived")
             await asyncio.sleep(0.02)
-        return self.results.pop(0)
+        result = self.results.pop(0)
+        if model is not None:
+            assert isinstance(result, model), type(result)
+        return result
 
 
 @pytest.fixture
@@ -351,7 +387,7 @@ async def test_too_many_in_flight_is_refused_at_the_ack(
 # --- failures after the ack ------------------------------------------------
 
 
-async def test_a_venue_without_history_says_so(
+async def test_a_venue_that_serves_no_reads_says_so(
     fetch: FetchSession, caller: Caller
 ) -> None:
     """Distinct from an empty answer, and settled before any call."""
@@ -359,7 +395,7 @@ async def test_a_venue_without_history_says_so(
     result = await caller.next_result()
 
     assert result.ok is False
-    assert result.error_code == QueryCode.MD_VENUE_NO_HISTORY
+    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
 
 
 async def test_a_venue_failure_still_produces_a_result(
@@ -490,3 +526,110 @@ async def test_a_strategy_with_no_market_data_gets_its_candles(
 
     await sts.stop()
     await session.stop()
+
+
+# --- other reads -----------------------------------------------------------
+
+
+async def test_an_order_book_query_comes_back_as_a_book(
+    broker: Broker, caller: Caller
+) -> None:
+    reader = FakeReader()
+    reader.book = OrderBook(
+        symbol=SYMBOL,
+        bids=[BookLevel(price=Decimal("59999"), qty=Decimal("3"))],
+        asks=[BookLevel(price=Decimal("60001"), qty=Decimal("1"))],
+    )
+    session = FetchSession(broker, FakeFactory(reader))
+    await session.start()
+    await asyncio.sleep(0.05)
+
+    ack = await caller.ask(type=MD_FETCH_ORDERBOOK, payload=_book_req(depth=5))
+    assert ack.accepted is True
+
+    result = await caller.next_result(model=MdOrderBookResult)
+    assert result.ok is True
+    assert result.book.bids[0].price == Decimal("59999")
+    assert reader.book_calls == [(SYMBOL, 5)]
+
+    await session.stop()
+
+
+async def test_a_best_quote_query_comes_back_as_a_quote(
+    broker: Broker, caller: Caller
+) -> None:
+    reader = FakeReader()
+    reader.quote = BestQuote(
+        symbol=SYMBOL,
+        bid=Decimal("59999"),
+        bid_qty=Decimal("3"),
+        ask=Decimal("60001"),
+        ask_qty=Decimal("1"),
+    )
+    session = FetchSession(broker, FakeFactory(reader))
+    await session.start()
+    await asyncio.sleep(0.05)
+
+    await caller.ask(type=MD_FETCH_BESTQUOTE, payload=_quote_req())
+    result = await caller.next_result(model=MdBestQuoteResult)
+
+    assert result.ok is True
+    assert result.quote.bid == Decimal("59999")
+    assert result.quote.ask_qty == Decimal("1")
+
+    await session.stop()
+
+
+async def test_a_one_sided_book_is_a_success_with_no_quote(
+    broker: Broker, caller: Caller
+) -> None:
+    """Not an error, and not a quote either — there is nothing to rest against,
+    and zeros would answer that question wrongly rather than decline it."""
+    reader = FakeReader()
+    reader.quote = None
+    session = FetchSession(broker, FakeFactory(reader))
+    await session.start()
+    await asyncio.sleep(0.05)
+
+    await caller.ask(type=MD_FETCH_BESTQUOTE, payload=_quote_req())
+    result = await caller.next_result(model=MdBestQuoteResult)
+
+    assert result.ok is True
+    assert result.quote is None
+    assert result.error_code == QueryCode.NONE
+
+    await session.stop()
+
+
+async def test_a_read_the_venue_does_not_serve_is_refused_by_name(
+    broker: Broker, caller: Caller
+) -> None:
+    """A reader without the method is the same answer as no reader at all."""
+
+    class KlinesOnly(FakeReader):
+        fetch_order_book = None
+
+    session = FetchSession(broker, FakeFactory(KlinesOnly()))
+    await session.start()
+    await asyncio.sleep(0.05)
+
+    await caller.ask(type=MD_FETCH_ORDERBOOK, payload=_book_req())
+    result = await caller.next_result(model=MdOrderBookResult)
+
+    assert result.ok is False
+    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
+    assert "fetch_order_book" in result.reason
+
+    await session.stop()
+
+
+def _book_req(depth: int = 10) -> MdFetchOrderBook:
+    return MdFetchOrderBook(
+        reply_channel=REPLY, query_id="q1", venue=VENUE, symbol=SYMBOL, depth=depth
+    )
+
+
+def _quote_req() -> MdFetchBestQuote:
+    return MdFetchBestQuote(
+        reply_channel=REPLY, query_id="q1", venue=VENUE, symbol=SYMBOL
+    )

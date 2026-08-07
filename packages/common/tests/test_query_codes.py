@@ -92,7 +92,7 @@ def test_retryability_cuts_across_the_bands() -> None:
         QueryCode.MD_INVALID_REQUEST,
         QueryCode.MD_UNSUPPORTED_REQUEST,
         QueryCode.MD_VENUE_NOT_CONNECTED,
-        QueryCode.MD_VENUE_NO_HISTORY,
+        QueryCode.MD_VENUE_UNSUPPORTED_READ,
         QueryCode.MD_INTERVAL_NOT_SUPPORTED,
         QueryCode.MD_UNREADABLE_ACK,
         QueryCode.VENUE_REJECTED,

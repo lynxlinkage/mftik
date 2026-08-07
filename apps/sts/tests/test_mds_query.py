@@ -9,14 +9,18 @@ from typing import Any
 import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
-from mft.exchange.models import Kline
+from mft.exchange.models import BestQuote, BookLevel, Kline, OrderBook
 from mft.protocol import (
+    MD_BESTQUOTE_RESULT,
     MD_KLINE,
     MD_KLINES_RESULT,
+    MD_ORDERBOOK_RESULT,
     MD_QUERY_ACK,
     Envelope,
+    MdBestQuoteResult,
     MdFetchKlines,
     MdKlinesResult,
+    MdOrderBookResult,
     MdQueryAck,
     QueryCode,
     Topics,
@@ -81,7 +85,7 @@ class FakeMd:
         self.requests: list[MdFetchKlines] = []
         self.accept = True
         self.refuse_reason = "no candle reader for venue 'nowhere'"
-        self.refuse_code: int | str = QueryCode.MD_VENUE_NO_HISTORY
+        self.refuse_code: int | str = QueryCode.MD_VENUE_UNSUPPORTED_READ
         self.klines: list[Kline] = [_kline()]
         self.answer = True
         self._stop = asyncio.Event()
@@ -248,7 +252,7 @@ async def test_a_refusal_comes_back_as_none_with_its_code(broker: Broker) -> Non
     query_id = await strategy.mds.fetch_klines("nowhere", "BTCUSDT", "1h")
 
     assert query_id is None
-    assert strategy.mds.last_reject_code == QueryCode.MD_VENUE_NO_HISTORY
+    assert strategy.mds.last_reject_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
     assert strategy.results == []
 
     await md.stop()
@@ -413,4 +417,108 @@ async def test_an_unreadable_result_is_dropped_not_fatal(broker: Broker) -> None
 
     await _wait_until(lambda: strategy.results)
     assert [r.query_id for r in strategy.results] == ["good"]
+    await sts.stop()
+
+
+# --- the other two reads ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_each_kind_of_answer_reaches_its_own_hook(broker: Broker) -> None:
+    """One reply channel carries all three, so the type is what routes them."""
+
+    class Collector(RecordingStrategy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.books: list[MdOrderBookResult] = []
+            self.quotes: list[MdBestQuoteResult] = []
+
+        async def on_fetch_orderbook(self, result: MdOrderBookResult) -> None:
+            self.books.append(result)
+
+        async def on_fetch_bestquote(self, result: MdBestQuoteResult) -> None:
+            self.quotes.append(result)
+
+    strategy = Collector()
+    sts = await _session(broker, strategy, md_ids=[])
+    channel = Topics.md_fetch_reply(SESSION_ID)
+
+    await broker.publish(channel, _result_env("k1", klines=[_kline()]))
+    await broker.publish(
+        channel,
+        Envelope[MdOrderBookResult].wrap(
+            MdOrderBookResult(
+                query_id="b1",
+                venue="gate_spot",
+                symbol="BTCUSDT",
+                book=OrderBook(
+                    symbol="BTCUSDT",
+                    bids=[BookLevel(price=Decimal("59999"), qty=Decimal("3"))],
+                    asks=[BookLevel(price=Decimal("60001"), qty=Decimal("1"))],
+                ),
+            ),
+            type=MD_ORDERBOOK_RESULT,
+            source="md",
+        ),
+    )
+    await broker.publish(
+        channel,
+        Envelope[MdBestQuoteResult].wrap(
+            MdBestQuoteResult(
+                query_id="q1",
+                venue="gate_spot",
+                symbol="BTCUSDT",
+                quote=BestQuote(
+                    symbol="BTCUSDT",
+                    bid=Decimal("59999"),
+                    bid_qty=Decimal("3"),
+                    ask=Decimal("60001"),
+                    ask_qty=Decimal("1"),
+                ),
+            ),
+            type=MD_BESTQUOTE_RESULT,
+            source="md",
+        ),
+    )
+
+    await _wait_until(
+        lambda: strategy.results and strategy.books and strategy.quotes
+    )
+    assert strategy.results[0].query_id == "k1"
+    assert strategy.books[0].book.bids[0].price == Decimal("59999")
+    assert strategy.quotes[0].quote.ask == Decimal("60001")
+    await sts.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_quote_with_nothing_resting_is_not_an_error(
+    broker: Broker,
+) -> None:
+    """``ok`` with no quote: a side of the book was empty. A strategy checking
+    whether its price can rest has nothing to check, not a quote of zero."""
+
+    class Collector(RecordingStrategy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.quotes: list[MdBestQuoteResult] = []
+
+        async def on_fetch_bestquote(self, result: MdBestQuoteResult) -> None:
+            self.quotes.append(result)
+
+    strategy = Collector()
+    sts = await _session(broker, strategy, md_ids=[])
+
+    await broker.publish(
+        Topics.md_fetch_reply(SESSION_ID),
+        Envelope[MdBestQuoteResult].wrap(
+            MdBestQuoteResult(query_id="q1", venue="gate_spot", symbol="BTCUSDT"),
+            type=MD_BESTQUOTE_RESULT,
+            source="md",
+        ),
+    )
+
+    await _wait_until(lambda: strategy.quotes)
+    assert strategy.quotes[0].ok is True
+    assert strategy.quotes[0].quote is None
+    assert strategy.quotes[0].error_code == QueryCode.NONE
     await sts.stop()

@@ -20,11 +20,13 @@ from mft.exchange.models import (
 )
 from mft.protocol import (
     MD_BEST_QUOTE,
+    MD_BESTQUOTE_RESULT,
     MD_DETACH,
     MD_KLINE,
     MD_KLINES_RESULT,
     MD_LEASE_ACK,
     MD_ORDERBOOK,
+    MD_ORDERBOOK_RESULT,
     MD_TICKER,
     MD_TRADE,
     STS_DETACH,
@@ -40,9 +42,11 @@ from mft.protocol import (
     Envelope,
     LeaseAck,
     LeaseHeartbeat,
+    MdBestQuoteResult,
     MdDetach,
     MdKlinesResult,
     MdLeaseAck,
+    MdOrderBookResult,
     OrderReject,
     ReconDone,
     StsDetach,
@@ -73,6 +77,16 @@ MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     MD_KLINE: ("on_kline", Kline),
     MD_TRADE: ("on_trade", Trade),
     MD_BEST_QUOTE: ("on_best_quote", BestQuote),
+}
+
+#: Query result type → (strategy hook, payload model). Separate from
+#: :data:`MD_HANDLERS` and from the feed channel: these arrive on the session's
+#: own reply channel, one per ``mds.fetch_*`` call, and reach hooks the feeds
+#: never touch.
+MD_FETCH_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
+    MD_KLINES_RESULT: ("on_fetch_klines", MdKlinesResult),
+    MD_ORDERBOOK_RESULT: ("on_fetch_orderbook", MdOrderBookResult),
+    MD_BESTQUOTE_RESULT: ("on_fetch_bestquote", MdBestQuoteResult),
 }
 
 #: TD global message type → (strategy hook, payload model).
@@ -419,8 +433,8 @@ class StsSession:
         topic = Topics.md_fetch_reply(self.session_id)
         try:
             async for env in self.broker.subscribe(topic, stop=self._stop):
-                if env.type == MD_KLINES_RESULT:
-                    await self._on_klines_result(env)
+                if env.type in MD_FETCH_HANDLERS:
+                    await self._on_fetch_result(env)
                     continue
                 self._on_message("md-fetch", env)
         except asyncio.CancelledError:
@@ -430,25 +444,24 @@ class StsSession:
                 "STS md fetch pump failed session=%s", self.session_id
             )
 
-    async def _on_klines_result(self, env: UntypedEnvelope) -> None:
-        """Hand one query answer to the strategy.
-
-        Kept out of :data:`MD_HANDLERS`, which maps a feed message onto a hook
-        taking one model. This payload is a batch plus the outcome of the query
-        that asked for it, and it reaches a hook the feeds never touch.
-        """
+    async def _on_fetch_result(self, env: UntypedEnvelope) -> None:
+        """Hand one query answer to the hook that asked for it."""
+        name, model = MD_FETCH_HANDLERS[env.type]
         try:
-            result = MdKlinesResult.model_validate(env.payload)
+            result = model.model_validate(env.payload)
         except Exception:
             logger.exception(
-                "invalid md klines result session=%s", self.session_id
+                "invalid md fetch result session=%s type=%s",
+                self.session_id,
+                env.type,
             )
             return
         try:
-            await self.strategy.on_fetch_klines(result)
+            await getattr(self.strategy, name)(result)
         except Exception:
             logger.exception(
-                "strategy on_fetch_klines failed session=%s query_id=%s",
+                "strategy %s failed session=%s query_id=%s",
+                name,
                 self.session_id,
                 result.query_id,
             )

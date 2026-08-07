@@ -12,9 +12,9 @@ instrument, the parameters, and the venue's willingness to answer right now.
 
 Two things differ from TD's, both because a read is not an order:
 
-* The typed table maps our own refusals too. :class:`~mft_md.fetch.NoHistoryError`
-  is not a venue error at all — it means the venue has no history to give — and
-  a caller has to be able to tell that from an empty answer.
+* The typed table maps our own refusals too. :class:`~mft_md.fetch.NoReaderError`
+  is not a venue error at all — it means the venue does not serve the read —
+  and a caller has to be able to tell that from an empty answer.
 * The fallback is :attr:`QueryCode.MD_VENUE_CALL_FAILED`, not a venue reject.
   A venue that refuses a read says so with a label; an exception carrying no
   label at all is far more likely a socket or a timeout than a refusal. Being
@@ -34,7 +34,7 @@ from mft.exchange.intervals import InvalidIntervalError
 from mft.protocol.query_codes import QueryCode
 from mft.symbols import SymbolNotFoundError
 
-from mft_md.fetch.readers import NoHistoryError
+from mft_md.fetch.readers import NoReaderError
 
 
 @dataclass(frozen=True)
@@ -95,9 +95,9 @@ VENUES: dict[str, VenueErrors] = {
 #: Typed errors, for the refusals that never reach a venue at all. Checked
 #: most-specific first, so a subclass never loses to its base.
 BY_TYPE: tuple[tuple[type[BaseException], QueryCode], ...] = (
-    # This venue keeps no history at all, which is not the same as having none
-    # for this instrument.
-    (NoHistoryError, QueryCode.MD_VENUE_NO_HISTORY),
+    # This venue does not serve the read at all, which is not the same as
+    # serving it and having nothing to return.
+    (NoReaderError, QueryCode.MD_VENUE_UNSUPPORTED_READ),
     # Refused against the adapter's own interval table, before any round trip.
     (InvalidIntervalError, QueryCode.MD_INTERVAL_NOT_SUPPORTED),
     # The venue client exists but is not connected, so nothing was sent.

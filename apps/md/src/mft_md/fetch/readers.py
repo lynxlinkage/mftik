@@ -1,11 +1,12 @@
-"""Per-venue candle readers, composed here rather than behind an interface.
+"""Per-venue readers, composed here rather than behind a shared interface.
 
 Each venue gets its own reader, assembled from the pieces its exchange module
 offers. Gate needs REST and only REST: ``spot.candlesticks`` pushes the window
-in progress and never what came before it, so history has to be asked for, and
-asking has nothing to do with the socket. A venue whose history *does* arrive
-over a socket would compose that instead, in its own reader, without anything
-else having to know.
+in progress and never what came before it, and ``spot.order_book`` pushes on a
+timer rather than on demand — so both reads have to be asked for, and asking
+has nothing to do with the socket. A venue that answers either over a socket
+would compose that instead, in its own reader, without anything else having to
+know.
 
 That is why the composition lives on this side. ``mft.exchange.<venue>``
 publishes connectors, not a contract — see :mod:`mft.exchange.base` — and the
@@ -24,15 +25,20 @@ from typing import Protocol
 from mft.exchange.gate.spot.public import GATE_INTERVALS
 from mft.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
 from mft.exchange.intervals import InvalidIntervalError, normalize_interval
-from mft.exchange.models import Kline
+from mft.exchange.models import BestQuote, Kline, OrderBook
 from mft.exchange.symbols import SymbolResolver, canonical
 from mft.symbols import SymbolClient
 
 logger = logging.getLogger(__name__)
 
 
-class KlineReader(Protocol):
-    """What the fetch plane needs of a venue to answer a candle query."""
+class VenueReader(Protocol):
+    """What the fetch plane needs of a venue to answer a query.
+
+    Every read is optional but ``connect``/``close``. A venue that cannot serve
+    one has no method for it, and the plane refuses the query naming the venue
+    rather than calling something that raises — same rule as the feeds.
+    """
 
     venue: str
 
@@ -40,13 +46,9 @@ class KlineReader(Protocol):
 
     async def close(self) -> None: ...
 
-    async def fetch_klines(
-        self, symbol: str, interval: str, *, limit: int
-    ) -> list[Kline]: ...
 
-
-class GateSpotKlineReader:
-    """Gate spot candles over REST, in canonical symbol and interval.
+class GateSpotReader:
+    """Gate spot reads over REST, in canonical symbol and interval.
 
     Composes only :class:`GateSpotPublicRest`. The Gate connector that pairs it
     with a WebSocket exists for feeds and is not used here — connecting a
@@ -72,6 +74,12 @@ class GateSpotKlineReader:
     async def close(self) -> None:
         await self.rest.close()
 
+    async def _pair(self, symbol: str) -> tuple[str, str]:
+        """``(canonical, Gate pair)`` — resolved through the symbol plane."""
+        symbol = canonical(symbol)
+        pair = await self.symbols.exch_ticker(self.venue, symbol, category="spot")
+        return symbol, pair
+
     async def fetch_klines(
         self, symbol: str, interval: str, *, limit: int
     ) -> list[Kline]:
@@ -88,8 +96,7 @@ class GateSpotKlineReader:
                 f"gate_spot serves no {canonical_interval} candles; "
                 f"supported: {sorted(GATE_INTERVALS)}"
             )
-        symbol = canonical(symbol)
-        pair = await self.symbols.exch_ticker(self.venue, symbol, category="spot")
+        symbol, pair = await self._pair(symbol)
         klines = await self.rest.fetch_klines(pair, gate_interval, limit=limit)
         return [
             kline.model_copy(
@@ -98,20 +105,54 @@ class GateSpotKlineReader:
             for kline in klines
         ]
 
+    async def fetch_order_book(self, symbol: str, *, depth: int) -> OrderBook:
+        """``GET /spot/order_book`` — a whole book, capped at ``depth``.
+
+        Gate's reply carries no pair, so the caller's canonical one is stamped
+        back on.
+        """
+        symbol, pair = await self._pair(symbol)
+        book = await self.rest.fetch_order_book(pair, depth=depth)
+        return book.model_copy(update={"symbol": symbol})
+
+    async def fetch_best_quote(self, symbol: str) -> BestQuote | None:
+        """Top of book with sizes, or None when a side is empty.
+
+        The same REST read as :meth:`fetch_order_book` at depth 1 — Gate serves
+        no endpoint for the touch alone, and a second call to get two numbers
+        out of a book we already have would be a round trip for nothing.
+
+        None rather than zeros when a side has nothing resting. A caller asking
+        for the touch is almost always checking whether its own price can rest
+        against it, and a zero bid would answer that question wrongly rather
+        than declining to answer it.
+        """
+        book = await self.fetch_order_book(symbol, depth=1)
+        if not book.bids or not book.asks:
+            return None
+        bid, ask = book.bids[0], book.asks[0]
+        return BestQuote(
+            symbol=book.symbol,
+            bid=bid.price,
+            bid_qty=bid.qty,
+            ask=ask.price,
+            ask_qty=ask.qty,
+            ts=book.ts,
+        )
+
 
 class ReaderFactory(Protocol):
-    """Builds the candle reader for a venue name."""
+    """Builds the reader for a venue name."""
 
-    async def create(self, venue: str) -> KlineReader:
+    async def create(self, venue: str) -> VenueReader:
         """Build (but do not connect) a reader, or raise if the venue has none."""
 
 
-class NoHistoryError(Exception):
-    """The venue keeps no candle history at all.
+class NoReaderError(Exception):
+    """Nothing here can answer reads for this venue.
 
-    Distinct from an empty answer, and raised before any call: the paper engine
-    invents prices tick by tick and has no past to return, which a caller has to
-    be able to tell from "asked, and there is none that far back".
+    Distinct from an empty answer, and raised before any call: a caller has to
+    be able to tell "cannot ask" from "asked, and there is none".
     """
 
 
@@ -125,11 +166,11 @@ class VenueReaderFactory:
     def __init__(self, symbols: SymbolClient) -> None:
         self._symbols = symbols
 
-    async def create(self, venue: str) -> KlineReader:
+    async def create(self, venue: str) -> VenueReader:
         if venue == "gate_spot":
-            return GateSpotKlineReader(symbols=self._symbols)
+            return GateSpotReader(symbols=self._symbols)
         if venue == "paper":
-            raise NoHistoryError(
-                "the paper engine invents prices tick by tick and keeps no past"
-            )
-        raise NoHistoryError(f"no candle reader for venue {venue!r}")
+            # The paper engine's book lives in another process and its prices
+            # are invented tick by tick; nothing here can be read out of band.
+            raise NoReaderError("the paper venue serves no on-demand reads")
+        raise NoReaderError(f"no reader for venue {venue!r}")

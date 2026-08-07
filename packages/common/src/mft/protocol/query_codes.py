@@ -61,10 +61,10 @@ class QueryCode(IntEnum):
     MD_UNSUPPORTED_REQUEST = 102
     #: No connected venue client to ask, so nothing was sent.
     MD_VENUE_NOT_CONNECTED = 103
-    #: The venue serves no history for this instrument class at all — the
-    #: paper engine invents prices tick by tick and keeps no past. Distinct
-    #: from an empty answer on purpose: "cannot ask" is not "asked, got none".
-    MD_VENUE_NO_HISTORY = 104
+    #: The venue does not serve this read at all — no reader for it, or a
+    #: reader that does not answer this question. Distinct from an empty answer
+    #: on purpose: "cannot ask" is not "asked, and got none".
+    MD_VENUE_UNSUPPORTED_READ = 104
     #: The venue does not serve candles at this interval. Refused against the
     #: adapter's own table, before any round trip.
     MD_INTERVAL_NOT_SUPPORTED = 105

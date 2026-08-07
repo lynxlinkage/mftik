@@ -4,18 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from mft.broker import Broker
 from mft.broker.request import IncomingRequest
-from mft.exchange.models import Kline
 from mft.protocol import (
+    MD_BESTQUOTE_RESULT,
+    MD_FETCH_BESTQUOTE,
     MD_FETCH_KLINES,
+    MD_FETCH_ORDERBOOK,
     MD_KLINES_RESULT,
+    MD_ORDERBOOK_RESULT,
     MD_QUERY_ACK,
     Envelope,
+    MdBestQuoteResult,
+    MdFetchBestQuote,
     MdFetchKlines,
+    MdFetchOrderBook,
+    MdFetchRequest,
     MdKlinesResult,
+    MdOrderBookResult,
     MdQueryAck,
     QueryCode,
     Topics,
@@ -23,7 +33,7 @@ from mft.protocol import (
 from mft.protocol.query_codes import describe
 
 from mft_md.errors import normalize as normalize_query_error
-from mft_md.fetch.readers import KlineReader, NoHistoryError, ReaderFactory
+from mft_md.fetch.readers import NoReaderError, ReaderFactory, VenueReader
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +43,75 @@ logger = logging.getLogger(__name__)
 #: guard behind that: refusing at the ack is the only refusal that reaches a
 #: caller before an unbounded pile of tasks does.
 MAX_QUERIES_IN_FLIGHT = 32
+
+
+@dataclass(frozen=True)
+class _Kind:
+    """One kind of query, start to finish.
+
+    A table rather than a branch per read: everything around a query — acking,
+    the in-flight cap, dispatching out of band, publishing whether or not it
+    worked — is identical for all of them, and only three things differ. Adding
+    a read is an entry here, not another copy of the machinery.
+    """
+
+    #: Request payload, and the reader method that answers it.
+    model: type[MdFetchRequest]
+    read: str
+    #: Wire type of the result, and how to build it from the answer.
+    result_type: str
+    call: Callable[[Any, Any], Awaitable[Any]]
+    result: Callable[[Any, bool, Any, str, int | str], Any]
+
+
+_KINDS: dict[str, _Kind] = {
+    MD_FETCH_KLINES: _Kind(
+        model=MdFetchKlines,
+        read="fetch_klines",
+        result_type=MD_KLINES_RESULT,
+        call=lambda read, req: read(req.symbol, req.interval, limit=req.limit),
+        result=lambda req, ok, answer, reason, code: MdKlinesResult(
+            query_id=req.query_id,
+            venue=req.venue,
+            symbol=req.symbol,
+            interval=req.interval,
+            ok=ok,
+            klines=list(answer or ()),
+            reason=reason,
+            error_code=code,
+        ),
+    ),
+    MD_FETCH_ORDERBOOK: _Kind(
+        model=MdFetchOrderBook,
+        read="fetch_order_book",
+        result_type=MD_ORDERBOOK_RESULT,
+        call=lambda read, req: read(req.symbol, depth=req.depth),
+        result=lambda req, ok, answer, reason, code: MdOrderBookResult(
+            query_id=req.query_id,
+            venue=req.venue,
+            symbol=req.symbol,
+            ok=ok,
+            book=answer,
+            reason=reason,
+            error_code=code,
+        ),
+    ),
+    MD_FETCH_BESTQUOTE: _Kind(
+        model=MdFetchBestQuote,
+        read="fetch_best_quote",
+        result_type=MD_BESTQUOTE_RESULT,
+        call=lambda read, req: read(req.symbol),
+        result=lambda req, ok, answer, reason, code: MdBestQuoteResult(
+            query_id=req.query_id,
+            venue=req.venue,
+            symbol=req.symbol,
+            ok=ok,
+            quote=answer,
+            reason=reason,
+            error_code=code,
+        ),
+    ),
+}
 
 
 class FetchSession:
@@ -63,7 +142,7 @@ class FetchSession:
         self._broker = broker
         self._factory = factory
         self._max_in_flight = max_in_flight
-        self._readers: dict[str, KlineReader] = {}
+        self._readers: dict[str, VenueReader] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._queries: set[asyncio.Task[Any]] = set()
         self._stop = asyncio.Event()
@@ -124,7 +203,8 @@ class FetchSession:
         what the venue will answer.
         """
         env = req.envelope
-        if env.type != MD_FETCH_KLINES:
+        kind = _KINDS.get(env.type)
+        if kind is None:
             await self._ack(
                 req,
                 "",
@@ -135,7 +215,7 @@ class FetchSession:
             return
 
         try:
-            payload = MdFetchKlines.model_validate(env.payload or {})
+            payload = kind.model.model_validate(env.payload or {})
         except Exception as exc:
             await self._ack(
                 req, "", False, f"invalid payload: {exc}", QueryCode.MD_INVALID_REQUEST
@@ -165,7 +245,7 @@ class FetchSession:
 
         await self._ack(req, payload.query_id, True, "", QueryCode.NONE)
         task = asyncio.create_task(
-            self._run(payload), name=f"md-fetch-{payload.query_id}"
+            self._run(kind, payload), name=f"md-fetch-{payload.query_id}"
         )
         self._queries.add(task)
         task.add_done_callback(self._queries.discard)
@@ -201,7 +281,7 @@ class FetchSession:
         except Exception:
             logger.exception("MD fetch ack failed query_id=%s", query_id)
 
-    async def _reader(self, venue: str) -> KlineReader:
+    async def _reader(self, venue: str) -> VenueReader:
         """The venue's reader, built and connected once and then kept.
 
         Under a per-venue lock: two queries arriving together on a venue that
@@ -222,13 +302,19 @@ class FetchSession:
             logger.info("MD fetch reader connected venue=%s", venue)
             return reader
 
-    async def _run(self, req: MdFetchKlines) -> None:
+    async def _run(self, kind: _Kind, req: MdFetchRequest) -> None:
         """Answer one query, and publish the result however it turns out."""
         try:
             reader = await self._reader(req.venue)
-            klines = await reader.fetch_klines(
-                req.symbol, req.interval, limit=req.limit
-            )
+            read = getattr(reader, kind.read, None)
+            if read is None:
+                # Same rule as the feeds: a venue that cannot serve a read has
+                # no method for it, and is refused by name rather than by
+                # calling something that raises.
+                raise NoReaderError(
+                    f"venue {req.venue!r} does not serve {kind.read}"
+                )
+            answer = await kind.call(read, req)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -238,10 +324,11 @@ class FetchSession:
                 req.query_id,
                 req.venue,
                 req.symbol,
-                req.interval,
+                kind.read,
                 describe(error_code),
             )
             await self._publish(
+                kind,
                 req,
                 ok=False,
                 # The venue's own words, which the code deliberately drops.
@@ -250,14 +337,15 @@ class FetchSession:
             )
             return
 
-        await self._publish(req, ok=True, klines=klines)
+        await self._publish(kind, req, ok=True, answer=answer)
 
     async def _publish(
         self,
-        req: MdFetchKlines,
+        kind: _Kind,
+        req: MdFetchRequest,
         *,
         ok: bool,
-        klines: list[Kline] | None = None,
+        answer: Any = None,
         reason: str = "",
         error_code: int | str = QueryCode.NONE,
     ) -> None:
@@ -270,18 +358,9 @@ class FetchSession:
         try:
             await self._broker.publish(
                 req.reply_channel,
-                Envelope[MdKlinesResult].wrap(
-                    MdKlinesResult(
-                        query_id=req.query_id,
-                        venue=req.venue,
-                        symbol=req.symbol,
-                        interval=req.interval,
-                        ok=ok,
-                        klines=list(klines or ()),
-                        reason=reason,
-                        error_code=error_code,
-                    ),
-                    type=MD_KLINES_RESULT,
+                Envelope[Any].wrap(
+                    kind.result(req, ok, answer, reason, error_code),
+                    type=kind.result_type,
                     source="md",
                 ),
             )
@@ -293,4 +372,4 @@ class FetchSession:
             )
 
 
-__all__ = ["MAX_QUERIES_IN_FLIGHT", "FetchSession", "NoHistoryError"]
+__all__ = ["MAX_QUERIES_IN_FLIGHT", "FetchSession"]
