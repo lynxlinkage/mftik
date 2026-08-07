@@ -10,8 +10,10 @@ from mft import configure_logging
 from mft.broker import Broker
 from mft.exchange import venues
 from mft.protocol import Topics
+from mft.symbols import SymbolClient
 
 from mft_md import db as md_db
+from mft_md.fetch import FetchSession, VenueReaderFactory
 from mft_md.rpc import dispatch
 from mft_md.session import SessionManager, VenuePublicFactory
 
@@ -55,6 +57,12 @@ async def amain() -> None:
             mark_done=md_db.mark_session_done,
             list_db_sessions=md_db.list_sessions,
         )
+        # Up for as long as the process is, and attached to nothing. A read
+        # is owned by nobody, so the fetch plane needs no lease and no
+        # subscription to answer — which is the whole point of it being
+        # separate from the feed sessions above.
+        fetch = FetchSession(broker, VenueReaderFactory(SymbolClient(broker)))
+        await fetch.start()
         logger.info("MD started (venue public factory: %s)", venues.names())
         rpc_task = asyncio.create_task(
             run_rpc(broker, sessions, stop), name="md-rpc"
@@ -75,6 +83,7 @@ async def amain() -> None:
             for task in (rpc_task, hb_task):
                 task.cancel()
             await asyncio.gather(rpc_task, hb_task, return_exceptions=True)
+            await fetch.stop()
             await sessions.close_all()
     logger.info("MD stopped")
 

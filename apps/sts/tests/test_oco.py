@@ -1,7 +1,7 @@
 """OneCancelOther — what it refuses to place, and how the pair resolves.
 
 The strategy is driven directly: recon through ``on_recon_done``, quotes
-through ``on_best_quote``, and venue answers through ``on_order_update`` /
+through ``on_fetch_bestquote``, and venue answers through ``on_order_update`` /
 ``on_order_reject``, with a fake OMS standing in for TD. What is under test is
 the legality check against that one reference quote, that only the first quote
 is ever read, and that every ending leaves nothing resting behind.
@@ -22,7 +22,14 @@ from mft.exchange.models import (
     TimeInForce,
 )
 from mft.exchange.oms import OmsView
-from mft.protocol import CancelReject, OrderReject, ReconDone, RejectCode, SymbolInfo
+from mft.protocol import (
+    CancelReject,
+    MdBestQuoteResult,
+    OrderReject,
+    ReconDone,
+    RejectCode,
+    SymbolInfo,
+)
 from mft_sts.impl.oco import LEG_COUNT, OneCancelOther
 
 BTCUSDT = SymbolInfo(
@@ -168,6 +175,23 @@ class FakeTimer:
         return tok
 
 
+class FakeMds:
+    """Records quote requests; the test delivers the answers by hand."""
+
+    def __init__(self, *, accepted: bool = True) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.accepted = accepted
+        self.last_reject_reason = "" if accepted else "no MD running"
+        self._seq = 0
+
+    async def fetch_best_quote(self, venue: str, symbol: str) -> str | None:
+        self.calls.append((venue, symbol))
+        if not self.accepted:
+            return None
+        self._seq += 1
+        return f"q{self._seq}"
+
+
 def _paras(**overrides) -> dict:
     payload = {
         "orders": [
@@ -179,7 +203,12 @@ def _paras(**overrides) -> dict:
     return payload
 
 
-def _strategy(*, accepts: list[bool] | None = None, **overrides) -> OneCancelOther:
+def _strategy(
+    *,
+    accepts: list[bool] | None = None,
+    mds_accepts: bool = True,
+    **overrides,
+) -> OneCancelOther:
     """A bound strategy with TD, the clock and the symbol plane stubbed out."""
     strat = OneCancelOther()
     strat.paras = OneCancelOther.on_initialized(_paras(**overrides))
@@ -187,6 +216,7 @@ def _strategy(*, accepts: list[bool] | None = None, **overrides) -> OneCancelOth
     strat.oms = FakeOms(accepts=accepts)  # type: ignore[assignment]
     strat.timer = FakeTimer()  # type: ignore[assignment]
     strat.ledger = FakeLedger()  # type: ignore[assignment]
+    strat.mds = FakeMds(accepted=mds_accepts)  # type: ignore[assignment]
     strat._info = BTCUSDT
     strat._venue, strat._symbol = "paper", "BTCUSDT"
 
@@ -207,13 +237,29 @@ async def _armed(**kwargs) -> OneCancelOther:
     return strat
 
 
-def _quote(bid: str = "50000", ask: str = "50010") -> BestQuote:
-    return BestQuote(
+def _quote(bid: str = "50000", ask: str = "50010") -> MdBestQuoteResult:
+    """A best-quote query answer, as MD's fetch plane would publish it."""
+    return _quote_result(
+        BestQuote(
+            symbol="BTCUSDT",
+            bid=Decimal(bid),
+            bid_qty=Decimal("1"),
+            ask=Decimal(ask),
+            ask_qty=Decimal("1"),
+        )
+    )
+
+
+def _quote_result(
+    quote: BestQuote | None, *, ok: bool = True, reason: str = ""
+) -> MdBestQuoteResult:
+    return MdBestQuoteResult(
+        query_id="q1",
+        venue="paper",
         symbol="BTCUSDT",
-        bid=Decimal(bid),
-        bid_qty=Decimal("1"),
-        ask=Decimal(ask),
-        ask_qty=Decimal("1"),
+        ok=ok,
+        quote=quote,
+        reason=reason,
     )
 
 
@@ -297,12 +343,17 @@ def test_arm_timeout_defaults_and_must_be_positive() -> None:
 
 
 async def test_a_quote_alone_places_nothing() -> None:
-    """The ledger is not real until recon, and the funds check reads it."""
+    """The ledger is not real until recon, and the funds check reads it.
+
+    A stray answer cannot arm the pair either: nothing asked for it, because
+    asking is what recon triggers.
+    """
     strat = _strategy()
     await strat.on_start()
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
 
     assert strat.oms.submitted == []
+    assert strat.mds.calls == []
 
 
 async def test_recon_alone_places_nothing() -> None:
@@ -313,17 +364,41 @@ async def test_recon_alone_places_nothing() -> None:
     assert strat.oms.submitted == []
 
 
-async def test_whichever_arrives_second_places_the_pair() -> None:
-    quote_first = _strategy()
-    await quote_first.on_start()
-    await quote_first.on_best_quote(_quote())
-    await quote_first.on_recon_done(ReconDone(session_id="s", api_id=API_ID))
+async def test_recon_asks_for_the_quote_and_the_answer_places_the_pair() -> None:
+    """One order now, not a race: recon arms, arming asks, the answer places.
 
-    recon_first = await _armed()
-    await recon_first.on_best_quote(_quote())
+    The quote is fetched as late as it can be and still be before the orders
+    go out, which is what the legality check wants it to be.
+    """
+    strat = await _armed()
 
-    assert len(quote_first.oms.submitted) == 2
-    assert len(recon_first.oms.submitted) == 2
+    assert strat.mds.calls == [("paper", "BTCUSDT")]
+    assert strat.oms.submitted == []
+
+    await strat.on_fetch_bestquote(_quote())
+    assert len(strat.oms.submitted) == 2
+
+
+async def test_a_quote_that_never_comes_back_ends_the_session() -> None:
+    """The arm timeout still bounds it — asking is not the same as answered."""
+    strat = await _armed()
+    assert strat.mds.calls
+
+    await strat.timer.tokens[0].fire()
+
+    assert strat.oms.submitted == []
+    assert strat.session.failures == ["oco_not_armed"]
+
+
+async def test_a_query_that_never_leaves_ends_the_session_now() -> None:
+    """No MD to ask means nothing will arrive; waiting out the arm timeout
+    would only make that a slower failure."""
+    strat = _strategy(mds_accepts=False)
+    await strat.on_start()
+    await strat.on_recon_done(ReconDone(session_id="s", api_id=API_ID))
+
+    assert strat.oms.submitted == []
+    assert strat.session.failures == ["oco_no_quote"]
 
 
 async def test_nothing_arriving_at_all_ends_the_session() -> None:
@@ -341,7 +416,7 @@ async def test_a_recon_for_another_account_does_not_arm_it() -> None:
     strat = _strategy()
     await strat.on_start()
     await strat.on_recon_done(ReconDone(session_id="s", api_id=API_ID + 1))
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
 
     assert strat.oms.submitted == []
 
@@ -351,7 +426,7 @@ async def test_a_recon_for_another_account_does_not_arm_it() -> None:
 
 async def test_a_legal_pair_places_both_legs_post_only() -> None:
     strat = await _armed()
-    await strat.on_best_quote(_quote(bid="50000", ask="50010"))
+    await strat.on_fetch_bestquote(_quote(bid="50000", ask="50010"))
 
     assert [o["side"] for o in strat.oms.submitted] == [Side.BUY, Side.SELL]
     assert [o["price"] for o in strat.oms.submitted] == [
@@ -367,12 +442,12 @@ async def test_a_legal_pair_places_both_legs_post_only() -> None:
 async def test_only_the_first_quote_is_read() -> None:
     """A later quote that would make the pair illegal changes nothing."""
     strat = await _armed()
-    await strat.on_best_quote(_quote(bid="50000", ask="50010"))
+    await strat.on_fetch_bestquote(_quote(bid="50000", ask="50010"))
     placed = len(strat.oms.submitted)
 
     # The market runs through both legs. The pair is already resting.
-    await strat.on_best_quote(_quote(bid="48000", ask="48010"))
-    await strat.on_best_quote(_quote(bid="52000", ask="52010"))
+    await strat.on_fetch_bestquote(_quote(bid="48000", ask="48010"))
+    await strat.on_fetch_bestquote(_quote(bid="52000", ask="52010"))
 
     assert len(strat.oms.submitted) == placed
     assert strat.session.exits == []
@@ -380,21 +455,37 @@ async def test_only_the_first_quote_is_read() -> None:
 
 
 async def test_an_empty_book_is_not_taken_as_the_reference() -> None:
-    """A one-sided quote says nothing about whether a leg can rest."""
+    """A one-sided quote says nothing about whether a leg can rest.
+
+    With a feed the next message came on its own; a query has to be asked
+    again, so the retry is what keeps the old behaviour.
+    """
     strat = await _armed()
-    await strat.on_best_quote(
-        BestQuote(
-            symbol="BTCUSDT",
-            bid=Decimal("0"),
-            bid_qty=Decimal("0"),
-            ask=Decimal("50010"),
-            ask_qty=Decimal("1"),
-        )
+    asked = len(strat.mds.calls)
+
+    await strat.on_fetch_bestquote(_quote_result(None))
+    assert strat.oms.submitted == []
+
+    # A retry was scheduled rather than the pair being judged on nothing.
+    await strat.timer.tokens[-1].fire()
+    assert len(strat.mds.calls) == asked + 1
+
+    await strat.on_fetch_bestquote(_quote())
+    assert len(strat.oms.submitted) == 2
+
+
+async def test_a_failed_query_is_asked_again_too() -> None:
+    """A failed read says nothing at all about the book."""
+    strat = await _armed()
+    asked = len(strat.mds.calls)
+
+    await strat.on_fetch_bestquote(
+        _quote_result(None, ok=False, reason="[429] TOO_MANY_REQUESTS")
     )
     assert strat.oms.submitted == []
 
-    await strat.on_best_quote(_quote())
-    assert len(strat.oms.submitted) == 2
+    await strat.timer.tokens[-1].fire()
+    assert len(strat.mds.calls) == asked + 1
 
 
 # --- legality --------------------------------------------------------------
@@ -407,7 +498,7 @@ async def test_a_buy_at_or_above_the_ask_is_illegal() -> None:
             {"side": "sell", "price": 51000, "qty": Decimal("0.001")},
         ]
     )
-    await strat.on_best_quote(_quote(bid="50000", ask="50010"))
+    await strat.on_fetch_bestquote(_quote(bid="50000", ask="50010"))
 
     assert strat.oms.submitted == []
     assert strat.session.exits == ["oco_illegal"]
@@ -420,7 +511,7 @@ async def test_a_sell_at_or_below_the_bid_is_illegal() -> None:
             {"side": "sell", "price": 50000, "qty": Decimal("0.001")},
         ]
     )
-    await strat.on_best_quote(_quote(bid="50000", ask="50010"))
+    await strat.on_fetch_bestquote(_quote(bid="50000", ask="50010"))
 
     assert strat.oms.submitted == []
     assert strat.session.exits == ["oco_illegal"]
@@ -435,7 +526,7 @@ async def test_an_illegal_pair_places_neither_leg() -> None:
             {"side": "sell", "price": 49500, "qty": Decimal("0.001")},
         ]
     )
-    await strat.on_best_quote(_quote(bid="50000", ask="50010"))
+    await strat.on_fetch_bestquote(_quote(bid="50000", ask="50010"))
 
     assert strat.oms.submitted == []
     assert strat.oms.cancelled == []
@@ -449,7 +540,7 @@ async def test_two_legs_on_the_same_side_are_legal() -> None:
             {"side": "buy", "price": 48000, "qty": Decimal("0.001")},
         ]
     )
-    await strat.on_best_quote(_quote(bid="50000", ask="50010"))
+    await strat.on_fetch_bestquote(_quote(bid="50000", ask="50010"))
 
     assert [o["side"] for o in strat.oms.submitted] == [Side.BUY, Side.BUY]
     assert strat.session.exits == []
@@ -463,7 +554,7 @@ async def test_a_leg_below_the_venue_minimum_is_illegal() -> None:
             {"side": "sell", "price": 51000, "qty": Decimal("0.001")},
         ]
     )
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
 
     assert strat.oms.submitted == []
     assert strat.session.exits == ["oco_illegal"]
@@ -477,7 +568,7 @@ async def test_a_qty_that_rounds_away_is_illegal() -> None:
             {"side": "sell", "price": 51000, "qty": Decimal("0.001")},
         ]
     )
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
 
     assert strat.oms.submitted == []
     assert strat.session.exits == ["oco_illegal"]
@@ -491,7 +582,7 @@ async def test_prices_are_snapped_to_the_tick_before_they_are_judged() -> None:
             {"side": "sell", "price": Decimal("51000.007"), "qty": Decimal("0.001")},
         ]
     )
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
 
     assert [o["price"] for o in strat.oms.submitted] == [
         Decimal("49000.00"),
@@ -507,7 +598,7 @@ async def test_both_legs_must_be_affordable_together() -> None:
     strat = await _armed()
     # 0.001 @ 49000 needs 49 USDT; the sell needs 0.001 BTC.
     strat.ledger.balances["USDT"] = Decimal("48")
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
 
     assert strat.oms.submitted == []
     assert strat.session.exits == ["oco_insufficient_balance"]
@@ -523,7 +614,7 @@ async def test_same_side_legs_have_their_commitments_summed() -> None:
     )
     # Enough for either leg alone (49 or 48), not for the pair (97).
     strat.ledger.balances["USDT"] = Decimal("60")
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
 
     assert strat.oms.submitted == []
     assert strat.session.exits == ["oco_insufficient_balance"]
@@ -534,7 +625,7 @@ async def test_same_side_legs_have_their_commitments_summed() -> None:
 
 async def _placed(**kwargs) -> OneCancelOther:
     strat = await _armed(**kwargs)
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
     assert len(strat.oms.submitted) == 2
     return strat
 
@@ -627,7 +718,7 @@ async def test_a_venue_reject_takes_the_other_leg_with_it() -> None:
 
 async def test_a_second_leg_td_refuses_unwinds_the_first() -> None:
     strat = await _armed(accepts=[True, False])
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
 
     assert len(strat.oms.submitted) == 2
     assert strat.oms.cancelled == ["cid-1"]
@@ -636,7 +727,7 @@ async def test_a_second_leg_td_refuses_unwinds_the_first() -> None:
 
 async def test_a_first_leg_td_refuses_places_no_second() -> None:
     strat = await _armed(accepts=[False])
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
 
     assert len(strat.oms.submitted) == 1
     assert strat.oms.cancelled == []
@@ -668,7 +759,7 @@ async def test_a_refused_cancel_is_not_an_error() -> None:
 async def test_a_paused_strategy_places_nothing_until_it_resumes() -> None:
     strat = await _armed()
     await strat.on_pause()
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
     assert strat.oms.submitted == []
 
     await strat.on_resume()
@@ -850,7 +941,7 @@ async def test_nothing_resting_means_placing_again() -> None:
     await _restore(strat)
     assert strat._placed is False
 
-    await strat.on_best_quote(_quote())
+    await strat.on_fetch_bestquote(_quote())
 
     assert strat._placed is True
     assert len(strat.oms.submitted) == LEG_COUNT
@@ -878,7 +969,7 @@ async def test_a_market_that_moved_through_a_leg_says_why() -> None:
     await _restore(strat)
 
     # The buy leg at 49000 is now at or above the ask.
-    await strat.on_best_quote(_quote(bid="48000", ask="48500"))
+    await strat.on_fetch_bestquote(_quote(bid="48000", ask="48500"))
 
     assert strat.session.failures == ["oco_illegal_on_restart"]
     assert strat.oms.submitted == []
@@ -899,3 +990,21 @@ async def test_restoring_without_an_instrument_refuses_to_place() -> None:
 
     assert strat.session.failures == ["oco_restore_no_instrument"]
     assert strat.oms.submitted == []
+
+
+def test_a_market_named_in_paras_needs_no_feed() -> None:
+    """The whole point of the quote being a query: no md_ids anywhere."""
+    strat = _strategy(venue="gate_spot", symbol="ETHUSDT")
+    strat._venue = strat._symbol = None
+    strat.session.md_ids = []
+    strat._resolve_market()
+
+    assert (strat._venue, strat._symbol) == ("gate_spot", "ETHUSDT")
+
+
+def test_half_a_market_is_refused() -> None:
+    """The other half would silently come from a feed key."""
+    with pytest.raises(ValueError, match="together, or neither"):
+        OneCancelOther.on_initialized(_paras(venue="gate_spot"))
+    with pytest.raises(ValueError, match="together, or neither"):
+        OneCancelOther.on_initialized(_paras(symbol="ETHUSDT"))

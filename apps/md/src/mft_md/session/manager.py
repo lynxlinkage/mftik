@@ -31,7 +31,7 @@ from mft.protocol import (
 from mft_db.models.session import SessionDomain, SessionStatus
 
 from mft_md.session.dispatcher import Dispatcher, FeedKey
-from mft_md.session.factory import PublicClientFactory
+from mft_md.session.factory import ConnectorFactory
 from mft_md.session.venue import VenueSession
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ class SessionManager:
 
     def __init__(
         self,
-        factory: PublicClientFactory,
+        factory: ConnectorFactory,
         broker: Broker,
         *,
         persist_live: PersistLive | None = None,

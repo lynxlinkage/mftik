@@ -1,17 +1,24 @@
-"""Gate spot as an MD :class:`PublicClient`.
+"""The gate_spot market-data connector.
+
+Not an implementation of a shared public interface — there is none; see
+:mod:`mft.exchange.base`. The methods here resemble the other venues' because
+the same questions get asked of every venue, not because anything enforces it,
+and where Gate differs the difference shows up in this file rather than being
+flattened away.
 
 Composes the two transports, same split as the private client:
 
 * **WebSocket** — every live feed. Gate pushes ticker, tape, book snapshots,
   candles and best quote on one socket, so all five streams share it.
-* **REST** — the three on-demand snapshots. A caller asking for "the book right
-  now" cannot wait for the channel's next scheduled push, and Gate has no
-  request-reply for these over the WebSocket.
+* **REST** — the on-demand reads. A caller asking for "the book right now"
+  cannot wait for the channel's next scheduled push, and one asking for the
+  last 500 candles cannot wait at all: ``spot.candlesticks`` pushes the window
+  in progress and never what came before it. Gate has no request-reply for any
+  of these over the WebSocket.
 
-Gate supports all five feeds MD knows about, which is not a promise the shared
-interface makes — :meth:`~mft.exchange.base.PublicClient.stream_kline` and
-``stream_best_quote`` are optional precisely because most venues cover a
-different subset. Here they are all real.
+Gate serves all five feeds MD knows about. Most venues cover a different
+subset, and a venue that does not publish one simply has no method for it here
+rather than a stub that raises.
 
 Symbols cross this boundary canonical (``BTCUSDT``) and are resolved to Gate's
 ``BTC_USDT`` through the symbol plane, never by string surgery — see
@@ -24,9 +31,10 @@ import logging
 from collections.abc import AsyncIterator
 from typing import TypeVar
 
-from mft.exchange.base import PublicClient
+from mft.exchange.base import BaseClient
 from mft.exchange.gate.spot.client import GATE_SPOT_WS_URL, GateSpotWebSocket
 from mft.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
+from mft.exchange.intervals import InvalidIntervalError, normalize_interval
 from mft.exchange.models import (
     BestQuote,
     Instrument,
@@ -49,8 +57,36 @@ T = TypeVar("T")
 DEFAULT_BOOK_LEVEL = "20"
 DEFAULT_BOOK_INTERVAL = "1000ms"
 
+#: Canonical interval → Gate's spelling, for the candle windows Gate serves.
+#:
+#: Nearly an identity map, and deliberately written out anyway. Gate happens to
+#: accept the canonical spelling for all but the month — it takes ``7d`` and
+#: ``1w`` alike, but rejects ``1M`` and wants ``30d`` — and this table is what
+#: keeps that "happens to" from becoming an assumption. It is also the only
+#: place that knows which windows Gate serves at all: an interval absent here
+#: is refused before the round trip rather than after a 400.
+GATE_INTERVALS: dict[str, str] = {
+    "1s": "1s",
+    "10s": "10s",
+    "1m": "1m",
+    "3m": "3m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "1h",
+    "2h": "2h",
+    "4h": "4h",
+    "6h": "6h",
+    "8h": "8h",
+    "12h": "12h",
+    "1d": "1d",
+    "3d": "3d",
+    "1w": "1w",
+    "1mo": "30d",
+}
 
-class GateSpotPublicClient(PublicClient):
+
+class GateSpotPublicClient(BaseClient):
     """Gate spot market data for MD.
 
     All five feeds are live::
@@ -118,6 +154,33 @@ class GateSpotPublicClient(PublicClient):
         symbol, pair = await self._resolve(symbol)
         book = await self.rest.fetch_order_book(pair, depth=depth)
         return book.model_copy(update={"symbol": symbol})
+
+    async def fetch_klines(
+        self, symbol: str, interval: str, *, limit: int = 100
+    ) -> list[Kline]:
+        """Recent candles, oldest first, in canonical symbol and interval.
+
+        Both spellings are translated on the way down and stamped back on the
+        way up, so what a caller passes in is what comes back out — REST
+        answers in Gate's ``BTC_USDT`` / ``30d`` vocabulary and none of it
+        escapes this method.
+        """
+        self._ensure_connected()
+        canonical_interval = normalize_interval(interval)
+        gate_interval = GATE_INTERVALS.get(canonical_interval)
+        if gate_interval is None:
+            raise InvalidIntervalError(
+                f"gate_spot serves no {canonical_interval} candles; "
+                f"supported: {sorted(GATE_INTERVALS)}"
+            )
+        symbol, pair = await self._resolve(symbol)
+        klines = await self.rest.fetch_klines(pair, gate_interval, limit=limit)
+        return [
+            kline.model_copy(
+                update={"symbol": symbol, "interval": canonical_interval}
+            )
+            for kline in klines
+        ]
 
     # --- streams (WebSocket) -----------------------------------------------
 

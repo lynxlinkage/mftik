@@ -1,4 +1,4 @@
-"""Gate spot as a PublicClient — five live feeds over WS, snapshots over REST."""
+"""The gate_spot connector — five live feeds over WS, reads over REST."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from mft.exchange.gate.spot import channels as ch
 from mft.exchange.gate.spot.client import GateSpotWebSocket
 from mft.exchange.gate.spot.public import GateSpotPublicClient
 from mft.exchange.gate.spot.rest import GateRestError, GateSpotPublicRest
+from mft.exchange.intervals import InvalidIntervalError
 
 CURRENCY_PAIRS = [
     {
@@ -52,6 +53,16 @@ ORDER_BOOK_ROW = {
     "bids": [["59999", "3"], ["59998", "4"]],
 }
 
+#: ``/spot/candlesticks`` rows, in Gate's own column order — timestamp, quote
+#: volume, **close**, high, low, open, base volume, closed. Every value here is
+#: distinct so a transposed index cannot pass by coincidence.
+CANDLESTICK_ROWS = [
+    ["1700000000", "6000000", "60500", "60900", "59900", "60100", "100", "true"],
+    # The window in progress: Gate marks it open, and older rows predate the
+    # eighth column entirely.
+    ["1700000060", "3000000", "60700", "60800", "60400", "60500", "50", "false"],
+]
+
 
 class FakePublicRest:
     """httpx MockTransport standing in for Gate's public REST v4."""
@@ -62,6 +73,7 @@ class FakePublicRest:
             "/api/v4/spot/currency_pairs": CURRENCY_PAIRS,
             "/api/v4/spot/tickers": [TICKER_ROW],
             "/api/v4/spot/order_book": ORDER_BOOK_ROW,
+            "/api/v4/spot/candlesticks": CANDLESTICK_ROWS,
         }
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -178,6 +190,113 @@ async def test_fetch_order_book_stamps_the_canonical_symbol(
     assert book.asks[0].qty == Decimal("1")
     assert book.ts == 1_700_000_000.5
     assert rest_stub.requests[-1].url.params["limit"] == "5"
+
+
+async def test_fetch_klines_reads_gates_column_order(
+    gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
+) -> None:
+    """Close comes before high/low/open in the row; OHLC order would silently
+    swap the four."""
+    async with await _public(gate, rest_stub, resolver) as client:
+        klines = await client.fetch_klines("BTCUSDT", "1m", limit=2)
+
+    first = klines[0]
+    assert first.open_time == 1_700_000_000
+    assert first.open == Decimal("60100")
+    assert first.high == Decimal("60900")
+    assert first.low == Decimal("59900")
+    assert first.close == Decimal("60500")
+    # Gate splits the two volumes; base is index 6, quote is index 1.
+    assert first.volume == Decimal("100")
+    assert first.quote_volume == Decimal("6000000")
+    assert first.closed is True
+
+
+async def test_fetch_klines_marks_the_window_in_progress_open(
+    gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
+) -> None:
+    async with await _public(gate, rest_stub, resolver) as client:
+        klines = await client.fetch_klines("BTCUSDT", "1m")
+
+    assert [k.closed for k in klines] == [True, False]
+
+
+async def test_fetch_klines_treats_a_missing_closed_column_as_open(
+    gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
+) -> None:
+    """The column was added late. Absent, "still open" is the safe reading —
+    a candle wrongly called closed is appended and never revised."""
+    rest_stub.routes["/api/v4/spot/candlesticks"] = [
+        ["1700000000", "6000000", "60500", "60900", "59900", "60100", "100"]
+    ]
+    async with await _public(gate, rest_stub, resolver) as client:
+        klines = await client.fetch_klines("BTCUSDT", "1m")
+
+    assert klines[0].closed is False
+
+
+async def test_fetch_klines_rejects_a_short_row(
+    gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
+) -> None:
+    rest_stub.routes["/api/v4/spot/candlesticks"] = [["1700000000", "6000000"]]
+    async with await _public(gate, rest_stub, resolver) as client:
+        with pytest.raises(GateRestError):
+            await client.fetch_klines("BTCUSDT", "1m")
+
+
+async def test_fetch_klines_resolves_symbol_and_comes_back_canonical(
+    gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
+) -> None:
+    async with await _public(gate, rest_stub, resolver) as client:
+        klines = await client.fetch_klines("BTCUSDT", "1m", limit=2)
+
+    assert rest_stub.requests[-1].url.params["currency_pair"] == "BTC_USDT"
+    assert rest_stub.requests[-1].url.params["limit"] == "2"
+    # Gate answered about BTC_USDT; nothing in its spelling escapes.
+    assert {k.symbol for k in klines} == {"BTCUSDT"}
+
+
+async def test_fetch_klines_translates_the_month_and_stamps_it_back(
+    gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
+) -> None:
+    """The one interval Gate genuinely spells differently: it refuses ``1M``
+    and serves the month as ``30d``."""
+    async with await _public(gate, rest_stub, resolver) as client:
+        klines = await client.fetch_klines("BTCUSDT", "1mo")
+
+    assert rest_stub.requests[-1].url.params["interval"] == "30d"
+    # ...and the canonical spelling is what comes back, not Gate's.
+    assert {k.interval for k in klines} == {"1mo"}
+
+
+async def test_fetch_klines_normalizes_before_translating(
+    gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
+) -> None:
+    async with await _public(gate, rest_stub, resolver) as client:
+        klines = await client.fetch_klines("BTCUSDT", " 1H ")
+
+    assert rest_stub.requests[-1].url.params["interval"] == "1h"
+    assert {k.interval for k in klines} == {"1h"}
+
+
+async def test_fetch_klines_refuses_an_interval_gate_does_not_serve(
+    gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
+) -> None:
+    """Refused here, before the round trip — the table is what knows."""
+    before = len(rest_stub.requests)
+    async with await _public(gate, rest_stub, resolver) as client:
+        with pytest.raises(InvalidIntervalError):
+            await client.fetch_klines("BTCUSDT", "2w")
+
+    assert len(rest_stub.requests) == before
+
+
+async def test_fetch_klines_refuses_capital_m_months(
+    gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
+) -> None:
+    async with await _public(gate, rest_stub, resolver) as client:
+        with pytest.raises(InvalidIntervalError):
+            await client.fetch_klines("BTCUSDT", "1M")
 
 
 async def test_rest_error_surfaces(

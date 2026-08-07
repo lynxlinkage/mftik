@@ -1,4 +1,24 @@
-"""Abstract exchange connectivity — public/private, stream + req-reply."""
+"""Shared lifecycle, and the private trading API every venue does implement.
+
+There is deliberately no ``PublicClient`` here, and adding one back would be a
+mistake worth arguing about first. Market data is where venues differ most:
+which reads come over a socket and which need REST, which feeds exist at all,
+whether history can be asked for. A single public interface made those
+differences invisible at the type level and then leaked them anyway, as
+optional methods that raise — and it forced a venue's REST reads and its socket
+to be connected together, so a caller wanting one paid for both.
+
+So ``mft.exchange.<venue>`` offers a *connector per venue* whose methods happen
+to resemble each other, not an implementation of a shared contract. What a
+consumer needs is the consumer's business to state: MD declares the shape it
+drives its feeds through, and composes each venue behind it.
+
+:class:`PrivateClient` stays because it is not the same animal. It carries real
+shared behaviour — ``place_market_order``, ``cancel_by_client_order_id`` and
+friends are written once here in terms of the abstract calls — so it is a mixin
+that happens to define an interface, and removing it would mean copying that
+behaviour into every venue.
+"""
 
 from __future__ import annotations
 
@@ -10,17 +30,11 @@ from typing import Any
 from mft.exchange.errors import ExchangeNotConnectedError
 from mft.exchange.models import (
     Balance,
-    BestQuote,
     Fill,
-    Instrument,
-    Kline,
     Order,
-    OrderBook,
     OrderType,
     PlaceOrderRequest,
     Side,
-    Ticker,
-    Trade,
 )
 from mft.exchange.oms import Position
 
@@ -57,59 +71,6 @@ class BaseClient(ABC):
 
     async def __aexit__(self, *args: object) -> None:
         await self.close()
-
-
-class PublicClient(BaseClient):
-    """Public market-data API: request-reply + push streams."""
-
-    # --- request-reply -----------------------------------------------------
-
-    @abstractmethod
-    async def fetch_instruments(self) -> list[Instrument]:
-        """List tradeable instruments."""
-
-    @abstractmethod
-    async def fetch_ticker(self, symbol: str) -> Ticker:
-        """Snapshot ticker for ``symbol``."""
-
-    @abstractmethod
-    async def fetch_order_book(self, symbol: str, *, depth: int = 10) -> OrderBook:
-        """Snapshot order book for ``symbol``."""
-
-    # --- streams -----------------------------------------------------------
-
-    @abstractmethod
-    def stream_ticker(self, symbol: str) -> AsyncIterator[Ticker]:
-        """Push ticker updates for ``symbol``."""
-
-    @abstractmethod
-    def stream_trades(self, symbol: str) -> AsyncIterator[Trade]:
-        """Push public trades for ``symbol``."""
-
-    @abstractmethod
-    def stream_order_book(self, symbol: str) -> AsyncIterator[OrderBook]:
-        """Push full order-book snapshots for ``symbol``.
-
-        Every item is a self-contained book. Venues that only push depth diffs
-        must fold them onto a snapshot inside the adapter — a consumer of this
-        stream never has to sequence anything.
-        """
-
-    # Optional streams: not every venue publishes these, and the ones that do
-    # do not all agree on the shape, so they default to unsupported rather
-    # than forcing every adapter to carry a stub.
-
-    def stream_kline(self, symbol: str, interval: str) -> AsyncIterator[Kline]:
-        """Push candles for ``symbol`` at ``interval`` (venue interval spelling)."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support stream_kline"
-        )
-
-    def stream_best_quote(self, symbol: str) -> AsyncIterator[BestQuote]:
-        """Push top-of-book quote changes for ``symbol``."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support stream_best_quote"
-        )
 
 
 class PrivateClient(BaseClient):

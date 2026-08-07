@@ -10,7 +10,9 @@ Two clients, split by whether the call is signed:
 * :class:`GateSpotPublicRest` — MD's snapshot reads. Instruments, ticker and
   order book have no WebSocket equivalent Gate will answer on demand: the
   channels push on their own schedule, and a caller asking for "the book right
-  now" cannot wait for the next tick.
+  now" cannot wait for the next tick. Candles are the same problem in the
+  other direction — ``spot.candlesticks`` pushes the window in progress and
+  nothing before it, so history has to be asked for.
 
 Deliberately not a general REST client. Order entry and every live feed stay on
 the WebSocket, where they belong latency-wise; this covers the request-reply
@@ -30,12 +32,24 @@ import httpx
 
 from mft.exchange.errors import ExchangeError
 from mft.exchange.gate.spot.models import GateOrderAck, GateTicker
-from mft.exchange.models import Balance, BookLevel, Instrument, Order, OrderBook, Ticker
+from mft.exchange.models import (
+    Balance,
+    BookLevel,
+    Instrument,
+    Kline,
+    Order,
+    OrderBook,
+    Ticker,
+)
 
 logger = logging.getLogger(__name__)
 
 GATE_SPOT_REST_URL = "https://api.gateio.ws"
 API_PREFIX = "/api/v4"
+
+#: Most candles ``/spot/candlesticks`` will return in one call. Asking for more
+#: is a 400, not a truncated answer.
+MAX_CANDLES = 1000
 
 
 class GateRestError(ExchangeError):
@@ -245,6 +259,66 @@ class GateSpotPublicRest(_GateRestTransport):
             # ``current`` is when Gate built the snapshot, in ms.
             ts=float(row.get("current", 0) or 0) / 1000.0,
         )
+
+    async def fetch_klines(
+        self, currency_pair: str, interval: str, *, limit: int = 100
+    ) -> list[Kline]:
+        """``GET /spot/candlesticks`` — recent candles, oldest first.
+
+        ``interval`` is Gate's own spelling; translating from the canonical one
+        happens a layer up, in :class:`GateSpotPublicClient`.
+
+        Gate caps ``limit`` at :data:`MAX_CANDLES` and answers 400 past it.
+        That is left to raise: silently returning fewer candles than asked for
+        would be indistinguishable from the pair simply not having that much
+        history.
+        """
+        rows = await self._get(
+            "/spot/candlesticks",
+            {
+                "currency_pair": currency_pair,
+                "interval": interval,
+                "limit": limit,
+            },
+        )
+        return [_to_kline(row, currency_pair, interval) for row in rows or []]
+
+
+def _to_kline(row: list[Any], currency_pair: str, interval: str) -> Kline:
+    """One ``/spot/candlesticks`` row.
+
+    Gate's column order is its own: the close price comes *before* high, low
+    and open, so these indices cannot be read as OHLC and must not be
+    reordered on the assumption that they are::
+
+        [0] window open time, seconds   [4] low
+        [1] volume in quote currency    [5] open
+        [2] close                       [6] volume in base currency
+        [3] high                        [7] "true" once the window has closed
+
+    Index 7 was added to the endpoint after the others; a row without it is
+    treated as still open, which is the safe reading — a candle wrongly called
+    closed gets appended to a series and never revised.
+    """
+    if len(row) < 7:
+        raise GateRestError(
+            200,
+            "bad_response",
+            f"candlestick row for {currency_pair} {interval} has "
+            f"{len(row)} columns, expected at least 7: {row!r}",
+        )
+    return Kline(
+        symbol=currency_pair,
+        interval=interval,
+        open_time=float(row[0]),
+        open=Decimal(str(row[5])),
+        high=Decimal(str(row[3])),
+        low=Decimal(str(row[4])),
+        close=Decimal(str(row[2])),
+        volume=Decimal(str(row[6])),
+        quote_volume=Decimal(str(row[1])),
+        closed=len(row) > 7 and str(row[7]).lower() == "true",
+    )
 
 
 def _book_levels(rows: list[Any] | None) -> list[BookLevel]:

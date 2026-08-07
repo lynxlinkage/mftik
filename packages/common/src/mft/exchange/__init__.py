@@ -1,6 +1,6 @@
 """Exchange connectivity — venue adapters with public/private clients."""
 
-from mft.exchange.base import BaseClient, PrivateClient, PublicClient
+from mft.exchange.base import BaseClient, PrivateClient
 from mft.exchange.errors import (
     ExchangeError,
     ExchangeNotConnectedError,
@@ -29,6 +29,12 @@ from mft.exchange.gate.spot import (
     GateTrade,
     GateUserTrade,
     GateWsError,
+)
+from mft.exchange.intervals import (
+    UNIT_SECONDS,
+    InvalidIntervalError,
+    interval_seconds,
+    normalize_interval,
 )
 from mft.exchange.models import (
     OPEN_STATUSES,
@@ -108,7 +114,11 @@ __all__ = [
     "Instrument",
     "InstrumentNotFoundError",
     "InsufficientBalanceError",
+    "InvalidIntervalError",
     "Kline",
+    "UNIT_SECONDS",
+    "interval_seconds",
+    "normalize_interval",
     "Order",
     "OrderBook",
     "OrderError",
@@ -133,7 +143,6 @@ __all__ = [
     "PlaceOrderRequest",
     "Position",
     "PrivateClient",
-    "PublicClient",
     "Side",
     "Ticker",
     "TimeInForce",

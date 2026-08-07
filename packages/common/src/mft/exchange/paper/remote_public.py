@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from mft.broker import Broker
-from mft.exchange.base import PublicClient
+from mft.exchange.base import BaseClient
 from mft.exchange.errors import ExchangeError
 from mft.exchange.models import Instrument, OrderBook, Ticker, Trade
 from mft.protocol import (
@@ -24,8 +24,8 @@ from mft.protocol import (
 )
 
 
-class PaperRemotePublicClient(PublicClient):
-    """``PublicClient`` adapter over paper-engine RPC + pub/sub streams."""
+class PaperRemotePublicClient(BaseClient):
+    """The paper connector for other processes: engine RPC + pub/sub streams."""
 
     name = "paper"
 

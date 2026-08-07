@@ -20,10 +20,13 @@ from mft.exchange.models import (
 )
 from mft.protocol import (
     MD_BEST_QUOTE,
+    MD_BESTQUOTE_RESULT,
     MD_DETACH,
     MD_KLINE,
+    MD_KLINES_RESULT,
     MD_LEASE_ACK,
     MD_ORDERBOOK,
+    MD_ORDERBOOK_RESULT,
     MD_TICKER,
     MD_TRADE,
     STS_DETACH,
@@ -39,8 +42,11 @@ from mft.protocol import (
     Envelope,
     LeaseAck,
     LeaseHeartbeat,
+    MdBestQuoteResult,
     MdDetach,
+    MdKlinesResult,
     MdLeaseAck,
+    MdOrderBookResult,
     OrderReject,
     ReconDone,
     StsDetach,
@@ -71,6 +77,16 @@ MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     MD_KLINE: ("on_kline", Kline),
     MD_TRADE: ("on_trade", Trade),
     MD_BEST_QUOTE: ("on_best_quote", BestQuote),
+}
+
+#: Query result type → (strategy hook, payload model). Separate from
+#: :data:`MD_HANDLERS` and from the feed channel: these arrive on the session's
+#: own reply channel, one per ``mds.fetch_*`` call, and reach hooks the feeds
+#: never touch.
+MD_FETCH_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
+    MD_KLINES_RESULT: ("on_fetch_klines", MdKlinesResult),
+    MD_ORDERBOOK_RESULT: ("on_fetch_orderbook", MdOrderBookResult),
+    MD_BESTQUOTE_RESULT: ("on_fetch_bestquote", MdBestQuoteResult),
 }
 
 #: TD global message type → (strategy hook, payload model).
@@ -152,7 +168,15 @@ class StsSession:
             asyncio.create_task(
                 self._lease_heartbeat_loop(),
                 name=f"sts-{self.session_id}-lease",
-            )
+            ),
+            # Unconditional, unlike the feed pump below. A query needs no
+            # subscription and no attach, so a session that asked for no market
+            # data can still make one — and its answer has to have somewhere to
+            # land before it does.
+            asyncio.create_task(
+                self._pump_fetch_replies(),
+                name=f"sts-{self.session_id}-fetch",
+            ),
         ]
         if self.md_ids:
             self._tasks.append(
@@ -395,6 +419,52 @@ class StsSession:
                 "STS md session pump failed session=%s", self.session_id
             )
             self._fail_from_infrastructure("md feed")
+
+    async def _pump_fetch_replies(self) -> None:
+        """Deliver query answers to ``on_fetch_klines``.
+
+        Its own channel and its own task, not a branch of the feed pump. The
+        two have different lifetimes — this one runs whether or not the session
+        subscribed to anything — and a failure here should not read as the
+        market data having died, so it does not fail the session the way a
+        broken feed does. A strategy that only queries is not receiving
+        anything it can be starved of.
+        """
+        topic = Topics.md_fetch_reply(self.session_id)
+        try:
+            async for env in self.broker.subscribe(topic, stop=self._stop):
+                if env.type in MD_FETCH_HANDLERS:
+                    await self._on_fetch_result(env)
+                    continue
+                self._on_message("md-fetch", env)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "STS md fetch pump failed session=%s", self.session_id
+            )
+
+    async def _on_fetch_result(self, env: UntypedEnvelope) -> None:
+        """Hand one query answer to the hook that asked for it."""
+        name, model = MD_FETCH_HANDLERS[env.type]
+        try:
+            result = model.model_validate(env.payload)
+        except Exception:
+            logger.exception(
+                "invalid md fetch result session=%s type=%s",
+                self.session_id,
+                env.type,
+            )
+            return
+        try:
+            await getattr(self.strategy, name)(result)
+        except Exception:
+            logger.exception(
+                "strategy %s failed session=%s query_id=%s",
+                name,
+                self.session_id,
+                result.query_id,
+            )
 
     async def _on_md_lease_ack(self, env: UntypedEnvelope) -> None:
         try:
