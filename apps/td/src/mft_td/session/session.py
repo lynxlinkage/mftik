@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
-from typing import Any
+from collections.abc import AsyncIterator, Callable
+from typing import Any, Protocol
 
 from mft.broker import Broker
-from mft.exchange.base import PrivateClient
 from mft.exchange.models import (
     Balance,
     Fill,
@@ -59,6 +58,51 @@ FillCallback = Callable[[Fill], None]
 BalanceCallback = Callable[[Balance], None]
 
 
+class TradingConnector(Protocol):
+    """What TD needs of a venue, stated by TD rather than by the venue.
+
+    ``mft.exchange`` has no shared trading interface on purpose — venues differ
+    too much for one to be honest (see :mod:`mft.exchange.base`). So the shape
+    lives here, with the consumer, and holds only what every venue really does
+    provide.
+
+    Three things are deliberately absent, because not every venue has them:
+
+    * ``fetch_positions`` — spot venues have no positions to report.
+    * ``fetch_order_by_client_order_id`` — the way out of ``UNKNOWN``, which a
+      venue that cannot look an order up by our id simply does not offer.
+    * ``on_reconnect`` — only a socket-backed venue has a reconnect to hear
+      about.
+
+    Each is asked for with ``hasattr`` where it is used. That replaces two
+    workarounds the old interface forced: comparing an implementation against
+    the base class to see whether it was real, and catching
+    ``NotImplementedError`` to discover the same thing a call too late.
+    """
+
+    name: str
+
+    async def connect(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def place_order(self, request: PlaceOrderRequest) -> Order: ...
+
+    async def cancel_by_client_order_id(self, client_order_id: str) -> Order: ...
+
+    async def fetch_open_orders(
+        self, symbol: str | None = None
+    ) -> list[Order]: ...
+
+    async def fetch_balances(self) -> list[Balance]: ...
+
+    def stream_orders(self) -> AsyncIterator[Order]: ...
+
+    def stream_fills(self) -> AsyncIterator[Fill]: ...
+
+    def stream_balances(self) -> AsyncIterator[Balance]: ...
+
+
 class Session:
     """Shared exchange session keyed by API id.
 
@@ -74,7 +118,7 @@ class Session:
         *,
         api_id: int,
         broker: Broker,
-        private: PrivateClient,
+        private: TradingConnector,
         oms: Oms | None = None,
         symbols: SymbolClient | None = None,
         ledger: Ledger | None = None,
@@ -159,8 +203,12 @@ class Session:
             ),
         ]
         # A dead socket looks exactly like a quiet venue, so rebuild from the
-        # venue rather than trusting a book that stopped updating.
-        self.private.on_reconnect(self._on_venue_reconnect)
+        # venue rather than trusting a book that stopped updating. Only a
+        # socket-backed venue has a reconnect to report; the rest simply have
+        # no such method.
+        on_reconnect = getattr(self.private, "on_reconnect", None)
+        if on_reconnect is not None:
+            on_reconnect(self._on_venue_reconnect)
         logger.info("Session started api_id=%s", self.api_id)
 
     async def _sweep_loop(self) -> None:
@@ -191,9 +239,12 @@ class Session:
             raise RuntimeError(f"session api_id={self.api_id} is destroyed")
         orders = await self.private.fetch_open_orders()
         balances = await self.private.fetch_balances()
+        # Spot venues have no positions to report and no method for them,
+        # which is a different thing from reporting none.
         positions: list[Position] | None = None
-        if type(self.private).fetch_positions is not PrivateClient.fetch_positions:
-            positions = list(await self.private.fetch_positions())
+        fetch_positions = getattr(self.private, "fetch_positions", None)
+        if fetch_positions is not None:
+            positions = list(await fetch_positions())
 
         view = self.oms.apply_reconcile(
             orders=orders,
@@ -385,11 +436,8 @@ class Session:
         cid = order.client_order_id
         if not cid:
             return None
-        try:
-            found = await self.private.fetch_order_by_client_order_id(
-                cid, symbol=order.symbol
-            )
-        except NotImplementedError:
+        resolve = getattr(self.private, "fetch_order_by_client_order_id", None)
+        if resolve is None:
             logger.debug(
                 "TD venue %s cannot resolve by client_order_id; leaving "
                 "cid=%s UNKNOWN for recon",
@@ -397,6 +445,8 @@ class Session:
                 cid,
             )
             return None
+        try:
+            found = await resolve(cid, symbol=order.symbol)
         except Exception:
             logger.exception(
                 "TD resolve failed api_id=%s cid=%s", self.api_id, cid

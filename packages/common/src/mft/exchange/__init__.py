@@ -1,6 +1,6 @@
 """Exchange connectivity — venue adapters with public/private clients."""
 
-from mft.exchange.base import BaseClient, PrivateClient
+from mft.exchange.base import BaseClient
 from mft.exchange.errors import (
     ExchangeError,
     ExchangeNotConnectedError,
@@ -61,6 +61,8 @@ from mft.exchange.models import (
     is_pending,
     is_terminal,
     is_working,
+    limit_order,
+    market_order,
     next_statuses,
 )
 from mft.exchange.oms import LedgerView, OmsView, Position
@@ -112,6 +114,8 @@ __all__ = [
     "GateUserTrade",
     "GateWsError",
     "Instrument",
+    "limit_order",
+    "market_order",
     "InstrumentNotFoundError",
     "InsufficientBalanceError",
     "InvalidIntervalError",
@@ -142,7 +146,6 @@ __all__ = [
     "PaperPublicClient",
     "PlaceOrderRequest",
     "Position",
-    "PrivateClient",
     "Side",
     "Ticker",
     "TimeInForce",

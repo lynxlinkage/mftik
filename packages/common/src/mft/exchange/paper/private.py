@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from mft.exchange.base import PrivateClient
+from mft.exchange.base import BaseClient
 from mft.exchange.errors import ExchangeError, OrderError
 from mft.exchange.models import Balance, Fill, Order, PlaceOrderRequest
 from mft.exchange.stream import EventStream
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from mft.exchange.paper.engine import PaperExchange
 
 
-class PaperPrivateClient(PrivateClient):
+class PaperPrivateClient(BaseClient):
     """Fake private venue client authenticated by api_key / api_secret.
 
     Each distinct ``api_key`` maps to an isolated paper account on the shared

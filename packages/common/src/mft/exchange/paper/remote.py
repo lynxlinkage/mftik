@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from mft.broker import Broker
-from mft.exchange.base import PrivateClient
+from mft.exchange.base import BaseClient
 from mft.exchange.errors import (
     ExchangeError,
     InsufficientBalanceError,
@@ -38,8 +38,13 @@ from mft.protocol import (
 )
 
 
-class PaperRemotePrivateClient(PrivateClient):
-    """``PrivateClient`` adapter over paper-engine RPC + pub/sub streams."""
+class PaperRemotePrivateClient(BaseClient):
+    """The paper trading connector for other processes: engine RPC + streams.
+
+    No ``fetch_order_by_client_order_id``: the engine answers by venue order
+    id, and TD leaves an order it cannot resolve ``UNKNOWN`` for recon to
+    settle. Absent rather than raising, so the caller can tell before asking.
+    """
 
     name = "paper"
 

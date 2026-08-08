@@ -394,3 +394,49 @@ class PlaceOrderRequest(BaseModel):
                 f"got {self.type}"
             )
         return self
+
+
+def market_order(
+    *,
+    symbol: str,
+    side: Side,
+    qty: Decimal,
+    client_order_id: str | None = None,
+    **extra: Any,
+) -> PlaceOrderRequest:
+    """A market :class:`PlaceOrderRequest`, spelled once.
+
+    A builder rather than a method on a venue client. Filling in ``type`` is
+    the same job at every venue, so it is nobody's implementation — and a
+    connector that had to carry it would be carrying a shared interface's worth
+    of convenience it never chose.
+    """
+    return PlaceOrderRequest(
+        symbol=symbol,
+        side=side,
+        type=OrderType.MARKET,
+        qty=qty,
+        client_order_id=client_order_id,
+        **extra,
+    )
+
+
+def limit_order(
+    *,
+    symbol: str,
+    side: Side,
+    qty: Decimal,
+    price: Decimal,
+    client_order_id: str | None = None,
+    **extra: Any,
+) -> PlaceOrderRequest:
+    """A limit :class:`PlaceOrderRequest` — see :func:`market_order`."""
+    return PlaceOrderRequest(
+        symbol=symbol,
+        side=side,
+        type=OrderType.LIMIT,
+        qty=qty,
+        price=price,
+        client_order_id=client_order_id,
+        **extra,
+    )

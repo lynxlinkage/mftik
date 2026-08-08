@@ -7,7 +7,7 @@ import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange
-from mft.exchange.models import Side, is_terminal
+from mft.exchange.models import Side, is_terminal, limit_order
 from mft.protocol import (
     ReconDone,
     StsCreateSessionRequest,
@@ -69,12 +69,12 @@ async def test_recon_handshake_and_strategy_oms(broker: Broker) -> None:
         api_key="paper-key-1", api_secret="sec-1", auto_register=False
     )
     await priv.connect()
-    await priv.place_limit_order(
+    await priv.place_order(limit_order(
         symbol="BTCUSDT",
         side=Side.BUY,
         qty=Decimal("0.01"),
         price=Decimal("1000"),
-    )
+    ))
     await priv.close()
 
     sts = StsSessionManager(

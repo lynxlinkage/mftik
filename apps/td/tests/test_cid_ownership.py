@@ -11,7 +11,7 @@ import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange, Side
-from mft.exchange.models import OrderStatus, OrderType
+from mft.exchange.models import OrderStatus, OrderType, limit_order
 from mft.protocol import (
     STS_LEASE_HEARTBEAT,
     STS_ORDER_CANCEL,
@@ -232,13 +232,13 @@ async def test_unowned_cid_is_cancelable(broker: Broker, two_sessions) -> None:
     assert session is not None
 
     cid = "2001"
-    await session.private.place_limit_order(
+    await session.private.place_order(limit_order(
         symbol="BTCUSDT",
         side=Side.BUY,
         qty=Decimal("0.01"),
         price=Decimal("1000"),
         client_order_id=cid,
-    )
+    ))
     await asyncio.sleep(0.1)
     assert cid not in manager._accounts[API_ID].cid_owner
 

@@ -7,7 +7,7 @@ import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange, Side
-from mft.exchange.models import OrderStatus
+from mft.exchange.models import OrderStatus, limit_order
 from mft.protocol import (
     STS_LEASE_HEARTBEAT,
     Envelope,
@@ -77,12 +77,12 @@ async def test_oms_updates_from_session_callbacks(
     await session.start()
 
     private = session.private
-    order = await private.place_limit_order(
+    order = await private.place_order(limit_order(
         symbol="BTCUSDT",
         side=Side.BUY,
         qty=Decimal("0.01"),
         price=Decimal("1000"),
-    )
+    ))
     await asyncio.sleep(0.05)
 
     view = session.oms.view()

@@ -14,6 +14,8 @@ from mft.exchange import (
     PlaceOrderRequest,
     Side,
     TimeInForce,
+    limit_order,
+    market_order,
 )
 
 
@@ -42,18 +44,18 @@ async def _seed_book(exchange: PaperExchange) -> None:
         api_key="maker", api_secret="secret-for-maker", auto_register=False
     )
     await maker.connect()
-    await maker.place_limit_order(
+    await maker.place_order(limit_order(
         symbol="BTCUSDT",
         side=Side.BUY,
         qty=Decimal("10"),
         price=Decimal("49999"),
-    )
-    await maker.place_limit_order(
+    ))
+    await maker.place_order(limit_order(
         symbol="BTCUSDT",
         side=Side.SELL,
         qty=Decimal("10"),
         price=Decimal("50001"),
-    )
+    ))
     await maker.close()
 
 
@@ -136,11 +138,11 @@ async def test_private_market_order_and_streams(exchange: PaperExchange) -> None
     await asyncio.sleep(0.05)
 
     before = {b.asset: b.free for b in await private.fetch_balances()}
-    order = await private.place_market_order(
+    order = await private.place_order(market_order(
         symbol="BTCUSDT",
         side=Side.BUY,
         qty=Decimal("0.01"),
-    )
+    ))
     assert order.status is OrderStatus.FILLED
     assert order.filled_qty == Decimal("0.01")
     assert order.avg_price is not None
@@ -284,9 +286,9 @@ async def test_public_and_private_share_engine(exchange: PaperExchange) -> None:
 
     task = asyncio.create_task(reader())
     await asyncio.sleep(0.05)
-    await private.place_market_order(
+    await private.place_order(market_order(
         symbol="BTCUSDT", side=Side.SELL, qty=Decimal("0.01")
-    )
+    ))
     trade = await asyncio.wait_for(trade_fut, timeout=2)
     assert trade.symbol == "BTCUSDT"
     assert trade.side is Side.SELL
@@ -304,12 +306,12 @@ async def test_cross_account_match(exchange: PaperExchange) -> None:
 
     taker = _private(exchange, "taker")
     await taker.connect()
-    order = await taker.place_limit_order(
+    order = await taker.place_order(limit_order(
         symbol="BTCUSDT",
         side=Side.BUY,
         qty=Decimal("1"),
         price=Decimal("50001"),
-    )
+    ))
     assert order.status is OrderStatus.FILLED
     assert order.avg_price == Decimal("50001")
     bals = {b.asset: b.free for b in await taker.fetch_balances()}
@@ -325,9 +327,9 @@ async def test_api_key_isolates_accounts(exchange: PaperExchange) -> None:
     await a.connect()
     await b.connect()
 
-    await a.place_market_order(
+    await a.place_order(market_order(
         symbol="BTCUSDT", side=Side.BUY, qty=Decimal("0.01")
-    )
+    ))
     bal_a = {x.asset: x.free for x in await a.fetch_balances()}
     bal_b = {x.asset: x.free for x in await b.fetch_balances()}
     assert bal_a["BTC"] != bal_b["BTC"]
@@ -431,12 +433,12 @@ async def _seed_thin_ask(
         api_key="thin", api_secret="secret-for-thin", auto_register=False
     )
     await maker.connect()
-    await maker.place_limit_order(
+    await maker.place_order(limit_order(
         symbol="BTCUSDT",
         side=Side.SELL,
         qty=Decimal(qty),
         price=Decimal(price),
-    )
+    ))
     await maker.close()
 
 

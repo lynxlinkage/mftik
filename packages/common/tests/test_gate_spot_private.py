@@ -1,4 +1,4 @@
-"""Gate spot as a PrivateClient — order entry over WS, recon over REST."""
+"""The gate_spot trading connector — order entry over WS, recon over REST."""
 
 from __future__ import annotations
 

@@ -7,7 +7,7 @@ import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange, Side
-from mft.exchange.models import OrderStatus, OrderType, PlaceOrderRequest
+from mft.exchange.models import OrderStatus, OrderType, PlaceOrderRequest, limit_order
 from mft.exchange.paper.remote import PaperRemotePrivateClient
 from mft_paper.app import RedisEventBridge
 from mft_paper.rpc import dispatch
@@ -67,12 +67,12 @@ async def test_remote_private_place_cancel(broker: Broker) -> None:
     await private.connect()
 
     # Resting below ask — does not cross.
-    order = await private.place_limit_order(
+    order = await private.place_order(limit_order(
         symbol="BTCUSDT",
         side=Side.BUY,
         qty=Decimal("1"),
         price=Decimal("50000"),
-    )
+    ))
     assert order.status is OrderStatus.NEW
     assert order.client_order_id
 
@@ -80,12 +80,12 @@ async def test_remote_private_place_cancel(broker: Broker) -> None:
     assert canceled.status is OrderStatus.CANCELED
 
     # Cross the seeded ask — fills against paper-key-2.
-    filled = await private.place_limit_order(
+    filled = await private.place_order(limit_order(
         symbol="BTCUSDT",
         side=Side.BUY,
         qty=Decimal("1"),
         price=Decimal("50001"),
-    )
+    ))
     assert filled.status is OrderStatus.FILLED
 
     bals = {b.asset: b.free for b in await private.fetch_balances()}

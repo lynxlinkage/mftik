@@ -1,4 +1,8 @@
-"""Gate spot as a TD :class:`PrivateClient`.
+"""The gate_spot trading connector.
+
+Not an implementation of a shared trading interface — there is none; see
+:mod:`mft.exchange.base`. It resembles the other venues' connectors because
+the same questions get asked of every venue, not because anything enforces it.
 
 Composes the two transports Gate actually offers:
 
@@ -20,7 +24,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from mft.exchange.base import PrivateClient
+from mft.exchange.base import BaseClient
 from mft.exchange.errors import OrderError
 from mft.exchange.gate.spot.client import GATE_SPOT_WS_URL, GateSpotWebSocket
 from mft.exchange.gate.spot.models import to_text
@@ -65,7 +69,7 @@ _TIF: dict[TimeInForce, str] = {
 }
 
 
-class GateSpotPrivateClient(PrivateClient):
+class GateSpotPrivateClient(BaseClient):
     """Gate spot trading account for TD.
 
     Symbols cross this boundary in canonical form (``BTCUSDT``) and are

@@ -7,7 +7,14 @@ import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange, Side
-from mft.exchange.models import Balance, Fill, Order, OrderStatus, OrderType
+from mft.exchange.models import (
+    Balance,
+    Fill,
+    Order,
+    OrderStatus,
+    OrderType,
+    limit_order,
+)
 from mft.protocol import (
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
@@ -114,18 +121,18 @@ async def _boot(
         api_key="maker", api_secret="maker-sec", auto_register=False
     )
     await maker.connect()
-    await maker.place_limit_order(
+    await maker.place_order(limit_order(
         symbol="BTCUSDT",
         side=Side.BUY,
         qty=Decimal("10"),
         price=Decimal("49999"),
-    )
-    await maker.place_limit_order(
+    ))
+    await maker.place_order(limit_order(
         symbol="BTCUSDT",
         side=Side.SELL,
         qty=Decimal("10"),
         price=Decimal("50001"),
-    )
+    ))
     await maker.close()
     await paper.start()
     paper_factory = PaperSessionFactory(broker, paper)
