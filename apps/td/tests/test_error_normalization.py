@@ -30,8 +30,8 @@ from mft.protocol.reject_codes import (
 )
 from mft_td.errors import VENUES, normalize
 
-GATE = "gate_spot"
-PAPER = "paper"
+GATE = "Gate"
+PAPER = "Paper"
 
 
 # --- band 2: venue errors we recognise -------------------------------------

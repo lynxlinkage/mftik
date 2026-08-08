@@ -53,7 +53,7 @@ class VenueErrors:
 #: Gate spot. Labels come from the ``label`` field on a REST error body; the
 #: ones here are what ``/spot/candlesticks`` and its neighbours actually
 #: answer with.
-GATE_SPOT = VenueErrors(
+GATE = VenueErrors(
     labels={
         # instrument
         "INVALID_CURRENCY_PAIR": QueryCode.VENUE_SYMBOL_NOT_FOUND,
@@ -88,8 +88,8 @@ PAPER = VenueErrors()
 #: Keyed by ``venues`` canonical name, which is also what a public client
 #: reports as its ``name``.
 VENUES: dict[str, VenueErrors] = {
-    "gate_spot": GATE_SPOT,
-    "paper": PAPER,
+    "Gate": GATE,
+    "Paper": PAPER,
 }
 
 #: Typed errors, for the refusals that never reach a venue at all. Checked
@@ -152,7 +152,7 @@ def normalize(exc: BaseException, *, venue: str) -> int | str:
 
 __all__ = [
     "BY_TYPE",
-    "GATE_SPOT",
+    "GATE",
     "PAPER",
     "VENUES",
     "VenueErrors",

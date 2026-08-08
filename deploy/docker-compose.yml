@@ -40,7 +40,7 @@ services:
     profiles: ["tools"]
 
   # One-shot: dev user (MFT_DEFAULT_USER_ID=1) + the two paper API rows, plus a
-  # gate_spot row when GATE_SPOT_API_KEY/SECRET are set. Idempotent.
+  # Gate row when GATE_SPOT_API_KEY/SECRET are set. Idempotent.
   seed:
     <<: *mft
     restart: "no"

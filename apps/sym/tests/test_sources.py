@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from mft.exchange.tickers import Category
 from mft_sym.sources import PaperInstrumentSource, tick_from_precision
 from mft_sym.sources.gate import GateSpotInstrumentSource
 
@@ -73,7 +74,8 @@ async def test_gate_rows_become_canonical_instruments() -> None:
     assert btc.base == "BTC"
     assert btc.quote == "USDT"
     assert btc.exch_ticker == "BTC_USDT"
-    assert btc.category == "spot"
+    assert str(btc.ticker) == "Gate_Spot_BTCUSDT"
+    assert btc.category is Category.SPOT
     assert btc.is_active
 
 

@@ -9,6 +9,7 @@ from mft.exchange.base import BaseClient
 from mft.exchange.errors import ExchangeError, OrderError
 from mft.exchange.models import Balance, Fill, Order, PlaceOrderRequest
 from mft.exchange.stream import EventStream
+from mft.exchange.tickers import Category
 
 if TYPE_CHECKING:
     from mft.exchange.paper.engine import PaperExchange
@@ -21,7 +22,8 @@ class PaperPrivateClient(BaseClient):
     :class:`PaperExchange` engine.
     """
 
-    name = "paper"
+    name = "Paper"
+    category = Category.SPOT
 
     def __init__(
         self,

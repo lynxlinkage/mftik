@@ -48,16 +48,16 @@ async def test_gate_spot_venue_builds_a_gate_public_client(
     broker: Broker,
 ) -> None:
     factory = VenuePublicFactory(broker)
-    client = await factory.create("gate_spot")
+    client = await factory.create("Gate")
     assert isinstance(client, GateSpotPublicClient)
-    assert client.name == "gate_spot"
+    assert client.name == "Gate"
     # Public market data only — the socket carries no credentials.
     assert not client.ws.authenticated
 
 
 async def test_venue_name_is_normalized(broker: Broker) -> None:
     factory = VenuePublicFactory(broker)
-    client = await factory.create("  GATE_SPOT ")
+    client = await factory.create("  gate ")
     assert isinstance(client, GateSpotPublicClient)
 
 
@@ -73,9 +73,9 @@ async def test_registered_venue_without_a_client_is_rejected(
     """A venue TD can trade but MD cannot read must fail at create."""
     from mft.exchange import venues
 
-    binance = venues.Venue(name="binance_spot", label="Binance Spot")
+    binance = venues.Venue(name="Binance", label="Binance Spot")
     monkeypatch.setitem(venues.VENUES, binance.name, binance)
 
     factory = VenuePublicFactory(broker)
     with pytest.raises(ExchangeError, match="no public client"):
-        await factory.create("binance_spot")
+        await factory.create("Binance")

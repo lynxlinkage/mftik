@@ -8,8 +8,13 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mft_db.models.symbol import SymbolCategory, SymbolFilter, SymbolTicker
+from mft_db.models.symbol import SymbolFilter, SymbolTicker
 from mft_db.repositories.base import BaseRepository
+
+#: What separates the parts of a universal ticker — and, awkwardly, also the
+#: single-character wildcard in SQL ``LIKE``. Every pattern built from it goes
+#: through ``autoescape=True`` so ``Gate_Spot_`` cannot match ``GateXSpotY``.
+SEPARATOR = "_"
 
 
 class SymbolRepository(BaseRepository[SymbolTicker]):
@@ -20,18 +25,10 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
 
     # --- reads -------------------------------------------------------------
 
-    async def get_ticker(
-        self,
-        *,
-        venue: str,
-        symbol: str,
-        category: str = SymbolCategory.SPOT.value,
-    ) -> SymbolTicker | None:
+    async def get_ticker(self, universal_ticker: str) -> SymbolTicker | None:
         result = await self.session.execute(
             select(SymbolTicker).where(
-                SymbolTicker.venue == venue,
-                SymbolTicker.symbol == symbol,
-                SymbolTicker.category == category,
+                SymbolTicker.universal_ticker == universal_ticker
             )
         )
         return result.scalar_one_or_none()
@@ -41,20 +38,22 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
         *,
         venue: str | None = None,
         category: str | None = None,
+        symbol: str | None = None,
         active_only: bool = True,
     ) -> Sequence[SymbolTicker]:
+        """Instruments matching the given parts of a ticker.
+
+        Every filter is a pattern over the one identity column. Naming a venue
+        (with or without a category) gives a left-anchored prefix, which the
+        index serves; the rest are unanchored and scan, which is fine because
+        nothing on a hot path asks for "every Perp everywhere".
+        """
         stmt = select(SymbolTicker)
-        if venue is not None:
-            stmt = stmt.where(SymbolTicker.venue == venue)
-        if category is not None:
-            stmt = stmt.where(SymbolTicker.category == category)
+        for clause in _match(venue, category, symbol):
+            stmt = stmt.where(clause)
         if active_only:
             stmt = stmt.where(SymbolTicker.is_active.is_(True))
-        stmt = stmt.order_by(
-            SymbolTicker.venue.asc(),
-            SymbolTicker.category.asc(),
-            SymbolTicker.symbol.asc(),
-        )
+        stmt = stmt.order_by(SymbolTicker.universal_ticker.asc())
         result = await self.session.execute(stmt)
         return result.scalars().unique().all()
 
@@ -73,7 +72,7 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
         """Filter rows for many instruments at once, grouped by ticker id.
 
         Building a whole venue table must use this rather than looping over
-        ``list_filters``: gate_spot lists 2200+ pairs, and one round trip per
+        ``list_filters``: Gate lists 2200+ pairs, and one round trip per
         instrument to a database on another host takes tens of seconds — well
         past the caller's RPC timeout. Ids absent from the result simply have
         no filters.
@@ -91,19 +90,28 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
         return grouped
 
     async def venues(self) -> list[str]:
+        """Distinct venues present in the table.
+
+        Split in Python rather than in SQL: the identity is one column now, and
+        the string functions that would carve a venue out of it differ between
+        PostgreSQL and the SQLite the tests run on. This is not on a hot path.
+        """
         result = await self.session.execute(
-            select(SymbolTicker.venue).distinct().order_by(SymbolTicker.venue)
+            select(SymbolTicker.universal_ticker).distinct()
         )
-        return list(result.scalars().all())
+        found = {
+            value.split(SEPARATOR, 1)[0]
+            for value in result.scalars().all()
+            if SEPARATOR in value
+        }
+        return sorted(found)
 
     # --- writes ------------------------------------------------------------
 
     async def upsert(
         self,
         *,
-        venue: str,
-        symbol: str,
-        category: str,
+        universal_ticker: str,
         base: str,
         quote: str,
         exch_ticker: str,
@@ -119,13 +127,9 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
         removes that row, and one whose bound changed is updated in place, so
         ``symbol_filter.id`` stays stable for anything referencing it.
         """
-        ticker = await self.get_ticker(
-            venue=venue, symbol=symbol, category=category
-        )
+        ticker = await self.get_ticker(universal_ticker)
         if ticker is None:
-            ticker = SymbolTicker(
-                venue=venue, symbol=symbol, category=category
-            )
+            ticker = SymbolTicker(universal_ticker=universal_ticker)
             self.session.add(ticker)
 
         ticker.base = base
@@ -159,20 +163,39 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
     ) -> int:
         """Flag instruments the venue no longer lists. Returns how many.
 
+        Scoped to one ``venue``/``category`` because that is what a source
+        refreshes — a Bybit spot pull says nothing about Bybit perps, and
+        must not delist them. ``keep`` holds universal tickers.
+
         Delisted rows stay: sessions, orders and audit history still reference
         them, and a symbol can come back.
         """
-        result = await self.session.execute(
-            select(SymbolTicker).where(
-                SymbolTicker.venue == venue,
-                SymbolTicker.category == category,
-                SymbolTicker.is_active.is_(True),
-            )
-        )
+        stmt = select(SymbolTicker).where(SymbolTicker.is_active.is_(True))
+        for clause in _match(venue, category, None):
+            stmt = stmt.where(clause)
+        result = await self.session.execute(stmt)
         count = 0
         for ticker in result.scalars().unique().all():
-            if ticker.symbol not in keep:
+            if ticker.universal_ticker not in keep:
                 ticker.is_active = False
                 count += 1
         await self.session.flush()
         return count
+
+
+def _match(venue: str | None, category: str | None, symbol: str | None) -> list:
+    """LIKE clauses over ``universal_ticker`` for whichever parts were named."""
+    column = SymbolTicker.universal_ticker
+    clauses = []
+    if venue is not None and category is not None:
+        prefix = f"{venue}{SEPARATOR}{category}{SEPARATOR}"
+        clauses.append(column.startswith(prefix, autoescape=True))
+    elif venue is not None:
+        clauses.append(column.startswith(f"{venue}{SEPARATOR}", autoescape=True))
+    elif category is not None:
+        clauses.append(
+            column.contains(f"{SEPARATOR}{category}{SEPARATOR}", autoescape=True)
+        )
+    if symbol is not None:
+        clauses.append(column.endswith(f"{SEPARATOR}{symbol}", autoescape=True))
+    return clauses

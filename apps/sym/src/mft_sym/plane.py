@@ -81,9 +81,7 @@ class SymbolPlane:
                 seen: set[str] = set()
                 for inst in instruments:
                     await self._upsert(
-                        venue=inst.venue,
-                        symbol=inst.symbol,
-                        category=inst.category,
+                        universal_ticker=str(inst.ticker),
                         base=inst.base,
                         quote=inst.quote,
                         exch_ticker=inst.exch_ticker,
@@ -94,10 +92,12 @@ class SymbolPlane:
                         is_active=inst.is_active,
                     )
                     if inst.is_active:
-                        seen.add(inst.symbol)
+                        seen.add(str(inst.ticker))
 
                 gone = await self._deactivate(
-                    venue=source.venue, category=source.category, keep=seen
+                    venue=source.venue,
+                    category=source.category.value,
+                    keep=seen,
                 )
                 refreshed[source.venue] = len(instruments)
                 deactivated[source.venue] = gone
@@ -134,18 +134,22 @@ class SymbolPlane:
     async def list_symbols(
         self,
         *,
+        universal_ticker: str | None = None,
         venue: str | None = None,
         category: str | None = None,
         symbol: str | None = None,
         active_only: bool = True,
     ) -> list[SymbolInfo]:
         rows = await self._list_tickers(
-            venue=venue, category=category, active_only=active_only
+            venue=venue,
+            category=category,
+            symbol=symbol,
+            active_only=active_only,
         )
-        if symbol is not None:
-            rows = [row for row in rows if row.symbol == symbol]
+        if universal_ticker is not None:
+            rows = [r for r in rows if r.universal_ticker == universal_ticker]
         # One query for every instrument's filters rather than one per
-        # instrument. A gate_spot table is 2200+ rows; fanning that out to a
+        # instrument. A Gate table is 2200+ rows; fanning that out to a
         # database on another host costs ~14s, and the RPC client gives up
         # after 5s — so the venue was simply unusable from td/md.
         filters = await self._list_filters_for([row.id for row in rows])
@@ -156,15 +160,14 @@ class SymbolPlane:
         rows = await self._list_tickers(active_only=True)
         totals: dict[str, int] = {venue: 0 for venue in self.venues}
         for row in rows:
-            totals[row.venue] = totals.get(row.venue, 0) + 1
+            venue = str(row.universal_ticker).split("_", 1)[0]
+            totals[venue] = totals.get(venue, 0) + 1
         return totals
 
     def _to_info(self, row: Any, rows: Sequence[Any]) -> SymbolInfo:
         filters = [SymbolFilterInfo(name=f.name, value=f.value) for f in rows]
         return SymbolInfo(
-            venue=row.venue,
-            symbol=row.symbol,
-            category=row.category,
+            universal_ticker=row.universal_ticker,
             base=row.base,
             quote=row.quote,
             exch_ticker=row.exch_ticker,

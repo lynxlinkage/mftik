@@ -44,7 +44,8 @@ from mft.exchange.models import (
     Trade,
 )
 from mft.exchange.stream import EventStream
-from mft.exchange.symbols import SymbolResolver, canonical
+from mft.exchange.symbols import SymbolResolver
+from mft.exchange.tickers import UniversalTicker
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +94,18 @@ class GateSpotPublicClient(BaseClient):
 
         client = GateSpotPublicClient(symbols=symbol_client)
         async with client:
-            async for book in client.stream_order_book("BTCUSDT"):
+            ticker = UniversalTicker.parse("Gate_Spot_BTCUSDT")
+            async for book in client.stream_order_book(ticker):
                 ...
+
+    Reads take a :class:`~mft.exchange.tickers.UniversalTicker` rather than a
+    symbol. Gate spot has one category and could have got by on the symbol
+    alone, but the market is the instrument's property on a unified venue, and
+    a connector interface that only works for classic ones is one MD would
+    have to branch around.
     """
 
-    name = "gate_spot"
+    name = "Gate"
 
     def __init__(
         self,
@@ -125,7 +133,7 @@ class GateSpotPublicClient(BaseClient):
         await self.ws.connect()
         await self.rest.connect()
         self._connected = True
-        logger.info("gate_spot public connected")
+        logger.info("Gate public connected")
 
     async def close(self) -> None:
         self._connected = False
@@ -143,20 +151,22 @@ class GateSpotPublicClient(BaseClient):
         self._ensure_connected()
         return await self.rest.fetch_instruments()
 
-    async def fetch_ticker(self, symbol: str) -> Ticker:
+    async def fetch_ticker(self, ticker: UniversalTicker) -> Ticker:
         self._ensure_connected()
-        symbol, pair = await self._resolve(symbol)
-        ticker = await self.rest.fetch_ticker(pair)
-        return ticker.model_copy(update={"symbol": symbol})
+        symbol, pair = await self._resolve(ticker)
+        row = await self.rest.fetch_ticker(pair)
+        return row.model_copy(update={"symbol": symbol})
 
-    async def fetch_order_book(self, symbol: str, *, depth: int = 10) -> OrderBook:
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int = 10
+    ) -> OrderBook:
         self._ensure_connected()
-        symbol, pair = await self._resolve(symbol)
+        symbol, pair = await self._resolve(ticker)
         book = await self.rest.fetch_order_book(pair, depth=depth)
         return book.model_copy(update={"symbol": symbol})
 
     async def fetch_klines(
-        self, symbol: str, interval: str, *, limit: int = 100
+        self, ticker: UniversalTicker, interval: str, *, limit: int = 100
     ) -> list[Kline]:
         """Recent candles, oldest first, in canonical symbol and interval.
 
@@ -170,10 +180,10 @@ class GateSpotPublicClient(BaseClient):
         gate_interval = GATE_INTERVALS.get(canonical_interval)
         if gate_interval is None:
             raise InvalidIntervalError(
-                f"gate_spot serves no {canonical_interval} candles; "
+                f"{self.name} serves no {canonical_interval} candles; "
                 f"supported: {sorted(GATE_INTERVALS)}"
             )
-        symbol, pair = await self._resolve(symbol)
+        symbol, pair = await self._resolve(ticker)
         klines = await self.rest.fetch_klines(pair, gate_interval, limit=limit)
         return [
             kline.model_copy(
@@ -184,44 +194,46 @@ class GateSpotPublicClient(BaseClient):
 
     # --- streams (WebSocket) -----------------------------------------------
 
-    def stream_ticker(self, symbol: str) -> AsyncIterator[Ticker]:
+    def stream_ticker(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         self._ensure_connected()
-        return self._tickers(symbol)
+        return self._tickers(ticker)
 
-    def stream_trades(self, symbol: str) -> AsyncIterator[Trade]:
+    def stream_trades(self, ticker: UniversalTicker) -> AsyncIterator[Trade]:
         self._ensure_connected()
-        return self._trades(symbol)
+        return self._trades(ticker)
 
-    def stream_order_book(self, symbol: str) -> AsyncIterator[OrderBook]:
+    def stream_order_book(self, ticker: UniversalTicker) -> AsyncIterator[OrderBook]:
         self._ensure_connected()
-        return self._order_books(symbol)
+        return self._order_books(ticker)
 
-    def stream_kline(self, symbol: str, interval: str) -> AsyncIterator[Kline]:
+    def stream_kline(
+        self, ticker: UniversalTicker, interval: str
+    ) -> AsyncIterator[Kline]:
         self._ensure_connected()
-        return self._klines(symbol, interval)
+        return self._klines(ticker, interval)
 
-    def stream_best_quote(self, symbol: str) -> AsyncIterator[BestQuote]:
+    def stream_best_quote(self, ticker: UniversalTicker) -> AsyncIterator[BestQuote]:
         self._ensure_connected()
-        return self._best_quotes(symbol)
+        return self._best_quotes(ticker)
 
-    async def _tickers(self, symbol: str) -> AsyncIterator[Ticker]:
-        symbol, pair = await self._resolve(symbol)
+    async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
+        symbol, pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_tickers(pair)
         async for row in self._rows(stream):
             if row.currency_pair != pair:
                 continue
             yield row.to_ticker().model_copy(update={"symbol": symbol})
 
-    async def _trades(self, symbol: str) -> AsyncIterator[Trade]:
-        symbol, pair = await self._resolve(symbol)
+    async def _trades(self, ticker: UniversalTicker) -> AsyncIterator[Trade]:
+        symbol, pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_trades(pair)
         async for row in self._rows(stream):
             if row.currency_pair != pair:
                 continue
             yield row.to_trade().model_copy(update={"symbol": symbol})
 
-    async def _order_books(self, symbol: str) -> AsyncIterator[OrderBook]:
-        symbol, pair = await self._resolve(symbol)
+    async def _order_books(self, ticker: UniversalTicker) -> AsyncIterator[OrderBook]:
+        symbol, pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_order_book(
             pair, level=self.book_level, interval=self.book_interval
         )
@@ -230,8 +242,10 @@ class GateSpotPublicClient(BaseClient):
                 continue
             yield row.to_order_book().model_copy(update={"symbol": symbol})
 
-    async def _klines(self, symbol: str, interval: str) -> AsyncIterator[Kline]:
-        symbol, pair = await self._resolve(symbol)
+    async def _klines(
+        self, ticker: UniversalTicker, interval: str
+    ) -> AsyncIterator[Kline]:
+        symbol, pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_candlesticks(interval, pair)
         async for row in self._rows(stream):
             if row.currency_pair != pair or row.interval != interval:
@@ -252,8 +266,8 @@ class GateSpotPublicClient(BaseClient):
                 closed=row.w,
             )
 
-    async def _best_quotes(self, symbol: str) -> AsyncIterator[BestQuote]:
-        symbol, pair = await self._resolve(symbol)
+    async def _best_quotes(self, ticker: UniversalTicker) -> AsyncIterator[BestQuote]:
+        symbol, pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_book_ticker(pair)
         async for row in self._rows(stream):
             if row.s != pair:
@@ -285,16 +299,18 @@ class GateSpotPublicClient(BaseClient):
 
     # --- symbols -----------------------------------------------------------
 
-    async def _resolve(self, symbol: str) -> tuple[str, str]:
-        """``(canonical, venue pair)`` for one instrument.
+    async def _resolve(self, ticker: UniversalTicker) -> tuple[str, str]:
+        """``(canonical symbol, venue pair)`` for one instrument.
 
         Resolved once per stream rather than per message: the pair we
         subscribed with is the pair every message we keep carries, so there is
         nothing left to look up on the hot path.
         """
-        symbol = canonical(symbol)
-        pair = await self.symbols.exch_ticker(self.name, symbol, category="spot")
-        return symbol, pair
+        if ticker.venue != self.name:
+            raise ValueError(
+                f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return ticker.symbol, await self.symbols.exch_ticker(ticker)
 
 
 __all__ = ["GateSpotPublicClient"]

@@ -10,6 +10,7 @@ from typing import Any
 
 from mft.broker import Broker
 from mft.broker.request import IncomingRequest
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     MD_BESTQUOTE_RESULT,
     MD_FETCH_BESTQUOTE,
@@ -69,11 +70,12 @@ _KINDS: dict[str, _Kind] = {
         model=MdFetchKlines,
         read="fetch_klines",
         result_type=MD_KLINES_RESULT,
-        call=lambda read, req: read(req.symbol, req.interval, limit=req.limit),
+        call=lambda read, req: read(
+            _ticker(req), req.interval, limit=req.limit
+        ),
         result=lambda req, ok, answer, reason, code: MdKlinesResult(
             query_id=req.query_id,
-            venue=req.venue,
-            symbol=req.symbol,
+            ticker=req.ticker,
             interval=req.interval,
             ok=ok,
             klines=list(answer or ()),
@@ -85,11 +87,10 @@ _KINDS: dict[str, _Kind] = {
         model=MdFetchOrderBook,
         read="fetch_order_book",
         result_type=MD_ORDERBOOK_RESULT,
-        call=lambda read, req: read(req.symbol, depth=req.depth),
+        call=lambda read, req: read(_ticker(req), depth=req.depth),
         result=lambda req, ok, answer, reason, code: MdOrderBookResult(
             query_id=req.query_id,
-            venue=req.venue,
-            symbol=req.symbol,
+            ticker=req.ticker,
             ok=ok,
             book=answer,
             reason=reason,
@@ -100,11 +101,10 @@ _KINDS: dict[str, _Kind] = {
         model=MdFetchBestQuote,
         read="fetch_best_quote",
         result_type=MD_BESTQUOTE_RESULT,
-        call=lambda read, req: read(req.symbol),
+        call=lambda read, req: read(_ticker(req)),
         result=lambda req, ok, answer, reason, code: MdBestQuoteResult(
             query_id=req.query_id,
-            venue=req.venue,
-            symbol=req.symbol,
+            ticker=req.ticker,
             ok=ok,
             quote=answer,
             reason=reason,
@@ -112,6 +112,15 @@ _KINDS: dict[str, _Kind] = {
         ),
     ),
 }
+
+
+def _ticker(req: MdFetchRequest) -> UniversalTicker:
+    """The request's instrument, parsed once per use.
+
+    Strict — a query naming ``gate_spot_btcusdt`` is refused rather than
+    guessed at, and the refusal reaches the caller as a normal query failure.
+    """
+    return UniversalTicker.parse(req.ticker)
 
 
 class FetchSession:
@@ -304,26 +313,25 @@ class FetchSession:
 
     async def _run(self, kind: _Kind, req: MdFetchRequest) -> None:
         """Answer one query, and publish the result however it turns out."""
+        venue = ""
         try:
-            reader = await self._reader(req.venue)
+            venue = _ticker(req).venue
+            reader = await self._reader(venue)
             read = getattr(reader, kind.read, None)
             if read is None:
                 # Same rule as the feeds: a venue that cannot serve a read has
                 # no method for it, and is refused by name rather than by
                 # calling something that raises.
-                raise NoReaderError(
-                    f"venue {req.venue!r} does not serve {kind.read}"
-                )
+                raise NoReaderError(f"venue {venue!r} does not serve {kind.read}")
             answer = await kind.call(read, req)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            error_code = normalize_query_error(exc, venue=req.venue)
+            error_code = normalize_query_error(exc, venue=venue)
             logger.warning(
-                "MD fetch failed query_id=%s venue=%s %s %s: %s",
+                "MD fetch failed query_id=%s ticker=%s %s: %s",
                 req.query_id,
-                req.venue,
-                req.symbol,
+                req.ticker,
                 kind.read,
                 describe(error_code),
             )

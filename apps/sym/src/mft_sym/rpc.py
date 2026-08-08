@@ -37,6 +37,7 @@ async def handle_list(req: IncomingRequest, *, plane: SymbolPlane) -> None:
         return
     try:
         symbols = await plane.list_symbols(
+            universal_ticker=payload.universal_ticker,
             venue=payload.venue,
             category=payload.category,
             symbol=payload.symbol,

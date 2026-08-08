@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from mft.exchange.models import OrderBook, Ticker, Trade
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     MD_BEST_QUOTE,
     MD_KLINE,
@@ -34,36 +35,44 @@ class MarketDataConnector(Protocol):
     method rather than one that raises — :meth:`VenueSession._open` looks for
     them and refuses the subscribe when they are missing, which is the same
     answer one venue short of the full set was always going to give.
+
+    Streams are opened on a :class:`~mft.exchange.tickers.UniversalTicker`, not
+    a symbol. A unified-account venue is one connector serving several markets,
+    and ``BTCUSDT`` alone does not say whether the spot book or the perp was
+    meant.
     """
 
     async def connect(self) -> None: ...
 
     async def close(self) -> None: ...
 
-    def stream_ticker(self, symbol: str) -> AsyncIterator[Ticker]: ...
+    def stream_ticker(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]: ...
 
-    def stream_trades(self, symbol: str) -> AsyncIterator[Trade]: ...
+    def stream_trades(self, ticker: UniversalTicker) -> AsyncIterator[Trade]: ...
 
-    def stream_order_book(self, symbol: str) -> AsyncIterator[OrderBook]: ...
+    def stream_order_book(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[OrderBook]: ...
 
 
 TOPIC_ORDERBOOK = "orderbook"
 TOPIC_TICKER = "ticker"
 TOPIC_TRADE = "trade"
 TOPIC_BEST_QUOTE = "bestquote"
-#: Klines need an interval, and a feed key is only ``venue.topic.symbol`` — so
-#: the interval rides in the topic: ``paper.kline_1m.BTCUSDT``.
+#: Klines need an interval, and a feed key is only ``topic.ticker`` — so the
+#: interval rides in the topic: ``kline_1m.Paper_Spot_BTCUSDT``. The split is
+#: on ``.``, so the underscore here is not ambiguous with the ticker's.
 KLINE_PREFIX = "kline_"
 
-OnUpdate = Callable[[str, str, str, UntypedEnvelope], Awaitable[None]]
+OnUpdate = Callable[[str, UniversalTicker, UntypedEnvelope], Awaitable[None]]
 
 
 @dataclass
 class Feed:
-    """One active (topic, symbol) stream on a venue."""
+    """One active (topic, ticker) stream on a venue."""
 
     topic: str
-    symbol: str
+    ticker: UniversalTicker
     task: asyncio.Task[None] | None = None
     stop: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -81,7 +90,7 @@ class VenueSession:
         self.venue = venue
         self.public = public
         self._on_update = on_update
-        self._feeds: dict[tuple[str, str], Feed] = {}
+        self._feeds: dict[tuple[str, UniversalTicker], Feed] = {}
         self._started = False
 
     @property
@@ -103,41 +112,31 @@ class VenueSession:
             self._started = False
         logger.info("MD venue stopped venue=%s", self.venue)
 
-    async def ensure_feed(self, topic: str, symbol: str) -> None:
-        key = (topic, symbol)
+    async def ensure_feed(self, topic: str, ticker: UniversalTicker) -> None:
+        key = (topic, ticker)
         if key in self._feeds:
             return
         # Opened here rather than inside the task so an unsupported topic or a
         # venue that does not publish this feed fails the subscribe call
         # instead of dying silently in a background pump.
-        source, msg_type = self._open(topic, symbol)
-        feed = Feed(topic=topic, symbol=symbol)
+        source, msg_type = self._open(topic, ticker)
+        feed = Feed(topic=topic, ticker=ticker)
         feed.task = asyncio.create_task(
             self._pump(feed, source, msg_type),
-            name=f"md-{self.venue}-{topic}-{symbol}",
+            name=f"md-{topic}-{ticker}",
         )
         self._feeds[key] = feed
-        logger.info(
-            "MD feed started venue=%s topic=%s symbol=%s",
-            self.venue,
-            topic,
-            symbol,
-        )
+        logger.info("MD feed started topic=%s ticker=%s", topic, ticker)
 
-    async def stop_feed(self, topic: str, symbol: str) -> None:
-        feed = self._feeds.pop((topic, symbol), None)
+    async def stop_feed(self, topic: str, ticker: UniversalTicker) -> None:
+        feed = self._feeds.pop((topic, ticker), None)
         if feed is None:
             return
         feed.stop.set()
         if feed.task is not None:
             feed.task.cancel()
             await asyncio.gather(feed.task, return_exceptions=True)
-        logger.info(
-            "MD feed stopped venue=%s topic=%s symbol=%s",
-            self.venue,
-            topic,
-            symbol,
-        )
+        logger.info("MD feed stopped topic=%s ticker=%s", topic, ticker)
 
     def _stream(self, name: str) -> Any:
         """The connector's ``name`` stream, or a refusal naming the venue.
@@ -152,16 +151,23 @@ class VenueSession:
             raise ValueError(f"venue {self.venue!r} does not publish {name}")
         return stream
 
-    def _open(self, topic: str, symbol: str) -> tuple[AsyncIterator[Any], str]:
+    def _open(
+        self, topic: str, ticker: UniversalTicker
+    ) -> tuple[AsyncIterator[Any], str]:
         """Resolve a feed topic to its venue stream and wire message type."""
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"venue session {self.venue!r} was handed a "
+                f"{ticker.venue!r} ticker: {ticker}"
+            )
         if topic == TOPIC_ORDERBOOK:
-            return self.public.stream_order_book(symbol), MD_ORDERBOOK
+            return self.public.stream_order_book(ticker), MD_ORDERBOOK
         if topic == TOPIC_TICKER:
-            return self.public.stream_ticker(symbol), MD_TICKER
+            return self.public.stream_ticker(ticker), MD_TICKER
         if topic == TOPIC_TRADE:
-            return self.public.stream_trades(symbol), MD_TRADE
+            return self.public.stream_trades(ticker), MD_TRADE
         if topic == TOPIC_BEST_QUOTE:
-            return self._stream("stream_best_quote")(symbol), MD_BEST_QUOTE
+            return self._stream("stream_best_quote")(ticker), MD_BEST_QUOTE
         if topic.startswith(KLINE_PREFIX):
             interval = topic[len(KLINE_PREFIX) :]
             if not interval:
@@ -169,7 +175,7 @@ class VenueSession:
                     f"md kline topic needs an interval, got {topic!r} "
                     f"(expected e.g. {KLINE_PREFIX}1m)"
                 )
-            return self._stream("stream_kline")(symbol, interval), MD_KLINE
+            return self._stream("stream_kline")(ticker, interval), MD_KLINE
         raise ValueError(f"unsupported md topic: {topic!r}")
 
     async def _pump(
@@ -187,13 +193,10 @@ class VenueSession:
                     type=msg_type,
                     source="md",
                 )
-                await self._on_update(self.venue, feed.topic, feed.symbol, env)
+                await self._on_update(feed.topic, feed.ticker, env)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception(
-                "MD %s pump failed venue=%s symbol=%s",
-                feed.topic,
-                self.venue,
-                feed.symbol,
+                "MD %s pump failed ticker=%s", feed.topic, feed.ticker
             )

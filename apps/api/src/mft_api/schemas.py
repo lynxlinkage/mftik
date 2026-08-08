@@ -138,10 +138,13 @@ class VenueOut(BaseModel):
 
     name: str
     label: str
+    #: Markets this venue trades. One entry is a classic account; several is a
+    #: unified one, where the category is part of every instrument's identity.
+    categories: list[str] = Field(default_factory=list)
     api_types: list[str] = Field(default_factory=list)
     requires_passphrase: bool = False
     simulated: bool = False
-    symbol_example: str = ""
+    ticker_example: str = ""
 
 
 class VenueListResponse(BaseModel):

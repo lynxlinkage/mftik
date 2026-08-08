@@ -18,7 +18,10 @@ kept only for normalizing user input before a lookup.
 from __future__ import annotations
 
 import re
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:  # Only for the annotation; tickers is built on this module.
+    from mft.exchange.tickers import UniversalTicker
 
 _SEPARATORS = re.compile(r"[/\-_\s]")
 
@@ -28,17 +31,21 @@ class SymbolResolver(Protocol):
 
     Adapters depend on this rather than on the plane's transport, so they stay
     usable with a stub and do not drag a broker into the exchange layer.
+
+    Both directions are keyed by a :class:`~mft.exchange.tickers.\
+UniversalTicker` rather than a bare symbol: on a unified-account venue the
+    same symbol names two different instruments, and only the ticker says
+    which. The inbound direction needs the venue and category but not the
+    symbol — that is the answer — so it takes them as the two parts.
     """
 
-    async def exch_ticker(
-        self, venue: str, symbol: str, *, category: str = "spot"
-    ) -> str:
+    async def exch_ticker(self, ticker: UniversalTicker) -> str:
         """Canonical → the venue's spelling."""
 
     async def symbol_for(
-        self, venue: str, exch_ticker: str, *, category: str = "spot"
-    ) -> str:
-        """The venue's spelling → canonical."""
+        self, venue: str, exch_ticker: str, *, category: str
+    ) -> UniversalTicker:
+        """The venue's spelling → the universal ticker."""
 
 
 def canonical(symbol: str) -> str:

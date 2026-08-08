@@ -19,6 +19,7 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
+from mft.exchange.tickers import UniversalTicker
 
 
 def _filled_order():
@@ -89,17 +90,17 @@ class StubResolver:
         self.native = pairs or {"BTCUSDT": "BTC_USDT", "ETHUSDT": "ETH_USDT"}
         self.canonical = {v: k for k, v in self.native.items()}
         self.lookups = 0
+        self.asked: list[UniversalTicker] = []
 
-    async def exch_ticker(
-        self, venue: str, symbol: str, *, category: str = "spot"
-    ) -> str:
+    async def exch_ticker(self, ticker: UniversalTicker) -> str:
         self.lookups += 1
-        return self.native[symbol]
+        self.asked.append(ticker)
+        return self.native[ticker.symbol]
 
     async def symbol_for(
-        self, venue: str, exch_ticker: str, *, category: str = "spot"
-    ) -> str:
-        return self.canonical[exch_ticker]
+        self, venue: str, exch_ticker: str, *, category: str
+    ) -> UniversalTicker:
+        return UniversalTicker.of(venue, category, self.canonical[exch_ticker])
 
 
 @pytest.fixture
@@ -446,7 +447,7 @@ async def test_cancel_of_unknown_order_raises_order_error(
 ) -> None:
     client = await _private(gate, rest_stub)
     async with client:
-        with pytest.raises(OrderError, match="no open gate_spot order"):
+        with pytest.raises(OrderError, match="no open Gate order"):
             await client.cancel_order("does-not-exist")
 
 

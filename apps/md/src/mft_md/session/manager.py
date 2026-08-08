@@ -83,8 +83,7 @@ class SessionManager:
         return self._dispatcher
 
     def feed_refcount(self, feed: str) -> int:
-        venue, topic, symbol = Topics.parse_md_feed(feed)
-        return self._dispatcher.refcount(venue, topic, symbol)
+        return self._dispatcher.refcount(*Topics.parse_md_feed(feed))
 
     async def attach(self, request: MdAttachRequest) -> MdAttachResult:
         """Attach STS ``session_id`` with subscriptions (lease + refcount)."""
@@ -165,12 +164,12 @@ class SessionManager:
             return
         changed = self._dispatcher.unsubscribe_all(session_id)
         venues: set[str] = set()
-        for (venue, topic, symbol), old_rc, new_rc in changed:
-            venues.add(venue)
-            feed = Topics.md_feed(venue, topic, symbol)
+        for (topic, ticker), old_rc, new_rc in changed:
+            venues.add(ticker.venue)
+            feed = Topics.md_feed(topic, ticker)
             await publish_md_log(
                 self._broker,
-                venue,
+                ticker.venue,
                 (
                     f"refcount {feed} {old_rc}→{new_rc} "
                     f"(sts={session_id} detach reason={reason})"
@@ -178,7 +177,7 @@ class SessionManager:
                 source="md",
             )
             if new_rc == 0:
-                await self._stop_feed_if_unused((venue, topic, symbol))
+                await self._stop_feed_if_unused((topic, ticker))
         await self._stop_link(link)
         if self._mark_done is not None:
             await self._mark_done(session_id=session_id)
@@ -252,15 +251,13 @@ class SessionManager:
             await self._destroy_venue(venue)
 
     async def _subscribe_feed(self, link: StsLink, feed: str) -> None:
-        venue, topic, symbol = Topics.parse_md_feed(feed)
-        first, new_rc = self._dispatcher.subscribe(
-            link.session_id, venue, topic, symbol
-        )
+        topic, ticker = Topics.parse_md_feed(feed)
+        first, new_rc = self._dispatcher.subscribe(link.session_id, topic, ticker)
         old_rc = new_rc - 1
         link.subscriptions.add(feed)
         await publish_md_log(
             self._broker,
-            venue,
+            ticker.venue,
             (
                 f"refcount {feed} {old_rc}→{new_rc} "
                 f"(sts={link.session_id} subscribe)"
@@ -268,25 +265,25 @@ class SessionManager:
             source="md",
         )
         if first:
-            venue_sess = await self._ensure_venue(venue)
-            await venue_sess.ensure_feed(topic, symbol)
+            venue_sess = await self._ensure_venue(ticker.venue)
+            await venue_sess.ensure_feed(topic, ticker)
             await publish_md_log(
                 self._broker,
-                venue,
+                ticker.venue,
                 f"feed pump started {feed}",
                 source="md",
             )
 
     async def _unsubscribe_feed(self, link: StsLink, feed: str) -> None:
-        venue, topic, symbol = Topics.parse_md_feed(feed)
-        old_rc = self._dispatcher.refcount(venue, topic, symbol)
+        topic, ticker = Topics.parse_md_feed(feed)
+        old_rc = self._dispatcher.refcount(topic, ticker)
         emptied, new_rc = self._dispatcher.unsubscribe(
-            link.session_id, venue, topic, symbol
+            link.session_id, topic, ticker
         )
         link.subscriptions.discard(feed)
         await publish_md_log(
             self._broker,
-            venue,
+            ticker.venue,
             (
                 f"refcount {feed} {old_rc}→{new_rc} "
                 f"(sts={link.session_id} unsubscribe)"
@@ -294,7 +291,7 @@ class SessionManager:
             source="md",
         )
         if emptied:
-            await self._stop_feed_if_unused((venue, topic, symbol))
+            await self._stop_feed_if_unused((topic, ticker))
 
     async def _ensure_venue(self, venue: str) -> VenueSession:
         existing = self._venues.get(venue)
@@ -318,22 +315,21 @@ class SessionManager:
         return sess
 
     async def _stop_feed_if_unused(self, key: FeedKey) -> None:
-        venue, topic, symbol = key
-        if self._dispatcher.refcount(venue, topic, symbol) > 0:
+        topic, ticker = key
+        if self._dispatcher.refcount(topic, ticker) > 0:
             return
-        venue_sess = self._venues.get(venue)
+        venue_sess = self._venues.get(ticker.venue)
         if venue_sess is None:
             return
-        await venue_sess.stop_feed(topic, symbol)
-        feed = Topics.md_feed(venue, topic, symbol)
+        await venue_sess.stop_feed(topic, ticker)
         await publish_md_log(
             self._broker,
-            venue,
-            f"feed pump stopped {feed} (refcount 0)",
+            ticker.venue,
+            f"feed pump stopped {Topics.md_feed(topic, ticker)} (refcount 0)",
             source="md",
         )
         if venue_sess.feed_count == 0:
-            await self._destroy_venue(venue)
+            await self._destroy_venue(ticker.venue)
 
     async def _destroy_venue(self, venue: str) -> None:
         sess = self._venues.pop(venue, None)
@@ -457,8 +453,8 @@ def _venues_from_feeds(feeds: set[str] | list[str]) -> set[str]:
     venues: set[str] = set()
     for feed in feeds:
         try:
-            venue, _topic, _symbol = Topics.parse_md_feed(feed)
+            _topic, ticker = Topics.parse_md_feed(feed)
         except ValueError:
             continue
-        venues.add(venue)
+        venues.add(ticker.venue)
     return venues

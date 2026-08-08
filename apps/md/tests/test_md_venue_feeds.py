@@ -15,6 +15,7 @@ from mft.exchange.models import (
     Ticker,
     Trade,
 )
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     MD_BEST_QUOTE,
     MD_KLINE,
@@ -26,6 +27,14 @@ from mft.protocol import (
 from mft_md.session.venue import VenueSession
 
 
+def _fake(symbol: str) -> UniversalTicker:
+    """A ticker on the made-up venue these fakes stand in for."""
+    return UniversalTicker.parse(f"Fake_Spot_{symbol}")
+
+
+FAKE = _fake("BTCUSDT")
+
+
 class FakePublic:
     """A venue connector: publishes one item per stream, then holds it open.
 
@@ -33,7 +42,7 @@ class FakePublic:
     satisfies it by having the methods, not by being registered anywhere.
     """
 
-    name = "fake"
+    name = "Fake"
 
     def __init__(self) -> None:
         self.kline_calls: list[tuple[str, str]] = []
@@ -49,40 +58,42 @@ class FakePublic:
         yield item
         await asyncio.Event().wait()
 
-    def stream_ticker(self, symbol: str) -> AsyncIterator[Ticker]:
+    def stream_ticker(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         return self._once(
             Ticker(
-                symbol=symbol,
+                symbol=ticker.symbol,
                 bid=Decimal("100"),
                 ask=Decimal("101"),
                 last=Decimal("100.5"),
             )
         )
 
-    def stream_trades(self, symbol: str) -> AsyncIterator[Trade]:
+    def stream_trades(self, ticker: UniversalTicker) -> AsyncIterator[Trade]:
         return self._once(
             Trade(
-                symbol=symbol,
+                symbol=ticker.symbol,
                 price=Decimal("100"),
                 qty=Decimal("1"),
                 side="buy",
             )
         )
 
-    def stream_order_book(self, symbol: str) -> AsyncIterator[OrderBook]:
+    def stream_order_book(self, ticker: UniversalTicker) -> AsyncIterator[OrderBook]:
         return self._once(
             OrderBook(
-                symbol=symbol,
+                symbol=ticker.symbol,
                 bids=[BookLevel(price=Decimal("100"), qty=Decimal("1"))],
                 asks=[BookLevel(price=Decimal("101"), qty=Decimal("1"))],
             )
         )
 
-    def stream_kline(self, symbol: str, interval: str) -> AsyncIterator[Kline]:
-        self.kline_calls.append((symbol, interval))
+    def stream_kline(
+        self, ticker: UniversalTicker, interval: str
+    ) -> AsyncIterator[Kline]:
+        self.kline_calls.append((ticker.symbol, interval))
         return self._once(
             Kline(
-                symbol=symbol,
+                symbol=ticker.symbol,
                 interval=interval,
                 open_time=1_700_000_000.0,
                 open=Decimal("100"),
@@ -92,10 +103,10 @@ class FakePublic:
             )
         )
 
-    def stream_best_quote(self, symbol: str) -> AsyncIterator[BestQuote]:
+    def stream_best_quote(self, ticker: UniversalTicker) -> AsyncIterator[BestQuote]:
         return self._once(
             BestQuote(
-                symbol=symbol,
+                symbol=ticker.symbol,
                 bid=Decimal("100"),
                 bid_qty=Decimal("1"),
                 ask=Decimal("101"),
@@ -118,18 +129,18 @@ class FakePublic:
 async def test_feed_topic_publishes_its_message_type(
     topic: str, msg_type: str
 ) -> None:
-    seen: list[tuple[str, str, str, UntypedEnvelope]] = []
+    seen: list[tuple[str, UniversalTicker, UntypedEnvelope]] = []
 
-    async def _on_update(venue, topic_, symbol, env) -> None:  # noqa: ANN001
-        seen.append((venue, topic_, symbol, env))
+    async def _on_update(topic_, ticker, env) -> None:  # noqa: ANN001
+        seen.append((topic_, ticker, env))
 
-    sess = VenueSession("fake", FakePublic(), on_update=_on_update)
+    sess = VenueSession(FAKE.venue, FakePublic(), on_update=_on_update)
     await sess.start()
-    await sess.ensure_feed(topic, "BTCUSDT")
+    await sess.ensure_feed(topic, FAKE)
 
     await _wait_until(lambda: bool(seen))
-    venue, topic_, symbol, env = seen[0]
-    assert (venue, topic_, symbol) == ("fake", topic, "BTCUSDT")
+    topic_, ticker, env = seen[0]
+    assert (topic_, ticker) == (topic, FAKE)
     assert env.type == msg_type
     assert env.payload["symbol"] == "BTCUSDT"
 
@@ -139,9 +150,9 @@ async def test_feed_topic_publishes_its_message_type(
 @pytest.mark.asyncio
 async def test_kline_topic_carries_the_interval() -> None:
     public = FakePublic()
-    sess = VenueSession("fake", public, on_update=_noop_update)
+    sess = VenueSession(FAKE.venue, public, on_update=_noop_update)
     await sess.start()
-    await sess.ensure_feed("kline_15m", "ETHUSDT")
+    await sess.ensure_feed("kline_15m", _fake("ETHUSDT"))
     assert public.kline_calls == [("ETHUSDT", "15m")]
     await sess.stop()
 
@@ -149,10 +160,10 @@ async def test_kline_topic_carries_the_interval() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("topic", ["depth", "kline_", ""])
 async def test_unknown_topic_is_rejected_at_subscribe(topic: str) -> None:
-    sess = VenueSession("fake", FakePublic(), on_update=_noop_update)
+    sess = VenueSession(FAKE.venue, FakePublic(), on_update=_noop_update)
     await sess.start()
     with pytest.raises(ValueError):
-        await sess.ensure_feed(topic, "BTCUSDT")
+        await sess.ensure_feed(topic, FAKE)
     assert sess.feed_count == 0
     await sess.stop()
 
@@ -166,15 +177,26 @@ async def test_unsupported_stream_is_rejected_at_subscribe() -> None:
 
         stream_kline = None
 
-    sess = VenueSession("fake", NoKlines(), on_update=_noop_update)
+    sess = VenueSession(FAKE.venue, NoKlines(), on_update=_noop_update)
     await sess.start()
     with pytest.raises(ValueError, match="does not publish stream_kline"):
-        await sess.ensure_feed("kline_1m", "BTCUSDT")
+        await sess.ensure_feed("kline_1m", FAKE)
     assert sess.feed_count == 0
     await sess.stop()
 
 
-async def _noop_update(venue, topic, symbol, env) -> None:  # noqa: ANN001
+@pytest.mark.asyncio
+async def test_a_ticker_from_another_venue_is_refused() -> None:
+    """A session owns one venue's connector; a stray ticker is a routing bug."""
+    sess = VenueSession(FAKE.venue, FakePublic(), on_update=_noop_update)
+    await sess.start()
+    with pytest.raises(ValueError, match="was handed a"):
+        await sess.ensure_feed("orderbook", UniversalTicker.parse("Other_Spot_BTCUSDT"))
+    assert sess.feed_count == 0
+    await sess.stop()
+
+
+async def _noop_update(topic, ticker, env) -> None:  # noqa: ANN001
     return None
 
 

@@ -20,6 +20,7 @@ from mft.exchange.models import (
     is_terminal,
 )
 from mft.exchange.oms import LedgerEntry, LedgerView, OmsView, Position
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
@@ -551,15 +552,17 @@ class Session:
     async def _instrument(self, symbol: str) -> Instrument | None:
         if self.symbols is None:
             return None
+        # The connector's own venue and category: an order arrives as a bare
+        # symbol because ``api_id`` already pins which account, and so which
+        # market, it is for. A unified-account venue would have to be told,
+        # and that is where ``OrderSubmit`` grows a category.
+        ticker = UniversalTicker.of(
+            self.private.name, self.private.category, symbol
+        )
         try:
-            info = await self.symbols.get(self.private.name, symbol)
+            info = await self.symbols.get(ticker)
         except Exception:
-            logger.debug(
-                "TD symbol lookup failed venue=%s symbol=%s",
-                self.private.name,
-                symbol,
-                exc_info=True,
-            )
+            logger.debug("TD symbol lookup failed ticker=%s", ticker, exc_info=True)
             return None
         return Instrument(
             symbol=info.symbol, base=info.base, quote=info.quote

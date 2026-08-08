@@ -10,7 +10,13 @@ import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange
 from mft.exchange.paper.remote_public import PaperRemotePublicClient
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import PAPER_ORDER_BOOK, Topics, UntypedEnvelope
+
+
+def PAPER(symbol: str) -> UniversalTicker:
+    """``BTCUSDT`` → ``Paper_Spot_BTCUSDT``; public reads are keyed by ticker."""
+    return UniversalTicker.of("Paper", "Spot", symbol)
 
 
 @pytest.fixture
@@ -46,7 +52,7 @@ async def test_remote_public_fetch_and_stream(broker: Broker) -> None:
             public = exchange.public()
             await public.connect()
             try:
-                async for book in public.stream_order_book("BTCUSDT"):
+                async for book in public.stream_order_book(PAPER("BTCUSDT")):
                     if stop.is_set():
                         return
                     await broker.publish(
@@ -68,12 +74,12 @@ async def test_remote_public_fetch_and_stream(broker: Broker) -> None:
         await client.connect()
         instruments = await client.fetch_instruments()
         assert any(i.symbol == "BTCUSDT" for i in instruments)
-        book = await client.fetch_order_book("BTCUSDT", depth=5)
+        book = await client.fetch_order_book(PAPER("BTCUSDT"), depth=5)
         assert book.symbol == "BTCUSDT"
         assert book.bids and book.asks
 
         got = None
-        async for update in client.stream_order_book("BTCUSDT"):
+        async for update in client.stream_order_book(PAPER("BTCUSDT")):
             got = update
             break
         assert got is not None

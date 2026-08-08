@@ -17,6 +17,12 @@ from mft.exchange import (
     limit_order,
     market_order,
 )
+from mft.exchange.tickers import UniversalTicker
+
+
+def PAPER(symbol: str) -> UniversalTicker:
+    """``BTCUSDT`` → ``Paper_Spot_BTCUSDT``; public reads are keyed by ticker."""
+    return UniversalTicker.of("Paper", "Spot", symbol)
 
 
 @pytest.fixture
@@ -67,12 +73,12 @@ async def test_public_req_reply(exchange: PaperExchange) -> None:
     instruments = await public.fetch_instruments()
     assert any(i.symbol == "BTCUSDT" for i in instruments)
 
-    ticker = await public.fetch_ticker("BTCUSDT")
+    ticker = await public.fetch_ticker(PAPER("BTCUSDT"))
     assert ticker.symbol == "BTCUSDT"
     assert ticker.ask >= ticker.bid
     assert ticker.last > 0
 
-    book = await public.fetch_order_book("BTCUSDT", depth=5)
+    book = await public.fetch_order_book(PAPER("BTCUSDT"), depth=5)
     assert len(book.bids) == 1
     assert len(book.asks) == 1
     assert book.bids[0].price == Decimal("49999")
@@ -106,7 +112,7 @@ async def test_public_stream_ticker(exchange: PaperExchange) -> None:
     await public.connect()
 
     ticks = []
-    async for ticker in public.stream_ticker("BTCUSDT"):
+    async for ticker in public.stream_ticker(PAPER("BTCUSDT")):
         ticks.append(ticker)
         if len(ticks) >= 3:
             break
@@ -265,7 +271,7 @@ async def test_requires_connect() -> None:
     async with PaperExchange(symbols={"BTCUSDT": Decimal("1")}) as ex:
         public = ex.public()
         with pytest.raises(ExchangeNotConnectedError):
-            await public.fetch_ticker("BTCUSDT")
+            await public.fetch_ticker(PAPER("BTCUSDT"))
 
 
 @pytest.mark.asyncio
@@ -279,7 +285,7 @@ async def test_public_and_private_share_engine(exchange: PaperExchange) -> None:
     trade_fut: asyncio.Future = asyncio.get_running_loop().create_future()
 
     async def reader() -> None:
-        async for trade in public.stream_trades("BTCUSDT"):
+        async for trade in public.stream_trades(PAPER("BTCUSDT")):
             if not trade_fut.done():
                 trade_fut.set_result(trade)
             break

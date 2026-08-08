@@ -22,11 +22,13 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
+from mft.exchange import venues
 from mft.exchange.gate.spot.public import GATE_INTERVALS
 from mft.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
 from mft.exchange.intervals import InvalidIntervalError, normalize_interval
 from mft.exchange.models import BestQuote, Kline, OrderBook
-from mft.exchange.symbols import SymbolResolver, canonical
+from mft.exchange.symbols import SymbolResolver
+from mft.exchange.tickers import UniversalTicker
 from mft.symbols import SymbolClient
 
 logger = logging.getLogger(__name__)
@@ -56,7 +58,7 @@ class GateSpotReader:
     avoid.
     """
 
-    venue = "gate_spot"
+    venue = "Gate"
 
     def __init__(
         self,
@@ -74,14 +76,16 @@ class GateSpotReader:
     async def close(self) -> None:
         await self.rest.close()
 
-    async def _pair(self, symbol: str) -> tuple[str, str]:
-        """``(canonical, Gate pair)`` — resolved through the symbol plane."""
-        symbol = canonical(symbol)
-        pair = await self.symbols.exch_ticker(self.venue, symbol, category="spot")
-        return symbol, pair
+    async def _pair(self, ticker: UniversalTicker) -> tuple[str, str]:
+        """``(canonical symbol, Gate pair)`` — resolved through the plane."""
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return ticker.symbol, await self.symbols.exch_ticker(ticker)
 
     async def fetch_klines(
-        self, symbol: str, interval: str, *, limit: int
+        self, ticker: UniversalTicker, interval: str, *, limit: int
     ) -> list[Kline]:
         """Recent candles, oldest first, answering in the caller's spelling.
 
@@ -93,10 +97,10 @@ class GateSpotReader:
         gate_interval = GATE_INTERVALS.get(canonical_interval)
         if gate_interval is None:
             raise InvalidIntervalError(
-                f"gate_spot serves no {canonical_interval} candles; "
+                f"{self.venue} serves no {canonical_interval} candles; "
                 f"supported: {sorted(GATE_INTERVALS)}"
             )
-        symbol, pair = await self._pair(symbol)
+        symbol, pair = await self._pair(ticker)
         klines = await self.rest.fetch_klines(pair, gate_interval, limit=limit)
         return [
             kline.model_copy(
@@ -105,17 +109,21 @@ class GateSpotReader:
             for kline in klines
         ]
 
-    async def fetch_order_book(self, symbol: str, *, depth: int) -> OrderBook:
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int
+    ) -> OrderBook:
         """``GET /spot/order_book`` — a whole book, capped at ``depth``.
 
         Gate's reply carries no pair, so the caller's canonical one is stamped
         back on.
         """
-        symbol, pair = await self._pair(symbol)
+        symbol, pair = await self._pair(ticker)
         book = await self.rest.fetch_order_book(pair, depth=depth)
         return book.model_copy(update={"symbol": symbol})
 
-    async def fetch_best_quote(self, symbol: str) -> BestQuote | None:
+    async def fetch_best_quote(
+        self, ticker: UniversalTicker
+    ) -> BestQuote | None:
         """Top of book with sizes, or None when a side is empty.
 
         The same REST read as :meth:`fetch_order_book` at depth 1 — Gate serves
@@ -127,7 +135,7 @@ class GateSpotReader:
         against it, and a zero bid would answer that question wrongly rather
         than declining to answer it.
         """
-        book = await self.fetch_order_book(symbol, depth=1)
+        book = await self.fetch_order_book(ticker, depth=1)
         if not book.bids or not book.asks:
             return None
         bid, ask = book.bids[0], book.asks[0]
@@ -167,9 +175,9 @@ class VenueReaderFactory:
         self._symbols = symbols
 
     async def create(self, venue: str) -> VenueReader:
-        if venue == "gate_spot":
+        if venue == venues.GATE.name:
             return GateSpotReader(symbols=self._symbols)
-        if venue == "paper":
+        if venue == venues.PAPER.name:
             # The paper engine's book lives in another process and its prices
             # are invented tick by tick; nothing here can be read out of band.
             raise NoReaderError("the paper venue serves no on-demand reads")

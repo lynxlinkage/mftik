@@ -19,6 +19,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -34,12 +35,18 @@ QUANTITY = Numeric(38, 18)
 
 
 class SymbolCategory(StrEnum):
-    """Instrument class. Determines which optional ticker columns apply."""
+    """Instrument class. Determines which optional ticker columns apply.
 
-    SPOT = "spot"
-    PERP = "perp"
-    FUTURE = "future"
-    OPTION = "option"
+    Mirrors ``mft.exchange.tickers.Category`` — spelling included, since these
+    values are the middle part of a stored universal ticker. This package does
+    not depend on ``mft-common``, so the two are kept in step by a test rather
+    than by an import.
+    """
+
+    SPOT = "Spot"
+    PERP = "Perp"
+    FUTURE = "Future"
+    OPTION = "Option"
 
 
 class FilterName(StrEnum):
@@ -60,27 +67,32 @@ class FilterName(StrEnum):
 
 
 class SymbolTicker(Base):
-    """One tradeable instrument on one venue.
+    """One tradeable instrument, anywhere.
 
-    Identity is ``(venue, symbol, category)``: the same canonical symbol can
-    exist as spot and as a perp on the same venue, and they are different
-    instruments with different filters.
+    Identity is the universal ticker — ``Gate_Spot_BTCUSDT`` — which already
+    carries venue, category and canonical symbol. They are not also stored as
+    columns: three fields that must agree with a fourth is three chances for
+    them not to, and the parse that recovers them is a string split.
+
+    Filtering by venue or by venue+category is a prefix match, which
+    ``ix_symbol_ticker_prefix`` serves — hence ``text_pattern_ops`` on
+    PostgreSQL, without which the default collation makes ``LIKE 'Gate\\_%'``
+    a sequential scan over every listed instrument.
     """
 
     __tablename__ = "symbol_ticker"
     __table_args__ = (
-        UniqueConstraint(
-            "venue", "symbol", "category", name="uq_symbol_ticker_identity"
+        UniqueConstraint("universal_ticker", name="uq_symbol_ticker_identity"),
+        Index(
+            "ix_symbol_ticker_prefix",
+            "universal_ticker",
+            postgresql_ops={"universal_ticker": "text_pattern_ops"},
         ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    venue: Mapped[str] = mapped_column(String(64), index=True)
-    #: Canonical form (``BTCUSDT``); the platform's spelling.
-    symbol: Mapped[str] = mapped_column(String(64), index=True)
-    category: Mapped[str] = mapped_column(
-        String(16), default=SymbolCategory.SPOT.value
-    )
+    #: ``<Venue>_<Category>_<SYMBOL>`` — see ``mft.exchange.tickers``.
+    universal_ticker: Mapped[str] = mapped_column(String(96))
 
     base: Mapped[str] = mapped_column(String(32))
     quote: Mapped[str] = mapped_column(String(32))

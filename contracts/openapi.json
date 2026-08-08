@@ -707,9 +707,25 @@
           "sym"
         ],
         "summary": "List Symbols",
-        "description": "Instruments from the golden tables. Omitted filters widen the result.",
+        "description": "Instruments from the golden tables. Omitted filters widen the result.\n\n``universal_ticker`` names exactly one instrument; the other three are\nparts of it and each widens the result by being left out. All are\nnormalized here rather than matched literally, so a query typed\n``gate/spot`` finds the rows stored as ``Gate_Spot_\u2026``.",
         "operationId": "list_symbols_sym_symbols_get",
         "parameters": [
+          {
+            "name": "universal_ticker",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Universal Ticker"
+            }
+          },
           {
             "name": "venue",
             "in": "query",
@@ -1758,18 +1774,9 @@
       },
       "SymbolInfo": {
         "properties": {
-          "venue": {
+          "universal_ticker": {
             "type": "string",
-            "title": "Venue"
-          },
-          "symbol": {
-            "type": "string",
-            "title": "Symbol"
-          },
-          "category": {
-            "type": "string",
-            "title": "Category",
-            "default": "spot"
+            "title": "Universal Ticker"
           },
           "base": {
             "type": "string",
@@ -1843,14 +1850,13 @@
         },
         "type": "object",
         "required": [
-          "venue",
-          "symbol",
+          "universal_ticker",
           "base",
           "quote",
           "exch_ticker"
         ],
         "title": "SymbolInfo",
-        "description": "One instrument as the symbol plane knows it.\n\n``symbol`` is canonical; ``exch_ticker`` is what the venue wants on the\nwire. Adapters resolve one to the other through this rather than guessing."
+        "description": "One instrument as the symbol plane knows it.\n\n``universal_ticker`` is the platform's identity for the instrument;\n``exch_ticker`` is what the venue wants on the wire. Adapters resolve one\nto the other through this rather than guessing.\n\nThe venue, category and symbol are not separate fields \u2014 they are the\nthree parts of the ticker, reachable through :attr:`ticker`. One field\ncannot disagree with itself, which three of them could."
       },
       "TdAttachOut": {
         "properties": {
@@ -1933,6 +1939,13 @@
             "type": "string",
             "title": "Label"
           },
+          "categories": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Categories"
+          },
           "api_types": {
             "items": {
               "type": "string"
@@ -1950,9 +1963,9 @@
             "title": "Simulated",
             "default": false
           },
-          "symbol_example": {
+          "ticker_example": {
             "type": "string",
-            "title": "Symbol Example",
+            "title": "Ticker Example",
             "default": ""
           }
         },

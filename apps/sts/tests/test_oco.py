@@ -22,6 +22,7 @@ from mft.exchange.models import (
     TimeInForce,
 )
 from mft.exchange.oms import OmsView
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     CancelReject,
     MdBestQuoteResult,
@@ -32,9 +33,10 @@ from mft.protocol import (
 )
 from mft_sts.impl.oco import LEG_COUNT, OneCancelOther
 
+PAPER_BTC = UniversalTicker.parse("Paper_Spot_BTCUSDT")
+
 BTCUSDT = SymbolInfo(
-    venue="paper",
-    symbol="BTCUSDT",
+    universal_ticker="Paper_Spot_BTCUSDT",
     base="BTC",
     quote="USDT",
     exch_ticker="BTCUSDT",
@@ -137,7 +139,7 @@ class FakeLedger:
 class FakeSession:
     def __init__(self) -> None:
         self.td_api_ids = [API_ID]
-        self.md_ids = ["paper.bestquote.BTCUSDT"]
+        self.md_ids = ["bestquote.Paper_Spot_BTCUSDT"]
         self.exits: list[str] = []
         #: Reasons the strategy ended as ``failed`` rather than ``done``.
         self.failures: list[str] = []
@@ -179,13 +181,13 @@ class FakeMds:
     """Records quote requests; the test delivers the answers by hand."""
 
     def __init__(self, *, accepted: bool = True) -> None:
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[UniversalTicker] = []
         self.accepted = accepted
         self.last_reject_reason = "" if accepted else "no MD running"
         self._seq = 0
 
-    async def fetch_best_quote(self, venue: str, symbol: str) -> str | None:
-        self.calls.append((venue, symbol))
+    async def fetch_best_quote(self, ticker: UniversalTicker) -> str | None:
+        self.calls.append(ticker)
         if not self.accepted:
             return None
         self._seq += 1
@@ -218,7 +220,7 @@ def _strategy(
     strat.ledger = FakeLedger()  # type: ignore[assignment]
     strat.mds = FakeMds(accepted=mds_accepts)  # type: ignore[assignment]
     strat._info = BTCUSDT
-    strat._venue, strat._symbol = "paper", "BTCUSDT"
+    strat._ticker = PAPER_BTC
 
     async def _noop_log(message: str, *, level: str = "info", **extra) -> None:
         return None
@@ -255,8 +257,7 @@ def _quote_result(
 ) -> MdBestQuoteResult:
     return MdBestQuoteResult(
         query_id="q1",
-        venue="paper",
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         ok=ok,
         quote=quote,
         reason=reason,
@@ -372,7 +373,7 @@ async def test_recon_asks_for_the_quote_and_the_answer_places_the_pair() -> None
     """
     strat = await _armed()
 
-    assert strat.mds.calls == [("paper", "BTCUSDT")]
+    assert strat.mds.calls == [PAPER_BTC]
     assert strat.oms.submitted == []
 
     await strat.on_fetch_bestquote(_quote())
@@ -994,17 +995,18 @@ async def test_restoring_without_an_instrument_refuses_to_place() -> None:
 
 def test_a_market_named_in_paras_needs_no_feed() -> None:
     """The whole point of the quote being a query: no md_ids anywhere."""
-    strat = _strategy(venue="gate_spot", symbol="ETHUSDT")
-    strat._venue = strat._symbol = None
+    strat = _strategy(ticker="Gate_Spot_ETHUSDT")
+    strat._ticker = None
     strat.session.md_ids = []
     strat._resolve_market()
 
-    assert (strat._venue, strat._symbol) == ("gate_spot", "ETHUSDT")
+    assert strat._ticker == UniversalTicker.parse("Gate_Spot_ETHUSDT")
 
 
-def test_half_a_market_is_refused() -> None:
-    """The other half would silently come from a feed key."""
-    with pytest.raises(ValueError, match="together, or neither"):
-        OneCancelOther.on_initialized(_paras(venue="gate_spot"))
-    with pytest.raises(ValueError, match="together, or neither"):
-        OneCancelOther.on_initialized(_paras(symbol="ETHUSDT"))
+def test_a_named_market_is_normalized_at_deploy_time() -> None:
+    """A typo must refuse the deployment, not the first quote request."""
+    paras = OneCancelOther.on_initialized(_paras(ticker=" gate_spot_eth/usdt "))
+    assert paras["ticker"] == "Gate_Spot_ETHUSDT"
+
+    with pytest.raises(Exception, match="unknown venue"):
+        OneCancelOther.on_initialized(_paras(ticker="Binance_Spot_ETHUSDT"))

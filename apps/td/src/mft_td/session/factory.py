@@ -36,7 +36,7 @@ class PaperSessionFactory:
       paper-engine Redis service (docker / production TD).
     """
 
-    venue = "paper"
+    venue = venues.PAPER.name
 
     def __init__(
         self,
@@ -122,7 +122,7 @@ class VenueSessionFactory:
     """Dispatches on ``apis.venue`` to build the right private client.
 
     ``paper`` keeps the existing behaviour (in-process or paper-engine remote);
-    ``gate_spot`` builds a real Gate client from the credential row. Unknown or
+    ``Gate`` builds a real Gate client from the credential row. Unknown or
     unregistered venues fail here rather than producing a session that silently
     trades somewhere else.
     """
@@ -161,14 +161,14 @@ class VenueSessionFactory:
             )
             return await self._paper.create(api_id)
 
-        if venue is venues.GATE_SPOT:
+        if venue is venues.GATE:
             private = GateSpotPrivateClient(
                 api_key=row.api_key,
                 api_secret=row.api_secret,
                 symbols=self._symbols,
             )
             logger.info(
-                "TD building gate_spot session api_id=%s key=%s…",
+                "TD building Gate session api_id=%s key=%s…",
                 api_id,
                 row.api_key[:6],
             )

@@ -10,6 +10,7 @@ import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange.models import BestQuote, BookLevel, Kline, OrderBook
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     MD_BESTQUOTE_RESULT,
     MD_KLINE,
@@ -30,7 +31,8 @@ from mft_sts.session.session import StsSession
 from mft_sts.strategy import Strategy
 
 SESSION_ID = "sts-mds-1"
-FEED = "gate_spot.orderbook.BTCUSDT"
+TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")
+FEED = f"orderbook.{TICKER}"
 
 
 @pytest.fixture
@@ -128,8 +130,7 @@ class FakeMd:
                 Envelope[MdKlinesResult].wrap(
                     MdKlinesResult(
                         query_id=payload.query_id,
-                        venue=payload.venue,
-                        symbol=payload.symbol,
+                        ticker=payload.ticker,
                         interval=payload.interval,
                         klines=list(self.klines),
                     ),
@@ -177,7 +178,7 @@ async def test_a_session_with_no_feeds_can_still_query(broker: Broker) -> None:
     md = FakeMd(broker)
     await md.start()
 
-    query_id = await strategy.mds.fetch_klines("gate_spot", "BTCUSDT", "1h")
+    query_id = await strategy.mds.fetch_klines(TICKER, "1h")
 
     assert query_id is not None, strategy.mds.last_reject_reason
     await _wait_until(lambda: strategy.results)
@@ -197,7 +198,7 @@ async def test_the_request_carries_this_session_s_reply_channel(
     md = FakeMd(broker)
     await md.start()
 
-    await strategy.mds.fetch_klines("gate_spot", "BTCUSDT", "1h")
+    await strategy.mds.fetch_klines(TICKER, "1h")
 
     assert md.requests[0].reply_channel == Topics.md_fetch_reply(SESSION_ID)
     # Not the feed channel: that one only exists while a feed attach does.
@@ -218,7 +219,7 @@ async def test_a_malformed_interval_is_refused_before_the_wire(
     strategy = RecordingStrategy()
     sts = await _session(broker, strategy, md_ids=[FEED])
 
-    query_id = await strategy.mds.fetch_klines("gate_spot", "BTCUSDT", "1M")
+    query_id = await strategy.mds.fetch_klines(TICKER, "1M")
 
     assert query_id is None
     assert strategy.mds.last_reject_code == QueryCode.MD_INVALID_REQUEST
@@ -234,7 +235,7 @@ async def test_no_md_running_reports_no_ack(broker: Broker) -> None:
     sts = await _session(broker, strategy, md_ids=[FEED])
     strategy.mds._ack_timeout = 0.2
 
-    query_id = await strategy.mds.fetch_klines("gate_spot", "BTCUSDT", "1h")
+    query_id = await strategy.mds.fetch_klines(TICKER, "1h")
 
     assert query_id is None
     assert strategy.mds.last_reject_code == QueryCode.MD_NO_ACK
@@ -249,7 +250,8 @@ async def test_a_refusal_comes_back_as_none_with_its_code(broker: Broker) -> Non
     md.accept = False
     await md.start()
 
-    query_id = await strategy.mds.fetch_klines("nowhere", "BTCUSDT", "1h")
+    nowhere = UniversalTicker.parse("Nowhere_Spot_BTCUSDT")
+    query_id = await strategy.mds.fetch_klines(nowhere, "1h")
 
     assert query_id is None
     assert strategy.mds.last_reject_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
@@ -267,11 +269,11 @@ async def test_a_stale_reason_does_not_outlive_the_refusal(broker: Broker) -> No
     md.accept = False
     await md.start()
 
-    assert await strategy.mds.fetch_klines("gate_spot", "BTCUSDT", "1h") is None
+    assert await strategy.mds.fetch_klines(TICKER, "1h") is None
     assert strategy.mds.last_reject_reason
 
     md.accept = True
-    assert await strategy.mds.fetch_klines("gate_spot", "BTCUSDT", "1h")
+    assert await strategy.mds.fetch_klines(TICKER, "1h")
     assert strategy.mds.last_reject_reason == ""
     assert strategy.mds.last_reject_code == QueryCode.NONE
 
@@ -288,7 +290,7 @@ async def test_the_interval_is_normalized_before_it_goes_on_the_wire(
     md = FakeMd(broker)
     await md.start()
 
-    await strategy.mds.fetch_klines("gate_spot", "BTCUSDT", " 1H ")
+    await strategy.mds.fetch_klines(TICKER, " 1H ")
 
     assert md.requests[0].interval == "1h"
     await md.stop()
@@ -304,7 +306,7 @@ async def test_query_ids_are_unique_within_a_session(broker: Broker) -> None:
     await md.start()
 
     ids = [
-        await strategy.mds.fetch_klines("gate_spot", "BTCUSDT", "1h")
+        await strategy.mds.fetch_klines(TICKER, "1h")
         for _ in range(3)
     ]
 
@@ -321,8 +323,7 @@ def _result_env(query_id: str, **kwargs) -> Envelope:
     return Envelope[MdKlinesResult].wrap(
         MdKlinesResult(
             query_id=query_id,
-            venue="gate_spot",
-            symbol="BTCUSDT",
+            ticker=str(TICKER),
             interval="1h",
             **kwargs,
         ),
@@ -449,8 +450,7 @@ async def test_each_kind_of_answer_reaches_its_own_hook(broker: Broker) -> None:
         Envelope[MdOrderBookResult].wrap(
             MdOrderBookResult(
                 query_id="b1",
-                venue="gate_spot",
-                symbol="BTCUSDT",
+                ticker=str(TICKER),
                 book=OrderBook(
                     symbol="BTCUSDT",
                     bids=[BookLevel(price=Decimal("59999"), qty=Decimal("3"))],
@@ -466,8 +466,7 @@ async def test_each_kind_of_answer_reaches_its_own_hook(broker: Broker) -> None:
         Envelope[MdBestQuoteResult].wrap(
             MdBestQuoteResult(
                 query_id="q1",
-                venue="gate_spot",
-                symbol="BTCUSDT",
+                ticker=str(TICKER),
                 quote=BestQuote(
                     symbol="BTCUSDT",
                     bid=Decimal("59999"),
@@ -511,7 +510,7 @@ async def test_a_quote_with_nothing_resting_is_not_an_error(
     await broker.publish(
         Topics.md_fetch_reply(SESSION_ID),
         Envelope[MdBestQuoteResult].wrap(
-            MdBestQuoteResult(query_id="q1", venue="gate_spot", symbol="BTCUSDT"),
+            MdBestQuoteResult(query_id="q1", ticker=str(TICKER)),
             type=MD_BESTQUOTE_RESULT,
             source="md",
         ),

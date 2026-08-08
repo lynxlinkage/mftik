@@ -16,6 +16,7 @@ from mft.exchange.models import (
     TimeInForce,
 )
 from mft.exchange.oms import OmsView
+from mft.exchange.tickers import Category, UniversalTicker
 from mft.protocol.envelope import Envelope
 from mft.protocol.query_codes import QueryCode
 from mft.protocol.reject_codes import RejectCode
@@ -296,8 +297,9 @@ class MdFetchRequest(BaseModel):
     #: listening on before it asks.
     reply_channel: str
     query_id: str
-    venue: str
-    symbol: str
+    #: The instrument, as a rendered ``UniversalTicker``. It carries the
+    #: venue, so there is no separate field for one.
+    ticker: str
 
 
 class MdFetchKlines(MdFetchRequest):
@@ -369,8 +371,8 @@ class MdFetchResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     query_id: str
-    venue: str
-    symbol: str
+    #: Quoted back from the request — see :class:`MdFetchRequest.ticker`.
+    ticker: str
     ok: bool = True
     #: Human-readable, and the venue's own words when it was the venue that
     #: refused. Free-form; do not branch on it.
@@ -726,15 +728,18 @@ class SymbolFilterInfo(BaseModel):
 class SymbolInfo(BaseModel):
     """One instrument as the symbol plane knows it.
 
-    ``symbol`` is canonical; ``exch_ticker`` is what the venue wants on the
-    wire. Adapters resolve one to the other through this rather than guessing.
+    ``universal_ticker`` is the platform's identity for the instrument;
+    ``exch_ticker`` is what the venue wants on the wire. Adapters resolve one
+    to the other through this rather than guessing.
+
+    The venue, category and symbol are not separate fields — they are the
+    three parts of the ticker, reachable through :attr:`ticker`. One field
+    cannot disagree with itself, which three of them could.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    venue: str
-    symbol: str
-    category: str = "spot"
+    universal_ticker: str
     base: str
     quote: str
     exch_ticker: str
@@ -744,6 +749,23 @@ class SymbolInfo(BaseModel):
     is_active: bool = True
     filters: list[SymbolFilterInfo] = Field(default_factory=list)
     updated_at: float | None = None
+
+    @property
+    def ticker(self) -> UniversalTicker:
+        """The parsed identity, for reaching venue / category / symbol."""
+        return UniversalTicker.parse(self.universal_ticker)
+
+    @property
+    def venue(self) -> str:
+        return self.ticker.venue
+
+    @property
+    def category(self) -> Category:
+        return self.ticker.category
+
+    @property
+    def symbol(self) -> str:
+        return self.ticker.symbol
 
     def filter(self, name: str) -> Decimal | None:
         """Bound for ``name``. None also means "published with no bound" —
@@ -801,10 +823,17 @@ class SymbolInfo(BaseModel):
 
 
 class SymListRequest(BaseModel):
-    """Query the plane. Omitted filters widen the result."""
+    """Query the plane. Omitted filters widen the result.
+
+    The filters stay separate fields rather than one ticker: this is a query,
+    and its whole use is to leave a part out — every instrument on ``Gate``,
+    every ``Perp`` anywhere. A ticker names exactly one row and cannot express
+    that. Pass ``universal_ticker`` when you do want exactly one.
+    """
 
     model_config = ConfigDict(frozen=True)
 
+    universal_ticker: str | None = None
     venue: str | None = None
     category: str | None = None
     symbol: str | None = None

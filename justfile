@@ -25,7 +25,7 @@ migrate revision="head":
 seed:
     uv run --all-packages python scripts/seed_paper_apis.py
 
-# Ask a running MD for market data: just fetch quote gate_spot BTCUSDT
+# Ask a running MD for market data: just fetch quote Gate_Spot_BTCUSDT
 fetch *args:
     REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}" \
       uv run --all-packages python scripts/fetch_md.py {{args}}

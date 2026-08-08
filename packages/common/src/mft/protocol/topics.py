@@ -1,5 +1,7 @@
 """Stream and channel name helpers for the MFT broker protocol."""
 
+from mft.exchange.tickers import UniversalTicker
+
 
 class Topics:
     # Request-reply subjects (control plane)
@@ -141,19 +143,49 @@ class Topics:
         return f"td.oms.{api_id}"
 
     @staticmethod
-    def md_feed(venue: str, topic: str, symbol: str) -> str:
-        """Logical feed key for attach payloads / refcount (not a Redis subject)."""
-        return f"{venue}.{topic}.{symbol}"
+    def md_feed(topic: str, ticker: UniversalTicker | str) -> str:
+        """Logical feed key for attach payloads / refcount (not a Redis subject).
+
+        ``topic.UniversalTicker`` — ``bestquote.Gate_Spot_ETHUSDT``. The topic
+        leads because it is the part with a fixed vocabulary, and the ticker is
+        one opaque token rather than three fields the reader has to reassemble.
+
+        Kline topics carry their interval (``kline_1m.Gate_Spot_BTCUSDT``); the
+        split is on ``.``, so the underscore inside the topic is not a problem.
+        """
+        return f"{topic}.{ticker}"
 
     @staticmethod
-    def parse_md_feed(feed: str) -> tuple[str, str, str]:
-        """Parse ``venue.topic.symbol`` feed key into components."""
-        parts = feed.split(".", 2)
-        if len(parts) != 3 or not all(parts):
+    def parse_md_feed(feed: str) -> tuple[str, UniversalTicker]:
+        """Parse a ``topic.UniversalTicker`` feed key.
+
+        Strict — see :meth:`UniversalTicker.parse`. Feed keys reaching here
+        have already been through a boundary that normalized them, and one
+        instrument spelled two ways would refcount as two feeds.
+        """
+        topic, separator, rest = feed.partition(".")
+        if not separator or not topic or not rest:
             raise ValueError(
-                f"invalid md feed key {feed!r}; expected venue.topic.symbol"
+                f"invalid md feed key {feed!r}; expected topic.UniversalTicker, "
+                f"e.g. bestquote.Gate_Spot_ETHUSDT"
             )
-        return parts[0], parts[1], parts[2]
+        return topic, UniversalTicker.parse(rest)
+
+    @staticmethod
+    def normalize_md_feed(feed: str) -> str:
+        """Accept a human's feed key and return the canonical spelling.
+
+        The lenient counterpart to :meth:`parse_md_feed`, for the boundaries
+        that take feed keys from people — strategy YAML, an API query. What it
+        returns is what everything downstream should carry.
+        """
+        topic, separator, rest = feed.partition(".")
+        if not separator or not topic or not rest:
+            raise ValueError(
+                f"invalid md feed key {feed!r}; expected topic.UniversalTicker, "
+                f"e.g. bestquote.Gate_Spot_ETHUSDT"
+            )
+        return Topics.md_feed(topic.strip(), UniversalTicker.resolve(rest))
 
     @staticmethod
     def private_order(account: str) -> str:

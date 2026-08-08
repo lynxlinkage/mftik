@@ -4,38 +4,45 @@ from __future__ import annotations
 
 import pytest
 from mft.exchange import venues
+from mft.exchange.tickers import SEPARATOR, Category
 
 
-def test_gate_spot_is_registered_as_its_own_venue() -> None:
-    gate = venues.require("gate_spot")
-    assert gate is venues.GATE_SPOT
-    assert gate.name == "gate_spot"
+def test_gate_is_registered_as_its_own_venue() -> None:
+    gate = venues.require("Gate")
+    assert gate is venues.GATE
+    assert gate.name == "Gate"
     assert gate.label == "Gate Spot"
     assert not gate.simulated
-    assert gate.symbol_example == "BTCUSDT"  # canonical, not BTC_USDT
+    # A classic account: Gate's futures plane signs separately and will be its
+    # own venue, so this one trades spot and nothing else.
+    assert gate.categories == frozenset({Category.SPOT})
+    assert gate.ticker_example == "Gate_Spot_BTCUSDT"
     # Gate's WS v4 signs with HMAC-SHA512, for subscribes and trading calls.
     assert gate.api_types == frozenset({venues.HMAC})
     assert not gate.requires_passphrase
 
 
 def test_registry_lists_every_venue() -> None:
-    assert venues.names() == ["gate_spot", "paper"]
+    assert venues.names() == ["Gate", "Paper"]
     assert [v.name for v in venues.all_venues()] == venues.names()
     assert venues.PAPER.simulated
-    assert not venues.GATE_SPOT.simulated
+    assert not venues.GATE.simulated
 
 
-@pytest.mark.parametrize(
-    "spelling",
-    ["gate_spot", "GATE_SPOT", " Gate_Spot ", "Gate_spot"],
-)
+@pytest.mark.parametrize("spelling", ["Gate", "GATE", " gate ", "gATe"])
 def test_lookup_normalizes_case_and_whitespace(spelling: str) -> None:
-    assert venues.get(spelling) is venues.GATE_SPOT
+    assert venues.get(spelling) is venues.GATE
 
 
-@pytest.mark.parametrize("bad", ["gate-spot", "gateio", "gate", "gate_futures", ""])
+@pytest.mark.parametrize("bad", ["gate-spot", "gateio", "gate_spot", ""])
 def test_near_miss_spellings_are_rejected(bad: str) -> None:
-    """The whole point: a typo must fail now, not at deploy time."""
+    """The whole point: a typo must fail now, not at deploy time.
+
+    ``gate_spot`` is in here deliberately. It was the venue's name before
+    categories became part of an instrument's identity, and it must not
+    quietly keep resolving — a stored credential still spelled that way has to
+    surface as an error rather than as a venue nobody meant.
+    """
     assert venues.get(bad) is None
     with pytest.raises(venues.UnknownVenueError, match="unknown venue"):
         venues.require(bad)
@@ -44,19 +51,19 @@ def test_near_miss_spellings_are_rejected(bad: str) -> None:
 def test_unknown_venue_error_lists_the_known_ones() -> None:
     with pytest.raises(venues.UnknownVenueError) as exc:
         venues.require("gate-spot")
-    assert "gate_spot" in str(exc.value)
-    assert "paper" in str(exc.value)
+    assert "Gate" in str(exc.value)
+    assert "Paper" in str(exc.value)
 
 
 def test_validate_credential_returns_the_canonical_venue() -> None:
     """Callers persist the resolved name, not whatever spelling arrived."""
-    resolved = venues.validate_credential("  GATE_SPOT ", "hmac")
-    assert resolved.name == "gate_spot"
+    resolved = venues.validate_credential("  gate ", "hmac")
+    assert resolved.name == "Gate"
 
 
 def test_validate_credential_rejects_unsupported_algorithm() -> None:
     with pytest.raises(venues.UnsupportedApiTypeError, match="ED25519"):
-        venues.validate_credential("gate_spot", venues.ED25519)
+        venues.validate_credential("Gate", venues.ED25519)
 
 
 def test_validate_credential_rejects_unknown_venue() -> None:
@@ -70,8 +77,39 @@ def test_registry_errors_are_exchange_errors() -> None:
 
     assert issubclass(venues.UnknownVenueError, ExchangeError)
     assert issubclass(venues.UnsupportedApiTypeError, ExchangeError)
+    assert issubclass(venues.UnsupportedCategoryError, ExchangeError)
 
 
 def test_venue_is_immutable() -> None:
     with pytest.raises(Exception):
-        venues.GATE_SPOT.name = "something-else"  # type: ignore[misc]
+        venues.GATE.name = "something-else"  # type: ignore[misc]
+
+
+# --- tickers off the registry ---------------------------------------------
+
+
+def test_a_venue_builds_tickers_on_its_own_markets() -> None:
+    assert str(venues.GATE.ticker("spot", "btc/usdt")) == "Gate_Spot_BTCUSDT"
+    assert str(venues.ticker("gate", "BTCUSDT")) == "Gate_Spot_BTCUSDT"
+
+
+def test_a_category_the_venue_does_not_trade_is_refused() -> None:
+    with pytest.raises(venues.UnsupportedCategoryError, match="does not trade"):
+        venues.GATE.ticker("perp", "BTCUSDT")
+
+
+def test_a_single_market_venue_infers_its_category() -> None:
+    """So a caller naming only a symbol still gets a well-formed ticker."""
+    assert venues.PAPER.default_category is Category.SPOT
+    assert str(venues.PAPER.ticker(None, "BTCUSDT")) == "Paper_Spot_BTCUSDT"
+
+
+def test_no_registered_name_can_break_a_ticker_parse() -> None:
+    """A venue named ``gate_futures`` would alias a different instrument.
+
+    ``check_registry`` runs at import, so this restates the invariant rather
+    than discovering it — but it is the one that makes ``UniversalTicker.parse``
+    a plain split, and it should fail loudly if anyone relaxes it.
+    """
+    venues.check_registry()
+    assert all(SEPARATOR not in name for name in venues.names())

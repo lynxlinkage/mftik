@@ -8,15 +8,22 @@ from typing import TYPE_CHECKING, Any
 from mft.exchange.base import BaseClient
 from mft.exchange.models import Instrument, OrderBook, Ticker, Trade
 from mft.exchange.stream import EventStream
+from mft.exchange.tickers import Category, UniversalTicker
 
 if TYPE_CHECKING:
     from mft.exchange.paper.engine import PaperExchange
 
 
 class PaperPublicClient(BaseClient):
-    """Fake public venue client backed by :class:`PaperExchange`."""
+    """Fake public venue client backed by :class:`PaperExchange`.
 
-    name = "paper"
+    Reads take a universal ticker, like every other public connector; the
+    engine underneath only knows symbols, so the category is checked and then
+    dropped.
+    """
+
+    name = "Paper"
+    category = Category.SPOT
 
     def __init__(self, exchange: PaperExchange) -> None:
         super().__init__()
@@ -39,30 +46,38 @@ class PaperPublicClient(BaseClient):
         self._ensure_connected()
         return self._exchange.list_instruments()
 
-    async def fetch_ticker(self, symbol: str) -> Ticker:
+    async def fetch_ticker(self, ticker: UniversalTicker) -> Ticker:
         self._ensure_connected()
-        return self._exchange.get_ticker(symbol)
+        return self._exchange.get_ticker(self._symbol(ticker))
 
-    async def fetch_order_book(self, symbol: str, *, depth: int = 10) -> OrderBook:
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int = 10
+    ) -> OrderBook:
         self._ensure_connected()
-        return self._exchange.get_order_book(symbol, depth=depth)
+        return self._exchange.get_order_book(self._symbol(ticker), depth=depth)
 
     # --- streams -----------------------------------------------------------
 
-    def stream_ticker(self, symbol: str) -> AsyncIterator[Ticker]:
+    def stream_ticker(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         self._ensure_connected()
-        stream = self._exchange.subscribe_ticker(symbol)
+        return self._track(self._exchange.subscribe_ticker(self._symbol(ticker)))
+
+    def stream_trades(self, ticker: UniversalTicker) -> AsyncIterator[Trade]:
+        self._ensure_connected()
+        return self._track(self._exchange.subscribe_trades(self._symbol(ticker)))
+
+    def stream_order_book(self, ticker: UniversalTicker) -> AsyncIterator[OrderBook]:
+        self._ensure_connected()
+        return self._track(
+            self._exchange.subscribe_order_book(self._symbol(ticker))
+        )
+
+    def _track(self, stream: EventStream[Any]) -> EventStream[Any]:
+        """Hold the stream so :meth:`close` can shut it down."""
         self._streams.append(stream)
         return stream
 
-    def stream_trades(self, symbol: str) -> AsyncIterator[Trade]:
-        self._ensure_connected()
-        stream = self._exchange.subscribe_trades(symbol)
-        self._streams.append(stream)
-        return stream
-
-    def stream_order_book(self, symbol: str) -> AsyncIterator[OrderBook]:
-        self._ensure_connected()
-        stream = self._exchange.subscribe_order_book(symbol)
-        self._streams.append(stream)
-        return stream
+    def _symbol(self, ticker: UniversalTicker) -> str:
+        if (ticker.venue, ticker.category) != (self.name, self.category):
+            raise ValueError(f"{self.name} client was handed {ticker}")
+        return ticker.symbol

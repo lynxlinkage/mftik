@@ -22,6 +22,7 @@ from mft.exchange.models import (
     TimeInForce,
 )
 from mft.exchange.oms import OmsView
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     CancelReject,
     OrderReject,
@@ -32,8 +33,7 @@ from mft.protocol import (
 from mft_sts.impl.chase import IOC_MAX_SLICES, ChaseOrder
 
 BTCUSDT = SymbolInfo(
-    venue="paper",
-    symbol="BTCUSDT",
+    universal_ticker="Paper_Spot_BTCUSDT",
     base="BTC",
     quote="USDT",
     exch_ticker="BTCUSDT",
@@ -162,7 +162,7 @@ class FakeLedger:
 class FakeSession:
     def __init__(self) -> None:
         self.td_api_ids = [7]
-        self.md_ids = ["paper.bestquote.BTCUSDT"]
+        self.md_ids = ["bestquote.Paper_Spot_BTCUSDT"]
         self.exits: list[str] = []
         #: Reasons the strategy ended as ``failed`` rather than ``done``.
         self.failures: list[str] = []
@@ -218,7 +218,7 @@ def _strategy(**paras) -> ChaseOrder:
     # Tests drive _on_tick directly, so stand in for the recon that arms it.
     strat._armed = True
     strat._info = BTCUSDT
-    strat._venue, strat._symbol = "paper", "BTCUSDT"
+    strat._ticker = UniversalTicker.parse("Paper_Spot_BTCUSDT")
     strat._started_ms = strat.timer.now_ms()
 
     async def _noop_log(message: str, *, level: str = "info", **extra) -> None:

@@ -14,6 +14,7 @@ from mft.exchange.errors import (
 )
 from mft.exchange.models import Balance, Fill, Order, PlaceOrderRequest
 from mft.exchange.paper.private import PaperAuthError
+from mft.exchange.tickers import Category
 from mft.protocol import (
     PAPER_AUTH,
     PAPER_BALANCE,
@@ -46,7 +47,8 @@ class PaperRemotePrivateClient(BaseClient):
     settle. Absent rather than raising, so the caller can tell before asking.
     """
 
-    name = "paper"
+    name = "Paper"
+    category = Category.SPOT
 
     def __init__(
         self,

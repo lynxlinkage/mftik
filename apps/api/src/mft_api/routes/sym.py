@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+from mft.exchange import tickers, venues
+from mft.exchange.symbols import canonical_symbol
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     SYM_ERROR,
     SYM_LIST,
@@ -48,18 +51,37 @@ async def list_venues(broker: BrokerDep) -> SymVenueListResponse:
 @router.get("/symbols", response_model=SymSymbolListResponse)
 async def list_symbols(
     broker: BrokerDep,
+    universal_ticker: str | None = None,
     venue: str | None = None,
     category: str | None = None,
     symbol: str | None = None,
     active_only: bool = True,
 ) -> SymSymbolListResponse:
-    """Instruments from the golden tables. Omitted filters widen the result."""
+    """Instruments from the golden tables. Omitted filters widen the result.
+
+    ``universal_ticker`` names exactly one instrument; the other three are
+    parts of it and each widens the result by being left out. All are
+    normalized here rather than matched literally, so a query typed
+    ``gate/spot`` finds the rows stored as ``Gate_Spot_…``.
+    """
+    try:
+        venue = venues.normalize(venue) if venue else None
+        category = tickers.category(category).value if category else None
+        symbol = canonical_symbol(symbol) if symbol else None
+        universal_ticker = (
+            str(UniversalTicker.resolve(universal_ticker))
+            if universal_ticker
+            else None
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         result = await request_domain(
             broker,
             Topics.SYM,
             SymListRequestEnvelope.wrap(
                 SymListRequest(
+                    universal_ticker=universal_ticker,
                     venue=venue,
                     category=category,
                     symbol=symbol,

@@ -108,14 +108,17 @@ class StrategySpec(BaseModel):
         for item in value:
             if not isinstance(item, str) or not item.strip():
                 raise ValueError(f"md entry must be a non-empty string, got {item!r}")
-            feed = item.strip()
+            # Normalized, not just checked: this is YAML a person typed, and
+            # what comes out is what MD refcounts on. A ticker typed in
+            # lower case and one typed canonically have to end up as one feed,
+            # or a single instrument runs two pumps.
             try:
-                Topics.parse_md_feed(feed)
-            except ValueError as exc:
+                out.append(Topics.normalize_md_feed(item.strip()))
+            except Exception as exc:
                 raise ValueError(
-                    f"md entry must be venue.topic.symbol, got {feed!r}"
+                    f"md entry must be topic.UniversalTicker (e.g. "
+                    f"bestquote.Gate_Spot_BTCUSDT), got {item!r}: {exc}"
                 ) from exc
-            out.append(feed)
         return out
 
     @model_validator(mode="after")

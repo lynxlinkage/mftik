@@ -57,7 +57,7 @@ async def test_paper_venue_builds_a_paper_session(
     broker: Broker, paper: PaperExchange
 ) -> None:
     rows = {
-        1: FakeApiRow(id=1, venue="paper", api_key="k1", api_secret="s1"),
+        1: FakeApiRow(id=1, venue="Paper", api_key="k1", api_secret="s1"),
     }
     factory = _factory(broker, rows, paper=PaperSessionFactory(broker, paper))
 
@@ -71,7 +71,7 @@ async def test_paper_venue_builds_a_paper_session(
 async def test_gate_spot_venue_builds_a_gate_client(broker: Broker) -> None:
     rows = {
         7: FakeApiRow(
-            id=7, venue="gate_spot", api_key="gk", api_secret="gs"
+            id=7, venue="Gate", api_key="gk", api_secret="gs"
         ),
     }
     factory = _factory(broker, rows)
@@ -79,7 +79,7 @@ async def test_gate_spot_venue_builds_a_gate_client(broker: Broker) -> None:
     session = await factory.create(7)
 
     assert isinstance(session.private, GateSpotPrivateClient)
-    assert session.private.name == "gate_spot"
+    assert session.private.name == "Gate"
     assert session.private.api_key == "gk"
     assert session.api_id == 7
     # Built but not connected — the manager starts it.
@@ -88,7 +88,7 @@ async def test_gate_spot_venue_builds_a_gate_client(broker: Broker) -> None:
 
 async def test_venue_is_resolved_case_insensitively(broker: Broker) -> None:
     rows = {
-        7: FakeApiRow(id=7, venue="  GATE_SPOT ", api_key="gk", api_secret="gs"),
+        7: FakeApiRow(id=7, venue="  gate ", api_key="gk", api_secret="gs"),
     }
     factory = _factory(broker, rows)
 
@@ -118,7 +118,7 @@ async def test_gate_client_gets_the_symbol_plane(broker: Broker) -> None:
     """Symbol translation must go through the plane, not string surgery."""
     from mft.exchange.symbols import SymbolResolver
 
-    rows = {7: FakeApiRow(id=7, venue="gate_spot", api_key="gk", api_secret="gs")}
+    rows = {7: FakeApiRow(id=7, venue="Gate", api_key="gk", api_secret="gs")}
     factory = _factory(broker, rows)
 
     session = await factory.create(7)
@@ -133,8 +133,8 @@ async def test_one_symbol_client_is_shared_across_sessions(
 ) -> None:
     """Its cache is what keeps symbol lookups off the order path."""
     rows = {
-        7: FakeApiRow(id=7, venue="gate_spot", api_key="a", api_secret="b"),
-        8: FakeApiRow(id=8, venue="gate_spot", api_key="c", api_secret="d"),
+        7: FakeApiRow(id=7, venue="Gate", api_key="a", api_secret="b"),
+        8: FakeApiRow(id=8, venue="Gate", api_key="c", api_secret="d"),
     }
     factory = _factory(broker, rows)
 

@@ -10,6 +10,7 @@ from mft.broker import Broker
 from mft.exchange.base import BaseClient
 from mft.exchange.errors import ExchangeError
 from mft.exchange.models import Instrument, OrderBook, Ticker, Trade
+from mft.exchange.tickers import Category, UniversalTicker
 from mft.protocol import (
     PAPER_ERROR,
     PAPER_FETCH_INSTRUMENTS,
@@ -27,7 +28,8 @@ from mft.protocol import (
 class PaperRemotePublicClient(BaseClient):
     """The paper connector for other processes: engine RPC + pub/sub streams."""
 
-    name = "paper"
+    name = "Paper"
+    category = Category.SPOT
 
     def __init__(self, broker: Broker) -> None:
         super().__init__()
@@ -59,12 +61,12 @@ class PaperRemotePublicClient(BaseClient):
         rows = reply.payload.get("instruments", [])
         return [Instrument.model_validate(r) for r in rows]
 
-    async def fetch_ticker(self, symbol: str) -> Ticker:
+    async def fetch_ticker(self, ticker: UniversalTicker) -> Ticker:
         self._ensure_connected()
         reply = await self._rpc(
             PAPER_FETCH_TICKER,
             Envelope[PaperFetchTickerRequest].wrap(
-                PaperFetchTickerRequest(symbol=symbol),
+                PaperFetchTickerRequest(symbol=self._symbol(ticker)),
                 type=PAPER_FETCH_TICKER,
                 source="md",
             ),
@@ -72,12 +74,16 @@ class PaperRemotePublicClient(BaseClient):
         self._raise_if_error(reply)
         return Ticker.model_validate(reply.payload)
 
-    async def fetch_order_book(self, symbol: str, *, depth: int = 10) -> OrderBook:
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int = 10
+    ) -> OrderBook:
         self._ensure_connected()
         reply = await self._rpc(
             PAPER_FETCH_ORDER_BOOK,
             Envelope[PaperFetchOrderBookRequest].wrap(
-                PaperFetchOrderBookRequest(symbol=symbol, depth=depth),
+                PaperFetchOrderBookRequest(
+                    symbol=self._symbol(ticker), depth=depth
+                ),
                 type=PAPER_FETCH_ORDER_BOOK,
                 source="md",
             ),
@@ -85,15 +91,20 @@ class PaperRemotePublicClient(BaseClient):
         self._raise_if_error(reply)
         return OrderBook.model_validate(reply.payload)
 
-    def stream_ticker(self, symbol: str) -> AsyncIterator[Ticker]:
+    def stream_ticker(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         raise NotImplementedError("paper remote ticker stream not wired yet")
 
-    def stream_trades(self, symbol: str) -> AsyncIterator[Trade]:
+    def stream_trades(self, ticker: UniversalTicker) -> AsyncIterator[Trade]:
         raise NotImplementedError("paper remote trades stream not wired yet")
 
-    def stream_order_book(self, symbol: str) -> AsyncIterator[OrderBook]:
+    def stream_order_book(self, ticker: UniversalTicker) -> AsyncIterator[OrderBook]:
         self._ensure_connected()
-        return self._stream_order_book(symbol)
+        return self._stream_order_book(self._symbol(ticker))
+
+    def _symbol(self, ticker: UniversalTicker) -> str:
+        if (ticker.venue, ticker.category) != (self.name, self.category):
+            raise ExchangeError(f"{self.name} client was handed {ticker}")
+        return ticker.symbol
 
     async def _stream_order_book(self, symbol: str) -> AsyncIterator[OrderBook]:
         stop = asyncio.Event()

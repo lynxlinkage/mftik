@@ -74,7 +74,7 @@ class Strategy:
         up here too. Filter with ``self.owns(cid)``.
 
     Symbol plane (wired):
-        self.symbols — exch_ticker / filters per (venue, symbol)
+        self.symbols — exch_ticker / filters per universal ticker
 
     Timer tokens (wired):
         self.timer.token().register(first_ms, interval_ms, func)
@@ -83,13 +83,13 @@ class Strategy:
     Public events from ``md.{session_id}`` (wired):
         on_ticker, on_order_book, on_kline, on_trade, on_best_quote
         One hook per feed topic subscribed in ``md_ids``
-        (``venue.topic.symbol``; kline carries its interval in the topic,
+        (``topic.UniversalTicker``; kline carries its interval in the topic,
         e.g. ``paper.kline_1m.BTCUSDT``).
 
     Market-data queries — request-reply on ``md.fetch`` (wired):
-        self.mds.fetch_klines(venue, symbol, interval, limit=...)
-        self.mds.fetch_order_book(venue, symbol, depth=...)
-        self.mds.fetch_best_quote(venue, symbol)
+        self.mds.fetch_klines(ticker, interval, limit=...)
+        self.mds.fetch_order_book(ticker, depth=...)
+        self.mds.fetch_best_quote(ticker)
         Each returns a query_id once MD acks, or None if it never left
         (refused, or no MD running — mds.last_reject_reason says which). The
         answer arrives later at on_fetch_klines / on_fetch_orderbook /
@@ -174,7 +174,9 @@ class Strategy:
         the venue's ``price_tick`` / ``qty_step`` and clearing ``min_notional``
         is the strategy's job::
 
-            info = await self.symbols.get("gate_spot", "BTCUSDT")
+            info = await self.symbols.get(
+                UniversalTicker.parse("Gate_Spot_BTCUSDT")
+            )
             tick = info.filter("price_tick")
             price = (price / tick).quantize(Decimal(1)) * tick
         """
@@ -281,7 +283,7 @@ class Strategy:
     # --- public events (md.{session_id}) -----------------------------------
     #
     # One hook per md feed topic. A session only receives what it subscribed
-    # to in ``md_ids`` (``venue.topic.symbol``). Session validates wire JSON
+    # to in ``md_ids`` (``topic.UniversalTicker``). Session validates wire JSON
     # into the shared ``mft.exchange.models`` shapes before the hook runs.
 
     async def on_ticker(self, ticker: Ticker) -> None:
@@ -300,7 +302,7 @@ class Strategy:
     async def on_kline(self, kline: Kline) -> None:
         """Handle candle updates from MD.
 
-        Feed topic ``kline_{interval}`` (e.g. ``paper.kline_1m.BTCUSDT``). The
+        Feed topic ``kline_{interval}`` (e.g. ``kline_1m.Paper_Spot_BTCUSDT``). The
         in-progress candle is re-pushed as it moves; only ``closed`` candles
         are final.
         """

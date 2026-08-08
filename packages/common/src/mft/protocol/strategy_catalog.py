@@ -46,7 +46,7 @@ NOOP = StrategyTemplate(
 td:
   - paper trader
 md:
-  - paper.orderbook.BTCUSDT
+  - orderbook.Paper_Spot_BTCUSDT
 sts:
   # BUY mid-gap/mid/mid+gap (place→cancel each), flip to SELL, then exit.
   # 100 of the quote currency (USDT here) per order; mid from the book.
@@ -68,7 +68,7 @@ td:
   - paper trader
 md:
   # Chases top of book, so it needs bestquote rather than orderbook.
-  - paper.bestquote.BTCUSDT
+  - bestquote.Paper_Spot_BTCUSDT
 sts:
   # BUY posts gap_bps below the ask; SELL posts gap_bps above the bid.
   # Repriced whenever it drifts more than gap_bps from where it belongs.
@@ -96,7 +96,7 @@ td:
   - paper trader
 md:
   # One quote is read — the pair is checked against it, then it is ignored.
-  - paper.bestquote.BTCUSDT
+  - bestquote.Paper_Spot_BTCUSDT
 sts:
   # Exactly two legs. Neither may be able to trade on arrival: a BUY at or
   # above the ask, or a SELL at or below the bid, is refused before anything

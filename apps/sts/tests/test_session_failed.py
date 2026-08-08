@@ -278,7 +278,7 @@ async def test_a_dead_feed_fails_the_session_instead_of_leaving_it_live(
                 session_id="dead-1",
                 created_by=1,
                 strategy="quiet_md",
-                md=["paper.ticker.BTCUSDT"],
+                md=["ticker.Paper_Spot_BTCUSDT"],
             )
         )
         row = await _until_closed(manager, store, "dead-1")

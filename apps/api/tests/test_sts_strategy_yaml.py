@@ -91,7 +91,7 @@ async def test_rebuilt_yaml_round_trips_to_the_stored_spec(
         strategy=_strategy(
             config={"exec_interval_ms": 1000, "gap_bps": 10},
             td_api_ids=[3],
-            md_ids=["paper.orderbook.BTCUSDT"],
+            md_ids=["orderbook.Paper_Spot_BTCUSDT"],
         ),
         accounts={3: "paper trader"},
     )
@@ -106,7 +106,7 @@ async def test_rebuilt_yaml_round_trips_to_the_stored_spec(
 
     spec = parse_strategy_yml(result.yaml)
     assert spec.td == ["paper trader"]
-    assert spec.md == ["paper.orderbook.BTCUSDT"]
+    assert spec.md == ["orderbook.Paper_Spot_BTCUSDT"]
     assert spec.sts == {"exec_interval_ms": 1000, "gap_bps": 10}
 
 

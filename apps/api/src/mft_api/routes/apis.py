@@ -32,10 +32,11 @@ def _venue_out(venue: venues.Venue) -> VenueOut:
     return VenueOut(
         name=venue.name,
         label=venue.label,
+        categories=sorted(c.value for c in venue.categories),
         api_types=sorted(venue.api_types),
         requires_passphrase=venue.requires_passphrase,
         simulated=venue.simulated,
-        symbol_example=venue.symbol_example,
+        ticker_example=venue.ticker_example,
     )
 
 

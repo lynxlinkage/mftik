@@ -12,14 +12,16 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+from mft.exchange import venues
 from mft.exchange.gate.spot.rest import API_PREFIX, GATE_SPOT_REST_URL
-from mft_db.models.symbol import FilterName, SymbolCategory
+from mft.exchange.tickers import Category
+from mft_db.models.symbol import FilterName
 
 from mft_sym.sources.base import Instrument, tick_from_precision
 
 logger = logging.getLogger(__name__)
 
-VENUE = "gate_spot"
+VENUE = venues.GATE.name
 
 #: Gate's trade_status values that mean the pair can actually be traded.
 TRADABLE = frozenset({"tradable", "buyable", "sellable"})
@@ -29,7 +31,7 @@ class GateSpotInstrumentSource:
     """Every spot pair Gate lists, as canonical instruments."""
 
     venue = VENUE
-    category = SymbolCategory.SPOT.value
+    category = Category.SPOT
 
     def __init__(
         self,
@@ -66,7 +68,7 @@ class GateSpotInstrumentSource:
             instrument = self._to_instrument(row)
             if instrument is not None:
                 out.append(instrument)
-        logger.info("gate_spot instruments fetched=%s", len(out))
+        logger.info("%s instruments fetched=%s", VENUE, len(out))
         return out
 
     def _to_instrument(self, row: dict[str, Any]) -> Instrument | None:
@@ -74,7 +76,7 @@ class GateSpotInstrumentSource:
         quote = str(row.get("quote") or "").upper()
         exch_ticker = str(row.get("id") or "")
         if not base or not quote or not exch_ticker:
-            logger.warning("gate_spot skipping malformed pair: %r", row)
+            logger.warning("%s skipping malformed pair: %r", VENUE, row)
             return None
 
         filters: dict[str, Decimal | None] = {

@@ -133,3 +133,13 @@ def test_session_row_columns() -> None:
 
     assert SessionDomain.TD.value == "td"
     assert SessionStatus.LIVE.value == "live"
+
+
+def test_symbol_category_matches_the_ticker_vocabulary() -> None:
+    """``mft_db`` does not depend on ``mft-common``, so nothing imports one
+    into the other — but these values are the middle part of a stored universal
+    ticker, and a drift would write rows nothing can parse."""
+    from mft.exchange.tickers import Category
+    from mft_db.models.symbol import SymbolCategory
+
+    assert {c.value for c in SymbolCategory} == {c.value for c in Category}

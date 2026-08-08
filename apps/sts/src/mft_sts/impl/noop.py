@@ -38,6 +38,7 @@ from mft.exchange.models import (
     OrderType,
     Side,
 )
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     CancelReject,
     OrderReject,
@@ -94,8 +95,7 @@ class NoopStrategy(Strategy):
     def __init__(self) -> None:
         super().__init__()
         self._tick_token: TimerToken | None = None
-        self._venue: str | None = None
-        self._symbol: str | None = None
+        self._ticker: UniversalTicker | None = None
         self._info: SymbolInfo | None = None
         self._mid: Decimal | None = None
         self._book_updates = 0
@@ -138,7 +138,7 @@ class NoopStrategy(Strategy):
     async def on_start(self) -> None:
         self._resolve_feed()
         await self.log(
-            f"NoopStrategy started venue={self._venue} symbol={self._symbol} "
+            f"NoopStrategy started ticker={self._ticker} "
             f"exec_interval_ms={self.paras['exec_interval_ms']} "
             f"gap_bps={_fmt(self.paras['gap_bps'])} "
             f"qty_quote={_fmt(self.paras['qty_quote'])}"
@@ -282,39 +282,36 @@ class NoopStrategy(Strategy):
         """Instrument metadata, fetched once and cached for the session."""
         if self._info is not None:
             return self._info
-        if self._venue is None or self._symbol is None:
+        if self._ticker is None:
             await self.log(
                 "NoopStrategy has no md feed to derive an instrument from",
                 level="warn",
             )
             return None
         try:
-            self._info = await self.symbols.get(self._venue, self._symbol)
+            self._info = await self.symbols.get(self._ticker)
         except Exception as exc:
             await self.log(
-                f"NoopStrategy cannot resolve {self._venue}/{self._symbol}: "
-                f"{exc}",
+                f"NoopStrategy cannot resolve {self._ticker}: {exc}",
                 level="error",
             )
             return None
         await self.log(
-            f"NoopStrategy instrument {self._venue}/{self._symbol} "
+            f"NoopStrategy instrument {self._ticker} "
             f"tick={_fmt(self._info.price_tick)} step={_fmt(self._info.qty_step)} "
             f"min_notional={_fmt(self._info.filter('min_notional'))}"
         )
         return self._info
 
     def _resolve_feed(self) -> None:
-        """Venue and symbol come from the md feed key in strategy.yml."""
+        """The instrument comes from the md feed key in strategy.yml."""
         md_ids = list(self.session.md_ids) if self.session is not None else []
         if not md_ids:
             return
         try:
-            venue, _topic, symbol = Topics.parse_md_feed(md_ids[0])
+            _topic, self._ticker = Topics.parse_md_feed(md_ids[0])
         except ValueError:
             return
-        self._venue = venue
-        self._symbol = symbol
 
     # --- reporting ---------------------------------------------------------
 

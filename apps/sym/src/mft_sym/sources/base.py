@@ -12,7 +12,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
-from mft_db.models.symbol import SymbolCategory
+from mft.exchange.tickers import Category, UniversalTicker
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ class Instrument:
     base: str
     quote: str
     exch_ticker: str
-    category: str = SymbolCategory.SPOT.value
+    category: Category = Category.SPOT
     contract_size: Decimal | None = None
     settlement_asset: str | None = None
     expiry: datetime | None = None
@@ -42,12 +42,23 @@ class Instrument:
         """Canonical symbol — exact, because base and quote came from the venue."""
         return f"{self.base.upper()}{self.quote.upper()}"
 
+    @property
+    def ticker(self) -> UniversalTicker:
+        """The row's identity in the golden tables."""
+        return UniversalTicker.of(self.venue, self.category, self.symbol)
+
 
 class InstrumentSource(Protocol):
-    """Fetches every instrument a venue currently lists."""
+    """Fetches every instrument a venue currently lists.
+
+    One source is one ``(venue, category)`` — the unit a venue's instrument
+    endpoint actually serves, and the unit a refresh can safely delist within.
+    A unified-account venue therefore has one source per market, not one for
+    the venue.
+    """
 
     venue: str
-    category: str
+    category: Category
 
     async def fetch(self) -> list[Instrument]:
         """Return the venue's current listing. Raises on transport failure."""

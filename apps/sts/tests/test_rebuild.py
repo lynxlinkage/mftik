@@ -214,7 +214,7 @@ async def _serve_attaches(
 @pytest.mark.asyncio
 async def test_an_interrupted_session_comes_back(broker: Broker) -> None:
     store = FakeStsStore()
-    store.seed("r-1", td_api_ids=[3], md_ids=["paper.bestquote.BTCUSDT"])
+    store.seed("r-1", td_api_ids=[3], md_ids=["bestquote.Paper_Spot_BTCUSDT"])
     instances: list[Rebuildable] = []
     manager = _manager(broker, store, instances)
 

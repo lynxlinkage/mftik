@@ -17,12 +17,21 @@
 	let query = $state('');
 	let includeInactive = $state(false);
 
+	/** `Gate_Spot_BTCUSDT` → `{ venue, category, symbol }`.
+	 *
+	 * The wire carries the one identity string; the table shows its parts. `_`
+	 * separates and cannot appear inside a part, so a plain split is exact. */
+	function parts(s: SymbolInfo): { venue: string; category: string; symbol: string } {
+		const [venue = '', category = '', symbol = ''] = s.universal_ticker.split('_');
+		return { venue, category, symbol };
+	}
+
 	const filtered = $derived.by(() => {
 		const q = query.trim().toUpperCase();
 		if (!q) return symbols;
 		return symbols.filter(
 			(s) =>
-				s.symbol.toUpperCase().includes(q) ||
+				s.universal_ticker.toUpperCase().includes(q) ||
 				s.exch_ticker.toUpperCase().includes(q) ||
 				s.base.toUpperCase().includes(q) ||
 				s.quote.toUpperCase().includes(q)
@@ -31,10 +40,9 @@
 	const shown = $derived(filtered.slice(0, MAX_ROWS));
 	const truncated = $derived(filtered.length - shown.length);
 
-	/** ``(venue, symbol, category)`` is the plane's identity — same canonical
-	 * symbol can be spot on one row and a perp on the next. */
+	/** The universal ticker is the plane's identity, so it is also the row key. */
 	function rowKey(s: SymbolInfo): string {
-		return `${s.venue}:${s.category}:${s.symbol}`;
+		return s.universal_ticker;
 	}
 
 	/** ``—`` the venue does not publish this restriction at all; ``none`` it
@@ -95,8 +103,10 @@
 		<h1>Sym</h1>
 		<p>
 			Instruments the symbol plane tracks — the golden record for tick sizes and lot steps. The
-			<strong>Symbol</strong> column is the canonical spelling: that is what strategy.yml
-			<code>md</code> feeds (<code>venue.topic.symbol</code>) take, not the venue's own ticker.
+			<strong>Ticker</strong> column is the platform's identity for an instrument
+			(<code>Venue_Category_SYMBOL</code>): that is what strategy.yml <code>md</code> feeds
+			(<code>topic.Ticker</code>, e.g. <code>bestquote.Gate_Spot_ETHUSDT</code>) take, not the
+			venue's own spelling.
 		</p>
 	</div>
 	<button type="button" class="secondary" onclick={refresh} disabled={loading}>Refresh</button>
@@ -122,7 +132,7 @@
 		<input
 			bind:value={query}
 			disabled={loading}
-			placeholder="BTC, USDT, BTC_USDT…"
+			placeholder="BTC, USDT, Gate_Spot_BTCUSDT…"
 			autocomplete="off"
 		/>
 	</label>
@@ -157,7 +167,7 @@
 		<table class="data">
 			<thead>
 				<tr>
-					<th>Symbol</th>
+					<th>Ticker</th>
 					<th>Venue</th>
 					<th>Category</th>
 					<th>Pair</th>
@@ -173,9 +183,9 @@
 			<tbody>
 				{#each shown as s (rowKey(s))}
 					<tr>
-						<td><code class="sym">{s.symbol}</code></td>
-						<td><code>{s.venue}</code></td>
-						<td class="muted">{s.category}</td>
+						<td><code class="sym">{s.universal_ticker}</code></td>
+						<td><code>{parts(s).venue}</code></td>
+						<td class="muted">{parts(s).category}</td>
 						<td class="muted">{s.base}/{s.quote}</td>
 						<td><code>{s.exch_ticker}</code></td>
 						<td class="num">{filterValue(s, 'price_tick')}</td>

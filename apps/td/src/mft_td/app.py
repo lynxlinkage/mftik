@@ -47,7 +47,7 @@ async def amain() -> None:
 
     async with Broker() as broker:
         # Venue comes from the apis row: paper goes to the paper-engine
-        # container, gate_spot connects to Gate directly.
+        # container, Gate connects to the venue directly.
         factory = VenueSessionFactory(broker, load_api=td_db.get_api)
         sessions = SessionManager(
             factory,

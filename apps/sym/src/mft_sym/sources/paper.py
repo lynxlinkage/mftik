@@ -12,22 +12,24 @@ import logging
 from decimal import Decimal
 
 from mft.broker import Broker
+from mft.exchange import venues
 from mft.exchange.models import Instrument as VenueInstrument
 from mft.exchange.paper.remote_public import PaperRemotePublicClient
-from mft_db.models.symbol import FilterName, SymbolCategory
+from mft.exchange.tickers import Category
+from mft_db.models.symbol import FilterName
 
 from mft_sym.sources.base import Instrument
 
 logger = logging.getLogger(__name__)
 
-VENUE = "paper"
+VENUE = venues.PAPER.name
 
 
 class PaperInstrumentSource:
     """Instruments the paper engine currently lists."""
 
     venue = VENUE
-    category = SymbolCategory.SPOT.value
+    category = Category.SPOT
 
     def __init__(
         self, broker: Broker, *, public: PaperRemotePublicClient | None = None
@@ -46,7 +48,7 @@ class PaperInstrumentSource:
 
         rows = await public.fetch_instruments()
         out = [self._to_instrument(row) for row in rows]
-        logger.info("paper instruments fetched=%s", len(out))
+        logger.info("%s instruments fetched=%s", VENUE, len(out))
         return out
 
     def _to_instrument(self, row: VenueInstrument) -> Instrument:

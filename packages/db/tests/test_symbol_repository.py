@@ -25,9 +25,7 @@ async def db():
 
 async def _btc(repo: SymbolRepository, **overrides):
     payload = {
-        "venue": "gate_spot",
-        "symbol": "BTCUSDT",
-        "category": SPOT,
+        "universal_ticker": "Gate_Spot_BTCUSDT",
         "base": "BTC",
         "quote": "USDT",
         "exch_ticker": "BTC_USDT",
@@ -47,8 +45,7 @@ async def test_upsert_creates_ticker_and_filter_rows(db) -> None:
     repo = SymbolRepository(db)
     ticker = await _btc(repo)
 
-    assert ticker.venue == "gate_spot"
-    assert ticker.symbol == "BTCUSDT"
+    assert ticker.universal_ticker == "Gate_Spot_BTCUSDT"
     assert ticker.exch_ticker == "BTC_USDT"
     assert ticker.base == "BTC"
     assert ticker.is_active
@@ -94,12 +91,13 @@ async def test_upsert_reconciles_changed_and_dropped_filters(db) -> None:
 
 
 async def test_same_symbol_in_two_categories_is_two_instruments(db) -> None:
+    """A unified-account venue's whole shape: one symbol, two instruments."""
     repo = SymbolRepository(db)
-    await _btc(repo)
+    await _btc(repo, universal_ticker="Bybit_Spot_BTCUSDT")
     await _btc(
         repo,
-        category=SymbolCategory.PERP.value,
-        exch_ticker="BTC_USDT",
+        universal_ticker="Bybit_Perp_BTCUSDT",
+        exch_ticker="BTCUSDT",
         contract_size=Decimal("0.0001"),
         settlement_asset="USDT",
         filters={"price_tick": Decimal("0.1")},
@@ -107,15 +105,11 @@ async def test_same_symbol_in_two_categories_is_two_instruments(db) -> None:
 
     tickers = await repo.list_tickers()
     assert len(tickers) == 2
-    perp = await repo.get_ticker(
-        venue="gate_spot", symbol="BTCUSDT", category="perp"
-    )
+    perp = await repo.get_ticker("Bybit_Perp_BTCUSDT")
     assert perp is not None
     assert perp.contract_size == Decimal("0.0001")
     assert perp.settlement_asset == "USDT"
-    spot = await repo.get_ticker(
-        venue="gate_spot", symbol="BTCUSDT", category=SPOT
-    )
+    spot = await repo.get_ticker("Bybit_Spot_BTCUSDT")
     assert spot is not None
     assert spot.contract_size is None
 
@@ -124,38 +118,83 @@ async def test_delisting_deactivates_rather_than_deletes(db) -> None:
     """Orders and sessions still reference instruments that got delisted."""
     repo = SymbolRepository(db)
     await _btc(repo)
-    await _btc(repo, symbol="ETHUSDT", base="ETH", exch_ticker="ETH_USDT")
+    await _btc(
+        repo,
+        universal_ticker="Gate_Spot_ETHUSDT",
+        base="ETH",
+        exch_ticker="ETH_USDT",
+    )
 
     dropped = await repo.deactivate_missing(
-        venue="gate_spot", category=SPOT, keep={"BTCUSDT"}
+        venue="Gate", category=SPOT, keep={"Gate_Spot_BTCUSDT"}
     )
 
     assert dropped == 1
     active = await repo.list_tickers()
-    assert [t.symbol for t in active] == ["BTCUSDT"]
+    assert [t.universal_ticker for t in active] == ["Gate_Spot_BTCUSDT"]
     everything = await repo.list_tickers(active_only=False)
     assert len(everything) == 2
-    eth = await repo.get_ticker(
-        venue="gate_spot", symbol="ETHUSDT", category=SPOT
-    )
+    eth = await repo.get_ticker("Gate_Spot_ETHUSDT")
     assert eth is not None and not eth.is_active
 
 
 async def test_relisting_reactivates(db) -> None:
     repo = SymbolRepository(db)
     await _btc(repo)
-    await repo.deactivate_missing(venue="gate_spot", category=SPOT, keep=set())
+    await repo.deactivate_missing(venue="Gate", category=SPOT, keep=set())
     assert not (await repo.list_tickers())
 
     await _btc(repo)
-    assert [t.symbol for t in await repo.list_tickers()] == ["BTCUSDT"]
+    assert [t.universal_ticker for t in await repo.list_tickers()] == [
+        "Gate_Spot_BTCUSDT"
+    ]
 
 
-async def test_list_filters_by_venue_and_category(db) -> None:
+async def test_list_filters_by_the_parts_of_a_ticker(db) -> None:
+    """Every filter is a pattern over the one identity column."""
     repo = SymbolRepository(db)
     await _btc(repo)
-    await _btc(repo, venue="paper", exch_ticker="BTCUSDT")
+    await _btc(repo, universal_ticker="Gate_Spot_ETHUSDT", exch_ticker="ETH_USDT")
+    await _btc(repo, universal_ticker="Paper_Spot_BTCUSDT", exch_ticker="BTCUSDT")
+    await _btc(repo, universal_ticker="Bybit_Perp_BTCUSDT", exch_ticker="BTCUSDT")
 
-    assert len(await repo.list_tickers(venue="gate_spot")) == 1
-    assert len(await repo.list_tickers(category=SPOT)) == 2
-    assert await repo.venues() == ["gate_spot", "paper"]
+    assert len(await repo.list_tickers(venue="Gate")) == 2
+    assert len(await repo.list_tickers(category=SPOT)) == 3
+    assert len(await repo.list_tickers(symbol="BTCUSDT")) == 3
+    assert len(await repo.list_tickers(venue="Bybit", category="Perp")) == 1
+    assert [
+        t.universal_ticker
+        for t in await repo.list_tickers(venue="Gate", symbol="ETHUSDT")
+    ] == ["Gate_Spot_ETHUSDT"]
+    assert await repo.venues() == ["Bybit", "Gate", "Paper"]
+
+
+async def test_a_filter_part_cannot_wildcard_across_the_separator(db) -> None:
+    """``_`` separates the parts and is also LIKE's single-char wildcard.
+
+    Without escaping, filtering on venue ``Gate`` would match a venue spelled
+    ``GateX`` — every pattern the repository builds goes through
+    ``autoescape`` precisely so it cannot.
+    """
+    repo = SymbolRepository(db)
+    await _btc(repo, universal_ticker="Gate_Spot_BTCUSDT")
+    await _btc(repo, universal_ticker="GateFutures_Perp_BTCUSDT")
+
+    found = await repo.list_tickers(venue="Gate")
+    assert [t.universal_ticker for t in found] == ["Gate_Spot_BTCUSDT"]
+
+
+async def test_deactivating_one_market_leaves_the_others_alone(db) -> None:
+    """A Bybit spot refresh says nothing about Bybit perps."""
+    repo = SymbolRepository(db)
+    await _btc(repo, universal_ticker="Bybit_Spot_BTCUSDT")
+    await _btc(repo, universal_ticker="Bybit_Perp_BTCUSDT")
+
+    dropped = await repo.deactivate_missing(
+        venue="Bybit", category=SPOT, keep=set()
+    )
+
+    assert dropped == 1
+    assert [t.universal_ticker for t in await repo.list_tickers()] == [
+        "Bybit_Perp_BTCUSDT"
+    ]

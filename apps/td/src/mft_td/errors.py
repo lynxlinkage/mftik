@@ -47,7 +47,7 @@ class VenueErrors:
 
 #: Gate spot. Labels are Gate's own, from ``data.errs.label`` on a trading
 #: call and the ``label`` field on a REST error body.
-GATE_SPOT = VenueErrors(
+GATE = VenueErrors(
     labels={
         # funds
         "BALANCE_NOT_ENOUGH": RejectCode.VENUE_INSUFFICIENT_BALANCE,
@@ -134,8 +134,8 @@ PAPER = VenueErrors(
 #: Keyed by ``venues`` canonical name, which is also what a private client
 #: reports as its ``name``.
 VENUES: dict[str, VenueErrors] = {
-    "gate_spot": GATE_SPOT,
-    "paper": PAPER,
+    "Gate": GATE,
+    "Paper": PAPER,
 }
 
 #: Typed errors, for the adapters that raise a class instead of a label.
@@ -192,7 +192,7 @@ def normalize(exc: BaseException, *, venue: str) -> int | str:
 
 __all__ = [
     "BY_TYPE",
-    "GATE_SPOT",
+    "GATE",
     "PAPER",
     "VENUES",
     "VenueErrors",

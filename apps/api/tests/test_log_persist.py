@@ -13,7 +13,7 @@ from mft_api import log_persist
 def test_parse_log_topic_ok() -> None:
     assert log_persist.parse_log_topic("log.sts.abc") == ("sts", "abc")
     assert log_persist.parse_log_topic("log.td.42") == ("td", "42")
-    assert log_persist.parse_log_topic("log.md.gate_spot") == ("md", "gate_spot")
+    assert log_persist.parse_log_topic("log.md.Gate") == ("md", "Gate")
 
 
 def test_parse_log_topic_rejects_junk() -> None:

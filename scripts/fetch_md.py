@@ -3,9 +3,11 @@
 
 Intended for local / docker-compose testing::
 
-    just fetch quote  gate_spot BTCUSDT
-    just fetch book   gate_spot BTCUSDT 5
-    just fetch klines gate_spot BTCUSDT 1h 5
+    just fetch quote  Gate_Spot_BTCUSDT
+    just fetch book   Gate_Spot_BTCUSDT 5
+    just fetch klines Gate_Spot_BTCUSDT 1h 5
+
+The ticker is resolved leniently, so ``gate_spot_btcusdt`` works too.
 
 Deliberately not a strategy, and not attached to anything. It opens a reply
 channel of its own, sends one request on ``md.fetch`` and prints the ack and
@@ -26,6 +28,7 @@ import sys
 import uuid
 
 from mft.broker import Broker, BrokerConfig
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     MD_BESTQUOTE_RESULT,
     MD_FETCH_BESTQUOTE,
@@ -58,20 +61,20 @@ RESULTS = {
 
 
 def build(kind: str, args: list[str], reply_channel: str) -> tuple[str, MdFetchRequest]:
-    if len(args) < 2:
-        raise SystemExit(f"usage: {kind} <venue> <symbol> [...]")
+    if not args:
+        raise SystemExit(f"usage: {kind} <universal_ticker> [...]")
     common = {
         "reply_channel": reply_channel,
         "query_id": f"cli-{uuid.uuid4().hex[:8]}",
-        "venue": args[0],
-        "symbol": args[1],
+        "ticker": str(UniversalTicker.resolve(args[0])),
     }
+    rest = args[1:]
     if kind == "klines":
-        interval = args[2] if len(args) > 2 else "1h"
-        limit = int(args[3]) if len(args) > 3 else 5
+        interval = rest[0] if rest else "1h"
+        limit = int(rest[1]) if len(rest) > 1 else 5
         return MD_FETCH_KLINES, MdFetchKlines(**common, interval=interval, limit=limit)
     if kind == "book":
-        depth = int(args[2]) if len(args) > 2 else 5
+        depth = int(rest[0]) if rest else 5
         return MD_FETCH_ORDERBOOK, MdFetchOrderBook(**common, depth=depth)
     if kind == "quote":
         return MD_FETCH_BESTQUOTE, MdFetchBestQuote(**common)
@@ -131,7 +134,7 @@ async def run(kind: str, args: list[str]) -> int:
         listener = asyncio.create_task(listen())
         await asyncio.sleep(0.2)
 
-        print(f"→ {Topics.md_fetch()}  {msg_type}  {payload.venue} {payload.symbol}")
+        print(f"→ {Topics.md_fetch()}  {msg_type}  {payload.ticker}")
         reply = await broker.request(
             Topics.md_fetch(),
             Envelope[type(payload)].wrap(payload, type=msg_type, source=caller),

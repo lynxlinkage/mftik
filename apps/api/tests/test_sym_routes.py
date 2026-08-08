@@ -56,8 +56,7 @@ def _venues_reply(**kwargs: Any) -> Envelope[Any]:
 
 def _symbol(**overrides: Any) -> SymbolInfo:
     payload: dict[str, Any] = {
-        "venue": "gate_spot",
-        "symbol": "BTCUSDT",
+        "universal_ticker": "Gate_Spot_BTCUSDT",
         "base": "BTC",
         "quote": "USDT",
         "exch_ticker": "BTC_USDT",
@@ -69,7 +68,7 @@ def _symbol(**overrides: Any) -> SymbolInfo:
 async def test_venues_returns_plane_coverage() -> None:
     broker = StubBroker(
         _venues_reply(
-            venues=["gate_spot", "paper"], counts={"gate_spot": 2, "paper": 1}
+            venues=["Gate", "Paper"], counts={"Gate": 2, "Paper": 1}
         )
     )
 
@@ -79,8 +78,8 @@ async def test_venues_returns_plane_coverage() -> None:
     assert broker.sent is not None
     assert broker.sent.type == SYM_VENUES
     assert broker.sent.source == "api"
-    assert result.venues == ["gate_spot", "paper"]
-    assert result.counts == {"gate_spot": 2, "paper": 1}
+    assert result.venues == ["Gate", "Paper"]
+    assert result.counts == {"Gate": 2, "Paper": 1}
 
 
 async def test_venues_maps_plane_error_to_502() -> None:
@@ -118,21 +117,39 @@ async def test_symbols_forwards_query_filters() -> None:
 
     result = await list_symbols(
         broker,  # type: ignore[arg-type]
-        venue="gate_spot",
+        venue="gate",
         category="spot",
-        symbol=None,
+        symbol="btc/usdt",
         active_only=False,
     )
 
     assert broker.sent is not None
     assert broker.sent.type == SYM_LIST
+    # Every part is normalized at the boundary, so what the plane matches on
+    # is the spelling it stores — not whatever the query string carried.
     assert broker.sent.payload == {
-        "venue": "gate_spot",
-        "category": "spot",
-        "symbol": None,
+        "universal_ticker": None,
+        "venue": "Gate",
+        "category": "Spot",
+        "symbol": "BTCUSDT",
         "active_only": False,
     }
     assert [s.exch_ticker for s in result.symbols] == ["BTC_USDT"]
+
+
+async def test_symbols_rejects_a_filter_it_cannot_normalize() -> None:
+    """A bad venue or category is a 400 here, not a 502 from the plane."""
+    broker = StubBroker(
+        SymListResultEnvelope.wrap(
+            SymListResult(symbols=[]), type=SYM_LIST, source="sym"
+        )
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await list_symbols(broker, category="futures")  # type: ignore[arg-type]
+
+    assert exc.value.status_code == 400
+    assert broker.sent is None
 
 
 async def test_symbols_defaults_to_every_venue() -> None:

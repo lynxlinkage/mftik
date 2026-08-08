@@ -36,7 +36,7 @@ class PaperPublicFactory:
     * ``exchange`` omitted — :class:`PaperRemotePublicClient` (docker / prod).
     """
 
-    venue = "paper"
+    venue = venues.PAPER.name
 
     def __init__(
         self,
@@ -63,8 +63,8 @@ class PaperPublicFactory:
 class VenuePublicFactory:
     """Dispatches on the feed's venue to build the right public client.
 
-    Mirrors TD's ``VenueSessionFactory``: ``paper`` keeps the existing
-    behaviour, ``gate_spot`` builds a real Gate market-data client. A venue
+    Mirrors TD's ``VenueSessionFactory``: ``Paper`` keeps the existing
+    behaviour, ``Gate`` builds a real Gate market-data client. A venue
     that is in the registry but has no public client fails here rather than
     attaching a session that would never produce a tick.
 
@@ -94,8 +94,8 @@ class VenuePublicFactory:
         resolved = venues.require(venue)
         if resolved is venues.PAPER:
             return await self._paper.create(resolved.name)
-        if resolved is venues.GATE_SPOT:
-            logger.info("MD building gate_spot public client")
+        if resolved is venues.GATE:
+            logger.info("MD building Gate public client")
             return GateSpotPublicClient(symbols=self._symbols)
         raise ExchangeError(
             f"venue {resolved.name!r} is registered but MD has no public "

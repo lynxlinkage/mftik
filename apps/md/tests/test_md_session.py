@@ -12,6 +12,7 @@ import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     MD_LEASE_ACK,
     MD_ORDERBOOK,
@@ -147,7 +148,7 @@ async def test_md_attach_lease_and_orderbook(
         lease_grace=2.0,
     )
     session_id = "sts-md-1"
-    feed = Topics.md_feed("paper", "orderbook", "BTCUSDT")
+    feed = Topics.md_feed("orderbook", UniversalTicker.parse("Paper_Spot_BTCUSDT"))
     stop = asyncio.Event()
     hb_task = asyncio.create_task(_md_lease_publisher(broker, session_id, stop))
 
@@ -204,7 +205,7 @@ async def test_md_feed_refcount_shared(
         mark_done=store.mark_done,
         lease_grace=2.0,
     )
-    feed = Topics.md_feed("paper", "orderbook", "BTCUSDT")
+    feed = Topics.md_feed("orderbook", UniversalTicker.parse("Paper_Spot_BTCUSDT"))
     stop = asyncio.Event()
     s1, s2 = "sts-a", "sts-b"
     hb_tasks = [
@@ -224,7 +225,7 @@ async def test_md_feed_refcount_shared(
         )
     )
     assert sessions.feed_refcount(feed) == 2
-    assert sessions.dispatcher.refcount("paper", "orderbook", "BTCUSDT") == 2
+    assert sessions.dispatcher.refcount(*Topics.parse_md_feed(feed)) == 2
 
     await sessions.detach(session_id=s1, reason="test")
     assert sessions.feed_refcount(feed) == 1
@@ -250,7 +251,7 @@ async def test_md_rpc_attach(broker: Broker, paper: PaperExchange) -> None:
         lease_grace=2.0,
     )
     session_id = "sts-rpc"
-    feed = "paper.orderbook.BTCUSDT"
+    feed = "orderbook.Paper_Spot_BTCUSDT"
     stop = asyncio.Event()
     hb_task = asyncio.create_task(_md_lease_publisher(broker, session_id, stop))
     rpc_stop = asyncio.Event()
@@ -315,7 +316,7 @@ async def test_sts_on_order_book_from_md(
         mark_done=store.mark_done,
         lease_grace=2.0,
     )
-    feed = "paper.orderbook.BTCUSDT"
+    feed = "orderbook.Paper_Spot_BTCUSDT"
     session_id = "sts-book"
     strategy = BookStrategy()
     sts = StsSession(
@@ -376,7 +377,7 @@ async def test_sts_ticker_and_order_book_from_md(
         mark_done=store.mark_done,
         lease_grace=2.0,
     )
-    feeds = ["paper.orderbook.BTCUSDT", "paper.ticker.BTCUSDT"]
+    feeds = ["orderbook.Paper_Spot_BTCUSDT", "ticker.Paper_Spot_BTCUSDT"]
     session_id = "sts-feeds"
     strategy = FeedStrategy()
     sts = StsSession(

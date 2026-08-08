@@ -46,8 +46,8 @@ SESSION = "sts-rpc"
 class _StubSymbols:
     """Minimal symbol plane: enough for the ledger to price BTCUSDT."""
 
-    async def get(self, venue: str, symbol: str, *, category: str = "spot"):
-        return SimpleNamespace(symbol=symbol, base="BTC", quote="USDT")
+    async def get(self, ticker):  # noqa: ANN001
+        return SimpleNamespace(symbol=ticker.symbol, base="BTC", quote="USDT")
 
 
 @pytest.fixture

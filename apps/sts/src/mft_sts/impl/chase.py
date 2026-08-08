@@ -40,7 +40,7 @@ slower, and it can end with size still unfilled after ``IOC_MAX_SLICES``, which
 is logged as an error because the guarantee did not hold.
 
 Sizing the slices as limit orders has a second effect worth knowing: it is what
-lets ``must_exec`` work on the **buy** side of ``gate_spot`` at all. Gate sizes
+lets ``must_exec`` work on the **buy** side of ``Gate`` at all. Gate sizes
 a spot *market* buy in quote currency, which the shared order interface cannot
 express, so its adapter refuses one outright — a limit IOC sidesteps that
 entirely.
@@ -65,6 +65,7 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     CancelReject,
     OrderReject,
@@ -168,8 +169,7 @@ class ChaseOrder(Strategy):
     def __init__(self) -> None:
         super().__init__()
         self._tick_token: TimerToken | None = None
-        self._venue: str | None = None
-        self._symbol: str | None = None
+        self._ticker: UniversalTicker | None = None
         self._info: SymbolInfo | None = None
         #: Latest price on the side we would have to cross to take.
         self._ref: Decimal | None = None
@@ -266,7 +266,7 @@ class ChaseOrder(Strategy):
     async def on_start(self) -> None:
         self._resolve_feed()
         await self.log(
-            f"ChaseOrder started venue={self._venue} symbol={self._symbol} "
+            f"ChaseOrder started ticker={self._ticker} "
             f"side={self.paras['side'].value} "
             f"gap_bps={_fmt(self.paras['gap_bps'])} "
             f"expiry_s={_fmt(self.paras['expiry_s'])} "
@@ -948,18 +948,17 @@ class ChaseOrder(Strategy):
         """Instrument metadata, fetched once and cached for the session."""
         if self._info is not None:
             return self._info
-        if self._venue is None or self._symbol is None:
+        if self._ticker is None:
             await self.log(
                 "ChaseOrder has no md feed to derive an instrument from",
                 level="warn",
             )
             return None
         try:
-            self._info = await self.symbols.get(self._venue, self._symbol)
+            self._info = await self.symbols.get(self._ticker)
         except Exception as exc:
             await self.log(
-                f"ChaseOrder cannot resolve {self._venue}/{self._symbol}: "
-                f"{exc}",
+                f"ChaseOrder cannot resolve {self._ticker}: {exc}",
                 level="error",
             )
             return None
@@ -971,11 +970,9 @@ class ChaseOrder(Strategy):
         if not md_ids:
             return
         try:
-            venue, _topic, symbol = Topics.parse_md_feed(md_ids[0])
+            _topic, self._ticker = Topics.parse_md_feed(md_ids[0])
         except ValueError:
             return
-        self._venue = venue
-        self._symbol = symbol
 
     def _primary_api_id(self) -> int | None:
         if self.session is None or not self.session.td_api_ids:

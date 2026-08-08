@@ -251,8 +251,8 @@ def _md_venues(feeds: list[str]) -> set[str]:
     venues: set[str] = set()
     for feed in feeds:
         try:
-            venue, _topic, _symbol = Topics.parse_md_feed(feed)
+            _topic, ticker = Topics.parse_md_feed(feed)
         except ValueError:
             continue
-        venues.add(venue)
+        venues.add(ticker.venue)
     return venues

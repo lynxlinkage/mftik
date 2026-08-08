@@ -14,6 +14,7 @@ from mft.exchange.gate.spot.client import GateSpotWebSocket
 from mft.exchange.gate.spot.public import GateSpotPublicClient
 from mft.exchange.gate.spot.rest import GateRestError, GateSpotPublicRest
 from mft.exchange.intervals import InvalidIntervalError
+from mft.exchange.tickers import UniversalTicker
 
 CURRENCY_PAIRS = [
     {
@@ -100,16 +101,19 @@ class StubResolver:
         self.canonical = {v: k for k, v in self.native.items()}
         self.lookups = 0
 
-    async def exch_ticker(
-        self, venue: str, symbol: str, *, category: str = "spot"
-    ) -> str:
+    async def exch_ticker(self, ticker: UniversalTicker) -> str:
         self.lookups += 1
-        return self.native[symbol]
+        return self.native[ticker.symbol]
 
     async def symbol_for(
-        self, venue: str, exch_ticker: str, *, category: str = "spot"
-    ) -> str:
-        return self.canonical[exch_ticker]
+        self, venue: str, exch_ticker: str, *, category: str
+    ) -> UniversalTicker:
+        return UniversalTicker.of(venue, category, self.canonical[exch_ticker])
+
+
+def GATE(symbol: str) -> UniversalTicker:
+    """``BTCUSDT`` → ``Gate_Spot_BTCUSDT``, for the reads keyed by a ticker."""
+    return UniversalTicker.of("Gate", "Spot", symbol)
 
 
 @pytest.fixture
@@ -168,7 +172,7 @@ async def test_fetch_ticker_resolves_the_pair_and_comes_back_canonical(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
     async with await _public(gate, rest_stub, resolver) as client:
-        ticker = await client.fetch_ticker("BTCUSDT")
+        ticker = await client.fetch_ticker(GATE("BTCUSDT"))
 
     assert ticker.symbol == "BTCUSDT"
     assert ticker.bid == Decimal("59999")
@@ -183,7 +187,7 @@ async def test_fetch_order_book_stamps_the_canonical_symbol(
 ) -> None:
     """Gate's reply carries no pair at all, so one has to be put back on."""
     async with await _public(gate, rest_stub, resolver) as client:
-        book = await client.fetch_order_book("BTCUSDT", depth=5)
+        book = await client.fetch_order_book(GATE("BTCUSDT"), depth=5)
 
     assert book.symbol == "BTCUSDT"
     assert book.bids[0].price == Decimal("59999")
@@ -198,7 +202,7 @@ async def test_fetch_klines_reads_gates_column_order(
     """Close comes before high/low/open in the row; OHLC order would silently
     swap the four."""
     async with await _public(gate, rest_stub, resolver) as client:
-        klines = await client.fetch_klines("BTCUSDT", "1m", limit=2)
+        klines = await client.fetch_klines(GATE("BTCUSDT"), "1m", limit=2)
 
     first = klines[0]
     assert first.open_time == 1_700_000_000
@@ -216,7 +220,7 @@ async def test_fetch_klines_marks_the_window_in_progress_open(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
     async with await _public(gate, rest_stub, resolver) as client:
-        klines = await client.fetch_klines("BTCUSDT", "1m")
+        klines = await client.fetch_klines(GATE("BTCUSDT"), "1m")
 
     assert [k.closed for k in klines] == [True, False]
 
@@ -230,7 +234,7 @@ async def test_fetch_klines_treats_a_missing_closed_column_as_open(
         ["1700000000", "6000000", "60500", "60900", "59900", "60100", "100"]
     ]
     async with await _public(gate, rest_stub, resolver) as client:
-        klines = await client.fetch_klines("BTCUSDT", "1m")
+        klines = await client.fetch_klines(GATE("BTCUSDT"), "1m")
 
     assert klines[0].closed is False
 
@@ -241,14 +245,14 @@ async def test_fetch_klines_rejects_a_short_row(
     rest_stub.routes["/api/v4/spot/candlesticks"] = [["1700000000", "6000000"]]
     async with await _public(gate, rest_stub, resolver) as client:
         with pytest.raises(GateRestError):
-            await client.fetch_klines("BTCUSDT", "1m")
+            await client.fetch_klines(GATE("BTCUSDT"), "1m")
 
 
 async def test_fetch_klines_resolves_symbol_and_comes_back_canonical(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
     async with await _public(gate, rest_stub, resolver) as client:
-        klines = await client.fetch_klines("BTCUSDT", "1m", limit=2)
+        klines = await client.fetch_klines(GATE("BTCUSDT"), "1m", limit=2)
 
     assert rest_stub.requests[-1].url.params["currency_pair"] == "BTC_USDT"
     assert rest_stub.requests[-1].url.params["limit"] == "2"
@@ -262,7 +266,7 @@ async def test_fetch_klines_translates_the_month_and_stamps_it_back(
     """The one interval Gate genuinely spells differently: it refuses ``1M``
     and serves the month as ``30d``."""
     async with await _public(gate, rest_stub, resolver) as client:
-        klines = await client.fetch_klines("BTCUSDT", "1mo")
+        klines = await client.fetch_klines(GATE("BTCUSDT"), "1mo")
 
     assert rest_stub.requests[-1].url.params["interval"] == "30d"
     # ...and the canonical spelling is what comes back, not Gate's.
@@ -273,7 +277,7 @@ async def test_fetch_klines_normalizes_before_translating(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
     async with await _public(gate, rest_stub, resolver) as client:
-        klines = await client.fetch_klines("BTCUSDT", " 1H ")
+        klines = await client.fetch_klines(GATE("BTCUSDT"), " 1H ")
 
     assert rest_stub.requests[-1].url.params["interval"] == "1h"
     assert {k.interval for k in klines} == {"1h"}
@@ -286,7 +290,7 @@ async def test_fetch_klines_refuses_an_interval_gate_does_not_serve(
     before = len(rest_stub.requests)
     async with await _public(gate, rest_stub, resolver) as client:
         with pytest.raises(InvalidIntervalError):
-            await client.fetch_klines("BTCUSDT", "2w")
+            await client.fetch_klines(GATE("BTCUSDT"), "2w")
 
     assert len(rest_stub.requests) == before
 
@@ -296,7 +300,7 @@ async def test_fetch_klines_refuses_capital_m_months(
 ) -> None:
     async with await _public(gate, rest_stub, resolver) as client:
         with pytest.raises(InvalidIntervalError):
-            await client.fetch_klines("BTCUSDT", "1M")
+            await client.fetch_klines(GATE("BTCUSDT"), "1M")
 
 
 async def test_rest_error_surfaces(
@@ -305,7 +309,7 @@ async def test_rest_error_surfaces(
     rest_stub.routes = {"/api/v4/spot/tickers": []}
     async with await _public(gate, rest_stub, resolver) as client:
         with pytest.raises(GateRestError):
-            await client.fetch_ticker("BTCUSDT")
+            await client.fetch_ticker(GATE("BTCUSDT"))
 
 
 # --- streams (WebSocket) ---------------------------------------------------
@@ -315,7 +319,7 @@ async def test_stream_ticker(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
     async with await _public(gate, rest_stub, resolver) as client:
-        stream = client.stream_ticker("BTCUSDT")
+        stream = client.stream_ticker(GATE("BTCUSDT"))
         task = asyncio.create_task(anext(stream))
         await _wait_for_subs(client)
         assert gate.frames_for(ch.TICKERS)[0]["payload"] == ["BTC_USDT"]
@@ -331,7 +335,7 @@ async def test_stream_trades(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
     async with await _public(gate, rest_stub, resolver) as client:
-        stream = client.stream_trades("BTCUSDT")
+        stream = client.stream_trades(GATE("BTCUSDT"))
         task = asyncio.create_task(anext(stream))
         await _wait_for_subs(client)
 
@@ -362,7 +366,7 @@ async def test_stream_order_book_is_a_full_snapshot(
 ) -> None:
     """MD gets whole books, so the diff channel is deliberately not used."""
     async with await _public(gate, rest_stub, resolver) as client:
-        stream = client.stream_order_book("BTCUSDT")
+        stream = client.stream_order_book(GATE("BTCUSDT"))
         task = asyncio.create_task(anext(stream))
         await _wait_for_subs(client)
         assert gate.frames_for(ch.ORDER_BOOK)[0]["payload"] == [
@@ -393,7 +397,7 @@ async def test_stream_kline(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
     async with await _public(gate, rest_stub, resolver) as client:
-        stream = client.stream_kline("BTCUSDT", "1m")
+        stream = client.stream_kline(GATE("BTCUSDT"), "1m")
         task = asyncio.create_task(anext(stream))
         await _wait_for_subs(client)
         # Gate wants the interval first on this channel.
@@ -437,7 +441,7 @@ async def test_stream_best_quote(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
     async with await _public(gate, rest_stub, resolver) as client:
-        stream = client.stream_best_quote("BTCUSDT")
+        stream = client.stream_best_quote(GATE("BTCUSDT"))
         task = asyncio.create_task(anext(stream))
         await _wait_for_subs(client)
 
@@ -473,8 +477,8 @@ async def test_streams_are_filtered_per_pair(
     out of the BTC feed.
     """
     async with await _public(gate, rest_stub, resolver) as client:
-        btc = client.stream_trades("BTCUSDT")
-        eth = client.stream_trades("ETHUSDT")
+        btc = client.stream_trades(GATE("BTCUSDT"))
+        eth = client.stream_trades(GATE("ETHUSDT"))
         btc_task = asyncio.create_task(anext(btc))
         eth_task = asyncio.create_task(anext(eth))
         await _wait_for_subs(client, count=2)
@@ -507,7 +511,7 @@ async def test_klines_are_filtered_per_interval(
 ) -> None:
     """Two intervals on one pair share the channel too."""
     async with await _public(gate, rest_stub, resolver) as client:
-        stream = client.stream_kline("BTCUSDT", "5m")
+        stream = client.stream_kline(GATE("BTCUSDT"), "5m")
         task = asyncio.create_task(anext(stream))
         await _wait_for_subs(client)
 
@@ -533,7 +537,7 @@ async def test_stream_unhooks_itself_when_the_consumer_stops(
 ) -> None:
     """MD ends a feed by dropping the iterator; the socket must forget it."""
     async with await _public(gate, rest_stub, resolver) as client:
-        stream = client.stream_trades("BTCUSDT")
+        stream = client.stream_trades(GATE("BTCUSDT"))
         task = asyncio.create_task(anext(stream))
         await _wait_for_subs(client)
         assert len(client.ws._subs) == 1  # noqa: SLF001
@@ -552,7 +556,7 @@ async def test_streams_need_a_connection(
 
     client = await _public(gate, rest_stub, resolver)
     with pytest.raises(ExchangeNotConnectedError):
-        client.stream_order_book("BTCUSDT")
+        client.stream_order_book(GATE("BTCUSDT"))
 
 
 async def _wait_for_subs(

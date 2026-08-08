@@ -1,4 +1,4 @@
-"""The gate_spot trading connector.
+"""The Gate spot trading connector.
 
 Not an implementation of a shared trading interface — there is none; see
 :mod:`mft.exchange.base`. It resembles the other venues' connectors because
@@ -40,7 +40,8 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
-from mft.exchange.symbols import SymbolResolver, canonical
+from mft.exchange.symbols import SymbolResolver
+from mft.exchange.tickers import Category, UniversalTicker
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,12 @@ class GateSpotPrivateClient(BaseClient):
     ``PlaceOrderRequest.params``.
     """
 
-    name = "gate_spot"
+    name = "Gate"
+    #: Gate's spot plane is a venue of its own — one credential, one market —
+    #: so every instrument this connector touches is on this category, and it
+    #: builds the ticker rather than being told it. A unified-account venue
+    #: could not, which is why the order path carries the ticker there.
+    category = Category.SPOT
 
     def __init__(
         self,
@@ -115,7 +121,7 @@ class GateSpotPrivateClient(BaseClient):
         await self.ws.connect()
         await self.rest.connect()
         self._connected = True
-        logger.info("gate_spot connected key=%s…", self.api_key[:6])
+        logger.info("Gate connected key=%s…", self.api_key[:6])
 
     async def close(self) -> None:
         self._connected = False
@@ -134,7 +140,7 @@ class GateSpotPrivateClient(BaseClient):
             # while PlaceOrderRequest.qty is base. Passing qty straight through
             # would size the order wrong by the price. Refuse rather than guess.
             raise OrderError(
-                "gate_spot market buy sizes in quote currency, which "
+                "Gate market buy sizes in quote currency, which "
                 "PlaceOrderRequest.qty (base) cannot express; use a limit order"
             )
         extras = dict(request.params or {})
@@ -143,7 +149,7 @@ class GateSpotPrivateClient(BaseClient):
         for reserved in _RESERVED_PARAMS:
             if extras.pop(reserved, None) is not None:
                 logger.warning(
-                    "gate_spot ignoring params[%r]; set it on the request",
+                    "Gate ignoring params[%r]; set it on the request",
                     reserved,
                 )
         # Market orders must not rest; Gate only takes ioc/fok there.
@@ -198,7 +204,7 @@ class GateSpotPrivateClient(BaseClient):
             pair = await self._venue_symbol(symbol)
         if pair is None:
             raise OrderError(
-                f"cannot resolve gate_spot order {client_order_id!r} "
+                f"cannot resolve Gate order {client_order_id!r} "
                 "without its symbol"
             )
         try:
@@ -232,23 +238,25 @@ class GateSpotPrivateClient(BaseClient):
             await self._inbound(order)
         pair = self._pairs.get(order_id)
         if pair is None:
-            raise OrderError(f"no open gate_spot order for id {order_id!r}")
+            raise OrderError(f"no open Gate order for id {order_id!r}")
         return pair
+
+    def _ticker(self, symbol: str) -> UniversalTicker:
+        """The universal identity of a symbol on this connector's market."""
+        return UniversalTicker.of(self.name, self.category, symbol)
 
     async def _venue_symbol(self, symbol: str) -> str:
         """Canonical → Gate's spelling, via the plane."""
-        return await self.symbols.exch_ticker(
-            self.name, canonical(symbol), category="spot"
-        )
+        return await self.symbols.exch_ticker(self._ticker(symbol))
 
     async def _inbound(self, order: Order) -> Order:
         """Resolve a venue order home: index its pair, canonicalize it."""
         native = order.symbol
-        symbol = await self.symbols.symbol_for(
-            self.name, native, category="spot"
+        ticker = await self.symbols.symbol_for(
+            self.name, native, category=self.category
         )
         self._remember(order, native)
-        return order.model_copy(update={"symbol": symbol})
+        return order.model_copy(update={"symbol": ticker.symbol})
 
     def _remember(self, order: Order, native_symbol: str) -> None:
         """Index an order's venue pair by every id it can be cancelled with."""
@@ -305,10 +313,10 @@ class GateSpotPrivateClient(BaseClient):
         stream = await self.ws.subscribe_user_trades()
         async for trade in stream:
             fill = trade.to_fill()
-            symbol = await self.symbols.symbol_for(
-                self.name, fill.symbol, category="spot"
+            ticker = await self.symbols.symbol_for(
+                self.name, fill.symbol, category=self.category
             )
-            yield fill.model_copy(update={"symbol": symbol})
+            yield fill.model_copy(update={"symbol": ticker.symbol})
 
     async def _balances(self) -> AsyncIterator[Balance]:
         stream = await self.ws.subscribe_balances()

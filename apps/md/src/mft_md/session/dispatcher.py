@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from mft.broker import Broker
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import Topics, UntypedEnvelope, publish_md_log
 
 if TYPE_CHECKING:
@@ -13,7 +14,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-FeedKey = tuple[str, str, str]  # (venue, topic, symbol)
+#: What a subscription is refcounted on. The ticker carries the venue, so the
+#: key is two parts, not four — and is exactly what ``Topics.md_feed`` renders.
+FeedKey = tuple[str, UniversalTicker]  # (topic, ticker)
 
 #: Dispatches between log lines on a feed. One line per message buries every
 #: other md event at book speed, and the interesting part of a dispatch line —
@@ -40,20 +43,20 @@ class Dispatcher:
         self._links.pop(session_id, None)
 
     def subscribe(
-        self, session_id: str, venue: str, topic: str, symbol: str
+        self, session_id: str, topic: str, ticker: UniversalTicker
     ) -> tuple[bool, int]:
         """Add subscription. Returns ``(first_subscriber, new_refcount)``."""
-        key = (venue, topic, symbol)
+        key = (topic, ticker)
         subs = self._subs.setdefault(key, set())
         first = len(subs) == 0
         subs.add(session_id)
         return first, len(subs)
 
     def unsubscribe(
-        self, session_id: str, venue: str, topic: str, symbol: str
+        self, session_id: str, topic: str, ticker: UniversalTicker
     ) -> tuple[bool, int]:
         """Remove subscription. Returns ``(emptied, new_refcount)``."""
-        key = (venue, topic, symbol)
+        key = (topic, ticker)
         subs = self._subs.get(key)
         if not subs:
             return True, 0
@@ -79,30 +82,28 @@ class Dispatcher:
         self.unregister_link(session_id)
         return changed
 
-    def subscribers(self, venue: str, topic: str, symbol: str) -> set[str]:
-        return set(self._subs.get((venue, topic, symbol), ()))
+    def subscribers(self, topic: str, ticker: UniversalTicker) -> set[str]:
+        return set(self._subs.get((topic, ticker), ()))
 
-    def refcount(self, venue: str, topic: str, symbol: str) -> int:
-        return len(self._subs.get((venue, topic, symbol), ()))
+    def refcount(self, topic: str, ticker: UniversalTicker) -> int:
+        return len(self._subs.get((topic, ticker), ()))
 
     def refcounts(self) -> dict[str, int]:
         return {
-            Topics.md_feed(v, t, s): len(subs)
-            for (v, t, s), subs in self._subs.items()
+            Topics.md_feed(topic, ticker): len(subs)
+            for (topic, ticker), subs in self._subs.items()
         }
 
     async def publish(
         self,
-        venue: str,
         topic: str,
-        symbol: str,
+        ticker: UniversalTicker,
         envelope: UntypedEnvelope,
     ) -> None:
         """Fan out one venue update to N live STS session streams."""
+        key = (topic, ticker)
         targets = [
-            sid
-            for sid in list(self._subs.get((venue, topic, symbol), ()))
-            if sid in self._links
+            sid for sid in list(self._subs.get(key, ())) if sid in self._links
         ]
         sent = 0
         for session_id in targets:
@@ -113,23 +114,20 @@ class Dispatcher:
                 sent += 1
             except Exception:
                 logger.exception(
-                    "MD dispatch failed session=%s feed=%s.%s.%s",
+                    "MD dispatch failed session=%s feed=%s",
                     session_id,
-                    venue,
-                    topic,
-                    symbol,
+                    Topics.md_feed(topic, ticker),
                 )
-        key = (venue, topic, symbol)
         count = self._dispatched.get(key, 0) + 1
         self._dispatched[key] = count
         # A partial fan-out means a session missed data, so it is never
         # sampled away — only the healthy repeats are.
         if sent == len(targets) and count > 1 and count % LOG_EVERY:
             return
-        feed = Topics.md_feed(venue, topic, symbol)
+        feed = Topics.md_feed(topic, ticker)
         await publish_md_log(
             self._broker,
-            venue,
+            ticker.venue,
             (
                 f"dispatch {envelope.type} {feed} "
                 f"→ {sent}/{len(targets)} sessions (#{count})"

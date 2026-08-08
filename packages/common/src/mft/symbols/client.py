@@ -5,6 +5,10 @@ derive on its own: how a venue spells an instrument, and what its trading
 restrictions are. Guessing either one is how orders land on the wrong
 instrument or get rejected for a tick-size violation.
 
+Everything here is keyed by a :class:`~mft.exchange.tickers.UniversalTicker`,
+never a bare symbol — on a unified-account venue ``BTCUSDT`` names both the
+spot pair and the perp, and they have different tick sizes.
+
 Reads are cached in-process. Listings are near-static by definition, so a
 process refetches on a miss or when its TTL lapses, not per order.
 """
@@ -17,6 +21,7 @@ import time
 from decimal import Decimal
 
 from mft.broker import Broker
+from mft.exchange.tickers import Category, UniversalTicker
 from mft.protocol import (
     SYM_LIST,
     SYM_REFRESH,
@@ -34,9 +39,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TTL = 600.0
 
+#: Cache bucket: one venue's one market. That is also the unit the plane
+#: refreshes, so a bucket is never half stale.
+TableKey = tuple[str, Category]
+
 
 class SymbolNotFoundError(LookupError):
-    """The plane has no such instrument (wrong venue, symbol, or category)."""
+    """The plane has no such instrument (wrong venue, category, or symbol)."""
 
 
 class SymbolClient:
@@ -53,68 +62,62 @@ class SymbolClient:
         self.ttl = ttl
         self.timeout = timeout
         # (venue, category) → {symbol: SymbolInfo}
-        self._cache: dict[tuple[str, str], dict[str, SymbolInfo]] = {}
+        self._cache: dict[TableKey, dict[str, SymbolInfo]] = {}
         # (venue, category) → {exch_ticker: symbol}, for the inbound direction
-        self._reverse: dict[tuple[str, str], dict[str, str]] = {}
-        self._fetched_at: dict[tuple[str, str], float] = {}
+        self._reverse: dict[TableKey, dict[str, str]] = {}
+        self._fetched_at: dict[TableKey, float] = {}
         self._lock = asyncio.Lock()
 
     # --- reads -------------------------------------------------------------
 
-    async def get(
-        self, venue: str, symbol: str, *, category: str = "spot"
-    ) -> SymbolInfo:
+    async def get(self, ticker: UniversalTicker) -> SymbolInfo:
         """One instrument, or :class:`SymbolNotFoundError`."""
-        table = await self._table(venue, category)
-        info = table.get(symbol)
+        key = _key(ticker)
+        table = await self._table(key)
+        info = table.get(ticker.symbol)
         if info is None:
             # Could be newly listed; one forced refresh before giving up.
-            table = await self._table(venue, category, force=True)
-            info = table.get(symbol)
+            table = await self._table(key, force=True)
+            info = table.get(ticker.symbol)
         if info is None:
-            raise SymbolNotFoundError(
-                f"no {category} instrument {symbol!r} on venue {venue!r}"
-            )
+            raise SymbolNotFoundError(f"no such instrument: {ticker}")
         return info
 
     async def list(
-        self, venue: str, *, category: str = "spot"
+        self, venue: str, *, category: Category | str = Category.SPOT
     ) -> list[SymbolInfo]:
-        table = await self._table(venue, category)
-        return sorted(table.values(), key=lambda i: i.symbol)
+        table = await self._table((venue, Category(category)))
+        return sorted(table.values(), key=lambda i: i.universal_ticker)
 
-    async def exch_ticker(
-        self, venue: str, symbol: str, *, category: str = "spot"
-    ) -> str:
-        """Canonical → the venue's spelling. The authoritative translation."""
-        return (await self.get(venue, symbol, category=category)).exch_ticker
+    async def exch_ticker(self, ticker: UniversalTicker) -> str:
+        """Universal → the venue's spelling. The authoritative translation."""
+        return (await self.get(ticker)).exch_ticker
 
     async def symbol_for(
-        self, venue: str, exch_ticker: str, *, category: str = "spot"
-    ) -> str:
-        """The venue's spelling → canonical.
+        self, venue: str, exch_ticker: str, *, category: Category | str
+    ) -> UniversalTicker:
+        """The venue's spelling → the universal ticker.
 
         Looked up rather than derived: a venue whose ticker is not simply
         ``base + separator + quote`` (``XBTUSD`` for BTC/USD, say) would not
         survive a string transform.
         """
-        await self._table(venue, category)
-        found = self._reverse.get((venue, category), {}).get(exch_ticker)
+        key = (venue, Category(category))
+        await self._table(key)
+        found = self._reverse.get(key, {}).get(exch_ticker)
         if found is None:
-            await self._table(venue, category, force=True)
-            found = self._reverse.get((venue, category), {}).get(exch_ticker)
+            await self._table(key, force=True)
+            found = self._reverse.get(key, {}).get(exch_ticker)
         if found is None:
             raise SymbolNotFoundError(
-                f"no {category} instrument spelled {exch_ticker!r} on "
+                f"no {key[1].value} instrument spelled {exch_ticker!r} on "
                 f"venue {venue!r}"
             )
-        return found
+        return UniversalTicker(venue=venue, category=key[1], symbol=found)
 
-    async def filter(
-        self, venue: str, symbol: str, name: str, *, category: str = "spot"
-    ) -> Decimal | None:
+    async def filter(self, ticker: UniversalTicker, name: str) -> Decimal | None:
         """One restriction, e.g. ``price_tick`` or ``min_notional``."""
-        return (await self.get(venue, symbol, category=category)).filter(name)
+        return (await self.get(ticker)).filter(name)
 
     async def venues(self) -> SymVenuesResult:
         reply = await self._request(SYM_VENUES, SymListRequest())
@@ -140,25 +143,25 @@ class SymbolClient:
     # --- internals ---------------------------------------------------------
 
     async def _table(
-        self, venue: str, category: str, *, force: bool = False
+        self, key: TableKey, *, force: bool = False
     ) -> dict[str, SymbolInfo]:
-        key = (venue, category)
+        venue, category = key
         async with self._lock:
             fresh = time.monotonic() - self._fetched_at.get(key, 0.0) < self.ttl
             if not force and fresh and key in self._cache:
                 return self._cache[key]
 
             reply = await self._request(
-                SYM_LIST, SymListRequest(venue=venue, category=category)
+                SYM_LIST,
+                SymListRequest(venue=venue, category=category.value),
             )
             result = SymListResult.model_validate(reply)
-            table = {info.symbol: info for info in result.symbols}
-            self._cache[key] = table
+            self._cache[key] = {info.symbol: info for info in result.symbols}
             self._reverse[key] = {
                 info.exch_ticker: info.symbol for info in result.symbols
             }
             self._fetched_at[key] = time.monotonic()
-            return table
+            return self._cache[key]
 
     async def _request(self, type_: str, payload: object) -> dict:
         envelope = Envelope[type(payload)].wrap(  # type: ignore[misc]
@@ -173,6 +176,10 @@ class SymbolClient:
                 f"{reply.payload.get('message')}"
             )
         return reply.payload
+
+
+def _key(ticker: UniversalTicker) -> TableKey:
+    return (ticker.venue, ticker.category)
 
 
 __all__ = ["DEFAULT_TTL", "SymbolClient", "SymbolNotFoundError"]

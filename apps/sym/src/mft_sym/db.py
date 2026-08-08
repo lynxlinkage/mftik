@@ -28,12 +28,16 @@ async def list_tickers(
     *,
     venue: str | None = None,
     category: str | None = None,
+    symbol: str | None = None,
     active_only: bool = True,
 ) -> Sequence[SymbolTicker]:
     async with session_scope() as db:
         return list(
             await SymbolRepository(db).list_tickers(
-                venue=venue, category=category, active_only=active_only
+                venue=venue,
+                category=category,
+                symbol=symbol,
+                active_only=active_only,
             )
         )
 

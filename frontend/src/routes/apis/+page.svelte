@@ -183,8 +183,8 @@
 		<p class="venue-hint">
 			<code>{selected.name}</code>
 			· signs with {selected.api_types.join(' / ')}
-			{#if selected.symbol_example}
-				· symbols like <code>{selected.symbol_example}</code>
+			{#if selected.ticker_example}
+				· tickers like <code>{selected.ticker_example}</code>
 			{/if}
 			{#if symCounts[selected.name] != null}
 				· {symCounts[selected.name]} tracked by sym

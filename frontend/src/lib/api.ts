@@ -128,9 +128,12 @@ export type Venue = {
 	name: string;
 	label: string;
 	api_types: string[];
+	/** Markets this venue trades. One entry is a classic account; several is a
+	 * unified one, where the category is part of every instrument's identity. */
+	categories: string[];
 	requires_passphrase: boolean;
 	simulated: boolean;
-	symbol_example: string;
+	ticker_example: string;
 };
 
 /** What the symbol plane actually tracks (`GET /sym/venues`). */
@@ -146,9 +149,8 @@ export type SymbolFilter = {
 };
 
 export type SymbolInfo = {
-	venue: string;
-	symbol: string;
-	category: string;
+	/** `<Venue>_<Category>_<SYMBOL>` — the platform's instrument identity. */
+	universal_ticker: string;
 	base: string;
 	quote: string;
 	exch_ticker: string;
@@ -169,7 +171,7 @@ export type ApiCreateBody = {
 const DEFAULT_STRATEGY_YML = `td:
   - paper trader
 md:
-  - paper.orderbook.BTCUSDT
+  - orderbook.Paper_Spot_BTCUSDT
 sts:
   # BUY mid-gap/mid/mid+gap (place→cancel each), flip to SELL, then exit.
   # 100 of the quote currency (USDT here) per order; mid from the book.

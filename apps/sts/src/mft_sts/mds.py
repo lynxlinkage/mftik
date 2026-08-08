@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from mft.broker.errors import RequestTimeoutError
 from mft.exchange.intervals import InvalidIntervalError, normalize_interval
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     MD_FETCH_BESTQUOTE,
     MD_FETCH_KLINES,
@@ -103,8 +104,7 @@ class StrategyMds:
 
     async def fetch_klines(
         self,
-        venue: str,
-        symbol: str,
+        ticker: UniversalTicker,
         interval: str,
         *,
         limit: int = 100,
@@ -139,14 +139,13 @@ class StrategyMds:
         return await self._send(
             MD_FETCH_KLINES,
             MdFetchKlines,
-            venue=venue,
-            symbol=symbol,
+            ticker=str(ticker),
             interval=canonical,
             limit=limit,
         )
 
     async def fetch_order_book(
-        self, venue: str, symbol: str, *, depth: int = 10
+        self, ticker: UniversalTicker, *, depth: int = 10
     ) -> str | None:
         """Ask MD for a book snapshot. Returns the query id, or ``None``.
 
@@ -157,12 +156,11 @@ class StrategyMds:
         return await self._send(
             MD_FETCH_ORDERBOOK,
             MdFetchOrderBook,
-            venue=venue,
-            symbol=symbol,
+            ticker=str(ticker),
             depth=depth,
         )
 
-    async def fetch_best_quote(self, venue: str, symbol: str) -> str | None:
+    async def fetch_best_quote(self, ticker: UniversalTicker) -> str | None:
         """Ask MD for the touch with its resting sizes. Returns the query id.
 
         The answer reaches ``on_fetch_bestquote``. Its ``quote`` is None when
@@ -171,7 +169,7 @@ class StrategyMds:
         should ask again rather than treat it as a quote of zero.
         """
         return await self._send(
-            MD_FETCH_BESTQUOTE, MdFetchBestQuote, venue=venue, symbol=symbol
+            MD_FETCH_BESTQUOTE, MdFetchBestQuote, ticker=str(ticker)
         )
 
     async def _send(

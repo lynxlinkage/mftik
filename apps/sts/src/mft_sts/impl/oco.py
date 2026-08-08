@@ -31,10 +31,11 @@ Both legs may sit on the same side — two entries at different prices, taking
 whichever the market reaches first, is a normal use. What is checked is that
 neither can trade immediately, not which way they point.
 
-**Configuring it.** ``venue`` and ``symbol`` in ``st_paras`` name the
-instrument. Leaving them out falls back to the first key in ``md_ids``, which
-is how this was configured when the quote came from a feed — but no
-subscription is needed now, and a session running this can have none at all.
+**Configuring it.** ``ticker`` in ``st_paras`` names the instrument, as one
+universal ticker — ``Gate_Spot_ETHUSDT``. Leaving it out falls back to the
+first key in ``md_ids``, which is how this was configured when the quote came
+from a feed — but no subscription is needed now, and a session running this
+can have none at all.
 
 **Post-only, on purpose.** The legality check reads a quote from a moment
 before the orders go out. Sending them post-only is what makes that check
@@ -73,6 +74,7 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     CancelReject,
     MdBestQuoteResult,
@@ -197,8 +199,7 @@ class OneCancelOther(Strategy):
         super().__init__()
         self._arm_token: TimerToken | None = None
         self._quote_token: TimerToken | None = None
-        self._venue: str | None = None
-        self._symbol: str | None = None
+        self._ticker: UniversalTicker | None = None
         self._info: SymbolInfo | None = None
         #: The one quote the pair is judged against. Asked for once armed.
         self._quote: BestQuote | None = None
@@ -234,12 +235,12 @@ class OneCancelOther(Strategy):
             )
         out["orders"] = [_leg(row, i) for i, row in enumerate(raw)]
 
-        venue, symbol = out.get("venue"), out.get("symbol")
-        if bool(venue) != bool(symbol):
-            # Half of a market is worse than none: the other half would come
-            # from a feed key, and the pair would trade an instrument nobody
-            # named on purpose.
-            raise ValueError("venue and symbol must be given together, or neither")
+        named = out.get("ticker")
+        if named:
+            # Resolved here rather than at first use: a typo in the instrument
+            # should refuse the deployment, not surface once the pair is live
+            # and has already been told there is nothing to quote against.
+            out["ticker"] = str(UniversalTicker.resolve(str(named)))
 
         timeout = Decimal(str(out.get("arm_timeout_s", DEFAULT_ARM_TIMEOUT_S)))
         if timeout <= 0:
@@ -253,8 +254,8 @@ class OneCancelOther(Strategy):
         self._resolve_market()
         first, second = self.paras["orders"]
         await self.log(
-            f"OneCancelOther started venue={self._venue} "
-            f"symbol={self._symbol} A=[{first}] B=[{second}] "
+            f"OneCancelOther started ticker={self._ticker} "
+            f"A=[{first}] B=[{second}] "
             f"arm_timeout_s={_fmt(self.paras['arm_timeout_s'])}"
         )
         # A one-shot deadline, not a tick: recon arms the pair, the quote is
@@ -434,14 +435,14 @@ class OneCancelOther(Strategy):
         """Ask for the touch the pair will be judged against."""
         if self._done or self._placed or self._quote is not None:
             return
-        if self._venue is None or self._symbol is None:
+        if self._ticker is None:
             await self.log(
-                "OneCancelOther has no venue/symbol to quote", level="error"
+                "OneCancelOther has no instrument to quote", level="error"
             )
             self._done = True
             self.fail("oco_no_market")
             return
-        query_id = await self.mds.fetch_best_quote(self._venue, self._symbol)
+        query_id = await self.mds.fetch_best_quote(self._ticker)
         if query_id is None:
             # The query never left. Nothing will arrive to place against, and
             # the arm timeout would only turn that into a slower failure.
@@ -769,18 +770,17 @@ class OneCancelOther(Strategy):
         """Instrument metadata, fetched once and cached for the session."""
         if self._info is not None:
             return self._info
-        if self._venue is None or self._symbol is None:
+        if self._ticker is None:
             await self.log(
                 "OneCancelOther has no md feed to derive an instrument from",
                 level="error",
             )
             return None
         try:
-            self._info = await self.symbols.get(self._venue, self._symbol)
+            self._info = await self.symbols.get(self._ticker)
         except Exception as exc:
             await self.log(
-                f"OneCancelOther cannot resolve {self._venue}/{self._symbol}: "
-                f"{exc}",
+                f"OneCancelOther cannot resolve {self._ticker}: {exc}",
                 level="error",
             )
             return None
@@ -789,26 +789,29 @@ class OneCancelOther(Strategy):
     def _resolve_market(self) -> None:
         """Which instrument this pair trades.
 
-        ``venue`` and ``symbol`` in ``st_paras`` say it outright. A feed key in
-        ``md_ids`` is still read when they are absent, which is how this was
-        configured before the quote came from a query — but a subscription is
-        no longer needed for anything here, and naming the market directly is
-        the honest way to say so.
+        ``ticker`` in ``st_paras`` says it outright — one universal ticker,
+        resolved leniently because a person wrote it. A feed key in ``md_ids``
+        is still read when it is absent, which is how this was configured
+        before the quote came from a query — but a subscription is no longer
+        needed for anything here, and naming the market directly is the honest
+        way to say so.
         """
-        venue = self.paras.get("venue")
-        symbol = self.paras.get("symbol")
-        if venue and symbol:
-            self._venue, self._symbol = str(venue), str(symbol)
-            return
+        named = self.paras.get("ticker")
+        if named:
+            try:
+                self._ticker = UniversalTicker.resolve(str(named))
+                return
+            except Exception:
+                # Falls through to the feed key rather than failing here; the
+                # caller learns about it from ``_instrument`` either way.
+                pass
         md_ids = list(self.session.md_ids) if self.session is not None else []
         if not md_ids:
             return
         try:
-            feed_venue, _topic, feed_symbol = Topics.parse_md_feed(md_ids[0])
+            _topic, self._ticker = Topics.parse_md_feed(md_ids[0])
         except ValueError:
             return
-        self._venue = feed_venue
-        self._symbol = feed_symbol
 
     def _primary_api_id(self) -> int | None:
         if self.session is None or not self.session.td_api_ids:

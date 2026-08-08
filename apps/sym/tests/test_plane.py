@@ -7,6 +7,7 @@ from decimal import Decimal
 import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
+from mft.exchange.tickers import Category, UniversalTicker
 from mft.protocol import (
     SYM_LIST,
     SYM_REFRESH,
@@ -24,7 +25,12 @@ from mft_sym.rpc import dispatch
 from mft_sym.sources.base import Instrument
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-VENUE = "gate_spot"
+VENUE = "Gate"
+
+
+def _t(symbol: str, venue: str = VENUE, category: str = "Spot") -> UniversalTicker:
+    """A universal ticker, for the reads that are keyed by one."""
+    return UniversalTicker.parse(f"{venue}_{category}_{symbol}")
 
 
 class StubSource:
@@ -32,7 +38,7 @@ class StubSource:
 
     def __init__(self, instruments: list[Instrument], venue: str = VENUE) -> None:
         self.venue = venue
-        self.category = "spot"
+        self.category = Category.SPOT
         self.instruments = instruments
         self.fail: Exception | None = None
         self.fetches = 0
@@ -145,7 +151,7 @@ async def test_refresh_writes_the_golden_record(plane_factory) -> None:
 async def test_list_symbols_loads_filters_in_one_query(plane_factory) -> None:
     """Regression: this used to be one query per instrument.
 
-    gate_spot lists 2200+ pairs, so a per-instrument fan-out to a database on
+    Gate lists 2200+ pairs, so a per-instrument fan-out to a database on
     another host took ~14s and every td/md caller hit the 5s RPC timeout. The
     count is what matters here, not the timing.
     """
@@ -197,21 +203,21 @@ async def test_one_venue_failing_does_not_block_the_others(
     plane_factory,
 ) -> None:
     good = StubSource([_inst("BTC")])
-    bad = StubSource([], venue="paper")
+    bad = StubSource([], venue="Paper")
     bad.fail = RuntimeError("endpoint down")
     plane = plane_factory([good, bad])
 
     result = await plane.refresh()
 
     assert result["refreshed"] == {VENUE: 1}
-    assert "paper" in result["failed"]
-    assert "endpoint down" in result["failed"]["paper"]
+    assert "Paper" in result["failed"]
+    assert "endpoint down" in result["failed"]["Paper"]
     assert [s.symbol for s in await plane.list_symbols()] == ["BTCUSDT"]
 
 
 async def test_refresh_can_target_one_venue(plane_factory) -> None:
     gate = StubSource([_inst("BTC")])
-    paper = StubSource([], venue="paper")
+    paper = StubSource([], venue="Paper")
     plane = plane_factory([gate, paper])
 
     await plane.refresh(venue=VENUE)
@@ -258,7 +264,10 @@ async def test_rpc_list(broker: Broker, served) -> None:
         ),
     )
     symbols = reply.payload["symbols"]
-    assert [s["symbol"] for s in symbols] == ["BTCUSDT", "ETHUSDT"]
+    assert [s["universal_ticker"] for s in symbols] == [
+        "Gate_Spot_BTCUSDT",
+        "Gate_Spot_ETHUSDT",
+    ]
     assert symbols[0]["exch_ticker"] == "BTC_USDT"
 
 
@@ -300,8 +309,8 @@ async def test_client_resolves_the_venue_ticker(broker: Broker, served) -> None:
     """The translation TD needs, straight from the golden record."""
     client = SymbolClient(broker)
 
-    assert await client.exch_ticker(VENUE, "BTCUSDT") == "BTC_USDT"
-    assert await client.filter(VENUE, "BTCUSDT", "price_tick") == Decimal("0.01")
+    assert await client.exch_ticker(_t("BTCUSDT")) == "BTC_USDT"
+    assert await client.filter(_t("BTCUSDT"), "price_tick") == Decimal("0.01")
     assert [i.symbol for i in await client.list(VENUE)] == ["BTCUSDT", "ETHUSDT"]
 
 
@@ -320,7 +329,7 @@ async def test_client_caches_reads(broker: Broker, served) -> None:
     client = SymbolClient(broker)
 
     for _ in range(5):
-        await client.exch_ticker(VENUE, "BTCUSDT")
+        await client.exch_ticker(_t("BTCUSDT"))
 
     assert calls == 1
 
@@ -331,27 +340,27 @@ async def test_client_refetches_once_for_an_unknown_symbol(
     """A newly listed pair should resolve without waiting for the TTL."""
     plane, source = served
     client = SymbolClient(broker)
-    await client.exch_ticker(VENUE, "BTCUSDT")  # warm the cache
+    await client.exch_ticker(_t("BTCUSDT"))  # warm the cache
 
     source.instruments = [_inst("BTC"), _inst("ETH"), _inst("SOL")]
     await plane.refresh()
 
-    assert await client.exch_ticker(VENUE, "SOLUSDT") == "SOL_USDT"
+    assert await client.exch_ticker(_t("SOLUSDT")) == "SOL_USDT"
 
 
 async def test_client_raises_for_a_symbol_that_does_not_exist(
     broker: Broker, served
 ) -> None:
     client = SymbolClient(broker)
-    with pytest.raises(SymbolNotFoundError, match="NOPEUSDT"):
-        await client.get(VENUE, "NOPEUSDT")
+    with pytest.raises(SymbolNotFoundError, match="Gate_Spot_NOPEUSDT"):
+        await client.get(_t("NOPEUSDT"))
 
 
 async def test_client_reverse_lookup(broker: Broker, served) -> None:
     """Venue spelling → canonical, the direction TD needs on inbound events."""
     client = SymbolClient(broker)
-    assert await client.symbol_for(VENUE, "BTC_USDT") == "BTCUSDT"
-    assert await client.symbol_for(VENUE, "ETH_USDT") == "ETHUSDT"
+    assert await client.symbol_for(VENUE, "BTC_USDT", category="Spot") == _t("BTCUSDT")
+    assert await client.symbol_for(VENUE, "ETH_USDT", category="Spot") == _t("ETHUSDT")
 
 
 async def test_client_reverse_lookup_refetches_for_an_unknown_ticker(
@@ -359,12 +368,12 @@ async def test_client_reverse_lookup_refetches_for_an_unknown_ticker(
 ) -> None:
     plane, source = served
     client = SymbolClient(broker)
-    await client.symbol_for(VENUE, "BTC_USDT")  # warm
+    await client.symbol_for(VENUE, "BTC_USDT", category="Spot")  # warm
 
     source.instruments = [_inst("BTC"), _inst("ETH"), _inst("SOL")]
     await plane.refresh()
 
-    assert await client.symbol_for(VENUE, "SOL_USDT") == "SOLUSDT"
+    assert await client.symbol_for(VENUE, "SOL_USDT", category="Spot") == _t("SOLUSDT")
 
 
 async def test_client_reverse_lookup_raises_for_unknown(
@@ -372,7 +381,7 @@ async def test_client_reverse_lookup_raises_for_unknown(
 ) -> None:
     client = SymbolClient(broker)
     with pytest.raises(SymbolNotFoundError, match="NOPE_USDT"):
-        await client.symbol_for(VENUE, "NOPE_USDT")
+        await client.symbol_for(VENUE, "NOPE_USDT", category="Spot")
 
 
 async def test_client_satisfies_the_resolver_protocol(broker: Broker) -> None:

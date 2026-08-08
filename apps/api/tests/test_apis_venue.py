@@ -16,7 +16,7 @@ from mft_api.schemas import ApiCreateBody
 def _body(**overrides: object) -> ApiCreateBody:
     payload: dict[str, object] = {
         "name": "gate spot",
-        "venue": "gate_spot",
+        "venue": "Gate",
         "api_key": "key-1",
         "api_secret": "secret-1",
         "type": "HMAC",
@@ -25,17 +25,18 @@ def _body(**overrides: object) -> ApiCreateBody:
     return ApiCreateBody.model_validate(payload)
 
 
-async def test_list_venues_exposes_gate_spot() -> None:
+async def test_list_venues_exposes_gate() -> None:
     result = await list_venues()
     by_name = {v.name: v for v in result.venues}
 
-    assert set(by_name) == {"gate_spot", "paper"}
-    gate = by_name["gate_spot"]
+    assert set(by_name) == {"Gate", "Paper"}
+    gate = by_name["Gate"]
     assert gate.label == "Gate Spot"
     assert gate.api_types == ["HMAC"]
     assert gate.simulated is False
-    assert gate.symbol_example == "BTCUSDT"
-    assert by_name["paper"].simulated is True
+    assert gate.ticker_example == "Gate_Spot_BTCUSDT"
+    assert gate.categories == ["Spot"]
+    assert by_name["Paper"].simulated is True
 
 
 async def test_unknown_venue_is_rejected_with_400() -> None:
@@ -45,7 +46,7 @@ async def test_unknown_venue_is_rejected_with_400() -> None:
     assert exc.value.status_code == 400
     assert "unknown venue" in exc.value.detail
     # The message should point at the right spelling.
-    assert "gate_spot" in exc.value.detail
+    assert "Gate" in exc.value.detail
 
 
 async def test_unsupported_api_type_for_venue_is_rejected() -> None:

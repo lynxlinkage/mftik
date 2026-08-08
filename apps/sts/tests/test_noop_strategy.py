@@ -6,12 +6,12 @@ from decimal import Decimal
 
 import pytest
 from mft.exchange.models import BookLevel, OrderBook, Side
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import SymbolInfo
 from mft_sts.impl.noop import NoopStrategy, _fmt
 
 PAPER_BTC = SymbolInfo(
-    venue="paper",
-    symbol="BTCUSDT",
+    universal_ticker="Paper_Spot_BTCUSDT",
     base="BTC",
     quote="USDT",
     exch_ticker="BTCUSDT",
@@ -67,15 +67,15 @@ class FakePlane:
         self.info = info
         self.calls = 0
 
-    async def get(self, venue, symbol, *, category="spot"):
+    async def get(self, ticker):
         self.calls += 1
         if self.info is None:
-            raise LookupError(f"no {symbol} on {venue}")
+            raise LookupError(f"no such instrument: {ticker}")
         return self.info
 
 
 class FakeSession:
-    def __init__(self, md_ids=("paper.orderbook.BTCUSDT",), td=(1,)) -> None:
+    def __init__(self, md_ids=("orderbook.Paper_Spot_BTCUSDT",), td=(1,)) -> None:
         self.md_ids = list(md_ids)
         self.td_api_ids = list(td)
         self.session_id = "noop-test"
@@ -166,10 +166,9 @@ def test_invalid_params_are_rejected(params, match) -> None:
 # --- venue / symbol resolution ---------------------------------------------
 
 
-def test_venue_and_symbol_come_from_the_md_feed() -> None:
+def test_the_instrument_comes_from_the_md_feed() -> None:
     strat = _strategy()
-    assert strat._venue == "paper"
-    assert strat._symbol == "BTCUSDT"
+    assert strat._ticker == UniversalTicker.parse("Paper_Spot_BTCUSDT")
 
 
 # --- execution -------------------------------------------------------------
@@ -307,8 +306,7 @@ def test_the_old_qty_usd_name_is_rejected() -> None:
 async def test_size_is_in_the_quote_currency_not_dollars() -> None:
     """On ETHBTC the size is BTC — the name no longer implies otherwise."""
     eth_btc = SymbolInfo(
-        venue="paper",
-        symbol="ETHBTC",
+        universal_ticker="Paper_Spot_ETHBTC",
         base="ETH",
         quote="BTC",
         exch_ticker="ETHBTC",

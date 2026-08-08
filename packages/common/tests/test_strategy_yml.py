@@ -22,7 +22,7 @@ from mft.protocol import (
 def test_parse_default_template() -> None:
     spec = parse_strategy_yml(default_template().yaml)
     assert spec.td == ["paper trader"]
-    assert spec.md == ["paper.orderbook.BTCUSDT"]
+    assert spec.md == ["orderbook.Paper_Spot_BTCUSDT"]
     # No mid: the strategy reads one from the order book feed above.
     assert "mid" not in spec.sts
     assert spec.sts["exec_interval_ms"] == 1000
@@ -53,7 +53,7 @@ def test_roundtrip_dump() -> None:
 
 
 def test_rejects_bad_md_feed() -> None:
-    with pytest.raises(StrategyYamlError, match="venue.topic.symbol"):
+    with pytest.raises(StrategyYamlError, match="topic.UniversalTicker"):
         parse_strategy_yml(
             """
 td: [paper trader]

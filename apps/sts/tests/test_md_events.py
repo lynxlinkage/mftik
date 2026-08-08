@@ -137,7 +137,7 @@ async def test_md_events_reach_every_hook(broker: Broker) -> None:
         broker=broker,
         created_by=1,
         strategy=strategy,
-        md_ids=["paper.orderbook.BTCUSDT"],
+        md_ids=["orderbook.Paper_Spot_BTCUSDT"],
         heartbeat_interval=0.1,
     )
     await sts.start()
@@ -179,7 +179,7 @@ async def test_md_hook_failure_does_not_kill_the_pump(broker: Broker) -> None:
         broker=broker,
         created_by=1,
         strategy=strategy,
-        md_ids=["paper.ticker.BTCUSDT"],
+        md_ids=["ticker.Paper_Spot_BTCUSDT"],
         heartbeat_interval=0.1,
     )
     await sts.start()

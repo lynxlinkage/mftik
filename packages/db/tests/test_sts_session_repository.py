@@ -171,12 +171,12 @@ async def test_td_attach_survives_a_detach_and_reattach(db) -> None:
 async def test_md_attach_survives_a_detach_and_reattach(db) -> None:
     repo = MdSessionRepository(db)
     first = await repo.attach_live(
-        venue="paper", session_id="s-md", created_by=1
+        venue="Paper", session_id="s-md", created_by=1
     )
-    await repo.mark_done(venue="paper", session_id="s-md")
+    await repo.mark_done(venue="Paper", session_id="s-md")
 
     again = await repo.attach_live(
-        venue="paper", session_id="s-md", created_by=1
+        venue="Paper", session_id="s-md", created_by=1
     )
 
     assert again.id == first.id

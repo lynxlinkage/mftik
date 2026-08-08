@@ -9,7 +9,7 @@ Paper credentials match ``PaperSessionFactory`` / paper-engine seeds:
 
 Paper engine seeds resting book from key-2: bid [[49999, 10]], ask [[50001, 10]].
 
-A ``gate_spot`` credential is registered too when ``GATE_SPOT_API_KEY`` and
+A ``Gate`` credential is registered too when ``GATE_SPOT_API_KEY`` and
 ``GATE_SPOT_API_SECRET`` are set — real venue keys cannot be hard-coded, so
 this is opt-in::
 
@@ -66,7 +66,7 @@ def live_venue_apis() -> tuple[dict[str, str], ...]:
             "name": os.getenv("GATE_SPOT_ACCOUNT_NAME", "gate spot").strip(),
             "api_key": key,
             "api_secret": secret,
-            "venue": venues.GATE_SPOT.name,
+            "venue": venues.GATE.name,
         },
     )
 

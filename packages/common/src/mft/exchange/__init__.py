@@ -73,17 +73,23 @@ from mft.exchange.paper import (
     PaperPublicClient,
 )
 from mft.exchange.symbols import SymbolResolver, canonical_symbol
+from mft.exchange.tickers import (
+    Category,
+    InvalidTickerError,
+    UniversalTicker,
+)
 from mft.exchange.venues import (
-    GATE_SPOT,
+    GATE,
     PAPER,
     VENUES,
     UnknownVenueError,
     UnsupportedApiTypeError,
+    UnsupportedCategoryError,
     Venue,
 )
 
 __all__ = [
-    "GATE_SPOT",
+    "GATE",
     "GATE_SPOT_REST_URL",
     "GATE_SPOT_WS_URL",
     "PAPER",
@@ -150,8 +156,12 @@ __all__ = [
     "Ticker",
     "TimeInForce",
     "Trade",
+    "Category",
+    "InvalidTickerError",
+    "UniversalTicker",
     "UnknownVenueError",
     "UnsupportedApiTypeError",
+    "UnsupportedCategoryError",
     "SymbolResolver",
     "Venue",
     "canonical_symbol",

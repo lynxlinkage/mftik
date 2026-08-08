@@ -136,8 +136,7 @@ def test_fetch_klines_request_roundtrip() -> None:
         MdFetchKlines(
             reply_channel="md.fetch.reply.sess-1",
             query_id="sess-1:7",
-            venue="gate_spot",
-            symbol="BTCUSDT",
+            ticker="Gate_Spot_BTCUSDT",
             interval="1mo",
             limit=500,
         ),
@@ -165,7 +164,7 @@ def test_ack_refusal_roundtrip_keeps_the_code_machine_readable() -> None:
         MdQueryAck(
             query_id="q1",
             accepted=False,
-            reason="no connected client for gate_spot",
+            reason="no connected client for Gate",
             error_code=QueryCode.MD_VENUE_NOT_CONNECTED,
         ),
         type=MD_QUERY_ACK,
@@ -184,8 +183,7 @@ def test_klines_result_roundtrip() -> None:
     env = MdKlinesResultEnvelope.wrap(
         MdKlinesResult(
             query_id="q1",
-            venue="gate_spot",
-            symbol="BTCUSDT",
+            ticker="Gate_Spot_BTCUSDT",
             interval="1h",
             klines=[
                 Kline(
@@ -220,8 +218,7 @@ def test_klines_result_roundtrip() -> None:
 def test_failed_result_carries_no_klines_but_a_code() -> None:
     result = MdKlinesResult(
         query_id="q1",
-        venue="gate_spot",
-        symbol="BTCUSDT",
+        ticker="Gate_Spot_BTCUSDT",
         interval="1h",
         ok=False,
         reason="[429] TOO_MANY_REQUESTS",
@@ -236,8 +233,7 @@ def test_empty_success_is_not_a_failure() -> None:
     history that far back — and must not read as an error."""
     result = MdKlinesResult(
         query_id="q1",
-        venue="gate_spot",
-        symbol="BTCUSDT",
+        ticker="Gate_Spot_BTCUSDT",
         interval="1h",
     )
     assert result.ok is True
@@ -251,8 +247,7 @@ def test_untyped_envelope_still_reads_the_payload() -> None:
         MdFetchKlines(
             reply_channel="md.fetch.reply.sess-1",
             query_id="q1",
-            venue="gate_spot",
-            symbol="BTCUSDT",
+            ticker="Gate_Spot_BTCUSDT",
             interval="1m",
         ),
         type=MD_FETCH_KLINES,
@@ -261,7 +256,7 @@ def test_untyped_envelope_still_reads_the_payload() -> None:
     restored = MdFetchKlines.model_validate(
         MdFetchKlinesEnvelope.from_json(env.to_json()).payload
     )
-    assert restored.symbol == "BTCUSDT"
+    assert restored.ticker == "Gate_Spot_BTCUSDT"
     assert restored.limit == 100
 
 
@@ -284,8 +279,7 @@ def test_the_request_carries_where_its_answer_goes() -> None:
     req = MdFetchKlines(
         reply_channel=Topics.md_fetch_reply("anyone"),
         query_id="q1",
-        venue="gate_spot",
-        symbol="BTCUSDT",
+        ticker="Gate_Spot_BTCUSDT",
         interval="1h",
     )
     assert req.reply_channel == "md.fetch.reply.anyone"

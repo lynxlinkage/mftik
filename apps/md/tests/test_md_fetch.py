@@ -12,6 +12,7 @@ from mft.broker import Broker, BrokerConfig
 from mft.exchange.errors import ExchangeError
 from mft.exchange.intervals import InvalidIntervalError
 from mft.exchange.models import BestQuote, BookLevel, Kline, OrderBook
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     MD_BESTQUOTE_RESULT,
     MD_FETCH_BESTQUOTE,
@@ -32,8 +33,9 @@ from mft.protocol import (
 )
 from mft_md.fetch import FetchSession, NoReaderError
 
-VENUE = "gate_spot"
+VENUE = "Gate"
 SYMBOL = "BTCUSDT"
+TICKER = UniversalTicker.of(VENUE, "Spot", SYMBOL)
 REPLY = Topics.md_fetch_reply("caller-1")
 
 
@@ -72,24 +74,26 @@ class FakeReader:
         self.closes += 1
 
     async def fetch_klines(
-        self, symbol: str, interval: str, *, limit: int
+        self, ticker: UniversalTicker, interval: str, *, limit: int
     ) -> list[Kline]:
-        self.calls.append((symbol, interval, limit))
+        self.calls.append((ticker.symbol, interval, limit))
         if self.gate is not None:
             await self.gate.wait()
         if self.raises is not None:
             raise self.raises
         return list(self.klines)
 
-    async def fetch_order_book(self, symbol: str, *, depth: int) -> OrderBook:
-        self.book_calls.append((symbol, depth))
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int
+    ) -> OrderBook:
+        self.book_calls.append((ticker.symbol, depth))
         if self.gate is not None:
             await self.gate.wait()
         if self.raises is not None:
             raise self.raises
-        return self.book or OrderBook(symbol=symbol, bids=[], asks=[])
+        return self.book or OrderBook(symbol=ticker.symbol, bids=[], asks=[])
 
-    async def fetch_best_quote(self, symbol: str) -> BestQuote | None:
+    async def fetch_best_quote(self, ticker: UniversalTicker) -> BestQuote | None:
         if self.gate is not None:
             await self.gate.wait()
         if self.raises is not None:
@@ -104,7 +108,7 @@ class FakeFactory:
 
     async def create(self, venue: str) -> FakeReader:
         self.built.append(venue)
-        if venue == "paper":
+        if venue == "Paper":
             raise NoReaderError("the paper venue serves no on-demand reads")
         if venue != VENUE:
             raise NoReaderError(f"no reader for venue {venue!r}")
@@ -172,8 +176,7 @@ class Caller:
     async def ask(
         self,
         *,
-        venue: str = VENUE,
-        symbol: str = SYMBOL,
+        ticker: str = str(TICKER),
         interval: str = "1h",
         limit: int = 100,
         query_id: str = "q1",
@@ -188,8 +191,7 @@ class Caller:
             else MdFetchKlines(
                 reply_channel=self.channel if reply_channel is None else reply_channel,
                 query_id=query_id,
-                venue=venue,
-                symbol=symbol,
+                ticker=ticker,
                 interval=interval,
                 limit=limit,
             )
@@ -391,7 +393,7 @@ async def test_a_venue_that_serves_no_reads_says_so(
     fetch: FetchSession, caller: Caller
 ) -> None:
     """Distinct from an empty answer, and settled before any call."""
-    await caller.ask(venue="paper")
+    await caller.ask(ticker="Paper_Spot_BTCUSDT")
     result = await caller.next_result()
 
     assert result.ok is False
@@ -415,7 +417,7 @@ async def test_a_venue_failure_still_produces_a_result(
 async def test_an_unsupported_interval_maps_to_its_own_code(
     fetch: FetchSession, caller: Caller, reader: FakeReader
 ) -> None:
-    reader.raises = InvalidIntervalError("gate_spot serves no 2w candles")
+    reader.raises = InvalidIntervalError("Gate serves no 2w candles")
 
     await caller.ask(interval="2w")
     result = await caller.next_result()
@@ -508,7 +510,7 @@ async def test_a_strategy_with_no_market_data_gets_its_candles(
     await sts.start()
     await asyncio.sleep(0.05)
 
-    query_id = await strategy.mds.fetch_klines(VENUE, SYMBOL, " 1MO ", limit=5)
+    query_id = await strategy.mds.fetch_klines(TICKER, " 1MO ", limit=5)
     assert query_id is not None, strategy.mds.last_reject_reason
 
     deadline = asyncio.get_running_loop().time() + 3.0
@@ -625,11 +627,11 @@ async def test_a_read_the_venue_does_not_serve_is_refused_by_name(
 
 def _book_req(depth: int = 10) -> MdFetchOrderBook:
     return MdFetchOrderBook(
-        reply_channel=REPLY, query_id="q1", venue=VENUE, symbol=SYMBOL, depth=depth
+        reply_channel=REPLY, query_id="q1", ticker=str(TICKER), depth=depth
     )
 
 
 def _quote_req() -> MdFetchBestQuote:
     return MdFetchBestQuote(
-        reply_channel=REPLY, query_id="q1", venue=VENUE, symbol=SYMBOL
+        reply_channel=REPLY, query_id="q1", ticker=str(TICKER)
     )
