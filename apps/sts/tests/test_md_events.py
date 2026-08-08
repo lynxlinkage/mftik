@@ -8,8 +8,17 @@ from decimal import Decimal
 import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
-from mft.exchange.models import BestQuote, BookLevel, Kline, OrderBook, Ticker, Trade
+from mft.exchange.models import (
+    AggTrade,
+    BestQuote,
+    BookLevel,
+    Kline,
+    OrderBook,
+    Ticker,
+    Trade,
+)
 from mft.protocol import (
+    MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_KLINE,
     MD_ORDERBOOK,
@@ -46,6 +55,7 @@ class RecordingStrategy(Strategy):
             "order_book": [],
             "kline": [],
             "trade": [],
+            "agg_trade": [],
             "best_quote": [],
         }
 
@@ -60,6 +70,9 @@ class RecordingStrategy(Strategy):
 
     async def on_trade(self, trade: Trade) -> None:
         self.seen["trade"].append(trade)
+
+    async def on_agg_trade(self, trade: AggTrade) -> None:
+        self.seen["agg_trade"].append(trade)
 
     async def on_best_quote(self, quote: BestQuote) -> None:
         self.seen["best_quote"].append(quote)
@@ -111,6 +124,19 @@ def _payloads() -> list[tuple[str, str, dict]]:
                 price=Decimal("100.5"),
                 qty=Decimal("0.5"),
                 side="buy",
+            ).model_dump(mode="json"),
+        ),
+        (
+            MD_AGG_TRADE,
+            "agg_trade",
+            AggTrade(
+                trade_id="a1",
+                symbol="BTCUSDT",
+                price=Decimal("100.5"),
+                qty=Decimal("0.5"),
+                side="sell",
+                first_trade_id="100",
+                last_trade_id="139",
             ).model_dump(mode="json"),
         ),
         (

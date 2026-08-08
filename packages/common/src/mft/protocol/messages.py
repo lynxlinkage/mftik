@@ -699,6 +699,7 @@ MD_LEASE_ACK = "md.lease.ack"
 MD_ORDERBOOK = "md.orderbook"
 MD_TICKER = "md.ticker"
 MD_TRADE = "md.trade"
+MD_AGG_TRADE = "md.aggtrade"
 MD_KLINE = "md.kline"
 MD_BEST_QUOTE = "md.bestquote"
 MD_SUBSCRIBE = "md.subscribe"
@@ -872,10 +873,31 @@ class SymRefreshResult(BaseModel):
 
 
 def _floor_to_step(value: Decimal, step: Decimal | None) -> Decimal:
-    """Largest multiple of ``step`` not exceeding ``value``."""
+    """Largest multiple of ``step`` not exceeding ``value``.
+
+    The result carries no more decimal places than the step's granularity.
+    That is not cosmetic: a ``Decimal`` product inherits the operands' scale,
+    so a step stored as ``0.00010000`` — trailing zeros and all, which is how
+    Binance publishes it — turns a size of ``0.0078`` into ``0.00780000``.
+    Venues that check written precision reject the second one (Binance answers
+    ``-1111``) while accepting the first, though they are the same number.
+    """
     if step is None or step <= 0:
         return value
-    return (value / step).to_integral_value(rounding=ROUND_FLOOR) * step
+    floored = (value / step).to_integral_value(rounding=ROUND_FLOOR) * step
+    return _strip(floored)
+
+
+def _strip(value: Decimal) -> Decimal:
+    """Drop trailing zeros without letting the result go exponential.
+
+    ``Decimal.normalize`` alone would turn ``30`` into ``3E+1``, which is the
+    same number but not a spelling every venue parses.
+    """
+    stripped = value.normalize()
+    if stripped.as_tuple().exponent > 0:
+        return stripped.quantize(Decimal(1))
+    return stripped
 
 
 SYM_HEALTH = "sym.health"

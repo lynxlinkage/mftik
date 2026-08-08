@@ -7,6 +7,7 @@ from typing import Protocol
 
 from mft.broker import Broker
 from mft.exchange import PaperExchange, venues
+from mft.exchange.binance.spot.public import BinanceSpotPublicClient
 from mft.exchange.errors import ExchangeError
 from mft.exchange.gate.spot.public import GateSpotPublicClient
 from mft.exchange.paper.remote_public import PaperRemotePublicClient
@@ -64,13 +65,17 @@ class VenuePublicFactory:
     """Dispatches on the feed's venue to build the right public client.
 
     Mirrors TD's ``VenueSessionFactory``: ``Paper`` keeps the existing
-    behaviour, ``Gate`` builds a real Gate market-data client. A venue
+    behaviour, ``Gate`` and ``Binance`` build real market-data clients. A venue
     that is in the registry but has no public client fails here rather than
     attaching a session that would never produce a tick.
 
-    Venues do not all publish the same feeds — Gate serves all five topics,
-    paper serves a subset — so a subscribe to a topic the venue has no stream
-    for fails at ``ensure_feed``, which is where that difference belongs.
+    Venues do not all publish the same feeds — Gate and Binance serve all five
+    topics, paper serves a subset — so a subscribe to a topic the venue has no
+    stream for fails at ``ensure_feed``, which is where that difference
+    belongs.
+
+    Neither real client is given credentials. Market data is open at both
+    venues, and a feed that needed a trading account would make MD wait on one.
     """
 
     def __init__(
@@ -97,6 +102,9 @@ class VenuePublicFactory:
         if resolved is venues.GATE:
             logger.info("MD building Gate public client")
             return GateSpotPublicClient(symbols=self._symbols)
+        if resolved is venues.BINANCE:
+            logger.info("MD building Binance public client")
+            return BinanceSpotPublicClient(symbols=self._symbols)
         raise ExchangeError(
             f"venue {resolved.name!r} is registered but MD has no public "
             f"client for it"

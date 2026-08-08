@@ -226,6 +226,55 @@ class Trade(BaseModel):
     ts: float = Field(default_factory=_ts)
 
 
+class AggTrade(Trade):
+    """Several matches at one price, reported as one print.
+
+    A venue that publishes this coalesces every fill a single aggressing order
+    took at a single price into one message. The tape's information is all
+    still here — same price, same total quantity, same taker side — at a
+    fraction of the message rate, which is why a strategy that only reads
+    price and size should prefer this feed to ``trade``.
+
+    What it adds is the part that *cannot* be recovered from the raw tape
+    without counting: ``first_trade_id``/``last_trade_id`` bound the matches
+    this print consumed, so :attr:`match_count` says whether 10 BTC lifted one
+    resting order or swept forty. Those are different events for anything
+    reading order flow, and a plain :class:`Trade` has nowhere to say which.
+
+    A subclass rather than a sibling because it genuinely is one — every field
+    a ``Trade`` promises means the same thing here — so a strategy that does
+    not care about the aggregation can pass one wherever a ``Trade`` goes.
+    ``trade_id`` is the aggregate's own id, not any constituent match's.
+
+    Not every venue has the concept: Binance publishes ``@aggTrade``, Gate has
+    no equivalent, and a venue without one simply serves no ``aggtrade`` feed.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Venue id of the first match folded into this print.
+    first_trade_id: str = ""
+    #: Venue id of the last. Equal to ``first_trade_id`` for a single match.
+    last_trade_id: str = ""
+
+    @property
+    def match_count(self) -> int:
+        """How many matches this print folded together, or 0 if unreported.
+
+        Venues number trades sequentially per instrument, so the count is the
+        span of the id range. Zero means the venue sent no range rather than
+        that nothing traded — the quantity says what traded.
+        """
+        if not self.first_trade_id or not self.last_trade_id:
+            return 0
+        try:
+            return int(self.last_trade_id) - int(self.first_trade_id) + 1
+        except ValueError:
+            # A venue whose trade ids are not integers cannot be counted this
+            # way; the ids still identify the range for anyone who can.
+            return 0
+
+
 class Kline(BaseModel):
     """One candle. ``closed`` marks the final tick of the window.
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mft.exchange.models import (
+    AggTrade,
     Balance,
     BestQuote,
     Fill,
@@ -81,7 +82,8 @@ class Strategy:
         token.cancel()  — timestamps are unix ms
 
     Public events from ``md.{session_id}`` (wired):
-        on_ticker, on_order_book, on_kline, on_trade, on_best_quote
+        on_ticker, on_order_book, on_kline, on_trade, on_agg_trade,
+        on_best_quote
         One hook per feed topic subscribed in ``md_ids``
         (``topic.UniversalTicker``; kline carries its interval in the topic,
         e.g. ``paper.kline_1m.BTCUSDT``).
@@ -310,7 +312,24 @@ class Strategy:
     async def on_trade(self, trade: Trade) -> None:
         """Handle public tape updates from MD.
 
-        Feed topic ``trade``. ``side`` is the taker's.
+        Feed topic ``trade``. ``side`` is the taker's, and one message is one
+        match.
+        """
+
+    async def on_agg_trade(self, trade: AggTrade) -> None:
+        """Handle coalesced tape updates from MD.
+
+        Feed topic ``aggtrade``. The same flow as :meth:`on_trade` with the
+        venue's own aggregation applied: every match one aggressing order took
+        at one price arrives as a single print. Same volume, far fewer
+        messages, so this is the cheaper feed for anything reading price and
+        size — and :attr:`~mft.exchange.models.AggTrade.match_count` tells you
+        how many resting orders the print consumed, which the raw tape only
+        yields by counting.
+
+        Not every venue has the concept. Binance publishes it; Gate does not,
+        and subscribing to ``aggtrade`` there is refused at attach rather than
+        silently producing nothing.
         """
 
     async def on_best_quote(self, quote: BestQuote) -> None:

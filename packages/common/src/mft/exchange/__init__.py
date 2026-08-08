@@ -1,6 +1,18 @@
 """Exchange connectivity — venue adapters with public/private clients."""
 
 from mft.exchange.base import BaseClient
+from mft.exchange.binance.spot import (
+    BINANCE_SPOT_STREAM_URL,
+    BINANCE_SPOT_WS_API_URL,
+    BinanceAuthError,
+    BinanceExecutionReport,
+    BinanceOrderAck,
+    BinanceSpotPrivateClient,
+    BinanceSpotPublicClient,
+    BinanceSpotStream,
+    BinanceSpotWsApi,
+    BinanceWsError,
+)
 from mft.exchange.errors import (
     ExchangeError,
     ExchangeNotConnectedError,
@@ -41,6 +53,7 @@ from mft.exchange.models import (
     PENDING_STATUSES,
     TERMINAL_STATUSES,
     WORKING_STATUSES,
+    AggTrade,
     Balance,
     BestQuote,
     BookLevel,
@@ -79,6 +92,7 @@ from mft.exchange.tickers import (
     UniversalTicker,
 )
 from mft.exchange.venues import (
+    BINANCE,
     GATE,
     PAPER,
     VENUES,
@@ -89,14 +103,26 @@ from mft.exchange.venues import (
 )
 
 __all__ = [
+    "BINANCE",
+    "BINANCE_SPOT_STREAM_URL",
+    "BINANCE_SPOT_WS_API_URL",
     "GATE",
     "GATE_SPOT_REST_URL",
     "GATE_SPOT_WS_URL",
     "PAPER",
     "VENUES",
+    "AggTrade",
     "Balance",
     "BaseClient",
     "BestQuote",
+    "BinanceAuthError",
+    "BinanceExecutionReport",
+    "BinanceOrderAck",
+    "BinanceSpotPrivateClient",
+    "BinanceSpotPublicClient",
+    "BinanceSpotStream",
+    "BinanceSpotWsApi",
+    "BinanceWsError",
     "BookLevel",
     "ExchangeError",
     "ExchangeNotConnectedError",

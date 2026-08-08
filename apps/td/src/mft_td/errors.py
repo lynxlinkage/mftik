@@ -39,6 +39,19 @@ class VenueErrors:
     labels: dict[str, RejectCode] = field(default_factory=dict)
     #: Numeric venue code → code, for venues that answer with integers.
     codes: dict[int, RejectCode] = field(default_factory=dict)
+    #: Numeric venue code → message fragments that say which refusal it really
+    #: was, tried in order before :attr:`codes` and falling through to it.
+    #:
+    #: For venues whose codes are coarser than their meanings. Binance answers
+    #: ``-2010`` to every rejected new order — out of funds, duplicate id,
+    #: post-only that would have crossed, symbol halted — and only the message
+    #: tells them apart. Mapping ``-2010`` to any one of those would tell a
+    #: strategy something specific and false, which is the one failure mode
+    #: this module exists to avoid; leaving it unmapped would throw away
+    #: information the venue did give us.
+    refine: dict[int, tuple[tuple[str, RejectCode], ...]] = field(
+        default_factory=dict
+    )
     #: Lowercased message fragment → code, tried in order. A last resort for
     #: venues that raise no code at all; only worth having where the messages
     #: are ours to keep stable.
@@ -115,6 +128,104 @@ GATE = VenueErrors(
     },
 )
 
+#: Binance spot. Numeric codes only — Binance publishes no label, and the
+#: numbers are its documented contract.
+#:
+#: They are all negative, which is what makes it safe for an unmapped one to
+#: pass through as itself: :mod:`mft.protocol.reject_codes` warns that a venue
+#: numbering inside ``100``–``299`` would be indistinguishable from a code this
+#: platform assigned, and Binance's cannot collide.
+#:
+#: The ``-2010`` and ``-2011`` families are refined by message, because one
+#: code covers many refusals; see :attr:`VenueErrors.refine`.
+BINANCE = VenueErrors(
+    codes={
+        # pacing
+        -1003: RejectCode.VENUE_RATE_LIMITED,  # too many requests / weight
+        -1015: RejectCode.VENUE_RATE_LIMITED,  # too many new orders
+        # theirs, not ours
+        -1000: RejectCode.VENUE_INTERNAL_ERROR,
+        -1001: RejectCode.VENUE_INTERNAL_ERROR,  # disconnected
+        -1008: RejectCode.VENUE_INTERNAL_ERROR,  # server busy
+        -1016: RejectCode.VENUE_INTERNAL_ERROR,  # service shutting down
+        # Execution status genuinely unknown on both of these: the order may
+        # have landed. Read as the venue's problem so recon settles it, rather
+        # than as a refusal a strategy would take as final.
+        -1006: RejectCode.VENUE_INTERNAL_ERROR,  # unexpected response
+        -1007: RejectCode.VENUE_INTERNAL_ERROR,  # backend timeout
+        # credentials and permissions
+        -1002: RejectCode.VENUE_AUTH_FAILED,  # unauthorized
+        -1021: RejectCode.VENUE_AUTH_FAILED,  # timestamp outside recvWindow
+        -1022: RejectCode.VENUE_AUTH_FAILED,  # bad signature
+        -2014: RejectCode.VENUE_AUTH_FAILED,  # malformed api key
+        # "Invalid API-key, IP, or permissions for action" — Binance will not
+        # say which, so neither can we.
+        -2015: RejectCode.VENUE_AUTH_FAILED,
+        # request fields
+        -1013: RejectCode.VENUE_INVALID_PARAM,  # rejected before the engine
+        -1020: RejectCode.VENUE_INVALID_PARAM,  # unsupported operation
+        -1100: RejectCode.VENUE_INVALID_PARAM,  # illegal characters
+        -1101: RejectCode.VENUE_INVALID_PARAM,
+        -1102: RejectCode.VENUE_INVALID_PARAM,  # mandatory param missing
+        -1103: RejectCode.VENUE_INVALID_PARAM,
+        -1104: RejectCode.VENUE_INVALID_PARAM,
+        -1105: RejectCode.VENUE_INVALID_PARAM,
+        -1106: RejectCode.VENUE_INVALID_PARAM,
+        -1108: RejectCode.VENUE_INVALID_PARAM,
+        -1111: RejectCode.VENUE_INVALID_PARAM,  # too much precision
+        -1114: RejectCode.VENUE_INVALID_PARAM,  # TIF sent where not allowed
+        -1115: RejectCode.VENUE_INVALID_PARAM,  # invalid TIF
+        -1116: RejectCode.VENUE_INVALID_PARAM,  # invalid order type
+        -1117: RejectCode.VENUE_INVALID_PARAM,  # invalid side
+        -1118: RejectCode.VENUE_INVALID_PARAM,  # empty newClientOrderId
+        -1119: RejectCode.VENUE_INVALID_PARAM,  # empty origClientOrderId
+        -1128: RejectCode.VENUE_INVALID_PARAM,  # bad optional param combo
+        -1130: RejectCode.VENUE_INVALID_PARAM,
+        -1131: RejectCode.VENUE_INVALID_PARAM,  # bad recvWindow
+        # instrument
+        -1121: RejectCode.VENUE_SYMBOL_NOT_TRADABLE,  # invalid symbol
+        -2016: RejectCode.VENUE_SYMBOL_NOT_TRADABLE,  # no trading window
+        # the order itself
+        -2011: RejectCode.VENUE_ORDER_NOT_FOUND,  # cancel rejected
+        -2013: RejectCode.VENUE_ORDER_NOT_FOUND,  # no such order
+        -2026: RejectCode.VENUE_ORDER_ALREADY_CLOSED,  # archived
+        # A new order Binance refused, without a message we recognise.
+        -2010: RejectCode.VENUE_REJECTED,
+    },
+    refine={
+        # Every rejected new order is -2010; the message is the only thing that
+        # says why. Fragments are lowercased and matched in order, so the more
+        # specific ones come first.
+        -2010: (
+            ("insufficient balance", RejectCode.VENUE_INSUFFICIENT_BALANCE),
+            # LIMIT_MAKER — our POST_ONLY — that would have taken liquidity.
+            ("immediately match and take", RejectCode.VENUE_POST_ONLY_WOULD_CROSS),
+            ("duplicate order", RejectCode.VENUE_DUPLICATE_CLIENT_ORDER_ID),
+            ("market is closed", RejectCode.VENUE_SYMBOL_NOT_TRADABLE),
+            ("too many open orders", RejectCode.VENUE_RISK_LIMIT),
+            ("may not place or cancel orders", RejectCode.VENUE_PERMISSION_DENIED),
+            ("disabled on this account", RejectCode.VENUE_PERMISSION_DENIED),
+            # "Price * QTY is zero or less" is the notional floor by another
+            # name.
+            ("zero or less", RejectCode.VENUE_BELOW_MINIMUM),
+            ("min_notional", RejectCode.VENUE_BELOW_MINIMUM),
+            ("filter failure", RejectCode.VENUE_INVALID_PARAM),
+            ("not supported for this symbol", RejectCode.VENUE_INVALID_PARAM),
+            ("would trigger immediately", RejectCode.VENUE_INVALID_PARAM),
+        ),
+        # A cancel Binance refused for a reason other than the order being
+        # gone: ``cancelRestrictions`` said the order had moved on.
+        -2011: (
+            ("cancel restrictions", RejectCode.VENUE_ORDER_ALREADY_CLOSED),
+        ),
+        # Filter failures arrive here too on some paths.
+        -1013: (
+            ("min_notional", RejectCode.VENUE_BELOW_MINIMUM),
+            ("lot_size", RejectCode.VENUE_BELOW_MINIMUM),
+        ),
+    },
+)
+
 #: The paper engine. Its errors carry no label, only a message — but the
 #: messages are ours, raised in ``mft.exchange.paper.engine``, so matching on
 #: them is a maintenance question rather than a guess about a third party.
@@ -134,6 +245,7 @@ PAPER = VenueErrors(
 #: Keyed by ``venues`` canonical name, which is also what a private client
 #: reports as its ``name``.
 VENUES: dict[str, VenueErrors] = {
+    "Binance": BINANCE,
     "Gate": GATE,
     "Paper": PAPER,
 }
@@ -155,27 +267,31 @@ def normalize(exc: BaseException, *, venue: str) -> int | str:
     """The reject code for an exception an adapter raised.
 
     Resolution runs most-specific first: the venue's own label, then its
-    numeric code, then the typed exception, then — for venues that give us
-    nothing else — a message match.
+    numeric code — refined by message where one code covers several refusals —
+    then the typed exception, then, for venues that give us nothing else, a
+    message match.
 
     An unmapped venue code comes back as itself rather than as some catch-all,
     which is what makes the table safe to extend later: today's native code is
     tomorrow's ``2xx``, and nothing in between silently changes meaning. The
     venue's own words are not returned here at all; the caller already has
     them in ``str(exc)`` and puts them on the reject as ``reason``.
+
+    **The chain is searched, not just the exception handed in.** Every adapter
+    re-raises a venue rejection as an :class:`~mft.exchange.errors.OrderError`
+    so TD publishes an order reject rather than treating it as a transport
+    failure — and a plain ``OrderError`` carries neither a label nor a code.
+    Read literally, that made this whole table unreachable from the order
+    path: every venue rejection normalized to ``VENUE_REJECTED``. What the
+    adapters do preserve is ``raise ... from exc``, so the original is one
+    ``__cause__`` away, and that is where the label and the code are found.
     """
     table = VENUES.get(venue, VenueErrors())
 
-    label = getattr(exc, "label", "")
-    if isinstance(label, str) and label:
-        mapped = table.labels.get(label.upper())
-        # Unmapped: hand back the venue's own label, not a catch-all.
-        return mapped if mapped is not None else label
-
-    code = getattr(exc, "code", None)
-    if isinstance(code, int) and not isinstance(code, bool):
-        mapped_code = table.codes.get(code)
-        return mapped_code if mapped_code is not None else code
+    for candidate in _chain(exc):
+        found = _venue_code(candidate, table)
+        if found is not None:
+            return found
 
     for exc_type, typed in BY_TYPE:
         if isinstance(exc, exc_type):
@@ -190,7 +306,44 @@ def normalize(exc: BaseException, *, venue: str) -> int | str:
     return RejectCode.VENUE_REJECTED
 
 
+def _chain(exc: BaseException) -> list[BaseException]:
+    """``exc`` and everything it was raised from, outermost first.
+
+    Guarded against a cycle: ``raise X from Y`` where Y already points back at
+    X is legal Python and would otherwise loop here.
+    """
+    out: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        out.append(current)
+        current = current.__cause__
+    return out
+
+
+def _venue_code(exc: BaseException, table: VenueErrors) -> int | str | None:
+    """The venue's own answer on one exception, or None if it carries none."""
+    label = getattr(exc, "label", "")
+    if isinstance(label, str) and label:
+        mapped = table.labels.get(label.upper())
+        # Unmapped: hand back the venue's own label, not a catch-all.
+        return mapped if mapped is not None else label
+
+    code = getattr(exc, "code", None)
+    if isinstance(code, int) and not isinstance(code, bool):
+        lowered = str(exc).lower()
+        for fragment, refined in table.refine.get(code, ()):
+            if fragment in lowered:
+                return refined
+        mapped_code = table.codes.get(code)
+        return mapped_code if mapped_code is not None else code
+
+    return None
+
+
 __all__ = [
+    "BINANCE",
     "BY_TYPE",
     "GATE",
     "PAPER",

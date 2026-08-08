@@ -120,10 +120,21 @@ GATE = Venue(
     requires_passphrase=False,
 )
 
+BINANCE = Venue(
+    name="Binance",
+    label="Binance Spot",
+    # Binance's WebSocket API authenticates a connection with ``session.logon``
+    # and accepts only Ed25519 keys for it. HMAC keys still work against its
+    # REST API, but this adapter does not use REST at all — so an HMAC
+    # credential could not place an order and is refused when it is stored.
+    api_types=frozenset({ED25519}),
+    requires_passphrase=False,
+)
+
 #: Every venue the platform knows, keyed by canonical name. The single source
 #: of truth — :func:`get` scans it rather than keeping a second index, so a
 #: test or a plugin that adds an entry here is immediately visible to lookups.
-VENUES: dict[str, Venue] = {v.name: v for v in (PAPER, GATE)}
+VENUES: dict[str, Venue] = {v.name: v for v in (PAPER, GATE, BINANCE)}
 
 
 def check_registry() -> None:
@@ -217,6 +228,7 @@ def _categories(venue: Venue) -> str:
 
 
 __all__ = [
+    "BINANCE",
     "ED25519",
     "GATE",
     "HMAC",

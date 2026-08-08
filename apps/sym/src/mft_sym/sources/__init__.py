@@ -12,6 +12,7 @@ from mft_sym.sources.base import (
     InstrumentSource,
     tick_from_precision,
 )
+from mft_sym.sources.binance import BinanceSpotInstrumentSource
 from mft_sym.sources.gate import GateSpotInstrumentSource
 from mft_sym.sources.paper import PaperInstrumentSource
 
@@ -21,10 +22,15 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
 
     ``broker`` is only needed by venues reached over IPC rather than HTTP.
     """
-    return [PaperInstrumentSource(broker), GateSpotInstrumentSource()]
+    return [
+        PaperInstrumentSource(broker),
+        GateSpotInstrumentSource(),
+        BinanceSpotInstrumentSource(),
+    ]
 
 
 __all__ = [
+    "BinanceSpotInstrumentSource",
     "GateSpotInstrumentSource",
     "Instrument",
     "InstrumentSource",

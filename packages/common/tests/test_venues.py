@@ -23,10 +23,27 @@ def test_gate_is_registered_as_its_own_venue() -> None:
 
 
 def test_registry_lists_every_venue() -> None:
-    assert venues.names() == ["Gate", "Paper"]
+    assert venues.names() == ["Binance", "Gate", "Paper"]
     assert [v.name for v in venues.all_venues()] == venues.names()
     assert venues.PAPER.simulated
     assert not venues.GATE.simulated
+    assert not venues.BINANCE.simulated
+
+
+def test_binance_signs_with_ed25519_and_nothing_else() -> None:
+    """Its WebSocket API session logon takes no other algorithm.
+
+    HMAC keys work against Binance's REST API, but this adapter never touches
+    REST — so an HMAC credential stored here could not place an order, and the
+    registry refuses it rather than letting that surface at deploy time.
+    """
+    assert venues.BINANCE.api_types == frozenset({venues.ED25519})
+    assert not venues.BINANCE.requires_passphrase
+    assert venues.BINANCE.categories == frozenset({Category.SPOT})
+    assert venues.BINANCE.ticker_example == "Binance_Spot_BTCUSDT"
+
+    with pytest.raises(venues.UnsupportedApiTypeError, match="ED25519"):
+        venues.validate_credential("Binance", venues.HMAC)
 
 
 @pytest.mark.parametrize("spelling", ["Gate", "GATE", " gate ", "gATe"])

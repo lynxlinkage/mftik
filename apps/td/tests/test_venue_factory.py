@@ -7,11 +7,31 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+)
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange
+from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
+from mft.exchange.binance.spot.protocol import BinanceAuthError
 from mft.exchange.errors import ExchangeError
 from mft.exchange.gate.spot.private import GateSpotPrivateClient
 from mft_td.session import PaperSessionFactory, VenueSessionFactory
+
+#: What a Binance credential's ``api_secret`` actually holds: an Ed25519
+#: private key, not a shared secret.
+ED25519_PEM = (
+    Ed25519PrivateKey.generate()
+    .private_bytes(
+        encoding=Encoding.PEM,
+        format=PrivateFormat.PKCS8,
+        encryption_algorithm=NoEncryption(),
+    )
+    .decode("ascii")
+)
 
 
 @dataclass
@@ -84,6 +104,39 @@ async def test_gate_spot_venue_builds_a_gate_client(broker: Broker) -> None:
     assert session.api_id == 7
     # Built but not connected — the manager starts it.
     assert not session.private.connected
+
+
+async def test_binance_venue_builds_a_binance_client(broker: Broker) -> None:
+    rows = {
+        8: FakeApiRow(
+            id=8, venue="Binance", api_key="bk", api_secret=ED25519_PEM
+        ),
+    }
+    factory = _factory(broker, rows)
+
+    session = await factory.create(8)
+
+    assert isinstance(session.private, BinanceSpotPrivateClient)
+    assert session.private.name == "Binance"
+    assert session.private.api_key == "bk"
+    assert session.api_id == 8
+    # Built but not connected — the manager starts it.
+    assert not session.private.connected
+
+
+async def test_a_binance_credential_that_is_not_a_key_fails_the_attach(
+    broker: Broker,
+) -> None:
+    """Better here than on the first order, hours later, as a signature error."""
+    rows = {
+        8: FakeApiRow(
+            id=8, venue="Binance", api_key="bk", api_secret="not-a-key"
+        ),
+    }
+    factory = _factory(broker, rows)
+
+    with pytest.raises(BinanceAuthError):
+        await factory.create(8)
 
 
 async def test_venue_is_resolved_case_insensitively(broker: Broker) -> None:

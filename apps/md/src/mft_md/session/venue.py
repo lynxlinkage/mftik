@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from mft.exchange.models import OrderBook, Ticker, Trade
 from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
+    MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_KLINE,
     MD_ORDERBOOK,
@@ -30,11 +31,12 @@ class MarketDataConnector(Protocol):
     lives here, with the consumer, and holds only what every venue really does
     provide: a lifecycle and the three feeds nobody lacks.
 
-    ``stream_kline`` and ``stream_best_quote`` are deliberately absent. Gate
-    serves them and paper does not, and a venue that cannot should have no such
-    method rather than one that raises — :meth:`VenueSession._open` looks for
-    them and refuses the subscribe when they are missing, which is the same
-    answer one venue short of the full set was always going to give.
+    ``stream_kline``, ``stream_best_quote`` and ``stream_agg_trades`` are
+    deliberately absent. Gate serves the first two and paper does not; only
+    Binance has the third. A venue that cannot should have no such method
+    rather than one that raises — :meth:`VenueSession._open` looks for them and
+    refuses the subscribe when they are missing, which is the same answer one
+    venue short of the full set was always going to give.
 
     Streams are opened on a :class:`~mft.exchange.tickers.UniversalTicker`, not
     a symbol. A unified-account venue is one connector serving several markets,
@@ -58,6 +60,11 @@ class MarketDataConnector(Protocol):
 TOPIC_ORDERBOOK = "orderbook"
 TOPIC_TICKER = "ticker"
 TOPIC_TRADE = "trade"
+#: The same tape with a venue's own coalescing applied — one print per
+#: aggressing order per price rather than one per match. Not every venue has
+#: the concept, so a venue without it publishes no such stream and the
+#: subscribe is refused by name, same as ``kline`` and ``bestquote``.
+TOPIC_AGG_TRADE = "aggtrade"
 TOPIC_BEST_QUOTE = "bestquote"
 #: Klines need an interval, and a feed key is only ``topic.ticker`` — so the
 #: interval rides in the topic: ``kline_1m.Paper_Spot_BTCUSDT``. The split is
@@ -166,6 +173,8 @@ class VenueSession:
             return self.public.stream_ticker(ticker), MD_TICKER
         if topic == TOPIC_TRADE:
             return self.public.stream_trades(ticker), MD_TRADE
+        if topic == TOPIC_AGG_TRADE:
+            return self._stream("stream_agg_trades")(ticker), MD_AGG_TRADE
         if topic == TOPIC_BEST_QUOTE:
             return self._stream("stream_best_quote")(ticker), MD_BEST_QUOTE
         if topic.startswith(KLINE_PREFIX):

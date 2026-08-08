@@ -2,6 +2,7 @@
 
 from mft.protocol.envelope import Envelope, UntypedEnvelope
 from mft.protocol.messages import (
+    MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_BESTQUOTE_RESULT,
     MD_DETACH,
@@ -222,6 +223,7 @@ __all__ = [
     "SymVenuesResultEnvelope",
     "SymbolFilterInfo",
     "SymbolInfo",
+    "MD_AGG_TRADE",
     "MD_BEST_QUOTE",
     "MD_DETACH",
     "MD_ERROR",

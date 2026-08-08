@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import pytest
 from mft.exchange.models import (
+    AggTrade,
     BestQuote,
     BookLevel,
     Kline,
@@ -17,6 +18,7 @@ from mft.exchange.models import (
 )
 from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
+    MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_KLINE,
     MD_ORDERBOOK,
@@ -103,6 +105,18 @@ class FakePublic:
             )
         )
 
+    def stream_agg_trades(self, ticker: UniversalTicker) -> AsyncIterator[AggTrade]:
+        return self._once(
+            AggTrade(
+                symbol=ticker.symbol,
+                price=Decimal("100"),
+                qty=Decimal("1"),
+                side="buy",
+                first_trade_id="10",
+                last_trade_id="13",
+            )
+        )
+
     def stream_best_quote(self, ticker: UniversalTicker) -> AsyncIterator[BestQuote]:
         return self._once(
             BestQuote(
@@ -122,6 +136,7 @@ class FakePublic:
         ("orderbook", MD_ORDERBOOK),
         ("ticker", MD_TICKER),
         ("trade", MD_TRADE),
+        ("aggtrade", MD_AGG_TRADE),
         ("bestquote", MD_BEST_QUOTE),
         ("kline_1m", MD_KLINE),
     ],
@@ -181,6 +196,21 @@ async def test_unsupported_stream_is_rejected_at_subscribe() -> None:
     await sess.start()
     with pytest.raises(ValueError, match="does not publish stream_kline"):
         await sess.ensure_feed("kline_1m", FAKE)
+    assert sess.feed_count == 0
+    await sess.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_venue_without_agg_trades_refuses_that_topic() -> None:
+    """Only Binance coalesces the tape; Gate and paper have no such stream."""
+
+    class NoAggTrades(FakePublic):
+        stream_agg_trades = None
+
+    sess = VenueSession(FAKE.venue, NoAggTrades(), on_update=_noop_update)
+    await sess.start()
+    with pytest.raises(ValueError, match="does not publish stream_agg_trades"):
+        await sess.ensure_feed("aggtrade", FAKE)
     assert sess.feed_count == 0
     await sess.stop()
 

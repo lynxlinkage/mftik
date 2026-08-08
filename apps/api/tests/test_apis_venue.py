@@ -25,11 +25,11 @@ def _body(**overrides: object) -> ApiCreateBody:
     return ApiCreateBody.model_validate(payload)
 
 
-async def test_list_venues_exposes_gate() -> None:
+async def test_list_venues_exposes_every_registered_venue() -> None:
     result = await list_venues()
     by_name = {v.name: v for v in result.venues}
 
-    assert set(by_name) == {"Gate", "Paper"}
+    assert set(by_name) == {"Binance", "Gate", "Paper"}
     gate = by_name["Gate"]
     assert gate.label == "Gate Spot"
     assert gate.api_types == ["HMAC"]
@@ -37,6 +37,9 @@ async def test_list_venues_exposes_gate() -> None:
     assert gate.ticker_example == "Gate_Spot_BTCUSDT"
     assert gate.categories == ["Spot"]
     assert by_name["Paper"].simulated is True
+    # The UI drives its credential form off this, and Binance is the venue
+    # that makes the field matter: it takes an Ed25519 key, not an HMAC secret.
+    assert by_name["Binance"].api_types == ["ED25519"]
 
 
 async def test_unknown_venue_is_rejected_with_400() -> None:

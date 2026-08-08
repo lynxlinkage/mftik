@@ -9,6 +9,7 @@ from typing import Any
 
 from mft.broker import Broker
 from mft.exchange.models import (
+    AggTrade,
     Balance,
     BestQuote,
     Fill,
@@ -19,6 +20,7 @@ from mft.exchange.models import (
     Trade,
 )
 from mft.protocol import (
+    MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_BESTQUOTE_RESULT,
     MD_DETACH,
@@ -82,6 +84,7 @@ MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     MD_ORDERBOOK: ("on_order_book", OrderBook),
     MD_KLINE: ("on_kline", Kline),
     MD_TRADE: ("on_trade", Trade),
+    MD_AGG_TRADE: ("on_agg_trade", AggTrade),
     MD_BEST_QUOTE: ("on_best_quote", BestQuote),
 }
 

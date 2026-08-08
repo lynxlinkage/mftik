@@ -694,7 +694,10 @@ class PaperExchange:
         *,
         limit_price: Decimal | None,
     ) -> tuple[Decimal, Decimal]:
-        """Match ``taker`` against opposite resting orders. Returns (filled_qty, notional)."""
+        """Match ``taker`` against opposite resting orders.
+
+        Returns ``(filled_qty, notional)``.
+        """
         inst = self._instruments[taker.symbol]
         remaining = taker.qty - taker.filled_qty
         filled = Decimal("0")

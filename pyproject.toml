@@ -33,6 +33,11 @@ ignore = ["UP046"]
 asyncio_mode = "auto"
 testpaths = ["packages", "apps"]
 pythonpath = [
+    # The venue stand-in servers (`gate_stub`, `binance_stub`) live beside the
+    # adapter tests that drive them hardest, but the apps composing those
+    # adapters need them too — MD's reader talks to the same fake Binance.
+    # One copy, importable from either side, beats two that drift.
+    "packages/common/tests",
     "packages/common/src",
     "packages/db/src",
     "apps/td/src",

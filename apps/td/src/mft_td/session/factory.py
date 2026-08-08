@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from mft.broker import Broker
 from mft.exchange import PaperExchange, venues
+from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mft.exchange.errors import ExchangeError
 from mft.exchange.gate.spot.private import GateSpotPrivateClient
 from mft.exchange.paper.remote import PaperRemotePrivateClient
@@ -172,13 +173,32 @@ class VenueSessionFactory:
                 api_id,
                 row.api_key[:6],
             )
-            return Session(
-                api_id=api_id,
-                broker=self._broker,
-                private=private,
+            return self._session(api_id, private)
+
+        if venue is venues.BINANCE:
+            # ``api_secret`` is the Ed25519 private key, not a shared secret.
+            # It is parsed here, at construction, so a malformed credential
+            # fails the attach rather than the first order.
+            private = BinanceSpotPrivateClient(
+                api_key=row.api_key,
+                api_secret=row.api_secret,
                 symbols=self._symbols,
             )
+            logger.info(
+                "TD building Binance session api_id=%s key=%s…",
+                api_id,
+                row.api_key[:6],
+            )
+            return self._session(api_id, private)
 
         raise ExchangeError(
             f"venue {venue.name!r} is registered but TD has no client for it"
+        )
+
+    def _session(self, api_id: int, private: Any) -> Session:
+        return Session(
+            api_id=api_id,
+            broker=self._broker,
+            private=private,
+            symbols=self._symbols,
         )

@@ -80,6 +80,45 @@ GATE = VenueErrors(
     },
 )
 
+#: Binance spot. Numeric codes only — Binance publishes no label, and the
+#: numbers are its documented contract. They are all negative, so an unmapped
+#: one passes through as itself without any risk of being read as a code this
+#: platform assigned.
+#:
+#: Much shorter than TD's Binance table, and for the same reason this whole
+#: module is shorter than TD's: a public read has no funds, no credentials and
+#: no order to be wrong about. The ``-2xxx`` order codes cannot reach a read at
+#: all, and the ones that could — a bad symbol, an interval Binance does not
+#: serve — are the whole surface.
+BINANCE = VenueErrors(
+    codes={
+        # instrument
+        -1121: QueryCode.VENUE_SYMBOL_NOT_FOUND,  # invalid symbol
+        -2016: QueryCode.VENUE_SYMBOL_NOT_FOUND,  # no trading window
+        # request fields — an interval Binance does not know, a limit past its
+        # ceiling, a malformed parameter
+        -1013: QueryCode.VENUE_INVALID_PARAM,
+        -1100: QueryCode.VENUE_INVALID_PARAM,
+        -1101: QueryCode.VENUE_INVALID_PARAM,
+        -1102: QueryCode.VENUE_INVALID_PARAM,
+        -1103: QueryCode.VENUE_INVALID_PARAM,
+        -1104: QueryCode.VENUE_INVALID_PARAM,
+        -1105: QueryCode.VENUE_INVALID_PARAM,
+        -1120: QueryCode.VENUE_INVALID_PARAM,  # bad interval
+        -1128: QueryCode.VENUE_INVALID_PARAM,
+        -1130: QueryCode.VENUE_INVALID_PARAM,
+        # pacing
+        -1003: QueryCode.VENUE_RATE_LIMITED,
+        # theirs, not ours
+        -1000: QueryCode.VENUE_INTERNAL_ERROR,
+        -1001: QueryCode.VENUE_INTERNAL_ERROR,  # disconnected
+        -1006: QueryCode.VENUE_INTERNAL_ERROR,  # unexpected response
+        -1007: QueryCode.VENUE_INTERNAL_ERROR,  # backend timeout
+        -1008: QueryCode.VENUE_INTERNAL_ERROR,  # server busy
+        -1016: QueryCode.VENUE_INTERNAL_ERROR,  # service shutting down
+    },
+)
+
 #: The paper engine, with nothing to map: it has no reader at all, so the
 #: factory refuses before any of this is reached. Listed so the venue is known
 #: rather than falling through as unrecognised.
@@ -88,6 +127,7 @@ PAPER = VenueErrors()
 #: Keyed by ``venues`` canonical name, which is also what a public client
 #: reports as its ``name``.
 VENUES: dict[str, VenueErrors] = {
+    "Binance": BINANCE,
     "Gate": GATE,
     "Paper": PAPER,
 }
@@ -151,6 +191,7 @@ def normalize(exc: BaseException, *, venue: str) -> int | str:
 
 
 __all__ = [
+    "BINANCE",
     "BY_TYPE",
     "GATE",
     "PAPER",

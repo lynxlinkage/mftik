@@ -123,7 +123,7 @@ def test_resolve_is_lenient_and_lands_on_one_spelling(loose: str) -> None:
 
 def test_resolve_checks_the_venue_registry() -> None:
     with pytest.raises(Exception, match="unknown venue"):
-        UniversalTicker.resolve("Binance_Spot_BTCUSDT")
+        UniversalTicker.resolve("Kraken_Spot_BTCUSDT")
 
 
 def test_resolve_checks_the_venue_actually_trades_the_category() -> None:

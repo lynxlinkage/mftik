@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 from mft.exchange import venues
+from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
+from mft.exchange.binance.spot.protocol import BinanceWsError
 from mft.exchange.errors import (
     ExchangeError,
     ExchangeNotConnectedError,
@@ -32,6 +34,7 @@ from mft_td.errors import VENUES, normalize
 
 GATE = "Gate"
 PAPER = "Paper"
+BINANCE = "Binance"
 
 
 # --- band 2: venue errors we recognise -------------------------------------
@@ -186,6 +189,163 @@ def test_an_unmatched_paper_message_is_still_a_venue_reject() -> None:
     assert code is RejectCode.VENUE_REJECTED
 
 
+# --- Binance: numeric codes, refined by message where they are coarse -------
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (-1003, RejectCode.VENUE_RATE_LIMITED),
+        (-1015, RejectCode.VENUE_RATE_LIMITED),
+        (-1021, RejectCode.VENUE_AUTH_FAILED),
+        (-1022, RejectCode.VENUE_AUTH_FAILED),
+        (-2015, RejectCode.VENUE_AUTH_FAILED),
+        (-1111, RejectCode.VENUE_INVALID_PARAM),
+        (-1121, RejectCode.VENUE_SYMBOL_NOT_TRADABLE),
+        (-2013, RejectCode.VENUE_ORDER_NOT_FOUND),
+        (-2026, RejectCode.VENUE_ORDER_ALREADY_CLOSED),
+        (-1008, RejectCode.VENUE_INTERNAL_ERROR),
+    ],
+)
+def test_a_known_binance_code_becomes_a_venue_code(
+    code: int, expected: RejectCode
+) -> None:
+    assert normalize(BinanceWsError(code, "nope"), venue=BINANCE) is expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "Account has insufficient balance for requested action.",
+            RejectCode.VENUE_INSUFFICIENT_BALANCE,
+        ),
+        (
+            "Order would immediately match and take.",
+            RejectCode.VENUE_POST_ONLY_WOULD_CROSS,
+        ),
+        ("Duplicate order sent.", RejectCode.VENUE_DUPLICATE_CLIENT_ORDER_ID),
+        ("Market is closed.", RejectCode.VENUE_SYMBOL_NOT_TRADABLE),
+        (
+            "Account has too many open orders.",
+            RejectCode.VENUE_RISK_LIMIT,
+        ),
+        (
+            "This account may not place or cancel orders.",
+            RejectCode.VENUE_PERMISSION_DENIED,
+        ),
+        ("Price * QTY is zero or less.", RejectCode.VENUE_BELOW_MINIMUM),
+        ("Filter failure: MIN_NOTIONAL", RejectCode.VENUE_BELOW_MINIMUM),
+        ("Filter failure: PERCENT_PRICE", RejectCode.VENUE_INVALID_PARAM),
+    ],
+)
+def test_one_binance_code_is_split_apart_by_its_message(
+    message: str, expected: RejectCode
+) -> None:
+    """``-2010`` is every rejected new order; only the message says which.
+
+    Mapping the code alone would tell a strategy "insufficient balance" when
+    the real reason was a post-only that would have crossed — a specific,
+    wrong answer, which is the failure this table exists to avoid.
+    """
+    assert normalize(BinanceWsError(-2010, message), venue=BINANCE) is expected
+
+
+def test_a_2010_with_a_message_we_do_not_know_stays_a_plain_reject() -> None:
+    """The refinement narrows; it never invents."""
+    code = normalize(
+        BinanceWsError(-2010, "Some new rejection reason"), venue=BINANCE
+    )
+    assert code is RejectCode.VENUE_REJECTED
+
+
+def test_a_cancel_refused_by_restrictions_is_not_a_missing_order() -> None:
+    """``-2011`` usually means the order is gone; sometimes it means it moved on."""
+    assert normalize(
+        BinanceWsError(-2011, "Cancel order is invalid. Check origClOrdId"),
+        venue=BINANCE,
+    ) is RejectCode.VENUE_ORDER_NOT_FOUND
+    assert normalize(
+        BinanceWsError(-2011, "Order was not canceled due to cancel restrictions."),
+        venue=BINANCE,
+    ) is RejectCode.VENUE_ORDER_ALREADY_CLOSED
+
+
+def test_an_unmapped_binance_code_survives_as_itself() -> None:
+    assert normalize(BinanceWsError(-9999, "brand new"), venue=BINANCE) == -9999
+
+
+def test_binance_codes_cannot_be_mistaken_for_ours() -> None:
+    """Native codes pass through, so the two numberings must not overlap.
+
+    ``reject_codes`` warns that a venue numbering inside 100–299 would be
+    indistinguishable from a code this platform assigned. Binance's are all
+    negative, which is why leaving one unmapped is safe.
+    """
+    from mft_td.errors import BINANCE as TABLE
+
+    assert all(code < 0 for code in TABLE.codes)
+    assert all(code < 0 for code in TABLE.refine)
+    assert not is_normalized(-2010)
+
+
+# --- the wrapper adapters raise through ------------------------------------
+
+
+def test_a_venue_error_wrapped_in_an_order_error_still_normalizes() -> None:
+    """The order path never hands ``normalize`` the venue's own exception.
+
+    Every adapter re-raises as ``OrderError`` so TD publishes a reject rather
+    than a transport failure, and ``OrderError`` carries no code. Before the
+    chain was searched this table was unreachable from the order path and
+    every rejection came back ``VENUE_REJECTED`` — which is what a live
+    ``-1111`` actually did.
+    """
+    venue_error = BinanceWsError(-1111, "Parameter 'quantity' has too much precision.")
+    wrapped = OrderError(str(venue_error))
+    wrapped.__cause__ = venue_error
+
+    assert normalize(wrapped, venue=BINANCE) is RejectCode.VENUE_INVALID_PARAM
+
+
+def test_a_wrapped_gate_label_still_normalizes() -> None:
+    """Gate's adapter wraps the same way, so it had the same blind spot."""
+    venue_error = GateApiError("BALANCE_NOT_ENOUGH", "not enough USDT")
+    wrapped = OrderError(str(venue_error))
+    wrapped.__cause__ = venue_error
+
+    assert normalize(wrapped, venue=GATE) is RejectCode.VENUE_INSUFFICIENT_BALANCE
+
+
+def test_message_refinement_reads_the_cause_not_the_wrapper() -> None:
+    """``-2010`` is split by message; the message has to come from the venue."""
+    venue_error = BinanceWsError(
+        -2010, "Account has insufficient balance for requested action."
+    )
+    wrapped = OrderError(str(venue_error))
+    wrapped.__cause__ = venue_error
+
+    assert normalize(wrapped, venue=BINANCE) is (
+        RejectCode.VENUE_INSUFFICIENT_BALANCE
+    )
+
+
+def test_a_local_refusal_with_no_cause_is_still_a_plain_reject() -> None:
+    """Nothing to walk to, so nothing changes for TD's own OrderErrors."""
+    assert normalize(OrderError("limit order requires a price"), venue=BINANCE) is (
+        RejectCode.VENUE_REJECTED
+    )
+
+
+def test_a_cyclic_cause_chain_does_not_hang() -> None:
+    first = OrderError("outer")
+    second = OrderError("inner")
+    first.__cause__ = second
+    second.__cause__ = first
+
+    assert normalize(first, venue=BINANCE) is RejectCode.VENUE_REJECTED
+
+
 # --- the bands themselves ---------------------------------------------------
 
 
@@ -215,6 +375,7 @@ def test_each_private_client_names_itself_after_its_venue() -> None:
     quietly stop normalizing, which is worse.
     """
     for client in (
+        BinanceSpotPrivateClient,
         GateSpotPrivateClient,
         PaperPrivateClient,
         PaperRemotePrivateClient,

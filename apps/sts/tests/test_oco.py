@@ -1009,4 +1009,4 @@ def test_a_named_market_is_normalized_at_deploy_time() -> None:
     assert paras["ticker"] == "Gate_Spot_ETHUSDT"
 
     with pytest.raises(Exception, match="unknown venue"):
-        OneCancelOther.on_initialized(_paras(ticker="Binance_Spot_ETHUSDT"))
+        OneCancelOther.on_initialized(_paras(ticker="Kraken_Spot_ETHUSDT"))

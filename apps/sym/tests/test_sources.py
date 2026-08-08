@@ -8,6 +8,7 @@ import httpx
 import pytest
 from mft.exchange.tickers import Category
 from mft_sym.sources import PaperInstrumentSource, tick_from_precision
+from mft_sym.sources.binance import BinanceSpotInstrumentSource
 from mft_sym.sources.gate import GateSpotInstrumentSource
 
 # Trimmed rows in Gate's /spot/currency_pairs shape.
@@ -118,6 +119,144 @@ async def test_http_failure_propagates() -> None:
         client=httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
             base_url="https://api.gateio.ws",
+        )
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await source.fetch()
+
+
+# --- Binance ---------------------------------------------------------------
+
+# Trimmed rows in Binance's /api/v3/exchangeInfo shape.
+BINANCE_ROWS = [
+    {
+        "symbol": "BTCUSDT",
+        "status": "TRADING",
+        "baseAsset": "BTC",
+        "quoteAsset": "USDT",
+        "filters": [
+            {
+                "filterType": "PRICE_FILTER",
+                "minPrice": "0.01000000",
+                "maxPrice": "1000000.00000000",
+                "tickSize": "0.01000000",
+            },
+            {
+                "filterType": "LOT_SIZE",
+                "minQty": "0.00001000",
+                "maxQty": "9000.00000000",
+                "stepSize": "0.00001000",
+            },
+            {
+                "filterType": "NOTIONAL",
+                "minNotional": "5.00000000",
+                # Present but unenforced — Binance writes zero, not null.
+                "maxNotional": "0.00000000",
+            },
+        ],
+    },
+    {
+        "symbol": "HALTUSDT",
+        "status": "HALT",
+        "baseAsset": "HALT",
+        "quoteAsset": "USDT",
+        # An older symbol, on the superseded filter name.
+        "filters": [{"filterType": "MIN_NOTIONAL", "minNotional": "10.00000000"}],
+    },
+    # Malformed — no baseAsset; must be skipped, not crash the refresh.
+    {"symbol": "BADUSDT", "status": "TRADING", "quoteAsset": "USDT"},
+]
+
+
+def _binance(rows: list[dict]) -> BinanceSpotInstrumentSource:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3/exchangeInfo"
+        return httpx.Response(200, json={"symbols": rows})
+
+    return BinanceSpotInstrumentSource(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://api.binance.com",
+        )
+    )
+
+
+async def test_binance_rows_become_canonical_instruments() -> None:
+    instruments = await _binance(BINANCE_ROWS).fetch()
+
+    assert [i.symbol for i in instruments] == ["BTCUSDT", "HALTUSDT"]
+    btc = instruments[0]
+    assert btc.base == "BTC"
+    assert btc.quote == "USDT"
+    # Binance spells spot pairs the canonical way, which is a coincidence and
+    # not a rule — the plane still stores both spellings.
+    assert btc.exch_ticker == "BTCUSDT"
+    assert str(btc.ticker) == "Binance_Spot_BTCUSDT"
+    assert btc.category is Category.SPOT
+    assert btc.is_active
+
+
+async def test_binance_steps_come_out_of_the_filter_list() -> None:
+    btc = (await _binance(BINANCE_ROWS).fetch())[0]
+
+    assert btc.filters["price_tick"] == Decimal("0.01")
+    assert btc.filters["qty_step"] == Decimal("0.00001")
+    assert btc.filters["min_qty"] == Decimal("0.00001")
+    assert btc.filters["max_qty"] == Decimal("9000")
+    assert btc.filters["min_notional"] == Decimal("5")
+    assert btc.filters["max_price"] == Decimal("1000000")
+
+
+async def test_a_step_is_stored_at_its_granularity_not_binances_formatting() -> None:
+    """Binance pads its filters (``"0.00010000"``); the scale then propagates.
+
+    Asserted on the written form, because ``Decimal`` equality cannot see it:
+    ``Decimal("0.00001000") == Decimal("0.00001")`` is true, so the assertions
+    above pass either way. A padded step is what floored a size to
+    ``0.00780000`` and drew a live ``-1111``.
+    """
+    btc = (await _binance(BINANCE_ROWS).fetch())[0]
+
+    assert str(btc.filters["qty_step"]) == "0.00001"
+    assert str(btc.filters["price_tick"]) == "0.01"
+    assert str(btc.filters["min_notional"]) == "5"
+    # A whole-number bound must not come back exponential either.
+    assert str(btc.filters["max_qty"]) == "9000"
+
+
+async def test_a_zero_bound_reads_as_unbounded_not_as_zero() -> None:
+    """Binance writes ``0`` for a filter it publishes but does not enforce."""
+    btc = (await _binance(BINANCE_ROWS).fetch())[0]
+
+    assert "max_notional" in btc.filters
+    assert btc.filters["max_notional"] is None
+
+
+async def test_the_superseded_min_notional_filter_is_still_read() -> None:
+    halt = (await _binance(BINANCE_ROWS).fetch())[1]
+    assert halt.filters["min_notional"] == Decimal("10")
+
+
+async def test_symbols_that_are_not_trading_are_marked_inactive() -> None:
+    halt = (await _binance(BINANCE_ROWS).fetch())[1]
+    assert halt.symbol == "HALTUSDT"
+    assert not halt.is_active
+
+
+async def test_malformed_binance_rows_are_skipped() -> None:
+    instruments = await _binance(BINANCE_ROWS).fetch()
+    assert "BAD" not in {i.base for i in instruments}
+    assert len(instruments) == 2
+
+
+async def test_binance_http_failure_propagates() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"code": -1008, "msg": "Server busy"})
+
+    source = BinanceSpotInstrumentSource(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://api.binance.com",
         )
     )
     with pytest.raises(httpx.HTTPStatusError):

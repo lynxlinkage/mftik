@@ -8,6 +8,7 @@ import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange
+from mft.exchange.binance.spot.public import BinanceSpotPublicClient
 from mft.exchange.errors import ExchangeError
 from mft.exchange.gate.spot.public import GateSpotPublicClient
 from mft.exchange.paper.public import PaperPublicClient
@@ -67,15 +68,27 @@ async def test_unknown_venue_is_rejected(broker: Broker) -> None:
         await factory.create("gate-spot")
 
 
+async def test_binance_venue_builds_a_binance_public_client(
+    broker: Broker,
+) -> None:
+    factory = VenuePublicFactory(broker)
+    client = await factory.create("Binance")
+    assert isinstance(client, BinanceSpotPublicClient)
+    assert client.name == "Binance"
+    # Public market data only — neither of Binance's two sockets carries
+    # credentials, so MD can run a feed without a trading account.
+    assert not client.api.authenticated
+
+
 async def test_registered_venue_without_a_client_is_rejected(
     broker: Broker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A venue TD can trade but MD cannot read must fail at create."""
     from mft.exchange import venues
 
-    binance = venues.Venue(name="Binance", label="Binance Spot")
-    monkeypatch.setitem(venues.VENUES, binance.name, binance)
+    kraken = venues.Venue(name="Kraken", label="Kraken Spot")
+    monkeypatch.setitem(venues.VENUES, kraken.name, kraken)
 
     factory = VenuePublicFactory(broker)
     with pytest.raises(ExchangeError, match="no public client"):
-        await factory.create("Binance")
+        await factory.create("Kraken")
