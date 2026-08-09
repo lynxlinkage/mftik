@@ -15,7 +15,13 @@ from mft.exchange.models import (
 )
 from mft.exchange.oms import OmsView
 from mft.exchange.tickers import InvalidTickerError, UniversalTicker
-from mft.protocol import OrderReject, ReconDone, RejectCode, SymbolInfo
+from mft.protocol import (
+    CancelReject,
+    OrderReject,
+    ReconDone,
+    RejectCode,
+    SymbolInfo,
+)
 from mft_sts.impl.cross_arb import (
     CrossArb,
     edge_bps,
@@ -464,6 +470,122 @@ async def test_post_only_reject_clears_open() -> None:
         ),
     )
     assert Side.SELL not in strat._open
+
+
+async def test_order_reject_send_failed_keeps_leg() -> None:
+    """on_order_reject must match cancel-reject: TD_SEND_FAILED is ambiguous."""
+    strat = await _armed(side=["sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    cid = strat.oms.submitted[0]["cid"]
+
+    await strat.on_order_reject(
+        QUOTE_API,
+        OrderReject(
+            api_id=QUOTE_API,
+            client_order_id=cid,
+            reason="Connection lost",
+            error_code=RejectCode.TD_SEND_FAILED,
+        ),
+    )
+    assert Side.SELL in strat._open
+    assert strat._open[Side.SELL].cid == cid
+
+
+async def test_cancel_send_failed_keeps_leg_until_terminal() -> None:
+    """TD_SEND_FAILED must not optimistic-pop — that re-quotes a live order."""
+    strat = await _armed(side=["sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    cid = strat.oms.submitted[0]["cid"]
+    leg = strat._open[Side.SELL]
+    leg.canceling = True
+
+    await strat.on_cancel_reject(
+        QUOTE_API,
+        CancelReject(
+            api_id=QUOTE_API,
+            client_order_id=cid,
+            reason="Connection lost",
+            error_code=RejectCode.TD_SEND_FAILED,
+        ),
+    )
+    assert Side.SELL in strat._open
+    assert strat._open[Side.SELL].cid == cid
+    assert strat._open[Side.SELL].canceling is False
+
+    before = len(strat.oms.submitted)
+    # Edge still outside band on a moved touch — may retry cancel, not place.
+    await strat.on_best_quote(_hedge_quote("49000", "49000"))
+    assert len([r for r in strat.oms.submitted if r["api_id"] == QUOTE_API]) == before
+
+    await strat.on_order_update(
+        QUOTE_API,
+        _update(cid, OrderStatus.CANCELED, side=Side.SELL, price="50050"),
+    )
+    assert Side.SELL not in strat._open
+
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    quotes = [r for r in strat.oms.submitted if r["api_id"] == QUOTE_API]
+    assert len(quotes) == before + 1
+    assert quotes[-1]["cid"] != cid
+
+
+async def test_venue_cancel_reject_still_clears_leg() -> None:
+    strat = await _armed(side=["sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    cid = strat.oms.submitted[0]["cid"]
+
+    await strat.on_cancel_reject(
+        QUOTE_API,
+        CancelReject(
+            api_id=QUOTE_API,
+            client_order_id=cid,
+            reason="Unknown order",
+            error_code=RejectCode.VENUE_ORDER_NOT_FOUND,
+        ),
+    )
+    assert Side.SELL not in strat._open
+
+
+async def test_cancel_ack_not_cancelable_keeps_leg() -> None:
+    """TD_NOT_CANCELABLE must not drop the leg — that re-quotes a live order."""
+    strat = await _armed(side=["sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    cid = strat.oms.submitted[0]["cid"]
+    strat.oms.accept_cancel = False
+    strat.oms.reject_code = RejectCode.TD_NOT_CANCELABLE
+    strat.oms.reject_reason = "order is unknown; it cannot be cancelled"
+
+    await strat._cancel_leg(QUOTE_API, Side.SELL)
+
+    assert Side.SELL in strat._open
+    assert strat._open[Side.SELL].cid == cid
+    assert strat._open[Side.SELL].canceling is False
+
+
+async def test_refused_cancel_is_paced_not_retried_every_tick() -> None:
+    """Keeping the leg must not mean cancelling it on every book update.
+
+    ``_maintain_quotes`` runs per quote, so an un-paced retry against a down
+    link is a cancel request per market tick.
+    """
+    strat = await _armed(side=["sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    cid = strat.oms.submitted[0]["cid"]
+    strat.oms.accept_cancel = False
+    strat.oms.reject_code = RejectCode.TD_SEND_FAILED
+    strat.oms.reject_reason = "connection lost"
+
+    # Every one of these puts the resting quote outside the band.
+    for _ in range(5):
+        await strat.on_best_quote(_hedge_quote("49000", "49000"))
+
+    assert strat.oms.cancelled == [cid]
+    assert Side.SELL in strat._open
+
+    # Deferred, not abandoned: past the cooldown the retry goes out.
+    strat._open[Side.SELL].retry_cancel_at = 0.0
+    await strat.on_best_quote(_hedge_quote("49000", "49000"))
+    assert strat.oms.cancelled == [cid, cid]
 
 
 # --- pause / resume / rebuild ----------------------------------------------

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Protocol
 
 from mft.broker import Broker
@@ -54,6 +54,26 @@ PENDING_NEW_TIMEOUT_S = 5.0
 
 #: How often the sweeper looks for aged-out PENDING_NEW orders.
 PENDING_SWEEP_INTERVAL_S = 1.0
+
+#: How long an UNKNOWN order may sit before TD forces a venue-wide recon.
+#: Resolve is retried with backoff; this is the backstop when the lookup path
+#: itself is dead (same transport failure that produced UNKNOWN).
+UNKNOWN_FORCE_RECON_S = 10.0
+
+#: Delay before the first resolve retry, doubled on every failed attempt.
+UNKNOWN_RETRY_BASE_S = 1.0
+#: Ceiling on that backoff, so a venue that never answers is asked this often
+#: rather than once a tick. A dead link is the one least able to absorb a
+#: lookup per order per second, and venues ban for that.
+UNKNOWN_RETRY_MAX_S = 30.0
+#: Minimum gap between the venue recons a stuck UNKNOWN forces.
+#: :data:`UNKNOWN_FORCE_RECON_S` is an age — it says when the first one fires,
+#: not how often after, which on its own is every tick forever.
+UNKNOWN_FORCE_RECON_INTERVAL_S = 60.0
+#: Cap on one venue lookup made from the chase loop.
+UNKNOWN_RESOLVE_TIMEOUT_S = 5.0
+#: Cap on the whole forced recon, which is several venue calls.
+UNKNOWN_FORCE_RECON_TIMEOUT_S = 15.0
 
 OrderCallback = Callable[[Order], None]
 FillCallback = Callable[[Fill], None]
@@ -153,9 +173,111 @@ class Session:
         #: client_order_id → (loop time the cancel went out, status to
         #: restore if the venue refuses it).
         self._cancel_since: dict[str, tuple[float, OrderStatus]] = {}
+        #: client_order_id → when it became UNKNOWN (for re-chase / force recon).
+        self._unknown_since: dict[str, float] = {}
+        #: client_order_id → status to use when resolve finds nothing.
+        self._unknown_if_missing: dict[str, OrderStatus] = {}
+        #: client_order_id → earliest loop time the next resolve may go out.
+        self._unknown_next_try: dict[str, float] = {}
+        #: client_order_id → resolve attempts already spent (drives backoff).
+        self._unknown_tries: dict[str, int] = {}
+        #: Loop time of the last UNKNOWN-forced reconcile, for its cooldown.
+        self._last_force_recon = float("-inf")
+        #: Serializes book mutations that come from venue snapshots or from
+        #: UNKNOWN resolution. Fetch I/O runs outside the lock; applying a
+        #: resolve result or ``apply_reconcile`` runs inside so a late resolve
+        #: cannot re-insert a phantom order after reconnect recon cleared it.
+        self._recon_lock = asyncio.Lock()
+        #: Single-flight background ``resolve_all_unknown`` (if any).
+        self._resolve_all_task: asyncio.Task[None] | None = None
+        #: Fired when the book has no UNKNOWN left (after resolve / recon).
+        #: SessionManager uses this to flush STS ``ReconDone`` waiters.
+        self._on_book_settled: Callable[[], Awaitable[None]] | None = None
+        #: How long UNKNOWN may linger before a forced venue recon.
+        self.unknown_force_recon = UNKNOWN_FORCE_RECON_S
+        #: Ceiling on the per-order resolve backoff.
+        self.unknown_retry_max = UNKNOWN_RETRY_MAX_S
+        #: How often a still-stuck UNKNOWN may force another venue recon.
+        self.unknown_force_recon_interval = UNKNOWN_FORCE_RECON_INTERVAL_S
 
         self.oms.bind(self)
         self.oms.on_update(self._on_oms_update)
+
+    @property
+    def started(self) -> bool:
+        return self._started
+
+    def has_unknown(self) -> bool:
+        """True when any live order is still transport-ambiguous."""
+        return any(
+            order.status is OrderStatus.UNKNOWN
+            for order in self.oms.view().orders.values()
+        )
+
+    def book_ready_for_snapshot(self) -> bool:
+        """STS may take a ReconDone snapshot without another venue pass."""
+        return self._started and not self.has_unknown()
+
+    def view_for_sts(self) -> OmsView:
+        """OMS snapshot for STS recon: live orders/positions, ledger balances.
+
+        ``Oms._balances`` is only reliably refreshed on full venue reconcile;
+        the ledger is what balance streams and pre-locks actually update. STS
+        funding checks read the ledger, so ReconDone must match it.
+        """
+        view = self.oms.view()
+        return OmsView(
+            orders=view.orders,
+            positions=view.positions,
+            balances=self.ledger.snapshot(),
+        )
+
+    async def accept_venue_order(self, order: Order) -> None:
+        """Book a venue place/cancel ack and announce it — do not wait on WS.
+
+        The REST/WS trading call already confirmed the outcome; discarding that
+        Order and only trusting the private stream leaves PENDING_* stuck when
+        the confirming push is lost.
+
+        The ack is authoritative about the *outcome* and about nothing else.
+        Connectors build it from whatever the venue handed back, and some
+        venues hand back almost nothing — Bybit's cancel ack carries two ids
+        and no state, so its connector echoes the last order the stream
+        reported. That makes an ack a stale source for fills, and a dangerous
+        one for a cid the book has already finished with.
+        """
+        cid = order.client_order_id
+        if cid:
+            current = self.oms.get_order(cid)
+            if current is None and not is_terminal(order.status):
+                # Filled, or reconciled away, while the call was in flight.
+                # Re-inserting it live from the ack would resurrect an order
+                # no stream will ever terminate again.
+                logger.info(
+                    "TD venue ack ignored api_id=%s cid=%s (%s) — the book "
+                    "has already finished with it",
+                    self.api_id,
+                    cid,
+                    order.status.value,
+                )
+                self.cancel_settled(cid)
+                self._pending_since.pop(cid, None)
+                return
+            if current is not None and order.filled_qty < current.filled_qty:
+                # The stream is what knows about fills. Keep its numbers.
+                order = order.model_copy(
+                    update={
+                        "filled_qty": current.filled_qty,
+                        "avg_price": current.avg_price,
+                    }
+                )
+        for cb in list(self._order_cbs):
+            cb(order)
+        await self._store_then_announce_order(order)
+        if cid and is_terminal(order.status):
+            self.cancel_settled(cid)
+            self._forget_unknown(cid)
+            self._pending_since.pop(cid, None)
 
     @property
     def destroyed(self) -> bool:
@@ -210,6 +332,9 @@ class Session:
             asyncio.create_task(
                 self._sweep_loop(), name=f"sess-{self.api_id}-sweep"
             ),
+            asyncio.create_task(
+                self._chase_loop(), name=f"sess-{self.api_id}-chase"
+            ),
         ]
         # Only if the venue has positions at all. A spot venue offers no such
         # stream, and pumping one that does not exist would fail the start of
@@ -241,6 +366,24 @@ class Session:
             except Exception:
                 logger.exception("TD pending sweep failed api_id=%s", self.api_id)
 
+    async def _chase_loop(self) -> None:
+        """Chase UNKNOWN orders on their own timer, not the sweeper's.
+
+        Sharing a task would let a slow venue lookup stop PENDING_NEW from
+        ageing out — the watchdog disabled by exactly the condition it is
+        there to catch.
+        """
+        while not self._destroyed:
+            try:
+                await asyncio.sleep(PENDING_SWEEP_INTERVAL_S)
+                await self.chase_unknown()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "TD unknown chase failed api_id=%s", self.api_id
+                )
+
     async def _on_venue_reconnect(self) -> None:
         """Re-run recon after the venue connection comes back."""
         if self._destroyed or not self._started:
@@ -254,33 +397,84 @@ class Session:
             logger.exception("TD post-reconnect recon failed api_id=%s", self.api_id)
 
     async def reconcile(self) -> OmsView:
-        """Query venue open orders / positions / balances into OMS and publish."""
+        """Query venue open orders / positions / balances into OMS and publish.
+
+        Single-flight per session: overlapping reconnect / internal recon
+        share one lock so two snapshots cannot interleave apply/publish.
+        """
         if self._destroyed:
             raise RuntimeError(f"session api_id={self.api_id} is destroyed")
-        orders = await self.private.fetch_open_orders()
-        balances = await self.private.fetch_balances()
-        # Spot venues have no positions to report and no method for them,
-        # which is a different thing from reporting none.
-        positions: list[Position] | None = None
-        fetch_positions = getattr(self.private, "fetch_positions", None)
-        if fetch_positions is not None:
-            positions = list(await fetch_positions())
+        async with self._recon_lock:
+            if self._destroyed:
+                raise RuntimeError(f"session api_id={self.api_id} is destroyed")
+            orders = await self.private.fetch_open_orders()
+            balances = await self.private.fetch_balances()
+            # Spot venues have no positions to report and no method for them,
+            # which is a different thing from reporting none.
+            positions: list[Position] | None = None
+            fetch_positions = getattr(self.private, "fetch_positions", None)
+            if fetch_positions is not None:
+                positions = list(await fetch_positions())
 
-        view = self.oms.apply_reconcile(
-            orders=orders,
-            balances=balances,
-            positions=positions,
-        )
-        # Recon is the moment TD's books become authoritative: the venue was
-        # just asked, so both hashes are replaced wholesale rather than
-        # merged. Pre-locks survive it — they cover orders the venue has not
-        # acknowledged yet, which is exactly what a snapshot cannot see.
-        self._pending_since.clear()
-        self._cancel_since.clear()
-        self.ledger.apply_venue_many(list(balances))
-        await self.write_ledger()
-        await self.publish_oms(view)
+            # What this snapshot is about to settle. ``apply_reconcile``
+            # replaces the book wholesale, so an UNKNOWN the venue no longer
+            # lists just disappears — no terminal event for it. STS drops a
+            # leg on a terminal update and on nothing else, so a silent drop
+            # leaves the strategy holding an order that no longer exists.
+            was_unknown = {
+                cid: order
+                for cid, order in self.oms.view().orders.items()
+                if order.status is OrderStatus.UNKNOWN
+            }
+            outcomes = dict(self._unknown_if_missing)
+
+            view = self.oms.apply_reconcile(
+                orders=orders,
+                balances=balances,
+                positions=positions,
+            )
+            # Recon is the moment TD's books become authoritative: the venue was
+            # just asked, so both hashes are replaced wholesale rather than
+            # merged. Pre-locks survive it — they cover orders the venue has not
+            # acknowledged yet, which is exactly what a snapshot cannot see.
+            self._pending_since.clear()
+            self._cancel_since.clear()
+            self._unknown_since.clear()
+            self._unknown_if_missing.clear()
+            self._unknown_next_try.clear()
+            self._unknown_tries.clear()
+            self.ledger.apply_venue_many(list(balances))
+            await self.write_ledger()
+            await self.publish_oms(view)
+            for cid, order in was_unknown.items():
+                if cid in view.orders:
+                    continue
+                await self._announce_recon_settled(
+                    cid,
+                    order,
+                    # CANCELED, not REJECTED, when nothing was recorded: the
+                    # order was live enough to be in the book, so claiming it
+                    # never landed would be the stronger and wronger guess.
+                    outcomes.get(cid, OrderStatus.CANCELED),
+                )
+        await self._emit_book_settled_if_clean()
         return view
+
+    async def _announce_recon_settled(
+        self, cid: str, order: Order, status: OrderStatus
+    ) -> None:
+        """Publish the terminal state recon implied for a dropped UNKNOWN."""
+        settled = order.model_copy(update={"status": status})
+        await self.write_order(settled)
+        await self._publish_global(TD_ORDER_UPDATE, settled)
+        await self.release(cid)
+        logger.info(
+            "TD recon settled UNKNOWN api_id=%s cid=%s → %s "
+            "(venue no longer lists it)",
+            self.api_id,
+            cid,
+            status.value,
+        )
 
     async def clear_state(self) -> None:
         """Delete this account's Redis state. Call when the session dies.
@@ -432,34 +626,133 @@ class Session:
         for cid in stale:
             self._pending_since.pop(cid, None)
             self._cancel_since.pop(cid, None)
-            order = self.oms.get_order(cid)
-            if order is None or not is_pending(order.status):
-                continue
-            unknown = order.model_copy(update={"status": OrderStatus.UNKNOWN})
-            self.oms.handle_order(unknown)
-            await self.write_order(unknown)
-            await self._publish_global(TD_ORDER_UPDATE, unknown)
-            logger.warning(
-                "TD %s unanswered after %ss api_id=%s cid=%s → UNKNOWN",
-                order.status.value,
-                self.pending_timeout,
-                self.api_id,
-                cid,
-            )
-            moved.append(unknown)
+            async with self._recon_lock:
+                order = self.oms.get_order(cid)
+                if order is None or not is_pending(order.status):
+                    continue
+                prior_status = order.status
+                unknown = order.model_copy(
+                    update={"status": OrderStatus.UNKNOWN}
+                )
+                self.oms.handle_order(unknown)
+                await self.write_order(unknown)
+                await self._publish_global(TD_ORDER_UPDATE, unknown)
+                self._remember_unknown(
+                    cid,
+                    if_missing=(
+                        OrderStatus.CANCELED
+                        if prior_status is OrderStatus.PENDING_CANCEL
+                        else OrderStatus.REJECTED
+                    ),
+                )
+                logger.warning(
+                    "TD %s unanswered after %ss api_id=%s cid=%s → UNKNOWN",
+                    prior_status.value,
+                    self.pending_timeout,
+                    self.api_id,
+                    cid,
+                )
+                moved.append(unknown)
             await self.resolve_unknown(unknown)
+        await self._emit_book_settled_if_clean()
         return moved
 
-    async def resolve_unknown(self, order: Order) -> Order | None:
+    def _remember_unknown(
+        self,
+        client_order_id: str,
+        *,
+        if_missing: OrderStatus,
+    ) -> None:
+        now = asyncio.get_running_loop().time()
+        self._unknown_since.setdefault(client_order_id, now)
+        self._unknown_if_missing[client_order_id] = if_missing
+        self._unknown_next_try.setdefault(client_order_id, now)
+        self._unknown_tries.setdefault(client_order_id, 0)
+
+    def _forget_unknown(self, client_order_id: str) -> None:
+        self._unknown_since.pop(client_order_id, None)
+        self._unknown_if_missing.pop(client_order_id, None)
+        self._unknown_next_try.pop(client_order_id, None)
+        self._unknown_tries.pop(client_order_id, None)
+
+    def _defer_unknown_retry(self, client_order_id: str, now: float) -> None:
+        """Push the next resolve out, doubling the wait per spent attempt."""
+        tries = self._unknown_tries.get(client_order_id, 0) + 1
+        self._unknown_tries[client_order_id] = tries
+        self._unknown_next_try[client_order_id] = now + min(
+            UNKNOWN_RETRY_BASE_S * 2 ** (tries - 1), self.unknown_retry_max
+        )
+
+    async def mark_unknown_and_resolve(
+        self,
+        client_order_id: str,
+        *,
+        if_missing: OrderStatus = OrderStatus.REJECTED,
+    ) -> Order | None:
+        """Transport failed mid-flight: mark UNKNOWN and ask the venue.
+
+        ``if_missing`` is used when the venue has no row for the cid — submit
+        silence means the order never landed (``REJECTED``); cancel silence
+        usually means it is already gone (``CANCELED``).
+        """
+        self._pending_since.pop(client_order_id, None)
+        self._cancel_since.pop(client_order_id, None)
+        async with self._recon_lock:
+            order = self.oms.get_order(client_order_id)
+            if order is None:
+                return None
+            if is_terminal(order.status):
+                self._forget_unknown(client_order_id)
+                return order
+            if order.status is not OrderStatus.UNKNOWN:
+                if not can_transition(order.status, OrderStatus.UNKNOWN):
+                    logger.warning(
+                        "TD cannot mark UNKNOWN api_id=%s cid=%s from %s",
+                        self.api_id,
+                        client_order_id,
+                        order.status.value,
+                    )
+                    return None
+                unknown = order.model_copy(
+                    update={"status": OrderStatus.UNKNOWN}
+                )
+                self.oms.handle_order(unknown)
+                await self.write_order(unknown)
+                await self._publish_global(TD_ORDER_UPDATE, unknown)
+                logger.warning(
+                    "TD transport ambiguous api_id=%s cid=%s (%s) → UNKNOWN",
+                    self.api_id,
+                    client_order_id,
+                    order.status.value,
+                )
+                order = unknown
+            self._remember_unknown(client_order_id, if_missing=if_missing)
+        settled = await self.resolve_unknown(order, if_missing=if_missing)
+        await self._emit_book_settled_if_clean()
+        return settled
+
+    async def resolve_unknown(
+        self,
+        order: Order,
+        *,
+        if_missing: OrderStatus | None = None,
+    ) -> Order | None:
         """Ask the venue what actually happened to an UNKNOWN order.
 
-        A ``None`` from the venue is a real answer — the order never landed —
-        so it becomes REJECTED and its reservation goes back. A venue that
-        cannot answer leaves the order UNKNOWN for recon to settle.
+        A ``None`` from the venue is a real answer — interpreted as
+        ``if_missing`` (default ``REJECTED``: the submit never landed). A
+        venue that cannot answer leaves the order UNKNOWN for recon to settle.
+
+        The venue lookup runs without the recon lock; applying the result
+        takes the lock and refuses to write unless the cid is still UNKNOWN,
+        so a concurrent ``reconcile()`` cannot be undone by a late resolve.
         """
         cid = order.client_order_id
         if not cid:
             return None
+        missing = if_missing or self._unknown_if_missing.get(
+            cid, OrderStatus.REJECTED
+        )
         resolve = getattr(self.private, "fetch_order_by_client_order_id", None)
         if resolve is None:
             logger.debug(
@@ -470,21 +763,37 @@ class Session:
             )
             return None
         try:
-            found = await resolve(cid, ticker=order.ticker)
+            # Bounded: the transport failure that produced the UNKNOWN is
+            # just as capable of hanging the lookup, and this runs on a loop
+            # that has other orders to watch.
+            found = await asyncio.wait_for(
+                resolve(cid, ticker=order.ticker), UNKNOWN_RESOLVE_TIMEOUT_S
+            )
         except Exception:
             logger.exception(
                 "TD resolve failed api_id=%s cid=%s", self.api_id, cid
             )
             return None
 
-        settled = found or order.model_copy(
-            update={"status": OrderStatus.REJECTED}
-        )
-        self.oms.handle_order(settled)
-        await self.write_order(settled)
-        await self._publish_global(TD_ORDER_UPDATE, settled)
-        self._cancel_since.pop(cid, None)
-        await self.release(cid)
+        settled = found or order.model_copy(update={"status": missing})
+        async with self._recon_lock:
+            current = self.oms.get_order(cid)
+            if current is None or current.status is not OrderStatus.UNKNOWN:
+                logger.info(
+                    "TD resolve skipped api_id=%s cid=%s — no longer UNKNOWN "
+                    "(current=%s)",
+                    self.api_id,
+                    cid,
+                    None if current is None else current.status.value,
+                )
+                self._forget_unknown(cid)
+                return current
+            self.oms.handle_order(settled)
+            await self.write_order(settled)
+            await self._publish_global(TD_ORDER_UPDATE, settled)
+            self._cancel_since.pop(cid, None)
+            self._forget_unknown(cid)
+            await self.release(cid)
         logger.info(
             "TD resolved UNKNOWN api_id=%s cid=%s → %s",
             self.api_id,
@@ -492,6 +801,112 @@ class Session:
             settled.status,
         )
         return settled
+
+    async def _emit_book_settled_if_clean(self) -> None:
+        if self.has_unknown() or self._on_book_settled is None:
+            return
+        try:
+            await self._on_book_settled()
+        except Exception:
+            logger.exception(
+                "TD book-settled callback failed api_id=%s", self.api_id
+            )
+
+    async def resolve_all_unknown(self) -> None:
+        """Chase every UNKNOWN order currently in the book."""
+        unknowns = [
+            order
+            for order in list(self.oms.view().orders.values())
+            if order.status is OrderStatus.UNKNOWN
+        ]
+        for order in unknowns:
+            await self.resolve_unknown(order)
+        await self._emit_book_settled_if_clean()
+
+    def kick_resolve_all_unknown(self) -> asyncio.Task[None] | None:
+        """Start at most one background ``resolve_all_unknown`` for this session.
+
+        Stores the task so it is not GC'd mid-flight, and coalesces concurrent
+        kickers (e.g. two ``sts.recon`` waiters) onto the same pass.
+        """
+        if self._destroyed:
+            return None
+        task = self._resolve_all_task
+        if task is not None and not task.done():
+            return task
+
+        async def _run() -> None:
+            try:
+                await self.resolve_all_unknown()
+            except Exception:
+                logger.exception(
+                    "TD resolve_all_unknown failed api_id=%s", self.api_id
+                )
+
+        self._resolve_all_task = asyncio.create_task(
+            _run(), name=f"td-resolve-all-{self.api_id}"
+        )
+        return self._resolve_all_task
+
+    async def chase_unknown(self) -> None:
+        """Re-resolve lingering UNKNOWN orders; force venue recon if stuck.
+
+        ``mark_unknown_and_resolve`` drops pending/cancel timers, so without
+        this path a failed resolve would sit forever and park STS recon
+        waiters with no production trigger to flush them.
+
+        Both the per-order retry and the forced recon are rate-limited. An
+        order that cannot be resolved is usually one whose venue link is
+        already unhealthy, and retrying it every tick until it works turns a
+        transport failure into a rate-limit ban.
+        """
+        if self._destroyed or not self._unknown_since:
+            return
+        now = asyncio.get_running_loop().time()
+        # Drop bookkeeping for orders that left UNKNOWN some other way.
+        for cid in list(self._unknown_since):
+            order = self.oms.get_order(cid)
+            if order is None or order.status is not OrderStatus.UNKNOWN:
+                self._forget_unknown(cid)
+        if not self._unknown_since:
+            await self._emit_book_settled_if_clean()
+            return
+
+        due = [cid for cid, at in self._unknown_next_try.items() if at <= now]
+        for cid in due:
+            order = self.oms.get_order(cid)
+            if order is None or order.status is not OrderStatus.UNKNOWN:
+                self._forget_unknown(cid)
+                continue
+            # Spend the attempt before making it: a resolve that raises must
+            # still push the next one out, or the backoff never applies.
+            self._defer_unknown_retry(cid, now)
+            await self.resolve_unknown(order)
+        if due:
+            await self._emit_book_settled_if_clean()
+        if not self._unknown_since:
+            return
+
+        oldest = min(self._unknown_since.values())
+        if now - oldest < self.unknown_force_recon:
+            return
+        if now - self._last_force_recon < self.unknown_force_recon_interval:
+            return
+        self._last_force_recon = now
+        logger.warning(
+            "TD UNKNOWN stuck >%ss api_id=%s cids=%s — forcing venue recon",
+            self.unknown_force_recon,
+            self.api_id,
+            sorted(self._unknown_since),
+        )
+        try:
+            await asyncio.wait_for(
+                self.reconcile(), UNKNOWN_FORCE_RECON_TIMEOUT_S
+            )
+        except Exception:
+            logger.exception(
+                "TD forced recon after UNKNOWN failed api_id=%s", self.api_id
+            )
 
     async def write_order(self, order: Order) -> None:
         """Persist one order, or drop it once it is finished.
@@ -677,6 +1092,10 @@ class Session:
 
         for task in self._tasks:
             task.cancel()
+        if self._resolve_all_task is not None:
+            self._resolve_all_task.cancel()
+            self._tasks.append(self._resolve_all_task)
+            self._resolve_all_task = None
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()

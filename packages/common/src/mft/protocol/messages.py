@@ -415,7 +415,11 @@ class MdBestQuoteResult(MdFetchResult):
 
 
 class Recon(BaseModel):
-    """STS → TD: request OMS reconciliation for ``api_id``."""
+    """STS → TD: request an async OMS snapshot for ``api_id``.
+
+    TD answers from its current book when clean, or after settling UNKNOWN
+    orders. This is not a request to hit the venue on the strategy's behalf.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -424,7 +428,7 @@ class Recon(BaseModel):
 
 
 class ReconDone(BaseModel):
-    """TD → STS: reconciliation finished (OMS also published to ``td.oms.{api_id}``)."""
+    """TD → STS: book snapshot ready (OMS also on ``td.oms.{api_id}``)."""
 
     model_config = ConfigDict(frozen=True)
 

@@ -71,6 +71,7 @@ def test_the_sets_partition_the_enum() -> None:
         (S.UNKNOWN, S.FILLED),
         (S.UNKNOWN, S.CANCELED),
         (S.UNKNOWN, S.REJECTED),
+        (S.UNKNOWN, S.PENDING_CANCEL),
     ],
 )
 def test_documented_transitions_are_allowed(
@@ -88,9 +89,8 @@ def test_documented_transitions_are_allowed(
         # A venue does not reject an order it already accepted and filled.
         (S.PARTIALLY_FILLED, S.REJECTED),
         (S.PARTIALLY_FILLED, S.NEW),
-        # Recovery resolves UNKNOWN; it never leaves it in flight.
+        # Recovery does not rewind to a pre-ack state.
         (S.UNKNOWN, S.PENDING_NEW),
-        (S.UNKNOWN, S.PENDING_CANCEL),
         (S.NEW, S.PENDING_NEW),
     ],
 )

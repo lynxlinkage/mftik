@@ -150,6 +150,9 @@ _TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
             _S.UNKNOWN,
         }
     ),
+    # Recovery may find the order still working or finished. A cancel retry
+    # after a transport failure must also be allowed: otherwise UNKNOWN is
+    # permanently unmanageable and the strategy cannot clear it.
     _S.UNKNOWN: frozenset(
         {
             _S.NEW,
@@ -157,6 +160,7 @@ _TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
             _S.FILLED,
             _S.CANCELED,
             _S.REJECTED,
+            _S.PENDING_CANCEL,
         }
     ),
     _S.FILLED: frozenset(),

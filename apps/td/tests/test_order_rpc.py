@@ -27,6 +27,7 @@ from mft.protocol import (
     STS_LEASE_HEARTBEAT,
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
+    TD_ORDER_UPDATE,
     Envelope,
     LeaseHeartbeat,
     OrderAck,
@@ -547,3 +548,408 @@ async def test_a_refused_instrument_reserves_nothing(
 
     assert ack.accepted is False
     assert await broker.state_all(Topics.td_ledger(API_ID)) == before
+
+
+# --- transport-ambiguous send failures --------------------------------------
+
+
+async def test_cancel_send_failure_resolves_missing_as_canceled(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """Cancel write fails and the venue has no row → treat as already gone."""
+    session = attached.get(API_ID)
+    assert session is not None
+    await _book(session, "cid-sendfail", OrderStatus.NEW)
+
+    async def boom(_cid: str) -> Order:
+        raise RuntimeError("Error UNKNOWN while writing to socket. Connection lost.")
+
+    session.private.cancel_by_client_order_id = boom  # type: ignore[method-assign]
+
+    ack = await _ack(broker, _cancel_envelope("cid-sendfail"))
+    assert ack.accepted is True
+    await asyncio.sleep(0.2)
+
+    assert session.oms.get_order("cid-sendfail") is None
+    assert await broker.state_get(Topics.td_oms(API_ID), "cid-sendfail") is None
+
+
+async def test_cancel_send_failure_keeps_order_when_venue_still_has_it(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """Cancel write fails but resolve finds the resting order → stay working."""
+    session = attached.get(API_ID)
+    assert session is not None
+
+    ack = await _ack(
+        broker,
+        _submit_envelope(
+            client_order_id="cid-keep",
+            price=Decimal("1"),
+        ),
+    )
+    assert ack.accepted is True
+    await asyncio.sleep(0.2)
+    assert session.oms.get_order("cid-keep") is not None
+
+    async def boom(_cid: str) -> Order:
+        raise RuntimeError("Connection lost")
+
+    session.private.cancel_by_client_order_id = boom  # type: ignore[method-assign]
+
+    ack = await _ack(broker, _cancel_envelope("cid-keep"))
+    assert ack.accepted is True
+    await asyncio.sleep(0.2)
+
+    order = session.oms.get_order("cid-keep")
+    assert order is not None
+    assert order.status is OrderStatus.NEW
+
+
+async def test_submit_send_failure_resolves_missing_as_rejected(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """Submit write fails and the venue never saw it → REJECTED."""
+    session = attached.get(API_ID)
+    assert session is not None
+
+    async def boom(_req: PlaceOrderRequest) -> Order:
+        raise RuntimeError("Connection lost")
+
+    session.private.place_order = boom  # type: ignore[method-assign]
+
+    ack = await _ack(
+        broker, _submit_envelope(client_order_id="cid-ghost-send")
+    )
+    assert ack.accepted is True
+    await asyncio.sleep(0.2)
+
+    assert session.oms.get_order("cid-ghost-send") is None
+    assert await broker.state_get(Topics.td_oms(API_ID), "cid-ghost-send") is None
+
+
+async def test_submit_send_failure_stays_unknown_when_resolve_fails(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """Resolve failing on the same dead transport must not publish a reject."""
+    session = attached.get(API_ID)
+    assert session is not None
+    manager = attached
+
+    async def boom_place(_req: PlaceOrderRequest) -> Order:
+        raise RuntimeError("Connection lost")
+
+    async def boom_resolve(_cid: str, *, ticker=None) -> Order | None:  # noqa: ANN001
+        raise RuntimeError("Connection lost")
+
+    session.private.place_order = boom_place  # type: ignore[method-assign]
+    session.private.fetch_order_by_client_order_id = boom_resolve  # type: ignore[method-assign]
+
+    ack = await _ack(
+        broker, _submit_envelope(client_order_id="cid-still-unk")
+    )
+    assert ack.accepted is True
+    await asyncio.sleep(0.2)
+
+    order = session.oms.get_order("cid-still-unk")
+    assert order is not None
+    assert order.status is OrderStatus.UNKNOWN
+    assert manager._accounts[API_ID].cid_owner.get("cid-still-unk") == SESSION
+
+
+async def test_unknown_order_accepts_cancel(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """A cancel retry after transport failure must not be TD_NOT_CANCELABLE."""
+    session = attached.get(API_ID)
+    assert session is not None
+    await _book(session, "cid-unk-cancel", OrderStatus.UNKNOWN)
+
+    ack = await _ack(broker, _cancel_envelope("cid-unk-cancel"))
+
+    assert ack.accepted is True
+    assert ack.error_code == RejectCode.NONE
+
+
+async def test_cancel_ack_settles_without_waiting_on_stream(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """Venue cancel reply must clear PENDING_CANCEL even if the push is lost."""
+    session = attached.get(API_ID)
+    assert session is not None
+    await _book(session, "cid-ack", OrderStatus.NEW)
+    assert await session.record_pending_cancel("cid-ack") is None
+    assert "cid-ack" in session._cancel_since
+
+    await session.accept_venue_order(
+        Order(
+            client_order_id="cid-ack",
+            universal_ticker="Paper_Spot_BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            status=OrderStatus.CANCELED,
+            qty=Decimal("0.01"),
+            price=Decimal("1000"),
+        )
+    )
+
+    assert session.oms.get_order("cid-ack") is None
+    assert "cid-ack" not in session._cancel_since
+    assert await broker.state_get(Topics.td_oms(API_ID), "cid-ack") is None
+
+
+async def test_view_for_sts_uses_ledger_balances(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """ReconDone must not ship stale OMS balances from the last full recon."""
+    session = attached.get(API_ID)
+    assert session is not None
+    session.oms._balances = {
+        "USDT": Balance(asset="USDT", free=Decimal("1"), locked=Decimal("0")),
+    }
+    session.ledger.apply_venue(
+        Balance(asset="USDT", free=Decimal("99"), locked=Decimal("0"))
+    )
+
+    view = session.view_for_sts()
+
+    assert view.balances["USDT"].free == Decimal("99")
+
+
+async def test_late_resolve_does_not_reinsert_after_reconcile(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """A resolve that finishes after reconnect recon must not resurrect the cid."""
+    session = attached.get(API_ID)
+    assert session is not None
+    await _book(session, "cid-phantom", OrderStatus.UNKNOWN)
+    session._remember_unknown("cid-phantom", if_missing=OrderStatus.REJECTED)
+
+    released = asyncio.Event()
+    hold = asyncio.Event()
+
+    async def slow_resolve(_cid: str, *, ticker=None) -> Order | None:  # noqa: ANN001
+        released.set()
+        await hold.wait()
+        return Order(
+            client_order_id="cid-phantom",
+            universal_ticker="Paper_Spot_BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            status=OrderStatus.NEW,
+            qty=Decimal("0.01"),
+            price=Decimal("1000"),
+        )
+
+    session.private.fetch_order_by_client_order_id = slow_resolve  # type: ignore[method-assign]
+
+    task = asyncio.create_task(
+        session.resolve_unknown(session.oms.get_order("cid-phantom"))  # type: ignore[arg-type]
+    )
+    await released.wait()
+    # Reconnect-style recon clears the book while resolve is still in flight.
+    await session.reconcile()
+    assert session.oms.get_order("cid-phantom") is None
+    hold.set()
+    result = await task
+
+    assert result is None
+    assert session.oms.get_order("cid-phantom") is None
+
+
+async def test_kick_resolve_all_unknown_is_single_flight(
+    attached: SessionManager, broker: Broker
+) -> None:
+    session = attached.get(API_ID)
+    assert session is not None
+    await _book(session, "cid-sf", OrderStatus.UNKNOWN)
+    session._remember_unknown("cid-sf", if_missing=OrderStatus.REJECTED)
+
+    calls = {"n": 0}
+    gate = asyncio.Event()
+
+    async def slow_resolve(_cid: str, *, ticker=None) -> Order | None:  # noqa: ANN001
+        calls["n"] += 1
+        await gate.wait()
+        return None
+
+    session.private.fetch_order_by_client_order_id = slow_resolve  # type: ignore[method-assign]
+
+    first = session.kick_resolve_all_unknown()
+    second = session.kick_resolve_all_unknown()
+    assert first is not None and first is second
+
+    gate.set()
+    await first
+    # One pass, one lookup — not two concurrent resolve_all runs.
+    assert calls["n"] == 1
+
+
+async def test_chase_unknown_backs_off_between_resolve_attempts(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """A venue that cannot answer must not be asked again every tick."""
+    session = attached.get(API_ID)
+    assert session is not None
+    await _book(session, "cid-bo", OrderStatus.UNKNOWN)
+    session._remember_unknown("cid-bo", if_missing=OrderStatus.REJECTED)
+
+    calls = {"n": 0}
+
+    async def dead(_cid: str, *, ticker=None) -> Order | None:  # noqa: ANN001
+        calls["n"] += 1
+        raise RuntimeError("venue unreachable")
+
+    session.private.fetch_order_by_client_order_id = dead  # type: ignore[method-assign]
+
+    for _ in range(5):
+        await session.chase_unknown()
+    # The first tick spends the one due attempt; the rest fall inside the
+    # backoff it opened. Without one this would be five lookups, and on a
+    # real venue five per second for as long as the link stays down.
+    assert calls["n"] == 1
+    still = session.oms.get_order("cid-bo")
+    assert still is not None and still.status is OrderStatus.UNKNOWN
+
+    # Once the backoff elapses the order is chased again — deferred, not dropped.
+    session._unknown_next_try["cid-bo"] = asyncio.get_running_loop().time() - 1
+    await session.chase_unknown()
+    assert calls["n"] == 2
+
+
+async def test_forced_recon_is_rate_limited_while_unknown_persists(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """``unknown_force_recon`` is an age — it must not mean "every tick"."""
+    session = attached.get(API_ID)
+    assert session is not None
+
+    async def dead(_cid: str, *, ticker=None) -> Order | None:  # noqa: ANN001
+        raise RuntimeError("venue unreachable")
+
+    session.private.fetch_order_by_client_order_id = dead  # type: ignore[method-assign]
+
+    recons = {"n": 0}
+    real_fetch = session.private.fetch_open_orders
+
+    async def counted(symbol: str | None = None) -> list[Order]:
+        recons["n"] += 1
+        return await real_fetch(symbol)
+
+    session.private.fetch_open_orders = counted  # type: ignore[method-assign]
+
+    async def _arm(cid: str) -> None:
+        await _book(session, cid, OrderStatus.UNKNOWN)
+        session._remember_unknown(cid, if_missing=OrderStatus.REJECTED)
+        session._unknown_since[cid] = (
+            asyncio.get_running_loop().time() - session.unknown_force_recon - 1
+        )
+
+    await _arm("cid-cd")
+    await session.chase_unknown()
+    assert recons["n"] == 1
+
+    # Re-arm an equally stale UNKNOWN — the first recon cleared the book, so
+    # this proves the cooldown is what stops the second pass, not an empty one.
+    await _arm("cid-cd2")
+    await session.chase_unknown()
+    assert recons["n"] == 1
+
+    session._last_force_recon = float("-inf")
+    await session.chase_unknown()
+    assert recons["n"] == 2
+
+
+async def test_recon_announces_unknown_the_venue_no_longer_lists(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """A silently dropped order leaves STS holding a leg it can never close.
+
+    ``apply_reconcile`` replaces the book wholesale, so the cid just vanishes.
+    STS drops its leg on a terminal update and on nothing else.
+    """
+    session = attached.get(API_ID)
+    assert session is not None
+    await _book(session, "cid-drop", OrderStatus.UNKNOWN)
+    session._remember_unknown("cid-drop", if_missing=OrderStatus.CANCELED)
+
+    got: asyncio.Future[dict[str, Any]] = (
+        asyncio.get_running_loop().create_future()
+    )
+    stop = asyncio.Event()
+
+    async def _listen() -> None:
+        async for env in broker.subscribe(Topics.td_global(API_ID), stop=stop):
+            payload = env.payload
+            if (
+                env.type == TD_ORDER_UPDATE
+                and payload.get("client_order_id") == "cid-drop"
+                and not got.done()
+            ):
+                got.set_result(payload)
+                stop.set()
+                return
+
+    listener = asyncio.create_task(_listen())
+    await asyncio.sleep(0.05)
+
+    # The paper venue has never heard of cid-drop, so recon settles it.
+    await session.reconcile()
+
+    payload = await asyncio.wait_for(got, timeout=2.0)
+    assert payload["status"] == OrderStatus.CANCELED.value
+    assert session.oms.get_order("cid-drop") is None
+
+    stop.set()
+    await asyncio.gather(listener, return_exceptions=True)
+
+
+async def test_venue_ack_does_not_resurrect_a_finished_order(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """A cancel ack that lost the race must not put the order back live."""
+    session = attached.get(API_ID)
+    assert session is not None
+    # The book already finished with it — a fill landed while the cancel
+    # call was still in flight, so handle_order popped it.
+    assert session.oms.get_order("cid-gone") is None
+
+    ack = Order(
+        client_order_id="cid-gone",
+        universal_ticker="Paper_Spot_BTCUSDT",
+        side=Side.BUY,
+        type=OrderType.LIMIT,
+        status=OrderStatus.PENDING_CANCEL,
+        qty=Decimal("0.01"),
+        price=Decimal("1000"),
+    )
+    await session.accept_venue_order(ack)
+
+    # No stream will ever terminate a resurrected order again.
+    assert session.oms.get_order("cid-gone") is None
+
+
+async def test_venue_ack_does_not_regress_filled_qty(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """Bybit's cancel ack echoes a cached order, so it can predate a fill."""
+    session = attached.get(API_ID)
+    assert session is not None
+    live = await _book(session, "cid-pf", OrderStatus.PARTIALLY_FILLED)
+    session.oms.handle_order(
+        live.model_copy(update={"filled_qty": Decimal("0.004")})
+    )
+
+    stale = live.model_copy(
+        update={
+            "status": OrderStatus.PENDING_CANCEL,
+            "filled_qty": Decimal("0"),
+        }
+    )
+    await session.accept_venue_order(stale)
+
+    booked = session.oms.get_order("cid-pf")
+    assert booked is not None
+    # Outcome from the ack, fills from the stream.
+    assert booked.status is OrderStatus.PENDING_CANCEL
+    assert booked.filled_qty == Decimal("0.004")

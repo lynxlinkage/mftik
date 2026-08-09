@@ -45,6 +45,7 @@ was away are not hunted — same as a redeploy.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -63,6 +64,7 @@ from mft.protocol import (
     CancelReject,
     OrderReject,
     ReconDone,
+    RejectCode,
     SymbolInfo,
 )
 from mft.protocol.reject_codes import describe
@@ -78,6 +80,22 @@ _TERMINAL = frozenset(
 _FILL_STATUSES = frozenset(
     {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED}
 )
+
+#: Transport / connectivity codes where the venue outcome is unknown.
+#: Used on reject hooks and on cancel-ack failures (``TD_NO_ACK`` only appears
+#: on the RPC ack path in ``oms.cancel_order``, never on CancelReject).
+_TRANSPORT_AMBIGUOUS = frozenset(
+    {
+        RejectCode.TD_SEND_FAILED,
+        RejectCode.TD_NO_ACK,
+        RejectCode.TD_VENUE_NOT_CONNECTED,
+    }
+)
+
+#: How long a leg waits before re-attempting a cancel that was kept, not
+#: dropped. Long enough that a dead link is not hammered, short enough that a
+#: quote sitting outside the band is not stranded there.
+CANCEL_RETRY_S = 1.0
 
 LOG_EVERY = 20
 
@@ -155,6 +173,20 @@ class _OpenLeg:
     side: Side
     price: Decimal
     canceling: bool = False
+    #: Loop time before which no further cancel attempt goes out. A refusal
+    #: we mean to retry has to be paced: ``_maintain_quotes`` runs on every
+    #: book update, so an un-paced retry is a cancel per quote tick.
+    retry_cancel_at: float = 0.0
+
+
+def _defer_cancel(leg: _OpenLeg, now: float) -> None:
+    """Keep a leg whose cancel was refused, and pace the next attempt.
+
+    Clearing ``canceling`` on its own frees the next book update to cancel
+    again immediately, which against a down link is a request per tick.
+    """
+    leg.canceling = False
+    leg.retry_cancel_at = now + CANCEL_RETRY_S
 
 
 class CrossArb(Strategy):
@@ -494,21 +526,35 @@ class CrossArb(Strategy):
         leg = self._open.get(side)
         if leg is None:
             return
+        now = asyncio.get_running_loop().time()
+        if now < leg.retry_cancel_at:
+            return
         leg.canceling = True
         try:
             if not await self.oms.cancel_order(api_id, leg.cid):
+                code = self.oms.last_reject_code
                 await self.log(
                     f"CrossArb cancel not accepted cid={leg.cid} "
-                    f"[{describe(self.oms.last_reject_code)}]: "
+                    f"[{describe(code)}]: "
                     f"{self.oms.last_reject_reason or 'no reason given'}",
                     level="warn",
                 )
-                self._open.pop(side, None)
+                # Transport / not-yet-cancelable: keep the leg and retry.
+                # ``TD_NO_ACK`` lands here (ack timeout), not on CancelReject.
+                # Dropping here is how a stuck UNKNOWN becomes a double quote.
+                if (
+                    code in _TRANSPORT_AMBIGUOUS
+                    or code == RejectCode.TD_NOT_CANCELABLE
+                ):
+                    _defer_cancel(leg, now)
+                else:
+                    self._open.pop(side, None)
         except Exception:
             await self.log(
                 f"CrossArb cancel failed cid={leg.cid}", level="warn"
             )
-            self._open.pop(side, None)
+            # Unknown local failure — keep waiting rather than re-quoting.
+            _defer_cancel(leg, now)
 
     # --- hedge -------------------------------------------------------------
 
@@ -640,7 +686,9 @@ class CrossArb(Strategy):
             return
         cid = str(reject.client_order_id)
         side = self._side_of(cid)
-        if side is not None:
+        # Same rule as cancel rejects: transport ambiguity is not "gone".
+        # Wait for a terminal order update (or a determined venue refuse).
+        if side is not None and reject.error_code not in _TRANSPORT_AMBIGUOUS:
             self._open.pop(side, None)
         await self.log(
             f"CrossArb order refused cid={cid} "
@@ -655,9 +703,18 @@ class CrossArb(Strategy):
             return
         cid = str(reject.client_order_id)
         side = self._side_of(cid)
-        if side is not None:
-            # Already gone at the venue — stop waiting on it.
+        # Transport ambiguity: the cancel may already have landed. Keep the
+        # leg so we do not double-quote; clear canceling so the next tick can
+        # retry cancel, and wait for a terminal order update before placing.
+        # (``TD_NO_ACK`` is handled in ``_cancel_leg`` — CancelReject only
+        # carries send-fail / venue codes.)
+        if side is not None and reject.error_code not in _TRANSPORT_AMBIGUOUS:
+            # Venue said the order is already gone — stop waiting on it.
             self._open.pop(side, None)
+        elif side is not None:
+            leg = self._open.get(side)
+            if leg is not None and leg.cid == cid:
+                _defer_cancel(leg, asyncio.get_running_loop().time())
         await self.log(
             f"CrossArb cancel refused cid={cid} "
             f"[{describe(reject.error_code)}] {reject.reason}",

@@ -84,9 +84,9 @@ class RejectCode(IntEnum):
     TD_UNREADABLE_ACK = 109
     #: The request type is not one TD's order plane answers.
     TD_UNSUPPORTED_REQUEST = 110
-    #: The send itself failed — a dead socket, a timeout. TD settles the order
-    #: as rejected on the assumption it never landed; recon is what corrects
-    #: that if the venue saw it after all.
+    #: The send itself failed — a dead socket, a timeout. Outcome at the venue
+    #: is unknown: TD marks the order UNKNOWN and resolves it; strategies must
+    #: not treat this as a determined reject or a successful cancel.
     TD_SEND_FAILED = 111
     #: The order named an instrument this session's venue does not trade —
     #: another venue's ticker, or a market this one has no book for. Refused

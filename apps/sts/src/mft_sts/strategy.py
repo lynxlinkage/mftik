@@ -249,7 +249,12 @@ class Strategy:
     # --- TD recon ----------------------------------------------------------
 
     async def send_recon(self, api_id: int) -> None:
-        """Ask TD to reconcile OMS for ``api_id`` (open orders / pos / balances)."""
+        """Ask TD for an async OMS snapshot for ``api_id``.
+
+        TD answers with :meth:`on_recon_done` from its current book when clean,
+        or after it has settled any UNKNOWN orders. This does not ask TD to
+        hit the venue on behalf of the strategy.
+        """
         if self.session is None:
             raise RuntimeError("strategy is not bound to a session")
         await self.session.broker.publish(

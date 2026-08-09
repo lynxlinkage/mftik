@@ -17,6 +17,7 @@ from mft.exchange.models import (
     PlaceOrderRequest,
     is_terminal,
 )
+from mft.exchange.oms import OmsView
 from mft.exchange.tickers import InvalidTickerError, UniversalTicker
 from mft.protocol import (
     STS_DETACH,
@@ -62,6 +63,11 @@ ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
 #: (e.g. a slow venue round-trip) without false expiry.
 LEASE_GRACE_S = 5.0
 
+#: How long a parked ``sts.recon`` waits for the book to come clean before TD
+#: answers with it as-is. Comfortably past the forced venue recon behind it,
+#: so this only fires when that could not settle the book either.
+RECON_WAIT_TIMEOUT_S = 30.0
+
 
 
 @dataclass
@@ -93,6 +99,13 @@ class TradingAccount:
     #: another session is logged, never blocked. Recon-discovered orders have
     #: no entry and are cancelled silently.
     cid_owner: dict[str, str] = field(default_factory=dict)
+    #: STS links waiting for a clean book snapshot (``ReconDone``). Filled
+    #: when ``sts.recon`` arrives while UNKNOWN is still open; drained when
+    #: the book settles — never by starting a venue recon for the STS.
+    recon_waiters: list[tuple[StsLink, str]] = field(default_factory=list)
+    #: Answers parked waiters with the book as it stands when UNKNOWN will
+    #: not clear at all. One per account, armed on the first park.
+    recon_deadline_task: asyncio.Task[Any] | None = None
 
     @property
     def refcount(self) -> int:
@@ -137,6 +150,7 @@ class SessionManager:
             acct = TradingAccount(api_id=request.api_id, trading=trading)
             self._accounts[request.api_id] = acct
             trading.on_order(partial(self._on_order_settled, acct))
+            trading._on_book_settled = partial(self._flush_recon_waiters, acct)
             acct.global_task = asyncio.create_task(
                 self._global_keepalive(acct),
                 name=f"td-global-{request.api_id}",
@@ -282,6 +296,12 @@ class SessionManager:
         link = acct.links.pop(session_id, None)
         before = acct.refcount + (1 if link is not None else 0)
         after = acct.refcount
+        if link is not None:
+            acct.recon_waiters = [
+                (waiter, topic)
+                for waiter, topic in acct.recon_waiters
+                if waiter.session_id != session_id
+            ]
 
         if link is not None:
             try:
@@ -360,6 +380,15 @@ class SessionManager:
             return
         acct.global_stop.set()
         current = asyncio.current_task()
+        if (
+            acct.recon_deadline_task is not None
+            and acct.recon_deadline_task is not current
+        ):
+            acct.recon_deadline_task.cancel()
+            await asyncio.gather(
+                acct.recon_deadline_task, return_exceptions=True
+            )
+            acct.recon_deadline_task = None
         if acct.global_task is not None and acct.global_task is not current:
             acct.global_task.cancel()
             await asyncio.gather(acct.global_task, return_exceptions=True)
@@ -531,6 +560,13 @@ class SessionManager:
         td_topic: str,
         payload: object,
     ) -> None:
+        """Hand STS the current book — do not venue-recon for the attach.
+
+        ``sts.recon`` is an async snapshot request. When the book is clean,
+        answer immediately from OMS. When UNKNOWN is open, park the link as a
+        waiter and let TD's own resolve / reconnect recon settle the book;
+        ``_flush_recon_waiters`` delivers ``ReconDone`` then.
+        """
         try:
             recon = Recon.model_validate(payload)
         except Exception:
@@ -543,36 +579,35 @@ class SessionManager:
         if recon.api_id != link.api_id or recon.session_id != link.session_id:
             return
         try:
-            view = await acct.trading.reconcile()
-            await self._broker.publish(
-                td_topic,
-                Envelope[ReconDone].wrap(
-                    ReconDone(
-                        session_id=link.session_id,
-                        api_id=link.api_id,
-                        oms=view,
-                    ),
-                    type=TD_RECON_DONE,
-                    source="td",
-                    session_id=link.session_id,
-                ),
+            if acct.trading.book_ready_for_snapshot():
+                await self._publish_recon_done(
+                    acct, link, td_topic, acct.trading.view_for_sts()
+                )
+                return
+            # An STS that resends ``sts.recon`` while parked must not collect
+            # a second waiter, or it gets a ReconDone per resend at flush.
+            if not any(
+                waiter.session_id == link.session_id and topic == td_topic
+                for waiter, topic in acct.recon_waiters
+            ):
+                acct.recon_waiters.append((link, td_topic))
+                self._arm_recon_deadline(acct)
+            logger.info(
+                "TD recon waiting session=%s api_id=%s (book not ready)",
+                link.session_id,
+                link.api_id,
             )
             await publish_td_log(
                 self._broker,
                 link.api_id,
-                (
-                    f"recon done sts={link.session_id} "
-                    f"orders={len(view.orders)} "
-                    f"balances={len(view.balances)} "
-                    f"positions={len(view.positions)}"
-                ),
+                f"recon waiting sts={link.session_id} (book not ready)",
                 source="td",
             )
-            logger.info(
-                "TD recon done session=%s api_id=%s",
-                link.session_id,
-                link.api_id,
-            )
+            # Kick resolve for any UNKNOWN already sitting in the book; do
+            # not start a full venue reconcile — that stays TD-owned.
+            # Single-flight: concurrent sts.recon waiters share one pass.
+            if acct.trading.has_unknown():
+                acct.trading.kick_resolve_all_unknown()
         except Exception as exc:
             logger.exception(
                 "TD recon failed session=%s api_id=%s",
@@ -586,6 +621,114 @@ class SessionManager:
                 source="td",
                 level="error",
             )
+
+    async def _publish_recon_done(
+        self,
+        acct: TradingAccount,
+        link: StsLink,
+        td_topic: str,
+        view: OmsView,
+    ) -> None:
+        await self._broker.publish(
+            td_topic,
+            Envelope[ReconDone].wrap(
+                ReconDone(
+                    session_id=link.session_id,
+                    api_id=link.api_id,
+                    oms=view,
+                ),
+                type=TD_RECON_DONE,
+                source="td",
+                session_id=link.session_id,
+            ),
+        )
+        await publish_td_log(
+            self._broker,
+            link.api_id,
+            (
+                f"recon done sts={link.session_id} "
+                f"orders={len(view.orders)} "
+                f"balances={len(view.balances)} "
+                f"positions={len(view.positions)}"
+            ),
+            source="td",
+        )
+        logger.info(
+            "TD recon done session=%s api_id=%s",
+            link.session_id,
+            link.api_id,
+        )
+
+    def _arm_recon_deadline(self, acct: TradingAccount) -> None:
+        """Bound how long a parked STS waits for the book to come clean.
+
+        Resolve and the forced recon behind it retry indefinitely, which is
+        right — but a venue that can never answer (revoked key, delisted
+        instrument) would otherwise park the strategy forever with nothing
+        but log lines to show for it. Late and honest beats silent.
+        """
+        task = acct.recon_deadline_task
+        if task is not None and not task.done():
+            return
+
+        async def _expire() -> None:
+            try:
+                await asyncio.sleep(RECON_WAIT_TIMEOUT_S)
+                if not acct.recon_waiters:
+                    return
+                logger.warning(
+                    "TD recon wait expired api_id=%s — answering with the "
+                    "book as it stands, UNKNOWN still open",
+                    acct.api_id,
+                )
+                await publish_td_log(
+                    self._broker,
+                    acct.api_id,
+                    (
+                        f"recon wait expired after {RECON_WAIT_TIMEOUT_S}s — "
+                        "snapshot still contains UNKNOWN orders"
+                    ),
+                    source="td",
+                    level="warn",
+                )
+                await self._flush_recon_waiters(acct, force=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "TD recon deadline failed api_id=%s", acct.api_id
+                )
+
+        acct.recon_deadline_task = asyncio.create_task(
+            _expire(), name=f"td-recon-deadline-{acct.api_id}"
+        )
+
+    async def _flush_recon_waiters(
+        self, acct: TradingAccount, *, force: bool = False
+    ) -> None:
+        """Deliver ``ReconDone`` to every STS waiting on a clean book.
+
+        ``force`` answers with the book as it stands, UNKNOWN and all — the
+        deadline path, where waiting longer has stopped being useful.
+        """
+        if not force and not acct.trading.book_ready_for_snapshot():
+            return
+        waiters = acct.recon_waiters
+        if not waiters:
+            return
+        acct.recon_waiters = []
+        view = acct.trading.view_for_sts()
+        for link, td_topic in waiters:
+            if link.session_id not in acct.links:
+                continue
+            try:
+                await self._publish_recon_done(acct, link, td_topic, view)
+            except Exception:
+                logger.exception(
+                    "TD recon flush failed session=%s api_id=%s",
+                    link.session_id,
+                    link.api_id,
+                )
 
     async def _serve_orders(self, acct: TradingAccount) -> None:
         """Answer STS order entry on ``td.order.{api_id}`` while the account lives."""
@@ -868,23 +1011,52 @@ class SessionManager:
                 level="warn",
             )
         except Exception as exc:
-            acct.cid_owner.pop(req.client_order_id, None)
             logger.exception(
                 "TD order submit failed session=%s api_id=%s cid=%s",
                 link.session_id,
                 link.api_id,
                 req.client_order_id,
             )
-            # Not the venue refusing — the send itself broke. TD settles the
-            # order as rejected on the assumption it never landed, so the code
-            # says so too; recon is what corrects it if the venue saw it.
-            await acct.trading.record_rejected(req.client_order_id)
-            await acct.trading.publish_order_reject(
-                reason=str(exc),
-                client_order_id=req.client_order_id,
-                universal_ticker=req.universal_ticker,
-                error_code=RejectCode.TD_SEND_FAILED,
+            # Send broke — the order may or may not have landed. Mark UNKNOWN
+            # and ask the venue; only reject when resolve proves it never did.
+            # A None settle means resolve could not answer (often the same dead
+            # transport) — leave UNKNOWN and keep ownership; do not pretend
+            # the submit was refused.
+            settled = await acct.trading.mark_unknown_and_resolve(
+                req.client_order_id,
+                if_missing=OrderStatus.REJECTED,
             )
+            if settled is not None and settled.status is OrderStatus.REJECTED:
+                acct.cid_owner.pop(req.client_order_id, None)
+                await acct.trading.publish_order_reject(
+                    reason=str(exc),
+                    client_order_id=req.client_order_id,
+                    universal_ticker=req.universal_ticker,
+                    error_code=RejectCode.TD_SEND_FAILED,
+                )
+                await publish_td_log(
+                    self._broker,
+                    link.api_id,
+                    (
+                        f"order rejected sts={link.session_id} "
+                        f"cid={req.client_order_id} "
+                        f"[{describe(RejectCode.TD_SEND_FAILED)}]: {exc}"
+                    ),
+                    source="td",
+                    level="warn",
+                )
+            elif settled is None:
+                await publish_td_log(
+                    self._broker,
+                    link.api_id,
+                    (
+                        f"order UNKNOWN sts={link.session_id} "
+                        f"cid={req.client_order_id} "
+                        f"(send failed, resolve deferred): {exc}"
+                    ),
+                    source="td",
+                    level="warn",
+                )
 
     async def _handle_order_cancel(
         self,
@@ -928,9 +1100,13 @@ class SessionManager:
                 level="warn",
             )
         try:
-            await acct.trading.private.cancel_by_client_order_id(
+            canceled = await acct.trading.private.cancel_by_client_order_id(
                 req.client_order_id
             )
+            # Apply the ack immediately. cancel_settled alone would drop the
+            # PENDING_CANCEL watchdog while leaving the book open if the
+            # confirming stream push never arrives.
+            await acct.trading.accept_venue_order(canceled)
             await publish_td_log(
                 self._broker,
                 link.api_id,
@@ -967,11 +1143,28 @@ class SessionManager:
                 link.api_id,
                 req.client_order_id,
             )
-            await acct.trading.revert_pending_cancel(req.client_order_id)
+            # Send broke — cancel may already have landed. Do not restore the
+            # prior working status; mark UNKNOWN and ask the venue. Still tell
+            # STS the cancel attempt failed so it does not assume success.
             await acct.trading.publish_cancel_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,
                 error_code=RejectCode.TD_SEND_FAILED,
+            )
+            await acct.trading.mark_unknown_and_resolve(
+                req.client_order_id,
+                if_missing=OrderStatus.CANCELED,
+            )
+            await publish_td_log(
+                self._broker,
+                link.api_id,
+                (
+                    f"cancel send failed sts={link.session_id} "
+                    f"cid={req.client_order_id} "
+                    f"[{describe(RejectCode.TD_SEND_FAILED)}]: {exc}"
+                ),
+                source="td",
+                level="warn",
             )
 
 
