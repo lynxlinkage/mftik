@@ -4,6 +4,12 @@
 
 	let { children } = $props();
 
+	const SITE_NAME = 'MFT Control';
+	const SITE_DESCRIPTION =
+		'Control plane for the Mid-Frequency Algo Trading platform — STS, TD, MD sessions, APIs, and audit.';
+	const SITE_URL = 'https://mft.lynkora.com';
+	const OG_IMAGE = `${SITE_URL}/og-image.png`;
+
 	const nav = [
 		{ href: '/', label: 'Home' },
 		{ href: '/apis', label: 'APIs' },
@@ -14,11 +20,41 @@
 		{ href: '/audit', label: 'Audit' }
 	] as const;
 
+	function sectionLabel(pathname: string): string {
+		if (pathname === '/') return 'Home';
+		const hit = nav.find((item) => item.href !== '/' && (pathname === item.href || pathname.startsWith(`${item.href}/`)));
+		return hit?.label ?? SITE_NAME;
+	}
+
+	const documentTitle = $derived(
+		page.url.pathname === '/' ? SITE_NAME : `${sectionLabel(page.url.pathname)} · ${SITE_NAME}`
+	);
+
 	function isActive(href: string, pathname: string): boolean {
 		if (href === '/') return pathname === '/';
 		return pathname === href || pathname.startsWith(`${href}/`);
 	}
 </script>
+
+<svelte:head>
+	<title>{documentTitle}</title>
+	<meta name="title" content={documentTitle} />
+	<meta name="description" content={SITE_DESCRIPTION} />
+	<meta name="application-name" content={SITE_NAME} />
+
+	<meta property="og:type" content="website" />
+	<meta property="og:site_name" content={SITE_NAME} />
+	<meta property="og:title" content={documentTitle} />
+	<meta property="og:description" content={SITE_DESCRIPTION} />
+	<meta property="og:url" content={`${SITE_URL}${page.url.pathname}`} />
+	<meta property="og:image" content={OG_IMAGE} />
+	<meta property="og:image:alt" content="MFT logo" />
+
+	<meta name="twitter:card" content="summary" />
+	<meta name="twitter:title" content={documentTitle} />
+	<meta name="twitter:description" content={SITE_DESCRIPTION} />
+	<meta name="twitter:image" content={OG_IMAGE} />
+</svelte:head>
 
 <div class="shell">
 	<aside class="nav">
