@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from mft.broker.errors import RequestTimeoutError
 from mft.exchange.models import Order, OrderType, Side, TimeInForce
 from mft.exchange.oms import OmsView
+from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
@@ -159,7 +160,7 @@ class StrategyOms:
         self,
         api_id: int,
         *,
-        symbol: str,
+        ticker: UniversalTicker | str,
         side: Side,
         qty: Decimal,
         type: OrderType = OrderType.LIMIT,
@@ -167,6 +168,13 @@ class StrategyOms:
         tif: TimeInForce | None = None,
     ) -> bool:
         """Submit an order via TD. True if TD accepted the request.
+
+        ``ticker`` names the instrument — ``Bybit_Perp_BTCUSDT``, not
+        ``BTCUSDT``. ``api_id`` says which account, which on a unified venue
+        does not say which book, and a strategy already holds the ticker: it
+        came from the feed key it subscribed to. TD refuses one belonging to a
+        venue this account does not trade, so sending a Binance ticker to a
+        Bybit session is caught rather than routed somewhere plausible.
 
         False means the order never reached the venue — no ack, a refusal, or
         no TD holding ``api_id``. It says nothing about whether the venue
@@ -187,7 +195,7 @@ class StrategyOms:
                 OrderSubmit(
                     session_id=session.session_id,
                     api_id=api_id,
-                    symbol=symbol,
+                    universal_ticker=str(ticker),
                     side=side,
                     type=type,
                     qty=qty,

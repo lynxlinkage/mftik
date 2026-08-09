@@ -23,6 +23,10 @@ from mft.exchange.gate.spot import (
 )
 from mft.exchange.gate.spot import channels as ch
 from mft.exchange.models import OrderStatus, OrderType, Side
+from mft.exchange.tickers import UniversalTicker
+
+#: The instrument every payload in this module is stamped with.
+TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")
 
 
 async def _client(gate: FakeGate, **kwargs: Any) -> GateSpotWebSocket:
@@ -55,7 +59,7 @@ async def test_public_subscribe_streams_typed_trades(gate: FakeGate) -> None:
 
     assert trade.currency_pair == "BTC_USDT"
     assert trade.price == Decimal("40000")
-    assert trade.to_trade().qty == Decimal("0.5")
+    assert trade.to_trade(TICKER).qty == Decimal("0.5")
 
 
 async def test_connect_with_credentials_logs_in(gate: FakeGate) -> None:
@@ -108,7 +112,7 @@ async def test_private_subscribe_is_signed(gate: FakeGate) -> None:
         update = await asyncio.wait_for(anext(orders), timeout=2.0)
 
     assert update.client_order_id == "42"
-    assert update.to_order().status.value == "filled"
+    assert update.to_order(TICKER).status.value == "filled"
 
 
 async def test_private_channel_without_credentials_raises(gate: FakeGate) -> None:
@@ -343,8 +347,8 @@ async def test_place_order_skips_ack_echo_and_returns_the_order(
 
     assert ack.id == "1852454420"
     assert ack.client_order_id == "42"
-    assert ack.to_order().status is OrderStatus.NEW
-    assert ack.to_order().symbol == "BTC_USDT"
+    assert ack.to_order(TICKER).status is OrderStatus.NEW
+    assert ack.to_order(TICKER).universal_ticker == str(TICKER)
 
 
 async def test_place_market_order_omits_price(gate: FakeGate) -> None:
@@ -390,7 +394,7 @@ async def test_cancel_order(gate: FakeGate) -> None:
 
     param = gate.api_call(ch.ORDER_CANCEL)["payload"]["req_param"]
     assert param == {"order_id": "1852454420", "currency_pair": "BTC_USDT"}
-    assert ack.to_order().status is OrderStatus.CANCELED
+    assert ack.to_order(TICKER).status is OrderStatus.CANCELED
 
 
 async def test_batch_cancel_reports_each_leg(gate: FakeGate) -> None:

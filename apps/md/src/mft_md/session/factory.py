@@ -8,6 +8,7 @@ from typing import Protocol
 from mft.broker import Broker
 from mft.exchange import PaperExchange, venues
 from mft.exchange.binance.spot.public import BinanceSpotPublicClient
+from mft.exchange.bybit.public import BybitPublicClient
 from mft.exchange.errors import ExchangeError
 from mft.exchange.gate.spot.public import GateSpotPublicClient
 from mft.exchange.paper.remote_public import PaperRemotePublicClient
@@ -65,14 +66,19 @@ class VenuePublicFactory:
     """Dispatches on the feed's venue to build the right public client.
 
     Mirrors TD's ``VenueSessionFactory``: ``Paper`` keeps the existing
-    behaviour, ``Gate`` and ``Binance`` build real market-data clients. A venue
-    that is in the registry but has no public client fails here rather than
+    behaviour, and the real venues build real market-data clients. A venue that
+    is in the registry but has no public client fails here rather than
     attaching a session that would never produce a tick.
 
     Venues do not all publish the same feeds — Gate and Binance serve all five
     topics, paper serves a subset — so a subscribe to a topic the venue has no
     stream for fails at ``ensure_feed``, which is where that difference
     belongs.
+
+    One client per venue, including Bybit: its category-per-socket shape is
+    the connector's business, not this factory's. ``BybitPublicClient`` opens a
+    socket per category on first use, so a session streaming only spot never
+    holds one to the perp book.
 
     Neither real client is given credentials. Market data is open at both
     venues, and a feed that needed a trading account would make MD wait on one.
@@ -105,6 +111,9 @@ class VenuePublicFactory:
         if resolved is venues.BINANCE:
             logger.info("MD building Binance public client")
             return BinanceSpotPublicClient(symbols=self._symbols)
+        if resolved is venues.BYBIT:
+            logger.info("MD building Bybit public client")
+            return BybitPublicClient(symbols=self._symbols)
         raise ExchangeError(
             f"venue {resolved.name!r} is registered but MD has no public "
             f"client for it"

@@ -119,7 +119,7 @@ def _submit_envelope(**overrides: Any) -> Envelope[Any]:
     payload: dict[str, Any] = {
         "session_id": SESSION,
         "api_id": API_ID,
-        "symbol": "BTCUSDT",
+        "universal_ticker": "Paper_Spot_BTCUSDT",
         "side": Side.BUY,
         "type": OrderType.LIMIT,
         "qty": Decimal("0.01"),
@@ -302,7 +302,7 @@ async def test_an_unacknowledged_order_becomes_unknown_then_resolves(
 
     order = await session.record_pending_new(
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.BUY,
             type=OrderType.LIMIT,
             qty=Decimal("0.01"),
@@ -332,7 +332,7 @@ async def test_a_live_order_is_not_swept(
 
     await session.record_pending_new(
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.BUY,
             type=OrderType.LIMIT,
             qty=Decimal("0.01"),
@@ -382,7 +382,7 @@ async def _book(session, cid: str, status: OrderStatus) -> Order:
     """Put an order in the book in ``status``, as the venue would have."""
     order = Order(
         client_order_id=cid,
-        symbol="BTCUSDT",
+        universal_ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         type=OrderType.LIMIT,
         status=status,
@@ -498,3 +498,52 @@ async def test_cancelling_an_order_we_never_booked_is_allowed(
     ack = await _ack(broker, _cancel_envelope("cid-not-ours"))
 
     assert ack.accepted is True
+
+
+# --- the instrument the order names -----------------------------------------
+
+
+async def test_an_order_for_another_venue_is_refused_at_the_boundary(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """The check the order path could not make until it carried an instrument.
+
+    ``api_id`` says which account; on a unified venue it does not say which
+    book, and it never said which *venue* the strategy meant. MD has always
+    made this check on its own feeds — TD could not, because a bare symbol is
+    true of every venue at once.
+    """
+    ack = await _ack(
+        broker,
+        _submit_envelope(universal_ticker="Binance_Spot_BTCUSDT"),
+    )
+
+    assert ack.accepted is False
+    assert ack.error_code == RejectCode.TD_WRONG_INSTRUMENT
+    assert "Binance" in ack.reason and "Paper" in ack.reason
+
+
+async def test_a_malformed_ticker_is_refused_rather_than_guessed_at(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """A bare symbol is exactly what this replaced, so it is not a shorthand
+    for the session's own venue — it is a strategy that has not been updated,
+    and guessing would send a real order somewhere plausible."""
+    ack = await _ack(broker, _submit_envelope(universal_ticker="BTCUSDT"))
+
+    assert ack.accepted is False
+    assert ack.error_code == RejectCode.TD_WRONG_INSTRUMENT
+
+
+async def test_a_refused_instrument_reserves_nothing(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """Refused before the pre-lock: nothing about it can be made to work, so
+    committing funds against it would strand them until recon."""
+    before = await broker.state_all(Topics.td_ledger(API_ID))
+    ack = await _ack(
+        broker, _submit_envelope(universal_ticker="Gate_Spot_BTCUSDT")
+    )
+
+    assert ack.accepted is False
+    assert await broker.state_all(Topics.td_ledger(API_ID)) == before

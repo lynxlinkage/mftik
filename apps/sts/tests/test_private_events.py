@@ -15,18 +15,22 @@ from mft.exchange.models import (
     OrderType,
     limit_order,
 )
+from mft.exchange.oms import Position
 from mft.protocol import (
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
     TD_FILL,
     TD_ORDER_REJECT,
     TD_ORDER_UPDATE,
+    TD_POSITION_UPDATE,
     CancelReject,
     OrderReject,
     ReconDone,
     RejectCode,
     StsCreateSessionRequest,
     TdAttachRequest,
+    Topics,
+    UntypedEnvelope,
 )
 from mft_sts.client_order_id import unpack
 from mft_sts.impl import register
@@ -49,6 +53,7 @@ class PrivateEventsStrategy(Strategy):
         self.order_rejects: asyncio.Queue[OrderReject] = asyncio.Queue()
         self.cancel_rejects: asyncio.Queue[CancelReject] = asyncio.Queue()
         self.balances: asyncio.Queue[Balance] = asyncio.Queue()
+        self.positions: asyncio.Queue[Position] = asyncio.Queue()
 
     async def on_recon_done(self, msg: ReconDone) -> None:
         self.recon_done.set()
@@ -72,6 +77,10 @@ class PrivateEventsStrategy(Strategy):
     async def on_balance_update(self, api_id: int, balance: Balance) -> None:
         self.events.append(("balance", api_id, TD_BALANCE_UPDATE))
         await self.balances.put(balance)
+
+    async def on_position_update(self, api_id: int, position: Position) -> None:
+        self.events.append(("position", api_id, TD_POSITION_UPDATE))
+        await self.positions.put(position)
 
 
 @pytest.fixture
@@ -122,13 +131,13 @@ async def _boot(
     )
     await maker.connect()
     await maker.place_order(limit_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("10"),
         price=Decimal("49999"),
     ))
     await maker.place_order(limit_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.SELL,
         qty=Decimal("10"),
         price=Decimal("50001"),
@@ -196,7 +205,7 @@ async def test_private_events_from_td_global(broker: Broker) -> None:
 
     assert await strat.oms.submit_order(
         7,
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("0.01"),
         type=OrderType.MARKET,
@@ -244,7 +253,7 @@ async def test_order_and_cancel_reject_paths(broker: Broker) -> None:
     # took the request, the venue's refusal comes back separately.
     assert await strat.oms.submit_order(
         7,
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("1000"),
         type=OrderType.MARKET,
@@ -270,7 +279,7 @@ async def test_order_and_cancel_reject_paths(broker: Broker) -> None:
     # Resting limit + cancel by client_order_id → on_order_update
     assert await strat.oms.submit_order(
         7,
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("0.01"),
         type=OrderType.LIMIT,
@@ -284,6 +293,46 @@ async def test_order_and_cancel_reject_paths(broker: Broker) -> None:
     assert await strat.oms.cancel_order(7, cid)
     canceled = await _await_status(strat, OrderStatus.CANCELED)
     assert canceled.client_order_id == cid
+
+    await td.close_all()
+    await sts.close_all()
+    await paper.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_position_update_reaches_the_strategy(broker: Broker) -> None:
+    """The hook a contract venue needs, delivered the same way as the rest.
+
+    Driven by publishing on ``td.{api_id}.global`` directly rather than through
+    the paper venue: paper is spot and has no positions, which is exactly why
+    the hook exists — a strategy on a contract venue cannot infer its exposure
+    from its own fills, because funding and ADL move it too.
+    """
+    strat, sts, td, paper = await _boot(broker)
+    await asyncio.sleep(0.1)
+
+    await broker.publish(
+        Topics.td_global(7),
+        UntypedEnvelope.wrap(
+            Position(
+                universal_ticker="Bybit_Perp_BTCUSDT",
+                qty=Decimal("-2"),
+                entry_price=Decimal("60000"),
+            ).model_dump(mode="json"),
+            type=TD_POSITION_UPDATE,
+            source="td",
+            session_id="7",
+        ),
+    )
+
+    position = await asyncio.wait_for(strat.positions.get(), timeout=3.0)
+
+    assert position.qty == Decimal("-2")
+    assert position.entry_price == Decimal("60000")
+    # The instrument, not the symbol: on a unified account BTCUSDT names two.
+    assert position.universal_ticker == "Bybit_Perp_BTCUSDT"
+    assert position.symbol == "BTCUSDT"
+    assert ("position", 7, TD_POSITION_UPDATE) in strat.events
 
     await td.close_all()
     await sts.close_all()

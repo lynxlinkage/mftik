@@ -19,7 +19,10 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
-from mft.exchange.tickers import UniversalTicker
+from mft.exchange.tickers import InvalidTickerError, UniversalTicker
+
+#: The instrument every payload in this module is stamped with.
+TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")
 
 
 def _filled_order():
@@ -27,7 +30,7 @@ def _filled_order():
 
     return GateOrderAck.model_validate(
         dict(OPEN_ORDER, status="closed", left="0")
-    ).to_order()
+    ).to_order(TICKER)
 
 
 OPEN_ORDER = {
@@ -169,21 +172,28 @@ async def test_rest_balances_map_available_and_locked(
     assert balances["USDT"].total == Decimal("1012.5")
 
 
-async def test_rest_flattens_grouped_open_orders(
+async def test_rest_keeps_open_orders_grouped_by_pair(
     rest_stub: FakeGateRest,
 ) -> None:
-    """``/spot/open_orders`` nests orders per pair; recon wants a flat list."""
+    """``/spot/open_orders`` nests orders per pair, and they stay nested.
+
+    Each group is a different instrument, and turning a row into an ``Order``
+    needs that instrument's ticker — so flattening here would throw away the
+    only thing that says which row belongs to which.
+    """
     rest = GateSpotRest(
         api_key=API_KEY, api_secret=API_SECRET, client=rest_stub.client()
     )
-    orders = await rest.fetch_open_orders()
+    grouped = await rest.fetch_open_order_rows()
+    orders = [row for rows in grouped.values() for row in rows]
 
+    assert list(grouped) == ["BTC_USDT"]
     assert len(orders) == 1
-    assert orders[0].order_id == "1852454420"
-    # The REST layer stays venue-native; the private client translates.
-    assert orders[0].symbol == "BTC_USDT"
+    assert orders[0].id == "1852454420"
     assert orders[0].client_order_id == "42"
-    assert orders[0].status is OrderStatus.NEW
+    assert orders[0].order_status is OrderStatus.NEW
+    # And the group key is what the private client resolves to a ticker.
+    assert orders[0].to_order(TICKER).universal_ticker == str(TICKER)
 
 
 async def test_rest_errors_surface_the_label(rest_stub: FakeGateRest) -> None:
@@ -223,7 +233,7 @@ async def test_place_order_goes_over_the_websocket(
     async with client:
         order = await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Gate_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.001"),
@@ -250,7 +260,7 @@ async def test_market_buy_is_refused(
         with pytest.raises(OrderError, match="quote currency"):
             await client.place_order(
                 PlaceOrderRequest(
-                    symbol="BTCUSDT",
+                    universal_ticker="Gate_Spot_BTCUSDT",
                     side=Side.BUY,
                     type=OrderType.MARKET,
                     qty=Decimal("0.001"),
@@ -267,7 +277,7 @@ async def test_market_sell_is_ioc(
     async with client:
         await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Gate_Spot_BTCUSDT",
                 side=Side.SELL,
                 type=OrderType.MARKET,
                 qty=Decimal("0.001"),
@@ -298,7 +308,7 @@ async def test_tif_translates_to_gates_spelling(
     async with client:
         await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Gate_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.001"),
@@ -320,7 +330,7 @@ async def test_raw_params_still_beat_the_translated_tif(
     async with client:
         await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Gate_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.001"),
@@ -338,7 +348,7 @@ def test_post_only_market_order_is_refused_before_any_venue_sees_it() -> None:
     """No venue can both never-take and always-take. Caught in the model."""
     with pytest.raises(ValueError, match="requires a limit order"):
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Gate_Spot_BTCUSDT",
             side=Side.BUY,
             type=OrderType.MARKET,
             qty=Decimal("0.001"),
@@ -354,7 +364,7 @@ async def test_limit_order_without_price_is_refused(
         with pytest.raises(OrderError, match="requires a price"):
             await client.place_order(
                 PlaceOrderRequest(
-                    symbol="BTCUSDT",
+                    universal_ticker="Gate_Spot_BTCUSDT",
                     side=Side.BUY,
                     type=OrderType.LIMIT,
                     qty=Decimal("1"),
@@ -378,7 +388,7 @@ async def test_placing_an_order_caches_its_pair_for_cancel(
     async with client:
         await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Gate_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.001"),
@@ -463,7 +473,7 @@ async def test_venue_rejection_becomes_order_error(
         with pytest.raises(OrderError, match="BALANCE_NOT_ENOUGH"):
             await client.place_order(
                 PlaceOrderRequest(
-                    symbol="BTCUSDT",
+                    universal_ticker="Gate_Spot_BTCUSDT",
                     side=Side.BUY,
                     type=OrderType.LIMIT,
                     qty=Decimal("1"),
@@ -566,7 +576,7 @@ async def test_canonical_symbol_is_rendered_to_gates_spelling(
     async with client:
         order = await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Gate_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.001"),
@@ -611,7 +621,7 @@ async def test_extension_params_reach_the_venue(
     async with client:
         await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Gate_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.001"),
@@ -640,7 +650,7 @@ async def test_params_default_to_the_clients_account(
     async with client:
         await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Gate_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.001"),
@@ -662,7 +672,7 @@ async def test_params_cannot_shadow_a_common_field(
     async with client:
         await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Gate_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.001"),
@@ -684,7 +694,7 @@ async def test_params_override_the_market_order_tif(
     async with client:
         await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Gate_Spot_BTCUSDT",
                 side=Side.SELL,
                 type=OrderType.MARKET,
                 qty=Decimal("0.001"),
@@ -710,7 +720,7 @@ async def test_translation_is_a_lookup_not_a_string_transform(
     async with client:
         order = await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSD",
+                universal_ticker="Gate_Spot_BTCUSD",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.001"),
@@ -733,7 +743,7 @@ async def test_adapter_asks_the_resolver_for_every_outbound_symbol(
     async with client:
         await client.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Gate_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.001"),
@@ -743,22 +753,29 @@ async def test_adapter_asks_the_resolver_for_every_outbound_symbol(
     assert resolver.lookups == 1
 
 
-async def test_input_spelling_is_normalized_before_lookup(
+async def test_a_ticker_in_the_venues_spelling_is_refused_not_fixed(
     gate: FakeGate, rest_stub: FakeGateRest
 ) -> None:
-    """A caller passing the venue's spelling should still resolve."""
+    """The order path parses strictly, and that is the point.
+
+    ``Gate_Spot_BTC_USDT`` carries Gate's own spelling of the pair. Quietly
+    canonicalizing it would let one instrument have two spellings inside the
+    system, which is the bug ``UniversalTicker`` exists to prevent — so it is
+    refused here, and a boundary taking human input calls
+    :meth:`UniversalTicker.resolve` before it ever gets this far.
+    """
     gate.api_data[ch.ORDER_PLACE] = {"result": OPEN_ORDER}
     client = await _private(gate, rest_stub)
     async with client:
-        await client.place_order(
-            PlaceOrderRequest(
-                symbol="BTC_USDT",  # not canonical
-                side=Side.BUY,
-                type=OrderType.LIMIT,
-                qty=Decimal("0.001"),
-                price=Decimal("60000"),
+        with pytest.raises(InvalidTickerError, match="not canonical|invalid"):
+            await client.place_order(
+                PlaceOrderRequest(
+                    universal_ticker="Gate_Spot_BTC_USDT",
+                    side=Side.BUY,
+                    type=OrderType.LIMIT,
+                    qty=Decimal("0.001"),
+                    price=Decimal("60000"),
+                )
             )
-        )
-    assert gate.api_call(ch.ORDER_PLACE)["payload"]["req_param"][
-        "currency_pair"
-    ] == "BTC_USDT"
+    with pytest.raises(AssertionError):
+        gate.api_call(ch.ORDER_PLACE)

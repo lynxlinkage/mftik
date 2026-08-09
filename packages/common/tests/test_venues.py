@@ -23,11 +23,35 @@ def test_gate_is_registered_as_its_own_venue() -> None:
 
 
 def test_registry_lists_every_venue() -> None:
-    assert venues.names() == ["Binance", "Gate", "Paper"]
+    assert venues.names() == ["Binance", "Bybit", "Gate", "Paper"]
     assert [v.name for v in venues.all_venues()] == venues.names()
     assert venues.PAPER.simulated
     assert not venues.GATE.simulated
     assert not venues.BINANCE.simulated
+    assert not venues.BYBIT.simulated
+
+
+def test_bybit_is_one_venue_trading_two_books() -> None:
+    """The unified account the ticker's category part exists for.
+
+    Gate's futures plane will be a second venue because it signs separately;
+    Bybit's perp book is the *same* credential and the same connection, so
+    folding it into the name would invent a venue that does not exist.
+    """
+    bybit = venues.require("Bybit")
+    assert bybit.categories == frozenset({Category.SPOT, Category.PERP})
+    assert bybit.api_types == frozenset({venues.HMAC})
+    assert not bybit.requires_passphrase
+    assert str(bybit.ticker("spot", "btc/usdt")) == "Bybit_Spot_BTCUSDT"
+    assert str(bybit.ticker("perp", "BTCUSDT")) == "Bybit_Perp_BTCUSDT"
+
+
+def test_a_unified_venue_refuses_to_guess_a_category() -> None:
+    """Two books, so a caller naming none has not said what it meant."""
+    with pytest.raises(venues.UnsupportedCategoryError, match="explicitly"):
+        venues.BYBIT.default_category
+    with pytest.raises(venues.UnsupportedCategoryError):
+        venues.ticker("bybit", "BTCUSDT")
 
 
 def test_binance_signs_with_ed25519_and_nothing_else() -> None:

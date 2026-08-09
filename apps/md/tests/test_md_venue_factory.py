@@ -9,6 +9,7 @@ import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange
 from mft.exchange.binance.spot.public import BinanceSpotPublicClient
+from mft.exchange.bybit.public import BybitPublicClient
 from mft.exchange.errors import ExchangeError
 from mft.exchange.gate.spot.public import GateSpotPublicClient
 from mft.exchange.paper.public import PaperPublicClient
@@ -78,6 +79,24 @@ async def test_binance_venue_builds_a_binance_public_client(
     # Public market data only — neither of Binance's two sockets carries
     # credentials, so MD can run a feed without a trading account.
     assert not client.api.authenticated
+
+
+async def test_bybit_venue_builds_one_client_for_every_category(
+    broker: Broker,
+) -> None:
+    """A unified venue is still one connector here.
+
+    Bybit needs a socket per category, but that is the connector's business:
+    it opens them on first use, so a session streaming only spot never holds
+    one to the perp book.
+    """
+    factory = VenuePublicFactory(broker)
+    client = await factory.create("Bybit")
+
+    assert isinstance(client, BybitPublicClient)
+    assert client.name == "Bybit"
+    # Nothing connected eagerly, and no credentials: market data is open.
+    assert client._feeds == {}
 
 
 async def test_registered_venue_without_a_client_is_rejected(

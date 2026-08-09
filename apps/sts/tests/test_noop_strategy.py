@@ -38,14 +38,14 @@ class FakeOms:
     def last_client_order_id(self) -> str | None:
         return self._last_cid
 
-    async def submit_order(self, api_id, *, symbol, side, qty, type, price):
+    async def submit_order(self, api_id, *, ticker, side, qty, type, price):
         self._n += 1
         cid = f"cid-{self._n}"
         self._last_cid = cid
         self.submitted.append(
             {
                 "api_id": api_id,
-                "symbol": symbol,
+                "ticker": ticker,
                 "side": side,
                 "qty": qty,
                 "price": price,
@@ -109,7 +109,7 @@ def _strategy(**paras) -> NoopStrategy:
 
 async def _book(strat: NoopStrategy, bid: str, ask: str) -> None:
     book = OrderBook(
-        symbol="BTCUSDT",
+        universal_ticker="Paper_Spot_BTCUSDT",
         bids=[BookLevel(price=Decimal(bid), qty=Decimal("1"))],
         asks=[BookLevel(price=Decimal(ask), qty=Decimal("1"))],
     )

@@ -1,0 +1,399 @@
+"""Bybit's public streams and the market-data connector.
+
+The book is the interesting part: Bybit sends a snapshot and then deltas, so
+"the book" is something this adapter builds rather than something it receives.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from decimal import Decimal
+from typing import Any
+
+import pytest
+from bybit_stub import FakeBybit
+from mft.exchange.bybit import channels as ch
+from mft.exchange.bybit.feed import BybitBook, BybitPublicStream
+from mft.exchange.bybit.models import BybitOrderBook
+from mft.exchange.bybit.public import BybitPublicClient, venue_interval
+from mft.exchange.intervals import InvalidIntervalError
+from mft.exchange.tickers import Category, UniversalTicker
+
+#: The instrument every payload in this module is stamped with.
+TICKER = UniversalTicker.parse("Bybit_Spot_BTCUSDT")
+
+NATIVE = "BTCUSDT"
+
+TRADE_ROW = {
+    "T": 1700000000000,
+    "s": NATIVE,
+    "S": "Buy",
+    "v": "0.001",
+    "p": "60000",
+    "i": "trade-1",
+    "L": "PlusTick",
+}
+
+KLINE_ROW = {
+    "start": 1700000000000,
+    "end": 1700000059999,
+    "interval": "1",
+    "open": "1",
+    "close": "2",
+    "high": "3",
+    "low": "0.5",
+    "volume": "10",
+    "turnover": "20",
+    "confirm": True,
+    "timestamp": 1700000030000,
+}
+
+
+class StubSymbols:
+    """A symbol plane whose venue spelling matches Bybit's, checked either way."""
+
+    async def exch_ticker(self, ticker: UniversalTicker) -> str:
+        return NATIVE
+
+    async def symbol_for(
+        self, venue: str, exch_ticker: str, *, category: str
+    ) -> UniversalTicker:
+        assert exch_ticker == NATIVE
+        return UniversalTicker.of(venue, category, "BTCUSDT")
+
+
+def _feed(stub: FakeBybit, **kwargs: Any) -> BybitPublicStream:
+    return BybitPublicStream(url=stub.url, ping_interval=0, **kwargs)
+
+
+def _book(u: int, bids: list[list[str]], asks: list[list[str]]) -> dict[str, Any]:
+    return {"s": NATIVE, "b": bids, "a": asks, "u": u, "seq": u}
+
+
+# --- topic names -----------------------------------------------------------
+
+
+def test_topics_carry_the_symbol_but_never_the_category() -> None:
+    """Which book a topic means is decided by the socket it is sent on."""
+    assert ch.order_book("btcusdt", depth=50) == "orderbook.50.BTCUSDT"
+    assert ch.public_trade("btcusdt") == "publicTrade.BTCUSDT"
+    assert ch.kline("btcusdt", "60") == "kline.60.BTCUSDT"
+    assert ch.symbol_of("orderbook.50.BTCUSDT") == "BTCUSDT"
+    assert ch.symbol_of("wallet") == ""
+
+
+def test_intervals_translate_into_bybits_own_vocabulary() -> None:
+    """It names minute windows by the number of minutes, so an hour is 60."""
+    assert venue_interval("1m") == "1"
+    assert venue_interval("1h") == "60"
+    assert venue_interval("4h") == "240"
+    assert venue_interval("1d") == "D"
+    assert venue_interval("1mo") == "M"
+
+
+def test_an_interval_bybit_does_not_serve_is_refused_before_the_round_trip() -> None:
+    with pytest.raises(InvalidIntervalError, match="serves no"):
+        venue_interval("1s")
+
+
+# --- book folding ----------------------------------------------------------
+
+
+def test_a_delta_sets_levels_and_a_zero_deletes_one() -> None:
+    """Setting a level to zero is not the same as removing it, and Bybit means
+    the second."""
+    book = BybitBook(NATIVE)
+    book.apply(
+        BybitOrderBook.model_validate(
+            _book(1, [["59999", "1"], ["59998", "2"]], [["60001", "3"]])
+        ),
+        "snapshot",
+    )
+    book.apply(
+        BybitOrderBook.model_validate(
+            _book(2, [["59998", "0"], ["59997", "5"]], [])
+        ),
+        "delta",
+    )
+    folded = book.snapshot()
+    assert [(level.price, level.qty) for level in folded.bids] == [
+        (Decimal("59999"), Decimal("1")),
+        (Decimal("59997"), Decimal("5")),
+    ]
+    # Untouched by the delta, and still there.
+    assert folded.asks[0].price == Decimal("60001")
+
+
+def test_a_gap_empties_the_book_rather_than_drifting() -> None:
+    """Every book built after a missed message would be wrong in a way nothing
+    downstream could detect."""
+    book = BybitBook(NATIVE)
+    book.apply(BybitOrderBook.model_validate(_book(1, [["1", "1"]], [])), "snapshot")
+    assert book.apply(
+        BybitOrderBook.model_validate(_book(9, [["2", "1"]], [])), "delta"
+    ) is False
+    assert book.stale
+    assert book.snapshot().bids == []
+    # And a fresh snapshot puts it back.
+    assert book.apply(
+        BybitOrderBook.model_validate(_book(1, [["3", "1"]], [])), "snapshot"
+    )
+    assert not book.stale
+
+
+def test_deltas_before_the_first_snapshot_have_nothing_to_apply_to() -> None:
+    book = BybitBook(NATIVE)
+    assert not book.apply(
+        BybitOrderBook.model_validate(_book(5, [["1", "1"]], [])), "delta"
+    )
+
+
+def test_update_id_one_is_a_snapshot_whatever_the_type_says() -> None:
+    """Bybit's marker for a service restart."""
+    book = BybitBook(NATIVE)
+    book.apply(BybitOrderBook.model_validate(_book(7, [["1", "1"]], [])), "snapshot")
+    assert book.apply(
+        BybitOrderBook.model_validate(_book(1, [["2", "2"]], [])), "delta"
+    )
+    assert book.snapshot().bids[0].price == Decimal("2")
+
+
+def test_folded_books_are_sorted_best_first() -> None:
+    book = BybitBook(NATIVE)
+    book.apply(
+        BybitOrderBook.model_validate(
+            _book(1, [["1", "1"], ["3", "1"], ["2", "1"]], [["9", "1"], ["7", "1"]])
+        ),
+        "snapshot",
+    )
+    folded = book.snapshot()
+    assert [level.price for level in folded.bids] == [
+        Decimal("3"),
+        Decimal("2"),
+        Decimal("1"),
+    ]
+    assert [level.price for level in folded.asks] == [Decimal("7"), Decimal("9")]
+
+
+# --- the socket ------------------------------------------------------------
+
+
+async def test_a_public_socket_subscribes_without_authenticating(
+    bybit_public: FakeBybit,
+) -> None:
+    async with _feed(bybit_public) as feed:
+        await feed.subscribe_trades(NATIVE)
+        await feed.subscribe_klines("1", NATIVE)
+    assert bybit_public.auths == 0
+    assert not bybit_public.frames_for("auth")
+    assert bybit_public.subscribed == {"publicTrade.BTCUSDT", "kline.1.BTCUSDT"}
+
+
+async def test_klines_arrive_with_the_symbol_off_the_topic(
+    bybit_public: FakeBybit,
+) -> None:
+    """The payload names no instrument; the topic is the only place it is."""
+    async with _feed(bybit_public) as feed:
+        stream = await feed.subscribe_klines("1", NATIVE)
+        await bybit_public.push("kline.1.BTCUSDT", [KLINE_ROW])
+        symbol, candle = await asyncio.wait_for(stream.__anext__(), 2)
+
+    assert symbol == NATIVE
+    assert candle.to_kline(symbol).close == Decimal("2")
+
+
+async def test_the_book_stream_yields_whole_books(
+    bybit_public: FakeBybit,
+) -> None:
+    async with _feed(bybit_public) as feed:
+        books = await feed.subscribe_order_book(NATIVE, depth=50)
+        await bybit_public.push(
+            "orderbook.50.BTCUSDT",
+            _book(1, [["59999", "1"]], [["60001", "2"]]),
+            kind="snapshot",
+        )
+        first = await asyncio.wait_for(books.__anext__(), 2)
+        await bybit_public.push(
+            "orderbook.50.BTCUSDT",
+            _book(2, [["59998", "3"]], []),
+            kind="delta",
+        )
+        second = await asyncio.wait_for(books.__anext__(), 2)
+
+    assert [level.price for level in first.bids] == [Decimal("59999")]
+    # The delta arrived carrying one level and came out as the whole book.
+    assert [level.price for level in second.bids] == [
+        Decimal("59999"),
+        Decimal("59998"),
+    ]
+    assert second.asks[0].price == Decimal("60001")
+
+
+async def test_a_gapped_book_resubscribes_instead_of_publishing(
+    bybit_public: FakeBybit,
+) -> None:
+    """Bybit only sends a snapshot when a subscription starts, so the way back
+    from a gap is to end the subscription and start it again."""
+    async with _feed(bybit_public) as feed:
+        books = await feed.subscribe_order_book(NATIVE, depth=50)
+        await bybit_public.push(
+            "orderbook.50.BTCUSDT", _book(1, [["1", "1"]], []), kind="snapshot"
+        )
+        await asyncio.wait_for(books.__anext__(), 2)
+
+        await bybit_public.push(
+            "orderbook.50.BTCUSDT", _book(99, [["2", "1"]], []), kind="delta"
+        )
+        for _ in range(200):
+            if bybit_public.frames_for("unsubscribe"):
+                break
+            await asyncio.sleep(0.01)
+
+        assert bybit_public.frames_for("unsubscribe")
+        assert len(bybit_public.frames_for("subscribe")) == 2
+        # Nothing was published from the gapped state.
+        await bybit_public.push(
+            "orderbook.50.BTCUSDT", _book(1, [["3", "1"]], []), kind="snapshot"
+        )
+        book = await asyncio.wait_for(books.__anext__(), 2)
+        assert [level.price for level in book.bids] == [Decimal("3")]
+
+
+async def test_an_unsupported_depth_is_refused_locally(
+    bybit_public: FakeBybit,
+) -> None:
+    """Bybit acknowledges a subscribe to any depth and then never pushes, so a
+    typo would be a silent dead feed."""
+    async with _feed(bybit_public, product="spot") as feed:
+        with pytest.raises(ValueError, match="serves no 500-level book"):
+            await feed.subscribe_order_book(NATIVE, depth=500)
+    assert not bybit_public.subscribed
+
+
+async def test_a_reconnect_resubscribes_and_rebuilds_the_book(
+    bybit_public: FakeBybit,
+) -> None:
+    async with _feed(bybit_public, retry_backoff=0.01) as feed:
+        books = await feed.subscribe_order_book(NATIVE, depth=50)
+        await bybit_public.push(
+            "orderbook.50.BTCUSDT", _book(1, [["1", "1"]], []), kind="snapshot"
+        )
+        await asyncio.wait_for(books.__anext__(), 2)
+
+        await bybit_public.drop()
+        for _ in range(200):
+            if len(bybit_public.frames_for("subscribe")) >= 2:
+                break
+            await asyncio.sleep(0.01)
+
+        # Whatever the old book held described a connection that is gone; the
+        # new subscription opens with a snapshot anyway.
+        await bybit_public.push(
+            "orderbook.50.BTCUSDT", _book(1, [["5", "1"]], []), kind="snapshot"
+        )
+        book = await asyncio.wait_for(books.__anext__(), 2)
+        assert [level.price for level in book.bids] == [Decimal("5")]
+
+
+# --- the connector ---------------------------------------------------------
+
+
+def _client(stub: FakeBybit, product: str = "spot") -> BybitPublicClient:
+    return BybitPublicClient(
+        symbols=StubSymbols(),
+        feeds={product: BybitPublicStream(url=stub.url, ping_interval=0)},
+    )
+
+
+async def test_the_connector_stamps_the_instrument_it_was_asked_for(
+    bybit_public: FakeBybit,
+) -> None:
+    client = _client(bybit_public)
+    async with client:
+        ticker = UniversalTicker.parse("Bybit_Spot_BTCUSDT")
+        stream = client.stream_trades(ticker)
+        task = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)
+        await bybit_public.push("publicTrade.BTCUSDT", [TRADE_ROW])
+        trade = await asyncio.wait_for(task, 2)
+
+    assert trade.symbol == "BTCUSDT"
+    assert trade.price == Decimal("60000")
+    # The identity, not just the symbol: this venue's spot tape and its perp
+    # tape are the same topic name on two sockets, and a strategy reading both
+    # would otherwise have nothing to tell the prints apart by.
+    assert trade.universal_ticker == "Bybit_Spot_BTCUSDT"
+    assert trade.category is Category.SPOT
+
+
+async def test_the_two_books_are_distinguishable_on_one_hook(
+    bybit_public: FakeBybit,
+) -> None:
+    """A unified venue's spot and perp tapes carry the same symbol, the same
+    topic name, and — until now — the same payload identity."""
+    spot_feed = BybitPublicStream(url=bybit_public.url, ping_interval=0)
+    perp_feed = BybitPublicStream(url=bybit_public.url, ping_interval=0)
+    client = BybitPublicClient(
+        symbols=StubSymbols(), feeds={"spot": spot_feed, "linear": perp_feed}
+    )
+    async with client:
+        spot = client.stream_trades(UniversalTicker.parse("Bybit_Spot_BTCUSDT"))
+        perp = client.stream_trades(UniversalTicker.parse("Bybit_Perp_BTCUSDT"))
+        tasks = [
+            asyncio.ensure_future(spot.__anext__()),
+            asyncio.ensure_future(perp.__anext__()),
+        ]
+        await asyncio.sleep(0.05)
+        # One push, on a socket both feeds share in this test — so the only
+        # thing that can separate the two prints is what each stream stamps.
+        await bybit_public.push("publicTrade.BTCUSDT", [TRADE_ROW])
+        first, second = await asyncio.wait_for(asyncio.gather(*tasks), 2)
+
+    assert {first.universal_ticker, second.universal_ticker} == {
+        "Bybit_Spot_BTCUSDT",
+        "Bybit_Perp_BTCUSDT",
+    }
+    assert first.symbol == second.symbol == "BTCUSDT"
+
+
+async def test_a_ticker_delta_with_no_price_is_not_published(
+    bybit_public: FakeBybit,
+) -> None:
+    client = _client(bybit_public)
+    async with client:
+        ticker = UniversalTicker.parse("Bybit_Spot_BTCUSDT")
+        stream = client.stream_ticker(ticker)
+        task = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)
+        # A funding-rate delta, which carries no quote at all.
+        await bybit_public.push(
+            "tickers.BTCUSDT", {"symbol": NATIVE, "fundingRate": "0.0001"}, kind="delta"
+        )
+        await bybit_public.push(
+            "tickers.BTCUSDT", {"symbol": NATIVE, "lastPrice": "60000"}
+        )
+        row = await asyncio.wait_for(task, 2)
+
+    assert row.last == Decimal("60000")
+
+
+async def test_a_client_is_refused_a_ticker_from_another_venue(
+    bybit_public: FakeBybit,
+) -> None:
+    client = _client(bybit_public)
+    async with client:
+        with pytest.raises(ValueError, match="was handed a Binance ticker"):
+            await client.fetch_ticker(UniversalTicker.parse("Binance_Spot_BTCUSDT"))
+
+
+async def test_each_category_gets_its_own_socket(bybit_public: FakeBybit) -> None:
+    """Bybit has no single market-data endpoint: spot and linear are different
+    connections carrying the same topic names."""
+    client = _client(bybit_public, product="spot")
+    async with client:
+        spot = await client.feed_for("spot")
+        assert spot.connected
+        assert set(client._feeds) == {"spot"}
+        # Asking for the perp book would open a second one, which the stub
+        # cannot serve — what matters is that it is not the same object.
+        assert client._feeds.get("linear") is None

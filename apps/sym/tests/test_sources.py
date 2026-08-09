@@ -9,6 +9,7 @@ import pytest
 from mft.exchange.tickers import Category
 from mft_sym.sources import PaperInstrumentSource, tick_from_precision
 from mft_sym.sources.binance import BinanceSpotInstrumentSource
+from mft_sym.sources.bybit import BybitInstrumentSource
 from mft_sym.sources.gate import GateSpotInstrumentSource
 
 # Trimmed rows in Gate's /spot/currency_pairs shape.
@@ -297,3 +298,215 @@ async def test_paper_source_reads_the_engines_own_filters() -> None:
     assert btc.filters["min_notional"] == Decimal("5")
     # ETH has a coarser lot size — the source must not flatten them.
     assert by_symbol["ETHUSDT"].filters["qty_step"] == Decimal("0.0001")
+
+
+# --- Bybit -----------------------------------------------------------------
+
+# Trimmed rows in Bybit's /v5/market/instruments-info shape.
+BYBIT_SPOT_ROWS = [
+    {
+        "symbol": "BTCUSDT",
+        "baseCoin": "BTC",
+        "quoteCoin": "USDT",
+        "status": "Trading",
+        "lotSizeFilter": {
+            "basePrecision": "0.000001",
+            "quotePrecision": "0.00000001",
+            "minOrderQty": "0.000048",
+            "maxOrderQty": "71.73956243",
+            "minOrderAmt": "1",
+            "maxOrderAmt": "2000000",
+        },
+        "priceFilter": {"tickSize": "0.01"},
+    },
+    {
+        "symbol": "SOONUSDT",
+        "baseCoin": "SOON",
+        "quoteCoin": "USDT",
+        "status": "PreLaunch",
+        "lotSizeFilter": {"basePrecision": "0.01", "minOrderQty": "1"},
+        "priceFilter": {"tickSize": "0.0001"},
+    },
+    # Malformed — no base coin; must be skipped, not crash the refresh.
+    {"symbol": "BADUSDT", "quoteCoin": "USDT", "status": "Trading"},
+]
+
+BYBIT_LINEAR_ROWS = [
+    {
+        "symbol": "BTCUSDT",
+        "contractType": "LinearPerpetual",
+        "baseCoin": "BTC",
+        "quoteCoin": "USDT",
+        "settleCoin": "USDT",
+        "status": "Trading",
+        "lotSizeFilter": {
+            "qtyStep": "0.001",
+            "minOrderQty": "0.001",
+            "maxOrderQty": "1190",
+            "minNotionalValue": "5",
+        },
+        "priceFilter": {"minPrice": "0.10", "maxPrice": "1999999.8",
+                        "tickSize": "0.10"},
+    },
+    {
+        # USDC-quoted perpetual: the venue ticker is nothing like the pair.
+        "symbol": "BTCPERP",
+        "contractType": "LinearPerpetual",
+        "baseCoin": "BTC",
+        "quoteCoin": "USDC",
+        "settleCoin": "USDC",
+        "status": "Trading",
+        "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001"},
+        "priceFilter": {"tickSize": "0.1"},
+    },
+    {
+        # A dated future, listed on the same book as the perpetuals — and
+        # sharing the first row's base and quote, so the two canonicalize to
+        # the same symbol.
+        "symbol": "BTCUSDT-25DEC26",
+        "contractType": "LinearFutures",
+        "baseCoin": "BTC",
+        "quoteCoin": "USDT",
+        "settleCoin": "USDT",
+        "status": "Trading",
+        "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001"},
+        "priceFilter": {"tickSize": "0.1"},
+    },
+]
+
+
+def _bybit(
+    pages: list[list[dict]],
+    *,
+    category: Category = Category.SPOT,
+) -> BybitInstrumentSource:
+    """A source over ``pages``, handed out one cursor page at a time."""
+    remaining = list(pages)
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v5/market/instruments-info"
+        seen.append(request)
+        rows = remaining.pop(0) if remaining else []
+        return httpx.Response(
+            200,
+            json={
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "list": rows,
+                    "nextPageCursor": "next" if remaining else "",
+                },
+            },
+        )
+
+    source = BybitInstrumentSource(
+        category=category,
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://api.bybit.com",
+        ),
+    )
+    source.requests = seen  # type: ignore[attr-defined]
+    return source
+
+
+async def test_bybit_spot_rows_become_canonical_instruments() -> None:
+    instruments = await _bybit([BYBIT_SPOT_ROWS]).fetch()
+
+    assert [i.symbol for i in instruments] == ["BTCUSDT", "SOONUSDT"]
+    btc = instruments[0]
+    assert btc.base == "BTC" and btc.quote == "USDT"
+    assert btc.exch_ticker == "BTCUSDT"
+    assert str(btc.ticker) == "Bybit_Spot_BTCUSDT"
+    assert btc.is_active
+    # Spot settles in its quote currency; repeating that says nothing.
+    assert btc.settlement_asset is None
+
+
+async def test_bybit_spot_filters_read_the_spot_spellings() -> None:
+    btc = (await _bybit([BYBIT_SPOT_ROWS]).fetch())[0]
+
+    assert btc.filters["price_tick"] == Decimal("0.01")
+    # ``basePrecision`` is what spot calls the quantity step.
+    assert btc.filters["qty_step"] == Decimal("0.000001")
+    assert btc.filters["min_qty"] == Decimal("0.000048")
+    assert btc.filters["min_notional"] == Decimal("1")
+    assert btc.filters["max_notional"] == Decimal("2000000")
+    # Published on the contract books only; the key stays so a caller can tell
+    # "unbounded" from "not published".
+    assert "min_price" in btc.filters
+    assert btc.filters["min_price"] is None
+
+
+async def test_bybit_prelaunch_symbols_are_marked_inactive() -> None:
+    soon = (await _bybit([BYBIT_SPOT_ROWS]).fetch())[1]
+    assert soon.symbol == "SOONUSDT"
+    assert not soon.is_active
+
+
+async def test_malformed_bybit_rows_are_skipped() -> None:
+    instruments = await _bybit([BYBIT_SPOT_ROWS]).fetch()
+    assert "BAD" not in {i.base for i in instruments}
+    assert len(instruments) == 2
+
+
+async def test_bybit_perp_filters_read_the_contract_spellings() -> None:
+    instruments = await _bybit(
+        [BYBIT_LINEAR_ROWS], category=Category.PERP
+    ).fetch()
+    btc = instruments[0]
+
+    assert str(btc.ticker) == "Bybit_Perp_BTCUSDT"
+    # ``qtyStep`` and ``minNotionalValue`` are the contract books' names for
+    # what spot calls ``basePrecision`` and ``minOrderAmt``.
+    assert btc.filters["qty_step"] == Decimal("0.001")
+    assert btc.filters["min_notional"] == Decimal("5")
+    assert btc.filters["min_price"] == Decimal("0.1")
+    assert btc.filters["max_price"] == Decimal("1999999.8")
+    assert btc.settlement_asset == "USDT"
+
+
+async def test_a_dated_future_is_not_published_as_a_perp() -> None:
+    """Bybit's linear book lists both, and a future's base and quote are the
+    perpetual's — so one stored as a Perp would not merely be mislabelled, it
+    would overwrite ``Bybit_Perp_BTCUSDT`` with a December 2026 contract's
+    ``exch_ticker`` and send every perp order there."""
+    instruments = await _bybit(
+        [BYBIT_LINEAR_ROWS], category=Category.PERP
+    ).fetch()
+
+    assert [i.exch_ticker for i in instruments] == ["BTCUSDT", "BTCPERP"]
+    # One canonical symbol per ticker, which is the property the filter buys.
+    assert len({str(i.ticker) for i in instruments}) == len(instruments)
+    # The USDC perpetual survives, spelled by the venue in a way no split of
+    # its symbol would have recovered.
+    assert instruments[1].symbol == "BTCUSDC"
+    assert str(instruments[1].ticker) == "Bybit_Perp_BTCUSDC"
+
+
+async def test_bybit_pagination_is_followed_to_the_end() -> None:
+    """A refresh that read one page would publish a fraction of the venue and
+    then deactivate everything it did not see."""
+    source = _bybit([BYBIT_SPOT_ROWS[:1], BYBIT_SPOT_ROWS[1:]])
+    instruments = await source.fetch()
+
+    assert [i.symbol for i in instruments] == ["BTCUSDT", "SOONUSDT"]
+    requests = source.requests  # type: ignore[attr-defined]
+    assert len(requests) == 2
+    assert "cursor" not in requests[0].url.query.decode()
+    assert "cursor=next" in requests[1].url.query.decode()
+
+
+async def test_bybit_http_failure_propagates() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"retCode": 10016, "retMsg": "busy"})
+
+    source = BybitInstrumentSource(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://api.bybit.com",
+        )
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await source.fetch()

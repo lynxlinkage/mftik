@@ -24,6 +24,10 @@ from mft.exchange.gate.spot import (
     to_text,
 )
 from mft.exchange.models import OrderStatus, OrderType, Side
+from mft.exchange.tickers import UniversalTicker
+
+#: The instrument every payload in this module is stamped with.
+TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")
 
 
 def test_ticker() -> None:
@@ -43,15 +47,15 @@ def test_ticker() -> None:
     assert t.currency_pair == "BTC_USDT"
     assert t.last == Decimal("43444.82")
 
-    ticker = t.to_ticker()
-    assert ticker.symbol == "BTC_USDT"
+    ticker = t.to_ticker(TICKER)
+    assert ticker.universal_ticker == str(TICKER)
     assert ticker.bid == Decimal("43444.81")
     assert ticker.ask == Decimal("43444.82")
 
 
 def test_ticker_without_quotes_falls_back_to_last() -> None:
     t = GateTicker.model_validate({"currency_pair": "GT_USDT", "last": "7.5"})
-    ticker = t.to_ticker()
+    ticker = t.to_ticker(TICKER)
     assert ticker.bid == ticker.ask == Decimal("7.5")
 
 
@@ -67,9 +71,9 @@ def test_public_trade() -> None:
             "price": "130.11",
         }
     )
-    trade = tr.to_trade()
+    trade = tr.to_trade(TICKER)
     assert trade.trade_id == "3130257995"
-    assert trade.symbol == "LTC_USDT"
+    assert trade.universal_ticker == str(TICKER)
     assert trade.side is Side.SELL
     assert trade.qty == Decimal("0.0116")
     assert trade.ts == pytest.approx(1648725035.923)
@@ -130,8 +134,8 @@ def test_order_book_snapshot() -> None:
     )
     assert ob.last_update_id == 48791820
 
-    book = ob.to_order_book()
-    assert book.symbol == "BTC_USDT"
+    book = ob.to_order_book(TICKER)
+    assert book.universal_ticker == str(TICKER)
     assert len(book.bids) == 2
     assert book.bids[0].price == Decimal("19137.74")
     assert book.asks[0].qty == Decimal("0.6135")
@@ -212,9 +216,9 @@ def test_order_put_is_open() -> None:
     assert o.status is OrderStatus.NEW
     assert o.client_order_id == "289865223110657"
 
-    order = o.to_order()
+    order = o.to_order(TICKER)
     assert order.order_id == "1036717689726"
-    assert order.symbol == "BTC_USDT"
+    assert order.universal_ticker == str(TICKER)
     assert order.side is Side.BUY
     assert order.type is OrderType.LIMIT
     assert order.qty == Decimal("0.1")
@@ -229,7 +233,7 @@ def test_order_partial_fill() -> None:
     )
     assert o.status is OrderStatus.PARTIALLY_FILLED
     assert o.filled_qty == Decimal("0.06")
-    assert o.to_order().avg_price == Decimal("199.5")
+    assert o.to_order(TICKER).avg_price == Decimal("199.5")
 
 
 @pytest.mark.parametrize(
@@ -281,7 +285,7 @@ def test_user_trade() -> None:
     )
     assert ut.role == "taker"
 
-    fill = ut.to_fill()
+    fill = ut.to_fill(TICKER)
     assert fill.fill_id == "5736713"
     assert fill.order_id == "30784428"
     assert fill.client_order_id == "99"
@@ -379,7 +383,7 @@ def test_order_ack_uses_status_not_event() -> None:
     assert ack.client_order_id == "42"
     assert ack.order_status is OrderStatus.NEW
 
-    order = ack.to_order()
+    order = ack.to_order(TICKER)
     assert order.order_id == "1852454420"
     assert order.qty == Decimal("0.001")
     assert order.filled_qty == Decimal("0")

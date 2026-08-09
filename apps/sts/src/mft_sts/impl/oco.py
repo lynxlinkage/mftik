@@ -613,7 +613,7 @@ class OneCancelOther(Strategy):
         """Send one leg. False means TD did not take it."""
         accepted = await self.oms.submit_order(
             api_id,
-            symbol=info.symbol,
+            ticker=info.ticker,
             side=leg.side,
             qty=leg.qty,
             type=OrderType.LIMIT,

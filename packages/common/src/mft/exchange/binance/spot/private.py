@@ -38,6 +38,7 @@ from collections.abc import AsyncIterator
 
 from mft.exchange.base import BaseClient
 from mft.exchange.binance.spot.client import BinanceSpotWsApi
+from mft.exchange.binance.spot.models import BinanceOrderAck
 from mft.exchange.binance.spot.protocol import (
     BINANCE_SPOT_WS_API_URL,
     BinanceWsError,
@@ -52,7 +53,7 @@ from mft.exchange.models import (
     PlaceOrderRequest,
     TimeInForce,
 )
-from mft.exchange.symbols import SymbolResolver
+from mft.exchange.symbols import SymbolResolver, check_venue
 from mft.exchange.tickers import Category, UniversalTicker
 
 logger = logging.getLogger(__name__)
@@ -164,7 +165,9 @@ class BinanceSpotPrivateClient(BaseClient):
                 )
 
         order_type, tif = self._order_shape(request)
-        symbol = await self._venue_symbol(request.symbol)
+        ticker = request.ticker
+        check_venue(ticker, self.name, {self.category})
+        symbol = await self.symbols.exch_ticker(ticker)
         try:
             ack = await self.api.place_order(
                 symbol=symbol,
@@ -180,10 +183,12 @@ class BinanceSpotPrivateClient(BaseClient):
             # Surface as OrderError so TD publishes an order reject instead of
             # treating a venue rejection as a transport failure.
             raise OrderError(str(exc)) from exc
-        order = ack.to_order()
-        if not order.symbol:
-            order = order.model_copy(update={"symbol": symbol})
-        return await self._inbound(order)
+        # No lookup on this path: the ticker is the one we sent the order
+        # under, so the reply needs no resolving and an ack that omits the
+        # symbol has nothing to reconcile.
+        order = ack.to_order(ticker)
+        self._remember(order, symbol)
+        return order
 
     def _order_shape(self, request: PlaceOrderRequest) -> tuple[str, str | None]:
         """``(Binance order type, timeInForce)`` for one request.
@@ -225,7 +230,7 @@ class BinanceSpotPrivateClient(BaseClient):
             )
         except BinanceWsError as exc:
             raise OrderError(str(exc)) from exc
-        return await self._inbound(ack.to_order())
+        return await self._inbound(ack)
 
     # --- recon reads -------------------------------------------------------
 
@@ -233,10 +238,10 @@ class BinanceSpotPrivateClient(BaseClient):
         self._ensure_connected()
         symbol = await self._symbol_for(order_id)
         ack = await self.api.query_order(symbol, order_id=order_id)
-        return await self._inbound(ack.to_order())
+        return await self._inbound(ack)
 
     async def fetch_order_by_client_order_id(
-        self, client_order_id: str, *, symbol: str | None = None
+        self, client_order_id: str, *, ticker: UniversalTicker | None = None
     ) -> Order | None:
         """Ask what happened to an order the push stream never reported.
 
@@ -246,8 +251,8 @@ class BinanceSpotPrivateClient(BaseClient):
         """
         self._ensure_connected()
         native = self._venue_symbols.get(client_order_id)
-        if native is None and symbol is not None:
-            native = await self._venue_symbol(symbol)
+        if native is None and ticker is not None:
+            native = await self.symbols.exch_ticker(ticker)
         if native is None:
             raise OrderError(
                 f"cannot resolve Binance order {client_order_id!r} "
@@ -259,13 +264,13 @@ class BinanceSpotPrivateClient(BaseClient):
             if exc.code in _NOT_FOUND_CODES:
                 return None
             raise OrderError(str(exc)) from exc
-        return await self._inbound(ack.to_order())
+        return await self._inbound(ack)
 
     async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
         self._ensure_connected()
         native = await self._venue_symbol(symbol) if symbol else None
         acks = await self.api.fetch_open_orders(native)
-        return [await self._inbound(ack.to_order()) for ack in acks]
+        return [await self._inbound(ack) for ack in acks]
 
     async def fetch_balances(self) -> list[Balance]:
         self._ensure_connected()
@@ -291,7 +296,10 @@ class BinanceSpotPrivateClient(BaseClient):
         async for report in stream:
             # Also keeps the cancel path from having to ask for a symbol it
             # has already seen.
-            yield await self._inbound(report.to_order())
+            ticker = await self._resolve(report.s)
+            order = report.to_order(ticker)
+            self._remember(order, report.s)
+            yield order
 
     async def _fills(self) -> AsyncIterator[Fill]:
         """Executions, filtered out of the same stream the orders come from.
@@ -305,11 +313,7 @@ class BinanceSpotPrivateClient(BaseClient):
         async for report in stream:
             if not report.is_fill:
                 continue
-            fill = report.to_fill()
-            ticker = await self.symbols.symbol_for(
-                self.name, fill.symbol, category=self.category
-            )
-            yield fill.model_copy(update={"symbol": ticker.symbol})
+            yield report.to_fill(await self._resolve(report.s))
 
     async def _balances(self) -> AsyncIterator[Balance]:
         """One :class:`~mft.exchange.models.Balance` per asset that moved.
@@ -332,26 +336,35 @@ class BinanceSpotPrivateClient(BaseClient):
         """Canonical → Binance's spelling, via the plane."""
         return await self.symbols.exch_ticker(self._ticker(symbol))
 
+    async def _resolve(self, native_symbol: str) -> UniversalTicker:
+        """Binance's spelling → the universal ticker, on this connector's book."""
+        return await self.symbols.symbol_for(
+            self.name, native_symbol, category=self.category
+        )
+
     async def _symbol_for(self, order_id: str) -> str:
         """Resolve an id to its venue symbol, refreshing only if unseen."""
         native = self._venue_symbols.get(order_id)
         if native is not None:
             return native
         for ack in await self.api.fetch_open_orders():
-            await self._inbound(ack.to_order())
+            await self._inbound(ack)
         native = self._venue_symbols.get(order_id)
         if native is None:
             raise OrderError(f"no open Binance order for id {order_id!r}")
         return native
 
-    async def _inbound(self, order: Order) -> Order:
-        """Resolve a venue order home: index its symbol, canonicalize it."""
-        native = order.symbol
-        ticker = await self.symbols.symbol_for(
-            self.name, native, category=self.category
-        )
-        self._remember(order, native)
-        return order.model_copy(update={"symbol": ticker.symbol})
+    async def _inbound(self, ack: BinanceOrderAck) -> Order:
+        """One venue order reply, resolved home and indexed.
+
+        The ticker is looked up *before* the conversion rather than patched on
+        after it, so an :class:`~mft.exchange.models.Order` never exists in a
+        state where its identity is Binance's spelling of a symbol.
+        """
+        ticker = await self._resolve(ack.symbol)
+        order = ack.to_order(ticker)
+        self._remember(order, ack.symbol)
+        return order
 
     def _remember(self, order: Order, native_symbol: str) -> None:
         """Index an order's venue symbol by every id it can be addressed with."""

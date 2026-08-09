@@ -443,13 +443,25 @@ class StsDetach(BaseModel):
 
 
 class OrderSubmit(BaseModel):
-    """STS → TD: place an order for ``api_id`` (keyed by ``client_order_id``)."""
+    """STS → TD: place an order for ``api_id`` (keyed by ``client_order_id``).
+
+    The instrument is a **universal ticker**, not a symbol. ``api_id`` pins
+    which account the order is for, but not which instrument: on a unified
+    venue ``BTCUSDT`` names both the spot pair and the perp, and the two are
+    different books at different prices. So STS says which, and TD checks that
+    it is one this session's venue trades before doing anything with it —
+    ``Binance_Spot_BTCUSDT`` sent to a Bybit session is a strategy bug, and
+    the only place it can be caught is where the two meet.
+
+    Resolving it to the venue's own spelling is TD's job, through the symbol
+    plane. STS neither knows nor needs to know what Gate calls this pair.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     session_id: str
     api_id: int
-    symbol: str
+    universal_ticker: str
     side: Side
     type: OrderType
     qty: Decimal
@@ -504,7 +516,9 @@ class OrderReject(BaseModel):
     api_id: int
     client_order_id: str | None = None
     order_id: str | None = None
-    symbol: str | None = None
+    #: The instrument the refused order was for. ``None`` when the request was
+    #: too malformed to say — a ticker TD could not parse is exactly that.
+    universal_ticker: str | None = None
     #: Human-readable, for logs and the UI. Free-form; do not branch on it.
     reason: str
     #: Machine-readable — see :mod:`mft.protocol.reject_codes`. Branch on this.
@@ -585,6 +599,7 @@ TD_ORDER_ACK = "td.order.ack"
 TD_ORDER_REJECT = "td.order.reject"
 TD_CANCEL_REJECT = "td.cancel.reject"
 TD_BALANCE_UPDATE = "td.balance.update"
+TD_POSITION_UPDATE = "td.position.update"
 
 # Paper engine RPC / streams
 PAPER = "paper"
@@ -619,7 +634,7 @@ class PaperPlaceOrderRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     credentials: PaperCredentials
-    symbol: str
+    universal_ticker: str
     side: Side
     type: OrderType
     qty: Decimal

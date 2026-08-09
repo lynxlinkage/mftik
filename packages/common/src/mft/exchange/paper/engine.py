@@ -31,6 +31,14 @@ from mft.exchange.models import (
     Trade,
 )
 from mft.exchange.stream import EventStream
+from mft.exchange.symbols import check_venue
+from mft.exchange.tickers import Category, UniversalTicker
+
+#: The venue and market every paper instrument is on. Hardcoded because paper
+#: really is one of each — there is no plane to ask, and no second book to be
+#: wrong about.
+PAPER_VENUE = "Paper"
+PAPER_CATEGORY = Category.SPOT
 
 if TYPE_CHECKING:
     from mft.exchange.paper.private import PaperPrivateClient
@@ -89,6 +97,16 @@ _FALLBACK_FILTERS = (
     Decimal("0.0001"),
     Decimal("5"),
 )
+
+
+def paper_ticker(symbol: str) -> UniversalTicker:
+    """The universal identity of a symbol on the paper venue.
+
+    Built rather than looked up: paper is one venue with one market, and it
+    spells pairs the canonical way — so unlike a real adapter there is no
+    symbol plane in the loop.
+    """
+    return UniversalTicker.of(PAPER_VENUE, PAPER_CATEGORY, symbol)
 
 
 def _instrument(symbol: str, base: str, quote: str) -> Instrument:
@@ -331,7 +349,12 @@ class PaperExchange:
         self._require_instrument(symbol)
         bid_px, ask_px = self._bbo_prices(symbol)
         mid = self._mid[symbol]
-        return Ticker(symbol=symbol, bid=bid_px, ask=ask_px, last=mid)
+        return Ticker(
+            universal_ticker=str(paper_ticker(symbol)),
+            bid=bid_px,
+            ask=ask_px,
+            last=mid,
+        )
 
     def get_order_book(self, symbol: str, *, depth: int = 10) -> OrderBook:
         self._require_instrument(symbol)
@@ -354,7 +377,9 @@ class PaperExchange:
             BookLevel(price=p, qty=q)
             for p, q in sorted(asks_map.items())[:depth]
         ]
-        return OrderBook(symbol=symbol, bids=bids, asks=asks)
+        return OrderBook(
+            universal_ticker=str(paper_ticker(symbol)), bids=bids, asks=asks
+        )
 
     # --- trading (req-reply) -----------------------------------------------
 
@@ -363,6 +388,7 @@ class PaperExchange:
             return self._place_order_locked(account, request)
 
     def _place_order_locked(self, account: str, request: PlaceOrderRequest) -> Order:
+        check_venue(request.ticker, PAPER_VENUE, {PAPER_CATEGORY})
         inst = self._require_instrument(request.symbol)
         if request.qty <= 0:
             raise OrderError("qty must be positive")
@@ -417,7 +443,7 @@ class PaperExchange:
 
         order = Order(
             client_order_id=client_order_id,
-            symbol=request.symbol,
+            universal_ticker=request.universal_ticker,
             side=request.side,
             type=request.type,
             # Not yet matched — the engine overwrites this before it emits.
@@ -758,7 +784,7 @@ class PaperExchange:
             maker_fill = Fill(
                 order_id=maker.order_id,
                 client_order_id=maker.client_order_id,
-                symbol=maker.symbol,
+                universal_ticker=maker.universal_ticker,
                 side=maker.side,
                 price=fill_price,
                 qty=qty,
@@ -768,7 +794,7 @@ class PaperExchange:
             taker_fill = Fill(
                 order_id=taker.order_id,
                 client_order_id=taker.client_order_id,
-                symbol=taker.symbol,
+                universal_ticker=taker.universal_ticker,
                 side=taker.side,
                 price=fill_price,
                 qty=qty,
@@ -781,7 +807,7 @@ class PaperExchange:
             self._emit_fill(taker_account, taker_fill)
             self._emit_public_trade(
                 Trade(
-                    symbol=taker.symbol,
+                    universal_ticker=taker.universal_ticker,
                     price=fill_price,
                     qty=qty,
                     side=taker.side,
@@ -858,7 +884,12 @@ class PaperExchange:
                 px = ticker.ask if side is Side.BUY else ticker.bid
                 qty = Decimal("0.001") * Decimal(self._rng.randint(1, 20))
                 self._emit_public_trade(
-                    Trade(symbol=symbol, price=px, qty=qty, side=side)
+                    Trade(
+                        universal_ticker=str(paper_ticker(symbol)),
+                        price=px,
+                        qty=qty,
+                        side=side,
+                    )
                 )
 
     def _reserve_and_settle(

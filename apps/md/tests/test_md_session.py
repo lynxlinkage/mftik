@@ -183,7 +183,7 @@ async def test_md_attach_lease_and_orderbook(
 
     await asyncio.wait_for(_wait_until(lambda: len(acks) >= 1), timeout=3.0)
     await asyncio.wait_for(_wait_until(lambda: len(books) >= 1), timeout=3.0)
-    assert books[0]["symbol"] == "BTCUSDT"
+    assert books[0]["universal_ticker"] == "Paper_Spot_BTCUSDT"
 
     stop.set()
     await sessions.detach(session_id=session_id, reason="test")

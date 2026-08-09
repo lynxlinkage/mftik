@@ -120,7 +120,7 @@ async def _place(req: IncomingRequest, exchange: PaperExchange) -> None:
         order = await exchange.place_order(
             body.credentials.api_key,
             PlaceOrderRequest(
-                symbol=body.symbol,
+                universal_ticker=body.universal_ticker,
                 side=body.side,
                 type=body.type,
                 qty=body.qty,

@@ -107,7 +107,7 @@ async def test_submitted_cid_carries_the_session_slot(
     a.strategy.oms._ack_timeout = 0.2
 
     assert not await a.strategy.oms.submit_order(
-        7, symbol="BTCUSDT", side=Side.BUY, qty=Decimal("0.01"),
+        7, ticker="Paper_Spot_BTCUSDT", side=Side.BUY, qty=Decimal("0.01"),
         price=Decimal("1000"),
     )
     cid = a.strategy.oms.last_client_order_id

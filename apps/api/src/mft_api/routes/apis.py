@@ -1,4 +1,4 @@
-"""Venue API credentials + 1-1 trading accounts (list / create / delete)."""
+"""Venue API credentials + 1-1 trading accounts (list / create / rename / delete)."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from mft_api.schemas import (
     ApiDeleteResponse,
     ApiListResponse,
     ApiOut,
+    ApiRenameBody,
     VenueListResponse,
     VenueOut,
 )
@@ -143,6 +144,58 @@ async def create_api(body: ApiCreateBody) -> ApiOut:
             f"venue={result.venue} name={result.name}"
         ),
     )
+    return result
+
+
+@router.patch("/apis/{api_id}", response_model=ApiOut)
+async def rename_api(api_id: int, body: ApiRenameBody) -> ApiOut:
+    """Rename the trading account bound 1-1 to this credential.
+
+    strategy.yml ``td`` entries resolve by account name at deploy time, so a
+    rename only affects future deploys — live sessions stay keyed by api_id.
+    """
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    async with session_scope() as db:
+        apis = ApiRepository(db)
+        accounts = AccountRepository(db)
+
+        api = await apis.get(api_id)
+        if api is None:
+            raise HTTPException(status_code=404, detail=f"api not found: {api_id}")
+
+        account = await accounts.get_by_api_id(api_id)
+        if account is None:
+            raise HTTPException(
+                status_code=404, detail=f"account not found for api_id={api_id}"
+            )
+
+        if account.name != name:
+            conflict = await accounts.get_by_name(name)
+            if conflict is not None:
+                raise HTTPException(
+                    status_code=409, detail=f"account name already exists: {name}"
+                )
+            old_name = account.name
+            account.name = name
+            await db.flush()
+        else:
+            old_name = name
+
+        owner_id = api.owner_id
+        result = _to_out(account_id=account.id, name=account.name, api=api)
+
+    if old_name != result.name:
+        await record_audit(
+            user_id=owner_id,
+            operation="api.rename",
+            result=(
+                f"api_id={result.id} account_id={result.account_id} "
+                f"{old_name!r} -> {result.name!r}"
+            ),
+        )
     return result
 
 

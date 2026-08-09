@@ -78,7 +78,7 @@ class FakeOms:
         return RejectCode.NONE if self._accepted_last else self.reject_code
 
     async def submit_order(
-        self, api_id, *, symbol, side, qty, type, price=None, tif=None
+        self, api_id, *, ticker, side, qty, type, price=None, tif=None
     ):
         self._n += 1
         self._last_cid = f"cid-{self._n}"
@@ -89,7 +89,7 @@ class FakeOms:
         self.submitted.append(
             {
                 "cid": self._last_cid,
-                "symbol": symbol,
+                "ticker": ticker,
                 "side": side,
                 "qty": qty,
                 "type": type,
@@ -243,7 +243,7 @@ def _quote(bid: str = "50000", ask: str = "50010") -> MdBestQuoteResult:
     """A best-quote query answer, as MD's fetch plane would publish it."""
     return _quote_result(
         BestQuote(
-            symbol="BTCUSDT",
+            universal_ticker="Gate_Spot_BTCUSDT",
             bid=Decimal(bid),
             bid_qty=Decimal("1"),
             ask=Decimal(ask),
@@ -274,7 +274,7 @@ def _update(
 ) -> Order:
     return Order(
         client_order_id=cid,
-        symbol="BTCUSDT",
+        universal_ticker="Gate_Spot_BTCUSDT",
         side=side,
         type=OrderType.LIMIT,
         status=status,
@@ -664,7 +664,7 @@ async def test_a_partial_fill_decides_nothing() -> None:
         Fill(
             order_id="o1",
             client_order_id="cid-1",
-            symbol="BTCUSDT",
+            universal_ticker="Gate_Spot_BTCUSDT",
             side=Side.BUY,
             price=Decimal("49000"),
             qty=Decimal("0.0002"),
@@ -832,7 +832,7 @@ def _leg_order(
 ) -> Order:
     return Order(
         client_order_id=cid,
-        symbol="BTCUSDT",
+        universal_ticker="Gate_Spot_BTCUSDT",
         side=side,
         type=OrderType.LIMIT,
         status=status,

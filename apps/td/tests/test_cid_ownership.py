@@ -94,7 +94,7 @@ async def _submit(broker: Broker, session_id: str, cid: str) -> bool:
             OrderSubmit(
                 session_id=session_id,
                 api_id=API_ID,
-                symbol="BTCUSDT",
+                universal_ticker="Paper_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.01"),
@@ -233,7 +233,7 @@ async def test_unowned_cid_is_cancelable(broker: Broker, two_sessions) -> None:
 
     cid = "2001"
     await session.private.place_order(limit_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("0.01"),
         price=Decimal("1000"),

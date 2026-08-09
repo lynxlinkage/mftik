@@ -28,9 +28,10 @@ from mft.protocol import (
     OrderReject,
     ReconDone,
     RejectCode,
+    SymbolFilterInfo,
     SymbolInfo,
 )
-from mft_sts.impl.chase import IOC_MAX_SLICES, ChaseOrder
+from mft_sts.impl.chase import IOC_MAX_SLICES, ChaseOrder, _floor_hint
 
 BTCUSDT = SymbolInfo(
     universal_ticker="Paper_Spot_BTCUSDT",
@@ -87,14 +88,14 @@ class FakeOms:
         return [o for o in self.submitted if o["tif"] is TimeInForce.IOC]
 
     async def submit_order(
-        self, api_id, *, symbol, side, qty, type, price=None, tif=None
+        self, api_id, *, ticker, side, qty, type, price=None, tif=None
     ):
         self._n += 1
         self._last_cid = f"cid-{self._n}"
         self.submitted.append(
             {
                 "cid": self._last_cid,
-                "symbol": symbol,
+                "ticker": ticker,
                 "side": side,
                 "qty": qty,
                 "type": type,
@@ -232,7 +233,7 @@ def _strategy(**paras) -> ChaseOrder:
 
 def _quote(bid: str, ask: str) -> BestQuote:
     return BestQuote(
-        symbol="BTCUSDT",
+        universal_ticker="Paper_Spot_BTCUSDT",
         bid=Decimal(bid),
         bid_qty=Decimal("1"),
         ask=Decimal(ask),
@@ -243,7 +244,7 @@ def _quote(bid: str, ask: str) -> BestQuote:
 def _update(cid: str, filled: str, status: OrderStatus) -> Order:
     return Order(
         client_order_id=cid,
-        symbol="BTCUSDT",
+        universal_ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         type=OrderType.LIMIT,
         status=status,
@@ -969,3 +970,61 @@ async def test_unreadable_facts_do_not_stop_the_rebuild() -> None:
     assert strat._armed
     # Fell back to arming fresh rather than refusing to come back.
     assert strat._ref_start is None
+
+
+# --- sizing against the venue's floor ---------------------------------------
+
+
+def test_an_unsizeable_config_is_told_what_would_work() -> None:
+    """A qty_quote under one lot cannot be expressed however it is written.
+
+    Bybit's ETHUSDT perp steps in 0.01 ETH, so 15 USDT at 1916 rounds to zero
+    and the strategy refuses — correctly. What the message has to add is the
+    number that would not.
+    """
+    info = SymbolInfo(
+        universal_ticker="Bybit_Perp_ETHUSDT",
+        base="ETH",
+        quote="USDT",
+        exch_ticker="ETHUSDT",
+        filters=[
+            SymbolFilterInfo(name="qty_step", value=Decimal("0.01")),
+            SymbolFilterInfo(name="min_qty", value=Decimal("0.01")),
+            SymbolFilterInfo(name="min_notional", value=Decimal("5")),
+        ],
+    )
+
+    hint = _floor_hint(info, Decimal("1916.11"))
+
+    assert "0.01" in hint
+    # The qty floor binds here, not the notional one — 19.16, not 5.
+    assert "19.16" in hint
+
+
+def test_the_notional_floor_binds_when_it_is_the_larger_one() -> None:
+    """A fine step and a real minimum notional: the second is the answer."""
+    info = SymbolInfo(
+        universal_ticker="Bybit_Spot_ETHUSDT",
+        base="ETH",
+        quote="USDT",
+        exch_ticker="ETHUSDT",
+        filters=[
+            SymbolFilterInfo(name="qty_step", value=Decimal("0.0001")),
+            SymbolFilterInfo(name="min_notional", value=Decimal("5")),
+        ],
+    )
+
+    assert "5" in _floor_hint(info, Decimal("1916.11"))
+
+
+def test_an_instrument_with_no_published_floor_says_nothing() -> None:
+    """Better silent than inventing a number the venue never published."""
+    bare = SymbolInfo(
+        universal_ticker="Paper_Spot_BTCUSDT",
+        base="BTC",
+        quote="USDT",
+        exch_ticker="BTCUSDT",
+    )
+
+    assert _floor_hint(bare, Decimal("60000")) == ""
+    assert _floor_hint(bare, None) == ""

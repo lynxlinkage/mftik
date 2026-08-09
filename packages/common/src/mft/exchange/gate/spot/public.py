@@ -153,17 +153,17 @@ class GateSpotPublicClient(BaseClient):
 
     async def fetch_ticker(self, ticker: UniversalTicker) -> Ticker:
         self._ensure_connected()
-        symbol, pair = await self._resolve(ticker)
-        row = await self.rest.fetch_ticker(pair)
-        return row.model_copy(update={"symbol": symbol})
+        pair = await self._resolve(ticker)
+        return await self.rest.fetch_ticker(pair, ticker=ticker)
 
     async def fetch_order_book(
         self, ticker: UniversalTicker, *, depth: int = 10
     ) -> OrderBook:
         self._ensure_connected()
-        symbol, pair = await self._resolve(ticker)
-        book = await self.rest.fetch_order_book(pair, depth=depth)
-        return book.model_copy(update={"symbol": symbol})
+        pair = await self._resolve(ticker)
+        return await self.rest.fetch_order_book(
+            pair, ticker=ticker, depth=depth
+        )
 
     async def fetch_klines(
         self, ticker: UniversalTicker, interval: str, *, limit: int = 100
@@ -183,12 +183,12 @@ class GateSpotPublicClient(BaseClient):
                 f"{self.name} serves no {canonical_interval} candles; "
                 f"supported: {sorted(GATE_INTERVALS)}"
             )
-        symbol, pair = await self._resolve(ticker)
-        klines = await self.rest.fetch_klines(pair, gate_interval, limit=limit)
+        pair = await self._resolve(ticker)
+        klines = await self.rest.fetch_klines(
+            pair, gate_interval, ticker=ticker, limit=limit
+        )
         return [
-            kline.model_copy(
-                update={"symbol": symbol, "interval": canonical_interval}
-            )
+            kline.model_copy(update={"interval": canonical_interval})
             for kline in klines
         ]
 
@@ -217,41 +217,41 @@ class GateSpotPublicClient(BaseClient):
         return self._best_quotes(ticker)
 
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
-        symbol, pair = await self._resolve(ticker)
+        pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_tickers(pair)
         async for row in self._rows(stream):
             if row.currency_pair != pair:
                 continue
-            yield row.to_ticker().model_copy(update={"symbol": symbol})
+            yield row.to_ticker(ticker)
 
     async def _trades(self, ticker: UniversalTicker) -> AsyncIterator[Trade]:
-        symbol, pair = await self._resolve(ticker)
+        pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_trades(pair)
         async for row in self._rows(stream):
             if row.currency_pair != pair:
                 continue
-            yield row.to_trade().model_copy(update={"symbol": symbol})
+            yield row.to_trade(ticker)
 
     async def _order_books(self, ticker: UniversalTicker) -> AsyncIterator[OrderBook]:
-        symbol, pair = await self._resolve(ticker)
+        pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_order_book(
             pair, level=self.book_level, interval=self.book_interval
         )
         async for row in self._rows(stream):
             if row.s != pair:
                 continue
-            yield row.to_order_book().model_copy(update={"symbol": symbol})
+            yield row.to_order_book(ticker)
 
     async def _klines(
         self, ticker: UniversalTicker, interval: str
     ) -> AsyncIterator[Kline]:
-        symbol, pair = await self._resolve(ticker)
+        pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_candlesticks(interval, pair)
         async for row in self._rows(stream):
             if row.currency_pair != pair or row.interval != interval:
                 continue
             yield Kline(
-                symbol=symbol,
+                universal_ticker=str(ticker),
                 interval=interval,
                 # ``t`` is the window's open time, in seconds.
                 open_time=float(row.t),
@@ -267,13 +267,13 @@ class GateSpotPublicClient(BaseClient):
             )
 
     async def _best_quotes(self, ticker: UniversalTicker) -> AsyncIterator[BestQuote]:
-        symbol, pair = await self._resolve(ticker)
+        pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_book_ticker(pair)
         async for row in self._rows(stream):
             if row.s != pair:
                 continue
             yield BestQuote(
-                symbol=symbol,
+                universal_ticker=str(ticker),
                 bid=row.bid,
                 bid_qty=row.bid_size,
                 ask=row.ask,
@@ -299,18 +299,19 @@ class GateSpotPublicClient(BaseClient):
 
     # --- symbols -----------------------------------------------------------
 
-    async def _resolve(self, ticker: UniversalTicker) -> tuple[str, str]:
-        """``(canonical symbol, venue pair)`` for one instrument.
+    async def _resolve(self, ticker: UniversalTicker) -> str:
+        """The venue's pair for one instrument.
 
         Resolved once per stream rather than per message: the pair we
         subscribed with is the pair every message we keep carries, so there is
-        nothing left to look up on the hot path.
+        nothing left to look up on the hot path. The ticker itself needs no
+        resolving — it is what every payload out of here is stamped with.
         """
         if ticker.venue != self.name:
             raise ValueError(
                 f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
             )
-        return ticker.symbol, await self.symbols.exch_ticker(ticker)
+        return await self.symbols.exch_ticker(ticker)
 
 
 __all__ = ["GateSpotPublicClient"]

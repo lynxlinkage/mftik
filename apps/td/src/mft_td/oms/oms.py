@@ -37,7 +37,8 @@ class Oms:
 
     def __init__(self) -> None:
         self._orders: dict[str, Order] = {}
-        self._positions: dict[str, Decimal] = {}
+        #: universal ticker → the account's exposure on it.
+        self._positions: dict[str, Position] = {}
         self._balances: dict[str, Balance] = {}
         self._hooks: list[UpdateHook] = []
 
@@ -46,6 +47,7 @@ class Oms:
         session.on_order(self.handle_order)
         session.on_fill(self.handle_fill)
         session.on_balance(self.handle_balance)
+        session.on_position(self.handle_position)
 
     def on_update(self, hook: UpdateHook) -> None:
         """Notify when OMS state changes (Session uses this to publish)."""
@@ -55,9 +57,9 @@ class Oms:
         return OmsView(
             orders=dict(self._orders),
             positions={
-                symbol: Position(symbol=symbol, qty=qty)
-                for symbol, qty in self._positions.items()
-                if qty != 0
+                ticker: position
+                for ticker, position in self._positions.items()
+                if not position.flat
             },
             balances=dict(self._balances),
         )
@@ -74,7 +76,7 @@ class Oms:
         self._balances = {b.asset: b for b in balances}
         if positions is not None:
             self._positions = {
-                p.symbol: p.qty for p in positions if p.qty != 0
+                p.universal_ticker: p for p in positions if not p.flat
             }
         logger.info(
             "OMS reconciled orders=%s balances=%s positions=%s",
@@ -100,11 +102,31 @@ class Oms:
         logger.debug("OMS order id=%s status=%s", order.order_id, order.status)
         self._emit()
 
+    def handle_position(self, position: Position) -> None:
+        """Take the venue's own figure for one instrument.
+
+        Authoritative over anything :meth:`handle_fill` inferred: a venue
+        position moves for reasons no fill of ours reports — funding, ADL,
+        liquidation — and it is the number the venue will settle on.
+        """
+        if position.flat:
+            self._positions.pop(position.universal_ticker, None)
+        else:
+            self._positions[position.universal_ticker] = position
+        logger.debug(
+            "OMS position %s qty=%s", position.universal_ticker, position.qty
+        )
+        self._emit()
+
     def handle_fill(self, fill: Fill) -> None:
         signed = fill.qty if fill.side is Side.BUY else -fill.qty
-        self._positions[fill.symbol] = (
-            self._positions.get(fill.symbol, Decimal("0")) + signed
-        )
+        key = fill.universal_ticker
+        held = self._positions.get(key)
+        qty = (held.qty if held is not None else Decimal("0")) + signed
+        # Inferred, not reported: a venue that publishes positions overwrites
+        # this on its next push. Only the size is derivable from a fill — the
+        # entry price and the pnl are the venue's to state.
+        self._positions[key] = Position(universal_ticker=key, qty=qty)
         logger.debug(
             "OMS fill symbol=%s qty=%s side=%s",
             fill.symbol,

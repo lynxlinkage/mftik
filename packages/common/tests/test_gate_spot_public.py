@@ -16,6 +16,9 @@ from mft.exchange.gate.spot.rest import GateRestError, GateSpotPublicRest
 from mft.exchange.intervals import InvalidIntervalError
 from mft.exchange.tickers import UniversalTicker
 
+#: The instrument every payload in this module is stamped with.
+TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")
+
 CURRENCY_PAIRS = [
     {
         "id": "BTC_USDT",

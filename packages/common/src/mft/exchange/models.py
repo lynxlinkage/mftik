@@ -1,4 +1,9 @@
-"""Exchange domain models shared by all venue adapters."""
+"""Exchange domain models shared by all venue adapters.
+
+Everything that describes one instrument names it the same way: by its
+:class:`~mft.exchange.tickers.UniversalTicker`, carried as the one canonical
+string. See :class:`InstrumentScoped` for why that is not a bare symbol.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,8 @@ from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from mft.exchange.tickers import SEPARATOR, Category, UniversalTicker
 
 
 def _id() -> str:
@@ -186,12 +193,86 @@ def next_statuses(current: OrderStatus) -> frozenset[OrderStatus]:
     return _TRANSITIONS[current]
 
 
+class InstrumentScoped(BaseModel):
+    """Base for anything that is about one instrument — and says which.
+
+    Market updates, order events and order *requests* alike: what they share
+    is not that something happened, but that everything on them is scoped to
+    the one instrument they name.
+
+    Identity is the :class:`~mft.exchange.tickers.UniversalTicker`, carried as
+    the one canonical string, because a bare symbol does not identify an
+    instrument and never did:
+
+    * ``BTCUSDT`` on a unified venue names both the spot pair and the perp, and
+      they have different tick sizes and different books;
+    * ``BTCUSDT`` on Binance and ``BTCUSDT`` on Gate are different instruments
+      at different prices, which is the whole premise of anything trading two
+      venues at once.
+
+    That mattered the moment a consumer could hold two feeds. MD routes a
+    strategy's updates to a hook by *message type* — every order book lands on
+    ``on_order_book``, whichever feed it came from — and the envelope carries
+    no feed key. So a payload's own identity is the only thing a strategy has,
+    and a payload identified by ``BTCUSDT`` alone left it unable to tell one
+    venue's book from another's.
+
+    Stored as one string rather than three fields, for the reason
+    :class:`~mft.protocol.messages.SymbolInfo` states: one field cannot
+    disagree with itself, which three of them could. ``str(ticker)`` is the
+    canonical rendering and the only form that belongs on a wire.
+
+    Not validated on construction, deliberately. These are the hot-path models
+    — one per trade print, one per book tick — and a parse per message would
+    cost more than it caught, since the only writers are the adapters, which
+    build the ticker from the plane rather than from a string. Reading is where
+    it is checked: :attr:`ticker` parses strictly.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: The instrument, canonical: ``Bybit_Perp_BTCUSDT``.
+    universal_ticker: str
+
+    @property
+    def ticker(self) -> UniversalTicker:
+        """The parsed identity. Raises on a ticker that is not canonical."""
+        return UniversalTicker.parse(self.universal_ticker)
+
+    @property
+    def symbol(self) -> str:
+        """The symbol alone — ``BTCUSDT``.
+
+        A split rather than a parse: this is read per message on the hot path
+        (a feed filters its own stream on it), and the three parts of a
+        canonical ticker are separated by :data:`~mft.exchange.tickers.
+        SEPARATOR` by construction. Use :attr:`ticker` where a malformed value
+        should raise.
+        """
+        return self.universal_ticker.rpartition(SEPARATOR)[2]
+
+    @property
+    def venue(self) -> str:
+        """The venue — ``Bybit``. Which of two feeds this update came from."""
+        return self.universal_ticker.partition(SEPARATOR)[0]
+
+    @property
+    def category(self) -> Category:
+        """The market — ``Perp``. Raises if the ticker is not canonical."""
+        return self.ticker.category
+
+
 class Instrument(BaseModel):
     """A tradeable instrument and the restrictions on trading it.
 
     ``tick_size`` / ``lot_size`` are the price and quantity steps; ``min_qty``
     and ``min_notional`` are floors an order has to clear. ``None`` means the
     venue publishes no such floor.
+
+    The one model here that is *not* an :class:`InstrumentScoped`, and the only
+    one whose ``symbol`` is the venue's own spelling. It has to be: a venue's
+    instrument listing is what the symbol plane ingests to *build* the
+    canonical mapping, so it cannot be stated in terms of one.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -205,21 +286,15 @@ class Instrument(BaseModel):
     min_notional: Decimal | None = None
 
 
-class Ticker(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    symbol: str
+class Ticker(InstrumentScoped):
     bid: Decimal
     ask: Decimal
     last: Decimal
     ts: float = Field(default_factory=_ts)
 
 
-class Trade(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class Trade(InstrumentScoped):
     trade_id: str = Field(default_factory=_id)
-    symbol: str
     price: Decimal
     qty: Decimal
     side: Side
@@ -250,8 +325,6 @@ class AggTrade(Trade):
     no equivalent, and a venue without one simply serves no ``aggtrade`` feed.
     """
 
-    model_config = ConfigDict(frozen=True)
-
     #: Venue id of the first match folded into this print.
     first_trade_id: str = ""
     #: Venue id of the last. Equal to ``first_trade_id`` for a single match.
@@ -275,7 +348,7 @@ class AggTrade(Trade):
             return 0
 
 
-class Kline(BaseModel):
+class Kline(InstrumentScoped):
     """One candle. ``closed`` marks the final tick of the window.
 
     Venues re-push the in-progress candle on every change, so an unclosed
@@ -283,9 +356,6 @@ class Kline(BaseModel):
     ``closed`` candles are safe to append to a series.
     """
 
-    model_config = ConfigDict(frozen=True)
-
-    symbol: str
     interval: str
     open_time: float
     open: Decimal
@@ -305,7 +375,7 @@ class BookLevel(BaseModel):
     qty: Decimal
 
 
-class BestQuote(BaseModel):
+class BestQuote(InstrumentScoped):
     """Top of book with sizes — pushed on every best bid/ask change.
 
     Distinct from :class:`Ticker`, which carries 24h stats on a venue-chosen
@@ -313,9 +383,6 @@ class BestQuote(BaseModel):
     sizes a :class:`Ticker` does not.
     """
 
-    model_config = ConfigDict(frozen=True)
-
-    symbol: str
     bid: Decimal
     bid_qty: Decimal
     ask: Decimal
@@ -323,10 +390,7 @@ class BestQuote(BaseModel):
     ts: float = Field(default_factory=_ts)
 
 
-class OrderBook(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    symbol: str
+class OrderBook(InstrumentScoped):
     bids: list[BookLevel]
     asks: list[BookLevel]
     ts: float = Field(default_factory=_ts)
@@ -375,12 +439,9 @@ class Balance(BaseModel):
         return self.locked + self.prelock
 
 
-class Order(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class Order(InstrumentScoped):
     order_id: str = Field(default_factory=_id)
     client_order_id: str | None = None
-    symbol: str
     side: Side
     type: OrderType
     status: OrderStatus
@@ -391,13 +452,10 @@ class Order(BaseModel):
     ts: float = Field(default_factory=_ts)
 
 
-class Fill(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class Fill(InstrumentScoped):
     fill_id: str = Field(default_factory=_id)
     order_id: str
     client_order_id: str | None = None
-    symbol: str
     side: Side
     price: Decimal
     qty: Decimal
@@ -406,14 +464,19 @@ class Fill(BaseModel):
     ts: float = Field(default_factory=_ts)
 
 
-class PlaceOrderRequest(BaseModel):
+class PlaceOrderRequest(InstrumentScoped):
     """Common order fields, plus venue-specific extras in ``params``.
 
-    ``symbol`` is canonical (``BTCUSDT``); the adapter renders the venue's
-    spelling. ``params`` carries what has no cross-venue meaning — Gate's
-    ``account`` / ``iceberg`` / ``stp_act``, for instance. Each adapter reads
-    the keys it understands and ignores the rest, so a request stays portable
-    even when it carries hints for one venue.
+    The instrument is named the same way everything else is — by its ticker —
+    which is what lets one connector on a unified account place an order on
+    either book: :attr:`~InstrumentScoped.category` says which, per order,
+    rather than per session. The adapter renders the venue's own spelling from
+    it through the symbol plane.
+
+    ``params`` carries what has no cross-venue meaning — Gate's ``account`` /
+    ``iceberg`` / ``stp_act``, for instance. Each adapter reads the keys it
+    understands and ignores the rest, so a request stays portable even when it
+    carries hints for one venue.
 
     ``tif`` is *not* one of those: it is a common field precisely because
     every venue has the concept under some spelling. A raw
@@ -421,9 +484,6 @@ class PlaceOrderRequest(BaseModel):
     venue-only values this enum has no name for.
     """
 
-    model_config = ConfigDict(frozen=True)
-
-    symbol: str
     side: Side
     type: OrderType
     qty: Decimal
@@ -447,7 +507,7 @@ class PlaceOrderRequest(BaseModel):
 
 def market_order(
     *,
-    symbol: str,
+    ticker: UniversalTicker | str,
     side: Side,
     qty: Decimal,
     client_order_id: str | None = None,
@@ -461,7 +521,7 @@ def market_order(
     of convenience it never chose.
     """
     return PlaceOrderRequest(
-        symbol=symbol,
+        universal_ticker=str(ticker),
         side=side,
         type=OrderType.MARKET,
         qty=qty,
@@ -472,7 +532,7 @@ def market_order(
 
 def limit_order(
     *,
-    symbol: str,
+    ticker: UniversalTicker | str,
     side: Side,
     qty: Decimal,
     price: Decimal,
@@ -481,7 +541,7 @@ def limit_order(
 ) -> PlaceOrderRequest:
     """A limit :class:`PlaceOrderRequest` — see :func:`market_order`."""
     return PlaceOrderRequest(
-        symbol=symbol,
+        universal_ticker=str(ticker),
         side=side,
         type=OrderType.LIMIT,
         qty=qty,

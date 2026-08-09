@@ -231,6 +231,11 @@ export const api = {
 				passphrase: body.passphrase
 			})
 		}),
+	renameApi: (id: number, name: string) =>
+		request<ApiCredential>(`/apis/${encodeURIComponent(String(id))}`, {
+			method: 'PATCH',
+			body: JSON.stringify({ name })
+		}),
 	deleteApi: (id: number) =>
 		request<{ id: number; account_id: number; deleted: boolean }>(
 			`/apis/${encodeURIComponent(String(id))}`,

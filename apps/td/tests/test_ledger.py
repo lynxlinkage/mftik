@@ -31,7 +31,7 @@ def _ledger(**assets: str) -> Ledger:
 
 def _request(**overrides: object) -> PlaceOrderRequest:
     payload: dict[str, object] = {
-        "symbol": "BTCUSDT",
+        "universal_ticker": "Paper_Spot_BTCUSDT",
         "side": Side.BUY,
         "type": OrderType.LIMIT,
         "qty": Decimal("0.01"),

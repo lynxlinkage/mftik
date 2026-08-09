@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from mft.broker import Broker
 from mft.exchange import PaperExchange, venues
 from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
+from mft.exchange.bybit.private import BybitPrivateClient
 from mft.exchange.errors import ExchangeError
 from mft.exchange.gate.spot.private import GateSpotPrivateClient
 from mft.exchange.paper.remote import PaperRemotePrivateClient
@@ -170,6 +171,28 @@ class VenueSessionFactory:
             )
             logger.info(
                 "TD building Gate session api_id=%s key=%s…",
+                api_id,
+                row.api_key[:6],
+            )
+            return self._session(api_id, private)
+
+        if venue is venues.BYBIT:
+            # Bybit is a unified account: this one connector holds the order
+            # socket, the account stream and REST for the whole credential.
+            #
+            # ``category`` says which book *orders* go to, and defaults to
+            # spot because ``OrderSubmit`` still carries a bare symbol — see
+            # ``Session._instrument``. It does not narrow what the session
+            # reports: the account stream is unscoped, so perp fills and perp
+            # positions reach recon and the OMS either way, which is what
+            # makes them true of the account rather than of one book.
+            private = BybitPrivateClient(
+                api_key=row.api_key,
+                api_secret=row.api_secret,
+                symbols=self._symbols,
+            )
+            logger.info(
+                "TD building Bybit session api_id=%s key=%s…",
                 api_id,
                 row.api_key[:6],
             )

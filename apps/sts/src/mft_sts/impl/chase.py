@@ -144,6 +144,30 @@ def _refusal_reason(code: int | str, reason: str) -> str:
     return "chase_refused"
 
 
+def _floor_hint(info: SymbolInfo, price: Decimal | None) -> str:
+    """What the venue's smallest order would cost, for an unsizeable config.
+
+    A size that rounds to zero is almost always a ``qty_quote`` below one lot:
+    Bybit's ETHUSDT perp steps in 0.01 ETH, so nothing under ~20 USDT can be
+    expressed however the number is written. Saying which number would work
+    turns the failure into a fix.
+    """
+    floor = max(
+        info.filter("qty_step") or Decimal("0"),
+        info.filter("min_qty") or Decimal("0"),
+    )
+    if floor <= 0 or price is None or price <= 0:
+        return ""
+    notional = floor * price
+    min_notional = info.filter("min_notional")
+    if min_notional is not None and min_notional > notional:
+        notional = min_notional
+    return (
+        f" — its smallest order is {_fmt(floor)} "
+        f"(about {_fmt(notional.quantize(Decimal('0.01')))} at {_fmt(price)})"
+    )
+
+
 def _fmt(value: object) -> str:
     """Compact Decimal for logs — drop trailing zeros from Numeric(38, 18)."""
     if value is None:
@@ -621,7 +645,7 @@ class ChaseOrder(Strategy):
 
         accepted = await self.oms.submit_order(
             api_id,
-            symbol=info.symbol,
+            ticker=info.ticker,
             side=self.paras["side"],
             qty=qty,
             type=OrderType.LIMIT,
@@ -802,7 +826,7 @@ class ChaseOrder(Strategy):
 
             accepted = await self.oms.submit_order(
                 api_id,
-                symbol=info.symbol,
+                ticker=info.ticker,
                 side=self.paras["side"],
                 qty=qty,
                 type=OrderType.LIMIT,
@@ -914,7 +938,8 @@ class ChaseOrder(Strategy):
         if target <= 0:
             await self.log(
                 f"ChaseOrder cannot size an order from "
-                f"{self._size_description()}",
+                f"{self._size_description()} on {info.universal_ticker}"
+                f"{_floor_hint(info, self._target_price())}",
                 level="error",
             )
             return False

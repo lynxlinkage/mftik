@@ -17,6 +17,7 @@ from mft.exchange.models import (
     PlaceOrderRequest,
     is_terminal,
 )
+from mft.exchange.tickers import InvalidTickerError, UniversalTicker
 from mft.protocol import (
     STS_DETACH,
     STS_LEASE_HEARTBEAT,
@@ -671,8 +672,23 @@ class SessionManager:
         # for. A refusal here means nothing was sent and no order event will
         # ever follow — the False is the whole story.
         if isinstance(payload, OrderSubmit):
+            # The instrument, checked before anything is committed. STS says
+            # which one; this is the only place that can tell whether it is one
+            # this session's venue trades, and an order for another venue's
+            # instrument cannot be made to work by trying.
+            refusal = _wrong_instrument(payload.universal_ticker, acct)
+            if refusal is not None:
+                await self._reply_order_ack(
+                    req,
+                    acct.api_id,
+                    cid,
+                    False,
+                    refusal,
+                    RejectCode.TD_WRONG_INSTRUMENT,
+                )
+                return
             request = PlaceOrderRequest(
-                symbol=payload.symbol,
+                universal_ticker=payload.universal_ticker,
                 side=payload.side,
                 type=payload.type,
                 qty=payload.qty,
@@ -811,7 +827,7 @@ class SessionManager:
         try:
             await acct.trading.private.place_order(
                 PlaceOrderRequest(
-                    symbol=req.symbol,
+                    universal_ticker=req.universal_ticker,
                     side=req.side,
                     type=req.type,
                     qty=req.qty,
@@ -825,7 +841,8 @@ class SessionManager:
                 link.api_id,
                 (
                     f"order submitted sts={link.session_id} "
-                    f"cid={req.client_order_id} {req.side} {req.qty} {req.symbol}"
+                    f"cid={req.client_order_id} {req.side} {req.qty} "
+                    f"{req.universal_ticker}"
                 ),
                 source="td",
             )
@@ -837,7 +854,7 @@ class SessionManager:
             await acct.trading.publish_order_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,
-                symbol=req.symbol,
+                universal_ticker=req.universal_ticker,
                 error_code=code,
             )
             await publish_td_log(
@@ -865,7 +882,7 @@ class SessionManager:
             await acct.trading.publish_order_reject(
                 reason=str(exc),
                 client_order_id=req.client_order_id,
-                symbol=req.symbol,
+                universal_ticker=req.universal_ticker,
                 error_code=RejectCode.TD_SEND_FAILED,
             )
 
@@ -956,3 +973,24 @@ class SessionManager:
                 client_order_id=req.client_order_id,
                 error_code=RejectCode.TD_SEND_FAILED,
             )
+
+
+def _wrong_instrument(universal_ticker: str, acct: TradingAccount) -> str | None:
+    """Why ``universal_ticker`` cannot be traded on this account, or None.
+
+    Two failures, both a strategy's: a ticker that is not well formed, and one
+    naming a venue this session does not hold a credential for. MD makes the
+    same check on its own feeds (``VenueSession._open``); TD could not until
+    the order carried an instrument rather than a bare symbol.
+    """
+    try:
+        ticker = UniversalTicker.parse(universal_ticker)
+    except InvalidTickerError as exc:
+        return str(exc)
+    venue = acct.trading.venue
+    if ticker.venue != venue:
+        return (
+            f"api_id={acct.api_id} trades {venue}; "
+            f"{universal_ticker} is a {ticker.venue} instrument"
+        )
+    return None

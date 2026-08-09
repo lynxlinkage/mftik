@@ -27,7 +27,7 @@ from collections.abc import AsyncIterator
 from mft.exchange.base import BaseClient
 from mft.exchange.errors import OrderError
 from mft.exchange.gate.spot.client import GATE_SPOT_WS_URL, GateSpotWebSocket
-from mft.exchange.gate.spot.models import to_text
+from mft.exchange.gate.spot.models import GateOrderAck, to_text
 from mft.exchange.gate.spot.protocol import GateApiError
 from mft.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotRest
 from mft.exchange.models import (
@@ -40,7 +40,7 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
-from mft.exchange.symbols import SymbolResolver
+from mft.exchange.symbols import SymbolResolver, check_venue
 from mft.exchange.tickers import Category, UniversalTicker
 
 logger = logging.getLogger(__name__)
@@ -156,7 +156,9 @@ class GateSpotPrivateClient(BaseClient):
         default_tif = "ioc" if request.type is OrderType.MARKET else None
         if request.tif is not None:
             default_tif = _TIF[request.tif]
-        pair = await self._venue_symbol(request.symbol)
+        ticker = request.ticker
+        check_venue(ticker, self.name, {self.category})
+        pair = await self.symbols.exch_ticker(ticker)
         try:
             ack = await self.ws.place_order(
                 currency_pair=pair,
@@ -173,11 +175,12 @@ class GateSpotPrivateClient(BaseClient):
             # Surface as OrderError so TD publishes an order reject instead of
             # treating a venue rejection as a transport failure.
             raise OrderError(str(exc)) from exc
-        order = ack.to_order()
-        # Thin ``action_mode=ACK`` replies omit the pair; keep the one we sent.
-        if not order.symbol:
-            order = order.model_copy(update={"symbol": pair})
-        return await self._inbound(order)
+        # No lookup on this path: the ticker is the one we sent the order
+        # under, so a thin ``action_mode=ACK`` reply that omits the pair has
+        # nothing to reconcile.
+        order = ack.to_order(ticker)
+        self._remember(order, pair)
+        return order
 
     async def cancel_order(self, order_id: str) -> Order:
         self._ensure_connected()
@@ -189,7 +192,7 @@ class GateSpotPrivateClient(BaseClient):
         return await self._cancel(to_text(client_order_id))
 
     async def fetch_order_by_client_order_id(
-        self, client_order_id: str, *, symbol: str | None = None
+        self, client_order_id: str, *, ticker: UniversalTicker | None = None
     ) -> Order | None:
         """Ask REST what happened to an order the WebSocket never reported.
 
@@ -200,21 +203,24 @@ class GateSpotPrivateClient(BaseClient):
         self._ensure_connected()
         text = to_text(client_order_id)
         pair = self._pairs.get(text)
-        if pair is None and symbol is not None:
-            pair = await self._venue_symbol(symbol)
+        if pair is None and ticker is not None:
+            pair = await self.symbols.exch_ticker(ticker)
         if pair is None:
             raise OrderError(
                 f"cannot resolve Gate order {client_order_id!r} "
                 "without its symbol"
             )
         try:
-            order = await self.rest.fetch_order(text, currency_pair=pair)
+            order = await self.rest.fetch_order(
+                text, currency_pair=pair, ticker=await self._resolve(pair)
+            )
         except GateApiError as exc:
             # ORDER_NOT_FOUND is an answer: the submit never landed.
             if "NOT_FOUND" in str(exc).upper():
                 return None
             raise OrderError(str(exc)) from exc
-        return await self._inbound(order)
+        self._remember(order, pair)
+        return order
 
     def on_reconnect(self, callback) -> None:
         self.ws.on_reconnect(callback)
@@ -227,15 +233,14 @@ class GateSpotPrivateClient(BaseClient):
             )
         except GateApiError as exc:
             raise OrderError(str(exc)) from exc
-        return await self._inbound(ack.to_order())
+        return await self._inbound(ack, currency_pair)
 
     async def _pair_for(self, order_id: str) -> str:
         """Resolve an id to its pair, refreshing from REST only if unseen."""
         pair = self._pairs.get(order_id)
         if pair is not None:
             return pair
-        for order in await self.rest.fetch_open_orders():
-            await self._inbound(order)
+        await self.fetch_open_orders()
         pair = self._pairs.get(order_id)
         if pair is None:
             raise OrderError(f"no open Gate order for id {order_id!r}")
@@ -249,14 +254,23 @@ class GateSpotPrivateClient(BaseClient):
         """Canonical → Gate's spelling, via the plane."""
         return await self.symbols.exch_ticker(self._ticker(symbol))
 
-    async def _inbound(self, order: Order) -> Order:
-        """Resolve a venue order home: index its pair, canonicalize it."""
-        native = order.symbol
-        ticker = await self.symbols.symbol_for(
-            self.name, native, category=self.category
+    async def _resolve(self, pair: str) -> UniversalTicker:
+        """Gate's spelling → the universal ticker, on this connector's market."""
+        return await self.symbols.symbol_for(
+            self.name, pair, category=self.category
         )
+
+    async def _inbound(self, ack: GateOrderAck, pair: str) -> Order:
+        """One venue order reply, resolved home and indexed.
+
+        The ticker is looked up *before* the conversion rather than patched on
+        after it, so an :class:`~mft.exchange.models.Order` never exists in a
+        state where its identity is Gate's spelling of a pair.
+        """
+        native = ack.currency_pair or pair
+        order = ack.to_order(await self._resolve(native))
         self._remember(order, native)
-        return order.model_copy(update={"symbol": ticker.symbol})
+        return order
 
     def _remember(self, order: Order, native_symbol: str) -> None:
         """Index an order's venue pair by every id it can be cancelled with."""
@@ -276,14 +290,40 @@ class GateSpotPrivateClient(BaseClient):
     async def fetch_order(self, order_id: str) -> Order:
         self._ensure_connected()
         currency_pair = await self._pair_for(order_id)
-        order = await self.rest.fetch_order(order_id, currency_pair=currency_pair)
-        return await self._inbound(order)
+        order = await self.rest.fetch_order(
+            order_id,
+            currency_pair=currency_pair,
+            ticker=await self._resolve(currency_pair),
+        )
+        self._remember(order, currency_pair)
+        return order
 
     async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
+        """Open orders, for one pair or across the account.
+
+        Gate's account-wide form returns every pair at once, and each row has
+        to be resolved to its own ticker — so unlike the single-pair form there
+        is no one ticker to hand down, and the rows come back grouped by the
+        pair they were asked under.
+        """
         self._ensure_connected()
-        native = await self._venue_symbol(symbol) if symbol else None
-        orders = await self.rest.fetch_open_orders(native)
-        return [await self._inbound(order) for order in orders]
+        if symbol is not None:
+            native = await self._venue_symbol(symbol)
+            orders = await self.rest.fetch_open_orders(
+                native, ticker=await self._resolve(native)
+            )
+            for order in orders:
+                self._remember(order, native)
+            return orders
+
+        out: list[Order] = []
+        for pair, rows in (await self.rest.fetch_open_order_rows()).items():
+            ticker = await self._resolve(pair)
+            for row in rows:
+                order = row.to_order(ticker)
+                self._remember(order, pair)
+                out.append(order)
+        return out
 
     async def fetch_balances(self) -> list[Balance]:
         self._ensure_connected()
@@ -307,16 +347,14 @@ class GateSpotPrivateClient(BaseClient):
         stream = await self.ws.subscribe_orders()
         async for update in stream:
             # Also keeps the cancel path off REST for anything seen live.
-            yield await self._inbound(update.to_order())
+            order = update.to_order(await self._resolve(update.currency_pair))
+            self._remember(order, update.currency_pair)
+            yield order
 
     async def _fills(self) -> AsyncIterator[Fill]:
         stream = await self.ws.subscribe_user_trades()
         async for trade in stream:
-            fill = trade.to_fill()
-            ticker = await self.symbols.symbol_for(
-                self.name, fill.symbol, category=self.category
-            )
-            yield fill.model_copy(update={"symbol": ticker.symbol})
+            yield trade.to_fill(await self._resolve(trade.currency_pair))
 
     async def _balances(self) -> AsyncIterator[Balance]:
         stream = await self.ws.subscribe_balances()

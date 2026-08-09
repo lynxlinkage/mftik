@@ -131,10 +131,25 @@ BINANCE = Venue(
     requires_passphrase=False,
 )
 
+BYBIT = Venue(
+    name="Bybit",
+    label="Bybit",
+    # The unified account this module's docstring is about: one credential and
+    # one connection for both books, so the category is the instrument's
+    # property rather than part of the venue's name. Options are left out until
+    # something trades them — a category listed here is one the ticker parser
+    # will accept, and accepting a market no adapter serves only moves the
+    # failure later.
+    categories=frozenset({Category.SPOT, Category.PERP}),
+    # Bybit signs both its WebSocket auth and its REST calls with HMAC-SHA256.
+    api_types=frozenset({HMAC}),
+    requires_passphrase=False,
+)
+
 #: Every venue the platform knows, keyed by canonical name. The single source
 #: of truth — :func:`get` scans it rather than keeping a second index, so a
 #: test or a plugin that adds an entry here is immediately visible to lookups.
-VENUES: dict[str, Venue] = {v.name: v for v in (PAPER, GATE, BINANCE)}
+VENUES: dict[str, Venue] = {v.name: v for v in (PAPER, GATE, BINANCE, BYBIT)}
 
 
 def check_registry() -> None:
@@ -229,6 +244,7 @@ def _categories(venue: Venue) -> str:
 
 __all__ = [
     "BINANCE",
+    "BYBIT",
     "ED25519",
     "GATE",
     "HMAC",

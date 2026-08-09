@@ -51,13 +51,13 @@ async def _seed_book(exchange: PaperExchange) -> None:
     )
     await maker.connect()
     await maker.place_order(limit_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("10"),
         price=Decimal("49999"),
     ))
     await maker.place_order(limit_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.SELL,
         qty=Decimal("10"),
         price=Decimal("50001"),
@@ -145,7 +145,7 @@ async def test_private_market_order_and_streams(exchange: PaperExchange) -> None
 
     before = {b.asset: b.free for b in await private.fetch_balances()}
     order = await private.place_order(market_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("0.01"),
     ))
@@ -183,7 +183,7 @@ async def test_limit_rest_cancel(exchange: PaperExchange) -> None:
 
     order = await private.place_order(
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.BUY,
             type=OrderType.LIMIT,
             qty=qty,
@@ -218,7 +218,7 @@ async def test_client_order_id_roundtrip_and_cancel(exchange: PaperExchange) -> 
     ticker = exchange.get_ticker("BTCUSDT")
     order = await private.place_order(
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.BUY,
             type=OrderType.LIMIT,
             qty=Decimal("0.01"),
@@ -244,7 +244,7 @@ async def test_duplicate_client_order_id_rejected(exchange: PaperExchange) -> No
     ticker = exchange.get_ticker("BTCUSDT")
     await private.place_order(
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.BUY,
             type=OrderType.LIMIT,
             qty=Decimal("0.01"),
@@ -255,7 +255,7 @@ async def test_duplicate_client_order_id_rejected(exchange: PaperExchange) -> No
     with pytest.raises(OrderError, match="duplicate client_order_id"):
         await private.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Paper_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.01"),
@@ -293,7 +293,7 @@ async def test_public_and_private_share_engine(exchange: PaperExchange) -> None:
     task = asyncio.create_task(reader())
     await asyncio.sleep(0.05)
     await private.place_order(market_order(
-        symbol="BTCUSDT", side=Side.SELL, qty=Decimal("0.01")
+        ticker="Paper_Spot_BTCUSDT", side=Side.SELL, qty=Decimal("0.01")
     ))
     trade = await asyncio.wait_for(trade_fut, timeout=2)
     assert trade.symbol == "BTCUSDT"
@@ -313,7 +313,7 @@ async def test_cross_account_match(exchange: PaperExchange) -> None:
     taker = _private(exchange, "taker")
     await taker.connect()
     order = await taker.place_order(limit_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("1"),
         price=Decimal("50001"),
@@ -334,7 +334,7 @@ async def test_api_key_isolates_accounts(exchange: PaperExchange) -> None:
     await b.connect()
 
     await a.place_order(market_order(
-        symbol="BTCUSDT", side=Side.BUY, qty=Decimal("0.01")
+        ticker="Paper_Spot_BTCUSDT", side=Side.BUY, qty=Decimal("0.01")
     ))
     bal_a = {x.asset: x.free for x in await a.fetch_balances()}
     bal_b = {x.asset: x.free for x in await b.fetch_balances()}
@@ -365,7 +365,7 @@ async def test_post_only_rests_when_it_does_not_cross(
     # Book is 49999 / 50001; a bid at 50000 sits inside the spread.
     order = await private.place_order(
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.BUY,
             type=OrderType.LIMIT,
             qty=Decimal("0.01"),
@@ -390,7 +390,7 @@ async def test_post_only_is_refused_rather_than_filled(
     with pytest.raises(OrderError, match="would cross"):
         await private.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Paper_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.01"),
@@ -415,7 +415,7 @@ async def test_a_crossing_limit_without_post_only_still_fills(
 
     order = await private.place_order(
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.BUY,
             type=OrderType.LIMIT,
             qty=Decimal("0.01"),
@@ -440,7 +440,7 @@ async def _seed_thin_ask(
     )
     await maker.connect()
     await maker.place_order(limit_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.SELL,
         qty=Decimal(qty),
         price=Decimal(price),
@@ -459,7 +459,7 @@ async def test_ioc_keeps_what_crossed_and_cancels_the_rest(
 
     order = await private.place_order(
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.BUY,
             type=OrderType.LIMIT,
             qty=Decimal("0.8"),
@@ -484,7 +484,7 @@ async def test_an_ioc_that_crosses_fully_just_fills(
 
     order = await private.place_order(
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.BUY,
             type=OrderType.LIMIT,
             qty=Decimal("0.2"),
@@ -509,7 +509,7 @@ async def test_fill_or_kill_is_refused_when_the_book_is_too_thin(
     with pytest.raises(OrderError, match="fill-or-kill"):
         await private.place_order(
             PlaceOrderRequest(
-                symbol="BTCUSDT",
+                universal_ticker="Paper_Spot_BTCUSDT",
                 side=Side.BUY,
                 type=OrderType.LIMIT,
                 qty=Decimal("0.8"),

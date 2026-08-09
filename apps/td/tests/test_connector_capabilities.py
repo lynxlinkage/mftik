@@ -18,7 +18,11 @@ from mft.exchange.models import (
     Side,
 )
 from mft.exchange.oms import Position
+from mft.protocol import TD_POSITION_UPDATE, Topics, UntypedEnvelope
 from mft_td.session.session import Session
+
+#: A contract instrument — the only kind that has positions.
+PERP = "Bybit_Perp_BTCUSDT"
 
 API_ID = 11
 
@@ -45,7 +49,7 @@ class MinimalConnector:
         return Order(
             order_id="o-1",
             client_order_id=request.client_order_id,
-            symbol=request.symbol,
+            universal_ticker=f"Paper_Spot_{request.symbol}",
             side=request.side,
             type=request.type,
             qty=request.qty,
@@ -87,18 +91,28 @@ class FullConnector(MinimalConnector):
         super().__init__()
         self.reconnect_hooks: list[object] = []
         self.resolved: list[str] = []
+        self.position_pushes: asyncio.Queue = asyncio.Queue()
 
     async def fetch_positions(self) -> list[Position]:
-        return [Position(symbol="BTCUSDT", qty=Decimal("2"))]
+        return [
+            Position(universal_ticker=PERP, qty=Decimal("2"))
+        ]
 
     async def fetch_order_by_client_order_id(
-        self, client_order_id: str, *, symbol: str | None = None
+        self, client_order_id: str, *, ticker: object | None = None
     ) -> Order | None:
         self.resolved.append(client_order_id)
         return None
 
     def on_reconnect(self, callback: object) -> None:
         self.reconnect_hooks.append(callback)
+
+    def stream_positions(self) -> AsyncIterator:
+        return self._positions()
+
+    async def _positions(self) -> AsyncIterator:
+        while True:
+            yield await self.position_pushes.get()
 
 
 @pytest.fixture
@@ -122,7 +136,7 @@ def _pending(cid: str = "cid-1") -> Order:
     return Order(
         order_id="",
         client_order_id=cid,
-        symbol="BTCUSDT",
+        universal_ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         type=OrderType.LIMIT,
         qty=Decimal("1"),
@@ -158,8 +172,11 @@ async def test_a_venue_with_positions_has_them_applied(broker: Broker) -> None:
 
     view = await session.reconcile()
 
-    assert "BTCUSDT" in view.positions
-    assert view.positions["BTCUSDT"].qty == Decimal("2")
+    # Keyed by the instrument, not the symbol: a unified account holds the
+    # perp and the spot pair under one credential and ``BTCUSDT`` names both.
+    assert PERP in view.positions
+    assert view.positions[PERP].qty == Decimal("2")
+    assert view.positions[PERP].symbol == "BTCUSDT"
 
 
 # --- resolving an unacknowledged order --------------------------------------
@@ -182,3 +199,91 @@ async def test_a_venue_that_can_resolve_by_cid_is_asked(broker: Broker) -> None:
     await session.resolve_unknown(_pending())
 
     assert connector.resolved == ["cid-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_position_push_reaches_the_oms_and_the_wire(
+    broker: Broker,
+) -> None:
+    """The venue's own figure, announced rather than merely booked.
+
+    A position moves on funding, ADL and liquidation, none of which arrive as
+    a fill — so a strategy inferring its exposure from its own fills would
+    drift, and only this tells it when.
+    """
+    seen: list[UntypedEnvelope] = []
+    stop = asyncio.Event()
+    pump = asyncio.create_task(
+        _collect(broker, Topics.td_global(API_ID), seen, stop)
+    )
+    await asyncio.sleep(0.05)
+
+    connector = FullConnector()
+    session = _session(broker, connector)
+    await session.start()
+    try:
+        connector.position_pushes.put_nowait(
+            Position(
+                universal_ticker=PERP,
+                qty=Decimal("-3"),
+                entry_price=Decimal("60000"),
+            )
+        )
+        # Recon already seeded a long 2 from ``fetch_positions``; the push is
+        # the venue changing its mind, and it wins.
+        await _wait_until(
+            lambda: session.oms.view().positions[PERP].qty == Decimal("-3")
+        )
+
+        held = session.oms.view().positions[PERP]
+        assert held.qty == Decimal("-3")
+        assert held.entry_price == Decimal("60000")
+
+        await _wait_until(
+            lambda: any(e.type == TD_POSITION_UPDATE for e in seen)
+        )
+        announced = next(e for e in seen if e.type == TD_POSITION_UPDATE)
+        assert announced.payload["universal_ticker"] == PERP
+        assert announced.payload["qty"] == "-3"
+    finally:
+        stop.set()
+        pump.cancel()
+        await session.destroy()
+
+
+@pytest.mark.asyncio
+async def test_a_closed_position_is_dropped_from_the_book(
+    broker: Broker,
+) -> None:
+    """Bybit reports a close as a zero, not as silence."""
+    connector = FullConnector()
+    session = _session(broker, connector)
+    await session.start()
+    try:
+        await _wait_until(lambda: PERP in session.oms.view().positions)
+
+        connector.position_pushes.put_nowait(
+            Position(universal_ticker=PERP, qty=Decimal("0"))
+        )
+        await _wait_until(lambda: PERP not in session.oms.view().positions)
+    finally:
+        await session.destroy()
+
+
+async def _collect(
+    broker: Broker,
+    subject: str,
+    sink: list[UntypedEnvelope],
+    stop: asyncio.Event,
+) -> None:
+    async for env in broker.subscribe(subject, stop=stop):
+        sink.append(env)
+
+
+async def _wait_until(predicate, timeout: float = 3.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached")

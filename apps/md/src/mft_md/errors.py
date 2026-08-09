@@ -119,6 +119,30 @@ BINANCE = VenueErrors(
     },
 )
 
+#: Bybit v5. Numeric codes only, five and six digit, so an unmapped one passes
+#: through as itself with no risk of being read as a code this platform
+#: assigned.
+#:
+#: Short for the same reason Binance's is: a public read has no funds, no
+#: credentials and no order to be wrong about. The ``1100xx``/``1701xx`` order
+#: families cannot reach a read at all, and what could — a symbol Bybit does
+#: not list, an interval it does not serve — is the whole surface.
+BYBIT = VenueErrors(
+    codes={
+        # request fields — an unknown interval, a limit past the ceiling, a
+        # category that does not go with the symbol
+        10001: QueryCode.VENUE_INVALID_PARAM,
+        # instrument
+        170210: QueryCode.VENUE_SYMBOL_NOT_FOUND,  # not open for trading
+        # pacing
+        10006: QueryCode.VENUE_RATE_LIMITED,  # too many visits
+        10018: QueryCode.VENUE_RATE_LIMITED,  # exceeded IP rate limit
+        # theirs, not ours
+        10000: QueryCode.VENUE_INTERNAL_ERROR,  # server timeout
+        10016: QueryCode.VENUE_INTERNAL_ERROR,  # server error
+    },
+)
+
 #: The paper engine, with nothing to map: it has no reader at all, so the
 #: factory refuses before any of this is reached. Listed so the venue is known
 #: rather than falling through as unrecognised.
@@ -128,6 +152,7 @@ PAPER = VenueErrors()
 #: reports as its ``name``.
 VENUES: dict[str, VenueErrors] = {
     "Binance": BINANCE,
+    "Bybit": BYBIT,
     "Gate": GATE,
     "Paper": PAPER,
 }
@@ -195,6 +220,7 @@ __all__ = [
     "BY_TYPE",
     "GATE",
     "PAPER",
+    "BYBIT",
     "VENUES",
     "VenueErrors",
     "normalize",

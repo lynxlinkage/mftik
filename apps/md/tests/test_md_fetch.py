@@ -41,7 +41,7 @@ REPLY = Topics.md_fetch_reply("caller-1")
 
 def _kline() -> Kline:
     return Kline(
-        symbol=SYMBOL,
+        universal_ticker=f"Paper_Spot_{SYMBOL}",
         interval="1h",
         open_time=1_700_000_000,
         open=Decimal("60100"),
@@ -91,7 +91,7 @@ class FakeReader:
             await self.gate.wait()
         if self.raises is not None:
             raise self.raises
-        return self.book or OrderBook(symbol=ticker.symbol, bids=[], asks=[])
+        return self.book or OrderBook(universal_ticker=str(ticker), bids=[], asks=[])
 
     async def fetch_best_quote(self, ticker: UniversalTicker) -> BestQuote | None:
         if self.gate is not None:
@@ -538,7 +538,7 @@ async def test_an_order_book_query_comes_back_as_a_book(
 ) -> None:
     reader = FakeReader()
     reader.book = OrderBook(
-        symbol=SYMBOL,
+        universal_ticker=f"Paper_Spot_{SYMBOL}",
         bids=[BookLevel(price=Decimal("59999"), qty=Decimal("3"))],
         asks=[BookLevel(price=Decimal("60001"), qty=Decimal("1"))],
     )
@@ -562,7 +562,7 @@ async def test_a_best_quote_query_comes_back_as_a_quote(
 ) -> None:
     reader = FakeReader()
     reader.quote = BestQuote(
-        symbol=SYMBOL,
+        universal_ticker=f"Paper_Spot_{SYMBOL}",
         bid=Decimal("59999"),
         bid_qty=Decimal("3"),
         ask=Decimal("60001"),

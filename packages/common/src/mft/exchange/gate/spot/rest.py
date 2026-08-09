@@ -41,6 +41,7 @@ from mft.exchange.models import (
     OrderBook,
     Ticker,
 )
+from mft.exchange.tickers import UniversalTicker
 
 logger = logging.getLogger(__name__)
 
@@ -172,27 +173,39 @@ class GateSpotRest(_GateRestTransport):
         }
 
     async def fetch_open_orders(
-        self, currency_pair: str | None = None
+        self, currency_pair: str, *, ticker: UniversalTicker
     ) -> list[Order]:
-        """Open orders, either for one pair or across the account.
+        """``GET /spot/orders?status=open`` — one pair's resting orders."""
+        rows = await self._get(
+            "/spot/orders",
+            {"currency_pair": currency_pair, "status": "open"},
+        )
+        return [_to_order(row, ticker) for row in rows or []]
 
-        ``GET /spot/orders?status=open`` needs a pair; ``GET /spot/open_orders``
-        returns every pair grouped, so the two are served by different
-        endpoints and flattened to the same list here.
+    async def fetch_open_order_rows(self) -> dict[str, list[GateOrderAck]]:
+        """``GET /spot/open_orders`` — every pair's resting orders, grouped.
+
+        Venue-native, and grouped rather than flattened, because the two are
+        the same fact: each group is a different instrument, and turning a row
+        into an :class:`~mft.exchange.models.Order` needs that instrument's
+        ticker. Flattening here would throw away the only thing that says which
+        row belongs to which — see
+        :meth:`~mft.exchange.gate.spot.private.GateSpotPrivateClient.\
+fetch_open_orders`, which resolves one ticker per group rather than one per
+        row.
         """
-        if currency_pair:
-            rows = await self._get(
-                "/spot/orders",
-                {"currency_pair": currency_pair, "status": "open"},
-            )
-            return [_to_order(row) for row in rows or []]
-
         grouped = await self._get("/spot/open_orders")
-        orders: list[Order] = []
+        out: dict[str, list[GateOrderAck]] = {}
         for group in grouped or []:
-            for row in group.get("orders", []) or []:
-                orders.append(_to_order(row))
-        return orders
+            pair = str(group.get("currency_pair") or "")
+            rows = [
+                GateOrderAck.model_validate(row)
+                for row in group.get("orders", []) or []
+            ]
+            if not pair or not rows:
+                continue
+            out.setdefault(pair, []).extend(rows)
+        return out
 
     async def fetch_balances(self) -> list[Balance]:
         """``GET /spot/accounts`` — per-currency available/locked."""
@@ -206,12 +219,14 @@ class GateSpotRest(_GateRestTransport):
             for row in rows or []
         ]
 
-    async def fetch_order(self, order_id: str, *, currency_pair: str) -> Order:
+    async def fetch_order(
+        self, order_id: str, *, currency_pair: str, ticker: UniversalTicker
+    ) -> Order:
         """``GET /spot/orders/{order_id}`` — used to resolve a single order."""
         row = await self._get(
             f"/spot/orders/{order_id}", {"currency_pair": currency_pair}
         )
-        return _to_order(row)
+        return _to_order(row, ticker)
 
 
 class GateSpotPublicRest(_GateRestTransport):
@@ -235,25 +250,27 @@ class GateSpotPublicRest(_GateRestTransport):
             if row.get("trade_status") == "tradable"
         ]
 
-    async def fetch_ticker(self, currency_pair: str) -> Ticker:
+    async def fetch_ticker(
+        self, currency_pair: str, *, ticker: UniversalTicker
+    ) -> Ticker:
         """``GET /spot/tickers`` — the same row shape ``spot.tickers`` pushes."""
         rows = await self._get("/spot/tickers", {"currency_pair": currency_pair})
         if not rows:
             raise GateRestError(200, "not_found", f"no ticker for {currency_pair}")
-        return GateTicker.model_validate(rows[0]).to_ticker()
+        return GateTicker.model_validate(rows[0]).to_ticker(ticker)
 
     async def fetch_order_book(
-        self, currency_pair: str, *, depth: int = 10
+        self, currency_pair: str, *, ticker: UniversalTicker, depth: int = 10
     ) -> OrderBook:
         """``GET /spot/order_book`` — a full snapshot, capped at ``depth``.
 
-        The reply carries no pair, so the caller's is stamped back on.
+        The reply carries no pair, so the caller's ticker is stamped on.
         """
         row = await self._get(
             "/spot/order_book", {"currency_pair": currency_pair, "limit": depth}
         )
         return OrderBook(
-            symbol=currency_pair,
+            universal_ticker=str(ticker),
             bids=_book_levels(row.get("bids")),
             asks=_book_levels(row.get("asks")),
             # ``current`` is when Gate built the snapshot, in ms.
@@ -261,7 +278,12 @@ class GateSpotPublicRest(_GateRestTransport):
         )
 
     async def fetch_klines(
-        self, currency_pair: str, interval: str, *, limit: int = 100
+        self,
+        currency_pair: str,
+        interval: str,
+        *,
+        ticker: UniversalTicker,
+        limit: int = 100,
     ) -> list[Kline]:
         """``GET /spot/candlesticks`` — recent candles, oldest first.
 
@@ -281,10 +303,10 @@ class GateSpotPublicRest(_GateRestTransport):
                 "limit": limit,
             },
         )
-        return [_to_kline(row, currency_pair, interval) for row in rows or []]
+        return [_to_kline(row, ticker, interval) for row in rows or []]
 
 
-def _to_kline(row: list[Any], currency_pair: str, interval: str) -> Kline:
+def _to_kline(row: list[Any], ticker: UniversalTicker, interval: str) -> Kline:
     """One ``/spot/candlesticks`` row.
 
     Gate's column order is its own: the close price comes *before* high, low
@@ -304,11 +326,11 @@ def _to_kline(row: list[Any], currency_pair: str, interval: str) -> Kline:
         raise GateRestError(
             200,
             "bad_response",
-            f"candlestick row for {currency_pair} {interval} has "
+            f"candlestick row for {ticker} {interval} has "
             f"{len(row)} columns, expected at least 7: {row!r}",
         )
     return Kline(
-        symbol=currency_pair,
+        universal_ticker=str(ticker),
         interval=interval,
         open_time=float(row[0]),
         open=Decimal(str(row[5])),
@@ -362,9 +384,9 @@ def _dec(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
-def _to_order(row: dict[str, Any]) -> Order:
+def _to_order(row: dict[str, Any], ticker: UniversalTicker) -> Order:
     """REST order rows share the trading-call reply shape (``status``-based)."""
-    return GateOrderAck.model_validate(row).to_order()
+    return GateOrderAck.model_validate(row).to_order(ticker)
 
 
 __all__ = [

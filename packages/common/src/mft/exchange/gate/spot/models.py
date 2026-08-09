@@ -27,6 +27,7 @@ from mft.exchange.models import (
     Ticker,
     Trade,
 )
+from mft.exchange.tickers import UniversalTicker
 
 #: Gate requires user-supplied order ids to start with ``t-``.
 TEXT_PREFIX = "t-"
@@ -90,10 +91,10 @@ class GateTicker(GateMessage):
     high_24h: Decimal | None = None
     low_24h: Decimal | None = None
 
-    def to_ticker(self) -> Ticker:
+    def to_ticker(self, ticker: UniversalTicker) -> Ticker:
         """Requires both sides quoted; Gate omits them on an empty book."""
         return Ticker(
-            symbol=self.currency_pair,
+            universal_ticker=str(ticker),
             bid=self.highest_bid if self.highest_bid is not None else self.last,
             ask=self.lowest_ask if self.lowest_ask is not None else self.last,
             last=self.last,
@@ -111,10 +112,10 @@ class GateTrade(GateMessage):
     amount: Decimal
     price: Decimal
 
-    def to_trade(self) -> Trade:
+    def to_trade(self, ticker: UniversalTicker) -> Trade:
         return Trade(
             trade_id=str(self.id),
-            symbol=self.currency_pair,
+            universal_ticker=str(ticker),
             price=self.price,
             qty=self.amount,
             side=self.side,
@@ -186,9 +187,9 @@ class GateOrderBook(GateMessage):
     bids: list[Any] = Field(default_factory=list)
     asks: list[Any] = Field(default_factory=list)
 
-    def to_order_book(self) -> OrderBook:
+    def to_order_book(self, ticker: UniversalTicker) -> OrderBook:
         return OrderBook(
-            symbol=self.s,
+            universal_ticker=str(ticker),
             bids=_levels(self.bids),
             asks=_levels(self.asks),
             ts=_secs(self.t),
@@ -287,11 +288,11 @@ class GateOrderUpdate(GateMessage):
             else OrderStatus.NEW
         )
 
-    def to_order(self) -> Order:
+    def to_order(self, ticker: UniversalTicker) -> Order:
         return Order(
             order_id=self.id,
             client_order_id=self.client_order_id,
-            symbol=self.currency_pair,
+            universal_ticker=str(ticker),
             side=self.side,
             type=self.type,
             status=self.status,
@@ -324,12 +325,12 @@ class GateUserTrade(GateMessage):
     def client_order_id(self) -> str | None:
         return from_text(self.text)
 
-    def to_fill(self) -> Fill:
+    def to_fill(self, ticker: UniversalTicker) -> Fill:
         return Fill(
             fill_id=str(self.id),
             order_id=self.order_id,
             client_order_id=self.client_order_id,
-            symbol=self.currency_pair,
+            universal_ticker=str(ticker),
             side=self.side,
             price=self.price,
             qty=self.amount,
@@ -392,11 +393,11 @@ class GateOrderAck(GateMessage):
             else OrderStatus.NEW
         )
 
-    def to_order(self) -> Order:
+    def to_order(self, ticker: UniversalTicker) -> Order:
         return Order(
             order_id=self.id,
             client_order_id=self.client_order_id,
-            symbol=self.currency_pair,
+            universal_ticker=str(ticker),
             side=self.side,
             type=self.type,
             status=self.order_status,

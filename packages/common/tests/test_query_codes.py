@@ -187,7 +187,7 @@ def test_klines_result_roundtrip() -> None:
             interval="1h",
             klines=[
                 Kline(
-                    symbol="BTCUSDT",
+                    universal_ticker="Gate_Spot_BTCUSDT",
                     interval="1h",
                     open_time=1_700_000_000,
                     open=Decimal("60100"),

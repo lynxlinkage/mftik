@@ -23,6 +23,8 @@ from mft.exchange.models import (
 from mft.exchange.tickers import UniversalTicker
 
 NATIVE = "BTC-USDT"
+#: The instrument every order in this module is for.
+TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")
 
 OPEN_ORDER = {
     "symbol": NATIVE,
@@ -96,7 +98,7 @@ def _client(
 def _limit(**overrides: Any) -> PlaceOrderRequest:
     return PlaceOrderRequest(
         **{
-            "symbol": "BTCUSDT",
+            "universal_ticker": str(TICKER),
             "side": Side.BUY,
             "type": OrderType.LIMIT,
             "qty": Decimal("0.001"),
@@ -399,7 +401,7 @@ async def test_an_order_the_venue_never_saw_reads_as_none(
         "msg": "Order does not exist.",
     }
     async with _client(binance_api, pem) as client:
-        found = await client.fetch_order_by_client_order_id("c-42", symbol="BTCUSDT")
+        found = await client.fetch_order_by_client_order_id("c-42", ticker=TICKER)
 
     assert found is None
 
@@ -411,7 +413,7 @@ async def test_a_real_failure_on_that_lookup_still_raises(
     binance_api.errors[m.ORDER_STATUS] = {"code": -1021, "msg": "Timestamp ahead."}
     async with _client(binance_api, pem) as client:
         with pytest.raises(OrderError, match="-1021"):
-            await client.fetch_order_by_client_order_id("c-42", symbol="BTCUSDT")
+            await client.fetch_order_by_client_order_id("c-42", ticker=TICKER)
 
 
 async def test_that_lookup_needs_a_symbol_it_has_never_seen(

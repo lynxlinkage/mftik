@@ -48,7 +48,7 @@ async def test_remote_private_place_cancel(broker: Broker) -> None:
     await exchange.place_order(
         "paper-key-2",
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.SELL,
             type=OrderType.LIMIT,
             qty=Decimal("10"),
@@ -68,7 +68,7 @@ async def test_remote_private_place_cancel(broker: Broker) -> None:
 
     # Resting below ask — does not cross.
     order = await private.place_order(limit_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("1"),
         price=Decimal("50000"),
@@ -81,7 +81,7 @@ async def test_remote_private_place_cancel(broker: Broker) -> None:
 
     # Cross the seeded ask — fills against paper-key-2.
     filled = await private.place_order(limit_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("1"),
         price=Decimal("50001"),

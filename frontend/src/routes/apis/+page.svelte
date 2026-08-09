@@ -18,6 +18,11 @@
 	let type = $state('HMAC');
 	let passphrase = $state('');
 
+	/** Inline rename of the account column (double-click). */
+	let editingId = $state<number | null>(null);
+	let editingName = $state('');
+	let renameInput = $state<HTMLInputElement | null>(null);
+
 	const selected = $derived(venues.find((v) => v.name === venue) ?? null);
 	const types = $derived(selected?.api_types ?? []);
 	const needsPassphrase = $derived(selected?.requires_passphrase ?? false);
@@ -105,6 +110,37 @@
 		error = null;
 		try {
 			await api.deleteApi(row.id);
+			await refresh();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			busy = false;
+		}
+	}
+
+	function startRename(row: ApiCredential) {
+		if (busy) return;
+		editingId = row.id;
+		editingName = row.name;
+		queueMicrotask(() => {
+			renameInput?.focus();
+			renameInput?.select();
+		});
+	}
+
+	function cancelRename() {
+		editingId = null;
+	}
+
+	async function commitRename(row: ApiCredential) {
+		if (editingId !== row.id) return;
+		const next = editingName.trim();
+		editingId = null;
+		if (!next || next === row.name) return;
+		busy = true;
+		error = null;
+		try {
+			await api.renameApi(row.id, next);
 			await refresh();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -216,7 +252,33 @@
 							<a href={`/td/${row.id}`}>{row.id}</a>
 						</td>
 						<td>
-							<span title={`account_id=${row.account_id}`}>{row.name}</span>
+							{#if editingId === row.id}
+								<input
+									class="rename-input"
+									bind:this={renameInput}
+									bind:value={editingName}
+									disabled={busy}
+									aria-label="Rename account"
+									onkeydown={(e) => {
+										if (e.key === 'Enter') {
+											e.preventDefault();
+											void commitRename(row);
+										} else if (e.key === 'Escape') {
+											e.preventDefault();
+											cancelRename();
+										}
+									}}
+									onblur={() => void commitRename(row)}
+								/>
+							{:else}
+								<span
+									class="renameable"
+									title={`account_id=${row.account_id} — double-click to rename`}
+									ondblclick={() => startRename(row)}
+								>
+									{row.name}
+								</span>
+							{/if}
 						</td>
 						<td><code>{row.venue}</code></td>
 						<td><code>{row.api_key}</code></td>
@@ -280,5 +342,25 @@
 	code {
 		font-family: var(--font);
 		font-size: 0.82rem;
+	}
+
+	.renameable {
+		cursor: text;
+		border-bottom: 1px dashed transparent;
+	}
+
+	.renameable:hover {
+		border-bottom-color: var(--muted);
+	}
+
+	.rename-input {
+		min-width: 8rem;
+		width: 100%;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		color: var(--text);
+		padding: 0.25rem 0.4rem;
+		border-radius: var(--radius);
+		font: inherit;
 	}
 </style>

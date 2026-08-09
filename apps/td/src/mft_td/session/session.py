@@ -27,6 +27,7 @@ from mft.protocol import (
     TD_FILL,
     TD_ORDER_REJECT,
     TD_ORDER_UPDATE,
+    TD_POSITION_UPDATE,
     CancelReject,
     OrderReject,
     RejectCode,
@@ -57,6 +58,7 @@ PENDING_SWEEP_INTERVAL_S = 1.0
 OrderCallback = Callable[[Order], None]
 FillCallback = Callable[[Fill], None]
 BalanceCallback = Callable[[Balance], None]
+PositionCallback = Callable[[Position], None]
 
 
 class TradingConnector(Protocol):
@@ -69,7 +71,9 @@ class TradingConnector(Protocol):
 
     Three things are deliberately absent, because not every venue has them:
 
-    * ``fetch_positions`` — spot venues have no positions to report.
+    * ``fetch_positions`` / ``stream_positions`` — only a venue with contract
+      books has any. A spot venue does not report zero positions; it reports
+      nothing, and the two are different answers.
     * ``fetch_order_by_client_order_id`` — the way out of ``UNKNOWN``, which a
       venue that cannot look an order up by our id simply does not offer.
     * ``on_reconnect`` — only a socket-backed venue has a reconnect to hear
@@ -137,6 +141,7 @@ class Session:
         self._order_cbs: list[OrderCallback] = []
         self._fill_cbs: list[FillCallback] = []
         self._balance_cbs: list[BalanceCallback] = []
+        self._position_cbs: list[PositionCallback] = []
         self._tasks: list[asyncio.Task[Any]] = []
         self._started = False
         self._destroyed = False
@@ -174,6 +179,9 @@ class Session:
     def on_balance(self, cb: BalanceCallback) -> None:
         self._balance_cbs.append(cb)
 
+    def on_position(self, cb: PositionCallback) -> None:
+        self._position_cbs.append(cb)
+
     async def start(self) -> None:
         """Connect private venue client, seed OMS, and begin stream pumps."""
         if self._started:
@@ -203,6 +211,17 @@ class Session:
                 self._sweep_loop(), name=f"sess-{self.api_id}-sweep"
             ),
         ]
+        # Only if the venue has positions at all. A spot venue offers no such
+        # stream, and pumping one that does not exist would fail the start of
+        # a session that is otherwise perfectly healthy.
+        stream_positions = getattr(self.private, "stream_positions", None)
+        if stream_positions is not None:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._pump(stream_positions(), self._dispatch_position),
+                    name=f"sess-{self.api_id}-positions",
+                )
+            )
         # A dead socket looks exactly like a quiet venue, so rebuild from the
         # venue rather than trusting a book that stopped updating. Only a
         # socket-backed venue has a reconnect to report; the rest simply have
@@ -294,7 +313,11 @@ class Session:
         """
         order = Order(
             client_order_id=request.client_order_id,
-            symbol=request.symbol,
+            # The connector's own market: an order arrives as a bare symbol
+            # because ``api_id`` already pins which account, and so which
+            # market, it is for. A unified-account venue would have to be told,
+            # and that is where ``OrderSubmit`` grows a ticker.
+            universal_ticker=request.universal_ticker,
             side=request.side,
             type=request.type,
             status=OrderStatus.PENDING_NEW,
@@ -447,7 +470,7 @@ class Session:
             )
             return None
         try:
-            found = await resolve(cid, symbol=order.symbol)
+            found = await resolve(cid, ticker=order.ticker)
         except Exception:
             logger.exception(
                 "TD resolve failed api_id=%s cid=%s", self.api_id, cid
@@ -492,11 +515,11 @@ class Session:
         rather than being blocked — the ledger is a guard against overspending
         what we know about, not a gate that fails closed on missing data.
         """
-        instrument = await self._instrument(request.symbol)
+        instrument = await self._instrument(request.ticker)
         if instrument is None:
             logger.debug(
                 "TD no instrument for %s api_id=%s; submitting unreserved",
-                request.symbol,
+                request.universal_ticker,
                 self.api_id,
             )
             return None
@@ -505,7 +528,7 @@ class Session:
             logger.debug(
                 "TD cannot price %s %s; submitting unreserved",
                 request.type,
-                request.symbol,
+                request.universal_ticker,
             )
             return None
         asset, amount = held
@@ -549,16 +572,16 @@ class Session:
                 asset,
             )
 
-    async def _instrument(self, symbol: str) -> Instrument | None:
+    async def _instrument(self, ticker: UniversalTicker) -> Instrument | None:
+        """The instrument an order is for, or None if the plane cannot say.
+
+        The order names it. TD used to build the ticker here from the
+        connector's own venue and category, which worked only because every
+        venue traded one market — a unified account has two, and ``BTCUSDT``
+        does not say which.
+        """
         if self.symbols is None:
             return None
-        # The connector's own venue and category: an order arrives as a bare
-        # symbol because ``api_id`` already pins which account, and so which
-        # market, it is for. A unified-account venue would have to be told,
-        # and that is where ``OrderSubmit`` grows a category.
-        ticker = UniversalTicker.of(
-            self.private.name, self.private.category, symbol
-        )
         try:
             info = await self.symbols.get(ticker)
         except Exception:
@@ -605,7 +628,7 @@ class Session:
         reason: str,
         client_order_id: str | None = None,
         order_id: str | None = None,
-        symbol: str | None = None,
+        universal_ticker: str | None = None,
         error_code: int | str = RejectCode.NONE,
     ) -> None:
         """Publish a submit reject on ``td.{api_id}.global``.
@@ -620,7 +643,7 @@ class Session:
                 api_id=self.api_id,
                 client_order_id=client_order_id,
                 order_id=order_id,
-                symbol=symbol,
+                universal_ticker=universal_ticker,
                 reason=reason,
                 error_code=error_code,
             ),
@@ -705,7 +728,7 @@ class Session:
                 reason="rejected",
                 client_order_id=order.client_order_id,
                 order_id=order.order_id,
-                symbol=order.symbol,
+                universal_ticker=order.universal_ticker,
                 error_code=RejectCode.VENUE_REJECTED,
             )
         else:
@@ -715,6 +738,20 @@ class Session:
         for cb in list(self._fill_cbs):
             cb(fill)
         self._schedule_publish(self._publish_global(TD_FILL, fill))
+
+    def _dispatch_position(self, position: Position) -> None:
+        """Fan out one position change and announce it.
+
+        Announced rather than merely booked: a position moves for reasons no
+        fill of ours reports — funding, ADL, liquidation — so a strategy that
+        inferred its exposure from its own fills would drift, and only the
+        venue can say when.
+        """
+        for cb in list(self._position_cbs):
+            cb(position)
+        self._schedule_publish(
+            self._publish_global(TD_POSITION_UPDATE, position)
+        )
 
     def _dispatch_balance(self, balance: Balance) -> None:
         # The ledger sees the venue's number first so anything reading it

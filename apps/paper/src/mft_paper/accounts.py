@@ -26,7 +26,7 @@ LIQUIDITY_ORDERS: tuple[tuple[str, PlaceOrderRequest], ...] = (
     (
         "paper-key-2",
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.BUY,
             type=OrderType.LIMIT,
             qty=Decimal("10"),
@@ -37,7 +37,7 @@ LIQUIDITY_ORDERS: tuple[tuple[str, PlaceOrderRequest], ...] = (
     (
         "paper-key-2",
         PlaceOrderRequest(
-            symbol="BTCUSDT",
+            universal_ticker="Paper_Spot_BTCUSDT",
             side=Side.SELL,
             type=OrderType.LIMIT,
             qty=Decimal("10"),

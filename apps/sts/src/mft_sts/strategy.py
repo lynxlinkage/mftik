@@ -15,6 +15,7 @@ from mft.exchange.models import (
     Ticker,
     Trade,
 )
+from mft.exchange.oms import Position
 from mft.protocol import (
     STS_RECON,
     CancelReject,
@@ -68,6 +69,7 @@ class Strategy:
 
     Private events from ``td.{api_id}.global`` (wired):
         on_order_update, on_fill, on_balance_update
+        on_position_update (contract venues only — spot has no positions)
         on_order_reject (submit fail), on_cancel_reject (cancel fail)
         submit → on_order_update | on_order_reject
         cancel → on_order_update | on_cancel_reject
@@ -281,6 +283,20 @@ class Strategy:
 
     async def on_balance_update(self, api_id: int, balance: Balance) -> None:
         """Handle balance updates from TD."""
+
+    async def on_position_update(self, api_id: int, position: Position) -> None:
+        """Handle position changes from TD — contract venues only.
+
+        The venue's own figure for one instrument, not something inferred from
+        this strategy's fills: a position also moves on funding, ADL and
+        liquidation, none of which arrive as a fill. Whatever this says is
+        what the venue will settle on.
+
+        ``position.qty`` is signed, and a position closing arrives as a zero
+        rather than as a message that stops coming. Spot venues never call
+        this — they have no positions, which is not the same as having flat
+        ones.
+        """
 
     # --- public events (md.{session_id}) -----------------------------------
     #

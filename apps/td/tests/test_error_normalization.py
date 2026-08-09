@@ -11,6 +11,7 @@ import pytest
 from mft.exchange import venues
 from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mft.exchange.binance.spot.protocol import BinanceWsError
+from mft.exchange.bybit.protocol import BybitRestError, BybitWsError
 from mft.exchange.errors import (
     ExchangeError,
     ExchangeNotConnectedError,
@@ -395,3 +396,50 @@ def test_none_is_not_a_refusal() -> None:
     assert not is_venue(RejectCode.NONE)
     assert not is_td_internal(RejectCode.NONE)
     assert not is_venue("")
+
+
+# --- Bybit ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (110007, RejectCode.VENUE_INSUFFICIENT_BALANCE),
+        (170131, RejectCode.VENUE_INSUFFICIENT_BALANCE),
+        (110001, RejectCode.VENUE_ORDER_NOT_FOUND),
+        # The same fact, numbered differently on the other book.
+        (170213, RejectCode.VENUE_ORDER_NOT_FOUND),
+        (10004, RejectCode.VENUE_AUTH_FAILED),
+        (10010, RejectCode.VENUE_IP_NOT_WHITELISTED),
+        (10006, RejectCode.VENUE_RATE_LIMITED),
+        (110020, RejectCode.VENUE_RISK_LIMIT),
+        (170140, RejectCode.VENUE_BELOW_MINIMUM),
+    ],
+)
+def test_bybit_codes_normalize(code: int, expected: RejectCode) -> None:
+    assert normalize(BybitWsError(code, "refused"), venue="Bybit") == expected
+
+
+def test_a_bybit_code_survives_being_wrapped_as_an_order_error() -> None:
+    """The connector re-raises venue rejections as ``OrderError``, which
+    carries no code — so the cause chain is where the answer lives."""
+    cause = BybitWsError(110007, "ab not enough for new order", op="order.create")
+    wrapped = OrderError(str(cause))
+    wrapped.__cause__ = cause
+
+    assert (
+        normalize(wrapped, venue="Bybit")
+        == RejectCode.VENUE_INSUFFICIENT_BALANCE
+    )
+
+
+def test_an_unmapped_bybit_code_passes_through_as_itself() -> None:
+    """Bybit numbers in five and six digits, so one cannot be mistaken for a
+    code this platform assigned — see ``mft.protocol.reject_codes``."""
+    assert normalize(BybitWsError(999999, "new one"), venue="Bybit") == 999999
+
+
+def test_a_rest_refusal_normalizes_like_a_socket_one() -> None:
+    """Same numbers over both transports, which is why one table covers them."""
+    rest = BybitRestError(170213, "Order does not exist", status=200)
+    assert normalize(rest, venue="Bybit") == RejectCode.VENUE_ORDER_NOT_FOUND

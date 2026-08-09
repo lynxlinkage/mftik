@@ -36,9 +36,16 @@ def _t(symbol: str, venue: str = VENUE, category: str = "Spot") -> UniversalTick
 class StubSource:
     """An instrument source whose listing the test controls."""
 
-    def __init__(self, instruments: list[Instrument], venue: str = VENUE) -> None:
+    def __init__(
+        self,
+        instruments: list[Instrument],
+        venue: str = VENUE,
+        category: Category = Category.SPOT,
+    ) -> None:
         self.venue = venue
-        self.category = Category.SPOT
+        # One source is one (venue, category) — the unit a venue's listing
+        # endpoint serves and a refresh can safely delist within.
+        self.category = category
         self.instruments = instruments
         self.fail: Exception | None = None
         self.fetches = 0
@@ -213,6 +220,75 @@ async def test_one_venue_failing_does_not_block_the_others(
     assert "Paper" in result["failed"]
     assert "endpoint down" in result["failed"]["Paper"]
     assert [s.symbol for s in await plane.list_symbols()] == ["BTCUSDT"]
+
+
+async def test_a_unified_venue_refreshes_each_book_independently(
+    plane_factory,
+) -> None:
+    """Bybit is one venue with two listings, and they must not delist each
+    other: a spot response that omits a perp says nothing about the perp."""
+    spot = StubSource(
+        [_inst("BTC", venue="Bybit", exch_ticker="BTCUSDT")],
+        venue="Bybit",
+    )
+    perp = StubSource(
+        [
+            _inst(
+                "BTC",
+                venue="Bybit",
+                category=Category.PERP,
+                exch_ticker="BTCUSDT",
+            ),
+            _inst(
+                "ETH",
+                venue="Bybit",
+                category=Category.PERP,
+                exch_ticker="ETHUSDT",
+            ),
+        ],
+        venue="Bybit",
+        category=Category.PERP,
+    )
+    plane = plane_factory([spot, perp])
+
+    result = await plane.refresh()
+
+    # The tallies are per venue, so the two books add up rather than the
+    # second overwriting the first.
+    assert result["refreshed"] == {"Bybit": 3}
+    assert plane.venues == ["Bybit"]
+    tickers = {
+        s.universal_ticker for s in await plane.list_symbols(venue="Bybit")
+    }
+    assert tickers == {
+        "Bybit_Spot_BTCUSDT",
+        "Bybit_Perp_BTCUSDT",
+        "Bybit_Perp_ETHUSDT",
+    }
+
+    # Delisting on one book leaves the other alone.
+    perp.instruments = perp.instruments[:1]
+    result = await plane.refresh()
+
+    assert result["deactivated"] == {"Bybit": 1}
+    tickers = {
+        s.universal_ticker for s in await plane.list_symbols(venue="Bybit")
+    }
+    assert tickers == {"Bybit_Spot_BTCUSDT", "Bybit_Perp_BTCUSDT"}
+
+
+async def test_a_failure_names_the_book_it_happened_on(plane_factory) -> None:
+    """One venue name, two sources — the message is the only place that can
+    say which of them was down."""
+    spot = StubSource([_inst("BTC", venue="Bybit")], venue="Bybit")
+    perp = StubSource([], venue="Bybit", category=Category.PERP)
+    perp.fail = RuntimeError("endpoint down")
+    plane = plane_factory([spot, perp])
+
+    result = await plane.refresh()
+
+    assert result["refreshed"] == {"Bybit": 1}
+    assert "Perp: RuntimeError: endpoint down" in result["failed"]["Bybit"]
 
 
 async def test_refresh_can_target_one_venue(plane_factory) -> None:

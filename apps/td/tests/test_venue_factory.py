@@ -17,8 +17,10 @@ from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange
 from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mft.exchange.binance.spot.protocol import BinanceAuthError
+from mft.exchange.bybit.private import BybitPrivateClient
 from mft.exchange.errors import ExchangeError
 from mft.exchange.gate.spot.private import GateSpotPrivateClient
+from mft.exchange.tickers import Category
 from mft_td.session import PaperSessionFactory, VenueSessionFactory
 
 #: What a Binance credential's ``api_secret`` actually holds: an Ed25519
@@ -120,6 +122,35 @@ async def test_binance_venue_builds_a_binance_client(broker: Broker) -> None:
     assert session.private.name == "Binance"
     assert session.private.api_key == "bk"
     assert session.api_id == 8
+    # Built but not connected — the manager starts it.
+    assert not session.private.connected
+
+
+async def test_bybit_venue_builds_one_client_for_the_whole_account(
+    broker: Broker,
+) -> None:
+    """One credential, one connector — and it reports every book.
+
+    ``category`` picks the book orders go to; the account stream is unscoped,
+    so a spot-ordering session still sees the perp positions that share the
+    wallet.
+    """
+    rows = {
+        9: FakeApiRow(id=9, venue="Bybit", api_key="yk", api_secret="ys"),
+    }
+    factory = _factory(broker, rows)
+
+    session = await factory.create(9)
+
+    assert isinstance(session.private, BybitPrivateClient)
+    assert session.private.name == "Bybit"
+    assert session.private.api_key == "yk"
+    assert session.private.category is Category.SPOT
+    # Unscoped: the private stream carries every category on the account.
+    assert session.private.stream.product is None
+    # The capability TD probes for before pumping a position feed.
+    assert hasattr(session.private, "stream_positions")
+    assert hasattr(session.private, "fetch_positions")
     # Built but not connected — the manager starts it.
     assert not session.private.connected
 

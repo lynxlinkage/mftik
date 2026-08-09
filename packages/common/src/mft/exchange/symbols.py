@@ -48,6 +48,28 @@ UniversalTicker` rather than a bare symbol: on a unified-account venue the
         """The venue's spelling → the universal ticker."""
 
 
+def check_venue(ticker: UniversalTicker, venue: str, categories=None) -> None:
+    """Refuse an order for an instrument this connector cannot trade.
+
+    TD checks the same thing at its own boundary, where a strategy's mistake
+    should be caught. This is the connector saying it for itself: it is also
+    reachable directly, and an order routed to the wrong venue is the one
+    mistake that cannot be undone by noticing later.
+    """
+    from mft.exchange.errors import OrderError
+
+    if ticker.venue != venue:
+        raise OrderError(
+            f"{venue} client was handed a {ticker.venue} order: {ticker}"
+        )
+    if categories is not None and ticker.category not in categories:
+        traded = ", ".join(sorted(c.value for c in categories))
+        raise OrderError(
+            f"{venue} client trades {traded}; {ticker} is "
+            f"{ticker.category.value}"
+        )
+
+
 def canonical(symbol: str) -> str:
     """Normalize a spelling for lookup.
 
@@ -68,6 +90,7 @@ canonical_symbol = canonical
 
 __all__ = [
     "SymbolResolver",
+    "check_venue",
     "canonical",
     "canonical_symbol",
     "join",

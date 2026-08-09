@@ -70,7 +70,7 @@ async def test_recon_handshake_and_strategy_oms(broker: Broker) -> None:
     )
     await priv.connect()
     await priv.place_order(limit_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("0.01"),
         price=Decimal("1000"),

@@ -96,7 +96,7 @@ class PaperRemotePrivateClient(BaseClient):
             Envelope[PaperPlaceOrderRequest].wrap(
                 PaperPlaceOrderRequest(
                     credentials=self._creds,
-                    symbol=request.symbol,
+                    universal_ticker=request.universal_ticker,
                     side=request.side,
                     type=request.type,
                     qty=request.qty,

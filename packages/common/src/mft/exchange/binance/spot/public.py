@@ -179,35 +179,36 @@ class BinanceSpotPublicClient(BaseClient):
 
     async def fetch_ticker(self, ticker: UniversalTicker) -> Ticker:
         self._ensure_connected()
-        symbol, native = await self._resolve(ticker)
-        row = await self.api.fetch_ticker(native)
-        return row.model_copy(update={"symbol": symbol})
+        native = await self._resolve(ticker)
+        return await self.api.fetch_ticker(native, ticker=ticker)
 
     async def fetch_order_book(
         self, ticker: UniversalTicker, *, depth: int = 10
     ) -> OrderBook:
         self._ensure_connected()
-        symbol, native = await self._resolve(ticker)
-        book = await self.api.fetch_order_book(native, depth=depth)
-        return book.model_copy(update={"symbol": symbol})
+        native = await self._resolve(ticker)
+        return await self.api.fetch_order_book(
+            native, ticker=ticker, depth=depth
+        )
 
     async def fetch_klines(
         self, ticker: UniversalTicker, interval: str, *, limit: int = 100
     ) -> list[Kline]:
         """Recent candles, oldest first, in canonical symbol and interval.
 
-        Both spellings are translated on the way down and stamped back on the
-        way up, so what a caller passes in is what comes back out — Binance
-        answers in its own ``1M`` vocabulary and none of it escapes this method.
+        The interval is translated on the way down and stamped back on the way
+        up, so what a caller passes in is what comes back out — Binance answers
+        in its own ``1M`` vocabulary and none of it escapes this method.
         """
         self._ensure_connected()
         canonical = normalize_interval(interval)
         native_interval = venue_interval(canonical)
-        symbol, native = await self._resolve(ticker)
-        klines = await self.api.fetch_klines(native, native_interval, limit=limit)
+        native = await self._resolve(ticker)
+        klines = await self.api.fetch_klines(
+            native, native_interval, ticker=ticker, limit=limit
+        )
         return [
-            kline.model_copy(update={"symbol": symbol, "interval": canonical})
-            for kline in klines
+            kline.model_copy(update={"interval": canonical}) for kline in klines
         ]
 
     # --- streams (market streams socket) -----------------------------------
@@ -239,12 +240,12 @@ class BinanceSpotPublicClient(BaseClient):
         return self._best_quotes(ticker)
 
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
-        symbol, native = await self._resolve(ticker)
+        native = await self._resolve(ticker)
         stream = await self.feed.subscribe_tickers(native)
         async for row in self._rows(stream):
             if row.s != native:
                 continue
-            yield row.to_ticker().model_copy(update={"symbol": symbol})
+            yield row.to_ticker(ticker)
 
     async def _trades(self, ticker: UniversalTicker) -> AsyncIterator[Trade]:
         """``@trade`` — one message per match, ids being the venue's own.
@@ -258,23 +259,23 @@ class BinanceSpotPublicClient(BaseClient):
         the venue's trade id. A strategy that wants the cheaper feed should ask
         for it by name.
         """
-        symbol, native = await self._resolve(ticker)
+        native = await self._resolve(ticker)
         stream = await self.feed.subscribe_trades(native)
         async for row in self._rows(stream):
             if row.s != native:
                 continue
-            yield row.to_trade().model_copy(update={"symbol": symbol})
+            yield row.to_trade(ticker)
 
     async def _agg_trades(self, ticker: UniversalTicker) -> AsyncIterator[AggTrade]:
-        symbol, native = await self._resolve(ticker)
+        native = await self._resolve(ticker)
         stream = await self.feed.subscribe_agg_trades(native)
         async for row in self._rows(stream):
             if row.s != native:
                 continue
-            yield row.to_agg_trade().model_copy(update={"symbol": symbol})
+            yield row.to_agg_trade(ticker)
 
     async def _order_books(self, ticker: UniversalTicker) -> AsyncIterator[OrderBook]:
-        symbol, native = await self._resolve(ticker)
+        native = await self._resolve(ticker)
         stream = await self.feed.subscribe_order_book(
             native, levels=self.book_levels, speed=self.book_speed
         )
@@ -284,30 +285,30 @@ class BinanceSpotPublicClient(BaseClient):
             # Binance dates neither the stream payload nor the call reply, so
             # arrival is the only timestamp there is. Stamped here rather than
             # left to default so every book in the feed is dated the same way.
-            yield row.to_order_book(symbol, ts=time.time())
+            yield row.to_order_book(ticker, ts=time.time())
 
     async def _klines(
         self, ticker: UniversalTicker, interval: str
     ) -> AsyncIterator[Kline]:
         canonical = normalize_interval(interval)
         native_interval = venue_interval(canonical)
-        symbol, native = await self._resolve(ticker)
+        native = await self._resolve(ticker)
         stream = await self.feed.subscribe_klines(native_interval, native)
         async for row in self._rows(stream):
             if row.s != native or row.interval != native_interval:
                 continue
-            yield row.to_kline().model_copy(
-                update={"symbol": symbol, "interval": canonical}
+            yield row.to_kline(ticker).model_copy(
+                update={"interval": canonical}
             )
 
     async def _best_quotes(self, ticker: UniversalTicker) -> AsyncIterator[BestQuote]:
-        symbol, native = await self._resolve(ticker)
+        native = await self._resolve(ticker)
         stream = await self.feed.subscribe_book_tickers(native)
         async for row in self._rows(stream):
             if row.s != native:
                 continue
             yield BestQuote(
-                symbol=symbol,
+                universal_ticker=str(ticker),
                 bid=row.bid,
                 bid_qty=row.bid_size,
                 ask=row.ask,
@@ -335,18 +336,19 @@ class BinanceSpotPublicClient(BaseClient):
 
     # --- symbols -----------------------------------------------------------
 
-    async def _resolve(self, ticker: UniversalTicker) -> tuple[str, str]:
-        """``(canonical symbol, venue symbol)`` for one instrument.
+    async def _resolve(self, ticker: UniversalTicker) -> str:
+        """The venue's spelling of one instrument.
 
         Resolved once per stream rather than per message: the symbol we
         subscribed with is the symbol every message we keep carries, so there
-        is nothing left to look up on the hot path.
+        is nothing left to look up on the hot path. The ticker itself needs no
+        resolving — it is what every payload out of here is stamped with.
         """
         if ticker.venue != self.name:
             raise ValueError(
                 f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
             )
-        return ticker.symbol, await self.symbols.exch_ticker(ticker)
+        return await self.symbols.exch_ticker(ticker)
 
 
 __all__ = [

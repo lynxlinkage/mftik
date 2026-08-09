@@ -65,6 +65,7 @@ from mft.exchange.binance.spot.socket import BinanceSocket
 from mft.exchange.errors import ExchangeError
 from mft.exchange.models import Instrument, Kline, OrderBook, OrderType, Side, Ticker
 from mft.exchange.stream import EventStream
+from mft.exchange.tickers import UniversalTicker
 
 logger = logging.getLogger(__name__)
 
@@ -261,22 +262,33 @@ class BinanceSpotWsApi(BinanceSocket):
             if row.get("status") == "TRADING"
         ]
 
-    async def fetch_order_book(self, symbol: str, *, depth: int = 100) -> OrderBook:
+    async def fetch_order_book(
+        self, symbol: str, *, ticker: UniversalTicker, depth: int = 100
+    ) -> OrderBook:
         """``depth`` — a whole book, capped at ``depth``.
 
-        The reply carries no symbol and no timestamp, so both are the caller's:
-        the symbol it asked for, and arrival time.
+        The reply carries no instrument and no timestamp, so both are the
+        caller's. ``symbol`` is what goes on the wire and ``ticker`` is what
+        the answer is labelled with: only the symbol plane maps between them,
+        and it lives a layer up, so this one is told both.
         """
         result = await self.call(m.DEPTH, {"symbol": symbol, "limit": depth})
-        return BinanceDepth.model_validate(result).to_order_book(symbol)
+        return BinanceDepth.model_validate(result).to_order_book(ticker)
 
-    async def fetch_ticker(self, symbol: str) -> Ticker:
+    async def fetch_ticker(
+        self, symbol: str, *, ticker: UniversalTicker
+    ) -> Ticker:
         """``ticker.24hr`` — the same row shape ``@ticker`` pushes."""
         result = await self.call(m.TICKER_24HR, {"symbol": symbol})
-        return BinanceTicker.model_validate(result).to_ticker()
+        return BinanceTicker.model_validate(result).to_ticker(ticker)
 
     async def fetch_klines(
-        self, symbol: str, interval: str, *, limit: int = 100
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        ticker: UniversalTicker,
+        limit: int = 100,
     ) -> list[Kline]:
         """``klines`` — recent candles, oldest first.
 
@@ -286,7 +298,7 @@ class BinanceSpotWsApi(BinanceSocket):
         result = await self.call(
             m.KLINES, {"symbol": symbol, "interval": interval, "limit": limit}
         )
-        return [kline_from_row(row, symbol, interval) for row in result or []]
+        return [kline_from_row(row, ticker, interval) for row in result or []]
 
     # --- trading -----------------------------------------------------------
 

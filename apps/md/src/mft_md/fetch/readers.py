@@ -30,6 +30,9 @@ from mft.exchange import venues
 from mft.exchange.binance.spot.client import BinanceSpotWsApi
 from mft.exchange.binance.spot.protocol import BINANCE_SPOT_WS_API_URL
 from mft.exchange.binance.spot.public import venue_interval as binance_interval
+from mft.exchange.bybit.protocol import BYBIT_REST_URL, product_of
+from mft.exchange.bybit.public import venue_interval as bybit_interval
+from mft.exchange.bybit.rest import BybitPublicRest
 from mft.exchange.gate.spot.public import GATE_INTERVALS
 from mft.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
 from mft.exchange.intervals import InvalidIntervalError, normalize_interval
@@ -83,22 +86,28 @@ class GateSpotReader:
     async def close(self) -> None:
         await self.rest.close()
 
-    async def _pair(self, ticker: UniversalTicker) -> tuple[str, str]:
-        """``(canonical symbol, Gate pair)`` — resolved through the plane."""
+    async def _pair(self, ticker: UniversalTicker) -> str:
+        """Gate's pair for one instrument — resolved through the plane.
+
+        The ticker needs no resolving: it is what every payload out of here is
+        stamped with, and the only thing that has to be looked up is the
+        spelling that goes on the wire.
+        """
         if ticker.venue != self.venue:
             raise ValueError(
                 f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
             )
-        return ticker.symbol, await self.symbols.exch_ticker(ticker)
+        return await self.symbols.exch_ticker(ticker)
 
     async def fetch_klines(
         self, ticker: UniversalTicker, interval: str, *, limit: int
     ) -> list[Kline]:
         """Recent candles, oldest first, answering in the caller's spelling.
 
-        Both the symbol and the interval are translated on the way down and
-        stamped back on the way up, so Gate's ``BTC_USDT`` / ``30d`` vocabulary
-        does not escape this method.
+        The interval is translated on the way down and stamped back on the
+        way up, so Gate's ``30d`` vocabulary does not escape this method; the
+        symbol needs no stamping, since the payload carries the ticker it was
+        asked under.
         """
         canonical_interval = normalize_interval(interval)
         gate_interval = GATE_INTERVALS.get(canonical_interval)
@@ -107,12 +116,12 @@ class GateSpotReader:
                 f"{self.venue} serves no {canonical_interval} candles; "
                 f"supported: {sorted(GATE_INTERVALS)}"
             )
-        symbol, pair = await self._pair(ticker)
-        klines = await self.rest.fetch_klines(pair, gate_interval, limit=limit)
+        pair = await self._pair(ticker)
+        klines = await self.rest.fetch_klines(
+            pair, gate_interval, ticker=ticker, limit=limit
+        )
         return [
-            kline.model_copy(
-                update={"symbol": symbol, "interval": canonical_interval}
-            )
+            kline.model_copy(update={"interval": canonical_interval})
             for kline in klines
         ]
 
@@ -121,12 +130,12 @@ class GateSpotReader:
     ) -> OrderBook:
         """``GET /spot/order_book`` — a whole book, capped at ``depth``.
 
-        Gate's reply carries no pair, so the caller's canonical one is stamped
-        back on.
+        Gate's reply carries no pair, so the caller's ticker is stamped on.
         """
-        symbol, pair = await self._pair(ticker)
-        book = await self.rest.fetch_order_book(pair, depth=depth)
-        return book.model_copy(update={"symbol": symbol})
+        pair = await self._pair(ticker)
+        return await self.rest.fetch_order_book(
+            pair, ticker=ticker, depth=depth
+        )
 
     async def fetch_best_quote(
         self, ticker: UniversalTicker
@@ -147,7 +156,7 @@ class GateSpotReader:
             return None
         bid, ask = book.bids[0], book.asks[0]
         return BestQuote(
-            symbol=book.symbol,
+            universal_ticker=book.universal_ticker,
             bid=bid.price,
             bid_qty=bid.qty,
             ask=ask.price,
@@ -183,13 +192,18 @@ class BinanceSpotReader:
     async def close(self) -> None:
         await self.api.close()
 
-    async def _symbol(self, ticker: UniversalTicker) -> tuple[str, str]:
-        """``(canonical symbol, Binance symbol)`` — resolved through the plane."""
+    async def _symbol(self, ticker: UniversalTicker) -> str:
+        """Binance's symbol for one instrument — resolved through the plane.
+
+        The ticker needs no resolving: it is what every payload out of here is
+        stamped with, and the only thing that has to be looked up is the
+        spelling that goes on the wire.
+        """
         if ticker.venue != self.venue:
             raise ValueError(
                 f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
             )
-        return ticker.symbol, await self.symbols.exch_ticker(ticker)
+        return await self.symbols.exch_ticker(ticker)
 
     async def fetch_klines(
         self, ticker: UniversalTicker, interval: str, *, limit: int
@@ -201,11 +215,12 @@ class BinanceSpotReader:
         """
         canonical = normalize_interval(interval)
         native_interval = binance_interval(canonical)
-        symbol, native = await self._symbol(ticker)
-        klines = await self.api.fetch_klines(native, native_interval, limit=limit)
+        native = await self._symbol(ticker)
+        klines = await self.api.fetch_klines(
+            native, native_interval, ticker=ticker, limit=limit
+        )
         return [
-            kline.model_copy(update={"symbol": symbol, "interval": canonical})
-            for kline in klines
+            kline.model_copy(update={"interval": canonical}) for kline in klines
         ]
 
     async def fetch_order_book(
@@ -213,12 +228,13 @@ class BinanceSpotReader:
     ) -> OrderBook:
         """``depth`` — a whole book, capped at ``depth``.
 
-        Binance's reply names neither the symbol nor a time, so the caller's
-        canonical symbol is stamped back on and the book is dated on arrival.
+        Binance's reply names neither the instrument nor a time, so the
+        caller's ticker is stamped on and the book is dated on arrival.
         """
-        symbol, native = await self._symbol(ticker)
-        book = await self.api.fetch_order_book(native, depth=depth)
-        return book.model_copy(update={"symbol": symbol})
+        native = await self._symbol(ticker)
+        return await self.api.fetch_order_book(
+            native, ticker=ticker, depth=depth
+        )
 
     async def fetch_best_quote(self, ticker: UniversalTicker) -> BestQuote | None:
         """Top of book with sizes, or None when a side is empty.
@@ -237,12 +253,104 @@ class BinanceSpotReader:
             return None
         bid, ask = book.bids[0], book.asks[0]
         return BestQuote(
-            symbol=book.symbol,
+            universal_ticker=book.universal_ticker,
             bid=bid.price,
             bid_qty=bid.qty,
             ask=ask.price,
             ask_qty=ask.qty,
             ts=book.ts,
+        )
+
+
+class BybitReader:
+    """Bybit reads over REST, across every category the venue trades.
+
+    Composes an unauthenticated :class:`BybitPublicRest` — the same client the
+    feed connector uses for its snapshot reads, built separately here so a
+    query never depends on a feed session existing. Bybit serves all of these
+    to anyone, so this holds no credentials.
+
+    Unlike the other readers there is no per-venue market: the ticker names the
+    book, and ``product_of`` turns it into the ``category`` every Bybit call
+    carries. One reader answers for spot and perps alike.
+    """
+
+    venue = "Bybit"
+
+    def __init__(
+        self,
+        *,
+        symbols: SymbolResolver,
+        rest: BybitPublicRest | None = None,
+        base_url: str = BYBIT_REST_URL,
+    ) -> None:
+        self.symbols = symbols
+        self.rest = rest or BybitPublicRest(base_url=base_url)
+
+    async def connect(self) -> None:
+        await self.rest.connect()
+
+    async def close(self) -> None:
+        await self.rest.close()
+
+    async def _resolve(self, ticker: UniversalTicker) -> tuple[str, str]:
+        """``(venue symbol, product)`` — the two things every call needs."""
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return await self.symbols.exch_ticker(ticker), product_of(ticker.category)
+
+    async def fetch_klines(
+        self, ticker: UniversalTicker, interval: str, *, limit: int
+    ) -> list[Kline]:
+        """Recent candles, oldest first, answering in the caller's spelling.
+
+        Bybit answers newest first and names its windows by the number of
+        minutes; neither escapes this method.
+        """
+        canonical = normalize_interval(interval)
+        native_interval = bybit_interval(canonical)
+        native, product = await self._resolve(ticker)
+        klines = await self.rest.fetch_klines(
+            product, native, native_interval, ticker=ticker, limit=limit
+        )
+        return [
+            kline.model_copy(update={"interval": canonical}) for kline in klines
+        ]
+
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int
+    ) -> OrderBook:
+        """``orderbook`` — a whole book, capped at ``depth``, dated by Bybit."""
+        native, product = await self._resolve(ticker)
+        return await self.rest.fetch_order_book(
+            product, native, ticker=ticker, depth=depth
+        )
+
+    async def fetch_best_quote(self, ticker: UniversalTicker) -> BestQuote | None:
+        """Top of book with sizes, or None when a side is empty.
+
+        Off ``tickers`` rather than a depth-1 book: the REST form carries
+        ``bid1Price`` and ``ask1Price`` on every category — unlike the push,
+        which omits them on spot — so this is one call instead of one plus a
+        book, and it answers in the same shape as the other readers.
+
+        None rather than zeros when a side has nothing resting. A caller asking
+        for the touch is almost always checking whether its own price can rest
+        against it, and a zero bid would answer that question wrongly rather
+        than declining to answer it.
+        """
+        native, product = await self._resolve(ticker)
+        row = await self.rest.fetch_ticker_row(product, native)
+        if not row.bid or not row.ask or not row.bid_qty or not row.ask_qty:
+            return None
+        return BestQuote(
+            universal_ticker=str(ticker),
+            bid=row.bid,
+            bid_qty=row.bid_qty,
+            ask=row.ask,
+            ask_qty=row.ask_qty,
         )
 
 
@@ -276,6 +384,8 @@ class VenueReaderFactory:
             return GateSpotReader(symbols=self._symbols)
         if venue == venues.BINANCE.name:
             return BinanceSpotReader(symbols=self._symbols)
+        if venue == venues.BYBIT.name:
+            return BybitReader(symbols=self._symbols)
         if venue == venues.PAPER.name:
             # The paper engine's book lives in another process and its prices
             # are invented tick by tick; nothing here can be read out of band.

@@ -63,7 +63,7 @@ class FakePublic:
     def stream_ticker(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         return self._once(
             Ticker(
-                symbol=ticker.symbol,
+                universal_ticker=str(ticker),
                 bid=Decimal("100"),
                 ask=Decimal("101"),
                 last=Decimal("100.5"),
@@ -73,7 +73,7 @@ class FakePublic:
     def stream_trades(self, ticker: UniversalTicker) -> AsyncIterator[Trade]:
         return self._once(
             Trade(
-                symbol=ticker.symbol,
+                universal_ticker=str(ticker),
                 price=Decimal("100"),
                 qty=Decimal("1"),
                 side="buy",
@@ -83,7 +83,7 @@ class FakePublic:
     def stream_order_book(self, ticker: UniversalTicker) -> AsyncIterator[OrderBook]:
         return self._once(
             OrderBook(
-                symbol=ticker.symbol,
+                universal_ticker=str(ticker),
                 bids=[BookLevel(price=Decimal("100"), qty=Decimal("1"))],
                 asks=[BookLevel(price=Decimal("101"), qty=Decimal("1"))],
             )
@@ -95,7 +95,7 @@ class FakePublic:
         self.kline_calls.append((ticker.symbol, interval))
         return self._once(
             Kline(
-                symbol=ticker.symbol,
+                universal_ticker=str(ticker),
                 interval=interval,
                 open_time=1_700_000_000.0,
                 open=Decimal("100"),
@@ -108,7 +108,7 @@ class FakePublic:
     def stream_agg_trades(self, ticker: UniversalTicker) -> AsyncIterator[AggTrade]:
         return self._once(
             AggTrade(
-                symbol=ticker.symbol,
+                universal_ticker=str(ticker),
                 price=Decimal("100"),
                 qty=Decimal("1"),
                 side="buy",
@@ -120,7 +120,7 @@ class FakePublic:
     def stream_best_quote(self, ticker: UniversalTicker) -> AsyncIterator[BestQuote]:
         return self._once(
             BestQuote(
-                symbol=ticker.symbol,
+                universal_ticker=str(ticker),
                 bid=Decimal("100"),
                 bid_qty=Decimal("1"),
                 ask=Decimal("101"),
@@ -157,7 +157,10 @@ async def test_feed_topic_publishes_its_message_type(
     topic_, ticker, env = seen[0]
     assert (topic_, ticker) == (topic, FAKE)
     assert env.type == msg_type
-    assert env.payload["symbol"] == "BTCUSDT"
+    # The payload names the instrument, not just the symbol. A strategy routes
+    # every book to one hook whatever feed it came from, and the envelope
+    # carries no feed key — so this is the only thing that says which.
+    assert env.payload["universal_ticker"] == "Fake_Spot_BTCUSDT"
 
     await sess.stop()
 

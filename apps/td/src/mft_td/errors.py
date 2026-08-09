@@ -226,6 +226,68 @@ BINANCE = VenueErrors(
     },
 )
 
+#: Bybit v5. Numeric codes only — Bybit publishes no label, and the numbers
+#: are its documented contract, the same ones over REST and over the sockets.
+#:
+#: They are all five and six digit, so an unmapped one passes through as itself
+#: without any risk of colliding with the ``100``–``299`` band this platform
+#: assigns — see :mod:`mft.protocol.reject_codes`.
+#:
+#: **The two books number the same fact differently**, which is why several
+#: meanings appear twice: ``110001`` is "no such order" on the contract books
+#: and ``170213`` is the same answer on spot.
+#:
+#: Deliberately partial. Bybit documents several hundred codes, most of which
+#: belong to endpoints this adapter never calls — leverage, margin mode,
+#: transfers, sub-accounts. What is here is what an order can be refused with.
+#:
+#: One refusal is missing on purpose: a post-only order that would cross does
+#: not come back as an error at all. Bybit accepts it, cancels it, and says so
+#: on the ``order`` topic with ``rejectReason``
+#: ``EC_PostOnlyWillTakeLiquidity`` — so it reaches TD as an order update, not
+#: as an exception, and :func:`normalize` never sees it.
+BYBIT = VenueErrors(
+    codes={
+        # credentials and permissions
+        10003: RejectCode.VENUE_AUTH_FAILED,  # invalid api key
+        10004: RejectCode.VENUE_AUTH_FAILED,  # error sign
+        10002: RejectCode.VENUE_AUTH_FAILED,  # request outside recv_window
+        33004: RejectCode.VENUE_AUTH_FAILED,  # api key expired
+        10005: RejectCode.VENUE_PERMISSION_DENIED,  # permission denied
+        10010: RejectCode.VENUE_IP_NOT_WHITELISTED,  # unmatched IP
+        # pacing
+        10006: RejectCode.VENUE_RATE_LIMITED,  # too many visits
+        10018: RejectCode.VENUE_RATE_LIMITED,  # exceeded IP rate limit
+        # request fields
+        10001: RejectCode.VENUE_INVALID_PARAM,  # parameter error
+        110003: RejectCode.VENUE_INVALID_PARAM,  # price out of range
+        110017: RejectCode.VENUE_INVALID_PARAM,  # reduce-only not satisfied
+        110025: RejectCode.VENUE_INVALID_PARAM,  # position idx / mode mismatch
+        170193: RejectCode.VENUE_INVALID_PARAM,  # buy price above the cap
+        170194: RejectCode.VENUE_INVALID_PARAM,  # sell price below the floor
+        # funds
+        110004: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # wallet balance short
+        110007: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # ab not enough
+        110012: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # available short
+        110045: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # wallet balance short
+        170131: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # spot balance short
+        # minimums
+        170140: RejectCode.VENUE_BELOW_MINIMUM,  # order value under the floor
+        170136: RejectCode.VENUE_BELOW_MINIMUM,  # order qty under the floor
+        # limits on the account
+        110009: RejectCode.VENUE_RISK_LIMIT,  # too many stop orders
+        110020: RejectCode.VENUE_RISK_LIMIT,  # too many active orders
+        # the order itself
+        110001: RejectCode.VENUE_ORDER_NOT_FOUND,  # order does not exist
+        170213: RejectCode.VENUE_ORDER_NOT_FOUND,  # order does not exist, spot
+        # instrument
+        170210: RejectCode.VENUE_SYMBOL_NOT_TRADABLE,  # not open for trading
+        # theirs, not ours
+        10016: RejectCode.VENUE_INTERNAL_ERROR,  # server error
+        10000: RejectCode.VENUE_INTERNAL_ERROR,  # server timeout
+    },
+)
+
 #: The paper engine. Its errors carry no label, only a message — but the
 #: messages are ours, raised in ``mft.exchange.paper.engine``, so matching on
 #: them is a maintenance question rather than a guess about a third party.
@@ -246,6 +308,7 @@ PAPER = VenueErrors(
 #: reports as its ``name``.
 VENUES: dict[str, VenueErrors] = {
     "Binance": BINANCE,
+    "Bybit": BYBIT,
     "Gate": GATE,
     "Paper": PAPER,
 }
@@ -347,6 +410,7 @@ __all__ = [
     "BY_TYPE",
     "GATE",
     "PAPER",
+    "BYBIT",
     "VENUES",
     "VenueErrors",
     "normalize",

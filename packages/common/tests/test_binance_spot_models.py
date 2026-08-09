@@ -27,6 +27,10 @@ from mft.exchange.binance.spot.models import (
     type_of,
 )
 from mft.exchange.models import AggTrade, OrderStatus, OrderType, Side, Trade
+from mft.exchange.tickers import UniversalTicker
+
+#: The instrument every payload in this module is stamped with.
+TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")
 
 AGG_TRADE = {
     "e": "aggTrade",
@@ -103,24 +107,24 @@ ORDER_ACK = {
 
 def test_the_maker_flag_names_the_taker_not_the_buyer() -> None:
     """``m: true`` means the buyer rested, so the aggressor sold."""
-    sell = BinanceAggTrade.model_validate(AGG_TRADE).to_trade()
+    sell = BinanceAggTrade.model_validate(AGG_TRADE).to_trade(TICKER)
     assert sell.side is Side.SELL
 
-    buy = BinanceAggTrade.model_validate({**AGG_TRADE, "m": False}).to_trade()
+    buy = BinanceAggTrade.model_validate({**AGG_TRADE, "m": False}).to_trade(TICKER)
     assert buy.side is Side.BUY
 
 
 def test_agg_trade_converts_with_the_aggregate_id_and_trade_time() -> None:
-    trade = BinanceAggTrade.model_validate(AGG_TRADE).to_trade()
+    trade = BinanceAggTrade.model_validate(AGG_TRADE).to_trade(TICKER)
     assert trade.trade_id == "12345"
-    assert trade.symbol == "BNBBTC"
+    assert trade.universal_ticker == str(TICKER)
     assert trade.price == Decimal("0.001")
     assert trade.qty == Decimal("100")
     assert trade.ts == pytest.approx(1672515782.136)
 
 
 def test_agg_trade_keeps_the_match_range_the_tape_cannot_report() -> None:
-    agg = BinanceAggTrade.model_validate(AGG_TRADE).to_agg_trade()
+    agg = BinanceAggTrade.model_validate(AGG_TRADE).to_agg_trade(TICKER)
 
     assert agg.trade_id == "12345", "the aggregate's id, not a match's"
     assert agg.first_trade_id == "100"
@@ -133,20 +137,25 @@ def test_agg_trade_keeps_the_match_range_the_tape_cannot_report() -> None:
 
 def test_an_agg_trade_is_usable_wherever_a_trade_is() -> None:
     """Additive, so a strategy that ignores the aggregation need not care."""
-    agg = BinanceAggTrade.model_validate(AGG_TRADE).to_agg_trade()
+    agg = BinanceAggTrade.model_validate(AGG_TRADE).to_agg_trade(TICKER)
     assert isinstance(agg, Trade)
 
 
 def test_a_single_match_print_counts_as_one() -> None:
     agg = BinanceAggTrade.model_validate(
         {**AGG_TRADE, "f": 42, "l": 42}
-    ).to_agg_trade()
+    ).to_agg_trade(TICKER)
     assert agg.match_count == 1
 
 
 def test_a_print_with_no_range_counts_nothing_rather_than_guessing() -> None:
     """Zero means the venue sent no range, not that nothing traded."""
-    bare = AggTrade(symbol="X", price=Decimal("1"), qty=Decimal("2"), side=Side.BUY)
+    bare = AggTrade(
+        universal_ticker=str(TICKER),
+        price=Decimal("1"),
+        qty=Decimal("2"),
+        side=Side.BUY,
+    )
     assert bare.match_count == 0
     assert bare.qty == Decimal("2")
 
@@ -154,7 +163,7 @@ def test_a_print_with_no_range_counts_nothing_rather_than_guessing() -> None:
 def test_non_numeric_trade_ids_do_not_break_the_count() -> None:
     """A venue whose ids are not integers still identifies the range."""
     odd = AggTrade(
-        symbol="X",
+        universal_ticker=str(TICKER),
         price=Decimal("1"),
         qty=Decimal("2"),
         side=Side.BUY,
@@ -167,7 +176,7 @@ def test_non_numeric_trade_ids_do_not_break_the_count() -> None:
 
 def test_to_trade_drops_the_aggregation() -> None:
     """Still offered, and still honest about what the id is."""
-    plain = BinanceAggTrade.model_validate(AGG_TRADE).to_trade()
+    plain = BinanceAggTrade.model_validate(AGG_TRADE).to_trade(TICKER)
     assert type(plain) is Trade
     assert plain.trade_id == "12345"
 
@@ -184,7 +193,7 @@ def test_raw_trade_uses_its_own_trade_id() -> None:
             "T": 1672515782136,
             "m": False,
         }
-    ).to_trade()
+    ).to_trade(TICKER)
     assert trade.trade_id == "12345"
     assert trade.side is Side.BUY
 
@@ -212,7 +221,7 @@ def test_kline_reads_open_time_in_seconds_and_the_closed_flag() -> None:
         }
     )
     assert event.interval == "1m"
-    kline = event.to_kline()
+    kline = event.to_kline(TICKER)
     assert kline.open_time == pytest.approx(1672515780.0)
     assert (kline.open, kline.high, kline.low, kline.close) == (
         Decimal("0.001"),
@@ -229,7 +238,7 @@ def test_ticker_falls_back_to_last_when_a_side_is_unquoted() -> None:
     """Binance publishes zero rather than omitting the side on an empty book."""
     ticker = BinanceTicker.model_validate(
         {"e": "24hrTicker", "E": 1, "s": "BNBBTC", "c": "0.0025", "b": "0", "a": "0"}
-    ).to_ticker()
+    ).to_ticker(TICKER)
     assert ticker.bid == Decimal("0.0025")
     assert ticker.ask == Decimal("0.0025")
 
@@ -250,7 +259,7 @@ def test_book_ticker_keeps_both_sizes() -> None:
     assert quote.ask_size == Decimal("40.66")
 
 
-def test_partial_depth_is_told_which_symbol_it_is() -> None:
+def test_partial_depth_is_told_which_instrument_it_is() -> None:
     """The payload names no instrument; the caller supplies it."""
     depth = BinanceDepth.model_validate(
         {
@@ -259,8 +268,8 @@ def test_partial_depth_is_told_which_symbol_it_is() -> None:
             "asks": [["0.0026", "100"]],
         }
     )
-    book = depth.to_order_book("BNBBTC", ts=1.5)
-    assert book.symbol == "BNBBTC"
+    book = depth.to_order_book(TICKER, ts=1.5)
+    assert book.universal_ticker == str(TICKER)
     assert book.ts == 1.5
     assert book.bids[0].price == Decimal("0.0024")
     assert book.asks[0].qty == Decimal("100")
@@ -298,10 +307,10 @@ def test_depth_diff_knows_whether_it_slots_onto_a_book() -> None:
 
 
 def test_execution_report_converts_a_resting_order() -> None:
-    order = BinanceExecutionReport.model_validate(EXECUTION_REPORT).to_order()
+    order = BinanceExecutionReport.model_validate(EXECUTION_REPORT).to_order(TICKER)
     assert order.order_id == "4293153"
     assert order.client_order_id == "mUvoqJxFIILMdfAW5iGSOW"
-    assert order.symbol == "ETHBTC"
+    assert order.universal_ticker == str(TICKER)
     assert order.side is Side.BUY
     assert order.type is OrderType.LIMIT
     assert order.status is OrderStatus.NEW
@@ -330,14 +339,14 @@ def test_a_partial_fill_reports_this_execution_not_the_running_total() -> None:
     )
     assert report.is_fill
 
-    fill = report.to_fill()
+    fill = report.to_fill(TICKER)
     assert fill.qty == Decimal("0.3"), "must be this fill, not the running total"
     assert fill.price == Decimal("0.1")
     assert fill.fill_id == "987654"
     assert fill.fee == Decimal("0.0001")
     assert fill.fee_asset == "BNB"
 
-    order = report.to_order()
+    order = report.to_order(TICKER)
     assert order.filled_qty == Decimal("0.7")
     # Average price is Z/z — Binance publishes no field for it.
     assert order.avg_price == Decimal("0.071") / Decimal("0.7")
@@ -348,7 +357,7 @@ def test_a_state_change_that_carries_no_execution_is_not_a_fill() -> None:
         {**EXECUTION_REPORT, "x": "CANCELED", "X": "CANCELED"}
     )
     assert canceled.is_fill is False
-    assert canceled.to_order().status is OrderStatus.CANCELED
+    assert canceled.to_order(TICKER).status is OrderStatus.CANCELED
 
 
 def test_a_cancel_report_keeps_the_orders_id_not_the_cancels() -> None:
@@ -368,7 +377,7 @@ def test_a_cancel_report_keeps_the_orders_id_not_the_cancels() -> None:
 def test_a_market_order_reports_no_limit_price() -> None:
     order = BinanceExecutionReport.model_validate(
         {**EXECUTION_REPORT, "o": "MARKET", "p": "0.00000000"}
-    ).to_order()
+    ).to_order(TICKER)
     assert order.type is OrderType.MARKET
     assert order.price is None
 
@@ -405,7 +414,7 @@ def test_a_balance_delta_is_not_offered_as_a_balance() -> None:
 
 
 def test_order_ack_converts_a_new_order() -> None:
-    order = BinanceOrderAck.model_validate(ORDER_ACK).to_order()
+    order = BinanceOrderAck.model_validate(ORDER_ACK).to_order(TICKER)
     assert order.order_id == "12569099453"
     assert order.client_order_id == "my-order-1"
     assert order.side is Side.SELL
@@ -423,7 +432,7 @@ def test_a_cancel_reply_reports_the_orders_client_id_not_the_cancels() -> None:
             "clientOrderId": "cancel-request-9",
             "origClientOrderId": "my-order-1",
         }
-    ).to_order()
+    ).to_order(TICKER)
     assert order.client_order_id == "my-order-1"
     assert order.status is OrderStatus.CANCELED
 
@@ -446,11 +455,11 @@ def test_order_ack_fills_become_fills_with_the_orders_ids() -> None:
             ],
         }
     )
-    order = ack.to_order()
+    order = ack.to_order(TICKER)
     assert order.status is OrderStatus.FILLED
     assert order.avg_price == Decimal("198.33477") / Decimal("0.00847")
 
-    fills = ack.to_fills()
+    fills = ack.to_fills(TICKER)
     assert len(fills) == 1
     assert fills[0].order_id == "12569099453"
     assert fills[0].client_order_id == "my-order-1"

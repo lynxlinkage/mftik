@@ -174,6 +174,12 @@ class ApiCreateBody(BaseModel):
     created_by: int | None = None
 
 
+class ApiRenameBody(BaseModel):
+    """Rename the trading account bound to an API credential."""
+
+    name: str = Field(..., min_length=1, max_length=128)
+
+
 class ApiOut(BaseModel):
     id: int
     account_id: int

@@ -19,6 +19,10 @@ from mft.exchange.binance.spot.client import BinanceSpotWsApi
 from mft.exchange.binance.spot.feed import BinanceSpotStream
 from mft.exchange.binance.spot.protocol import BinanceWsError
 from mft.exchange.errors import ExchangeError, ExchangeNotConnectedError
+from mft.exchange.tickers import UniversalTicker
+
+#: The instrument every payload in this module is stamped with.
+TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")
 
 AGG_TRADE = {
     "e": "aggTrade",
@@ -94,7 +98,7 @@ async def test_pushes_are_routed_by_stream_name(
         symbol, book = await asyncio.wait_for(anext(books), timeout=2.0)
 
     assert trade.s == "BTCUSDT"
-    assert trade.to_trade().price == Decimal("40000")
+    assert trade.to_trade(TICKER).price == Decimal("40000")
     # Partial depth names no instrument, so the stream name supplies it.
     assert symbol == "BTCUSDT"
     assert book.to_order_book(symbol).bids[0].price == Decimal("39999")
@@ -229,7 +233,7 @@ async def test_without_credentials_market_data_still_works(
     async with _api(binance_api) as api:
         assert not api.authenticated
         assert not api.logged_on
-        book = await api.fetch_order_book("BTCUSDT", depth=5)
+        book = await api.fetch_order_book("BTCUSDT", ticker=TICKER, depth=5)
 
     assert book.symbol == "BTCUSDT"
     assert book.asks[0].qty == Decimal("2")
@@ -507,7 +511,7 @@ async def test_klines_come_back_oldest_first_in_the_asked_for_spelling(
         ]
     ]
     async with _api(binance_api) as api:
-        klines = await api.fetch_klines("BTCUSDT", "1m", limit=5)
+        klines = await api.fetch_klines("BTCUSDT", "1m", ticker=TICKER, limit=5)
 
     assert len(klines) == 1
     assert klines[0].symbol == "BTCUSDT"

@@ -19,6 +19,7 @@ from mft.exchange.models import (
     Ticker,
     Trade,
 )
+from mft.exchange.oms import Position
 from mft.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
@@ -39,6 +40,7 @@ from mft.protocol import (
     TD_LEASE_ACK,
     TD_ORDER_REJECT,
     TD_ORDER_UPDATE,
+    TD_POSITION_UPDATE,
     TD_RECON_DONE,
     CancelReject,
     Envelope,
@@ -105,6 +107,7 @@ TD_GLOBAL_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     TD_ORDER_REJECT: ("on_order_reject", OrderReject),
     TD_CANCEL_REJECT: ("on_cancel_reject", CancelReject),
     TD_BALANCE_UPDATE: ("on_balance_update", Balance),
+    TD_POSITION_UPDATE: ("on_position_update", Position),
 }
 
 

@@ -6,18 +6,41 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from mft.exchange.models import Balance, Order
+from mft.exchange.models import Balance, InstrumentScoped, Order
 
 
-class Position(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class Position(InstrumentScoped):
+    """One instrument's open exposure, as the venue reports it.
 
-    symbol: str
+    Only the contract books have these. Spot holdings are balances — an
+    :class:`~mft.exchange.models.Balance` of BTC *is* the position — so a spot
+    venue reports none, which is different from reporting zero.
+
+    ``qty`` is **signed**: negative is short. Venues report a size and a
+    direction in separate fields; one number cannot disagree with itself.
+
+    ``entry_price`` and ``unrealised_pnl`` are the venue's own figures, kept
+    because the venue sends them alongside the size and a size on its own
+    cannot answer the first question anyone asks of a position. ``None`` means
+    the venue published none, not zero.
+    """
+
     qty: Decimal
+    entry_price: Decimal | None = None
+    unrealised_pnl: Decimal | None = None
+
+    @property
+    def flat(self) -> bool:
+        return self.qty == 0
 
 
 class OmsView(BaseModel):
-    """Immutable snapshot of OMS live state."""
+    """Immutable snapshot of OMS live state.
+
+    ``positions`` is keyed by universal ticker rather than symbol, because a
+    unified account holds the perp and the spot pair under one credential and
+    ``BTCUSDT`` names both.
+    """
 
     model_config = ConfigDict(frozen=True)
 

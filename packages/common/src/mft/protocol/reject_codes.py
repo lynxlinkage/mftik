@@ -88,6 +88,10 @@ class RejectCode(IntEnum):
     #: as rejected on the assumption it never landed; recon is what corrects
     #: that if the venue saw it after all.
     TD_SEND_FAILED = 111
+    #: The order named an instrument this session's venue does not trade —
+    #: another venue's ticker, or a market this one has no book for. Refused
+    #: before the pre-lock, because nothing about it can be made to work.
+    TD_WRONG_INSTRUMENT = 112
 
     # --- 2xx: the venue said no, in a way we recognise ---------------------
 

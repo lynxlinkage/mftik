@@ -60,6 +60,12 @@ class SymbolPlane:
         Sources are refreshed independently: one venue's endpoint being down
         must not stop the others from updating, so failures are collected and
         reported rather than raised.
+
+        The tallies are per **venue**, and a unified-account venue has more
+        than one source behind that name — so they accumulate rather than being
+        assigned. Keying them by source would say more, at the cost of a report
+        whose keys are venue names for three venues and something else for the
+        fourth; a failure names its category in the message instead.
         """
         refreshed: dict[str, int] = {}
         deactivated: dict[str, int] = {}
@@ -73,9 +79,17 @@ class SymbolPlane:
                     instruments = await source.fetch()
                 except Exception as exc:
                     logger.exception(
-                        "sym refresh failed venue=%s", source.venue
+                        "sym refresh failed venue=%s category=%s",
+                        source.venue,
+                        source.category.value,
                     )
-                    failed[source.venue] = f"{type(exc).__name__}: {exc}"
+                    reason = (
+                        f"{source.category.value}: {type(exc).__name__}: {exc}"
+                    )
+                    prior = failed.get(source.venue)
+                    failed[source.venue] = (
+                        f"{prior}; {reason}" if prior else reason
+                    )
                     continue
 
                 seen: set[str] = set()
@@ -99,11 +113,17 @@ class SymbolPlane:
                     category=source.category.value,
                     keep=seen,
                 )
-                refreshed[source.venue] = len(instruments)
-                deactivated[source.venue] = gone
+                refreshed[source.venue] = (
+                    refreshed.get(source.venue, 0) + len(instruments)
+                )
+                deactivated[source.venue] = (
+                    deactivated.get(source.venue, 0) + gone
+                )
                 logger.info(
-                    "sym refreshed venue=%s instruments=%s deactivated=%s",
+                    "sym refreshed venue=%s category=%s instruments=%s "
+                    "deactivated=%s",
                     source.venue,
+                    source.category.value,
                     len(instruments),
                     gone,
                 )

@@ -131,6 +131,57 @@
       }
     },
     "/apis/{api_id}": {
+      "patch": {
+        "tags": [
+          "apis"
+        ],
+        "summary": "Rename Api",
+        "description": "Rename the trading account bound 1-1 to this credential.\n\nstrategy.yml ``td`` entries resolve by account name at deploy time, so a\nrename only affects future deploys \u2014 live sessions stay keyed by api_id.",
+        "operationId": "rename_api_apis__api_id__patch",
+        "parameters": [
+          {
+            "name": "api_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Api Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiRenameBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [
           "apis"
@@ -1096,6 +1147,22 @@
           "created_by"
         ],
         "title": "ApiOut"
+      },
+      "ApiRenameBody": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "ApiRenameBody",
+        "description": "Rename the trading account bound to an API credential."
       },
       "AuditListResponse": {
         "properties": {

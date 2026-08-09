@@ -240,7 +240,7 @@ class NoopStrategy(Strategy):
 
         accepted = await self.oms.submit_order(
             api_id,
-            symbol=info.symbol,
+            ticker=info.ticker,
             side=side,
             qty=qty,
             type=OrderType.LIMIT,

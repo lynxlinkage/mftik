@@ -78,7 +78,7 @@ async def test_oms_updates_from_session_callbacks(
 
     private = session.private
     order = await private.place_order(limit_order(
-        symbol="BTCUSDT",
+        ticker="Paper_Spot_BTCUSDT",
         side=Side.BUY,
         qty=Decimal("0.01"),
         price=Decimal("1000"),

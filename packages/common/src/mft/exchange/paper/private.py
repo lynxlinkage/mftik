@@ -9,7 +9,7 @@ from mft.exchange.base import BaseClient
 from mft.exchange.errors import ExchangeError, OrderError
 from mft.exchange.models import Balance, Fill, Order, PlaceOrderRequest
 from mft.exchange.stream import EventStream
-from mft.exchange.tickers import Category
+from mft.exchange.tickers import Category, UniversalTicker
 
 if TYPE_CHECKING:
     from mft.exchange.paper.engine import PaperExchange
@@ -75,9 +75,14 @@ class PaperPrivateClient(BaseClient):
         return await self._exchange.cancel_order(self.api_key, order_id)
 
     async def fetch_order_by_client_order_id(
-        self, client_order_id: str, *, symbol: str | None = None
+        self, client_order_id: str, *, ticker: UniversalTicker | None = None
     ) -> Order | None:
-        """Look the order up in the engine, or None if it never landed."""
+        """Look the order up in the engine, or None if it never landed.
+
+        ``ticker`` is unused: paper indexes by client order id alone. It is in
+        the signature because that is the shape TD calls this with, and a
+        venue that needs the instrument to look one up is the normal case.
+        """
         self._ensure_connected()
         try:
             return self._exchange.get_order_by_client_id(

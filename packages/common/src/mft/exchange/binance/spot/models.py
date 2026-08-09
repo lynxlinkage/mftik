@@ -42,6 +42,7 @@ from mft.exchange.models import (
     Ticker,
     Trade,
 )
+from mft.exchange.tickers import UniversalTicker
 
 #: Binance order status → ours. ``EXPIRED`` covers both a time-in-force that
 #: ran out and an order the venue killed, and ``EXPIRED_IN_MATCH`` is a
@@ -169,7 +170,7 @@ class BinanceAggTrade(BinanceMessage):
     def ts(self) -> float:
         return _secs(self.trade_time or self.event_time)
 
-    def to_trade(self) -> Trade:
+    def to_trade(self, ticker: UniversalTicker) -> Trade:
         """The print as a plain tape entry, aggregation dropped.
 
         ``trade_id`` is the aggregate's id, which is not a trade id on this
@@ -177,19 +178,19 @@ class BinanceAggTrade(BinanceMessage):
         :meth:`to_agg_trade`, which says what the id is.
         """
         return Trade(
+            universal_ticker=str(ticker),
             trade_id=str(self.a),
-            symbol=self.s,
             price=self.p,
             qty=self.q,
             side=side_of(self.m),
             ts=self.ts,
         )
 
-    def to_agg_trade(self) -> AggTrade:
+    def to_agg_trade(self, ticker: UniversalTicker) -> AggTrade:
         """The print with its match range kept, so the count survives."""
         return AggTrade(
+            universal_ticker=str(ticker),
             trade_id=str(self.a),
-            symbol=self.s,
             price=self.p,
             qty=self.q,
             side=side_of(self.m),
@@ -219,10 +220,10 @@ class BinanceTrade(BinanceMessage):
     def ts(self) -> float:
         return _secs(self.trade_time or self.event_time)
 
-    def to_trade(self) -> Trade:
+    def to_trade(self, ticker: UniversalTicker) -> Trade:
         return Trade(
+            universal_ticker=str(ticker),
             trade_id=str(self.t),
-            symbol=self.s,
             price=self.p,
             qty=self.q,
             side=side_of(self.m),
@@ -268,15 +269,15 @@ class BinanceKlineEvent(BinanceMessage):
         """Binance's spelling of the window, echoed back from the subscribe."""
         return self.k.i
 
-    def to_kline(self) -> Kline:
-        """The candle in shared form, still in Binance's symbol and interval.
+    def to_kline(self, ticker: UniversalTicker) -> Kline:
+        """The candle in shared form, still in Binance's interval spelling.
 
-        Both are translated a layer up, in
+        The interval is translated a layer up, in
         :class:`~mft.exchange.binance.spot.public.BinanceSpotPublicClient`, so
         that this model stays a faithful reading of the wire.
         """
         return Kline(
-            symbol=self.k.s,
+            universal_ticker=str(ticker),
             interval=self.k.i,
             # ``t`` is the window's open time, in milliseconds.
             open_time=_secs(self.k.t),
@@ -313,7 +314,7 @@ class BinanceTicker(BinanceMessage):
     def symbol(self) -> str:
         return self.s
 
-    def to_ticker(self) -> Ticker:
+    def to_ticker(self, ticker: UniversalTicker) -> Ticker:
         """Falls back to ``last`` on whichever side is unquoted.
 
         Binance publishes ``0`` rather than omitting a side on an empty book,
@@ -322,7 +323,7 @@ class BinanceTicker(BinanceMessage):
         bid = self.bid if self.bid else self.last
         ask = self.ask if self.ask else self.last
         return Ticker(
-            symbol=self.s,
+            universal_ticker=str(ticker),
             bid=bid,
             ask=ask,
             last=self.last,
@@ -364,8 +365,10 @@ class BinanceDepth(BinanceMessage):
     bids: list[Any] = Field(default_factory=list)
     asks: list[Any] = Field(default_factory=list)
 
-    def to_order_book(self, symbol: str, *, ts: float | None = None) -> OrderBook:
-        """The book under ``symbol``, stamped ``ts`` or with arrival time.
+    def to_order_book(
+        self, ticker: UniversalTicker, *, ts: float | None = None
+    ) -> OrderBook:
+        """The book under ``ticker``, stamped ``ts`` or with arrival time.
 
         Binance dates neither form of this payload — a book carries only
         ``lastUpdateId`` — so ``ts`` is whatever the caller knows, and arrival
@@ -373,7 +376,7 @@ class BinanceDepth(BinanceMessage):
         """
         fields: dict[str, Any] = {} if ts is None else {"ts": ts}
         return OrderBook(
-            symbol=symbol,
+            universal_ticker=str(ticker),
             bids=_levels(self.bids),
             asks=_levels(self.asks),
             **fields,
@@ -484,11 +487,11 @@ class BinanceExecutionReport(BinanceMessage):
         """Whether this report carries an execution, not just a state change."""
         return self.exec_type.upper() == "TRADE" and self.last_qty > 0
 
-    def to_order(self) -> Order:
+    def to_order(self, ticker: UniversalTicker) -> Order:
         return Order(
+            universal_ticker=str(ticker),
             order_id=str(self.order_id),
             client_order_id=self.client_order_id,
-            symbol=self.s,
             side=self.side,
             type=self.type,
             status=self.status,
@@ -501,16 +504,16 @@ class BinanceExecutionReport(BinanceMessage):
             ts=_secs(self.transact_time or self.event_time),
         )
 
-    def to_fill(self) -> Fill:
+    def to_fill(self, ticker: UniversalTicker) -> Fill:
         """This report's own execution — ``l``/``L``, never the running totals.
 
         Only meaningful when :attr:`is_fill`; callers filter first.
         """
         return Fill(
+            universal_ticker=str(ticker),
             fill_id=str(self.trade_id),
             order_id=str(self.order_id),
             client_order_id=self.client_order_id,
-            symbol=self.s,
             side=self.side,
             price=self.last_price,
             qty=self.last_qty,
@@ -642,11 +645,11 @@ class BinanceOrderAck(BinanceMessage):
             self.transact_time or self.update_time or self.working_time or self.time
         )
 
-    def to_order(self) -> Order:
+    def to_order(self, ticker: UniversalTicker) -> Order:
         return Order(
+            universal_ticker=str(ticker),
             order_id=str(self.order_id),
             client_order_id=self.order_client_id,
-            symbol=self.symbol,
             side=self.side,
             type=type_of(self.type),
             status=self.order_status,
@@ -657,14 +660,14 @@ class BinanceOrderAck(BinanceMessage):
             ts=self.ts,
         )
 
-    def to_fills(self) -> list[Fill]:
+    def to_fills(self, ticker: UniversalTicker) -> list[Fill]:
         """The executions this reply reported, if the order traded on arrival."""
         return [
             Fill(
+                universal_ticker=str(ticker),
                 fill_id=str(leg.trade_id),
                 order_id=str(self.order_id),
                 client_order_id=self.order_client_id,
-                symbol=self.symbol,
                 side=self.side,
                 price=leg.price,
                 qty=leg.qty,
@@ -695,7 +698,9 @@ class BinanceAccountInfo(BinanceMessage):
         ]
 
 
-def kline_from_row(row: list[Any], symbol: str, interval: str) -> Kline:
+def kline_from_row(
+    row: list[Any], ticker: UniversalTicker, interval: str
+) -> Kline:
     """One row of the ``klines`` reply — a positional array, not an object.
 
     Binance's column order *is* OHLC, unlike some venues, but the two volumes
@@ -716,11 +721,11 @@ def kline_from_row(row: list[Any], symbol: str, interval: str) -> Kline:
     """
     if len(row) < 8:
         raise ValueError(
-            f"kline row for {symbol} {interval} has {len(row)} columns, "
+            f"kline row for {ticker} {interval} has {len(row)} columns, "
             f"expected at least 8: {row!r}"
         )
     return Kline(
-        symbol=symbol,
+        universal_ticker=str(ticker),
         interval=interval,
         open_time=_secs(row[0]),
         open=Decimal(str(row[1])),

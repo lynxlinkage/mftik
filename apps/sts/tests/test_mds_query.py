@@ -66,7 +66,7 @@ class RecordingStrategy(Strategy):
 
 def _kline() -> Kline:
     return Kline(
-        symbol="BTCUSDT",
+        universal_ticker="Gate_Spot_BTCUSDT",
         interval="1h",
         open_time=1_700_000_000,
         open=Decimal("60100"),
@@ -452,7 +452,7 @@ async def test_each_kind_of_answer_reaches_its_own_hook(broker: Broker) -> None:
                 query_id="b1",
                 ticker=str(TICKER),
                 book=OrderBook(
-                    symbol="BTCUSDT",
+                    universal_ticker="Gate_Spot_BTCUSDT",
                     bids=[BookLevel(price=Decimal("59999"), qty=Decimal("3"))],
                     asks=[BookLevel(price=Decimal("60001"), qty=Decimal("1"))],
                 ),
@@ -468,7 +468,7 @@ async def test_each_kind_of_answer_reaches_its_own_hook(broker: Broker) -> None:
                 query_id="q1",
                 ticker=str(TICKER),
                 quote=BestQuote(
-                    symbol="BTCUSDT",
+                    universal_ticker="Gate_Spot_BTCUSDT",
                     bid=Decimal("59999"),
                     bid_qty=Decimal("3"),
                     ask=Decimal("60001"),

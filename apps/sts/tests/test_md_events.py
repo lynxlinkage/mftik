@@ -85,7 +85,7 @@ def _payloads() -> list[tuple[str, str, dict]]:
             MD_TICKER,
             "ticker",
             Ticker(
-                symbol="BTCUSDT",
+                universal_ticker="Paper_Spot_BTCUSDT",
                 bid=Decimal("100"),
                 ask=Decimal("101"),
                 last=Decimal("100.5"),
@@ -95,7 +95,7 @@ def _payloads() -> list[tuple[str, str, dict]]:
             MD_ORDERBOOK,
             "order_book",
             OrderBook(
-                symbol="BTCUSDT",
+                universal_ticker="Paper_Spot_BTCUSDT",
                 bids=[BookLevel(price=Decimal("100"), qty=Decimal("1"))],
                 asks=[BookLevel(price=Decimal("101"), qty=Decimal("2"))],
             ).model_dump(mode="json"),
@@ -104,7 +104,7 @@ def _payloads() -> list[tuple[str, str, dict]]:
             MD_KLINE,
             "kline",
             Kline(
-                symbol="BTCUSDT",
+                universal_ticker="Paper_Spot_BTCUSDT",
                 interval="1m",
                 open_time=1_700_000_000.0,
                 open=Decimal("100"),
@@ -120,7 +120,7 @@ def _payloads() -> list[tuple[str, str, dict]]:
             "trade",
             Trade(
                 trade_id="t1",
-                symbol="BTCUSDT",
+                universal_ticker="Paper_Spot_BTCUSDT",
                 price=Decimal("100.5"),
                 qty=Decimal("0.5"),
                 side="buy",
@@ -131,7 +131,7 @@ def _payloads() -> list[tuple[str, str, dict]]:
             "agg_trade",
             AggTrade(
                 trade_id="a1",
-                symbol="BTCUSDT",
+                universal_ticker="Paper_Spot_BTCUSDT",
                 price=Decimal("100.5"),
                 qty=Decimal("0.5"),
                 side="sell",
@@ -143,7 +143,7 @@ def _payloads() -> list[tuple[str, str, dict]]:
             MD_BEST_QUOTE,
             "best_quote",
             BestQuote(
-                symbol="BTCUSDT",
+                universal_ticker="Paper_Spot_BTCUSDT",
                 bid=Decimal("100"),
                 bid_qty=Decimal("1"),
                 ask=Decimal("101"),
