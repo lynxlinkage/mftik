@@ -113,9 +113,36 @@ sts:
 """,
 )
 
+CROSS_ARB = StrategyTemplate(
+    type="CrossArb",
+    label="Cross-venue arb",
+    description=(
+        "Posts PostOnly quotes on one account from another venue's best "
+        "quote, and IOC-hedges full size on the first partial/fill."
+    ),
+    yaml="""\
+td:
+  # td[0] quotes; td[1] hedges. Two different venue accounts.
+  - binance quoter
+  - gate hedger
+md:
+  - bestquote.Binance_Spot_BTCUSDT
+  - bestquote.Gate_Spot_BTCUSDT
+sts:
+  quote_ticker: Binance_Spot_BTCUSDT
+  hedge_ticker: Gate_Spot_BTCUSDT
+  # One or both sides.
+  side: [buy, sell]
+  qty: 0.001
+  # Fee-blind edge band in bps; quotes sit at the midpoint.
+  x_lo_bps: 5
+  x_hi_bps: 15
+""",
+)
+
 #: Every deployable strategy, keyed by the type used on the wire.
 TEMPLATES: dict[str, StrategyTemplate] = {
-    t.type: t for t in (NOOP, CHASE, OCO)
+    t.type: t for t in (NOOP, CHASE, OCO, CROSS_ARB)
 }
 
 #: Type offered when the caller does not choose one.
