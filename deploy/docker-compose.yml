@@ -89,6 +89,9 @@ services:
   sts:
     <<: *mft
     command: ["sts"]
+    environment:
+      # A deploy is a restart: sessions interrupted by it are rebuilt on boot.
+      STS_REBUILD_ON_BOOT: "1"
 
   # Paper exchange engine. Kept in production so the `paper` venue works
   # end-to-end and mft.lynkora.com can be smoke-tested without real money.

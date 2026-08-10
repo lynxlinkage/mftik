@@ -105,6 +105,9 @@ services:
   sts:
     <<: *mft
     command: ["sts"]
+    environment:
+      # Restart the stack and interrupted sessions come back on their own.
+      STS_REBUILD_ON_BOOT: "1"
     depends_on:
       redis:
         condition: service_healthy
