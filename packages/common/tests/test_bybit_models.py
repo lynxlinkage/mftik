@@ -8,6 +8,7 @@ import pytest
 from mft.exchange.bybit.models import (
     BybitExecution,
     BybitKline,
+    BybitLiquidation,
     BybitOrderBook,
     BybitOrderUpdate,
     BybitPosition,
@@ -309,6 +310,23 @@ def test_the_tape_reports_the_aggressor_with_nothing_to_invert() -> None:
     assert trade.side is Side.SELL
     assert trade.trade_id == "trade-1"
     assert trade.ts == 1700000000.0
+
+
+def test_a_liquidation_reports_the_position_that_was_closed() -> None:
+    """``Buy`` means a long was liquidated — the opposite of the tape's ``S``."""
+    row = BybitLiquidation.model_validate(
+        {
+            "T": 1700000000000,
+            "s": "BTCUSDT",
+            "S": "Buy",
+            "v": "1.5",
+            "p": "59100",
+        }
+    ).to_liquidation(TICKER)
+    assert row.side is Side.BUY
+    assert row.qty == Decimal("1.5")
+    assert row.price == Decimal("59100")
+    assert row.ts == 1700000000.0
 
 
 def test_a_spot_ticker_has_no_quote_and_falls_back_to_last() -> None:

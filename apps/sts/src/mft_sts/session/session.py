@@ -14,6 +14,7 @@ from mft.exchange.models import (
     BestQuote,
     Fill,
     Kline,
+    Liquidation,
     Order,
     OrderBook,
     Ticker,
@@ -28,6 +29,7 @@ from mft.protocol import (
     MD_KLINE,
     MD_KLINES_RESULT,
     MD_LEASE_ACK,
+    MD_LIQUIDATION,
     MD_ORDERBOOK,
     MD_ORDERBOOK_RESULT,
     MD_TICKER,
@@ -88,6 +90,7 @@ MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     MD_TRADE: ("on_trade", Trade),
     MD_AGG_TRADE: ("on_agg_trade", AggTrade),
     MD_BEST_QUOTE: ("on_best_quote", BestQuote),
+    MD_LIQUIDATION: ("on_liquidation", Liquidation),
 }
 
 #: Query result type → (strategy hook, payload model). Separate from

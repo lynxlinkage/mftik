@@ -13,6 +13,7 @@ from mft.exchange.models import (
     BestQuote,
     BookLevel,
     Kline,
+    Liquidation,
     OrderBook,
     Ticker,
     Trade,
@@ -21,6 +22,7 @@ from mft.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_KLINE,
+    MD_LIQUIDATION,
     MD_ORDERBOOK,
     MD_TICKER,
     MD_TRADE,
@@ -57,6 +59,7 @@ class RecordingStrategy(Strategy):
             "trade": [],
             "agg_trade": [],
             "best_quote": [],
+            "liquidation": [],
         }
 
     async def on_ticker(self, ticker: Ticker) -> None:
@@ -76,6 +79,9 @@ class RecordingStrategy(Strategy):
 
     async def on_best_quote(self, quote: BestQuote) -> None:
         self.seen["best_quote"].append(quote)
+
+    async def on_liquidation(self, liquidation: Liquidation) -> None:
+        self.seen["liquidation"].append(liquidation)
 
 
 def _payloads() -> list[tuple[str, str, dict]]:
@@ -148,6 +154,16 @@ def _payloads() -> list[tuple[str, str, dict]]:
                 bid_qty=Decimal("1"),
                 ask=Decimal("101"),
                 ask_qty=Decimal("2"),
+            ).model_dump(mode="json"),
+        ),
+        (
+            MD_LIQUIDATION,
+            "liquidation",
+            Liquidation(
+                universal_ticker="Bybit_Perp_BTCUSDT",
+                price=Decimal("59100"),
+                qty=Decimal("1.5"),
+                side="buy",
             ).model_dump(mode="json"),
         ),
     ]

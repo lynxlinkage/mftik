@@ -35,13 +35,19 @@ from typing import TypeVar
 
 from mft.exchange.base import BaseClient
 from mft.exchange.bybit.feed import DEFAULT_BOOK_DEPTH, BybitPublicStream
-from mft.exchange.bybit.protocol import BYBIT_REST_URL, product_of
+from mft.exchange.bybit.protocol import (
+    BYBIT_REST_URL,
+    INVERSE,
+    LINEAR,
+    product_of,
+)
 from mft.exchange.bybit.rest import BybitPublicRest
 from mft.exchange.intervals import InvalidIntervalError, normalize_interval
 from mft.exchange.models import (
     BestQuote,
     Instrument,
     Kline,
+    Liquidation,
     OrderBook,
     Ticker,
     Trade,
@@ -76,6 +82,11 @@ BYBIT_INTERVALS: dict[str, str] = {
     "1w": "W",
     "1mo": "M",
 }
+
+#: Products that carry ``allLiquidation``. Spot has no liquidations; options
+#: are not traded here yet, so a subscribe on those books is refused locally
+#: rather than left hanging on a socket that never pushes.
+LIQUIDATION_PRODUCTS = frozenset({LINEAR, INVERSE})
 
 
 def venue_interval(interval: str) -> str:
@@ -235,6 +246,28 @@ class BybitPublicClient(BaseClient):
         self._ensure_connected()
         return self._best_quotes(ticker)
 
+    def stream_liquidation(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[Liquidation]:
+        """``allLiquidation`` — refused on books Bybit does not liquidate.
+
+        Checked here, before the iterator runs, so MD's subscribe fails the
+        same way a missing ``stream_*`` does rather than starting a pump that
+        never yields.
+        """
+        self._ensure_connected()
+        if ticker.venue != self.name:
+            raise ValueError(
+                f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
+            )
+        product = product_of(ticker.category)
+        if product not in LIQUIDATION_PRODUCTS:
+            raise ValueError(
+                f"Bybit {product} serves no liquidation stream; "
+                f"supported: {', '.join(sorted(LIQUIDATION_PRODUCTS))}"
+            )
+        return self._liquidations(ticker)
+
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         """``tickers`` — skipping the deltas that carry no price.
 
@@ -303,6 +336,18 @@ class BybitPublicClient(BaseClient):
                 continue
             yield quote
 
+    async def _liquidations(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[Liquidation]:
+        """``allLiquidation`` — forced closes on the contract books."""
+        native, product = await self._resolve(ticker)
+        feed = await self.feed_for(product)
+        stream = await feed.subscribe_liquidations(native)
+        async for row in self._rows(stream):
+            if row.symbol != native:
+                continue
+            yield row.to_liquidation(ticker)
+
     # --- stream plumbing ---------------------------------------------------
 
     @staticmethod
@@ -339,4 +384,9 @@ class BybitPublicClient(BaseClient):
         )
 
 
-__all__ = ["BYBIT_INTERVALS", "BybitPublicClient", "venue_interval"]
+__all__ = [
+    "BYBIT_INTERVALS",
+    "LIQUIDATION_PRODUCTS",
+    "BybitPublicClient",
+    "venue_interval",
+]

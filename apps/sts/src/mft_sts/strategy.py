@@ -10,6 +10,7 @@ from mft.exchange.models import (
     BestQuote,
     Fill,
     Kline,
+    Liquidation,
     Order,
     OrderBook,
     Ticker,
@@ -85,7 +86,7 @@ class Strategy:
 
     Public events from ``md.{session_id}`` (wired):
         on_ticker, on_order_book, on_kline, on_trade, on_agg_trade,
-        on_best_quote
+        on_best_quote, on_liquidation
         One hook per feed topic subscribed in ``md_ids``
         (``topic.UniversalTicker``; kline carries its interval in the topic,
         e.g. ``paper.kline_1m.BTCUSDT``).
@@ -357,6 +358,19 @@ class Strategy:
         """Handle top-of-book updates from MD.
 
         Feed topic ``bestquote``. Best bid/ask with sizes, at book speed.
+        """
+
+    async def on_liquidation(self, liquidation: Liquidation) -> None:
+        """Handle public forced-liquidation prints from MD.
+
+        Feed topic ``liquidation``. Other accounts being closed out for
+        insufficient margin — not a fill of ours. ``side`` is the liquidated
+        position (``buy`` = long closed out), and ``price`` is the bankruptcy
+        price the venue reported.
+
+        Not every venue publishes this. Bybit does via ``allLiquidation``;
+        subscribing where it is absent is refused at attach rather than
+        silently producing nothing.
         """
 
     # --- query answers -----------------------------------------------------

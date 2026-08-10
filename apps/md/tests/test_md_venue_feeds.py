@@ -12,6 +12,7 @@ from mft.exchange.models import (
     BestQuote,
     BookLevel,
     Kline,
+    Liquidation,
     OrderBook,
     Ticker,
     Trade,
@@ -21,6 +22,7 @@ from mft.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_KLINE,
+    MD_LIQUIDATION,
     MD_ORDERBOOK,
     MD_TICKER,
     MD_TRADE,
@@ -128,6 +130,18 @@ class FakePublic:
             )
         )
 
+    def stream_liquidation(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[Liquidation]:
+        return self._once(
+            Liquidation(
+                universal_ticker=str(ticker),
+                price=Decimal("99"),
+                qty=Decimal("5"),
+                side="sell",
+            )
+        )
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -138,6 +152,7 @@ class FakePublic:
         ("trade", MD_TRADE),
         ("aggtrade", MD_AGG_TRADE),
         ("bestquote", MD_BEST_QUOTE),
+        ("liquidation", MD_LIQUIDATION),
         ("kline_1m", MD_KLINE),
     ],
 )
@@ -214,6 +229,21 @@ async def test_a_venue_without_agg_trades_refuses_that_topic() -> None:
     await sess.start()
     with pytest.raises(ValueError, match="does not publish stream_agg_trades"):
         await sess.ensure_feed("aggtrade", FAKE)
+    assert sess.feed_count == 0
+    await sess.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_venue_without_liquidations_refuses_that_topic() -> None:
+    """Only Bybit publishes public liquidations today."""
+
+    class NoLiquidations(FakePublic):
+        stream_liquidation = None
+
+    sess = VenueSession(FAKE.venue, NoLiquidations(), on_update=_noop_update)
+    await sess.start()
+    with pytest.raises(ValueError, match="does not publish stream_liquidation"):
+        await sess.ensure_feed("liquidation", FAKE)
     assert sess.feed_count == 0
     await sess.stop()
 

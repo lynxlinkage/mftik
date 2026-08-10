@@ -40,6 +40,7 @@ from mft.exchange.models import (
     Fill,
     Instrument,
     Kline,
+    Liquidation,
     Order,
     OrderBook,
     OrderStatus,
@@ -459,6 +460,34 @@ class BybitPublicTrade(BybitMessage):
         )
 
 
+class BybitLiquidation(BybitMessage):
+    """One row of ``allLiquidation.<symbol>`` — a forced close on the contracts.
+
+    ``S`` is the **liquidated position's** side, not the aggressor: ``Buy``
+    means a long was closed out. ``p`` is the bankruptcy price Bybit reported
+    for the event.
+    """
+
+    updated_time: Ms = Field(default=0.0, alias="T")
+    s: str = ""
+    side: VenueSide = Field(default=Side.BUY, alias="S")
+    v: Dec = Decimal("0")
+    p: Dec = Decimal("0")
+
+    @property
+    def symbol(self) -> str:
+        return self.s
+
+    def to_liquidation(self, ticker: UniversalTicker) -> Liquidation:
+        return Liquidation(
+            universal_ticker=str(ticker),
+            price=self.p,
+            qty=self.v,
+            side=self.side,
+            ts=self.updated_time,
+        )
+
+
 class BybitTicker(BybitMessage):
     """``tickers.<symbol>``, and one row of ``GET /v5/market/tickers``.
 
@@ -739,6 +768,7 @@ __all__ = [
     "EXEC_TYPE_TRADE",
     "BybitExecution",
     "BybitKline",
+    "BybitLiquidation",
     "BybitMessage",
     "BybitOrderAck",
     "BybitOrderBook",

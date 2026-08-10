@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mft.exchange.bybit import channels as ch
 from mft.exchange.bybit.models import (
     BybitKline,
+    BybitLiquidation,
     BybitOrderBook,
     BybitPublicTrade,
     BybitTicker,
@@ -356,6 +357,19 @@ class BybitPublicStream(BybitSocket):
         return await self._subscribe(
             tuple(ch.order_book(s, depth=1) for s in symbols),
             lambda _t, _k, row: BybitOrderBook.model_validate(row),
+        )
+
+    async def subscribe_liquidations(
+        self, *symbols: str
+    ) -> EventStream[BybitLiquidation]:
+        """``allLiquidation.<symbol>`` — forced closes on the contract books.
+
+        Spot has none; this topic only pushes on the linear and inverse
+        sockets. See :class:`~mft.exchange.bybit.models.BybitLiquidation`.
+        """
+        return await self._subscribe(
+            tuple(ch.all_liquidation(s) for s in symbols),
+            lambda _t, _k, row: BybitLiquidation.model_validate(row),
         )
 
     def _check_depth(self, depth: int) -> None:

@@ -394,6 +394,30 @@ class BestQuote(InstrumentScoped):
     ts: float = Field(default_factory=_ts)
 
 
+class Liquidation(InstrumentScoped):
+    """One public forced-liquidation print.
+
+    Feed topic ``liquidation``. A venue that publishes this reports other
+    accounts being closed out for insufficient margin — not a fill of ours,
+    and not a private account event. Bybit serves it as ``allLiquidation``;
+    venues without an equivalent simply have no ``stream_liquidation``, and
+    subscribing there is refused at attach.
+
+    ``side`` is the **liquidated position's** side: ``buy`` means a long was
+    closed out, ``sell`` a short. That matches Bybit's ``S`` field and is the
+    opposite reading from :class:`Trade.side`, which is the aggressor on the
+    tape.
+
+    ``price`` is the bankruptcy price the venue reported for the event, not a
+    public-trade print.
+    """
+
+    price: Decimal
+    qty: Decimal
+    side: Side
+    ts: float = Field(default_factory=_ts)
+
+
 class OrderBook(InstrumentScoped):
     bids: list[BookLevel]
     asks: list[BookLevel]

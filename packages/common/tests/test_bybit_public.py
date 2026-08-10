@@ -78,7 +78,9 @@ def test_topics_carry_the_symbol_but_never_the_category() -> None:
     assert ch.order_book("btcusdt", depth=50) == "orderbook.50.BTCUSDT"
     assert ch.public_trade("btcusdt") == "publicTrade.BTCUSDT"
     assert ch.kline("btcusdt", "60") == "kline.60.BTCUSDT"
+    assert ch.all_liquidation("btcusdt") == "allLiquidation.BTCUSDT"
     assert ch.symbol_of("orderbook.50.BTCUSDT") == "BTCUSDT"
+    assert ch.symbol_of("allLiquidation.BTCUSDT") == "BTCUSDT"
     assert ch.symbol_of("wallet") == ""
 
 
@@ -384,6 +386,46 @@ async def test_a_client_is_refused_a_ticker_from_another_venue(
     async with client:
         with pytest.raises(ValueError, match="was handed a Binance ticker"):
             await client.fetch_ticker(UniversalTicker.parse("Binance_Spot_BTCUSDT"))
+
+
+async def test_liquidations_arrive_stamped_with_the_perp(
+    bybit_public: FakeBybit,
+) -> None:
+    """``allLiquidation`` is a contract-book topic; side is the position closed."""
+    client = _client(bybit_public, product="linear")
+    async with client:
+        ticker = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
+        stream = client.stream_liquidation(ticker)
+        task = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)
+        await bybit_public.push(
+            "allLiquidation.BTCUSDT",
+            [
+                {
+                    "T": 1700000000000,
+                    "s": NATIVE,
+                    "S": "Sell",
+                    "v": "12.5",
+                    "p": "59900",
+                }
+            ],
+        )
+        row = await asyncio.wait_for(task, 2)
+
+    assert row.universal_ticker == "Bybit_Perp_BTCUSDT"
+    assert row.side.value == "sell"
+    assert row.qty == Decimal("12.5")
+    assert row.price == Decimal("59900")
+    assert row.ts == 1700000000.0
+    assert bybit_public.subscribed == {"allLiquidation.BTCUSDT"}
+
+
+async def test_spot_has_no_liquidation_stream(bybit_public: FakeBybit) -> None:
+    """Spot cannot be liquidated; the subscribe is refused before any socket."""
+    client = _client(bybit_public)
+    async with client:
+        with pytest.raises(ValueError, match="serves no liquidation stream"):
+            client.stream_liquidation(UniversalTicker.parse("Bybit_Spot_BTCUSDT"))
 
 
 async def test_each_category_gets_its_own_socket(bybit_public: FakeBybit) -> None:

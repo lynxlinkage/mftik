@@ -91,6 +91,16 @@ def kline(symbol: str, interval: str) -> str:
     return f"kline.{interval}.{symbol.upper()}"
 
 
+def all_liquidation(symbol: str) -> str:
+    """``allLiquidation.BTCUSDT`` — every forced close on the contract books.
+
+    Spot has no liquidations; this topic lives on the linear and inverse
+    sockets only. ``S`` on the payload is the liquidated position's side —
+    ``Buy`` means a long was closed out — not the aggressor on the tape.
+    """
+    return f"allLiquidation.{symbol.upper()}"
+
+
 def symbol_of(topic: str) -> str:
     """The symbol a topic names, or ``""`` for one that names none.
 
@@ -227,6 +237,7 @@ __all__ = [
     "TRADE_OPS",
     "WALLET",
     "WALLET_BALANCE_PATH",
+    "all_liquidation",
     "base_topic",
     "kline",
     "order_book",

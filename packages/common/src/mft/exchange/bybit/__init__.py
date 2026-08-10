@@ -39,6 +39,7 @@ from mft.exchange.bybit.models import (
     EXEC_TYPE_TRADE,
     BybitExecution,
     BybitKline,
+    BybitLiquidation,
     BybitMessage,
     BybitOrderAck,
     BybitOrderBook,
@@ -82,6 +83,7 @@ from mft.exchange.bybit.protocol import (
 )
 from mft.exchange.bybit.public import (
     BYBIT_INTERVALS,
+    LIQUIDATION_PRODUCTS,
     BybitPublicClient,
     venue_interval,
 )
@@ -111,6 +113,7 @@ __all__ = [
     "BybitError",
     "BybitExecution",
     "BybitKline",
+    "BybitLiquidation",
     "BybitMessage",
     "BybitOrderAck",
     "BybitOrderBook",
@@ -131,6 +134,7 @@ __all__ = [
     "BybitWallet",
     "BybitWalletCoin",
     "BybitWsError",
+    "LIQUIDATION_PRODUCTS",
     "auth_frame",
     "channels",
     "instrument_from_row",
