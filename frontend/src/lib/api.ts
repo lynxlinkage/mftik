@@ -78,7 +78,7 @@ export type StrategyRow = {
 	reason: string | null;
 };
 
-/** A past deploy rebuilt as strategy.yml (`GET /sts/strategies/{id}/yaml`). */
+/** The strategy.yml behind a past deploy (`GET /sts/strategies/{id}/yaml`). */
 export type StrategyYaml = {
 	id: number;
 	/** Strategy class this was deployed as. */
@@ -86,8 +86,11 @@ export type StrategyYaml = {
 	sts_session: string;
 	yaml: string;
 	/** api ids whose account name could not be recovered — their `td` entries
-	 * are placeholders that will not redeploy. */
+	 * are placeholders that will not redeploy. Reconstructed documents only. */
 	unresolved_td: number[];
+	/** False when `yaml` is the submitted document; true when it was rebuilt
+	 * from the stored spec because that deploy predates the text being kept. */
+	reconstructed: boolean;
 };
 
 export type Audit = {

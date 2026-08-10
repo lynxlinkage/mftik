@@ -27,7 +27,8 @@
 	let busy = $state(false);
 	let loading = $state(true);
 
-	// The strategy.yml of a past deploy, rebuilt on demand from the stored spec.
+	// The strategy.yml of a past deploy: the submitted document, or a rebuild
+	// from the stored spec for deploys made before the text was kept.
 	let viewing = $state<StrategyYaml | null>(null);
 	let viewingId = $state<number | null>(null);
 	let copied = $state(false);
@@ -439,12 +440,17 @@
 						<tr class="yaml-row">
 							<td colspan="6">
 								{#if viewing === null}
-									<p class="muted small">Rebuilding…</p>
+									<p class="muted small">Loading…</p>
 								{:else}
 									<div class="yaml-head">
 										<span class="muted small">
-											Rebuilt from the stored spec — the submitted document is not kept, so
-											comments and formatting are gone.
+											{#if viewing.reconstructed}
+												Rebuilt from the stored spec — this deploy predates the submitted document
+												being kept, so comments and formatting are gone and <code>td</code> shows
+												accounts' current names.
+											{:else}
+												The document as submitted.
+											{/if}
 										</span>
 										<div class="actions">
 											<button type="button" class="secondary" onclick={copyYaml}>

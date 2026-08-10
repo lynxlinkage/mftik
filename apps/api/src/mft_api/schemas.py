@@ -117,12 +117,14 @@ class StsControlResponse(BaseModel):
 
 
 class StrategyYamlResponse(BaseModel):
-    """A past deploy rebuilt as strategy.yml.
+    """The strategy.yml behind a past deploy.
 
-    ``yaml`` is reconstructed from the stored spec, not the original document:
-    comments, key order and formatting are gone. ``unresolved_td`` lists api
-    ids whose account name could not be recovered — their ``td`` entries are
-    placeholders that will not redeploy.
+    Normally ``yaml`` is the document as submitted. When ``reconstructed`` is
+    true it is not: that deploy predates the text being stored, so this was
+    rebuilt from the persisted spec, with comments and formatting gone and
+    ``td`` showing accounts' current names. ``unresolved_td`` (reconstructed
+    documents only) lists api ids whose account name could not be recovered —
+    their ``td`` entries are placeholders that will not redeploy.
     """
 
     id: int
@@ -131,6 +133,8 @@ class StrategyYamlResponse(BaseModel):
     sts_session: str
     yaml: str
     unresolved_td: list[int] = Field(default_factory=list)
+    #: False when ``yaml`` is the original text; true when it was rebuilt.
+    reconstructed: bool = False
 
 
 class VenueOut(BaseModel):

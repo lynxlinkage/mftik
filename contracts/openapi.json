@@ -364,7 +364,7 @@
           "sts"
         ],
         "summary": "Strategy Yaml",
-        "description": "Rebuild a past deploy as strategy.yml.\n\nThe submitted document is not stored, so this is a reconstruction from the\nspec that was persisted: ``strategies`` for the sts block and the session\nrow for the td/md attach lists. It parses back to the same spec, but the\noriginal comments and formatting are gone.",
+        "description": "The strategy.yml behind a past deploy.\n\nServed verbatim from what was submitted. The stored text is what a person\nwrote \u2014 comments, ordering and the account names as typed \u2014 and it is what\neverything else about the deploy was derived from, so it is the document\nto hand back.\n\nDeploys made before the text was kept have nothing to serve, and fall back\nto a reconstruction from the persisted spec (``reconstructed``). That\ndocument parses to the same spec but is not the same document: comments\nand formatting are gone, and ``td`` shows each account's *current* name\nrather than the one that was typed.",
         "operationId": "strategy_yaml_sts_strategies__strategy_id__yaml_get",
         "parameters": [
           {
@@ -1723,6 +1723,11 @@
             },
             "type": "array",
             "title": "Unresolved Td"
+          },
+          "reconstructed": {
+            "type": "boolean",
+            "title": "Reconstructed",
+            "default": false
           }
         },
         "type": "object",
@@ -1732,7 +1737,7 @@
           "yaml"
         ],
         "title": "StrategyYamlResponse",
-        "description": "A past deploy rebuilt as strategy.yml.\n\n``yaml`` is reconstructed from the stored spec, not the original document:\ncomments, key order and formatting are gone. ``unresolved_td`` lists api\nids whose account name could not be recovered \u2014 their ``td`` entries are\nplaceholders that will not redeploy."
+        "description": "The strategy.yml behind a past deploy.\n\nNormally ``yaml`` is the document as submitted. When ``reconstructed`` is\ntrue it is not: that deploy predates the text being stored, so this was\nrebuilt from the persisted spec, with comments and formatting gone and\n``td`` showing accounts' current names. ``unresolved_td`` (reconstructed\ndocuments only) lists api ids whose account name could not be recovered \u2014\ntheir ``td`` entries are placeholders that will not redeploy."
       },
       "StsControlResponse": {
         "properties": {

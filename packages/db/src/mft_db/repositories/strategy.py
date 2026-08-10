@@ -24,9 +24,11 @@ class StrategyRepository(BaseRepository[StrategyRow]):
         config: dict[str, Any] | None = None,
         created_by: int,
         sts_session: str,
+        yaml_text: str | None = None,
     ) -> StrategyRow:
         row = StrategyRow(
             type=type,
+            yaml_text=yaml_text,
             config=dict(config or {}),
             created_by=created_by,
             sts_session=sts_session,

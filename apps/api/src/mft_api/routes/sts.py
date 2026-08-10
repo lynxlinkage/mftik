@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 from mft.protocol import (
     DEFAULT_STRATEGY_TYPE,
+    RESTART_ALWAYS,
     STS_SESSION_LIST,
     STS_SESSION_PAUSE,
     STS_SESSION_RESUME,
@@ -140,12 +141,18 @@ def _deleted_td_placeholder(api_id: int) -> str:
 
 @router.get("/strategies/{strategy_id}/yaml", response_model=StrategyYamlResponse)
 async def strategy_yaml(strategy_id: int) -> StrategyYamlResponse:
-    """Rebuild a past deploy as strategy.yml.
+    """The strategy.yml behind a past deploy.
 
-    The submitted document is not stored, so this is a reconstruction from the
-    spec that was persisted: ``strategies`` for the sts block and the session
-    row for the td/md attach lists. It parses back to the same spec, but the
-    original comments and formatting are gone.
+    Served verbatim from what was submitted. The stored text is what a person
+    wrote — comments, ordering and the account names as typed — and it is what
+    everything else about the deploy was derived from, so it is the document
+    to hand back.
+
+    Deploys made before the text was kept have nothing to serve, and fall back
+    to a reconstruction from the persisted spec (``reconstructed``). That
+    document parses to the same spec but is not the same document: comments
+    and formatting are gone, and ``td`` shows each account's *current* name
+    rather than the one that was typed.
     """
     async with session_scope() as db:
         row = await StrategyRepository(db).get_with_session(strategy_id)
@@ -154,9 +161,19 @@ async def strategy_yaml(strategy_id: int) -> StrategyYamlResponse:
                 status_code=404, detail=f"strategy not found: {strategy_id}"
             )
 
+        if row.yaml_text:
+            return StrategyYamlResponse(
+                id=row.id,
+                type=row.type,
+                sts_session=row.sts_session,
+                yaml=row.yaml_text,
+                reconstructed=False,
+            )
+
         session = row.session
         td_api_ids = [int(v) for v in (session.td_api_ids or [])] if session else []
         md_ids = [str(v) for v in (session.md_ids or [])] if session else []
+        restart = session.restart if session is not None else RESTART_ALWAYS
 
         # strategy.yml names accounts; the session stores api ids. Map back.
         accounts = AccountRepository(db)
@@ -170,13 +187,16 @@ async def strategy_yaml(strategy_id: int) -> StrategyYamlResponse:
                 continue
             td_names.append(account.name)
 
-    spec = StrategySpec(td=td_names, md=md_ids, sts=dict(row.config or {}))
+    spec = StrategySpec(
+        td=td_names, md=md_ids, restart=restart, sts=dict(row.config or {})
+    )
     return StrategyYamlResponse(
         id=row.id,
         type=row.type,
         sts_session=row.sts_session,
         yaml=dump_strategy_yml(spec),
         unresolved_td=unresolved,
+        reconstructed=True,
     )
 
 
@@ -263,6 +283,10 @@ async def deploy(
     async with session_scope() as db:
         row = await StrategyRepository(db).create(
             type=strategy_type,
+            # Stored as submitted, not re-dumped from the spec: the point is
+            # to keep the document the operator wrote, which round-tripping
+            # through the parser would strip back down to its parsed shape.
+            yaml_text=body.yaml,
             config=dict(spec.sts),
             created_by=created_by,
             sts_session=session_id,

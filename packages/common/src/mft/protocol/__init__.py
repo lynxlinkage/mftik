@@ -199,6 +199,8 @@ from mft.protocol.strategy_catalog import (
     strategy_types,
 )
 from mft.protocol.strategy_yml import (
+    RESTART_ALWAYS,
+    RESTART_NEVER,
     StrategySpec,
     StrategyYamlError,
     dump_strategy_yml,
@@ -276,6 +278,8 @@ __all__ = [
     "STS_SESSION_PAUSE",
     "STS_SESSION_RESUME",
     "STS_SESSION_STOP",
+    "RESTART_ALWAYS",
+    "RESTART_NEVER",
     "TD_BALANCE_UPDATE",
     "TD_CANCEL_REJECT",
     "TD_ERROR",
