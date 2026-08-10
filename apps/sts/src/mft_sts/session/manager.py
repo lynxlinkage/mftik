@@ -11,6 +11,7 @@ from typing import Any
 
 from mft.broker import Broker
 from mft.broker.errors import RequestTimeoutError
+from mft.liveness import claim_alive, clear_alive, is_alive, mark_alive
 from mft.protocol import (
     MD_ERROR,
     MD_SESSION_ATTACH,
@@ -37,7 +38,6 @@ from mft_db.models.session import SessionDomain, SessionStatus
 
 from mft_sts.client_order_id import SLOT_SPACE
 from mft_sts.impl import resolve as resolve_strategy
-from mft_sts.liveness import claim_alive, clear_alive, is_alive, mark_alive
 from mft_sts.session.session import StsSession
 from mft_sts.strategy import Strategy
 
@@ -257,7 +257,7 @@ class SessionManager:
         # Claim liveness before the row exists, not after: a reaper that saw a
         # live row with no key would read it as an orphan and fail a session
         # that is only a moment old.
-        await mark_alive(self._broker, request.session_id)
+        await mark_alive(self._broker, request.session_id, domain="sts")
         # Persist before start, not after: a strategy that ends inside
         # on_start / on_ready reaches close() before start() returns, and a
         # row written afterwards would resurrect it as live forever.
@@ -283,7 +283,7 @@ class SessionManager:
                     status=SessionStatus.FAILED.value,
                     reason=reason,
                 )
-            await clear_alive(self._broker, request.session_id)
+            await clear_alive(self._broker, request.session_id, domain="sts")
             await self._publish_status(
                 request.session_id,
                 status=SessionStatus.FAILED.value,
@@ -449,7 +449,7 @@ class SessionManager:
         if self._mark_done is not None:
             await self._mark_done(session_id, status=status, reason=reason)
         try:
-            await clear_alive(broker, session_id)
+            await clear_alive(broker, session_id, domain="sts")
         except Exception:
             logger.exception(
                 "STS liveness release failed session=%s", session_id
@@ -533,7 +533,7 @@ class SessionManager:
             if session_id is None or session_id in self._sessions:
                 continue
             try:
-                if await is_alive(self._broker, session_id):
+                if await is_alive(self._broker, session_id, domain="sts"):
                     continue
             except Exception:
                 # Unreadable liveness is not evidence of death. Leaving a
@@ -668,7 +668,7 @@ class SessionManager:
                     strategy.name,
                 )
                 continue
-            if not await claim_alive(self._broker, session_id):
+            if not await claim_alive(self._broker, session_id, domain="sts"):
                 continue
             if self._bump_rebuild_count is not None:
                 try:
@@ -764,7 +764,7 @@ class SessionManager:
         """Drop a claim so the next boot — or another process — may retry."""
         self._sessions.pop(session_id, None)
         try:
-            await clear_alive(self._broker, session_id)
+            await clear_alive(self._broker, session_id, domain="sts")
         except Exception:
             logger.exception(
                 "STS rebuild claim release failed session=%s", session_id

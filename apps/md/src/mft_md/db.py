@@ -43,9 +43,17 @@ async def list_sessions(
     *,
     status: str | None = "live",
     created_by: int | None = None,
+    limit: int = 100,
 ) -> Sequence[MdSessionRow]:
+    """List rows in ``status``.
+
+    ``limit`` mirrors the repository's own default: a scan that has to see
+    every row must say so, because the default silently truncates.
+    """
     async with session_scope() as db:
         repo = MdSessionRepository(db)
         return list(
-            await repo.list_sessions(status=status, created_by=created_by)
+            await repo.list_sessions(
+                status=status, created_by=created_by, limit=limit
+            )
         )

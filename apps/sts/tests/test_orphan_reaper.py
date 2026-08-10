@@ -15,9 +15,9 @@ from types import SimpleNamespace
 import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
+from mft.liveness import alive_key, clear_alive, is_alive, mark_alive
 from mft.protocol import StsCreateSessionRequest
 from mft_sts.impl import register
-from mft_sts.liveness import alive_key, clear_alive, is_alive, mark_alive
 from mft_sts.session import SessionManager
 from mft_sts.strategy import Strategy
 
@@ -162,7 +162,7 @@ async def test_a_session_another_process_runs_is_left_alone(
     store = FakeStsStore()
     store.seed_live("theirs-1")
     # Stands in for the peer that owns it holding its key.
-    await mark_alive(broker, "theirs-1")
+    await mark_alive(broker, "theirs-1", domain="sts")
     manager = _manager(broker, store)
 
     assert await manager.reap_orphans() == []
@@ -177,7 +177,7 @@ async def test_the_key_is_claimed_before_the_row_exists(broker: Broker) -> None:
     seen: list[bool] = []
 
     async def watching_persist(**kwargs):
-        seen.append(await is_alive(broker, kwargs["session_id"]))
+        seen.append(await is_alive(broker, kwargs["session_id"], domain="sts"))
         return await store.persist_live(**kwargs)
 
     manager = _manager(broker, store)
@@ -201,10 +201,10 @@ async def test_closing_releases_the_key(broker: Broker) -> None:
             session_id="rel-1", created_by=1, strategy="idle_reap"
         )
     )
-    assert await is_alive(broker, "rel-1")
+    assert await is_alive(broker, "rel-1", domain="sts")
 
     await manager.close("rel-1")
-    assert not await is_alive(broker, "rel-1")
+    assert not await is_alive(broker, "rel-1", domain="sts")
 
 
 @pytest.mark.asyncio
@@ -219,15 +219,15 @@ async def test_the_key_is_renewed_while_the_session_runs(
             session_id="renew-1", created_by=1, strategy="idle_reap"
         )
     )
-    key = alive_key(broker.config.key_prefix, "renew-1")
+    key = alive_key(broker.config.key_prefix, "renew-1", domain="sts")
     # Expire it out from under the session; the heartbeat must put it back.
     await broker.redis.delete(key)
     for _ in range(50):
-        if await is_alive(broker, "renew-1"):
+        if await is_alive(broker, "renew-1", domain="sts"):
             break
         await asyncio.sleep(0.02)
 
-    assert await is_alive(broker, "renew-1")
+    assert await is_alive(broker, "renew-1", domain="sts")
     await manager.close_all()
 
 
@@ -273,4 +273,4 @@ async def test_reaping_is_safe_to_repeat(broker: Broker) -> None:
 async def test_clearing_a_key_that_was_never_claimed_is_fine(
     broker: Broker,
 ) -> None:
-    await clear_alive(broker, "never-existed")
+    await clear_alive(broker, "never-existed", domain="sts")

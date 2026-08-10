@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from mft.broker import Broker
+from mft.liveness import clear_alive, is_alive, mark_alive
 from mft.protocol import (
     MD_DETACH,
     MD_LEASE_ACK,
@@ -41,6 +42,15 @@ MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
 
 LEASE_GRACE_S = 3.0
+
+#: Which liveness key an MD attach holds. MD's own, not the STS session's:
+#: the two processes die independently, and it is MD's row being guarded.
+_ALIVE_DOMAIN = SessionDomain.MD.value
+
+#: How many live rows one reap scan will consider. Well above any plausible
+#: number of concurrent attaches, and named so the scan can say when it hit
+#: the limit rather than truncating in silence.
+_REAP_SCAN_LIMIT = 500
 
 
 @dataclass
@@ -122,6 +132,12 @@ class SessionManager:
         self._links[request.session_id] = link
         self._dispatcher.register_link(link)
 
+        # Before the row, not after: a reaper that saw a live row with no
+        # key yet would close an attach that is a moment old.
+        await mark_alive(
+            self._broker, request.session_id, domain=_ALIVE_DOMAIN
+        )
+
         for feed in request.subscriptions:
             await self._subscribe_feed(link, feed)
 
@@ -181,6 +197,16 @@ class SessionManager:
         await self._stop_link(link)
         if self._mark_done is not None:
             await self._mark_done(session_id=session_id)
+        try:
+            await clear_alive(
+                self._broker, session_id, domain=_ALIVE_DOMAIN
+            )
+        except Exception:
+            # The row is already closed, and the key expires on its own —
+            # the reaper only ever looks at rows that are still live.
+            logger.exception(
+                "MD liveness release failed session=%s", session_id
+            )
         logger.info(
             "MD detached session=%s reason=%s", session_id, reason
         )
@@ -243,6 +269,91 @@ class SessionManager:
                     )
                 )
         return items
+
+    async def reap_orphans(self) -> list[str]:
+        """Close rows left ``live`` by an MD process that died silently.
+
+        A row ends in :meth:`detach`, and every way into it needs this
+        process running: a lease that expires, an ``MD_DETACH``, a shutdown.
+        Kill MD outright and none of them happen, so the row goes on
+        claiming a venue feed that no longer exists — and because
+        :meth:`list_sessions` answers from the table, the API reports a feed
+        nobody is pumping.
+
+        A row is an orphan when nobody holds the ``md`` liveness key for its
+        session. That is MD's own key and deliberately not the STS one: the
+        two processes die independently, and MD killed under a strategy that
+        is still running is exactly the case an STS check would call
+        healthy. Testing a key rather than local state is also what keeps
+        this safe to run in every MD process at once — several serve the
+        same RPC subject, so "not in my links" says nothing about a peer's,
+        while "no key" is true for all of them at the same time.
+
+        Returns the session ids reaped, for logging and tests.
+        """
+        if self._list_db_sessions is None or self._mark_done is None:
+            return []
+        try:
+            rows = await self._list_db_sessions(
+                status=SessionStatus.LIVE.value,
+                created_by=None,
+                limit=_REAP_SCAN_LIMIT,
+            )
+        except Exception:
+            logger.exception("MD orphan scan failed to list sessions")
+            return []
+        if len(rows) >= _REAP_SCAN_LIMIT:
+            # Truncation is the one thing a scan must not do quietly: the
+            # rows past the limit look exactly like rows with a live owner.
+            logger.warning(
+                "MD orphan scan hit its %d-row limit — there may be live "
+                "rows it did not consider",
+                _REAP_SCAN_LIMIT,
+            )
+
+        reaped: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            session_id = getattr(row, "session_id", None)
+            # One row per (venue, session), and the mark below closes every
+            # row a session has — so each id is worth deciding about once.
+            if session_id is None or session_id in seen:
+                continue
+            seen.add(session_id)
+            if session_id in self._links:
+                continue
+            try:
+                if await is_alive(
+                    self._broker, session_id, domain=_ALIVE_DOMAIN
+                ):
+                    continue
+            except Exception:
+                # Unreadable liveness is not evidence of death. A stale row
+                # survives to the next scan; a row closed by mistake hides a
+                # feed that is still running.
+                logger.exception(
+                    "MD liveness check failed session=%s", session_id
+                )
+                continue
+
+            # `done`, not `interrupted`: an md row follows its owning
+            # strategy session rather than carrying an outcome of its own,
+            # and nothing rebuilds from one — STS re-attaching on rebuild is
+            # what writes the row live again.
+            try:
+                await self._mark_done(session_id=session_id)
+            except Exception:
+                logger.exception(
+                    "MD orphan reap failed session=%s", session_id
+                )
+                continue
+            reaped.append(session_id)
+            logger.warning(
+                "MD reaped orphaned session id=%s venue=%s",
+                session_id,
+                getattr(row, "venue", None),
+            )
+        return reaped
 
     async def close_all(self) -> None:
         for session_id in list(self._links):
@@ -399,6 +510,23 @@ class SessionManager:
                     link.last_token = hb.token
                     if not ready.is_set():
                         ready.set()
+                    # Renewed here rather than on a timer of its own: the
+                    # lease heartbeat already is the signal that this attach
+                    # is in use, and the key should outlive exactly that.
+                    try:
+                        await mark_alive(
+                            self._broker,
+                            link.session_id,
+                            domain=_ALIVE_DOMAIN,
+                        )
+                    except Exception:
+                        # A missed renewal is survivable — the TTL is many
+                        # heartbeats wide. Dropping the lease loop over one
+                        # would not be: that stops the ACKs STS waits on.
+                        logger.exception(
+                            "MD liveness refresh failed session=%s",
+                            link.session_id,
+                        )
                     await self._broker.publish(
                         md_topic,
                         Envelope[MdLeaseAck].wrap(

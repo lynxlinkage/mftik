@@ -19,6 +19,7 @@ import fakeredis.aioredis
 import mft_sts.session.manager as manager_mod
 import pytest
 from mft.broker import Broker, BrokerConfig
+from mft.liveness import is_alive, mark_alive
 from mft.protocol import (
     MD_SESSION_ATTACH,
     TD_SESSION_ATTACH,
@@ -29,7 +30,6 @@ from mft.protocol import (
     Topics,
 )
 from mft_sts.impl import register
-from mft_sts.liveness import is_alive, mark_alive
 from mft_sts.session import SessionManager
 from mft_sts.strategy import Strategy
 
@@ -290,7 +290,7 @@ async def test_only_one_process_rebuilds_a_session(broker: Broker) -> None:
     store = FakeStsStore()
     store.seed("r-4")
     # Stands in for the peer that got there first.
-    await mark_alive(broker, "r-4")
+    await mark_alive(broker, "r-4", domain="sts")
     manager = _manager(broker, store, [])
 
     assert await manager.rebuild_interrupted() == []
@@ -333,7 +333,7 @@ async def test_a_failed_attach_puts_the_session_back(
     assert store.rows["r-5"].status == "interrupted"
     assert manager.get("r-5") is None
     # The claim is released, so the next boot may try again.
-    assert not await is_alive(broker, "r-5")
+    assert not await is_alive(broker, "r-5", domain="sts")
 
 
 @pytest.mark.asyncio
@@ -353,7 +353,7 @@ async def test_a_stale_session_is_left_where_it_is(broker: Broker) -> None:
     row = store.rows["r-stale"]
     assert row.status == "interrupted"
     assert row.reason == "STS shut down while this was running"
-    assert not await is_alive(broker, "r-stale")
+    assert not await is_alive(broker, "r-stale", domain="sts")
 
 
 @pytest.mark.asyncio
@@ -414,7 +414,7 @@ async def test_a_strategy_that_cannot_be_rebuilt_is_left_alone(
     assert await manager.rebuild_interrupted() == []
     assert store.rows["r-noimpl"].status == "interrupted"
     # No claim taken, so nothing has to release one.
-    assert not await is_alive(broker, "r-noimpl")
+    assert not await is_alive(broker, "r-noimpl", domain="sts")
 
 
 @pytest.mark.asyncio
@@ -430,7 +430,7 @@ async def test_a_run_that_asked_not_to_come_back_stays_ended(
 
     assert await manager.rebuild_interrupted() == []
     assert store.rows["r-oneshot"].status == "interrupted"
-    assert not await is_alive(broker, "r-oneshot")
+    assert not await is_alive(broker, "r-oneshot", domain="sts")
 
 
 @pytest.mark.asyncio

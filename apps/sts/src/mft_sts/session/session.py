@@ -21,6 +21,7 @@ from mft.exchange.models import (
     Trade,
 )
 from mft.exchange.oms import Position
+from mft.liveness import mark_alive
 from mft.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
@@ -63,7 +64,6 @@ from mft.protocol import (
 from mft.symbols import SymbolClient
 from pydantic import BaseModel
 
-from mft_sts.liveness import mark_alive
 from mft_sts.strategy import Strategy
 
 logger = logging.getLogger(__name__)
@@ -414,7 +414,7 @@ class StsSession:
             # stops when the session stops, so the key expiring means the
             # session really is gone and not merely quiet.
             try:
-                await mark_alive(self.broker, self.session_id)
+                await mark_alive(self.broker, self.session_id, domain="sts")
             except Exception:
                 logger.exception(
                     "STS liveness refresh failed session=%s", self.session_id

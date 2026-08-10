@@ -6,6 +6,7 @@ from mft_sts.impl.chase import ChaseOrder
 from mft_sts.impl.cross_arb import CrossArb
 from mft_sts.impl.noop import NoopStrategy
 from mft_sts.impl.oco import OneCancelOther
+from mft_sts.impl.twap import TwapStrategy
 from mft_sts.strategy import Strategy
 
 # Keys: short ``name`` (e.g. noop) and class ``__name__`` (e.g. NoopStrategy).
@@ -24,6 +25,7 @@ register(NoopStrategy)
 register(ChaseOrder)
 register(OneCancelOther)
 register(CrossArb)
+register(TwapStrategy)
 
 
 def resolve(name: str | None) -> Strategy:

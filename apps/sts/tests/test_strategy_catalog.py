@@ -18,6 +18,7 @@ from mft_sts.impl.chase import ChaseOrder
 from mft_sts.impl.cross_arb import CrossArb
 from mft_sts.impl.noop import NoopStrategy
 from mft_sts.impl.oco import OneCancelOther
+from mft_sts.impl.twap import TwapStrategy
 
 
 @pytest.mark.parametrize("type_name", strategy_types())
@@ -35,7 +36,7 @@ def test_every_template_config_survives_its_own_strategy(type_name: str) -> None
 
 
 @pytest.mark.parametrize(
-    "cls", [NoopStrategy, ChaseOrder, OneCancelOther, CrossArb]
+    "cls", [NoopStrategy, ChaseOrder, OneCancelOther, CrossArb, TwapStrategy]
 )
 def test_every_strategy_is_offered_in_the_catalogue(cls: type) -> None:
     """A strategy with no template cannot be deployed from the UI at all."""

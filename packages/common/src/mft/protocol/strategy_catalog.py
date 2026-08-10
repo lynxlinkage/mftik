@@ -140,9 +140,31 @@ sts:
 """,
 )
 
+TWAP = StrategyTemplate(
+    type="TwapStrategy",
+    label="TWAP",
+    description=(
+        "Takes liquidity in evenly spaced IOC slices at the touch until "
+        "num_round successes land or the window ends. Needs a bestquote feed."
+    ),
+    yaml="""\
+td:
+  - paper trader
+md:
+  - bestquote.Paper_Spot_BTCUSDT
+sts:
+  side: buy
+  # Seconds between slices; total window is exec_interval_s * num_round.
+  exec_interval_s: 5
+  num_round: 6
+  # Exactly one sizing knob — base units or quote currency per round.
+  qty_per_round: 0.001
+""",
+)
+
 #: Every deployable strategy, keyed by the type used on the wire.
 TEMPLATES: dict[str, StrategyTemplate] = {
-    t.type: t for t in (NOOP, CHASE, OCO, CROSS_ARB)
+    t.type: t for t in (NOOP, CHASE, OCO, CROSS_ARB, TWAP)
 }
 
 #: Type offered when the caller does not choose one.
