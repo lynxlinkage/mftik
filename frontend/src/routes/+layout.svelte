@@ -1,8 +1,15 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { startSessionKeepalive } from '$lib/auth';
 	import '../app.css';
 
 	let { children } = $props();
+
+	// Every route is behind the same login session, and the pages people leave
+	// open longest are the ones that talk over WebSockets and so never touch
+	// it. Held here so the heartbeat covers the whole app rather than the
+	// handful of pages that happen to make requests.
+	$effect(() => startSessionKeepalive());
 
 	const SITE_NAME = 'MFT Control';
 	const SITE_DESCRIPTION =

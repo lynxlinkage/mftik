@@ -1,3 +1,5 @@
+import { reloadForLogin } from '$lib/auth';
+
 export type DomainStats = {
 	domain: string;
 	live: number;
@@ -197,6 +199,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 			...(init?.headers ?? {})
 		}
 	});
+	// The auth chain in front of the origin, not the API, answers an expired
+	// login with 401. Reloading is what turns that into a re-login; see
+	// $lib/auth. The throw still happens so no caller treats this as data —
+	// the page is on its way out, but nothing may proceed in the meantime.
+	if (res.status === 401 && reloadForLogin()) {
+		throw new Error('Login session expired — signing in again…');
+	}
 	if (!res.ok) {
 		let detail = res.statusText;
 		try {

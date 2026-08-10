@@ -1,3 +1,4 @@
+import { reloadIfSessionExpired } from '$lib/auth';
 import { wsBaseUrl } from '$lib/ws';
 
 export type LogEntry = {
@@ -35,10 +36,19 @@ export function connectDomainLog(
 	const url = `${wsBaseUrl()}/ws/${domain}/${encodeURIComponent(id)}`;
 	onStatus('connecting');
 	const ws = new WebSocket(url);
+	// Distinguishes our own teardown from the socket dropping under us; only
+	// the latter is worth asking the auth chain about.
+	let disposed = false;
 
 	ws.onopen = () => onStatus('open');
 	ws.onerror = () => onStatus('error');
-	ws.onclose = () => onStatus('closed');
+	ws.onclose = () => {
+		onStatus('closed');
+		// An expired session closes the handshake with no status the browser
+		// will show us, so a dead login is indistinguishable here from a
+		// finished stream. $lib/auth asks the question over REST instead.
+		if (!disposed) void reloadIfSessionExpired();
+	};
 	ws.onmessage = (ev) => {
 		const raw = String(ev.data);
 		try {
@@ -64,6 +74,7 @@ export function connectDomainLog(
 	};
 
 	return () => {
+		disposed = true;
 		ws.close();
 	};
 }
