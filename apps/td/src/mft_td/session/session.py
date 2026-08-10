@@ -33,7 +33,9 @@ from mft.protocol import (
     RejectCode,
     Topics,
     UntypedEnvelope,
+    publish_td_log,
 )
+from mft.protocol.reject_codes import describe
 from mft.symbols import SymbolClient
 from pydantic import BaseModel
 
@@ -466,7 +468,7 @@ class Session:
         """Publish the terminal state recon implied for a dropped UNKNOWN."""
         settled = order.model_copy(update={"status": status})
         await self.write_order(settled)
-        await self._publish_global(TD_ORDER_UPDATE, settled)
+        await self._publish_order_update(settled)
         await self.release(cid)
         logger.info(
             "TD recon settled UNKNOWN api_id=%s cid=%s → %s "
@@ -523,7 +525,7 @@ class Session:
             asyncio.get_running_loop().time()
         )
         await self.write_order(order)
-        await self._publish_global(TD_ORDER_UPDATE, order)
+        await self._publish_order_update(order)
         return order
 
     async def record_rejected(self, client_order_id: str) -> Order | None:
@@ -574,7 +576,7 @@ class Session:
             order.status,
         )
         await self.write_order(pending)
-        await self._publish_global(TD_ORDER_UPDATE, pending)
+        await self._publish_order_update(pending)
         return None
 
     async def revert_pending_cancel(self, client_order_id: str) -> Order | None:
@@ -589,7 +591,7 @@ class Session:
         restored = order.model_copy(update={"status": prior})
         self.oms.handle_order(restored)
         await self.write_order(restored)
-        await self._publish_global(TD_ORDER_UPDATE, restored)
+        await self._publish_order_update(restored)
         logger.info(
             "TD cancel refused api_id=%s cid=%s → back to %s",
             self.api_id,
@@ -636,7 +638,7 @@ class Session:
                 )
                 self.oms.handle_order(unknown)
                 await self.write_order(unknown)
-                await self._publish_global(TD_ORDER_UPDATE, unknown)
+                await self._publish_order_update(unknown)
                 self._remember_unknown(
                     cid,
                     if_missing=(
@@ -718,7 +720,7 @@ class Session:
                 )
                 self.oms.handle_order(unknown)
                 await self.write_order(unknown)
-                await self._publish_global(TD_ORDER_UPDATE, unknown)
+                await self._publish_order_update(unknown)
                 logger.warning(
                     "TD transport ambiguous api_id=%s cid=%s (%s) → UNKNOWN",
                     self.api_id,
@@ -790,7 +792,7 @@ class Session:
                 return current
             self.oms.handle_order(settled)
             await self.write_order(settled)
-            await self._publish_global(TD_ORDER_UPDATE, settled)
+            await self._publish_order_update(settled)
             self._cancel_since.pop(cid, None)
             self._forget_unknown(cid)
             await self.release(cid)
@@ -1052,6 +1054,14 @@ class Session:
         branches on. Callers that have an exception should run it through
         :func:`mft_td.errors.normalize` rather than picking a code by hand.
         """
+        await self._td_log(
+            (
+                f"order rejected cid={client_order_id or '?'} "
+                f"[{describe(error_code)}]: {reason}"
+                + (f" {universal_ticker}" if universal_ticker else "")
+            ),
+            level="warn",
+        )
         await self._publish_global(
             TD_ORDER_REJECT,
             OrderReject(
@@ -1073,6 +1083,13 @@ class Session:
         error_code: int | str = RejectCode.NONE,
     ) -> None:
         """Publish a cancel reject on ``td.{api_id}.global``."""
+        await self._td_log(
+            (
+                f"cancel rejected cid={client_order_id or '?'} "
+                f"[{describe(error_code)}]: {reason}"
+            ),
+            level="warn",
+        )
         await self._publish_global(
             TD_CANCEL_REJECT,
             CancelReject(
@@ -1151,12 +1168,57 @@ class Session:
                 error_code=RejectCode.VENUE_REJECTED,
             )
         else:
-            await self._publish_global(TD_ORDER_UPDATE, order)
+            await self._publish_order_update(order)
 
     def _dispatch_fill(self, fill: Fill) -> None:
         for cb in list(self._fill_cbs):
             cb(fill)
-        self._schedule_publish(self._publish_global(TD_FILL, fill))
+        self._schedule_publish(self._announce_fill(fill))
+
+    async def _announce_fill(self, fill: Fill) -> None:
+        fee = f" fee={fill.fee}"
+        if fill.fee_asset:
+            fee = f"{fee} {fill.fee_asset}"
+        await self._td_log(
+            (
+                f"fill cid={fill.client_order_id or '?'} "
+                f"{fill.side} {fill.price}@{fill.qty}{fee} "
+                f"{fill.universal_ticker}"
+            )
+        )
+        await self._publish_global(TD_FILL, fill)
+
+    async def _publish_order_update(self, order: Order) -> None:
+        """Announce an order on ``td.{api_id}.global`` and log it."""
+        level = (
+            "warn"
+            if order.status in (OrderStatus.UNKNOWN, OrderStatus.REJECTED)
+            else "info"
+        )
+        await self._td_log(
+            (
+                f"order update cid={order.client_order_id or order.order_id} "
+                f"{order.status.value} {order.side} "
+                f"filled={order.filled_qty}/{order.qty} "
+                f"{order.universal_ticker}"
+            ),
+            level=level,
+        )
+        await self._publish_global(TD_ORDER_UPDATE, order)
+
+    async def _td_log(self, message: str, *, level: str = "info") -> None:
+        try:
+            await publish_td_log(
+                self.broker,
+                self.api_id,
+                message,
+                source="td",
+                level=level,
+            )
+        except Exception:
+            logger.exception(
+                "TD session log failed api_id=%s", self.api_id
+            )
 
     def _dispatch_position(self, position: Position) -> None:
         """Fan out one position change and announce it.

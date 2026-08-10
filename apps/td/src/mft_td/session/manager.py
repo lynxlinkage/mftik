@@ -1000,16 +1000,6 @@ class SessionManager:
                 universal_ticker=req.universal_ticker,
                 error_code=code,
             )
-            await publish_td_log(
-                self._broker,
-                link.api_id,
-                (
-                    f"order rejected sts={link.session_id} "
-                    f"cid={req.client_order_id} [{describe(code)}]: {exc}"
-                ),
-                source="td",
-                level="warn",
-            )
         except Exception as exc:
             logger.exception(
                 "TD order submit failed session=%s api_id=%s cid=%s",
@@ -1033,17 +1023,6 @@ class SessionManager:
                     client_order_id=req.client_order_id,
                     universal_ticker=req.universal_ticker,
                     error_code=RejectCode.TD_SEND_FAILED,
-                )
-                await publish_td_log(
-                    self._broker,
-                    link.api_id,
-                    (
-                        f"order rejected sts={link.session_id} "
-                        f"cid={req.client_order_id} "
-                        f"[{describe(RejectCode.TD_SEND_FAILED)}]: {exc}"
-                    ),
-                    source="td",
-                    level="warn",
                 )
             elif settled is None:
                 await publish_td_log(
@@ -1107,15 +1086,6 @@ class SessionManager:
             # PENDING_CANCEL watchdog while leaving the book open if the
             # confirming stream push never arrives.
             await acct.trading.accept_venue_order(canceled)
-            await publish_td_log(
-                self._broker,
-                link.api_id,
-                (
-                    f"order canceled sts={link.session_id} "
-                    f"cid={req.client_order_id}"
-                ),
-                source="td",
-            )
         except ExchangeError as exc:
             # The venue refused it, so the order is still working: put it back
             # before telling anyone, or PENDING_CANCEL sticks forever.
@@ -1125,16 +1095,6 @@ class SessionManager:
                 reason=str(exc),
                 client_order_id=req.client_order_id,
                 error_code=code,
-            )
-            await publish_td_log(
-                self._broker,
-                link.api_id,
-                (
-                    f"cancel rejected sts={link.session_id} "
-                    f"cid={req.client_order_id} [{describe(code)}]: {exc}"
-                ),
-                source="td",
-                level="warn",
             )
         except Exception as exc:
             logger.exception(
@@ -1154,17 +1114,6 @@ class SessionManager:
             await acct.trading.mark_unknown_and_resolve(
                 req.client_order_id,
                 if_missing=OrderStatus.CANCELED,
-            )
-            await publish_td_log(
-                self._broker,
-                link.api_id,
-                (
-                    f"cancel send failed sts={link.session_id} "
-                    f"cid={req.client_order_id} "
-                    f"[{describe(RejectCode.TD_SEND_FAILED)}]: {exc}"
-                ),
-                source="td",
-                level="warn",
             )
 
 
