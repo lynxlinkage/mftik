@@ -36,6 +36,7 @@ from mft_td.errors import VENUES, normalize
 GATE = "Gate"
 PAPER = "Paper"
 BINANCE = "Binance"
+BINANCE_FUTURE = "BinanceFuture"
 
 
 # --- band 2: venue errors we recognise -------------------------------------
@@ -250,6 +251,38 @@ def test_one_binance_code_is_split_apart_by_its_message(
     wrong answer, which is the failure this table exists to avoid.
     """
     assert normalize(BinanceWsError(-2010, message), venue=BINANCE) is expected
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        # This market's own refusals, which spot has no code for.
+        (-5022, RejectCode.VENUE_POST_ONLY_WOULD_CROSS),  # GTX would have taken
+        (-2019, RejectCode.VENUE_INSUFFICIENT_BALANCE),  # margin insufficient
+        (-2022, RejectCode.VENUE_INVALID_PARAM),  # reduce-only rejected
+        (-2027, RejectCode.VENUE_RISK_LIMIT),  # past max position at leverage
+        (-4164, RejectCode.VENUE_BELOW_MINIMUM),  # notional under the floor
+        # And everything both markets share, from the spot table underneath.
+        (-1121, RejectCode.VENUE_SYMBOL_NOT_TRADABLE),
+        (-2013, RejectCode.VENUE_ORDER_NOT_FOUND),
+        (-1022, RejectCode.VENUE_AUTH_FAILED),
+    ],
+)
+def test_a_known_binance_future_code_becomes_a_venue_code(
+    code: int, expected: RejectCode
+) -> None:
+    """Futures inherits spot's numbering and adds the margined book's own.
+
+    ``-5022`` is the one that has no spot counterpart at all: post-only is an
+    order type there, refused inside the ``-2010`` message, and a time-in-force
+    here with a code of its own.
+    """
+    assert normalize(BinanceWsError(code, "nope"), venue=BINANCE_FUTURE) is expected
+
+
+def test_the_futures_venue_is_normalized_at_all() -> None:
+    """A venue missing from the table would fall through as unrecognised."""
+    assert BINANCE_FUTURE in VENUES
 
 
 def test_a_2010_with_a_message_we_do_not_know_stays_a_plain_reject() -> None:

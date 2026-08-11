@@ -23,11 +23,18 @@ def test_gate_is_registered_as_its_own_venue() -> None:
 
 
 def test_registry_lists_every_venue() -> None:
-    assert venues.names() == ["Binance", "Bybit", "Gate", "Paper"]
+    assert venues.names() == [
+        "Binance",
+        "BinanceFuture",
+        "Bybit",
+        "Gate",
+        "Paper",
+    ]
     assert [v.name for v in venues.all_venues()] == venues.names()
     assert venues.PAPER.simulated
     assert not venues.GATE.simulated
     assert not venues.BINANCE.simulated
+    assert not venues.BINANCE_FUTURE.simulated
     assert not venues.BYBIT.simulated
 
 

@@ -14,6 +14,7 @@ from mft_sym.sources.base import (
     tick_from_precision,
 )
 from mft_sym.sources.binance import BinanceSpotInstrumentSource
+from mft_sym.sources.binance_future import BinanceFutureInstrumentSource
 from mft_sym.sources.bybit import BybitInstrumentSource
 from mft_sym.sources.gate import GateSpotInstrumentSource
 from mft_sym.sources.paper import PaperInstrumentSource
@@ -27,17 +28,23 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
     Bybit appears twice, which is what a unified-account venue looks like here:
     one credential, but two listings that are fetched and delisted
     independently — see :mod:`mft_sym.sources.bybit`.
+
+    Binance appears twice too, and for the opposite reason: ``Binance`` and
+    ``BinanceFuture`` are two venues with two credentials and two listing
+    endpoints, so their sources share nothing but a brand.
     """
     return [
         PaperInstrumentSource(broker),
         GateSpotInstrumentSource(),
         BinanceSpotInstrumentSource(),
+        BinanceFutureInstrumentSource(),
         BybitInstrumentSource(category=Category.SPOT),
         BybitInstrumentSource(category=Category.PERP),
     ]
 
 
 __all__ = [
+    "BinanceFutureInstrumentSource",
     "BinanceSpotInstrumentSource",
     "BybitInstrumentSource",
     "GateSpotInstrumentSource",

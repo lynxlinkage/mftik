@@ -133,6 +133,17 @@ class Topics:
         return f"td.order.{api_id}"
 
     @staticmethod
+    def td_account(api_id: int) -> str:
+        """STS → TD request-reply for account reads that are not order entry.
+
+        Same per-``api_id`` ownership rule as :meth:`td_order`. Kept off the
+        order subject so a venue round-trip (e.g. leverage lookup) cannot
+        stall submit/cancel acks. Distinct from :meth:`td_ledger`, which is
+        a state fan-out key, not a request-reply subject.
+        """
+        return f"td.account.{api_id}"
+
+    @staticmethod
     def td_ledger(api_id: int) -> str:
         """TD → STS balance-ledger fan-out (venue balances + TD pre-locks)."""
         return f"td.ledger.{api_id}"

@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange
+from mft.exchange.binance.future.private import BinanceFuturePrivateClient
 from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mft.exchange.binance.spot.protocol import BinanceAuthError
 from mft.exchange.bybit.private import BybitPrivateClient
@@ -123,6 +124,31 @@ async def test_binance_venue_builds_a_binance_client(broker: Broker) -> None:
     assert session.private.api_key == "bk"
     assert session.api_id == 8
     # Built but not connected — the manager starts it.
+    assert not session.private.connected
+
+
+async def test_binance_future_venue_builds_a_futures_client(
+    broker: Broker,
+) -> None:
+    """Same credential shape as spot, different account entirely.
+
+    And a connector that reports positions, which no spot session does — TD
+    picks those up by name off the client it was handed.
+    """
+    rows = {
+        11: FakeApiRow(
+            id=11, venue="BinanceFuture", api_key="fk", api_secret=ED25519_PEM
+        ),
+    }
+    factory = _factory(broker, rows)
+
+    session = await factory.create(11)
+
+    assert isinstance(session.private, BinanceFuturePrivateClient)
+    assert session.private.name == "BinanceFuture"
+    assert session.private.category is Category.PERP
+    assert hasattr(session.private, "fetch_positions")
+    assert hasattr(session.private, "stream_positions")
     assert not session.private.connected
 
 

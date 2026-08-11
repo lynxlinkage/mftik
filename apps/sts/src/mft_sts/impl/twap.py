@@ -10,6 +10,10 @@ bid) for ``qty_per_round`` / ``qty_quote_per_round``. A round that fills any
 size — full or partial — counts as one success; a zero-fill IOC does not.
 IOC never rests, so the filled total is at most the configured target. The
 session ends when ``num_round`` successes land, or when the end time passes.
+
+Works on Spot and Perp. Perp arms only after ``ledger.ensure_leverage`` so TD
+can size pre-locks as ``notional / leverage``; funding and reduce-only are
+out of scope — this is the same IOC slicer with margin-aware funding checks.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
-from mft.exchange.tickers import UniversalTicker
+from mft.exchange.tickers import Category, UniversalTicker
 from mft.protocol import (
     OrderReject,
     ReconDone,
@@ -42,6 +46,7 @@ from mft_sts.timer import TimerToken
 _TERMINAL = frozenset({OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED})
 
 _NO_FUNDS = "insufficient balance"
+_ONE = Decimal("1")
 
 
 def _positive_int(paras: dict[str, Any], name: str) -> int:
@@ -223,6 +228,9 @@ class TwapStrategy(Strategy):
         if not self._recon_done or self._ref is None:
             return
 
+        if not await self._ensure_perp_leverage():
+            return
+
         self._armed = True
         self._successes = 0
         self._filled.clear()
@@ -242,6 +250,46 @@ class TwapStrategy(Strategy):
             f"first_ms={first_ms} interval_ms={interval_ms} "
             f"num_round={self.paras['num_round']}"
         )
+
+    async def _ensure_perp_leverage(self) -> bool:
+        """For Perp, ask TD to cache leverage before any IOC can pre-lock.
+
+        Spot returns True immediately. Failure fails the session — without a
+        figure TD would reserve at 1x, and the strategy's own shortfall check
+        would disagree with that guess.
+        """
+        if self._ticker is None or self._ticker.category is not Category.PERP:
+            return True
+
+        api_id = self._primary_api_id()
+        if api_id is None:
+            await self.log("TwapStrategy has no TD api_id — exiting", level="warn")
+            self._done = True
+            self.fail("twap_no_td")
+            return False
+
+        info = await self._instrument()
+        if info is None:
+            self._done = True
+            self.fail("twap_no_instrument")
+            return False
+
+        lev = await self.ledger.ensure_leverage(info.ticker, api_id)
+        if lev is None:
+            reason = self.ledger.last_reject_reason or "leverage unavailable"
+            await self.log(
+                f"TwapStrategy ensure_leverage failed ticker={info.ticker}: "
+                f"{reason} — exiting",
+                level="error",
+            )
+            self._done = True
+            self.fail("twap_leverage_unavailable")
+            return False
+
+        await self.log(
+            f"TwapStrategy leverage={_fmt(lev)} ticker={info.ticker}"
+        )
+        return True
 
     def _rearm_timer(self) -> None:
         """Resume mid-window: next fire is one interval from now."""
@@ -361,7 +409,18 @@ class TwapStrategy(Strategy):
     async def _shortfall(
         self, api_id: int, info: SymbolInfo, qty: Decimal, price: Decimal
     ) -> str | None:
-        if self.paras["side"] is Side.SELL:
+        """Why the ledger cannot fund this IOC, or None if it can.
+
+        Mirrors TD ``reservation_for``: Spot sells lock base and buys lock
+        ``qty * price`` quote; Perp locks ``(qty * price) / leverage`` quote
+        on either side (missing leverage treated as 1x).
+        """
+        if info.category is Category.PERP:
+            lev = self.ledger.leverage(info.ticker, api_id)
+            if lev is None or lev <= 0:
+                lev = _ONE
+            asset, need = info.quote, (qty * price) / lev
+        elif self.paras["side"] is Side.SELL:
             asset, need = info.base, qty
         else:
             asset, need = info.quote, qty * price

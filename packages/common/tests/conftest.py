@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from binance_future_stub import FakeBinanceFutureApi, FakeBinanceFutureUser
 from binance_stub import FakeBinanceApi, FakeBinanceStream, keypair
 from bybit_stub import FakeBybit
 from gate_stub import FakeGate
@@ -41,6 +42,56 @@ async def binance_api(binance_key):
 @pytest.fixture
 async def binance_stream():
     """A FakeBinanceStream on an ephemeral port; ``.url`` points at it."""
+    fake = FakeBinanceStream()
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def future_api(binance_key):
+    """A FakeBinanceFutureApi verifying logon signatures against ``binance_key``."""
+    private_key, _pem = binance_key
+    fake = FakeBinanceFutureApi(public_key=private_key.public_key())
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def future_user():
+    """The futures user data socket — the listen-key connection."""
+    fake = FakeBinanceFutureUser()
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def future_public_stream():
+    """The futures ``/public`` market socket — book feeds only."""
+    fake = FakeBinanceStream()
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def future_market_stream():
+    """The futures ``/market`` socket — tape, candles, stats, liquidations.
+
+    A second server rather than a second subscription on the first: that is
+    what the venue is since the 2026 endpoint split, and a test sharing one
+    stub would never catch a stream routed to the wrong host.
+    """
     fake = FakeBinanceStream()
     server = await serve(fake.handler, "127.0.0.1", 0)
     fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"

@@ -29,7 +29,13 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     result = await list_venues()
     by_name = {v.name: v for v in result.venues}
 
-    assert set(by_name) == {"Binance", "Bybit", "Gate", "Paper"}
+    assert set(by_name) == {
+        "Binance",
+        "BinanceFuture",
+        "Bybit",
+        "Gate",
+        "Paper",
+    }
     gate = by_name["Gate"]
     assert gate.label == "Gate Spot"
     assert gate.api_types == ["HMAC"]
@@ -43,6 +49,11 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     # Bybit is the venue that makes ``categories`` matter: one credential, two
     # books, so the UI cannot infer which market a ticker is on from the venue.
     assert by_name["Bybit"].categories == ["Perp", "Spot"]
+    # Binance's USD-M plane is a venue of its own, on one category: separate
+    # keys and a separate wallet, so it cannot be a category of "Binance".
+    assert by_name["BinanceFuture"].categories == ["Perp"]
+    assert by_name["BinanceFuture"].api_types == ["ED25519"]
+    assert by_name["BinanceFuture"].ticker_example == "BinanceFuture_Perp_BTCUSDT"
 
 
 async def test_unknown_venue_is_rejected_with_400() -> None:

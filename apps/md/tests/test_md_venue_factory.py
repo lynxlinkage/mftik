@@ -8,6 +8,7 @@ import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange
+from mft.exchange.binance.future.public import BinanceFuturePublicClient
 from mft.exchange.binance.spot.public import BinanceSpotPublicClient
 from mft.exchange.bybit.public import BybitPublicClient
 from mft.exchange.errors import ExchangeError
@@ -79,6 +80,22 @@ async def test_binance_venue_builds_a_binance_public_client(
     # Public market data only — neither of Binance's two sockets carries
     # credentials, so MD can run a feed without a trading account.
     assert not client.api.authenticated
+
+
+async def test_binance_future_venue_builds_its_own_public_client(
+    broker: Broker,
+) -> None:
+    """A separate venue, not a category of ``Binance``: separate hosts entirely.
+
+    It is also the only Binance client that holds no WebSocket API socket —
+    futures serves its candles and its instrument listing over REST alone.
+    """
+    factory = VenuePublicFactory(broker)
+    client = await factory.create("BinanceFuture")
+    assert isinstance(client, BinanceFuturePublicClient)
+    assert client.name == "BinanceFuture"
+    # Liquidations are this venue's own feed; MD refuses the topic elsewhere.
+    assert hasattr(client, "stream_liquidation")
 
 
 async def test_bybit_venue_builds_one_client_for_every_category(

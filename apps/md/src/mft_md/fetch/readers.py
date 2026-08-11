@@ -12,6 +12,10 @@ socket where Gate's composes an HTTP client — and holds it open, because a
 request/reply socket is a connection to the venue's read plane, not a
 subscription to a feed. Nothing else has to know which of the two a venue is.
 
+Binance's futures plane then shows that the decision is not even per *brand*:
+the same company serves no candles at all over that market's WebSocket API, so
+``BinanceFuture``'s reader is an HTTP one beside spot's socket.
+
 That is why the composition lives on this side. ``mft.exchange.<venue>``
 publishes connectors, not a contract — see :mod:`mft.exchange.base` — and the
 shape below is what the fetch plane needs of them, stated by the fetch plane.
@@ -27,6 +31,11 @@ import logging
 from typing import Protocol
 
 from mft.exchange import venues
+from mft.exchange.binance.future.protocol import BINANCE_FUTURE_REST_URL
+from mft.exchange.binance.future.public import (
+    venue_interval as binance_future_interval,
+)
+from mft.exchange.binance.future.rest import BinanceFuturePublicRest
 from mft.exchange.binance.spot.client import BinanceSpotWsApi
 from mft.exchange.binance.spot.protocol import BINANCE_SPOT_WS_API_URL
 from mft.exchange.binance.spot.public import venue_interval as binance_interval
@@ -262,6 +271,95 @@ class BinanceSpotReader:
         )
 
 
+class BinanceFutureReader:
+    """Binance USDⓈ-M futures reads over REST, in canonical symbol and interval.
+
+    REST, where the spot reader holds a socket — and that is not a preference:
+    the futures WebSocket API serves no ``klines`` at all, so a socket here
+    could answer one of this reader's three questions. Composing
+    :class:`BinanceFuturePublicRest` instead means one transport for all of
+    them, and no connection held open between queries.
+    """
+
+    venue = "BinanceFuture"
+
+    def __init__(
+        self,
+        *,
+        symbols: SymbolResolver,
+        rest: BinanceFuturePublicRest | None = None,
+        base_url: str = BINANCE_FUTURE_REST_URL,
+    ) -> None:
+        self.symbols = symbols
+        self.rest = rest or BinanceFuturePublicRest(base_url=base_url)
+
+    async def connect(self) -> None:
+        await self.rest.connect()
+
+    async def close(self) -> None:
+        await self.rest.close()
+
+    async def _symbol(self, ticker: UniversalTicker) -> str:
+        """Binance's symbol for one instrument — resolved through the plane."""
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return await self.symbols.exch_ticker(ticker)
+
+    async def fetch_klines(
+        self, ticker: UniversalTicker, interval: str, *, limit: int
+    ) -> list[Kline]:
+        """Recent candles, oldest first, answering in the caller's spelling.
+
+        The interval is translated on the way down and stamped back on the way
+        up. Futures serves one window fewer than spot — there are no
+        one-second candles here — and ``binance_future_interval`` refuses that
+        one before the round trip.
+        """
+        canonical = normalize_interval(interval)
+        native_interval = binance_future_interval(canonical)
+        native = await self._symbol(ticker)
+        klines = await self.rest.fetch_klines(
+            native, native_interval, ticker=ticker, limit=limit
+        )
+        return [
+            kline.model_copy(update={"interval": canonical}) for kline in klines
+        ]
+
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int
+    ) -> OrderBook:
+        """``GET /fapi/v1/depth`` — a whole book, capped at ``depth``.
+
+        Dated by Binance, unlike the spot reply, so nothing is stamped on here.
+        """
+        native = await self._symbol(ticker)
+        return await self.rest.fetch_order_book(native, ticker=ticker, depth=depth)
+
+    async def fetch_best_quote(self, ticker: UniversalTicker) -> BestQuote | None:
+        """Top of book with sizes, or None when a side is empty.
+
+        Read out of a depth-1 book, so the answer has the same shape as every
+        other reader's. None rather than zeros when a side has nothing resting:
+        a caller asking for the touch is almost always checking whether its own
+        price can rest against it, and a zero bid would answer that question
+        wrongly rather than declining to answer it.
+        """
+        book = await self.fetch_order_book(ticker, depth=1)
+        if not book.bids or not book.asks:
+            return None
+        bid, ask = book.bids[0], book.asks[0]
+        return BestQuote(
+            universal_ticker=book.universal_ticker,
+            bid=bid.price,
+            bid_qty=bid.qty,
+            ask=ask.price,
+            ask_qty=ask.qty,
+            ts=book.ts,
+        )
+
+
 class BybitReader:
     """Bybit reads over REST, across every category the venue trades.
 
@@ -384,6 +482,8 @@ class VenueReaderFactory:
             return GateSpotReader(symbols=self._symbols)
         if venue == venues.BINANCE.name:
             return BinanceSpotReader(symbols=self._symbols)
+        if venue == venues.BINANCE_FUTURE.name:
+            return BinanceFutureReader(symbols=self._symbols)
         if venue == venues.BYBIT.name:
             return BybitReader(symbols=self._symbols)
         if venue == venues.PAPER.name:

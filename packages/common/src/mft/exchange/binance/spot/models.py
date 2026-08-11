@@ -24,10 +24,19 @@ converters:
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Any
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import Field
 
+from mft.exchange.binance.models import (
+    BinanceMessage,
+    VenueSide,
+    avg,
+    kline_from_row,
+    levels,
+    secs,
+    side_of,
+)
 from mft.exchange.models import (
     AggTrade,
     Balance,
@@ -92,54 +101,6 @@ def type_of(value: str | None) -> OrderType:
     return _TYPE.get((value or "").upper(), OrderType.LIMIT)
 
 
-def side_of(is_buyer_maker: bool) -> Side:
-    """The aggressor's side on a public trade.
-
-    ``m`` says whether the buyer was the maker. If they were, the taker — whose
-    side the tape reports — was the seller.
-    """
-    return Side.SELL if is_buyer_maker else Side.BUY
-
-
-def _lower(value: Any) -> Any:
-    return value.lower() if isinstance(value, str) else value
-
-
-#: Binance spells sides ``BUY``/``SELL``; :class:`~mft.exchange.models.Side` is
-#: lowercase. Folded on the way in rather than at each use, so a model field
-#: annotated with this parses the venue's casing and holds ours.
-VenueSide = Annotated[Side, BeforeValidator(_lower)]
-
-
-def _secs(ms: Any) -> float:
-    """Binance timestamps are milliseconds, as ints, everywhere."""
-    if ms is None or ms == "":
-        return 0.0
-    return float(ms) / 1000.0
-
-
-def _levels(rows: list[Any] | None) -> list[BookLevel]:
-    out: list[BookLevel] = []
-    for row in rows or []:
-        if len(row) < 2:
-            continue
-        out.append(BookLevel(price=Decimal(str(row[0])), qty=Decimal(str(row[1]))))
-    return out
-
-
-def _avg(quote_total: Decimal, base_total: Decimal) -> Decimal | None:
-    """``Z / z`` — None while nothing has filled, rather than a zero price."""
-    if base_total <= 0:
-        return None
-    return quote_total / base_total
-
-
-class BinanceMessage(BaseModel):
-    """Base for wire models: tolerant of new fields, immutable once parsed."""
-
-    model_config = ConfigDict(frozen=True, populate_by_name=True, extra="ignore")
-
-
 # --- market streams --------------------------------------------------------
 
 
@@ -168,7 +129,7 @@ class BinanceAggTrade(BinanceMessage):
 
     @property
     def ts(self) -> float:
-        return _secs(self.trade_time or self.event_time)
+        return secs(self.trade_time or self.event_time)
 
     def to_trade(self, ticker: UniversalTicker) -> Trade:
         """The print as a plain tape entry, aggregation dropped.
@@ -218,7 +179,7 @@ class BinanceTrade(BinanceMessage):
 
     @property
     def ts(self) -> float:
-        return _secs(self.trade_time or self.event_time)
+        return secs(self.trade_time or self.event_time)
 
     def to_trade(self, ticker: UniversalTicker) -> Trade:
         return Trade(
@@ -280,7 +241,7 @@ class BinanceKlineEvent(BinanceMessage):
             universal_ticker=str(ticker),
             interval=self.k.i,
             # ``t`` is the window's open time, in milliseconds.
-            open_time=_secs(self.k.t),
+            open_time=secs(self.k.t),
             open=self.k.o,
             high=self.k.h,
             low=self.k.low,
@@ -327,7 +288,7 @@ class BinanceTicker(BinanceMessage):
             bid=bid,
             ask=ask,
             last=self.last,
-            ts=_secs(self.event_time),
+            ts=secs(self.event_time),
         )
 
 
@@ -377,8 +338,8 @@ class BinanceDepth(BinanceMessage):
         fields: dict[str, Any] = {} if ts is None else {"ts": ts}
         return OrderBook(
             universal_ticker=str(ticker),
-            bids=_levels(self.bids),
-            asks=_levels(self.asks),
+            bids=levels(self.bids),
+            asks=levels(self.asks),
             **fields,
         )
 
@@ -405,13 +366,13 @@ class BinanceDepthUpdate(BinanceMessage):
 
     @property
     def ts(self) -> float:
-        return _secs(self.event_time)
+        return secs(self.event_time)
 
     def bid_levels(self) -> list[BookLevel]:
-        return _levels(self.bids)
+        return levels(self.bids)
 
     def ask_levels(self) -> list[BookLevel]:
-        return _levels(self.asks)
+        return levels(self.asks)
 
     def follows(self, last_applied_id: int) -> bool:
         """Whether this diff slots onto a book already at ``last_applied_id``."""
@@ -480,7 +441,7 @@ class BinanceExecutionReport(BinanceMessage):
 
     @property
     def avg_price(self) -> Decimal | None:
-        return _avg(self.quote_total, self.filled_qty_total)
+        return avg(self.quote_total, self.filled_qty_total)
 
     @property
     def is_fill(self) -> bool:
@@ -501,7 +462,7 @@ class BinanceExecutionReport(BinanceMessage):
             price=self.p or None,
             filled_qty=self.filled_qty_total,
             avg_price=self.avg_price,
-            ts=_secs(self.transact_time or self.event_time),
+            ts=secs(self.transact_time or self.event_time),
         )
 
     def to_fill(self, ticker: UniversalTicker) -> Fill:
@@ -519,7 +480,7 @@ class BinanceExecutionReport(BinanceMessage):
             qty=self.last_qty,
             fee=self.commission,
             fee_asset=self.commission_asset or "",
-            ts=_secs(self.transact_time or self.event_time),
+            ts=secs(self.transact_time or self.event_time),
         )
 
 
@@ -548,7 +509,7 @@ class BinanceAccountPosition(BinanceMessage):
 
     @property
     def ts(self) -> float:
-        return _secs(self.event_time)
+        return secs(self.event_time)
 
     def to_balances(self) -> list[Balance]:
         return [row.to_balance() for row in self.balances]
@@ -572,7 +533,7 @@ class BinanceBalanceUpdate(BinanceMessage):
 
     @property
     def ts(self) -> float:
-        return _secs(self.event_time)
+        return secs(self.event_time)
 
 
 # --- call replies ----------------------------------------------------------
@@ -637,11 +598,11 @@ class BinanceOrderAck(BinanceMessage):
 
     @property
     def avg_price(self) -> Decimal | None:
-        return _avg(self.quote_qty, self.executed_qty)
+        return avg(self.quote_qty, self.executed_qty)
 
     @property
     def ts(self) -> float:
-        return _secs(
+        return secs(
             self.transact_time or self.update_time or self.working_time or self.time
         )
 
@@ -696,46 +657,6 @@ class BinanceAccountInfo(BinanceMessage):
             )
             for row in self.balances
         ]
-
-
-def kline_from_row(
-    row: list[Any], ticker: UniversalTicker, interval: str
-) -> Kline:
-    """One row of the ``klines`` reply — a positional array, not an object.
-
-    Binance's column order *is* OHLC, unlike some venues, but the two volumes
-    sit either side of a second timestamp, so they cannot be read positionally
-    from the OHLC block::
-
-        [0] open time, ms      [5] volume, base
-        [1] open               [6] close time, ms
-        [2] high               [7] quote volume
-        [3] low                [8] trade count
-        [4] close              ...
-
-    A row from this endpoint is always a closed window except the last one,
-    which is the bar in progress — and the reply says nothing about which is
-    which. It is reported as closed here and the caller drops or keeps the tail
-    knowing the interval, because guessing from a timestamp would be wrong
-    exactly at the boundary that matters.
-    """
-    if len(row) < 8:
-        raise ValueError(
-            f"kline row for {ticker} {interval} has {len(row)} columns, "
-            f"expected at least 8: {row!r}"
-        )
-    return Kline(
-        universal_ticker=str(ticker),
-        interval=interval,
-        open_time=_secs(row[0]),
-        open=Decimal(str(row[1])),
-        high=Decimal(str(row[2])),
-        low=Decimal(str(row[3])),
-        close=Decimal(str(row[4])),
-        volume=Decimal(str(row[5])),
-        quote_volume=Decimal(str(row[7])),
-        closed=True,
-    )
 
 
 __all__ = [

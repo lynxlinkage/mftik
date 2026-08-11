@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from decimal import Decimal
 
 from mft.exchange.base import BaseClient
 from mft.exchange.bybit.account import BybitPrivateStream
@@ -64,7 +65,7 @@ from mft.exchange.bybit.protocol import (
 )
 from mft.exchange.bybit.rest import UNIFIED, BybitRest
 from mft.exchange.bybit.trade import BybitTradeSocket
-from mft.exchange.errors import OrderError
+from mft.exchange.errors import ExchangeError, OrderError
 from mft.exchange.models import (
     TERMINAL_STATUSES,
     Balance,
@@ -448,6 +449,28 @@ class BybitPrivateClient(BaseClient):
             ticker = await self._resolve(row.symbol, row.category or LINEAR)
             out.append(row.to_position(ticker))
         return out
+
+    async def fetch_leverage(self, ticker: UniversalTicker) -> Decimal:
+        """This account's configured leverage for a contract ``ticker``.
+
+        Spot has no leverage — refused before the venue is asked. On linear,
+        Bybit answers for a flat book when ``symbol`` is passed, which is what
+        lets a strategy warm the figure before its first order.
+        """
+        self._ensure_connected()
+        check_venue(ticker, self.name, {Category.SPOT, Category.PERP})
+        if ticker.category is not Category.PERP:
+            raise ExchangeError(
+                f"Bybit leverage is only defined on perps, got {ticker}"
+            )
+        native = await self.symbols.exch_ticker(ticker)
+        row = await self.rest.fetch_leverage_row(LINEAR, native)
+        if row.leverage is None or row.leverage <= 0:
+            raise ExchangeError(
+                f"Bybit position/list for {native} has no leverage "
+                f"(portfolio margin returns an empty figure)"
+            )
+        return row.leverage
 
     # --- account streams ---------------------------------------------------
 

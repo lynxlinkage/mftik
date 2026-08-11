@@ -226,6 +226,51 @@ BINANCE = VenueErrors(
     },
 )
 
+#: Binance USDⓈ-M futures. The same numbering as spot for everything both
+#: markets can refuse — one company, one error space — plus the ``-2xxx`` and
+#: ``-4xxx`` families that only a margined book has: insufficient margin, a
+#: reduce-only order with nothing to reduce, a position past what the current
+#: leverage allows.
+#:
+#: Built on top of :data:`BINANCE` rather than beside it, so a code added there
+#: is a code this venue knows too. The one place they genuinely disagree is
+#: post-only: spot expresses it as ``LIMIT_MAKER`` and refuses it inside the
+#: ``-2010`` message, while futures has a code of its own (``-5022``) for a
+#: ``GTX`` order that would have taken.
+BINANCE_FUTURE = VenueErrors(
+    codes={
+        **BINANCE.codes,
+        # post-only (GTX) that would have crossed — futures says it outright
+        -5022: RejectCode.VENUE_POST_ONLY_WOULD_CROSS,
+        # funds and margin
+        -2018: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # balance insufficient
+        -2019: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # margin insufficient
+        # counterparty's best price fails the PERCENT_PRICE filter
+        -4131: RejectCode.VENUE_INVALID_PARAM,
+        # the order itself
+        -2020: RejectCode.VENUE_REJECTED,  # unable to fill (FOK)
+        -2021: RejectCode.VENUE_INVALID_PARAM,  # would trigger immediately
+        -2022: RejectCode.VENUE_INVALID_PARAM,  # reduce-only rejected
+        -4061: RejectCode.VENUE_INVALID_PARAM,  # positionSide does not match mode
+        -4164: RejectCode.VENUE_BELOW_MINIMUM,  # notional under the floor
+        # limits on the account
+        -2023: RejectCode.VENUE_RISK_LIMIT,  # user is in liquidation mode
+        -2027: RejectCode.VENUE_RISK_LIMIT,  # position past max at this leverage
+        -2028: RejectCode.VENUE_RISK_LIMIT,  # leverage below what margin allows
+        # permissions
+        -4400: RejectCode.VENUE_PERMISSION_DENIED,  # compliance restricted
+        -4401: RejectCode.VENUE_PERMISSION_DENIED,  # compliance restricted
+    },
+    refine={
+        **BINANCE.refine,
+        -2010: (
+            *BINANCE.refine[-2010],
+            ("margin is insufficient", RejectCode.VENUE_INSUFFICIENT_BALANCE),
+            ("reduceonly", RejectCode.VENUE_INVALID_PARAM),
+        ),
+    },
+)
+
 #: Bybit v5. Numeric codes only — Bybit publishes no label, and the numbers
 #: are its documented contract, the same ones over REST and over the sockets.
 #:
@@ -308,6 +353,7 @@ PAPER = VenueErrors(
 #: reports as its ``name``.
 VENUES: dict[str, VenueErrors] = {
     "Binance": BINANCE,
+    "BinanceFuture": BINANCE_FUTURE,
     "Bybit": BYBIT,
     "Gate": GATE,
     "Paper": PAPER,

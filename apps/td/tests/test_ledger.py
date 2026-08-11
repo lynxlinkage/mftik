@@ -72,6 +72,49 @@ def test_a_market_sell_still_commits_base() -> None:
     assert held == ("BTC", Decimal("0.01"))
 
 
+def _perp(**overrides: object) -> PlaceOrderRequest:
+    payload: dict[str, object] = {
+        "universal_ticker": "BinanceFuture_Perp_BTCUSDT",
+        "side": Side.BUY,
+        "type": OrderType.LIMIT,
+        "qty": Decimal("0.01"),
+        "price": Decimal("50000"),
+        "client_order_id": "cid-1",
+    }
+    payload.update(overrides)
+    return PlaceOrderRequest.model_validate(payload)
+
+
+def test_a_perp_buy_commits_quote_margin_over_leverage() -> None:
+    held = reservation_for(_perp(), BTCUSDT, leverage=Decimal("10"))
+    assert held == ("USDT", Decimal("50"))  # 500 / 10
+
+
+def test_a_perp_sell_also_commits_quote_margin() -> None:
+    """Perp sells do not lock base inventory — both sides need margin."""
+    held = reservation_for(
+        _perp(side=Side.SELL), BTCUSDT, leverage=Decimal("5")
+    )
+    assert held == ("USDT", Decimal("100"))  # 500 / 5
+
+
+def test_a_perp_without_leverage_defaults_to_one() -> None:
+    """Conservative until ensure_leverage has filled the cache."""
+    held = reservation_for(_perp(), BTCUSDT, leverage=None)
+    assert held == ("USDT", Decimal("500"))
+
+
+def test_a_perp_market_order_cannot_be_priced() -> None:
+    assert (
+        reservation_for(
+            _perp(type=OrderType.MARKET, price=None),
+            BTCUSDT,
+            leverage=Decimal("10"),
+        )
+        is None
+    )
+
+
 # --- reserving and releasing ----------------------------------------------
 
 

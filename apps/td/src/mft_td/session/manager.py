@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 from functools import partial
 from typing import Any
 
@@ -21,16 +22,20 @@ from mft.exchange.oms import OmsView
 from mft.exchange.tickers import InvalidTickerError, UniversalTicker
 from mft.protocol import (
     STS_DETACH,
+    STS_ENSURE_LEVERAGE,
     STS_LEASE_HEARTBEAT,
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
     STS_RECON,
     TD_LEASE_ACK,
+    TD_LEVERAGE_ACK,
     TD_ORDER_ACK,
     TD_RECON_DONE,
     Envelope,
+    EnsureLeverage,
     LeaseAck,
     LeaseHeartbeat,
+    LeverageAck,
     ListSessionsRequest,
     OrderAck,
     OrderAckEnvelope,
@@ -94,6 +99,9 @@ class TradingAccount:
     #: Serves STS order entry on ``td.order.{api_id}``. Shares ``global_stop``
     #: — both live exactly as long as the account does.
     order_task: asyncio.Task[Any] | None = None
+    #: Serves STS account reads on ``td.account.{api_id}`` (e.g. leverage).
+    #: Kept off the order loop so a venue round-trip cannot stall submit acks.
+    account_task: asyncio.Task[Any] | None = None
     #: ``client_order_id`` → the STS ``session_id`` that submitted it, kept
     #: until the order reaches a terminal state. Advisory only: a cancel from
     #: another session is logged, never blocked. Recon-discovered orders have
@@ -158,6 +166,10 @@ class SessionManager:
             acct.order_task = asyncio.create_task(
                 self._serve_orders(acct),
                 name=f"td-orders-{request.api_id}",
+            )
+            acct.account_task = asyncio.create_task(
+                self._serve_account(acct),
+                name=f"td-account-{request.api_id}",
             )
             logger.info("TD trading started api_id=%s (refcount 0→1)", request.api_id)
             await publish_td_log(
@@ -392,12 +404,15 @@ class SessionManager:
         if acct.global_task is not None and acct.global_task is not current:
             acct.global_task.cancel()
             await asyncio.gather(acct.global_task, return_exceptions=True)
-        # The order loop parks in a blocking BLPOP. Cancelling it there leaves
-        # the unread reply on the pooled connection and corrupts whatever runs
-        # next on it, so let it retire on its own: ``serve`` rechecks the stop
-        # event between polls, which bounds this to about a second.
+        # The order / account loops park in a blocking BLPOP. Cancelling them
+        # there leaves the unread reply on the pooled connection and corrupts
+        # whatever runs next on it, so let them retire on their own: ``serve``
+        # rechecks the stop event between polls, which bounds this to about a
+        # second.
         if acct.order_task is not None and acct.order_task is not current:
             await asyncio.gather(acct.order_task, return_exceptions=True)
+        if acct.account_task is not None and acct.account_task is not current:
+            await asyncio.gather(acct.account_task, return_exceptions=True)
         for link in list(acct.links.values()):
             await self._stop_link(link)
             if self._mark_done is not None:
@@ -741,6 +756,149 @@ class SessionManager:
             raise
         except Exception:
             logger.exception("TD order RPC loop failed api_id=%s", acct.api_id)
+
+    async def _serve_account(self, acct: TradingAccount) -> None:
+        """Answer STS account reads on ``td.account.{api_id}``."""
+        subject = Topics.td_account(acct.api_id)
+        logger.info(
+            "TD account RPC listening api_id=%s subject=%s", acct.api_id, subject
+        )
+        try:
+            async for req in self._broker.serve(subject, stop=acct.global_stop):
+                await self._handle_account_rpc(acct, req)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("TD account RPC loop failed api_id=%s", acct.api_id)
+
+    async def _handle_account_rpc(
+        self, acct: TradingAccount, req: IncomingRequest
+    ) -> None:
+        """Reply to :class:`EnsureLeverage` after the venue (or cache) answers."""
+        env = req.envelope
+        if env.type != STS_ENSURE_LEVERAGE:
+            await self._reply_leverage_ack(
+                req,
+                acct.api_id,
+                "",
+                False,
+                None,
+                f"unsupported request {env.type!r}",
+                RejectCode.TD_UNSUPPORTED_REQUEST,
+            )
+            return
+        try:
+            payload = EnsureLeverage.model_validate(env.payload or {})
+        except Exception as exc:
+            await self._reply_leverage_ack(
+                req,
+                acct.api_id,
+                "",
+                False,
+                None,
+                f"invalid payload: {exc}",
+                RejectCode.TD_INVALID_REQUEST,
+            )
+            return
+        if payload.api_id != acct.api_id:
+            await self._reply_leverage_ack(
+                req,
+                acct.api_id,
+                payload.universal_ticker,
+                False,
+                None,
+                f"wrong api_id {payload.api_id}",
+                RejectCode.TD_WRONG_API_ID,
+            )
+            return
+        if payload.session_id not in acct.links:
+            await self._reply_leverage_ack(
+                req,
+                acct.api_id,
+                payload.universal_ticker,
+                False,
+                None,
+                f"session {payload.session_id!r} not attached to "
+                f"api_id={acct.api_id}",
+                RejectCode.TD_SESSION_NOT_ATTACHED,
+            )
+            return
+        refusal = _wrong_instrument(payload.universal_ticker, acct)
+        if refusal is not None:
+            await self._reply_leverage_ack(
+                req,
+                acct.api_id,
+                payload.universal_ticker,
+                False,
+                None,
+                refusal,
+                RejectCode.TD_WRONG_INSTRUMENT,
+            )
+            return
+        try:
+            ticker = UniversalTicker.parse(payload.universal_ticker)
+            leverage = await acct.trading.ensure_leverage(ticker)
+        except ExchangeError as exc:
+            await self._reply_leverage_ack(
+                req,
+                acct.api_id,
+                payload.universal_ticker,
+                False,
+                None,
+                str(exc),
+                RejectCode.TD_LEVERAGE_UNAVAILABLE,
+            )
+            return
+        except Exception as exc:
+            logger.exception(
+                "TD ensure_leverage failed api_id=%s ticker=%s",
+                acct.api_id,
+                payload.universal_ticker,
+            )
+            await self._reply_leverage_ack(
+                req,
+                acct.api_id,
+                payload.universal_ticker,
+                False,
+                None,
+                str(exc),
+                RejectCode.TD_INTERNAL,
+            )
+            return
+        await self._reply_leverage_ack(
+            req,
+            acct.api_id,
+            payload.universal_ticker,
+            True,
+            leverage,
+            "",
+            RejectCode.NONE,
+        )
+
+    async def _reply_leverage_ack(
+        self,
+        req: IncomingRequest,
+        api_id: int,
+        universal_ticker: str,
+        ok: bool,
+        leverage: Decimal | None,
+        reason: str,
+        error_code: int | str,
+    ) -> None:
+        await req.reply(
+            Envelope[LeverageAck].wrap(
+                LeverageAck(
+                    api_id=api_id,
+                    universal_ticker=universal_ticker,
+                    ok=ok,
+                    leverage=leverage,
+                    reason=reason,
+                    error_code=error_code,
+                ),
+                type=TD_LEVERAGE_ACK,
+                source="td",
+            )
+        )
 
     async def _handle_order_rpc(
         self, acct: TradingAccount, req: IncomingRequest

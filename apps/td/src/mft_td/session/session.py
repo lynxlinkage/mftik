@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
+from decimal import Decimal
 from typing import Any, Protocol
 
 from mft.broker import Broker
+from mft.exchange.errors import ExchangeError
 from mft.exchange.models import (
     Balance,
     Fill,
@@ -20,7 +22,7 @@ from mft.exchange.models import (
     is_terminal,
 )
 from mft.exchange.oms import LedgerEntry, LedgerView, OmsView, Position
-from mft.exchange.tickers import UniversalTicker
+from mft.exchange.tickers import Category, UniversalTicker
 from mft.protocol import (
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
@@ -96,15 +98,17 @@ class TradingConnector(Protocol):
     * ``fetch_positions`` / ``stream_positions`` — only a venue with contract
       books has any. A spot venue does not report zero positions; it reports
       nothing, and the two are different answers.
+    * ``fetch_leverage`` — only contract venues expose per-symbol leverage.
     * ``fetch_order_by_client_order_id`` — the way out of ``UNKNOWN``, which a
       venue that cannot look an order up by our id simply does not offer.
     * ``on_reconnect`` — only a socket-backed venue has a reconnect to hear
       about.
 
-    Each is asked for with ``hasattr`` where it is used. That replaces two
-    workarounds the old interface forced: comparing an implementation against
-    the base class to see whether it was real, and catching
-    ``NotImplementedError`` to discover the same thing a call too late.
+    Each is asked for with ``hasattr`` / ``getattr`` where it is used. That
+    replaces two workarounds the old interface forced: comparing an
+    implementation against the base class to see whether it was real, and
+    catching ``NotImplementedError`` to discover the same thing a call too
+    late.
     """
 
     name: str
@@ -160,6 +164,10 @@ class Session:
         #: Resolves base/quote so a reservation knows which asset it holds.
         #: Optional: without it TD still trades, it just cannot pre-lock.
         self.symbols = symbols
+        #: universal_ticker → configured leverage, filled by
+        #: :meth:`ensure_leverage` (and optionally recon). Used to size perp
+        #: pre-locks as ``notional / leverage``.
+        self._leverage: dict[str, Decimal] = {}
         self._order_cbs: list[OrderCallback] = []
         self._fill_cbs: list[FillCallback] = []
         self._balance_cbs: list[BalanceCallback] = []
@@ -486,6 +494,7 @@ class Session:
         has no way to tell they are dead.
         """
         self.ledger.release_all()
+        self._leverage.clear()
         await self.broker.state_clear(self._ledger_key, self._oms_key)
 
     async def publish_oms(self, view: OmsView | None = None) -> None:
@@ -923,6 +932,46 @@ class Session:
         else:
             await self.broker.state_put(self._oms_key, field, order)
 
+    def cached_leverage(self, ticker: UniversalTicker | str) -> Decimal | None:
+        """Leverage last stored for ``ticker``, or None if never ensured."""
+        return self._leverage.get(str(ticker))
+
+    async def ensure_leverage(self, ticker: UniversalTicker) -> Decimal:
+        """Return this account's leverage for ``ticker``, fetching if needed.
+
+        Spot tickers and venues without ``fetch_leverage`` raise
+        :class:`~mft.exchange.errors.ExchangeError`. A successful read is
+        cached for :meth:`reserve` and later ensure calls.
+        """
+        key = str(ticker)
+        cached = self._leverage.get(key)
+        if cached is not None:
+            return cached
+        if ticker.category is not Category.PERP:
+            raise ExchangeError(
+                f"leverage is only defined on perps, got {ticker}"
+            )
+        fetch = getattr(self.private, "fetch_leverage", None)
+        if fetch is None:
+            raise ExchangeError(
+                f"{self.venue} does not support leverage lookup"
+            )
+        value = await fetch(ticker)
+        if not isinstance(value, Decimal):
+            value = Decimal(str(value))
+        if value <= 0:
+            raise ExchangeError(
+                f"leverage for {ticker} is not positive: {value}"
+            )
+        self._leverage[key] = value
+        logger.info(
+            "TD cached leverage api_id=%s ticker=%s leverage=%s",
+            self.api_id,
+            key,
+            value,
+        )
+        return value
+
     async def reserve(self, request: PlaceOrderRequest) -> str | None:
         """Pre-lock the funds ``request`` commits. None on success, else why not.
 
@@ -940,7 +989,12 @@ class Session:
                 self.api_id,
             )
             return None
-        held = reservation_for(request, instrument)
+        leverage = (
+            self._leverage.get(request.universal_ticker)
+            if request.category is Category.PERP
+            else None
+        )
+        held = reservation_for(request, instrument, leverage=leverage)
         if held is None:
             logger.debug(
                 "TD cannot price %s %s; submitting unreserved",

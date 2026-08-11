@@ -11,28 +11,54 @@ Snapshots arrive on ``td.ledger.{api_id}`` and land here via
 here are one update stale, so treat :meth:`available` as a floor to plan
 against rather than a guarantee — TD re-checks it before every order anyway,
 and that check is the authoritative one.
+
+Contract accounts also expose per-symbol leverage through
+:meth:`ensure_leverage`: STS asks TD, TD asks the venue (or its own cache),
+and both sides remember the figure so perp pre-locks can be sized as
+``notional / leverage``.
 """
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from mft.broker.errors import RequestTimeoutError
 from mft.exchange.models import Balance
 from mft.exchange.oms import LedgerView
-from mft.protocol import Topics
+from mft.exchange.tickers import UniversalTicker
+from mft.protocol import (
+    STS_ENSURE_LEVERAGE,
+    Envelope,
+    EnsureLeverage,
+    LeverageAck,
+    RejectCode,
+    Topics,
+)
+from mft.protocol.reject_codes import describe
 
 if TYPE_CHECKING:
     from mft_sts.strategy import Strategy
 
+logger = logging.getLogger(__name__)
+
 ZERO = Decimal("0")
+
+#: Venue leverage lookup can need a REST round-trip; longer than order ack.
+LEVERAGE_ACK_TIMEOUT_S = 5.0
 
 
 class StrategyLedger:
-    """Latest :class:`LedgerView` per TD ``api_id``."""
+    """Latest :class:`LedgerView` per TD ``api_id``, plus leverage ensure."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, ack_timeout: float = LEVERAGE_ACK_TIMEOUT_S) -> None:
         self._strategy: Strategy | None = None
+        self._ack_timeout = ack_timeout
+        #: ``(api_id, universal_ticker)`` → leverage confirmed by TD.
+        self._leverage: dict[tuple[int, str], Decimal] = {}
+        self._last_reason: str = ""
+        self._last_code: int | str = RejectCode.NONE
 
     def bind(self, strategy: Strategy) -> None:
         self._strategy = strategy
@@ -41,6 +67,16 @@ class StrategyLedger:
     def api_ids(self) -> list[int]:
         session = self._strategy.session if self._strategy is not None else None
         return list(session.td_api_ids) if session is not None else []
+
+    @property
+    def last_reject_reason(self) -> str:
+        """Why the most recent :meth:`ensure_leverage` failed, or ``""``."""
+        return self._last_reason
+
+    @property
+    def last_reject_code(self) -> int | str:
+        """:attr:`last_reject_reason` as a code — see reject_codes."""
+        return self._last_code
 
     async def view(self, api_id: int | None = None) -> LedgerView:
         """Read ``td.ledger.{api_id}``: asset → free / prelock / lock."""
@@ -68,8 +104,109 @@ class StrategyLedger:
     async def balances(self, api_id: int | None = None) -> dict[str, Balance]:
         return dict((await self.view(api_id)).balances)
 
+    def leverage(
+        self, ticker: UniversalTicker | str, api_id: int | None = None
+    ) -> Decimal | None:
+        """Cached leverage for ``ticker``, or None if never ensured on STS."""
+        resolved = self._resolve(api_id)
+        if resolved is None:
+            return None
+        return self._leverage.get((resolved, str(ticker)))
+
+    async def ensure_leverage(
+        self,
+        ticker: UniversalTicker | str,
+        api_id: int | None = None,
+    ) -> Decimal | None:
+        """Ask TD for this account's leverage on ``ticker``; cache and return it.
+
+        Returns the positive leverage on success. ``None`` means the lookup
+        failed (spot ticker, unsupported venue, timeout, attach missing) —
+        :attr:`last_reject_reason` / :attr:`last_reject_code` say which.
+
+        A local cache hit skips the RPC. TD also caches, so a second STS
+        session on the same account still benefits after the first ensure.
+        """
+        self._last_reason = ""
+        self._last_code = RejectCode.NONE
+        resolved = self._resolve(api_id)
+        if resolved is None:
+            self._refuse(
+                "api_id is required when more than one TD is attached",
+                RejectCode.TD_INVALID_REQUEST,
+            )
+            return None
+        key = str(UniversalTicker.resolve(str(ticker)))
+        cached = self._leverage.get((resolved, key))
+        if cached is not None:
+            return cached
+
+        session = self._require_session()
+        envelope = Envelope[EnsureLeverage].wrap(
+            EnsureLeverage(
+                session_id=session.session_id,
+                api_id=resolved,
+                universal_ticker=key,
+            ),
+            type=STS_ENSURE_LEVERAGE,
+            source=f"strategy.{session.strategy.name}",
+            session_id=session.session_id,
+        )
+        try:
+            reply = await session.broker.request(
+                Topics.td_account(resolved),
+                envelope,
+                timeout=self._ack_timeout,
+            )
+        except RequestTimeoutError:
+            logger.warning(
+                "TD leverage ack timed out api_id=%s ticker=%s",
+                resolved,
+                key,
+            )
+            self._refuse("no ack from TD", RejectCode.TD_NO_ACK)
+            return None
+
+        try:
+            ack = LeverageAck.model_validate(reply.payload)
+        except Exception:
+            logger.warning(
+                "TD leverage ack unreadable api_id=%s ticker=%s payload=%r",
+                resolved,
+                key,
+                reply.payload,
+            )
+            self._refuse("unreadable leverage ack", RejectCode.TD_UNREADABLE_ACK)
+            return None
+
+        if not ack.ok or ack.leverage is None or ack.leverage <= ZERO:
+            self._refuse(
+                ack.reason or "leverage unavailable",
+                ack.error_code
+                if ack.error_code != RejectCode.NONE
+                else RejectCode.TD_LEVERAGE_UNAVAILABLE,
+            )
+            return None
+
+        self._leverage[(resolved, key)] = ack.leverage
+        return ack.leverage
+
+    def _refuse(self, reason: str, code: int | str) -> None:
+        self._last_reason = reason
+        self._last_code = code
+        logger.debug(
+            "StrategyLedger ensure_leverage refused [%s]: %s",
+            describe(code),
+            reason,
+        )
+
     def _resolve(self, api_id: int | None) -> int | None:
         if api_id is not None:
             return api_id
         attached = self.api_ids
         return attached[0] if len(attached) == 1 else None
+
+    def _require_session(self):
+        if self._strategy is None or self._strategy.session is None:
+            raise RuntimeError("strategy ledger is not bound to a session")
+        return self._strategy.session

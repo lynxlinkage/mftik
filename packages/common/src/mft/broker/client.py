@@ -181,19 +181,23 @@ class Broker:
         topic: str,
         envelope: Envelope[Any],
         *,
-        maxlen: int = 500,
+        maxlen: int | None = None,
         ttl_seconds: int = 86_400,
     ) -> int:
         """Publish a log line and append it to a Redis list for late subscribers.
 
         Redis Pub/Sub alone drops messages when nobody is listening (e.g. UI
         opens ``/ws/sts/...`` after deploy). The buffer is replayed on connect.
+        ``maxlen`` defaults to :attr:`BrokerConfig.log_buffer_maxlen` (100).
         """
+        keep = (
+            self.config.log_buffer_maxlen if maxlen is None else max(1, maxlen)
+        )
         raw = envelope.to_json()
         key = self._log_buffer_key(topic)
         pipe = self.redis.pipeline()
         pipe.rpush(key, raw)
-        pipe.ltrim(key, -maxlen, -1)
+        pipe.ltrim(key, -keep, -1)
         pipe.expire(key, ttl_seconds)
         pipe.publish(topic, raw)
         results = await pipe.execute()

@@ -102,6 +102,27 @@ async def test_publish_log_buffers_for_late_subscribers(broker: Broker) -> None:
 
 
 @pytest.mark.asyncio
+async def test_publish_log_trims_to_maxlen(broker: Broker) -> None:
+    topic = "log.sts.trim"
+    for i in range(5):
+        await broker.publish_log(
+            topic,
+            Envelope[dict].wrap(
+                {"level": "info", "message": f"line-{i}"},
+                type="log",
+                source="sts",
+                session_id="trim",
+            ),
+            maxlen=3,
+        )
+
+    buffered = await broker.fetch_log_buffer(topic)
+    assert len(buffered) == 3
+    assert '"line-2"' in buffered[0]
+    assert '"line-4"' in buffered[-1]
+
+
+@pytest.mark.asyncio
 async def test_request_reply(broker: Broker) -> None:
     stop = asyncio.Event()
 

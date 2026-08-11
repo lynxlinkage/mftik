@@ -7,6 +7,7 @@ from typing import Protocol
 
 from mft.broker import Broker
 from mft.exchange import PaperExchange, venues
+from mft.exchange.binance.future.public import BinanceFuturePublicClient
 from mft.exchange.binance.spot.public import BinanceSpotPublicClient
 from mft.exchange.bybit.public import BybitPublicClient
 from mft.exchange.errors import ExchangeError
@@ -71,9 +72,9 @@ class VenuePublicFactory:
     attaching a session that would never produce a tick.
 
     Venues do not all publish the same feeds — Gate and Binance serve all five
-    topics, paper serves a subset — so a subscribe to a topic the venue has no
-    stream for fails at ``ensure_feed``, which is where that difference
-    belongs.
+    topics, ``BinanceFuture`` and Bybit add liquidations, paper serves a subset
+    — so a subscribe to a topic the venue has no stream for fails at
+    ``ensure_feed``, which is where that difference belongs.
 
     One client per venue, including Bybit: its category-per-socket shape is
     the connector's business, not this factory's. ``BybitPublicClient`` opens a
@@ -111,6 +112,9 @@ class VenuePublicFactory:
         if resolved is venues.BINANCE:
             logger.info("MD building Binance public client")
             return BinanceSpotPublicClient(symbols=self._symbols)
+        if resolved is venues.BINANCE_FUTURE:
+            logger.info("MD building BinanceFuture public client")
+            return BinanceFuturePublicClient(symbols=self._symbols)
         if resolved is venues.BYBIT:
             logger.info("MD building Bybit public client")
             return BybitPublicClient(symbols=self._symbols)

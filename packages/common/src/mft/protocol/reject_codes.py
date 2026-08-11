@@ -92,6 +92,9 @@ class RejectCode(IntEnum):
     #: another venue's ticker, or a market this one has no book for. Refused
     #: before the pre-lock, because nothing about it can be made to work.
     TD_WRONG_INSTRUMENT = 112
+    #: Leverage for this instrument could not be read — spot ticker, a venue
+    #: without a leverage API, or the venue answered without a usable figure.
+    TD_LEVERAGE_UNAVAILABLE = 113
 
     # --- 2xx: the venue said no, in a way we recognise ---------------------
 

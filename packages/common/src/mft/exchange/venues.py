@@ -131,6 +131,21 @@ BINANCE = Venue(
     requires_passphrase=False,
 )
 
+BINANCE_FUTURE = Venue(
+    name="BinanceFuture",
+    label="Binance USD-M Futures",
+    # A venue of its own rather than a category of ``Binance``, and this is the
+    # case the docstring above is about: Binance's USDⓈ-M plane has its own
+    # hosts, its own wallet, its own order book and its own API key, and a
+    # credential for one cannot trade the other. One connection, one
+    # credential — so, one venue.
+    categories=frozenset({Category.PERP}),
+    # Same authentication story as spot: the WebSocket API authenticates a
+    # connection with ``session.logon``, which accepts only Ed25519 keys.
+    api_types=frozenset({ED25519}),
+    requires_passphrase=False,
+)
+
 BYBIT = Venue(
     name="Bybit",
     label="Bybit",
@@ -149,7 +164,9 @@ BYBIT = Venue(
 #: Every venue the platform knows, keyed by canonical name. The single source
 #: of truth — :func:`get` scans it rather than keeping a second index, so a
 #: test or a plugin that adds an entry here is immediately visible to lookups.
-VENUES: dict[str, Venue] = {v.name: v for v in (PAPER, GATE, BINANCE, BYBIT)}
+VENUES: dict[str, Venue] = {
+    v.name: v for v in (PAPER, GATE, BINANCE, BINANCE_FUTURE, BYBIT)
+}
 
 
 def check_registry() -> None:
@@ -244,6 +261,7 @@ def _categories(venue: Venue) -> str:
 
 __all__ = [
     "BINANCE",
+    "BINANCE_FUTURE",
     "BYBIT",
     "ED25519",
     "GATE",

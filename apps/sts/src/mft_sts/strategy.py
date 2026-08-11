@@ -58,7 +58,9 @@ class Strategy:
         send_recon (auto on first lease ACK), on_recon_done
         self.oms — read OMS snapshots from ``td.oms.{api_id}``
         self.ledger — read balances from ``td.ledger.{api_id}``; TD owns
-        them, so this is a view: available() is free minus TD's pre-locks
+        them, so this is a view: available() is free minus TD's pre-locks.
+        Contract strategies also call ledger.ensure_leverage(ticker) so TD
+        caches per-symbol leverage for perp pre-locks (notional / leverage).
 
     Order entry — request-reply on ``td.order.{api_id}`` (wired):
         submit_order / cancel_order return True once TD acks the request.

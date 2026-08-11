@@ -9,6 +9,7 @@ import pytest
 from mft.exchange.tickers import Category
 from mft_sym.sources import PaperInstrumentSource, tick_from_precision
 from mft_sym.sources.binance import BinanceSpotInstrumentSource
+from mft_sym.sources.binance_future import BinanceFutureInstrumentSource
 from mft_sym.sources.bybit import BybitInstrumentSource
 from mft_sym.sources.gate import GateSpotInstrumentSource
 
@@ -510,3 +511,112 @@ async def test_bybit_http_failure_propagates() -> None:
     )
     with pytest.raises(httpx.HTTPStatusError):
         await source.fetch()
+
+
+# --- Binance USDⓈ-M futures ------------------------------------------------
+
+#: Trimmed rows in ``fapi/v1/exchangeInfo``'s shape. The second is a dated
+#: future, which shares the perpetual's base and quote and therefore its
+#: canonical symbol.
+BINANCE_FUTURE_ROWS = [
+    {
+        "symbol": "BTCUSDT",
+        "pair": "BTCUSDT",
+        "contractType": "PERPETUAL",
+        "status": "TRADING",
+        "baseAsset": "BTC",
+        "quoteAsset": "USDT",
+        "marginAsset": "USDT",
+        "filters": [
+            {
+                "filterType": "PRICE_FILTER",
+                "tickSize": "0.10",
+                "minPrice": "556.80",
+                "maxPrice": "4529764",
+            },
+            {
+                "filterType": "LOT_SIZE",
+                "stepSize": "0.00100000",
+                "minQty": "0.001",
+                "maxQty": "1000",
+            },
+            {"filterType": "MIN_NOTIONAL", "notional": "100"},
+        ],
+    },
+    {
+        "symbol": "BTCUSDT_250926",
+        "pair": "BTCUSDT",
+        "contractType": "CURRENT_QUARTER",
+        "status": "TRADING",
+        "baseAsset": "BTC",
+        "quoteAsset": "USDT",
+        "marginAsset": "USDT",
+        "filters": [],
+    },
+    {
+        "symbol": "SOONUSDT",
+        "contractType": "PERPETUAL",
+        "status": "PENDING_TRADING",
+        "baseAsset": "SOON",
+        "quoteAsset": "USDT",
+        "marginAsset": "USDT",
+        "filters": [],
+    },
+    # Malformed — no baseAsset; must be skipped, not crash the refresh.
+    {
+        "symbol": "BADUSDT",
+        "contractType": "PERPETUAL",
+        "status": "TRADING",
+        "quoteAsset": "USDT",
+    },
+]
+
+
+def _binance_future(rows: list[dict]) -> BinanceFutureInstrumentSource:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/exchangeInfo"
+        return httpx.Response(200, json={"symbols": rows})
+
+    return BinanceFutureInstrumentSource(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        )
+    )
+
+
+async def test_binance_future_rows_become_perp_instruments() -> None:
+    instruments = await _binance_future(BINANCE_FUTURE_ROWS).fetch()
+
+    btc = instruments[0]
+    assert str(btc.ticker) == "BinanceFuture_Perp_BTCUSDT"
+    assert btc.category is Category.PERP
+    # The settlement currency, which spot has no field for because the quote
+    # currency is the settlement there.
+    assert btc.settlement_asset == "USDT"
+    assert btc.filters["min_notional"] == Decimal("100")
+    # Padding is the venue's formatting, not the granularity.
+    assert str(btc.filters["qty_step"]) == "0.001"
+
+
+async def test_dated_futures_are_not_stored_as_perpetuals() -> None:
+    """``BTCUSDT_250926`` canonicalizes to ``BTCUSDT`` — the perpetual's symbol.
+
+    Keeping both would leave whichever was written last holding
+    ``BinanceFuture_Perp_BTCUSDT``, and every perp order would route to a
+    contract that expires.
+    """
+    instruments = await _binance_future(BINANCE_FUTURE_ROWS).fetch()
+
+    assert [i.exch_ticker for i in instruments] == ["BTCUSDT", "SOONUSDT"]
+
+
+async def test_a_contract_not_yet_trading_is_listed_but_inactive() -> None:
+    soon = (await _binance_future(BINANCE_FUTURE_ROWS).fetch())[1]
+    assert soon.symbol == "SOONUSDT"
+    assert not soon.is_active
+
+
+async def test_malformed_binance_future_rows_are_skipped() -> None:
+    instruments = await _binance_future(BINANCE_FUTURE_ROWS).fetch()
+    assert "BAD" not in {i.base for i in instruments}

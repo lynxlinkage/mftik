@@ -145,12 +145,14 @@ TWAP = StrategyTemplate(
     label="TWAP",
     description=(
         "Takes liquidity in evenly spaced IOC slices at the touch until "
-        "num_round successes land or the window ends. Needs a bestquote feed."
+        "num_round successes land or the window ends. Spot or Perp; needs a "
+        "bestquote feed. Perp ensures leverage before arming."
     ),
     yaml="""\
 td:
   - paper trader
 md:
+  # Spot or Perp (e.g. bestquote.BinanceFuture_Perp_BTCUSDT).
   - bestquote.Paper_Spot_BTCUSDT
 sts:
   side: buy

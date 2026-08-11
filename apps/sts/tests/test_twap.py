@@ -38,6 +38,19 @@ BTCUSDT = SymbolInfo(
     ],
 )
 
+BTCUSDT_PERP = SymbolInfo(
+    universal_ticker="BinanceFuture_Perp_BTCUSDT",
+    base="BTC",
+    quote="USDT",
+    exch_ticker="BTCUSDT",
+    filters=[
+        {"name": "price_tick", "value": Decimal("0.01")},
+        {"name": "qty_step", "value": Decimal("0.00001")},
+        {"name": "min_qty", "value": Decimal("0.00001")},
+        {"name": "min_notional", "value": Decimal("5")},
+    ],
+)
+
 
 class FakeOms:
     def __init__(self, *, accept: bool = True) -> None:
@@ -94,9 +107,26 @@ class FakeLedger:
     def __init__(self) -> None:
         self.balances: dict[str, Decimal] = {}
         self.default = Decimal("1000000")
+        self._leverage: dict[str, Decimal] = {}
+        self.ensure_calls: list[tuple[str, int | None]] = []
+        self.ensure_result: Decimal | None = Decimal("10")
+        self.last_reject_reason = ""
+        self.last_reject_code: int | str = RejectCode.NONE
 
     async def available(self, asset: str, api_id=None) -> Decimal:
         return self.balances.get(asset, self.default)
+
+    def leverage(self, ticker, api_id=None) -> Decimal | None:
+        return self._leverage.get(str(ticker))
+
+    async def ensure_leverage(self, ticker, api_id=None) -> Decimal | None:
+        self.ensure_calls.append((str(ticker), api_id))
+        if self.ensure_result is None:
+            self.last_reject_reason = "leverage unavailable"
+            self.last_reject_code = RejectCode.TD_LEVERAGE_UNAVAILABLE
+            return None
+        self._leverage[str(ticker)] = self.ensure_result
+        return self.ensure_result
 
 
 class FakeSession:
@@ -139,7 +169,7 @@ class _FakeToken:
         self.registered.clear()
 
 
-def _strategy(**paras) -> TwapStrategy:
+def _strategy(*, perp: bool = False, **paras) -> TwapStrategy:
     payload = {
         "side": "buy",
         "qty_per_round": Decimal("0.1"),
@@ -148,15 +178,20 @@ def _strategy(**paras) -> TwapStrategy:
     }
     payload.update(paras)
 
+    info = BTCUSDT_PERP if perp else BTCUSDT
+    ticker = info.universal_ticker
+
     strat = TwapStrategy()
     strat.paras = TwapStrategy.on_initialized(payload)
     strat.session = FakeSession()  # type: ignore[assignment]
+    if perp:
+        strat.session.md_ids = [f"bestquote.{ticker}"]
     strat.oms = FakeOms()  # type: ignore[assignment]
     strat.oms.strategy = strat
     strat.timer = FakeTimer()  # type: ignore[assignment]
     strat.ledger = FakeLedger()  # type: ignore[assignment]
-    strat._info = BTCUSDT
-    strat._ticker = UniversalTicker.parse("Paper_Spot_BTCUSDT")
+    strat._info = info
+    strat._ticker = UniversalTicker.parse(ticker)
 
     async def _noop_log(message: str, *, level: str = "info", **extra) -> None:
         return None
@@ -166,9 +201,9 @@ def _strategy(**paras) -> TwapStrategy:
     return strat
 
 
-def _quote(bid: str, ask: str) -> BestQuote:
+def _quote(bid: str, ask: str, *, ticker: str = "Paper_Spot_BTCUSDT") -> BestQuote:
     return BestQuote(
-        universal_ticker="Paper_Spot_BTCUSDT",
+        universal_ticker=ticker,
         bid=Decimal(bid),
         bid_qty=Decimal("1"),
         ask=Decimal(ask),
@@ -190,8 +225,9 @@ def _update(cid: str, filled: str, status: OrderStatus) -> Order:
 
 
 async def _arm(strat: TwapStrategy, bid: str = "49999", ask: str = "50000") -> None:
+    ticker = str(strat._ticker) if strat._ticker is not None else "Paper_Spot_BTCUSDT"
     await strat.on_recon_done(ReconDone(session_id="s1", api_id=7, oms=OmsView()))
-    await strat.on_best_quote(_quote(bid, ask))
+    await strat.on_best_quote(_quote(bid, ask, ticker=ticker))
 
 
 async def _settle() -> None:
@@ -436,3 +472,62 @@ async def test_td_refusal_fails_the_session() -> None:
 
     assert strat._done
     assert strat.session.failures[-1] == "twap_refused"
+
+
+# --- Perp ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spot_arm_skips_ensure_leverage() -> None:
+    strat = _strategy()
+    await _arm(strat)
+    assert strat._armed
+    assert strat.ledger.ensure_calls == []
+
+
+@pytest.mark.asyncio
+async def test_perp_arm_ensures_leverage() -> None:
+    strat = _strategy(perp=True)
+    await _arm(strat)
+    assert strat._armed
+    assert strat.ledger.ensure_calls == [
+        ("BinanceFuture_Perp_BTCUSDT", 7),
+    ]
+    assert strat.ledger.leverage("BinanceFuture_Perp_BTCUSDT") == Decimal("10")
+
+
+@pytest.mark.asyncio
+async def test_perp_arm_fails_when_leverage_unavailable() -> None:
+    strat = _strategy(perp=True)
+    strat.ledger.ensure_result = None
+    await _arm(strat)
+    assert not strat._armed
+    assert strat._done
+    assert strat.session.failures[-1] == "twap_leverage_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_perp_buy_shortfall_uses_margin_not_full_notional() -> None:
+    # 0.1 * 50000 / 10 = 500 USDT margin; 1000 free is enough.
+    strat = _strategy(perp=True, side="buy")
+    strat.ledger.balances["USDT"] = Decimal("1000")
+    strat.ledger.balances["BTC"] = Decimal("0")
+    await _arm(strat)
+    await strat._on_tick()
+
+    assert len(strat.oms.submitted) == 1
+    assert not strat._done
+
+
+@pytest.mark.asyncio
+async def test_perp_sell_also_needs_quote_margin() -> None:
+    # Spot sell would only need BTC; Perp sell still locks USDT margin.
+    strat = _strategy(perp=True, side="sell")
+    strat.ledger.balances["BTC"] = Decimal("100")
+    strat.ledger.balances["USDT"] = Decimal("1")
+    await _arm(strat, bid="50000", ask="50001")
+    await strat._on_tick()
+
+    assert strat.oms.submitted == []
+    assert strat._done
+    assert strat.session.failures[-1] == "twap_insufficient_balance"

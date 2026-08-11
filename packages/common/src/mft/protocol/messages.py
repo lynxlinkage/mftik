@@ -507,6 +507,38 @@ class OrderAck(BaseModel):
     error_code: int | str = RejectCode.NONE
 
 
+class EnsureLeverage(BaseModel):
+    """STS → TD: look up (and cache) this account's leverage for a perp.
+
+    Answered on ``td.account.{api_id}`` with :class:`LeverageAck`. Spot
+    tickers and venues without a leverage read are refused.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    api_id: int
+    universal_ticker: str
+
+
+class LeverageAck(BaseModel):
+    """TD → STS: reply to :class:`EnsureLeverage` on ``td.account.{api_id}``.
+
+    Unlike :class:`OrderAck`, this waits for the venue (or a TD cache hit)
+    before answering: ``ok`` means the leverage figure is known and cached
+    on TD, not merely that the request was accepted.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    universal_ticker: str
+    ok: bool
+    leverage: Decimal | None = None
+    reason: str = ""
+    error_code: int | str = RejectCode.NONE
+
+
 class OrderReject(BaseModel):
     """TD → STS: submit rejected (publish on ``td.{api_id}.global``).
 
@@ -571,6 +603,8 @@ StsDetachEnvelope = Envelope[StsDetach]
 OrderSubmitEnvelope = Envelope[OrderSubmit]
 OrderCancelEnvelope = Envelope[OrderCancel]
 OrderAckEnvelope = Envelope[OrderAck]
+EnsureLeverageEnvelope = Envelope[EnsureLeverage]
+LeverageAckEnvelope = Envelope[LeverageAck]
 OrderRejectEnvelope = Envelope[OrderReject]
 CancelRejectEnvelope = Envelope[CancelReject]
 MdLeaseAckEnvelope = Envelope[MdLeaseAck]
@@ -600,6 +634,7 @@ TD_LEDGER_VIEW = "td.ledger.view"
 TD_ORDER_UPDATE = "td.order.update"
 TD_FILL = "td.fill"
 TD_ORDER_ACK = "td.order.ack"
+TD_LEVERAGE_ACK = "td.leverage.ack"
 TD_ORDER_REJECT = "td.order.reject"
 TD_CANCEL_REJECT = "td.cancel.reject"
 TD_BALANCE_UPDATE = "td.balance.update"
@@ -709,6 +744,7 @@ STS_RECON = "sts.recon"
 STS_DETACH = "sts.detach"
 STS_ORDER_SUBMIT = "sts.order.submit"
 STS_ORDER_CANCEL = "sts.order.cancel"
+STS_ENSURE_LEVERAGE = "sts.ensure_leverage"
 
 MD_HEALTH = "md.health"
 MD_ERROR = "md.error"

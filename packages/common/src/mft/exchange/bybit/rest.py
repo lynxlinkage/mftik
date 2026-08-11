@@ -60,6 +60,7 @@ from mft.exchange.bybit.protocol import (
     query_string,
     rest_headers,
 )
+from mft.exchange.errors import ExchangeError
 from mft.exchange.models import (
     Balance,
     Instrument,
@@ -410,7 +411,8 @@ class BybitRest(_BybitRestTransport):
 
         A flat position (``size == 0``) is dropped here: Bybit keeps reporting
         a symbol after it is closed, and an OMS reading that as a position
-        would hold a row that says nothing.
+        would hold a row that says nothing. Callers that need the configured
+        leverage on a flat book use :meth:`fetch_leverage_row` instead.
         """
         if product == SPOT:
             return []
@@ -428,6 +430,32 @@ class BybitRest(_BybitRestTransport):
             )
             if row.size > 0
         ]
+
+    async def fetch_leverage_row(
+        self, product: str, symbol: str
+    ) -> BybitPosition:
+        """``position/list`` for one symbol, including a flat book.
+
+        Bybit returns the configured leverage even when ``size`` is zero, but
+        only when ``symbol`` is passed — without it the list is open positions
+        only. This is the read :meth:`fetch_leverage` needs.
+        """
+        if product == SPOT:
+            raise ExchangeError("spot has no leverage")
+        if not symbol:
+            raise ValueError("symbol is required")
+        result = await self._get(
+            ch.POSITION_LIST_PATH, {"category": product, "symbol": symbol}
+        )
+        rows = [
+            BybitPosition.model_validate(raw)
+            for raw in result.get("list") or []
+        ]
+        if not rows:
+            raise ExchangeError(
+                f"Bybit position/list returned no row for {symbol}"
+            )
+        return rows[0]
 
     # --- order entry (fallback) --------------------------------------------
 

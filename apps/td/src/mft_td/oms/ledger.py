@@ -22,6 +22,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from mft.exchange.models import Balance, OrderType, Side
+from mft.exchange.tickers import Category
 
 if TYPE_CHECKING:
     from mft.exchange.models import Instrument, PlaceOrderRequest
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
+ONE = Decimal("1")
 
 
 class InsufficientAvailable(Exception):
@@ -44,15 +46,28 @@ class InsufficientAvailable(Exception):
 
 
 def reservation_for(
-    request: PlaceOrderRequest, instrument: Instrument
+    request: PlaceOrderRequest,
+    instrument: Instrument,
+    *,
+    leverage: Decimal | None = None,
 ) -> tuple[str, Decimal] | None:
     """What an order commits: ``(asset, amount)``, or None if unknowable.
 
-    A buy commits quote currency, a sell commits base. A market buy has no
-    price to size the commitment with, so it returns None — the caller decides
-    whether to let it through unreserved rather than having a guess baked in
-    here.
+    Spot: a buy commits quote currency, a sell commits base. A market buy has
+    no price to size the commitment with, so it returns None — the caller
+    decides whether to let it through unreserved rather than having a guess
+    baked in here.
+
+    Perp: both sides commit margin in the quote (settle) asset. The amount is
+    ``notional / leverage``. Missing or non-positive ``leverage`` is treated
+    as ``1`` — conservative until :meth:`Session.ensure_leverage` has filled
+    the cache.
     """
+    if request.category is Category.PERP:
+        if request.type is OrderType.MARKET or request.price is None:
+            return None
+        lev = leverage if leverage is not None and leverage > ZERO else ONE
+        return instrument.quote, (request.qty * request.price) / lev
     if request.side is Side.SELL:
         return instrument.base, request.qty
     if request.type is OrderType.MARKET or request.price is None:

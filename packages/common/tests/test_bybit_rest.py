@@ -335,3 +335,25 @@ async def test_positions_drop_the_flat_rows_and_skip_spot(api: FakeApi) -> None:
     assert [(r.symbol, r.signed_size) for r in rows] == [
         ("BTCUSDT", Decimal("-2"))
     ]
+
+
+async def test_leverage_row_keeps_a_flat_symbol(api: FakeApi) -> None:
+    """Configured leverage is readable before the first contract is opened."""
+    api.results["/v5/position/list"] = {
+        "list": [
+            {
+                "symbol": "BTCUSDT",
+                "side": "",
+                "size": "0",
+                "leverage": "15",
+            }
+        ]
+    }
+    rest = _signed(api)
+    row = await rest.fetch_leverage_row("linear", "BTCUSDT")
+    assert row.symbol == "BTCUSDT"
+    assert row.size == Decimal("0")
+    assert row.leverage == Decimal("15")
+    request = api.request_for("/v5/position/list")
+    assert "symbol=BTCUSDT" in str(request.url)
+    assert "category=linear" in str(request.url)

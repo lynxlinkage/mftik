@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from mft.broker import Broker
 from mft.exchange import PaperExchange, venues
+from mft.exchange.binance.future.private import BinanceFuturePrivateClient
 from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mft.exchange.bybit.private import BybitPrivateClient
 from mft.exchange.errors import ExchangeError
@@ -209,6 +210,26 @@ class VenueSessionFactory:
             )
             logger.info(
                 "TD building Binance session api_id=%s key=%s…",
+                api_id,
+                row.api_key[:6],
+            )
+            return self._session(api_id, private)
+
+        if venue is venues.BINANCE_FUTURE:
+            # The same Ed25519 credential shape as spot, and a different key:
+            # Binance's USDⓈ-M plane is a separate account with separate API
+            # keys, so a spot credential stored against this venue would fail
+            # its logon rather than trade the wrong book.
+            #
+            # This connector also reports positions, which no spot session
+            # does — TD picks them up by name, so nothing here has to say so.
+            private = BinanceFuturePrivateClient(
+                api_key=row.api_key,
+                api_secret=row.api_secret,
+                symbols=self._symbols,
+            )
+            logger.info(
+                "TD building BinanceFuture session api_id=%s key=%s…",
                 api_id,
                 row.api_key[:6],
             )

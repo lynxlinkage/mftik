@@ -21,9 +21,14 @@ which puts the name — and therefore the symbol — back on the message. See
 
 from __future__ import annotations
 
-SUBSCRIBE = "SUBSCRIBE"
-UNSUBSCRIBE = "UNSUBSCRIBE"
-LIST_SUBSCRIPTIONS = "LIST_SUBSCRIPTIONS"
+# The three subscribe verbs are the same on every Binance market-streams
+# socket, so they are defined once with the plumbing that sends them and
+# re-exported here, where a caller building stream names looks for them.
+from mft.exchange.binance.feed import (
+    LIST_SUBSCRIPTIONS,
+    SUBSCRIBE,
+    UNSUBSCRIBE,
+)
 
 #: Update speeds the depth streams accept. ``1000ms`` is the default for the
 #: diff stream, ``100ms`` for partial book depth.

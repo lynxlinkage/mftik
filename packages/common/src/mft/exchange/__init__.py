@@ -1,6 +1,24 @@
 """Exchange connectivity — venue adapters with public/private clients."""
 
 from mft.exchange.base import BaseClient
+from mft.exchange.binance.future import (
+    BINANCE_FUTURE_MARKET_STREAM_URL,
+    BINANCE_FUTURE_PRIVATE_STREAM_URL,
+    BINANCE_FUTURE_PUBLIC_STREAM_URL,
+    BINANCE_FUTURE_REST_URL,
+    BINANCE_FUTURE_WS_API_URL,
+    BinanceFutureAccountUpdate,
+    BinanceFutureLiquidation,
+    BinanceFutureOrderTradeUpdate,
+    BinanceFuturePrivateClient,
+    BinanceFuturePublicClient,
+    BinanceFuturePublicRest,
+    BinanceFutureRest,
+    BinanceFutureRestError,
+    BinanceFutureStream,
+    BinanceFutureUserStream,
+    BinanceFutureWsApi,
+)
 from mft.exchange.binance.spot import (
     BINANCE_SPOT_STREAM_URL,
     BINANCE_SPOT_WS_API_URL,
@@ -115,6 +133,7 @@ from mft.exchange.tickers import (
 )
 from mft.exchange.venues import (
     BINANCE,
+    BINANCE_FUTURE,
     BYBIT,
     GATE,
     PAPER,
@@ -127,6 +146,12 @@ from mft.exchange.venues import (
 
 __all__ = [
     "BINANCE",
+    "BINANCE_FUTURE",
+    "BINANCE_FUTURE_MARKET_STREAM_URL",
+    "BINANCE_FUTURE_PRIVATE_STREAM_URL",
+    "BINANCE_FUTURE_PUBLIC_STREAM_URL",
+    "BINANCE_FUTURE_REST_URL",
+    "BINANCE_FUTURE_WS_API_URL",
     "BINANCE_SPOT_STREAM_URL",
     "BINANCE_SPOT_WS_API_URL",
     "BYBIT",
@@ -145,6 +170,17 @@ __all__ = [
     "BestQuote",
     "BinanceAuthError",
     "BinanceExecutionReport",
+    "BinanceFutureAccountUpdate",
+    "BinanceFutureLiquidation",
+    "BinanceFutureOrderTradeUpdate",
+    "BinanceFuturePrivateClient",
+    "BinanceFuturePublicClient",
+    "BinanceFuturePublicRest",
+    "BinanceFutureRest",
+    "BinanceFutureRestError",
+    "BinanceFutureStream",
+    "BinanceFutureUserStream",
+    "BinanceFutureWsApi",
     "BinanceOrderAck",
     "BinanceSpotPrivateClient",
     "BinanceSpotPublicClient",

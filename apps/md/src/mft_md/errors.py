@@ -119,6 +119,13 @@ BINANCE = VenueErrors(
     },
 )
 
+#: Binance USDⓈ-M futures. The same numbering as spot — one company, one error
+#: space — and the same short table, for the same reason: a public read has no
+#: funds, no credentials and no order to be wrong about. ``-1120`` for an
+#: interval Binance does not serve is the one that actually fires here, since
+#: futures serves one window fewer than spot.
+BINANCE_FUTURE = BINANCE
+
 #: Bybit v5. Numeric codes only, five and six digit, so an unmapped one passes
 #: through as itself with no risk of being read as a code this platform
 #: assigned.
@@ -152,6 +159,7 @@ PAPER = VenueErrors()
 #: reports as its ``name``.
 VENUES: dict[str, VenueErrors] = {
     "Binance": BINANCE,
+    "BinanceFuture": BINANCE_FUTURE,
     "Bybit": BYBIT,
     "Gate": GATE,
     "Paper": PAPER,
