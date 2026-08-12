@@ -65,6 +65,15 @@ def _symbol(**overrides: Any) -> SymbolInfo:
     return SymbolInfo.model_validate(payload)
 
 
+def _list_reply(*symbols: SymbolInfo, total: int | None = None) -> Envelope[Any]:
+    items = list(symbols)
+    return SymListResultEnvelope.wrap(
+        SymListResult(symbols=items, total=total if total is not None else len(items)),
+        type=SYM_LIST,
+        source="sym",
+    )
+
+
 async def test_venues_returns_plane_coverage() -> None:
     broker = StubBroker(
         _venues_reply(
@@ -109,11 +118,7 @@ async def test_venues_maps_timeout_to_502() -> None:
 
 
 async def test_symbols_forwards_query_filters() -> None:
-    broker = StubBroker(
-        SymListResultEnvelope.wrap(
-            SymListResult(symbols=[_symbol()]), type=SYM_LIST, source="sym"
-        )
-    )
+    broker = StubBroker(_list_reply(_symbol()))
 
     result = await list_symbols(
         broker,  # type: ignore[arg-type]
@@ -133,17 +138,18 @@ async def test_symbols_forwards_query_filters() -> None:
         "category": "Spot",
         "symbol": "BTCUSDT",
         "active_only": False,
+        "q": None,
+        "limit": None,
+        "offset": 0,
+        "slim": False,
     }
     assert [s.exch_ticker for s in result.symbols] == ["BTC_USDT"]
+    assert result.total == 1
 
 
 async def test_symbols_rejects_a_filter_it_cannot_normalize() -> None:
     """A bad venue or category is a 400 here, not a 502 from the plane."""
-    broker = StubBroker(
-        SymListResultEnvelope.wrap(
-            SymListResult(symbols=[]), type=SYM_LIST, source="sym"
-        )
-    )
+    broker = StubBroker(_list_reply())
 
     with pytest.raises(HTTPException) as exc:
         await list_symbols(broker, category="futures")  # type: ignore[arg-type]
@@ -153,11 +159,7 @@ async def test_symbols_rejects_a_filter_it_cannot_normalize() -> None:
 
 
 async def test_symbols_defaults_to_every_venue() -> None:
-    broker = StubBroker(
-        SymListResultEnvelope.wrap(
-            SymListResult(symbols=[]), type=SYM_LIST, source="sym"
-        )
-    )
+    broker = StubBroker(_list_reply())
 
     await list_symbols(broker)  # type: ignore[arg-type]
 
@@ -165,3 +167,23 @@ async def test_symbols_defaults_to_every_venue() -> None:
     # Omitted filters widen the result — sym must not receive a venue here.
     assert broker.sent.payload["venue"] is None
     assert broker.sent.payload["active_only"] is True
+
+
+async def test_symbols_forwards_browse_knobs() -> None:
+    broker = StubBroker(_list_reply(_symbol(), total=40))
+
+    result = await list_symbols(
+        broker,  # type: ignore[arg-type]
+        venue="Gate",
+        q="btc",
+        limit=10,
+        offset=20,
+        slim=True,
+    )
+
+    assert broker.sent is not None
+    assert broker.sent.payload["q"] == "btc"
+    assert broker.sent.payload["limit"] == 10
+    assert broker.sent.payload["offset"] == 20
+    assert broker.sent.payload["slim"] is True
+    assert result.total == 40

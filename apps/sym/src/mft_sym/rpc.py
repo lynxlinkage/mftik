@@ -13,7 +13,6 @@ from mft.protocol import (
     RpcError,
     RpcErrorEnvelope,
     SymListRequest,
-    SymListResult,
     SymListResultEnvelope,
     SymRefreshRequest,
     SymRefreshResult,
@@ -36,21 +35,23 @@ async def handle_list(req: IncomingRequest, *, plane: SymbolPlane) -> None:
         await _error(req, "invalid_payload", str(exc))
         return
     try:
-        symbols = await plane.list_symbols(
+        result = await plane.list_symbols(
             universal_ticker=payload.universal_ticker,
             venue=payload.venue,
             category=payload.category,
             symbol=payload.symbol,
             active_only=payload.active_only,
+            q=payload.q,
+            limit=payload.limit,
+            offset=payload.offset,
+            slim=payload.slim,
         )
     except Exception as exc:
         logger.exception("sym.list failed")
         await _error(req, "list_failed", str(exc))
         return
     await req.reply(
-        SymListResultEnvelope.wrap(
-            SymListResult(symbols=symbols), type=SYM_LIST, source=SOURCE
-        )
+        SymListResultEnvelope.wrap(result, type=SYM_LIST, source=SOURCE)
     )
 
 

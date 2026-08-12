@@ -223,12 +223,29 @@ export const api = {
 	stats: () => request<{ domains: DomainStats[] }>('/stats'),
 	venues: () => request<{ venues: Venue[] }>('/venues'),
 	symVenues: () => request<SymVenues>('/sym/venues'),
-	symbols: (opts: { venue?: string; activeOnly?: boolean } = {}) => {
+	symbols: (
+		opts: {
+			venue?: string;
+			activeOnly?: boolean;
+			universalTicker?: string;
+			q?: string;
+			limit?: number;
+			offset?: number;
+			slim?: boolean;
+		} = {}
+	) => {
 		const q = new URLSearchParams();
 		if (opts.venue) q.set('venue', opts.venue);
 		if (opts.activeOnly === false) q.set('active_only', 'false');
+		if (opts.universalTicker) q.set('universal_ticker', opts.universalTicker);
+		if (opts.q) q.set('q', opts.q);
+		if (opts.limit != null) q.set('limit', String(opts.limit));
+		if (opts.offset != null && opts.offset > 0) q.set('offset', String(opts.offset));
+		if (opts.slim) q.set('slim', 'true');
 		const qs = q.toString();
-		return request<{ symbols: SymbolInfo[] }>(`/sym/symbols${qs ? `?${qs}` : ''}`);
+		return request<{ symbols: SymbolInfo[]; total: number }>(
+			`/sym/symbols${qs ? `?${qs}` : ''}`
+		);
 	},
 	apis: () => request<{ apis: ApiCredential[] }>('/apis'),
 	createApi: (body: ApiCreateBody) =>

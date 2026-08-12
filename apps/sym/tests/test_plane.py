@@ -106,9 +106,15 @@ def plane_factory(sessionmaker_):
             async with sessionmaker_() as db:
                 return list(await SymbolRepository(db).list_tickers(**payload))
 
-        async def list_filters_for(ticker_ids):
+        async def count_tickers(**payload):
             async with sessionmaker_() as db:
-                return await SymbolRepository(db).list_filters_for(ticker_ids)
+                return await SymbolRepository(db).count_tickers(**payload)
+
+        async def list_filters_for(ticker_ids, *, names=None):
+            async with sessionmaker_() as db:
+                return await SymbolRepository(db).list_filters_for(
+                    ticker_ids, names=names
+                )
 
         return SymbolPlane(
             sources,
@@ -116,6 +122,7 @@ def plane_factory(sessionmaker_):
             deactivate_missing=deactivate,
             list_tickers=list_tickers,
             list_filters_for=list_filters_for,
+            count_tickers=count_tickers,
             **kwargs,
         )
 
@@ -146,9 +153,10 @@ async def test_refresh_writes_the_golden_record(plane_factory) -> None:
 
     assert result["refreshed"] == {VENUE: 2}
     assert result["failed"] == {}
-    symbols = await plane.list_symbols(venue=VENUE)
-    assert [s.symbol for s in symbols] == ["BTCUSDT", "ETHUSDT"]
-    btc = symbols[0]
+    page = await plane.list_symbols(venue=VENUE)
+    assert [s.symbol for s in page.symbols] == ["BTCUSDT", "ETHUSDT"]
+    assert page.total == 2
+    btc = page.symbols[0]
     assert btc.exch_ticker == "BTC_USDT"
     assert btc.filter("price_tick") == Decimal("0.01")
     assert btc.has_filter("min_notional")
@@ -168,17 +176,97 @@ async def test_list_symbols_loads_filters_in_one_query(plane_factory) -> None:
     inner = plane._list_filters_for
     calls: list[list[int]] = []
 
-    async def counting(ticker_ids):
+    async def counting(ticker_ids, *, names=None):
         calls.append(list(ticker_ids))
-        return await inner(ticker_ids)
+        return await inner(ticker_ids, names=names)
 
     plane._list_filters_for = counting
-    symbols = await plane.list_symbols(venue=VENUE)
+    page = await plane.list_symbols(venue=VENUE)
 
-    assert len(symbols) == 3
+    assert len(page.symbols) == 3
     assert len(calls) == 1
     assert len(calls[0]) == 3
-    assert symbols[0].filter("price_tick") == Decimal("0.01")
+    assert page.symbols[0].filter("price_tick") == Decimal("0.01")
+
+
+async def test_list_symbols_pages_and_searches(plane_factory) -> None:
+    plane = plane_factory(
+        [StubSource([_inst("BTC"), _inst("ETH"), _inst("SOL"), _inst("BNB")])]
+    )
+    await plane.refresh()
+
+    page = await plane.list_symbols(venue=VENUE, limit=2, offset=0)
+    assert [s.symbol for s in page.symbols] == ["BNBUSDT", "BTCUSDT"]
+    assert page.total == 4
+
+    page = await plane.list_symbols(venue=VENUE, limit=2, offset=2)
+    assert [s.symbol for s in page.symbols] == ["ETHUSDT", "SOLUSDT"]
+
+    # offset without limit still reports the pre-page match count
+    page = await plane.list_symbols(venue=VENUE, offset=1)
+    assert page.total == 4
+    assert len(page.symbols) == 3
+
+    found = await plane.list_symbols(venue=VENUE, q="eth")
+    assert [s.symbol for s in found.symbols] == ["ETHUSDT"]
+    assert found.total == 1
+
+
+async def test_list_symbols_by_universal_ticker_is_exact(plane_factory) -> None:
+    plane = plane_factory(
+        [
+            StubSource([_inst("BTC"), _inst("ETH")]),
+            StubSource([_inst("BTC", venue="Paper")], venue="Paper"),
+        ]
+    )
+    await plane.refresh()
+
+    page = await plane.list_symbols(
+        universal_ticker="Gate_Spot_BTCUSDT", active_only=False
+    )
+    assert [s.universal_ticker for s in page.symbols] == ["Gate_Spot_BTCUSDT"]
+    assert page.total == 1
+
+
+async def test_list_symbols_slim_keeps_only_browse_filters(plane_factory) -> None:
+    plane = plane_factory(
+        [
+            StubSource(
+                [
+                    _inst(
+                        "BTC",
+                        filters={
+                            "price_tick": Decimal("0.01"),
+                            "qty_step": Decimal("0.001"),
+                            "min_qty": Decimal("0.001"),
+                            "min_notional": None,
+                            "max_leverage": Decimal("50"),
+                        },
+                    )
+                ]
+            )
+        ]
+    )
+    await plane.refresh()
+
+    slim = await plane.list_symbols(venue=VENUE, slim=True)
+    assert {f.name for f in slim.symbols[0].filters} == {
+        "price_tick",
+        "qty_step",
+        "min_qty",
+        "min_notional",
+    }
+
+    full = await plane.list_symbols(
+        universal_ticker="Gate_Spot_BTCUSDT", slim=False
+    )
+    assert {f.name for f in full.symbols[0].filters} == {
+        "price_tick",
+        "qty_step",
+        "min_qty",
+        "min_notional",
+        "max_leverage",
+    }
 
 
 async def test_refresh_deactivates_delisted_instruments(plane_factory) -> None:
@@ -190,10 +278,10 @@ async def test_refresh_deactivates_delisted_instruments(plane_factory) -> None:
     result = await plane.refresh()
 
     assert result["deactivated"] == {VENUE: 1}
-    assert [s.symbol for s in await plane.list_symbols()] == ["BTCUSDT"]
+    assert [s.symbol for s in (await plane.list_symbols()).symbols] == ["BTCUSDT"]
     # The row survives — orders and sessions still reference it.
     everything = await plane.list_symbols(active_only=False)
-    assert {s.symbol for s in everything} == {"BTCUSDT", "ETHUSDT"}
+    assert {s.symbol for s in everything.symbols} == {"BTCUSDT", "ETHUSDT"}
 
 
 async def test_inactive_instruments_are_not_kept_alive(plane_factory) -> None:
@@ -203,7 +291,7 @@ async def test_inactive_instruments_are_not_kept_alive(plane_factory) -> None:
 
     await plane.refresh()
 
-    assert [s.symbol for s in await plane.list_symbols()] == ["BTCUSDT"]
+    assert [s.symbol for s in (await plane.list_symbols()).symbols] == ["BTCUSDT"]
 
 
 async def test_one_venue_failing_does_not_block_the_others(
@@ -219,7 +307,7 @@ async def test_one_venue_failing_does_not_block_the_others(
     assert result["refreshed"] == {VENUE: 1}
     assert "Paper" in result["failed"]
     assert "endpoint down" in result["failed"]["Paper"]
-    assert [s.symbol for s in await plane.list_symbols()] == ["BTCUSDT"]
+    assert [s.symbol for s in (await plane.list_symbols()).symbols] == ["BTCUSDT"]
 
 
 async def test_a_unified_venue_refreshes_each_book_independently(
@@ -258,7 +346,8 @@ async def test_a_unified_venue_refreshes_each_book_independently(
     assert result["refreshed"] == {"Bybit": 3}
     assert plane.venues == ["Bybit"]
     tickers = {
-        s.universal_ticker for s in await plane.list_symbols(venue="Bybit")
+        s.universal_ticker
+        for s in (await plane.list_symbols(venue="Bybit")).symbols
     }
     assert tickers == {
         "Bybit_Spot_BTCUSDT",
@@ -272,7 +361,8 @@ async def test_a_unified_venue_refreshes_each_book_independently(
 
     assert result["deactivated"] == {"Bybit": 1}
     tickers = {
-        s.universal_ticker for s in await plane.list_symbols(venue="Bybit")
+        s.universal_ticker
+        for s in (await plane.list_symbols(venue="Bybit")).symbols
     }
     assert tickers == {"Bybit_Spot_BTCUSDT", "Bybit_Perp_BTCUSDT"}
 
@@ -345,6 +435,7 @@ async def test_rpc_list(broker: Broker, served) -> None:
         "Gate_Spot_ETHUSDT",
     ]
     assert symbols[0]["exch_ticker"] == "BTC_USDT"
+    assert reply.payload["total"] == 2
 
 
 async def test_rpc_venues_reports_counts(broker: Broker, served) -> None:

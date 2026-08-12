@@ -26,19 +26,47 @@ async def deactivate_missing(
 
 async def list_tickers(
     *,
+    universal_ticker: str | None = None,
     venue: str | None = None,
     category: str | None = None,
     symbol: str | None = None,
     active_only: bool = True,
+    q: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> Sequence[SymbolTicker]:
     async with session_scope() as db:
         return list(
             await SymbolRepository(db).list_tickers(
+                universal_ticker=universal_ticker,
                 venue=venue,
                 category=category,
                 symbol=symbol,
                 active_only=active_only,
+                q=q,
+                limit=limit,
+                offset=offset,
             )
+        )
+
+
+async def count_tickers(
+    *,
+    universal_ticker: str | None = None,
+    venue: str | None = None,
+    category: str | None = None,
+    symbol: str | None = None,
+    active_only: bool = True,
+    q: str | None = None,
+) -> int:
+    async with session_scope() as db:
+        return await SymbolRepository(db).count_tickers(
+            universal_ticker=universal_ticker,
+            venue=venue,
+            category=category,
+            symbol=symbol,
+            active_only=active_only,
+            q=q,
         )
 
 
@@ -49,12 +77,17 @@ async def list_filters(ticker_id: int) -> Sequence[SymbolFilter]:
 
 async def list_filters_for(
     ticker_ids: Sequence[int],
+    *,
+    names: Sequence[str] | None = None,
 ) -> dict[int, list[SymbolFilter]]:
     async with session_scope() as db:
-        return await SymbolRepository(db).list_filters_for(ticker_ids)
+        return await SymbolRepository(db).list_filters_for(
+            ticker_ids, names=names
+        )
 
 
 __all__ = [
+    "count_tickers",
     "deactivate_missing",
     "list_filters",
     "list_filters_for",

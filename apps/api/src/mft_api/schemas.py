@@ -164,6 +164,8 @@ class SymVenueListResponse(BaseModel):
 
 class SymSymbolListResponse(BaseModel):
     symbols: list[SymbolInfo] = Field(default_factory=list)
+    #: Match count before limit/offset; equals ``len(symbols)`` when unpaged.
+    total: int = 0
 
 
 class ApiCreateBody(BaseModel):

@@ -758,7 +758,7 @@
           "sym"
         ],
         "summary": "List Symbols",
-        "description": "Instruments from the golden tables. Omitted filters widen the result.\n\n``universal_ticker`` names exactly one instrument; the other three are\nparts of it and each widens the result by being left out. All are\nnormalized here rather than matched literally, so a query typed\n``gate/spot`` finds the rows stored as ``Gate_Spot_\u2026``.",
+        "description": "Instruments from the golden tables. Omitted filters widen the result.\n\n``universal_ticker`` names exactly one instrument; the other three are\nparts of it and each widens the result by being left out. All are\nnormalized here rather than matched literally, so a query typed\n``gate/spot`` finds the rows stored as ``Gate_Spot_\u2026``.\n\n``q`` / ``limit`` / ``offset`` page a browse. ``slim`` returns only the\nfilters the table shows; pass ``universal_ticker`` without ``slim`` for\nthe full filter set on one row.",
         "operationId": "list_symbols_sym_symbols_get",
         "parameters": [
           {
@@ -833,6 +833,61 @@
               "type": "boolean",
               "default": true,
               "title": "Active Only"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 500,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "slim",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Slim"
             }
           }
         ],
@@ -1792,6 +1847,11 @@
             },
             "type": "array",
             "title": "Symbols"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
           }
         },
         "type": "object",

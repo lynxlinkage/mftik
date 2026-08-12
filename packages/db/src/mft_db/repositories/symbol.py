@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import noload
 
 from mft_db.models.symbol import SymbolFilter, SymbolTicker
 from mft_db.repositories.base import BaseRepository
@@ -36,10 +37,14 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
     async def list_tickers(
         self,
         *,
+        universal_ticker: str | None = None,
         venue: str | None = None,
         category: str | None = None,
         symbol: str | None = None,
         active_only: bool = True,
+        q: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> Sequence[SymbolTicker]:
         """Instruments matching the given parts of a ticker.
 
@@ -47,15 +52,60 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
         (with or without a category) gives a left-anchored prefix, which the
         index serves; the rest are unanchored and scan, which is fine because
         nothing on a hot path asks for "every Perp everywhere".
+
+        ``universal_ticker`` is an exact match — used when the caller already
+        has the identity and must not scan the whole table to find one row.
+
+        ``q`` is a case-insensitive substring over the ticker, the venue's
+        spelling, and the base/quote legs. ``limit``/``offset`` page the
+        ordered result; omit ``limit`` for the whole match.
+
+        Filter rows are deliberately not loaded here: the relationship is
+        ``lazy="selectin"``, which would pull every filter for every ticker
+        in the result before the caller can ask for a slim subset. Callers
+        that need filters use :meth:`list_filters_for`.
         """
-        stmt = select(SymbolTicker)
+        # noload: see docstring. Without it, selectin eager-loads every
+        # symbol_filter row for the page and makes slim lists pointless.
+        stmt = select(SymbolTicker).options(noload(SymbolTicker.filters))
+        if universal_ticker is not None:
+            stmt = stmt.where(SymbolTicker.universal_ticker == universal_ticker)
         for clause in _match(venue, category, symbol):
             stmt = stmt.where(clause)
         if active_only:
             stmt = stmt.where(SymbolTicker.is_active.is_(True))
+        for clause in _search(q):
+            stmt = stmt.where(clause)
         stmt = stmt.order_by(SymbolTicker.universal_ticker.asc())
+        if offset:
+            stmt = stmt.offset(offset)
+        if limit is not None:
+            stmt = stmt.limit(limit)
         result = await self.session.execute(stmt)
         return result.scalars().unique().all()
+
+    async def count_tickers(
+        self,
+        *,
+        universal_ticker: str | None = None,
+        venue: str | None = None,
+        category: str | None = None,
+        symbol: str | None = None,
+        active_only: bool = True,
+        q: str | None = None,
+    ) -> int:
+        """How many instruments match, ignoring ``limit``/``offset``."""
+        stmt = select(func.count()).select_from(SymbolTicker)
+        if universal_ticker is not None:
+            stmt = stmt.where(SymbolTicker.universal_ticker == universal_ticker)
+        for clause in _match(venue, category, symbol):
+            stmt = stmt.where(clause)
+        if active_only:
+            stmt = stmt.where(SymbolTicker.is_active.is_(True))
+        for clause in _search(q):
+            stmt = stmt.where(clause)
+        result = await self.session.execute(stmt)
+        return int(result.scalar_one())
 
     async def list_filters(self, ticker_id: int) -> Sequence[SymbolFilter]:
         """Filter rows for one instrument, ordered by name."""
@@ -67,7 +117,10 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
         return result.scalars().all()
 
     async def list_filters_for(
-        self, ticker_ids: Sequence[int]
+        self,
+        ticker_ids: Sequence[int],
+        *,
+        names: Sequence[str] | None = None,
     ) -> dict[int, list[SymbolFilter]]:
         """Filter rows for many instruments at once, grouped by ticker id.
 
@@ -76,14 +129,20 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
         instrument to a database on another host takes tens of seconds — well
         past the caller's RPC timeout. Ids absent from the result simply have
         no filters.
+
+        ``names`` restricts which filter keys come back (the browse UI only
+        needs tick / lot / minimums).
         """
         if not ticker_ids:
             return {}
-        result = await self.session.execute(
+        stmt = (
             select(SymbolFilter)
             .where(SymbolFilter.ticker_id.in_(ticker_ids))
             .order_by(SymbolFilter.ticker_id.asc(), SymbolFilter.name.asc())
         )
+        if names is not None:
+            stmt = stmt.where(SymbolFilter.name.in_(list(names)))
+        result = await self.session.execute(stmt)
         grouped: dict[int, list[SymbolFilter]] = {}
         for row in result.scalars().all():
             grouped.setdefault(row.ticker_id, []).append(row)
@@ -199,3 +258,27 @@ def _match(venue: str | None, category: str | None, symbol: str | None) -> list:
     if symbol is not None:
         clauses.append(column.endswith(f"{SEPARATOR}{symbol}", autoescape=True))
     return clauses
+
+
+def _search(q: str | None) -> list:
+    """Case-insensitive substring match across the columns the UI searches."""
+    needle = (q or "").strip()
+    if not needle:
+        return []
+    pattern = _like_pattern(needle)
+    return [
+        or_(
+            SymbolTicker.universal_ticker.ilike(pattern, escape="\\"),
+            SymbolTicker.exch_ticker.ilike(pattern, escape="\\"),
+            SymbolTicker.base.ilike(pattern, escape="\\"),
+            SymbolTicker.quote.ilike(pattern, escape="\\"),
+        )
+    ]
+
+
+def _like_pattern(value: str) -> str:
+    """``%value%`` with LIKE metacharacters escaped for ``escape='\\'``."""
+    escaped = (
+        value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    return f"%{escaped}%"

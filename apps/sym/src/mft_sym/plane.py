@@ -14,17 +14,21 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
-from mft.protocol import SymbolFilterInfo, SymbolInfo
+from mft.protocol import SymbolFilterInfo, SymbolInfo, SymListResult
 
 from mft_sym.sources import InstrumentSource
 
 logger = logging.getLogger(__name__)
 
+#: Filters the browse UI shows; ``slim`` list replies keep only these.
+BROWSE_FILTER_NAMES = ("price_tick", "qty_step", "min_qty", "min_notional")
+
 Upsert = Callable[..., Awaitable[Any]]
 Deactivate = Callable[..., Awaitable[int]]
 ListTickers = Callable[..., Awaitable[Sequence[Any]]]
-# Batched deliberately: see list_symbols.
-ListFiltersFor = Callable[[Sequence[int]], Awaitable[Mapping[int, Sequence[Any]]]]
+CountTickers = Callable[..., Awaitable[int]]
+# Batched deliberately: see list_symbols. ``names`` is optional.
+ListFiltersFor = Callable[..., Awaitable[Mapping[int, Sequence[Any]]]]
 
 
 class SymbolPlane:
@@ -38,6 +42,7 @@ class SymbolPlane:
         deactivate_missing: Deactivate,
         list_tickers: ListTickers,
         list_filters_for: ListFiltersFor,
+        count_tickers: CountTickers | None = None,
         refresh_interval: float = 3600.0,
     ) -> None:
         self._sources = list(sources)
@@ -45,6 +50,7 @@ class SymbolPlane:
         self._deactivate = deactivate_missing
         self._list_tickers = list_tickers
         self._list_filters_for = list_filters_for
+        self._count_tickers = count_tickers
         self.refresh_interval = refresh_interval
         self._lock = asyncio.Lock()
 
@@ -159,21 +165,59 @@ class SymbolPlane:
         category: str | None = None,
         symbol: str | None = None,
         active_only: bool = True,
-    ) -> list[SymbolInfo]:
-        rows = await self._list_tickers(
-            venue=venue,
-            category=category,
-            symbol=symbol,
-            active_only=active_only,
-        )
+        q: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        slim: bool = False,
+    ) -> SymListResult:
+        # An exact ticker is one SQL match; do not list every venue and
+        # filter in Python — that is the ~14s / RPC-timeout path.
         if universal_ticker is not None:
-            rows = [r for r in rows if r.universal_ticker == universal_ticker]
+            rows = await self._list_tickers(
+                universal_ticker=universal_ticker,
+                active_only=active_only,
+            )
+            total = len(rows)
+        else:
+            rows = await self._list_tickers(
+                venue=venue,
+                category=category,
+                symbol=symbol,
+                active_only=active_only,
+                q=q,
+                limit=limit,
+                offset=offset,
+            )
+            paged = limit is not None or offset > 0
+            if not paged:
+                total = len(rows)
+            elif self._count_tickers is not None:
+                total = await self._count_tickers(
+                    venue=venue,
+                    category=category,
+                    symbol=symbol,
+                    active_only=active_only,
+                    q=q,
+                )
+            else:
+                # Tests that stub only list_tickers still get a usable total.
+                total = offset + len(rows)
+                if limit is not None and len(rows) == limit:
+                    total += 1
+
         # One query for every instrument's filters rather than one per
         # instrument. A Gate table is 2200+ rows; fanning that out to a
         # database on another host costs ~14s, and the RPC client gives up
         # after 5s — so the venue was simply unusable from td/md.
-        filters = await self._list_filters_for([row.id for row in rows])
-        return [self._to_info(row, filters.get(row.id, ())) for row in rows]
+        # list_tickers noloads the selectin relationship so this is the only
+        # filter round trip, and ``slim`` can actually restrict which names
+        # come back.
+        filter_names = BROWSE_FILTER_NAMES if slim else None
+        filters = await self._list_filters_for(
+            [row.id for row in rows], names=filter_names
+        )
+        symbols = [self._to_info(row, filters.get(row.id, ())) for row in rows]
+        return SymListResult(symbols=symbols, total=total)
 
     async def counts(self) -> dict[str, int]:
         """Active instrument count per venue, for a health read."""

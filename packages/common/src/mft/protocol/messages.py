@@ -886,6 +886,10 @@ class SymListRequest(BaseModel):
     and its whole use is to leave a part out — every instrument on ``Gate``,
     every ``Perp`` anywhere. A ticker names exactly one row and cannot express
     that. Pass ``universal_ticker`` when you do want exactly one.
+
+    ``q`` / ``limit`` / ``offset`` page a browse; omit ``limit`` to get the
+    whole match (what TD/MD cache loads). ``slim`` keeps only the filters the
+    UI table shows — full filter sets are a follow-up by ticker.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -895,12 +899,19 @@ class SymListRequest(BaseModel):
     category: str | None = None
     symbol: str | None = None
     active_only: bool = True
+    q: str | None = None
+    limit: int | None = Field(default=None, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+    slim: bool = False
 
 
 class SymListResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     symbols: list[SymbolInfo] = Field(default_factory=list)
+    #: Rows matching the filters before ``limit``/``offset``. Equals
+    #: ``len(symbols)`` when the caller did not page.
+    total: int = 0
 
 
 class SymVenuesResult(BaseModel):

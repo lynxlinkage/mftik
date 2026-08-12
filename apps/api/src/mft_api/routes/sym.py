@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, HTTPException, Query
 from mft.exchange import tickers, venues
 from mft.exchange.symbols import canonical_symbol
 from mft.exchange.tickers import UniversalTicker
@@ -56,6 +58,10 @@ async def list_symbols(
     category: str | None = None,
     symbol: str | None = None,
     active_only: bool = True,
+    q: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    slim: bool = False,
 ) -> SymSymbolListResponse:
     """Instruments from the golden tables. Omitted filters widen the result.
 
@@ -63,6 +69,10 @@ async def list_symbols(
     parts of it and each widens the result by being left out. All are
     normalized here rather than matched literally, so a query typed
     ``gate/spot`` finds the rows stored as ``Gate_Spot_…``.
+
+    ``q`` / ``limit`` / ``offset`` page a browse. ``slim`` returns only the
+    filters the table shows; pass ``universal_ticker`` without ``slim`` for
+    the full filter set on one row.
     """
     try:
         venue = venues.normalize(venue) if venue else None
@@ -86,6 +96,10 @@ async def list_symbols(
                     category=category,
                     symbol=symbol,
                     active_only=active_only,
+                    q=q,
+                    limit=limit,
+                    offset=offset,
+                    slim=slim,
                 ),
                 type=SYM_LIST,
                 source="api",
@@ -95,4 +109,4 @@ async def list_symbols(
         )
     except DomainRpcError as exc:
         raise HTTPException(status_code=502, detail=exc.message) from exc
-    return SymSymbolListResponse(symbols=result.symbols)
+    return SymSymbolListResponse(symbols=result.symbols, total=result.total)

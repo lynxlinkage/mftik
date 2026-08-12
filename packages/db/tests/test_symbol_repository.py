@@ -198,3 +198,57 @@ async def test_deactivating_one_market_leaves_the_others_alone(db) -> None:
     assert [t.universal_ticker for t in await repo.list_tickers()] == [
         "Bybit_Perp_BTCUSDT"
     ]
+
+
+async def test_list_tickers_pages_and_searches(db) -> None:
+    repo = SymbolRepository(db)
+    await _btc(repo)
+    await _btc(
+        repo,
+        universal_ticker="Gate_Spot_ETHUSDT",
+        base="ETH",
+        exch_ticker="ETH_USDT",
+    )
+    await _btc(
+        repo,
+        universal_ticker="Gate_Spot_SOLUSDT",
+        base="SOL",
+        exch_ticker="SOL_USDT",
+    )
+
+    page = await repo.list_tickers(venue="Gate", limit=2, offset=0)
+    assert [t.universal_ticker for t in page] == [
+        "Gate_Spot_BTCUSDT",
+        "Gate_Spot_ETHUSDT",
+    ]
+    assert await repo.count_tickers(venue="Gate") == 3
+
+    found = await repo.list_tickers(venue="Gate", q="sol")
+    assert [t.universal_ticker for t in found] == ["Gate_Spot_SOLUSDT"]
+    assert await repo.count_tickers(venue="Gate", q="sol") == 1
+
+
+async def test_list_tickers_exact_universal_ticker(db) -> None:
+    """A detail lookup must not scan every venue's instruments."""
+    repo = SymbolRepository(db)
+    await _btc(repo)
+    await _btc(
+        repo,
+        universal_ticker="Paper_Spot_BTCUSDT",
+        exch_ticker="BTCUSDT",
+    )
+
+    found = await repo.list_tickers(
+        universal_ticker="Gate_Spot_BTCUSDT", active_only=False
+    )
+    assert [t.universal_ticker for t in found] == ["Gate_Spot_BTCUSDT"]
+
+
+async def test_list_filters_for_can_restrict_names(db) -> None:
+    repo = SymbolRepository(db)
+    ticker = await _btc(repo)
+
+    slim = await repo.list_filters_for(
+        [ticker.id], names=("price_tick", "qty_step")
+    )
+    assert {f.name for f in slim[ticker.id]} == {"price_tick", "qty_step"}

@@ -41,6 +41,7 @@ def build_plane(broker: Broker) -> SymbolPlane:
         deactivate_missing=sym_db.deactivate_missing,
         list_tickers=sym_db.list_tickers,
         list_filters_for=sym_db.list_filters_for,
+        count_tickers=sym_db.count_tickers,
         refresh_interval=refresh_interval(),
     )
 
