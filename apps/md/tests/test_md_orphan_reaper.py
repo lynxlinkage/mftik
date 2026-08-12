@@ -209,6 +209,71 @@ async def test_an_attach_this_process_holds_is_left_alone(
 
 
 @pytest.mark.asyncio
+async def test_a_link_whose_lease_loop_stopped_is_torn_down(
+    broker: Broker, paper: PaperExchange
+) -> None:
+    """A link this process holds is not exempt from the scan.
+
+    The key is renewed by the lease loop and by nothing else, so a link whose
+    key has gone is one whose loop has stopped — an attach holding a venue
+    feed open for a session nobody is leasing. Skipping local links, as this
+    scan used to, is what let exactly that state last for hours.
+    """
+    store = FakeMdStore()
+    sessions = _manager(broker, paper, store)
+    task, stop = await _attached(broker, sessions, "dead-loop-1")
+
+    # Stop the loop the way a transport failure leaves it — gone, with the
+    # link still registered — then let its key lapse.
+    link = sessions._links["dead-loop-1"]  # noqa: SLF001
+    link.stop.set()
+    await asyncio.gather(*link.tasks, return_exceptions=True)
+    await clear_alive(broker, "dead-loop-1", domain="md")
+
+    assert await sessions.reap_orphans() == []
+    assert await sessions.reap_orphans() == ["dead-loop-1"]
+
+    assert store.rows[("Paper", "dead-loop-1")].status == "done"
+    # Torn down, not merely marked done: the feed must stop pumping too.
+    assert "dead-loop-1" not in sessions._links  # noqa: SLF001
+    assert sessions.feed_refcount(FEED) == 0
+
+    stop.set()
+    await asyncio.gather(task, return_exceptions=True)
+    await sessions.close_all()
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_link_survives_a_missing_key(
+    broker: Broker, paper: PaperExchange
+) -> None:
+    """A Redis outage past the TTL looks like a dead loop for one scan.
+
+    The lease loop puts the key back as soon as it can heartbeat again, so
+    one absent reading must not cost a running session its feeds.
+    """
+    store = FakeMdStore()
+    sessions = _manager(broker, paper, store)
+    task, stop = await _attached(broker, sessions, "blip-1")
+
+    await clear_alive(broker, "blip-1", domain="md")
+    assert await sessions.reap_orphans() == []
+
+    # The loop is alive, so the key is back before the next scan.
+    for _ in range(50):
+        if await is_alive(broker, "blip-1", domain="md"):
+            break
+        await asyncio.sleep(0.02)
+    assert await sessions.reap_orphans() == []
+    assert store.rows[("Paper", "blip-1")].status == "live"
+
+    stop.set()
+    await sessions.detach(session_id="blip-1", reason="test")
+    await asyncio.gather(task, return_exceptions=True)
+    await sessions.close_all()
+
+
+@pytest.mark.asyncio
 async def test_an_attach_another_process_holds_is_left_alone(
     broker: Broker, paper: PaperExchange
 ) -> None:

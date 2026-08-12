@@ -35,11 +35,14 @@ async def list_sessions(
     *,
     status: str | None = "live",
     created_by: int | None = None,
+    limit: int = 100,
 ) -> Sequence[TdSessionRow]:
     async with session_scope() as db:
         repo = TdSessionRepository(db)
         return list(
-            await repo.list_sessions(status=status, created_by=created_by)
+            await repo.list_sessions(
+                status=status, created_by=created_by, limit=limit
+            )
         )
 
 

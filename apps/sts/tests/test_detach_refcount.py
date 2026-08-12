@@ -9,6 +9,7 @@ from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange
 from mft.protocol import StsCreateSessionRequest, TdAttachRequest, Topics
 from mft_sts.session import SessionManager as StsSessionManager
+from mft_td.rpc import dispatch as td_dispatch
 from mft_td.session import PaperSessionFactory
 from mft_td.session import SessionManager as TdSessionManager
 
@@ -26,6 +27,14 @@ async def broker() -> Broker:
     await redis.aclose()
 
 
+async def _serve_td(
+    broker: Broker, td: TdSessionManager, stop: asyncio.Event
+) -> None:
+    """TD's control-plane RPC, which is where a detach arrives."""
+    async for req in broker.serve(Topics.TD, stop=stop):
+        await td_dispatch(req, sessions=td)
+
+
 @pytest.mark.asyncio
 async def test_stop_one_sts_drops_td_refcount(broker: Broker) -> None:
     paper = PaperExchange(
@@ -35,6 +44,8 @@ async def test_stop_one_sts_drops_td_refcount(broker: Broker) -> None:
     factory = PaperSessionFactory(broker, paper)
     sts = StsSessionManager(broker, heartbeat_interval=0.1)
     td = TdSessionManager(factory, broker, lease_grace=2.0)
+    td_stop = asyncio.Event()
+    td_rpc = asyncio.create_task(_serve_td(broker, td, td_stop))
 
     await sts.create_session(
         StsCreateSessionRequest(
@@ -57,7 +68,9 @@ async def test_stop_one_sts_drops_td_refcount(broker: Broker) -> None:
     assert td.get(1) is not None
 
     await sts.close("a")
-    # Detach is async on the sts.{id} channel; give TD a moment.
+    # The detach is answered before close returns, but the teardown behind it
+    # (stopping the link, destroying an account at refcount 0) settles just
+    # after — so read the refcount rather than race it.
     for _ in range(30):
         acct = td._accounts.get(1)
         if acct is not None and acct.refcount == 1:
@@ -77,5 +90,8 @@ async def test_stop_one_sts_drops_td_refcount(broker: Broker) -> None:
     assert td.get(1) is None
 
     await sts.close_all()
+    td_stop.set()
+    td_rpc.cancel()
+    await asyncio.gather(td_rpc, return_exceptions=True)
     await td.close_all()
     await paper.stop()

@@ -9,6 +9,7 @@ from mft.broker import IncomingRequest
 from mft.protocol import (
     TD_ERROR,
     TD_SESSION_ATTACH,
+    TD_SESSION_DETACH,
     TD_SESSION_LIST,
     ListSessionsRequest,
     ListSessionsResult,
@@ -17,6 +18,9 @@ from mft.protocol import (
     RpcErrorEnvelope,
     TdAttachRequest,
     TdAttachResultEnvelope,
+    TdDetachRequest,
+    TdDetachResult,
+    TdDetachResultEnvelope,
 )
 
 if TYPE_CHECKING:
@@ -62,6 +66,58 @@ async def handle_session_attach(
 
 # Alias for older dispatcher registration name
 handle_session_create = handle_session_attach
+
+
+async def handle_session_detach(
+    req: IncomingRequest,
+    *,
+    sessions: SessionManager | None = None,
+) -> None:
+    """Close one attach and answer with what the api_id has left.
+
+    Served here rather than on the session stream because this is the one
+    request whose delivery cannot be checked afterwards: everything that
+    would notice a missed detach — the lease, the watchdog, the ACKs — lives
+    in the loop the detach is meant to end. Answering from the process-level
+    RPC subject means one always-on server task handles it, and the caller
+    finds out either way.
+
+    ``detach`` is idempotent: an attach that is already gone still closes its
+    row, so a retry after a lost reply is a no-op rather than an error.
+    """
+    if sessions is None:
+        await _error(req, "unavailable", "session manager not configured")
+        return
+
+    try:
+        payload = TdDetachRequest.model_validate(req.envelope.payload)
+    except Exception as exc:
+        await _error(req, "invalid_payload", str(exc))
+        return
+
+    try:
+        await sessions.detach(
+            session_id=payload.session_id,
+            api_id=payload.api_id,
+            reason=payload.reason,
+        )
+    except Exception as exc:
+        logger.exception("td.session.detach failed")
+        await _error(req, "detach_failed", str(exc))
+        return
+
+    await req.reply(
+        TdDetachResultEnvelope.wrap(
+            TdDetachResult(
+                session_id=payload.session_id,
+                api_id=payload.api_id,
+                refcount=sessions.refcount(payload.api_id),
+            ),
+            type=TD_SESSION_DETACH,
+            source="td",
+            session_id=payload.session_id,
+        )
+    )
 
 
 async def handle_session_list(

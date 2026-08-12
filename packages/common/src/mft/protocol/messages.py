@@ -86,6 +86,34 @@ class TdAttachResult(BaseModel):
     refcount: int
 
 
+class TdDetachRequest(BaseModel):
+    """STS → TD: drop this attach (refcount --), and say so.
+
+    Request-reply rather than a message on the session stream, for the same
+    reason order entry is: the sender needs to learn whether it landed. A
+    detach published to ``sts.td.{session}`` is read by one subscriber per
+    link and acted on only by the one whose api_id it names — so if that
+    link's reader is gone, the message is dropped by the sibling that did
+    read it, and nothing anywhere records that the attach was never closed.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    api_id: int
+    reason: str = "sts_stop"
+
+
+class TdDetachResult(BaseModel):
+    """TD → STS: the attach is closed; ``refcount`` is what is left."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    api_id: int
+    refcount: int
+
+
 # Backward-compatible aliases used by older call sites / tests.
 CreateSessionRequest = TdAttachRequest
 CreateSessionResult = TdAttachResult
@@ -247,6 +275,28 @@ class MdAttachResult(BaseModel):
     session_id: str
     subscriptions: list[str] = Field(default_factory=list)
     refcounts: dict[str, int] = Field(default_factory=dict)
+
+
+class MdDetachRequest(BaseModel):
+    """STS → MD: drop this session's attach, and say so.
+
+    Request-reply for the same reason as :class:`TdDetachRequest` — the
+    session stream's only reader is the lease loop, so a detach published
+    there is lost exactly when it matters most.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    reason: str = "sts_stop"
+
+
+class MdDetachResult(BaseModel):
+    """MD → STS: the attach is closed and its feeds released."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
 
 
 class MdSubscribe(BaseModel):
@@ -586,6 +636,8 @@ HealthStatusEnvelope = Envelope[HealthStatus]
 RpcErrorEnvelope = Envelope[RpcError]
 TdAttachRequestEnvelope = Envelope[TdAttachRequest]
 TdAttachResultEnvelope = Envelope[TdAttachResult]
+TdDetachRequestEnvelope = Envelope[TdDetachRequest]
+TdDetachResultEnvelope = Envelope[TdDetachResult]
 CreateSessionRequestEnvelope = TdAttachRequestEnvelope
 CreateSessionResultEnvelope = TdAttachResultEnvelope
 StsCreateSessionRequestEnvelope = Envelope[StsCreateSessionRequest]
@@ -610,6 +662,8 @@ CancelRejectEnvelope = Envelope[CancelReject]
 MdLeaseAckEnvelope = Envelope[MdLeaseAck]
 MdAttachRequestEnvelope = Envelope[MdAttachRequest]
 MdAttachResultEnvelope = Envelope[MdAttachResult]
+MdDetachRequestEnvelope = Envelope[MdDetachRequest]
+MdDetachResultEnvelope = Envelope[MdDetachResult]
 MdSubscribeEnvelope = Envelope[MdSubscribe]
 MdUnsubscribeEnvelope = Envelope[MdUnsubscribe]
 MdDetachEnvelope = Envelope[MdDetach]
@@ -626,6 +680,7 @@ TD_HEALTH = "td.health"
 TD_ERROR = "td.error"
 TD_SESSION_ATTACH = "td.session.attach"
 TD_SESSION_CREATE = TD_SESSION_ATTACH  # alias
+TD_SESSION_DETACH = "td.session.detach"
 TD_SESSION_LIST = "td.session.list"
 TD_LEASE_ACK = "td.lease.ack"
 TD_RECON_DONE = "td.recon.done"
@@ -749,6 +804,7 @@ STS_ENSURE_LEVERAGE = "sts.ensure_leverage"
 MD_HEALTH = "md.health"
 MD_ERROR = "md.error"
 MD_SESSION_ATTACH = "md.session.attach"
+MD_SESSION_DETACH = "md.session.detach"
 MD_SESSION_LIST = "md.session.list"
 MD_LEASE_ACK = "md.lease.ack"
 MD_ORDERBOOK = "md.orderbook"

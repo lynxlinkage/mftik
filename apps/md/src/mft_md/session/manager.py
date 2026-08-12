@@ -43,9 +43,22 @@ ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
 
 LEASE_GRACE_S = 3.0
 
+#: How long a lease subscription waits before resubscribing after a transport
+#: failure. Well inside :data:`LEASE_GRACE_S`: reconnecting must not spend so
+#: much of the grace window that a still-live STS reads as expired.
+RESUBSCRIBE_DELAY_S = 0.5
+
 #: Which liveness key an MD attach holds. MD's own, not the STS session's:
 #: the two processes die independently, and it is MD's row being guarded.
 _ALIVE_DOMAIN = SessionDomain.MD.value
+
+#: How many consecutive scans must agree before a link this process holds is
+#: torn down. The key is refreshed by the lease loop and by nothing else, so
+#: its absence usually means that loop is gone — but a Redis outage past the
+#: 30s TTL looks identical for one scan, and detaching costs a running
+#: strategy its feeds. Rows with no link behind them are closed on the first
+#: scan: nothing is running to be wrong about.
+_ORPHAN_STRIKES = 2
 
 #: How many live rows one reap scan will consider. Well above any plausible
 #: number of concurrent attaches, and named so the scan can say when it hit
@@ -87,6 +100,9 @@ class SessionManager:
         self._dispatcher = Dispatcher(broker)
         self._venues: dict[str, VenueSession] = {}
         self._links: dict[str, StsLink] = {}
+        #: ``session_id`` → consecutive scans that found no liveness key for a
+        #: link this process holds. See :data:`_ORPHAN_STRIKES`.
+        self._orphan_strikes: dict[str, int] = {}
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -289,6 +305,14 @@ class SessionManager:
         same RPC subject, so "not in my links" says nothing about a peer's,
         while "no key" is true for all of them at the same time.
 
+        A link this process still holds is *not* exempt. The key is renewed
+        by the lease loop and by nothing else, so a link whose key has gone
+        is one whose loop has stopped — an attach holding feeds open for a
+        session nobody is leasing. That case used to be skipped outright,
+        and it is the one that left a td/md pair live for hours. It is torn
+        down properly rather than merely marked done, or the venue keeps
+        pumping a feed the refcount says is still wanted.
+
         Returns the session ids reaped, for logging and tests.
         """
         if self._list_db_sessions is None or self._mark_done is None:
@@ -320,12 +344,11 @@ class SessionManager:
             if session_id is None or session_id in seen:
                 continue
             seen.add(session_id)
-            if session_id in self._links:
-                continue
             try:
                 if await is_alive(
                     self._broker, session_id, domain=_ALIVE_DOMAIN
                 ):
+                    self._orphan_strikes.pop(session_id, None)
                     continue
             except Exception:
                 # Unreadable liveness is not evidence of death. A stale row
@@ -334,6 +357,27 @@ class SessionManager:
                 logger.exception(
                     "MD liveness check failed session=%s", session_id
                 )
+                self._orphan_strikes.pop(session_id, None)
+                continue
+
+            if session_id in self._links:
+                strikes = self._orphan_strikes.get(session_id, 0) + 1
+                self._orphan_strikes[session_id] = strikes
+                if strikes < _ORPHAN_STRIKES:
+                    continue
+                logger.warning(
+                    "MD reaping orphaned link session=%s", session_id
+                )
+                try:
+                    await self.detach(
+                        session_id=session_id, reason="lease_loop_died"
+                    )
+                except Exception:
+                    logger.exception(
+                        "MD orphan detach failed session=%s", session_id
+                    )
+                    continue
+                reaped.append(session_id)
                 continue
 
             # `done`, not `interrupted`: an md row follows its owning
@@ -353,6 +397,12 @@ class SessionManager:
                 session_id,
                 getattr(row, "venue", None),
             )
+        # Strikes only mean something for a session still in front of us.
+        self._orphan_strikes = {
+            session_id: strikes
+            for session_id, strikes in self._orphan_strikes.items()
+            if session_id in seen
+        }
         return reaped
 
     async def close_all(self) -> None:
@@ -496,10 +546,9 @@ class SessionManager:
                         )
                     return
 
-        watchdog = asyncio.create_task(
-            _watch_timeout(), name=f"md-lease-wd-{link.session_id}"
-        )
-        try:
+        async def _pump() -> bool:
+            """Read one subscription to its end. True once STS has detached."""
+            nonlocal last_seen
             async for env in self._broker.subscribe(sts_topic, stop=link.stop):
                 if env.type == STS_LEASE_HEARTBEAT:
                     try:
@@ -527,20 +576,32 @@ class SessionManager:
                             "MD liveness refresh failed session=%s",
                             link.session_id,
                         )
-                    await self._broker.publish(
-                        md_topic,
-                        Envelope[MdLeaseAck].wrap(
-                            MdLeaseAck(
+                    try:
+                        await self._broker.publish(
+                            md_topic,
+                            Envelope[MdLeaseAck].wrap(
+                                MdLeaseAck(
+                                    session_id=link.session_id,
+                                    token=hb.token,
+                                ),
+                                type=MD_LEASE_ACK,
+                                source="md",
                                 session_id=link.session_id,
-                                token=hb.token,
                             ),
-                            type=MD_LEASE_ACK,
-                            source="md",
-                            session_id=link.session_id,
-                        ),
-                    )
+                        )
+                    except Exception:
+                        # Same reasoning as the renewal above, and the same
+                        # cost if it ends the loop: the watchdog goes with it,
+                        # and nothing is left that can expire this lease.
+                        logger.exception(
+                            "MD lease ack failed session=%s", link.session_id
+                        )
                     continue
 
+                # Feed changes do venue I/O — a websocket that will not open
+                # must not take the lease down with it. Logged and dropped:
+                # STS asked for a feed and does not get one, which is visible,
+                # where a dead lease loop is not.
                 if env.type == MD_SUBSCRIBE:
                     try:
                         msg = MdSubscribe.model_validate(env.payload)
@@ -548,7 +609,14 @@ class SessionManager:
                         continue
                     if msg.session_id != link.session_id:
                         continue
-                    await self._subscribe_feed(link, msg.feed)
+                    try:
+                        await self._subscribe_feed(link, msg.feed)
+                    except Exception:
+                        logger.exception(
+                            "MD subscribe failed session=%s feed=%s",
+                            link.session_id,
+                            msg.feed,
+                        )
                     continue
 
                 if env.type == MD_UNSUBSCRIBE:
@@ -558,9 +626,19 @@ class SessionManager:
                         continue
                     if msg.session_id != link.session_id:
                         continue
-                    await self._unsubscribe_feed(link, msg.feed)
+                    try:
+                        await self._unsubscribe_feed(link, msg.feed)
+                    except Exception:
+                        logger.exception(
+                            "MD unsubscribe failed session=%s feed=%s",
+                            link.session_id,
+                            msg.feed,
+                        )
                     continue
 
+                # STS detaches over ``md.session.detach`` now. This stays
+                # because a rolling deploy has both versions running at once
+                # — an STS that has not restarted yet still says goodbye here.
                 if env.type == MD_DETACH:
                     try:
                         det = MdDetach.model_validate(env.payload)
@@ -571,10 +649,60 @@ class SessionManager:
                             session_id=link.session_id,
                             reason="sts_stop",
                         )
+                        return True
+            return False
+
+        watchdog = asyncio.create_task(
+            _watch_timeout(), name=f"md-lease-wd-{link.session_id}"
+        )
+        try:
+            # Resubscribed rather than returned: a dropped Redis connection is
+            # not an ending, and this loop is the only thing that answers STS
+            # for this link. The watchdog stays outside the retry so it keeps
+            # judging liveness across the gap — a resubscribe that never comes
+            # back still expires the lease, instead of leaving an attach with
+            # nobody reading for it.
+            while not link.stop.is_set():
+                try:
+                    if await _pump():
                         return
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "MD lease subscription failed session=%s "
+                        "— resubscribing",
+                        link.session_id,
+                    )
+                try:
+                    await asyncio.wait_for(
+                        link.stop.wait(), timeout=RESUBSCRIBE_DELAY_S
+                    )
+                except TimeoutError:
+                    continue
         finally:
             watchdog.cancel()
             await asyncio.gather(watchdog, return_exceptions=True)
+            # Last resort, for an ending neither branch above accounts for:
+            # this loop stopped without detaching and without being torn down,
+            # leaving an md row live and a venue feed pumping for a session
+            # nobody is leasing — with no log to say so, because nothing
+            # awaits this task and its exception is never retrieved.
+            if (
+                not link.stop.is_set()
+                and self._links.get(link.session_id) is link
+            ):
+                logger.error(
+                    "MD lease loop exited unexpectedly session=%s — detaching",
+                    link.session_id,
+                )
+                asyncio.create_task(
+                    self.detach(
+                        session_id=link.session_id,
+                        reason="lease_loop_died",
+                    ),
+                    name=f"md-detach-{link.session_id}",
+                )
 
 
 def _venues_from_feeds(feeds: set[str] | list[str]) -> set[str]:

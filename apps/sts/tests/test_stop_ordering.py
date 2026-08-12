@@ -7,7 +7,13 @@ import asyncio
 import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
-from mft.protocol import STS_DETACH, Topics
+from mft.protocol import (
+    TD_SESSION_DETACH,
+    TdDetachRequest,
+    TdDetachResult,
+    TdDetachResultEnvelope,
+    Topics,
+)
 from mft_sts.session import session as session_mod
 from mft_sts.session.session import StsSession
 from mft_sts.strategy import Strategy
@@ -30,7 +36,12 @@ async def broker() -> Broker:
 
 
 class DetachWatcher:
-    """Records when the TD detach lands, relative to whatever else happens."""
+    """Stands in for TD, recording when the detach lands.
+
+    Serves the process-level RPC subject rather than the session stream: a
+    detach is a request now, and one that nobody answers is retried and then
+    reported, which is the point of having moved it.
+    """
 
     def __init__(self, broker: Broker, log: list[str]) -> None:
         self.broker = broker
@@ -39,14 +50,26 @@ class DetachWatcher:
         self._task: asyncio.Task | None = None
 
     async def listen(self) -> None:
-        async def _pump() -> None:
-            async for env in self.broker.subscribe(
-                Topics.sts_td_session(SESSION_ID), stop=self._stop
-            ):
-                if env.type == STS_DETACH:
-                    self.log.append("detach")
+        async def _serve() -> None:
+            async for req in self.broker.serve(Topics.TD, stop=self._stop):
+                if req.envelope.type != TD_SESSION_DETACH:
+                    continue
+                payload = TdDetachRequest.model_validate(req.envelope.payload)
+                self.log.append("detach")
+                await req.reply(
+                    TdDetachResultEnvelope.wrap(
+                        TdDetachResult(
+                            session_id=payload.session_id,
+                            api_id=payload.api_id,
+                            refcount=0,
+                        ),
+                        type=TD_SESSION_DETACH,
+                        source="td",
+                        session_id=payload.session_id,
+                    )
+                )
 
-        self._task = asyncio.create_task(_pump())
+        self._task = asyncio.create_task(_serve())
         await asyncio.sleep(0.05)
 
     async def close(self) -> None:
@@ -159,6 +182,11 @@ async def test_a_hung_on_stop_is_left_running_not_cancelled(
             await released.wait()
             finished.set()
 
+    # Not asserted on here, but a detach nobody answers is retried before it
+    # gives up — and this test has no interest in waiting that out.
+    watcher = DetachWatcher(broker, [])
+    await watcher.listen()
+
     sts = StsSession(
         session_id=SESSION_ID,
         broker=broker,
@@ -178,6 +206,7 @@ async def test_a_hung_on_stop_is_left_running_not_cancelled(
     released.set()
     await asyncio.wait_for(finished.wait(), timeout=1.0)
     assert not sts._on_stop_task.cancelled()
+    await watcher.close()
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ from mft.exchange.models import (
 )
 from mft.exchange.oms import OmsView
 from mft.exchange.tickers import InvalidTickerError, UniversalTicker
+from mft.liveness import is_alive
 from mft.protocol import (
     STS_DETACH,
     STS_ENSURE_LEVERAGE,
@@ -72,6 +73,29 @@ LEASE_GRACE_S = 5.0
 #: answers with it as-is. Comfortably past the forced venue recon behind it,
 #: so this only fires when that could not settle the book either.
 RECON_WAIT_TIMEOUT_S = 30.0
+
+#: How long a lease subscription waits before resubscribing after a transport
+#: failure. Well inside :data:`LEASE_GRACE_S`: reconnecting must not spend so
+#: much of the grace window that a still-live STS reads as expired.
+RESUBSCRIBE_DELAY_S = 0.5
+
+#: Which plane's liveness key :meth:`SessionManager.reap_orphans` reads. STS's,
+#: not one of TD's own: a td row exists only because a strategy asked for it,
+#: so the strategy going away is what makes the row and its link stale.
+_STS_ALIVE_DOMAIN = SessionDomain.STS.value
+
+#: How many live rows one reap scan will consider. Well above any plausible
+#: number of concurrent attaches, and named so the scan can say when it hit
+#: the limit rather than truncating in silence.
+_REAP_SCAN_LIMIT = 500
+
+#: How many consecutive scans must agree that an STS session is gone before
+#: TD detaches a link it still holds. One scan cannot tell a stopped strategy
+#: from a Redis outage that outlasted the 30s liveness TTL, and the lease
+#: already handles the fast case in seconds — so there is nothing to gain by
+#: being quick here, and a trading strategy to lose. Rows with no link behind
+#: them are closed on the first scan: nothing is running to be wrong about.
+_ORPHAN_STRIKES = 2
 
 
 
@@ -140,10 +164,19 @@ class SessionManager:
         self._list_db_sessions = list_db_sessions
         self._lease_grace = lease_grace
         self._accounts: dict[int, TradingAccount] = {}
+        #: ``(session_id, api_id)`` → consecutive scans that found no STS
+        #: liveness key. Cleared the moment one does — see
+        #: :data:`_ORPHAN_STRIKES`.
+        self._orphan_strikes: dict[tuple[str, int], int] = {}
 
     def get(self, api_id: int) -> Session | None:
         acct = self._accounts.get(api_id)
         return acct.trading if acct else None
+
+    def refcount(self, api_id: int) -> int:
+        """How many STS sessions are attached to ``api_id`` right now."""
+        acct = self._accounts.get(api_id)
+        return acct.refcount if acct else 0
 
     @property
     def active_api_ids(self) -> list[int]:
@@ -293,6 +326,148 @@ class SessionManager:
                     )
                 )
         return rows
+
+    async def reap_orphans(self) -> list[tuple[str, int]]:
+        """Close attaches whose STS session is gone — in memory and in the table.
+
+        The lease is the primary signal and this is deliberately not a second
+        one: it asks a different question, of a different plane, over a
+        different key. A lease can only expire while something is reading it,
+        so a lease loop that dies takes the expiry with it — which is how a
+        td row once outlived its strategy by three hours, with the link still
+        counted against its api_id and the venue session held open behind it.
+        This is the check that holds when TD's own per-link machinery does
+        not, whether it died, wedged, or never ran because the process that
+        owned it was replaced.
+
+        Read on STS's key rather than one of TD's own because the question is
+        about the strategy — see :data:`_STS_ALIVE_DOMAIN`. The answer is the
+        same in every TD process at once, which is what makes this safe to run
+        in all of them: local state cannot say whether a peer holds a link,
+        while "no key" is true for everyone simultaneously.
+
+        What it does not cover is TD dying while the strategy keeps running.
+        That row's STS key is healthy, and closing it needs a key of TD's own,
+        per ``(session_id, api_id)``. Left until TD runs more than one process
+        — until then a restart clears the links and this scan closes the rows
+        they left behind.
+
+        Returns the ``(session_id, api_id)`` pairs it closed.
+        """
+        closed: list[tuple[str, int]] = []
+        seen: set[tuple[str, int]] = set()
+
+        # Links this process still holds for a session that has ended. The
+        # detach is the full one: the row is the visible symptom, but the
+        # refcount and the venue session behind it are the expensive part.
+        for api_id, acct in list(self._accounts.items()):
+            for session_id in list(acct.links):
+                seen.add((session_id, api_id))
+                if not await self._is_orphan(session_id, api_id):
+                    continue
+                logger.warning(
+                    "TD reaping orphaned link session=%s api_id=%s",
+                    session_id,
+                    api_id,
+                )
+                try:
+                    await self.detach(
+                        session_id=session_id, api_id=api_id, reason="sts_gone"
+                    )
+                except Exception:
+                    logger.exception(
+                        "TD orphan detach failed session=%s api_id=%s",
+                        session_id,
+                        api_id,
+                    )
+                    continue
+                closed.append((session_id, api_id))
+
+        # Rows with no link behind them anywhere. A restart clears the links
+        # but not the table, so these are what a previous process left.
+        if self._list_db_sessions is not None and self._mark_done is not None:
+            try:
+                rows = await self._list_db_sessions(
+                    status=SessionStatus.LIVE.value,
+                    created_by=None,
+                    limit=_REAP_SCAN_LIMIT,
+                )
+            except Exception:
+                logger.exception("TD orphan scan failed to list sessions")
+                rows = []
+            if len(rows) >= _REAP_SCAN_LIMIT:
+                # Truncation is the one thing a scan must not do quietly: the
+                # rows past the limit look exactly like rows with a live owner.
+                logger.warning(
+                    "TD orphan scan hit its %d-row limit — there may be live "
+                    "rows it did not consider",
+                    _REAP_SCAN_LIMIT,
+                )
+            for row in rows:
+                session_id = getattr(row, "session_id", None)
+                api_id = getattr(row, "api_id", None)
+                if session_id is None or api_id is None:
+                    continue
+                if (session_id, api_id) in seen:
+                    continue
+                seen.add((session_id, api_id))
+                try:
+                    if await is_alive(
+                        self._broker, session_id, domain=_STS_ALIVE_DOMAIN
+                    ):
+                        continue
+                except Exception:
+                    # Unreadable liveness is not evidence of death.
+                    logger.exception(
+                        "TD liveness check failed session=%s", session_id
+                    )
+                    continue
+                # ``_mark_done`` rather than ``detach``: there is no link to
+                # stop, and detach would read a refcount of zero on an account
+                # between attaches as a reason to destroy it.
+                try:
+                    await self._mark_done(session_id=session_id, api_id=api_id)
+                except Exception:
+                    logger.exception(
+                        "TD orphan reap failed session=%s api_id=%s",
+                        session_id,
+                        api_id,
+                    )
+                    continue
+                closed.append((session_id, api_id))
+                logger.warning(
+                    "TD reaped orphaned row session=%s api_id=%s",
+                    session_id,
+                    api_id,
+                )
+
+        # Strikes only mean something for a pair still in front of us.
+        self._orphan_strikes = {
+            pair: strikes
+            for pair, strikes in self._orphan_strikes.items()
+            if pair in seen
+        }
+        return closed
+
+    async def _is_orphan(self, session_id: str, api_id: int) -> bool:
+        """Has STS been missing for :data:`_ORPHAN_STRIKES` scans running?"""
+        pair = (session_id, api_id)
+        try:
+            if await is_alive(
+                self._broker, session_id, domain=_STS_ALIVE_DOMAIN
+            ):
+                self._orphan_strikes.pop(pair, None)
+                return False
+        except Exception:
+            # Unreadable liveness is not evidence of death. A stale link
+            # survives to the next scan; one detached by mistake takes the
+            # attach out from under a strategy that is still trading.
+            logger.exception("TD liveness check failed session=%s", session_id)
+            self._orphan_strikes.pop(pair, None)
+            return False
+        strikes = self._orphan_strikes.get(pair, 0) + 1
+        self._orphan_strikes[pair] = strikes
+        return strikes >= _ORPHAN_STRIKES
 
     async def detach(
         self, *, session_id: str, api_id: int, reason: str = "detach"
@@ -483,10 +658,9 @@ class SessionManager:
                         )
                     return
 
-        watchdog = asyncio.create_task(
-            _watch_timeout(), name=f"td-lease-wd-{link.api_id}-{link.session_id}"
-        )
-        try:
+        async def _pump() -> bool:
+            """Read one subscription to its end. True once STS has detached."""
+            nonlocal last_seen
             async for env in self._broker.subscribe(sts_topic, stop=link.stop):
                 if env.type == STS_LEASE_HEARTBEAT:
                     try:
@@ -497,19 +671,30 @@ class SessionManager:
                     link.last_token = hb.token
                     if not ready.is_set():
                         ready.set()
-                    await self._broker.publish(
-                        td_topic,
-                        Envelope[LeaseAck].wrap(
-                            LeaseAck(
-                                api_id=link.api_id,
+                    try:
+                        await self._broker.publish(
+                            td_topic,
+                            Envelope[LeaseAck].wrap(
+                                LeaseAck(
+                                    api_id=link.api_id,
+                                    session_id=link.session_id,
+                                    token=hb.token,
+                                ),
+                                type=TD_LEASE_ACK,
+                                source="td",
                                 session_id=link.session_id,
-                                token=hb.token,
                             ),
-                            type=TD_LEASE_ACK,
-                            source="td",
-                            session_id=link.session_id,
-                        ),
-                    )
+                        )
+                    except Exception:
+                        # A dropped ACK is survivable — STS heartbeats again
+                        # in a second. Letting it end this loop is not: the
+                        # watchdog below goes with it, and then nothing is
+                        # left that can expire this lease.
+                        logger.exception(
+                            "TD lease ack failed session=%s api_id=%s",
+                            link.session_id,
+                            link.api_id,
+                        )
                     continue
 
                 # Venue I/O must not stall heartbeat reads — otherwise the
@@ -525,6 +710,10 @@ class SessionManager:
                 # on td.order.{api_id} so the strategy learns whether TD took
                 # the order. This loop carries lease/recon/detach only.
 
+                # STS detaches over ``td.session.detach`` now, for the reason
+                # in that handler. This stays because it costs nothing and a
+                # rolling deploy has both versions running at once — an STS
+                # that has not restarted yet still says goodbye this way.
                 if env.type == STS_DETACH:
                     try:
                         det = StsDetach.model_validate(env.payload)
@@ -539,10 +728,64 @@ class SessionManager:
                             api_id=link.api_id,
                             reason="sts_stop",
                         )
+                        return True
+            return False
+
+        watchdog = asyncio.create_task(
+            _watch_timeout(), name=f"td-lease-wd-{link.api_id}-{link.session_id}"
+        )
+        try:
+            # Resubscribed rather than returned: a dropped Redis connection is
+            # not an ending, and this loop is the only thing that answers STS
+            # for this link. The watchdog stays outside the retry so it keeps
+            # judging liveness across the gap — a resubscribe that never comes
+            # back still expires the lease, instead of leaving an attach with
+            # nobody reading for it.
+            while not link.stop.is_set():
+                try:
+                    if await _pump():
                         return
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "TD lease subscription failed session=%s api_id=%s "
+                        "— resubscribing",
+                        link.session_id,
+                        link.api_id,
+                    )
+                try:
+                    await asyncio.wait_for(
+                        link.stop.wait(), timeout=RESUBSCRIBE_DELAY_S
+                    )
+                except TimeoutError:
+                    continue
         finally:
             watchdog.cancel()
             await asyncio.gather(watchdog, return_exceptions=True)
+            # Last resort, for an ending neither branch above accounts for:
+            # this loop stopped without detaching and without being torn
+            # down. That is the leak — a td_sessions row left live with no
+            # lease behind it and no log to say so, because nothing awaits
+            # this task and its exception is never retrieved.
+            if (
+                not link.stop.is_set()
+                and acct.links.get(link.session_id) is link
+            ):
+                logger.error(
+                    "TD lease loop exited unexpectedly session=%s api_id=%s "
+                    "— detaching",
+                    link.session_id,
+                    link.api_id,
+                )
+                asyncio.create_task(
+                    self.detach(
+                        session_id=link.session_id,
+                        api_id=link.api_id,
+                        reason="lease_loop_died",
+                    ),
+                    name=f"td-detach-{link.api_id}-{link.session_id}",
+                )
 
     def _on_order_settled(self, acct: TradingAccount, order: Order) -> None:
         """Release what an order was holding once the venue owns the outcome.

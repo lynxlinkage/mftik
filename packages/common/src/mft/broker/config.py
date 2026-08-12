@@ -15,6 +15,11 @@ class BrokerConfig:
     #: How many log lines ``publish_log`` keeps per topic for late WS
     #: subscribers. Older lines are trimmed; live pub/sub is unaffected.
     log_buffer_maxlen: int = 100
+    #: How old a pooled connection may be before it is pinged on checkout.
+    #: Must stay under the Redis server's ``timeout`` (300s in production) —
+    #: the point is to retire a connection the server has already closed
+    #: before a caller borrows it and fails on it.
+    health_check_interval: int = 30
 
     @classmethod
     def from_env(cls) -> BrokerConfig:
@@ -25,5 +30,8 @@ class BrokerConfig:
             reply_ttl_seconds=int(os.getenv("BROKER_REPLY_TTL", "60")),
             log_buffer_maxlen=max(
                 1, int(os.getenv("BROKER_LOG_BUFFER_MAXLEN", "100"))
+            ),
+            health_check_interval=int(
+                os.getenv("BROKER_HEALTH_CHECK_INTERVAL", "30")
             ),
         )

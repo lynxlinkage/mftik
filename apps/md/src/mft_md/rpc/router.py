@@ -11,13 +11,18 @@ from mft.protocol import (
     MD_ERROR,
     MD_HEALTH,
     MD_SESSION_ATTACH,
+    MD_SESSION_DETACH,
     MD_SESSION_LIST,
     RpcError,
     RpcErrorEnvelope,
 )
 
 from mft_md.rpc.health import handle_health
-from mft_md.rpc.sessions import handle_session_attach, handle_session_list
+from mft_md.rpc.sessions import (
+    handle_session_attach,
+    handle_session_detach,
+    handle_session_list,
+)
 
 if TYPE_CHECKING:
     from mft_md.session import SessionManager
@@ -29,6 +34,7 @@ Handler = Callable[..., Awaitable[None]]
 _HANDLERS: dict[str, Handler] = {
     MD_HEALTH: handle_health,
     MD_SESSION_ATTACH: handle_session_attach,
+    MD_SESSION_DETACH: handle_session_detach,
     MD_SESSION_LIST: handle_session_list,
 }
 

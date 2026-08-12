@@ -71,7 +71,18 @@ class Broker:
     async def connect(self) -> None:
         if self._redis is None:
             self._redis = redis.from_url(
-                self.config.redis_url, decode_responses=True
+                self.config.redis_url,
+                decode_responses=True,
+                # Pooled connections are handed out newest-first, so one that
+                # sinks to the bottom of the pool can idle past the server's
+                # ``timeout`` and be closed there. Nothing notices until it is
+                # borrowed again, and then the command fails on a socket that
+                # was already gone — which is how a domain gets a burst of
+                # ConnectionErrors on a Redis that is perfectly healthy.
+                # Checking a connection's health on checkout retires those
+                # before a caller can trip over one.
+                health_check_interval=self.config.health_check_interval,
+                socket_keepalive=True,
             )
             self._owns_redis = True
         await self._redis.ping()

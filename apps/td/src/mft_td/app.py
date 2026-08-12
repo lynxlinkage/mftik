@@ -36,6 +36,39 @@ async def run_rpc(
             )
 
 
+#: How often to look for attaches whose strategy is gone. Well under the
+#: window someone would spend wondering why an api_id still reports a session
+#: nobody is running, and far enough above the liveness TTL that a key is
+#: never checked mid-refresh.
+REAP_INTERVAL_SECONDS = 60.0
+
+
+async def reap_loop(
+    sessions: SessionManager,
+    stop: asyncio.Event,
+    *,
+    interval: float = REAP_INTERVAL_SECONDS,
+) -> None:
+    """Scan for orphaned attaches on boot, then on a slow interval.
+
+    On boot because rows outlive the process that wrote them, and whatever
+    replaces it is the first thing in a position to notice; on an interval
+    because a lease loop can stop without the process doing so, and nobody
+    should have to restart TD to find out.
+    """
+    while not stop.is_set():
+        try:
+            closed = await sessions.reap_orphans()
+            if closed:
+                logger.warning("TD reaped %d orphaned attach(es)", len(closed))
+        except Exception:
+            logger.exception("TD orphan reaper failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            continue
+
+
 async def amain() -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -69,13 +102,18 @@ async def amain() -> None:
             ),
             name="td-heartbeat",
         )
+        reaper_task = asyncio.create_task(
+            reap_loop(sessions, stop), name="td-reaper"
+        )
         try:
             await stop.wait()
         finally:
             stop.set()
-            for task in (rpc_task, hb_task):
+            for task in (rpc_task, hb_task, reaper_task):
                 task.cancel()
-            await asyncio.gather(rpc_task, hb_task, return_exceptions=True)
+            await asyncio.gather(
+                rpc_task, hb_task, reaper_task, return_exceptions=True
+            )
             await sessions.close_all()
     logger.info("TD stopped")
 

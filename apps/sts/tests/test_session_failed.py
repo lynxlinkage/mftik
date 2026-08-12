@@ -15,7 +15,15 @@ from types import SimpleNamespace
 import fakeredis.aioredis
 import pytest
 from mft.broker import Broker, BrokerConfig
-from mft.protocol import ListSessionsRequest, StsCreateSessionRequest
+from mft.protocol import (
+    MD_SESSION_DETACH,
+    ListSessionsRequest,
+    MdDetachRequest,
+    MdDetachResult,
+    MdDetachResultEnvelope,
+    StsCreateSessionRequest,
+    Topics,
+)
 from mft_sts.impl import register
 from mft_sts.session import SessionManager
 from mft_sts.strategy import Strategy
@@ -248,6 +256,27 @@ async def test_the_first_ending_wins(broker: Broker) -> None:
     assert row.reason == "work_done"
 
 
+async def _serve_md_detach(broker: Broker, stop: asyncio.Event) -> None:
+    """Answer detaches so a stop does not wait out an absent MD.
+
+    The session under test has an md attach, and detaching is a request now:
+    unanswered, it is retried and then reported, which this test has no
+    reason to sit through.
+    """
+    async for req in broker.serve(Topics.MD, stop=stop):
+        if req.envelope.type != MD_SESSION_DETACH:
+            continue
+        payload = MdDetachRequest.model_validate(req.envelope.payload)
+        await req.reply(
+            MdDetachResultEnvelope.wrap(
+                MdDetachResult(session_id=payload.session_id),
+                type=MD_SESSION_DETACH,
+                source="md",
+                session_id=payload.session_id,
+            )
+        )
+
+
 @pytest.mark.asyncio
 async def test_a_dead_feed_fails_the_session_instead_of_leaving_it_live(
     broker: Broker,
@@ -272,6 +301,8 @@ async def test_a_dead_feed_fails_the_session_instead_of_leaving_it_live(
         return original(topics, **kwargs)
 
     broker.subscribe = exploding_subscribe  # type: ignore[method-assign]
+    md_stop = asyncio.Event()
+    md = asyncio.create_task(_serve_md_detach(broker, md_stop))
     try:
         await manager.create_session(
             StsCreateSessionRequest(
@@ -284,6 +315,9 @@ async def test_a_dead_feed_fails_the_session_instead_of_leaving_it_live(
         row = await _until_closed(manager, store, "dead-1")
     finally:
         broker.subscribe = original  # type: ignore[method-assign]
+        md_stop.set()
+        md.cancel()
+        await asyncio.gather(md, return_exceptions=True)
 
     assert row.status == "failed"
     assert "md feed" in (row.reason or "")

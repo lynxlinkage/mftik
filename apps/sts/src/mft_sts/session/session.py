@@ -26,37 +26,42 @@ from mft.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_BESTQUOTE_RESULT,
-    MD_DETACH,
+    MD_ERROR,
     MD_KLINE,
     MD_KLINES_RESULT,
     MD_LEASE_ACK,
     MD_LIQUIDATION,
     MD_ORDERBOOK,
     MD_ORDERBOOK_RESULT,
+    MD_SESSION_DETACH,
     MD_TICKER,
     MD_TRADE,
-    STS_DETACH,
     STS_LEASE_HEARTBEAT,
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
+    TD_ERROR,
     TD_FILL,
     TD_LEASE_ACK,
     TD_ORDER_REJECT,
     TD_ORDER_UPDATE,
     TD_POSITION_UPDATE,
     TD_RECON_DONE,
+    TD_SESSION_DETACH,
     CancelReject,
     Envelope,
     LeaseAck,
     LeaseHeartbeat,
     MdBestQuoteResult,
-    MdDetach,
+    MdDetachRequest,
+    MdDetachRequestEnvelope,
     MdKlinesResult,
     MdLeaseAck,
     MdOrderBookResult,
     OrderReject,
     ReconDone,
-    StsDetach,
+    RpcError,
+    TdDetachRequest,
+    TdDetachRequestEnvelope,
     Topics,
     UntypedEnvelope,
     publish_sts_log,
@@ -73,6 +78,16 @@ logger = logging.getLogger(__name__)
 #: an ack round-trip; short enough that a wedged strategy cannot hold a trading
 #: attach open behind it.
 ON_STOP_TIMEOUT_S = 10.0
+
+#: How long one detach request waits for its domain to answer, and how many
+#: times it is sent. Retried because ``detach`` is idempotent, so a reply lost
+#: after the work was done costs nothing but a second call. Kept to two
+#: attempts because a domain that is merely busy does not need them — the
+#: request waits in its RPC list rather than being dropped — while a domain
+#: that is gone should not hold a stopping session for longer than this.
+#: Whatever these do not close, the domain's orphan scan will.
+DETACH_TIMEOUT_S = 5.0
+DETACH_ATTEMPTS = 2
 
 #: ``(session_id, reason, failed)`` — the manager tears the session down and
 #: records the terminal status.
@@ -360,52 +375,113 @@ class StsSession:
             )
 
     async def _publish_detaches(self) -> None:
-        td_topic = Topics.sts_td_session(self.session_id)
-        for api_id in self.td_api_ids:
-            try:
-                await self.broker.publish(
-                    td_topic,
-                    Envelope[StsDetach].wrap(
-                        StsDetach(session_id=self.session_id, api_id=api_id),
-                        type=STS_DETACH,
-                        source="sts",
-                        session_id=self.session_id,
+        """Tell TD and MD this session is over, and check that they heard.
+
+        Request-reply on each domain's process-level subject, not a message
+        on the session stream. That stream is read by one lease loop per
+        attach, and a detach is only ever acted on by the loop whose attach
+        it names — so when that loop is the thing that has already stopped,
+        the message is read by a sibling, filtered out, and lost, leaving an
+        attach open with nothing left to close it. The RPC is served by a
+        task that outlives every lease, and it answers, so a detach that does
+        not land is one we know about.
+
+        Sent together rather than in turn: they are independent, and a
+        session with several attaches should not wait out one unreachable
+        domain per attach before it can finish stopping.
+        """
+        pending = [
+            self._request_detach(
+                what=f"td api_id={api_id}",
+                subject=Topics.TD,
+                envelope=TdDetachRequestEnvelope.wrap(
+                    TdDetachRequest(
+                        session_id=self.session_id, api_id=api_id
                     ),
-                )
-                await publish_sts_log(
-                    self.broker,
-                    self.session_id,
-                    f"detach requested api_id={api_id}",
+                    type=TD_SESSION_DETACH,
                     source="sts",
-                )
-            except Exception:
-                logger.exception(
-                    "STS detach publish failed session=%s api_id=%s",
-                    self.session_id,
-                    api_id,
-                )
+                    session_id=self.session_id,
+                ),
+                error_type=TD_ERROR,
+            )
+            for api_id in self.td_api_ids
+        ]
         if self.md_ids:
-            try:
-                await self.broker.publish(
-                    Topics.sts_md_session(self.session_id),
-                    Envelope[MdDetach].wrap(
-                        MdDetach(session_id=self.session_id),
-                        type=MD_DETACH,
+            pending.append(
+                self._request_detach(
+                    what="md",
+                    subject=Topics.MD,
+                    envelope=MdDetachRequestEnvelope.wrap(
+                        MdDetachRequest(session_id=self.session_id),
+                        type=MD_SESSION_DETACH,
                         source="sts",
                         session_id=self.session_id,
                     ),
+                    error_type=MD_ERROR,
                 )
-                await publish_sts_log(
-                    self.broker,
-                    self.session_id,
-                    "MD detach requested",
-                    source="sts",
+            )
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _request_detach(
+        self,
+        *,
+        what: str,
+        subject: str,
+        envelope: Any,
+        error_type: str,
+    ) -> None:
+        """Send one detach until it is acknowledged, or say that it was not.
+
+        A detach that never lands is not fatal to the stop — the session is
+        going away either way, and both domains reconcile attaches whose
+        strategy is gone. Saying so is the point: this used to fail silently.
+        """
+        last: Exception | None = None
+        for attempt in range(1, DETACH_ATTEMPTS + 1):
+            try:
+                reply = await self.broker.request(
+                    subject, envelope, timeout=DETACH_TIMEOUT_S
                 )
-            except Exception:
-                logger.exception(
-                    "STS MD detach publish failed session=%s",
-                    self.session_id,
-                )
+            except Exception as exc:
+                last = exc
+            else:
+                if reply.type != error_type:
+                    await publish_sts_log(
+                        self.broker,
+                        self.session_id,
+                        f"detached {what}",
+                        source="sts",
+                    )
+                    return
+                err = RpcError.model_validate(reply.payload)
+                last = RuntimeError(f"{err.code}: {err.message}")
+            logger.warning(
+                "STS detach %s failed (attempt %d/%d) session=%s: %s",
+                what,
+                attempt,
+                DETACH_ATTEMPTS,
+                self.session_id,
+                last,
+            )
+        logger.error(
+            "STS could not detach %s session=%s: %s — leaving it to the "
+            "domain's orphan scan",
+            what,
+            self.session_id,
+            last,
+        )
+        try:
+            await publish_sts_log(
+                self.broker,
+                self.session_id,
+                f"detach {what} FAILED: {last}",
+                source="sts",
+            )
+        except Exception:
+            logger.exception(
+                "STS detach log failed session=%s", self.session_id
+            )
 
     async def _lease_heartbeat_loop(self) -> None:
         """Publish fencing heartbeats on sts.td.* and/or sts.md.*."""
