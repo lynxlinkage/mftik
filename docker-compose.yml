@@ -138,6 +138,8 @@ services:
       PUBLIC_API_URL: http://localhost:8000
       # Vite proxy inside the frontend container → api service
       API_PROXY_TARGET: http://api:8000
+      # Production gets sha-<commit> from MFT_VERSION; locally it is just "dev".
+      PUBLIC_APP_VERSION: ${MFT_VERSION:-dev}
     ports:
       - "5173:5173"
     depends_on:

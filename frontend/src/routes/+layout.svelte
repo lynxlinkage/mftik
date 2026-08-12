@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { startSessionKeepalive } from '$lib/auth';
+	import { appVersion, appVersionShort } from '$lib/version';
 	import '../app.css';
 
 	let { children } = $props();
@@ -80,6 +81,8 @@
 				</a>
 			{/each}
 		</nav>
+
+		<span class="version" title={`build ${appVersion()}`}>{appVersionShort()}</span>
 	</aside>
 
 	<main class="content">
@@ -158,6 +161,18 @@
 		color: var(--text);
 		background: var(--accent-dim);
 		transform: translateX(2px);
+	}
+
+	/* Pushed to the bottom of the sidebar — visible on every page, out of the
+	   way of the content column. */
+	.version {
+		margin-top: auto;
+		font-family: var(--font);
+		font-size: 0.68rem;
+		letter-spacing: 0.04em;
+		color: var(--muted);
+		opacity: 0.65;
+		user-select: text;
 	}
 
 	.content {
