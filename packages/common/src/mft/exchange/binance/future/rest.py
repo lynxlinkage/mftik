@@ -1,7 +1,6 @@
 """Binance futures REST — only what the WebSocket API cannot answer.
 
-The spot adapter has no REST client at all, on purpose: Binance answers every
-read that platform needs over ``ws-api``. Futures does not, and the gaps are
+Futures needs REST for reads ``ws-fapi`` has no method for, and the gaps are
 not small ones:
 
 * :class:`BinanceFuturePublicRest` — **candles and the instrument listing.**
@@ -14,13 +13,9 @@ not small ones:
   with nothing would leave the OMS believing the account is flat, which is
   worse than not reconciling at all.
 
-Signing is the same Ed25519 key the sockets use — Binance accepts it on REST
-too — but the payload is a **query string**, not a JSON object: the parameters
-are rendered ``k=v&k=v``, that exact string is signed, and the signature is
-appended to it. Sorting the keys is ours to choose (the server rebuilds the
-string from what it receives, in the order it receives it) and it is done for
-the same reason the socket path sorts: one canonical rendering means the signed
-bytes and the sent bytes cannot drift apart.
+The transport and the per-call signature are the venue's, not this product's,
+and live in :mod:`mft.exchange.binance.rest`. What is here is the futures host,
+the futures paths and the futures models.
 """
 
 from __future__ import annotations
@@ -28,26 +23,22 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 from typing import Any
-from urllib.parse import quote
-
-import httpx
 
 from mft.exchange.binance.future.models import (
     BinanceFutureDepth,
+    BinanceFutureMyTrade,
     BinanceFutureOrderAck,
     BinanceFutureSymbolConfig,
     instrument_from_row,
     kline_from_row,
 )
-from mft.exchange.binance.future.protocol import (
-    BINANCE_FUTURE_REST_URL,
-    load_private_key,
-    now_ms,
-    payload_for,
-    sign,
-)
+from mft.exchange.binance.future.protocol import BINANCE_FUTURE_REST_URL
 from mft.exchange.binance.models import secs
-from mft.exchange.errors import ExchangeError
+from mft.exchange.binance.rest import (
+    BinanceRestError,
+    BinanceRestTransport,
+    BinanceSignedRest,
+)
 from mft.exchange.models import Instrument, Kline, OrderBook, Ticker
 from mft.exchange.tickers import UniversalTicker
 
@@ -59,6 +50,9 @@ API_PREFIX = "/fapi/v1"
 #: 400, not a truncated answer.
 MAX_KLINES = 1500
 
+#: Most history rows ``userTrades`` / ``allOrders`` return in one call.
+MAX_HISTORY = 1000
+
 #: The only ``status`` that means a contract can be traded right now.
 TRADING = "TRADING"
 
@@ -69,87 +63,15 @@ TRADING = "TRADING"
 PERPETUAL = "PERPETUAL"
 
 
-class BinanceFutureRestError(ExchangeError):
-    """A non-2xx answer from Binance's futures REST API.
-
-    Carries the same ``code`` the socket errors do — Binance uses one numbering
-    across both transports — so TD and MD can normalize a REST refusal and a
-    socket refusal through the same table.
-    """
-
-    def __init__(self, status: int, code: int | None, message: str) -> None:
-        self.status = status
-        self.code = code
-        super().__init__(f"[{status}] [{code}] {message}")
+class BinanceFutureRestError(BinanceRestError):
+    """A non-2xx answer from Binance's futures REST API."""
 
 
-class _FutureRestTransport:
-    """httpx lifecycle and error decoding, shared by the signed/public pair."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str = BINANCE_FUTURE_REST_URL,
-        timeout: float = 10.0,
-        client: httpx.AsyncClient | None = None,
-    ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self._client = client
-        self._owns_client = client is None
-
-    async def connect(self) -> None:
-        if self._client is None:
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url, timeout=self.timeout
-            )
-            self._owns_client = True
-
-    async def close(self) -> None:
-        if self._client is not None and self._owns_client:
-            await self._client.aclose()
-            self._client = None
-
-    async def _get(
-        self,
-        path: str,
-        params: dict[str, Any] | None = None,
-        *,
-        headers: dict[str, str] | None = None,
-    ) -> Any:
-        await self.connect()
-        assert self._client is not None
-        response = await self._client.get(
-            path,
-            params=params or None,
-            headers=headers or {"Accept": "application/json"},
-        )
-        return self._parse(response)
-
-    @staticmethod
-    def _parse(response: httpx.Response) -> Any:
-        """The body, or the venue's own error rather than an HTTP one.
-
-        Binance reports refusals as ``{"code": -1121, "msg": "..."}`` with a
-        4xx status, and the code says far more than the status does — so it is
-        read out rather than left inside a ``raise_for_status`` message.
-        """
-        try:
-            body = response.json()
-        except ValueError:
-            body = None
-        if response.status_code >= 400:
-            code = None
-            message = response.text[:300]
-            if isinstance(body, dict):
-                code = body.get("code")
-                message = str(body.get("msg") or message)
-            raise BinanceFutureRestError(response.status_code, code, message)
-        return body
-
-
-class BinanceFuturePublicRest(_FutureRestTransport):
+class BinanceFuturePublicRest(BinanceRestTransport):
     """The two public reads the futures WebSocket API does not serve."""
+
+    default_base_url = BINANCE_FUTURE_REST_URL
+    error_type = BinanceFutureRestError
 
     async def fetch_instruments(self) -> list[Instrument]:
         """``GET /fapi/v1/exchangeInfo`` — every perpetual, in Binance's spelling.
@@ -232,32 +154,23 @@ class BinanceFuturePublicRest(_FutureRestTransport):
         return BinanceFutureDepth.model_validate(payload or {}).to_order_book(ticker)
 
 
-class BinanceFutureRest(_FutureRestTransport):
-    """The signed recon read futures has nowhere else: open orders.
+class BinanceFutureRest(BinanceSignedRest):
+    """The signed reads futures has nowhere else, or wants off a socket.
 
-    Deliberately narrow. Order entry stays on the WebSocket API, where it is
-    one authenticated connection and no per-call signature; this exists for the
-    one question that has no method there.
+    Two kinds, and they are here for different reasons. ``openOrders`` and
+    ``symbolConfig`` have no WebSocket API method at all, and recon needs them
+    at attach time. The history pair does have socket equivalents and is here
+    anyway: it is read by a batch job on a schedule, where building and tearing
+    down an authenticated session to ask three questions costs more and fails
+    in more ways than three HTTP GETs — the same argument spot's history client
+    is built on.
+
+    Order entry stays on the WebSocket API regardless: one authenticated
+    connection and no per-call signature.
     """
 
-    def __init__(
-        self,
-        *,
-        api_key: str,
-        api_secret: str,
-        base_url: str = BINANCE_FUTURE_REST_URL,
-        timeout: float = 10.0,
-        recv_window: int | None = None,
-        client: httpx.AsyncClient | None = None,
-    ) -> None:
-        super().__init__(base_url=base_url, timeout=timeout, client=client)
-        if not api_key or not api_secret:
-            raise ValueError("api_key and api_secret are required")
-        self.api_key = api_key
-        self.recv_window = recv_window
-        # Parsed at construction, so a malformed key fails where it was
-        # configured rather than on the first recon.
-        self._key = load_private_key(api_secret)
+    default_base_url = BINANCE_FUTURE_REST_URL
+    error_type = BinanceFutureRestError
 
     async def fetch_open_orders(
         self, symbol: str | None = None
@@ -269,6 +182,69 @@ class BinanceFutureRest(_FutureRestTransport):
         """
         rows = await self._signed_get(
             f"{API_PREFIX}/openOrders", {"symbol": symbol} if symbol else {}
+        )
+        return [BinanceFutureOrderAck.model_validate(row) for row in rows or []]
+
+    async def fetch_my_trades(
+        self,
+        symbol: str,
+        *,
+        from_id: int | None = None,
+        start_time: int | None = None,
+        limit: int = MAX_HISTORY,
+    ) -> list[BinanceFutureMyTrade]:
+        """``GET /fapi/v1/userTrades`` — this account's executions, oldest first.
+
+        Per-symbol and paginated by trade id, the same shape spot uses and for
+        the same reasons: ids are monotonic per symbol with no window cap, and
+        a time range cannot separate two trades inside one millisecond. Time
+        opens a walk that has no id to resume from and nothing else.
+        """
+        if from_id is not None and start_time is not None:
+            raise ValueError(
+                "pass from_id or start_time, not both: Binance ignores the "
+                "range when fromId is set"
+            )
+        rows = await self._signed_get(
+            f"{API_PREFIX}/userTrades",
+            {
+                "symbol": symbol,
+                "fromId": from_id,
+                "startTime": start_time,
+                "limit": min(limit, MAX_HISTORY),
+            },
+        )
+        return [BinanceFutureMyTrade.model_validate(row) for row in rows or []]
+
+    async def fetch_orders(
+        self,
+        symbol: str,
+        *,
+        from_order_id: int | None = None,
+        start_time: int | None = None,
+        limit: int = MAX_HISTORY,
+    ) -> list[BinanceFutureOrderAck]:
+        """``GET /fapi/v1/allOrders`` — every order on ``symbol``, open or not.
+
+        Not optional beside :meth:`fetch_my_trades`: a trade row carries no
+        client order id, so this is the only read that can tie an execution
+        back to the session that placed it. It returns orders this platform
+        never sent as well, which is how an account's manual activity stops
+        being invisible.
+        """
+        if from_order_id is not None and start_time is not None:
+            raise ValueError(
+                "pass from_order_id or start_time, not both: Binance ignores "
+                "the range when orderId is set"
+            )
+        rows = await self._signed_get(
+            f"{API_PREFIX}/allOrders",
+            {
+                "symbol": symbol,
+                "orderId": from_order_id,
+                "startTime": start_time,
+                "limit": min(limit, MAX_HISTORY),
+            },
         )
         return [BinanceFutureOrderAck.model_validate(row) for row in rows or []]
 
@@ -288,23 +264,6 @@ class BinanceFutureRest(_FutureRestTransport):
         return [
             BinanceFutureSymbolConfig.model_validate(row) for row in rows or []
         ]
-
-    async def _signed_get(self, path: str, params: dict[str, Any]) -> Any:
-        body = {k: v for k, v in params.items() if v is not None}
-        body["timestamp"] = now_ms()
-        if self.recv_window is not None:
-            body["recvWindow"] = self.recv_window
-        # Signed and sent from one rendering: ``payload_for`` is the same
-        # function the socket path signs with, so the bytes cannot drift.
-        # Nothing sent here needs percent-encoding — a symbol and two integers
-        # — and the signature would be over the un-escaped form regardless.
-        query = payload_for(body)
-        signature = sign(self._key, body)
-        return await self._get(
-            f"{path}?{query}&signature={quote(signature, safe='')}",
-            None,
-            headers={"Accept": "application/json", "X-MBX-APIKEY": self.api_key},
-        )
 
 
 def _first(payload: Any) -> dict[str, Any]:

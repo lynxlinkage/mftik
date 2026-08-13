@@ -9,8 +9,16 @@ import signal
 from mft import configure_logging
 from mft.broker import Broker
 from mft.protocol import Topics
+from mft.symbols import SymbolClient
 
 from mft_td import db as td_db
+from mft_td.backfill import (
+    BackfillExecutor,
+    BackfillSession,
+    HistoryReaderFactory,
+    request_backfill,
+)
+from mft_td.history import HistoryWriter
 from mft_td.rpc import dispatch
 from mft_td.session import SessionManager, VenueSessionFactory
 
@@ -81,13 +89,31 @@ async def amain() -> None:
     async with Broker() as broker:
         # Venue comes from the apis row: paper goes to the paper-engine
         # container, Gate connects to the venue directly.
-        factory = VenueSessionFactory(broker, load_api=td_db.get_api)
+        # One symbol client for the process: its cache is what keeps symbol
+        # resolution off the wire, and the backfill resolves the same tickers
+        # the order path does.
+        symbols = SymbolClient(broker)
+        factory = VenueSessionFactory(
+            broker, load_api=td_db.get_api, symbols=symbols
+        )
+        history = HistoryWriter()
+        await history.start()
+        backfill = BackfillSession(
+            broker,
+            BackfillExecutor(
+                broker=broker,
+                factory=HistoryReaderFactory(symbols),
+                load_api=td_db.get_api,
+            ),
+        )
+        await backfill.start()
         sessions = SessionManager(
             factory,
             broker,
             persist_live=td_db.persist_live_session,
             mark_done=td_db.mark_session_done,
             list_db_sessions=td_db.list_sessions,
+            history=history,
         )
         logger.info("TD started (venue session factory)")
         rpc_task = asyncio.create_task(
@@ -114,7 +140,18 @@ async def amain() -> None:
             await asyncio.gather(
                 rpc_task, hb_task, reaper_task, return_exceptions=True
             )
+            # Asked for before this process stops serving the subject, and
+            # deliberately not run here: whoever comes up next takes it off the
+            # list. This process is going away and the accounts it was holding
+            # are the ones whose record is most likely to have a hole in it.
+            held = sessions.active_api_ids
+            await backfill.stop()
             await sessions.close_all()
+            for api_id in held:
+                await request_backfill(broker, api_id, reason="shutdown")
+            # After the sessions, so the last of their order updates is in the
+            # queue before it is drained.
+            await history.stop()
     logger.info("TD stopped")
 
 

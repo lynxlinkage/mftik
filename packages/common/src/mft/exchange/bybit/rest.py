@@ -41,6 +41,8 @@ import httpx
 
 from mft.exchange.bybit import channels as ch
 from mft.exchange.bybit.models import (
+    EXEC_TYPE_TRADE,
+    BybitExecution,
     BybitOrderAck,
     BybitOrderUpdate,
     BybitPosition,
@@ -78,6 +80,9 @@ MAX_KLINES = 1000
 #: Most rows ``instruments-info`` returns per page. More than that comes back
 #: paginated, behind a cursor.
 MAX_INSTRUMENT_PAGE = 1000
+
+#: Most history rows ``execution/list`` / ``order/history`` return per page.
+MAX_HISTORY = 100
 
 #: What a unified trading account is called. A classic account's spot wallet is
 #: ``SPOT``; Bybit has been migrating everyone to ``UNIFIED`` for years, so it
@@ -325,6 +330,77 @@ class BybitRest(_BybitRestTransport):
         )
         headers["Accept"] = "application/json"
         return headers
+
+    # --- history reads -----------------------------------------------------
+
+    async def fetch_executions(
+        self,
+        product: str,
+        symbol: str,
+        *,
+        cursor: str | None = None,
+        start_time: int | None = None,
+        limit: int = MAX_HISTORY,
+    ) -> tuple[list[BybitExecution], str | None]:
+        """``execution/list`` — this account's fills, and where the next page is.
+
+        ``execType=Trade`` is sent rather than filtered here. The same endpoint
+        carries funding, ADL, liquidation and delivery rows, and letting the
+        venue drop them costs a query parameter where doing it locally costs
+        bandwidth, pages and rate-limit budget shared with live trading.
+
+        Returns Bybit's own ``nextPageCursor``, opaque and passed straight
+        back. No arithmetic on it here: how a venue numbers its pages is the
+        adapter's business, which is what lets the caller treat every venue's
+        cursor as one string.
+        """
+        params: dict[str, Any] = {
+            "category": product,
+            "symbol": symbol,
+            "execType": EXEC_TYPE_TRADE,
+            "limit": min(limit, MAX_HISTORY),
+        }
+        if cursor:
+            params["cursor"] = cursor
+        elif start_time is not None:
+            params["startTime"] = start_time
+        result = await self._get(ch.EXECUTION_LIST_PATH, params)
+        rows = [
+            BybitExecution.model_validate(row) for row in result.get("list") or []
+        ]
+        return rows, (result.get("nextPageCursor") or None)
+
+    async def fetch_order_history(
+        self,
+        product: str,
+        symbol: str,
+        *,
+        cursor: str | None = None,
+        start_time: int | None = None,
+        limit: int = MAX_HISTORY,
+    ) -> tuple[list[BybitOrderUpdate], str | None]:
+        """``order/history`` — orders that have finished, newest first.
+
+        Not for attribution: Bybit puts ``orderLinkId`` on the execution rows
+        themselves, so a fill re-read from this venue already knows whose it
+        was — unlike Binance, where a trade row carries no client order id at
+        all. This is read to make orders placed *outside* the platform visible,
+        which no execution of ours would ever mention.
+        """
+        params: dict[str, Any] = {
+            "category": product,
+            "symbol": symbol,
+            "limit": min(limit, MAX_HISTORY),
+        }
+        if cursor:
+            params["cursor"] = cursor
+        elif start_time is not None:
+            params["startTime"] = start_time
+        result = await self._get(ch.ORDER_HISTORY_PATH, params)
+        rows = [
+            BybitOrderUpdate.model_validate(row) for row in result.get("list") or []
+        ]
+        return rows, (result.get("nextPageCursor") or None)
 
     # --- recon reads -------------------------------------------------------
 

@@ -1052,6 +1052,198 @@
           }
         }
       }
+    },
+    "/board/sessions": {
+      "get": {
+        "tags": [
+          "board"
+        ],
+        "summary": "List Board Sessions",
+        "description": "Recent runs, newest first. ``status`` omitted means every status.",
+        "operationId": "list_board_sessions_board_sessions_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoardResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/board/sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "board"
+        ],
+        "summary": "Get Board Session",
+        "description": "One run's summary \u2014 the header a drill-in needs to keep its context.",
+        "operationId": "get_board_session_board_sessions__session_id__get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoardSession"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/board/sessions/{session_id}/fills": {
+      "get": {
+        "tags": [
+          "board"
+        ],
+        "summary": "List Board Fills",
+        "description": "This run's executions, newest first.\n\nCursor-paginated on ``(ts, id)`` the way the log listing is, and for the\nsame reason: a busy run has more of these than a page, and an offset would\nshift under rows arriving while somebody reads.",
+        "operationId": "list_board_fills_board_sessions__session_id__fills_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "before_ts",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Ts"
+            }
+          },
+          {
+            "name": "before_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoardFillListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1270,6 +1462,223 @@
           "result"
         ],
         "title": "AuditOut"
+      },
+      "BoardFill": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "fill_id": {
+            "type": "string",
+            "title": "Fill Id"
+          },
+          "universal_ticker": {
+            "type": "string",
+            "title": "Universal Ticker"
+          },
+          "side": {
+            "type": "string",
+            "title": "Side"
+          },
+          "price": {
+            "type": "string",
+            "title": "Price"
+          },
+          "qty": {
+            "type": "string",
+            "title": "Qty"
+          },
+          "fee": {
+            "type": "string",
+            "title": "Fee"
+          },
+          "fee_asset": {
+            "type": "string",
+            "title": "Fee Asset"
+          },
+          "client_order_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Order Id"
+          },
+          "venue_order_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Venue Order Id"
+          },
+          "api_id": {
+            "type": "integer",
+            "title": "Api Id"
+          },
+          "ts": {
+            "type": "number",
+            "title": "Ts"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "settled": {
+            "type": "boolean",
+            "title": "Settled",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "fill_id",
+          "universal_ticker",
+          "side",
+          "price",
+          "qty",
+          "fee",
+          "fee_asset",
+          "api_id",
+          "ts",
+          "source"
+        ],
+        "title": "BoardFill",
+        "description": "One execution, as the record holds it.\n\nDecimals travel as strings. Every one of these is money or size, and JSON\nnumbers are doubles \u2014 a round trip through one is exactly the silent\nrounding the ``NUMERIC(38,18)`` columns exist to avoid, and it would happen\non the way *out*, where nothing downstream could tell."
+      },
+      "BoardFillListResponse": {
+        "properties": {
+          "fills": {
+            "items": {
+              "$ref": "#/components/schemas/BoardFill"
+            },
+            "type": "array",
+            "title": "Fills"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "BoardFillListResponse"
+      },
+      "BoardResponse": {
+        "properties": {
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/BoardSession"
+            },
+            "type": "array",
+            "title": "Sessions"
+          }
+        },
+        "type": "object",
+        "title": "BoardResponse"
+      },
+      "BoardSession": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "duration_s": {
+            "type": "number",
+            "title": "Duration S"
+          },
+          "running": {
+            "type": "boolean",
+            "title": "Running"
+          },
+          "fills": {
+            "type": "integer",
+            "title": "Fills",
+            "default": 0
+          },
+          "td_api_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Td Api Ids"
+          },
+          "confirmed_through_ts": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirmed Through Ts"
+          },
+          "settled": {
+            "type": "boolean",
+            "title": "Settled",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "status",
+          "created_at",
+          "duration_s",
+          "running"
+        ],
+        "title": "BoardSession",
+        "description": "One strategy run, as the board shows it.\n\nCounts and times, and deliberately no PnL. Deriving a result means matching\nexecutions into positions and valuing whatever is left open, and a number\nproduced before that machinery exists would be believed. What is here is\nwhat the record can already state without arithmetic."
       },
       "DeployResponse": {
         "properties": {

@@ -144,6 +144,28 @@ class Topics:
         return f"td.account.{api_id}"
 
     @staticmethod
+    def td_backfill() -> str:
+        """Work queue for re-reading an account's history from its venue.
+
+        Unkeyed, unlike :meth:`td_order`. That subject names an account because
+        an order is *owned* — only the process holding the lease may place one.
+        A history read is owned by nobody: any TD can load the credential and
+        ask, the answer is the same whoever asked, and the writes it produces
+        are idempotent. So competing consumers stop being the hazard the key
+        exists to avoid and become the point, spreading the work across
+        whatever TD processes are up and surviving the loss of any one.
+
+        It also means an account with no live attach still gets backfilled. A
+        keyed subject would park the request in a list until somebody attached,
+        which for a retired account is forever.
+
+        What *is* owned is the API key's rate-limit budget, and that is fenced
+        with a lock per ``api_id`` rather than by the subject — see
+        :mod:`mft_td.backfill.executor`.
+        """
+        return "td.backfill"
+
+    @staticmethod
     def td_ledger(api_id: int) -> str:
         """TD → STS balance-ledger fan-out (venue balances + TD pre-locks)."""
         return f"td.ledger.{api_id}"

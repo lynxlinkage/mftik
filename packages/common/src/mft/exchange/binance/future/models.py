@@ -737,6 +737,62 @@ class BinanceListenKeyExpired(BinanceMessage):
 # --- call replies ----------------------------------------------------------
 
 
+class BinanceFutureMyTrade(BinanceMessage):
+    """One row of ``GET /fapi/v1/userTrades`` — an execution, after the fact.
+
+    The same execution the user stream reports inside an
+    ``ORDER_TRADE_UPDATE``, and ``id`` here is that message's ``t``. Keeping
+    the two spellings identical is what lets a backfilled fill and a streamed
+    one collapse onto a single record rather than double-count the trade.
+
+    Futures states ``side`` outright, where spot leaves it to be read off
+    ``isBuyer``. ``maker`` is the account's role in the match.
+
+    **``realizedPnl`` is deliberately not carried onto the fill**, though the
+    venue reports it here. Binance computes it against the *account's* position
+    basis at that moment, so an execution closing a position opened by another
+    session — or by hand — carries a figure derived from fills this one never
+    made. Stored on a row that also names a ``session_id`` it would be summed
+    per session and be wrong, which is the same reason
+    :class:`~mft_db.models.history.CashFlowRow` refuses a session: the venue
+    accounts for a net position, and sessions hold gross ones.
+    """
+
+    symbol: str = ""
+    trade_id: int = Field(default=-1, alias="id")
+    order_id: int = Field(default=0, alias="orderId")
+    side: VenueSide = Side.BUY
+    price: Decimal = Decimal("0")
+    qty: Decimal = Decimal("0")
+    quote_qty: Decimal = Field(default=Decimal("0"), alias="quoteQty")
+    commission: Decimal = Decimal("0")
+    commission_asset: str = Field(default="", alias="commissionAsset")
+    position_side: str = Field(default=BOTH, alias="positionSide")
+    buyer: bool = False
+    maker: bool = False
+    time: int = 0
+
+    def to_fill(self, ticker: UniversalTicker) -> Fill:
+        """This execution as the shared model, ``client_order_id`` unset.
+
+        Unset rather than guessed: Binance puts no client order id on a trade
+        row, and the caller ties it back through ``orderId`` — which is what
+        the orders read alongside this is for.
+        """
+        return Fill(
+            universal_ticker=str(ticker),
+            fill_id=str(self.trade_id),
+            order_id=str(self.order_id),
+            client_order_id=None,
+            side=self.side,
+            price=self.price,
+            qty=self.qty,
+            fee=self.commission,
+            fee_asset=self.commission_asset,
+            ts=secs(self.time),
+        )
+
+
 class BinanceFutureOrderAck(BinanceMessage):
     """The reply to ``order.place`` / ``order.cancel`` / ``order.status``.
 

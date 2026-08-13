@@ -143,3 +143,4 @@ def test_symbol_category_matches_the_ticker_vocabulary() -> None:
     from mft_db.models.symbol import SymbolCategory
 
     assert {c.value for c in SymbolCategory} == {c.value for c in Category}
+

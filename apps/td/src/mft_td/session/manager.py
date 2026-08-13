@@ -55,7 +55,9 @@ from mft.protocol import (
 from mft.protocol.reject_codes import describe
 from mft_db.models.session import SessionDomain, SessionStatus
 
+from mft_td.backfill.trigger import request_backfill
 from mft_td.errors import normalize
+from mft_td.history import HistoryWriter
 from mft_td.session.factory import SessionFactory
 from mft_td.session.session import Session
 
@@ -155,6 +157,7 @@ class SessionManager:
         persist_live: PersistLive | None = None,
         mark_done: MarkDone | None = None,
         list_db_sessions: ListDbSessions | None = None,
+        history: HistoryWriter | None = None,
         lease_grace: float = LEASE_GRACE_S,
     ) -> None:
         self._factory = factory
@@ -162,6 +165,10 @@ class SessionManager:
         self._persist_live = persist_live
         self._mark_done = mark_done
         self._list_db_sessions = list_db_sessions
+        #: One per process, shared by every account: the batches are worth
+        #: more pooled than kept apart, and a flush loop per api_id would be
+        #: a connection each for no gain.
+        self._history = history
         self._lease_grace = lease_grace
         self._accounts: dict[int, TradingAccount] = {}
         #: ``(session_id, api_id)`` → consecutive scans that found no STS
@@ -187,6 +194,9 @@ class SessionManager:
         acct = self._accounts.get(request.api_id)
         if acct is None:
             trading = await self._factory.create(request.api_id)
+            # Set before start(): recon runs inside it and its order updates
+            # are history too.
+            trading.history = self._history
             await trading.start()
             acct = TradingAccount(api_id=request.api_id, trading=trading)
             self._accounts[request.api_id] = acct
@@ -543,6 +553,16 @@ class SessionManager:
                 f"trading destroyed (refcount 0) last_sts={session_id}",
                 source="td",
             )
+
+        if link is not None:
+            # A detach is when somebody goes to look at what the run did, so it
+            # is worth settling the record soon rather than at the next tick of
+            # the schedule. Only the ask is awaited, never the walk — this is
+            # latency, and the schedule is what guarantees it happens at all —
+            # and the ask is itself bounded by ``POST_TIMEOUT_S``, so an
+            # unreachable Redis delays a detach by seconds rather than failing
+            # it.
+            await request_backfill(self._broker, api_id, reason="detach")
 
     async def close(self, api_id: int) -> None:
         await self._destroy_account(api_id)
@@ -1256,7 +1276,9 @@ class SessionManager:
             # this write fails the ack is False and no order event follows,
             # so False stays a complete answer.
             try:
-                await acct.trading.record_pending_new(request)
+                await acct.trading.record_pending_new(
+                    request, session_id=payload.session_id
+                )
             except Exception as exc:
                 await acct.trading.release(cid)
                 logger.exception(

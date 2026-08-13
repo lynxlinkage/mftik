@@ -31,7 +31,11 @@ from typing import Any
 import httpx
 
 from mft.exchange.errors import ExchangeError
-from mft.exchange.gate.spot.models import GateOrderAck, GateTicker
+from mft.exchange.gate.spot.models import (
+    GateOrderAck,
+    GateTicker,
+    GateUserTrade,
+)
 from mft.exchange.models import (
     Balance,
     BookLevel,
@@ -51,6 +55,9 @@ API_PREFIX = "/api/v4"
 #: Most candles ``/spot/candlesticks`` will return in one call. Asking for more
 #: is a 400, not a truncated answer.
 MAX_CANDLES = 1000
+
+#: Most history rows ``my_trades`` / ``orders`` return per page.
+MAX_HISTORY = 1000
 
 
 class GateRestError(ExchangeError):
@@ -181,6 +188,66 @@ class GateSpotRest(_GateRestTransport):
             {"currency_pair": currency_pair, "status": "open"},
         )
         return [_to_order(row, ticker) for row in rows or []]
+
+    async def fetch_my_trades(
+        self,
+        currency_pair: str,
+        *,
+        page: int = 1,
+        limit: int = MAX_HISTORY,
+        since: int | None = None,
+    ) -> list[GateUserTrade]:
+        """``GET /spot/my_trades`` — this account's executions on one pair.
+
+        Paginated by page number, which Gate offers instead of an id cursor.
+        That is weaker than Binance's or Bybit's: page N only means anything
+        against a fixed query, so a walk fixes ``from`` for its whole run and
+        re-derives it from the settlement line on the next one. The caller is
+        what keeps those two together; see the Gate history reader.
+
+        Unlike the other venues, a Gate trade row carries ``text`` — our own
+        client order id — so an execution re-read here needs no join to be
+        attributed.
+        """
+        params: dict[str, Any] = {
+            "currency_pair": currency_pair,
+            "limit": min(limit, MAX_HISTORY),
+            "page": max(1, page),
+        }
+        if since is not None:
+            params["from"] = since
+        rows = await self._get("/spot/my_trades", params)
+        return [GateUserTrade.model_validate(row) for row in rows or []]
+
+    async def fetch_orders(
+        self,
+        currency_pair: str,
+        *,
+        page: int = 1,
+        limit: int = MAX_HISTORY,
+        since: int | None = None,
+        status: str = "finished",
+    ) -> list[GateOrderAck]:
+        """``GET /spot/orders`` — one pair's orders in a terminal state.
+
+        ``finished`` rather than ``open``: what a history walk wants is orders
+        that have stopped moving, and the open ones are recon's business and
+        arrive on the socket anyway.
+
+        Read alongside the trades even though Gate's trade rows are already
+        attributable, because this is what makes orders placed outside the
+        platform visible — the same reason it is read on every other venue.
+        """
+        params: dict[str, Any] = {
+            "currency_pair": currency_pair,
+            "status": status,
+            "limit": min(limit, MAX_HISTORY),
+            "page": max(1, page),
+        }
+        if since is not None:
+            params["from"] = since
+        rows = await self._get("/spot/orders", params)
+        return [GateOrderAck.model_validate(row) for row in rows or []]
 
     async def fetch_open_order_rows(self) -> dict[str, list[GateOrderAck]]:
         """``GET /spot/open_orders`` — every pair's resting orders, grouped.

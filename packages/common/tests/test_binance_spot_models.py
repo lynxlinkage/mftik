@@ -20,6 +20,8 @@ from mft.exchange.binance.spot.models import (
     BinanceExecutionReport,
     BinanceKlineEvent,
     BinanceOrderAck,
+    BinanceSpotHistoricalOrder,
+    BinanceSpotMyTrade,
     BinanceTicker,
     BinanceTrade,
     kline_from_row,
@@ -530,3 +532,175 @@ def test_limit_maker_is_a_limit_order_here() -> None:
     """Post-only is a time-in-force in our vocabulary, not a type."""
     assert type_of("LIMIT_MAKER") is OrderType.LIMIT
     assert type_of("MARKET") is OrderType.MARKET
+
+
+# --- account history -------------------------------------------------------
+
+#: The same execution as the partial fill above, as ``myTrades`` reports it
+#: after the fact: trade 987654 of order 4293153, 0.3 @ 0.1, 0.0001 BNB.
+MY_TRADE = {
+    "symbol": "ETHBTC",
+    "id": 987654,
+    "orderId": 4293153,
+    "orderListId": -1,
+    "price": "0.10000000",
+    "qty": "0.30000000",
+    "quoteQty": "0.03000000",
+    "commission": "0.00010000",
+    "commissionAsset": "BNB",
+    "time": 1499405658657,
+    "isBuyer": True,
+    "isMaker": False,
+    "isBestMatch": True,
+}
+
+HISTORICAL_ORDER = {
+    "symbol": "ETHBTC",
+    "orderId": 4293153,
+    "orderListId": -1,
+    "clientOrderId": "mUvoqJxFIILMdfAW5iGSOW",
+    "price": "0.10264410",
+    "origQty": "1.00000000",
+    "executedQty": "0.70000000",
+    "cummulativeQuoteQty": "0.07100000",
+    "status": "CANCELED",
+    "timeInForce": "GTC",
+    "type": "LIMIT",
+    "side": "BUY",
+    "stopPrice": "0.00000000",
+    "icebergQty": "0.00000000",
+    "time": 1499827319559,
+    "updateTime": 1499827420000,
+    "isWorking": True,
+    "workingTime": 1499827319559,
+    "origQuoteOrderQty": "0.00000000",
+    "selfTradePreventionMode": "NONE",
+}
+
+
+def test_a_streamed_fill_and_a_backfilled_one_are_the_same_record() -> None:
+    """The invariant the whole two-tier history design rests on.
+
+    A fill can arrive twice — live on the user data stream, and again when a
+    backfill re-reads the window from ``myTrades``. Storage dedupes on
+    ``fill_id``, so if these two paths spelled the same execution differently
+    every backfilled trade would be booked a second time and every PnL number
+    derived from them would double. Binance's ``t`` and ``id`` are the same
+    trade id; this pins that they stay the same *fill_id*.
+    """
+    streamed = BinanceExecutionReport.model_validate(
+        {
+            **EXECUTION_REPORT,
+            "x": "TRADE",
+            "X": "PARTIALLY_FILLED",
+            "l": "0.30000000",
+            "L": "0.10000000",
+            "z": "0.70000000",
+            "Z": "0.07100000",
+            "n": "0.00010000",
+            "N": "BNB",
+            "t": 987654,
+        }
+    ).to_fill(TICKER)
+    backfilled = BinanceSpotMyTrade.model_validate(MY_TRADE).to_fill(TICKER)
+
+    assert streamed.fill_id == backfilled.fill_id == "987654"
+    assert streamed.order_id == backfilled.order_id
+    assert streamed.side is backfilled.side
+    assert streamed.price == backfilled.price
+    assert streamed.qty == backfilled.qty
+    assert streamed.fee == backfilled.fee
+    assert streamed.fee_asset == backfilled.fee_asset
+    assert streamed.ts == backfilled.ts
+    assert streamed.universal_ticker == backfilled.universal_ticker
+
+
+def test_a_trade_row_is_the_one_thing_that_cannot_name_its_own_order_id() -> None:
+    """Which is why ``allOrders`` is read alongside ``myTrades``, not instead.
+
+    Left unset rather than filled with the venue's order id: the field means
+    *our* id for the order, and putting anything else there would make an
+    execution look attributable when it is not.
+    """
+    fill = BinanceSpotMyTrade.model_validate(MY_TRADE).to_fill(TICKER)
+    assert fill.client_order_id is None
+    assert fill.order_id == "4293153", "the venue's id is all this row carries"
+
+
+def test_is_buyer_is_the_accounts_side_not_the_tapes_maker_flag() -> None:
+    """``m`` on the tape inverts; ``isBuyer`` here does not. Different fields."""
+    bought = BinanceSpotMyTrade.model_validate(MY_TRADE)
+    sold = BinanceSpotMyTrade.model_validate(
+        {**MY_TRADE, "isBuyer": False, "isMaker": True}
+    )
+    assert bought.side is Side.BUY
+    assert bought.is_maker is False
+    assert sold.side is Side.SELL
+    assert sold.is_maker is True
+
+
+def test_historical_order_converts_a_terminal_order() -> None:
+    order = BinanceSpotHistoricalOrder.model_validate(HISTORICAL_ORDER).to_order(
+        TICKER
+    )
+    assert order.order_id == "4293153"
+    assert order.client_order_id == "mUvoqJxFIILMdfAW5iGSOW"
+    assert order.status is OrderStatus.CANCELED
+    assert order.side is Side.BUY
+    assert order.type is OrderType.LIMIT
+    assert order.qty == Decimal("1")
+    assert order.filled_qty == Decimal("0.7")
+    # Same Z/z division the stream needs — allOrders has no average either.
+    assert order.avg_price == Decimal("0.071") / Decimal("0.7")
+
+
+def test_a_historical_order_is_stamped_when_it_last_moved() -> None:
+    """``updateTime``, not ``time``: a history read is about where it ended."""
+    order = BinanceSpotHistoricalOrder.model_validate(HISTORICAL_ORDER).to_order(
+        TICKER
+    )
+    assert order.ts == 1499827420000 / 1000.0
+
+    never_moved = BinanceSpotHistoricalOrder.model_validate(
+        {**HISTORICAL_ORDER, "updateTime": 0}
+    ).to_order(TICKER)
+    assert never_moved.ts == 1499827319559 / 1000.0
+
+
+def test_an_order_this_platform_never_placed_keeps_the_venues_id() -> None:
+    """Manual and third-party orders come back on the same endpoint.
+
+    Passed through rather than dropped or normalized: recognising which ids
+    are ours is the caller's job, and it cannot do it on an id we rewrote.
+    """
+    order = BinanceSpotHistoricalOrder.model_validate(
+        {**HISTORICAL_ORDER, "clientOrderId": "web_a1b2c3d4"}
+    ).to_order(TICKER)
+    assert order.client_order_id == "web_a1b2c3d4"
+
+
+def test_a_historical_order_with_no_client_order_id_reports_none() -> None:
+    order = BinanceSpotHistoricalOrder.model_validate(
+        {**HISTORICAL_ORDER, "clientOrderId": ""}
+    ).to_order(TICKER)
+    assert order.client_order_id is None
+
+
+def test_a_historical_market_order_reports_no_limit_price() -> None:
+    order = BinanceSpotHistoricalOrder.model_validate(
+        {**HISTORICAL_ORDER, "type": "MARKET", "price": "0.00000000"}
+    ).to_order(TICKER)
+    assert order.type is OrderType.MARKET
+    assert order.price is None
+
+
+def test_an_unfilled_historical_order_has_no_average_price() -> None:
+    order = BinanceSpotHistoricalOrder.model_validate(
+        {
+            **HISTORICAL_ORDER,
+            "status": "NEW",
+            "executedQty": "0.00000000",
+            "cummulativeQuoteQty": "0.00000000",
+        }
+    ).to_order(TICKER)
+    assert order.avg_price is None

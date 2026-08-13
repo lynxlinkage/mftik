@@ -41,6 +41,7 @@ from mft.protocol.reject_codes import describe
 from mft.symbols import SymbolClient
 from pydantic import BaseModel
 
+from mft_td.history import HistoryWriter
 from mft_td.oms import (
     InsufficientAvailable,
     Ledger,
@@ -153,12 +154,17 @@ class Session:
         oms: Oms | None = None,
         symbols: SymbolClient | None = None,
         ledger: Ledger | None = None,
+        history: HistoryWriter | None = None,
         pending_timeout: float = PENDING_NEW_TIMEOUT_S,
     ) -> None:
         self.api_id = api_id
         self.broker = broker
         self.private = private
         self.oms = oms or Oms()
+        #: Records orders and fills for PnL. Optional: without one the session
+        #: trades exactly as before and keeps no history, which is what every
+        #: test that builds a bare session wants.
+        self.history = history
         #: Balances with TD's own pre-locks layered on the venue's numbers.
         self.ledger = ledger or Ledger()
         #: Resolves base/quote so a reservation knows which asset it holds.
@@ -508,13 +514,23 @@ class Session:
             self._oms_key, {order_key(o): o for o in snap.orders.values()}
         )
 
-    async def record_pending_new(self, request: PlaceOrderRequest) -> Order:
+    async def record_pending_new(
+        self, request: PlaceOrderRequest, *, session_id: str | None = None
+    ) -> Order:
         """Book the order locally before it goes to the venue.
 
         Written and announced before the submit is acked, so a strategy that
         is told True can immediately read the order it just placed. It carries
         no venue ``order_id`` yet — until the venue answers there is nothing to
         cancel, which is exactly what ``PENDING_NEW`` means.
+
+        ``session_id`` is recorded to history here and nowhere else. This is
+        the only moment TD holds it and the ``client_order_id`` together: every
+        later event about this order arrives from the venue, which has never
+        heard of an STS session. Attribution derived afterwards would have to
+        decode the slot packed into the cid, and that slot is unique only among
+        sessions alive at the same time — sound for a live lookup, a guess
+        against history.
         """
         order = Order(
             client_order_id=request.client_order_id,
@@ -534,6 +550,7 @@ class Session:
             asyncio.get_running_loop().time()
         )
         await self.write_order(order)
+        self._record_order(order, session_id=session_id, submitted_at=order.ts)
         await self._publish_order_update(order)
         return order
 
@@ -552,6 +569,13 @@ class Session:
         rejected = order.model_copy(update={"status": OrderStatus.REJECTED})
         self.oms.handle_order(rejected)
         await self.write_order(rejected)
+        # Recorded here rather than through ``_publish_order_update``, which
+        # this path deliberately skips: the submit already publishes its own
+        # reject envelope and a second announcement would be noise. History
+        # still has to hear it — an order left at its previous state would sit
+        # in the record as pending forever, indistinguishable from one that
+        # really is.
+        self._record_order(rejected)
         return rejected
 
     async def record_pending_cancel(self, client_order_id: str) -> str | None:
@@ -1214,6 +1238,11 @@ class Session:
             # the venue said no after accepting the request, and the stream
             # carries no reason with it. VENUE_REJECTED is the honest code —
             # the venue refused it, and that is all anyone knows.
+            #
+            # Recorded before the refusal goes out, because this branch skips
+            # ``_publish_order_update`` and would otherwise leave the order in
+            # history at whatever state it last reached.
+            self._record_order(order)
             await self.publish_order_reject(
                 reason="rejected",
                 client_order_id=order.client_order_id,
@@ -1227,6 +1256,11 @@ class Session:
     def _dispatch_fill(self, fill: Fill) -> None:
         for cb in list(self._fill_cbs):
             cb(fill)
+        # Queued, not written: this runs on the socket pump, and a database
+        # round trip taken here would stall the stream feeding the OMS, the
+        # ledger and every strategy on the account.
+        if self.history is not None:
+            self.history.record_fill(fill, api_id=self.api_id)
         self._schedule_publish(self._announce_fill(fill))
 
     async def _announce_fill(self, fill: Fill) -> None:
@@ -1242,8 +1276,38 @@ class Session:
         )
         await self._publish_global(TD_FILL, fill)
 
+    def _record_order(
+        self,
+        order: Order,
+        *,
+        session_id: str | None = None,
+        submitted_at: float | None = None,
+    ) -> None:
+        """Hand one order state to the history writer, if there is one.
+
+        Never awaited and never able to raise: history is a bystander to
+        trading, and a database that is unwell must not be able to fail an
+        order path that is otherwise fine.
+        """
+        if self.history is None:
+            return
+        self.history.record_order(
+            order,
+            api_id=self.api_id,
+            session_id=session_id,
+            submitted_at=submitted_at,
+        )
+
     async def _publish_order_update(self, order: Order) -> None:
-        """Announce an order on ``td.{api_id}.global`` and log it."""
+        """Announce an order on ``td.{api_id}.global`` and log it.
+
+        Every order state change funnels through here — venue pushes, sweeps,
+        resolves, recon — so this is where history hears about all of them.
+        The row it writes names no session, because at this point nothing on
+        the wire says which one: the upsert keeps whatever the submit recorded,
+        and an order that was never ours stays honestly unattributed.
+        """
+        self._record_order(order)
         level = (
             "warn"
             if order.status in (OrderStatus.UNKNOWN, OrderStatus.REJECTED)

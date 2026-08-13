@@ -351,6 +351,22 @@ class Broker:
         finally:
             await self.redis.delete(reply_key)
 
+    async def post(self, subject: str, envelope: Envelope[Any]) -> None:
+        """Enqueue on a request-reply subject without waiting for a reply.
+
+        The same queue :meth:`request` uses and the same competing consumers
+        take from it; what is missing is the ``reply_to``, so the handler
+        answers nobody and this returns as soon as Redis has the message.
+
+        For work whose *result* the sender has no use for and whose duration it
+        must not inherit — a backfill run is minutes of venue round trips, and
+        the shutdown path that asks for one is measured in seconds. A request
+        left in the list because nothing is serving the subject yet is not lost:
+        the next consumer to come up takes it, which is the recovery a pub/sub
+        message could not offer.
+        """
+        await self.redis.rpush(self._rpc_queue(subject), envelope.to_json())
+
     async def serve(
         self,
         subject: str,

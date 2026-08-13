@@ -16,9 +16,12 @@ Above those sit the two connectors the platform composes:
 :class:`BinanceSpotPublicClient` for MD and :class:`BinanceSpotPrivateClient`
 for TD.
 
-There is no REST client here on purpose. Binance answers every read this
-platform needs over the WebSocket API, so keeping one envelope and one error
-type across the venue is worth more than a second transport would be.
+The **trading path** has no REST half on purpose: Binance answers every read it
+needs over the WebSocket API, and one envelope and one error type across the
+live order path is worth more than a second transport would be.
+:class:`BinanceSpotRest` sits outside that path — history reads for the
+backfill plane, holding no order state — and is not composed into
+:class:`BinanceSpotPrivateClient`. See :mod:`mft.exchange.binance.spot.rest`.
 """
 
 from mft.exchange.binance.spot import methods, streams
@@ -43,6 +46,8 @@ from mft.exchange.binance.spot.models import (
     BinanceMessage,
     BinanceOrderAck,
     BinanceOrderFill,
+    BinanceSpotHistoricalOrder,
+    BinanceSpotMyTrade,
     BinanceTicker,
     BinanceTrade,
     kline_from_row,
@@ -52,6 +57,8 @@ from mft.exchange.binance.spot.models import (
 )
 from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mft.exchange.binance.spot.protocol import (
+    BINANCE_SPOT_REST_TESTNET_URL,
+    BINANCE_SPOT_REST_URL,
     BINANCE_SPOT_STREAM_TESTNET_URL,
     BINANCE_SPOT_STREAM_URL,
     BINANCE_SPOT_WS_API_TESTNET_URL,
@@ -72,10 +79,13 @@ from mft.exchange.binance.spot.public import (
     BinanceSpotPublicClient,
     venue_interval,
 )
+from mft.exchange.binance.spot.rest import BinanceSpotRest, BinanceSpotRestError
 from mft.exchange.binance.spot.socket import BinanceSocket
 
 __all__ = [
     "BINANCE_INTERVALS",
+    "BINANCE_SPOT_REST_TESTNET_URL",
+    "BINANCE_SPOT_REST_URL",
     "BINANCE_SPOT_STREAM_TESTNET_URL",
     "BINANCE_SPOT_STREAM_URL",
     "BINANCE_SPOT_WS_API_TESTNET_URL",
@@ -99,8 +109,12 @@ __all__ = [
     "BinanceOrderFill",
     "BinanceResponse",
     "BinanceSocket",
+    "BinanceSpotHistoricalOrder",
+    "BinanceSpotMyTrade",
     "BinanceSpotPrivateClient",
     "BinanceSpotPublicClient",
+    "BinanceSpotRest",
+    "BinanceSpotRestError",
     "BinanceSpotStream",
     "BinanceSpotWsApi",
     "BinanceTicker",

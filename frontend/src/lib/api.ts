@@ -1,5 +1,62 @@
 import { reloadForLogin } from '$lib/auth';
 
+/**
+ * One strategy run, as the board shows it.
+ *
+ * Counts and times, and deliberately no PnL: deriving a result means matching
+ * executions into positions and valuing whatever is left open, and a number
+ * shown before that exists would be believed.
+ *
+ * `fills` is what has been recorded. `settled` says whether the venue has been
+ * re-read across the whole run and agreed — a live run never is, and neither
+ * is a finished one whose last minutes are still inside the safety lag.
+ */
+export type BoardSession = {
+	session_id: string;
+	strategy: string | null;
+	status: string;
+	reason: string | null;
+	created_at: number;
+	finished_at: number | null;
+	duration_s: number;
+	running: boolean;
+	/** Executions recorded. The only count here — see the board route. */
+	fills: number;
+	td_api_ids: number[];
+	confirmed_through_ts: number | null;
+	settled: boolean;
+};
+
+/**
+ * One execution, as the record holds it.
+ *
+ * Decimals arrive as strings and stay that way. Every one is money or size,
+ * and parsing to a JS number is exactly the silent rounding the NUMERIC(38,18)
+ * columns exist to avoid — display them, do not compute with them.
+ */
+export type BoardFill = {
+	id: number;
+	fill_id: string;
+	universal_ticker: string;
+	side: string;
+	price: string;
+	qty: string;
+	fee: string;
+	fee_asset: string;
+	client_order_id: string | null;
+	venue_order_id: string | null;
+	api_id: number;
+	ts: number;
+	/** `stream` — caught live. `backfill` — re-read from the venue. */
+	source: string;
+	settled: boolean;
+};
+
+export type BoardFillList = {
+	fills: BoardFill[];
+	has_more: boolean;
+};
+
 export type DomainStats = {
 	domain: string;
 	live: number;
@@ -221,6 +278,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
 	stats: () => request<{ domains: DomainStats[] }>('/stats'),
+	boardSessions: (opts: { status?: string; limit?: number } = {}) => {
+		const q = new URLSearchParams();
+		if (opts.status) q.set('status', opts.status);
+		if (opts.limit != null) q.set('limit', String(opts.limit));
+		const qs = q.toString();
+		return request<{ sessions: BoardSession[] }>(`/board/sessions${qs ? `?${qs}` : ''}`);
+	},
+	boardSession: (sessionId: string) =>
+		request<BoardSession>(`/board/sessions/${encodeURIComponent(sessionId)}`),
+	boardFills: (
+		sessionId: string,
+		opts: { beforeTs?: number; beforeId?: number; limit?: number } = {}
+	) => {
+		const q = new URLSearchParams();
+		if (opts.beforeTs != null) q.set('before_ts', String(opts.beforeTs));
+		if (opts.beforeId != null) q.set('before_id', String(opts.beforeId));
+		if (opts.limit != null) q.set('limit', String(opts.limit));
+		const qs = q.toString();
+		return request<BoardFillList>(
+			`/board/sessions/${encodeURIComponent(sessionId)}/fills${qs ? `?${qs}` : ''}`
+		);
+	},
 	venues: () => request<{ venues: Venue[] }>('/venues'),
 	symVenues: () => request<SymVenues>('/sym/venues'),
 	symbols: (

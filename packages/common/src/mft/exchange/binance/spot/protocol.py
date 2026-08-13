@@ -5,8 +5,10 @@ spot and on futures, so it lives one level up in
 :mod:`mft.exchange.binance.protocol` and is re-exported here — this module is
 the spot half: which URLs those frames go to.
 
-Two of them, because Binance splits what Gate serves on one: request/reply on
-``ws-api.binance.com`` and market pushes on ``stream.binance.com``.
+Three of them. Binance splits what Gate serves on one: request/reply on
+``ws-api.binance.com`` and market pushes on ``stream.binance.com``. The third
+is REST — not a transport the trading path uses, and deliberately so, but the
+one the account-history reads go to; see :mod:`mft.exchange.binance.spot.rest`.
 """
 
 from __future__ import annotations
@@ -33,12 +35,17 @@ from mft.exchange.binance.protocol import (
 BINANCE_SPOT_WS_API_URL = "wss://ws-api.binance.com:443/ws-api/v3"
 #: Market pushes. Always the ``/stream`` (combined) form — see :mod:`.streams`.
 BINANCE_SPOT_STREAM_URL = "wss://stream.binance.com:9443/stream"
+#: Account history. Batch reads only — the trading path stays on the socket.
+BINANCE_SPOT_REST_URL = "https://api.binance.com"
 
 #: Testnet, for smoke-testing a credential without risking one.
 BINANCE_SPOT_WS_API_TESTNET_URL = "wss://ws-api.testnet.binance.vision/ws-api/v3"
 BINANCE_SPOT_STREAM_TESTNET_URL = "wss://stream.testnet.binance.vision/stream"
+BINANCE_SPOT_REST_TESTNET_URL = "https://testnet.binance.vision"
 
 __all__ = [
+    "BINANCE_SPOT_REST_TESTNET_URL",
+    "BINANCE_SPOT_REST_URL",
     "BINANCE_SPOT_STREAM_TESTNET_URL",
     "BINANCE_SPOT_STREAM_URL",
     "BINANCE_SPOT_WS_API_TESTNET_URL",

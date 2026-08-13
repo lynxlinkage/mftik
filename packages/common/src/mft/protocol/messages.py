@@ -86,6 +86,44 @@ class TdAttachResult(BaseModel):
     refcount: int
 
 
+class TdBackfill(BaseModel):
+    """Anyone → TD: re-read this account's history from the venue.
+
+    A request, not a command: whoever takes it decides how much of the walk to
+    do, and a run that stops early is not a failure — the cursors it advanced
+    are progress, and the next request resumes from them. That is what lets the
+    same message be sent by a schedule, by a strategy detaching, and by a TD on
+    its way down, without any of them coordinating.
+
+    ``tickers`` narrows the walk to named instruments. Empty means every
+    instrument the account has an order on file for, which is the set that can
+    have history worth reading.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    tickers: list[str] = Field(default_factory=list)
+    #: Why this was asked for, for the log. ``cron`` / ``detach`` / ``shutdown``.
+    reason: str = ""
+
+
+class TdBackfillResult(BaseModel):
+    """TD → caller: what one backfill run managed to confirm."""
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    ok: bool
+    #: Instruments walked to completion this run.
+    tickers: list[str] = Field(default_factory=list)
+    fills: int = 0
+    orders: int = 0
+    #: The weakest settlement line across the walks, after this run.
+    confirmed_through_ts: float = 0.0
+    reason: str = ""
+
+
 class TdDetachRequest(BaseModel):
     """STS → TD: drop this attach (refcount --), and say so.
 
@@ -687,6 +725,8 @@ TD_RECON_DONE = "td.recon.done"
 TD_OMS_VIEW = "td.oms.view"
 TD_LEDGER_VIEW = "td.ledger.view"
 TD_ORDER_UPDATE = "td.order.update"
+TD_BACKFILL = "td.backfill"
+TD_BACKFILL_RESULT = "td.backfill.result"
 TD_FILL = "td.fill"
 TD_ORDER_ACK = "td.order.ack"
 TD_LEVERAGE_ACK = "td.leverage.ack"

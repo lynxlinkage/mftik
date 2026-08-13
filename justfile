@@ -17,6 +17,11 @@ test:
 lint:
     uv run --all-packages ruff check packages apps
 
+# Sign a real history read with a stored credential and print what came back.
+# Read-only: every call is a GET on a history endpoint and nothing is written.
+backfill-check *args:
+    uv run --all-packages python scripts/backfill_check.py {{args}}
+
 # Apply DB migrations
 migrate revision="head":
     uv run --all-packages mft-db-migrate {{revision}}

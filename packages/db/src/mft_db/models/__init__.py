@@ -2,6 +2,15 @@ from mft_db.models.account import Account
 from mft_db.models.api import Api, ApiType
 from mft_db.models.audit import Audit
 from mft_db.models.base import Base
+from mft_db.models.history import (
+    Attribution,
+    BackfillCursorRow,
+    CashFlowRow,
+    FillRow,
+    OrderRow,
+    Source,
+    Stream,
+)
 from mft_db.models.session import (
     MdSessionRow,
     SessionDomain,
@@ -23,13 +32,20 @@ __all__ = [
     "Account",
     "Api",
     "ApiType",
+    "Attribution",
     "Audit",
+    "BackfillCursorRow",
     "Base",
+    "CashFlowRow",
+    "FillRow",
     "MdSessionRow",
+    "OrderRow",
     "SessionDomain",
     "SessionLog",
     "SessionStatus",
     "FilterName",
+    "Source",
+    "Stream",
     "StrategyRow",
     "StsSessionRow",
     "SymbolCategory",

@@ -9,10 +9,12 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from mft.broker import Broker
 
+from mft_api.backfill_cron import run_backfill_cron
 from mft_api.log_persist import run_log_persist
 from mft_api.routes import (
     apis_router,
     audits_router,
+    board_router,
     health_router,
     logs_router,
     md_router,
@@ -22,6 +24,7 @@ from mft_api.routes import (
     td_router,
 )
 from mft_api.ws import (
+    board_bridge,
     md_log_bridge,
     sts_log_bridge,
     sts_status_bridge,
@@ -44,18 +47,22 @@ async def lifespan(app: FastAPI):
 
     persist_stop = asyncio.Event()
     persist_task = asyncio.create_task(run_log_persist(persist_stop))
+    backfill_stop = asyncio.Event()
+    backfill_task = asyncio.create_task(run_backfill_cron(backfill_stop))
     try:
         yield
     finally:
         persist_stop.set()
-        try:
-            await asyncio.wait_for(persist_task, timeout=10)
-        except (TimeoutError, asyncio.CancelledError):
-            persist_task.cancel()
+        backfill_stop.set()
+        for task in (persist_task, backfill_task):
             try:
-                await persist_task
-            except asyncio.CancelledError:
-                pass
+                await asyncio.wait_for(task, timeout=10)
+            except (TimeoutError, asyncio.CancelledError):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         await broker.close()
         app.state.broker = None
         logger.info("API broker closed")
@@ -78,6 +85,13 @@ app.include_router(md_router)
 app.include_router(sym_router)
 app.include_router(audits_router)
 app.include_router(logs_router)
+app.include_router(board_router)
+
+
+@app.websocket("/ws/board")
+async def ws_board(websocket: WebSocket) -> None:
+    """Live executions, attributed to the session that placed them."""
+    await board_bridge(websocket)
 
 
 @app.websocket("/ws/status/sts")

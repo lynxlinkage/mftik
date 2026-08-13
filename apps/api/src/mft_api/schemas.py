@@ -235,6 +235,76 @@ class SessionLogListResponse(BaseModel):
     has_more: bool = False
 
 
+class BoardSession(BaseModel):
+    """One strategy run, as the board shows it.
+
+    Counts and times, and deliberately no PnL. Deriving a result means matching
+    executions into positions and valuing whatever is left open, and a number
+    produced before that machinery exists would be believed. What is here is
+    what the record can already state without arithmetic.
+    """
+
+    session_id: str
+    strategy: str | None = None
+    #: live | done | failed | interrupted
+    status: str
+    reason: str | None = None
+    created_at: float
+    finished_at: float | None = None
+    #: Seconds from start to finish, or to now while it is still running.
+    duration_s: float
+    running: bool
+    #: Executions recorded for this run. The only count here, and deliberately:
+    #: it never decreases, and losing rows makes it under-report, which reads
+    #: as a quiet run rather than as a wrong one.
+    fills: int = 0
+    td_api_ids: list[int] = Field(default_factory=list)
+    #: How far this run's record has been confirmed against the venue. Null
+    #: when nothing has been walked yet, which is not the same as zero fills —
+    #: it is the record declining to claim it knows.
+    confirmed_through_ts: float | None = None
+    #: Whether every count above sits at or before that line.
+    settled: bool = False
+
+
+class BoardResponse(BaseModel):
+    sessions: list[BoardSession] = Field(default_factory=list)
+
+
+class BoardFill(BaseModel):
+    """One execution, as the record holds it.
+
+    Decimals travel as strings. Every one of these is money or size, and JSON
+    numbers are doubles — a round trip through one is exactly the silent
+    rounding the ``NUMERIC(38,18)`` columns exist to avoid, and it would happen
+    on the way *out*, where nothing downstream could tell.
+    """
+
+    #: Row id, and the second half of the page cursor.
+    id: int
+    #: The venue's own trade id.
+    fill_id: str
+    universal_ticker: str
+    side: str
+    price: str
+    qty: str
+    fee: str
+    fee_asset: str
+    client_order_id: str | None = None
+    venue_order_id: str | None = None
+    api_id: int
+    ts: float
+    #: ``stream`` — what TD caught live. ``backfill`` — re-read from the venue.
+    source: str
+    #: Whether this row sits at or before the run's settlement line.
+    settled: bool = False
+
+
+class BoardFillListResponse(BaseModel):
+    fills: list[BoardFill] = Field(default_factory=list)
+    has_more: bool = False
+
+
 class ErrorBody(BaseModel):
     code: str
     message: str

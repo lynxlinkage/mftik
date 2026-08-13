@@ -20,6 +20,7 @@
 
 	const nav = [
 		{ href: '/', label: 'Home' },
+		{ href: '/board', label: 'Board' },
 		{ href: '/apis', label: 'APIs' },
 		{ href: '/sts', label: 'STS' },
 		{ href: '/td', label: 'TD' },
