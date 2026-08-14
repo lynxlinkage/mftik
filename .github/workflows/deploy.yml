@@ -32,6 +32,7 @@ jobs:
           --health-retries 10
     env:
       TEST_POSTGRES_URL: postgresql+asyncpg://mft:mft@localhost:5432/mft_test
+      DATABASE_URL_SYNC: postgresql+psycopg://mft:mft@localhost:5432/mft_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -43,6 +44,14 @@ jobs:
 
       - name: Lint
         run: uv run --all-packages ruff check packages apps conftest.py
+
+      # The deploy runs `alembic upgrade head` against production. This is the
+      # only place that proves the result of doing so matches the models the
+      # images are built from.
+      - name: Migrations match the models
+        run: |
+          uv run --all-packages alembic -c packages/db/alembic.ini upgrade head
+          uv run --all-packages alembic -c packages/db/alembic.ini check
 
       - name: Test
         run: uv run --all-packages pytest packages apps -q

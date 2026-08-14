@@ -50,6 +50,19 @@ fetch *args:
     REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}" \
       uv run --all-packages python scripts/fetch_md.py {{args}}
 
+# Fail if the migrations would not build the models. Runs against a scratch
+# database so it never touches the dev one, and drops it again afterwards.
+check-migrations:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    user="${POSTGRES_USER:-mft}"
+    docker compose exec -T postgres dropdb -U "$user" --if-exists mft_migration_check
+    docker compose exec -T postgres createdb -U "$user" mft_migration_check
+    export DATABASE_URL_SYNC="postgresql+psycopg://mft:mft@localhost:5432/mft_migration_check"
+    uv run --all-packages alembic -c packages/db/alembic.ini upgrade head
+    uv run --all-packages alembic -c packages/db/alembic.ini check
+    docker compose exec -T postgres dropdb -U "$user" mft_migration_check
+
 # Autogenerate a migration (message required)
 makemigration message:
     uv run --all-packages alembic -c packages/db/alembic.ini revision --autogenerate -m "{{message}}"
