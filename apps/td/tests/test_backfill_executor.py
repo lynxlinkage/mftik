@@ -131,11 +131,14 @@ class FakeFactory:
         return self.reader
 
 
-def a_trade(fill_id: str, *, ts: float, order_id: str = "500") -> Fill:
+def a_trade(
+    fill_id: str, *, ts: float, order_id: str = "500", cid: str | None = None
+) -> Fill:
+    """``cid`` is what Bybit and Gate echo back on the trade row itself."""
     return Fill(
         fill_id=fill_id,
         order_id=order_id,
-        client_order_id=None,
+        client_order_id=cid,
         universal_ticker=TICKER,
         side=Side.BUY,
         price=Decimal("100"),
@@ -306,7 +309,7 @@ async def test_a_first_walk_starts_at_the_accounts_first_order(
 async def test_a_backfilled_fill_is_attributed_through_its_order(
     broker, scope
 ) -> None:
-    """A venue trade row names an order id and no client order id."""
+    """A Binance trade row names an order id and no client order id."""
     await seed_order(scope, ts=ago(3600), cid="cid-1", session="sess-1")
     reader = FakeReader(trades=[a_trade("1", ts=ago(1800), order_id="500")])
 
@@ -331,6 +334,80 @@ async def test_a_fill_on_an_unknown_order_is_written_unattributed(
     async with scope() as db:
         rows = await FillRepository(db).list_for_session("sess-1")
     assert [r.fill_id for r in rows] == [], "not filed under somebody else"
+
+
+async def test_our_own_id_on_the_trade_row_attributes_it(broker, scope) -> None:
+    """Bybit and Gate echo the link id back, so the fill names its own owner.
+
+    The order here has no venue id on file — a submit TD recorded before the
+    ack came back — so the id join cannot see it at all. Ignoring what the
+    venue handed us would file one of our own executions under nobody.
+    """
+    await seed_order(scope, ts=ago(3600), cid="cid-1", session="sess-1", key="")
+    reader = FakeReader(
+        trades=[a_trade("1", ts=ago(1800), order_id="500", cid="cid-1")]
+    )
+
+    await executor(broker, scope, FakeFactory(reader)).run(API_ID)
+
+    async with scope() as db:
+        fills = await FillRepository(db).replay_for_session("sess-1")
+    assert [f.fill_id for f in fills] == ["1"]
+    assert fills[0].client_order_id == "cid-1"
+
+
+async def test_the_venues_own_id_wins_where_both_answer(broker, scope) -> None:
+    """A slot wraps and is reused; a venue order id never is.
+
+    So a trade carrying a client order id from far enough back can name an
+    order a later session also used, and the id the venue itself assigned is
+    the one to believe.
+    """
+    await seed_order(scope, ts=ago(3600), cid="cid-new", session="sess-new")
+    await seed_order(
+        scope, ts=ago(86400), cid="cid-old", session="sess-old", key="404"
+    )
+    reader = FakeReader(
+        trades=[a_trade("1", ts=ago(1800), order_id="500", cid="cid-old")]
+    )
+
+    await executor(broker, scope, FakeFactory(reader)).run(API_ID)
+
+    async with scope() as db:
+        repo = FillRepository(db)
+        assert [f.fill_id for f in await repo.replay_for_session("sess-new")] == ["1"]
+        assert await repo.replay_for_session("sess-old") == []
+
+
+async def test_a_link_id_we_never_placed_stays_unattributed(broker, scope) -> None:
+    """``text`` is free-form on Gate: another tool may put anything there."""
+    await seed_order(scope, ts=ago(3600))
+    reader = FakeReader(
+        trades=[a_trade("9", ts=ago(1800), order_id="999", cid="not-ours")]
+    )
+
+    await executor(broker, scope, FakeFactory(reader)).run(API_ID)
+
+    async with scope() as db:
+        (fill,) = await FillRepository(db).list_unattributed()
+    assert fill.fill_id == "9"
+    assert fill.client_order_id == "not-ours", "kept — it is what the venue said"
+
+
+async def test_a_link_id_on_an_order_that_is_nobodys_stays_unattributed(
+    broker, scope
+) -> None:
+    """An order on file with no session is an answer, not a missing one."""
+    await seed_order(scope, ts=ago(3600), cid="by-hand", session=None, key="")
+    reader = FakeReader(
+        trades=[a_trade("9", ts=ago(1800), order_id="999", cid="by-hand")]
+    )
+
+    await executor(broker, scope, FakeFactory(reader)).run(API_ID)
+
+    async with scope() as db:
+        (fill,) = await FillRepository(db).list_unattributed()
+    assert fill.fill_id == "9"
 
 
 async def test_a_rediscovered_order_of_ours_keeps_its_session(

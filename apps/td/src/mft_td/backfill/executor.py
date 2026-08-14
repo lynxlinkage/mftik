@@ -360,28 +360,61 @@ class BackfillExecutor:
     ) -> int:
         """Write executions, attributed through the orders already on file.
 
-        A venue trade row names an order id and no client order id, so this is
-        the join. A fill whose order is not on file is written unattributed
-        rather than guessed at — that is a real state, and the next run has
-        another chance once the orders walk has caught up.
+        Two joins, because the venues do not agree on what a trade row says. A
+        Binance trade names an order id and nothing else, so the only route to
+        a session is the order that id belongs to. Bybit and Gate echo back our
+        own link id on the trade itself — an execution that arrives already
+        naming the session that placed it — and reaching that session still
+        needs ``orders``, but by the key the fill itself carries.
+
+        The venue's id is preferred where both answer. Ours is minted from a
+        slot that wraps and is reused, so a client order id from far enough
+        back can name an order a later session also used; the venue's is
+        unambiguous for the life of the account.
+
+        A fill neither join reaches is written unattributed rather than guessed
+        at — that is a real state, and the next run has another chance once the
+        orders walk has caught up.
         """
         rows = [fill_row(fill, api_id=api_id, source=Source.BACKFILL) for fill in fills]
-        owners = await OrderRepository(db).by_venue_ids(
+        repo = OrderRepository(db)
+        owners = await repo.by_venue_ids(
             api_id, [row["venue_order_id"] for row in rows if row["venue_order_id"]]
+        )
+        # Keyed the way ``orders`` keys itself — ``order_key`` is the client
+        # order id whenever there is one. Empty for a venue that sends none, and
+        # the read costs nothing then.
+        by_cid = await repo.owners_for(
+            [
+                (api_id, row["client_order_id"])
+                for row in rows
+                if row["client_order_id"]
+            ]
         )
         for row in rows:
             owner = owners.get(row["venue_order_id"] or "")
-            if owner is None:
-                continue
-            row["session_id"] = owner.session_id
-            # Only when the venue gave us none. Bybit and Gate put the link id
-            # on the trade row itself, and the matched order can carry a null
-            # one — an order discovered by an earlier backfill, say — so
-            # assigning unconditionally would throw away the real id on its way
-            # to a first insert, where the upsert's coalesce cannot save it.
-            row["client_order_id"] = (
-                row["client_order_id"] or owner.client_order_id
-            )
+            if owner is not None:
+                # Only when the venue gave us none. Bybit and Gate put the link
+                # id on the trade row itself, and the matched order can carry a
+                # null one — an order discovered by an earlier backfill, say —
+                # so assigning unconditionally would throw away the real id on
+                # its way to a first insert, where the upsert's coalesce cannot
+                # save it.
+                row["client_order_id"] = (
+                    row["client_order_id"] or owner.client_order_id
+                )
+                if owner.session_id is not None:
+                    row["session_id"] = owner.session_id
+                    continue
+            # The order is not on file, or is on file as nobody's. Our own id
+            # on the trade row is the second chance, and the only one for a
+            # fill whose order row exists but has no venue id yet — a submit TD
+            # recorded before the ack came back, which is precisely the row the
+            # first join cannot see.
+            cid = row["client_order_id"]
+            session_id = by_cid.get((api_id, cid)) if cid else None
+            if session_id is not None:
+                row["session_id"] = session_id
         return await FillRepository(db).bulk_upsert(rows)
 
     async def _pause(self) -> None:

@@ -182,9 +182,12 @@ class OrderRepository(BaseRepository[OrderRow]):
     ) -> dict[str, OrderRow]:
         """``venue_order_id`` → order, for the ids asked about.
 
-        The join a backfilled trade row cannot make for itself: the venue's
-        trade history names an order id and no client order id, so this is
-        where an execution re-read from a venue becomes a session's again.
+        The join a backfilled trade row cannot make for itself: a Binance trade
+        row names an order id and no client order id, so this is where an
+        execution re-read from that venue becomes a session's again. Bybit and
+        Gate echo our own link id back on the trade and can be attributed by
+        :meth:`owners_for` instead — but this is still preferred where both
+        answer, a venue's id being unambiguous where a reused slot is not.
 
         Scoped to the ids in hand rather than to a whole instrument — an
         account with a long history on one symbol would otherwise load every
