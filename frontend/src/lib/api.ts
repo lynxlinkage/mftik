@@ -300,6 +300,21 @@ export const api = {
 			`/board/sessions/${encodeURIComponent(sessionId)}/fills${qs ? `?${qs}` : ''}`
 		);
 	},
+	/**
+	 * Executions no session of ours placed — trading done outside the platform,
+	 * and our own fills whose order never reached the record. Not keyed by a
+	 * session, because that is exactly what these rows are missing.
+	 */
+	boardExternalFills: (
+		opts: { beforeTs?: number; beforeId?: number; limit?: number } = {}
+	) => {
+		const q = new URLSearchParams();
+		if (opts.beforeTs != null) q.set('before_ts', String(opts.beforeTs));
+		if (opts.beforeId != null) q.set('before_id', String(opts.beforeId));
+		if (opts.limit != null) q.set('limit', String(opts.limit));
+		const qs = q.toString();
+		return request<BoardFillList>(`/board/fills/external${qs ? `?${qs}` : ''}`);
+	},
 	venues: () => request<{ venues: Venue[] }>('/venues'),
 	symVenues: () => request<SymVenues>('/sym/venues'),
 	symbols: (

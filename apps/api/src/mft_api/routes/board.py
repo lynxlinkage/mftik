@@ -16,6 +16,12 @@ direction a record should have.
 "What is resting right now" is a real question and this is the wrong place for
 it — the answer lives in TD's own book, and a session's page is where to ask.
 
+One listing here is not keyed by a session at all: the executions that belong
+to none. Everything else reads by ``session_id``, so a fill without one was in
+no listing anywhere, and the row that most needs looking at — ours, with its
+order missing — was the quietest thing in the record. It is a listing rather
+than a count for the same reason: there is nothing to total, only rows to read.
+
 Every summary carries its settlement line alongside its count, because the two
 mean different things. ``fills`` is what has been recorded; ``settled`` says
 whether the venue has been re-read across the whole run and agreed. A live
@@ -155,6 +161,31 @@ def _summary(
     )
 
 
+def _fill(row: Any, line: float | None) -> BoardFill:
+    """One stored execution on the wire.
+
+    ``settled`` is decided per row rather than per page: a page can straddle
+    the line, and the rows after it are the ones a reader should not treat as
+    final.
+    """
+    return BoardFill(
+        id=row.id,
+        fill_id=row.fill_id,
+        universal_ticker=row.universal_ticker,
+        side=row.side,
+        price=wire_decimal(row.price) or "0",
+        qty=wire_decimal(row.qty) or "0",
+        fee=wire_decimal(row.fee) or "0",
+        fee_asset=row.fee_asset,
+        client_order_id=row.client_order_id,
+        venue_order_id=row.venue_order_id,
+        api_id=row.api_id,
+        ts=row.ts,
+        source=row.source,
+        settled=bool(line and row.ts <= line),
+    )
+
+
 @router.get("/sessions", response_model=BoardResponse)
 async def list_board_sessions(
     status: str | None = Query(default=None),
@@ -232,27 +263,57 @@ async def list_board_fills(
     has_more = len(rows) > limit
     line = lines.get(session_id)
     return BoardFillListResponse(
-        fills=[
-            BoardFill(
-                id=row.id,
-                fill_id=row.fill_id,
-                universal_ticker=row.universal_ticker,
-                side=row.side,
-                price=wire_decimal(row.price) or "0",
-                qty=wire_decimal(row.qty) or "0",
-                fee=wire_decimal(row.fee) or "0",
-                fee_asset=row.fee_asset,
-                client_order_id=row.client_order_id,
-                venue_order_id=row.venue_order_id,
-                api_id=row.api_id,
-                ts=row.ts,
-                source=row.source,
-                # Per row rather than per page: a page can straddle the line,
-                # and the rows after it are the ones a reader should not treat
-                # as final.
-                settled=bool(line and row.ts <= line),
-            )
-            for row in rows[:limit]
-        ],
+        fills=[_fill(row, line) for row in rows[:limit]],
         has_more=has_more,
+    )
+
+
+@router.get("/fills/external", response_model=BoardFillListResponse)
+async def list_external_fills(
+    before_ts: float | None = Query(default=None),
+    before_id: int | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> BoardFillListResponse:
+    """Executions on our accounts that no session of ours placed, newest first.
+
+    These are recorded and, until now, invisible: every other listing here is
+    keyed by session, and a fill with no session is in none of them. That hid
+    two different things behind one silence — trading done by hand or by
+    another tool, which is real and simply not a run's, and *our own* fills
+    whose order never reached ``orders``, which is a hole in the record.
+
+    They are not told apart here on purpose. The two are indistinguishable
+    from the fill alone — the question is what the account was doing, and
+    answering it needs a person. What this page can do is stop the second kind
+    from being silent.
+
+    Cursor-paginated on ``(ts, id)`` like the per-session listing, and for the
+    same reason: rows keep arriving underneath a reader.
+    """
+    fetch = limit + 1
+    async with session_scope() as db:
+        rows = list(
+            await FillRepository(db).list_unattributed(
+                before_ts=before_ts, before_id=before_id, limit=fetch
+            )
+        )
+        page = rows[:limit]
+        cursors = await BackfillCursorRepository(db).lines_for(
+            [row.api_id for row in page], [Stream.TRADES, Stream.ORDERS]
+        )
+
+    # Both streams, unlike a session's rows which need trades for the figures
+    # and orders for the attribution: here the *absence* of an attribution is
+    # the claim being made, and it only holds once the orders walk has passed
+    # this instrument too. Until then the order that would claim this fill may
+    # still be on its way.
+    def line_for(row: Any) -> float:
+        return min(
+            cursors.get((row.api_id, stream, row.universal_ticker), 0.0)
+            for stream in (Stream.TRADES, Stream.ORDERS)
+        )
+
+    return BoardFillListResponse(
+        fills=[_fill(row, line_for(row)) for row in page],
+        has_more=len(rows) > limit,
     )

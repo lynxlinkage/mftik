@@ -349,6 +349,30 @@ class FillRepository(BaseRepository[FillRow]):
         q = q.order_by(FillRow.ts.desc(), FillRow.id.desc()).limit(limit)
         return (await self.session.execute(q)).scalars().all()
 
+    async def list_unattributed(
+        self,
+        *,
+        before_ts: float | None = None,
+        before_id: int | None = None,
+        limit: int = 100,
+    ) -> Sequence[FillRow]:
+        """Executions on our accounts that no session of ours placed.
+
+        Placed by hand, by another tool, or before the account was attached —
+        and also, until the walk that finds them catches up, our own fills
+        whose order is not on file yet. The two look identical here, which is
+        the point of showing them at all: the second kind is a hole in the
+        record and nothing else lists it.
+
+        ``ix_fills_session_ts_id`` covers this: nulls are indexed, so this
+        reads the head of one index rather than scanning every fill ever
+        recorded to find the few that are nobody's.
+        """
+        q = select(FillRow).where(FillRow.session_id.is_(None))
+        q = _before(q, FillRow, before_ts, before_id)
+        q = q.order_by(FillRow.ts.desc(), FillRow.id.desc()).limit(limit)
+        return (await self.session.execute(q)).scalars().all()
+
     async def count_by_session(
         self, session_ids: Sequence[str]
     ) -> dict[str, int]:

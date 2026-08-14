@@ -1244,6 +1244,84 @@
           }
         }
       }
+    },
+    "/board/fills/external": {
+      "get": {
+        "tags": [
+          "board"
+        ],
+        "summary": "List External Fills",
+        "description": "Executions on our accounts that no session of ours placed, newest first.\n\nThese are recorded and, until now, invisible: every other listing here is\nkeyed by session, and a fill with no session is in none of them. That hid\ntwo different things behind one silence \u2014 trading done by hand or by\nanother tool, which is real and simply not a run's, and *our own* fills\nwhose order never reached ``orders``, which is a hole in the record.\n\nThey are not told apart here on purpose. The two are indistinguishable\nfrom the fill alone \u2014 the question is what the account was doing, and\nanswering it needs a person. What this page can do is stop the second kind\nfrom being silent.\n\nCursor-paginated on ``(ts, id)`` like the per-session listing, and for the\nsame reason: rows keep arriving underneath a reader.",
+        "operationId": "list_external_fills_board_fills_external_get",
+        "parameters": [
+          {
+            "name": "before_ts",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Ts"
+            }
+          },
+          {
+            "name": "before_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoardFillListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

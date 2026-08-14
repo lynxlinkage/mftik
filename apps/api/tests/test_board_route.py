@@ -100,20 +100,22 @@ async def an_order(
 
 async def a_fill(
     scope,
-    session_id: str,
+    session_id: str | None,
     *,
     fill_id: str,
     ts: float,
     price: str = "100",
     qty: str = "0.25",
+    ticker: str = TICKER,
 ) -> None:
+    """``session_id=None`` is an execution no run of ours placed."""
     async with scope() as session:
         await FillRepository(session).bulk_upsert(
             [
                 {
                     "api_id": API_ID,
                     "fill_id": fill_id,
-                    "universal_ticker": TICKER,
+                    "universal_ticker": ticker,
                     "venue_order_id": "500",
                     "client_order_id": "cid-1",
                     "session_id": session_id,
@@ -131,10 +133,16 @@ async def a_fill(
         )
 
 
-async def confirm(scope, through: float, *, ticker: str = TICKER) -> None:
+async def confirm(
+    scope,
+    through: float,
+    *,
+    ticker: str = TICKER,
+    streams: tuple[str, ...] = (Stream.TRADES, Stream.ORDERS),
+) -> None:
     async with scope() as session:
         repo = BackfillCursorRepository(session)
-        for stream in (Stream.TRADES, Stream.ORDERS):
+        for stream in streams:
             await repo.advance(
                 API_ID, stream, scope=ticker, confirmed_through_ts=through
             )
@@ -151,6 +159,14 @@ async def rows(*, status: str | None = None, limit: int = 50):
 async def fills_of(session_id: str, **kw):
     return await board_routes.list_board_fills(
         session_id,
+        before_ts=kw.get("before_ts"),
+        before_id=kw.get("before_id"),
+        limit=kw.get("limit", 100),
+    )
+
+
+async def external_fills(**kw):
+    return await board_routes.list_external_fills(
         before_ts=kw.get("before_ts"),
         before_id=kw.get("before_id"),
         limit=kw.get("limit", 100),
@@ -444,3 +460,103 @@ async def test_a_live_run_that_recorded_nothing_is_still_not_settled(db) -> None
     (row,) = await rows()
 
     assert row.settled is False
+
+
+# --- executions belonging to no run ----------------------------------------
+
+
+async def test_executions_with_no_session_are_listed_on_their_own(db) -> None:
+    """Every other listing is keyed by session, so these were in none of them."""
+    await a_session(db, "s1")
+    await a_fill(db, "s1", fill_id="ours", ts=START.timestamp())
+    await a_fill(db, None, fill_id="theirs", ts=START.timestamp() + 1)
+
+    page = await external_fills()
+
+    assert [f.fill_id for f in page.fills] == ["theirs"]
+    assert page.has_more is False
+
+
+async def test_external_executions_come_back_newest_first(db) -> None:
+    for i in range(1, 4):
+        await a_fill(db, None, fill_id=str(i), ts=START.timestamp() + i)
+
+    page = await external_fills()
+
+    assert [f.fill_id for f in page.fills] == ["3", "2", "1"]
+
+
+async def test_external_executions_paginate_on_a_cursor(db) -> None:
+    for i in range(1, 6):
+        await a_fill(db, None, fill_id=str(i), ts=START.timestamp() + i)
+
+    first = await external_fills(limit=2)
+    assert [f.fill_id for f in first.fills] == ["5", "4"]
+    assert first.has_more is True
+
+    oldest = first.fills[-1]
+    second = await external_fills(
+        before_ts=oldest.ts, before_id=oldest.id, limit=2
+    )
+    assert [f.fill_id for f in second.fills] == ["3", "2"]
+
+
+async def test_an_external_execution_is_settled_once_the_walk_passed_it(db) -> None:
+    await a_fill(db, None, fill_id="early", ts=START.timestamp() + 60)
+    await a_fill(db, None, fill_id="late", ts=START.timestamp() + 900)
+    await confirm(db, START.timestamp() + 300)
+
+    by_id = {f.fill_id: f for f in (await external_fills()).fills}
+
+    assert by_id["early"].settled is True
+    assert by_id["late"].settled is False
+
+
+async def test_an_unwalked_account_has_no_settled_external_executions(db) -> None:
+    await a_fill(db, None, fill_id="1", ts=START.timestamp())
+
+    (fill,) = (await external_fills()).fills
+
+    assert fill.settled is False
+
+
+async def test_an_unwalked_order_stream_leaves_it_provisional(db) -> None:
+    """Here the *absence* of an attribution is the claim being made.
+
+    The trades walk confirms the figures; only the orders walk can say nothing
+    on file claims this fill. Calling it settled on trades alone would report
+    "nobody's" about a fill whose order is still on its way.
+    """
+    await a_fill(db, None, fill_id="1", ts=START.timestamp())
+    await confirm(db, START.timestamp() + 300, streams=(Stream.TRADES,))
+
+    (fill,) = (await external_fills()).fills
+
+    assert fill.settled is False
+
+
+async def test_an_external_execution_on_another_instrument_reads_its_own_line(
+    db,
+) -> None:
+    """One account, two books, and only one of them walked."""
+    other = "Binance_Spot_ETHUSDT"
+    await a_fill(db, None, fill_id="btc", ts=START.timestamp())
+    await a_fill(db, None, fill_id="eth", ts=START.timestamp(), ticker=other)
+    await confirm(db, START.timestamp() + 300)
+
+    by_id = {f.fill_id: f for f in (await external_fills()).fills}
+
+    assert by_id["btc"].settled is True
+    assert by_id["eth"].settled is False
+
+
+async def test_external_amounts_travel_as_strings_without_padding(db) -> None:
+    await a_fill(
+        db, None, fill_id="1", ts=START.timestamp(), price="63863.5", qty="1"
+    )
+
+    (fill,) = (await external_fills()).fills
+
+    assert fill.price == "63863.5"
+    assert fill.qty == "1"
+    assert Decimal(fill.price) == Decimal("63863.5")

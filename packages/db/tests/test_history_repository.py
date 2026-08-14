@@ -370,6 +370,59 @@ async def test_fills_list_newest_first_with_a_cursor(db) -> None:
     assert [r.fill_id for r in page] == ["2", "1"]
 
 
+async def test_unattributed_fills_list_newest_first_with_a_cursor(db) -> None:
+    """The rows no session listing can reach, since they have no session."""
+    repo = FillRepository(db)
+    await repo.bulk_upsert(
+        [
+            fill_row(fill_id=str(i), ts=1000.0 + i, session_id=None)
+            for i in range(1, 5)
+        ]
+    )
+    await db.commit()
+
+    newest = await repo.list_unattributed(limit=2)
+    assert [r.fill_id for r in newest] == ["4", "3"]
+
+    page = await repo.list_unattributed(
+        before_ts=newest[-1].ts, before_id=newest[-1].id, limit=2
+    )
+    assert [r.fill_id for r in page] == ["2", "1"]
+
+
+async def test_an_attributed_fill_is_not_listed_as_unattributed(db) -> None:
+    repo = FillRepository(db)
+    await repo.bulk_upsert(
+        [
+            fill_row(fill_id="ours", ts=1001.0),
+            fill_row(fill_id="theirs", ts=1002.0, session_id=None),
+        ]
+    )
+    await db.commit()
+
+    assert [r.fill_id for r in await repo.list_unattributed()] == ["theirs"]
+
+
+async def test_a_fill_leaves_the_unattributed_list_once_it_is_claimed(db) -> None:
+    """Same rule ``attribute`` writes, read from the other side.
+
+    A fill that arrived before its order is here until the order lands, and the
+    listing has to stop showing it then — otherwise a hole that has since been
+    filled goes on asking to be looked at.
+    """
+    repo = FillRepository(db)
+    await repo.bulk_upsert([fill_row(client_order_id=None, session_id=None)])
+    await db.commit()
+    assert len(await repo.list_unattributed()) == 1
+
+    await repo.attribute(
+        1, "4293153", session_id="sess-1", client_order_id="281474976710656001"
+    )
+    await db.commit()
+
+    assert await repo.list_unattributed() == []
+
+
 # --- cash flows ------------------------------------------------------------
 
 

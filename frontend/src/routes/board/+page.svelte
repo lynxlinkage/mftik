@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { api, formatTs, shortId, type BoardSession } from '$lib/api';
+	import { api, formatTs, shortId, type BoardFill, type BoardSession } from '$lib/api';
 	import { connectFills, type FillConnection } from '$lib/logging/fills';
 
 	/**
@@ -14,27 +14,44 @@
 	 * what has arrived on the socket since this page loaded, and exists so a
 	 * running session moves before the writer's next flush — it is a hint, never
 	 * a total, and a refresh replaces it with the real figure.
+	 *
+	 * The last tab shows rows instead of cards, because what it lists has no run
+	 * to be a card of: executions belonging to no session. A card would need a
+	 * heading naming whose they are, which is the one thing nobody knows — so
+	 * they are listed one execution per line, the way the drill-in lists a run's,
+	 * and read rather than counted.
 	 */
 
+	type Tab = 'all' | 'live' | 'done' | 'external';
+
 	let sessions = $state<BoardSession[]>([]);
+	let external = $state<BoardFill[]>([]);
+	let externalMore = $state(false);
 	let live = $state<Record<string, number>>({});
 	let connection = $state<FillConnection>('connecting');
-	let filter = $state<'all' | 'live' | 'done'>('all');
+	let filter = $state<Tab>('all');
 	let error = $state<string | null>(null);
 	let loading = $state(true);
+	let loadingMore = $state(false);
 	let disconnect: (() => void) | null = null;
 
 	async function refresh() {
 		loading = true;
 		error = null;
 		try {
-			const res = await api.boardSessions(
-				filter === 'all' ? {} : { status: filter === 'live' ? 'live' : 'done' }
-			);
-			sessions = res.sessions;
-			// The server just told us the truth; anything counted locally is
-			// already inside it.
-			live = {};
+			if (filter === 'external') {
+				const res = await api.boardExternalFills({ limit: 100 });
+				external = res.fills;
+				externalMore = res.has_more;
+			} else {
+				const res = await api.boardSessions(
+					filter === 'all' ? {} : { status: filter === 'live' ? 'live' : 'done' }
+				);
+				sessions = res.sessions;
+				// The server just told us the truth; anything counted locally is
+				// already inside it.
+				live = {};
+			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -42,7 +59,26 @@
 		}
 	}
 
-	function setFilter(next: 'all' | 'live' | 'done') {
+	async function loadMore() {
+		const oldest = external.at(-1);
+		if (!oldest || loadingMore) return;
+		loadingMore = true;
+		try {
+			const next = await api.boardExternalFills({
+				beforeTs: oldest.ts,
+				beforeId: oldest.id,
+				limit: 100
+			});
+			external = [...external, ...next.fills];
+			externalMore = next.has_more;
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			loadingMore = false;
+		}
+	}
+
+	function setFilter(next: Tab) {
 		filter = next;
 		void refresh();
 	}
@@ -111,9 +147,95 @@
 	<button type="button" class:active={filter === 'done'} onclick={() => setFilter('done')}>
 		Finished
 	</button>
+	<button
+		type="button"
+		class:active={filter === 'external'}
+		onclick={() => setFilter('external')}
+		title="executions on these accounts that no run of ours placed"
+	>
+		External
+	</button>
 </div>
 
-{#if sessions.length === 0}
+{#if filter === 'external'}
+	<section class="panel">
+		<p class="note">
+			Executions recorded on these accounts that no session placed. Trading done by hand
+			or by another tool belongs here and is nothing to fix. Something you recognise as a
+			strategy's does not: it means the fill reached the record and its order did not, and
+			this is the only listing it appears in.
+		</p>
+
+		{#if external.length === 0}
+			<p class="empty-state">
+				{loading ? 'Loading…' : 'Every execution on file belongs to a run.'}
+			</p>
+		{:else}
+			<table class="data">
+				<thead>
+					<tr>
+						<th>Time</th>
+						<th>Account</th>
+						<th>Instrument</th>
+						<th>Side</th>
+						<th class="num">Price</th>
+						<th class="num">Qty</th>
+						<th class="num">Fee</th>
+						<th>Order</th>
+						<th>Source</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each external as f (f.id)}
+						<tr>
+							<td class="muted">{formatTs(f.ts)}</td>
+							<td><a href={`/td/${f.api_id}`}>{f.api_id}</a></td>
+							<td>{f.universal_ticker}</td>
+							<td class:sell={f.side === 'sell'}>{f.side}</td>
+							<td class="num mono">{f.price}</td>
+							<td class="num mono">{f.qty}</td>
+							<td class="num mono muted">
+								{f.fee === '0' || f.fee === '' ? '—' : `${f.fee} ${f.fee_asset}`}
+							</td>
+							<td
+								class="muted mono"
+								title={f.client_order_id ?? f.venue_order_id ?? 'no order id on the fill'}
+							>
+								{#if f.client_order_id}
+									{shortId(f.client_order_id)}
+								{:else if f.venue_order_id}
+									{shortId(f.venue_order_id)}
+								{:else}
+									—
+								{/if}
+							</td>
+							<td>
+								<span
+									class="badge"
+									class:done={f.settled}
+									class:pending={!f.settled}
+									title={f.settled
+										? 'the venue has been re-read past this row, orders included — no run of ours claims it'
+										: 'not yet re-read against the venue; an order claiming this fill may still arrive'}
+								>
+									{f.source}
+								</span>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+
+			{#if externalMore}
+				<div class="more">
+					<button type="button" class="secondary" onclick={loadMore} disabled={loadingMore}>
+						{loadingMore ? 'Loading…' : 'Load older'}
+					</button>
+				</div>
+			{/if}
+		{/if}
+	</section>
+{:else if sessions.length === 0}
 	<section class="panel">
 		<p class="empty-state">{loading ? 'Loading…' : 'No sessions yet.'}</p>
 	</section>
@@ -275,6 +397,28 @@
 
 	.mono {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	}
+
+	.note {
+		margin: 0 0 1rem;
+		color: var(--muted);
+		font-size: 0.85rem;
+		max-width: 60rem;
+	}
+
+	.num {
+		text-align: right;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.sell {
+		color: var(--danger, #c0392b);
+	}
+
+	.more {
+		display: flex;
+		justify-content: center;
+		padding-top: 1rem;
 	}
 
 	.card footer {
