@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 
 from mft import configure_logging
@@ -16,6 +17,12 @@ from mft_md import db as md_db
 from mft_md.fetch import FetchSession, VenueReaderFactory
 from mft_md.rpc import dispatch
 from mft_md.session import SessionManager, VenuePublicFactory
+from mft_md.tape import (
+    DEFAULT_MAXLEN,
+    DEFAULT_RETENTION_S,
+    DEFAULT_TOPICS,
+    TapeRecorder,
+)
 
 SOURCE = "md"
 logger = logging.getLogger(SOURCE)
@@ -74,6 +81,71 @@ async def reap_loop(
             continue
 
 
+#: How often the retention window is applied. Far below it, so a tape is never
+#: much longer than it claims, and far above the cost of one XTRIM per feed.
+TRIM_INTERVAL_SECONDS = 60.0
+
+
+def _build_recorder(broker: Broker) -> TapeRecorder | None:
+    """Configure tape recording from the environment.
+
+    On by default: recording is what makes a warm-up possible at all, and a
+    strategy that needs one cannot add it after the fact — the history it wants
+    is the history nobody was keeping. ``MD_TAPE_TOPICS=`` (empty) turns it off
+    for a deployment that would rather not spend the memory.
+    """
+    raw = os.getenv("MD_TAPE_TOPICS")
+    if raw is None:
+        topics = list(DEFAULT_TOPICS)
+    else:
+        topics = [part.strip() for part in raw.split(",") if part.strip()]
+    if not topics:
+        logger.info("MD tape recording disabled (MD_TAPE_TOPICS is empty)")
+        return None
+
+    def _number(name: str, fallback: float) -> float:
+        text = os.getenv(name, "").strip()
+        if not text:
+            return fallback
+        try:
+            return float(text)
+        except ValueError:
+            logger.warning(
+                "ignoring %s=%r — not a number, using %s", name, text, fallback
+            )
+            return fallback
+
+    retention_s = _number("MD_TAPE_RETENTION_S", DEFAULT_RETENTION_S)
+    maxlen = int(_number("MD_TAPE_MAXLEN", DEFAULT_MAXLEN))
+    logger.info(
+        "MD tape recording topics=%s retention=%.0fs maxlen=%d",
+        topics,
+        retention_s,
+        maxlen,
+    )
+    return TapeRecorder(
+        broker, topics=topics, maxlen=maxlen, retention_s=retention_s
+    )
+
+
+async def trim_loop(
+    sessions: SessionManager,
+    stop: asyncio.Event,
+    *,
+    interval: float = TRIM_INTERVAL_SECONDS,
+) -> None:
+    """Hold every recording feed to its retention window."""
+    while not stop.is_set():
+        try:
+            await sessions.trim_tapes()
+        except Exception:
+            logger.exception("MD tape trim failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            continue
+
+
 async def amain() -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -91,6 +163,7 @@ async def amain() -> None:
             persist_live=md_db.persist_live_session,
             mark_done=md_db.mark_session_done,
             list_db_sessions=md_db.list_sessions,
+            recorder=_build_recorder(broker),
         )
         # Up for as long as the process is, and attached to nothing. A read
         # is owned by nobody, so the fetch plane needs no lease and no
@@ -114,15 +187,17 @@ async def amain() -> None:
         reaper_task = asyncio.create_task(
             reap_loop(sessions, stop), name="md-reaper"
         )
+        trim_task = asyncio.create_task(
+            trim_loop(sessions, stop), name="md-tape-trim"
+        )
         try:
             await stop.wait()
         finally:
             stop.set()
-            for task in (rpc_task, hb_task, reaper_task):
+            tasks = (rpc_task, hb_task, reaper_task, trim_task)
+            for task in tasks:
                 task.cancel()
-            await asyncio.gather(
-                rpc_task, hb_task, reaper_task, return_exceptions=True
-            )
+            await asyncio.gather(*tasks, return_exceptions=True)
             await fetch.stop()
             await sessions.close_all()
     logger.info("MD stopped")

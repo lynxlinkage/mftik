@@ -164,9 +164,61 @@ sts:
 """,
 )
 
+TAPE_KEEPER = StrategyTemplate(
+    type="TapeKeeper",
+    label="Tape keeper",
+    description=(
+        "Subscribes to trade feeds and holds them open so MD keeps recording "
+        "their tape. Places no orders — it exists so another strategy can "
+        "warm up on history from before it started."
+    ),
+    yaml="""\
+# No td: this session attaches to no account and cannot place an order.
+md:
+  # One entry per feed to keep recorded. Only aggtrade and trade are recorded;
+  # subscribing to anything else here holds the feed but records nothing.
+  - aggtrade.BinanceFuture_Perp_BTCUSDT
+sts:
+  # How often to log that the feeds are still held (ms). It does nothing else,
+  # so this line is the difference between "quiet" and "died an hour ago".
+  report_interval_ms: 300000
+""",
+)
+
+MACD_VOLUME = StrategyTemplate(
+    type="MacdVolumeBars",
+    label="MACD on volume bars",
+    description=(
+        "Aggregates trade prints into fixed quote-volume bars, runs MACD over "
+        "their closes, and goes long on a bullish cross / flat on a bearish "
+        "one. Warms up from MD's recorded tape, then from live prints."
+    ),
+    yaml="""\
+td:
+  - paper trader
+md:
+  # Exactly one of aggtrade / trade — they report the same matches, so
+  # subscribing to both would count every bar's volume twice (refused at start).
+  - aggtrade.BinanceFuture_Perp_BTCUSDT
+sts:
+  feed: aggtrade
+  # A bar closes once its prints carry this much of the quote currency.
+  # Smaller means more bars: warm-up needs slow + signal = 35 of them, so this
+  # has to be small enough that the recorded tape can produce that many.
+  bar_quote_volume: 1000000
+  # MACD periods over bar closes. fast must be shorter than slow.
+  fast: 12
+  slow: 26
+  signal: 9
+  # Quote currency per entry. One MARKET order at a time, long only.
+  qty_quote: 100
+""",
+)
+
 #: Every deployable strategy, keyed by the type used on the wire.
 TEMPLATES: dict[str, StrategyTemplate] = {
-    t.type: t for t in (NOOP, CHASE, OCO, CROSS_ARB, TWAP)
+    t.type: t
+    for t in (NOOP, CHASE, OCO, CROSS_ARB, TWAP, TAPE_KEEPER, MACD_VOLUME)
 }
 
 #: Type offered when the caller does not choose one.

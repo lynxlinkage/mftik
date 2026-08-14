@@ -76,6 +76,35 @@ services:
   md:
     <<: *mft
     command: ["md"]
+    environment:
+      # Recorded tape, so a strategy that starts later can warm up on prints
+      # it was not running for. Only the trade feeds — a book snapshot is ~7x
+      # the bytes and no use as history.
+      #
+      # One topic, not both. aggtrade and trade describe the same matches, so
+      # recording both doubles the memory to serve a strategy that can only
+      # read one of them (MacdVolumeBars refuses a session subscribed to both).
+      MD_TAPE_TOPICS: "aggtrade"
+      # How far back a warm-up may reach. Retention is a duration, not a count:
+      # the same number of prints is eight hours of a quiet instrument and
+      # twenty minutes of a busy one.
+      MD_TAPE_RETENTION_S: "7200"
+      # Memory fuse per feed, in records — roughly 200 bytes each, so ~30 MB.
+      #
+      # Sized against the Redis this deploys to, not against the retention
+      # window: that box caps Redis at 512mb with maxmemory-policy noeviction,
+      # and Redis here is the whole broker — order RPC, ledger and oms state,
+      # liveness. A tape that fills the cap does not degrade the warm-up, it
+      # stops the writes that trade. The budget is this number times the number
+      # of recorded feeds, and it has to stay well under 512mb with room for
+      # everything else: 150k x 8 feeds is ~240mb, which does.
+      #
+      # 2h of a busy perp (~50 msg/s) is ~360k records, so this fuse will bite
+      # first on the busiest instruments — they will warm up on less than two
+      # hours, and the coverage stamps will say so rather than pretending.
+      # Raising it needs a bigger box or a smaller feed list, not just a bigger
+      # number.
+      MD_TAPE_MAXLEN: "150000"
     depends_on:
       redis:
         condition: service_healthy

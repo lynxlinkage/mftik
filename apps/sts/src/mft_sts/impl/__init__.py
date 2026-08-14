@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from mft_sts.impl.chase import ChaseOrder
 from mft_sts.impl.cross_arb import CrossArb
+from mft_sts.impl.macd_volume import MacdVolumeBars
 from mft_sts.impl.noop import NoopStrategy
 from mft_sts.impl.oco import OneCancelOther
+from mft_sts.impl.tape_keeper import TapeKeeper
 from mft_sts.impl.twap import TwapStrategy
 from mft_sts.strategy import Strategy
 
@@ -26,6 +28,8 @@ register(ChaseOrder)
 register(OneCancelOther)
 register(CrossArb)
 register(TwapStrategy)
+register(TapeKeeper)
+register(MacdVolumeBars)
 
 
 def resolve(name: str | None) -> Strategy:

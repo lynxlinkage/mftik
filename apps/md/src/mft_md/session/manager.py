@@ -34,6 +34,7 @@ from mft_db.models.session import SessionDomain, SessionStatus
 from mft_md.session.dispatcher import Dispatcher, FeedKey
 from mft_md.session.factory import ConnectorFactory
 from mft_md.session.venue import VenueSession
+from mft_md.tape import TapeRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class SessionManager:
         mark_done: MarkDone | None = None,
         list_db_sessions: ListDbSessions | None = None,
         lease_grace: float = LEASE_GRACE_S,
+        recorder: TapeRecorder | None = None,
     ) -> None:
         self._factory = factory
         self._broker = broker
@@ -97,7 +99,11 @@ class SessionManager:
         self._mark_done = mark_done
         self._list_db_sessions = list_db_sessions
         self._lease_grace = lease_grace
-        self._dispatcher = Dispatcher(broker)
+        #: Records the trade feeds so a strategy starting later can warm up.
+        #: None leaves every feed unrecorded — MD serves live data exactly as
+        #: before, and a warm-up simply finds nothing.
+        self._recorder = recorder
+        self._dispatcher = Dispatcher(broker, recorder=recorder)
         self._venues: dict[str, VenueSession] = {}
         self._links: dict[str, StsLink] = {}
         #: ``session_id`` → consecutive scans that found no liveness key for a
@@ -110,6 +116,17 @@ class SessionManager:
 
     def feed_refcount(self, feed: str) -> int:
         return self._dispatcher.refcount(*Topics.parse_md_feed(feed))
+
+    async def trim_tapes(self) -> None:
+        """Apply the retention window to every feed currently recording.
+
+        Only the live ones need it. A feed nobody holds has stopped growing, so
+        it can only shrink from here — and the key's TTL reclaims it outright
+        once it is older than any warm-up would want.
+        """
+        if self._recorder is None:
+            return
+        await self._recorder.trim(self._dispatcher.refcounts())
 
     async def attach(self, request: MdAttachRequest) -> MdAttachResult:
         """Attach STS ``session_id`` with subscriptions (lease + refcount)."""
@@ -428,6 +445,11 @@ class SessionManager:
         if first:
             venue_sess = await self._ensure_venue(ticker.venue)
             await venue_sess.ensure_feed(topic, ticker)
+            # Stamped here rather than on the first record: this is the moment
+            # continuity broke, and a feed that starts pumping into a silent
+            # market would otherwise look like it had been recording all along.
+            if self._recorder is not None and self._recorder.records(topic):
+                await self._recorder.started(feed)
             await publish_md_log(
                 self._broker,
                 ticker.venue,
@@ -483,6 +505,11 @@ class SessionManager:
         if venue_sess is None:
             return
         await venue_sess.stop_feed(topic, ticker)
+        # The tape is left where it is. Two hours of history does not stop
+        # being true because nobody is subscribed any more — it stops being
+        # *current*, and saying so is what this stamp is for.
+        if self._recorder is not None and self._recorder.records(topic):
+            await self._recorder.stopped(Topics.md_feed(topic, ticker))
         await publish_md_log(
             self._broker,
             ticker.venue,

@@ -181,6 +181,125 @@ class Broker:
         if names:
             await self.redis.delete(*(self.state_key(n) for n in names))
 
+    # --- recorded tape (streams) -------------------------------------------
+    #
+    # A feed's own history, kept so a strategy that starts later can warm up on
+    # what it missed. Streams rather than lists because the retention policy is
+    # a *duration* — a stream id is a millisecond timestamp, so "keep two
+    # hours" is ``XTRIM MINID`` and "read from T" is ``XRANGE``, neither of
+    # which a list can express: ``LTRIM`` counts entries, and the same count is
+    # eight hours of a quiet instrument or twenty minutes of a busy one.
+    #
+    # Two bounds, and they mean different things. ``maxlen`` on append is the
+    # memory fuse — approximate, so Redis trims whole nodes and the write stays
+    # cheap. The MINID trim is the intent. Whichever binds first is what the
+    # reader gets, and :meth:`tape_coverage` is how it finds out which.
+
+    def tape_key(self, feed: str) -> str:
+        """Redis stream holding recorded tape for ``feed``."""
+        return f"{self.config.key_prefix}:tape:{feed}"
+
+    def tape_coverage_key(self, feed: str) -> str:
+        """Redis hash describing what :meth:`tape_key` currently covers."""
+        return f"{self.config.key_prefix}:tape:coverage:{feed}"
+
+    async def tape_append(
+        self,
+        feed: str,
+        fields: Mapping[str, str],
+        *,
+        maxlen: int,
+        ttl_seconds: int,
+    ) -> None:
+        """Append one record, capping the stream at ``maxlen`` entries.
+
+        The id is Redis' own clock, not the venue's timestamp. Event time is a
+        field on the record instead, because ``XADD`` refuses an id that does
+        not exceed the last one and a venue tape is not strictly monotonic —
+        one late print out of a million would otherwise end the recording.
+
+        ``ttl_seconds`` is renewed on every append, so a feed that stops being
+        recorded expires on its own. Without it a tape would outlive the last
+        strategy that ever wanted it: the MINID trim only runs against feeds
+        that are still pumping, and a stream nobody writes to is never capped
+        by ``maxlen`` either. Every instrument ever subscribed would keep its
+        last two hours for as long as Redis lived.
+        """
+        pipe = self.redis.pipeline()
+        pipe.xadd(
+            self.tape_key(feed),
+            dict(fields),
+            maxlen=maxlen,
+            approximate=True,
+        )
+        pipe.expire(self.tape_key(feed), ttl_seconds)
+        pipe.expire(self.tape_coverage_key(feed), ttl_seconds)
+        await pipe.execute()
+
+    async def tape_tail(
+        self, feed: str, *, count: int
+    ) -> list[tuple[str, dict[str, str]]]:
+        """Read the newest ``count`` records, oldest → newest.
+
+        The newest rather than the oldest: warming up means catching up to now,
+        and a stream capped by two independent bounds holds an unknown number
+        of records, so "the first N" is not a window anyone asked for.
+        """
+        if count <= 0:
+            return []
+        rows = await self.redis.xrevrange(
+            self.tape_key(feed), max="+", min="-", count=count
+        )
+        return [(str(rid), dict(fields)) for rid, fields in reversed(rows)]
+
+    async def tape_trim_before(self, feed: str, *, min_id_ms: int) -> int:
+        """Drop records older than ``min_id_ms``. Returns how many went."""
+        return int(
+            await self.redis.xtrim(self.tape_key(feed), minid=min_id_ms)
+        )
+
+    async def tape_mark_recording(
+        self, feed: str, *, since_ms: int, ttl_seconds: int
+    ) -> None:
+        """Record that this feed started recording at ``since_ms``.
+
+        Called when a feed begins pumping, which is also the moment continuity
+        breaks: whatever is already in the stream predates a gap of unknown
+        length. Readers compare against this rather than assuming the records
+        they can see form one series.
+
+        Carries its own TTL because a feed can be subscribed and then print
+        nothing at all — a dead instrument, a venue outage — and the appends
+        that would otherwise renew it never come.
+        """
+        pipe = self.redis.pipeline()
+        pipe.hset(
+            self.tape_coverage_key(feed),
+            mapping={
+                "continuous_since_ms": str(since_ms),
+                "recording": "1",
+                "stopped_ms": "",
+            },
+        )
+        pipe.expire(self.tape_coverage_key(feed), ttl_seconds)
+        await pipe.execute()
+
+    async def tape_mark_stopped(self, feed: str, *, at_ms: int) -> None:
+        """Record that this feed stopped recording at ``at_ms``.
+
+        The stream is left alone. A reader that wants the last two hours before
+        a feed went quiet can still have them — it just has to know they end,
+        and that is exactly what this says.
+        """
+        await self.redis.hset(  # type: ignore[misc]
+            self.tape_coverage_key(feed),
+            mapping={"recording": "0", "stopped_ms": str(at_ms)},
+        )
+
+    async def tape_coverage(self, feed: str) -> dict[str, str]:
+        """What :meth:`tape_key` covers, or ``{}`` if it was never recorded."""
+        return dict(await self.redis.hgetall(self.tape_coverage_key(feed)))  # type: ignore[misc]
+
     # --- Pub/Sub -----------------------------------------------------------
 
     async def publish(self, topic: str, envelope: Envelope[Any]) -> int:

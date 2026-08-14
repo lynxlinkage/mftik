@@ -35,6 +35,7 @@ from mft_sts.client_order_id import slot_of
 from mft_sts.ledger import StrategyLedger
 from mft_sts.mds import StrategyMds
 from mft_sts.oms import StrategyOms
+from mft_sts.tape import StrategyTape
 from mft_sts.timer import Timer
 
 if TYPE_CHECKING:
@@ -108,6 +109,16 @@ class Strategy:
         the book at one moment is a query, not a subscription.
         ``interval`` is canonical (``1m``, ``4h``, ``1mo``) — see
         ``mft.exchange.intervals``; the month is ``1mo``, never ``1M``.
+
+    Recorded tape — warm-up on prints from before this session (wired):
+        self.tape.read(ticker, topic="aggtrade") — the trade history MD kept
+        while something else held the feed, as the same Trade / AggTrade the
+        live hooks are handed. Only ``aggtrade`` and ``trade`` are recorded.
+        The slice says what it covers (``continuous_since_ms``, ``recording``,
+        ``span_ms``): a count of prints is not a length of history, and a
+        strategy that needs N of something has to check rather than assume.
+        Empty is a normal answer — nothing was holding the feed, or MD runs
+        with recording off.
     """
 
     name: str = "base"
@@ -131,6 +142,9 @@ class Strategy:
         self.mds = StrategyMds()
         #: Read-only balances from TD's ledger (available / free / prelock).
         self.ledger = StrategyLedger()
+        #: Recorded trade history from MD, for warming up on what this session
+        #: was not running for.
+        self.tape = StrategyTape()
         self.timer = Timer()
 
     def bind(self, session: StsSession) -> None:
@@ -144,6 +158,7 @@ class Strategy:
         self.oms.bind(self, cid_slot=session.cid_slot)
         self.mds.bind(self)
         self.ledger.bind(self)
+        self.tape.bind(self)
         self.timer.bind(self)
 
     @classmethod

@@ -11,6 +11,7 @@ from mft.protocol import Topics, UntypedEnvelope, publish_md_log
 
 if TYPE_CHECKING:
     from mft_md.session.manager import StsLink
+    from mft_md.tape import TapeRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,13 @@ LOG_EVERY = 20
 class Dispatcher:
     """Route venue market-data updates to subscribed STS session streams."""
 
-    def __init__(self, broker: Broker) -> None:
+    def __init__(
+        self, broker: Broker, *, recorder: TapeRecorder | None = None
+    ) -> None:
         self._broker = broker
+        #: Writes recorded feeds to their tape. None disables recording, which
+        #: costs a strategy its warm-up and nothing else.
+        self._recorder = recorder
         self._subs: dict[FeedKey, set[str]] = {}
         self._links: dict[str, StsLink] = {}
         #: Messages dispatched per feed since it last had no subscribers.
@@ -118,6 +124,13 @@ class Dispatcher:
                     session_id,
                     Topics.md_feed(topic, ticker),
                 )
+        # After the fan-out, not before: the sessions waiting on this print are
+        # trading on it, and recording is for a session that has not started
+        # yet. It also runs whether or not anyone was listening — the feed is
+        # pumping because *someone* holds it, and that is what makes the tape
+        # continuous rather than a record of who happened to be attached.
+        if self._recorder is not None:
+            await self._recorder.append(topic, ticker, envelope.payload)
         count = self._dispatched.get(key, 0) + 1
         self._dispatched[key] = count
         # A partial fan-out means a session missed data, so it is never

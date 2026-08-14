@@ -30,13 +30,27 @@ def test_parse_default_template() -> None:
     assert spec.sts["qty_quote"] == 100
 
 
+#: Templates that deliberately attach to no trading account. Listing them here
+#: rather than dropping the assertion keeps it doing its job for the strategies
+#: that do trade: a missing ``td`` is a broken template for every one of those,
+#: and it should stay a test failure rather than a session that deploys and
+#: then cannot place the order it exists to place.
+NO_ACCOUNT_TYPES = frozenset({"TapeKeeper"})
+
+
 @pytest.mark.parametrize("type_name", strategy_types())
 def test_every_template_parses(type_name: str) -> None:
     """A template that does not parse is a broken starting point for the UI."""
     template = get_template(type_name)
     assert template is not None
     spec = parse_strategy_yml(template.yaml)
-    assert spec.td, f"{type_name} template has no td account"
+    if type_name in NO_ACCOUNT_TYPES:
+        assert not spec.td, (
+            f"{type_name} is meant to hold feeds without an account; a td here "
+            "would give it the power to trade that its whole design is to lack"
+        )
+    else:
+        assert spec.td, f"{type_name} template has no td account"
     assert spec.md, f"{type_name} template has no md feed"
     assert spec.sts, f"{type_name} template has no sts config"
 
