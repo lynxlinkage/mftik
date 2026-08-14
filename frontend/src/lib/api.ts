@@ -65,6 +65,8 @@ export type DomainStats = {
 	failed: number;
 	/** Sessions STS cut short when it went down. Always 0 outside `sts`. */
 	interrupted: number;
+	/** Failed/interrupted sessions an operator has acknowledged. Always 0 outside `sts`. */
+	ack: number;
 	healthy: boolean | null;
 };
 
@@ -276,6 +278,54 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	return (await res.json()) as T;
 }
 
+function filenameFromDisposition(header: string | null, fallback: string): string {
+	if (!header) return fallback;
+	const star = /filename\*=(?:UTF-8''|)([^;]+)/i.exec(header);
+	if (star?.[1]) {
+		try {
+			return decodeURIComponent(star[1].trim().replace(/^"|"$/g, ''));
+		} catch {
+			/* fall through */
+		}
+	}
+	const quoted = /filename="([^"]+)"/i.exec(header);
+	if (quoted?.[1]) return quoted[1];
+	const plain = /filename=([^;]+)/i.exec(header);
+	if (plain?.[1]) return plain[1].trim();
+	return fallback;
+}
+
+async function downloadFile(path: string, fallbackName: string): Promise<void> {
+	const res = await fetch(`${apiBase()}${path}`);
+	if (res.status === 401 && reloadForLogin()) {
+		throw new Error('Login session expired — signing in again…');
+	}
+	if (!res.ok) {
+		let detail = res.statusText;
+		try {
+			const body = (await res.json()) as { detail?: string };
+			if (body.detail) detail = body.detail;
+		} catch {
+			/* ignore */
+		}
+		throw new Error(detail || `HTTP ${res.status}`);
+	}
+	const blob = await res.blob();
+	const name = filenameFromDisposition(res.headers.get('Content-Disposition'), fallbackName);
+	const url = URL.createObjectURL(blob);
+	try {
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = name;
+		a.rel = 'noopener';
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+	} finally {
+		URL.revokeObjectURL(url);
+	}
+}
+
 export const api = {
 	stats: () => request<{ domains: DomainStats[] }>('/stats'),
 	boardSessions: (opts: { status?: string; limit?: number } = {}) => {
@@ -395,6 +445,10 @@ export const api = {
 		request<StsControl>(`/sts/sessions/${encodeURIComponent(id)}/stop`, {
 			method: 'POST'
 		}),
+	ackSts: (id: string) =>
+		request<StsControl>(`/sts/sessions/${encodeURIComponent(id)}/ack`, {
+			method: 'POST'
+		}),
 	tdSessions: (status: string | null = 'live') =>
 		request<{ sessions: Session[] }>(
 			`/td/sessions${status ? `?status=${encodeURIComponent(status)}` : ''}`
@@ -417,6 +471,27 @@ export const api = {
 		const qs = q.toString();
 		return request<SessionLogList>(
 			`/logs/${encodeURIComponent(domain)}/${encodeURIComponent(streamId)}${qs ? `?${qs}` : ''}`
+		);
+	},
+	downloadBoardFillsCsv: (sessionId: string) =>
+		downloadFile(
+			`/board/sessions/${encodeURIComponent(sessionId)}/fills.csv`,
+			`${sessionId}_historical_fills.csv`
+		),
+	downloadLogs: (
+		domain: 'sts' | 'td' | 'md',
+		streamId: string,
+		from: string,
+		to: string
+	) => {
+		const q = new URLSearchParams({ from, to });
+		const fallback =
+			from === to
+				? `${streamId}_${domain}_${from}.log`
+				: `${streamId}_${domain}_${from}_${to}.tar.gz`;
+		return downloadFile(
+			`/logs/${encodeURIComponent(domain)}/${encodeURIComponent(streamId)}/download?${q}`,
+			fallback
 		);
 	}
 };

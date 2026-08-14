@@ -45,7 +45,9 @@
 				externalMore = res.has_more;
 			} else {
 				const res = await api.boardSessions(
-					filter === 'all' ? {} : { status: filter === 'live' ? 'live' : 'done' }
+					filter === 'all'
+						? {}
+						: { status: filter === 'live' ? 'live' : 'done,ack' }
 				);
 				sessions = res.sessions;
 				// The server just told us the truth; anything counted locally is
@@ -248,7 +250,9 @@
 					<span
 						class="badge"
 						class:live={s.status === 'live'}
-						class:done={s.status !== 'live'}
+						class:done={s.status === 'done' || s.status === 'ack'}
+						class:failed={s.status === 'failed'}
+						class:interrupted={s.status === 'interrupted'}
 						title={s.reason ?? ''}
 					>
 						{s.status}

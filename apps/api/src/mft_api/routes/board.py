@@ -32,11 +32,14 @@ so a reader looking at a single row can tell whether it is a figure or a note.
 
 from __future__ import annotations
 
+import csv
+import io
 import time
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 from mft_db.models.history import Stream
 from mft_db.models.session import SessionStatus
 from mft_db.repositories import (
@@ -53,6 +56,22 @@ from mft_api.schemas import (
     BoardFillListResponse,
     BoardResponse,
     BoardSession,
+)
+
+_CSV_COLUMNS = (
+    "ts",
+    "fill_id",
+    "universal_ticker",
+    "side",
+    "price",
+    "qty",
+    "fee",
+    "fee_asset",
+    "client_order_id",
+    "venue_order_id",
+    "api_id",
+    "source",
+    "settled",
 )
 
 router = APIRouter(prefix="/board", tags=["board"])
@@ -186,16 +205,33 @@ def _fill(row: Any, line: float | None) -> BoardFill:
     )
 
 
+def _parse_statuses(status: str | None) -> str | list[str] | None:
+    """``done,ack`` is the Finished tab; a single value is the rest."""
+    if status is None or not status.strip():
+        return None
+    parts = [part.strip() for part in status.split(",") if part.strip()]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return parts
+
+
 @router.get("/sessions", response_model=BoardResponse)
 async def list_board_sessions(
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
 ) -> BoardResponse:
-    """Recent runs, newest first. ``status`` omitted means every status."""
+    """Recent runs, newest first. ``status`` omitted means every status.
+
+    Comma-separated values select a union (``done,ack`` is Finished).
+    """
     now = time.time()
     async with session_scope() as db:
         rows = list(
-            await StsSessionRepository(db).list_sessions(status=status, limit=limit)
+            await StsSessionRepository(db).list_sessions(
+                status=_parse_statuses(status), limit=limit
+            )
         )
         fills = await FillRepository(db).count_by_session(
             [row.session_id for row in rows]
@@ -265,6 +301,47 @@ async def list_board_fills(
     return BoardFillListResponse(
         fills=[_fill(row, line) for row in rows[:limit]],
         has_more=has_more,
+    )
+
+
+@router.get("/sessions/{session_id}/fills.csv")
+async def export_board_fills_csv(session_id: str) -> Response:
+    """Every execution this run recorded, oldest first, as a CSV download."""
+    async with session_scope() as db:
+        summary_row = await StsSessionRepository(db).get_by_session_id(session_id)
+        if summary_row is None:
+            raise HTTPException(status_code=404, detail=f"no session {session_id}")
+        fills = await FillRepository(db).replay_for_session(session_id)
+        lines, _scoped = await _settlement_lines(db, [summary_row])
+
+    line = lines.get(session_id)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_CSV_COLUMNS)
+    for row in fills:
+        item = _fill(row, line)
+        writer.writerow(
+            [
+                item.ts,
+                item.fill_id,
+                item.universal_ticker,
+                item.side,
+                item.price,
+                item.qty,
+                item.fee,
+                item.fee_asset,
+                item.client_order_id or "",
+                item.venue_order_id or "",
+                item.api_id,
+                item.source,
+                "true" if item.settled else "false",
+            ]
+        )
+    filename = f"{session_id}_historical_fills.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

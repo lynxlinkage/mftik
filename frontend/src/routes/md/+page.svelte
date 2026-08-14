@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api, formatTs, shortId, type Session } from '$lib/api';
+	import LogDownloadModal from '$lib/components/LogDownloadModal.svelte';
 
 	let tab = $state<'live' | 'history'>('live');
 	let sessions = $state<Session[]>([]);
 	let error = $state<string | null>(null);
 	let loading = $state(true);
+	let downloadVenue = $state<string | null>(null);
 
 	async function refresh() {
 		loading = true;
@@ -92,7 +94,16 @@
 						<td class="muted">{formatTs(s.created_at)}</td>
 						<td>
 							{#if s.venue}
-								<a class="link-btn" href={`/md/${s.venue}`}>Logs</a>
+								<div class="row-actions">
+									<a class="link-btn" href={`/md/${s.venue}`}>Logs</a>
+									<button
+										type="button"
+										class="secondary"
+										onclick={() => (downloadVenue = s.venue)}
+									>
+										Download
+									</button>
+								</div>
 							{/if}
 						</td>
 					</tr>
@@ -102,7 +113,22 @@
 	{/if}
 </section>
 
+{#if downloadVenue}
+	<LogDownloadModal
+		domain="md"
+		streamId={downloadVenue}
+		open={true}
+		onclose={() => (downloadVenue = null)}
+	/>
+{/if}
+
 <style>
+	.row-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
 	.link-btn {
 		display: inline-flex;
 		align-items: center;

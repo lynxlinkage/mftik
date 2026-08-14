@@ -17,6 +17,8 @@ class DomainStats(BaseModel):
     failed: int = 0
     #: Sessions STS cut short when it went down. Also sts-only.
     interrupted: int = 0
+    #: Failed or interrupted sessions an operator has acknowledged. sts-only.
+    ack: int = 0
     healthy: bool | None = None
 
 

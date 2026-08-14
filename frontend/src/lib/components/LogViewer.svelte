@@ -2,6 +2,7 @@
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { api } from '$lib/api';
 	import { connectDomainLog, type LogDomain, type LogEntry } from '$lib/logging/session';
+	import LogDownloadModal from '$lib/components/LogDownloadModal.svelte';
 
 	interface Props {
 		domain: LogDomain;
@@ -22,6 +23,7 @@
 	let hasMoreHistory = $state(true);
 	let historyLoaded = $state(false);
 	let historyHint = $state('');
+	let downloadOpen = $state(false);
 
 	const HISTORY_PAGE = 100;
 	const SCROLL_TOP_THRESHOLD = 40;
@@ -170,6 +172,9 @@
 			</p>
 		</div>
 		<div class="actions">
+			<button type="button" class="secondary" onclick={() => (downloadOpen = true)}>
+				Download
+			</button>
 			<button type="button" class="secondary" onclick={selectAll} disabled={!text}>
 				Select all
 			</button>
@@ -186,6 +191,13 @@
 		aria-live="polite"
 		aria-label={`${title} terminal`}>{#if !text}<span class="empty">Waiting for log lines…</span>{:else}{text}{/if}</pre>
 </section>
+
+<LogDownloadModal
+	{domain}
+	{streamId}
+	open={downloadOpen}
+	onclose={() => (downloadOpen = false)}
+/>
 
 <style>
 	.log-page {

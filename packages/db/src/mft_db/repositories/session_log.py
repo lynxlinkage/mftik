@@ -60,3 +60,25 @@ class SessionLogRepository(BaseRepository[SessionLog]):
         q = q.order_by(SessionLog.ts.desc(), SessionLog.id.desc()).limit(limit)
         result = await self.session.execute(q)
         return result.scalars().all()
+
+    async def list_between(
+        self,
+        domain: str,
+        stream_id: str,
+        *,
+        start_ts: float,
+        end_ts: float,
+    ) -> Sequence[SessionLog]:
+        """Rows in ``[start_ts, end_ts)``, oldest first — a day's worth of a stream."""
+        q = (
+            select(SessionLog)
+            .where(
+                SessionLog.domain == domain,
+                SessionLog.stream_id == stream_id,
+                SessionLog.ts >= start_ts,
+                SessionLog.ts < end_ts,
+            )
+            .order_by(SessionLog.ts.asc(), SessionLog.id.asc())
+        )
+        result = await self.session.execute(q)
+        return result.scalars().all()

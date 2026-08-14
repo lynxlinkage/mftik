@@ -27,7 +27,7 @@ class _SessionListMixin(BaseRepository[RowT], Generic[RowT]):
     async def list_sessions(
         self,
         *,
-        status: str | None = SessionStatus.LIVE.value,
+        status: str | Sequence[str] | None = SessionStatus.LIVE.value,
         created_by: int | None = None,
         limit: int = 100,
     ) -> Sequence[RowT]:
@@ -36,7 +36,16 @@ class _SessionListMixin(BaseRepository[RowT], Generic[RowT]):
 
         stmt = select(self.model).order_by(self.model.created_at.desc())  # type: ignore[attr-defined]
         if status is not None:
-            stmt = stmt.where(self.model.status == status)  # type: ignore[attr-defined]
+            # ``str`` is a Sequence of characters — check it first or
+            # ``status="done"`` becomes ``IN ('d','o','n','e')``.
+            if isinstance(status, str):
+                stmt = stmt.where(self.model.status == status)  # type: ignore[attr-defined]
+            else:
+                values = list(status)
+                if len(values) == 1:
+                    stmt = stmt.where(self.model.status == values[0])  # type: ignore[attr-defined]
+                elif values:
+                    stmt = stmt.where(self.model.status.in_(values))  # type: ignore[attr-defined]
         if created_by is not None:
             stmt = stmt.where(self.model.created_by == created_by)  # type: ignore[attr-defined]
         stmt = stmt.limit(limit)
@@ -165,6 +174,26 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         return await self.mark_finished(
             session_id, status=SessionStatus.FAILED.value, reason=reason
         )
+
+    _ACKABLE = frozenset(
+        {SessionStatus.FAILED.value, SessionStatus.INTERRUPTED.value}
+    )
+
+    async def mark_ack(self, session_id: str) -> StsSessionRow | None:
+        """Operator acknowledgement of a failed or interrupted session.
+
+        Turns an abnormal stop into a normal one without rewriting why it
+        ended or when. Returns ``None`` when the row is missing or is not
+        in a status that can be acked — the caller distinguishes those.
+        """
+        row = await self.get_by_session_id(session_id)
+        if row is None:
+            return None
+        if row.status not in self._ACKABLE:
+            return None
+        row.status = SessionStatus.ACK.value
+        await self.session.flush()
+        return row
 
 
 class TdSessionRepository(_SessionListMixin[TdSessionRow]):

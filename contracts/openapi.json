@@ -577,6 +577,49 @@
         }
       }
     },
+    "/sts/sessions/{session_id}/ack": {
+      "post": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "Ack Session",
+        "description": "Mark a failed or interrupted session as acknowledged \u2014 a normal stop.\n\nThe process is already gone, so this is a database write rather than an\nSTS RPC. The original reason stays so the badge still explains why it\nended; only the status changes.",
+        "operationId": "ack_session_sts_sessions__session_id__ack_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StsControlResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/sts/deploy/{strategy_type}": {
       "post": {
         "tags": [
@@ -1053,13 +1096,81 @@
         }
       }
     },
+    "/logs/{domain}/{stream_id}/download": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "Download Session Logs",
+        "description": "Persisted logs for one stream, as a daily file or a tar.gz of them.",
+        "operationId": "download_session_logs_logs__domain___stream_id__download_get",
+        "parameters": [
+          {
+            "name": "domain",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Domain"
+            }
+          },
+          {
+            "name": "stream_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Stream Id"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "To"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/board/sessions": {
       "get": {
         "tags": [
           "board"
         ],
         "summary": "List Board Sessions",
-        "description": "Recent runs, newest first. ``status`` omitted means every status.",
+        "description": "Recent runs, newest first. ``status`` omitted means every status.\n\nComma-separated values select a union (``done,ack`` is Finished).",
         "operationId": "list_board_sessions_board_sessions_get",
         "parameters": [
           {
@@ -1229,6 +1340,47 @@
                 "schema": {
                   "$ref": "#/components/schemas/BoardFillListResponse"
                 }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/board/sessions/{session_id}/fills.csv": {
+      "get": {
+        "tags": [
+          "board"
+        ],
+        "summary": "Export Board Fills Csv",
+        "description": "Every execution this run recorded, oldest first, as a CSV download.",
+        "operationId": "export_board_fills_csv_board_sessions__session_id__fills_csv_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           },
@@ -1829,6 +1981,11 @@
           "interrupted": {
             "type": "integer",
             "title": "Interrupted",
+            "default": 0
+          },
+          "ack": {
+            "type": "integer",
+            "title": "Ack",
             "default": 0
           },
           "healthy": {

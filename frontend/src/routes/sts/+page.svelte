@@ -10,6 +10,7 @@
 		type StrategyTemplate,
 		type StrategyYaml
 	} from '$lib/api';
+	import LogDownloadModal from '$lib/components/LogDownloadModal.svelte';
 	import {
 		connectStsStatus,
 		type StatusConnection,
@@ -42,6 +43,7 @@
 	// Envelope ts of the newest event applied per session, so a replayed event
 	// cannot overwrite a newer one we already have.
 	let lastEventTs = new Map<string, number>();
+	let downloadId = $state<string | null>(null);
 	// Sessions we are already fetching a row for, so a burst of events for the
 	// same new session does not fan out into a burst of list fetches.
 	let pendingSessions = new Set<string>();
@@ -174,6 +176,19 @@
 		error = null;
 		try {
 			await api.stopSts(s.sts_session);
+			await refresh();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function ack(s: StrategyRow) {
+		busy = true;
+		error = null;
+		try {
+			await api.ackSts(s.sts_session);
 			await refresh();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -388,6 +403,11 @@
 									<span class="badge {s.status}">{s.status}</span>
 									{@render why(s.reason)}
 								</div>
+							{:else if s.status === 'ack'}
+								<div class="status-cell">
+									<span class="badge ack">ack</span>
+									{#if s.reason}{@render why(s.reason)}{/if}
+								</div>
 							{:else if s.status === 'done' && s.reason === OPERATOR_STOP}
 								<!-- Someone pulled this one. Same status as a strategy that
 								     finished, but a different thing to have happened, and the
@@ -424,6 +444,11 @@
 										Stop
 									</button>
 								{/if}
+								{#if s.status === 'failed' || s.status === 'interrupted'}
+									<button type="button" class="secondary" disabled={busy} onclick={() => ack(s)}>
+										Ack
+									</button>
+								{/if}
 								<button
 									type="button"
 									class="secondary"
@@ -433,6 +458,13 @@
 									YAML
 								</button>
 								<a class="link-btn" href={`/sts/${s.sts_session}`}>Logs</a>
+								<button
+									type="button"
+									class="secondary"
+									onclick={() => (downloadId = s.sts_session)}
+								>
+									Download
+								</button>
 							</div>
 						</td>
 					</tr>
@@ -494,6 +526,15 @@
 	>
 		{tip.text}
 	</div>
+{/if}
+
+{#if downloadId}
+	<LogDownloadModal
+		domain="sts"
+		streamId={downloadId}
+		open={true}
+		onclose={() => (downloadId = null)}
+	/>
 {/if}
 
 <style>
@@ -617,7 +658,8 @@
 		white-space: pre;
 	}
 
-	.badge.done {
+	.badge.done,
+	.badge.ack {
 		opacity: 0.75;
 	}
 

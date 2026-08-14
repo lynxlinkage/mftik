@@ -166,6 +166,10 @@ table.data tr:hover td {
 	background: rgba(240, 180, 41, 0.08);
 }
 
+.badge.ack {
+	color: var(--muted);
+}
+
 .page-head {
 	display: flex;
 	flex-wrap: wrap;

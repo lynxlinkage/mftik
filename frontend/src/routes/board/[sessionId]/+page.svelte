@@ -35,6 +35,7 @@
 	let loading = $state(true);
 	let loadingMore = $state(false);
 	let disconnect: (() => void) | null = null;
+	let exporting = $state(false);
 
 	async function refresh() {
 		loading = true;
@@ -71,6 +72,18 @@
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			loadingMore = false;
+		}
+	}
+
+	async function exportCsv() {
+		exporting = true;
+		error = null;
+		try {
+			await api.downloadBoardFillsCsv(sessionId);
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			exporting = false;
 		}
 	}
 
@@ -126,6 +139,9 @@
 			{connection === 'open' ? 'live' : connection}
 		</span>
 		<a class="link-btn" href="/board">← Board</a>
+		<button type="button" class="secondary" onclick={exportCsv} disabled={exporting || loading}>
+			{exporting ? 'Exporting…' : 'Export CSV'}
+		</button>
 		<button type="button" class="secondary" onclick={refresh} disabled={loading}>
 			Refresh
 		</button>
@@ -145,7 +161,9 @@
 					<span
 						class="badge"
 						class:live={summary.status === 'live'}
-						class:done={summary.status !== 'live'}
+						class:done={summary.status === 'done' || summary.status === 'ack'}
+						class:failed={summary.status === 'failed'}
+						class:interrupted={summary.status === 'interrupted'}
 						title={summary.reason ?? ''}
 					>
 						{summary.status}

@@ -69,6 +69,11 @@ async def get_stats(broker: BrokerDep) -> StatsResponse:
                 status=SessionStatus.INTERRUPTED.value
             ),
         }
+        ack = {
+            SessionDomain.STS.value: await sts.count(
+                status=SessionStatus.ACK.value
+            ),
+        }
 
     domains: list[DomainStats] = []
     for domain in (
@@ -104,6 +109,7 @@ async def get_stats(broker: BrokerDep) -> StatsResponse:
                 done=done.get(domain, 0),
                 failed=failed.get(domain, 0),
                 interrupted=interrupted.get(domain, 0),
+                ack=ack.get(domain, 0),
                 healthy=healthy,
             )
         )

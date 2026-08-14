@@ -85,3 +85,19 @@ async def test_list_before_cursor_pagination(db) -> None:
         limit=2,
     )
     assert older == []
+
+
+async def test_list_between_is_oldest_first_and_half_open(db) -> None:
+    repo = SessionLogRepository(db)
+    await repo.bulk_insert_ignore(
+        [
+            _row("e0", ts=0.5),
+            _row("e1", ts=1.0),
+            _row("e2", ts=1.5),
+            _row("e3", ts=2.0),
+        ]
+    )
+    await db.commit()
+
+    rows = await repo.list_between("sts", "sess-1", start_ts=1.0, end_ts=2.0)
+    assert [r.envelope_id for r in rows] == ["e1", "e2"]

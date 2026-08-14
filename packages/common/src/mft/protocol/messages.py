@@ -257,7 +257,7 @@ class StsSessionStatus(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     session_id: str
-    #: live | done | failed
+    #: live | done | failed | interrupted | ack
     status: str
     paused: bool = False
     strategy: str | None = None

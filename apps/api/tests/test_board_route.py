@@ -9,6 +9,8 @@ one thing a record like this must never do.
 
 from __future__ import annotations
 
+import csv
+import io
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -233,7 +235,18 @@ async def test_a_status_filter_narrows_the_list(db) -> None:
 
     assert [r.session_id for r in await rows(status="live")] == ["s1"]
     assert [r.session_id for r in await rows(status="done")] == ["s2"]
-    assert len(await rows()) == 2
+    assert {r.session_id for r in await rows()} == {"s1", "s2"}
+
+
+async def test_finished_is_done_and_ack(db) -> None:
+    await a_session(db, "s-done", status="done")
+    await a_session(db, "s-ack", status="ack")
+    await a_session(db, "s-fail", status="failed")
+
+    assert {r.session_id for r in await rows(status="done,ack")} == {
+        "s-done",
+        "s-ack",
+    }
 
 
 # --- settled vs provisional ------------------------------------------------
@@ -560,3 +573,48 @@ async def test_external_amounts_travel_as_strings_without_padding(db) -> None:
     assert fill.price == "63863.5"
     assert fill.qty == "1"
     assert Decimal(fill.price) == Decimal("63863.5")
+
+
+async def test_csv_export_is_oldest_first_and_named(db) -> None:
+    await a_session(db, "s1")
+    await an_order(db, "s1", key="cid-1", ts=START.timestamp())
+    await a_fill(db, "s1", fill_id="1", ts=START.timestamp() + 1)
+    await a_fill(db, "s1", fill_id="2", ts=START.timestamp() + 2)
+    await confirm(db, (START + timedelta(minutes=30)).timestamp())
+
+    response = await board_routes.export_board_fills_csv("s1")
+    assert response.media_type is not None
+    assert response.media_type.startswith("text/csv")
+    assert 'filename="s1_historical_fills.csv"' in response.headers[
+        "content-disposition"
+    ]
+
+    text = (
+        response.body.decode()
+        if isinstance(response.body, (bytes, bytearray))
+        else str(response.body)
+    )
+    rows = list(csv.reader(io.StringIO(text)))
+    assert rows[0] == [
+        "ts",
+        "fill_id",
+        "universal_ticker",
+        "side",
+        "price",
+        "qty",
+        "fee",
+        "fee_asset",
+        "client_order_id",
+        "venue_order_id",
+        "api_id",
+        "source",
+        "settled",
+    ]
+    assert [row[1] for row in rows[1:]] == ["1", "2"]
+    assert rows[1][12] == "true"
+
+
+async def test_csv_export_of_a_missing_session_is_a_404(db) -> None:
+    with pytest.raises(HTTPException) as caught:
+        await board_routes.export_board_fills_csv("nope")
+    assert caught.value.status_code == 404

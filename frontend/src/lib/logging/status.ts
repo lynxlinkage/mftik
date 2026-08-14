@@ -12,7 +12,7 @@ import { wsBaseUrl } from '$lib/ws';
 
 export type StsSessionStatusEvent = {
 	session_id: string;
-	/** live | done | failed */
+	/** live | done | failed | interrupted | ack */
 	status: string;
 	paused: boolean;
 	strategy: string | null;

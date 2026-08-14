@@ -91,6 +91,22 @@ async def test_failed_sessions_are_listed_under_their_own_status(db) -> None:
     assert [r.session_id for r in failed] == ["s-b"]
 
 
+async def test_list_sessions_accepts_several_statuses(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-done")
+    await _live(repo, "s-ack")
+    await _live(repo, "s-fail")
+    await repo.mark_done("s-done")
+    await repo.mark_failed("s-fail", "boom")
+    await repo.mark_finished("s-ack", status=SessionStatus.INTERRUPTED.value)
+    await repo.mark_ack("s-ack")
+
+    rows = await repo.list_sessions(
+        status=[SessionStatus.DONE.value, SessionStatus.ACK.value]
+    )
+    assert {r.session_id for r in rows} == {"s-done", "s-ack"}
+
+
 async def test_the_cid_slot_is_kept(db) -> None:
     """A rebuilt session has to mint order ids in the same slot.
 
@@ -194,3 +210,43 @@ async def test_rebuild_count_accumulates(db) -> None:
     assert row.rebuild_count == 2
     # Deploys say whether they want to come back; the default is that they do.
     assert row.restart == "always"
+
+
+async def test_mark_ack_keeps_the_reason_and_the_end(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-ack")
+    failed = await repo.mark_failed("s-ack", "oco_insufficient_balance")
+    assert failed is not None
+    ended = failed.finished_at
+
+    row = await repo.mark_ack("s-ack")
+    assert row is not None
+    assert row.status == SessionStatus.ACK.value
+    assert row.reason == "oco_insufficient_balance"
+    assert row.finished_at == ended
+
+
+async def test_mark_ack_accepts_interrupted(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-int")
+    await repo.mark_finished(
+        "s-int",
+        status=SessionStatus.INTERRUPTED.value,
+        reason="STS shut down while this was running",
+    )
+
+    row = await repo.mark_ack("s-int")
+    assert row is not None
+    assert row.status == SessionStatus.ACK.value
+    assert row.reason == "STS shut down while this was running"
+
+
+async def test_mark_ack_refuses_live_and_done(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-live")
+    await _live(repo, "s-done")
+    await repo.mark_done("s-done")
+
+    assert await repo.mark_ack("s-live") is None
+    assert await repo.mark_ack("s-done") is None
+    assert await repo.mark_ack("nope") is None

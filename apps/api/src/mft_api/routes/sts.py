@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 from mft.protocol import (
@@ -11,6 +12,7 @@ from mft.protocol import (
     STS_SESSION_LIST,
     STS_SESSION_PAUSE,
     STS_SESSION_RESUME,
+    STS_SESSION_STATUS,
     STS_SESSION_STOP,
     ListSessionsRequest,
     ListSessionsRequestEnvelope,
@@ -20,6 +22,8 @@ from mft.protocol import (
     StsSessionControlRequest,
     StsSessionControlRequestEnvelope,
     StsSessionControlResult,
+    StsSessionStatus,
+    StsSessionStatusEnvelope,
     Topics,
     all_templates,
     default_template,
@@ -28,7 +32,12 @@ from mft.protocol import (
     parse_strategy_yml,
     strategy_types,
 )
-from mft_db.repositories import AccountRepository, StrategyRepository
+from mft_db.models.session import SessionStatus
+from mft_db.repositories import (
+    AccountRepository,
+    StrategyRepository,
+    StsSessionRepository,
+)
 from mft_db.session import session_scope
 
 from mft_api.audit_util import record_audit
@@ -52,6 +61,14 @@ from mft_api.schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sts", tags=["sts"])
+
+#: Replay buffer sizing matches STS manager — cover the gap between a
+#: page loading and its socket being live, not history.
+_STATUS_BUFFER = 200
+_STATUS_TTL_SECONDS = 3600
+_ACKABLE = frozenset(
+    {SessionStatus.FAILED.value, SessionStatus.INTERRUPTED.value}
+)
 
 @router.get("/template")
 async def strategy_template() -> dict[str, str]:
@@ -235,6 +252,91 @@ async def resume_session(session_id: str, broker: BrokerDep) -> StsControlRespon
 @router.post("/sessions/{session_id}/stop", response_model=StsControlResponse)
 async def stop_session(session_id: str, broker: BrokerDep) -> StsControlResponse:
     return await _control(broker, session_id, STS_SESSION_STOP, "sts.session.stop")
+
+
+def _epoch(value: datetime | None) -> float | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.timestamp()
+
+
+@router.post("/sessions/{session_id}/ack", response_model=StsControlResponse)
+async def ack_session(session_id: str, broker: BrokerDep) -> StsControlResponse:
+    """Mark a failed or interrupted session as acknowledged — a normal stop.
+
+    The process is already gone, so this is a database write rather than an
+    STS RPC. The original reason stays so the badge still explains why it
+    ended; only the status changes.
+    """
+    async with session_scope() as db:
+        repo = StsSessionRepository(db)
+        row = await repo.get_by_session_id(session_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"no session {session_id}"
+            )
+        if row.status not in _ACKABLE:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"session {session_id} is {row.status}, "
+                    "not failed or interrupted"
+                ),
+            )
+        row = await repo.mark_ack(session_id)
+        if row is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"session {session_id} is not failed or interrupted",
+            )
+        snapshot = (
+            row.session_id,
+            row.status,
+            row.strategy,
+            row.reason,
+            row.created_by,
+            _epoch(row.finished_at),
+        )
+
+    session_id_, status, strategy, reason, created_by, finished_at = snapshot
+    envelope = StsSessionStatusEnvelope.wrap(
+        StsSessionStatus(
+            session_id=session_id_,
+            status=status,
+            paused=False,
+            strategy=strategy,
+            reason=reason,
+            created_by=created_by,
+            finished_at=finished_at,
+        ),
+        type=STS_SESSION_STATUS,
+        source="api",
+        session_id=session_id_,
+    )
+    try:
+        await broker.publish_log(
+            Topics.status_sts(),
+            envelope,
+            maxlen=_STATUS_BUFFER,
+            ttl_seconds=_STATUS_TTL_SECONDS,
+        )
+    except Exception:
+        logger.exception("STS ack status publish failed session=%s", session_id)
+
+    await record_audit(
+        user_id=DEFAULT_USER_ID,
+        operation="sts.session.ack",
+        result=f"session_id={session_id_} status={status}",
+    )
+    return StsControlResponse(
+        session_id=session_id_,
+        status=status,
+        paused=False,
+        strategy=strategy,
+        reason=reason,
+    )
 
 
 @router.post("/deploy/{strategy_type}", response_model=DeployResponse)

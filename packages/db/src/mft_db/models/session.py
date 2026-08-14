@@ -42,6 +42,9 @@ class SessionStatus(StrEnum):
     #: rebuild-on-restart would draw from. Recording it is all this does —
     #: rebuilding is per-strategy work that does not exist yet.
     INTERRUPTED = "interrupted"
+    #: An operator looked at a failed or interrupted session and marked it
+    #: seen. The original reason stays; rebuild does not draw from this.
+    ACK = "ack"
 
     @classmethod
     def terminal(cls) -> frozenset[str]:
@@ -53,7 +56,12 @@ class SessionStatus(StrEnum):
         missing from the dashboard.
         """
         return frozenset(
-            {cls.DONE.value, cls.FAILED.value, cls.INTERRUPTED.value}
+            {
+                cls.DONE.value,
+                cls.FAILED.value,
+                cls.INTERRUPTED.value,
+                cls.ACK.value,
+            }
         )
 
 

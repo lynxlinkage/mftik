@@ -74,6 +74,12 @@
 						<span class="l">interrupted</span>
 					</div>
 				{/if}
+				{#if d.ack > 0}
+					<div>
+						<span class="n muted-n">{d.ack}</span>
+						<span class="l">ack</span>
+					</div>
+				{/if}
 			</div>
 		</a>
 	{:else}

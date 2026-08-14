@@ -110,3 +110,135 @@ async def test_list_with_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(result.logs) == 1
     assert result.logs[0].id == "e2"
     assert result.has_more is False
+
+
+async def test_download_invalid_domain_rejected() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await logs_routes.download_session_logs(
+            "xx", "s1", from_day="2026-08-01", to_day="2026-08-01"
+        )
+    assert exc.value.status_code == 400
+
+
+async def test_download_rejects_a_backwards_range() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await logs_routes.download_session_logs(
+            "sts", "s1", from_day="2026-08-02", to_day="2026-08-01"
+        )
+    assert exc.value.status_code == 400
+
+
+async def test_download_rejects_a_range_over_31_days() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await logs_routes.download_session_logs(
+            "sts", "s1", from_day="2026-08-01", to_day="2026-09-02"
+        )
+    assert exc.value.status_code == 400
+
+
+async def test_download_single_day_is_a_named_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    ts = datetime(2026, 8, 1, 12, 0, 0, 123000, tzinfo=UTC).timestamp()
+
+    class FakeRepo:
+        def __init__(self, _db: Any) -> None:
+            pass
+
+        async def list_between(
+            self,
+            domain: str,
+            stream_id: str,
+            *,
+            start_ts: float,
+            end_ts: float,
+        ) -> list[SimpleNamespace]:
+            assert domain == "sts"
+            assert stream_id == "sess-1"
+            return [
+                SimpleNamespace(
+                    ts=ts, source="sts", level="info", message="hello"
+                )
+            ]
+
+    monkeypatch.setattr(logs_routes, "session_scope", _session_scope_stub())
+    monkeypatch.setattr(logs_routes, "SessionLogRepository", FakeRepo)
+
+    result = await logs_routes.download_session_logs(
+        "sts", "sess-1", from_day="2026-08-01", to_day="2026-08-01"
+    )
+    assert result.media_type is not None
+    assert result.media_type.startswith("text/plain")
+    assert 'filename="sess-1_sts_2026-08-01.log"' in result.headers[
+        "content-disposition"
+    ]
+    body = result.body.decode()
+    assert "hello" in body
+    assert "2026-08-01T12:00:00" in body
+
+
+async def test_download_empty_range_is_a_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeRepo:
+        def __init__(self, _db: Any) -> None:
+            pass
+
+        async def list_between(self, *_a: Any, **_k: Any) -> list[SimpleNamespace]:
+            return []
+
+    monkeypatch.setattr(logs_routes, "session_scope", _session_scope_stub())
+    monkeypatch.setattr(logs_routes, "SessionLogRepository", FakeRepo)
+
+    with pytest.raises(HTTPException) as exc:
+        await logs_routes.download_session_logs(
+            "sts", "sess-1", from_day="2026-08-01", to_day="2026-08-01"
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_download_several_days_is_a_tar_gz(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    import tarfile
+    from datetime import UTC, datetime
+
+    ts1 = datetime(2026, 8, 1, 12, tzinfo=UTC).timestamp()
+    ts2 = datetime(2026, 8, 3, 12, tzinfo=UTC).timestamp()
+
+    class FakeRepo:
+        def __init__(self, _db: Any) -> None:
+            pass
+
+        async def list_between(self, *_a: Any, **_k: Any) -> list[SimpleNamespace]:
+            return [
+                SimpleNamespace(ts=ts1, source="sts", level="info", message="day1"),
+                SimpleNamespace(ts=ts2, source="sts", level="info", message="day3"),
+            ]
+
+    monkeypatch.setattr(logs_routes, "session_scope", _session_scope_stub())
+    monkeypatch.setattr(logs_routes, "SessionLogRepository", FakeRepo)
+
+    result = await logs_routes.download_session_logs(
+        "sts", "sess-1", from_day="2026-08-01", to_day="2026-08-03"
+    )
+    assert result.media_type == "application/gzip"
+    assert (
+        'filename="sess-1_sts_2026-08-01_2026-08-03.tar.gz"'
+        in result.headers["content-disposition"]
+    )
+    with tarfile.open(fileobj=io.BytesIO(result.body), mode="r:gz") as tar:
+        names = tar.getnames()
+        assert names == [
+            "sess-1_sts_2026-08-01.log",
+            "sess-1_sts_2026-08-03.log",
+        ]
+        day1 = tar.extractfile("sess-1_sts_2026-08-01.log")
+        assert day1 is not None
+        assert b"day1" in day1.read()
+
+
+def test_safe_filename_part_strips_spaces_and_slashes() -> None:
+    assert logs_routes.safe_filename_part("main trader") == "main_trader"
+    assert logs_routes.safe_filename_part("Binance/spot") == "Binance_spot"
