@@ -200,7 +200,21 @@ class BinanceSpotHistoryReader:
 
 
 def _ms(ts: float | None) -> int | None:
+    """Epoch seconds → milliseconds, which is what Binance and Bybit want."""
     return None if ts is None else int(ts * 1000)
+
+
+def _sec(ts: float | None) -> int | None:
+    """Epoch seconds, truncated. Gate's ``from`` is in seconds, not millis.
+
+    Its own payloads say so — a candlestick row opens with a ten-digit time,
+    and every millisecond field it sends is spelled ``*_time_ms``. Worth its own
+    helper next to :func:`_ms` because the two are one keystroke apart and the
+    venue will not tell you which one it got: ``from`` a thousand times too
+    large is a timestamp in the year 58,000, and Gate answers that with ``200``
+    and an empty array rather than an error.
+    """
+    return None if ts is None else int(ts)
 
 
 class BinanceFutureHistoryReader:
@@ -389,10 +403,19 @@ class GateSpotHistoryReader:
 
     The weakest pagination of the three: Gate numbers pages rather than
     handing out an id or a cursor, and a page number only means anything
-    against a fixed query. So the cursor carried here is ``"{since_ms}:{page}"``
+    against a fixed query. So the cursor carried here is ``"{since_s}:{page}"``
     — the window *and* the position in it — which keeps the walk stable for a
     run and lets the next one start again from the settlement line. Opaque to
     the executor either way, which is the point of the cursor being a string.
+
+    The window is in **seconds**. Gate is the only venue here that wants them,
+    and asking in milliseconds is not an error to it: ``from`` a thousand times
+    too large lands beyond any trade that will ever exist, so it answers ``200``
+    with ``[]``. A walk reading that sees a short page, calls itself drained,
+    and moves the settlement line to the ceiling — the account marked settled
+    on history nobody read. Nothing downstream can tell that apart from an
+    account that genuinely traded nothing, which is why it is spelled out here
+    and pinned by :func:`_sec` rather than left to whoever edits this next.
 
     Gate trade rows carry ``text``, our own client order id, so an execution
     re-read here arrives already attributable — as Bybit's do, and as neither
@@ -424,11 +447,11 @@ class GateSpotHistoryReader:
 
     @staticmethod
     def _resume(cursor: str | None, since_ts: float | None) -> tuple[int, int | None]:
-        """``(page, since_ms)`` from either half of the pair."""
+        """``(page, since_s)`` from either half of the pair."""
         if cursor:
             window, _, page = cursor.partition(":")
             return max(1, int(page or 1)), int(window) if window else None
-        return 1, _ms(since_ts)
+        return 1, _sec(since_ts)
 
     @staticmethod
     def _next(page: int, since: int | None, served: int, limit: int) -> str | None:

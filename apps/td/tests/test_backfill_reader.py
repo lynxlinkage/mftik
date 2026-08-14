@@ -362,8 +362,32 @@ async def test_gate_carries_the_window_and_the_page_in_one_cursor() -> None:
     )
 
     assert rest.calls[0]["page"] == 1
-    assert rest.calls[0]["since"] == 1_600_000_000_000
-    assert page.next_cursor == "1600000000000:2"
+    assert page.next_cursor == "1600000000:2"
+
+
+async def test_gate_is_asked_in_seconds_not_milliseconds() -> None:
+    """The one venue here that wants seconds, and it will not say so.
+
+    Verified against the live endpoint: ``from`` in seconds returns rows,
+    ``from`` in milliseconds returns ``200`` and ``[]`` — a window starting
+    fifty thousand years out. Every layer above reads that empty page as a
+    drained walk and settles the account on history it never saw, so the unit
+    is the whole correctness of the Gate backfill and belongs in a test that
+    says so out loud.
+    """
+    rest = FakeGateRest()
+    reader = GateSpotHistoryReader(symbols=FakeSymbols(), rest=rest)
+
+    await reader.fetch_my_trades(
+        UniversalTicker.parse("Gate_Spot_BTCUSDT"), since_ts=1_600_000_000.75
+    )
+    await reader.fetch_orders(
+        UniversalTicker.parse("Gate_Spot_BTCUSDT"), since_ts=1_600_000_000.75
+    )
+
+    assert [call["since"] for call in rest.calls] == [1_600_000_000] * 2, (
+        "seconds, truncated — not 1_600_000_000_750"
+    )
 
 
 async def test_gate_resumes_the_same_window_on_the_next_page() -> None:
@@ -371,11 +395,11 @@ async def test_gate_resumes_the_same_window_on_the_next_page() -> None:
     reader = GateSpotHistoryReader(symbols=FakeSymbols(), rest=rest)
 
     await reader.fetch_my_trades(
-        UniversalTicker.parse("Gate_Spot_BTCUSDT"), cursor="1600000000000:2"
+        UniversalTicker.parse("Gate_Spot_BTCUSDT"), cursor="1600000000:2"
     )
 
     assert rest.calls[0]["page"] == 2
-    assert rest.calls[0]["since"] == 1_600_000_000_000
+    assert rest.calls[0]["since"] == 1_600_000_000
 
 
 async def test_gate_stops_on_a_short_page() -> None:

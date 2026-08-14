@@ -205,6 +205,11 @@ class GateSpotRest(_GateRestTransport):
         re-derives it from the settlement line on the next one. The caller is
         what keeps those two together; see the Gate history reader.
 
+        ``since`` is Gate's ``from``, in **seconds** — not the milliseconds
+        Binance and Bybit take. Passing millis is not rejected: it asks for
+        trades after a date fifty thousand years out and gets ``200`` with an
+        empty page, which reads as an account that never traded.
+
         Unlike the other venues, a Gate trade row carries ``text`` — our own
         client order id — so an execution re-read here needs no join to be
         attributed.
@@ -237,6 +242,8 @@ class GateSpotRest(_GateRestTransport):
         Read alongside the trades even though Gate's trade rows are already
         attributable, because this is what makes orders placed outside the
         platform visible — the same reason it is read on every other venue.
+
+        ``since`` is in seconds, as on :meth:`fetch_my_trades`.
         """
         params: dict[str, Any] = {
             "currency_pair": currency_pair,
