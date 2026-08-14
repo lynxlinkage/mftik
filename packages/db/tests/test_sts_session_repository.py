@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from db_harness import a_database
+from db_harness import a_database, an_owner
 from mft_db.models.session import SessionStatus
 from mft_db.repositories import (
     MdSessionRepository,
@@ -13,8 +13,11 @@ from mft_db.repositories import (
 
 
 @pytest.fixture
-async def db():
-    async with a_database() as database, database.maker() as session:
+async def db(database_url):
+    async with a_database(database_url) as database, database.maker() as session:
+        # Every session row names a creator, and that column is a foreign key.
+        await an_owner(session)
+        await session.commit()
         yield session
 
 

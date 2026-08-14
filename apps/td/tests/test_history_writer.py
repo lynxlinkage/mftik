@@ -26,9 +26,9 @@ CID = "281474976710656001"
 
 
 @pytest.fixture
-async def scope():
+async def scope(database_url):
     """A ``session_scope``-alike; the writer opens a fresh session per flush."""
-    async with a_database() as database:
+    async with a_database(database_url) as database:
         yield database.scope
 
 

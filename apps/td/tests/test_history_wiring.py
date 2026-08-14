@@ -65,8 +65,8 @@ async def paper() -> PaperExchange:
 
 
 @pytest.fixture
-async def scope():
-    async with a_database() as database:
+async def scope(database_url):
+    async with a_database(database_url) as database:
         yield database.scope
 
 

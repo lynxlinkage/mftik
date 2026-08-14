@@ -6,7 +6,7 @@ Repositories are stubbed so the handler can be driven with no database.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -36,7 +36,7 @@ def _api(*, api_id: int = 3, owner_id: int = 1) -> SimpleNamespace:
         venue="Paper",
         api_key="paper-key",
         type="HMAC",
-        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2024, 1, 1, tzinfo=UTC),
     )
 
 

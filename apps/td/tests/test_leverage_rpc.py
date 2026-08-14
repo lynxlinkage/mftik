@@ -15,8 +15,8 @@ from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     STS_ENSURE_LEVERAGE,
     STS_LEASE_HEARTBEAT,
-    Envelope,
     EnsureLeverage,
+    Envelope,
     LeaseHeartbeat,
     LeverageAck,
     RejectCode,

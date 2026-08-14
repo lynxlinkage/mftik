@@ -12,8 +12,8 @@ from mft.broker import Broker, BrokerConfig
 from mft.protocol import (
     STS_ENSURE_LEVERAGE,
     TD_LEVERAGE_ACK,
-    Envelope,
     EnsureLeverage,
+    Envelope,
     LeverageAck,
     RejectCode,
     Topics,

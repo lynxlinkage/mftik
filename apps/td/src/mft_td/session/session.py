@@ -1268,11 +1268,9 @@ class Session:
         if fill.fee_asset:
             fee = f"{fee} {fill.fee_asset}"
         await self._td_log(
-            (
-                f"fill cid={fill.client_order_id or '?'} "
-                f"{fill.side} {fill.price}@{fill.qty}{fee} "
-                f"{fill.universal_ticker}"
-            )
+            f"fill cid={fill.client_order_id or '?'} "
+            f"{fill.side} {fill.price}@{fill.qty}{fee} "
+            f"{fill.universal_ticker}"
         )
         await self._publish_global(TD_FILL, fill)
 

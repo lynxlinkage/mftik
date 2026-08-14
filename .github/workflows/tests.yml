@@ -9,6 +9,27 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # Every database test runs twice: once on in-memory sqlite, once here.
+    # sqlite alone is not a stand-in — it has no decimal type and ignores
+    # VARCHAR length, so a column too small for what a venue sends looks fine.
+    # `conftest.py` fails the run outright if this service did not come up,
+    # rather than letting the suite quietly pass on sqlite only.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mft
+          POSTGRES_PASSWORD: mft
+          POSTGRES_DB: mft_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mft -d mft_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql+asyncpg://mft:mft@localhost:5432/mft_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -17,5 +38,10 @@ jobs:
           python-version: "3.12"
       - name: Sync
         run: uv sync --all-packages
+
+      # First because it is the fastest thing here and needs no service.
+      - name: Lint
+        run: uv run --all-packages ruff check packages apps conftest.py
+
       - name: Test
         run: uv run --all-packages pytest packages apps -q

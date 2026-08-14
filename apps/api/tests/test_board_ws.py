@@ -26,8 +26,8 @@ TICKER = "Binance_Spot_BTCUSDT"
 
 
 @pytest.fixture
-async def db(monkeypatch):
-    async with a_database() as database:
+async def db(monkeypatch, database_url):
+    async with a_database(database_url) as database:
         monkeypatch.setattr(ws_module, "session_scope", database.scope)
         yield database.scope
 

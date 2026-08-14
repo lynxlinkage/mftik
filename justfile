@@ -9,13 +9,28 @@ sync:
     uv sync --all-packages
     cd frontend && npm install
 
-# Run all Python tests
+# Run all Python tests (sqlite only — fast, and what most changes need)
 test:
     uv run --all-packages pytest packages apps -q
 
-# Lint Python
+# Run them again on Postgres too, which is what CI does and what production is.
+# sqlite ignores VARCHAR length and has no decimal type, so it cannot show you
+# a column too small for what a venue sends. Needs `just up postgres` running;
+# the database is created on first use and its tables are dropped every run.
+test-pg *args="packages apps":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    url="${TEST_POSTGRES_URL:-postgresql+asyncpg://mft:mft@localhost:5432/mft_test}"
+    docker compose exec -T postgres \
+      createdb -U "${POSTGRES_USER:-mft}" mft_test 2>/dev/null \
+      && echo "created mft_test" || true
+    TEST_POSTGRES_URL="$url" uv run --all-packages pytest {{args}} -q
+
+# Lint Python. Same invocation CI runs, so a green run here means a green one
+# there — conftest.py included, since it sits at the root and neither path
+# would otherwise reach it.
 lint:
-    uv run --all-packages ruff check packages apps
+    uv run --all-packages ruff check packages apps conftest.py
 
 # Sign a real history read with a stored credential and print what came back.
 # Read-only: every call is a GET on a history endpoint and nothing is written.

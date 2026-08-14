@@ -26,9 +26,8 @@ from mft.exchange.binance.future.models import (
     BinanceFutureSymbolConfig,
 )
 from mft.exchange.binance.future.private import BinanceFuturePrivateClient
-from mft.exchange.errors import ExchangeError
 from mft.exchange.binance.future.user import BinanceFutureUserStream
-from mft.exchange.errors import OrderError
+from mft.exchange.errors import ExchangeError, OrderError
 from mft.exchange.models import (
     OrderStatus,
     OrderType,

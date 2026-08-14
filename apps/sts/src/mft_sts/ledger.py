@@ -30,8 +30,8 @@ from mft.exchange.oms import LedgerView
 from mft.exchange.tickers import UniversalTicker
 from mft.protocol import (
     STS_ENSURE_LEVERAGE,
-    Envelope,
     EnsureLeverage,
+    Envelope,
     LeverageAck,
     RejectCode,
     Topics,

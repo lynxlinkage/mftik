@@ -13,8 +13,8 @@ SPOT = SymbolCategory.SPOT.value
 
 
 @pytest.fixture
-async def db():
-    async with a_database() as database, database.maker() as session:
+async def db(database_url):
+    async with a_database(database_url) as database, database.maker() as session:
         yield session
 
 

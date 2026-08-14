@@ -14,6 +14,24 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Same matrix as tests.yml — see the note there for why sqlite alone will
+    # not do. A deploy must not be gated on a weaker suite than a PR is.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mft
+          POSTGRES_PASSWORD: mft
+          POSTGRES_DB: mft_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mft -d mft_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql+asyncpg://mft:mft@localhost:5432/mft_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -22,6 +40,10 @@ jobs:
           python-version: "3.12"
       - name: Sync
         run: uv sync --all-packages
+
+      - name: Lint
+        run: uv run --all-packages ruff check packages apps conftest.py
+
       - name: Test
         run: uv run --all-packages pytest packages apps -q
       - name: Contracts up to date

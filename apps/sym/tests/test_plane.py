@@ -76,8 +76,8 @@ def _inst(base: str, quote: str = "USDT", **kwargs) -> Instrument:
 
 
 @pytest.fixture
-async def sessionmaker_():
-    async with a_database() as database:
+async def sessionmaker_(database_url):
+    async with a_database(database_url) as database:
         yield database.maker
 
 

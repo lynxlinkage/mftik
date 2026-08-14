@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from db_harness import a_database
+from db_harness import a_database, an_owner
 from fastapi import HTTPException
 from mft_api.routes import board as board_routes
 from mft_db.models import StsSessionRow
@@ -30,8 +30,10 @@ START = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-async def db(monkeypatch):
-    async with a_database() as database:
+async def db(monkeypatch, database_url):
+    async with a_database(database_url) as database:
+        async with database.scope() as session:
+            await an_owner(session)
         monkeypatch.setattr(board_routes, "session_scope", database.scope)
         yield database.scope
 

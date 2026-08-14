@@ -36,9 +36,9 @@ async def broker() -> Broker:
 
 
 @pytest.fixture
-async def db(monkeypatch):
+async def db(monkeypatch, database_url):
     """The database the sweep reads, in place of the one it would open."""
-    async with a_database() as database:
+    async with a_database(database_url) as database:
         monkeypatch.setattr(backfill_cron, "session_scope", database.scope)
         yield database.scope
 
