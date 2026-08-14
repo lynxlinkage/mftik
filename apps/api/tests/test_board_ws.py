@@ -15,12 +15,10 @@ from contextlib import asynccontextmanager
 from decimal import Decimal
 
 import pytest
+from db_harness import a_database
 from mft_api import ws as ws_module
-from mft_db.models import Base
 from mft_db.models.history import Attribution, Source
 from mft_db.repositories import OrderRepository
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 API_ID = 7
 CID = "281474976710656001"
@@ -29,28 +27,9 @@ TICKER = "Binance_Spot_BTCUSDT"
 
 @pytest.fixture
 async def db(monkeypatch):
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def scope():
-        async with maker() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    monkeypatch.setattr(ws_module, "session_scope", scope)
-    yield scope
-    await engine.dispose()
+    async with a_database() as database:
+        monkeypatch.setattr(ws_module, "session_scope", database.scope)
+        yield database.scope
 
 
 async def seed_order(

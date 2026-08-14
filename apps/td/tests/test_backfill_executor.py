@@ -12,15 +12,14 @@ trade after a walk has already read past its number.
 from __future__ import annotations
 
 import time
-from contextlib import asynccontextmanager
 from decimal import Decimal
 from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
+from db_harness import a_database
 from mft.broker import Broker, BrokerConfig
 from mft.exchange.models import Fill, Order, OrderStatus, OrderType, Side
-from mft_db.models import Base
 from mft_db.models.history import Attribution, Source, Stream
 from mft_db.repositories import (
     BackfillCursorRepository,
@@ -30,8 +29,6 @@ from mft_db.repositories import (
 from mft_td.backfill.executor import BackfillExecutor
 from mft_td.backfill.reader import HistoryPage, NoHistoryReaderError
 from mft_td.history import order_row
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 API_ID = 7
 TICKER = "Binance_Spot_BTCUSDT"
@@ -64,27 +61,8 @@ async def broker() -> Broker:
 
 @pytest.fixture
 async def scope():
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def open_scope():
-        async with maker() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    yield open_scope
-    await engine.dispose()
+    async with a_database() as database:
+        yield database.scope
 
 
 class FakeReader:

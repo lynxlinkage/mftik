@@ -19,6 +19,7 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
+from db_harness import a_database
 from mft.broker import Broker, BrokerConfig
 from mft.exchange import PaperExchange, Side
 from mft.exchange.models import OrderStatus, OrderType, PlaceOrderRequest
@@ -32,13 +33,10 @@ from mft.protocol import (
     TdAttachRequest,
     Topics,
 )
-from mft_db.models import Base
 from mft_db.models.history import Attribution
 from mft_db.repositories import FillRepository, OrderRepository
 from mft_td.history import HistoryWriter
 from mft_td.session import PaperSessionFactory, SessionManager
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 API_ID = 42
 SESSION = "sts-history"
@@ -68,27 +66,8 @@ async def paper() -> PaperExchange:
 
 @pytest.fixture
 async def scope():
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def open_scope():
-        async with maker() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    yield open_scope
-    await engine.dispose()
+    async with a_database() as database:
+        yield database.scope
 
 
 async def _lease_publisher(

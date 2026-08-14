@@ -3,20 +3,14 @@
 from __future__ import annotations
 
 import pytest
-from mft_db.models import Base
+from db_harness import a_database
 from mft_db.repositories import SessionLogRepository
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 @pytest.fixture
 async def db():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-    async with maker() as session:
+    async with a_database() as database, database.maker() as session:
         yield session
-    await engine.dispose()
 
 
 def _row(

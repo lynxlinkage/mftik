@@ -9,22 +9,20 @@ one thing a record like this must never do.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from db_harness import a_database
 from fastapi import HTTPException
 from mft_api.routes import board as board_routes
-from mft_db.models import Base, StsSessionRow
+from mft_db.models import StsSessionRow
 from mft_db.models.history import Attribution, Source, Stream
 from mft_db.repositories import (
     BackfillCursorRepository,
     FillRepository,
     OrderRepository,
 )
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 API_ID = 7
 TICKER = "Binance_Spot_BTCUSDT"
@@ -33,28 +31,9 @@ START = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
 
 @pytest.fixture
 async def db(monkeypatch):
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def scope():
-        async with maker() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    monkeypatch.setattr(board_routes, "session_scope", scope)
-    yield scope
-    await engine.dispose()
+    async with a_database() as database:
+        monkeypatch.setattr(board_routes, "session_scope", database.scope)
+        yield database.scope
 
 
 async def a_session(

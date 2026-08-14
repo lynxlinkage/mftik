@@ -14,13 +14,11 @@ from contextlib import asynccontextmanager
 from decimal import Decimal
 
 import pytest
+from db_harness import a_database
 from mft.exchange.models import Fill, Order, OrderStatus, OrderType, Side
-from mft_db.models import Base
 from mft_db.models.history import Attribution, Source
 from mft_db.repositories import FillRepository, OrderRepository
 from mft_td.history import HistoryWriter
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 API_ID = 7
 TICKER = "Binance_Spot_BTCUSDT"
@@ -29,32 +27,9 @@ CID = "281474976710656001"
 
 @pytest.fixture
 async def scope():
-    """A ``session_scope``-alike over one in-memory sqlite database.
-
-    StaticPool because the writer opens a fresh session per flush, and every
-    connection to ``:memory:`` would otherwise get a database of its own.
-    """
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def open_scope():
-        async with maker() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    yield open_scope
-    await engine.dispose()
+    """A ``session_scope``-alike; the writer opens a fresh session per flush."""
+    async with a_database() as database:
+        yield database.scope
 
 
 @pytest.fixture

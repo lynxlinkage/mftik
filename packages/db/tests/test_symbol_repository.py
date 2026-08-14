@@ -5,22 +5,17 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft_db.models import Base, SymbolCategory
+from db_harness import a_database
+from mft_db.models import SymbolCategory
 from mft_db.repositories import SymbolRepository
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 SPOT = SymbolCategory.SPOT.value
 
 
 @pytest.fixture
 async def db():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-    async with maker() as session:
+    async with a_database() as database, database.maker() as session:
         yield session
-    await engine.dispose()
 
 
 async def _btc(repo: SymbolRepository, **overrides):

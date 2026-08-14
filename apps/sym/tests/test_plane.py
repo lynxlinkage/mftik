@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
+from db_harness import a_database
 from mft.broker import Broker, BrokerConfig
 from mft.exchange.tickers import Category, UniversalTicker
 from mft.protocol import (
@@ -18,12 +19,10 @@ from mft.protocol import (
     Topics,
 )
 from mft.symbols import SymbolClient, SymbolNotFoundError
-from mft_db.models import Base
 from mft_db.repositories import SymbolRepository
 from mft_sym.plane import SymbolPlane
 from mft_sym.rpc import dispatch
 from mft_sym.sources.base import Instrument
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 VENUE = "Gate"
 
@@ -78,11 +77,8 @@ def _inst(base: str, quote: str = "USDT", **kwargs) -> Instrument:
 
 @pytest.fixture
 async def sessionmaker_():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield async_sessionmaker(engine, expire_on_commit=False)
-    await engine.dispose()
+    async with a_database() as database:
+        yield database.maker
 
 
 @pytest.fixture
