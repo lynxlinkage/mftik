@@ -82,6 +82,11 @@ _RESERVED_PARAMS = (
     "quantity",
     "price",
     "newClientOrderId",
+    # A request field since reduce_only stopped being a venue-only option.
+    # Left open, a params key could contradict the field and win, which on
+    # this flag is the difference between closing a position and opening the
+    # opposite one.
+    "reduceOnly",
 )
 
 #: Canonical time-in-force → Binance futures' spelling. All four exist here,
@@ -231,6 +236,9 @@ class BinanceFuturePrivateClient(BaseClient):
                 price=request.price,
                 time_in_force=extras.pop("timeInForce", tif),
                 client_order_id=request.client_order_id,
+                # None rather than False when it is off, so an ordinary order
+                # goes out exactly as it did before this flag existed.
+                reduce_only=request.reduce_only or None,
                 **extras,
             )
         except BinanceWsError as exc:

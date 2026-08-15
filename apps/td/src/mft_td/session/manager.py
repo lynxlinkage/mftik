@@ -19,7 +19,7 @@ from mft.exchange.models import (
     is_terminal,
 )
 from mft.exchange.oms import OmsView
-from mft.exchange.tickers import InvalidTickerError, UniversalTicker
+from mft.exchange.tickers import Category, InvalidTickerError, UniversalTicker
 from mft.liveness import is_alive
 from mft.protocol import (
     STS_DETACH,
@@ -1251,6 +1251,20 @@ class SessionManager:
                     RejectCode.TD_WRONG_INSTRUMENT,
                 )
                 return
+            # Checked here, beside the instrument check and before the
+            # pre-lock, because this is where the category is known and
+            # nothing has been committed yet.
+            refusal = _reduce_only_unsupported(payload)
+            if refusal is not None:
+                await self._reply_order_ack(
+                    req,
+                    acct.api_id,
+                    cid,
+                    False,
+                    refusal,
+                    RejectCode.TD_REDUCE_ONLY_UNSUPPORTED,
+                )
+                return
             request = PlaceOrderRequest(
                 universal_ticker=payload.universal_ticker,
                 side=payload.side,
@@ -1258,6 +1272,7 @@ class SessionManager:
                 qty=payload.qty,
                 price=payload.price,
                 tif=payload.tif,
+                reduce_only=payload.reduce_only,
                 client_order_id=cid,
             )
             refusal = await acct.trading.reserve(request)
@@ -1557,5 +1572,32 @@ def _wrong_instrument(universal_ticker: str, acct: TradingAccount) -> str | None
         return (
             f"api_id={acct.api_id} trades {venue}; "
             f"{universal_ticker} is a {ticker.venue} instrument"
+        )
+    return None
+
+
+def _reduce_only_unsupported(payload: OrderSubmit) -> str | None:
+    """Why this order cannot carry ``reduce_only``, or None.
+
+    Spot is the whole of it. There is no position to reduce, so no venue has
+    anywhere to apply the flag — and the order would go out as an ordinary one
+    that can open exposure in either direction.
+
+    Refused rather than quietly stripped. A caller sets this to be certain an
+    order cannot go the other way, and dropping it would hand back the same
+    ``True`` as an order that really is protected. The one case this exists to
+    prevent looks, from the strategy's side, exactly like success.
+    """
+    if not payload.reduce_only:
+        return None
+    try:
+        ticker = UniversalTicker.parse(payload.universal_ticker)
+    except InvalidTickerError:
+        # The instrument check above already refused this one.
+        return None
+    if ticker.category is Category.SPOT:
+        return (
+            f"reduce_only is not a spot concept; {payload.universal_ticker} "
+            "has no position to reduce"
         )
     return None

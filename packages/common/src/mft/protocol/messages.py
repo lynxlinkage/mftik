@@ -560,6 +560,12 @@ class OrderSubmit(BaseModel):
     price: Decimal | None = None
     #: ``None`` leaves it to the adapter's default for this order type.
     tif: TimeInForce | None = None
+    #: Close only — ask the venue to refuse this order rather than let it open
+    #: or extend a position. Contract markets only: spot has no position to
+    #: reduce, and TD refuses a spot order carrying it instead of dropping the
+    #: flag, because a strategy sets this to be certain it cannot go the other
+    #: way and a silently ignored guarantee is worse than none.
+    reduce_only: bool = False
     client_order_id: str
 
 

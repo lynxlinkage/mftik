@@ -93,6 +93,11 @@ _RESERVED_PARAMS = (
     "qty",
     "price",
     "orderLinkId",
+    # A request field since reduce_only stopped being a venue-only option.
+    # Left open, a params key could contradict the field and win, which on
+    # this flag is the difference between closing a position and opening the
+    # opposite one.
+    "reduceOnly",
 )
 
 #: Canonical time-in-force → Bybit's spelling. All four exist on this venue,
@@ -259,6 +264,9 @@ class BybitPrivateClient(BaseClient):
                 market_unit=extras.pop(
                     "marketUnit", self._market_unit(request, product)
                 ),
+                # None rather than False when off, so an ordinary order goes
+                # out exactly as it did before this flag existed.
+                reduce_only=request.reduce_only or None,
                 **extras,
             )
         except BybitError as exc:

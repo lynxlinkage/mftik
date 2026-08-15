@@ -536,6 +536,44 @@ async def test_a_malformed_ticker_is_refused_rather_than_guessed_at(
     assert ack.error_code == RejectCode.TD_WRONG_INSTRUMENT
 
 
+async def test_reduce_only_on_spot_is_refused_not_dropped(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """Spot has no position to reduce, so the flag cannot mean anything.
+
+    Refused rather than stripped: a caller sets this to be certain an order
+    cannot open exposure, and an accepted order with the guarantee quietly
+    removed is indistinguishable from a protected one until it flips a
+    position that was never supposed to exist.
+    """
+    ack = await _ack(broker, _submit_envelope(reduce_only=True))
+
+    assert ack.accepted is False
+    assert ack.error_code == RejectCode.TD_REDUCE_ONLY_UNSUPPORTED
+    assert "spot" in ack.reason
+
+
+async def test_a_refused_reduce_only_reserves_nothing(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """Checked beside the instrument, so before anything is committed."""
+    before = await broker.state_all(Topics.td_ledger(API_ID))
+
+    ack = await _ack(broker, _submit_envelope(reduce_only=True))
+
+    assert ack.accepted is False
+    assert await broker.state_all(Topics.td_ledger(API_ID)) == before
+
+
+async def test_an_ordinary_spot_order_is_unaffected(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """The flag defaults off, and off must change nothing about a spot order."""
+    ack = await _ack(broker, _submit_envelope())
+
+    assert ack.accepted is True
+
+
 async def test_a_refused_instrument_reserves_nothing(
     attached: SessionManager, broker: Broker
 ) -> None:
@@ -953,3 +991,51 @@ async def test_venue_ack_does_not_regress_filled_qty(
     # Outcome from the ack, fills from the stream.
     assert booked.status is OrderStatus.PENDING_CANCEL
     assert booked.filled_qty == Decimal("0.004")
+
+
+# --- reduce_only, on the markets that have positions -------------------------
+
+
+def test_reduce_only_passes_on_a_contract_ticker() -> None:
+    """The spot refusal is about spot, not about the flag.
+
+    Driven directly rather than through the RPC above, whose account is Paper —
+    a spot-only venue, so it cannot answer the question this asks.
+    """
+    from mft_td.session.manager import _reduce_only_unsupported
+
+    for ticker in ("BinanceFuture_Perp_BTCUSDT", "Bybit_Perp_BTCUSDT"):
+        payload = OrderSubmit.model_validate(
+            {
+                "session_id": SESSION,
+                "api_id": API_ID,
+                "universal_ticker": ticker,
+                "side": Side.BUY,
+                "type": OrderType.LIMIT,
+                "qty": Decimal("1"),
+                "price": Decimal("1000"),
+                "client_order_id": "cid-1",
+                "reduce_only": True,
+            }
+        )
+        assert _reduce_only_unsupported(payload) is None
+
+
+def test_a_malformed_ticker_is_left_to_the_instrument_check() -> None:
+    """One refusal per fault. Answering here would report the wrong reason."""
+    from mft_td.session.manager import _reduce_only_unsupported
+
+    payload = OrderSubmit.model_validate(
+        {
+            "session_id": SESSION,
+            "api_id": API_ID,
+            "universal_ticker": "BTCUSDT",
+            "side": Side.BUY,
+            "type": OrderType.LIMIT,
+            "qty": Decimal("1"),
+            "price": Decimal("1000"),
+            "client_order_id": "cid-1",
+            "reduce_only": True,
+        }
+    )
+    assert _reduce_only_unsupported(payload) is None

@@ -175,6 +175,7 @@ class BybitTradeSocket(BybitSocket):
         time_in_force: str | None = None,
         order_link_id: str | None = None,
         market_unit: str | None = None,
+        reduce_only: bool | None = None,
         **extra: Any,
     ) -> BybitOrderAck:
         """``order.create``.
@@ -205,6 +206,11 @@ class BybitTradeSocket(BybitSocket):
             args["orderLinkId"] = order_link_id
         if market_unit:
             args["marketUnit"] = market_unit
+        if reduce_only is not None:
+            # A real JSON boolean. Bybit takes ``reduceOnly`` unquoted, which
+            # is why ``query_string`` has its own note about not stringifying
+            # every value.
+            args["reduceOnly"] = reduce_only
         args.update(extra)
         return BybitOrderAck.model_validate(
             await self.call(ch.ORDER_CREATE, args) or {}

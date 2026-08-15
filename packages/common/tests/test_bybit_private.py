@@ -648,3 +648,46 @@ def test_the_connector_states_the_category_td_reads_off_it() -> None:
     assert str(UniversalTicker.of(client.name, client.category, "BTCUSDT")) == (
         "Bybit_Perp_BTCUSDT"
     )
+
+
+async def test_reduce_only_reaches_the_venue_on_a_perp(
+    bybit: FakeBybit, api: FakeApi
+) -> None:
+    """A real boolean, not the string "true" — see ``protocol.query_string``."""
+    async with _client(bybit, api) as client:
+        await client.place_order(
+            PlaceOrderRequest(
+                universal_ticker="Bybit_Perp_BTCUSDT",
+                side=Side.SELL,
+                type=OrderType.LIMIT,
+                qty=Decimal("1"),
+                price=Decimal("60000"),
+                tif=TimeInForce.IOC,
+                reduce_only=True,
+                client_order_id="c-42",
+            )
+        )
+
+    args = bybit.call("order.create")["args"][0]
+    assert args["category"] == "linear"
+    assert args["reduceOnly"] is True
+
+
+async def test_an_ordinary_order_says_nothing_about_reduce_only(
+    bybit: FakeBybit, api: FakeApi
+) -> None:
+    """Off means absent, not ``false`` — the wire is what it always was."""
+    async with _client(bybit, api) as client:
+        await client.place_order(
+            PlaceOrderRequest(
+                universal_ticker="Bybit_Perp_BTCUSDT",
+                side=Side.SELL,
+                type=OrderType.LIMIT,
+                qty=Decimal("1"),
+                price=Decimal("60000"),
+                tif=TimeInForce.IOC,
+                client_order_id="c-42",
+            )
+        )
+
+    assert "reduceOnly" not in bybit.call("order.create")["args"][0]

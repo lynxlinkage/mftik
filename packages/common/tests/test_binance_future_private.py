@@ -238,16 +238,59 @@ async def test_venue_only_options_ride_through_params(
     future_user: FakeBinanceFutureUser,
     binance_key,
 ) -> None:
-    """``reduceOnly`` and ``positionSide`` have no cross-venue meaning."""
+    """``positionSide`` has no cross-venue meaning.
+
+    ``reduceOnly`` used to travel this way and no longer does — it is a request
+    field now, so it is reserved here. ``positionSide`` stays: it means
+    something only in Binance's hedge mode, and Bybit's nearest equivalent
+    (``positionIdx``) is not the same thing under another name.
+    """
+    _key, pem = binance_key
+    future_api.results[m.ORDER_PLACE] = OPEN_ORDER
+    async with _client(future_api, future_user, pem) as client:
+        await client.place_order(_order(params={"positionSide": "LONG"}))
+    params = future_api.call(m.ORDER_PLACE)["params"]
+    assert params["positionSide"] == "LONG"
+
+
+async def test_reduce_only_rides_on_the_request(
+    future_api: FakeBinanceFutureApi,
+    future_user: FakeBinanceFutureUser,
+    binance_key,
+) -> None:
+    _key, pem = binance_key
+    future_api.results[m.ORDER_PLACE] = OPEN_ORDER
+    async with _client(future_api, future_user, pem) as client:
+        await client.place_order(_order(reduce_only=True))
+    assert future_api.call(m.ORDER_PLACE)["params"]["reduceOnly"] is True
+
+
+async def test_an_ordinary_order_says_nothing_about_reduce_only(
+    future_api: FakeBinanceFutureApi,
+    future_user: FakeBinanceFutureUser,
+    binance_key,
+) -> None:
+    """Off means absent, not ``false`` — the wire is what it always was."""
+    _key, pem = binance_key
+    future_api.results[m.ORDER_PLACE] = OPEN_ORDER
+    async with _client(future_api, future_user, pem) as client:
+        await client.place_order(_order())
+    assert "reduceOnly" not in future_api.call(m.ORDER_PLACE)["params"]
+
+
+async def test_a_params_reduce_only_cannot_contradict_the_field(
+    future_api: FakeBinanceFutureApi,
+    future_user: FakeBinanceFutureUser,
+    binance_key,
+) -> None:
+    """On this flag a shadowing param is the difference between close and flip."""
     _key, pem = binance_key
     future_api.results[m.ORDER_PLACE] = OPEN_ORDER
     async with _client(future_api, future_user, pem) as client:
         await client.place_order(
-            _order(params={"reduceOnly": True, "positionSide": "LONG"})
+            _order(reduce_only=True, params={"reduceOnly": False})
         )
-    params = future_api.call(m.ORDER_PLACE)["params"]
-    assert params["reduceOnly"] is True
-    assert params["positionSide"] == "LONG"
+    assert future_api.call(m.ORDER_PLACE)["params"]["reduceOnly"] is True
 
 
 async def test_a_param_that_shadows_a_request_field_is_dropped(

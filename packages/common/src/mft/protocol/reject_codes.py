@@ -95,6 +95,12 @@ class RejectCode(IntEnum):
     #: Leverage for this instrument could not be read — spot ticker, a venue
     #: without a leverage API, or the venue answered without a usable figure.
     TD_LEVERAGE_UNAVAILABLE = 113
+    #: ``reduce_only`` was asked for on a spot order. Spot has no position to
+    #: reduce, so there is nothing the flag could mean and no venue would
+    #: honour it. Refused rather than dropped: a caller sets it to be sure an
+    #: order cannot open exposure, and silently ignoring it would leave that
+    #: caller believing in a guarantee it does not have.
+    TD_REDUCE_ONLY_UNSUPPORTED = 114
 
     # --- 2xx: the venue said no, in a way we recognise ---------------------
 

@@ -510,6 +510,14 @@ class PlaceOrderRequest(InstrumentScoped):
     every venue has the concept under some spelling. A raw
     ``params["time_in_force"]`` still wins where an adapter supports it, for
     venue-only values this enum has no name for.
+
+    ``reduce_only`` is a common field for the same reason, and it earns it more
+    than most: it is the difference between closing a position and opening the
+    opposite one. Left in ``params`` it would be a venue's own spelling that
+    each adapter reads or ignores, and an adapter that ignores it fails exactly
+    like one that honours it — right up until the order flips a position.
+    Spot has no position to reduce, so a spot order carrying it is refused
+    rather than sent (see TD's submit path).
     """
 
     side: Side
@@ -518,6 +526,9 @@ class PlaceOrderRequest(InstrumentScoped):
     price: Decimal | None = None
     client_order_id: str | None = None
     tif: TimeInForce | None = None
+    #: Close only — the venue must not let this order open or extend a
+    #: position. Contract markets only.
+    reduce_only: bool = False
     params: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

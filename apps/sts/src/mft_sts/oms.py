@@ -166,6 +166,7 @@ class StrategyOms:
         type: OrderType = OrderType.LIMIT,
         price: Decimal | None = None,
         tif: TimeInForce | None = None,
+        reduce_only: bool = False,
     ) -> bool:
         """Submit an order via TD. True if TD accepted the request.
 
@@ -185,6 +186,18 @@ class StrategyOms:
         type. :attr:`TimeInForce.POST_ONLY` asks the venue to refuse rather
         than cross, which arrives as a rejection, not a fill — so a caller
         using it has to handle being turned down as a normal outcome.
+
+        ``reduce_only`` asks the venue to refuse this order rather than let it
+        open or extend a position. It is the guarantee a strategy closing out
+        wants: a size computed from its own tally of fills can exceed what the
+        account actually holds — funding, ADL and liquidation move a position
+        without ever arriving as a fill — and without this, the excess opens
+        the opposite position instead of being turned away.
+
+        Contract markets only. TD refuses a spot order carrying it
+        (``TD_REDUCE_ONLY_UNSUPPORTED``) rather than dropping the flag, so a
+        caller is never told True for an order it believes is protected and
+        is not.
         """
         session = self._require_session()
         cid = self._next_client_order_id()
@@ -201,6 +214,7 @@ class StrategyOms:
                     qty=qty,
                     price=price,
                     tif=tif,
+                    reduce_only=reduce_only,
                     client_order_id=cid,
                 ),
                 type=STS_ORDER_SUBMIT,
