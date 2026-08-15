@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import base64
 import logging
+import re
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from mft.protocol import (
     DEFAULT_STRATEGY_TYPE,
     RESTART_ALWAYS,
+    STS_EVENTLOG_INFO,
+    STS_EVENTLOG_READ,
     STS_SESSION_LIST,
     STS_SESSION_PAUSE,
     STS_SESSION_RESUME,
@@ -19,6 +25,12 @@ from mft.protocol import (
     ListSessionsResult,
     StrategySpec,
     StrategyYamlError,
+    StsEventLogChunk,
+    StsEventLogInfo,
+    StsEventLogInfoRequest,
+    StsEventLogInfoRequestEnvelope,
+    StsEventLogReadRequest,
+    StsEventLogReadRequestEnvelope,
     StsSessionControlRequest,
     StsSessionControlRequestEnvelope,
     StsSessionControlResult,
@@ -46,6 +58,7 @@ from mft_api.deps import DEFAULT_USER_ID, BrokerDep
 from mft_api.orchestrate import deploy_strategy
 from mft_api.schemas import (
     DeployResponse,
+    EventLogInfoResponse,
     SessionListResponse,
     SessionOut,
     StrategyDeployBody,
@@ -69,6 +82,13 @@ _STATUS_TTL_SECONDS = 3600
 _ACKABLE = frozenset(
     {SessionStatus.FAILED.value, SessionStatus.INTERRUPTED.value}
 )
+
+#: Bytes of log requested per RPC. Small enough that STS answers between two
+#: session controls and Redis holds one slice, large enough that a 100 MB log
+#: is a few hundred round trips rather than tens of thousands.
+_EVENTLOG_CHUNK_BYTES = 262_144
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
 
 @router.get("/template")
 async def strategy_template() -> dict[str, str]:
@@ -339,6 +359,136 @@ async def ack_session(session_id: str, broker: BrokerDep) -> StsControlResponse:
     )
 
 
+@router.get(
+    "/sessions/{session_id}/eventlog/info", response_model=EventLogInfoResponse
+)
+async def eventlog_info(
+    session_id: str, broker: BrokerDep
+) -> EventLogInfoResponse:
+    """What event log STS holds for this session, if any.
+
+    Its own endpoint so the UI can decide whether to offer a download, and how
+    large a one, before committing a user to it.
+    """
+    info = await _eventlog_info(broker, session_id)
+    return EventLogInfoResponse(
+        session_id=info.session_id,
+        available=info.available,
+        enabled=info.enabled,
+        parts=len(info.parts),
+        total_bytes=info.total_bytes,
+        live=info.live,
+    )
+
+
+@router.get("/sessions/{session_id}/eventlog")
+async def download_eventlog(
+    session_id: str, broker: BrokerDep
+) -> StreamingResponse:
+    """Stream the session's event log as one gzip, oldest part first.
+
+    Pulled from STS a slice at a time and passed straight through: each slice
+    arrives as its own gzip member, and a concatenation of gzip members is a
+    gzip. So neither this process nor the broker ever holds the whole file, and
+    nothing here has to decompress what it is only forwarding.
+    """
+    info = await _eventlog_info(broker, session_id)
+    if not info.available:
+        detail = (
+            "STS is not keeping event logs (STS_EVENTLOG_DIR unset)"
+            if not info.enabled
+            else f"no event log for session {session_id!r} on the STS that answered"
+        )
+        raise HTTPException(status_code=404, detail=detail)
+
+    await record_audit(
+        user_id=DEFAULT_USER_ID,
+        operation="sts.eventlog.download",
+        result=f"session_id={session_id} bytes={info.total_bytes}",
+    )
+    name = f"{_safe_name(session_id)}.jsonl.gz"
+    return StreamingResponse(
+        _eventlog_chunks(broker, session_id, info),
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+async def _eventlog_info(broker: BrokerDep, session_id: str) -> StsEventLogInfo:
+    try:
+        return await request_domain(
+            broker,
+            Topics.STS,
+            StsEventLogInfoRequestEnvelope.wrap(
+                StsEventLogInfoRequest(session_id=session_id),
+                type=STS_EVENTLOG_INFO,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=StsEventLogInfo,
+            timeout=10.0,
+        )
+    except DomainRpcError as exc:
+        raise HTTPException(status_code=502, detail=exc.message) from exc
+
+
+async def _eventlog_chunks(
+    broker: BrokerDep, session_id: str, info: StsEventLogInfo
+) -> AsyncIterator[bytes]:
+    """Yield every part's slices in order, stopping at the first failure.
+
+    A failure mid-stream cannot become a status code — the headers went out
+    with the first chunk — so it ends the response and says so in the process
+    log. A truncated ``.gz`` is at least detectable as truncated, which a
+    silently short one would not be.
+    """
+    for part in info.parts:
+        offset = 0
+        while True:
+            try:
+                chunk = await request_domain(
+                    broker,
+                    Topics.STS,
+                    StsEventLogReadRequestEnvelope.wrap(
+                        StsEventLogReadRequest(
+                            session_id=session_id,
+                            part=part.name,
+                            offset=offset,
+                            length=_EVENTLOG_CHUNK_BYTES,
+                        ),
+                        type=STS_EVENTLOG_READ,
+                        source="api",
+                        session_id=session_id,
+                    ),
+                    result_type=StsEventLogChunk,
+                    timeout=15.0,
+                )
+            except DomainRpcError as exc:
+                logger.error(
+                    "sts eventlog download failed session=%s part=%s "
+                    "offset=%d: %s",
+                    session_id,
+                    part.name,
+                    offset,
+                    exc.message,
+                )
+                return
+            if chunk.data:
+                yield base64.b64decode(chunk.data)
+            offset += chunk.raw_bytes
+            if chunk.eof:
+                break
+            if chunk.raw_bytes == 0:
+                # Not eof and nothing read: the file is being written but has
+                # nothing new yet. Stopping beats spinning on a live session.
+                break
+
+
+def _safe_name(value: str) -> str:
+    cleaned = _UNSAFE_NAME.sub("_", value.strip()).strip("._")
+    return cleaned or "session"
+
+
 @router.post("/deploy/{strategy_type}", response_model=DeployResponse)
 async def deploy(
     strategy_type: str, body: StrategyDeployBody, broker: BrokerDep
@@ -379,6 +529,11 @@ async def deploy(
         code = 404 if exc.code in {"unknown_strategy", "not_found"} else 502
         if exc.code == "timeout":
             code = 504
+        if exc.code == "strategy_refused":
+            # The document is wrong, not the platform. Nothing upstream failed
+            # and retrying will do the same thing, which is what separates this
+            # from the 502 and 504 beside it.
+            code = 400
         raise HTTPException(status_code=code, detail=str(exc)) from exc
 
     session_id = result["session_id"]

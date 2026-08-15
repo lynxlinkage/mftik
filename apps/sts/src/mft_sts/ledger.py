@@ -38,6 +38,8 @@ from mft.protocol import (
 )
 from mft.protocol.reject_codes import describe
 
+from mft_sts.eventlog import session_log
+
 if TYPE_CHECKING:
     from mft_sts.strategy import Strategy
 
@@ -81,12 +83,26 @@ class StrategyLedger:
     async def view(self, api_id: int | None = None) -> LedgerView:
         """Read ``td.ledger.{api_id}``: asset → free / prelock / lock."""
         resolved = self._resolve(api_id)
+        log = session_log(self._strategy)
         if resolved is None or self._strategy is None:
+            log.record("read", "ledger.view", dir="out", resolved=False)
             return LedgerView()
         session = self._strategy.session
         if session is None:
+            log.record("read", "ledger.view", dir="out", resolved=False)
             return LedgerView()
         rows = await session.broker.state_all(Topics.td_ledger(resolved))
+        # Every sizing decision downstream rests on these numbers, and they are
+        # TD's, read at one moment. Nothing else in the log can reconstruct
+        # what the balance was when the strategy asked.
+        log.record(
+            "read",
+            "ledger.view",
+            dir="out",
+            api_id=resolved,
+            count=len(rows),
+            payload=rows,
+        )
         return LedgerView.from_rows(resolved, rows)
 
     async def available(self, asset: str, api_id: int | None = None) -> Decimal:
@@ -135,10 +151,15 @@ class StrategyLedger:
                 "api_id is required when more than one TD is attached",
                 RejectCode.TD_INVALID_REQUEST,
             )
+            self._record_leverage(str(ticker), None, None)
             return None
         key = str(UniversalTicker.resolve(str(ticker)))
         cached = self._leverage.get((resolved, key))
         if cached is not None:
+            # Recorded even though nothing left the process. The strategy was
+            # given a number and acted on it, and a reader reconstructing the
+            # session cannot tell a cache hit from a call that never happened.
+            self._record_leverage(key, resolved, cached, cached_hit=True)
             return cached
 
         session = self._require_session()
@@ -165,6 +186,7 @@ class StrategyLedger:
                 key,
             )
             self._refuse("no ack from TD", RejectCode.TD_NO_ACK)
+            self._record_leverage(key, resolved, None)
             return None
 
         try:
@@ -177,6 +199,7 @@ class StrategyLedger:
                 reply.payload,
             )
             self._refuse("unreadable leverage ack", RejectCode.TD_UNREADABLE_ACK)
+            self._record_leverage(key, resolved, None)
             return None
 
         if not ack.ok or ack.leverage is None or ack.leverage <= ZERO:
@@ -186,10 +209,37 @@ class StrategyLedger:
                 if ack.error_code != RejectCode.NONE
                 else RejectCode.TD_LEVERAGE_UNAVAILABLE,
             )
+            self._record_leverage(key, resolved, None)
             return None
 
         self._leverage[(resolved, key)] = ack.leverage
+        self._record_leverage(key, resolved, ack.leverage)
         return ack.leverage
+
+    def _record_leverage(
+        self,
+        ticker: str,
+        api_id: int | None,
+        leverage: Decimal | None,
+        *,
+        cached_hit: bool = False,
+    ) -> None:
+        """Log one leverage answer, however it was arrived at."""
+        session_log(self._strategy).record(
+            "read",
+            "ledger.leverage",
+            dir="out",
+            api_id=api_id,
+            ticker=ticker,
+            leverage=leverage,
+            cached=cached_hit or None,
+            reason=self._last_reason or None,
+            code=(
+                None
+                if self._last_code == RejectCode.NONE
+                else self._last_code
+            ),
+        )
 
     def _refuse(self, reason: str, code: int | str) -> None:
         self._last_reason = reason

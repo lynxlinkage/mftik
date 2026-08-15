@@ -89,9 +89,23 @@ services:
   sts:
     <<: *mft
     command: ["sts"]
+    volumes:
+      - sts_eventlog:/var/log/mft/sts
     environment:
       # A deploy is a restart: sessions interrupted by it are rebuilt on boot.
       STS_REBUILD_ON_BOOT: "1"
+      # Per-session audit trail: every event a session was handed and every
+      # call it made, one jsonl each. On a volume so a deploy — which replaces
+      # this container — does not take the log of the session it interrupted.
+      STS_EVENTLOG_DIR: "/var/log/mft/sts"
+      STS_EVENTLOG_QUEUE: "20000"
+      # Budget is MAX_BYTES x (BACKUPS + 1) x concurrent sessions, and this
+      # host's disk is not big. 128 MB x 3 is 384 MB a session, so ten at once
+      # is under 4 GB. Files are per session_id and stay after the session
+      # ends — they are the point — so the floor rises until someone prunes
+      # the volume. Raise these only after checking `df` on the host.
+      STS_EVENTLOG_MAX_BYTES: "134217728"
+      STS_EVENTLOG_BACKUPS: "2"
 
   # Paper exchange engine. Kept in production so the `paper` venue works
   # end-to-end and mft.lynkora.com can be smoke-tested without real money.
@@ -125,6 +139,11 @@ services:
       - "traefik.http.routers.mft-frontend.priority=1"
       - "traefik.http.routers.mft-frontend.middlewares=discord-auth-chain@docker"
       - "traefik.http.services.mft-frontend.loadbalancer.server.port=3000"
+
+volumes:
+  # Session event logs. Survives the container a deploy replaces; pruning it is
+  # a manual, deliberate act — see the size budget on the sts service.
+  sts_eventlog:
 
 networks:
   web:

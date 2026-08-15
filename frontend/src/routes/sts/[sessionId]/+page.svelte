@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import EventLogDownload from '$lib/components/EventLogDownload.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 
 	const sessionId = $derived(page.params.sessionId ?? '');
 </script>
 
 <p class="back"><a href="/sts">← STS</a></p>
+<EventLogDownload {sessionId} />
 <LogViewer
 	domain="sts"
 	streamId={sessionId}

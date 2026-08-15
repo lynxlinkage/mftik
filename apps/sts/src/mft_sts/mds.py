@@ -196,6 +196,14 @@ class StrategyMds:
     async def _request_ack(self, query_id: str, envelope: Envelope[Any]) -> bool:
         """Round-trip a query to MD and report whether it was taken."""
         session = self._require_session()
+        log = session.event_log
+        log.record(
+            "query",
+            envelope.type,
+            dir="out",
+            query_id=query_id,
+            payload=envelope.payload,
+        )
         # Cleared up front so a stale reason cannot outlive the refusal it
         # described and be read against a later, accepted query.
         self._last_reason = ""
@@ -214,6 +222,14 @@ class StrategyMds:
                 envelope.type,
             )
             self._refuse("no ack from MD", QueryCode.MD_NO_ACK)
+            log.record(
+                "query",
+                "query_ack",
+                query_id=query_id,
+                accepted=False,
+                code=self._last_code,
+                reason=self._last_reason,
+            )
             return False
 
         try:
@@ -225,6 +241,15 @@ class StrategyMds:
                 reply.type,
             )
             self._refuse("unreadable ack from MD", QueryCode.MD_UNREADABLE_ACK)
+            log.record(
+                "query",
+                "query_ack",
+                query_id=query_id,
+                accepted=False,
+                code=self._last_code,
+                reason=self._last_reason,
+                sent_ts=reply.ts,
+            )
             return False
 
         if not ack.accepted:
@@ -236,6 +261,15 @@ class StrategyMds:
             )
             self._last_reason = ack.reason
             self._last_code = ack.error_code
+        log.record(
+            "query",
+            "query_ack",
+            query_id=query_id,
+            accepted=ack.accepted,
+            code=ack.error_code,
+            reason=ack.reason or None,
+            sent_ts=reply.ts,
+        )
         return ack.accepted
 
     def _refuse(self, reason: str, code: int | str) -> None:

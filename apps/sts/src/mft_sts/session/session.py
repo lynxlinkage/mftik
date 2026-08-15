@@ -69,6 +69,7 @@ from mft.protocol import (
 from mft.symbols import SymbolClient
 from pydantic import BaseModel
 
+from mft_sts.eventlog import EventLog
 from mft_sts.strategy import Strategy
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,7 @@ class StsSession:
         symbols: SymbolClient | None = None,
         on_exit: ExitHandler | None = None,
         remember: RememberHandler | None = None,
+        event_log: EventLog | None = None,
     ) -> None:
         self.session_id = session_id
         self.broker = broker
@@ -164,6 +166,11 @@ class StsSession:
         self.symbols = symbols or SymbolClient(broker)
         self._on_exit = on_exit
         self._remember = remember
+        #: Audit trail of every event this session was handed and every call it
+        #: made. Off unless ``STS_EVENTLOG_DIR`` is set — see
+        #: :mod:`mft_sts.eventlog`. Built before ``bind`` so oms / mds / tape
+        #: can reach it through the session from their first call.
+        self.event_log = event_log or EventLog.from_env(session_id)
 
         # Must follow cid_slot: bind() builds the client_order_id factory.
         strategy.bind(self)
@@ -174,6 +181,8 @@ class StsSession:
         self._started = False
         self._destroyed = False
         self._exit_requested = False
+        self._exit_reason: str | None = None
+        self._exit_failed = False
         self._token = 0
         self._ack_tokens: dict[int, int] = {}
         self._md_ack_token: int | None = None
@@ -186,6 +195,25 @@ class StsSession:
         return self._destroyed
 
     @property
+    def exit_requested(self) -> bool:
+        """Whether this session has asked to end, teardown run or not.
+
+        Set synchronously by :meth:`request_exit`, which is what makes it
+        readable the moment :meth:`start` returns — a strategy that rejects
+        its configuration in ``on_start`` has already set this by then.
+        """
+        return self._exit_requested
+
+    @property
+    def exit_reason(self) -> str | None:
+        return self._exit_reason
+
+    @property
+    def exit_failed(self) -> bool:
+        """Whether the end was a failure rather than a natural finish."""
+        return self._exit_failed
+
+    @property
     def strategy_name(self) -> str:
         return self.strategy.name
 
@@ -194,6 +222,20 @@ class StsSession:
             return
         self._started = True
         self._stop.clear()
+
+        # Before the pumps: the first thing on a feed must not arrive with
+        # nowhere to be written.
+        await self.event_log.start()
+        self.event_log.record(
+            "lifecycle",
+            "session_start",
+            dir="self",
+            strategy=self.strategy_name,
+            td=self.td_api_ids,
+            md=self.md_ids,
+            cid_slot=self.cid_slot,
+            paras=self.st_paras or None,
+        )
 
         self._tasks = [
             asyncio.create_task(
@@ -230,7 +272,12 @@ class StsSession:
                 )
             )
 
+        # Recorded on the way in rather than on the way out: a hook that raises
+        # takes the session down with it, and the log should show which of the
+        # two it was standing in when that happened.
+        self.event_log.record("lifecycle", "on_start", dir="self")
         await self.strategy.on_start()
+        self.event_log.record("lifecycle", "on_ready", dir="self")
         await self.strategy.on_ready()
         await publish_sts_log(
             self.broker,
@@ -253,6 +300,7 @@ class StsSession:
         """Persist one fact for this session — see ``Strategy.remember``."""
         if self._remember is None:
             return
+        self.event_log.record("remember", key, dir="out", value=value)
         await self._remember(self.session_id, key, value)
 
     async def pause(self) -> None:
@@ -260,6 +308,7 @@ class StsSession:
             return
         if self.strategy.paused:
             return
+        self.event_log.record("lifecycle", "on_pause", dir="self")
         await self.strategy.on_pause()
 
     async def resume(self) -> None:
@@ -267,6 +316,7 @@ class StsSession:
             return
         if not self.strategy.paused:
             return
+        self.event_log.record("lifecycle", "on_resume", dir="self")
         await self.strategy.on_resume()
 
     def request_exit(
@@ -284,6 +334,15 @@ class StsSession:
         if self._destroyed or self._exit_requested:
             return
         self._exit_requested = True
+        # Kept, not just passed on. The teardown runs as its own task, so a
+        # caller that asks "did this session survive being started?" the
+        # instant ``start`` returns needs an answer that does not depend on
+        # whether that task has had a turn yet.
+        self._exit_reason = reason
+        self._exit_failed = failed
+        self.event_log.record(
+            "lifecycle", "exit_requested", dir="self", reason=reason, failed=failed
+        )
         logger.info(
             "STS session exit requested id=%s failed=%s reason=%s",
             self.session_id,
@@ -341,6 +400,10 @@ class StsSession:
             )
         except Exception:
             pass
+        self.event_log.record("lifecycle", "session_stop", dir="self")
+        # Last, and awaited: the records above are the ones a post-mortem opens
+        # the file for, and they are still in the queue at this point.
+        await self.event_log.close()
         logger.info("STS session stopped id=%s", self.session_id)
 
     async def _run_on_stop(self) -> None:
@@ -353,6 +416,7 @@ class StsSession:
         detach goes out anyway — its cancel will be refused, but a stuck
         strategy must not hold an attach open indefinitely either.
         """
+        self.event_log.record("lifecycle", "on_stop", dir="self")
         self._on_stop_task = asyncio.create_task(
             self.strategy.on_stop(), name=f"sts-{self.session_id}-on-stop"
         )
@@ -360,6 +424,12 @@ class StsSession:
             {self._on_stop_task}, timeout=ON_STOP_TIMEOUT_S
         )
         if not done:
+            self.event_log.record(
+                "lifecycle",
+                "on_stop_timeout",
+                dir="self",
+                timeout_s=ON_STOP_TIMEOUT_S,
+            )
             logger.warning(
                 "STS on_stop still running after %ss session=%s — detaching "
                 "anyway; anything it still had to cancel will be refused",
@@ -439,6 +509,9 @@ class StsSession:
         """
         last: Exception | None = None
         for attempt in range(1, DETACH_ATTEMPTS + 1):
+            self.event_log.record(
+                "detach", envelope.type, dir="out", what=what, attempt=attempt
+            )
             try:
                 reply = await self.broker.request(
                     subject, envelope, timeout=DETACH_TIMEOUT_S
@@ -447,6 +520,9 @@ class StsSession:
                 last = exc
             else:
                 if reply.type != error_type:
+                    self.event_log.record(
+                        "detach", "detached", what=what, sent_ts=reply.ts
+                    )
                     await publish_sts_log(
                         self.broker,
                         self.session_id,
@@ -464,6 +540,9 @@ class StsSession:
                 self.session_id,
                 last,
             )
+        self.event_log.record(
+            "detach", "detach_failed", dir="self", what=what, error=repr(last)
+        )
         logger.error(
             "STS could not detach %s session=%s: %s — leaving it to the "
             "domain's orphan scan",
@@ -571,9 +650,19 @@ class StsSession:
     async def _on_fetch_result(self, env: UntypedEnvelope) -> None:
         """Hand one query answer to the hook that asked for it."""
         name, model = MD_FETCH_HANDLERS[env.type]
+        self._record_in("md_fetch", env, hook=name)
         try:
             result = model.model_validate(env.payload)
-        except Exception:
+        except Exception as exc:
+            self.event_log.record(
+                "error",
+                "payload_invalid",
+                dir="self",
+                hook=name,
+                type=env.type,
+                env_id=env.id,
+                error=repr(exc),
+            )
             logger.exception(
                 "invalid md fetch result session=%s type=%s",
                 self.session_id,
@@ -582,7 +671,8 @@ class StsSession:
             return
         try:
             await getattr(self.strategy, name)(result)
-        except Exception:
+        except Exception as exc:
+            self._record_hook_failed(name, env, exc)
             logger.exception(
                 "strategy %s failed session=%s query_id=%s",
                 name,
@@ -591,6 +681,7 @@ class StsSession:
             )
 
     async def _on_md_lease_ack(self, env: UntypedEnvelope) -> None:
+        self._record_in("lease", env)
         try:
             ack = MdLeaseAck.model_validate(env.payload)
             self._md_ack_token = ack.token
@@ -608,9 +699,23 @@ class StsSession:
 
     async def _on_market_data(self, env: UntypedEnvelope) -> None:
         name, model = MD_HANDLERS[env.type]
+        # The wire dict, not the model built from it. It is what arrived, it
+        # costs nothing to record — the parse has already happened, upstream —
+        # and a payload that fails validation below is exactly the one worth
+        # having on disk in the shape it came in.
+        self._record_in("md", env, hook=name)
         try:
             payload = model.model_validate(env.payload)
-        except Exception:
+        except Exception as exc:
+            self.event_log.record(
+                "error",
+                "payload_invalid",
+                dir="self",
+                hook=name,
+                type=env.type,
+                env_id=env.id,
+                error=repr(exc),
+            )
             logger.exception(
                 "invalid md payload session=%s type=%s",
                 self.session_id,
@@ -620,7 +725,8 @@ class StsSession:
         handler = getattr(self.strategy, name)
         try:
             await handler(payload)
-        except Exception:
+        except Exception as exc:
+            self._record_hook_failed(name, env, exc)
             logger.exception(
                 "strategy %s failed session=%s type=%s",
                 name,
@@ -670,9 +776,23 @@ class StsSession:
             self._on_message(f"global-{api_id}", env)
             return
         name, model = entry
+        # Recorded before ``owns`` has a say — that filter belongs to the
+        # strategy, and an audit trail that only kept this session's own fills
+        # could not show the account moving underneath it.
+        self._record_in("td", env, hook=name, api_id=api_id)
         try:
             payload = model.model_validate(env.payload)
-        except Exception:
+        except Exception as exc:
+            self.event_log.record(
+                "error",
+                "payload_invalid",
+                dir="self",
+                hook=name,
+                type=env.type,
+                env_id=env.id,
+                api_id=api_id,
+                error=repr(exc),
+            )
             logger.exception(
                 "invalid td global payload session=%s api_id=%s type=%s",
                 self.session_id,
@@ -683,7 +803,8 @@ class StsSession:
         handler = getattr(self.strategy, name)
         try:
             await handler(api_id, payload)
-        except Exception:
+        except Exception as exc:
+            self._record_hook_failed(name, env, exc, api_id=api_id)
             logger.exception(
                 "strategy %s failed session=%s api_id=%s type=%s",
                 name,
@@ -693,6 +814,9 @@ class StsSession:
             )
 
     async def _on_lease_ack(self, api_id: int, env: UntypedEnvelope) -> None:
+        # The closest thing this system has to a login: TD has accepted the
+        # lease and this session may now trade the account.
+        self._record_in("lease", env, api_id=api_id)
         try:
             ack = LeaseAck.model_validate(env.payload)
             self._ack_tokens[api_id] = ack.token
@@ -723,6 +847,7 @@ class StsSession:
             )
 
     async def _on_recon_done(self, env: UntypedEnvelope) -> None:
+        self._record_in("recon", env, hook="on_recon_done")
         try:
             msg = ReconDone.model_validate(env.payload)
         except Exception:
@@ -735,7 +860,8 @@ class StsSession:
         )
         try:
             await self.strategy.on_recon_done(msg)
-        except Exception:
+        except Exception as exc:
+            self._record_hook_failed("on_recon_done", env, exc, api_id=msg.api_id)
             logger.exception(
                 "strategy on_recon_done failed session=%s api_id=%s",
                 self.session_id,
@@ -743,9 +869,54 @@ class StsSession:
             )
 
     def _on_message(self, peer: str, env: UntypedEnvelope) -> None:
+        # Worth a line of its own: this is where a message arrives that no hook
+        # claims. In the process log it is a DEBUG nobody runs with, and the
+        # symptom it produces — a strategy that is simply never called — looks
+        # from the inside exactly like a feed that went quiet.
+        self._record_in("unhandled", env, peer=peer)
         logger.debug(
             "STS session=%s from=%s type=%s",
             self.session_id,
             peer,
             env.type,
+        )
+
+    # --- event log ---------------------------------------------------------
+
+    def _record_in(
+        self, kind: str, env: UntypedEnvelope, **fields: Any
+    ) -> None:
+        """Log one inbound envelope, as it arrived.
+
+        ``sent_ts`` is the sender's stamp and ``ts`` is ours, so the wire
+        latency of any message is the difference between two fields on one
+        line rather than a correlation across two services' logs.
+        """
+        self.event_log.record(
+            kind,
+            env.type,
+            env_id=env.id,
+            sent_ts=env.ts,
+            source=env.source,
+            payload=env.payload,
+            **fields,
+        )
+
+    def _record_hook_failed(
+        self,
+        hook: str,
+        env: UntypedEnvelope,
+        exc: BaseException,
+        **fields: Any,
+    ) -> None:
+        """Log a strategy hook that raised on an event it was handed."""
+        self.event_log.record(
+            "error",
+            "hook_failed",
+            dir="self",
+            hook=hook,
+            type=env.type,
+            env_id=env.id,
+            error=repr(exc),
+            **fields,
         )

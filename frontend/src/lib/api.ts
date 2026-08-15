@@ -176,6 +176,19 @@ export type SessionLogList = {
 	has_more: boolean;
 };
 
+/** What STS holds for one session's event log (`GET /sts/sessions/{id}/eventlog/info`). */
+export type EventLogInfo = {
+	session_id: string;
+	/** Whether there is anything to download. */
+	available: boolean;
+	/** Whether this deployment keeps event logs at all. */
+	enabled: boolean;
+	parts: number;
+	total_bytes: number;
+	/** Session still running, so a download is a prefix of the log. */
+	live: boolean;
+};
+
 export type ApiCredential = {
 	id: number;
 	account_id: number;
@@ -477,6 +490,13 @@ export const api = {
 		downloadFile(
 			`/board/sessions/${encodeURIComponent(sessionId)}/fills.csv`,
 			`${sessionId}_historical_fills.csv`
+		),
+	eventLogInfo: (sessionId: string) =>
+		request<EventLogInfo>(`/sts/sessions/${encodeURIComponent(sessionId)}/eventlog/info`),
+	downloadEventLog: (sessionId: string) =>
+		downloadFile(
+			`/sts/sessions/${encodeURIComponent(sessionId)}/eventlog`,
+			`${sessionId}.jsonl.gz`
 		),
 	downloadLogs: (
 		domain: 'sts' | 'td' | 'md',

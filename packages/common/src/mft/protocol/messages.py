@@ -173,13 +173,25 @@ class StsCreateSessionRequest(BaseModel):
 
 
 class StsCreateSessionResult(BaseModel):
-    """STS → API: strategy session created."""
+    """STS → API: strategy session created.
+
+    ``status`` is not always ``live``. A strategy that rejects its
+    configuration does so in ``on_start`` / ``on_ready`` — which run before
+    this reply is sent — so the session can be over before the caller has
+    heard that it began. Saying so here is what lets a deploy stop at that
+    point instead of attaching feeds to a session that is already gone and
+    learning about it, half a minute later, as a lease timeout.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     session_id: str
     strategy: str
     td: list[int] = Field(default_factory=list)
+    #: ``live`` | ``failed`` | ``done``.
+    status: str = "live"
+    #: Why it is not live. The strategy's own words, meant for an operator.
+    reason: str | None = None
 
 
 class ListSessionsRequest(BaseModel):
@@ -239,6 +251,97 @@ class StsSessionControlResult(BaseModel):
     strategy: str | None = None
     #: Set when the action left the session in ``failed``.
     reason: str | None = None
+
+
+class StsEventLogPart(BaseModel):
+    """One file of a session's event log — see :mod:`mft_sts.eventlog`.
+
+    Rotation splits a long session across several, so a whole log is the parts
+    concatenated in the order they are listed, which is oldest first.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: File name as STS will accept it back on a read. Not a path: the reader
+    #: never composes one, it echoes what this listing gave it.
+    name: str
+    size: int
+    modified: float | None = None
+
+
+class StsEventLogInfoRequest(BaseModel):
+    """API → STS: what event log does this session have, and how big."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+
+
+class StsEventLogInfo(BaseModel):
+    """STS → API: the parts of one session's event log.
+
+    ``available`` False means this STS has no log for the session — either
+    logging is off, or the session ran on a different process. The two are
+    distinguished by ``enabled``, because "we do not keep these" and "we keep
+    these but not that one" call for different answers from an operator.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    available: bool = False
+    #: Whether this STS keeps event logs at all (``STS_EVENTLOG_DIR`` set).
+    enabled: bool = False
+    #: Oldest first — the order a reader wants them concatenated in.
+    parts: list[StsEventLogPart] = Field(default_factory=list)
+    total_bytes: int = 0
+    #: Session still running here, so the newest part is still being written
+    #: and a download is a prefix rather than the whole story.
+    live: bool = False
+
+
+class StsEventLogReadRequest(BaseModel):
+    """API → STS: one slice of one part.
+
+    Paged rather than streamed because a domain's RPC subject is served in
+    turn: a handler that sat on the queue for the length of a file transfer
+    would hold every session create and stop behind it. One small read per
+    request keeps that loop moving, and lets a download resume instead of
+    starting over.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    #: A ``name`` from :class:`StsEventLogInfo`, never a path.
+    part: str
+    offset: int = 0
+    length: int = 262_144
+
+
+class StsEventLogChunk(BaseModel):
+    """STS → API: one slice, gzipped and base64'd.
+
+    Compressed at the source because this crosses the broker that also carries
+    order acks, and jsonl gives up roughly a factor of ten. Base64 because the
+    envelope is JSON; the two together still cost far less than the raw bytes.
+
+    Each chunk is a self-contained gzip member, so a reader concatenates them
+    — across parts as well — and gets one valid ``.gz`` without decompressing
+    anything on the way through.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    part: str
+    offset: int
+    #: base64 of gzip of the slice. Empty at or past end of file.
+    data: str = ""
+    #: Uncompressed length of this slice, so a caller can advance ``offset``.
+    raw_bytes: int = 0
+    #: Nothing follows this slice in this part.
+    eof: bool = True
 
 
 class StsSessionStatus(BaseModel):
@@ -689,6 +792,10 @@ StsCreateSessionResultEnvelope = Envelope[StsCreateSessionResult]
 StsSessionControlRequestEnvelope = Envelope[StsSessionControlRequest]
 StsSessionControlResultEnvelope = Envelope[StsSessionControlResult]
 StsSessionStatusEnvelope = Envelope[StsSessionStatus]
+StsEventLogInfoRequestEnvelope = Envelope[StsEventLogInfoRequest]
+StsEventLogInfoEnvelope = Envelope[StsEventLogInfo]
+StsEventLogReadRequestEnvelope = Envelope[StsEventLogReadRequest]
+StsEventLogChunkEnvelope = Envelope[StsEventLogChunk]
 ListSessionsRequestEnvelope = Envelope[ListSessionsRequest]
 ListSessionsResultEnvelope = Envelope[ListSessionsResult]
 LeaseHeartbeatEnvelope = Envelope[LeaseHeartbeat]
@@ -832,6 +939,8 @@ STS_SESSION_PAUSE = "sts.session.pause"
 STS_SESSION_RESUME = "sts.session.resume"
 STS_SESSION_STOP = "sts.session.stop"
 STS_SESSION_STATUS = "sts.session.status"
+STS_EVENTLOG_INFO = "sts.eventlog.info"
+STS_EVENTLOG_READ = "sts.eventlog.read"
 
 #: ``reason`` written when an operator stopped a session from the UI. A fixed
 #: sentinel rather than prose because it is matched, not just displayed: it is

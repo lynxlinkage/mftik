@@ -219,7 +219,10 @@ async def test_strategy_can_reach_the_symbol_plane(broker: Broker) -> None:
     assert session is not None
 
     plane = session.strategy.symbols
-    assert plane is session.symbols
+    # A recording view over the session's client, not the client itself: what
+    # the plane answers decides how an order is rounded, so the session event
+    # log has to see it (see ``mft_sts.symbols``).
+    assert plane.client is session.symbols
     assert hasattr(plane, "get")
     assert hasattr(plane, "filter")
 

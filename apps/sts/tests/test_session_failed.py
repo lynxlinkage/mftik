@@ -524,3 +524,64 @@ async def test_a_failed_remember_does_not_stop_the_strategy(
     assert result.session_id == "mem-2"
     assert manager.get("mem-2") is not None
     await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_create_says_the_session_is_already_over(broker: Broker) -> None:
+    """The reply carries the refusal, so a deploy need not go on to attach.
+
+    A strategy rejects its configuration in ``on_start`` / ``on_ready``, which
+    run inside ``create_session``. Without this the caller is told it created
+    a live session, attaches feeds to it, and finds out half a minute later as
+    a lease timeout naming nothing that went wrong.
+    """
+    store = FakeStsStore()
+    manager, _ = _manager(broker, store, FailingStrategy)
+
+    result = await manager.create_session(
+        StsCreateSessionRequest(
+            session_id="f-fast", created_by=1, strategy="failing"
+        )
+    )
+
+    # Answered from the reply itself — no waiting on the teardown task.
+    assert result.status == "failed"
+    assert result.reason == "no tradable account attached"
+    assert result.session_id == "f-fast"
+
+
+@pytest.mark.asyncio
+async def test_create_reports_a_natural_end_as_done(broker: Broker) -> None:
+    """Not every early ending is a failure, and the deploy should see which."""
+    store = FakeStsStore()
+    manager, _ = _manager(broker, store, ExitingStrategy)
+
+    result = await manager.create_session(
+        StsCreateSessionRequest(
+            session_id="e-fast", created_by=1, strategy="exiting"
+        )
+    )
+
+    assert result.status == "done"
+    assert result.reason == "work_done"
+
+
+@pytest.mark.asyncio
+async def test_create_of_a_healthy_session_still_says_live(
+    broker: Broker,
+) -> None:
+    store = FakeStsStore()
+
+    class Idle(Strategy):
+        name = "idle_create"
+
+    manager, _ = _manager(broker, store, Idle)
+    result = await manager.create_session(
+        StsCreateSessionRequest(
+            session_id="ok-1", created_by=1, strategy="idle_create"
+        )
+    )
+
+    assert result.status == "live"
+    assert result.reason is None
+    await manager.close_all()

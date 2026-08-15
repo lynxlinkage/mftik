@@ -16,6 +16,7 @@ from mft.broker import Broker, BrokerConfig
 from mft.exchange.models import AggTrade, Side, Trade
 from mft.exchange.tickers import UniversalTicker
 from mft.protocol import Topics
+from mft_sts.eventlog import EventLog
 from mft_sts.tape import StrategyTape
 
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
@@ -39,6 +40,9 @@ async def broker() -> Broker:
 class _Session:
     def __init__(self, broker: Broker) -> None:
         self.broker = broker
+        # Disabled, as it is in any deployment without STS_EVENTLOG_DIR — the
+        # read still logs what it covered, to nowhere.
+        self.event_log = EventLog("tape-read", directory=None)
 
 
 class _Strategy:

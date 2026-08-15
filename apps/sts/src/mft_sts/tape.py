@@ -28,6 +28,8 @@ from mft.exchange.models import AggTrade, Side, Trade
 from mft.exchange.tickers import UniversalTicker
 from mft.protocol import Topics
 
+from mft_sts.eventlog import session_log
+
 if TYPE_CHECKING:
     from mft_sts.strategy import Strategy
 
@@ -40,6 +42,15 @@ RECORDED_TOPICS = ("aggtrade", "trade")
 #: How many records one read will pull. A ceiling on memory and parse time, not
 #: a recommendation: a caller wanting fewer should ask for fewer.
 DEFAULT_LIMIT = 200_000
+
+#: How many prints of one read reach the event log, and how many ride on a
+#: line. The cap is a disk budget, not a judgement about what matters: at
+#: roughly 200 bytes a print this is about 10 MB per read, against the ~40 MB
+#: a full 200k-record warm-up would cost. A read past it is written short and
+#: says so on the ``tape.read`` line, the way MD's own tape reports the fuse
+#: rather than pretending it did not bite.
+LOG_MAX_RECORDS = 50_000
+LOG_CHUNK = 1_000
 
 
 @dataclass(frozen=True)
@@ -135,11 +146,54 @@ class StrategyTape:
                 dropped,
                 feed,
             )
+        log = session_log(self._strategy)
+        log.record(
+            "read",
+            "tape.read",
+            dir="out",
+            feed=feed,
+            limit=limit,
+            records=len(records),
+            continuous_since_ms=since_ms,
+            recording=recording,
+            dropped_before_gap=dropped,
+            logged=min(len(records), LOG_MAX_RECORDS),
+            truncated=len(records) > LOG_MAX_RECORDS or None,
+        )
+        _log_records(log, feed, records)
         return TapeSlice(
             records=records,
             continuous_since_ms=since_ms,
             recording=recording,
             dropped_before_gap=dropped,
+        )
+
+
+def _log_records(log, feed: str, records: list[Trade]) -> None:  # noqa: ANN001
+    """Write the prints themselves, in chunks, up to the cap.
+
+    The one read in this class whose answer cannot be inferred from anything
+    else on disk. MD's tape is the only copy, it expires within hours, and a
+    warm-up is the whole basis of what the strategy does for its first
+    minutes — a coverage summary says how much history there was, not what was
+    in it.
+
+    Chunked because one line per print would multiply the per-record overhead
+    by a hundred thousand, and one line for all of them would be a forty-megabyte
+    string that no jsonl reader will take in a single bite.
+    """
+    for start in range(0, min(len(records), LOG_MAX_RECORDS), LOG_CHUNK):
+        chunk = records[start : start + LOG_CHUNK]
+        # The models, unserialized: they are frozen, and dumping them here
+        # would put the cost of a whole warm-up on the event loop.
+        log.record(
+            "read",
+            "tape.records",
+            dir="out",
+            feed=feed,
+            offset=start,
+            count=len(chunk),
+            payload=chunk,
         )
 
 

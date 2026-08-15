@@ -35,6 +35,7 @@ from mft_sts.client_order_id import slot_of
 from mft_sts.ledger import StrategyLedger
 from mft_sts.mds import StrategyMds
 from mft_sts.oms import StrategyOms
+from mft_sts.symbols import StrategySymbols
 from mft_sts.tape import StrategyTape
 from mft_sts.timer import Timer
 
@@ -84,8 +85,10 @@ class Strategy:
         self.symbols — exch_ticker / filters per universal ticker
 
     Timer tokens (wired):
-        self.timer.token().register(first_ms, interval_ms, func)
+        self.timer.token().register(first_ms, interval_ms, func, label=...)
         token.cancel()  — timestamps are unix ms
+        ``label`` names the token in the event log below; it defaults to the
+        callback's name, which is ambiguous when one method backs two tokens.
 
     Public events from ``md.{session_id}`` (wired):
         on_ticker, on_order_book, on_kline, on_trade, on_agg_trade,
@@ -119,6 +122,18 @@ class Strategy:
         strategy that needs N of something has to check rather than assume.
         Empty is a normal answer — nothing was holding the feed, or MD runs
         with recording off.
+
+    Event log (wired, nothing to call):
+        Every event reaching a hook here, and every order, cancel and query
+        going the other way, is written to one jsonl per session — see
+        :mod:`mft_sts.eventlog`. Recorded at the session's dispatch points
+        rather than inside the hooks, so a strategy that ignores an event
+        still logs having been offered it, and nothing needs to be added to a
+        strategy to be audited. Off unless ``STS_EVENTLOG_DIR`` is set.
+
+        It is not a substitute for :meth:`log`: this records what happened,
+        while :meth:`log` records what the strategy made of it, and only the
+        second reaches the UI.
     """
 
     name: str = "base"
@@ -145,6 +160,13 @@ class Strategy:
         #: Recorded trade history from MD, for warming up on what this session
         #: was not running for.
         self.tape = StrategyTape()
+        #: Symbol plane reads, recorded like the rest of them. Bound here
+        #: rather than in :meth:`bind` because it needs nothing from the
+        #: session but a way back to it, and a strategy handed a session
+        #: directly — as the strategy unit tests do — must still be able to
+        #: read the plane.
+        self._symbols = StrategySymbols()
+        self._symbols.bind(self)
         self.timer = Timer()
 
     def bind(self, session: StsSession) -> None:
@@ -202,7 +224,7 @@ class Strategy:
             tick = info.filter("price_tick")
             price = (price / tick).quantize(Decimal(1)) * tick
         """
-        return self.session.symbols if self.session is not None else None
+        return self._symbols if self.session is not None else None
 
     @property
     def cid_slot(self) -> int | None:

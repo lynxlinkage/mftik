@@ -39,21 +39,34 @@ class TimerToken:
         self._func: TimerFunc | None = None
         self._first_ms: int | None = None
         self._interval_ms: int = 0
+        self._label: str = "timer"
 
     @property
     def active(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    @property
+    def label(self) -> str:
+        """What this token is called in the event log."""
+        return self._label
 
     def register(
         self,
         first_ms: int,
         interval_ms: int,
         func: TimerFunc,
+        *,
+        label: str | None = None,
     ) -> TimerToken:
         """Schedule ``func`` at ``first_ms`` (unix ms), then every ``interval_ms``.
 
         ``interval_ms <= 0`` means one-shot. Re-registering replaces any prior
         schedule on this token.
+
+        ``label`` names the token in the session event log, defaulting to the
+        callback's qualified name. Worth setting when one method backs several
+        tokens — two schedules that log under one name cannot be told apart by
+        anyone reading back what the session did.
         """
         if not callable(func):
             raise TypeError("func must be callable")
@@ -62,7 +75,14 @@ class TimerToken:
         self._func = func
         self._first_ms = int(first_ms)
         self._interval_ms = int(interval_ms)
+        self._label = label or getattr(func, "__qualname__", None) or repr(func)
         self._timer._track(self)
+        self._timer._record(
+            "registered",
+            self._label,
+            first_ms=self._first_ms,
+            interval_ms=self._interval_ms,
+        )
         self._task = asyncio.create_task(
             self._run(),
             name=f"timer-token-{id(self):x}",
@@ -118,6 +138,12 @@ class TimerToken:
                         return
                     except TimeoutError:
                         continue
+                # ``due_ms`` alongside the wall clock: a tick that fires late
+                # is the timer's own version of wire latency, and a strategy
+                # that acted on a stale schedule shows it here.
+                self._timer._record(
+                    "fired", self._label, due_ms=next_ms
+                )
                 await self._invoke(func)
                 if interval <= 0 or self._cancelled.is_set():
                     return
@@ -129,7 +155,10 @@ class TimerToken:
                     next_ms += missed * interval
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            self._timer._record(
+                "failed", self._label, error=repr(exc)
+            )
             logger.exception("timer token callback failed")
         finally:
             self._task = None
@@ -172,6 +201,14 @@ class Timer:
         for token in list(self._tokens):
             token.cancel()
         self._tokens.clear()
+
+    def _record(self, event: str, label: str, **fields: Any) -> None:
+        """Log one token event, if this timer's session keeps an event log."""
+        strategy = self._strategy
+        session = getattr(strategy, "session", None) if strategy else None
+        log = getattr(session, "event_log", None)
+        if log is not None:
+            log.record("timer", event, dir="self", token=label, **fields)
 
     def _track(self, token: TimerToken) -> None:
         if self._closed:

@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 from mft.broker import IncomingRequest
 from mft.protocol import (
     STS_ERROR,
+    STS_EVENTLOG_INFO,
+    STS_EVENTLOG_READ,
     STS_HEALTH,
     STS_SESSION_CREATE,
     STS_SESSION_LIST,
@@ -19,6 +21,7 @@ from mft.protocol import (
     RpcErrorEnvelope,
 )
 
+from mft_sts.rpc.eventlog import handle_eventlog_info, handle_eventlog_read
 from mft_sts.rpc.health import handle_health
 from mft_sts.rpc.sessions import (
     handle_session_create,
@@ -37,6 +40,8 @@ Handler = Callable[..., Awaitable[None]]
 
 _HANDLERS: dict[str, Handler] = {
     STS_HEALTH: handle_health,
+    STS_EVENTLOG_INFO: handle_eventlog_info,
+    STS_EVENTLOG_READ: handle_eventlog_read,
     STS_SESSION_CREATE: handle_session_create,
     STS_SESSION_LIST: handle_session_list,
     STS_SESSION_PAUSE: handle_session_pause,

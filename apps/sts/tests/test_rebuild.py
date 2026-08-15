@@ -10,6 +10,7 @@ it cannot hear heartbeating.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -462,4 +463,96 @@ async def test_the_attempt_is_counted_before_it_is_made(broker: Broker) -> None:
 
     assert await manager.rebuild_interrupted() == ["r-count"]
     assert counted == ["r-count"]
+    await manager.close_all()
+
+
+def _manager_with_factory(
+    broker: Broker, store: FakeStsStore, factory
+) -> SessionManager:  # noqa: ANN001
+    return SessionManager(
+        broker,
+        heartbeat_interval=0.05,
+        strategy_factory=factory,
+        persist_live=store.persist_live,
+        mark_done=store.mark_finished,
+        mark_live=store.mark_live,
+        list_db_sessions=store.list_sessions,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_strategy_this_build_lacks_is_skipped_without_a_traceback(
+    broker: Broker, caplog
+) -> None:
+    """A renamed or withdrawn strategy leaves rows that name it.
+
+    Expected, and permanent for that row: no build will ever resolve it. A
+    stack trace on every boot for a condition nothing can act on teaches an
+    operator that STS tracebacks are noise, which is how a real one gets
+    missed.
+    """
+    store = FakeStsStore()
+    store.seed("r-gone", strategy="macd_volume")
+
+    def factory(name: str | None) -> Strategy:
+        raise KeyError(f"unknown strategy {name!r}")
+
+    manager = _manager_with_factory(broker, store, factory)
+
+    with caplog.at_level(logging.WARNING, logger=manager_mod.__name__):
+        assert await manager.rebuild_interrupted() == []
+
+    assert store.rows["r-gone"].status == "interrupted"
+    records = [r for r in caplog.records if "r-gone" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert records[0].exc_info is None
+    # The name is in the line, since finding the row is the next thing anyone
+    # reading this will want to do.
+    assert "macd_volume" in records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_strategy_that_will_not_construct_keeps_its_traceback(
+    broker: Broker, caplog
+) -> None:
+    """The other branch: this one is a fault, and the trace is the point."""
+    store = FakeStsStore()
+    store.seed("r-broken", strategy="explodes")
+
+    def factory(name: str | None) -> Strategy:
+        raise RuntimeError("__init__ blew up")
+
+    manager = _manager_with_factory(broker, store, factory)
+
+    with caplog.at_level(logging.WARNING, logger=manager_mod.__name__):
+        assert await manager.rebuild_interrupted() == []
+
+    records = [r for r in caplog.records if "r-broken" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    assert records[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_one_unresolvable_row_does_not_stop_the_scan(
+    broker: Broker
+) -> None:
+    """The rows are independent; one stale name must not strand the rest."""
+    store = FakeStsStore()
+    store.seed("r-gone", strategy="macd_volume")
+    store.seed("r-good")
+    instances: list[Rebuildable] = []
+
+    def factory(name: str | None) -> Strategy:
+        if name == "macd_volume":
+            raise KeyError(name)
+        s = Rebuildable()
+        instances.append(s)
+        return s
+
+    manager = _manager_with_factory(broker, store, factory)
+
+    assert await manager.rebuild_interrupted() == ["r-good"]
+    assert store.rows["r-gone"].status == "interrupted"
     await manager.close_all()

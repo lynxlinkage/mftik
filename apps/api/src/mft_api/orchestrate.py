@@ -28,6 +28,7 @@ from mft.protocol import (
     publish_md_log,
     publish_sts_log,
 )
+from mft_db.models.session import SessionStatus
 
 from mft_api.broker_rpc import DomainRpcError, request_domain
 
@@ -95,6 +96,27 @@ async def deploy_strategy(
             level="error",
         )
         raise
+
+    if sts.status != SessionStatus.LIVE.value:
+        # The strategy read its configuration and refused it. Stop here rather
+        # than attaching feeds to a session that no longer exists: MD would
+        # wait out its whole timeout for a lease heartbeat from a stopped
+        # session, and the operator would be handed that timeout instead of
+        # the sentence the strategy wrote explaining what is wrong.
+        reason = sts.reason or f"session ended during start ({sts.status})"
+        logger.error(
+            "STS session ended during start — not attaching session=%s: %s",
+            session_id,
+            reason,
+        )
+        await publish_sts_log(
+            broker,
+            session_id,
+            f"strategy refused this configuration: {reason}",
+            source="api",
+            level="error",
+        )
+        raise DomainRpcError("strategy_refused", reason)
 
     try:
         if md:

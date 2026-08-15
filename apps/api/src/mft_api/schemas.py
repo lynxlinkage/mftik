@@ -118,6 +118,23 @@ class StsControlResponse(BaseModel):
     reason: str | None = None
 
 
+class EventLogInfoResponse(BaseModel):
+    """Whether a session's event log can be downloaded, and how big it is.
+
+    ``available`` false with ``enabled`` false means this deployment keeps no
+    event logs at all; with ``enabled`` true it means the STS that answered has
+    none for this session. ``live`` says the session is still running, so a
+    download is a prefix and not the whole of it.
+    """
+
+    session_id: str
+    available: bool = False
+    enabled: bool = False
+    parts: int = 0
+    total_bytes: int = 0
+    live: bool = False
+
+
 class StrategyYamlResponse(BaseModel):
     """The strategy.yml behind a past deploy.
 

@@ -134,9 +134,26 @@ services:
   sts:
     <<: *mft
     command: ["sts"]
+    volumes:
+      - sts_eventlog:/var/log/mft/sts
     environment:
       # Restart the stack and interrupted sessions come back on their own.
       STS_REBUILD_ON_BOOT: "1"
+      # One jsonl per session: every event it was handed and every call it
+      # made. A named volume, not the container filesystem — the moment the
+      # log is worth reading is usually the moment the container went away.
+      STS_EVENTLOG_DIR: "/var/log/mft/sts"
+      # Records held between the session and the disk. Overflow is dropped and
+      # counted into the file rather than blocking the dispatch path — a full
+      # queue must not put disk latency in front of an order.
+      STS_EVENTLOG_QUEUE: "20000"
+      # Disk per session is MAX_BYTES x (BACKUPS + 1) — 768 MB here. Sized for
+      # a session that records the book feeds: at ~1.5 KB a snapshot, an
+      # orderbook subscription writes on the order of 250 MB an hour, so this
+      # is hours rather than days. Sessions reading only trade feeds are an
+      # order of magnitude cheaper and will never reach it.
+      STS_EVENTLOG_MAX_BYTES: "268435456"
+      STS_EVENTLOG_BACKUPS: "2"
     depends_on:
       redis:
         condition: service_healthy
@@ -176,3 +193,4 @@ services:
 
 volumes:
   postgres_data:
+  sts_eventlog:

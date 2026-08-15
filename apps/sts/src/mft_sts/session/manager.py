@@ -295,12 +295,43 @@ class SessionManager:
 
         # A strategy that ended inside on_start / on_ready is already gone and
         # has announced its own terminal status — do not follow it with "live".
-        if request.session_id in self._sessions:
+        #
+        # Asked of the session rather than of this dict, because the two do not
+        # answer at the same moment: the teardown that removes the entry is a
+        # task, and it may not have run yet, while the flag is set the instant
+        # the strategy calls exit() or fail().
+        session_exited = session.exit_requested
+        if request.session_id in self._sessions and not session_exited:
             await self._publish_status(
                 request.session_id,
                 status=SessionStatus.LIVE.value,
                 strategy=strategy.name,
                 created_by=request.created_by,
+            )
+        if session_exited:
+            status = (
+                SessionStatus.FAILED.value
+                if session.exit_failed
+                else SessionStatus.DONE.value
+            )
+            # Not an exception: the session was created, and everything that
+            # follows a create — the row, the rollback, the audit line — still
+            # has to happen. The caller is being told what it created, which
+            # is a session that is already over.
+            logger.warning(
+                "STS session ended during start id=%s strategy=%s status=%s "
+                "reason=%s",
+                request.session_id,
+                strategy.name,
+                status,
+                session.exit_reason,
+            )
+            return StsCreateSessionResult(
+                session_id=request.session_id,
+                strategy=strategy.name,
+                td=list(request.td),
+                status=status,
+                reason=session.exit_reason,
             )
         logger.info(
             "STS session created id=%s strategy=%s td=%s",
@@ -653,9 +684,28 @@ class SessionManager:
                 continue
             try:
                 strategy = self._strategy_factory(getattr(row, "strategy", None))
+            except KeyError:
+                # A row naming a strategy this build does not have. Expected —
+                # a strategy can be renamed or withdrawn while a session that
+                # ran it is still on file — so it reads like its neighbours
+                # here rather than like a fault. A stack trace every boot for
+                # a row that will never resolve teaches the operator to skip
+                # the tracebacks.
+                logger.warning(
+                    "STS not rebuilding session=%s: no strategy named %r in "
+                    "this build",
+                    session_id,
+                    getattr(row, "strategy", None),
+                )
+                continue
             except Exception:
+                # Anything else is the class failing to construct, which is a
+                # fault and keeps its traceback.
                 logger.exception(
-                    "STS cannot rebuild session=%s: unknown strategy", session_id
+                    "STS cannot rebuild session=%s: strategy %r would not "
+                    "build",
+                    session_id,
+                    getattr(row, "strategy", None),
                 )
                 continue
             if not strategy.rebuildable:

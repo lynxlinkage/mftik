@@ -23,6 +23,7 @@ from mft.protocol import (
 from mft.protocol.reject_codes import describe
 
 from mft_sts.client_order_id import ClientOrderIdFactory
+from mft_sts.eventlog import session_log
 
 if TYPE_CHECKING:
     from mft_sts.strategy import Strategy
@@ -78,9 +79,24 @@ class StrategyOms:
         the same account cannot drift apart by each maintaining their own.
         """
         resolved = self._resolve(api_id)
+        log = session_log(self._strategy)
         if resolved is None:
+            # An empty book and an unanswerable question look identical to the
+            # caller, so the log has to be the thing that tells them apart.
+            log.record("read", "oms.view", dir="out", resolved=False, count=0)
             return OmsView()
         rows = await self._session_broker().state_all(Topics.td_oms(resolved))
+        # The rows, not the view built from them. This read is an input to
+        # whatever the strategy did next, and only the answer it was actually
+        # given can stand in for TD's book after the fact.
+        log.record(
+            "read",
+            "oms.view",
+            dir="out",
+            api_id=resolved,
+            count=len(rows),
+            payload=rows,
+        )
         orders = {
             cid: Order.model_validate(row) for cid, row in rows.items()
         }
@@ -95,10 +111,27 @@ class StrategyOms:
     ) -> Order | None:
         """One order by ``client_order_id``, or None if it is not live."""
         resolved = self._resolve(api_id)
+        log = session_log(self._strategy)
+        cid = str(client_order_id)
         if resolved is None:
+            log.record(
+                "read", "oms.order", dir="out", cid=cid, resolved=False
+            )
             return None
         row = await self._session_broker().state_get(
-            Topics.td_oms(resolved), str(client_order_id)
+            Topics.td_oms(resolved), cid
+        )
+        # ``found`` rather than inferring it from a missing payload: an order
+        # that is no longer live is a different answer from one nobody asked
+        # about, and both arrive here as None.
+        log.record(
+            "read",
+            "oms.order",
+            dir="out",
+            api_id=resolved,
+            cid=cid,
+            found=row is not None,
+            payload=row,
         )
         return None if row is None else Order.model_validate(row)
 
@@ -255,6 +288,18 @@ class StrategyOms:
     ) -> bool:
         """Round-trip an order request to TD and report whether it was taken."""
         session = self._require_session()
+        log = session.event_log
+        # Before the request, not after it. A submit that is never answered is
+        # the case the log is most needed for, and one recorded on the way back
+        # would have nothing to say about it.
+        log.record(
+            "order",
+            envelope.type,
+            dir="out",
+            api_id=api_id,
+            cid=cid,
+            payload=envelope.payload,
+        )
         # Cleared up front so a stale reason cannot outlive the refusal it
         # described and be read against a later, accepted request.
         self._last_reason = ""
@@ -275,6 +320,15 @@ class StrategyOms:
             )
             self._last_reason = "no ack from TD"
             self._last_code = RejectCode.TD_NO_ACK
+            log.record(
+                "order",
+                "order_ack",
+                api_id=api_id,
+                cid=cid,
+                accepted=False,
+                code=self._last_code,
+                reason=self._last_reason,
+            )
             return False
 
         try:
@@ -288,6 +342,16 @@ class StrategyOms:
             )
             self._last_reason = "unreadable ack from TD"
             self._last_code = RejectCode.TD_UNREADABLE_ACK
+            log.record(
+                "order",
+                "order_ack",
+                api_id=api_id,
+                cid=cid,
+                accepted=False,
+                code=self._last_code,
+                reason=self._last_reason,
+                sent_ts=reply.ts,
+            )
             return False
 
         if not ack.accepted:
@@ -300,6 +364,16 @@ class StrategyOms:
             )
             self._last_reason = ack.reason
             self._last_code = ack.error_code
+        log.record(
+            "order",
+            "order_ack",
+            api_id=api_id,
+            cid=cid,
+            accepted=ack.accepted,
+            code=ack.error_code,
+            reason=ack.reason or None,
+            sent_ts=reply.ts,
+        )
         return ack.accepted
 
     def _require_session(self):

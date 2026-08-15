@@ -1,4 +1,13 @@
-"""Strategy implementations loaded by the STS runtime."""
+"""Strategy implementations loaded by the STS runtime.
+
+Renaming one of these is a migration. Both spellings registered below are
+stored in the database — ``sts_sessions.strategy`` keeps the short ``name``
+and ``strategies.type`` keeps the class name — so a rename that touches only
+this file leaves rows naming a strategy nothing will answer to again, and the
+rebuild scan can do nothing with them but skip them. See
+``0020_macd_dollar_rename``, which is the one that had to be written after the
+fact.
+"""
 
 from __future__ import annotations
 
