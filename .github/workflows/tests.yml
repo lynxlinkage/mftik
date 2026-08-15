@@ -44,6 +44,17 @@ jobs:
       - name: Lint
         run: uv run --all-packages ruff check packages apps conftest.py
 
+      # Also gates the deploy. It lived only there until a PR that added two
+      # endpoints went green here and broke main on merge — a PR must not pass
+      # a weaker suite than the deploy runs. Early, since it needs no service.
+      - name: Contracts up to date
+        run: |
+          uv run --all-packages python -c \
+            "import json; from mft_api.main import app; print(json.dumps(app.openapi(), indent=2))" \
+            > /tmp/openapi.json
+          diff -u contracts/openapi.json /tmp/openapi.json \
+            || { echo "contracts/openapi.json is stale — run: just openapi" >&2; exit 1; }
+
       # Before the tests, which build their schema from the models and would
       # leave a database no migration has ever touched. The suite proves the
       # models work; this proves a deploy would arrive at the same models.

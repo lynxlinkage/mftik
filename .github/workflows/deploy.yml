@@ -169,35 +169,82 @@ jobs:
     env:
       WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
+      # Name the stage that stopped it, and say what that means for the host —
+      # "failed" alone sends you to the logs to find out whether anything
+      # reached production. The stages are checked in pipeline order because
+      # only the first non-success actually broke; the ones after it report
+      # `skipped`, which is not a failure worth naming.
       - name: Determine status
         id: status
+        env:
+          TEST: ${{ needs.test.result }}
+          BUILD: ${{ needs.build.result }}
+          DEPLOY: ${{ needs.deploy.result }}
         run: |
-          if [ "${{ needs.test.result }}" = "success" ] \
-            && [ "${{ needs.build.result }}" = "success" ] \
-            && [ "${{ needs.deploy.result }}" = "success" ]; then
-            echo "status=✅ Success" >> "$GITHUB_OUTPUT"
-            echo "color=3066993" >> "$GITHUB_OUTPUT"
+          if [ "$TEST" != "success" ]; then
+            title="❌ Tests failed"
+            desc="Nothing was built and nothing shipped. Production is unchanged."
+            color=15158332
+          elif [ "$BUILD" != "success" ]; then
+            title="❌ Build failed"
+            desc="No images were pushed. Production is unchanged."
+            color=15158332
+          elif [ "$DEPLOY" != "success" ]; then
+            title="❌ Deploy failed"
+            desc="Images were pushed, but the host did not finish updating — it may be part-way through a migration or restart. Check it before re-running."
+            color=15158332
           else
-            echo "status=❌ Failed" >> "$GITHUB_OUTPUT"
-            echo "color=15158332" >> "$GITHUB_OUTPUT"
+            title="✅ Deployed"
+            desc="Migrations ran and the stack was restarted."
+            color=3066993
           fi
+          {
+            echo "title=$title"
+            echo "desc=$desc"
+            echo "color=$color"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Notify Discord
         if: ${{ env.WEBHOOK_URL != '' }}
         env:
+          REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
-          ACTOR: ${{ github.actor }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
-          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          STATUS_TEXT: ${{ steps.status.outputs.status }}
-          STATUS_COLOR: ${{ steps.status.outputs.color }}
+          ACTOR: ${{ github.actor }}
+          SERVER_URL: ${{ github.server_url }}
+          RUN_ID: ${{ github.run_id }}
+          TITLE: ${{ steps.status.outputs.title }}
+          DESC: ${{ steps.status.outputs.desc }}
+          COLOR: ${{ steps.status.outputs.color }}
         run: |
-          DESC="Commit \`${COMMIT_SHA}\` by ${ACTOR} on \`main\`"$'\n'"${COMMIT_MSG}"
-          curl -sf -X POST "$WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg title "mft deploy: ${STATUS_TEXT}" \
-              --arg url "$RUN_URL" \
-              --arg desc "$DESC" \
-              --argjson color "$STATUS_COLOR" \
-              '{embeds: [{title: $title, url: $url, description: $desc, color: $color}]}')"
+          # workflow_dispatch has no head_commit, and Discord rejects an embed
+          # field with an empty value — which would fail this step on a run
+          # that otherwise went fine.
+          MSG="${COMMIT_MSG:0:1000}"
+          [ -n "$MSG" ] || MSG="(manual run — no commit message)"
+          # Piped rather than passed with -d "$(...)": the payload carries a
+          # commit message we did not write, and argv is the wrong place for it.
+          jq -n \
+            --arg title "mft: $TITLE" \
+            --arg desc "$DESC" \
+            --arg repo "$REPO" \
+            --arg actor "$ACTOR" \
+            --arg commit "[\`${COMMIT_SHA:0:7}\`](${SERVER_URL}/${REPO}/commit/${COMMIT_SHA})" \
+            --arg message "$MSG" \
+            --arg run "[View logs](${SERVER_URL}/${REPO}/actions/runs/${RUN_ID})" \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson color "$COLOR" \
+            '{embeds: [{
+              title: $title,
+              description: $desc,
+              color: $color,
+              fields: [
+                {name: "Repository", value: $repo, inline: true},
+                {name: "Triggered by", value: $actor, inline: true},
+                {name: "Commit", value: $commit, inline: false},
+                {name: "Message", value: $message, inline: false},
+                {name: "Workflow Run", value: $run, inline: false}
+              ],
+              timestamp: $ts
+            }]}' \
+          | curl -sf -H "Content-Type: application/json" -X POST -d @- "$WEBHOOK_URL"

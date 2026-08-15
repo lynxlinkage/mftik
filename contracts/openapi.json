@@ -620,6 +620,90 @@
         }
       }
     },
+    "/sts/sessions/{session_id}/eventlog/info": {
+      "get": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "Eventlog Info",
+        "description": "What event log STS holds for this session, if any.\n\nIts own endpoint so the UI can decide whether to offer a download, and how\nlarge a one, before committing a user to it.",
+        "operationId": "eventlog_info_sts_sessions__session_id__eventlog_info_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventLogInfoResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sts/sessions/{session_id}/eventlog": {
+      "get": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "Download Eventlog",
+        "description": "Stream the session's event log as one gzip, oldest part first.\n\nPulled from STS a slice at a time and passed straight through: each slice\narrives as its own gzip member, and a concatenation of gzip members is a\ngzip. So neither this process nor the broker ever holds the whole file, and\nnothing here has to decompress what it is only forwarding.",
+        "operationId": "download_eventlog_sts_sessions__session_id__eventlog_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/sts/deploy/{strategy_type}": {
       "post": {
         "tags": [
@@ -2005,6 +2089,45 @@
           "domain"
         ],
         "title": "DomainStats"
+      },
+      "EventLogInfoResponse": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "available": {
+            "type": "boolean",
+            "title": "Available",
+            "default": false
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": false
+          },
+          "parts": {
+            "type": "integer",
+            "title": "Parts",
+            "default": 0
+          },
+          "total_bytes": {
+            "type": "integer",
+            "title": "Total Bytes",
+            "default": 0
+          },
+          "live": {
+            "type": "boolean",
+            "title": "Live",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id"
+        ],
+        "title": "EventLogInfoResponse",
+        "description": "Whether a session's event log can be downloaded, and how big it is.\n\n``available`` false with ``enabled`` false means this deployment keeps no\nevent logs at all; with ``enabled`` true it means the STS that answered has\nnone for this session. ``live`` says the session is still running, so a\ndownload is a prefix and not the whole of it."
       },
       "HTTPValidationError": {
         "properties": {
