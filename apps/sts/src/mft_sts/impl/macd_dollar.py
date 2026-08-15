@@ -1,10 +1,23 @@
-"""MACD over quote-volume bars — long only, in on a bullish cross, out on a bearish one.
+"""MACD over dollar bars — long only, in on a bullish cross, out on a bearish one.
 
-**Bars.** Not time bars. One bar closes when the trades folded into it have
-carried ``bar_quote_volume`` of the quote currency, so a bar is a fixed amount
-of *business* rather than a fixed amount of clock. A quiet hour produces one bar
-and a violent minute produces thirty, which is the property the indicator wants:
-a time bar spends most of the day describing an idle book.
+**Bars.** Not time bars, and specifically *dollar* bars rather than volume bars.
+One closes when the trades folded into it have carried ``bar_quote_volume`` of
+the **quote** currency — ``price * qty`` summed, so USDT on a ``*USDT``
+instrument, not units of the base asset. The distinction is the whole reason for
+the name: a volume bar counts BTC, a dollar bar counts what the BTC was worth,
+and on this instrument a threshold meant for one is out by five orders of
+magnitude if read as the other.
+
+Dollar rather than volume because the alternative drifts. The same 100 BTC is
+four times the market activity at $120k that it was at $30k, so a volume bar
+quietly changes what it measures as the price moves, while a fixed amount of
+value does not. ("Dollar" is the standard name for the sampling scheme; the
+currency is whatever the instrument quotes in.)
+
+Either way a bar is a fixed amount of *business* rather than a fixed amount of
+clock. A quiet hour produces one bar and a violent minute produces thirty, which
+is the property the indicator wants: a time bar spends most of the day
+describing an idle book.
 
 The trade that crosses the threshold is folded in whole and the bar closes after
 it; the next bar starts empty. The alternative — splitting a print across two
@@ -157,7 +170,7 @@ _OVERLAP_GUARD = 2_000
 
 @dataclass(frozen=True)
 class _Bar:
-    """One closed quote-volume bar."""
+    """One closed dollar bar — a fixed amount of quote currency traded."""
 
     open: Decimal
     high: Decimal
@@ -186,7 +199,7 @@ class _Ema:
 
 
 class _BarBuilder:
-    """Folds trade prints into quote-volume bars."""
+    """Folds trade prints into dollar bars."""
 
     def __init__(self, threshold: Decimal) -> None:
         if threshold <= ZERO:
@@ -249,10 +262,10 @@ class _BarBuilder:
         self._prints = 0
 
 
-class MacdVolumeBars(Strategy):
-    """MACD on quote-volume bars. Long only, IOC through the touch."""
+class MacdDollarBars(Strategy):
+    """MACD on dollar bars. Long only, IOC through the touch."""
 
-    name = "macd_volume"
+    name = "macd_dollar"
     id = 7
     rebuildable = False
 
@@ -352,7 +365,7 @@ class MacdVolumeBars(Strategy):
             return
         if len(self.session.td_api_ids) != 1:
             self.fail(
-                "macd_volume trades one account; attach exactly one td, got "
+                "macd_dollar trades one account; attach exactly one td, got "
                 f"{self.session.td_api_ids}"
             )
             return
@@ -653,13 +666,13 @@ class MacdVolumeBars(Strategy):
         quote = self._quote
         if quote is None:
             logger.warning(
-                "macd_volume has no quote yet for %s", self._ticker
+                "macd_dollar has no quote yet for %s", self._ticker
             )
             return None
         age = time.time() - quote.ts
         if age > QUOTE_MAX_AGE_S:
             logger.warning(
-                "macd_volume quote for %s is %.1fs old — not pricing off it",
+                "macd_dollar quote for %s is %.1fs old — not pricing off it",
                 self._ticker,
                 age,
             )
@@ -761,7 +774,7 @@ class MacdVolumeBars(Strategy):
             # somebody else's short rather than open this strategy's long —
             # the position would be wrong and the accounting silently so.
             self.fail(
-                f"account is short {qty} of {self._ticker}; macd_volume is "
+                f"account is short {qty} of {self._ticker}; macd_dollar is "
                 "long only and will not trade against a position it did not "
                 "open"
             )
@@ -900,18 +913,18 @@ class MacdVolumeBars(Strategy):
             )
         if not mine:
             raise ValueError(
-                f"no {wanted} feed in md {md_ids}; macd_volume builds its bars "
+                f"no {wanted} feed in md {md_ids}; macd_dollar builds its bars "
                 f"from {wanted} prints"
             )
         if len(mine) > 1:
             raise ValueError(
-                f"macd_volume trades one instrument, got {wanted} feeds for "
+                f"macd_dollar trades one instrument, got {wanted} feeds for "
                 f"{[str(t) for t in mine]}"
             )
         ticker = mine[0]
         if ticker not in quoted:
             raise ValueError(
-                f"no bestquote feed for {ticker} in md {md_ids}; macd_volume "
+                f"no bestquote feed for {ticker} in md {md_ids}; macd_dollar "
                 "prices its IOCs through the touch and has no book without one"
             )
         self._ticker = ticker

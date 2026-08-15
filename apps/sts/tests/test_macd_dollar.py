@@ -1,4 +1,4 @@
-"""MacdVolumeBars — bars, warm-up, and the crosses that become orders.
+"""MacdDollarBars — dollar bars, warm-up, and the crosses that become orders.
 
 Driven directly: prints go in through the feed hooks, orders come out through a
 fake OMS. What is under test is the bar boundary, the refusal to trade before
@@ -25,7 +25,7 @@ from mft.exchange.models import (
 )
 from mft.exchange.oms import OmsView, Position
 from mft.protocol import ReconDone, RejectCode, SymbolInfo
-from mft_sts.impl.macd_volume import MacdVolumeBars, _BarBuilder, _Ema
+from mft_sts.impl.macd_dollar import MacdDollarBars, _BarBuilder, _Ema
 from mft_sts.tape import TapeSlice
 
 TICKER = "BinanceFuture_Perp_BTCUSDT"
@@ -112,7 +112,7 @@ class FakeTape:
         return self.slice
 
 
-def _strategy(*, md_ids: list[str] | None = None, **paras) -> MacdVolumeBars:
+def _strategy(*, md_ids: list[str] | None = None, **paras) -> MacdDollarBars:
     payload = {
         "bar_quote_volume": "1000",
         "qty_quote": "100",
@@ -124,8 +124,8 @@ def _strategy(*, md_ids: list[str] | None = None, **paras) -> MacdVolumeBars:
     }
     payload.update(paras)
 
-    strat = MacdVolumeBars()
-    strat.paras = MacdVolumeBars.on_initialized(payload)
+    strat = MacdDollarBars()
+    strat.paras = MacdDollarBars.on_initialized(payload)
     strat.session = FakeSession(md_ids)  # type: ignore[assignment]
     strat.oms = FakeOms()  # type: ignore[assignment]
     strat.tape = FakeTape()  # type: ignore[assignment]
@@ -229,7 +229,7 @@ def test_ema_is_seeded_with_its_first_sample() -> None:
 
 def test_fast_must_be_shorter_than_slow() -> None:
     with pytest.raises(ValueError, match="must be shorter than slow"):
-        MacdVolumeBars.on_initialized(
+        MacdDollarBars.on_initialized(
             {
                 "bar_quote_volume": "1000",
                 "qty_quote": "100",
@@ -241,7 +241,7 @@ def test_fast_must_be_shorter_than_slow() -> None:
 
 def test_feed_must_be_a_recorded_topic() -> None:
     with pytest.raises(ValueError, match="aggtrade"):
-        MacdVolumeBars.on_initialized(
+        MacdDollarBars.on_initialized(
             {
                 "bar_quote_volume": "1000",
                 "qty_quote": "100",
@@ -252,7 +252,7 @@ def test_feed_must_be_a_recorded_topic() -> None:
 
 def test_bar_quote_volume_is_required() -> None:
     with pytest.raises(ValueError, match="bar_quote_volume is required"):
-        MacdVolumeBars.on_initialized({"qty_quote": "100"})
+        MacdDollarBars.on_initialized({"qty_quote": "100"})
 
 
 @pytest.mark.asyncio
@@ -404,7 +404,7 @@ def _recon(qty: str | None) -> ReconDone:
 
 
 async def _warm(
-    strat: MacdVolumeBars, prices: list[str], *, recon: bool = True
+    strat: MacdDollarBars, prices: list[str], *, recon: bool = True
 ) -> None:
     """Start the strategy warm and, on a contract, told it is flat.
 
@@ -646,7 +646,7 @@ def _fill(cid: str, side: Side, qty: Decimal) -> Fill:
 # --- where the position comes from -------------------------------------------
 
 
-def _spot_strategy(**paras) -> MacdVolumeBars:
+def _spot_strategy(**paras) -> MacdDollarBars:
     strat = _strategy(
         md_ids=[f"aggtrade.{SPOT_TICKER}", f"bestquote.{SPOT_TICKER}"],
         **paras,

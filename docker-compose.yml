@@ -83,7 +83,7 @@ services:
       #
       # One topic, not both. aggtrade and trade describe the same matches, so
       # recording both doubles the memory to serve a strategy that can only
-      # read one of them (MacdVolumeBars refuses a session subscribed to both).
+      # read one of them (MacdDollarBars refuses a session subscribed to both).
       MD_TAPE_TOPICS: "aggtrade"
       # How far back a warm-up may reach. Retention is a duration, not a count:
       # the same number of prints is eight hours of a quiet instrument and

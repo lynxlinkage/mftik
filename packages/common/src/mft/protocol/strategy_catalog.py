@@ -185,13 +185,14 @@ sts:
 """,
 )
 
-MACD_VOLUME = StrategyTemplate(
-    type="MacdVolumeBars",
-    label="MACD on volume bars",
+MACD_DOLLAR = StrategyTemplate(
+    type="MacdDollarBars",
+    label="MACD on dollar bars",
     description=(
-        "Aggregates trade prints into fixed quote-volume bars, runs MACD over "
-        "their closes, and goes long on a bullish cross / flat on a bearish "
-        "one. Warms up from MD's recorded tape, then from live prints."
+        "Aggregates trade prints into dollar bars — one bar per fixed amount of "
+        "quote currency traded — runs MACD over their closes, and goes long "
+        "on a bullish cross / flat on a bearish one. Warms up from MD's "
+        "recorded tape, then from live prints."
     ),
     yaml="""\
 td:
@@ -231,7 +232,7 @@ sts:
 #: Every deployable strategy, keyed by the type used on the wire.
 TEMPLATES: dict[str, StrategyTemplate] = {
     t.type: t
-    for t in (NOOP, CHASE, OCO, CROSS_ARB, TWAP, TAPE_KEEPER, MACD_VOLUME)
+    for t in (NOOP, CHASE, OCO, CROSS_ARB, TWAP, TAPE_KEEPER, MACD_DOLLAR)
 }
 
 #: Type offered when the caller does not choose one.
