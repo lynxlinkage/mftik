@@ -26,7 +26,6 @@ from mft.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_BESTQUOTE_RESULT,
-    MD_ERROR,
     MD_KLINE,
     MD_KLINES_RESULT,
     MD_LEASE_ACK,
@@ -39,7 +38,6 @@ from mft.protocol import (
     STS_LEASE_HEARTBEAT,
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
-    TD_ERROR,
     TD_FILL,
     TD_LEASE_ACK,
     TD_ORDER_REJECT,
@@ -59,7 +57,6 @@ from mft.protocol import (
     MdOrderBookResult,
     OrderReject,
     ReconDone,
-    RpcError,
     TdDetachRequest,
     TdDetachRequestEnvelope,
     Topics,
@@ -79,16 +76,6 @@ logger = logging.getLogger(__name__)
 #: an ack round-trip; short enough that a wedged strategy cannot hold a trading
 #: attach open behind it.
 ON_STOP_TIMEOUT_S = 10.0
-
-#: How long one detach request waits for its domain to answer, and how many
-#: times it is sent. Retried because ``detach`` is idempotent, so a reply lost
-#: after the work was done costs nothing but a second call. Kept to two
-#: attempts because a domain that is merely busy does not need them — the
-#: request waits in its RPC list rather than being dropped — while a domain
-#: that is gone should not hold a stopping session for longer than this.
-#: Whatever these do not close, the domain's orphan scan will.
-DETACH_TIMEOUT_S = 5.0
-DETACH_ATTEMPTS = 2
 
 #: ``(session_id, reason, failed)`` — the manager tears the session down and
 #: records the terminal status.
@@ -445,23 +432,31 @@ class StsSession:
             )
 
     async def _publish_detaches(self) -> None:
-        """Tell TD and MD this session is over, and check that they heard.
+        """Tell TD and MD this session is over. Do not wait to be thanked.
 
-        Request-reply on each domain's process-level subject, not a message
-        on the session stream. That stream is read by one lease loop per
-        attach, and a detach is only ever acted on by the loop whose attach
-        it names — so when that loop is the thing that has already stopped,
-        the message is read by a sibling, filtered out, and lost, leaving an
-        attach open with nothing left to close it. The RPC is served by a
-        task that outlives every lease, and it answers, so a detach that does
-        not land is one we know about.
+        Posted to each domain's process-level subject rather than published on
+        the session stream. That stream is read by one lease loop per attach,
+        and a detach is only ever acted on by the loop whose attach it names —
+        so when that loop is the thing that has already stopped, the message is
+        read by a sibling, filtered out, and lost. The RPC queue is a list: it
+        is taken by whichever process is serving the subject, and one that is
+        down leaves it there for the next.
 
-        Sent together rather than in turn: they are independent, and a
-        session with several attaches should not wait out one unreachable
-        domain per attach before it can finish stopping.
+        Sent without a reply because there is nothing to learn from one. The
+        lease is what actually ends an attach: both domains watch this
+        session's heartbeat and run the identical teardown when it stops — MD
+        after 3 seconds, TD after 5 — so a detach that never lands costs those
+        seconds and nothing else. What this buys is promptness and a reason on
+        the row (``sts_stop`` rather than ``lease_expired``), neither of which
+        is worth holding a stop open for.
+
+        It used to be request-reply with two five-second attempts per attach,
+        which is up to ten seconds of a stopping session's life spent waiting
+        to save MD three — and an ERROR when it timed out, for a teardown that
+        was about to happen anyway.
         """
-        pending = [
-            self._request_detach(
+        posts = [
+            self._post_detach(
                 what=f"td api_id={api_id}",
                 subject=Topics.TD,
                 envelope=TdDetachRequestEnvelope.wrap(
@@ -472,13 +467,12 @@ class StsSession:
                     source="sts",
                     session_id=self.session_id,
                 ),
-                error_type=TD_ERROR,
             )
             for api_id in self.td_api_ids
         ]
         if self.md_ids:
-            pending.append(
-                self._request_detach(
+            posts.append(
+                self._post_detach(
                     what="md",
                     subject=Topics.MD,
                     envelope=MdDetachRequestEnvelope.wrap(
@@ -487,74 +481,41 @@ class StsSession:
                         source="sts",
                         session_id=self.session_id,
                     ),
-                    error_type=MD_ERROR,
                 )
             )
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        if posts:
+            await asyncio.gather(*posts, return_exceptions=True)
 
-    async def _request_detach(
-        self,
-        *,
-        what: str,
-        subject: str,
-        envelope: Any,
-        error_type: str,
+    async def _post_detach(
+        self, *, what: str, subject: str, envelope: Any
     ) -> None:
-        """Send one detach until it is acknowledged, or say that it was not.
-
-        A detach that never lands is not fatal to the stop — the session is
-        going away either way, and both domains reconcile attaches whose
-        strategy is gone. Saying so is the point: this used to fail silently.
-        """
-        last: Exception | None = None
-        for attempt in range(1, DETACH_ATTEMPTS + 1):
-            self.event_log.record(
-                "detach", envelope.type, dir="out", what=what, attempt=attempt
-            )
-            try:
-                reply = await self.broker.request(
-                    subject, envelope, timeout=DETACH_TIMEOUT_S
-                )
-            except Exception as exc:
-                last = exc
-            else:
-                if reply.type != error_type:
-                    self.event_log.record(
-                        "detach", "detached", what=what, sent_ts=reply.ts
-                    )
-                    await publish_sts_log(
-                        self.broker,
-                        self.session_id,
-                        f"detached {what}",
-                        source="sts",
-                    )
-                    return
-                err = RpcError.model_validate(reply.payload)
-                last = RuntimeError(f"{err.code}: {err.message}")
-            logger.warning(
-                "STS detach %s failed (attempt %d/%d) session=%s: %s",
-                what,
-                attempt,
-                DETACH_ATTEMPTS,
-                self.session_id,
-                last,
-            )
+        """Enqueue one detach. A failure here is logged, not waited on."""
         self.event_log.record(
-            "detach", "detach_failed", dir="self", what=what, error=repr(last)
+            "detach", envelope.type, dir="out", what=what
         )
-        logger.error(
-            "STS could not detach %s session=%s: %s — leaving it to the "
-            "domain's orphan scan",
-            what,
-            self.session_id,
-            last,
-        )
+        try:
+            await self.broker.post(subject, envelope)
+        except Exception as exc:
+            # The lease covers this. Worth a line because a broker that cannot
+            # take a write is a problem in its own right, not because the
+            # attach is now stuck.
+            self.event_log.record(
+                "detach", "detach_post_failed", dir="self", what=what,
+                error=repr(exc),
+            )
+            logger.warning(
+                "STS could not post detach %s session=%s: %s — the lease will "
+                "expire it",
+                what,
+                self.session_id,
+                exc,
+            )
+            return
         try:
             await publish_sts_log(
                 self.broker,
                 self.session_id,
-                f"detach {what} FAILED: {last}",
+                f"detach sent {what}",
                 source="sts",
             )
         except Exception:

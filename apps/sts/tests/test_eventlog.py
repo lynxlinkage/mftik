@@ -30,16 +30,8 @@ from mft.protocol import (
 )
 from mft_sts import tape as tape_module
 from mft_sts.eventlog import DIR_ENV, EventLog
-from mft_sts.session import session as session_module
 from mft_sts.session.session import StsSession
 from mft_sts.strategy import Strategy
-
-
-@pytest.fixture(autouse=True)
-def fast_detach(monkeypatch) -> None:  # noqa: ANN001
-    """No TD or MD is running here, so every stop waits out its detach."""
-    monkeypatch.setattr(session_module, "DETACH_TIMEOUT_S", 0.1)
-    monkeypatch.setattr(session_module, "DETACH_ATTEMPTS", 1)
 
 
 @pytest.fixture

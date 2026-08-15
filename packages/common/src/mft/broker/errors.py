@@ -19,7 +19,3 @@ class RequestTimeoutError(BrokerError):
         super().__init__(
             f"request to {subject!r} timed out after {timeout}s (id={request_id})"
         )
-
-
-class ReplyError(BrokerError):
-    """Raised when a reply cannot be sent (e.g. missing reply_to)."""

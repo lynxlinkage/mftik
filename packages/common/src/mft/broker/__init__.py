@@ -5,7 +5,6 @@ from mft.broker.config import BrokerConfig
 from mft.broker.errors import (
     BrokerError,
     BrokerNotConnectedError,
-    ReplyError,
     RequestTimeoutError,
 )
 from mft.broker.request import IncomingRequest
@@ -19,6 +18,5 @@ __all__ = [
     "BrokerError",
     "BrokerNotConnectedError",
     "IncomingRequest",
-    "ReplyError",
     "RequestTimeoutError",
 ]

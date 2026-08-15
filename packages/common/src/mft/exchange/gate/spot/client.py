@@ -127,6 +127,7 @@ class GateSpotWebSocket:
         max_retries: int = 10,
         retry_backoff: float = 1.0,
         max_retry_backoff: float = 30.0,
+        close_timeout: float = 2.0,
     ) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
@@ -139,6 +140,12 @@ class GateSpotWebSocket:
         self.max_retries = max_retries
         self.retry_backoff = retry_backoff
         self.max_retry_backoff = max_retry_backoff
+        #: How long the closing handshake may take before the socket is
+        #: dropped. ``websockets`` defaults this to 10 seconds, paid by
+        #: whoever is tearing the connection down. Nothing here needs it:
+        #: pending requests are cancelled before the handshake begins, and
+        #: orders already at the venue do not depend on how this socket ends.
+        self.close_timeout = close_timeout
 
         self._conn: ClientConnection | None = None
         self._subs: list[_Sub] = []
@@ -231,7 +238,7 @@ class GateSpotWebSocket:
                 asyncio.create_task(result, name="gate-spot-reconnect-cb")
 
     async def _open(self) -> None:
-        self._conn = await connect(self.url)
+        self._conn = await connect(self.url, close_timeout=self.close_timeout)
 
     async def _authenticate_socket(self) -> None:
         """Run ``spot.login`` on the current socket (no concurrent reader).

@@ -109,6 +109,9 @@ class SessionManager:
         #: ``session_id`` → consecutive scans that found no liveness key for a
         #: link this process holds. See :data:`_ORPHAN_STRIKES`.
         self._orphan_strikes: dict[str, int] = {}
+        #: Venue disconnects still running. Held so :meth:`close_all` can wait
+        #: for them and a stray task cannot be garbage-collected mid-close.
+        self._disconnects: set[asyncio.Task[Any]] = set()
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -426,7 +429,13 @@ class SessionManager:
         for session_id in list(self._links):
             await self.detach(session_id=session_id, reason="shutdown")
         for venue in list(self._venues):
-            await self._destroy_venue(venue)
+            self._destroy_venue(venue)
+        # Waited for here and nowhere else. A detach hands the disconnect to a
+        # task because nothing is blocked on it; a shutdown is the one moment
+        # something is — the process is about to end, and a socket closed by
+        # exit rather than by handshake is one the venue has to time out.
+        if self._disconnects:
+            await asyncio.gather(*self._disconnects, return_exceptions=True)
 
     async def _subscribe_feed(self, link: StsLink, feed: str) -> None:
         topic, ticker = Topics.parse_md_feed(feed)
@@ -517,19 +526,49 @@ class SessionManager:
             source="md",
         )
         if venue_sess.feed_count == 0:
-            await self._destroy_venue(ticker.venue)
+            self._destroy_venue(ticker.venue)
 
-    async def _destroy_venue(self, venue: str) -> None:
+    def _destroy_venue(self, venue: str) -> None:
+        """Drop the venue and disconnect it in the background.
+
+        The pop is what matters and it is synchronous: from here on nothing can
+        reach this session, and an attach arriving a moment later builds a
+        fresh one rather than waiting behind a closing socket.
+
+        Disconnecting is the slow part and nobody is waiting on it. A venue
+        socket takes seconds to close — the server may never answer the close
+        frame, and there is one connection per traffic class to get through —
+        and this used to run inline on the RPC loop, which serves one request
+        at a time. A detach therefore held every other attach, list and detach
+        behind a websocket handshake with a venue nobody was subscribed to any
+        more.
+        """
         sess = self._venues.pop(venue, None)
         if sess is None:
             return
-        await sess.stop()
-        await publish_md_log(
-            self._broker,
-            venue,
-            "venue public client disconnected",
-            source="md",
+        task = asyncio.create_task(
+            self._disconnect_venue(venue, sess), name=f"md-disconnect-{venue}"
         )
+        self._disconnects.add(task)
+        task.add_done_callback(self._disconnects.discard)
+
+    async def _disconnect_venue(self, venue: str, sess: VenueSession) -> None:
+        try:
+            await sess.stop()
+        except Exception:
+            # Nothing to recover: the session is already unreachable, and the
+            # connection dies with the process at worst.
+            logger.exception("MD venue disconnect failed venue=%s", venue)
+            return
+        try:
+            await publish_md_log(
+                self._broker,
+                venue,
+                "venue public client disconnected",
+                source="md",
+            )
+        except Exception:
+            logger.exception("MD venue disconnect log failed venue=%s", venue)
 
     async def _stop_link(self, link: StsLink) -> None:
         link.stop.set()

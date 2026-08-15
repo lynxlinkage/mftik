@@ -78,6 +78,7 @@ class BinanceSocket:
         retry_backoff: float = 1.0,
         max_retry_backoff: float = 30.0,
         keepalive: float = 20.0,
+        close_timeout: float = 2.0,
     ) -> None:
         self.url = url
         self.ack_timeout = ack_timeout
@@ -88,6 +89,18 @@ class BinanceSocket:
         #: Protocol-level ping interval handed to ``websockets``. Zero disables
         #: it, which only a test against a stub server should want.
         self.keepalive = keepalive
+        #: How long the closing handshake may take before the socket is simply
+        #: dropped. ``websockets`` defaults this to 10 seconds, and Binance
+        #: routinely does not answer a close frame at all — measured at 6 and
+        #: 10 seconds for the two futures endpoints, paid serially by whoever
+        #: is tearing the venue down.
+        #:
+        #: Nothing on these sockets is worth waiting for. They are read-only
+        #: market pushes: no order is in flight, and :meth:`close` has already
+        #: cancelled every pending request before reaching the handshake. The
+        #: server learns we are gone from the TCP close either way; the only
+        #: thing the full timeout buys is a tidier entry in Binance's logs.
+        self.close_timeout = close_timeout
 
         self._conn: ClientConnection | None = None
         self._pending: dict[str, _Pending] = {}
@@ -177,6 +190,7 @@ class BinanceSocket:
         self._conn = await connect(
             self.url,
             ping_interval=self.keepalive or None,
+            close_timeout=self.close_timeout,
         )
 
     def _ensure_connected(self) -> None:

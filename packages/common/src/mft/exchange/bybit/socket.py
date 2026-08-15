@@ -84,6 +84,7 @@ class BybitSocket:
         retry_backoff: float = 1.0,
         max_retry_backoff: float = 30.0,
         ping_interval: float = DEFAULT_PING_INTERVAL,
+        close_timeout: float = 2.0,
     ) -> None:
         self.url = url
         self.ack_timeout = ack_timeout
@@ -95,6 +96,13 @@ class BybitSocket:
         #: heartbeat and the silence watchdog, which only a test against a stub
         #: server should want.
         self.ping_interval = ping_interval
+        #: How long the closing handshake may take before the socket is
+        #: dropped. ``websockets`` defaults this to 10 seconds, which is paid
+        #: by whoever is tearing the connection down and buys nothing here:
+        #: :meth:`close` has already cancelled every pending request, and the
+        #: venue learns we are gone from the TCP close regardless. Orders
+        #: already at the venue are unaffected by how this socket ends.
+        self.close_timeout = close_timeout
 
         self._conn: ClientConnection | None = None
         self._pending: dict[str, _Pending] = {}
@@ -187,7 +195,9 @@ class BybitSocket:
         # No protocol-level ping: Bybit's keepalive is the application ``ping``
         # op, and layering the WebSocket one on top would mean a connection
         # could be dropped by ``websockets`` for a pong Bybit never promised.
-        self._conn = await connect(self.url, ping_interval=None)
+        self._conn = await connect(
+            self.url, ping_interval=None, close_timeout=self.close_timeout
+        )
 
     def _ensure_connected(self) -> None:
         if not self._connected or self._conn is None:
