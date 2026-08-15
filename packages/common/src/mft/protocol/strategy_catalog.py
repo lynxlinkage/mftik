@@ -197,21 +197,34 @@ MACD_VOLUME = StrategyTemplate(
 td:
   - paper trader
 md:
-  # Exactly one of aggtrade / trade — they report the same matches, so
-  # subscribing to both would count every bar's volume twice (refused at start).
+  # Two feeds, two jobs. The trade feed builds the bars; the quote feed prices
+  # the orders. Both are required — a session with only the first computes its
+  # signals and then has no book to cross (refused at start).
+  #
+  # Exactly one of aggtrade / trade: they report the same matches, so
+  # subscribing to both would count every bar's volume twice (also refused).
   - aggtrade.BinanceFuture_Perp_BTCUSDT
+  - bestquote.BinanceFuture_Perp_BTCUSDT
 sts:
   feed: aggtrade
-  # A bar closes once its prints carry this much of the quote currency.
-  # Smaller means more bars: warm-up needs slow + signal = 35 of them, so this
-  # has to be small enough that the recorded tape can produce that many.
-  bar_quote_volume: 1000000
+  # A bar closes once its prints carry this much of the quote currency, so it
+  # sets the strategy's whole timeframe. Sized against how fast the instrument
+  # actually trades: on a venue turning over ~$170k/s, 10M is roughly a minute
+  # a bar. Too small and MACD crosses faster than the fees it pays; too large
+  # and the recorded tape cannot produce the slow + signal = 35 bars warm-up
+  # needs, so the session waits on live prints instead.
+  bar_quote_volume: 10000000
   # MACD periods over bar closes. fast must be shorter than slow.
   fast: 12
   slow: 26
   signal: 9
-  # Quote currency per entry. One MARKET order at a time, long only.
+  # Quote currency per entry. Long only, one order in flight at a time.
   qty_quote: 100
+  # How far through the touch each IOC is priced — the slippage this agrees to
+  # in advance. Limit IOC rather than MARKET because a market order's quantity
+  # means different things on different venues, while this one is exactly the
+  # size that was asked for.
+  cross_bps: 5
 """,
 )
 

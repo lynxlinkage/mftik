@@ -34,14 +34,62 @@ divided by ``bar_quote_volume``. A threshold too large for the retention window
 simply means a longer wait on live prints. If that wait is routinely long, the
 threshold is too big for the instrument.
 
-**Orders.** ``MARKET``, one at a time, sized ``qty_quote`` of the quote
-currency. A cross is a statement about wanting exposure now; a resting limit
-would turn it into a bet on being filled before the next cross. Nothing rests,
-so there is nothing to cancel on the way out.
+**Orders.** ``LIMIT`` + ``IOC``, priced through the touch by ``cross_bps``, one
+at a time, sized ``qty_quote`` of the quote currency.
 
-**Long only.** A bullish cross with no position opens one. A bearish cross with
-a position closes it. A bearish cross while flat does nothing — it is not an
-instruction to go short.
+Not ``MARKET``, because a market order's quantity does not mean the same thing
+everywhere — some venues read it as base units, some as an amount of the quote
+currency — and a strategy that sizes in quote currency and converts to base has
+already decided which it means. A limit priced through the touch takes the same
+liquidity a market order would, but the quantity is the one that was asked for
+and the price carries a bound: ``cross_bps`` is the most slippage this will
+accept, stated rather than discovered.
+
+Nothing rests. An IOC either takes what is there now or is cancelled, so there
+is no resting order to cancel on the way out and no repricing to do.
+
+Priced off the live ``bestquote``, not off the bar that triggered it. A bar
+closes on volume, and by the time it does its close is already history; the
+order has to cross a book that exists now.
+
+**Long only, and the two sides are not symmetric.** A bullish cross with no
+position opens one — once, at the cross. If that IOC takes nothing, the trade
+is missed and the strategy waits for the next signal rather than chasing a
+market that has moved.
+
+A bearish cross closes the position, and keeps trying on every bar that stays
+bearish until it is flat. The asymmetry is deliberate: an entry that does not
+fill costs an opportunity, while an exit that does not fill leaves a position
+nobody decided to keep. Only one of those grows.
+
+A bearish cross while flat does nothing — it is not an instruction to go short.
+
+**Where the position comes from, and it depends on the market.**
+
+On a *contract*, the venue is the authority. The session's automatic recon
+reports what is already open, so a session that starts on an account already
+holding this instrument starts long rather than flat, and one that starts on a
+flat account holds. From then on ``on_position_update`` maintains it — a
+position moves on funding, ADL and liquidation, none of which arrive as a fill,
+so a tally of this strategy's own fills would drift from the truth exactly when
+being wrong is most expensive. The exit is sized from that figure and sent
+``reduce_only``: the intent is *be flat*, and the flag makes the venue refuse
+an overshoot rather than turn it into a short.
+
+Nothing is sent until recon has answered. This is a second gate, independent of
+the warm-up: the indicator is often ready first, and an entry sized against a
+position the strategy cannot see is the one mistake this ordering exists to
+prevent.
+
+An account already *short* fails the session. Long-only has no state for it,
+and a bullish cross would place a buy that shrinks somebody else's short
+instead of opening a long — wrong, and silently so.
+
+On *spot* none of that applies. There are no positions, only balances, and a
+holding of the base asset belongs to whoever put it there. The strategy starts
+flat, counts its own fills, and never sends ``reduce_only`` — TD refuses a spot
+order carrying it, which is the correct answer to asking for a guarantee spot
+cannot give.
 
 **Rebuild.** Off. The position is real and recon would report it, but reasoning
 about a restored position against an indicator rebuilt from a different stretch
@@ -52,21 +100,25 @@ of tape is a decision this strategy has not been given. See
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from mft.exchange.models import (
     AggTrade,
+    BestQuote,
     Fill,
     Order,
     OrderType,
     Side,
+    TimeInForce,
     Trade,
     is_terminal,
 )
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import CancelReject, OrderReject, SymbolInfo
+from mft.exchange.oms import Position
+from mft.exchange.tickers import Category, UniversalTicker
+from mft.protocol import CancelReject, OrderReject, ReconDone, SymbolInfo
 
 from mft_sts.strategy import Strategy
 
@@ -78,6 +130,19 @@ DEFAULT_FEED = "aggtrade"
 DEFAULT_FAST = 12
 DEFAULT_SLOW = 26
 DEFAULT_SIGNAL = 9
+
+#: How far through the touch an IOC is priced, in basis points. This is the
+#: slippage the strategy agrees to in advance: too small and the order takes
+#: only the top level before expiring, too large and it pays for depth it did
+#: not need. It is not a fee — an IOC that fills at the touch pays the touch.
+DEFAULT_CROSS_BPS = Decimal("5")
+
+BPS = Decimal("10000")
+
+#: A quote older than this is not priced off. At book speed a quote goes stale
+#: in well under a second, and an IOC aimed at a book that has moved is either
+#: a miss or a fill somewhere nobody chose.
+QUOTE_MAX_AGE_S = 5.0
 
 #: Recorded prints one warm-up read will pull. Two hours of a busy perp is
 #: comfortably inside this; a smaller number would silently shorten the warm-up
@@ -185,7 +250,7 @@ class _BarBuilder:
 
 
 class MacdVolumeBars(Strategy):
-    """MACD on quote-volume bars. Long only, market orders, one at a time."""
+    """MACD on quote-volume bars. Long only, IOC through the touch."""
 
     name = "macd_volume"
     id = 7
@@ -194,6 +259,10 @@ class MacdVolumeBars(Strategy):
     def __init__(self) -> None:
         super().__init__()
         self._ticker: UniversalTicker | None = None
+        #: Whether this instrument has positions at all. Decides where the
+        #: position comes from and what an exit means — see the class
+        #: docstring on the two markets.
+        self._contract = False
         self._info: SymbolInfo | None = None
         self._builder: _BarBuilder | None = None
         self._fast: _Ema | None = None
@@ -216,7 +285,19 @@ class MacdVolumeBars(Strategy):
         #: floor of zero, and the de-duplication below would discard the lot.
         self._last_tape_ts: float | None = None
         self._position = ZERO
+        #: Whether :attr:`_position` yet describes anything real. True from the
+        #: start on spot, where zero is the truth and this strategy's own fills
+        #: are what change it. False on a contract until recon answers: the
+        #: account may already be holding something, and an entry sent before
+        #: that is known would be sizing against a position it cannot see.
+        self._position_known = False
         self._pending_cid: str | None = None
+        #: Latest top of book, for pricing an IOC through it.
+        self._quote: BestQuote | None = None
+        #: Set by a bearish cross, cleared once flat. While it is on, every
+        #: bar that stays bearish tries the exit again — an IOC can take
+        #: nothing, and one unfilled attempt must not leave the position.
+        self._exiting = False
 
     # --- configuration -----------------------------------------------------
 
@@ -254,6 +335,9 @@ class MacdVolumeBars(Strategy):
         paras["warmup_limit"] = _positive_int(
             paras.get("warmup_limit", DEFAULT_WARMUP_LIMIT), "warmup_limit"
         )
+        paras["cross_bps"] = _positive_decimal(
+            paras.get("cross_bps", DEFAULT_CROSS_BPS), "cross_bps"
+        )
         return paras
 
     # --- lifecycle ---------------------------------------------------------
@@ -279,13 +363,31 @@ class MacdVolumeBars(Strategy):
         self._signal = _Ema(self.paras["signal"])
         self._required_bars = self.paras["slow"] + self.paras["signal"]
 
+        self._contract = self._ticker.category is not Category.SPOT
+        if self._contract:
+            # Nothing is known until recon answers. The session sends it
+            # automatically on the first lease ack, so this is a wait rather
+            # than a request.
+            self._position_known = False
+            await self.log(
+                f"{self._ticker.category} account — waiting for recon to say "
+                "what position is already open"
+            )
+        else:
+            # Spot has no position to inherit. A holding of the base asset is
+            # a balance, and it belongs to whoever put it there — this
+            # strategy starts flat and counts only its own fills.
+            self._position_known = True
+            self._position = ZERO
+
         await self._warm_up()
 
     async def on_stop(self) -> None:
-        # Nothing rests — every order this strategy sends is a MARKET order —
-        # so there is nothing to cancel. The position, if any, is left open on
-        # purpose: closing it here would turn "stop this session" into "sell my
-        # inventory at whatever the book has", which is an operator's decision.
+        # Nothing rests — every order this strategy sends is an IOC, which the
+        # venue either fills or cancels — so there is nothing to cancel here.
+        # The position, if any, is left open on purpose: closing it would turn
+        # "stop this session" into "sell my inventory into whatever the book
+        # has right now", which is an operator's decision, not a teardown step.
         if self._position > ZERO:
             await self.log(
                 f"stopping with {self._position} still held — "
@@ -392,6 +494,16 @@ class MacdVolumeBars(Strategy):
     async def on_trade(self, trade: Trade) -> None:
         await self._on_print(trade)
 
+    async def on_best_quote(self, quote: BestQuote) -> None:
+        """Keep the touch an order will be priced through.
+
+        Not folded into the bars: this feed says what the book looks like, not
+        that anything traded, and a bar is a measure of what traded.
+        """
+        if self._ticker is None or quote.universal_ticker != str(self._ticker):
+            return
+        self._quote = quote
+
     async def _on_print(self, trade: Trade) -> None:
         # The ticker check tolerates not knowing yet. A print can reach a hook
         # before ``on_start`` has resolved the feed, and dropping it there
@@ -450,62 +562,139 @@ class MacdVolumeBars(Strategy):
             # from, and treating "started above" as a cross would open a
             # position on the accident of when the session began.
             return
+        if not self._position_known:
+            # A second gate, independent of the warm-up above: the indicator
+            # can be ready long before recon has said what the account holds.
+            # Acting now would size an entry against a position it cannot see.
+            await self.log(
+                "signal ignored — still waiting for recon to report the "
+                "position",
+                level="warn",
+            )
+            return
 
         if previous <= ZERO < delta:
-            await self._enter(bar)
+            self._exiting = False
+            await self._enter()
         elif previous >= ZERO > delta:
-            await self._exit(bar)
+            # Arm the exit here rather than only acting once. An IOC can take
+            # nothing, and the cross that told us to get out happens once.
+            self._exiting = True
+            await self._exit("bearish cross")
+        elif self._exiting and delta < ZERO:
+            # Still bearish, still holding: the previous attempt did not
+            # finish the job. Entries get no such second chance — see the
+            # module docstring on why the two sides are not symmetric.
+            await self._exit("still bearish")
 
     # --- orders ------------------------------------------------------------
 
-    async def _enter(self, bar: _Bar) -> None:
-        if self._position > ZERO:
-            return
-        if self._pending_cid is not None:
-            await self.log(
-                "bullish cross ignored — an order is still in flight",
-                level="warn",
-            )
+    async def _enter(self) -> None:
+        if self._position > ZERO or self._pending_cid is not None:
             return
         info = await self._instrument()
         if info is None:
             return
-        qty = info.qty_for_notional(self.paras["qty_quote"], bar.close)
-        if qty <= ZERO or not info.meets_minimums(qty, bar.close):
+        price = self._crossing_price(Side.BUY, info)
+        if price is None:
+            return
+        qty = info.qty_for_notional(self.paras["qty_quote"], price)
+        if qty <= ZERO or not info.meets_minimums(qty, price):
             await self.log(
                 f"bullish cross skipped — {self.paras['qty_quote']} at "
-                f"{bar.close} rounds to {qty}, under the venue's minimums",
+                f"{price} rounds to {qty}, under the venue's minimums",
                 level="warn",
             )
             return
-        await self._submit(Side.BUY, qty, bar, "bullish cross")
+        await self._submit(Side.BUY, qty, price, "bullish cross")
 
-    async def _exit(self, bar: _Bar) -> None:
+    async def _exit(self, why: str) -> None:
         if self._position <= ZERO:
             # Long only: a bearish cross while flat is not an instruction to
             # go short.
+            self._exiting = False
             return
         if self._pending_cid is not None:
-            await self.log(
-                "bearish cross ignored — an order is still in flight",
-                level="warn",
-            )
             return
         info = await self._instrument()
         if info is None:
             return
+        price = self._crossing_price(Side.SELL, info)
+        if price is None:
+            return
+        # On a contract the size is the venue's open position and the order is
+        # reduce-only: the intent is "be flat", not "sell the amount I think I
+        # bought". Those differ whenever funding, ADL or another session has
+        # moved the position, and reduce_only makes the venue refuse an
+        # overshoot rather than turn it into a short.
+        #
+        # On spot there is no position to reduce and no flag to send — the
+        # tally of this strategy's own fills is the whole truth.
         qty = info.round_qty(self._position)
         if qty <= ZERO:
             await self.log(
-                f"bearish cross skipped — position {self._position} rounds to "
-                "nothing at this venue's lot step",
+                f"{why}: position {self._position} rounds to nothing at this "
+                "venue's lot step — treating as flat",
                 level="warn",
             )
+            self._exiting = False
             return
-        await self._submit(Side.SELL, qty, bar, "bearish cross")
+        await self._submit(
+            Side.SELL, qty, price, why, reduce_only=self._contract
+        )
+
+    def _crossing_price(self, side: Side, info: SymbolInfo) -> Decimal | None:
+        """Price an IOC through the touch, snapped to the venue's tick.
+
+        Returns None when there is no usable quote — which is a reason not to
+        send anything. An order priced off a stale book is a fill at a price
+        nobody agreed to.
+        """
+        quote = self._quote
+        if quote is None:
+            logger.warning(
+                "macd_volume has no quote yet for %s", self._ticker
+            )
+            return None
+        age = time.time() - quote.ts
+        if age > QUOTE_MAX_AGE_S:
+            logger.warning(
+                "macd_volume quote for %s is %.1fs old — not pricing off it",
+                self._ticker,
+                age,
+            )
+            return None
+
+        offset = self.paras["cross_bps"] / BPS
+        if side is Side.BUY:
+            touch = quote.ask
+            if touch <= ZERO:
+                return None
+            raw = touch * (Decimal(1) + offset)
+            # round_price floors, which for a buy can land *under* the ask and
+            # turn a crossing order into one that rests and then expires. Step
+            # back up until it crosses again.
+            price = info.round_price(raw)
+            tick = info.price_tick
+            if tick is not None and price < touch:
+                price = info.round_price(touch + tick)
+            return price if price > ZERO else None
+
+        touch = quote.bid
+        if touch <= ZERO:
+            return None
+        # Flooring is already the aggressive direction for a sell.
+        price = info.round_price(touch * (Decimal(1) - offset))
+        return price if price > ZERO else None
 
     async def _submit(
-        self, side: Side, qty: Decimal, bar: _Bar, why: str
+        self,
+        side: Side,
+        qty: Decimal,
+        price: Decimal,
+        why: str,
+        *,
+        reduce_only: bool = False,
     ) -> None:
         api_id = self.session.td_api_ids[0]
         accepted = await self.oms.submit_order(
@@ -513,7 +702,10 @@ class MacdVolumeBars(Strategy):
             ticker=self._ticker,
             side=side,
             qty=qty,
-            type=OrderType.MARKET,
+            type=OrderType.LIMIT,
+            price=price,
+            tif=TimeInForce.IOC,
+            reduce_only=reduce_only,
         )
         cid = self.oms.last_client_order_id
         if not accepted:
@@ -525,8 +717,9 @@ class MacdVolumeBars(Strategy):
             return
         self._pending_cid = cid
         await self.log(
-            f"{why} on bar close {bar.close} "
-            f"({self._bars_seen} bars) → MARKET {side} {qty} cid={cid}"
+            f"{why} ({self._bars_seen} bars) → IOC {side} {qty} @ {price} "
+            f"(+{self.paras['cross_bps']}bps through the touch"
+            f"{', reduce-only' if reduce_only else ''}) cid={cid}"
         )
 
     async def _instrument(self) -> SymbolInfo | None:
@@ -544,8 +737,83 @@ class MacdVolumeBars(Strategy):
 
     # --- private events ----------------------------------------------------
 
+    async def on_recon_done(self, msg: ReconDone) -> None:
+        """Take the venue's word for what is already open.
+
+        Contract only. This is the one moment the strategy can learn about a
+        position it did not place — carried over from a previous session, or
+        opened by something else on the same account — and starting long is
+        the correct state to start in when the account is long.
+
+        Spot never gets here: a base-asset balance is not this strategy's
+        position, and treating one as inherited inventory would have it sell
+        coins somebody else is holding.
+        """
+        if not self._contract or self._ticker is None:
+            return
+        position = msg.oms.positions.get(str(self._ticker))
+        qty = ZERO if position is None else position.qty
+        self._position_known = True
+
+        if qty < ZERO:
+            # Long-only has no answer for an account that is already short.
+            # A bullish cross here would buy, and that buy would shrink
+            # somebody else's short rather than open this strategy's long —
+            # the position would be wrong and the accounting silently so.
+            self.fail(
+                f"account is short {qty} of {self._ticker}; macd_volume is "
+                "long only and will not trade against a position it did not "
+                "open"
+            )
+            return
+
+        self._position = qty
+        if qty > ZERO:
+            await self.log(
+                f"recon: already long {qty} {self._ticker} — starting from "
+                "that position rather than flat"
+            )
+        else:
+            await self.log(f"recon: flat on {self._ticker}")
+
+    async def on_position_update(self, api_id: int, position: Position) -> None:
+        """The venue's own figure, and on a contract it wins.
+
+        A position moves on funding, ADL and liquidation, none of which arrive
+        as a fill — so a tally of this strategy's own fills drifts from the
+        truth exactly when it matters most. On spot this never fires.
+        """
+        if not self._contract or self._ticker is None:
+            return
+        if position.universal_ticker != str(self._ticker):
+            return
+        self._position_known = True
+        previous = self._position
+        self._position = max(position.qty, ZERO)
+        if position.qty < ZERO:
+            await self.log(
+                f"venue reports a short of {position.qty} — this strategy "
+                "does not open shorts; treating as flat and leaving it alone",
+                level="error",
+            )
+        elif self._position != previous:
+            await self.log(
+                f"venue position {previous} → {self._position}"
+            )
+        if self._position <= ZERO:
+            self._exiting = False
+
     async def on_fill(self, api_id: int, fill: Fill) -> None:
         if not self.owns(fill.client_order_id):
+            return
+        if self._contract:
+            # The venue is the authority here and says so through
+            # on_position_update. Counting fills as well would give two
+            # answers that disagree the first time funding moves the position.
+            await self.log(
+                f"fill {fill.side} {fill.qty} @ {fill.price} "
+                f"(position from the venue: {self._position})"
+            )
             return
         if fill.side is Side.BUY:
             self._position += fill.qty
@@ -562,6 +830,9 @@ class MacdVolumeBars(Strategy):
                 level="warn",
             )
             self._position = ZERO
+        if self._position <= ZERO:
+            # Flat: whatever the exit was chasing, it is done.
+            self._exiting = False
         await self.log(
             f"fill {fill.side} {fill.qty} @ {fill.price} → position "
             f"{self._position}"
@@ -586,8 +857,8 @@ class MacdVolumeBars(Strategy):
         )
 
     async def on_cancel_reject(self, api_id: int, reject: CancelReject) -> None:
-        # Nothing here ever cancels — market orders do not rest — so one of
-        # these is somebody else's, or a bug worth seeing.
+        # Nothing here ever cancels — an IOC is already gone — so one of these
+        # is somebody else's, or a bug worth seeing.
         if self.owns(reject.client_order_id):
             await self.log(
                 f"unexpected cancel reject for our cid: {reject.reason}",
@@ -597,19 +868,29 @@ class MacdVolumeBars(Strategy):
     # --- helpers -----------------------------------------------------------
 
     def _resolve_feed(self) -> None:
-        """Pin the instrument, and refuse a double-counted subscription."""
+        """Pin the instrument, and refuse a subscription it cannot trade on.
+
+        Two feeds are required and they do different jobs: the trade feed
+        builds the bars, the quote feed prices the orders. A session with only
+        the first would compute every signal correctly and then have no book to
+        cross, which is a failure worth having at start rather than at the
+        first cross.
+        """
         md_ids = list(self.session.md_ids) if self.session is not None else []
         wanted = self.paras["feed"]
         other = "trade" if wanted == "aggtrade" else "aggtrade"
 
         mine: list[UniversalTicker] = []
         clashing: list[str] = []
+        quoted: list[UniversalTicker] = []
         for feed in md_ids:
             topic, _, rest = feed.partition(".")
             if topic == wanted:
                 mine.append(UniversalTicker.resolve(rest))
             elif topic == other:
                 clashing.append(feed)
+            elif topic == "bestquote":
+                quoted.append(UniversalTicker.resolve(rest))
 
         if clashing:
             raise ValueError(
@@ -627,7 +908,13 @@ class MacdVolumeBars(Strategy):
                 f"macd_volume trades one instrument, got {wanted} feeds for "
                 f"{[str(t) for t in mine]}"
             )
-        self._ticker = mine[0]
+        ticker = mine[0]
+        if ticker not in quoted:
+            raise ValueError(
+                f"no bestquote feed for {ticker} in md {md_ids}; macd_volume "
+                "prices its IOCs through the touch and has no book without one"
+            )
+        self._ticker = ticker
 
 
 def _positive_decimal(raw: Any, name: str) -> Decimal:

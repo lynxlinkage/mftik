@@ -9,22 +9,27 @@ and replaying a print that was already on the tape.
 
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 
 import pytest
 from mft.exchange.models import (
     AggTrade,
+    BestQuote,
     Fill,
     Order,
     OrderStatus,
     OrderType,
     Side,
+    TimeInForce,
 )
-from mft.protocol import RejectCode, SymbolInfo
+from mft.exchange.oms import OmsView, Position
+from mft.protocol import ReconDone, RejectCode, SymbolInfo
 from mft_sts.impl.macd_volume import MacdVolumeBars, _BarBuilder, _Ema
 from mft_sts.tape import TapeSlice
 
 TICKER = "BinanceFuture_Perp_BTCUSDT"
+SPOT_TICKER = "Bybit_Spot_BTCUSDT"
 
 INFO = SymbolInfo(
     universal_ticker=TICKER,
@@ -54,12 +59,30 @@ class FakeOms:
         return self._last_cid
 
     async def submit_order(
-        self, api_id, *, ticker, side, qty, type, price=None, tif=None
+        self,
+        api_id,
+        *,
+        ticker,
+        side,
+        qty,
+        type,
+        price=None,
+        tif=None,
+        reduce_only=False,
     ):
         self._n += 1
         self._last_cid = f"cid-{self._n}"
         self.submitted.append(
-            {"cid": self._last_cid, "side": side, "qty": qty, "type": type}
+            {
+                "cid": self._last_cid,
+                "ticker": ticker,
+                "side": side,
+                "qty": qty,
+                "type": type,
+                "price": price,
+                "tif": tif,
+                "reduce_only": reduce_only,
+            }
         )
         return self.accept
 
@@ -67,7 +90,11 @@ class FakeOms:
 class FakeSession:
     def __init__(self, md_ids: list[str] | None = None) -> None:
         self.td_api_ids = [7]
-        self.md_ids = md_ids if md_ids is not None else [f"aggtrade.{TICKER}"]
+        self.md_ids = (
+            md_ids
+            if md_ids is not None
+            else [f"aggtrade.{TICKER}", f"bestquote.{TICKER}"]
+        )
         self.failures: list[str] = []
 
     def request_exit(self, reason: str, *, failed: bool = False) -> None:
@@ -109,17 +136,38 @@ def _strategy(*, md_ids: list[str] | None = None, **paras) -> MacdVolumeBars:
 
     strat.log = _noop_log  # type: ignore[method-assign]
     strat.owns = lambda cid: True  # type: ignore[method-assign]
+    # A fresh touch, so pricing is not gated on quote staleness. Tests that
+    # care about a missing or stale quote set it themselves.
+    strat._quote = _quote("100", "101")
     return strat
 
 
-def _print(price: str, qty: str = "1", *, trade_id: str = "", ts: float = 0.0):
+def _print(
+    price: str,
+    qty: str = "1",
+    *,
+    trade_id: str = "",
+    ts: float = 0.0,
+    ticker: str = TICKER,
+):
     return AggTrade(
-        universal_ticker=TICKER,
+        universal_ticker=ticker,
         trade_id=trade_id,
         price=Decimal(price),
         qty=Decimal(qty),
         side=Side.BUY,
         ts=ts,
+    )
+
+
+def _quote(bid: str, ask: str, *, age_s: float = 0.0) -> BestQuote:
+    return BestQuote(
+        universal_ticker=TICKER,
+        bid=Decimal(bid),
+        bid_qty=Decimal("100"),
+        ask=Decimal(ask),
+        ask_qty=Decimal("100"),
+        ts=time.time() - age_s,
     )
 
 
@@ -210,12 +258,29 @@ def test_bar_quote_volume_is_required() -> None:
 @pytest.mark.asyncio
 async def test_subscribing_to_both_trade_feeds_is_refused() -> None:
     """They report the same matches — every bar would double-count its volume."""
-    strat = _strategy(md_ids=[f"aggtrade.{TICKER}", f"trade.{TICKER}"])
+    strat = _strategy(
+        md_ids=[
+            f"aggtrade.{TICKER}",
+            f"trade.{TICKER}",
+            f"bestquote.{TICKER}",
+        ]
+    )
 
     await strat.on_start()
 
     assert strat.session.failures
     assert "twice" in strat.session.failures[0]
+
+
+@pytest.mark.asyncio
+async def test_a_missing_quote_feed_is_refused() -> None:
+    """Signals it can compute, orders it cannot price — fail at start."""
+    strat = _strategy(md_ids=[f"aggtrade.{TICKER}"])
+
+    await strat.on_start()
+
+    assert strat.session.failures
+    assert "no bestquote feed" in strat.session.failures[0]
 
 
 @pytest.mark.asyncio
@@ -322,8 +387,31 @@ async def test_a_print_already_on_the_tape_is_not_counted_twice() -> None:
 ONE_BAR = "20"
 
 
-async def _warm(strat: MacdVolumeBars, prices: list[str]) -> None:
-    """Push enough bars through the tape to leave the strategy ready."""
+def _recon(qty: str | None) -> ReconDone:
+    """TD's answer about what the account already holds.
+
+    ``None`` means the venue reported no position for this instrument, which
+    is what a flat contract account looks like.
+    """
+    positions = (
+        {}
+        if qty is None
+        else {TICKER: Position(universal_ticker=TICKER, qty=Decimal(qty))}
+    )
+    return ReconDone(
+        session_id="s-1", api_id=7, oms=OmsView(positions=positions)
+    )
+
+
+async def _warm(
+    strat: MacdVolumeBars, prices: list[str], *, recon: bool = True
+) -> None:
+    """Start the strategy warm and, on a contract, told it is flat.
+
+    Recon is part of starting up: the session sends it automatically on the
+    first lease ack, so a test that skips it is testing a state the strategy
+    only passes through.
+    """
     strat.tape = FakeTape(
         TapeSlice(
             records=[_print(p, ONE_BAR) for p in prices],
@@ -332,6 +420,8 @@ async def _warm(strat: MacdVolumeBars, prices: list[str]) -> None:
         )
     )
     await strat.on_start()
+    if recon:
+        await strat.on_recon_done(_recon(None))
 
 
 @pytest.mark.asyncio
@@ -347,7 +437,12 @@ async def test_a_bullish_cross_buys_when_flat() -> None:
     assert strat.oms.submitted, "a rally after a fall should cross bullish"
     first = strat.oms.submitted[0]
     assert first["side"] is Side.BUY
-    assert first["type"] is OrderType.MARKET
+    assert first["type"] is OrderType.LIMIT
+    assert first["tif"] is TimeInForce.IOC
+    # Priced through the ask (101) by cross_bps, snapped to the 0.01 tick —
+    # and never below the ask, or the "crossing" order would just expire.
+    assert first["price"] >= Decimal("101")
+    assert first["price"] <= Decimal("101") * Decimal("1.001")
 
 
 @pytest.mark.asyncio
@@ -370,20 +465,118 @@ async def test_a_bearish_cross_sells_the_position() -> None:
         await strat.on_agg_trade(_print(price, ONE_BAR))
     assert strat.oms.submitted
 
-    # The buy fills, so the strategy is long.
+    # The buy fills. On a contract the position comes from the venue, not
+    # from counting our own fills, so this is what makes the strategy long.
     bought = strat.oms.submitted[0]
     await strat.on_order_update(
         7, _order(bought["cid"], OrderStatus.FILLED, bought["qty"])
     )
-    await strat.on_fill(7, _fill(bought["cid"], Side.BUY, bought["qty"]))
+    await strat.on_position_update(7, _position(bought["qty"]))
     assert strat._position > 0
 
     for price in ("180", "120", "60", "30"):
         await strat.on_agg_trade(_print(price, ONE_BAR))
 
     assert len(strat.oms.submitted) == 2
-    assert strat.oms.submitted[1]["side"] is Side.SELL
-    assert strat.oms.submitted[1]["qty"] == strat._position
+    sold = strat.oms.submitted[1]
+    assert sold["side"] is Side.SELL
+    assert sold["qty"] == strat._position
+    assert sold["tif"] is TimeInForce.IOC
+    # Priced under the bid (100) — the aggressive side for a sell.
+    assert sold["price"] <= Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_an_exit_that_takes_nothing_is_retried_while_bearish() -> None:
+    """An IOC can fill nothing, and the cross that said "get out" happens once."""
+    strat = _strategy()
+    await _warm(strat, ["120", "110", "100", "90", "80", "70"])
+    for price in ("90", "120", "160", "220"):
+        await strat.on_agg_trade(_print(price, ONE_BAR))
+    bought = strat.oms.submitted[0]
+    await strat.on_order_update(
+        7, _order(bought["cid"], OrderStatus.FILLED, bought["qty"])
+    )
+    await strat.on_position_update(7, _position(bought["qty"]))
+
+    # The bearish cross fires a sell that the venue cancels unfilled.
+    await strat.on_agg_trade(_print("180", ONE_BAR))
+    assert len(strat.oms.submitted) == 2
+    unfilled = strat.oms.submitted[1]
+    await strat.on_order_update(
+        7, _order(unfilled["cid"], OrderStatus.CANCELED, Decimal("0"))
+    )
+
+    # Still long, still bearish — the next bar tries again.
+    await strat.on_agg_trade(_print("120", ONE_BAR))
+
+    assert len(strat.oms.submitted) == 3
+    assert strat.oms.submitted[2]["side"] is Side.SELL
+    assert strat._position > 0
+
+
+@pytest.mark.asyncio
+async def test_an_entry_that_takes_nothing_is_not_retried() -> None:
+    """Missing an entry costs an opportunity; chasing costs more."""
+    strat = _strategy()
+    await _warm(strat, ["120", "110", "100", "90", "80", "70"])
+
+    await strat.on_agg_trade(_print("90", ONE_BAR))
+    assert len(strat.oms.submitted) == 1
+    unfilled = strat.oms.submitted[0]
+    await strat.on_order_update(
+        7, _order(unfilled["cid"], OrderStatus.CANCELED, Decimal("0"))
+    )
+
+    # Still bullish and still flat, but the cross has been and gone.
+    for price in ("120", "160", "220"):
+        await strat.on_agg_trade(_print(price, ONE_BAR))
+
+    assert len(strat.oms.submitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_sent_without_a_quote() -> None:
+    """A signal it cannot price is a signal it must not act on."""
+    strat = _strategy()
+    strat._quote = None
+    await _warm(strat, ["120", "110", "100", "90", "80", "70"])
+
+    for price in ("90", "120", "160", "220"):
+        await strat.on_agg_trade(_print(price, ONE_BAR))
+
+    assert strat.oms.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_sent_on_a_stale_quote() -> None:
+    strat = _strategy()
+    await _warm(strat, ["120", "110", "100", "90", "80", "70"])
+    strat._quote = _quote("100", "101", age_s=60.0)
+
+    for price in ("90", "120", "160", "220"):
+        await strat.on_agg_trade(_print(price, ONE_BAR))
+
+    assert strat.oms.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_a_quote_for_another_instrument_is_ignored() -> None:
+    strat = _strategy()
+    # After on_start, so the ticker is resolved and the filter is really the
+    # thing being tested rather than "not knowing yet".
+    await _warm(strat, ["120", "110"])
+    await strat.on_best_quote(
+        BestQuote(
+            universal_ticker="BinanceFuture_Perp_ETHUSDT",
+            bid=Decimal("1"),
+            bid_qty=Decimal("1"),
+            ask=Decimal("2"),
+            ask_qty=Decimal("1"),
+        )
+    )
+    assert strat._quote is not None
+    assert strat._quote.universal_ticker == TICKER
 
 
 @pytest.mark.asyncio
@@ -434,6 +627,10 @@ def _order(cid: str, status: OrderStatus, qty: Decimal) -> Order:
     )
 
 
+def _position(qty: Decimal) -> Position:
+    return Position(universal_ticker=TICKER, qty=qty)
+
+
 def _fill(cid: str, side: Side, qty: Decimal) -> Fill:
     return Fill(
         universal_ticker=TICKER,
@@ -444,3 +641,180 @@ def _fill(cid: str, side: Side, qty: Decimal) -> Fill:
         price=Decimal("100"),
         qty=qty,
     )
+
+
+# --- where the position comes from -------------------------------------------
+
+
+def _spot_strategy(**paras) -> MacdVolumeBars:
+    strat = _strategy(
+        md_ids=[f"aggtrade.{SPOT_TICKER}", f"bestquote.{SPOT_TICKER}"],
+        **paras,
+    )
+    strat._info = SymbolInfo(
+        universal_ticker=SPOT_TICKER,
+        base="BTC",
+        quote="USDT",
+        exch_ticker="BTCUSDT",
+        filters=list(INFO.filters),
+    )
+    return strat
+
+
+@pytest.mark.asyncio
+async def test_a_contract_starts_long_when_the_account_is_long() -> None:
+    """The venue's position is the state, not an opening balance to ignore."""
+    strat = _strategy()
+    await _warm(strat, ["120", "110"], recon=False)
+
+    await strat.on_recon_done(_recon("0.5"))
+
+    assert strat._position == Decimal("0.5")
+    assert strat._position_known is True
+
+
+@pytest.mark.asyncio
+async def test_a_contract_starts_flat_when_the_venue_reports_nothing() -> None:
+    strat = _strategy()
+    await _warm(strat, ["120", "110"], recon=False)
+
+    await strat.on_recon_done(_recon(None))
+
+    assert strat._position == Decimal("0")
+    assert strat._position_known is True
+
+
+@pytest.mark.asyncio
+async def test_an_account_already_short_fails_the_session() -> None:
+    """Long-only has no state for it, and a buy here reduces someone's short."""
+    strat = _strategy()
+    await _warm(strat, ["120", "110"], recon=False)
+
+    await strat.on_recon_done(_recon("-0.5"))
+
+    assert strat.session.failures
+    assert "long only" in strat.session.failures[0]
+
+
+@pytest.mark.asyncio
+async def test_a_contract_sends_nothing_before_recon_answers() -> None:
+    """A second gate: warm is not the same as knowing what you hold."""
+    strat = _strategy()
+    await _warm(strat, ["120", "110", "100", "90", "80", "70"], recon=False)
+
+    for price in ("90", "120", "160", "220"):
+        await strat.on_agg_trade(_print(price, ONE_BAR))
+
+    assert strat._position_known is False
+    assert strat.oms.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_the_venue_position_wins_over_this_strategys_fills() -> None:
+    """Funding, ADL and liquidation move a position without any fill."""
+    strat = _strategy()
+    await _warm(strat, ["120", "110"])
+    await strat.on_position_update(7, _position(Decimal("2")))
+
+    # A fill that would disagree if fills were counted on a contract.
+    await strat.on_fill(7, _fill("cid-1", Side.BUY, Decimal("1")))
+
+    assert strat._position == Decimal("2")
+
+
+@pytest.mark.asyncio
+async def test_a_contract_exit_is_reduce_only() -> None:
+    """The intent is "be flat" — the venue must refuse an overshoot."""
+    strat = _strategy()
+    await _warm(strat, ["120", "110", "100", "90", "80", "70"])
+    for price in ("90", "120", "160", "220"):
+        await strat.on_agg_trade(_print(price, ONE_BAR))
+    await strat.on_order_update(
+        7,
+        _order(
+            strat.oms.submitted[0]["cid"], OrderStatus.FILLED, Decimal("1")
+        ),
+    )
+    await strat.on_position_update(7, _position(Decimal("1")))
+
+    for price in ("180", "120", "60", "30"):
+        await strat.on_agg_trade(_print(price, ONE_BAR))
+
+    sell = strat.oms.submitted[1]
+    assert sell["side"] is Side.SELL
+    assert sell["reduce_only"] is True
+    # Sized from the venue's figure, which is what "flat" means here.
+    assert sell["qty"] == Decimal("1")
+
+
+@pytest.mark.asyncio
+async def test_a_contract_entry_is_not_reduce_only() -> None:
+    strat = _strategy()
+    await _warm(strat, ["120", "110", "100", "90", "80", "70"])
+
+    for price in ("90", "120", "160", "220"):
+        await strat.on_agg_trade(_print(price, ONE_BAR))
+
+    assert strat.oms.submitted[0]["side"] is Side.BUY
+    assert strat.oms.submitted[0]["reduce_only"] is False
+
+
+@pytest.mark.asyncio
+async def test_spot_needs_no_recon_and_starts_flat() -> None:
+    """A base-asset balance belongs to whoever put it there."""
+    strat = _spot_strategy()
+    await _warm(strat, ["120", "110"], recon=False)
+
+    assert strat._contract is False
+    assert strat._position_known is True
+    assert strat._position == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_spot_counts_its_own_fills() -> None:
+    strat = _spot_strategy()
+    await _warm(strat, ["120", "110"], recon=False)
+
+    await strat.on_fill(7, _fill("cid-1", Side.BUY, Decimal("0.25")))
+
+    assert strat._position == Decimal("0.25")
+
+
+@pytest.mark.asyncio
+async def test_a_spot_exit_never_asks_for_reduce_only() -> None:
+    """TD refuses a spot order carrying it, and it would be right to."""
+    strat = _spot_strategy()
+    await _warm(strat, ["120", "110", "100", "90", "80", "70"], recon=False)
+    for price in ("90", "120", "160", "220"):
+        await strat.on_agg_trade(
+            _print(price, ONE_BAR, ticker=SPOT_TICKER)
+        )
+    await strat.on_fill(
+        7, _fill(strat.oms.submitted[0]["cid"], Side.BUY, Decimal("1"))
+    )
+    await strat.on_order_update(
+        7,
+        _order(
+            strat.oms.submitted[0]["cid"], OrderStatus.FILLED, Decimal("1")
+        ),
+    )
+
+    for price in ("180", "120", "60", "30"):
+        await strat.on_agg_trade(
+            _print(price, ONE_BAR, ticker=SPOT_TICKER)
+        )
+
+    sell = strat.oms.submitted[1]
+    assert sell["side"] is Side.SELL
+    assert sell["reduce_only"] is False
+
+
+@pytest.mark.asyncio
+async def test_spot_ignores_a_position_update() -> None:
+    """Spot venues publish none; one arriving is somebody else's instrument."""
+    strat = _spot_strategy()
+    await _warm(strat, ["120", "110"], recon=False)
+
+    await strat.on_position_update(7, _position(Decimal("9")))
+
+    assert strat._position == Decimal("0")
