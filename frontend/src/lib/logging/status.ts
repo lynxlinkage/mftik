@@ -1,4 +1,4 @@
-import { reloadIfSessionExpired } from '$lib/auth';
+import { pingSession } from '$lib/auth';
 import { wsBaseUrl } from '$lib/ws';
 
 /**
@@ -65,7 +65,7 @@ export function connectStsStatus(
 			// chain rejected looks exactly like the API going away, and the
 			// backoff below would retry a dead session forever behind a UI
 			// that still claims to be connecting.
-			void reloadIfSessionExpired();
+			void pingSession();
 			// 1s, 2s, 4s … capped at 30s.
 			const delay = Math.min(1000 * 2 ** attempt, 30_000);
 			attempt += 1;

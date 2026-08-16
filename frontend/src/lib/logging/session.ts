@@ -1,4 +1,4 @@
-import { reloadIfSessionExpired } from '$lib/auth';
+import { pingSession } from '$lib/auth';
 import { wsBaseUrl } from '$lib/ws';
 
 export type LogEntry = {
@@ -47,7 +47,7 @@ export function connectDomainLog(
 		// An expired session closes the handshake with no status the browser
 		// will show us, so a dead login is indistinguishable here from a
 		// finished stream. $lib/auth asks the question over REST instead.
-		if (!disposed) void reloadIfSessionExpired();
+		if (!disposed) void pingSession();
 	};
 	ws.onmessage = (ev) => {
 		const raw = String(ev.data);

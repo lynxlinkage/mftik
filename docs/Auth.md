@@ -486,9 +486,12 @@ demonstrated at all, which is what happened to `/login` in step 2.
 
 7. Give the production api service a volume for MFT_DATA.
 8. One deploy: MFT_AUTH_ENABLED=1, pin CORS, remove discord-auth-chain.
+        Update CICD.md and deploy/docker-compose.yml in the same PR — four
+        statements there stop being true the moment the chain comes off, and
+        prose that lags the behaviour it describes is how a comment becomes a
+        trap.
 9. ui   Strip the reload machinery from frontend/src/lib/auth.ts — it is an
         artifact of the chain and has nothing left to do.
-        Update CICD.md and deploy/docker-compose.yml.
 ```
 
 Step 2 is deliberately separate from step 1 rather than folded into it: get

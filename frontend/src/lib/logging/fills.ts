@@ -1,3 +1,4 @@
+import { pingSession } from '$lib/auth';
 import { wsBaseUrl } from '$lib/ws';
 
 /**
@@ -60,6 +61,12 @@ export function connectFills(
 				return;
 			}
 			onConnection?.('closed');
+			// Same reason as the status socket: a handshake the gate refused
+			// looks exactly like the API going away, so the backoff below
+			// would retry a dead session forever behind a UI that still says
+			// it is connecting. The board is left open as long as anything
+			// here, so it is as likely as any to outlive its login.
+			void pingSession();
 			const delay = Math.min(30_000, 500 * 2 ** attempt++);
 			retry = setTimeout(open, delay);
 		};

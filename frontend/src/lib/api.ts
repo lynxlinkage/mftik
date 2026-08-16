@@ -405,11 +405,10 @@ async function request<T>(
 			...(init?.headers ?? {})
 		}
 	});
-	// An expired login is answered by whichever gate is in front — see
-	// $lib/auth for how they differ. The throw still happens so no caller
+	// An expired login routes to /login. The throw still happens so no caller
 	// treats this as data: the page is on its way out, but nothing may proceed
 	// in the meantime.
-	if (res.status === 401 && !opts?.signIn && handleUnauthorized(res)) {
+	if (res.status === 401 && !opts?.signIn && handleUnauthorized()) {
 		throw new Error('Login session expired — signing in again…');
 	}
 	if (!res.ok) {
@@ -437,7 +436,7 @@ function filenameFromDisposition(header: string | null, fallback: string): strin
 
 async function downloadFile(path: string, fallbackName: string): Promise<void> {
 	const res = await fetch(`${apiBase()}${path}`);
-	if (res.status === 401 && handleUnauthorized(res)) {
+	if (res.status === 401 && handleUnauthorized()) {
 		throw new Error('Login session expired — signing in again…');
 	}
 	if (!res.ok) {
