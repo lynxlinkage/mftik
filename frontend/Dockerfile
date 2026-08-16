@@ -13,7 +13,6 @@ COPY . .
 RUN npx svelte-kit sync || true
 ENV HOST=0.0.0.0 \
     PORT=5173 \
-    PUBLIC_API_URL=http://localhost:8000 \
     API_PROXY_TARGET=http://api:8000
 EXPOSE 5173
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
@@ -36,6 +35,7 @@ ENV NODE_ENV=production \
 COPY --from=build /app/build ./build
 COPY --from=build /app/package.json ./package.json
 EXPOSE 3000
-# PUBLIC_API_URL is read at run time via $env/dynamic/public (see src/lib/ws.ts),
-# so one image serves any origin.
+# One image serves any origin: the browser opens /api and /ws on whatever host
+# served the document, and the edge routes them (see src/lib/ws.ts for why a
+# WebSocket in particular cannot be pointed anywhere else).
 CMD ["node", "build"]

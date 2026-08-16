@@ -65,11 +65,14 @@ services:
       - "8000:8000"
     environment:
       MFT_DATA: /var/lib/mft
-      # Off for now. The gate works over HTTP, but the WebSocket endpoints are
-      # opened at localhost:8000 while the UI is served from :5173, so the
-      # session cookie is cross-origin and never sent — turning this on before
-      # the Vite proxy carries /ws would break every live view. See docs/Auth.md.
-      MFT_AUTH_ENABLED: "0"
+      # On. This stack is where in-app auth is developed and verified;
+      # production keeps its Traefik chain and this flag off until the cutover,
+      # because running both gates locks everybody out. See docs/Auth.md.
+      #
+      # First `just up` on an empty database: open the UI and claim the
+      # instance at /login. `seed` has already created the Owner row so
+      # foreign keys resolve; claiming fills in its username and password.
+      MFT_AUTH_ENABLED: "1"
       # This stack is http end to end, and Safari drops Secure cookies there.
       MFT_COOKIE_SECURE: "0"
     volumes:
@@ -193,9 +196,9 @@ services:
       dockerfile: Dockerfile
       target: dev
     environment:
-      # Browser → host-published API (WebSocket logs)
-      PUBLIC_API_URL: http://localhost:8000
-      # Vite proxy inside the frontend container → api service
+      # Vite proxy inside the frontend container → api service, for /api and
+      # now /ws alike. WebSockets are opened on this origin rather than the
+      # API's own, so the session cookie rides the handshake; see src/lib/ws.ts.
       API_PROXY_TARGET: http://api:8000
       # Production gets sha-<commit> from MFT_VERSION; locally it is just "dev".
       PUBLIC_APP_VERSION: ${MFT_VERSION:-dev}

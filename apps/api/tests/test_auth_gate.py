@@ -62,9 +62,13 @@ async def test_the_flag_off_is_exactly_todays_behaviour(
 
         async with a_client(an_api()) as client:
             answered = await client.get("/sts/sessions")
+            # And says so, so the UI does not offer to sign in or out of a
+            # gate that is not there. Both would be no-ops.
+            status = await client.get("/auth/status")
 
     assert answered.status_code == 200
     assert answered.json() == {"owner": DEFAULT_USER_ID}
+    assert status.json()["enabled"] is False
 
 
 async def test_a_gated_route_without_a_cookie_is_401(db) -> None:
@@ -73,6 +77,10 @@ async def test_a_gated_route_without_a_cookie_is_401(db) -> None:
 
     assert refused.status_code == 401
     assert refused.json() == {"detail": "authentication required"}
+    # Says which gate answered. Until the cutover the Traefik chain is also in
+    # front of production and wants the opposite response from the browser —
+    # a document navigation rather than a client-side route to /login.
+    assert refused.headers["x-mft-auth"] == "login-required"
 
 
 async def test_the_public_routes_answer_without_one(db) -> None:

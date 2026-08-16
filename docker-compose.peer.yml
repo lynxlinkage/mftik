@@ -26,6 +26,5 @@ services:
     ports: !override
       - "5174:5173"
     environment:
-      PUBLIC_API_URL: http://localhost:8001
       API_PROXY_TARGET: http://api:8000
       PUBLIC_APP_VERSION: ${MFT_VERSION:-dev}

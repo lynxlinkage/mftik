@@ -117,9 +117,6 @@ services:
     image: ghcr.io/lynxlinkage/mft-frontend:${MFT_VERSION:-latest}
     restart: unless-stopped
     environment:
-      # Same origin as the UI: wsBaseUrl() turns this into wss://mft.lynkora.com
-      # and the /ws router above carries it to the API.
-      PUBLIC_API_URL: https://mft.lynkora.com
       ORIGIN: https://mft.lynkora.com
       # Same pin as the image tag, surfaced in the UI's corner badge so the
       # running build is identifiable without SSHing to the host.

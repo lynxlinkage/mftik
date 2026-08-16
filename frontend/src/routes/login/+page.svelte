@@ -1,0 +1,181 @@
+<script lang="ts">
+	import { goto } from '$app/navigation';
+	import { onMount } from 'svelte';
+	import { api, type AuthStatus } from '$lib/api';
+
+	/**
+	 * One form, two jobs. An instance with no password yet is claimed here;
+	 * afterwards the same fields sign in. `/auth/status` says which, and it is
+	 * public precisely so this page can ask before proving anything.
+	 *
+	 * A passwordless owner is not a missing one — `seed` creates the row so
+	 * foreign keys resolve. So "claim" fills that row in rather than making a
+	 * second, and there is never more than one person here.
+	 */
+	let status = $state<AuthStatus | null>(null);
+	let username = $state('');
+	let password = $state('');
+	let error = $state<string | null>(null);
+	let busy = $state(false);
+
+	const claiming = $derived(status?.setup_required === true);
+	const off = $derived(status?.enabled === false);
+
+	onMount(async () => {
+		try {
+			status = await api.authStatus();
+			// Nothing to sign in to while the gate is off — every request is
+			// already the Owner. Showing a form here would look like it did
+			// something.
+			if (status.enabled && status.authenticated) {
+				await goto('/');
+				return;
+			}
+			if (status.username) username = status.username;
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
+	});
+
+	async function submit(event: SubmitEvent) {
+		event.preventDefault();
+		if (busy || !status) return;
+		busy = true;
+		error = null;
+		try {
+			if (claiming) {
+				await api.authSetup(username.trim(), password);
+			} else {
+				await api.authLogin(username.trim(), password);
+			}
+			password = '';
+			await goto('/');
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			busy = false;
+		}
+	}
+</script>
+
+<div class="gate">
+	{#if off}
+		<div class="notice">
+			<h1>Authentication is off</h1>
+			<p class="lede">
+				This instance runs with <code>MFT_AUTH_ENABLED=0</code>, so every request already
+				acts as the Owner and there is nothing to sign in to. Whatever sits in front of
+				it is the gate.
+			</p>
+			<a href="/">Back to the control panel</a>
+		</div>
+	{:else}
+	<form onsubmit={submit}>
+		<h1>{claiming ? 'Claim this instance' : 'Sign in'}</h1>
+		<p class="lede">
+			{#if status === null}
+				Checking this instance…
+			{:else if claiming}
+				Nobody owns this node yet. The username and password you set here are the
+				ones that will always work, whatever else gets connected later.
+			{:else}
+				One instance, one owner.
+			{/if}
+		</p>
+
+		<label>
+			<span>Username</span>
+			<!-- svelte-ignore a11y_autofocus -->
+			<input
+				name="username"
+				autocomplete="username"
+				autofocus
+				bind:value={username}
+				disabled={status === null || busy}
+				required
+			/>
+		</label>
+
+		<label>
+			<span>Password</span>
+			<input
+				name="password"
+				type="password"
+				autocomplete={claiming ? 'new-password' : 'current-password'}
+				bind:value={password}
+				disabled={status === null || busy}
+				minlength={claiming ? 12 : undefined}
+				required
+			/>
+			{#if claiming}
+				<small>At least 12 characters. There is no reset that does not involve a shell.</small>
+			{/if}
+		</label>
+
+		{#if error}
+			<div class="error-banner">{error}</div>
+		{/if}
+
+		<button type="submit" disabled={status === null || busy}>
+			{#if busy}
+				Working…
+			{:else if claiming}
+				Claim
+			{:else}
+				Sign in
+			{/if}
+		</button>
+	</form>
+	{/if}
+</div>
+
+<style>
+	.gate {
+		display: flex;
+		justify-content: center;
+		padding-top: 4rem;
+	}
+
+	form,
+	.notice {
+		width: min(26rem, 100%);
+		display: grid;
+		gap: 1rem;
+		padding: 1.75rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		background: var(--bg-elevated);
+	}
+
+	h1 {
+		margin: 0;
+	}
+
+	.lede {
+		margin: 0;
+		color: var(--muted);
+		font-size: 0.85rem;
+		line-height: 1.5;
+	}
+
+	label {
+		display: grid;
+		gap: 0.35rem;
+	}
+
+	label span {
+		font-size: 0.78rem;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--muted);
+	}
+
+	small {
+		color: var(--muted);
+		font-size: 0.72rem;
+	}
+
+	button {
+		margin-top: 0.25rem;
+	}
+</style>

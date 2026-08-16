@@ -1,10 +1,39 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { startSessionKeepalive } from '$lib/auth';
+	import { onMount } from 'svelte';
+	import { api } from '$lib/api';
+	import { LOGIN_PATH, startSessionKeepalive } from '$lib/auth';
 	import { appVersion, appVersionShort } from '$lib/version';
 	import '../app.css';
 
 	let { children } = $props();
+
+	/**
+	 * Only offer to sign out where signing out means something. With the gate
+	 * off every request is already the Owner, so the button would end a
+	 * session that does not exist and land back on a page that redirects home.
+	 */
+	let signedIn = $state(false);
+
+	onMount(async () => {
+		try {
+			const status = await api.authStatus();
+			signedIn = status.enabled && status.authenticated;
+		} catch {
+			/* the gate will answer for itself on the next request */
+		}
+	});
+
+	async function signOut() {
+		try {
+			await api.authLogout();
+		} catch {
+			/* already gone is the outcome we wanted */
+		}
+		signedIn = false;
+		await goto(LOGIN_PATH);
+	}
 
 	// Every route is behind the same login session, and the pages people leave
 	// open longest are the ones that talk over WebSockets and so never touch
@@ -86,7 +115,12 @@
 			{/each}
 		</nav>
 
-		<span class="version" title={`build ${appVersion()}`}>{appVersionShort()}</span>
+		<div class="foot">
+			{#if signedIn && page.url.pathname !== LOGIN_PATH}
+				<button type="button" class="signout" onclick={signOut}>Sign out</button>
+			{/if}
+			<span class="version" title={`build ${appVersion()}`}>{appVersionShort()}</span>
+		</div>
 	</aside>
 
 	<main class="content">
@@ -169,8 +203,30 @@
 
 	/* Pushed to the bottom of the sidebar — visible on every page, out of the
 	   way of the content column. */
-	.version {
+	.foot {
 		margin-top: auto;
+		display: grid;
+		gap: 0.5rem;
+		justify-items: start;
+	}
+
+	.signout {
+		padding: 0.3rem 0.6rem;
+		font-size: 0.72rem;
+		letter-spacing: 0.04em;
+		color: var(--muted);
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		cursor: pointer;
+	}
+
+	.signout:hover {
+		color: var(--text);
+		border-color: var(--muted);
+	}
+
+	.version {
 		font-family: var(--font);
 		font-size: 0.68rem;
 		letter-spacing: 0.04em;

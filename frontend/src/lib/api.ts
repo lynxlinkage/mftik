@@ -1,4 +1,4 @@
-import { reloadForLogin } from '$lib/auth';
+import { handleUnauthorized } from '$lib/auth';
 
 /**
  * One strategy run, as the board shows it.
@@ -298,13 +298,63 @@ sts:
   qty_quote: 100
 `;
 
+/**
+ * What the login page needs before anyone has proved anything.
+ *
+ * `setup_required` is true while the Owner has no password — either no user
+ * row at all, or the passwordless one `seed` creates so foreign keys resolve.
+ * Both mean the same thing to whoever is looking at the form: claim this
+ * instance rather than sign in to it.
+ */
+export type AuthStatus = {
+	/**
+	 * Whether the gate is on at all. Off, every request is already the Owner
+	 * and there is nothing to sign in or out of — the UI hides both rather
+	 * than offering a no-op.
+	 */
+	enabled: boolean;
+	setup_required: boolean;
+	providers: string[];
+	authenticated: boolean;
+	username: string | null;
+};
+
+/** The Owner, and which proof this request arrived with. */
+export type Me = {
+	user_id: number;
+	username: string | null;
+	display_name: string;
+	email: string | null;
+	via: string;
+};
+
 function apiBase(): string {
 	// Always go through the Vite `/api` proxy so Docker (frontend → api service)
 	// and local (`localhost:8000`) both work. See API_PROXY_TARGET in vite.config.ts.
 	return '/api';
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function detailOf(res: Response): Promise<string> {
+	let detail = res.statusText;
+	try {
+		const body = (await res.json()) as { detail?: string };
+		if (body.detail) detail = body.detail;
+	} catch {
+		/* ignore */
+	}
+	return detail || `HTTP ${res.status}`;
+}
+
+/**
+ * `signIn: true` marks the endpoints that *are* the login. A 401 from those is
+ * the answer — wrong password — not a sign the session lapsed, and routing it
+ * to the login page would send someone standing on that page back to it.
+ */
+async function request<T>(
+	path: string,
+	init?: RequestInit,
+	opts?: { signIn?: boolean }
+): Promise<T> {
 	const res = await fetch(`${apiBase()}${path}`, {
 		...init,
 		headers: {
@@ -312,22 +362,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 			...(init?.headers ?? {})
 		}
 	});
-	// The auth chain in front of the origin, not the API, answers an expired
-	// login with 401. Reloading is what turns that into a re-login; see
-	// $lib/auth. The throw still happens so no caller treats this as data —
-	// the page is on its way out, but nothing may proceed in the meantime.
-	if (res.status === 401 && reloadForLogin()) {
+	// An expired login is answered by whichever gate is in front — see
+	// $lib/auth for how they differ. The throw still happens so no caller
+	// treats this as data: the page is on its way out, but nothing may proceed
+	// in the meantime.
+	if (res.status === 401 && !opts?.signIn && handleUnauthorized(res)) {
 		throw new Error('Login session expired — signing in again…');
 	}
 	if (!res.ok) {
-		let detail = res.statusText;
-		try {
-			const body = (await res.json()) as { detail?: string };
-			if (body.detail) detail = body.detail;
-		} catch {
-			/* ignore */
-		}
-		throw new Error(detail || `HTTP ${res.status}`);
+		throw new Error(await detailOf(res));
 	}
 	return (await res.json()) as T;
 }
@@ -351,7 +394,7 @@ function filenameFromDisposition(header: string | null, fallback: string): strin
 
 async function downloadFile(path: string, fallbackName: string): Promise<void> {
 	const res = await fetch(`${apiBase()}${path}`);
-	if (res.status === 401 && reloadForLogin()) {
+	if (res.status === 401 && handleUnauthorized(res)) {
 		throw new Error('Login session expired — signing in again…');
 	}
 	if (!res.ok) {
@@ -381,6 +424,22 @@ async function downloadFile(path: string, fallbackName: string): Promise<void> {
 }
 
 export const api = {
+	/* -- auth ------------------------------------------------------------- */
+	authStatus: () => request<AuthStatus>('/auth/status', undefined, { signIn: true }),
+	authSetup: (username: string, password: string) =>
+		request<Me>(
+			'/auth/setup',
+			{ method: 'POST', body: JSON.stringify({ username, password }) },
+			{ signIn: true }
+		),
+	authLogin: (username: string, password: string) =>
+		request<Me>(
+			'/auth/login/password',
+			{ method: 'POST', body: JSON.stringify({ username, password }) },
+			{ signIn: true }
+		),
+	authMe: () => request<Me>('/auth/me'),
+	authLogout: () => request<{ status: string }>('/auth/logout', { method: 'POST' }),
 	stats: () => request<{ domains: DomainStats[] }>('/stats'),
 	boardSessions: (opts: { status?: string; limit?: number } = {}) => {
 		const q = new URLSearchParams();
@@ -616,3 +675,5 @@ export function apiLabel(opts: {
 	if (opts.api_id != null) return String(opts.api_id);
 	return '—';
 }
+
+/* ---------------------------------------------------------------- auth --- */

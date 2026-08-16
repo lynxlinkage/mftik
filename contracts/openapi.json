@@ -3300,6 +3300,10 @@
       },
       "StatusOut": {
         "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
           "setup_required": {
             "type": "boolean",
             "title": "Setup Required"
@@ -3329,6 +3333,7 @@
         },
         "type": "object",
         "required": [
+          "enabled",
           "setup_required",
           "providers",
           "authenticated"

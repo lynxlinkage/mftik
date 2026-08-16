@@ -158,6 +158,13 @@ async def _refuse(scope: Scope, receive: Receive, send: Send) -> None:
         "headers": [
             (b"content-type", b"application/json"),
             (b"content-length", str(len(body)).encode()),
+            # Says this 401 came from the app, not from the Traefik chain in
+            # front of it. The two want opposite things from the browser: the
+            # chain needs a document navigation to reach its redirect, while
+            # this one wants the SPA to route itself to /login. Both gates
+            # exist at once until the cutover, so the answer has to say which
+            # one it is rather than the frontend guessing from a build flag.
+            (b"x-mft-auth", b"login-required"),
         ],
     }
     await send(message)

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from mft_api.audit_util import record_audit
 from mft_api.auth import passwords, sessions
 from mft_api.auth.deps import PrincipalDep
+from mft_api.auth.middleware import auth_enabled
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -34,6 +35,10 @@ _failures: dict[str, tuple[float, int]] = {}
 
 
 class StatusOut(BaseModel):
+    #: Whether the gate is on at all (``MFT_AUTH_ENABLED``). Off, every
+    #: request is already the Owner, and the UI has no business offering to
+    #: sign anybody in or out — the answer to both would be a no-op.
+    enabled: bool
     #: True while the Owner has no password — either no user row at all, or
     #: the one ``seed`` creates so foreign keys resolve. Both are "run setup".
     setup_required: bool
@@ -117,6 +122,7 @@ async def status(principal: PrincipalDep) -> StatusOut:
     async with session_scope() as db:
         owner = await UserRepository(db).get_owner()
     return StatusOut(
+        enabled=auth_enabled(),
         setup_required=owner is None or owner.password_hash is None,
         providers=list(_PROVIDERS),
         authenticated=principal.authenticated,

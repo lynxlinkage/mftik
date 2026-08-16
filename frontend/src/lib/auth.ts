@@ -1,11 +1,17 @@
 import { browser } from '$app/environment';
+import { goto } from '$app/navigation';
 
 /**
  * Keeping the login session alive, and recovering when it dies anyway.
  *
- * Nothing in this app authenticates anyone. The whole origin sits behind a
- * Traefik ForwardAuth chain (discord-forward-auth), which answers an expired
- * session two different ways depending on what asked:
+ * There are two gates, and until the cutover both exist. The API now has one
+ * of its own (see docs/Auth.md); production also still sits behind the Traefik
+ * ForwardAuth chain. They want opposite things from the browser, so a 401 is
+ * routed by who sent it: the app marks its own with `x-mft-auth`, and anything
+ * without that header came from the chain.
+ *
+ * The chain answers an expired session two different ways depending on what
+ * asked:
  *
  *   - a top-level *document* navigation (`Sec-Fetch-Mode: navigate`) gets a
  *     302 into the Discord OAuth flow, which is what re-login is;
@@ -75,6 +81,39 @@ export function reloadForLogin(): boolean {
 	return true;
 }
 
+/** Where the app's own gate sends someone who has not proved anything. */
+export const LOGIN_PATH = '/login';
+
+/**
+ * Response header the API's own 401 carries. The Traefik chain has no idea
+ * this exists, which is exactly what makes it a reliable way to tell the two
+ * apart while both are in front of the same origin.
+ */
+const APP_GATE_HEADER = 'x-mft-auth';
+
+/**
+ * Route to the login page. Client-side, because the page is part of this app
+ * — there is no external redirect to reach and nothing to reload for.
+ *
+ * Always reports true: the caller's request is over either way, and the
+ * navigation is already on its way.
+ */
+function goToLogin(): boolean {
+	if (!browser) return false;
+	if (location.pathname !== LOGIN_PATH) void goto(LOGIN_PATH);
+	return true;
+}
+
+/**
+ * What to do about a 401, given which gate produced it. Returns true when
+ * re-login is under way and the caller should stop rather than surface an
+ * error the user cannot act on.
+ */
+export function handleUnauthorized(res: Response): boolean {
+	if (res.headers.get(APP_GATE_HEADER)) return goToLogin();
+	return reloadForLogin();
+}
+
 /**
  * One authenticated request: slides the idle window when the session is alive,
  * and reloads into re-login when it is not.
@@ -95,7 +134,7 @@ export async function reloadIfSessionExpired(): Promise<void> {
 		// compose and CI can probe it, which means it answers 200 to an expired
 		// session and can never be the request that notices one.
 		const res = await fetch('/api/auth/me', { cache: 'no-store' });
-		if (res.status === 401) reloadForLogin();
+		if (res.status === 401) handleUnauthorized(res);
 	} catch {
 		/* offline or API down — not an auth verdict */
 	}

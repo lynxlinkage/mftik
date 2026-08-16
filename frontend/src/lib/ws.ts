@@ -1,25 +1,21 @@
-import { env } from '$env/dynamic/public';
-
 /**
  * Origin for WebSocket connections (`/ws/...` on the API).
  *
- * REST goes through the Vite `/api` proxy, but a WebSocket cannot — it is
- * opened straight from the browser — so this needs the API's real origin.
+ * Always the document's own origin, and deliberately not configurable.
  *
- * Read through `$env/dynamic/public` rather than `import.meta.env`: Vite only
- * exposes variables matching its `envPrefix` (`VITE_` by default), so
- * `import.meta.env.PUBLIC_API_URL` was always undefined and this silently fell
- * back to `hostname:8000` no matter what the deployment set. Dynamic rather
- * than static because the container is built once and given PUBLIC_API_URL at
- * run time, which a build-time substitution would ignore.
+ * A WebSocket handshake carries cookies under the same rules as any other
+ * request, which means it carries the session cookie only when it goes to the
+ * origin that cookie belongs to. Pointed at the API's own port instead — which
+ * is what `PUBLIC_API_URL` used to do here — the socket is cross-origin, the
+ * cookie is withheld, and the handshake is refused as unauthenticated. It
+ * looked fine before only because nothing authenticated these sockets.
+ *
+ * Production already satisfies this: one hostname serves the document, `/api`
+ * and `/ws`. Locally the Vite proxy forwards `/ws` to the API for the same
+ * reason it forwards `/api`, so both sides of the app now reach it the same
+ * way. See docs/Auth.md.
  */
 export function wsBaseUrl(): string {
-	const api = env.PUBLIC_API_URL;
-	if (api) {
-		const u = new URL(api);
-		u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
-		return u.origin;
-	}
 	const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-	return `${proto}//${window.location.hostname}:8000`;
+	return `${proto}//${window.location.host}`;
 }
