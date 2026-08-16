@@ -116,6 +116,47 @@ export type StrategyTypes = {
 	default: string;
 };
 
+/** One strategy tree in this node's registry (public, private, or pulled). */
+export type RegistryStrategy = {
+	name: string;
+	type: string;
+	digest: string;
+	requires_mft: string;
+	origin: string;
+	files: string[];
+};
+
+export type RegistryRemote = {
+	name: string;
+	url: string;
+	count: number;
+};
+
+export type RegistryRemoteDetail = RegistryRemote & {
+	strategies: RegistryStrategy[];
+};
+
+export type RegistrySyncStatus =
+	| 'synced'
+	| 'diverged'
+	| 'remote_only'
+	| 'local_only'
+	| 'unknown';
+
+export type RegistrySyncRow = {
+	name: string;
+	type: string;
+	local_digest: string | null;
+	remote_digest: string | null;
+	status: RegistrySyncStatus;
+};
+
+export type RegistryDiff = RegistryRemote & {
+	reachable: boolean;
+	error: string | null;
+	strategies: RegistrySyncRow[];
+};
+
 export type DeployResponse = {
 	id: number;
 	session_id: string;
@@ -513,7 +554,21 @@ export const api = {
 			`/logs/${encodeURIComponent(domain)}/${encodeURIComponent(streamId)}/download?${q}`,
 			fallback
 		);
-	}
+	},
+	registryStrategies: () =>
+		request<{ strategies: RegistryStrategy[] }>('/registry/v1/strategies'),
+	registryPrivate: () =>
+		request<{ strategies: RegistryStrategy[] }>('/registry/v1/private'),
+	registryRemotes: () => request<{ remotes: RegistryRemote[] }>('/registry/v1/remotes'),
+	registryRemote: (name: string) =>
+		request<RegistryRemoteDetail>(`/registry/v1/remotes/${encodeURIComponent(name)}`),
+	registryDiff: (name: string) =>
+		request<RegistryDiff>(`/registry/v1/remotes/${encodeURIComponent(name)}/diff`),
+	connectRegistry: (body: { name: string; url: string }) =>
+		request<{ name: string; url: string; pulled: RegistryStrategy[] }>(
+			'/registry/v1/remotes',
+			{ method: 'POST', body: JSON.stringify(body) }
+		)
 };
 
 export function defaultStrategyYml(): string {

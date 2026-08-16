@@ -223,6 +223,303 @@
         }
       }
     },
+    "/registry/v1/info": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Registry Info",
+        "description": "Wire version. A peer that cannot speak this refuses to connect.",
+        "operationId": "registry_info_registry_v1_info_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryInfoOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/registry/v1/strategies": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "List Published",
+        "description": "Strategies this node publishes. Private and pulled copies are not listed.",
+        "operationId": "list_published_registry_v1_strategies_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryStrategyListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/registry/v1/private": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "List Private",
+        "description": "Strategies that stay on this node. Peers never see this list.",
+        "operationId": "list_private_registry_v1_private_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryStrategyListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/registry/v1/strategies/{name}": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Get Published",
+        "description": "One published tree, including source, so another node can copy it.",
+        "operationId": "get_published_registry_v1_strategies__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryStrategyDetailOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/registry/v1/add": {
+      "post": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Add Strategy",
+        "description": "Copy a strategy's files into this node's public or private registry.",
+        "operationId": "add_strategy_registry_v1_add_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegistryAddBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryStrategyOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/registry/v1/remotes": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "List Remotes",
+        "operationId": "list_remotes_registry_v1_remotes_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryRemotesResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Connect",
+        "description": "Name a peer, check protocol, and pull everything it publishes.",
+        "operationId": "connect_registry_v1_remotes_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegistryRemoteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryConnectOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/registry/v1/remotes/{name}": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Get Remote",
+        "operationId": "get_remote_registry_v1_remotes__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryRemoteDetailOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/registry/v1/remotes/{name}/diff": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Remote Diff",
+        "description": "Pulled copy versus what the peer currently publishes.",
+        "operationId": "remote_diff_registry_v1_remotes__name__diff_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryDiffOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/sts/template": {
       "get": {
         "tags": [
@@ -2141,6 +2438,371 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "RegistryAddBody": {
+        "properties": {
+          "files": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "minProperties": 1,
+            "title": "Files"
+          },
+          "replace": {
+            "type": "boolean",
+            "title": "Replace",
+            "default": false
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "title": "Origin",
+            "default": "private"
+          }
+        },
+        "type": "object",
+        "required": [
+          "files"
+        ],
+        "title": "RegistryAddBody",
+        "description": "Register a strategy tree on this node.\n\n``files`` is path \u2192 UTF-8 text. Default origin is ``private`` (this node\nonly). ``public`` is what other nodes pull."
+      },
+      "RegistryConnectOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "pulled": {
+            "items": {
+              "$ref": "#/components/schemas/RegistryStrategyOut"
+            },
+            "type": "array",
+            "title": "Pulled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "url"
+        ],
+        "title": "RegistryConnectOut"
+      },
+      "RegistryDiffOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count",
+            "default": 0
+          },
+          "reachable": {
+            "type": "boolean",
+            "title": "Reachable",
+            "default": true
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "strategies": {
+            "items": {
+              "$ref": "#/components/schemas/RegistrySyncRow"
+            },
+            "type": "array",
+            "title": "Strategies"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "url"
+        ],
+        "title": "RegistryDiffOut"
+      },
+      "RegistryInfoOut": {
+        "properties": {
+          "protocol": {
+            "type": "string",
+            "title": "Protocol"
+          },
+          "protocol_version": {
+            "type": "integer",
+            "title": "Protocol Version"
+          },
+          "protocol_min": {
+            "type": "integer",
+            "title": "Protocol Min"
+          },
+          "mft_version": {
+            "type": "string",
+            "title": "Mft Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "protocol",
+          "protocol_version",
+          "protocol_min",
+          "mft_version"
+        ],
+        "title": "RegistryInfoOut"
+      },
+      "RegistryRemoteBody": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "url"
+        ],
+        "title": "RegistryRemoteBody",
+        "description": "Name this node will show in front of pulled types (``name::HelloStrategy``)."
+      },
+      "RegistryRemoteDetailOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count",
+            "default": 0
+          },
+          "strategies": {
+            "items": {
+              "$ref": "#/components/schemas/RegistryStrategyOut"
+            },
+            "type": "array",
+            "title": "Strategies"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "url"
+        ],
+        "title": "RegistryRemoteDetailOut",
+        "description": "A named peer and the strategies pulled from it."
+      },
+      "RegistryRemoteOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "url"
+        ],
+        "title": "RegistryRemoteOut"
+      },
+      "RegistryRemotesResponse": {
+        "properties": {
+          "remotes": {
+            "items": {
+              "$ref": "#/components/schemas/RegistryRemoteOut"
+            },
+            "type": "array",
+            "title": "Remotes"
+          }
+        },
+        "type": "object",
+        "title": "RegistryRemotesResponse"
+      },
+      "RegistryStrategyDetailOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "digest": {
+            "type": "string",
+            "title": "Digest"
+          },
+          "requires_mft": {
+            "type": "string",
+            "title": "Requires Mft"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Files"
+          },
+          "contents": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Contents"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "digest",
+          "requires_mft",
+          "origin"
+        ],
+        "title": "RegistryStrategyDetailOut",
+        "description": "Published tree plus file contents, for another node to pull."
+      },
+      "RegistryStrategyListResponse": {
+        "properties": {
+          "strategies": {
+            "items": {
+              "$ref": "#/components/schemas/RegistryStrategyOut"
+            },
+            "type": "array",
+            "title": "Strategies"
+          }
+        },
+        "type": "object",
+        "title": "RegistryStrategyListResponse"
+      },
+      "RegistryStrategyOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "digest": {
+            "type": "string",
+            "title": "Digest"
+          },
+          "requires_mft": {
+            "type": "string",
+            "title": "Requires Mft"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "digest",
+          "requires_mft",
+          "origin"
+        ],
+        "title": "RegistryStrategyOut",
+        "description": "One strategy as stored under ``public/``, ``private/``, or ``pulled/``."
+      },
+      "RegistrySyncRow": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "local_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Digest"
+          },
+          "remote_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Digest"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "status"
+        ],
+        "title": "RegistrySyncRow",
+        "description": "One strategy as it sits on this node versus on the peer."
       },
       "SessionListResponse": {
         "properties": {

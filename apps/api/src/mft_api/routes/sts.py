@@ -24,6 +24,7 @@ from mft.protocol import (
     ListSessionsRequestEnvelope,
     ListSessionsResult,
     StrategySpec,
+    StrategyTemplate,
     StrategyYamlError,
     StsEventLogChunk,
     StsEventLogInfo,
@@ -42,8 +43,8 @@ from mft.protocol import (
     dump_strategy_yml,
     get_template,
     parse_strategy_yml,
-    strategy_types,
 )
+from mft.registry import AddedStrategy, RegistryStore, qualify
 from mft_db.models.session import SessionStatus
 from mft_db.repositories import (
     AccountRepository,
@@ -54,7 +55,7 @@ from mft_db.session import session_scope
 
 from mft_api.audit_util import record_audit
 from mft_api.broker_rpc import DomainRpcError, request_domain
-from mft_api.deps import DEFAULT_USER_ID, BrokerDep
+from mft_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
 from mft_api.orchestrate import deploy_strategy
 from mft_api.schemas import (
     DeployResponse,
@@ -89,6 +90,50 @@ _ACKABLE = frozenset(
 _EVENTLOG_CHUNK_BYTES = 262_144
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
+#: A registry tree does not have to ship a deploy document. The picker still
+#: needs *some* yaml, and an empty ``sts:`` is a valid starting point — the
+#: strategy's ``on_initialized`` is what refuses a bad config after that.
+_LOCAL_YAML = "sts: {}\n"
+
+
+def _registry_template(rec: AddedStrategy) -> StrategyTemplate:
+    key = qualify(rec.origin, rec.type)
+    return StrategyTemplate(
+        type=key,
+        label=key,
+        description=f"{rec.origin} registry ({rec.digest})",
+        yaml=_LOCAL_YAML,
+    )
+
+
+def _deployable_templates(store: RegistryStore) -> list[StrategyTemplate]:
+    bundled = list(all_templates())
+    bundled_types = {t.type for t in bundled}
+    seen = set(bundled_types)
+    extra: list[StrategyTemplate] = []
+    for rec in store.list_all():
+        if rec.type in bundled_types:
+            continue
+        key = qualify(rec.origin, rec.type)
+        if key in seen:
+            continue
+        extra.append(_registry_template(rec))
+        seen.add(key)
+    extra.sort(key=lambda t: t.type)
+    return bundled + extra
+
+
+def _deployable_template(
+    strategy_type: str, store: RegistryStore
+) -> StrategyTemplate | None:
+    template = get_template(strategy_type)
+    if template is not None:
+        return template
+    for rec in store.list_all():
+        if qualify(rec.origin, rec.type) == strategy_type:
+            return _registry_template(rec)
+    return None
+
 
 @router.get("/template")
 async def strategy_template() -> dict[str, str]:
@@ -97,29 +142,32 @@ async def strategy_template() -> dict[str, str]:
 
 
 @router.get("/types", response_model=StrategyTypesResponse)
-async def list_strategy_types() -> StrategyTypesResponse:
+async def list_strategy_types(
+    store: RegistryStoreDep,
+) -> StrategyTypesResponse:
     """Deployable strategies, with the template each one starts from."""
+    templates = _deployable_templates(store)
     return StrategyTypesResponse(
-        types=strategy_types(),
+        types=[t.type for t in templates],
         templates=[
             StrategyTemplateOut.model_validate(t.model_dump())
-            for t in all_templates()
+            for t in templates
         ],
         default=DEFAULT_STRATEGY_TYPE,
     )
 
 
 @router.get("/types/{strategy_type}/template", response_model=StrategyTemplateOut)
-async def strategy_type_template(strategy_type: str) -> StrategyTemplateOut:
+async def strategy_type_template(
+    strategy_type: str, store: RegistryStoreDep
+) -> StrategyTemplateOut:
     """The starting document for one strategy type."""
-    template = get_template(strategy_type)
+    template = _deployable_template(strategy_type, store)
     if template is None:
+        known = ", ".join(t.type for t in _deployable_templates(store))
         raise HTTPException(
             status_code=404,
-            detail=(
-                f"unknown strategy type: {strategy_type}; "
-                f"known: {', '.join(strategy_types())}"
-            ),
+            detail=f"unknown strategy type: {strategy_type}; known: {known}",
         )
     return StrategyTemplateOut.model_validate(template.model_dump())
 
@@ -491,7 +539,10 @@ def _safe_name(value: str) -> str:
 
 @router.post("/deploy/{strategy_type}", response_model=DeployResponse)
 async def deploy(
-    strategy_type: str, body: StrategyDeployBody, broker: BrokerDep
+    strategy_type: str,
+    body: StrategyDeployBody,
+    broker: BrokerDep,
+    store: RegistryStoreDep,
 ) -> DeployResponse:
     """Deploy ``strategy_type`` with the td / md / sts document in ``body``.
 
@@ -499,13 +550,11 @@ async def deploy(
     ``sts:`` is allowed to contain — keeping them together let a user edit one
     into disagreement with the other.
     """
-    if get_template(strategy_type) is None:
+    if _deployable_template(strategy_type, store) is None:
+        known = ", ".join(t.type for t in _deployable_templates(store))
         raise HTTPException(
             status_code=404,
-            detail=(
-                f"unknown strategy type: {strategy_type}; "
-                f"known: {', '.join(strategy_types())}"
-            ),
+            detail=f"unknown strategy type: {strategy_type}; known: {known}",
         )
     try:
         spec = parse_strategy_yml(body.yaml)

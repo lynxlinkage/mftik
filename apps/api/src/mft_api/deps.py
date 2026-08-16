@@ -7,6 +7,7 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 from mft.broker import Broker
+from mft.registry import RegistryStore
 
 DEFAULT_USER_ID = int(os.getenv("MFT_DEFAULT_USER_ID", "1"))
 
@@ -19,3 +20,10 @@ def get_broker(request: Request) -> Broker:
 
 
 BrokerDep = Annotated[Broker, Depends(get_broker)]
+
+
+def get_registry_store() -> RegistryStore:
+    return RegistryStore.from_env()
+
+
+RegistryStoreDep = Annotated[RegistryStore, Depends(get_registry_store)]

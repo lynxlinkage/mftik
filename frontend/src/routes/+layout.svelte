@@ -25,13 +25,16 @@
 		{ href: '/sts', label: 'STS' },
 		{ href: '/td', label: 'TD' },
 		{ href: '/md', label: 'MD' },
+		{ href: '/registry', label: 'Registry' },
 		{ href: '/sym', label: 'Sym' },
 		{ href: '/audit', label: 'Audit' }
 	] as const;
 
 	function sectionLabel(pathname: string): string {
 		if (pathname === '/') return 'Home';
-		const hit = nav.find((item) => item.href !== '/' && (pathname === item.href || pathname.startsWith(`${item.href}/`)));
+		const hit = nav.find(
+			(item) => item.href !== '/' && (pathname === item.href || pathname.startsWith(`${item.href}/`))
+		);
 		return hit?.label ?? SITE_NAME;
 	}
 

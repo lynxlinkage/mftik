@@ -170,6 +170,12 @@ table.data tr:hover td {
 	color: var(--muted);
 }
 
+.badge.remote {
+	color: var(--accent);
+	border-color: rgba(61, 156, 240, 0.35);
+	background: rgba(61, 156, 240, 0.08);
+}
+
 .page-head {
 	display: flex;
 	flex-wrap: wrap;

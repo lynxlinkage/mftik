@@ -35,3 +35,6 @@ frontend/package-lock.json
 
 # Live API tokens (Hostinger, GitHub, Discord). Never commit.
 credentials/
+
+# Local node data (strategy registry). Default when MFT_DATA is unset.
+.mft/

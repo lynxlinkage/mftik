@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from mft.protocol import SymbolInfo
 from pydantic import BaseModel, Field
@@ -327,3 +327,88 @@ class BoardFillListResponse(BaseModel):
 class ErrorBody(BaseModel):
     code: str
     message: str
+
+
+class RegistryAddBody(BaseModel):
+    """Register a strategy tree on this node.
+
+    ``files`` is path → UTF-8 text. Default origin is ``private`` (this node
+    only). ``public`` is what other nodes pull.
+    """
+
+    files: dict[str, str] = Field(..., min_length=1)
+    replace: bool = False
+    origin: Literal["public", "private"] = "private"
+
+
+class RegistryStrategyOut(BaseModel):
+    """One strategy as stored under ``public/``, ``private/``, or ``pulled/``."""
+
+    name: str
+    type: str
+    digest: str
+    requires_mft: str
+    origin: str
+    files: list[str] = Field(default_factory=list)
+
+
+class RegistryStrategyDetailOut(RegistryStrategyOut):
+    """Published tree plus file contents, for another node to pull."""
+
+    contents: dict[str, str] = Field(default_factory=dict)
+
+
+class RegistryStrategyListResponse(BaseModel):
+    strategies: list[RegistryStrategyOut] = Field(default_factory=list)
+
+
+class RegistryInfoOut(BaseModel):
+    protocol: str
+    protocol_version: int
+    protocol_min: int
+    mft_version: str
+
+
+class RegistryRemoteBody(BaseModel):
+    """Name this node will show in front of pulled types (``name::HelloStrategy``)."""
+
+    name: str
+    url: str
+
+
+class RegistryRemoteOut(BaseModel):
+    name: str
+    url: str
+    count: int = 0
+
+
+class RegistrySyncRow(BaseModel):
+    """One strategy as it sits on this node versus on the peer."""
+
+    name: str
+    type: str
+    local_digest: str | None = None
+    remote_digest: str | None = None
+    status: str
+
+
+class RegistryRemoteDetailOut(RegistryRemoteOut):
+    """A named peer and the strategies pulled from it."""
+
+    strategies: list[RegistryStrategyOut] = Field(default_factory=list)
+
+
+class RegistryDiffOut(RegistryRemoteOut):
+    reachable: bool = True
+    error: str | None = None
+    strategies: list[RegistrySyncRow] = Field(default_factory=list)
+
+
+class RegistryRemotesResponse(BaseModel):
+    remotes: list[RegistryRemoteOut] = Field(default_factory=list)
+
+
+class RegistryConnectOut(BaseModel):
+    name: str
+    url: str
+    pulled: list[RegistryStrategyOut] = Field(default_factory=list)

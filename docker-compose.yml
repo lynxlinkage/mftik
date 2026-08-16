@@ -63,6 +63,10 @@ services:
     command: ["mft-api"]
     ports:
       - "8000:8000"
+    environment:
+      MFT_DATA: /var/lib/mft
+    volumes:
+      - mft_data:/var/lib/mft
     depends_on:
       redis:
         condition: service_healthy
@@ -136,7 +140,9 @@ services:
     command: ["sts"]
     volumes:
       - sts_eventlog:/var/log/mft/sts
+      - mft_data:/var/lib/mft
     environment:
+      MFT_DATA: /var/lib/mft
       # Restart the stack and interrupted sessions come back on their own.
       STS_REBUILD_ON_BOOT: "1"
       # One jsonl per session: every event it was handed and every call it
@@ -194,3 +200,4 @@ services:
 volumes:
   postgres_data:
   sts_eventlog:
+  mft_data:

@@ -13,6 +13,7 @@ from mft.broker import Broker
 from mft.protocol import Topics
 
 from mft_sts import db as sts_db
+from mft_sts.impl import load_local_registry
 from mft_sts.rpc import dispatch
 from mft_sts.session import SessionManager
 
@@ -130,6 +131,13 @@ async def amain() -> None:
             pass
 
     async with Broker() as broker:
+        loaded = load_local_registry()
+        if loaded:
+            logger.info(
+                "STS loaded %d registry strategy(ies): %s",
+                len(loaded),
+                ", ".join(loaded),
+            )
         sessions = SessionManager(
             broker,
             persist_live=sts_db.persist_live_session,

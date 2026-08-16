@@ -6,6 +6,7 @@ from mft_api.routes.board import router as board_router
 from mft_api.routes.health import router as health_router
 from mft_api.routes.logs import router as logs_router
 from mft_api.routes.md import router as md_router
+from mft_api.routes.registry import router as registry_router
 from mft_api.routes.stats import router as stats_router
 from mft_api.routes.sts import router as sts_router
 from mft_api.routes.sym import router as sym_router
@@ -18,6 +19,7 @@ __all__ = [
     "health_router",
     "logs_router",
     "md_router",
+    "registry_router",
     "stats_router",
     "sts_router",
     "sym_router",

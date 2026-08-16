@@ -1,0 +1,31 @@
+# Second node on the same machine. Isolated project name → own volumes.
+#
+#   docker compose -p mft2 -f docker-compose.yml -f docker-compose.peer.yml up -d --no-build
+#
+# API http://localhost:8001  UI http://localhost:5174
+# Host ports are overridden so they do not collide with the first node.
+# From this stack, the first node's API is http://host.docker.internal:8000
+
+services:
+  postgres:
+    ports: !override
+      - "5433:5432"
+
+  redis:
+    ports: !override
+      - "6380:6379"
+
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports: !override
+      - "8001:8000"
+
+  frontend:
+    image: mft-frontend:latest
+    ports: !override
+      - "5174:5173"
+    environment:
+      PUBLIC_API_URL: http://localhost:8001
+      API_PROXY_TARGET: http://api:8000
+      PUBLIC_APP_VERSION: ${MFT_VERSION:-dev}

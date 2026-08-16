@@ -18,6 +18,7 @@ from mft_api.routes import (
     health_router,
     logs_router,
     md_router,
+    registry_router,
     stats_router,
     sts_router,
     sym_router,
@@ -79,6 +80,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(stats_router)
 app.include_router(apis_router)
+app.include_router(registry_router)
 app.include_router(sts_router)
 app.include_router(td_router)
 app.include_router(md_router)
