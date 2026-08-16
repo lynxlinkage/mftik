@@ -7,14 +7,19 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from mft_db.models.auth import AuthKey
+from fastapi.responses import RedirectResponse
+from mft_db.models.auth import AuthIdentity, AuthKey
 from mft_db.models.user import User
-from mft_db.repositories import AuthKeyRepository, UserRepository
+from mft_db.repositories import (
+    AuthIdentityRepository,
+    AuthKeyRepository,
+    UserRepository,
+)
 from mft_db.session import session_scope
 from pydantic import BaseModel, Field
 
 from mft_api.audit_util import record_audit
-from mft_api.auth import keys, passwords, sessions
+from mft_api.auth import keys, oauth, passwords, sessions
 from mft_api.auth.deps import PrincipalDep, SessionDep
 from mft_api.auth.middleware import auth_enabled
 
@@ -22,7 +27,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 #: Providers this instance can prove an identity with. OAuth joins the list
 #: when it is wired; the UI reads this rather than guessing from a build flag.
-_PROVIDERS = ("password",)
+_PASSWORD_PROVIDER = "password"
 
 #: Failed attempts one address gets per window before it waits. Generous
 #: enough that a mistyped password is never a lockout, small enough that a
@@ -126,7 +131,7 @@ async def status(principal: PrincipalDep) -> StatusOut:
     return StatusOut(
         enabled=auth_enabled(),
         setup_required=owner is None or owner.password_hash is None,
-        providers=list(_PROVIDERS),
+        providers=[_PASSWORD_PROVIDER, *oauth.configured()],
         authenticated=principal.authenticated,
         username=owner.username if owner is not None else None,
     )
@@ -379,3 +384,248 @@ async def revoke_key(key_id: int, principal: SessionDep) -> KeyOut:
         result=f"id={key_id} name={out.name}",
     )
     return out
+
+
+# ------------------------------------------------------------- identities ---
+
+
+class IdentityOut(BaseModel):
+    """One way of proving you are the Owner.
+
+    ``id`` is null for the password, which is not a row and cannot be removed
+    — the UI lists it alongside the others so both look like what they are,
+    and gets `removable: false` rather than having to special-case a name.
+    """
+
+    id: int | None
+    provider: str
+    label: str | None = None
+    email: str | None = None
+    linked_at: float | None = None
+    removable: bool = True
+
+
+class IdentityListOut(BaseModel):
+    identities: list[IdentityOut]
+
+
+async def _identities(db, owner: User) -> list[IdentityOut]:
+    rows = await AuthIdentityRepository(db).list_for_user(owner.id)
+    out = [
+        IdentityOut(
+            id=None,
+            provider="password",
+            label=owner.username,
+            linked_at=_epoch(owner.created_at),
+            removable=False,
+        )
+    ]
+    out.extend(
+        IdentityOut(
+            id=row.id,
+            provider=row.provider,
+            label=row.label,
+            email=row.email,
+            linked_at=_epoch(row.created_at),
+        )
+        for row in rows
+    )
+    return out
+
+
+@router.get("/identities", response_model=IdentityListOut)
+async def list_identities(principal: SessionDep) -> IdentityListOut:
+    async with session_scope() as db:
+        owner = await UserRepository(db).get(principal.user_id)
+        if owner is None:
+            raise HTTPException(status_code=401, detail="authentication required")
+        return IdentityListOut(identities=await _identities(db, owner))
+
+
+@router.delete("/identities/{identity_id}", response_model=IdentityOut)
+async def unlink_identity(identity_id: int, principal: SessionDep) -> IdentityOut:
+    """Detach an OAuth account. The password is not one of these and stays."""
+    async with session_scope() as db:
+        row = await AuthIdentityRepository(db).unlink(identity_id, principal.user_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"unknown identity: {identity_id}"
+            )
+        out = IdentityOut(
+            id=row.id,
+            provider=row.provider,
+            label=row.label,
+            email=row.email,
+            linked_at=_epoch(row.created_at),
+        )
+
+    await record_audit(
+        user_id=principal.user_id,
+        operation="auth.identity.unlink",
+        result=f"provider={out.provider} label={out.label}",
+    )
+    return out
+
+
+# ------------------------------------------------------------------ oauth ---
+
+
+def _provider(name: str) -> oauth.Provider:
+    provider = oauth.PROVIDERS.get(name)
+    if provider is None or not provider.configured():
+        raise HTTPException(status_code=404, detail=f"unknown provider: {name}")
+    return provider
+
+
+@router.get("/login/{provider_name}", include_in_schema=False)
+async def oauth_login(provider_name: str, request: Request) -> RedirectResponse:
+    """Start a login. Public, because logging in is what you have not done yet."""
+    provider = _provider(provider_name)
+    async with session_scope() as db:
+        state, verifier = await oauth.start(
+            db, provider=provider_name, mode=oauth.MODE_LOGIN, session_id=None
+        )
+    return RedirectResponse(
+        provider.authorize(state=state, verifier=verifier), status_code=307
+    )
+
+
+@router.get("/connect/{provider_name}", include_in_schema=False)
+async def oauth_connect(
+    provider_name: str, request: Request, principal: SessionDep
+) -> RedirectResponse:
+    """Start a link, bound to the session starting it.
+
+    That binding is what stops a link begun in one browser being finished in
+    another — including one the Owner is not sitting at.
+    """
+    provider = _provider(provider_name)
+    async with session_scope() as db:
+        state, verifier = await oauth.start(
+            db,
+            provider=provider_name,
+            mode=oauth.MODE_CONNECT,
+            session_id=principal.session_id,
+        )
+    return RedirectResponse(
+        provider.authorize(state=state, verifier=verifier), status_code=307
+    )
+
+
+@router.get("/callback/{provider_name}", include_in_schema=False)
+async def oauth_callback(
+    provider_name: str,
+    request: Request,
+    response: Response,
+    state: str = "",
+    code: str = "",
+) -> RedirectResponse:
+    """One callback, two meanings, decided by the record and never the URL.
+
+    Everything below reads ``mode`` from the row that ``state`` names. A
+    readable ``state=connect`` would let anyone walk the Owner's browser into
+    linking *their* account and logging in as the Owner from then on.
+    """
+    provider = _provider(provider_name)
+    if not state or not code:
+        raise HTTPException(status_code=400, detail="missing state or code")
+
+    async with session_scope() as db:
+        record = await oauth.consume(db, state)
+    if record is None or record.provider != provider_name:
+        raise HTTPException(status_code=403, detail="this is not a flow we started")
+
+    try:
+        profile = await provider.exchange(code, record.verifier)
+    except oauth.OAuthError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if record.mode == oauth.MODE_CONNECT:
+        return await _finish_connect(request, record, profile, provider_name)
+    return await _finish_login(request, response, profile, provider_name)
+
+
+async def _finish_connect(
+    request: Request,
+    record: oauth.StateRecord,
+    profile: oauth.Profile,
+    provider_name: str,
+) -> RedirectResponse:
+    presented = request.cookies.get(sessions.COOKIE_NAME)
+    async with session_scope() as db:
+        live = await sessions.resolve(db, presented) if presented else None
+        if live is None or live.id != record.session_id:
+            raise HTTPException(
+                status_code=403,
+                detail="finish connecting in the browser that started it",
+            )
+
+        identities = AuthIdentityRepository(db)
+        existing = await identities.get(provider_name, profile.subject)
+        if existing is not None:
+            if existing.user_id != live.user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="that account is linked to a different owner",
+                )
+            return RedirectResponse("/settings", status_code=303)
+
+        await identities.add(
+            AuthIdentity(
+                user_id=live.user_id,
+                provider=provider_name,
+                subject=profile.subject,
+                label=profile.label,
+                email=profile.email,
+            )
+        )
+        user_id = live.user_id
+
+    await record_audit(
+        user_id=user_id,
+        operation="auth.identity.connect",
+        result=f"provider={provider_name} label={profile.label}",
+    )
+    return RedirectResponse("/settings", status_code=303)
+
+
+async def _finish_login(
+    request: Request,
+    response: Response,
+    profile: oauth.Profile,
+    provider_name: str,
+) -> RedirectResponse:
+    """Sign in an account that is already linked. Never create one.
+
+    An unknown account is refused rather than welcomed. That refusal is the
+    whole "no second owner" rule: OAuth attaches to the existing Owner or it
+    does nothing at all.
+    """
+    async with session_scope() as db:
+        identity = await AuthIdentityRepository(db).get(provider_name, profile.subject)
+        if identity is None:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "this account is not connected to this instance — sign in "
+                    "with your password, then connect it in settings"
+                ),
+            )
+        user_id = identity.user_id
+
+    redirect = RedirectResponse("/", status_code=303)
+    async with session_scope() as db:
+        token = await sessions.issue(
+            db,
+            user_id=user_id,
+            via=provider_name,
+            user_agent=request.headers.get("user-agent"),
+            ip=_client(request),
+        )
+    sessions.set_cookie(redirect, token)
+    await record_audit(
+        user_id=user_id,
+        operation="auth.login",
+        result=f"via={provider_name} ip={_client(request)}",
+    )
+    return redirect

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { api, type AuthStatus } from '$lib/api';
+	import { api, startOAuth, type AuthStatus } from '$lib/api';
 
 	/**
 	 * One form, two jobs. An instance with no password yet is claimed here;
@@ -20,6 +20,8 @@
 
 	const claiming = $derived(status?.setup_required === true);
 	const off = $derived(status?.enabled === false);
+	// Password is always there and is not a button; the rest are.
+	const oauth = $derived((status?.providers ?? []).filter((p) => p !== 'password'));
 
 	onMount(async () => {
 		try {
@@ -125,6 +127,23 @@
 				Sign in
 			{/if}
 		</button>
+
+		{#if !claiming && oauth.length > 0}
+			<!-- Only ever a shortcut to the same Owner. An account nobody has
+			     connected is refused here, which is what stops a stranger
+			     signing in with one. -->
+			<div class="or"><span>or</span></div>
+			{#each oauth as provider (provider)}
+				<button
+					type="button"
+					class="secondary"
+					disabled={busy}
+					onclick={() => startOAuth(provider, 'login')}
+				>
+					Continue with {provider}
+				</button>
+			{/each}
+		{/if}
 	</form>
 	{/if}
 </div>
@@ -177,5 +196,22 @@
 
 	button {
 		margin-top: 0.25rem;
+	}
+
+	.or {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		color: var(--muted);
+		font-size: 0.72rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+
+	.or::before,
+	.or::after {
+		content: '';
+		flex: 1;
+		border-top: 1px solid var(--border);
 	}
 </style>

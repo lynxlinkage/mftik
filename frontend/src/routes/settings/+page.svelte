@@ -1,6 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, formatTs, type AuthKey, type AuthKeyCreated } from '$lib/api';
+	import {
+		api,
+		formatTs,
+		startOAuth,
+		type AuthKey,
+		type AuthKeyCreated,
+		type Identity
+	} from '$lib/api';
 
 	/**
 	 * The Owner's account page. Keys today; linked identities join it when
@@ -13,6 +20,8 @@
 	 * copes by never revoking anything.
 	 */
 	let keys = $state<AuthKey[]>([]);
+	let identities = $state<Identity[]>([]);
+	let providers = $state<string[]>([]);
 	let name = $state('');
 	let kind = $state<'api' | 'registry'>('api');
 	let minted = $state<AuthKeyCreated | null>(null);
@@ -24,12 +33,40 @@
 	async function refresh() {
 		loading = true;
 		try {
-			keys = (await api.authKeys()).keys;
+			const [keyList, identityList, status] = await Promise.all([
+				api.authKeys(),
+				api.authIdentities(),
+				api.authStatus()
+			]);
+			keys = keyList.keys;
+			identities = identityList.identities;
+			providers = status.providers;
 			error = null;
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			loading = false;
+		}
+	}
+
+	/** Configured providers this Owner has not attached yet. */
+	const connectable = $derived(
+		providers.filter(
+			(p) => p !== 'password' && !identities.some((i) => i.provider === p)
+		)
+	);
+
+	async function unlink(identity: Identity) {
+		if (busy || identity.id === null) return;
+		busy = true;
+		error = null;
+		try {
+			await api.authIdentityUnlink(identity.id);
+			await refresh();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			busy = false;
 		}
 	}
 
@@ -122,6 +159,60 @@
 		</button>
 	</section>
 {/if}
+
+<section>
+	<h2>Identities</h2>
+	<p class="hint">
+		Ways of proving you are this instance's owner — not separate accounts. Connecting
+		one attaches it to you; an account nobody has connected cannot sign in here at all.
+	</p>
+	{#if identities.length > 0}
+		<table>
+			<thead>
+				<tr>
+					<th>Provider</th>
+					<th>Account</th>
+					<th>Linked</th>
+					<th></th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each identities as identity (identity.provider + (identity.id ?? ''))}
+					<tr>
+						<td>{identity.provider}</td>
+						<td>{identity.label ?? '—'}</td>
+						<td>{identity.linked_at ? formatTs(identity.linked_at) : '—'}</td>
+						<td class="right">
+							{#if identity.removable}
+								<button
+									type="button"
+									class="secondary"
+									onclick={() => unlink(identity)}
+									disabled={busy}
+								>
+									Disconnect
+								</button>
+							{:else}
+								<!-- The password is a column on the user, not a row. There is
+								     no way to unlink yourself out of your own instance. -->
+								<span class="badge">always available</span>
+							{/if}
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	{/if}
+	{#if connectable.length > 0}
+		<div class="connect">
+			{#each connectable as provider (provider)}
+				<button type="button" onclick={() => startOAuth(provider, 'connect')}>
+					Connect {provider}
+				</button>
+			{/each}
+		</div>
+	{/if}
+</section>
 
 <section class="mint">
 	<h2>New key</h2>
@@ -255,6 +346,12 @@
 		overflow-x: auto;
 		white-space: nowrap;
 		user-select: all;
+	}
+
+	.connect {
+		display: flex;
+		gap: 0.6rem;
+		margin-top: 0.9rem;
 	}
 
 	.mint form {

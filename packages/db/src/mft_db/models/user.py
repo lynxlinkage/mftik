@@ -58,3 +58,6 @@ class User(Base):
     auth_keys = relationship(
         "AuthKey", back_populates="user", cascade="all, delete-orphan"
     )
+    auth_identities = relationship(
+        "AuthIdentity", back_populates="user", cascade="all, delete-orphan"
+    )

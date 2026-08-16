@@ -351,6 +351,23 @@ export type AuthKey = {
 /** The mint response. The only shape that carries `token`. */
 export type AuthKeyCreated = AuthKey & { token: string };
 
+/**
+ * One way of proving you are the Owner.
+ *
+ * The password has no `id` and is not removable: it is a column on the user,
+ * not a row, which is precisely what makes it impossible to unlink yourself
+ * out of your own instance. It is listed anyway so the UI shows all the ways
+ * in as one set.
+ */
+export type Identity = {
+	id: number | null;
+	provider: string;
+	label: string | null;
+	email: string | null;
+	linked_at: number | null;
+	removable: boolean;
+};
+
 function apiBase(): string {
 	// Always go through the Vite `/api` proxy so Docker (frontend → api service)
 	// and local (`localhost:8000`) both work. See API_PROXY_TARGET in vite.config.ts.
@@ -463,6 +480,11 @@ export const api = {
 		),
 	authMe: () => request<Me>('/auth/me'),
 	authLogout: () => request<{ status: string }>('/auth/logout', { method: 'POST' }),
+	authIdentities: () => request<{ identities: Identity[] }>('/auth/identities'),
+	authIdentityUnlink: (id: number) =>
+		request<Identity>(`/auth/identities/${encodeURIComponent(String(id))}`, {
+			method: 'DELETE'
+		}),
 	authKeys: () => request<{ keys: AuthKey[] }>('/auth/keys'),
 	authKeyCreate: (name: string, kind: 'api' | 'registry' = 'api') =>
 		request<AuthKeyCreated>('/auth/keys', {
@@ -708,3 +730,15 @@ export function apiLabel(opts: {
 }
 
 /* ---------------------------------------------------------------- auth --- */
+
+
+/**
+ * Start an OAuth flow.
+ *
+ * A navigation, not a fetch: the browser has to leave for the provider and
+ * come back, and the callback answers with a redirect and a Set-Cookie. An
+ * XHR would follow all of that invisibly and land the result nowhere.
+ */
+export function startOAuth(provider: string, mode: 'login' | 'connect'): void {
+	window.location.href = `${apiBase()}/auth/${mode}/${encodeURIComponent(provider)}`;
+}
