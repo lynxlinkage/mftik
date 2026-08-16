@@ -22,7 +22,12 @@ from mft_db.session import session_scope
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from mft_api.auth import keys, sessions
-from mft_api.auth.principal import ANONYMOUS, SCOPE_API, Principal
+from mft_api.auth.principal import (
+    ANONYMOUS,
+    SCOPE_API,
+    SCOPE_REGISTRY_READ,
+    Principal,
+)
 from mft_api.deps import DEFAULT_USER_ID
 
 logger = logging.getLogger(__name__)
@@ -51,6 +56,23 @@ PUBLIC_PREFIXES = ("/auth/login/", "/auth/callback/")
 #: it and API keys carry it; a credential issued for one narrow job does not,
 #: which is how a registry key stays out of everything but the registry.
 DEFAULT_SCOPE = SCOPE_API
+
+#: The peer-facing reads, and the only paths a registry key can reach. Listed
+#: as an exception to the default rather than as a permission on the routes:
+#: a route that forgets to ask is then closed to peers, not open to them.
+#:
+#: ``/registry/v1/info`` is not here because it is public — a peer has to be
+#: able to find out it speaks the wrong protocol before it needs a key at all.
+#: ``/private``, ``/add`` and ``/remotes`` are not here either, which is what
+#: keeps this node's own registry administration away from other nodes.
+REGISTRY_READ_PATHS = ("/registry/v1/strategies",)
+
+
+def required_scope(path: str) -> str:
+    for prefix in REGISTRY_READ_PATHS:
+        if path == prefix or path.startswith(f"{prefix}/"):
+            return SCOPE_REGISTRY_READ
+    return DEFAULT_SCOPE
 
 #: Identity is something this middleware decides. Anything arriving under
 #: these names is a client trying to decide it instead. The Traefik chain
@@ -100,7 +122,7 @@ class AuthMiddleware:
                 if not principal.authenticated:
                     await _refuse(scope, receive, send)
                     return
-                if not principal.allows(DEFAULT_SCOPE):
+                if not principal.allows(required_scope(scope["path"])):
                     await _forbid(scope, receive, send)
                     return
 

@@ -42,28 +42,45 @@ class DiffResult:
     rows: tuple[SyncRow, ...]
 
 
+def _auth(token: str | None) -> dict[str, str]:
+    """The peer's registry key, if it issued us one.
+
+    Absent for a node that publishes openly — ``/info`` is public either way,
+    so the handshake still tells you whether you are talking to a registry
+    before the key is ever needed.
+    """
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 async def connect_remote(
     store: RegistryStore,
     *,
     name: str,
     url: str,
+    token: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> ConnectResult:
     """Handshake, remember the remote, and copy every strategy it publishes."""
     base = _normalize_url(url)
     own = client is None
     http = client or httpx.AsyncClient(timeout=_TIMEOUT)
+    headers = _auth(token)
     try:
         info = await _get_json(http, f"{base}/registry/v1/info")
         check_handshake(info)
-        store.put_remote(name, base)
-        listed = await _get_json(http, f"{base}/registry/v1/strategies")
+        # Remembered only once the peer has answered as a registry, so a typo
+        # does not leave a broken remote behind — and only after the listing
+        # below succeeds would be worse: the token is what makes it succeed.
+        store.put_remote(name, base, token)
+        listed = await _get_json(
+            http, f"{base}/registry/v1/strategies", headers=headers
+        )
         items = _strategy_list(listed)
         pulled: list[AddedStrategy] = []
         for item in items:
             short = item["name"]
             detail = await _get_json(
-                http, f"{base}/registry/v1/strategies/{short}"
+                http, f"{base}/registry/v1/strategies/{short}", headers=headers
             )
             contents = _contents(detail)
             expected = item.get("digest") or detail.get("digest")
@@ -96,7 +113,11 @@ async def diff_remote(
     http = client or httpx.AsyncClient(timeout=_TIMEOUT)
     try:
         try:
-            listed = await _get_json(http, f"{remote.url}/registry/v1/strategies")
+            listed = await _get_json(
+                http,
+                f"{remote.url}/registry/v1/strategies",
+                headers=_auth(remote.token),
+            )
             items = {row["name"]: row for row in _strategy_list(listed)}
         except (RegistryError, httpx.HTTPError) as exc:
             rows = tuple(
@@ -168,9 +189,13 @@ def _normalize_url(url: str) -> str:
     return raw
 
 
-async def _get_json(client: httpx.AsyncClient, url: str) -> object:
+async def _get_json(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: Mapping[str, str] | None = None,
+) -> object:
     try:
-        response = await client.get(url)
+        response = await client.get(url, headers=dict(headers or {}))
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         raise RegistryError(

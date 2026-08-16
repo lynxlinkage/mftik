@@ -374,12 +374,18 @@ class RegistryRemoteBody(BaseModel):
 
     name: str
     url: str
+    #: A registry key the peer issued us, for a peer that does not publish
+    #: openly. Kept with the remote and sent on every pull from it.
+    token: str | None = None
 
 
 class RegistryRemoteOut(BaseModel):
     name: str
     url: str
     count: int = 0
+    #: Whether we hold a key for this peer. Never the key: it is a credential
+    #: someone else issued, and a list is not a place to hand it back out.
+    authenticated: bool = False
 
 
 class RegistrySyncRow(BaseModel):

@@ -2743,7 +2743,10 @@
           },
           "kind": {
             "type": "string",
-            "const": "api",
+            "enum": [
+              "api",
+              "registry"
+            ],
             "title": "Kind",
             "default": "api"
           }
@@ -3051,6 +3054,11 @@
             "title": "Count",
             "default": 0
           },
+          "authenticated": {
+            "type": "boolean",
+            "title": "Authenticated",
+            "default": false
+          },
           "reachable": {
             "type": "boolean",
             "title": "Reachable",
@@ -3119,6 +3127,17 @@
           "url": {
             "type": "string",
             "title": "Url"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
           }
         },
         "type": "object",
@@ -3143,6 +3162,11 @@
             "type": "integer",
             "title": "Count",
             "default": 0
+          },
+          "authenticated": {
+            "type": "boolean",
+            "title": "Authenticated",
+            "default": false
           },
           "strategies": {
             "items": {
@@ -3174,6 +3198,11 @@
             "type": "integer",
             "title": "Count",
             "default": 0
+          },
+          "authenticated": {
+            "type": "boolean",
+            "title": "Authenticated",
+            "default": false
           }
         },
         "type": "object",

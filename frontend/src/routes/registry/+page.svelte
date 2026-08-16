@@ -12,6 +12,7 @@
 	let connectOpen = $state(false);
 	let name = $state('');
 	let url = $state('');
+	let token = $state('');
 	let connectError = $state<string | null>(null);
 	let removing = $state<string | null>(null);
 	let blocked = $state<{ name: string; message: string } | null>(null);
@@ -41,6 +42,7 @@
 		connectOpen = true;
 		name = '';
 		url = '';
+		token = '';
 		connectError = null;
 	}
 
@@ -54,11 +56,13 @@
 		try {
 			const result = await api.connectRegistry({
 				name: name.trim(),
-				url: url.trim()
+				url: url.trim(),
+				token: token.trim() || undefined
 			});
 			connectOpen = false;
 			name = '';
 			url = '';
+			token = '';
 			await refresh();
 			await goto(`/registry/${result.name}`);
 		} catch (e) {
@@ -166,6 +170,9 @@
 				<header>
 					<span class="title">{remote.name}</span>
 					<span class="badge live">connected</span>
+					{#if remote.authenticated}
+						<span class="badge" title="A registry key is stored for this peer">keyed</span>
+					{/if}
 				</header>
 				<div class="figure">
 					<span class="count">{remote.count}</span>
@@ -210,6 +217,20 @@
 					placeholder="http://host.docker.internal:8000"
 				/>
 			</label>
+			<label>
+				Registry key <span class="optional">optional</span>
+				<input
+					bind:value={token}
+					disabled={busy}
+					placeholder="mft_rk_…"
+					autocomplete="off"
+				/>
+			</label>
+			<p class="hint">
+				A peer that does not publish openly issues you one of these. It is kept with
+				the remote and sent on every pull from it — leave it blank for a peer that
+				needs none.
+			</p>
 			{#if connectError}
 				<p class="err">{connectError}</p>
 			{/if}
@@ -401,6 +422,13 @@
 	.modal h2 {
 		margin: 0;
 		font-size: 1.1rem;
+	}
+
+	.optional {
+		color: var(--muted);
+		font-size: 0.7rem;
+		text-transform: none;
+		letter-spacing: 0;
 	}
 
 	.hint {

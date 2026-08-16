@@ -130,6 +130,8 @@ export type RegistryRemote = {
 	name: string;
 	url: string;
 	count: number;
+	/** Whether we hold a registry key for this peer. Never the key itself. */
+	authenticated: boolean;
 };
 
 export type RegistryRemoteDetail = RegistryRemote & {
@@ -462,10 +464,10 @@ export const api = {
 	authMe: () => request<Me>('/auth/me'),
 	authLogout: () => request<{ status: string }>('/auth/logout', { method: 'POST' }),
 	authKeys: () => request<{ keys: AuthKey[] }>('/auth/keys'),
-	authKeyCreate: (name: string) =>
+	authKeyCreate: (name: string, kind: 'api' | 'registry' = 'api') =>
 		request<AuthKeyCreated>('/auth/keys', {
 			method: 'POST',
-			body: JSON.stringify({ name })
+			body: JSON.stringify({ name, kind })
 		}),
 	authKeyRevoke: (id: number) =>
 		request<AuthKey>(`/auth/keys/${encodeURIComponent(String(id))}`, { method: 'DELETE' }),
@@ -652,7 +654,7 @@ export const api = {
 		request<RegistryRemoteDetail>(`/registry/v1/remotes/${encodeURIComponent(name)}`),
 	registryDiff: (name: string) =>
 		request<RegistryDiff>(`/registry/v1/remotes/${encodeURIComponent(name)}/diff`),
-	connectRegistry: (body: { name: string; url: string }) =>
+	connectRegistry: (body: { name: string; url: string; token?: string }) =>
 		request<{ name: string; url: string; pulled: RegistryStrategy[] }>(
 			'/registry/v1/remotes',
 			{ method: 'POST', body: JSON.stringify(body) }

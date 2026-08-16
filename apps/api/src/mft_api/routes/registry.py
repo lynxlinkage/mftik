@@ -114,6 +114,7 @@ async def list_remotes(store: RegistryStoreDep) -> RegistryRemotesResponse:
                 name=r.name,
                 url=r.url,
                 count=len(store.list_pulled_from(r.name)),
+                authenticated=r.token is not None,
             )
             for r in store.list_remotes()
         ]
@@ -132,6 +133,7 @@ async def get_remote(
         name=remote.name,
         url=remote.url,
         count=len(pulled),
+        authenticated=remote.token is not None,
         strategies=[_strategy_out(rec) for rec in pulled],
     )
 
@@ -139,13 +141,15 @@ async def get_remote(
 @router.get("/remotes/{name}/diff", response_model=RegistryDiffOut)
 async def remote_diff(name: str, store: RegistryStoreDep) -> RegistryDiffOut:
     """Pulled copy versus what the peer currently publishes."""
-    if store.get_remote(name) is None:
+    remote = store.get_remote(name)
+    if remote is None:
         raise HTTPException(status_code=404, detail=f"unknown remote: {name}")
     result = await diff_remote(store, name=name)
     return RegistryDiffOut(
         name=result.name,
         url=result.url,
         count=len(result.rows),
+        authenticated=remote.token is not None,
         reachable=result.reachable,
         error=result.error,
         strategies=[
@@ -167,7 +171,9 @@ async def connect(
 ) -> RegistryConnectOut:
     """Name a peer, check protocol, and pull everything it publishes."""
     try:
-        result = await connect_remote(store, name=body.name, url=body.url)
+        result = await connect_remote(
+            store, name=body.name, url=body.url, token=body.token
+        )
     except RegistryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPError as exc:
@@ -213,3 +219,4 @@ async def disconnect_remote(
         )
     remote = store.drop_remote(name)
     return RegistryRemoteOut(name=remote.name, url=remote.url, count=0)
+

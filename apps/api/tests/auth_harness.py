@@ -23,11 +23,20 @@ from mft_api.deps import DEFAULT_USER_ID
 BASE_URL = "https://mft.test"
 
 
-def an_api() -> FastAPI:
-    """The auth routes, the gate, and one route of each kind to aim at."""
+def an_api(*, registry: bool = False) -> FastAPI:
+    """The auth routes, the gate, and one route of each kind to aim at.
+
+    ``registry=True`` mounts the real registry router, because what a registry
+    key may reach is decided by path — stubs at the same paths would prove the
+    policy agrees with itself rather than with the routes it governs.
+    """
     app = FastAPI()
     app.add_middleware(AuthMiddleware)
     app.include_router(auth_router)
+    if registry:
+        from mft_api.routes import registry_router
+
+        app.include_router(registry_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

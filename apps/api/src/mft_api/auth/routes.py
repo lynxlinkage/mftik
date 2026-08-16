@@ -295,10 +295,10 @@ class KeyCreatedOut(KeyOut):
 
 class KeyCreateBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
-    #: Only `api` for now. Registry keys mint the same way but must not be
-    #: issuable before the routes that confine them exist — a key with
-    #: nowhere it is refused is just an API key with a misleading name.
-    kind: Literal["api"] = "api"
+    #: `registry` is for handing to another node. It reads what this one
+    #: publishes and is refused everywhere else, so it is safe to give away in
+    #: a way an API key never is.
+    kind: Literal["api", "registry"] = "api"
 
 
 class KeyListOut(BaseModel):

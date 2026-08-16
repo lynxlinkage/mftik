@@ -14,6 +14,7 @@
 	 */
 	let keys = $state<AuthKey[]>([]);
 	let name = $state('');
+	let kind = $state<'api' | 'registry'>('api');
 	let minted = $state<AuthKeyCreated | null>(null);
 	let copied = $state(false);
 	let error = $state<string | null>(null);
@@ -41,7 +42,7 @@
 		error = null;
 		copied = false;
 		try {
-			minted = await api.authKeyCreate(name.trim());
+			minted = await api.authKeyCreate(name.trim(), kind);
 			name = '';
 			await refresh();
 		} catch (e) {
@@ -99,6 +100,10 @@
 			<p>
 				This is the only time it will be shown. The server keeps a hash, not the key —
 				closing this box loses it for good, and the way back is a new key.
+				{#if minted.kind === 'registry'}
+					Give it to the node that will pull from this one; it goes in the key field
+					of that node's Connect form.
+				{/if}
 			</p>
 		</header>
 		<div class="token">
@@ -119,15 +124,25 @@
 {/if}
 
 <section class="mint">
-	<h2>New API key</h2>
+	<h2>New key</h2>
 	<p class="hint">
-		Acts as you on every domain route, and on nothing that changes how you log in or
-		issues more keys. Name it after whatever will hold it.
+		{#if kind === 'api'}
+			Acts as you on every domain route, and on nothing that changes how you log in or
+			issues more keys. Name it after whatever will hold it.
+		{:else}
+			For another node. It reads the strategies this one publishes and is refused
+			everywhere else, which is what makes it safe to give away. Name it after the
+			peer you are giving it to.
+		{/if}
 	</p>
 	<form onsubmit={mint}>
+		<select bind:value={kind} disabled={busy} aria-label="Key kind">
+			<option value="api">API</option>
+			<option value="registry">Registry</option>
+		</select>
 		<input
 			bind:value={name}
-			placeholder="ci, laptop, backfill…"
+			placeholder={kind === 'api' ? 'ci, laptop, backfill…' : 'node2, alice…'}
 			maxlength="64"
 			disabled={busy}
 			required
@@ -245,7 +260,11 @@
 	.mint form {
 		display: flex;
 		gap: 0.6rem;
-		max-width: 30rem;
+		max-width: 34rem;
+	}
+
+	.mint select {
+		flex: 0 0 auto;
 	}
 
 	.mint input {
