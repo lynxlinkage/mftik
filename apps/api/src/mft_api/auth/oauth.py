@@ -51,6 +51,12 @@ class Provider:
     token_url: str
     userinfo_url: str
     scope: str
+    #: What to make the provider ask before handing back an account. Without
+    #: it a provider may silently reuse an existing grant, which turns
+    #: "connect a different account" into something the Owner cannot do from
+    #: the UI. The right word differs: Discord re-shows consent, Google needs
+    #: telling that the account itself is the choice.
+    prompt: str = "consent"
 
     def client_id(self) -> str:
         return os.getenv(f"{self.name.upper()}_CLIENT_ID", "").strip()
@@ -73,10 +79,7 @@ class Provider:
             "state": state,
             "code_challenge": _challenge(verifier),
             "code_challenge_method": "S256",
-            # Ask every time. Without it a provider may silently reuse an
-            # existing grant, which makes "connect a different account" a
-            # thing the Owner cannot actually do from the UI.
-            "prompt": "consent",
+            "prompt": self.prompt,
         }
         return f"{self.authorize_url}?{httpx.QueryParams(params)}"
 
@@ -144,7 +147,25 @@ DISCORD = Provider(
     scope="identify",
 )
 
-PROVIDERS: dict[str, Provider] = {DISCORD.name: DISCORD}
+#: Google, over OIDC. ``openid`` alone would give the ``sub`` this keys on
+#: and nothing else — which would leave the settings page able to say an
+#: account is connected but not *which*, and noticing the wrong one is
+#: attached is the reason that column exists. Discord has a username to show;
+#: Google has only the address, so ``email`` is asked for and displayed.
+#:
+#: It is still never matched on. The identity is ``sub``, which Google does
+#: not reuse; the address is a label, and a label that changes hands is a
+#: cosmetic problem rather than a way in.
+GOOGLE = Provider(
+    name="google",
+    authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+    token_url="https://oauth2.googleapis.com/token",
+    userinfo_url="https://openidconnect.googleapis.com/v1/userinfo",
+    scope="openid email",
+    prompt="select_account",
+)
+
+PROVIDERS: dict[str, Provider] = {DISCORD.name: DISCORD, GOOGLE.name: GOOGLE}
 
 
 def redirect_base() -> str:

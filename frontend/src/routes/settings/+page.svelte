@@ -180,7 +180,10 @@
 				{#each identities as identity (identity.provider + (identity.id ?? ''))}
 					<tr>
 						<td>{identity.provider}</td>
-						<td>{identity.label ?? '—'}</td>
+						<!-- Discord gives a username, Google only the address. Either
+						     is enough to notice the wrong account is attached, which is
+						     what this column is for. -->
+						<td>{identity.label ?? identity.email ?? '—'}</td>
 						<td>{identity.linked_at ? formatTs(identity.linked_at) : '—'}</td>
 						<td class="right">
 							{#if identity.removable}
