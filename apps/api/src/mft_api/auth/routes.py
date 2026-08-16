@@ -52,6 +52,9 @@ class StatusOut(BaseModel):
     providers: list[str]
     authenticated: bool
     username: str | None = None
+    #: Published rather than duplicated. The rule is enforced here, and a
+    #: number the login form also hard-codes is a number that drifts from it.
+    min_password_length: int = passwords.MIN_LENGTH
 
 
 class MeOut(BaseModel):
@@ -134,6 +137,7 @@ async def status(principal: PrincipalDep) -> StatusOut:
         providers=[_PASSWORD_PROVIDER, *oauth.configured()],
         authenticated=principal.authenticated,
         username=owner.username if owner is not None else None,
+        min_password_length=passwords.MIN_LENGTH,
     )
 
 

@@ -106,11 +106,14 @@
 				autocomplete={claiming ? 'new-password' : 'current-password'}
 				bind:value={password}
 				disabled={status === null || busy}
-				minlength={claiming ? 12 : undefined}
+				minlength={claiming ? (status?.min_password_length ?? undefined) : undefined}
 				required
 			/>
 			{#if claiming}
-				<small>At least 12 characters. There is no reset that does not involve a shell.</small>
+				<small>
+					At least {status?.min_password_length} characters. There is no reset that does
+					not involve a shell.
+				</small>
 			{/if}
 		</label>
 

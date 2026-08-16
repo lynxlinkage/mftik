@@ -3718,7 +3718,7 @@
           },
           "password": {
             "type": "string",
-            "minLength": 12,
+            "minLength": 8,
             "title": "Password"
           }
         },
@@ -3776,6 +3776,11 @@
               }
             ],
             "title": "Username"
+          },
+          "min_password_length": {
+            "type": "integer",
+            "title": "Min Password Length",
+            "default": 8
           }
         },
         "type": "object",

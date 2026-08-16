@@ -319,6 +319,9 @@ export type AuthStatus = {
 	providers: string[];
 	authenticated: boolean;
 	username: string | null;
+	/** The server's rule, not a copy of it. Hard-coding it here is how the
+	 *  form and the endpoint that enforces it drift apart. */
+	min_password_length: number;
 };
 
 /** The Owner, and which proof this request arrived with. */

@@ -16,9 +16,14 @@ _hasher = PasswordHasher()
 #: instance set up yet" — the one question the login form must not answer.
 _ABSENT = _hasher.hash("password-that-does-not-exist")
 
-#: Long enough that the argon2 cost is what an attacker faces rather than the
-#: keyspace. This is the Owner's only password and it is typed rarely.
-MIN_LENGTH = 12
+#: The floor, not the advice.
+#:
+#: Online guessing is not what this defends against — ten failures per address
+#: per five minutes makes that hopeless at any length. What length buys is
+#: time if the hash itself is ever taken, and there argon2's cost is doing most
+#: of the work. So this is set where a rule stops being a rule people work
+#: around, and the Owner is free to be more careful than it asks.
+MIN_LENGTH = 8
 
 
 def hash_password(raw: str) -> str:

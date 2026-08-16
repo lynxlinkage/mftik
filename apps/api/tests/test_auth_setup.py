@@ -12,8 +12,8 @@ from __future__ import annotations
 import pytest
 from auth_harness import a_client, an_api, use_database
 from db_harness import a_database, an_owner
+from mft_api.auth import passwords, sessions
 from mft_api.auth import routes as auth_routes
-from mft_api.auth import sessions
 from mft_db.models import Api, StsSessionRow
 from mft_db.models.api import ApiType
 from mft_db.models.user import User
@@ -123,12 +123,28 @@ async def test_status_stops_asking_for_setup_once_there_is_a_password(db) -> Non
     assert body["providers"] == ["password"]
 
 
-async def test_a_short_password_is_refused(db) -> None:
+async def test_the_minimum_password_length_is_where_it_says_it_is(db) -> None:
+    """One character either side of the rule, and the rule as published.
+
+    The login form reads `min_password_length` rather than hard-coding it, so
+    a change that moved one without the other would show up here.
+    """
     async with a_client(an_api()) as client:
-        refused = await client.post(
-            "/auth/setup", json={"username": "yite", "password": "short"}
+        status = (await client.get("/auth/status")).json()
+        published = status["min_password_length"]
+
+        short = await client.post(
+            "/auth/setup",
+            json={"username": "yite", "password": "x" * (published - 1)},
         )
-    assert refused.status_code == 422
+        exact = await client.post(
+            "/auth/setup",
+            json={"username": "yite", "password": "x" * published},
+        )
+
+    assert published == passwords.MIN_LENGTH == 8
+    assert short.status_code == 422
+    assert exact.status_code == 201
 
 
 async def test_login_takes_the_password_and_refuses_the_wrong_one(db) -> None:
