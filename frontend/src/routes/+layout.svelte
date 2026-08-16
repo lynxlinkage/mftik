@@ -56,7 +56,8 @@
 		{ href: '/md', label: 'MD' },
 		{ href: '/registry', label: 'Registry' },
 		{ href: '/sym', label: 'Sym' },
-		{ href: '/audit', label: 'Audit' }
+		{ href: '/audit', label: 'Audit' },
+		{ href: '/settings', label: 'Settings' }
 	] as const;
 
 	function sectionLabel(pathname: string): string {

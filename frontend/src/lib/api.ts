@@ -328,6 +328,27 @@ export type Me = {
 	via: string;
 };
 
+/**
+ * A machine credential, as the settings page can know it.
+ *
+ * `prefix` is `mft_ak_abc12345…` — everything of the token that survives
+ * minting. The secret exists once, in the response that creates it, and is a
+ * hash in the database from then on, so no list can ever show it again.
+ */
+export type AuthKey = {
+	id: number;
+	name: string;
+	kind: string;
+	prefix: string;
+	scopes: string[];
+	created_at: number;
+	last_used_at: number | null;
+	revoked_at: number | null;
+};
+
+/** The mint response. The only shape that carries `token`. */
+export type AuthKeyCreated = AuthKey & { token: string };
+
 function apiBase(): string {
 	// Always go through the Vite `/api` proxy so Docker (frontend → api service)
 	// and local (`localhost:8000`) both work. See API_PROXY_TARGET in vite.config.ts.
@@ -440,6 +461,14 @@ export const api = {
 		),
 	authMe: () => request<Me>('/auth/me'),
 	authLogout: () => request<{ status: string }>('/auth/logout', { method: 'POST' }),
+	authKeys: () => request<{ keys: AuthKey[] }>('/auth/keys'),
+	authKeyCreate: (name: string) =>
+		request<AuthKeyCreated>('/auth/keys', {
+			method: 'POST',
+			body: JSON.stringify({ name })
+		}),
+	authKeyRevoke: (id: number) =>
+		request<AuthKey>(`/auth/keys/${encodeURIComponent(String(id))}`, { method: 'DELETE' }),
 	stats: () => request<{ domains: DomainStats[] }>('/stats'),
 	boardSessions: (opts: { status?: string; limit?: number } = {}) => {
 		const q = new URLSearchParams();

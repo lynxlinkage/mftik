@@ -21,8 +21,8 @@ from http.cookies import SimpleCookie
 from mft_db.session import session_scope
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from mft_api.auth import sessions
-from mft_api.auth.principal import ANONYMOUS, Principal
+from mft_api.auth import keys, sessions
+from mft_api.auth.principal import ANONYMOUS, SCOPE_API, Principal
 from mft_api.deps import DEFAULT_USER_ID
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,11 @@ PUBLIC_PATHS = frozenset(
 
 #: Public by prefix: the OAuth entry points and returns added in later steps.
 PUBLIC_PREFIXES = ("/auth/login/", "/auth/callback/")
+
+#: What a gated route needs unless something says otherwise. Sessions imply
+#: it and API keys carry it; a credential issued for one narrow job does not,
+#: which is how a registry key stays out of everything but the registry.
+DEFAULT_SCOPE = SCOPE_API
 
 #: Identity is something this middleware decides. Anything arriving under
 #: these names is a client trying to decide it instead. The Traefik chain
@@ -91,9 +96,13 @@ class AuthMiddleware:
             principal = Principal.owner(DEFAULT_USER_ID, via="disabled")
         else:
             principal = await _resolve(scope)
-            if not principal.authenticated and not is_public(scope["path"]):
-                await _refuse(scope, receive, send)
-                return
+            if not is_public(scope["path"]):
+                if not principal.authenticated:
+                    await _refuse(scope, receive, send)
+                    return
+                if not principal.allows(DEFAULT_SCOPE):
+                    await _forbid(scope, receive, send)
+                    return
 
         scope.setdefault("state", {})["principal"] = principal
         await self.app(scope, receive, send)
@@ -107,6 +116,23 @@ async def _resolve(scope: Scope) -> Principal:
     turning every route into a stack trace — and ``/health`` goes on
     answering, which is how anything finds out what broke.
     """
+    bearer = _bearer(scope)
+    if bearer is not None:
+        try:
+            async with session_scope() as db:
+                key = await keys.resolve(db, bearer)
+        except Exception:
+            logger.exception("key lookup failed")
+            return ANONYMOUS
+        if key is None:
+            return ANONYMOUS
+        return Principal.machine(
+            key.user_id,
+            name=key.name,
+            scopes=frozenset(key.scopes),
+            key_id=key.id,
+        )
+
     token = _cookie(scope, sessions.COOKIE_NAME)
     if token is None:
         return ANONYMOUS
@@ -119,6 +145,23 @@ async def _resolve(scope: Scope) -> Principal:
     if row is None:
         return ANONYMOUS
     return Principal.owner(row.user_id, via=row.via, session_id=row.id)
+
+
+def _bearer(scope: Scope) -> str | None:
+    """The token in ``Authorization: Bearer``, if there is one.
+
+    Checked before the cookie, not after: a browser sends its cookie with
+    every request, so a script driven from one — or any client that keeps
+    both — would otherwise never be able to act as its key.
+    """
+    for header, value in scope["headers"]:
+        if header.lower() != b"authorization":
+            continue
+        raw = value.decode("latin-1").strip()
+        scheme, _, token = raw.partition(" ")
+        if scheme.lower() == "bearer" and token.strip():
+            return token.strip()
+    return None
 
 
 def _cookie(scope: Scope, name: str) -> str | None:
@@ -151,21 +194,42 @@ async def _refuse(scope: Scope, receive: Receive, send: Send) -> None:
         await send({"type": "websocket.close", "code": 1008})
         return
 
-    body = json.dumps({"detail": "authentication required"}).encode()
+    await _json(send, 401, "authentication required", login=True)
+
+
+async def _forbid(scope: Scope, receive: Receive, send: Send) -> None:
+    """403: the credential is real, and not enough.
+
+    Deliberately not a 401 and deliberately without the login header. Sending
+    someone to /login here would be a lie — they are signed in, and signing in
+    again with the same credential would fail the same way. This is a key
+    being used somewhere its scopes do not reach.
+    """
+    if scope["type"] == "websocket":
+        await receive()
+        await send({"type": "websocket.close", "code": 1008})
+        return
+    await _json(send, 403, "this credential is not allowed here", login=False)
+
+
+async def _json(send: Send, status: int, detail: str, *, login: bool) -> None:
+    body = json.dumps({"detail": detail}).encode()
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+    ]
+    if login:
+        # Says this answer came from the app, not from the Traefik chain in
+        # front of it. The two want opposite things from the browser: the
+        # chain needs a document navigation to reach its redirect, while this
+        # one wants the SPA to route itself to /login. Both gates exist at
+        # once until the cutover, so the answer has to say which one it is
+        # rather than the frontend guessing from a build flag.
+        headers.append((b"x-mft-auth", b"login-required"))
     message: Message = {
         "type": "http.response.start",
-        "status": 401,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(body)).encode()),
-            # Says this 401 came from the app, not from the Traefik chain in
-            # front of it. The two want opposite things from the browser: the
-            # chain needs a document navigation to reach its redirect, while
-            # this one wants the SPA to route itself to /login. Both gates
-            # exist at once until the cutover, so the answer has to say which
-            # one it is rather than the frontend guessing from a build flag.
-            (b"x-mft-auth", b"login-required"),
-        ],
+        "status": status,
+        "headers": headers,
     }
     await send(message)
     await send({"type": "http.response.body", "body": body})

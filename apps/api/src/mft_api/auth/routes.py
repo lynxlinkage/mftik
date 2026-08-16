@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from mft_db.models.auth import AuthKey
 from mft_db.models.user import User
-from mft_db.repositories import UserRepository
+from mft_db.repositories import AuthKeyRepository, UserRepository
 from mft_db.session import session_scope
 from pydantic import BaseModel, Field
 
 from mft_api.audit_util import record_audit
-from mft_api.auth import passwords, sessions
-from mft_api.auth.deps import PrincipalDep
+from mft_api.auth import keys, passwords, sessions
+from mft_api.auth.deps import PrincipalDep, SessionDep
 from mft_api.auth.middleware import auth_enabled
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -263,3 +265,117 @@ async def me(principal: PrincipalDep) -> MeOut:
         email=owner.email,
         via=principal.via,
     )
+
+
+# ------------------------------------------------------------------ keys ---
+
+
+class KeyOut(BaseModel):
+    id: int
+    name: str
+    kind: str
+    #: `mft_ak_abc12345…`. Everything of the token that is knowable from here.
+    prefix: str
+    scopes: list[str]
+    created_at: float
+    last_used_at: float | None = None
+    revoked_at: float | None = None
+
+
+class KeyCreatedOut(KeyOut):
+    """The mint response, and the only place the secret ever appears.
+
+    Everything else about a key can be looked up again. This cannot: the
+    database has a SHA-256 of it. Whoever shows this to a person has one
+    chance to make that clear.
+    """
+
+    token: str
+
+
+class KeyCreateBody(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    #: Only `api` for now. Registry keys mint the same way but must not be
+    #: issuable before the routes that confine them exist — a key with
+    #: nowhere it is refused is just an API key with a misleading name.
+    kind: Literal["api"] = "api"
+
+
+class KeyListOut(BaseModel):
+    keys: list[KeyOut]
+
+
+def _epoch(value: datetime | None) -> float | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.timestamp()
+
+
+def _key_out(row: AuthKey) -> KeyOut:
+    return KeyOut(
+        id=row.id,
+        name=row.name,
+        kind=row.kind,
+        prefix=keys.display(row),
+        scopes=list(row.scopes),
+        created_at=_epoch(row.created_at) or 0.0,
+        last_used_at=_epoch(row.last_used_at),
+        revoked_at=_epoch(row.revoked_at),
+    )
+
+
+@router.post("/keys", response_model=KeyCreatedOut, status_code=201)
+async def create_key(
+    body: KeyCreateBody, principal: SessionDep
+) -> KeyCreatedOut:
+    """Mint a key and return it once."""
+    minted = keys.mint(body.kind)
+    async with session_scope() as db:
+        row = await AuthKeyRepository(db).add(
+            AuthKey(
+                user_id=principal.user_id,
+                kind=body.kind,
+                name=body.name.strip(),
+                prefix=minted.prefix,
+                key_hash=minted.key_hash,
+                scopes=list(minted.scopes),
+            )
+        )
+        out = _key_out(row)
+        key_id = row.id
+
+    await record_audit(
+        user_id=principal.user_id,
+        operation="auth.key.mint",
+        result=f"id={key_id} kind={body.kind} name={body.name}",
+    )
+    return KeyCreatedOut(**out.model_dump(), token=minted.token)
+
+
+@router.get("/keys", response_model=KeyListOut)
+async def list_keys(principal: SessionDep) -> KeyListOut:
+    """Every key this Owner has issued. Never a secret, revoked ones included."""
+    async with session_scope() as db:
+        rows = await AuthKeyRepository(db).list_for_user(principal.user_id)
+        return KeyListOut(keys=[_key_out(row) for row in rows])
+
+
+@router.delete("/keys/{key_id}", response_model=KeyOut)
+async def revoke_key(key_id: int, principal: SessionDep) -> KeyOut:
+    """Stop a key working. The row stays so the audit trail still resolves."""
+    async with session_scope() as db:
+        row = await AuthKeyRepository(db).revoke(
+            key_id, principal.user_id, datetime.now(UTC)
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"unknown key: {key_id}")
+        out = _key_out(row)
+
+    await record_audit(
+        user_id=principal.user_id,
+        operation="auth.key.revoke",
+        result=f"id={key_id} name={out.name}",
+    )
+    return out

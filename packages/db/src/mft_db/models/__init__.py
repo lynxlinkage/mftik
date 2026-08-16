@@ -1,7 +1,7 @@
 from mft_db.models.account import Account
 from mft_db.models.api import Api, ApiType
 from mft_db.models.audit import Audit
-from mft_db.models.auth import AuthSession
+from mft_db.models.auth import AuthKey, AuthSession, KeyKind
 from mft_db.models.base import Base
 from mft_db.models.history import (
     Attribution,
@@ -35,7 +35,9 @@ __all__ = [
     "ApiType",
     "Attribution",
     "Audit",
+    "AuthKey",
     "AuthSession",
+    "KeyKind",
     "BackfillCursorRow",
     "Base",
     "CashFlowRow",

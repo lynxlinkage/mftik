@@ -11,7 +11,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, WebSocket
 
-from mft_api.auth.principal import ANONYMOUS, Principal
+from mft_api.auth.principal import ANONYMOUS, SCOPE_OWNER, Principal
 
 
 def principal_of(scope_holder: Request | WebSocket) -> Principal:
@@ -23,6 +23,27 @@ def get_principal(request: Request) -> Principal:
 
 
 PrincipalDep = Annotated[Principal, Depends(get_principal)]
+
+
+def require_session(request: Request) -> Principal:
+    """Refuse anything that is not a browser session.
+
+    For the routes that change who the Owner is, or issue credentials. A key
+    that could mint keys would be a key that cannot be contained: revoking it
+    would not remove whatever it minted in the meantime, and the audit trail
+    would attribute all of it to the Owner. Sitting at the machine is the
+    proof those routes want.
+    """
+    principal = principal_of(request)
+    if not principal.allows(SCOPE_OWNER):
+        raise HTTPException(
+            status_code=403,
+            detail="this needs a browser session, not a key",
+        )
+    return principal
+
+
+SessionDep = Annotated[Principal, Depends(require_session)]
 
 
 def current_user_id(request: Request) -> int:

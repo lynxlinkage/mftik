@@ -55,3 +55,6 @@ class User(Base):
     auth_sessions = relationship(
         "AuthSession", back_populates="user", cascade="all, delete-orphan"
     )
+    auth_keys = relationship(
+        "AuthKey", back_populates="user", cascade="all, delete-orphan"
+    )
