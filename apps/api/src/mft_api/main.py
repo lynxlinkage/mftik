@@ -33,6 +33,27 @@ from mft_api.ws import (
     td_log_bridge,
 )
 
+
+def allowed_origins() -> list[str]:
+    """Origins allowed to make credentialed cross-origin requests. None, by default.
+
+    This used to be ``["*"]`` with ``allow_credentials=True``, which is not a
+    permissive setting so much as an invalid one: browsers refuse to send
+    cookies to a wildcard origin, so it never granted anything. It was
+    harmless only because nothing here has ever been cross-origin — the Vite
+    proxy makes local same-origin, and production serves the document, /api
+    and /ws from one hostname.
+
+    Empty is therefore the correct default and not a restriction: same-origin
+    requests do not consult CORS at all. ``MFT_ALLOWED_ORIGINS`` exists for
+    the deployment that genuinely splits the UI off onto another host, and
+    that deployment has to name it — a session cookie is at stake, and the
+    wildcard cannot be what names it.
+    """
+    raw = os.getenv("MFT_ALLOWED_ORIGINS", "")
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -78,7 +99,7 @@ app = FastAPI(title="MFT API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
