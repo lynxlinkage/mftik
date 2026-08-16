@@ -15,8 +15,11 @@ from mft.registry import (
     RegistryError,
     connect_remote,
     diff_remote,
+    split_qualified,
 )
 from mft.registry.protocol import handshake_info
+from mft_db.repositories import StrategyRepository
+from mft_db.session import session_scope
 
 from mft_api.deps import RegistryStoreDep
 from mft_api.schemas import (
@@ -176,3 +179,37 @@ async def connect(
         url=result.url,
         pulled=[_strategy_out(rec) for rec in result.pulled],
     )
+
+
+@router.delete("/remotes/{name}", response_model=RegistryRemoteOut)
+async def disconnect_remote(
+    name: str, store: RegistryStoreDep
+) -> RegistryRemoteOut:
+    """Drop the named peer and the copy pulled from it.
+
+    Refuses while any live STS session still uses a strategy pulled from
+    this peer — stop those sessions first.
+    """
+    if store.get_remote(name) is None:
+        raise HTTPException(status_code=404, detail=f"unknown remote: {name}")
+    async with session_scope() as db:
+        rows = await StrategyRepository(db).list_live_for_origin(name)
+    live: list[tuple[str, str]] = []
+    for row in rows:
+        split = split_qualified(row.type)
+        if split is None or split[0] != name:
+            continue
+        live.append((split[1], row.sts_session))
+    if live:
+        listed = ", ".join(
+            f"{type_name} ({session_id})" for type_name, session_id in live
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"cannot disconnect {name}: live sessions still use its "
+                f"strategies. Stop these first: {listed}"
+            ),
+        )
+    remote = store.drop_remote(name)
+    return RegistryRemoteOut(name=remote.name, url=remote.url, count=0)

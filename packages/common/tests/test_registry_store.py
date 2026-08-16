@@ -213,6 +213,25 @@ def test_put_and_list_remotes(tmp_path) -> None:
     assert remotes[0].url == "http://host.docker.internal:8000"
 
 
+def test_drop_remote_forgets_the_url_and_the_copy(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    store.add({"strategy.py": _TINY}, origin="node1")
+    store.put_remote("node1", "http://host.docker.internal:8000")
+    dest = tmp_path / "registry" / "pulled" / "node1"
+    assert dest.is_dir()
+    dropped = store.drop_remote("node1")
+    assert dropped.name == "node1"
+    assert store.list_remotes() == []
+    assert store.list_pulled() == []
+    assert not dest.exists()
+
+
+def test_drop_unknown_remote_is_refused(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    with pytest.raises(RegistryError, match="unknown remote"):
+        store.drop_remote("node1")
+
+
 def test_add_public_is_not_private(tmp_path) -> None:
     store = RegistryStore(tmp_path)
     added = store.add({"strategy.py": _TINY}, origin="public")

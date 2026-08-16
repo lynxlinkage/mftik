@@ -475,6 +475,47 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Disconnect Remote",
+        "description": "Drop the named peer and the copy pulled from it.\n\nRefuses while any live STS session still uses a strategy pulled from\nthis peer \u2014 stop those sessions first.",
+        "operationId": "disconnect_remote_registry_v1_remotes__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryRemoteOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/registry/v1/remotes/{name}/diff": {

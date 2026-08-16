@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from mft_db.models.session import SessionStatus, StsSessionRow
 from mft_db.models.strategy import StrategyRow
 from mft_db.repositories.base import BaseRepository
 
@@ -69,3 +70,30 @@ class StrategyRepository(BaseRepository[StrategyRow]):
             .where(StrategyRow.sts_session == sts_session)
         )
         return result.scalars().unique().one_or_none()
+
+    async def list_live_for_origin(self, origin: str) -> Sequence[StrategyRow]:
+        """Strategies whose type is ``{origin}::…`` and whose session is live.
+
+        ``type`` is the qualified key (``node1::Tiny``). Matching on
+        ``{origin}::`` so ``node1`` does not catch ``node10``. Paused sessions
+        stay ``live``.
+        """
+        prefix = f"{origin}::"
+        stmt = (
+            select(StrategyRow)
+            .join(
+                StsSessionRow,
+                StrategyRow.sts_session == StsSessionRow.session_id,
+            )
+            .where(StsSessionRow.status == SessionStatus.LIVE.value)
+            .where(StrategyRow.type.startswith(prefix))
+            .order_by(StrategyRow.created_at.desc())
+        )
+        result = await self.session.execute(stmt)
+        rows = result.scalars().all()
+        # ``startswith`` is the SQL prefilter; refuse a type with extra ``::``.
+        return [
+            row
+            for row in rows
+            if row.type.startswith(prefix) and "::" not in row.type[len(prefix) :]
+        ]

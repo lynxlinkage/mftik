@@ -568,7 +568,11 @@ export const api = {
 		request<{ name: string; url: string; pulled: RegistryStrategy[] }>(
 			'/registry/v1/remotes',
 			{ method: 'POST', body: JSON.stringify(body) }
-		)
+		),
+	disconnectRegistry: (name: string) =>
+		request<RegistryRemote>(`/registry/v1/remotes/${encodeURIComponent(name)}`, {
+			method: 'DELETE'
+		})
 };
 
 export function defaultStrategyYml(): string {

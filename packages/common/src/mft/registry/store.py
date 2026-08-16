@@ -177,6 +177,25 @@ class RegistryStore:
         self.remotes_path.write_text(_dump_remotes(remotes), encoding="utf-8")
         return Remote(name=name, url=url)
 
+    def drop_remote(self, name: str) -> Remote:
+        """Forget a peer: drop the URL and the pulled copy."""
+        _check_remote_name(name)
+        remotes = _load_remotes(self.remotes_path)
+        url = remotes.pop(name, None)
+        if url is None:
+            raise RegistryError(f"unknown remote: {name}")
+        if remotes:
+            self.remotes_path.write_text(_dump_remotes(remotes), encoding="utf-8")
+        elif self.remotes_path.is_file():
+            self.remotes_path.unlink()
+        pulled = self.pulled_dir / name
+        if pulled.is_dir():
+            shutil.rmtree(pulled)
+        self._tree_cache = {
+            key: val for key, val in self._tree_cache.items() if key[1] != name
+        }
+        return Remote(name=name, url=url)
+
     def _dest(self, origin: str, name: str) -> Path:
         if origin == PUBLIC_ORIGIN:
             return self.public_dir / name

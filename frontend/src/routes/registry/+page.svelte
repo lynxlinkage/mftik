@@ -13,6 +13,8 @@
 	let name = $state('');
 	let url = $state('');
 	let connectError = $state<string | null>(null);
+	let removing = $state<string | null>(null);
+	let blocked = $state<{ name: string; message: string } | null>(null);
 
 	const canConnect = $derived(!busy && !!name.trim() && !!url.trim());
 
@@ -70,6 +72,30 @@
 		if (event.key === 'Escape') closeConnect();
 	}
 
+	async function disconnect(remoteName: string) {
+		removing = remoteName;
+		error = null;
+		try {
+			await api.disconnectRegistry(remoteName);
+			remotes = remotes.filter((r) => r.name !== remoteName);
+		} catch (e) {
+			blocked = {
+				name: remoteName,
+				message: e instanceof Error ? e.message : String(e)
+			};
+		} finally {
+			removing = null;
+		}
+	}
+
+	function closeBlocked() {
+		blocked = null;
+	}
+
+	function onBlockedKey(event: KeyboardEvent) {
+		if (event.key === 'Escape') closeBlocked();
+	}
+
 	onMount(refresh);
 </script>
 
@@ -118,20 +144,39 @@
 		</footer>
 	</a>
 	{#each remotes as remote (remote.name)}
-		<a class="card" href={`/registry/${remote.name}`}>
-			<header>
-				<span class="title">{remote.name}</span>
-				<span class="badge live">connected</span>
-			</header>
-			<div class="figure">
-				<span class="count">{remote.count}</span>
-				<span class="unit">strategies</span>
-			</div>
-			<p class="url" title={remote.url}>{remote.url}</p>
-			<footer>
-				<span class="go">View strategies →</span>
-			</footer>
-		</a>
+		<article class="card">
+			<button
+				type="button"
+				class="dismiss ghost"
+				aria-label={`Disconnect ${remote.name}`}
+				disabled={removing === remote.name}
+				onclick={() => disconnect(remote.name)}
+			>
+				<svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true">
+					<path
+						d="M2 2l8 8M10 2L2 10"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.5"
+						stroke-linecap="square"
+					/>
+				</svg>
+			</button>
+			<a href={`/registry/${remote.name}`}>
+				<header>
+					<span class="title">{remote.name}</span>
+					<span class="badge live">connected</span>
+				</header>
+				<div class="figure">
+					<span class="count">{remote.count}</span>
+					<span class="unit">strategies</span>
+				</div>
+				<p class="url" title={remote.url}>{remote.url}</p>
+				<footer>
+					<span class="go">View strategies →</span>
+				</footer>
+			</a>
+		</article>
 	{/each}
 </div>
 
@@ -180,6 +225,31 @@
 	</div>
 {/if}
 
+{#if blocked}
+	<div
+		class="backdrop"
+		role="presentation"
+		onclick={closeBlocked}
+		onkeydown={onBlockedKey}
+	>
+		<div
+			class="modal"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="blocked-title"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+			onkeydown={(e) => e.stopPropagation()}
+		>
+			<h2 id="blocked-title">Cannot disconnect {blocked.name}</h2>
+			<p class="hint">{blocked.message}</p>
+			<div class="modal-actions">
+				<button type="button" onclick={closeBlocked}>OK</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
 <style>
 	.head-actions {
 		display: flex;
@@ -195,6 +265,7 @@
 	}
 
 	.card {
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		gap: 0.85rem;
@@ -204,6 +275,41 @@
 		background: linear-gradient(180deg, rgba(24, 32, 43, 0.9), rgba(18, 24, 32, 0.85));
 		color: inherit;
 		text-decoration: none;
+	}
+
+	.card > a {
+		display: flex;
+		flex-direction: column;
+		gap: 0.85rem;
+		color: inherit;
+		text-decoration: none;
+		flex: 1;
+	}
+
+	.card > a:hover {
+		text-decoration: none;
+	}
+
+	.dismiss {
+		position: absolute;
+		top: 0.35rem;
+		left: 0.35rem;
+		z-index: 1;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.45rem;
+		height: 1.45rem;
+		padding: 0;
+		color: var(--muted);
+	}
+
+	.dismiss:hover:not(:disabled) {
+		color: var(--err);
+	}
+
+	.card:has(.dismiss) header {
+		padding-left: 1.35rem;
 	}
 
 	.card:hover {
