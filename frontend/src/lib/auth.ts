@@ -91,7 +91,10 @@ export function reloadForLogin(): boolean {
 export async function reloadIfSessionExpired(): Promise<void> {
 	if (!browser || reloading) return;
 	try {
-		const res = await fetch('/api/health', { cache: 'no-store' });
+		// `/auth/me` rather than `/health`: health is deliberately public so
+		// compose and CI can probe it, which means it answers 200 to an expired
+		// session and can never be the request that notices one.
+		const res = await fetch('/api/auth/me', { cache: 'no-store' });
 		if (res.status === 401) reloadForLogin();
 	} catch {
 		/* offline or API down — not an auth verdict */

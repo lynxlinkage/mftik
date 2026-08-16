@@ -13,6 +13,7 @@ from mft_db.repositories import (
 from mft_db.session import session_scope
 
 from mft_api.audit_util import record_audit
+from mft_api.auth import OwnerId
 from mft_api.deps import DEFAULT_USER_ID
 from mft_api.schemas import (
     ApiCreateBody,
@@ -76,7 +77,9 @@ async def list_apis() -> ApiListResponse:
 
 
 @router.post("/apis", response_model=ApiOut, status_code=201)
-async def create_api(body: ApiCreateBody) -> ApiOut:
+async def create_api(
+    body: ApiCreateBody, owner: OwnerId = DEFAULT_USER_ID
+) -> ApiOut:
     api_type = body.type.strip().upper()
     if api_type not in _ALLOWED_TYPES:
         raise HTTPException(
@@ -84,7 +87,7 @@ async def create_api(body: ApiCreateBody) -> ApiOut:
             detail=f"type must be one of {sorted(_ALLOWED_TYPES)}",
         )
 
-    created_by = body.created_by if body.created_by is not None else DEFAULT_USER_ID
+    created_by = body.created_by if body.created_by is not None else owner
     name = body.name.strip()
     api_key = body.api_key.strip()
     if not name or not body.venue.strip() or not api_key:

@@ -54,6 +54,7 @@ from mft_db.repositories import (
 from mft_db.session import session_scope
 
 from mft_api.audit_util import record_audit
+from mft_api.auth import OwnerId
 from mft_api.broker_rpc import DomainRpcError, request_domain
 from mft_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
 from mft_api.orchestrate import deploy_strategy
@@ -308,18 +309,30 @@ async def list_sessions(
 
 
 @router.post("/sessions/{session_id}/pause", response_model=StsControlResponse)
-async def pause_session(session_id: str, broker: BrokerDep) -> StsControlResponse:
-    return await _control(broker, session_id, STS_SESSION_PAUSE, "sts.session.pause")
+async def pause_session(
+    session_id: str, broker: BrokerDep, owner: OwnerId = DEFAULT_USER_ID
+) -> StsControlResponse:
+    return await _control(
+        broker, session_id, STS_SESSION_PAUSE, "sts.session.pause", owner
+    )
 
 
 @router.post("/sessions/{session_id}/resume", response_model=StsControlResponse)
-async def resume_session(session_id: str, broker: BrokerDep) -> StsControlResponse:
-    return await _control(broker, session_id, STS_SESSION_RESUME, "sts.session.resume")
+async def resume_session(
+    session_id: str, broker: BrokerDep, owner: OwnerId = DEFAULT_USER_ID
+) -> StsControlResponse:
+    return await _control(
+        broker, session_id, STS_SESSION_RESUME, "sts.session.resume", owner
+    )
 
 
 @router.post("/sessions/{session_id}/stop", response_model=StsControlResponse)
-async def stop_session(session_id: str, broker: BrokerDep) -> StsControlResponse:
-    return await _control(broker, session_id, STS_SESSION_STOP, "sts.session.stop")
+async def stop_session(
+    session_id: str, broker: BrokerDep, owner: OwnerId = DEFAULT_USER_ID
+) -> StsControlResponse:
+    return await _control(
+        broker, session_id, STS_SESSION_STOP, "sts.session.stop", owner
+    )
 
 
 def _epoch(value: datetime | None) -> float | None:
@@ -331,7 +344,9 @@ def _epoch(value: datetime | None) -> float | None:
 
 
 @router.post("/sessions/{session_id}/ack", response_model=StsControlResponse)
-async def ack_session(session_id: str, broker: BrokerDep) -> StsControlResponse:
+async def ack_session(
+    session_id: str, broker: BrokerDep, owner: OwnerId = DEFAULT_USER_ID
+) -> StsControlResponse:
     """Mark a failed or interrupted session as acknowledged — a normal stop.
 
     The process is already gone, so this is a database write rather than an
@@ -394,7 +409,7 @@ async def ack_session(session_id: str, broker: BrokerDep) -> StsControlResponse:
         logger.exception("STS ack status publish failed session=%s", session_id)
 
     await record_audit(
-        user_id=DEFAULT_USER_ID,
+        user_id=owner,
         operation="sts.session.ack",
         result=f"session_id={session_id_} status={status}",
     )
@@ -431,7 +446,7 @@ async def eventlog_info(
 
 @router.get("/sessions/{session_id}/eventlog")
 async def download_eventlog(
-    session_id: str, broker: BrokerDep
+    session_id: str, broker: BrokerDep, owner: OwnerId = DEFAULT_USER_ID
 ) -> StreamingResponse:
     """Stream the session's event log as one gzip, oldest part first.
 
@@ -450,7 +465,7 @@ async def download_eventlog(
         raise HTTPException(status_code=404, detail=detail)
 
     await record_audit(
-        user_id=DEFAULT_USER_ID,
+        user_id=owner,
         operation="sts.eventlog.download",
         result=f"session_id={session_id} bytes={info.total_bytes}",
     )
@@ -543,6 +558,7 @@ async def deploy(
     body: StrategyDeployBody,
     broker: BrokerDep,
     store: RegistryStoreDep,
+    owner: OwnerId = DEFAULT_USER_ID,
 ) -> DeployResponse:
     """Deploy ``strategy_type`` with the td / md / sts document in ``body``.
 
@@ -561,7 +577,7 @@ async def deploy(
     except StrategyYamlError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    created_by = body.created_by if body.created_by is not None else DEFAULT_USER_ID
+    created_by = body.created_by if body.created_by is not None else owner
     td_api_ids = await _resolve_td_names(list(spec.td))
     try:
         result = await deploy_strategy(
@@ -642,6 +658,7 @@ async def _control(
     session_id: str,
     type_name: str,
     audit_op: str,
+    owner: int,
 ) -> StsControlResponse:
     try:
         result = await request_domain(
@@ -661,7 +678,7 @@ async def _control(
         raise HTTPException(status_code=code, detail=exc.message) from exc
 
     await record_audit(
-        user_id=DEFAULT_USER_ID,
+        user_id=owner,
         operation=audit_op,
         result=f"session_id={result.session_id} status={result.status}",
     )

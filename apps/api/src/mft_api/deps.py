@@ -9,6 +9,12 @@ from fastapi import Depends, Request
 from mft.broker import Broker
 from mft.registry import RegistryStore
 
+#: The Owner, for code that has no request to read a principal from.
+#:
+#: This used to be the identity of every request. It is now the identity of
+#: none of them while ``MFT_AUTH_ENABLED`` is on — handlers take ``OwnerId``,
+#: which resolves the principal the gate built. What is left is the seed
+#: default and the stand-in for a handler called outside a request.
 DEFAULT_USER_ID = int(os.getenv("MFT_DEFAULT_USER_ID", "1"))
 
 

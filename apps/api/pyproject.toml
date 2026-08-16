@@ -9,6 +9,9 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "websockets>=13.0",
+    # argon2id for the Owner's password. The one hashing decision here, and
+    # not one to hand-roll.
+    "argon2-cffi>=23.1",
 ]
 
 [tool.uv.sources]

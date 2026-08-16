@@ -9,6 +9,7 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from mft.broker import Broker
 
+from mft_api.auth import AuthMiddleware, auth_router
 from mft_api.backfill_cron import run_backfill_cron
 from mft_api.log_persist import run_log_persist
 from mft_api.routes import (
@@ -70,6 +71,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MFT API", version="0.1.0", lifespan=lifespan)
+# Added before CORS on purpose. `add_middleware` prepends, so the last call is
+# the outermost layer — CORS has to wrap the gate, not sit behind it, or a
+# preflight (which carries no credentials, by design) would be refused as
+# unauthenticated and the real request would never be sent.
+app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -77,6 +83,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
 app.include_router(health_router)
 app.include_router(stats_router)
 app.include_router(apis_router)

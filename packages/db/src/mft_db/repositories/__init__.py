@@ -1,6 +1,7 @@
 from mft_db.repositories.account import AccountRepository
 from mft_db.repositories.api import ApiRepository
 from mft_db.repositories.audit import AuditRepository
+from mft_db.repositories.auth import AuthSessionRepository
 from mft_db.repositories.history import (
     BackfillCursorRepository,
     CashFlowRepository,
@@ -21,6 +22,7 @@ __all__ = [
     "AccountRepository",
     "ApiRepository",
     "AuditRepository",
+    "AuthSessionRepository",
     "BackfillCursorRepository",
     "CashFlowRepository",
     "FillRepository",

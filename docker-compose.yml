@@ -65,6 +65,13 @@ services:
       - "8000:8000"
     environment:
       MFT_DATA: /var/lib/mft
+      # Off for now. The gate works over HTTP, but the WebSocket endpoints are
+      # opened at localhost:8000 while the UI is served from :5173, so the
+      # session cookie is cross-origin and never sent — turning this on before
+      # the Vite proxy carries /ws would break every live view. See docs/Auth.md.
+      MFT_AUTH_ENABLED: "0"
+      # This stack is http end to end, and Safari drops Secure cookies there.
+      MFT_COOKIE_SECURE: "0"
     volumes:
       - mft_data:/var/lib/mft
     depends_on:
