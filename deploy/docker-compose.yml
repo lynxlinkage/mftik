@@ -50,6 +50,18 @@ services:
   api:
     <<: *mft
     command: ["mft-api"]
+    volumes:
+      - mft_data:/var/lib/mft
+    environment:
+      # The strategy registry: public/, private/, pulled/ and remotes.toml.
+      #
+      # Two things were wrong without this. MFT_DATA defaults to a relative
+      # `.mft`, so the trees lived in the container's writable layer and every
+      # deploy took them with it. And sts is a *different* container, so its
+      # `.mft` was a different directory — a strategy added through the API
+      # was never visible to the process that has to load it. Sharing one
+      # named volume, as the local stack already does, fixes both.
+      MFT_DATA: /var/lib/mft
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
@@ -91,7 +103,12 @@ services:
     command: ["sts"]
     volumes:
       - sts_eventlog:/var/log/mft/sts
+      - mft_data:/var/lib/mft
     environment:
+      # The same registry the API writes. STS resolves a session's strategy
+      # from these trees, so this has to be the identical volume — not merely
+      # a volume of the same shape.
+      MFT_DATA: /var/lib/mft
       # A deploy is a restart: sessions interrupted by it are rebuilt on boot.
       STS_REBUILD_ON_BOOT: "1"
       # Per-session audit trail: every event a session was handed and every
@@ -141,6 +158,10 @@ volumes:
   # Session event logs. Survives the container a deploy replaces; pruning it is
   # a manual, deliberate act — see the size budget on the sts service.
   sts_eventlog:
+  # The strategy registry, shared by api and sts. Source trees, not caches:
+  # a session deployed from a pulled strategy cannot be rebuilt without them,
+  # so this outlives deploys deliberately.
+  mft_data:
 
 networks:
   web:
