@@ -434,7 +434,12 @@ all three routers **in one deploy**. Traefik keeps TLS. Do not run both gates.
 Then drop `MFT_DEFAULT_USER_ID` from the request path.
 
 The first setup on production is username/password against the existing
-passwordless Owner. The Discord account that gets in today via the `admin`
+passwordless Owner, and it has to happen **before** the chain comes off:
+`setup_required` is true there, `POST /auth/setup` is public, and the moment
+the origin is reachable an unclaimed instance belongs to whoever loads
+`/login` first. So `/login` offers the claim form while the gate is still off
+— that state is not "nothing to do here", it is the one moment claiming
+matters most. The Discord account that gets in today via the `admin`
 group is then **connected**, not used as bootstrap.
 
 `CICD.md` and the header comment in `deploy/docker-compose.yml` both state

@@ -19,16 +19,22 @@
 	let busy = $state(false);
 
 	const claiming = $derived(status?.setup_required === true);
-	const off = $derived(status?.enabled === false);
+	/**
+	 * "Nothing to sign in to" — which is true with the gate off, but only
+	 * once somebody owns this node. Claiming it is still a real act while the
+	 * gate is off: it is the thing you have to do *before* turning the gate
+	 * on, because the moment it comes on an unclaimed instance is claimable
+	 * by whoever loads this page first.
+	 */
+	const off = $derived(status?.enabled === false && !claiming);
 	// Password is always there and is not a button; the rest are.
 	const oauth = $derived((status?.providers ?? []).filter((p) => p !== 'password'));
 
 	onMount(async () => {
 		try {
 			status = await api.authStatus();
-			// Nothing to sign in to while the gate is off — every request is
-			// already the Owner. Showing a form here would look like it did
-			// something.
+			// Only bounce a signed-in visitor away. An unclaimed instance with
+			// the gate off still has something for them to do here.
 			if (status.enabled && status.authenticated) {
 				await goto('/');
 				return;
@@ -77,6 +83,10 @@
 		<p class="lede">
 			{#if status === null}
 				Checking this instance…
+			{:else if claiming && status.enabled === false}
+				Nobody owns this node yet, and the gate is not on — whatever is in front
+				of it is doing the deciding for now. Claim it here first: once the gate
+				comes on, an unclaimed instance belongs to whoever loads this page next.
 			{:else if claiming}
 				Nobody owns this node yet. The username and password you set here are the
 				ones that will always work, whatever else gets connected later.
