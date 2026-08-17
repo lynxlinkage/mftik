@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 
+from mftik.cli import connect as connect_cmd
 from mftik.cli import profiles
 from mftik.cli.client import CliError, NodeUnreachable
 from mftik.cli.config import ConfigError
@@ -41,7 +42,7 @@ class Command:
     run: Callable[[argparse.Namespace], int]
 
 
-def _setup_profiles(parser: argparse.ArgumentParser) -> None:
+def _setup_nothing(parser: argparse.ArgumentParser) -> None:
     del parser  # takes nothing
 
 
@@ -49,11 +50,53 @@ def _setup_disconnect(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("name", help="profile to forget (see: mftik profiles)")
 
 
+def _setup_connect(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("url", help="the node's URL, e.g. https://node.example.com")
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="what to call this node here; defaults to its hostname",
+    )
+    parser.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "use an existing API key instead of signing in. This is the "
+            "non-interactive path, and the one CI should take"
+        ),
+    )
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help=(
+            "claim an unclaimed node, becoming its Owner. Refused on a node "
+            "that already has one"
+        ),
+    )
+    parser.add_argument(
+        "--keep-default",
+        action="store_true",
+        help="do not make this the default profile",
+    )
+
+
 COMMANDS: tuple[Command, ...] = (
+    Command(
+        name="connect",
+        help="authenticate this machine against a node",
+        setup=_setup_connect,
+        run=connect_cmd.connect,
+    ),
+    Command(
+        name="whoami",
+        help="who this machine is, to the node it is pointed at",
+        setup=_setup_nothing,
+        run=connect_cmd.whoami,
+    ),
     Command(
         name="profiles",
         help="list the nodes this machine is connected to",
-        setup=_setup_profiles,
+        setup=_setup_nothing,
         run=profiles.list_profiles,
     ),
     Command(

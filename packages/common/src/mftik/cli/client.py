@@ -22,6 +22,9 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
+from mftik.cli import config
+from mftik.cli.config import Profile
+
 #: How long a plain request may take. Generous for a deploy, which walks TD
 #: and MD attach before it answers, and still short enough that an
 #: unreachable host fails rather than hangs.
@@ -96,10 +99,19 @@ class Client:
         token: str | None = None,
         *,
         timeout: float = DEFAULT_TIMEOUT_S,
+        login_hint: bool = True,
     ) -> None:
         self.node = node
         self.token = token
+        #: Whether a 401 should suggest running ``mftik connect``. It should,
+        #: everywhere except inside ``connect`` itself — where a 401 means the
+        #: password was wrong and being told to run the command you are
+        #: running is not advice.
+        self.login_hint = login_hint
         headers = {"Authorization": f"Bearer {token}"} if token else {}
+        # Cookies persist across requests on this client, which is what lets
+        # ``connect`` log in, mint a key with the session it was given, and
+        # log out again.
         self._http = httpx.Client(
             timeout=timeout, headers=headers, follow_redirects=True
         )
@@ -130,7 +142,7 @@ class Client:
         except httpx.HTTPError as exc:
             raise NodeUnreachable(f"cannot reach {url}: {exc}") from exc
         if response.status_code >= 400:
-            raise _refusal(response)
+            raise _refusal(response, login_hint=self.login_hint)
         if not response.content:
             return None
         try:
@@ -146,6 +158,21 @@ class Client:
 
     def delete(self, path: str, **kwargs: Any) -> Any:
         return self.request("DELETE", path, **kwargs)
+
+
+def for_profile(profile: Profile, **kwargs: Any) -> Client:
+    """A client aimed at a connected node, carrying its key."""
+    return Client(Node(api_base=profile.url), profile.token, **kwargs)
+
+
+def connected(name: str | None = None, **kwargs: Any) -> tuple[Profile, Client]:
+    """The profile a command should act on, and a client for it.
+
+    Every command that talks to a node starts here, so "which node" is
+    resolved the same way once rather than at each call site.
+    """
+    profile = config.load().resolve(name)
+    return profile, for_profile(profile, **kwargs)
 
 
 def probe(url: str, *, timeout: float = 10.0) -> Node:
@@ -174,7 +201,7 @@ def probe(url: str, *, timeout: float = 10.0) -> Node:
     )
 
 
-def _refusal(response: httpx.Response) -> CliError:
+def _refusal(response: httpx.Response, *, login_hint: bool = True) -> CliError:
     """The API's own explanation, when it gave one.
 
     FastAPI puts it in ``detail``; a proxy answering instead of the app will
@@ -193,6 +220,8 @@ def _refusal(response: httpx.Response) -> CliError:
 
     status = response.status_code
     if status == 401:
+        if not login_hint:
+            return CliError(detail)
         return CliError(
             f"{detail}\nThis node wants a credential — run: mftik connect <url>"
         )

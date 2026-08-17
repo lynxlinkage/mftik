@@ -85,11 +85,28 @@ by presenting another. So `connect` does what a browser would:
 
 The cookie is never written to disk. What is stored is the key, which is what
 every later command sends as `Authorization: Bearer`. `--token` skips the whole
-flow for a key that already exists, which is what CI should use.
+flow for a key that already exists, which is what CI should use — and it is the
+only path that needs no terminal, so a prompt reached without a tty says so and
+points at it.
+
+The key is named `mftik-cli@{hostname}`, so revoking the laptop that was lost
+does not mean revoking every machine. `/auth/me` reports `via` as
+`key:{name}` — which is what lets `mftik whoami` say *which* credential got you
+in, not just that one did.
+
+`--setup` claims an unclaimed node. It is opt-in because claiming decides who
+owns the instance and is not undoable from this side; without it, a node with
+no Owner is an error that tells you the flag exists.
 
 Revoking is a node-side act. `mftik disconnect` forgets the key here; the row on
 the node stays live until it is revoked there, and the command says so rather
 than letting a user believe otherwise.
+
+**A key cannot manage keys.** `GET/POST/DELETE /auth/keys` are gated on a
+browser session — a key that could mint another key would make a leaked one
+unbounded. A `mftik key ls` would therefore have to ask for the password on
+every call, which is worse than opening the UI. Left to the UI unless that
+changes.
 
 ## Exit codes
 
@@ -111,6 +128,8 @@ everything reaching the top level is the second.
 Built:
 
 ```
+mftik connect <url>         authenticate this machine against a node
+mftik whoami                who this machine is, to the node it points at
 mftik profiles              the nodes this machine is connected to
 mftik disconnect <name>     forget one, and the key it issued
 ```
@@ -118,12 +137,11 @@ mftik disconnect <name>     forget one, and the key it issued
 Landing next — see the implementation plan for ordering:
 
 ```
-mftik connect <url>         authenticate against a node, once
-mftik init [dir]            scaffold a project: mftik.toml + a strategy + strategy.yml
-mftik check <path>          run the import gate offline, before pushing anything
+mftik check <path> [cfg]    the import gate and on_initialized, offline
 mftik push <path>           copy a strategy tree into the node's registry
-mftik run <path> <config>   push, deploy, and tail the session's log
+mftik run <target> [cfg]    push, deploy, and tail the session's log
 mftik ps / logs / stop      what is running, and what it is saying
+mftik init [dir]            scaffold a project against a connected node
 ```
 
 `run` pushes by default, because the iteration loop is edit-then-run and a
