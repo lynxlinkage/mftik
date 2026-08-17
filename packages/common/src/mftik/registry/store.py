@@ -22,8 +22,8 @@ from mftik.registry.qualify import (
     RESERVED_REMOTE_NAMES,
 )
 
-DATA_ENV = "MFT_DATA"
-DEFAULT_DATA_DIR = ".mft"
+DATA_ENV = "MFTIK_DATA"
+DEFAULT_DATA_DIR = ".mftik"
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_REQUIRES = "0.1.0"
@@ -36,7 +36,7 @@ class AddedStrategy:
     name: str
     type: str
     digest: str
-    requires_mft: str
+    requires_mftik: str
     files: tuple[str, ...]
     path: str
     origin: str = PRIVATE_ORIGIN
@@ -91,7 +91,7 @@ class RegistryStore:
             )
         _check_name(chosen.name)
         _check_type(chosen.type)
-        requires = chosen.requires_mft or _DEFAULT_REQUIRES
+        requires = chosen.requires_mftik or _DEFAULT_REQUIRES
         digest = digest_files(normalised)
         dest = self._dest(origin, chosen.name)
         if dest.exists() and not replace:
@@ -103,7 +103,7 @@ class RegistryStore:
             name=chosen.name,
             type=chosen.type,
             digest=digest,
-            requires_mft=requires,
+            requires_mftik=requires,
             files=tuple(sorted(normalised)),
             path=str(dest),
             origin=origin,
@@ -307,7 +307,7 @@ def _scan_tree(dest: Path, *, origin: str) -> AddedStrategy | None:
         name=dest.name,
         type=chosen.type,
         digest=digest,
-        requires_mft=chosen.requires_mft or _DEFAULT_REQUIRES,
+        requires_mftik=chosen.requires_mftik or _DEFAULT_REQUIRES,
         files=tuple(sorted(normalised)),
         path=str(dest),
         origin=origin,

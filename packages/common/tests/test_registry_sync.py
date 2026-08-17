@@ -33,7 +33,7 @@ def _peer(store: RegistryStore) -> httpx.MockTransport:
                             "name": rec.name,
                             "type": rec.type,
                             "digest": rec.digest,
-                            "requires_mft": rec.requires_mft,
+                            "requires_mftik": rec.requires_mftik,
                             "origin": rec.origin,
                             "files": list(rec.files),
                         }
@@ -53,7 +53,7 @@ def _peer(store: RegistryStore) -> httpx.MockTransport:
                     "name": rec.name,
                     "type": rec.type,
                     "digest": rec.digest,
-                    "requires_mft": rec.requires_mft,
+                    "requires_mftik": rec.requires_mftik,
                     "origin": rec.origin,
                     "files": list(rec.files),
                     "contents": store.read_contents(rec),
@@ -166,7 +166,7 @@ async def test_connect_refuses_a_bad_handshake(tmp_path) -> None:
         return httpx.Response(
             200,
             json={
-                "protocol": "mft.registry",
+                "protocol": "mftik.registry",
                 "protocol_version": 99,
                 "protocol_min": 99,
             },

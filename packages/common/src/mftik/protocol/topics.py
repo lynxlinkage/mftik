@@ -1,4 +1,4 @@
-"""Stream and channel name helpers for the MFT broker protocol."""
+"""Stream and channel name helpers for the MFTIK broker protocol."""
 
 from mftik.exchange.tickers import UniversalTicker
 

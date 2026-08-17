@@ -82,7 +82,7 @@ def test_missing_name_is_refused(tmp_path) -> None:
         )
 
 
-def test_requires_mft_comes_from_the_class(tmp_path) -> None:
+def test_requires_mftik_comes_from_the_class(tmp_path) -> None:
     store = RegistryStore(tmp_path)
     added = store.add(
         {
@@ -90,11 +90,11 @@ def test_requires_mft_comes_from_the_class(tmp_path) -> None:
                 "from mftik_sts.strategy import Strategy\n"
                 "class Tiny(Strategy):\n"
                 '    name = "tiny"\n'
-                '    requires_mft = "0.2.0"\n'
+                '    requires_mftik = "0.2.0"\n'
             )
         }
     )
-    assert added.requires_mft == "0.2.0"
+    assert added.requires_mftik == "0.2.0"
 
 
 def test_parent_path_is_refused(tmp_path) -> None:

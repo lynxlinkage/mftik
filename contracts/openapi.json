@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "MFT API",
+    "title": "MFTIK API",
     "version": "0.1.0"
   },
   "paths": {
@@ -3248,9 +3248,9 @@
             "type": "integer",
             "title": "Protocol Min"
           },
-          "mft_version": {
+          "mftik_version": {
             "type": "string",
-            "title": "Mft Version"
+            "title": "Mftik Version"
           }
         },
         "type": "object",
@@ -3258,7 +3258,7 @@
           "protocol",
           "protocol_version",
           "protocol_min",
-          "mft_version"
+          "mftik_version"
         ],
         "title": "RegistryInfoOut"
       },
@@ -3383,9 +3383,9 @@
             "type": "string",
             "title": "Digest"
           },
-          "requires_mft": {
+          "requires_mftik": {
             "type": "string",
-            "title": "Requires Mft"
+            "title": "Requires Mftik"
           },
           "origin": {
             "type": "string",
@@ -3411,7 +3411,7 @@
           "name",
           "type",
           "digest",
-          "requires_mft",
+          "requires_mftik",
           "origin"
         ],
         "title": "RegistryStrategyDetailOut",
@@ -3444,9 +3444,9 @@
             "type": "string",
             "title": "Digest"
           },
-          "requires_mft": {
+          "requires_mftik": {
             "type": "string",
-            "title": "Requires Mft"
+            "title": "Requires Mftik"
           },
           "origin": {
             "type": "string",
@@ -3465,7 +3465,7 @@
           "name",
           "type",
           "digest",
-          "requires_mft",
+          "requires_mftik",
           "origin"
         ],
         "title": "RegistryStrategyOut",

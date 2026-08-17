@@ -20,7 +20,7 @@ from mftik_api.deps import DEFAULT_USER_ID
 #: https, so the cookie jar sends a ``Secure`` cookie back. Over http it would
 #: silently withhold it and every authenticated test would look like a bug in
 #: the gate rather than in the harness.
-BASE_URL = "https://mft.test"
+BASE_URL = "https://mftik.test"
 
 
 def an_api(*, registry: bool = False) -> FastAPI:

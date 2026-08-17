@@ -66,7 +66,7 @@ class KeyKind(StrEnum):
     #: The Owner's own scripts and CI. Acts as the Owner everywhere except
     #: the routes that change who the Owner is or mint more keys.
     API = "api"
-    #: Another MFT node. Reads this node's published strategies and nothing
+    #: Another MFTIK node. Reads this node's published strategies and nothing
     #: else — it does not stand for a person at all.
     REGISTRY = "registry"
 

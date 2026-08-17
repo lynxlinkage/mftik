@@ -2,7 +2,7 @@
 
 The middleware decides whether a request gets in at all. These say what a
 handler wants from it — today only "the Owner's id", which is what every
-``created_by`` and audit line has been getting from ``MFT_DEFAULT_USER_ID``.
+``created_by`` and audit line has been getting from ``MFTIK_DEFAULT_USER_ID``.
 """
 
 from __future__ import annotations

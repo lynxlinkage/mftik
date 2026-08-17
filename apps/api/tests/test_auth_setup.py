@@ -33,7 +33,7 @@ def _no_throttle() -> None:
 async def db(monkeypatch, database_url):
     async with a_database(database_url) as database:
         use_database(monkeypatch, database.scope)
-        monkeypatch.setenv("MFT_AUTH_ENABLED", "1")
+        monkeypatch.setenv("MFTIK_AUTH_ENABLED", "1")
         yield database.scope
 
 
@@ -208,7 +208,7 @@ async def test_a_revoked_session_does_not_come_back_with_the_cookie(db) -> None:
         await client.post("/auth/logout")
 
     async with a_client(app) as client:
-        client.cookies.set(sessions.COOKIE_NAME, token, domain="mft.test")
+        client.cookies.set(sessions.COOKIE_NAME, token, domain="mftik.test")
         replayed = await client.get("/sts/sessions")
 
     assert replayed.status_code == 401

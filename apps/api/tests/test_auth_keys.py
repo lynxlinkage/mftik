@@ -27,7 +27,7 @@ def _no_throttle() -> None:
 async def db(monkeypatch, database_url):
     async with a_database(database_url) as database:
         use_database(monkeypatch, database.scope)
-        monkeypatch.setenv("MFT_AUTH_ENABLED", "1")
+        monkeypatch.setenv("MFTIK_AUTH_ENABLED", "1")
         yield database.scope
 
 
@@ -47,12 +47,12 @@ async def test_a_key_is_returned_once_and_never_again(db) -> None:
         token = await an_owner_with_a_key(client)
         listed = await client.get("/auth/keys")
 
-    assert token.startswith("mft_ak_")
+    assert token.startswith("mftik_ak_")
     body = listed.json()["keys"]
     assert len(body) == 1
     assert "token" not in body[0]
     assert token not in listed.text
-    assert body[0]["prefix"].startswith("mft_ak_")
+    assert body[0]["prefix"].startswith("mftik_ak_")
     assert body[0]["prefix"].endswith("…")
 
 
@@ -102,7 +102,7 @@ async def test_a_key_cannot_mint_or_list_keys(db) -> None:
     assert revoked.status_code == 403
     # 403, not 401: the credential is real. Sending it to /login would be a
     # lie, and the SPA must not treat this as an expired session.
-    assert "x-mft-auth" not in minted.headers
+    assert "x-mftik-auth" not in minted.headers
 
 
 async def test_a_revoked_key_stops_working_but_stays_listed(db) -> None:
@@ -132,7 +132,7 @@ async def test_a_token_claiming_the_wrong_kind_is_refused(db) -> None:
     async with a_client(app) as client:
         token = await an_owner_with_a_key(client)
 
-    lying = token.replace("mft_ak_", "mft_rk_", 1)
+    lying = token.replace("mftik_ak_", "mftik_rk_", 1)
     async with a_client(app) as client:
         refused = await client.get(
             "/sts/sessions", headers={"Authorization": f"Bearer {lying}"}
@@ -144,8 +144,8 @@ async def test_a_token_claiming_the_wrong_kind_is_refused(db) -> None:
     "header",
     [
         "Bearer not-a-key-at-all",
-        "Bearer mft_ak_short",
-        "Basic mft_ak_whatever",
+        "Bearer mftik_ak_short",
+        "Basic mftik_ak_whatever",
         "Bearer ",
     ],
 )

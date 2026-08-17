@@ -1,7 +1,7 @@
 [project]
 name = "mftik-workspace"
 version = "0.1.0"
-description = "MFT monorepo workspace root"
+description = "MFTIK monorepo workspace root"
 requires-python = ">=3.12"
 dependencies = []
 

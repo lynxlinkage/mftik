@@ -42,7 +42,7 @@ _failures: dict[str, tuple[float, int]] = {}
 
 
 class StatusOut(BaseModel):
-    #: Whether the gate is on at all (``MFT_AUTH_ENABLED``). Off, every
+    #: Whether the gate is on at all (``MFTIK_AUTH_ENABLED``). Off, every
     #: request is already the Owner, and the UI has no business offering to
     #: sign anybody in or out — the answer to both would be a no-op.
     enabled: bool
@@ -283,7 +283,7 @@ class KeyOut(BaseModel):
     id: int
     name: str
     kind: str
-    #: `mft_ak_abc12345…`. Everything of the token that is knowable from here.
+    #: `mftik_ak_abc12345…`. Everything of the token that is knowable from here.
     prefix: str
     scopes: list[str]
     created_at: float

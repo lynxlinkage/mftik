@@ -1,4 +1,4 @@
-"""MFT symbol plane — the golden record of venue instruments."""
+"""MFTIK symbol plane — the golden record of venue instruments."""
 
 from mftik_sym.app import main
 

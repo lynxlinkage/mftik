@@ -17,7 +17,7 @@ from mftik_db.models.auth import AuthSession
 from mftik_db.repositories import AuthSessionRepository
 from sqlalchemy.ext.asyncio import AsyncSession
 
-COOKIE_NAME = "mft_session"
+COOKIE_NAME = "mftik_session"
 
 #: Sliding: a session dies this long after the last request that used it.
 #: Matches the order of magnitude the Traefik chain has been enforcing.
@@ -42,7 +42,7 @@ def cookie_secure() -> bool:
     as a secure context and keep Secure cookies there, but Safari drops them,
     and the symptom is a login that silently does nothing.
     """
-    return os.getenv("MFT_COOKIE_SECURE", "1").strip().lower() not in {
+    return os.getenv("MFTIK_COOKIE_SECURE", "1").strip().lower() not in {
         "0",
         "false",
         "no",

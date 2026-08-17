@@ -20,10 +20,10 @@ test:
 test-pg *args="packages apps":
     #!/usr/bin/env bash
     set -euo pipefail
-    url="${TEST_POSTGRES_URL:-postgresql+asyncpg://mft:mft@localhost:5432/mft_test}"
+    url="${TEST_POSTGRES_URL:-postgresql+asyncpg://mftik:mftik@localhost:5432/mftik_test}"
     docker compose exec -T postgres \
-      createdb -U "${POSTGRES_USER:-mft}" mft_test 2>/dev/null \
-      && echo "created mft_test" || true
+      createdb -U "${POSTGRES_USER:-mftik}" mftik_test 2>/dev/null \
+      && echo "created mftik_test" || true
     TEST_POSTGRES_URL="$url" uv run --all-packages pytest {{args}} -q
 
 # Lint Python. Same invocation CI runs, so a green run here means a green one
@@ -55,13 +55,13 @@ fetch *args:
 check-migrations:
     #!/usr/bin/env bash
     set -euo pipefail
-    user="${POSTGRES_USER:-mft}"
-    docker compose exec -T postgres dropdb -U "$user" --if-exists mft_migration_check
-    docker compose exec -T postgres createdb -U "$user" mft_migration_check
-    export DATABASE_URL_SYNC="postgresql+psycopg://mft:mft@localhost:5432/mft_migration_check"
+    user="${POSTGRES_USER:-mftik}"
+    docker compose exec -T postgres dropdb -U "$user" --if-exists mftik_migration_check
+    docker compose exec -T postgres createdb -U "$user" mftik_migration_check
+    export DATABASE_URL_SYNC="postgresql+psycopg://mftik:mftik@localhost:5432/mftik_migration_check"
     uv run --all-packages alembic -c packages/db/alembic.ini upgrade head
     uv run --all-packages alembic -c packages/db/alembic.ini check
-    docker compose exec -T postgres dropdb -U "$user" mft_migration_check
+    docker compose exec -T postgres dropdb -U "$user" mftik_migration_check
 
 # Autogenerate a migration (message required)
 makemigration message:
@@ -92,7 +92,7 @@ frontend-check:
 # Docker compose
 up *args:
     # Build the two images explicitly first. Every Python service shares the
-    # `mft:dev` tag, so letting `up --build` build them all would have seven
+    # `mftik:dev` tag, so letting `up --build` build them all would have seven
     # concurrent builds racing to write the same tag ("image already exists").
     docker compose build migrate frontend
     docker compose up {{args}}

@@ -12,7 +12,7 @@ from mftik.registry.protocol import (
 
 
 def test_handshake_info_shape() -> None:
-    info = handshake_info(mft_version="0.1.0")
+    info = handshake_info(mftik_version="0.1.0")
     assert info["protocol"] == PROTOCOL
     assert info["protocol_version"] == PROTOCOL_VERSION
     assert info["protocol_min"] == PROTOCOL_MIN
@@ -31,7 +31,7 @@ def test_incompatible_protocol_is_refused() -> None:
 
 
 def test_wrong_protocol_name_is_refused() -> None:
-    with pytest.raises(RegistryError, match="not an mft registry"):
+    with pytest.raises(RegistryError, match="not an mftik registry"):
         check_handshake(
             {
                 "protocol": "other",

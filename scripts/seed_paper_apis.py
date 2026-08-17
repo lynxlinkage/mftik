@@ -35,7 +35,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("seed")
 
-DEV_EMAIL = "dev@mft.local"
+DEV_EMAIL = "dev@mftik.local"
 DEV_DISPLAY_NAME = "Dev"
 
 # Two isolated paper accounts for testing (api ↔ account is 1-1).

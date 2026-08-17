@@ -1,7 +1,7 @@
 [project]
 name = "mftik-api"
 version = "0.1.0"
-description = "MFT FastAPI gateway"
+description = "MFTIK FastAPI gateway"
 requires-python = ">=3.12"
 dependencies = [
     "mftik-common",

@@ -1,6 +1,6 @@
 """Static import check — the registry copies source, not a venv.
 
-Every node already has the stdlib and the MFT SDK (``mft``, ``mftik_sts``). A
+Every node already has the stdlib and the MFTIK SDK (``mft``, ``mftik_sts``). A
 third-party import would be a missing module after a pull. Dynamic imports
 (``importlib``, ``__import__``) are refused because this scan would not see
 the module they load.
@@ -34,7 +34,7 @@ class StrategyClass:
     type: str
     filename: str
     name: str | None
-    requires_mft: str | None = None
+    requires_mftik: str | None = None
 
 
 @dataclass
@@ -259,7 +259,7 @@ def _strategy_classes(
                 type=node.name,
                 filename=path,
                 name=_class_str_attr(node, "name"),
-                requires_mft=_class_str_attr(node, "requires_mft"),
+                requires_mftik=_class_str_attr(node, "requires_mftik"),
             )
         )
     return found

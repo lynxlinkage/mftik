@@ -18,19 +18,19 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: mft
-          POSTGRES_PASSWORD: mft
-          POSTGRES_DB: mft_test
+          POSTGRES_USER: mftik
+          POSTGRES_PASSWORD: mftik
+          POSTGRES_DB: mftik_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U mft -d mft_test"
+          --health-cmd "pg_isready -U mftik -d mftik_test"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
     env:
-      TEST_POSTGRES_URL: postgresql+asyncpg://mft:mft@localhost:5432/mft_test
-      DATABASE_URL_SYNC: postgresql+psycopg://mft:mft@localhost:5432/mft_test
+      TEST_POSTGRES_URL: postgresql+asyncpg://mftik:mftik@localhost:5432/mftik_test
+      DATABASE_URL_SYNC: postgresql+psycopg://mftik:mftik@localhost:5432/mftik_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5

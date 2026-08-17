@@ -4,7 +4,7 @@ Revision ID: 0021_auth_owner
 Revises: 0020_macd_dollar
 Create Date: 2026-08-16
 
-The API has never authenticated anyone; ``MFT_DEFAULT_USER_ID`` names the
+The API has never authenticated anyone; ``MFTIK_DEFAULT_USER_ID`` names the
 Owner and the gate lives in Traefik. This is the first half of moving that
 gate into the app — the columns a username/password login needs, and the
 table a browser session lives in. See docs/Auth.md.
@@ -93,7 +93,7 @@ def downgrade() -> None:
     # Owner never had an email for take a synthetic one rather than blocking
     # the downgrade; they were display-only either way.
     op.execute(
-        "UPDATE users SET email = 'user-' || id || '@mft.invalid' "
+        "UPDATE users SET email = 'user-' || id || '@mftik.invalid' "
         "WHERE email IS NULL"
     )
     op.alter_column(

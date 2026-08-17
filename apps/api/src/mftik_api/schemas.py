@@ -1,4 +1,4 @@
-"""HTTP response / request models for the MFT API."""
+"""HTTP response / request models for the MFTIK API."""
 
 from __future__ import annotations
 
@@ -347,7 +347,7 @@ class RegistryStrategyOut(BaseModel):
     name: str
     type: str
     digest: str
-    requires_mft: str
+    requires_mftik: str
     origin: str
     files: list[str] = Field(default_factory=list)
 
@@ -366,7 +366,7 @@ class RegistryInfoOut(BaseModel):
     protocol: str
     protocol_version: int
     protocol_min: int
-    mft_version: str
+    mftik_version: str
 
 
 class RegistryRemoteBody(BaseModel):

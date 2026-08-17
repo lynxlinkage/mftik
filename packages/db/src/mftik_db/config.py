@@ -6,18 +6,18 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class DatabaseConfig:
-    url: str = "postgresql+asyncpg://mft:mft@localhost:5432/mft"
-    sync_url: str = "postgresql+psycopg://mft:mft@localhost:5432/mft"
+    url: str = "postgresql+asyncpg://mftik:mftik@localhost:5432/mftik"
+    sync_url: str = "postgresql+psycopg://mftik:mftik@localhost:5432/mftik"
 
     @classmethod
     def from_env(cls) -> DatabaseConfig:
         return cls(
             url=os.getenv(
                 "DATABASE_URL",
-                "postgresql+asyncpg://mft:mft@localhost:5432/mft",
+                "postgresql+asyncpg://mftik:mftik@localhost:5432/mftik",
             ),
             sync_url=os.getenv(
                 "DATABASE_URL_SYNC",
-                "postgresql+psycopg://mft:mft@localhost:5432/mft",
+                "postgresql+psycopg://mftik:mftik@localhost:5432/mftik",
             ),
         )

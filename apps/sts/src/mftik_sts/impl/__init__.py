@@ -96,7 +96,7 @@ def load_local_registry(store: RegistryStore | None = None) -> list[str]:
     """Import ``local/`` and ``pulled/`` trees under qualified type keys.
 
     Called from STS boot, not at import: tests that merely import this module
-    must not scan whatever ``MFT_DATA`` the developer has on disk. A tree that
+    must not scan whatever ``MFTIK_DATA`` the developer has on disk. A tree that
     fails to import is skipped so one broken add cannot take the process down.
     """
     store = store or RegistryStore.from_env()

@@ -1,1 +1,1 @@
-"""MFT FastAPI gateway service."""
+"""MFTIK FastAPI gateway service."""

@@ -45,7 +45,7 @@ def _strategy_out(added: AddedStrategy) -> RegistryStrategyOut:
         name=added.name,
         type=added.type,
         digest=added.digest,
-        requires_mft=added.requires_mft,
+        requires_mftik=added.requires_mftik,
         origin=added.origin,
         files=list(added.files),
     )

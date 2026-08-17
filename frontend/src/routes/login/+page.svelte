@@ -71,7 +71,7 @@
 		<div class="notice">
 			<h1>Authentication is off</h1>
 			<p class="lede">
-				This instance runs with <code>MFT_AUTH_ENABLED=0</code>, so every request already
+				This instance runs with <code>MFTIK_AUTH_ENABLED=0</code>, so every request already
 				acts as the Owner and there is nothing to sign in to. Whatever sits in front of
 				it is the gate.
 			</p>

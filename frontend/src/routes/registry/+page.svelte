@@ -222,7 +222,7 @@
 				<input
 					bind:value={token}
 					disabled={busy}
-					placeholder="mft_rk_…"
+					placeholder="mftik_rk_…"
 					autocomplete="off"
 				/>
 			</label>

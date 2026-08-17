@@ -37,10 +37,10 @@ async def db(monkeypatch, database_url):
     async with a_database(database_url) as database:
         use_database(monkeypatch, database.scope)
         monkeypatch.setattr(oauth, "session_scope", database.scope, raising=False)
-        monkeypatch.setenv("MFT_AUTH_ENABLED", "1")
+        monkeypatch.setenv("MFTIK_AUTH_ENABLED", "1")
         monkeypatch.setenv("DISCORD_CLIENT_ID", "client-id")
         monkeypatch.setenv("DISCORD_CLIENT_SECRET", "client-secret")
-        monkeypatch.setenv("MFT_OAUTH_REDIRECT_BASE", "http://localhost:5173/api")
+        monkeypatch.setenv("MFTIK_OAUTH_REDIRECT_BASE", "http://localhost:5173/api")
         yield database.scope
 
 

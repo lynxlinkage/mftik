@@ -175,9 +175,9 @@ def redirect_base() -> str:
     sees anything, and locally the Vite proxy does the same, so the API's own
     view of its URL is exactly the one the provider must not be given. It has
     to be configured: `http://localhost:5173/api` locally,
-    `https://mft.lynkora.com/api` in production.
+    `https://mftik.lynkora.com/api` in production.
     """
-    return os.getenv("MFT_OAUTH_REDIRECT_BASE", "").strip().rstrip("/")
+    return os.getenv("MFTIK_OAUTH_REDIRECT_BASE", "").strip().rstrip("/")
 
 
 def configured() -> list[str]:

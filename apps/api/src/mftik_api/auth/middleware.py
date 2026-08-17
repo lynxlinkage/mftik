@@ -90,7 +90,7 @@ def auth_enabled() -> bool:
     This flag is what lets the module land as small PRs instead of a
     long-lived branch. See docs/Auth.md.
     """
-    return os.getenv("MFT_AUTH_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
+    return os.getenv("MFTIK_AUTH_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
 
 
 def is_public(path: str) -> bool:
@@ -247,7 +247,7 @@ async def _json(send: Send, status: int, detail: str, *, login: bool) -> None:
         # one wants the SPA to route itself to /login. Both gates exist at
         # once until the cutover, so the answer has to say which one it is
         # rather than the frontend guessing from a build flag.
-        headers.append((b"x-mft-auth", b"login-required"))
+        headers.append((b"x-mftik-auth", b"login-required"))
     message: Message = {
         "type": "http.response.start",
         "status": status,

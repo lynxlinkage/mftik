@@ -168,16 +168,16 @@ class Tiny(Strategy):
     assert check_files(_py(source))[0].name == "tiny"
 
 
-def test_requires_mft_is_read() -> None:
+def test_requires_mftik_is_read() -> None:
     source = """\
 from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
-    requires_mft = "0.2.0"
+    requires_mftik = "0.2.0"
 """
     found = check_files(_py(source))[0]
-    assert found.requires_mft == "0.2.0"
+    assert found.requires_mftik == "0.2.0"
 
 
 def test_invalid_python_is_refused() -> None:

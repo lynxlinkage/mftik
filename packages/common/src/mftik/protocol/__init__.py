@@ -1,4 +1,4 @@
-"""MFT broker protocol — typed envelopes and topic names."""
+"""MFTIK broker protocol — typed envelopes and topic names."""
 
 from mftik.protocol.envelope import Envelope, UntypedEnvelope
 from mftik.protocol.messages import (

@@ -1,4 +1,4 @@
-# MFT — Mid-Frequency Algo Trading Platform
+# MFTIK — Mid-Frequency Algo Trading Platform
 
 Async, broker-centric trading platform. Domains talk through Redis (Streams + Pub/Sub).
 
@@ -16,7 +16,7 @@ Async, broker-centric trading platform. Domains talk through Redis (Streams + Pu
 | `contracts/` | OpenAPI contract (Python ↔ JS) |
 | `frontend/` | SvelteKit UI (outside uv workspace) |
 | `Dockerfile` | One image for every Python process — they differ only by `command:` |
-| `deploy/` | Production stack for mft.lynkora.com (see [docs/CICD.md](docs/CICD.md)) |
+| `deploy/` | Production stack for mftik.lynkora.com |
 
 ## Quick start
 
@@ -34,8 +34,9 @@ shares one image tag, so building them all at once races.
 
 ## Deployment
 
-Merging to `main` builds, tags and ships to https://mft.lynkora.com.
-See [docs/CICD.md](docs/CICD.md).
+Merging to `main` builds, tags and ships to https://mftik.lynkora.com.
+The host-side runbook — addresses, secrets, volumes — is kept outside this
+repository.
 
 ## Common tasks
 

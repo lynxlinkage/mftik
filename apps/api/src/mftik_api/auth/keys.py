@@ -1,6 +1,6 @@
 """Bearer credentials: minting them, and recognising one on the wire.
 
-A token is `mft_ak_` or `mft_rk_` followed by 256 bits of randomness. The
+A token is `mftik_ak_` or `mftik_rk_` followed by 256 bits of randomness. The
 prefix on the wire says which kind it claims to be before anything is looked
 up, and the first characters of the random part are stored — unique, indexed
 — so verification is one exact lookup rather than a scan over every hash.
@@ -25,8 +25,8 @@ from mftik_api.auth.principal import SCOPE_API, SCOPE_REGISTRY_READ
 #: Wire prefix per kind. Distinct so a leaked token is identifiable on sight —
 #: in a log, in a shell history — as this platform's, and as which kind.
 WIRE_PREFIX: dict[str, str] = {
-    KeyKind.API.value: "mft_ak_",
-    KeyKind.REGISTRY.value: "mft_rk_",
+    KeyKind.API.value: "mftik_ak_",
+    KeyKind.REGISTRY.value: "mftik_rk_",
 }
 
 #: Characters of the random part kept in the clear. Long enough that a
@@ -91,7 +91,7 @@ async def resolve(db: AsyncSession, token: str) -> AuthKey | None:
     """The live key this token names, recording that it was used.
 
     The wire prefix is checked against the stored ``kind`` rather than
-    trusted: it is attacker-supplied, and a token that says `mft_rk_` while
+    trusted: it is attacker-supplied, and a token that says `mftik_rk_` while
     naming a row minted as an API key is not a key, it is someone probing.
     """
     parsed = parse(token)

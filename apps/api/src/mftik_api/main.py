@@ -45,12 +45,12 @@ def allowed_origins() -> list[str]:
     and /ws from one hostname.
 
     Empty is therefore the correct default and not a restriction: same-origin
-    requests do not consult CORS at all. ``MFT_ALLOWED_ORIGINS`` exists for
+    requests do not consult CORS at all. ``MFTIK_ALLOWED_ORIGINS`` exists for
     the deployment that genuinely splits the UI off onto another host, and
     that deployment has to name it — a session cookie is at stake, and the
     wildcard cannot be what names it.
     """
-    raw = os.getenv("MFT_ALLOWED_ORIGINS", "")
+    raw = os.getenv("MFTIK_ALLOWED_ORIGINS", "")
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI):
         logger.info("API broker closed")
 
 
-app = FastAPI(title="MFT API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="MFTIK API", version="0.1.0", lifespan=lifespan)
 # Added before CORS on purpose. `add_middleware` prepends, so the last call is
 # the outermost layer — CORS has to wrap the gate, not sit behind it, or a
 # preflight (which carries no credentials, by design) would be refused as
