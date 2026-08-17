@@ -4,6 +4,7 @@
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
 	import { LOGIN_PATH, startSessionKeepalive } from '$lib/auth';
+	import { siteUrl } from '$lib/site';
 	import { appVersion, appVersionShort } from '$lib/version';
 	import '../app.css';
 
@@ -44,8 +45,9 @@
 	const SITE_NAME = 'MFTIK Control';
 	const SITE_DESCRIPTION =
 		'Control plane for the Mid-Frequency Algo Trading platform — STS, TD, MD sessions, APIs, and audit.';
-	const SITE_URL = 'https://mftik.lynkora.com';
-	const OG_IMAGE = `${SITE_URL}/og-image.png`;
+	// Absolute, and not written down here — see `$lib/site`.
+	const siteOrigin = $derived(siteUrl(page.url.origin));
+	const ogImage = $derived(`${siteOrigin}/og-image.png`);
 
 	const nav = [
 		{ href: '/', label: 'Home' },
@@ -88,14 +90,14 @@
 	<meta property="og:site_name" content={SITE_NAME} />
 	<meta property="og:title" content={documentTitle} />
 	<meta property="og:description" content={SITE_DESCRIPTION} />
-	<meta property="og:url" content={`${SITE_URL}${page.url.pathname}`} />
-	<meta property="og:image" content={OG_IMAGE} />
+	<meta property="og:url" content={`${siteOrigin}${page.url.pathname}`} />
+	<meta property="og:image" content={ogImage} />
 	<meta property="og:image:alt" content="MFTIK logo" />
 
 	<meta name="twitter:card" content="summary" />
 	<meta name="twitter:title" content={documentTitle} />
 	<meta name="twitter:description" content={SITE_DESCRIPTION} />
-	<meta name="twitter:image" content={OG_IMAGE} />
+	<meta name="twitter:image" content={ogImage} />
 </svelte:head>
 
 <div class="shell">

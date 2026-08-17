@@ -148,6 +148,10 @@ services:
     restart: unless-stopped
     environment:
       ORIGIN: https://${MFTIK_DOMAIN:?set MFTIK_DOMAIN in .env}
+      # The origin crawlers get in og:url and og:image. Same value as ORIGIN
+      # here; it exists as its own variable because a deployment whose public
+      # name differs from the one it is served on needs to say so.
+      PUBLIC_SITE_URL: https://${MFTIK_DOMAIN:?set MFTIK_DOMAIN in .env}
       # Same pin as the image tag, surfaced in the UI's corner badge so the
       # running build is identifiable without SSHing to the host.
       PUBLIC_APP_VERSION: ${MFTIK_VERSION:-latest}
