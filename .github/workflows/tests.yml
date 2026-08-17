@@ -1,10 +1,12 @@
 name: Tests
 
 on:
-  # PRs only. The same suite runs as the first job of deploy.yml on push to
-  # main, where it gates the release — running it here too would just duplicate
-  # every main build.
   pull_request:
+  # Also on main: nothing builds from a push to main any more (release.yml is
+  # tag-only), so without this a commit that lands outside a PR would go
+  # untested until someone cut a tag.
+  push:
+    branches: [main]
 
 jobs:
   pytest:
@@ -44,9 +46,9 @@ jobs:
       - name: Lint
         run: uv run --all-packages ruff check packages apps conftest.py
 
-      # Also gates the deploy. It lived only there until a PR that added two
+      # Also gates the release. It lived only there until a PR that added two
       # endpoints went green here and broke main on merge — a PR must not pass
-      # a weaker suite than the deploy runs. Early, since it needs no service.
+      # a weaker suite than a release runs. Early, since it needs no service.
       - name: Contracts up to date
         run: |
           uv run --all-packages python -c \

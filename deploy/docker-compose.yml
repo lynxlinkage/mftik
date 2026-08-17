@@ -1,7 +1,8 @@
 # Production stack for mftik.lynkora.com. Lives at /opt/mftik/deploy on the host.
 #
-# CI rewrites only MFTIK_VERSION in .env and runs `docker compose up -d`; the rest
-# of .env (secrets, venue keys) is never touched by a deploy.
+# Deploys are manual: set MFTIK_VERSION in .env to a published tag, then run
+# `docker compose pull && docker compose run --rm migrate && docker compose up -d`.
+# CI only builds and publishes the images — it never touches a host.
 #
 # Nothing here publishes a port. Traefik (/opt/traefik, compose project
 # `traefik`) owns :80/:443 and discovers containers on the external `web`

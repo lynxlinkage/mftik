@@ -1,10 +1,12 @@
-name: Build, Deploy, Notify
+name: Build, Notify
 
-# Every merge to main ships. Tests run here rather than in tests.yml (which is
-# PR-only) so a red suite blocks the deploy instead of racing it.
+# Tags only. Nothing ships from this repo any more — a push to main builds
+# nothing, and a tag builds images that a human pulls when they choose to.
+# Tests run here rather than only in tests.yml (which is PR-only) so a red suite
+# stops the release instead of publishing an image nobody should pull.
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 env:
@@ -15,7 +17,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     # Same matrix as tests.yml — see the note there for why sqlite alone will
-    # not do. A deploy must not be gated on a weaker suite than a PR is.
+    # not do. A release must not be gated on a weaker suite than a PR is.
     services:
       postgres:
         image: postgres:16-alpine
@@ -45,7 +47,7 @@ jobs:
       - name: Lint
         run: uv run --all-packages ruff check packages apps conftest.py
 
-      # The deploy runs `alembic upgrade head` against production. This is the
+      # Whoever runs these images runs `alembic upgrade head` first. This is the
       # only place that proves the result of doing so matches the models the
       # images are built from.
       - name: Migrations match the models
@@ -72,6 +74,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `v1.2.3` on a tag run; the branch name on a manual one, which is why
+      # `latest` below only moves for an actual tag.
+      - name: Resolve version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -89,8 +97,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.APP_IMAGE }}:latest
-            ${{ env.APP_IMAGE }}:sha-${{ github.sha }}
+            ${{ env.APP_IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ github.ref_type == 'tag' && format('{0}:latest', env.APP_IMAGE) || '' }}
           cache-from: type=gha,scope=app
           cache-to: type=gha,mode=max,scope=app
 
@@ -101,67 +109,13 @@ jobs:
           target: prod
           push: true
           tags: |
-            ${{ env.FRONTEND_IMAGE }}:latest
-            ${{ env.FRONTEND_IMAGE }}:sha-${{ github.sha }}
+            ${{ env.FRONTEND_IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ github.ref_type == 'tag' && format('{0}:latest', env.FRONTEND_IMAGE) || '' }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      # The host pulls the images with this job's GITHUB_TOKEN.
-      packages: read
-    steps:
-      - uses: actions/checkout@v4
-
-      # The compose file is versioned here and synced on every deploy; .env on
-      # the host holds the secrets and is never overwritten.
-      - name: Sync compose file to production
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: deploy/docker-compose.yml
-          # strip_components drops the leading `deploy/`, so the file lands at
-          # /opt/mftik/deploy/docker-compose.yml — next to the .env it reads.
-          target: /opt/mftik/deploy
-          strip_components: 1
-
-      - name: Pin version, migrate, restart
-        uses: appleboy/ssh-action@v1.0.3
-        env:
-          VERSION: sha-${{ github.sha }}
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: VERSION
-          script: |
-            set -euo pipefail
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-            # Shared reverse-proxy network, owned by the standalone Traefik in
-            # /opt/traefik (not this stack). Ensure it exists so the external
-            # network reference in docker-compose.yml resolves.
-            docker network inspect web >/dev/null 2>&1 || docker network create web
-            cd /opt/mftik/deploy
-            # Rewrite only the version line; every secret in .env survives.
-            if grep -q '^MFTIK_VERSION=' .env; then
-              sed -i "s|^MFTIK_VERSION=.*|MFTIK_VERSION=${VERSION}|" .env
-            else
-              echo "MFTIK_VERSION=${VERSION}" >> .env
-            fi
-            docker compose pull
-            # Schema first: the new images assume the new schema.
-            docker compose run --rm migrate
-            docker compose run --rm seed
-            docker compose up -d --remove-orphans
-            docker image prune -f
-
   notify:
-    needs: [test, build, deploy]
+    needs: [test, build]
     if: always()
     runs-on: ubuntu-latest
     # Job level, not step level: the `secrets` context is not available in a
@@ -169,9 +123,9 @@ jobs:
     env:
       WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
-      # Name the stage that stopped it, and say what that means for the host —
-      # "failed" alone sends you to the logs to find out whether anything
-      # reached production. The stages are checked in pipeline order because
+      # Name the stage that stopped it, and say what that means for the
+      # registry — "failed" alone sends you to the logs to find out whether an
+      # image was published. The stages are checked in pipeline order because
       # only the first non-success actually broke; the ones after it report
       # `skipped`, which is not a failure worth naming.
       - name: Determine status
@@ -179,23 +133,18 @@ jobs:
         env:
           TEST: ${{ needs.test.result }}
           BUILD: ${{ needs.build.result }}
-          DEPLOY: ${{ needs.deploy.result }}
         run: |
           if [ "$TEST" != "success" ]; then
             title="❌ Tests failed"
-            desc="Nothing was built and nothing shipped. Production is unchanged."
+            desc="Nothing was built. No image was published."
             color=15158332
           elif [ "$BUILD" != "success" ]; then
             title="❌ Build failed"
-            desc="No images were pushed. Production is unchanged."
-            color=15158332
-          elif [ "$DEPLOY" != "success" ]; then
-            title="❌ Deploy failed"
-            desc="Images were pushed, but the host did not finish updating — it may be part-way through a migration or restart. Check it before re-running."
+            desc="No image was published for this tag."
             color=15158332
           else
-            title="✅ Deployed"
-            desc="Migrations ran and the stack was restarted."
+            title="✅ Images published"
+            desc="Tagged images are on GHCR and ready to pull."
             color=3066993
           fi
           {
@@ -208,8 +157,8 @@ jobs:
         if: ${{ env.WEBHOOK_URL != '' }}
         env:
           REPO: ${{ github.repository }}
+          VERSION: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
           ACTOR: ${{ github.actor }}
           SERVER_URL: ${{ github.server_url }}
           RUN_ID: ${{ github.run_id }}
@@ -217,20 +166,15 @@ jobs:
           DESC: ${{ steps.status.outputs.desc }}
           COLOR: ${{ steps.status.outputs.color }}
         run: |
-          # workflow_dispatch has no head_commit, and Discord rejects an embed
-          # field with an empty value — which would fail this step on a run
-          # that otherwise went fine.
-          MSG="${COMMIT_MSG:0:1000}"
-          [ -n "$MSG" ] || MSG="(manual run — no commit message)"
-          # Piped rather than passed with -d "$(...)": the payload carries a
-          # commit message we did not write, and argv is the wrong place for it.
+          # Piped rather than passed with -d "$(...)": the payload carries text
+          # we did not write, and argv is the wrong place for it.
           jq -n \
-            --arg title "mftik: $TITLE" \
+            --arg title "mftik $VERSION: $TITLE" \
             --arg desc "$DESC" \
             --arg repo "$REPO" \
             --arg actor "$ACTOR" \
+            --arg version "$VERSION" \
             --arg commit "[\`${COMMIT_SHA:0:7}\`](${SERVER_URL}/${REPO}/commit/${COMMIT_SHA})" \
-            --arg message "$MSG" \
             --arg run "[View logs](${SERVER_URL}/${REPO}/actions/runs/${RUN_ID})" \
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --argjson color "$COLOR" \
@@ -240,9 +184,9 @@ jobs:
               color: $color,
               fields: [
                 {name: "Repository", value: $repo, inline: true},
+                {name: "Version", value: $version, inline: true},
                 {name: "Triggered by", value: $actor, inline: true},
                 {name: "Commit", value: $commit, inline: false},
-                {name: "Message", value: $message, inline: false},
                 {name: "Workflow Run", value: $run, inline: false}
               ],
               timestamp: $ts
