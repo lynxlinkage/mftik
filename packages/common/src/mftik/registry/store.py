@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import tomllib
 from collections.abc import Mapping
@@ -13,8 +12,9 @@ from pathlib import Path
 
 from mftik.registry.digest import digest_files
 from mftik.registry.errors import RegistryConflict, RegistryError
-from mftik.registry.files import normalize_files
-from mftik.registry.gate import StrategyClass, check_files
+from mftik.registry.files import normalize_files, read_tree
+from mftik.registry.gate import check_files
+from mftik.registry.inspect import check_name, inspect_files, pick_class
 from mftik.registry.qualify import (
     OWN_ORIGINS,
     PRIVATE_ORIGIN,
@@ -24,8 +24,6 @@ from mftik.registry.qualify import (
 
 DATA_ENV = "MFTIK_DATA"
 DEFAULT_DATA_DIR = ".mftik"
-_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
-_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_REQUIRES = "0.1.0"
 
 
@@ -82,25 +80,19 @@ class RegistryStore:
     ) -> AddedStrategy:
         """Validate, hash, and copy ``.py`` files into public, private, or pulled."""
         _check_origin(origin)
-        normalised = normalize_files(files)
-        classes = check_files(normalised)
-        chosen = _pick_class(classes)
-        if not chosen.name:
-            raise RegistryError(
-                f"{chosen.type} has no name — set class attribute name = \"...\""
-            )
-        _check_name(chosen.name)
-        _check_type(chosen.type)
+        inspected = inspect_files(files)
+        chosen = inspected.cls
+        normalised = inspected.files
         requires = chosen.requires_mftik or _DEFAULT_REQUIRES
         digest = digest_files(normalised)
-        dest = self._dest(origin, chosen.name)
+        dest = self._dest(origin, inspected.name)
         if dest.exists() and not replace:
             raise RegistryConflict(
-                f"strategy {chosen.name!r} is already in the {_where(origin)}"
+                f"strategy {inspected.name!r} is already in the {_where(origin)}"
             )
         self._commit(dest, normalised)
         return AddedStrategy(
-            name=chosen.name,
+            name=inspected.name,
             type=chosen.type,
             digest=digest,
             requires_mftik=requires,
@@ -123,7 +115,7 @@ class RegistryStore:
                 f"{origin!r} is a pulled copy — disconnect the remote instead "
                 f"of deleting one of its strategies"
             )
-        _check_name(name)
+        check_name(name)
         dest = self._dest(origin, name)
         rec = self._read_tree(dest, origin=origin) if dest.is_dir() else None
         if rec is None:
@@ -312,19 +304,15 @@ def _tree_stamp(dest: Path) -> tuple[int, int] | None:
 
 
 def _scan_tree(dest: Path, *, origin: str) -> AddedStrategy | None:
-    files: dict[str, bytes] = {}
     try:
-        for py in dest.rglob("*.py"):
-            if "__pycache__" in py.parts:
-                continue
-            files[py.relative_to(dest).as_posix()] = py.read_bytes()
-    except OSError:
+        files = read_tree(dest)
+    except (OSError, RegistryError):
         return None
     if not files:
         return None
     try:
         normalised = normalize_files(files)
-        chosen = _pick_class(check_files(normalised))
+        chosen = pick_class(check_files(normalised))
         if chosen.name != dest.name:
             return None
         digest = digest_files(normalised)
@@ -341,44 +329,15 @@ def _scan_tree(dest: Path, *, origin: str) -> AddedStrategy | None:
     )
 
 
-def _pick_class(classes: list[StrategyClass]) -> StrategyClass:
-    if not classes:
-        raise RegistryError(
-            "no Strategy subclass found — import Strategy from "
-            "mftik.strategy and subclass it"
-        )
-    if len(classes) > 1:
-        known = ", ".join(sorted(c.type for c in classes))
-        raise RegistryError(
-            f"multiple Strategy subclasses ({known}) — one tree, one subclass"
-        )
-    return classes[0]
-
-
-def _check_name(name: str) -> None:
-    if not _NAME.match(name):
-        raise RegistryError(
-            f"strategy name {name!r} must be lowercase "
-            f"[a-z][a-z0-9_]* (e.g. macd_dollar)"
-        )
-
-
-def _check_type(type_name: str) -> None:
-    if not _TYPE.match(type_name):
-        raise RegistryError(
-            f"strategy type {type_name!r} must be a Python identifier"
-        )
-
-
 def _check_origin(origin: str) -> None:
-    _check_name(origin)
+    check_name(origin)
     if origin in OWN_ORIGINS:
         return
     _check_remote_name(origin)
 
 
 def _check_remote_name(name: str) -> None:
-    _check_name(name)
+    check_name(name)
     if name in RESERVED_REMOTE_NAMES:
         raise RegistryError(f"remote name {name!r} is reserved")
 

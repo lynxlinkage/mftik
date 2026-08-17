@@ -132,12 +132,18 @@ mftik connect <url>         authenticate this machine against a node
 mftik whoami                who this machine is, to the node it points at
 mftik profiles              the nodes this machine is connected to
 mftik disconnect <name>     forget one, and the key it issued
+mftik check <path> [cfg]    the import gate and on_initialized, offline
 ```
+
+`check` does not talk to a node. It runs four layers and stops at the first
+refusal: the import gate, the naming rules `add` uses, `parse_strategy_yml`
+if a document was given or `<path>/strategy.yml` exists, then `load_class`
+and — when there is a document — `on_initialized`. Without a document those
+last two steps about the config are skipped, and the command says so.
 
 Landing next — see the implementation plan for ordering:
 
 ```
-mftik check <path> [cfg]    the import gate and on_initialized, offline
 mftik push <path>           copy a strategy tree into the node's registry
 mftik run <target> [cfg]    push, deploy, and tail the session's log
 mftik ps / logs / stop      what is running, and what it is saying

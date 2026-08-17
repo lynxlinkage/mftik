@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 
+from mftik.cli import check as check_cmd
 from mftik.cli import connect as connect_cmd
 from mftik.cli import profiles
 from mftik.cli.client import CliError, NodeUnreachable
@@ -48,6 +49,27 @@ def _setup_nothing(parser: argparse.ArgumentParser) -> None:
 
 def _setup_disconnect(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("name", help="profile to forget (see: mftik profiles)")
+
+
+def _setup_check(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("path", help="strategy directory")
+    parser.add_argument(
+        "cfg",
+        nargs="?",
+        default=None,
+        help=(
+            "strategy.yml to validate with on_initialized; defaults to "
+            "<path>/strategy.yml if that file exists"
+        ),
+    )
+    parser.add_argument(
+        "--traceback",
+        action="store_true",
+        help=(
+            "show frames when the strategy's own code raises, at import or "
+            "in on_initialized"
+        ),
+    )
 
 
 def _setup_connect(parser: argparse.ArgumentParser) -> None:
@@ -104,6 +126,12 @@ COMMANDS: tuple[Command, ...] = (
         help="forget a node and the key it issued",
         setup=_setup_disconnect,
         run=profiles.disconnect,
+    ),
+    Command(
+        name="check",
+        help="the import gate and on_initialized, offline",
+        setup=_setup_check,
+        run=check_cmd.check,
     ),
 )
 

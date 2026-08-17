@@ -169,3 +169,38 @@ def test_an_unknown_restart_mode_is_refused() -> None:
     to be, which is the one direction this must not fail in."""
     with pytest.raises(StrategyYamlError, match="restart must be one of"):
         parse_strategy_yml("td: []\nmd: []\nrestart: maybe\nsts: {}\n")
+
+
+def test_a_refusal_reads_as_a_sentence_about_the_field() -> None:
+    """``str(ValidationError)`` is written for whoever is debugging the model.
+
+    This text is not for them. It reaches the editor as a 400 detail and the
+    terminal as ``mftik check`` output, so what has to survive is the field
+    and the sentence the validator raised — not a leading count, a repeat of
+    the class name, an echo of the input, a type tag and a docs URL.
+    """
+    with pytest.raises(StrategyYamlError) as caught:
+        parse_strategy_yml("td: []\nmd: ['bestquote.NotATicker']\nsts: {}\n")
+
+    message = str(caught.value)
+    assert message.startswith("md: ")
+    assert "topic.UniversalTicker" in message
+    for noise in (
+        "validation error",
+        "StrategySpec",
+        "[type=",
+        "input_value=",
+        "pydantic.dev",
+        "Value error, ",
+    ):
+        assert noise not in message, noise
+
+
+def test_every_bad_field_gets_its_own_line() -> None:
+    """One round trip should not have to be spent finding the second mistake."""
+    with pytest.raises(StrategyYamlError) as caught:
+        parse_strategy_yml("td: [x, x]\nmd: ['nope']\nsts: {}\n")
+
+    lines = str(caught.value).splitlines()
+    assert len(lines) == 2
+    assert {line.split(":")[0] for line in lines} == {"td", "md"}

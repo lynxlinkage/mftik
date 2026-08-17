@@ -45,6 +45,7 @@ mftik connect https://node.example.com   # sign in once; stores an API key
 mftik whoami                             # who you are to that node
 mftik profiles                           # every node this machine knows
 mftik disconnect <name>                  # forget one
+mftik check ./hello                      # import gate and on_initialized, offline
 ```
 
 `connect` signs in with your password, mints an API key through that session,
@@ -52,7 +53,7 @@ stores the key and drops the session — so the password is never written down.
 Profiles live in `~/.config/mftik/config.toml` at mode `0600`. For CI, pass an
 existing key with `--token` and no prompt is reached.
 
-`check`, `push` and `run` are being built — see
+`push` and `run` are being built — see
 [docs/CLI.md](https://github.com/lynxlinkage/mftik/blob/main/docs/CLI.md) for the
 shape they are landing in.
 

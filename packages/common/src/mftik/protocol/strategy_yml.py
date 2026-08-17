@@ -5,7 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from mftik.protocol.topics import Topics
 
@@ -143,8 +150,33 @@ def parse_strategy_yml(text: str) -> StrategySpec:
         raise StrategyYamlError("strategy.yml root must be a mapping")
     try:
         return StrategySpec.model_validate(raw)
+    except ValidationError as exc:
+        raise StrategyYamlError(_readable(exc)) from exc
     except Exception as exc:
         raise StrategyYamlError(str(exc)) from exc
+
+
+def _readable(exc: ValidationError) -> str:
+    """One ``field: what is wrong`` line per problem.
+
+    ``str(ValidationError)`` is written for someone debugging the model, not
+    for someone who typed the document: it leads with a count, repeats the
+    class name, and trails every message with the input value, a type tag and
+    a link to pydantic's docs. This text is what a person sees in the editor
+    and what ``mftik check`` prints, so what survives is the field and the
+    sentence the validator raised.
+    """
+    lines: list[str] = []
+    for error in exc.errors():
+        where = ".".join(str(part) for part in error.get("loc", ())) or "strategy.yml"
+        message = str(error.get("msg", "")).strip()
+        # Pydantic prefixes a raised ValueError with this. The validators here
+        # write whole sentences, so the prefix is noise in front of one.
+        for prefix in ("Value error, ", "Assertion failed, "):
+            if message.startswith(prefix):
+                message = message[len(prefix) :]
+        lines.append(f"{where}: {message}")
+    return "\n".join(lines) or str(exc)
 
 
 def dump_strategy_yml(spec: StrategySpec) -> str:

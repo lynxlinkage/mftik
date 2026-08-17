@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from pathlib import Path
 
 from mftik.registry.errors import RegistryError
 
@@ -49,6 +50,25 @@ def normalize_files(files: Mapping[str, str | bytes]) -> dict[str, bytes]:
     if not out:
         raise RegistryError("strategy has no .py files")
     return out
+
+
+def read_tree(root: Path) -> dict[str, bytes]:
+    """Collect ``.py`` files under ``root`` as a POSIX-relative map.
+
+    Skips ``__pycache__``. Does not normalise: that is
+    :func:`normalize_files`, which is what refuses junk paths and empty
+    trees. A missing directory is a refusal here so a caller does not have
+    to distinguish "nothing there" from "nothing worth copying".
+    """
+    root = Path(root)
+    if not root.is_dir():
+        raise RegistryError(f"strategy tree does not exist: {root}")
+    files: dict[str, bytes] = {}
+    for py in root.rglob("*.py"):
+        if "__pycache__" in py.parts:
+            continue
+        files[py.relative_to(root).as_posix()] = py.read_bytes()
+    return files
 
 
 def _collapse(path: str) -> str:
