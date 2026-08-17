@@ -16,7 +16,7 @@ Async, broker-centric trading platform. Domains talk through Redis (Streams + Pu
 | `contracts/` | OpenAPI contract (Python ↔ JS) |
 | `frontend/` | SvelteKit UI (outside uv workspace) |
 | `Dockerfile` | One image for every Python process — they differ only by `command:` |
-| `deploy/` | Production stack for mftik.lynkora.com |
+| `deploy/` | Production stack — Traefik-routed, runs published images |
 
 ## Quick start
 
@@ -34,8 +34,10 @@ shares one image tag, so building them all at once races.
 
 ## Deployment
 
-Merging to `main` builds, tags and ships to https://mftik.lynkora.com.
-The host-side runbook — addresses, secrets, volumes — is kept outside this
+Tagging `v*` builds and publishes images to GHCR; nothing deploys itself.
+A host runs them with `deploy/docker-compose.yml`, which reads its domain,
+image tag and secrets from a `.env` beside it (`deploy/.env.example`). The
+host-side runbook — addresses, secrets, volumes — is kept outside this
 repository.
 
 ## Common tasks

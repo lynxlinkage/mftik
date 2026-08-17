@@ -1,15 +1,15 @@
-# Production stack for mftik.lynkora.com. Lives at /opt/mftik/deploy on the host.
+# Production stack. Lives wherever you keep it on the host, next to its .env.
 #
 # Deploys are manual: set MFTIK_VERSION in .env to a published tag, then run
 # `docker compose pull && docker compose run --rm migrate && docker compose up -d`.
 # CI only builds and publishes the images — it never touches a host.
 #
-# Nothing here publishes a port. Traefik (/opt/traefik, compose project
-# `traefik`) owns :80/:443 and discovers containers on the external `web`
+# Nothing here publishes a port. A standalone Traefik (compose project
+# `traefik`, not this stack) owns :80/:443 and discovers containers on the external `web`
 # network. Postgres and Redis are long-lived substrate on another host and are
 # not managed by this file.
 #
-# Routing on the single host mftik.lynkora.com, by priority:
+# Routing on the single host $MFTIK_DOMAIN, by priority:
 #   /api/*  -> api:8000    (StripPrefix /api — the routers have no prefix)
 #   /ws/*   -> api:8000    (no strip — WebSocket paths are literal)
 #   /*      -> frontend:3000
@@ -66,7 +66,7 @@ services:
       # own view of its URL is exactly the one an OAuth provider must not be
       # given. Register the callback under this base on the Discord/Google
       # application; the client id and secret go in .env, not here.
-      MFTIK_OAUTH_REDIRECT_BASE: "https://mftik.lynkora.com/api"
+      MFTIK_OAUTH_REDIRECT_BASE: "https://${MFTIK_DOMAIN:?set MFTIK_DOMAIN in .env}/api"
       # The strategy registry: public/, private/, pulled/ and remotes.toml.
       #
       # Two things were wrong without this. MFTIK_DATA defaults to a relative
@@ -83,7 +83,7 @@ services:
       # Strip /api: the FastAPI routers are mounted at the root, and the
       # frontend calls /api/... because that is what the Vite dev proxy did.
       - "traefik.http.middlewares.mftik-strip-api.stripprefix.prefixes=/api"
-      - "traefik.http.routers.mftik-api.rule=Host(`mftik.lynkora.com`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.mftik-api.rule=Host(`${MFTIK_DOMAIN:?set MFTIK_DOMAIN in .env}`) && PathPrefix(`/api`)"
       - "traefik.http.routers.mftik-api.entrypoints=websecure"
       - "traefik.http.routers.mftik-api.tls.certresolver=le"
       - "traefik.http.routers.mftik-api.priority=100"
@@ -91,7 +91,7 @@ services:
       # WebSockets (/ws/status/sts, /ws/sts/{id}, /ws/td/{id}, /ws/md/{venue}).
       # Separate router because these paths are NOT stripped — the browser opens
       # them directly at the origin, so they must arrive at the API verbatim.
-      - "traefik.http.routers.mftik-ws.rule=Host(`mftik.lynkora.com`) && PathPrefix(`/ws`)"
+      - "traefik.http.routers.mftik-ws.rule=Host(`${MFTIK_DOMAIN:?set MFTIK_DOMAIN in .env}`) && PathPrefix(`/ws`)"
       - "traefik.http.routers.mftik-ws.entrypoints=websecure"
       - "traefik.http.routers.mftik-ws.tls.certresolver=le"
       - "traefik.http.routers.mftik-ws.priority=100"
@@ -138,7 +138,7 @@ services:
       STS_EVENTLOG_BACKUPS: "2"
 
   # Paper exchange engine. Kept in production so the `paper` venue works
-  # end-to-end and mftik.lynkora.com can be smoke-tested without real money.
+  # end-to-end and the deployment can be smoke-tested without real money.
   paper:
     <<: *mftik
     command: ["paper"]
@@ -147,7 +147,7 @@ services:
     image: ghcr.io/lynxlinkage/mftik-frontend:${MFTIK_VERSION:-latest}
     restart: unless-stopped
     environment:
-      ORIGIN: https://mftik.lynkora.com
+      ORIGIN: https://${MFTIK_DOMAIN:?set MFTIK_DOMAIN in .env}
       # Same pin as the image tag, surfaced in the UI's corner badge so the
       # running build is identifiable without SSHing to the host.
       PUBLIC_APP_VERSION: ${MFTIK_VERSION:-latest}
@@ -160,7 +160,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.routers.mftik-frontend.rule=Host(`mftik.lynkora.com`)"
+      - "traefik.http.routers.mftik-frontend.rule=Host(`${MFTIK_DOMAIN:?set MFTIK_DOMAIN in .env}`)"
       - "traefik.http.routers.mftik-frontend.entrypoints=websecure"
       - "traefik.http.routers.mftik-frontend.tls.certresolver=le"
       - "traefik.http.routers.mftik-frontend.priority=1"

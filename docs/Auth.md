@@ -234,7 +234,7 @@ trail cannot tell the Owner apart from a CI key acting as the Owner.
 asked, with a JSON body the SPA can act on.
 
 Nothing needs the 302-on-navigation split the Traefik chain forced. After
-cutover, a document navigation to `mftik.lynkora.com/sts` reaches the *frontend*
+cutover, a document navigation to `$MFTIK_DOMAIN/sts` reaches the *frontend*
 container, which is not gated — the SPA loads, its first `fetch` gets 401, and
 it routes to `/login` client-side. Locally there was never a gate in front of
 the document at all. `location.reload()` was only ever a way to hand an
@@ -409,7 +409,7 @@ paths must arrive verbatim), and let `wsBaseUrl()` return the current origin.
 A `/auth/ws-ticket` would mean a fourth credential type and another endpoint
 to secure, all to work around a dev-server config.
 
-Production is one host (`mftik.lynkora.com`): document, `/api` and `/ws` share an
+Production is one host (`$MFTIK_DOMAIN`): document, `/api` and `/ws` share an
 origin, so the session cookie rides the handshake with no change. Pinning CORS
 away from `origins=["*"]` (which browsers reject for credentialed requests
 anyway) belongs to the cutover, step 8.
@@ -419,7 +419,7 @@ anyway) belongs to the cutover, step 8.
 Not part of the local work. Recorded here so the local steps do not paint it
 into a corner.
 
-Today every router on `mftik.lynkora.com` uses `discord-auth-chain@docker`
+Today every router on `$MFTIK_DOMAIN` uses `discord-auth-chain@docker`
 ([discord-forward-auth](https://github.com/yitech/discord-forward-auth)). The
 API has no auth of its own.
 
