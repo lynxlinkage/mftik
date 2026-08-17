@@ -11,6 +11,11 @@
 # The venv is on PATH, so the commands above are the literal `command:` values.
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
+# What links the GHCR package back to this repo. Without it the package is
+# owned by the org and connected to nothing, and the Actions token of the repo
+# that built it cannot push a second version.
+LABEL org.opencontainers.image.source="https://github.com/lynxlinkage/mftik"
+
 WORKDIR /app
 
 ENV UV_COMPILE_BYTECODE=1 \

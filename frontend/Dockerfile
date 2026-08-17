@@ -28,6 +28,9 @@ RUN npm run build
 # edge (Traefik) routes /api and /ws straight to the api service instead. See
 # deploy/docker-compose.yml.
 FROM node:22-bookworm-slim AS prod
+# See the note in the root Dockerfile — this is what links the package to the
+# repo that builds it.
+LABEL org.opencontainers.image.source="https://github.com/lynxlinkage/mftik"
 WORKDIR /app
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
