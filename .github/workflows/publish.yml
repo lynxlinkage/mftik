@@ -1,0 +1,146 @@
+name: Publish to PyPI
+
+# A GitHub Release publishes the `mftik` package. Deliberately a different
+# event from release.yml, which builds images on a tag push: a tag is cheap and
+# can be moved or deleted, and a version on PyPI is neither. Cutting the
+# release is the second, deliberate act.
+#
+# Because they are separate events, the two can drift — a tag with images and
+# no release, or the reverse. `verify` below refuses the second half of that by
+# checking the tag against the version in the file, so at least the number
+# published is the number tagged.
+on:
+  release:
+    types: [published]
+  # Same suite, no publish. For proving a change to this file works without
+  # burning a version number, which cannot be un-burned.
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # Same matrix as tests.yml and release.yml — a release must not be gated on
+    # a weaker suite than a PR is, and an upload cannot be taken back the way a
+    # bad image tag can be re-pushed.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mftik
+          POSTGRES_PASSWORD: mftik
+          POSTGRES_DB: mftik_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mftik -d mftik_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql+asyncpg://mftik:mftik@localhost:5432/mftik_test
+      DATABASE_URL_SYNC: postgresql+psycopg://mftik:mftik@localhost:5432/mftik_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      # Nothing derives the package version from the tag, so nothing stops the
+      # two disagreeing — and the failure that causes is quiet: the first
+      # release uploads 0.1.0 under whatever tag, and every release after it
+      # rebuilds 0.1.0 and is rejected as a duplicate, or worse, is not.
+      # Bumping the version is a commit; this only refuses to publish when it
+      # was forgotten.
+      - name: Tag matches the packaged version
+        if: github.event_name == 'release'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python3 -c 'import tomllib;print(tomllib.load(open("packages/common/pyproject.toml","rb"))["project"]["version"])')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::release ${GITHUB_REF_NAME} would publish ${pkg}." \
+                 "Bump version in packages/common/pyproject.toml, or retag." >&2
+            exit 1
+          fi
+          echo "publishing ${pkg}"
+
+      - name: Sync
+        run: uv sync --all-packages
+      - name: Lint
+        run: uv run --all-packages ruff check packages apps conftest.py
+      - name: Migrations match the models
+        run: |
+          uv run --all-packages alembic -c packages/db/alembic.ini upgrade head
+          uv run --all-packages alembic -c packages/db/alembic.ini check
+      - name: Test
+        run: uv run --all-packages pytest packages apps -q
+      - name: Contracts up to date
+        run: |
+          uv run --all-packages python -c \
+            "import json; from mftik_api.main import app; print(json.dumps(app.openapi(), indent=2))" \
+            > /tmp/openapi.json
+          diff -u contracts/openapi.json /tmp/openapi.json \
+            || { echo "contracts/openapi.json is stale — run: just openapi" >&2; exit 1; }
+
+      # `packages/common`, not the repository root. The root pyproject is the uv
+      # workspace (`package = false`, no build-system), so building there falls
+      # back to setuptools and fails on package discovery — which at least fails
+      # loudly rather than uploading something called mftik-workspace.
+      - name: Build
+        run: |
+          uv build packages/common --out-dir dist
+          ls -l dist
+
+      # The command `mftik node-init` writes a compose stack out of files that
+      # are data, not code. A wheel that dropped them installs a command that
+      # cannot do anything, and nothing else in the build would notice.
+      - name: The wheel carries its templates
+        run: |
+          python3 - <<'PY'
+          import glob, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          want = {
+              "mftik/cli/templates/docker-compose.yml",
+              "mftik/cli/templates/Caddyfile",
+              "mftik/cli/templates/env",
+          }
+          missing = want - set(names)
+          assert not missing, f"{wheel} is missing {sorted(missing)}"
+          print(f"{wheel}: templates present")
+          PY
+
+      # Installed from the wheel into a clean environment, so this exercises
+      # what a user gets rather than the source tree the tests ran against.
+      - name: The wheel installs and runs
+        run: |
+          python3 -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          /tmp/smoke/bin/mftik --version
+          /tmp/smoke/bin/mftik node-init /tmp/smoke-node
+          test -s /tmp/smoke-node/docker-compose.yml
+          test -s /tmp/smoke-node/Caddyfile
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: verify
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    # Trusted publishing: no API token anywhere. PyPI checks this workflow's
+    # OIDC claim, which names the repository AND this file — renaming it means
+    # reconfiguring the publisher on PyPI.
+    permissions:
+      id-token: write
+    # Set this only if the PyPI publisher was configured with an environment.
+    # A mismatch either way is rejected at upload.
+    # environment: pypi
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
