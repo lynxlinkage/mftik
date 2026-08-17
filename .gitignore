@@ -38,3 +38,4 @@ credentials/
 
 # Local node data (strategy registry). Default when MFTIK_DATA is unset.
 .mftik/
+mft/
