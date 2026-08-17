@@ -1,0 +1,81 @@
+name: Prune old images
+
+# Every release leaves five versions in GHCR per image — the index, one
+# manifest per architecture, and the attestations — so the registry grows about
+# ten versions a release across the two packages. This keeps the newest ten
+# tags of each and deletes what nothing tagged points at any more.
+#
+# PyPI is deliberately not touched. There is no supported API for deleting or
+# yanking a release, and deleting one breaks every build that pinned it —
+# which is the failure the whole ecosystem learned from left-pad. Old versions
+# on PyPI cost nothing to leave alone. If one has to go, yank it by hand and
+# know that the number stays spent either way.
+on:
+  schedule:
+    # Sunday, 04:00 UTC. Nothing else runs then, and a deletion that races a
+    # release would be deleting something somebody is pulling.
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: "How many tagged versions of each image to keep"
+        default: "10"
+      dry_run:
+        description: "List what would go without deleting it"
+        type: boolean
+        default: true
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        # Reading a manifest is what tells this which untagged versions belong
+        # to a tag it is keeping, so the registry has to be readable before
+        # anything is deleted.
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prune
+        env:
+          # gh needs this; the packages: write permission above is what makes
+          # the DELETE allowed. If GitHub ever tightens that, this is the step
+          # that will start failing and it will need a PAT with delete:packages.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: ${{ inputs.keep || '10' }}
+          # A scheduled run deletes. A hand-run one does not unless asked,
+          # because the safe default for an irreversible job is to show its
+          # working first.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          args=""
+          if [ "$DRY_RUN" = "true" ]; then
+            args="--dry-run"
+            echo "::notice::dry run — nothing will be deleted"
+          fi
+          python3 scripts/prune_ghcr.py \
+            --owner "${{ github.repository_owner }}" \
+            --package mftik \
+            --package mftik-frontend \
+            --keep "$KEEP" \
+            $args | tee /tmp/prune.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '## GHCR prune'
+            echo '```'
+            cat /tmp/prune.txt 2>/dev/null || echo '(no output)'
+            echo '```'
+            echo '_PyPI is not pruned: no supported API, and deleting a'
+            echo 'published version breaks anything that pinned it._'
+          } >> "$GITHUB_STEP_SUMMARY"

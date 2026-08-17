@@ -1,17 +1,18 @@
 name: Publish to PyPI
 
-# A GitHub Release publishes the `mftik` package. Deliberately a different
-# event from release.yml, which builds images on a tag push: a tag is cheap and
-# can be moved or deleted, and a version on PyPI is neither. Cutting the
-# release is the second, deliberate act.
+# A tag publishes the `mftik` package, the same tag that builds the images in
+# release.yml. One act ships everything, and the version on PyPI is the version
+# on GHCR because there is no second decision to forget.
 #
-# Because they are separate events, the two can drift — a tag with images and
-# no release, or the reverse. `verify` below refuses the second half of that by
-# checking the tag against the version in the file, so at least the number
-# published is the number tagged.
+# What that costs: a tag is cheap and a version on PyPI is not. `git push
+# --tags` can send one by accident, and the number it burns cannot be reused —
+# not by deleting the release, not by re-uploading. The guard below is what
+# stands between a stray tag and a wasted version: it refuses unless the tag
+# and the version committed to packages/common/pyproject.toml agree, so
+# publishing takes a deliberate commit even when tagging did not.
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   # Same suite, no publish. For proving a change to this file works without
   # burning a version number, which cannot be un-burned.
   workflow_dispatch:
@@ -53,7 +54,7 @@ jobs:
       # Bumping the version is a commit; this only refuses to publish when it
       # was forgotten.
       - name: Tag matches the packaged version
-        if: github.event_name == 'release'
+        if: github.ref_type == 'tag'
         run: |
           tag="${GITHUB_REF_NAME#v}"
           pkg="$(python3 -c 'import tomllib;print(tomllib.load(open("packages/common/pyproject.toml","rb"))["project"]["version"])')"
@@ -128,7 +129,9 @@ jobs:
 
   publish:
     needs: verify
-    if: github.event_name == 'release'
+    # Never on workflow_dispatch: that exists to rehearse this file, and a
+    # rehearsal that uploaded would defeat the point of having one.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     # Trusted publishing: no API token anywhere. PyPI checks this workflow's
     # OIDC claim, which names the repository AND this file — renaming it means

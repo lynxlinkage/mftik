@@ -65,21 +65,31 @@ jobs:
           diff -u contracts/openapi.json /tmp/openapi.json \
             || { echo "contracts/openapi.json is stale — run: just openapi" >&2; exit 1; }
 
+  # Each architecture on a runner that is that architecture, then one manifest
+  # list stitched from the digests. QEMU worked and cost about five minutes,
+  # but emulating a CPU to compile for it is a strange thing to do when GitHub
+  # hands out arm64 hardware for free on a public repository.
+  #
+  # Nothing here pushes a tag. Each build pushes by digest only, and `merge`
+  # is what makes those digests answer to `v1.2.3` — so a half-finished matrix
+  # leaves the old tag intact rather than a manifest missing an architecture.
   build:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: app, platform: linux/amd64, runner: ubuntu-latest }
+          - { image: app, platform: linux/arm64, runner: ubuntu-24.04-arm }
+          - { image: frontend, platform: linux/amd64, runner: ubuntu-latest }
+          - { image: frontend, platform: linux/arm64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
-
-      # `v1.2.3` on a tag run; the branch name on a manual one, which is why
-      # `latest` below only moves for an actual tag.
-      - name: Resolve version
-        id: version
-        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-
+      - uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -87,43 +97,81 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # arm64 as well as amd64, and QEMU is what makes that possible on an
-      # amd64 runner. Without it these images are amd64-only, which is fine for
-      # the maintainers' own host and useless for `mftik node init` on the
-      # Apple Silicon laptop most people would try it from — docker there
-      # answers "no matching manifest for linux/arm64/v8" and stops.
-      - uses: docker/setup-qemu-action@v3
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image == 'app' && '.' || './frontend' }}
+          target: ${{ matrix.image == 'app' && '' || 'prod' }}
+          platforms: ${{ matrix.platform }}
+          outputs: >-
+            type=image,name=${{ matrix.image == 'app' && env.APP_IMAGE || env.FRONTEND_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # Scoped per architecture: one cache shared by both would be two
+          # architectures evicting each other's layers on every run.
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.platform }}
+
+      # The digest is all `merge` needs, and an empty file named for it is the
+      # smallest thing that survives an artifact round trip.
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          # `/` is not allowed in an artifact name, and linux/amd64 has one.
+          name: digests-${{ matrix.image }}-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [app, frontend]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.image }}-*
+          merge-multiple: true
+          path: /tmp/digests
+
       - uses: docker/setup-buildx-action@v3
-
-      # One image for api, td, md, sts, sym, paper and the migrator — they
-      # differ only by `command:` in deploy/docker-compose.yml.
-      - name: Build and push app image
-        uses: docker/build-push-action@v6
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.APP_IMAGE }}:${{ steps.version.outputs.version }}
-            ${{ github.ref_type == 'tag' && format('{0}:latest', env.APP_IMAGE) || '' }}
-          cache-from: type=gha,scope=app
-          cache-to: type=gha,mode=max,scope=app
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push frontend image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          target: prod
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.FRONTEND_IMAGE }}:${{ steps.version.outputs.version }}
-            ${{ github.ref_type == 'tag' && format('{0}:latest', env.FRONTEND_IMAGE) || '' }}
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
+      # `latest` only moves for an actual tag — a manual run builds images that
+      # can be pulled by version and does not redirect anybody's :latest.
+      - name: Create the manifest list
+        env:
+          NAME: ${{ matrix.image == 'app' && env.APP_IMAGE || env.FRONTEND_IMAGE }}
+          VERSION: ${{ github.ref_name }}
+          IS_TAG: ${{ github.ref_type == 'tag' }}
+        run: |
+          cd /tmp/digests
+          tags="-t ${NAME}:${VERSION}"
+          if [ "$IS_TAG" = "true" ]; then
+            tags="$tags -t ${NAME}:latest"
+          fi
+          # shellcheck disable=SC2046
+          docker buildx imagetools create $tags \
+            $(printf "${NAME}@sha256:%s " *)
+          docker buildx imagetools inspect "${NAME}:${VERSION}"
 
   notify:
-    needs: [test, build]
+    needs: [test, build, merge]
     if: always()
     runs-on: ubuntu-latest
     # Job level, not step level: the `secrets` context is not available in a
@@ -141,6 +189,7 @@ jobs:
         env:
           TEST: ${{ needs.test.result }}
           BUILD: ${{ needs.build.result }}
+          MERGE: ${{ needs.merge.result }}
         run: |
           if [ "$TEST" != "success" ]; then
             title="❌ Tests failed"
@@ -149,6 +198,14 @@ jobs:
           elif [ "$BUILD" != "success" ]; then
             title="❌ Build failed"
             desc="No image was published for this tag."
+            color=15158332
+          elif [ "$MERGE" != "success" ]; then
+            # The per-architecture builds push by digest and tag nothing, so
+            # this leaves layers in the registry that no tag points at and the
+            # previous release still answering to :latest. Nothing is broken;
+            # this version is simply not published.
+            title="❌ Manifest merge failed"
+            desc="Architectures built but were never tagged. No image was published for this tag."
             color=15158332
           else
             title="✅ Images published"
