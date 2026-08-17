@@ -32,7 +32,9 @@ async def broker() -> Broker:
     await redis.aclose()
 
 
-def _trade(ticker: UniversalTicker, trade_id: str, *, price: str = "100") -> UntypedEnvelope:
+def _trade(
+    ticker: UniversalTicker, trade_id: str, *, price: str = "100"
+) -> UntypedEnvelope:
     return UntypedEnvelope.wrap(
         {
             "universal_ticker": str(ticker),
@@ -102,9 +104,9 @@ def test_event_id_uses_trade_id_and_kline_window() -> None:
         event_id("kline_1m", {"interval": "1m", "open_time": 10.0, "closed": True})
         == "1m|10.0|1"
     )
-    assert event_id("bestquote", {"bid": "1", "ask": "2", "bid_qty": "3", "ask_qty": "4"}) == (
-        "1|2|3|4"
-    )
+    assert event_id(
+        "bestquote", {"bid": "1", "ask": "2", "bid_qty": "3", "ask_qty": "4"}
+    ) == ("1|2|3|4")
     assert event_id("orderbook", {"last_update_id": 77}) == "77"
     assert event_id("orderbook", {"u": 8}) == "8"
 

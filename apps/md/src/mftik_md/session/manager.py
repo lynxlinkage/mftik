@@ -262,7 +262,11 @@ class SessionManager:
             )
             self._disconnects.add(task)
             task.add_done_callback(self._disconnects.discard)
-        logger.info("MD mirrored %d feed(s) across %d session(s)", len(pinned), len(rows))
+        logger.info(
+            "MD mirrored %d feed(s) across %d session(s)",
+            len(pinned),
+            len(rows),
+        )
         return pinned
 
     async def _grace_published(self, feeds: set[str], grace_s: float) -> None:
