@@ -7,9 +7,9 @@ from decimal import Decimal
 import fakeredis.aioredis
 import pytest
 from db_harness import a_database
-from mft.broker import Broker, BrokerConfig
-from mft.exchange.tickers import Category, UniversalTicker
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange.tickers import Category, UniversalTicker
+from mftik.protocol import (
     SYM_LIST,
     SYM_REFRESH,
     SYM_VENUES,
@@ -18,11 +18,11 @@ from mft.protocol import (
     SymRefreshRequest,
     Topics,
 )
-from mft.symbols import SymbolClient, SymbolNotFoundError
-from mft_db.repositories import SymbolRepository
-from mft_sym.plane import SymbolPlane
-from mft_sym.rpc import dispatch
-from mft_sym.sources.base import Instrument
+from mftik.symbols import SymbolClient, SymbolNotFoundError
+from mftik_db.repositories import SymbolRepository
+from mftik_sym.plane import SymbolPlane
+from mftik_sym.rpc import dispatch
+from mftik_sym.sources.base import Instrument
 
 VENUE = "Gate"
 
@@ -549,7 +549,7 @@ async def test_client_reverse_lookup_raises_for_unknown(
 
 async def test_client_satisfies_the_resolver_protocol(broker: Broker) -> None:
     """The adapter's dependency is the protocol, not this class."""
-    from mft.exchange.symbols import SymbolResolver
+    from mftik.exchange.symbols import SymbolResolver
 
     resolver: SymbolResolver = SymbolClient(broker)
     assert hasattr(resolver, "exch_ticker")

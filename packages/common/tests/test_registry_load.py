@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from mft.registry.errors import RegistryError
-from mft.registry.load import load_class
+from mftik.registry.errors import RegistryError
+from mftik.registry.load import load_class
 
 
 def test_single_file_class(tmp_path) -> None:

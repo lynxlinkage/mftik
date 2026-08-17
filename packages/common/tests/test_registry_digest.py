@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mft.registry.digest import digest_files
+from mftik.registry.digest import digest_files
 
 
 def test_same_source_same_digest() -> None:

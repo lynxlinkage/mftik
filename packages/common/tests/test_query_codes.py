@@ -5,8 +5,8 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft.exchange.models import Kline
-from mft.protocol import (
+from mftik.exchange.models import Kline
+from mftik.protocol import (
     MD_FETCH_KLINES,
     MD_KLINES_RESULT,
     MD_QUERY_ACK,
@@ -20,7 +20,7 @@ from mft.protocol import (
     QueryCode,
     Topics,
 )
-from mft.protocol.query_codes import (
+from mftik.protocol.query_codes import (
     BAND_END,
     MD_BAND,
     VENUE_BAND,

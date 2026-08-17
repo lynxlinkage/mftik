@@ -10,9 +10,9 @@ adapter and that, so it is checked name by name.
 from __future__ import annotations
 
 import pytest
-from mft.exchange.binance.future import methods as m
-from mft.exchange.binance.future import streams as st
-from mft.exchange.binance.future.protocol import (
+from mftik.exchange.binance.future import methods as m
+from mftik.exchange.binance.future import streams as st
+from mftik.exchange.binance.future.protocol import (
     BINANCE_FUTURE_MARKET_STREAM_URL,
     BINANCE_FUTURE_PRIVATE_STREAM_URL,
     BINANCE_FUTURE_PUBLIC_STREAM_URL,

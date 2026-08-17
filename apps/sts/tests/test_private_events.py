@@ -5,9 +5,9 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange, Side
-from mft.exchange.models import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange, Side
+from mftik.exchange.models import (
     Balance,
     Fill,
     Order,
@@ -15,8 +15,8 @@ from mft.exchange.models import (
     OrderType,
     limit_order,
 )
-from mft.exchange.oms import Position
-from mft.protocol import (
+from mftik.exchange.oms import Position
+from mftik.protocol import (
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
     TD_FILL,
@@ -32,12 +32,12 @@ from mft.protocol import (
     Topics,
     UntypedEnvelope,
 )
-from mft_sts.client_order_id import unpack
-from mft_sts.impl import register
-from mft_sts.session import SessionManager as StsSessionManager
-from mft_sts.strategy import Strategy
-from mft_td.session import PaperSessionFactory
-from mft_td.session import SessionManager as TdSessionManager
+from mftik_sts.client_order_id import unpack
+from mftik_sts.impl import register
+from mftik_sts.session import SessionManager as StsSessionManager
+from mftik_sts.strategy import Strategy
+from mftik_td.session import PaperSessionFactory
+from mftik_td.session import SessionManager as TdSessionManager
 
 
 class PrivateEventsStrategy(Strategy):

@@ -12,12 +12,12 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange.models import AggTrade, Side, Trade
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import Topics
-from mft_sts.eventlog import EventLog
-from mft_sts.tape import StrategyTape
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange.models import AggTrade, Side, Trade
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import Topics
+from mftik_sts.eventlog import EventLog
+from mftik_sts.tape import StrategyTape
 
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
 AGG_FEED = Topics.md_feed("aggtrade", TICKER)

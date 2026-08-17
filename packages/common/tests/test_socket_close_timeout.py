@@ -16,9 +16,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from mft.exchange.binance import socket as binance_socket
-from mft.exchange.bybit import socket as bybit_socket
-from mft.exchange.gate.spot import client as gate_client
+from mftik.exchange.binance import socket as binance_socket
+from mftik.exchange.bybit import socket as bybit_socket
+from mftik.exchange.gate.spot import client as gate_client
 
 
 class _Recorder:

@@ -12,7 +12,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft_api.decimals import wire_decimal
+from mftik_api.decimals import wire_decimal
 
 
 @pytest.mark.parametrize(

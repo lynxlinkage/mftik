@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException
-from mft.protocol import parse_strategy_yml
-from mft_api.routes import sts as sts_routes
+from mftik.protocol import parse_strategy_yml
+from mftik_api.routes import sts as sts_routes
 
 
 class _FakeDb:

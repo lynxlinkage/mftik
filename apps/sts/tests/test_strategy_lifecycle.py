@@ -4,11 +4,11 @@ import asyncio
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.protocol import StsCreateSessionRequest
-from mft_sts.impl import register, resolve
-from mft_sts.session import SessionManager
-from mft_sts.strategy import Strategy
+from mftik.broker import Broker, BrokerConfig
+from mftik.protocol import StsCreateSessionRequest
+from mftik_sts.impl import register, resolve
+from mftik_sts.session import SessionManager
+from mftik_sts.strategy import Strategy
 
 
 class RecordingStrategy(Strategy):
@@ -221,7 +221,7 @@ async def test_strategy_can_reach_the_symbol_plane(broker: Broker) -> None:
     plane = session.strategy.symbols
     # A recording view over the session's client, not the client itself: what
     # the plane answers decides how an order is rounded, so the session event
-    # log has to see it (see ``mft_sts.symbols``).
+    # log has to see it (see ``mftik_sts.symbols``).
     assert plane.client is session.symbols
     assert hasattr(plane, "get")
     assert hasattr(plane, "filter")

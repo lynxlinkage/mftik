@@ -1,8 +1,8 @@
 """Handshake: refuse a remote whose registry protocol we cannot speak."""
 
 import pytest
-from mft.registry.errors import RegistryError
-from mft.registry.protocol import (
+from mftik.registry.errors import RegistryError
+from mftik.registry.protocol import (
     PROTOCOL,
     PROTOCOL_MIN,
     PROTOCOL_VERSION,

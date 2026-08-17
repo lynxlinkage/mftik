@@ -16,18 +16,18 @@ from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.exchange.tickers import UniversalTicker
-from mft.liveness import alive_key, clear_alive, is_alive, mark_alive
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.exchange.tickers import UniversalTicker
+from mftik.liveness import alive_key, clear_alive, is_alive, mark_alive
+from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     Envelope,
     LeaseHeartbeat,
     MdAttachRequest,
     Topics,
 )
-from mft_md.session import PaperPublicFactory, SessionManager
+from mftik_md.session import PaperPublicFactory, SessionManager
 
 FEED = Topics.md_feed("orderbook", UniversalTicker.parse("Paper_Spot_BTCUSDT"))
 

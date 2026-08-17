@@ -4,7 +4,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from mft.exchange import (
+from mftik.exchange import (
     ExchangeNotConnectedError,
     OrderError,
     OrderStatus,
@@ -17,7 +17,7 @@ from mft.exchange import (
     limit_order,
     market_order,
 )
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import UniversalTicker
 
 
 def PAPER(symbol: str) -> UniversalTicker:

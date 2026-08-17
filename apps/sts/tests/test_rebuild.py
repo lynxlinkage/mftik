@@ -17,11 +17,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import fakeredis.aioredis
-import mft_sts.session.manager as manager_mod
+import mftik_sts.session.manager as manager_mod
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.liveness import is_alive, mark_alive
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.liveness import is_alive, mark_alive
+from mftik.protocol import (
     MD_SESSION_ATTACH,
     TD_SESSION_ATTACH,
     Envelope,
@@ -30,9 +30,9 @@ from mft.protocol import (
     TdAttachResult,
     Topics,
 )
-from mft_sts.impl import register
-from mft_sts.session import SessionManager
-from mft_sts.strategy import Strategy
+from mftik_sts.impl import register
+from mftik_sts.session import SessionManager
+from mftik_sts.strategy import Strategy
 
 
 @dataclass

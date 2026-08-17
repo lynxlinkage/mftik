@@ -14,19 +14,19 @@ from typing import Any
 
 import pytest
 from binance_stub import FakeBinanceApi, FakeBinanceStream
-from mft.exchange.binance.spot import methods as m
-from mft.exchange.binance.spot import streams as st
-from mft.exchange.binance.spot.client import BinanceSpotWsApi
-from mft.exchange.binance.spot.feed import BinanceSpotStream
-from mft.exchange.binance.spot.public import (
+from mftik.exchange.binance.spot import methods as m
+from mftik.exchange.binance.spot import streams as st
+from mftik.exchange.binance.spot.client import BinanceSpotWsApi
+from mftik.exchange.binance.spot.feed import BinanceSpotStream
+from mftik.exchange.binance.spot.public import (
     BINANCE_INTERVALS,
     BinanceSpotPublicClient,
     venue_interval,
 )
-from mft.exchange.errors import ExchangeNotConnectedError
-from mft.exchange.intervals import InvalidIntervalError
-from mft.exchange.models import AggTrade, Side
-from mft.exchange.tickers import Category, UniversalTicker
+from mftik.exchange.errors import ExchangeNotConnectedError
+from mftik.exchange.intervals import InvalidIntervalError
+from mftik.exchange.models import AggTrade, Side
+from mftik.exchange.tickers import Category, UniversalTicker
 
 TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")
 

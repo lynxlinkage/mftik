@@ -188,7 +188,7 @@ Not a new workspace package. `packages/common` must not import FastAPI.
 
 ```
 packages/db                         users + identities / sessions / keys / oauth states
-apps/api/src/mft_api/auth/
+apps/api/src/mftik_api/auth/
   principal.py                      Principal(user_id, via, scopes, key_id)
   passwords.py                      argon2id
   oauth.py                          Discord / Google, PKCE, the state record
@@ -219,7 +219,7 @@ seed/migration default and as the `MFT_AUTH_ENABLED=0` identity, never as a
 request identity once the flag is on.
 
 `session` is already an overloaded word here — `sts_sessions`, `td_sessions`,
-`md_sessions`, and `mft_db.session.session_scope` for the SQLAlchemy one.
+`md_sessions`, and `mftik_db.session.session_scope` for the SQLAlchemy one.
 `auth/sessions.py` will be managing auth sessions inside `async with
 session_scope() as db:` blocks. Name locals accordingly.
 

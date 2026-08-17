@@ -13,8 +13,8 @@ import time
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.protocol import (
     MD_SESSION_DETACH,
     TD_SESSION_DETACH,
     MdDetachRequest,
@@ -22,8 +22,8 @@ from mft.protocol import (
     Topics,
     UntypedEnvelope,
 )
-from mft_sts.session.session import StsSession
-from mft_sts.strategy import Strategy
+from mftik_sts.session.session import StsSession
+from mftik_sts.strategy import Strategy
 
 
 @pytest.fixture

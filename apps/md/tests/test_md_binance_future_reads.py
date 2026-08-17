@@ -13,10 +13,10 @@ from typing import Any
 
 import httpx
 import pytest
-from mft.exchange.binance.future.rest import BinanceFuturePublicRest
-from mft.exchange.intervals import InvalidIntervalError
-from mft.exchange.tickers import UniversalTicker
-from mft_md.fetch.readers import BinanceFutureReader, VenueReaderFactory
+from mftik.exchange.binance.future.rest import BinanceFuturePublicRest
+from mftik.exchange.intervals import InvalidIntervalError
+from mftik.exchange.tickers import UniversalTicker
+from mftik_md.fetch.readers import BinanceFutureReader, VenueReaderFactory
 
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
 NATIVE = "BTC-USDT"

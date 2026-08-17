@@ -17,9 +17,9 @@ from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     TD_ERROR,
     TD_SESSION_DETACH,
@@ -32,8 +32,8 @@ from mft.protocol import (
     TdDetachResult,
     Topics,
 )
-from mft_td.rpc import dispatch
-from mft_td.session import PaperSessionFactory, SessionManager
+from mftik_td.rpc import dispatch
+from mftik_td.session import PaperSessionFactory, SessionManager
 
 SID = "sess-detach-rpc"
 API_ID = 3

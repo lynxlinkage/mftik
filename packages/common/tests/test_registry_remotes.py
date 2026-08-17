@@ -14,11 +14,11 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
-from mft.registry.store import RegistryStore
-from mft.registry.sync import connect_remote, diff_remote
+from mftik.registry.store import RegistryStore
+from mftik.registry.sync import connect_remote, diff_remote
 
 _TINY = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -130,7 +130,7 @@ def a_locked_peer(store: RegistryStore, token: str) -> tuple[httpx.MockTransport
         auth = request.headers.get("authorization")
         seen.append((path, auth))
         if path == "/registry/v1/info":
-            from mft.registry.protocol import handshake_info
+            from mftik.registry.protocol import handshake_info
 
             return httpx.Response(200, json=handshake_info())
         if auth != f"Bearer {token}":

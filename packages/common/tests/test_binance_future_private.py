@@ -19,23 +19,23 @@ from binance_future_stub import (
     FakeBinanceFutureApi,
     FakeBinanceFutureUser,
 )
-from mft.exchange.binance.future import methods as m
-from mft.exchange.binance.future.client import BinanceFutureWsApi
-from mft.exchange.binance.future.models import (
+from mftik.exchange.binance.future import methods as m
+from mftik.exchange.binance.future.client import BinanceFutureWsApi
+from mftik.exchange.binance.future.models import (
     BinanceFutureOrderAck,
     BinanceFutureSymbolConfig,
 )
-from mft.exchange.binance.future.private import BinanceFuturePrivateClient
-from mft.exchange.binance.future.user import BinanceFutureUserStream
-from mft.exchange.errors import ExchangeError, OrderError
-from mft.exchange.models import (
+from mftik.exchange.binance.future.private import BinanceFuturePrivateClient
+from mftik.exchange.binance.future.user import BinanceFutureUserStream
+from mftik.exchange.errors import ExchangeError, OrderError
+from mftik.exchange.models import (
     OrderStatus,
     OrderType,
     PlaceOrderRequest,
     Side,
     TimeInForce,
 )
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import UniversalTicker
 
 NATIVE = "BTC-USDT"
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")

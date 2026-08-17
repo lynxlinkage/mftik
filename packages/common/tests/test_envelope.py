@@ -1,4 +1,4 @@
-from mft.protocol import (
+from mftik.protocol import (
     Envelope,
     Heartbeat,
     HeartbeatEnvelope,

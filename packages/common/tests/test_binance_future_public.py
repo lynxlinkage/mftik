@@ -15,15 +15,15 @@ from typing import Any
 
 import pytest
 from binance_stub import FakeBinanceStream
-from mft.exchange.binance.future.feed import BinanceFutureStream
-from mft.exchange.binance.future.public import (
+from mftik.exchange.binance.future.feed import BinanceFutureStream
+from mftik.exchange.binance.future.public import (
     BINANCE_FUTURE_INTERVALS,
     BinanceFuturePublicClient,
     venue_interval,
 )
-from mft.exchange.intervals import InvalidIntervalError
-from mft.exchange.models import AggTrade, Side
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.intervals import InvalidIntervalError
+from mftik.exchange.models import AggTrade, Side
+from mftik.exchange.tickers import UniversalTicker
 
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
 NATIVE = "BTC-USDT"

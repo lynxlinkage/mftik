@@ -13,9 +13,9 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
-from mft_api.auth import AuthMiddleware, auth_router
-from mft_api.auth.deps import OwnerId
-from mft_api.deps import DEFAULT_USER_ID
+from mftik_api.auth import AuthMiddleware, auth_router
+from mftik_api.auth.deps import OwnerId
+from mftik_api.deps import DEFAULT_USER_ID
 
 #: https, so the cookie jar sends a ``Secure`` cookie back. Over http it would
 #: silently withhold it and every authenticated test would look like a bug in
@@ -34,7 +34,7 @@ def an_api(*, registry: bool = False) -> FastAPI:
     app.add_middleware(AuthMiddleware)
     app.include_router(auth_router)
     if registry:
-        from mft_api.routes import registry_router
+        from mftik_api.routes import registry_router
 
         app.include_router(registry_router)
 
@@ -63,8 +63,8 @@ def use_database(monkeypatch, scope) -> None:
     it back on the next request. Patching one and not the other produces a
     login that succeeds and then does not exist.
     """
-    from mft_api.auth import middleware as auth_middleware
-    from mft_api.auth import routes as auth_routes
+    from mftik_api.auth import middleware as auth_middleware
+    from mftik_api.auth import routes as auth_routes
 
     async def _audit(**_kwargs: object) -> None:
         return None

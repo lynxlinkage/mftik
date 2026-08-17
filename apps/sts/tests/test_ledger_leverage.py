@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.protocol import (
     STS_ENSURE_LEVERAGE,
     TD_LEVERAGE_ACK,
     EnsureLeverage,
@@ -18,7 +18,7 @@ from mft.protocol import (
     RejectCode,
     Topics,
 )
-from mft_sts.ledger import StrategyLedger
+from mftik_sts.ledger import StrategyLedger
 
 
 @pytest.fixture

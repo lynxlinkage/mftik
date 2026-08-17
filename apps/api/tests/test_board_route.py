@@ -17,10 +17,10 @@ from decimal import Decimal
 import pytest
 from db_harness import a_database, an_owner
 from fastapi import HTTPException
-from mft_api.routes import board as board_routes
-from mft_db.models import StsSessionRow
-from mft_db.models.history import Attribution, Source, Stream
-from mft_db.repositories import (
+from mftik_api.routes import board as board_routes
+from mftik_db.models import StsSessionRow
+from mftik_db.models.history import Attribution, Source, Stream
+from mftik_db.repositories import (
     BackfillCursorRepository,
     FillRepository,
     OrderRepository,

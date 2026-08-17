@@ -14,10 +14,10 @@ from typing import Any
 
 import httpx
 import pytest
-from mft.exchange.bybit.rest import BybitPublicRest
-from mft.exchange.intervals import InvalidIntervalError
-from mft.exchange.tickers import UniversalTicker
-from mft_md.fetch.readers import BybitReader, NoReaderError, VenueReaderFactory
+from mftik.exchange.bybit.rest import BybitPublicRest
+from mftik.exchange.intervals import InvalidIntervalError
+from mftik.exchange.tickers import UniversalTicker
+from mftik_md.fetch.readers import BybitReader, NoReaderError, VenueReaderFactory
 
 SPOT = UniversalTicker.parse("Bybit_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Bybit_Perp_BTCUSDT")

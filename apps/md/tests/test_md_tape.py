@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import Envelope, Topics
-from mft_md.tape import TapeRecorder
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import Envelope, Topics
+from mftik_md.tape import TapeRecorder
 
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
 AGG_FEED = Topics.md_feed("aggtrade", TICKER)
@@ -132,7 +132,7 @@ async def test_configured_topics_replace_the_defaults(broker: Broker) -> None:
 @pytest.mark.asyncio
 async def test_dispatcher_records_after_fanning_out(broker: Broker) -> None:
     """Wired where every print already passes, and behind the live sessions."""
-    from mft_md.session.dispatcher import Dispatcher
+    from mftik_md.session.dispatcher import Dispatcher
 
     recorder = TapeRecorder(broker)
     dispatcher = Dispatcher(broker, recorder=recorder)
@@ -150,7 +150,7 @@ async def test_dispatcher_records_after_fanning_out(broker: Broker) -> None:
 async def test_dispatcher_without_a_recorder_records_nothing(
     broker: Broker,
 ) -> None:
-    from mft_md.session.dispatcher import Dispatcher
+    from mftik_md.session.dispatcher import Dispatcher
 
     dispatcher = Dispatcher(broker)
     envelope = Envelope[dict].wrap(

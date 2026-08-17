@@ -23,11 +23,11 @@ import logging
 import os
 import sys
 
-from mft.exchange import venues
-from mft_db.models.api import Api, ApiType
-from mft_db.models.user import User
-from mft_db.repositories import AccountRepository, ApiRepository, UserRepository
-from mft_db.session import session_scope
+from mftik.exchange import venues
+from mftik_db.models.api import Api, ApiType
+from mftik_db.models.user import User
+from mftik_db.repositories import AccountRepository, ApiRepository, UserRepository
+from mftik_db.session import session_scope
 
 logging.basicConfig(
     level=logging.INFO,

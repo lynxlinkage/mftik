@@ -6,13 +6,13 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
-from mft.registry.errors import RegistryError
-from mft.registry.protocol import handshake_info
-from mft.registry.store import RegistryStore
-from mft.registry.sync import connect_remote, diff_remote
+from mftik.registry.errors import RegistryError
+from mftik.registry.protocol import handshake_info
+from mftik.registry.store import RegistryStore
+from mftik.registry.sync import connect_remote, diff_remote
 
 _TINY = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -92,7 +92,7 @@ async def test_connect_does_not_pull_private(tmp_path) -> None:
     peer.add(
         {
             "strategy.py": (
-                "from mft_sts.strategy import Strategy\n"
+                "from mftik_sts.strategy import Strategy\n"
                 "class Extra(Strategy):\n"
                 '    name = "extra"\n'
             )
@@ -127,7 +127,7 @@ async def test_diff_marks_synced_diverged_and_remote_only(tmp_path) -> None:
         peer.add(
             {
                 "strategy.py": (
-                    "from mft_sts.strategy import Strategy\n"
+                    "from mftik_sts.strategy import Strategy\n"
                     "class Extra(Strategy):\n"
                     '    name = "extra"\n'
                 )

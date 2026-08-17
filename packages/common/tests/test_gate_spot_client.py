@@ -13,17 +13,17 @@ from typing import Any
 
 import pytest
 from gate_stub import API_KEY, API_SECRET, FakeGate
-from mft.exchange.errors import ExchangeError, ExchangeNotConnectedError
-from mft.exchange.gate.spot import (
+from mftik.exchange.errors import ExchangeError, ExchangeNotConnectedError
+from mftik.exchange.gate.spot import (
     GateApiError,
     GateSpotWebSocket,
     GateWsError,
     api_sign,
     sign,
 )
-from mft.exchange.gate.spot import channels as ch
-from mft.exchange.models import OrderStatus, OrderType, Side
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.gate.spot import channels as ch
+from mftik.exchange.models import OrderStatus, OrderType, Side
+from mftik.exchange.tickers import UniversalTicker
 
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")

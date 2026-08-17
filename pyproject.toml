@@ -1,5 +1,5 @@
 [project]
-name = "mft-workspace"
+name = "mftik-workspace"
 version = "0.1.0"
 description = "MFT monorepo workspace root"
 requires-python = ">=3.12"

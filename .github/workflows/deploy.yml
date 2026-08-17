@@ -58,7 +58,7 @@ jobs:
       - name: Contracts up to date
         run: |
           uv run --all-packages python -c \
-            "import json; from mft_api.main import app; print(json.dumps(app.openapi(), indent=2))" \
+            "import json; from mftik_api.main import app; print(json.dumps(app.openapi(), indent=2))" \
             > /tmp/openapi.json
           diff -u contracts/openapi.json /tmp/openapi.json \
             || { echo "contracts/openapi.json is stale — run: just openapi" >&2; exit 1; }

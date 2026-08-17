@@ -18,10 +18,10 @@ import httpx
 import pytest
 from auth_harness import a_client, an_api, use_database
 from db_harness import a_database
-from mft_api.auth import oauth
-from mft_api.auth import routes as auth_routes
-from mft_db.models.auth import AuthIdentity, AuthOAuthState
-from mft_db.models.user import User
+from mftik_api.auth import oauth
+from mftik_api.auth import routes as auth_routes
+from mftik_db.models.auth import AuthIdentity, AuthOAuthState
+from mftik_db.models.user import User
 from sqlalchemy import func, select
 
 GOOD = "correct-horse-battery"

@@ -13,10 +13,10 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import (
     MD_LEASE_ACK,
     MD_SUBSCRIBE,
     STS_LEASE_HEARTBEAT,
@@ -26,7 +26,7 @@ from mft.protocol import (
     MdSubscribe,
     Topics,
 )
-from mft_md.session import PaperPublicFactory, SessionManager
+from mftik_md.session import PaperPublicFactory, SessionManager
 
 FEED = Topics.md_feed("orderbook", UniversalTicker.parse("Paper_Spot_BTCUSDT"))
 SID = "md-lease-1"

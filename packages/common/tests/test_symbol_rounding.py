@@ -12,7 +12,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft.protocol.messages import SymbolFilterInfo, SymbolInfo
+from mftik.protocol.messages import SymbolFilterInfo, SymbolInfo
 
 
 def _info(**filters: str | None) -> SymbolInfo:

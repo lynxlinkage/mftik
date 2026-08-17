@@ -18,12 +18,12 @@ from binance_future_stub import (
     FakeBinanceFutureApi,
     FakeBinanceFutureUser,
 )
-from mft.exchange.binance.future import methods as m
-from mft.exchange.binance.future.client import BinanceFutureWsApi
-from mft.exchange.binance.future.protocol import BinanceWsError
-from mft.exchange.binance.future.user import BinanceFutureUserStream
-from mft.exchange.errors import ExchangeError
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.binance.future import methods as m
+from mftik.exchange.binance.future.client import BinanceFutureWsApi
+from mftik.exchange.binance.future.protocol import BinanceWsError
+from mftik.exchange.binance.future.user import BinanceFutureUserStream
+from mftik.exchange.errors import ExchangeError
+from mftik.exchange.tickers import UniversalTicker
 
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
 

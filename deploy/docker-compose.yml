@@ -39,7 +39,7 @@ services:
   migrate:
     <<: *mft
     restart: "no"
-    command: ["mft-db-migrate"]
+    command: ["mftik-db-migrate"]
     profiles: ["tools"]
 
   # One-shot: dev user (MFT_DEFAULT_USER_ID=1) + the two paper API rows, plus a
@@ -52,7 +52,7 @@ services:
 
   api:
     <<: *mft
-    command: ["mft-api"]
+    command: ["mftik-api"]
     volumes:
       - mft_data:/var/lib/mft
     environment:

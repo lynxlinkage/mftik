@@ -13,14 +13,14 @@ from pathlib import Path
 import pytest
 from auth_harness import a_client, an_api, use_database
 from db_harness import a_database
-from mft_api.auth import routes as auth_routes
-from mft_api.auth.middleware import required_scope
-from mft_api.auth.principal import SCOPE_API, SCOPE_REGISTRY_READ
+from mftik_api.auth import routes as auth_routes
+from mftik_api.auth.middleware import required_scope
+from mftik_api.auth.principal import SCOPE_API, SCOPE_REGISTRY_READ
 
 GOOD = "correct-horse-battery"
 
 _TINY = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"

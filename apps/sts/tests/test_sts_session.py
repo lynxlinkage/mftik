@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.protocol import (
     STS_HEALTH,
     STS_SESSION_CREATE,
     STS_SESSION_LIST,
@@ -26,10 +26,10 @@ from mft.protocol import (
     TdAttachRequest,
     Topics,
 )
-from mft_sts.rpc import dispatch
-from mft_sts.session import SessionManager as StsSessionManager
-from mft_td.session import PaperSessionFactory
-from mft_td.session import SessionManager as TdSessionManager
+from mftik_sts.rpc import dispatch
+from mftik_sts.session import SessionManager as StsSessionManager
+from mftik_td.session import PaperSessionFactory
+from mftik_td.session import SessionManager as TdSessionManager
 
 
 @dataclass

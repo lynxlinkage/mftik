@@ -8,11 +8,11 @@ the scan would not see them.
 from __future__ import annotations
 
 import pytest
-from mft.registry.errors import RegistryError
-from mft.registry.gate import check_files
+from mftik.registry.errors import RegistryError
+from mftik.registry.gate import check_files
 
 _TINY = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -29,9 +29,9 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from mft.exchange.models import Order
-from mft_sts.strategy import Strategy
-from mft_sts.timer import TimerToken
+from mftik.exchange.models import Order
+from mftik_sts.strategy import Strategy
+from mftik_sts.timer import TimerToken
 
 class Tiny(Strategy):
     name = "tiny"
@@ -45,7 +45,7 @@ class Tiny(Strategy):
 def test_third_party_import_is_refused() -> None:
     source = """\
 import numpy
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -57,7 +57,7 @@ class Tiny(Strategy):
 def test_importlib_is_refused() -> None:
     source = """\
 import importlib
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -68,7 +68,7 @@ class Tiny(Strategy):
 
 def test_dunder_import_is_refused() -> None:
     source = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -84,7 +84,7 @@ def test_type_checking_imports_are_ignored() -> None:
     """A TYPE_CHECKING pandas import must not block a strategy that never loads it."""
     source = """\
 from typing import TYPE_CHECKING
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 if TYPE_CHECKING:
     import pandas
@@ -100,7 +100,7 @@ def test_sibling_module_is_allowed() -> None:
     files = {
         "strategy.py": (
             b"from helpers import N\n"
-            b"from mft_sts.strategy import Strategy\n"
+            b"from mftik_sts.strategy import Strategy\n"
             b"class Tiny(Strategy):\n"
             b'    name = "tiny"\n'
         ),
@@ -112,7 +112,7 @@ def test_sibling_module_is_allowed() -> None:
 def test_missing_sibling_is_refused() -> None:
     source = """\
 from missing import N
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -127,7 +127,7 @@ def test_relative_import_inside_a_package() -> None:
         "pkg/helpers.py": b"N = 1\n",
         "pkg/strategy.py": (
             b"from .helpers import N\n"
-            b"from mft_sts.strategy import Strategy\n"
+            b"from mftik_sts.strategy import Strategy\n"
             b"class Tiny(Strategy):\n"
             b'    name = "tiny"\n'
         ),
@@ -138,7 +138,7 @@ def test_relative_import_inside_a_package() -> None:
 def test_relative_import_at_top_level_is_refused() -> None:
     source = """\
 from .helpers import N
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -149,9 +149,9 @@ class Tiny(Strategy):
 
 def test_strategy_via_module_attribute() -> None:
     source = """\
-import mft_sts.strategy
+import mftik_sts.strategy
 
-class Tiny(mft_sts.strategy.Strategy):
+class Tiny(mftik_sts.strategy.Strategy):
     name = "tiny"
 """
     found = check_files(_py(source))
@@ -160,7 +160,7 @@ class Tiny(mft_sts.strategy.Strategy):
 
 def test_annotated_name_is_read() -> None:
     source = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name: str = "tiny"
@@ -170,7 +170,7 @@ class Tiny(Strategy):
 
 def test_requires_mft_is_read() -> None:
     source = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -187,7 +187,7 @@ def test_invalid_python_is_refused() -> None:
 
 def test_shadowing_the_sdk_is_refused() -> None:
     files = {
-        "mft.py": b"x = 1\n",
+        "mftik.py": b"x = 1\n",
         "strategy.py": _TINY.encode(),
     }
     with pytest.raises(RegistryError, match="provided by the node"):

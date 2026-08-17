@@ -7,8 +7,8 @@ here is only making user input uniform before a lookup.
 from __future__ import annotations
 
 import pytest
-from mft.exchange import symbols
-from mft.exchange.symbols import canonical, join
+from mftik.exchange import symbols
+from mftik.exchange.symbols import canonical, join
 
 
 @pytest.mark.parametrize(

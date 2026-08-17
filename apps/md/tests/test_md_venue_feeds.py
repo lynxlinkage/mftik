@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from decimal import Decimal
 
 import pytest
-from mft.exchange.models import (
+from mftik.exchange.models import (
     AggTrade,
     BestQuote,
     BookLevel,
@@ -17,8 +17,8 @@ from mft.exchange.models import (
     Ticker,
     Trade,
 )
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import (
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_KLINE,
@@ -28,7 +28,7 @@ from mft.protocol import (
     MD_TRADE,
     UntypedEnvelope,
 )
-from mft_md.session.venue import VenueSession
+from mftik_md.session.venue import VenueSession
 
 
 def _fake(symbol: str) -> UniversalTicker:

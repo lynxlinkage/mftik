@@ -9,7 +9,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft.exchange.gate.spot import (
+from mftik.exchange.gate.spot import (
     GateBalance,
     GateBookTicker,
     GateCandlestick,
@@ -23,8 +23,8 @@ from mft.exchange.gate.spot import (
     from_text,
     to_text,
 )
-from mft.exchange.models import OrderStatus, OrderType, Side
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.models import OrderStatus, OrderType, Side
+from mftik.exchange.tickers import UniversalTicker
 
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")
@@ -341,7 +341,7 @@ def test_models_tolerate_unknown_fields() -> None:
 
 def test_api_ack_with_data_is_still_preliminary() -> None:
     """Gate's ack frame echoes ``req_param`` under ``data`` — not the order."""
-    from mft.exchange.gate.spot.protocol import GateResponse
+    from mftik.exchange.gate.spot.protocol import GateResponse
 
     resp = GateResponse(
         {

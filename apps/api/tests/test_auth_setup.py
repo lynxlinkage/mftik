@@ -12,12 +12,12 @@ from __future__ import annotations
 import pytest
 from auth_harness import a_client, an_api, use_database
 from db_harness import a_database, an_owner
-from mft_api.auth import passwords, sessions
-from mft_api.auth import routes as auth_routes
-from mft_db.models import Api, StsSessionRow
-from mft_db.models.api import ApiType
-from mft_db.models.user import User
-from mft_db.repositories import UserRepository
+from mftik_api.auth import passwords, sessions
+from mftik_api.auth import routes as auth_routes
+from mftik_db.models import Api, StsSessionRow
+from mftik_db.models.api import ApiType
+from mftik_db.models.user import User
+from mftik_db.repositories import UserRepository
 from sqlalchemy import func, select
 
 GOOD = "correct-horse-battery"

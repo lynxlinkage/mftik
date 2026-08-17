@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from db_harness import a_database
-from mft_db.repositories import SessionLogRepository
+from mftik_db.repositories import SessionLogRepository
 
 
 @pytest.fixture

@@ -44,7 +44,7 @@ services:
 
   migrate:
     <<: *mft
-    command: ["mft-db-migrate"]
+    command: ["mftik-db-migrate"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,7 +60,7 @@ services:
 
   api:
     <<: *mft
-    command: ["mft-api"]
+    command: ["mftik-api"]
     ports:
       - "8000:8000"
     environment:

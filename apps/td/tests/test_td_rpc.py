@@ -4,8 +4,8 @@ import asyncio
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.protocol import (
     TD_ERROR,
     TD_HEALTH,
     HealthCheck,
@@ -14,7 +14,7 @@ from mft.protocol import (
     RpcError,
     Topics,
 )
-from mft_td.rpc import dispatch
+from mftik_td.rpc import dispatch
 
 
 @pytest.fixture

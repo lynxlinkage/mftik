@@ -5,10 +5,10 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft.exchange.models import BookLevel, OrderBook, Side
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import SymbolInfo
-from mft_sts.impl.noop import NoopStrategy, _fmt
+from mftik.exchange.models import BookLevel, OrderBook, Side
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import SymbolInfo
+from mftik_sts.impl.noop import NoopStrategy, _fmt
 
 PAPER_BTC = SymbolInfo(
     universal_ticker="Paper_Spot_BTCUSDT",

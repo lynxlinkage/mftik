@@ -5,12 +5,12 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange, Side
-from mft.exchange.models import OrderStatus, OrderType, PlaceOrderRequest, limit_order
-from mft.exchange.paper.remote import PaperRemotePrivateClient
-from mft_paper.app import RedisEventBridge
-from mft_paper.rpc import dispatch
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange, Side
+from mftik.exchange.models import OrderStatus, OrderType, PlaceOrderRequest, limit_order
+from mftik.exchange.paper.remote import PaperRemotePrivateClient
+from mftik_paper.app import RedisEventBridge
+from mftik_paper.rpc import dispatch
 
 
 @pytest.fixture
@@ -101,7 +101,7 @@ async def test_remote_private_place_cancel(broker: Broker) -> None:
 async def _serve(
     broker: Broker, exchange: PaperExchange, stop: asyncio.Event
 ) -> None:
-    from mft.protocol import Topics
+    from mftik.protocol import Topics
 
     async for req in broker.serve(Topics.PAPER, stop=stop):
         await dispatch(req, exchange=exchange)

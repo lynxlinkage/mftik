@@ -11,10 +11,10 @@ from __future__ import annotations
 import pytest
 from auth_harness import a_client, an_api, use_database
 from db_harness import a_database
-from mft_api.auth import routes as auth_routes
-from mft_api.auth import sessions
-from mft_api.auth.middleware import AuthMiddleware, is_public
-from mft_api.deps import DEFAULT_USER_ID
+from mftik_api.auth import routes as auth_routes
+from mftik_api.auth import sessions
+from mftik_api.auth.middleware import AuthMiddleware, is_public
+from mftik_api.deps import DEFAULT_USER_ID
 
 GOOD = "correct-horse-battery"
 
@@ -121,7 +121,7 @@ async def test_a_database_that_cannot_answer_is_401_not_500(
         async with a_client(app) as client:
             await an_owner_with_a_password(client)
 
-            from mft_api.auth import middleware as auth_middleware
+            from mftik_api.auth import middleware as auth_middleware
 
             def _broken():
                 raise RuntimeError("database is gone")
@@ -199,7 +199,7 @@ def test_the_public_surface_is_the_one_we_meant() -> None:
     and the assertion is what says so.
     """
     from fastapi.routing import APIWebSocketRoute
-    from mft_api.main import app
+    from mftik_api.main import app
 
     paths = set(app.openapi()["paths"]) | {
         route.path for route in app.routes if isinstance(route, APIWebSocketRoute)

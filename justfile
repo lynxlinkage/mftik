@@ -39,7 +39,7 @@ backfill-check *args:
 
 # Apply DB migrations
 migrate revision="head":
-    uv run --all-packages mft-db-migrate {{revision}}
+    uv run --all-packages mftik-db-migrate {{revision}}
 
 # Seed dev user + two paper APIs (idempotent)
 seed:
@@ -69,14 +69,14 @@ makemigration message:
 
 # Export FastAPI OpenAPI → contracts/openapi.json
 openapi:
-    uv run --all-packages python -c "import json; from mft_api.main import app; print(json.dumps(app.openapi(), indent=2))" > contracts/openapi.json
+    uv run --all-packages python -c "import json; from mftik_api.main import app; print(json.dumps(app.openapi(), indent=2))" > contracts/openapi.json
 
 # Fail if OpenAPI contract is stale
 check-contracts:
     #!/usr/bin/env bash
     set -euo pipefail
     tmp="$(mktemp)"
-    uv run --all-packages python -c "import json; from mft_api.main import app; print(json.dumps(app.openapi(), indent=2))" > "$tmp"
+    uv run --all-packages python -c "import json; from mftik_api.main import app; print(json.dumps(app.openapi(), indent=2))" > "$tmp"
     if ! diff -u contracts/openapi.json "$tmp"; then
       echo "contracts/openapi.json is stale — run: just openapi" >&2
       rm -f "$tmp"

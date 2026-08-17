@@ -12,7 +12,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from mft.exchange.models import (
+from mftik.exchange.models import (
     BestQuote,
     Order,
     OrderStatus,
@@ -20,10 +20,10 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
-from mft.exchange.oms import OmsView
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import ReconDone, RejectCode, SymbolInfo
-from mft_sts.impl.twap import TwapStrategy
+from mftik.exchange.oms import OmsView
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import ReconDone, RejectCode, SymbolInfo
+from mftik_sts.impl.twap import TwapStrategy
 
 BTCUSDT = SymbolInfo(
     universal_ticker="Paper_Spot_BTCUSDT",

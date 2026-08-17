@@ -19,10 +19,10 @@ from typing import Any
 import httpx
 import pytest
 from binance_stub import keypair
-from mft.exchange.binance.spot.rest import BinanceSpotRest
-from mft.exchange.models import Side
-from mft.exchange.tickers import UniversalTicker
-from mft_td.backfill.reader import (
+from mftik.exchange.binance.spot.rest import BinanceSpotRest
+from mftik.exchange.models import Side
+from mftik.exchange.tickers import UniversalTicker
+from mftik_td.backfill.reader import (
     BinanceSpotHistoryReader,
     BybitHistoryReader,
     GateSpotHistoryReader,
@@ -236,7 +236,7 @@ class FakeBybitRest:
 
 
 def bybit_execution(exec_id: str, *, exec_type: str = "Trade") -> Any:
-    from mft.exchange.bybit.models import BybitExecution
+    from mftik.exchange.bybit.models import BybitExecution
 
     return BybitExecution.model_validate(
         {
@@ -328,7 +328,7 @@ class FakeGateRest:
 
 
 def gate_trade(trade_id: int) -> Any:
-    from mft.exchange.gate.spot.models import GateUserTrade
+    from mftik.exchange.gate.spot.models import GateUserTrade
 
     return GateUserTrade.model_validate(
         {

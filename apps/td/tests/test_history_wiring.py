@@ -20,10 +20,10 @@ from decimal import Decimal
 import fakeredis.aioredis
 import pytest
 from db_harness import a_database
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange, Side
-from mft.exchange.models import OrderStatus, OrderType, PlaceOrderRequest
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange, Side
+from mftik.exchange.models import OrderStatus, OrderType, PlaceOrderRequest
+from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     STS_ORDER_SUBMIT,
     Envelope,
@@ -33,10 +33,10 @@ from mft.protocol import (
     TdAttachRequest,
     Topics,
 )
-from mft_db.models.history import Attribution
-from mft_db.repositories import FillRepository, OrderRepository
-from mft_td.history import HistoryWriter
-from mft_td.session import PaperSessionFactory, SessionManager
+from mftik_db.models.history import Attribution
+from mftik_db.repositories import FillRepository, OrderRepository
+from mftik_td.history import HistoryWriter
+from mftik_td.session import PaperSessionFactory, SessionManager
 
 API_ID = 42
 SESSION = "sts-history"

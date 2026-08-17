@@ -9,7 +9,7 @@ becomes two rows.
 from __future__ import annotations
 
 import pytest
-from mft.exchange.tickers import (
+from mftik.exchange.tickers import (
     Category,
     InvalidTickerError,
     UniversalTicker,
@@ -144,6 +144,6 @@ def test_category_lookup_ignores_case() -> None:
 
 def test_invalid_ticker_is_an_exchange_error() -> None:
     """So a boundary can catch one type for every malformed instrument id."""
-    from mft.exchange.errors import ExchangeError
+    from mftik.exchange.errors import ExchangeError
 
     assert issubclass(InvalidTickerError, ExchangeError)

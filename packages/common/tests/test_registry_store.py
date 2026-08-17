@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from mft.registry.digest import digest_files
-from mft.registry.errors import RegistryConflict, RegistryError
-from mft.registry.store import RegistryStore
+from mftik.registry.digest import digest_files
+from mftik.registry.errors import RegistryConflict, RegistryError
+from mftik.registry.store import RegistryStore
 
 _TINY = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -25,7 +25,7 @@ def test_add_writes_source(tmp_path) -> None:
     assert added.files == ("strategy.py",)
     dest = tmp_path / "registry" / "private" / "tiny"
     assert (dest / "strategy.py").read_text() == _TINY
-    assert not (dest / "mft-strategy.toml").exists()
+    assert not (dest / "mftik-strategy.toml").exists()
     assert digest_files({"strategy.py": _TINY.encode()}) == added.digest
 
 
@@ -34,14 +34,14 @@ def test_leftover_toml_is_ignored(tmp_path) -> None:
     added = store.add(
         {
             "strategy.py": _TINY,
-            "mft-strategy.toml": "name = \"other\"\n",
+            "mftik-strategy.toml": "name = \"other\"\n",
             "README.md": "ignore me\n",
         }
     )
     assert added.name == "tiny"
     assert added.files == ("strategy.py",)
     dest = tmp_path / "registry" / "private" / "tiny"
-    assert not (dest / "mft-strategy.toml").exists()
+    assert not (dest / "mftik-strategy.toml").exists()
     assert not (dest / "README.md").exists()
 
 
@@ -74,7 +74,7 @@ def test_missing_name_is_refused(tmp_path) -> None:
         store.add(
             {
                 "strategy.py": (
-                    "from mft_sts.strategy import Strategy\n"
+                    "from mftik_sts.strategy import Strategy\n"
                     "class Tiny(Strategy):\n"
                     "    pass\n"
                 )
@@ -87,7 +87,7 @@ def test_requires_mft_comes_from_the_class(tmp_path) -> None:
     added = store.add(
         {
             "strategy.py": (
-                "from mft_sts.strategy import Strategy\n"
+                "from mftik_sts.strategy import Strategy\n"
                 "class Tiny(Strategy):\n"
                 '    name = "tiny"\n'
                 '    requires_mft = "0.2.0"\n'
@@ -118,7 +118,7 @@ def test_pycache_is_ignored_and_does_not_change_digest(tmp_path) -> None:
 
 def test_multiple_subclasses_are_refused(tmp_path) -> None:
     source = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class One(Strategy):
     name = "one"
@@ -152,7 +152,7 @@ def test_list_private_skips_junk(tmp_path) -> None:
     (broken / "strategy.py").write_text("def (\n")
     leftover = store.private_dir / "onlytoml"
     leftover.mkdir(parents=True)
-    (leftover / "mft-strategy.toml").write_text("name = \"x\"\n")
+    (leftover / "mftik-strategy.toml").write_text("name = \"x\"\n")
     assert store.list_private() == []
 
 
@@ -160,7 +160,7 @@ def test_leftover_toml_on_disk_is_not_listed(tmp_path) -> None:
     store = RegistryStore(tmp_path)
     store.add({"strategy.py": _TINY})
     dest = tmp_path / "registry" / "private" / "tiny"
-    (dest / "mft-strategy.toml").write_text("name = \"other\"\n")
+    (dest / "mftik-strategy.toml").write_text("name = \"other\"\n")
     listed = store.list_private()
     assert listed[0].files == ("strategy.py",)
     assert listed[0].name == "tiny"

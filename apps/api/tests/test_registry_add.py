@@ -9,9 +9,9 @@ from typing import Any
 import pytest
 from db_harness import a_database, an_owner
 from fastapi import HTTPException
-from mft.registry import RegistryStore
-from mft_api.routes import registry as registry_routes
-from mft_api.routes.registry import (
+from mftik.registry import RegistryStore
+from mftik_api.routes import registry as registry_routes
+from mftik_api.routes.registry import (
     add_strategy,
     disconnect_remote,
     get_published,
@@ -20,12 +20,12 @@ from mft_api.routes.registry import (
     list_published,
     remote_diff,
 )
-from mft_api.routes.sts import list_strategy_types, strategy_type_template
-from mft_api.schemas import RegistryAddBody
-from mft_db.repositories import StrategyRepository, StsSessionRepository
+from mftik_api.routes.sts import list_strategy_types, strategy_type_template
+from mftik_api.schemas import RegistryAddBody
+from mftik_db.repositories import StrategyRepository, StsSessionRepository
 
 _TINY = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -53,7 +53,7 @@ async def test_disallowed_import_is_400(tmp_path: Path) -> None:
         files={
             "strategy.py": (
                 "import requests\n"
-                "from mft_sts.strategy import Strategy\n"
+                "from mftik_sts.strategy import Strategy\n"
                 "class Tiny(Strategy):\n"
                 '    name = "tiny"\n'
             )

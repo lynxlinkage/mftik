@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 from db_harness import a_database, an_owner
-from mft_db.models.session import SessionStatus
-from mft_db.repositories import (
+from mftik_db.models.session import SessionStatus
+from mftik_db.repositories import (
     MdSessionRepository,
     StsSessionRepository,
     TdSessionRepository,

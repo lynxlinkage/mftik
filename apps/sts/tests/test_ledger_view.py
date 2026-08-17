@@ -12,10 +12,10 @@ from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange.oms import LedgerEntry
-from mft.protocol import Topics
-from mft_sts.ledger import StrategyLedger
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange.oms import LedgerEntry
+from mftik.protocol import Topics
+from mftik_sts.ledger import StrategyLedger
 
 
 @pytest.fixture

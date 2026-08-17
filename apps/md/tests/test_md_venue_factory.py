@@ -6,16 +6,16 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.exchange.binance.future.public import BinanceFuturePublicClient
-from mft.exchange.binance.spot.public import BinanceSpotPublicClient
-from mft.exchange.bybit.public import BybitPublicClient
-from mft.exchange.errors import ExchangeError
-from mft.exchange.gate.spot.public import GateSpotPublicClient
-from mft.exchange.paper.public import PaperPublicClient
-from mft.exchange.venues import UnknownVenueError
-from mft_md.session import PaperPublicFactory, VenuePublicFactory
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.exchange.binance.future.public import BinanceFuturePublicClient
+from mftik.exchange.binance.spot.public import BinanceSpotPublicClient
+from mftik.exchange.bybit.public import BybitPublicClient
+from mftik.exchange.errors import ExchangeError
+from mftik.exchange.gate.spot.public import GateSpotPublicClient
+from mftik.exchange.paper.public import PaperPublicClient
+from mftik.exchange.venues import UnknownVenueError
+from mftik_md.session import PaperPublicFactory, VenuePublicFactory
 
 
 @pytest.fixture
@@ -120,7 +120,7 @@ async def test_registered_venue_without_a_client_is_rejected(
     broker: Broker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A venue TD can trade but MD cannot read must fail at create."""
-    from mft.exchange import venues
+    from mftik.exchange import venues
 
     kraken = venues.Venue(name="Kraken", label="Kraken Spot")
     monkeypatch.setitem(venues.VENUES, kraken.name, kraken)

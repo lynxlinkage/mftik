@@ -13,13 +13,13 @@ from typing import Any
 
 import pytest
 from binance_stub import API_KEY, FakeBinanceApi, FakeBinanceStream
-from mft.exchange.binance.spot import methods as m
-from mft.exchange.binance.spot import streams as st
-from mft.exchange.binance.spot.client import BinanceSpotWsApi
-from mft.exchange.binance.spot.feed import BinanceSpotStream
-from mft.exchange.binance.spot.protocol import BinanceWsError
-from mft.exchange.errors import ExchangeError, ExchangeNotConnectedError
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.binance.spot import methods as m
+from mftik.exchange.binance.spot import streams as st
+from mftik.exchange.binance.spot.client import BinanceSpotWsApi
+from mftik.exchange.binance.spot.feed import BinanceSpotStream
+from mftik.exchange.binance.spot.protocol import BinanceWsError
+from mftik.exchange.errors import ExchangeError, ExchangeNotConnectedError
+from mftik.exchange.tickers import UniversalTicker
 
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")

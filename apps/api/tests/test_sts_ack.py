@@ -7,9 +7,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from db_harness import a_database, an_owner
 from fastapi import HTTPException
-from mft_api.routes import sts as sts_routes
-from mft_db.models import StsSessionRow
-from mft_db.models.session import SessionStatus
+from mftik_api.routes import sts as sts_routes
+from mftik_db.models import StsSessionRow
+from mftik_db.models.session import SessionStatus
 
 START = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
 

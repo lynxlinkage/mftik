@@ -8,7 +8,7 @@ it is pinned here rather than left implicit in the code that reads it.
 from __future__ import annotations
 
 import pytest
-from mft.exchange.models import (
+from mftik.exchange.models import (
     OPEN_STATUSES,
     PENDING_STATUSES,
     TERMINAL_STATUSES,

@@ -10,14 +10,14 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft.exchange.models import (
+from mftik.exchange.models import (
     Balance,
     Instrument,
     OrderType,
     PlaceOrderRequest,
     Side,
 )
-from mft_td.oms import InsufficientAvailable, Ledger, reservation_for
+from mftik_td.oms import InsufficientAvailable, Ledger, reservation_for
 
 BTCUSDT = Instrument(symbol="BTCUSDT", base="BTC", quote="USDT")
 

@@ -34,7 +34,7 @@
 	let viewingId = $state<number | null>(null);
 	let copied = $state(false);
 
-	// Matches mft.protocol.STS_REASON_OPERATOR_STOP. A stopped session is
+	// Matches mftik.protocol.STS_REASON_OPERATOR_STOP. A stopped session is
 	// `done` like any other, so this string is the only thing telling the two
 	// apart — keep it in step with the backend constant.
 	const OPERATOR_STOP = 'operator_stop';

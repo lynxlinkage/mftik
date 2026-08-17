@@ -11,8 +11,8 @@ from __future__ import annotations
 import pytest
 from auth_harness import a_client, an_api, use_database
 from db_harness import a_database
-from mft_api.auth import routes as auth_routes
-from mft_db.models.auth import AuthKey
+from mftik_api.auth import routes as auth_routes
+from mftik_db.models.auth import AuthKey
 from sqlalchemy import select
 
 GOOD = "correct-horse-battery"

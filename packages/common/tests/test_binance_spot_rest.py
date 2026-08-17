@@ -17,13 +17,13 @@ from urllib.parse import parse_qsl, unquote
 import httpx
 import pytest
 from binance_stub import keypair
-from mft.exchange.binance.spot.rest import (
+from mftik.exchange.binance.spot.rest import (
     MAX_ROWS,
     BinanceSpotRest,
     BinanceSpotRestError,
 )
-from mft.exchange.models import Side
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.models import Side
+from mftik.exchange.tickers import UniversalTicker
 
 TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")
 BASE = "https://api.test"

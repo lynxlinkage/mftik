@@ -7,10 +7,10 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.exchange.models import Order, OrderStatus, OrderType, Side
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.exchange.models import Order, OrderStatus, OrderType, Side
+from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     STS_RECON,
     TD_RECON_DONE,
@@ -21,8 +21,8 @@ from mft.protocol import (
     TdAttachRequest,
     Topics,
 )
-from mft_td.session import PaperSessionFactory, SessionManager
-from mft_td.session import manager as sessions_manager
+from mftik_td.session import PaperSessionFactory, SessionManager
+from mftik_td.session import manager as sessions_manager
 
 API_ID = 42
 SESSION = "sts-recon"

@@ -6,12 +6,12 @@ from decimal import Decimal
 
 import httpx
 import pytest
-from mft.exchange.tickers import Category
-from mft_sym.sources import PaperInstrumentSource, tick_from_precision
-from mft_sym.sources.binance import BinanceSpotInstrumentSource
-from mft_sym.sources.binance_future import BinanceFutureInstrumentSource
-from mft_sym.sources.bybit import BybitInstrumentSource
-from mft_sym.sources.gate import GateSpotInstrumentSource
+from mftik.exchange.tickers import Category
+from mftik_sym.sources import PaperInstrumentSource, tick_from_precision
+from mftik_sym.sources.binance import BinanceSpotInstrumentSource
+from mftik_sym.sources.binance_future import BinanceFutureInstrumentSource
+from mftik_sym.sources.bybit import BybitInstrumentSource
+from mftik_sym.sources.gate import GateSpotInstrumentSource
 
 # Trimmed rows in Gate's /spot/currency_pairs shape.
 GATE_ROWS = [
@@ -281,7 +281,7 @@ class FakePaperPublic:
 
 async def test_paper_source_reads_the_engines_own_filters() -> None:
     """Paper is pulled, not restated, so it cannot drift from the engine."""
-    from mft.exchange import PaperExchange
+    from mftik.exchange import PaperExchange
 
     rows = PaperExchange().list_instruments()
     source = PaperInstrumentSource(None, public=FakePaperPublic(rows))

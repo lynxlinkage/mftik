@@ -16,8 +16,8 @@ from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.protocol import (
     STS_ERROR,
     STS_EVENTLOG_INFO,
     STS_EVENTLOG_READ,
@@ -30,8 +30,8 @@ from mft.protocol import (
     StsEventLogReadRequestEnvelope,
     Topics,
 )
-from mft_sts.eventlog import DIR_ENV
-from mft_sts.rpc import dispatch
+from mftik_sts.eventlog import DIR_ENV
+from mftik_sts.rpc import dispatch
 
 
 @pytest.fixture

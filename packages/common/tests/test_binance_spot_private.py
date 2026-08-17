@@ -8,19 +8,19 @@ from typing import Any
 
 import pytest
 from binance_stub import API_KEY, FakeBinanceApi
-from mft.exchange.binance.spot import methods as m
-from mft.exchange.binance.spot.client import BinanceSpotWsApi
-from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
-from mft.exchange.binance.spot.protocol import BinanceWsError
-from mft.exchange.errors import OrderError
-from mft.exchange.models import (
+from mftik.exchange.binance.spot import methods as m
+from mftik.exchange.binance.spot.client import BinanceSpotWsApi
+from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
+from mftik.exchange.binance.spot.protocol import BinanceWsError
+from mftik.exchange.errors import OrderError
+from mftik.exchange.models import (
     OrderStatus,
     OrderType,
     PlaceOrderRequest,
     Side,
     TimeInForce,
 )
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import UniversalTicker
 
 NATIVE = "BTC-USDT"
 #: The instrument every order in this module is for.

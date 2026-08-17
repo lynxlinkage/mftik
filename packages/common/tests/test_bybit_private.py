@@ -9,19 +9,19 @@ from typing import Any
 import httpx
 import pytest
 from bybit_stub import API_KEY, API_SECRET, FakeBybit
-from mft.exchange.bybit.account import BybitPrivateStream
-from mft.exchange.bybit.private import BybitPrivateClient
-from mft.exchange.bybit.rest import BybitRest
-from mft.exchange.bybit.trade import BybitTradeSocket
-from mft.exchange.errors import OrderError
-from mft.exchange.models import (
+from mftik.exchange.bybit.account import BybitPrivateStream
+from mftik.exchange.bybit.private import BybitPrivateClient
+from mftik.exchange.bybit.rest import BybitRest
+from mftik.exchange.bybit.trade import BybitTradeSocket
+from mftik.exchange.errors import OrderError
+from mftik.exchange.models import (
     OrderStatus,
     OrderType,
     PlaceOrderRequest,
     Side,
     TimeInForce,
 )
-from mft.exchange.tickers import Category, UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
 
 #: Bybit's spelling happens to differ from the canonical one here on purpose,
 #: so a test would catch a connector that passed symbols through untranslated.

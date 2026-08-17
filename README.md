@@ -11,8 +11,8 @@ Async, broker-centric trading platform. Domains talk through Redis (Streams + Pu
 | `apps/paper` | Paper exchange engine (Redis RPC + streams) |
 | `apps/md` | Market-data domain |
 | `apps/sts` | Strategy domain |
-| `packages/common` | Shared library (`mft`) — protocol, broker, runtime, exchange |
-| `packages/db` | Schema + Alembic migrations (`mft_db`) |
+| `packages/common` | Shared library (`mftik`) — protocol, broker, runtime, exchange |
+| `packages/db` | Schema + Alembic migrations (`mftik_db`) |
 | `contracts/` | OpenAPI contract (Python ↔ JS) |
 | `frontend/` | SvelteKit UI (outside uv workspace) |
 | `Dockerfile` | One image for every Python process — they differ only by `command:` |
@@ -50,4 +50,4 @@ just check-contracts   # fail if OpenAPI is stale
 just frontend-check
 ```
 
-Apps do not import each other. Shared code lives in `packages/common` (`import mft`) and `packages/db` (`import mft_db`).
+Apps do not import each other. Shared code lives in `packages/common` (`import mftik`) and `packages/db` (`import mftik_db`).

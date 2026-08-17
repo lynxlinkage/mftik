@@ -14,16 +14,16 @@ from typing import Any
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange, Side
-from mft.exchange.models import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange, Side
+from mftik.exchange.models import (
     Balance,
     Order,
     OrderStatus,
     OrderType,
     PlaceOrderRequest,
 )
-from mft.protocol import (
+from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
@@ -38,7 +38,7 @@ from mft.protocol import (
     Topics,
     UntypedEnvelope,
 )
-from mft_td.session import PaperSessionFactory, SessionManager
+from mftik_td.session import PaperSessionFactory, SessionManager
 
 API_ID = 42
 SESSION = "sts-rpc"
@@ -213,7 +213,7 @@ async def test_no_td_serving_times_out(broker: Broker) -> None:
     This is the case the old pub/sub path lost silently: the message went
     nowhere and the strategy never learned it.
     """
-    from mft.broker.errors import RequestTimeoutError
+    from mftik.broker.errors import RequestTimeoutError
 
     with pytest.raises(RequestTimeoutError):
         await broker.request(
@@ -1002,7 +1002,7 @@ def test_reduce_only_passes_on_a_contract_ticker() -> None:
     Driven directly rather than through the RPC above, whose account is Paper —
     a spot-only venue, so it cannot answer the question this asks.
     """
-    from mft_td.session.manager import _reduce_only_unsupported
+    from mftik_td.session.manager import _reduce_only_unsupported
 
     for ticker in ("BinanceFuture_Perp_BTCUSDT", "Bybit_Perp_BTCUSDT"):
         payload = OrderSubmit.model_validate(
@@ -1023,7 +1023,7 @@ def test_reduce_only_passes_on_a_contract_ticker() -> None:
 
 def test_a_malformed_ticker_is_left_to_the_instrument_check() -> None:
     """One refusal per fault. Answering here would report the wrong reason."""
-    from mft_td.session.manager import _reduce_only_unsupported
+    from mftik_td.session.manager import _reduce_only_unsupported
 
     payload = OrderSubmit.model_validate(
         {

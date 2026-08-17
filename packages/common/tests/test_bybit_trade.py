@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 from bybit_stub import API_KEY, API_SECRET, FakeBybit
-from mft.exchange.bybit.protocol import BybitWsError
-from mft.exchange.bybit.trade import BybitTradeSocket
+from mftik.exchange.bybit.protocol import BybitWsError
+from mftik.exchange.bybit.trade import BybitTradeSocket
 
 
 def _trade(stub: FakeBybit, **kwargs: Any) -> BybitTradeSocket:

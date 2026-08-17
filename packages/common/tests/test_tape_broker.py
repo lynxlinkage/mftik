@@ -11,7 +11,7 @@ import asyncio
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
+from mftik.broker import Broker, BrokerConfig
 
 FEED = "aggtrade.BinanceFuture_Perp_BTCUSDT"
 

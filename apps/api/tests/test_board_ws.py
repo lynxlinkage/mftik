@@ -16,9 +16,9 @@ from decimal import Decimal
 
 import pytest
 from db_harness import a_database
-from mft_api import ws as ws_module
-from mft_db.models.history import Attribution, Source
-from mft_db.repositories import OrderRepository
+from mftik_api import ws as ws_module
+from mftik_db.models.history import Attribution, Source
+from mftik_db.repositories import OrderRepository
 
 API_ID = 7
 CID = "281474976710656001"
