@@ -152,8 +152,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # `latest` only moves for an actual tag — a manual run builds images that
-      # can be pulled by version and does not redirect anybody's :latest.
+      # `latest` is what `mftik node-init` writes into a generated stack, so
+      # moving it points every self-hosted node at whatever was tagged last.
+      # Only a real, final tag earns it: a manual run builds images that can be
+      # pulled by name and redirect nobody, and neither does a pre-release —
+      # `v0.0.3-rc1` exists precisely to be tried without becoming what
+      # everyone gets by default.
       - name: Create the manifest list
         env:
           NAME: ${{ matrix.image == 'app' && env.APP_IMAGE || env.FRONTEND_IMAGE }}
@@ -162,8 +166,14 @@ jobs:
         run: |
           cd /tmp/digests
           tags="-t ${NAME}:${VERSION}"
-          if [ "$IS_TAG" = "true" ]; then
+          case "$VERSION" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+          if [ "$IS_TAG" = "true" ] && [ "$prerelease" = "false" ]; then
             tags="$tags -t ${NAME}:latest"
+          else
+            echo "not moving :latest (tag=$IS_TAG prerelease=$prerelease)"
           fi
           # shellcheck disable=SC2046
           docker buildx imagetools create $tags \
