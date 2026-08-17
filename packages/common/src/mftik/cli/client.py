@@ -16,11 +16,14 @@ base beside it.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import httpx
+from websockets.exceptions import InvalidStatus, WebSocketException
+from websockets.sync.client import connect as ws_connect
 
 from mftik.cli import config
 from mftik.cli.config import Profile
@@ -158,6 +161,47 @@ class Client:
 
     def delete(self, path: str, **kwargs: Any) -> Any:
         return self.request("DELETE", path, **kwargs)
+
+    def follow_sts_logs(
+        self,
+        session_id: str,
+        write: Callable[[str], None] = print,
+    ) -> None:
+        """Print live STS log lines until the socket closes or is interrupted.
+
+        The URL is ``ws_base/sts/{id}``, not the API base: Traefik routes
+        ``/ws/*`` without stripping, so a node whose API is at ``/api`` still
+        serves sockets at ``/ws``. Ctrl-C is left to the caller — this does
+        not stop the session.
+        """
+        url = f"{self.node.ws_base}/sts/{session_id}"
+        headers = (
+            [("Authorization", f"Bearer {self.token}")] if self.token else []
+        )
+        try:
+            with ws_connect(url, additional_headers=headers, close_timeout=1) as ws:
+                for raw in ws:
+                    write(_format_log_frame(raw))
+        except KeyboardInterrupt:
+            raise
+        except InvalidStatus as exc:
+            raise CliError(f"{url} refused the socket ({exc})") from exc
+        except (OSError, WebSocketException) as exc:
+            raise NodeUnreachable(f"cannot reach {url}: {exc}") from exc
+
+
+def _format_log_frame(raw: str) -> str:
+    """``level  message`` from a log envelope, or the frame itself."""
+    try:
+        env = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    payload = env.get("payload") if isinstance(env, dict) else None
+    if not isinstance(payload, dict):
+        return raw
+    level = str(payload.get("level") or "info")
+    message = str(payload.get("message") or "")
+    return f"{level}  {message}"
 
 
 def for_profile(profile: Profile, **kwargs: Any) -> Client:

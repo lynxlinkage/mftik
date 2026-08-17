@@ -20,18 +20,23 @@ from importlib.metadata import PackageNotFoundError, version
 
 from mftik.cli import check as check_cmd
 from mftik.cli import connect as connect_cmd
-from mftik.cli import profiles
+from mftik.cli import profiles, sessions
+from mftik.cli import push as push_cmd
+from mftik.cli import run as run_cmd
 from mftik.cli.client import CliError, NodeUnreachable
 from mftik.cli.config import ConfigError
+from mftik.cli.exits import EXIT_ERROR, EXIT_INTERRUPTED, EXIT_UNREACHABLE
 from mftik.cli.output import fail
 
-#: Something the user can fix: a bad argument, a refused request, a 404.
-EXIT_ERROR = 1
-#: The node did not answer. Separated so a script can retry this and not that.
-EXIT_UNREACHABLE = 2
-#: Interrupted. The shell convention, so ``mftik run`` stopped with Ctrl-C
-#: reports the same thing every other program does.
-EXIT_INTERRUPTED = 130
+__all__ = [
+    "EXIT_ERROR",
+    "EXIT_INTERRUPTED",
+    "EXIT_UNREACHABLE",
+    "COMMANDS",
+    "Command",
+    "build_parser",
+    "main",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +74,47 @@ def _setup_check(parser: argparse.ArgumentParser) -> None:
             "show frames when the strategy's own code raises, at import or "
             "in on_initialized"
         ),
+    )
+
+
+def _setup_push(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("path", help="strategy directory")
+
+
+def _setup_run(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("path", help="strategy directory")
+    parser.add_argument(
+        "cfg",
+        nargs="?",
+        default=None,
+        help=(
+            "strategy.yml to deploy; defaults to <path>/strategy.yml if "
+            "that file exists, otherwise an empty sts block"
+        ),
+    )
+    parser.add_argument(
+        "--no-push",
+        action="store_true",
+        help="deploy what is already on the node, without copying the tree",
+    )
+    parser.add_argument(
+        "--no-follow",
+        action="store_true",
+        help="print the session id and exit, without tailing its log",
+    )
+
+
+def _setup_session(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("session_id", help="session to act on")
+
+
+def _setup_logs(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("session_id", help="session whose log to print")
+    parser.add_argument(
+        "-f",
+        "--follow",
+        action="store_true",
+        help="tail the live stream instead of printing the stored page",
     )
 
 
@@ -132,6 +178,36 @@ COMMANDS: tuple[Command, ...] = (
         help="the import gate and on_initialized, offline",
         setup=_setup_check,
         run=check_cmd.check,
+    ),
+    Command(
+        name="push",
+        help="copy a strategy tree into the node's private registry",
+        setup=_setup_push,
+        run=push_cmd.push,
+    ),
+    Command(
+        name="run",
+        help="push, deploy, and tail the session's log",
+        setup=_setup_run,
+        run=run_cmd.run,
+    ),
+    Command(
+        name="ps",
+        help="list live sessions",
+        setup=_setup_nothing,
+        run=sessions.list_sessions,
+    ),
+    Command(
+        name="logs",
+        help="print a session's log",
+        setup=_setup_logs,
+        run=sessions.logs,
+    ),
+    Command(
+        name="stop",
+        help="stop a live session",
+        setup=_setup_session,
+        run=sessions.stop_session,
     ),
 )
 

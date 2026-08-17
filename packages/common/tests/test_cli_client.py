@@ -157,6 +157,35 @@ def test_url_joins_without_doubling_the_slash() -> None:
     assert node.url("sts/sessions") == "https://node.example.com/api/sts/sessions"
 
 
+def test_follow_sts_logs_uses_ws_base_and_the_bearer(monkeypatch) -> None:
+    """The socket is on the origin, not under /api, and the key rides the handshake."""
+    seen: dict[str, object] = {}
+
+    class FakeWs:
+        def __enter__(self) -> FakeWs:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def __iter__(self):
+            yield '{"payload":{"level":"info","message":"hi"}}'
+
+    def fake_connect(url: str, **kwargs):  # noqa: ANN003, ANN202
+        seen["url"] = url
+        seen["headers"] = kwargs.get("additional_headers")
+        return FakeWs()
+
+    monkeypatch.setattr("mftik.cli.client.ws_connect", fake_connect)
+    lines: list[str] = []
+    Client(Node("https://n.example.com/api"), "mftik_ak_t").follow_sts_logs(
+        "sess-1", write=lines.append
+    )
+    assert seen["url"] == "wss://n.example.com/ws/sts/sess-1"
+    assert seen["headers"] == [("Authorization", "Bearer mftik_ak_t")]
+    assert lines == ["info  hi"]
+
+
 # --- what comes back -------------------------------------------------------
 
 

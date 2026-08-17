@@ -133,6 +133,11 @@ mftik whoami                who this machine is, to the node it points at
 mftik profiles              the nodes this machine is connected to
 mftik disconnect <name>     forget one, and the key it issued
 mftik check <path> [cfg]    the import gate and on_initialized, offline
+mftik push <path>           copy a strategy tree into the node's private registry
+mftik run <path> [cfg]      push, deploy, and tail the session's log
+mftik ps                    live sessions
+mftik logs <session>        a session's log; -f tails the live stream
+mftik stop <session>        stop a live session
 ```
 
 `check` does not talk to a node. It runs four layers and stops at the first
@@ -141,18 +146,22 @@ if a document was given or `<path>/strategy.yml` exists, then `load_class`
 and — when there is a document — `on_initialized`. Without a document those
 last two steps about the config are skipped, and the command says so.
 
-Landing next — see the implementation plan for ordering:
-
-```
-mftik push <path>           copy a strategy tree into the node's registry
-mftik run <target> [cfg]    push, deploy, and tail the session's log
-mftik ps / logs / stop      what is running, and what it is saying
-mftik init [dir]            scaffold a project against a connected node
-```
+`push` is always `origin=private` and always replaces. The node answers
+`loaded` after asking STS to re-scan; only `loaded: true` means a deploy
+will resolve the tree. The other two outcomes (STS did not answer; STS
+answered and skipped the tree) are exit 1, with the node's `load_error`.
 
 `run` pushes by default, because the iteration loop is edit-then-run and a
 separate push step is one a person forgets exactly once before it costs them a
-confusing session. `--no-push` deploys what is already on the node.
+confusing session. `--no-push` deploys `private::{Type}` from the local tree
+without copying it. `--no-follow` prints the session id and exits — for CI.
+Ctrl-C on a tail drops the socket and does **not** stop the session.
+
+Landing next — see the implementation plan for ordering:
+
+```
+mftik init [dir]            scaffold a project against a connected node
+```
 
 ## What the node had to learn first
 

@@ -10,37 +10,25 @@ from __future__ import annotations
 
 import argparse
 import traceback
-from pathlib import Path
 
 from mftik.cli.client import CliError
+from mftik.cli.tree import cfg_path, inspect_tree, require_tree
 from mftik.protocol.strategy_yml import StrategyYamlError, parse_strategy_yml
 from mftik.registry.digest import digest_files
-from mftik.registry.errors import RegistryError
-from mftik.registry.files import read_tree
-from mftik.registry.inspect import inspect_files
 from mftik.registry.load import load_class
 
 
 def check(args: argparse.Namespace) -> int:
-    root = Path(args.path)
-    if root.is_file():
-        raise CliError(f"{root} is a file — give the strategy directory")
-    if not root.is_dir():
-        raise CliError(f"strategy tree does not exist: {root}")
-
-    cfg_path = _cfg_path(args.cfg, root)
-
-    try:
-        inspected = inspect_files(read_tree(root))
-    except RegistryError as exc:
-        raise CliError(str(exc)) from exc
+    root = require_tree(args.path)
+    document = cfg_path(args.cfg, root)
+    inspected = inspect_tree(root)
 
     spec = None
-    if cfg_path is not None:
+    if document is not None:
         try:
-            spec = parse_strategy_yml(cfg_path.read_text(encoding="utf-8"))
+            spec = parse_strategy_yml(document.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError) as exc:
-            raise CliError(f"cannot read {cfg_path}: {exc}") from exc
+            raise CliError(f"cannot read {document}: {exc}") from exc
         except StrategyYamlError as exc:
             raise CliError(str(exc)) from exc
 
@@ -78,7 +66,7 @@ def check(args: argparse.Namespace) -> int:
     print(f"ok  {inspected.name}  ({inspected.cls.type})")
     print(f"    {len(inspected.files)} file(s), {digest}")
     if spec is not None:
-        print(f"    config {cfg_path} accepted by on_initialized")
+        print(f"    config {document} accepted by on_initialized")
     else:
         # Silence here would read as "the config is fine", and there was none.
         print(
@@ -102,15 +90,3 @@ def _from_your_code(during: str, exc: Exception, args: argparse.Namespace) -> st
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         ).rstrip()
     return label + "\n(run again with --traceback to see where)"
-
-
-def _cfg_path(cfg: str | None, root: Path) -> Path | None:
-    if cfg is not None:
-        path = Path(cfg)
-        if not path.is_file():
-            raise CliError(f"strategy.yml does not exist: {path}")
-        return path
-    candidate = root / "strategy.yml"
-    if candidate.is_file():
-        return candidate
-    return None
