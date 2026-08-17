@@ -82,11 +82,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # context and target are spelled out per row rather than derived with
+        # `image == 'app' && '' || 'prod'`. An empty string is falsy in a
+        # GitHub expression, so that idiom returns the right-hand side for the
+        # row it was meant to leave blank — the app image asked for the
+        # frontend's `prod` stage and failed on a target that is not in its
+        # Dockerfile.
         include:
-          - { image: app, platform: linux/amd64, runner: ubuntu-latest }
-          - { image: app, platform: linux/arm64, runner: ubuntu-24.04-arm }
-          - { image: frontend, platform: linux/amd64, runner: ubuntu-latest }
-          - { image: frontend, platform: linux/arm64, runner: ubuntu-24.04-arm }
+          - image: app
+            context: "."
+            target: ""
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - image: app
+            context: "."
+            target: ""
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - image: frontend
+            context: "./frontend"
+            target: "prod"
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - image: frontend
+            context: "./frontend"
+            target: "prod"
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -101,8 +123,8 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.image == 'app' && '.' || './frontend' }}
-          target: ${{ matrix.image == 'app' && '' || 'prod' }}
+          context: ${{ matrix.context }}
+          target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
           outputs: >-
             type=image,name=${{ matrix.image == 'app' && env.APP_IMAGE || env.FRONTEND_IMAGE }},push-by-digest=true,name-canonical=true,push=true
@@ -112,11 +134,15 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.platform }}
 
       # The digest is all `merge` needs, and an empty file named for it is the
-      # smallest thing that survives an artifact round trip.
+      # smallest thing that survives an artifact round trip. The `sha256:`
+      # prefix comes off because a colon is not allowed in an artifact path,
+      # and `merge` puts it back.
       - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${DIGEST#sha256:}"
         shell: bash
 
       - uses: actions/upload-artifact@v4
