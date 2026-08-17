@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft.exchange.bybit.models import (
+from mftik.exchange.bybit.models import (
     BybitExecution,
     BybitKline,
     BybitLiquidation,
@@ -23,8 +23,8 @@ from mft.exchange.bybit.models import (
     status_of,
     type_of,
 )
-from mft.exchange.models import OrderStatus, OrderType, Side
-from mft.exchange.tickers import Category, UniversalTicker
+from mftik.exchange.models import OrderStatus, OrderType, Side
+from mftik.exchange.tickers import Category, UniversalTicker
 
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Bybit_Spot_BTCUSDT")

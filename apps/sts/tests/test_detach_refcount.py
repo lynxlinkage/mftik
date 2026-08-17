@@ -5,13 +5,13 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.protocol import StsCreateSessionRequest, TdAttachRequest, Topics
-from mft_sts.session import SessionManager as StsSessionManager
-from mft_td.rpc import dispatch as td_dispatch
-from mft_td.session import PaperSessionFactory
-from mft_td.session import SessionManager as TdSessionManager
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.protocol import StsCreateSessionRequest, TdAttachRequest, Topics
+from mftik_sts.session import SessionManager as StsSessionManager
+from mftik_td.rpc import dispatch as td_dispatch
+from mftik_td.session import PaperSessionFactory
+from mftik_td.session import SessionManager as TdSessionManager
 
 
 @pytest.fixture

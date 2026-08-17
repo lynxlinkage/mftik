@@ -12,11 +12,11 @@ from typing import Any
 
 import pytest
 from bybit_stub import API_KEY, API_SECRET, FakeBybit
-from mft.exchange.bybit.account import BybitPrivateStream
-from mft.exchange.bybit.protocol import BybitAuthError, BybitWsError
-from mft.exchange.errors import ExchangeNotConnectedError
-from mft.exchange.models import OrderStatus, Side
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.bybit.account import BybitPrivateStream
+from mftik.exchange.bybit.protocol import BybitAuthError, BybitWsError
+from mftik.exchange.errors import ExchangeNotConnectedError
+from mftik.exchange.models import OrderStatus, Side
+from mftik.exchange.tickers import UniversalTicker
 
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Bybit_Spot_BTCUSDT")

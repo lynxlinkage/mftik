@@ -1,4 +1,4 @@
-from mft_db.models import (
+from mftik_db.models import (
     Account,
     Api,
     ApiType,
@@ -136,11 +136,11 @@ def test_session_row_columns() -> None:
 
 
 def test_symbol_category_matches_the_ticker_vocabulary() -> None:
-    """``mft_db`` does not depend on ``mft-common``, so nothing imports one
+    """``mftik_db`` does not depend on ``mftik-common``, so nothing imports one
     into the other — but these values are the middle part of a stored universal
     ticker, and a drift would write rows nothing can parse."""
-    from mft.exchange.tickers import Category
-    from mft_db.models.symbol import SymbolCategory
+    from mftik.exchange.tickers import Category
+    from mftik_db.models.symbol import SymbolCategory
 
     assert {c.value for c in SymbolCategory} == {c.value for c in Category}
 

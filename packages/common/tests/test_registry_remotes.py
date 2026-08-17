@@ -14,11 +14,11 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
-from mft.registry.store import RegistryStore
-from mft.registry.sync import connect_remote, diff_remote
+from mftik.registry.store import RegistryStore
+from mftik.registry.sync import connect_remote, diff_remote
 
 _TINY = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -31,13 +31,13 @@ def a_store(tmp_path: Path) -> RegistryStore:
 
 def test_a_remote_round_trips_with_its_token(tmp_path: Path) -> None:
     store = a_store(tmp_path)
-    store.put_remote("node1", "https://one.example", "mft_rk_secret")
+    store.put_remote("node1", "https://one.example", "mftik_rk_secret")
     store.put_remote("node2", "https://two.example")
 
     one = store.get_remote("node1")
     two = store.get_remote("node2")
 
-    assert one is not None and one.token == "mft_rk_secret"
+    assert one is not None and one.token == "mftik_rk_secret"
     assert two is not None and two.token is None, "a peer may publish openly"
     assert [r.name for r in store.list_remotes()] == ["node1", "node2"]
 
@@ -46,7 +46,7 @@ def test_the_file_that_holds_a_token_is_not_world_readable(
     tmp_path: Path,
 ) -> None:
     store = a_store(tmp_path)
-    store.put_remote("node1", "https://one.example", "mft_rk_secret")
+    store.put_remote("node1", "https://one.example", "mftik_rk_secret")
 
     mode = stat.S_IMODE(store.remotes_path.stat().st_mode)
 
@@ -62,7 +62,7 @@ def test_a_second_write_does_not_widen_it_again(tmp_path: Path) -> None:
     store.remotes_path.write_text('[remotes]\nnode1 = "https://one.example"\n')
     store.remotes_path.chmod(0o644)
 
-    store.put_remote("node1", "https://one.example", "mft_rk_secret")
+    store.put_remote("node1", "https://one.example", "mftik_rk_secret")
 
     assert stat.S_IMODE(store.remotes_path.stat().st_mode) == 0o600
 
@@ -93,24 +93,24 @@ def test_writing_converts_the_old_file_and_keeps_the_others(
         '[remotes]\nnode1 = "https://one.example"\n', encoding="utf-8"
     )
 
-    store.put_remote("node2", "https://two.example", "mft_rk_secret")
+    store.put_remote("node2", "https://two.example", "mftik_rk_secret")
 
     body = store.remotes_path.read_text()
     assert "[remotes.node1]" in body and "[remotes.node2]" in body
     assert store.get_remote("node1") is not None, "the peer we did not touch"
-    assert store.get_remote("node2").token == "mft_rk_secret"
+    assert store.get_remote("node2").token == "mftik_rk_secret"
 
 
 def test_dropping_a_remote_takes_its_token_with_it(tmp_path: Path) -> None:
     store = a_store(tmp_path)
-    store.put_remote("node1", "https://one.example", "mft_rk_secret")
-    store.put_remote("node2", "https://two.example", "mft_rk_other")
+    store.put_remote("node1", "https://one.example", "mftik_rk_secret")
+    store.put_remote("node2", "https://two.example", "mftik_rk_other")
 
     dropped = store.drop_remote("node1")
 
-    assert dropped.token == "mft_rk_secret"
-    assert "mft_rk_secret" not in store.remotes_path.read_text()
-    assert store.get_remote("node2").token == "mft_rk_other"
+    assert dropped.token == "mftik_rk_secret"
+    assert "mftik_rk_secret" not in store.remotes_path.read_text()
+    assert store.get_remote("node2").token == "mftik_rk_other"
 
 
 # --------------------------------------------------------------- the wire ---
@@ -130,7 +130,7 @@ def a_locked_peer(store: RegistryStore, token: str) -> tuple[httpx.MockTransport
         auth = request.headers.get("authorization")
         seen.append((path, auth))
         if path == "/registry/v1/info":
-            from mft.registry.protocol import handshake_info
+            from mftik.registry.protocol import handshake_info
 
             return httpx.Response(200, json=handshake_info())
         if auth != f"Bearer {token}":
@@ -168,23 +168,23 @@ async def test_connect_presents_the_key_and_pulls(tmp_path: Path) -> None:
     theirs = RegistryStore(tmp_path / "peer")
     theirs.add({"strategy.py": _TINY}, origin="public")
     mine = RegistryStore(tmp_path / "mine")
-    transport, seen = a_locked_peer(theirs, "mft_rk_secret")
+    transport, seen = a_locked_peer(theirs, "mftik_rk_secret")
 
     async with httpx.AsyncClient(transport=transport) as client:
         result = await connect_remote(
             mine,
             name="node1",
             url="https://one.example",
-            token="mft_rk_secret",
+            token="mftik_rk_secret",
             client=client,
         )
 
     assert [rec.name for rec in result.pulled] == ["tiny"]
-    assert mine.get_remote("node1").token == "mft_rk_secret"
+    assert mine.get_remote("node1").token == "mftik_rk_secret"
     # /info without, everything else with.
     assert ("/registry/v1/info", None) in seen
     assert all(
-        auth == "Bearer mft_rk_secret"
+        auth == "Bearer mftik_rk_secret"
         for path, auth in seen
         if path != "/registry/v1/info"
     )
@@ -196,7 +196,7 @@ async def test_connecting_to_a_locked_peer_without_the_key_fails(
     theirs = RegistryStore(tmp_path / "peer")
     theirs.add({"strategy.py": _TINY}, origin="public")
     mine = RegistryStore(tmp_path / "mine")
-    transport, _ = a_locked_peer(theirs, "mft_rk_secret")
+    transport, _ = a_locked_peer(theirs, "mftik_rk_secret")
 
     with pytest.raises(Exception) as caught:
         async with httpx.AsyncClient(transport=transport) as client:
@@ -212,14 +212,14 @@ async def test_a_later_diff_presents_the_stored_key(tmp_path: Path) -> None:
     theirs = RegistryStore(tmp_path / "peer")
     theirs.add({"strategy.py": _TINY}, origin="public")
     mine = RegistryStore(tmp_path / "mine")
-    transport, seen = a_locked_peer(theirs, "mft_rk_secret")
+    transport, seen = a_locked_peer(theirs, "mftik_rk_secret")
 
     async with httpx.AsyncClient(transport=transport) as client:
         await connect_remote(
             mine,
             name="node1",
             url="https://one.example",
-            token="mft_rk_secret",
+            token="mftik_rk_secret",
             client=client,
         )
         seen.clear()
@@ -227,4 +227,4 @@ async def test_a_later_diff_presents_the_stored_key(tmp_path: Path) -> None:
 
     assert result.reachable is True
     assert [row.status for row in result.rows] == ["synced"]
-    assert seen and all(auth == "Bearer mft_rk_secret" for _, auth in seen)
+    assert seen and all(auth == "Bearer mftik_rk_secret" for _, auth in seen)

@@ -9,9 +9,9 @@ from typing import Any
 import httpx
 import pytest
 from bybit_stub import API_KEY, API_SECRET
-from mft.exchange.bybit.protocol import BybitRestError, sign_rest
-from mft.exchange.bybit.rest import BybitPublicRest, BybitRest
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.bybit.protocol import BybitRestError, sign_rest
+from mftik.exchange.bybit.rest import BybitPublicRest, BybitRest
+from mftik.exchange.tickers import UniversalTicker
 
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Bybit_Spot_BTCUSDT")

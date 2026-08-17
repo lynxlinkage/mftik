@@ -12,12 +12,12 @@ from typing import Any
 
 import pytest
 from bybit_stub import FakeBybit
-from mft.exchange.bybit import channels as ch
-from mft.exchange.bybit.feed import BybitBook, BybitPublicStream
-from mft.exchange.bybit.models import BybitOrderBook
-from mft.exchange.bybit.public import BybitPublicClient, venue_interval
-from mft.exchange.intervals import InvalidIntervalError
-from mft.exchange.tickers import Category, UniversalTicker
+from mftik.exchange.bybit import channels as ch
+from mftik.exchange.bybit.feed import BybitBook, BybitPublicStream
+from mftik.exchange.bybit.models import BybitOrderBook
+from mftik.exchange.bybit.public import BybitPublicClient, venue_interval
+from mftik.exchange.intervals import InvalidIntervalError
+from mftik.exchange.tickers import Category, UniversalTicker
 
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Bybit_Spot_BTCUSDT")

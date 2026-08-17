@@ -6,8 +6,8 @@ from decimal import Decimal
 
 import pytest
 from db_harness import a_database
-from mft_db.models import SymbolCategory
-from mft_db.repositories import SymbolRepository
+from mftik_db.models import SymbolCategory
+from mftik_db.repositories import SymbolRepository
 
 SPOT = SymbolCategory.SPOT.value
 

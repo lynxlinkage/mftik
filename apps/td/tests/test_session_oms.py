@@ -5,17 +5,17 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange, Side
-from mft.exchange.models import OrderStatus, limit_order
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange, Side
+from mftik.exchange.models import OrderStatus, limit_order
+from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     Envelope,
     LeaseHeartbeat,
     TdAttachRequest,
     Topics,
 )
-from mft_td.session import PaperSessionFactory, SessionManager
+from mftik_td.session import PaperSessionFactory, SessionManager
 
 
 @pytest.fixture

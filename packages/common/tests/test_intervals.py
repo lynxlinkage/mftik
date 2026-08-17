@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from mft.exchange.intervals import (
+from mftik.exchange.intervals import (
     InvalidIntervalError,
     interval_seconds,
     normalize_interval,

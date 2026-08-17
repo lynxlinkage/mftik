@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import pytest
-from mft.registry.errors import RegistryError
-from mft.registry.files import normalize_files
+from mftik.registry.errors import RegistryError
+from mftik.registry.files import normalize_files
 
 
 def test_non_py_is_dropped() -> None:
     out = normalize_files(
         {
             "strategy.py": b"x = 1\n",
-            "mft-strategy.toml": b'name = "a"\n',
+            "mftik-strategy.toml": b'name = "a"\n',
             "README.md": b"hi\n",
         }
     )
@@ -31,4 +31,4 @@ def test_pycache_and_pyc_are_dropped() -> None:
 
 def test_empty_after_skip_is_refused() -> None:
     with pytest.raises(RegistryError, match=r"no \.py files"):
-        normalize_files({"mft-strategy.toml": b"name = \"x\"\n"})
+        normalize_files({"mftik-strategy.toml": b"name = \"x\"\n"})

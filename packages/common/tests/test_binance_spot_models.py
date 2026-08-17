@@ -10,7 +10,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft.exchange.binance.spot.models import (
+from mftik.exchange.binance.spot.models import (
     BinanceAccountPosition,
     BinanceAggTrade,
     BinanceBalanceUpdate,
@@ -28,8 +28,8 @@ from mft.exchange.binance.spot.models import (
     status_of,
     type_of,
 )
-from mft.exchange.models import AggTrade, OrderStatus, OrderType, Side, Trade
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.models import AggTrade, OrderStatus, OrderType, Side, Trade
+from mftik.exchange.tickers import UniversalTicker
 
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")

@@ -10,10 +10,10 @@ from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import (
     MD_LEASE_ACK,
     MD_ORDERBOOK,
     MD_SESSION_ATTACH,
@@ -26,9 +26,9 @@ from mft.protocol import (
     MdLeaseAck,
     Topics,
 )
-from mft_md.rpc import dispatch
-from mft_md.session import PaperPublicFactory, SessionManager
-from mft_sts.strategy import Strategy
+from mftik_md.rpc import dispatch
+from mftik_md.session import PaperPublicFactory, SessionManager
+from mftik_sts.strategy import Strategy
 
 
 @dataclass
@@ -294,7 +294,7 @@ async def test_sts_on_order_book_from_md(
     broker: Broker, paper: PaperExchange
 ) -> None:
     """STS session pump delivers MD orderbook into strategy hook."""
-    from mft_sts.session.session import StsSession
+    from mftik_sts.session.session import StsSession
 
     class BookStrategy(Strategy):
         name = "book"
@@ -351,7 +351,7 @@ async def test_sts_ticker_and_order_book_from_md(
     broker: Broker, paper: PaperExchange
 ) -> None:
     """Two feed topics on one session land in their own strategy hooks."""
-    from mft_sts.session.session import StsSession
+    from mftik_sts.session.session import StsSession
 
     class FeedStrategy(Strategy):
         name = "feeds"

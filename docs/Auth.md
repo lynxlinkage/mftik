@@ -1,13 +1,13 @@
 # Auth — one owner, many proofs
 
-An MFT instance is single-tenant. One person owns it. That person may prove
+An MFTIK instance is single-tenant. One person owns it. That person may prove
 who they are several ways, and may mint machine credentials for scripts and
 peer nodes. Nobody else gets a `users` row.
 
 This document is the in-app replacement for the Traefik gate described in
-[CICD.md](CICD.md). **It is built and validated locally first.** Production
+the private ops runbook. **It is built and validated locally first.** Production
 keeps `discord-auth-chain@docker` untouched until the cutover in step 8;
-everything before that ships to production inert (see `MFT_AUTH_ENABLED`
+everything before that ships to production inert (see `MFTIK_AUTH_ENABLED`
 below). Local compose and `docker-compose.peer.yml` have no gate at all
 today, which is why they are where this gets exercised.
 
@@ -54,7 +54,7 @@ seeded before this feature existed. So:
 | **Identity** | A way to prove you *are* that Owner. Password is intrinsic. OAuth is linked later. |
 | **Session** | Browser proof, httpOnly cookie, full power including minting keys and linking OAuth. |
 | **API key** | Machine proof for scripts / CLI. Acts as the Owner on every domain route. Cannot change identities or mint keys. |
-| **Registry key** | Machine proof for another MFT node. Can only read the peer-facing registry routes. |
+| **Registry key** | Machine proof for another MFTIK node. Can only read the peer-facing registry routes. |
 
 Discord / Google / password are not three users. After connect, Discord login
 issues a session for the same Owner. An API key is not a second person; it is
@@ -139,16 +139,16 @@ Three proofs, distinguished by prefix so the gateway does not guess:
 
 | Proof | On the wire | Scopes |
 |---|---|---|
-| Session cookie `mft_session` | Cookie, httpOnly, SameSite=Lax, Secure *(see below)* | Everything, including `/auth/keys` and Connect |
-| API key `mft_ak_…` | `Authorization: Bearer` | Every domain route and `/ws/*`. Not identity or key admin. |
-| Registry key `mft_rk_…` | `Authorization: Bearer` | `/registry/v1/strategies` and `/registry/v1/strategies/{name}` only |
+| Session cookie `mftik_session` | Cookie, httpOnly, SameSite=Lax, Secure *(see below)* | Everything, including `/auth/keys` and Connect |
+| API key `mftik_ak_…` | `Authorization: Bearer` | Every domain route and `/ws/*`. Not identity or key admin. |
+| Registry key `mftik_rk_…` | `Authorization: Bearer` | `/registry/v1/strategies` and `/registry/v1/strategies/{name}` only |
 
 Keys are shown once at creation. The database stores a SHA-256 (or HMAC)
 plus a short prefix for the UI. Revoke is a `revoked_at` timestamp, not a
 delete.
 
 Resolution: a Bearer token is one lookup on its prefix — `auth_keys.kind`
-says what it is, and the `mft_ak_` / `mft_rk_` prefix is a consistency check,
+says what it is, and the `mftik_ak_` / `mftik_rk_` prefix is a consistency check,
 not a second query. No Bearer, then the session cookie. Neither, anonymous.
 
 `Secure` is environment-dependent. Local development is `http://localhost:5173`
@@ -162,10 +162,10 @@ stays public so compose and CI can probe it. Session keepalive therefore must
 **not** use `/health` (today `frontend/src/lib/auth.ts` pings `/api/health`
 because the Traefik chain wraps the whole origin). It pings `/auth/me`.
 
-### MFT_AUTH_ENABLED
+### MFTIK_AUTH_ENABLED
 
 Off by default. When off, the middleware returns an Owner principal built from
-`MFT_DEFAULT_USER_ID` and every route behaves exactly as it does today.
+`MFTIK_DEFAULT_USER_ID` and every route behaves exactly as it does today.
 
 This exists because merging to `main` deploys to production, and production
 still has the Traefik chain in front. Shipping a live in-app gate behind that
@@ -188,7 +188,7 @@ Not a new workspace package. `packages/common` must not import FastAPI.
 
 ```
 packages/db                         users + identities / sessions / keys / oauth states
-apps/api/src/mft_api/auth/
+apps/api/src/mftik_api/auth/
   principal.py                      Principal(user_id, via, scopes, key_id)
   passwords.py                      argon2id
   oauth.py                          Discord / Google, PKCE, the state record
@@ -214,12 +214,12 @@ nothing else authenticates `/ws/*`. In-app auth must use an **ASGI**
 middleware (or the same `authenticate()` called from every `ws.py` entry) so
 HTTP and WS share one parser.
 
-Handlers take `principal.user_id`. `MFT_DEFAULT_USER_ID` remains only as a
-seed/migration default and as the `MFT_AUTH_ENABLED=0` identity, never as a
+Handlers take `principal.user_id`. `MFTIK_DEFAULT_USER_ID` remains only as a
+seed/migration default and as the `MFTIK_AUTH_ENABLED=0` identity, never as a
 request identity once the flag is on.
 
 `session` is already an overloaded word here — `sts_sessions`, `td_sessions`,
-`md_sessions`, and `mft_db.session.session_scope` for the SQLAlchemy one.
+`md_sessions`, and `mftik_db.session.session_scope` for the SQLAlchemy one.
 `auth/sessions.py` will be managing auth sessions inside `async with
 session_scope() as db:` blocks. Name locals accordingly.
 
@@ -234,7 +234,7 @@ trail cannot tell the Owner apart from a CI key acting as the Owner.
 asked, with a JSON body the SPA can act on.
 
 Nothing needs the 302-on-navigation split the Traefik chain forced. After
-cutover, a document navigation to `mft.lynkora.com/sts` reaches the *frontend*
+cutover, a document navigation to `mftik.lynkora.com/sts` reaches the *frontend*
 container, which is not gated — the SPA loads, its first `fetch` gets 401, and
 it routes to `/login` client-side. Locally there was never a gate in front of
 the document at all. `location.reload()` was only ever a way to hand an
@@ -249,7 +249,7 @@ until then the file is still describing production accurately.
 
 Which gate produced a 401 is part of the answer, because until the cutover
 both exist and they want opposite things from the browser. The app's own 401
-carries `x-mft-auth: login-required`; the chain's does not. `$lib/auth` reads
+carries `x-mftik-auth: login-required`; the chain's does not. `$lib/auth` reads
 that and either routes to `/login` or performs the reload. A build flag would
 have had to be kept in sync with a deploy, and would be wrong for exactly the
 window where being wrong locks somebody out.
@@ -381,13 +381,13 @@ Split the routes:
 | `GET /registry/v1/strategies/{name}` | Same — this is the source dump |
 | `/private`, `/add`, `/remotes*` | Session or API key. **403** for a registry key |
 
-`POST /registry/v1/remotes` grows a `token` (the peer's `mft_rk_…`).
+`POST /registry/v1/remotes` grows a `token` (the peer's `mftik_rk_…`).
 `remotes.toml` currently maps `name → url` only; it must store the token
 (mode 0600) and `_load_remotes` must still read the flat form. `diff_remote`
 and later syncs send
 
 ```
-Authorization: Bearer mft_rk_…
+Authorization: Bearer mftik_rk_…
 ```
 
 A registry key that can start STS sessions is a bug. Tests should say so.
@@ -409,7 +409,7 @@ paths must arrive verbatim), and let `wsBaseUrl()` return the current origin.
 A `/auth/ws-ticket` would mean a fourth credential type and another endpoint
 to secure, all to work around a dev-server config.
 
-Production is one host (`mft.lynkora.com`): document, `/api` and `/ws` share an
+Production is one host (`mftik.lynkora.com`): document, `/api` and `/ws` share an
 origin, so the session cookie rides the handshake with no change. Pinning CORS
 away from `origins=["*"]` (which browsers reject for credentialed requests
 anyway) belongs to the cutover, step 8.
@@ -419,19 +419,19 @@ anyway) belongs to the cutover, step 8.
 Not part of the local work. Recorded here so the local steps do not paint it
 into a corner.
 
-Today every router on `mft.lynkora.com` uses `discord-auth-chain@docker`
+Today every router on `mftik.lynkora.com` uses `discord-auth-chain@docker`
 ([discord-forward-auth](https://github.com/yitech/discord-forward-auth)). The
-API has no auth of its own; see [CICD.md](CICD.md).
+API has no auth of its own.
 
 The production API service also has **no volume**, while local compose mounts
-`mft_data:/var/lib/mft` and sets `MFT_DATA`. Registry state — including peer
+`mftik_data:/var/lib/mftik` and sets `MFTIK_DATA`. Registry state — including peer
 tokens once they exist — currently lives in the container's writable layer and
 dies with every deploy. That is an existing bug independent of auth, and it
 must be fixed before registry keys reach production.
 
-At cutover: turn on `MFT_AUTH_ENABLED`, pin CORS, and remove the chain from
+At cutover: turn on `MFTIK_AUTH_ENABLED`, pin CORS, and remove the chain from
 all three routers **in one deploy**. Traefik keeps TLS. Do not run both gates.
-Then drop `MFT_DEFAULT_USER_ID` from the request path.
+Then drop `MFTIK_DEFAULT_USER_ID` from the request path.
 
 The first setup on production is username/password against the existing
 passwordless Owner, and it has to happen **before** the chain comes off:
@@ -442,13 +442,13 @@ the origin is reachable an unclaimed instance belongs to whoever loads
 matters most. The Discord account that gets in today via the `admin`
 group is then **connected**, not used as bootstrap.
 
-`CICD.md` and the header comment in `deploy/docker-compose.yml` both state
+The ops runbook and the header comment in `deploy/docker-compose.yml` both state
 that the API has no authentication of its own. Both are accurate now and
 become traps the moment the chain comes off.
 
 ## Order of work
 
-Local first. Steps 1–6 land on `main` with `MFT_AUTH_ENABLED` off, so
+Local first. Steps 1–6 land on `main` with `MFTIK_AUTH_ENABLED` off, so
 production keeps behaving exactly as it does today.
 
 Each step names its frontend work. Left implicit, it does not go away — it
@@ -461,16 +461,16 @@ demonstrated at all, which is what happened to `/login` in step 2.
         Handlers take principal.user_id. Public /health.
    ui   Keepalive → /auth/me.
 
-2. api  x-mft-auth on the gate's own 401. enabled on /auth/status.
+2. api  x-mftik-auth on the gate's own 401. enabled on /auth/status.
    ui   Vite proxy /ws + wsBaseUrl() same-origin — without this every socket
         fails auth locally, so nothing above can be verified end to end.
         /login (claim or sign in). 401 → /login when the app's gate answered.
-        Sign out in the layout. MFT_AUTH_ENABLED on in local compose.
+        Sign out in the layout. MFTIK_AUTH_ENABLED on in local compose.
 
-3. api  API keys (mft_ak_).
+3. api  API keys (mftik_ak_).
    ui   /settings with the key list, and the one-time reveal on mint.
 
-4. api  Registry keys (mft_rk_) + connect_remote Authorization + remotes.toml
+4. api  Registry keys (mftik_rk_) + connect_remote Authorization + remotes.toml
         token. Lock the public source dump.
    ui   A token field on the registry's connect form; registry keys minted
         from the same screen as step 3, under their own kind.
@@ -484,9 +484,9 @@ demonstrated at all, which is what happened to `/login` in step 2.
 
 ── production, later ──
 
-7. Give the production api service a volume for MFT_DATA.
-8. One deploy: MFT_AUTH_ENABLED=1, pin CORS, remove discord-auth-chain.
-        Update CICD.md and deploy/docker-compose.yml in the same PR — four
+7. Give the production api service a volume for MFTIK_DATA.
+8. One deploy: MFTIK_AUTH_ENABLED=1, pin CORS, remove discord-auth-chain.
+        Update the ops runbook and deploy/docker-compose.yml together — four
         statements there stop being true the moment the chain comes off, and
         prose that lags the behaviour it describes is how a comment becomes a
         trap.
@@ -516,9 +516,9 @@ is one cookie-delivery path at a time.
 - API key on `POST /auth/keys` or Connect → 403.
 - No cookie, no Bearer → 401, on `fetch` and on a WS handshake alike.
 - Peer GET `/registry/v1/strategies/{name}` without Bearer → 401.
-- `MFT_AUTH_ENABLED=0` → every route answers as the Owner with no credential,
+- `MFTIK_AUTH_ENABLED=0` → every route answers as the Owner with no credential,
   and `/auth/status` says `enabled: false`.
-- The gate's own 401 carries `x-mft-auth`. This is the only thing telling the
+- The gate's own 401 carries `x-mftik-auth`. This is the only thing telling the
   two gates apart while both are live, and nothing else would notice it
   disappearing.
 
@@ -527,5 +527,5 @@ assertions the UI depends on are made here, on the API: `enabled`, the 401
 header, and the shape of `/auth/status`. What cannot be asserted that way is
 the one-time key reveal, which is why it is called out under **The UI** rather
 than left to be inferred from `POST /auth/keys` returning a secret once.
-- `MFT_AUTH_ENABLED=0` → every route answers as the Owner, no credential
+- `MFTIK_AUTH_ENABLED=0` → every route answers as the Owner, no credential
   required.

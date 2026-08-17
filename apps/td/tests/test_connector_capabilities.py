@@ -8,8 +8,8 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange.models import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange.models import (
     Balance,
     Order,
     OrderStatus,
@@ -17,9 +17,9 @@ from mft.exchange.models import (
     PlaceOrderRequest,
     Side,
 )
-from mft.exchange.oms import Position
-from mft.protocol import TD_POSITION_UPDATE, Topics, UntypedEnvelope
-from mft_td.session.session import Session
+from mftik.exchange.oms import Position
+from mftik.protocol import TD_POSITION_UPDATE, Topics, UntypedEnvelope
+from mftik_td.session.session import Session
 
 #: A contract instrument — the only kind that has positions.
 PERP = "Bybit_Perp_BTCUSDT"

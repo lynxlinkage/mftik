@@ -1,5 +1,0 @@
-"""Shared MFT library — protocol, broker, runtime, exchange."""
-
-from mft.runtime import configure_logging, run_heartbeat_service
-
-__all__ = ["configure_logging", "run_heartbeat_service"]

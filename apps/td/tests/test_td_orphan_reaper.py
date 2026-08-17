@@ -17,17 +17,17 @@ from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.liveness import clear_alive, mark_alive
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.liveness import clear_alive, mark_alive
+from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     Envelope,
     LeaseHeartbeat,
     TdAttachRequest,
     Topics,
 )
-from mft_td.session import PaperSessionFactory, SessionManager
+from mftik_td.session import PaperSessionFactory, SessionManager
 
 API_ID = 3
 

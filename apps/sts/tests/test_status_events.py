@@ -12,15 +12,15 @@ import json
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.protocol import (
     STS_SESSION_STATUS,
     StsCreateSessionRequest,
     Topics,
 )
-from mft_sts.impl import register
-from mft_sts.session import SessionManager
-from mft_sts.strategy import Strategy
+from mftik_sts.impl import register
+from mftik_sts.session import SessionManager
+from mftik_sts.strategy import Strategy
 
 
 class Idle(Strategy):

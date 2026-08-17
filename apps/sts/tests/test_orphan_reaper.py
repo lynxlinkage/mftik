@@ -14,12 +14,12 @@ from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.liveness import alive_key, clear_alive, is_alive, mark_alive
-from mft.protocol import StsCreateSessionRequest
-from mft_sts.impl import register
-from mft_sts.session import SessionManager
-from mft_sts.strategy import Strategy
+from mftik.broker import Broker, BrokerConfig
+from mftik.liveness import alive_key, clear_alive, is_alive, mark_alive
+from mftik.protocol import StsCreateSessionRequest
+from mftik_sts.impl import register
+from mftik_sts.session import SessionManager
+from mftik_sts.strategy import Strategy
 
 
 @dataclass

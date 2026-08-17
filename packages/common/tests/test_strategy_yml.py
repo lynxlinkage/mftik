@@ -8,7 +8,7 @@ the two shapes that used to carry it are now errors with a message saying so.
 from __future__ import annotations
 
 import pytest
-from mft.protocol import (
+from mftik.protocol import (
     StrategyYamlError,
     all_templates,
     default_template,

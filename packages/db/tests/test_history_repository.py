@@ -13,8 +13,8 @@ from decimal import Decimal
 
 import pytest
 from db_harness import a_database
-from mft_db.models.history import Attribution, Source, Stream
-from mft_db.repositories import (
+from mftik_db.models.history import Attribution, Source, Stream
+from mftik_db.repositories import (
     BackfillCursorRepository,
     CashFlowRepository,
     FillRepository,

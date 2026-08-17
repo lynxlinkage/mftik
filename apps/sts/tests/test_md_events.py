@@ -7,8 +7,8 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange.models import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange.models import (
     AggTrade,
     BestQuote,
     BookLevel,
@@ -18,7 +18,7 @@ from mft.exchange.models import (
     Ticker,
     Trade,
 )
-from mft.protocol import (
+from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_KLINE,
@@ -29,8 +29,8 @@ from mft.protocol import (
     Topics,
     UntypedEnvelope,
 )
-from mft_sts.session.session import StsSession
-from mft_sts.strategy import Strategy
+from mftik_sts.session.session import StsSession
+from mftik_sts.strategy import Strategy
 
 
 @pytest.fixture

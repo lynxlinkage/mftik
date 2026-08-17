@@ -7,11 +7,11 @@
 # REDIS_URL / DATABASE_URL / DATABASE_URL_SYNC come from .env (see .env.example),
 # where they already point at the `redis` and `postgres` service names.
 
-x-mft: &mft
+x-mftik: &mftik
   build:
     context: .
     dockerfile: Dockerfile
-  image: mft:dev
+  image: mftik:dev
   env_file:
     - .env
 
@@ -19,15 +19,15 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-mft}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mft}
-      POSTGRES_DB: ${POSTGRES_DB:-mft}
+      POSTGRES_USER: ${POSTGRES_USER:-mftik}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mftik}
+      POSTGRES_DB: ${POSTGRES_DB:-mftik}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mft} -d ${POSTGRES_DB:-mft}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mftik} -d ${POSTGRES_DB:-mftik}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -43,14 +43,14 @@ services:
       retries: 10
 
   migrate:
-    <<: *mft
-    command: ["mft-db-migrate"]
+    <<: *mftik
+    command: ["mftik-db-migrate"]
     depends_on:
       postgres:
         condition: service_healthy
 
   seed:
-    <<: *mft
+    <<: *mftik
     command: ["python", "scripts/seed_paper_apis.py"]
     depends_on:
       postgres:
@@ -59,12 +59,12 @@ services:
         condition: service_completed_successfully
 
   api:
-    <<: *mft
-    command: ["mft-api"]
+    <<: *mftik
+    command: ["mftik-api"]
     ports:
       - "8000:8000"
     environment:
-      MFT_DATA: /var/lib/mft
+      MFTIK_DATA: /var/lib/mftik
       # On. This stack is where in-app auth is developed and verified;
       # production keeps its Traefik chain and this flag off until the cutover,
       # because running both gates locks everybody out. See docs/Auth.md.
@@ -72,11 +72,11 @@ services:
       # First `just up` on an empty database: open the UI and claim the
       # instance at /login. `seed` has already created the Owner row so
       # foreign keys resolve; claiming fills in its username and password.
-      MFT_AUTH_ENABLED: "1"
+      MFTIK_AUTH_ENABLED: "1"
       # This stack is http end to end, and Safari drops Secure cookies there.
-      MFT_COOKIE_SECURE: "0"
+      MFTIK_COOKIE_SECURE: "0"
     volumes:
-      - mft_data:/var/lib/mft
+      - mftik_data:/var/lib/mftik
     depends_on:
       redis:
         condition: service_healthy
@@ -88,7 +88,7 @@ services:
         condition: service_completed_successfully
 
   md:
-    <<: *mft
+    <<: *mftik
     command: ["md"]
     environment:
       # Recorded tape, so a strategy that starts later can warm up on prints
@@ -130,14 +130,14 @@ services:
         condition: service_started
 
   paper:
-    <<: *mft
+    <<: *mftik
     command: ["paper"]
     depends_on:
       redis:
         condition: service_healthy
 
   td:
-    <<: *mft
+    <<: *mftik
     command: ["td"]
     depends_on:
       redis:
@@ -146,19 +146,19 @@ services:
         condition: service_started
 
   sts:
-    <<: *mft
+    <<: *mftik
     command: ["sts"]
     volumes:
-      - sts_eventlog:/var/log/mft/sts
-      - mft_data:/var/lib/mft
+      - sts_eventlog:/var/log/mftik/sts
+      - mftik_data:/var/lib/mftik
     environment:
-      MFT_DATA: /var/lib/mft
+      MFTIK_DATA: /var/lib/mftik
       # Restart the stack and interrupted sessions come back on their own.
       STS_REBUILD_ON_BOOT: "1"
       # One jsonl per session: every event it was handed and every call it
       # made. A named volume, not the container filesystem — the moment the
       # log is worth reading is usually the moment the container went away.
-      STS_EVENTLOG_DIR: "/var/log/mft/sts"
+      STS_EVENTLOG_DIR: "/var/log/mftik/sts"
       # Records held between the session and the disk. Overflow is dropped and
       # counted into the file rather than blocking the dispatch path — a full
       # queue must not put disk latency in front of an order.
@@ -177,7 +177,7 @@ services:
   # Symbol plane. Lifecycle is independent of td/md/sts — it is up whenever
   # the stack is, so an instrument can be resolved before anything trades.
   sym:
-    <<: *mft
+    <<: *mftik
     command: ["sym"]
     environment:
       # Listings are near-static; an hourly re-pull is plenty.
@@ -200,8 +200,8 @@ services:
       # now /ws alike. WebSockets are opened on this origin rather than the
       # API's own, so the session cookie rides the handshake; see src/lib/ws.ts.
       API_PROXY_TARGET: http://api:8000
-      # Production gets sha-<commit> from MFT_VERSION; locally it is just "dev".
-      PUBLIC_APP_VERSION: ${MFT_VERSION:-dev}
+      # Production gets sha-<commit> from MFTIK_VERSION; locally it is just "dev".
+      PUBLIC_APP_VERSION: ${MFTIK_VERSION:-dev}
     ports:
       - "5173:5173"
     depends_on:
@@ -210,4 +210,4 @@ services:
 volumes:
   postgres_data:
   sts_eventlog:
-  mft_data:
+  mftik_data:

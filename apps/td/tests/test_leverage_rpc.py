@@ -8,11 +8,11 @@ from typing import Any
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.exchange.errors import ExchangeError
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.exchange.errors import ExchangeError
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import (
     STS_ENSURE_LEVERAGE,
     STS_LEASE_HEARTBEAT,
     EnsureLeverage,
@@ -23,7 +23,7 @@ from mft.protocol import (
     TdAttachRequest,
     Topics,
 )
-from mft_td.session import PaperSessionFactory, SessionManager
+from mftik_td.session import PaperSessionFactory, SessionManager
 
 API_ID = 42
 SESSION = "sts-lev"

@@ -13,8 +13,8 @@ from decimal import Decimal
 
 import pytest
 from binance_stub import FakeBinanceStream
-from mft.exchange.binance.future import streams as st
-from mft.exchange.binance.future.feed import BinanceFutureStream
+from mftik.exchange.binance.future import streams as st
+from mftik.exchange.binance.future.feed import BinanceFutureStream
 
 
 def _feed(

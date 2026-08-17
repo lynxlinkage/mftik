@@ -9,12 +9,12 @@ from typing import Any
 import httpx
 import pytest
 from gate_stub import FakeGate
-from mft.exchange.gate.spot import channels as ch
-from mft.exchange.gate.spot.client import GateSpotWebSocket
-from mft.exchange.gate.spot.public import GateSpotPublicClient
-from mft.exchange.gate.spot.rest import GateRestError, GateSpotPublicRest
-from mft.exchange.intervals import InvalidIntervalError
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.gate.spot import channels as ch
+from mftik.exchange.gate.spot.client import GateSpotWebSocket
+from mftik.exchange.gate.spot.public import GateSpotPublicClient
+from mftik.exchange.gate.spot.rest import GateRestError, GateSpotPublicRest
+from mftik.exchange.intervals import InvalidIntervalError
+from mftik.exchange.tickers import UniversalTicker
 
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")
@@ -555,7 +555,7 @@ async def test_stream_unhooks_itself_when_the_consumer_stops(
 async def test_streams_need_a_connection(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
-    from mft.exchange.errors import ExchangeNotConnectedError
+    from mftik.exchange.errors import ExchangeNotConnectedError
 
     client = await _public(gate, rest_stub, resolver)
     with pytest.raises(ExchangeNotConnectedError):

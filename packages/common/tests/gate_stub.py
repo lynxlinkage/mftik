@@ -11,7 +11,7 @@ import json
 import time
 from typing import Any
 
-from mft.exchange.gate.spot import channels as ch
+from mftik.exchange.gate.spot import channels as ch
 
 API_KEY = "test-key"
 API_SECRET = "test-secret"

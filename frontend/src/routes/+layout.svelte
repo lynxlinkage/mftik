@@ -41,10 +41,10 @@
 	// handful of pages that happen to make requests.
 	$effect(() => startSessionKeepalive());
 
-	const SITE_NAME = 'MFT Control';
+	const SITE_NAME = 'MFTIK Control';
 	const SITE_DESCRIPTION =
 		'Control plane for the Mid-Frequency Algo Trading platform — STS, TD, MD sessions, APIs, and audit.';
-	const SITE_URL = 'https://mft.lynkora.com';
+	const SITE_URL = 'https://mftik.lynkora.com';
 	const OG_IMAGE = `${SITE_URL}/og-image.png`;
 
 	const nav = [
@@ -90,7 +90,7 @@
 	<meta property="og:description" content={SITE_DESCRIPTION} />
 	<meta property="og:url" content={`${SITE_URL}${page.url.pathname}`} />
 	<meta property="og:image" content={OG_IMAGE} />
-	<meta property="og:image:alt" content="MFT logo" />
+	<meta property="og:image:alt" content="MFTIK logo" />
 
 	<meta name="twitter:card" content="summary" />
 	<meta name="twitter:title" content={documentTitle} />
@@ -101,7 +101,7 @@
 <div class="shell">
 	<aside class="nav">
 		<a class="brand" href="/">
-			<span class="mark">MFT</span>
+			<span class="mark">MFTIK</span>
 			<span class="tag">control</span>
 		</a>
 		<nav>

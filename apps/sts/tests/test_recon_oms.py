@@ -5,19 +5,19 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.exchange.models import Side, is_terminal, limit_order
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.exchange.models import Side, is_terminal, limit_order
+from mftik.protocol import (
     ReconDone,
     StsCreateSessionRequest,
     TdAttachRequest,
 )
-from mft_sts.impl import register
-from mft_sts.session import SessionManager as StsSessionManager
-from mft_sts.strategy import Strategy
-from mft_td.session import PaperSessionFactory
-from mft_td.session import SessionManager as TdSessionManager
+from mftik_sts.impl import register
+from mftik_sts.session import SessionManager as StsSessionManager
+from mftik_sts.strategy import Strategy
+from mftik_td.session import PaperSessionFactory
+from mftik_td.session import SessionManager as TdSessionManager
 
 
 class ReconStrategy(Strategy):

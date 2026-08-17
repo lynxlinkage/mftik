@@ -15,10 +15,10 @@ from decimal import Decimal
 
 import pytest
 from db_harness import a_database
-from mft.exchange.models import Fill, Order, OrderStatus, OrderType, Side
-from mft_db.models.history import Attribution, Source
-from mft_db.repositories import FillRepository, OrderRepository
-from mft_td.history import HistoryWriter
+from mftik.exchange.models import Fill, Order, OrderStatus, OrderType, Side
+from mftik_db.models.history import Attribution, Source
+from mftik_db.repositories import FillRepository, OrderRepository
+from mftik_td.history import HistoryWriter
 
 API_ID = 7
 TICKER = "Binance_Spot_BTCUSDT"

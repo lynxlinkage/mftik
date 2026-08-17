@@ -8,30 +8,30 @@ survives as itself rather than collapsing into a catch-all.
 from __future__ import annotations
 
 import pytest
-from mft.exchange import venues
-from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
-from mft.exchange.binance.spot.protocol import BinanceWsError
-from mft.exchange.bybit.protocol import BybitRestError, BybitWsError
-from mft.exchange.errors import (
+from mftik.exchange import venues
+from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
+from mftik.exchange.binance.spot.protocol import BinanceWsError
+from mftik.exchange.bybit.protocol import BybitRestError, BybitWsError
+from mftik.exchange.errors import (
     ExchangeError,
     ExchangeNotConnectedError,
     InstrumentNotFoundError,
     InsufficientBalanceError,
     OrderError,
 )
-from mft.exchange.gate.spot.private import GateSpotPrivateClient
-from mft.exchange.gate.spot.protocol import GateApiError, GateWsError
-from mft.exchange.gate.spot.rest import GateRestError
-from mft.exchange.paper.private import PaperAuthError, PaperPrivateClient
-from mft.exchange.paper.remote import PaperRemotePrivateClient
-from mft.protocol.reject_codes import (
+from mftik.exchange.gate.spot.private import GateSpotPrivateClient
+from mftik.exchange.gate.spot.protocol import GateApiError, GateWsError
+from mftik.exchange.gate.spot.rest import GateRestError
+from mftik.exchange.paper.private import PaperAuthError, PaperPrivateClient
+from mftik.exchange.paper.remote import PaperRemotePrivateClient
+from mftik.protocol.reject_codes import (
     RejectCode,
     describe,
     is_normalized,
     is_td_internal,
     is_venue,
 )
-from mft_td.errors import VENUES, normalize
+from mftik_td.errors import VENUES, normalize
 
 GATE = "Gate"
 PAPER = "Paper"
@@ -316,7 +316,7 @@ def test_binance_codes_cannot_be_mistaken_for_ours() -> None:
     indistinguishable from a code this platform assigned. Binance's are all
     negative, which is why leaving one unmapped is safe.
     """
-    from mft_td.errors import BINANCE as TABLE
+    from mftik_td.errors import BINANCE as TABLE
 
     assert all(code < 0 for code in TABLE.codes)
     assert all(code < 0 for code in TABLE.refine)
@@ -468,7 +468,7 @@ def test_a_bybit_code_survives_being_wrapped_as_an_order_error() -> None:
 
 def test_an_unmapped_bybit_code_passes_through_as_itself() -> None:
     """Bybit numbers in five and six digits, so one cannot be mistaken for a
-    code this platform assigned — see ``mft.protocol.reject_codes``."""
+    code this platform assigned — see ``mftik.protocol.reject_codes``."""
     assert normalize(BybitWsError(999999, "new one"), venue="Bybit") == 999999
 
 

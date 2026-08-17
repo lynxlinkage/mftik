@@ -9,11 +9,11 @@ from pathlib import Path
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange.models import Order, OrderStatus, OrderType, Side, Ticker
-from mft.exchange.oms import LedgerEntry
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange.models import Order, OrderStatus, OrderType, Side, Ticker
+from mftik.exchange.oms import LedgerEntry
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import (
     MD_TICKER,
     TD_LEASE_ACK,
     TD_LEVERAGE_ACK,
@@ -28,10 +28,10 @@ from mft.protocol import (
     Topics,
     UntypedEnvelope,
 )
-from mft_sts import tape as tape_module
-from mft_sts.eventlog import DIR_ENV, EventLog
-from mft_sts.session.session import StsSession
-from mft_sts.strategy import Strategy
+from mftik_sts import tape as tape_module
+from mftik_sts.eventlog import DIR_ENV, EventLog
+from mftik_sts.session.session import StsSession
+from mftik_sts.strategy import Strategy
 
 
 @pytest.fixture

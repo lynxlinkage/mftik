@@ -11,14 +11,14 @@ from decimal import Decimal
 
 import pytest
 from binance_stub import FakeBinanceApi
-from mft.exchange.binance.spot import methods as m
-from mft.exchange.binance.spot.client import BinanceSpotWsApi
-from mft.exchange.binance.spot.protocol import BinanceWsError
-from mft.exchange.intervals import InvalidIntervalError
-from mft.exchange.tickers import Category, UniversalTicker
-from mft.protocol.query_codes import QueryCode, is_normalized
-from mft_md.errors import VENUES, normalize
-from mft_md.fetch.readers import (
+from mftik.exchange.binance.spot import methods as m
+from mftik.exchange.binance.spot.client import BinanceSpotWsApi
+from mftik.exchange.binance.spot.protocol import BinanceWsError
+from mftik.exchange.intervals import InvalidIntervalError
+from mftik.exchange.tickers import Category, UniversalTicker
+from mftik.protocol.query_codes import QueryCode, is_normalized
+from mftik_md.errors import VENUES, normalize
+from mftik_md.fetch.readers import (
     BinanceSpotReader,
     NoReaderError,
     VenueReaderFactory,
@@ -230,7 +230,7 @@ def test_a_call_that_never_completed_is_not_read_as_a_refusal() -> None:
 
 
 def test_binance_is_a_registered_venue_in_the_table() -> None:
-    from mft.exchange import venues
+    from mftik.exchange import venues
 
     assert BINANCE in VENUES
     assert set(VENUES) <= set(venues.names())

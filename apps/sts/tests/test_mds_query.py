@@ -8,10 +8,10 @@ from typing import Any
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange.models import BestQuote, BookLevel, Kline, OrderBook
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange.models import BestQuote, BookLevel, Kline, OrderBook
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import (
     MD_BESTQUOTE_RESULT,
     MD_KLINE,
     MD_KLINES_RESULT,
@@ -27,8 +27,8 @@ from mft.protocol import (
     Topics,
     UntypedEnvelope,
 )
-from mft_sts.session.session import StsSession
-from mft_sts.strategy import Strategy
+from mftik_sts.session.session import StsSession
+from mftik_sts.strategy import Strategy
 
 SESSION_ID = "sts-mds-1"
 TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")

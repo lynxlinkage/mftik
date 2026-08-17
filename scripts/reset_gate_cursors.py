@@ -37,10 +37,10 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
-from mft.exchange import venues
-from mft_db.models.history import BackfillCursorRow
-from mft_db.repositories import ApiRepository, OrderRepository
-from mft_db.session import session_scope
+from mftik.exchange import venues
+from mftik_db.models.history import BackfillCursorRow
+from mftik_db.repositories import ApiRepository, OrderRepository
+from mftik_db.session import session_scope
 from sqlalchemy import delete, select
 
 

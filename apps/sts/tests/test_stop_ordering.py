@@ -6,17 +6,17 @@ import asyncio
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.protocol import (
     TD_SESSION_DETACH,
     TdDetachRequest,
     TdDetachResult,
     TdDetachResultEnvelope,
     Topics,
 )
-from mft_sts.session import session as session_mod
-from mft_sts.session.session import StsSession
-from mft_sts.strategy import Strategy
+from mftik_sts.session import session as session_mod
+from mftik_sts.session.session import StsSession
+from mftik_sts.strategy import Strategy
 
 SESSION_ID = "sts-stop-order"
 API_ID = 7

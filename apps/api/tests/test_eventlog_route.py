@@ -12,7 +12,7 @@ import gzip
 
 import pytest
 from fastapi import HTTPException
-from mft.protocol import (
+from mftik.protocol import (
     STS_ERROR,
     STS_EVENTLOG_INFO,
     STS_EVENTLOG_READ,
@@ -26,7 +26,7 @@ from mft.protocol import (
     StsEventLogPart,
     StsEventLogReadRequest,
 )
-from mft_api.routes import sts as sts_routes
+from mftik_api.routes import sts as sts_routes
 
 
 class FakeSts:

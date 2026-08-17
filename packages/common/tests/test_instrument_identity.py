@@ -11,7 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft.exchange.models import (
+from mftik.exchange.models import (
     BestQuote,
     BookLevel,
     Fill,
@@ -28,7 +28,7 @@ from mft.exchange.models import (
     limit_order,
     market_order,
 )
-from mft.exchange.tickers import Category, InvalidTickerError, UniversalTicker
+from mftik.exchange.tickers import Category, InvalidTickerError, UniversalTicker
 
 
 def _book(ticker: str) -> OrderBook:

@@ -9,10 +9,10 @@ from typing import Any
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange, Side
-from mft.exchange.models import OrderStatus, OrderType, limit_order
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange, Side
+from mftik.exchange.models import OrderStatus, OrderType, limit_order
+from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
@@ -24,7 +24,7 @@ from mft.protocol import (
     TdAttachRequest,
     Topics,
 )
-from mft_td.session import PaperSessionFactory, SessionManager
+from mftik_td.session import PaperSessionFactory, SessionManager
 
 API_ID = 42
 
@@ -165,7 +165,7 @@ async def test_foreign_cancel_is_warned_not_blocked(
     assert _order_by_cid(manager, cid) is not None
 
     # sts-b sees the cid on td.oms.{api_id} and cancels it.
-    with caplog.at_level(logging.WARNING, logger="mft_td.session.manager"):
+    with caplog.at_level(logging.WARNING, logger="mftik_td.session.manager"):
         await _cancel(broker, "sts-b", cid)
         await asyncio.sleep(0.2)
 
@@ -194,7 +194,7 @@ async def test_detached_owner_is_reported_as_detached(
     await asyncio.sleep(0.2)
     await manager.detach(session_id="sts-a", api_id=API_ID)
 
-    with caplog.at_level(logging.WARNING, logger="mft_td.session.manager"):
+    with caplog.at_level(logging.WARNING, logger="mftik_td.session.manager"):
         await _cancel(broker, "sts-b", cid)
         await asyncio.sleep(0.2)
 

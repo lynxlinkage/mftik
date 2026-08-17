@@ -1,6 +1,6 @@
 """The catalogue and the registry have to agree.
 
-``mft.protocol.strategy_catalog`` lives in mft-common so the API can serve it
+``mftik.protocol.strategy_catalog`` lives in mftik-common so the API can serve it
 without depending on STS, which means nothing in the type system stops the two
 from drifting: a template can name a strategy that was never registered, or
 carry an ``sts:`` block that the strategy itself would refuse. Either way the
@@ -11,14 +11,14 @@ lands at deploy time rather than here.
 from __future__ import annotations
 
 import pytest
-from mft.protocol import all_templates, strategy_types
-from mft.protocol.strategy_yml import parse_strategy_yml
-from mft_sts.impl import resolve_class
-from mft_sts.impl.chase import ChaseOrder
-from mft_sts.impl.cross_arb import CrossArb
-from mft_sts.impl.noop import NoopStrategy
-from mft_sts.impl.oco import OneCancelOther
-from mft_sts.impl.twap import TwapStrategy
+from mftik.protocol import all_templates, strategy_types
+from mftik.protocol.strategy_yml import parse_strategy_yml
+from mftik_sts.impl import resolve_class
+from mftik_sts.impl.chase import ChaseOrder
+from mftik_sts.impl.cross_arb import CrossArb
+from mftik_sts.impl.noop import NoopStrategy
+from mftik_sts.impl.oco import OneCancelOther
+from mftik_sts.impl.twap import TwapStrategy
 
 
 @pytest.mark.parametrize("type_name", strategy_types())

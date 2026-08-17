@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  APP_IMAGE: ghcr.io/${{ github.repository_owner }}/mft
-  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/mft-frontend
+  APP_IMAGE: ghcr.io/${{ github.repository_owner }}/mftik
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/mftik-frontend
 
 jobs:
   test:
@@ -20,19 +20,19 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: mft
-          POSTGRES_PASSWORD: mft
-          POSTGRES_DB: mft_test
+          POSTGRES_USER: mftik
+          POSTGRES_PASSWORD: mftik
+          POSTGRES_DB: mftik_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U mft -d mft_test"
+          --health-cmd "pg_isready -U mftik -d mftik_test"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
     env:
-      TEST_POSTGRES_URL: postgresql+asyncpg://mft:mft@localhost:5432/mft_test
-      DATABASE_URL_SYNC: postgresql+psycopg://mft:mft@localhost:5432/mft_test
+      TEST_POSTGRES_URL: postgresql+asyncpg://mftik:mftik@localhost:5432/mftik_test
+      DATABASE_URL_SYNC: postgresql+psycopg://mftik:mftik@localhost:5432/mftik_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -58,7 +58,7 @@ jobs:
       - name: Contracts up to date
         run: |
           uv run --all-packages python -c \
-            "import json; from mft_api.main import app; print(json.dumps(app.openapi(), indent=2))" \
+            "import json; from mftik_api.main import app; print(json.dumps(app.openapi(), indent=2))" \
             > /tmp/openapi.json
           diff -u contracts/openapi.json /tmp/openapi.json \
             || { echo "contracts/openapi.json is stale — run: just openapi" >&2; exit 1; }
@@ -126,8 +126,8 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: deploy/docker-compose.yml
           # strip_components drops the leading `deploy/`, so the file lands at
-          # /opt/mft/deploy/docker-compose.yml — next to the .env it reads.
-          target: /opt/mft/deploy
+          # /opt/mftik/deploy/docker-compose.yml — next to the .env it reads.
+          target: /opt/mftik/deploy
           strip_components: 1
 
       - name: Pin version, migrate, restart
@@ -146,12 +146,12 @@ jobs:
             # /opt/traefik (not this stack). Ensure it exists so the external
             # network reference in docker-compose.yml resolves.
             docker network inspect web >/dev/null 2>&1 || docker network create web
-            cd /opt/mft/deploy
+            cd /opt/mftik/deploy
             # Rewrite only the version line; every secret in .env survives.
-            if grep -q '^MFT_VERSION=' .env; then
-              sed -i "s|^MFT_VERSION=.*|MFT_VERSION=${VERSION}|" .env
+            if grep -q '^MFTIK_VERSION=' .env; then
+              sed -i "s|^MFTIK_VERSION=.*|MFTIK_VERSION=${VERSION}|" .env
             else
-              echo "MFT_VERSION=${VERSION}" >> .env
+              echo "MFTIK_VERSION=${VERSION}" >> .env
             fi
             docker compose pull
             # Schema first: the new images assume the new schema.
@@ -225,7 +225,7 @@ jobs:
           # Piped rather than passed with -d "$(...)": the payload carries a
           # commit message we did not write, and argv is the wrong place for it.
           jq -n \
-            --arg title "mft: $TITLE" \
+            --arg title "mftik: $TITLE" \
             --arg desc "$DESC" \
             --arg repo "$REPO" \
             --arg actor "$ACTOR" \

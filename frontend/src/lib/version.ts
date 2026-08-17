@@ -3,7 +3,7 @@ import { env } from '$env/dynamic/public';
 /**
  * The build this frontend container came from.
  *
- * Production pins images by `MFT_VERSION` (CI writes `sha-<commit>` into the
+ * Production pins images by `MFTIK_VERSION` (CI writes `sha-<commit>` into the
  * host's .env), and deploy/docker-compose.yml hands that same value to the
  * frontend as PUBLIC_APP_VERSION. Read through `$env/dynamic/public` rather
  * than `import.meta.env`, and dynamically rather than statically: one image is

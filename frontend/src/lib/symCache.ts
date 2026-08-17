@@ -1,7 +1,7 @@
 import type { SymbolInfo } from '$lib/api';
 
-const VENUE_KEY = 'mft.sym.venue';
-const PAGE_KEY = 'mft.sym.page';
+const VENUE_KEY = 'mftik.sym.venue';
+const PAGE_KEY = 'mftik.sym.page';
 
 export type SymPageCache = {
 	venue: string;

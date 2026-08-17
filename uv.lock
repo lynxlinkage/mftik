@@ -8,15 +8,15 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "mft-api",
-    "mft-common",
-    "mft-db",
-    "mft-md",
-    "mft-paper",
-    "mft-sts",
-    "mft-sym",
-    "mft-td",
-    "mft-workspace",
+    "mftik-api",
+    "mftik-common",
+    "mftik-db",
+    "mftik-md",
+    "mftik-paper",
+    "mftik-sts",
+    "mftik-sym",
+    "mftik-td",
+    "mftik-workspace",
 ]
 
 [[package]]
@@ -584,14 +584,14 @@ wheels = [
 ]
 
 [[package]]
-name = "mft-api"
+name = "mftik-api"
 version = "0.1.0"
 source = { editable = "apps/api" }
 dependencies = [
     { name = "argon2-cffi" },
     { name = "fastapi" },
-    { name = "mft-common" },
-    { name = "mft-db" },
+    { name = "mftik-common" },
+    { name = "mftik-db" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "websockets" },
 ]
@@ -600,14 +600,14 @@ dependencies = [
 requires-dist = [
     { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "mft-common", editable = "packages/common" },
-    { name = "mft-db", editable = "packages/db" },
+    { name = "mftik-common", editable = "packages/common" },
+    { name = "mftik-db", editable = "packages/db" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
     { name = "websockets", specifier = ">=13.0" },
 ]
 
 [[package]]
-name = "mft-common"
+name = "mftik-common"
 version = "0.1.0"
 source = { editable = "packages/common" }
 dependencies = [
@@ -630,7 +630,7 @@ requires-dist = [
 ]
 
 [[package]]
-name = "mft-db"
+name = "mftik-db"
 version = "0.1.0"
 source = { editable = "packages/db" }
 dependencies = [
@@ -649,78 +649,78 @@ requires-dist = [
 ]
 
 [[package]]
-name = "mft-md"
+name = "mftik-md"
 version = "0.1.0"
 source = { editable = "apps/md" }
 dependencies = [
-    { name = "mft-common" },
-    { name = "mft-db" },
+    { name = "mftik-common" },
+    { name = "mftik-db" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mft-common", editable = "packages/common" },
-    { name = "mft-db", editable = "packages/db" },
+    { name = "mftik-common", editable = "packages/common" },
+    { name = "mftik-db", editable = "packages/db" },
 ]
 
 [[package]]
-name = "mft-paper"
+name = "mftik-paper"
 version = "0.1.0"
 source = { editable = "apps/paper" }
 dependencies = [
-    { name = "mft-common" },
+    { name = "mftik-common" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "mft-common", editable = "packages/common" }]
+requires-dist = [{ name = "mftik-common", editable = "packages/common" }]
 
 [[package]]
-name = "mft-sts"
+name = "mftik-sts"
 version = "0.1.0"
 source = { editable = "apps/sts" }
 dependencies = [
-    { name = "mft-common" },
-    { name = "mft-db" },
+    { name = "mftik-common" },
+    { name = "mftik-db" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mft-common", editable = "packages/common" },
-    { name = "mft-db", editable = "packages/db" },
+    { name = "mftik-common", editable = "packages/common" },
+    { name = "mftik-db", editable = "packages/db" },
 ]
 
 [[package]]
-name = "mft-sym"
+name = "mftik-sym"
 version = "0.1.0"
 source = { editable = "apps/sym" }
 dependencies = [
-    { name = "mft-common" },
-    { name = "mft-db" },
+    { name = "mftik-common" },
+    { name = "mftik-db" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mft-common", editable = "packages/common" },
-    { name = "mft-db", editable = "packages/db" },
+    { name = "mftik-common", editable = "packages/common" },
+    { name = "mftik-db", editable = "packages/db" },
 ]
 
 [[package]]
-name = "mft-td"
+name = "mftik-td"
 version = "0.1.0"
 source = { editable = "apps/td" }
 dependencies = [
-    { name = "mft-common" },
-    { name = "mft-db" },
+    { name = "mftik-common" },
+    { name = "mftik-db" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mft-common", editable = "packages/common" },
-    { name = "mft-db", editable = "packages/db" },
+    { name = "mftik-common", editable = "packages/common" },
+    { name = "mftik-db", editable = "packages/db" },
 ]
 
 [[package]]
-name = "mft-workspace"
+name = "mftik-workspace"
 version = "0.1.0"
 source = { virtual = "." }
 

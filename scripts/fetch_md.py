@@ -27,9 +27,9 @@ import os
 import sys
 import uuid
 
-from mft.broker import Broker, BrokerConfig
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import (
     MD_BESTQUOTE_RESULT,
     MD_FETCH_BESTQUOTE,
     MD_FETCH_KLINES,
@@ -47,7 +47,7 @@ from mft.protocol import (
     MdQueryAck,
     Topics,
 )
-from mft.protocol.query_codes import describe, is_retryable
+from mftik.protocol.query_codes import describe, is_retryable
 
 #: How long to wait for the data itself. Generous: the ack is one Redis
 #: round-trip, but the answer behind it is a venue call.

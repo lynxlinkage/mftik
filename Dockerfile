@@ -6,7 +6,7 @@
 # this installs the whole workspace once and lets each container pick its
 # entrypoint via `command:`:
 #
-#   mft-api | td | md | sts | sym | paper | mft-db-migrate
+#   mftik-api | td | md | sts | sym | paper | mftik-db-migrate
 #
 # The venv is on PATH, so the commands above are the literal `command:` values.
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
@@ -30,4 +30,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8000
 
-CMD ["mft-api"]
+CMD ["mftik-api"]

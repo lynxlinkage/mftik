@@ -8,25 +8,25 @@ from typing import Any
 import httpx
 import pytest
 from gate_stub import API_KEY, API_SECRET, FakeGate
-from mft.exchange.errors import OrderError
-from mft.exchange.gate.spot import channels as ch
-from mft.exchange.gate.spot.private import GateSpotPrivateClient
-from mft.exchange.gate.spot.rest import GateRestError, GateSpotRest, sign_rest
-from mft.exchange.models import (
+from mftik.exchange.errors import OrderError
+from mftik.exchange.gate.spot import channels as ch
+from mftik.exchange.gate.spot.private import GateSpotPrivateClient
+from mftik.exchange.gate.spot.rest import GateRestError, GateSpotRest, sign_rest
+from mftik.exchange.models import (
     OrderStatus,
     OrderType,
     PlaceOrderRequest,
     Side,
     TimeInForce,
 )
-from mft.exchange.tickers import InvalidTickerError, UniversalTicker
+from mftik.exchange.tickers import InvalidTickerError, UniversalTicker
 
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")
 
 
 def _filled_order():
-    from mft.exchange.gate.spot.models import GateOrderAck
+    from mftik.exchange.gate.spot.models import GateOrderAck
 
     return GateOrderAck.model_validate(
         dict(OPEN_ORDER, status="closed", left="0")
@@ -121,7 +121,7 @@ async def _private(
     rest_stub: FakeGateRest,
     resolver: StubResolver | None = None,
 ) -> GateSpotPrivateClient:
-    from mft.exchange.gate.spot.client import GateSpotWebSocket
+    from mftik.exchange.gate.spot.client import GateSpotWebSocket
 
     ws = GateSpotWebSocket(
         url=gate.url,  # type: ignore[attr-defined]
@@ -558,7 +558,7 @@ async def test_credentials_are_required() -> None:
 async def test_calls_before_connect_raise(
     gate: FakeGate, rest_stub: FakeGateRest
 ) -> None:
-    from mft.exchange.errors import ExchangeNotConnectedError
+    from mftik.exchange.errors import ExchangeNotConnectedError
 
     client = await _private(gate, rest_stub)
     with pytest.raises(ExchangeNotConnectedError):

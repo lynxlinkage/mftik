@@ -13,10 +13,10 @@ import asyncio
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.protocol import Envelope, TdAttachRequest, TdBackfill, Topics
-from mft_td.backfill.trigger import request_backfill
-from mft_td.session import PaperSessionFactory, SessionManager
+from mftik.broker import Broker, BrokerConfig
+from mftik.protocol import Envelope, TdAttachRequest, TdBackfill, Topics
+from mftik_td.backfill.trigger import request_backfill
+from mftik_td.session import PaperSessionFactory, SessionManager
 
 API_ID = 42
 SESSION = "sts-trigger"
@@ -131,7 +131,7 @@ async def test_a_cancelled_ask_is_not_swallowed(broker) -> None:
 async def paper():
     from decimal import Decimal
 
-    from mft.exchange import PaperExchange
+    from mftik.exchange import PaperExchange
 
     async with PaperExchange(
         symbols={"BTCUSDT": Decimal("50000")}, tick_interval=0.05, seed=7
@@ -140,7 +140,7 @@ async def paper():
 
 
 async def _lease(broker: Broker, stop: asyncio.Event) -> None:
-    from mft.protocol import STS_LEASE_HEARTBEAT, LeaseHeartbeat
+    from mftik.protocol import STS_LEASE_HEARTBEAT, LeaseHeartbeat
 
     token = 0
     while not stop.is_set():

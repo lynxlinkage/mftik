@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft.exchange.models import (
+from mftik.exchange.models import (
     BestQuote,
     Order,
     OrderStatus,
@@ -13,16 +13,16 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
-from mft.exchange.oms import OmsView
-from mft.exchange.tickers import InvalidTickerError, UniversalTicker
-from mft.protocol import (
+from mftik.exchange.oms import OmsView
+from mftik.exchange.tickers import InvalidTickerError, UniversalTicker
+from mftik.protocol import (
     CancelReject,
     OrderReject,
     ReconDone,
     RejectCode,
     SymbolInfo,
 )
-from mft_sts.impl.cross_arb import (
+from mftik_sts.impl.cross_arb import (
     CrossArb,
     edge_bps,
     edge_in_band,

@@ -1,1 +1,0 @@
-"""MFT FastAPI gateway service."""

@@ -14,17 +14,17 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     Envelope,
     LeaseHeartbeat,
     MdAttachRequest,
     Topics,
 )
-from mft_md.session import PaperPublicFactory, SessionManager
-from mft_md.session.venue import VenueSession
+from mftik_md.session import PaperPublicFactory, SessionManager
+from mftik_md.session.venue import VenueSession
 
 FEED = "orderbook.Paper_Spot_BTCUSDT"
 

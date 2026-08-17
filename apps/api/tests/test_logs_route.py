@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException
-from mft_api.routes import logs as logs_routes
+from mftik_api.routes import logs as logs_routes
 
 
 class _FakeDb:

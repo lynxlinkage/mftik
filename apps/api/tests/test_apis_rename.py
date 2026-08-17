@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException
-from mft_api.routes import apis as apis_routes
-from mft_api.schemas import ApiRenameBody
+from mftik_api.routes import apis as apis_routes
+from mftik_api.schemas import ApiRenameBody
 
 
 class _FakeDb:

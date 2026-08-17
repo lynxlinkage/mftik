@@ -121,7 +121,7 @@ export type RegistryStrategy = {
 	name: string;
 	type: string;
 	digest: string;
-	requires_mft: string;
+	requires_mftik: string;
 	origin: string;
 	files: string[];
 };
@@ -336,7 +336,7 @@ export type Me = {
 /**
  * A machine credential, as the settings page can know it.
  *
- * `prefix` is `mft_ak_abc12345…` — everything of the token that survives
+ * `prefix` is `mftik_ak_abc12345…` — everything of the token that survives
  * minting. The secret exists once, in the response that creates it, and is a
  * hash in the database from then on, so no list can ever show it again.
  */

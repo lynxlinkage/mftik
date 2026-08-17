@@ -13,14 +13,14 @@ from pathlib import Path
 import pytest
 from auth_harness import a_client, an_api, use_database
 from db_harness import a_database
-from mft_api.auth import routes as auth_routes
-from mft_api.auth.middleware import required_scope
-from mft_api.auth.principal import SCOPE_API, SCOPE_REGISTRY_READ
+from mftik_api.auth import routes as auth_routes
+from mftik_api.auth.middleware import required_scope
+from mftik_api.auth.principal import SCOPE_API, SCOPE_REGISTRY_READ
 
 GOOD = "correct-horse-battery"
 
 _TINY = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -36,8 +36,8 @@ def _no_throttle() -> None:
 async def db(monkeypatch, database_url, tmp_path: Path):
     async with a_database(database_url) as database:
         use_database(monkeypatch, database.scope)
-        monkeypatch.setenv("MFT_AUTH_ENABLED", "1")
-        monkeypatch.setenv("MFT_DATA", str(tmp_path))
+        monkeypatch.setenv("MFTIK_AUTH_ENABLED", "1")
+        monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
         yield database.scope
 
 
@@ -70,7 +70,7 @@ async def test_a_registry_key_reads_what_this_node_publishes(db) -> None:
         listed = await client.get("/registry/v1/strategies", headers=auth)
         detail = await client.get("/registry/v1/strategies/tiny", headers=auth)
 
-    assert peer.startswith("mft_rk_")
+    assert peer.startswith("mftik_rk_")
     assert [s["name"] for s in listed.json()["strategies"]] == ["tiny"]
     assert "strategy.py" in detail.json()["contents"]
 
@@ -101,7 +101,7 @@ async def test_a_registry_key_reaches_nothing_else(db, method: str, path: str) -
     )
     # Not 401: this is a real credential in the wrong place, and the peer
     # presenting it has no login to be sent to.
-    assert "x-mft-auth" not in answered.headers
+    assert "x-mftik-auth" not in answered.headers
 
 
 async def test_the_source_dump_is_no_longer_public(db) -> None:

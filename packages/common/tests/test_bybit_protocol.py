@@ -8,9 +8,9 @@ import json
 from decimal import Decimal
 
 import pytest
-from mft.exchange.bybit import protocol as p
-from mft.exchange.errors import ExchangeError
-from mft.exchange.tickers import Category
+from mftik.exchange.bybit import protocol as p
+from mftik.exchange.errors import ExchangeError
+from mftik.exchange.tickers import Category
 
 # --- endpoints and categories ----------------------------------------------
 

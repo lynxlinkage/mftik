@@ -10,15 +10,15 @@ that timeout instead of the sentence the strategy wrote.
 from __future__ import annotations
 
 import pytest
-from mft.protocol import (
+from mftik.protocol import (
     MD_SESSION_ATTACH,
     STS_SESSION_CREATE,
     STS_SESSION_STOP,
     StsCreateSessionResult,
     StsCreateSessionResultEnvelope,
 )
-from mft_api.broker_rpc import DomainRpcError
-from mft_api.orchestrate import deploy_strategy
+from mftik_api.broker_rpc import DomainRpcError
+from mftik_api.orchestrate import deploy_strategy
 
 REFUSAL = (
     "no bestquote feed for BinanceFuture_Perp_BTCUSDT in md "

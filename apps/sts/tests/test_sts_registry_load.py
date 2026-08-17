@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from mft.registry import RegistryStore
-from mft_sts.impl import load_local_registry, resolve, resolve_class
-from mft_sts.impl.noop import NoopStrategy
+from mftik.registry import RegistryStore
+from mftik_sts.impl import load_local_registry, resolve, resolve_class
+from mftik_sts.impl.noop import NoopStrategy
 
 _TINY = """\
-from mft_sts.strategy import Strategy
+from mftik_sts.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -28,7 +28,7 @@ def test_builtin_name_is_not_overwritten(tmp_path) -> None:
     store.add(
         {
             "strategy.py": (
-                "from mft_sts.strategy import Strategy\n"
+                "from mftik_sts.strategy import Strategy\n"
                 "class Hijack(Strategy):\n"
                 '    name = "noop"\n'
             )
@@ -45,7 +45,7 @@ def test_a_broken_tree_does_not_block_the_others(tmp_path) -> None:
     store.add(
         {
             "strategy.py": (
-                "from mft_sts.strategy import Strategy\n"
+                "from mftik_sts.strategy import Strategy\n"
                 "class Broken(Strategy):\n"
                 '    name = "broken"\n'
                 "\n"

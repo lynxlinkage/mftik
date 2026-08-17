@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from mft.exchange import venues
-from mft.exchange.tickers import SEPARATOR, Category
+from mftik.exchange import venues
+from mftik.exchange.tickers import SEPARATOR, Category
 
 
 def test_gate_is_registered_as_its_own_venue() -> None:
@@ -121,7 +121,7 @@ def test_validate_credential_rejects_unknown_venue() -> None:
 
 def test_registry_errors_are_exchange_errors() -> None:
     """So callers can catch one type at the boundary."""
-    from mft.exchange.errors import ExchangeError
+    from mftik.exchange.errors import ExchangeError
 
     assert issubclass(venues.UnknownVenueError, ExchangeError)
     assert issubclass(venues.UnsupportedApiTypeError, ExchangeError)

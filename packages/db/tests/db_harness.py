@@ -6,7 +6,7 @@ duplication than as a single point of control: the URL was hardcoded in every
 one of them, so pointing the suite at anything other than in-memory sqlite
 would have meant editing all nine. Here it is an argument.
 
-``scope`` is the shape most tests want. It mirrors ``mft_db.session_scope``
+``scope`` is the shape most tests want. It mirrors ``mftik_db.session_scope``
 exactly — commit on clean exit, rollback and re-raise otherwise — because the
 code under test is usually handed one and cannot tell the difference.
 
@@ -27,7 +27,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 
-from mft_db.models import Base, User
+from mftik_db.models import Base, User
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,

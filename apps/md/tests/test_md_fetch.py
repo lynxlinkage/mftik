@@ -8,12 +8,12 @@ from typing import Any
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange.errors import ExchangeError
-from mft.exchange.intervals import InvalidIntervalError
-from mft.exchange.models import BestQuote, BookLevel, Kline, OrderBook
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange.errors import ExchangeError
+from mftik.exchange.intervals import InvalidIntervalError
+from mftik.exchange.models import BestQuote, BookLevel, Kline, OrderBook
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import (
     MD_BESTQUOTE_RESULT,
     MD_FETCH_BESTQUOTE,
     MD_FETCH_KLINES,
@@ -31,7 +31,7 @@ from mft.protocol import (
     QueryCode,
     Topics,
 )
-from mft_md.fetch import FetchSession, NoReaderError
+from mftik_md.fetch import FetchSession, NoReaderError
 
 VENUE = "Gate"
 SYMBOL = "BTCUSDT"
@@ -480,8 +480,8 @@ async def test_a_strategy_with_no_market_data_gets_its_candles(
     whole claim of this plane, and it only holds if both halves agree on the
     subject, the reply channel and the query id.
     """
-    from mft_sts.session.session import StsSession
-    from mft_sts.strategy import Strategy
+    from mftik_sts.session.session import StsSession
+    from mftik_sts.strategy import Strategy
 
     class Recording(Strategy):
         name = "fetch-e2e"

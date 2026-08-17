@@ -7,10 +7,10 @@ worth testing is the one way it can fail: looking healthy while holding nothing.
 from __future__ import annotations
 
 import pytest
-from mft.exchange.models import AggTrade, Side
-from mft.protocol import parse_strategy_yml, strategy_catalog
-from mft_sts.impl import resolve, resolve_class
-from mft_sts.impl.tape_keeper import TapeKeeper
+from mftik.exchange.models import AggTrade, Side
+from mftik.protocol import parse_strategy_yml, strategy_catalog
+from mftik_sts.impl import resolve, resolve_class
+from mftik_sts.impl.tape_keeper import TapeKeeper
 
 TICKER = "BinanceFuture_Perp_BTCUSDT"
 

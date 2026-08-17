@@ -15,12 +15,12 @@ from urllib.parse import parse_qsl, unquote
 import httpx
 import pytest
 from binance_stub import keypair
-from mft.exchange.binance.future.rest import (
+from mftik.exchange.binance.future.rest import (
     BinanceFuturePublicRest,
     BinanceFutureRest,
     BinanceFutureRestError,
 )
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import UniversalTicker
 
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
 BASE = "https://fapi.test"

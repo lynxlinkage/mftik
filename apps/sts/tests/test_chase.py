@@ -13,7 +13,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from mft.exchange.models import (
+from mftik.exchange.models import (
     BestQuote,
     Order,
     OrderStatus,
@@ -21,9 +21,9 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
-from mft.exchange.oms import OmsView
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import (
+from mftik.exchange.oms import OmsView
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import (
     CancelReject,
     OrderReject,
     ReconDone,
@@ -31,7 +31,7 @@ from mft.protocol import (
     SymbolFilterInfo,
     SymbolInfo,
 )
-from mft_sts.impl.chase import IOC_MAX_SLICES, ChaseOrder, _floor_hint
+from mftik_sts.impl.chase import IOC_MAX_SLICES, ChaseOrder, _floor_hint
 
 BTCUSDT = SymbolInfo(
     universal_ticker="Paper_Spot_BTCUSDT",

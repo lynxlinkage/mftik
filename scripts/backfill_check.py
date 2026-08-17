@@ -26,11 +26,11 @@ import asyncio
 import sys
 from typing import Any
 
-from mft.broker import Broker
-from mft.symbols import SymbolClient
-from mft_db.repositories import ApiRepository, OrderRepository
-from mft_db.session import session_scope
-from mft_td.backfill.reader import HistoryReaderFactory, NoHistoryReaderError
+from mftik.broker import Broker
+from mftik.symbols import SymbolClient
+from mftik_db.repositories import ApiRepository, OrderRepository
+from mftik_db.session import session_scope
+from mftik_td.backfill.reader import HistoryReaderFactory, NoHistoryReaderError
 
 
 def show(label: str, value: Any) -> None:
@@ -80,7 +80,7 @@ async def check(api_id: int, ticker: str | None, limit: int) -> int:
 
 
 async def _one(reader: Any, call: str, ticker: str, limit: int) -> None:
-    from mft.exchange.tickers import UniversalTicker
+    from mftik.exchange.tickers import UniversalTicker
 
     fetch = getattr(reader, call, None)
     print(f"\n  {call}")

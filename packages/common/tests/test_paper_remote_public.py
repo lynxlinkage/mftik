@@ -7,11 +7,11 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.exchange.paper.remote_public import PaperRemotePublicClient
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import PAPER_ORDER_BOOK, Topics, UntypedEnvelope
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.exchange.paper.remote_public import PaperRemotePublicClient
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import PAPER_ORDER_BOOK, Topics, UntypedEnvelope
 
 
 def PAPER(symbol: str) -> UniversalTicker:
@@ -34,7 +34,7 @@ async def broker() -> Broker:
 
 @pytest.mark.asyncio
 async def test_remote_public_fetch_and_stream(broker: Broker) -> None:
-    from mft_paper.rpc import dispatch
+    from mftik_paper.rpc import dispatch
 
     async with PaperExchange(
         symbols={"BTCUSDT": Decimal("50000")},

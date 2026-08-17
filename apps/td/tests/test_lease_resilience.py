@@ -17,9 +17,9 @@ from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.protocol import (
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.protocol import (
     STS_DETACH,
     STS_LEASE_HEARTBEAT,
     TD_LEASE_ACK,
@@ -29,7 +29,7 @@ from mft.protocol import (
     TdAttachRequest,
     Topics,
 )
-from mft_td.session import PaperSessionFactory, SessionManager
+from mftik_td.session import PaperSessionFactory, SessionManager
 
 SID = "sess-lease-1"
 API_ID = 3

@@ -1,0 +1,1 @@
+"""MFTIK FastAPI gateway service."""

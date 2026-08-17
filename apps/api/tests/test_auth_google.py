@@ -12,10 +12,10 @@ import httpx
 import pytest
 from auth_harness import a_client, an_api, use_database
 from db_harness import a_database
-from mft_api.auth import oauth
-from mft_api.auth import routes as auth_routes
-from mft_db.models.auth import AuthIdentity
-from mft_db.models.user import User
+from mftik_api.auth import oauth
+from mftik_api.auth import routes as auth_routes
+from mftik_db.models.auth import AuthIdentity
+from mftik_db.models.user import User
 from sqlalchemy import func, select
 
 GOOD = "correct-horse-battery"
@@ -30,8 +30,8 @@ def _no_throttle() -> None:
 async def db(monkeypatch, database_url):
     async with a_database(database_url) as database:
         use_database(monkeypatch, database.scope)
-        monkeypatch.setenv("MFT_AUTH_ENABLED", "1")
-        monkeypatch.setenv("MFT_OAUTH_REDIRECT_BASE", "http://localhost:5173/api")
+        monkeypatch.setenv("MFTIK_AUTH_ENABLED", "1")
+        monkeypatch.setenv("MFTIK_OAUTH_REDIRECT_BASE", "http://localhost:5173/api")
         for provider in ("DISCORD", "GOOGLE"):
             monkeypatch.setenv(f"{provider}_CLIENT_ID", "client-id")
             monkeypatch.setenv(f"{provider}_CLIENT_SECRET", "client-secret")

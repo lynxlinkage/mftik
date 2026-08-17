@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException
-from mft.broker.errors import RequestTimeoutError
-from mft.protocol import (
+from mftik.broker.errors import RequestTimeoutError
+from mftik.protocol import (
     SYM_ERROR,
     SYM_LIST,
     SYM_VENUES,
@@ -26,7 +26,7 @@ from mft.protocol import (
     Topics,
     UntypedEnvelope,
 )
-from mft_api.routes.sym import list_symbols, list_venues
+from mftik_api.routes.sym import list_symbols, list_venues
 
 
 class StubBroker:

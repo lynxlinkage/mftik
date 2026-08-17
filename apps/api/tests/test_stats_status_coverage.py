@@ -9,8 +9,8 @@ find out from a confused user.
 
 from __future__ import annotations
 
-from mft_api.schemas import DomainStats
-from mft_db.models.session import SessionStatus
+from mftik_api.schemas import DomainStats
+from mftik_db.models.session import SessionStatus
 
 
 def test_every_status_is_counted_by_domain_stats() -> None:

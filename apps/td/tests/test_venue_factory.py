@@ -13,16 +13,16 @@ from cryptography.hazmat.primitives.serialization import (
     NoEncryption,
     PrivateFormat,
 )
-from mft.broker import Broker, BrokerConfig
-from mft.exchange import PaperExchange
-from mft.exchange.binance.future.private import BinanceFuturePrivateClient
-from mft.exchange.binance.spot.private import BinanceSpotPrivateClient
-from mft.exchange.binance.spot.protocol import BinanceAuthError
-from mft.exchange.bybit.private import BybitPrivateClient
-from mft.exchange.errors import ExchangeError
-from mft.exchange.gate.spot.private import GateSpotPrivateClient
-from mft.exchange.tickers import Category
-from mft_td.session import PaperSessionFactory, VenueSessionFactory
+from mftik.broker import Broker, BrokerConfig
+from mftik.exchange import PaperExchange
+from mftik.exchange.binance.future.private import BinanceFuturePrivateClient
+from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
+from mftik.exchange.binance.spot.protocol import BinanceAuthError
+from mftik.exchange.bybit.private import BybitPrivateClient
+from mftik.exchange.errors import ExchangeError
+from mftik.exchange.gate.spot.private import GateSpotPrivateClient
+from mftik.exchange.tickers import Category
+from mftik_td.session import PaperSessionFactory, VenueSessionFactory
 
 #: What a Binance credential's ``api_secret`` actually holds: an Ed25519
 #: private key, not a shared secret.
@@ -226,7 +226,7 @@ async def test_missing_credential_row_fails(broker: Broker) -> None:
 
 async def test_gate_client_gets_the_symbol_plane(broker: Broker) -> None:
     """Symbol translation must go through the plane, not string surgery."""
-    from mft.exchange.symbols import SymbolResolver
+    from mftik.exchange.symbols import SymbolResolver
 
     rows = {7: FakeApiRow(id=7, venue="Gate", api_key="gk", api_secret="gs")}
     factory = _factory(broker, rows)

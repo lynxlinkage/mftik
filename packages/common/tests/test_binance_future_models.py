@@ -11,7 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft.exchange.binance.future.models import (
+from mftik.exchange.binance.future.models import (
     BinanceFutureAccountUpdate,
     BinanceFutureAggTrade,
     BinanceFutureBalance,
@@ -29,8 +29,8 @@ from mft.exchange.binance.future.models import (
     status_of,
     type_of,
 )
-from mft.exchange.models import OrderStatus, OrderType, Side
-from mft.exchange.tickers import UniversalTicker
+from mftik.exchange.models import OrderStatus, OrderType, Side
+from mftik.exchange.tickers import UniversalTicker
 
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
 
@@ -152,7 +152,7 @@ def test_the_depth_reply_carries_no_symbol_so_it_is_told_one() -> None:
 def test_a_liquidation_reports_the_position_side_not_the_order_side() -> None:
     """Binance sends the *closing* order: a SELL means a long was wiped out.
 
-    :class:`~mft.exchange.models.Liquidation` states the liquidated position's
+    :class:`~mftik.exchange.models.Liquidation` states the liquidated position's
     side, so reading ``S`` straight through would mirror every event on the
     feed.
     """

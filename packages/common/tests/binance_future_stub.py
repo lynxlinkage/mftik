@@ -29,8 +29,8 @@ import time
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
-from mft.exchange.binance.future import methods as m
-from mft.exchange.binance.future.protocol import payload_for
+from mftik.exchange.binance.future import methods as m
+from mftik.exchange.binance.future.protocol import payload_for
 
 API_KEY = "test-future-key"
 

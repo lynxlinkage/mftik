@@ -12,7 +12,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mft.exchange.models import (
+from mftik.exchange.models import (
     BestQuote,
     Fill,
     Order,
@@ -21,9 +21,9 @@ from mft.exchange.models import (
     Side,
     TimeInForce,
 )
-from mft.exchange.oms import OmsView
-from mft.exchange.tickers import UniversalTicker
-from mft.protocol import (
+from mftik.exchange.oms import OmsView
+from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol import (
     CancelReject,
     MdBestQuoteResult,
     OrderReject,
@@ -31,7 +31,7 @@ from mft.protocol import (
     RejectCode,
     SymbolInfo,
 )
-from mft_sts.impl.oco import LEG_COUNT, OneCancelOther
+from mftik_sts.impl.oco import LEG_COUNT, OneCancelOther
 
 PAPER_BTC = UniversalTicker.parse("Paper_Spot_BTCUSDT")
 

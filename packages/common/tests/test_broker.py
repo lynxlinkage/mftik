@@ -4,14 +4,14 @@ import asyncio
 
 import fakeredis.aioredis
 import pytest
-from mft.broker import (
+from mftik.broker import (
     BidirectionalStream,
     Broker,
     BrokerConfig,
     IncomingRequest,
     RequestTimeoutError,
 )
-from mft.protocol import Envelope, UntypedEnvelope
+from mftik.protocol import Envelope, UntypedEnvelope
 
 
 @pytest.fixture

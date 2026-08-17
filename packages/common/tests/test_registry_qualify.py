@@ -1,6 +1,6 @@
 """Qualified type names for registry trees."""
 
-from mft.registry.qualify import (
+from mftik.registry.qualify import (
     PRIVATE_ORIGIN,
     PUBLIC_ORIGIN,
     qualify,

@@ -6,8 +6,8 @@ import asyncio
 from typing import Any
 
 import pytest
-from mft.protocol import Envelope
-from mft_api import log_persist
+from mftik.protocol import Envelope
+from mftik_api import log_persist
 
 
 def test_parse_log_topic_ok() -> None:

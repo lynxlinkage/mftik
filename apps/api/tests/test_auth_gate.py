@@ -11,10 +11,10 @@ from __future__ import annotations
 import pytest
 from auth_harness import a_client, an_api, use_database
 from db_harness import a_database
-from mft_api.auth import routes as auth_routes
-from mft_api.auth import sessions
-from mft_api.auth.middleware import AuthMiddleware, is_public
-from mft_api.deps import DEFAULT_USER_ID
+from mftik_api.auth import routes as auth_routes
+from mftik_api.auth import sessions
+from mftik_api.auth.middleware import AuthMiddleware, is_public
+from mftik_api.deps import DEFAULT_USER_ID
 
 GOOD = "correct-horse-battery"
 
@@ -42,7 +42,7 @@ def _no_throttle() -> None:
 async def db(monkeypatch, database_url):
     async with a_database(database_url) as database:
         use_database(monkeypatch, database.scope)
-        monkeypatch.setenv("MFT_AUTH_ENABLED", "1")
+        monkeypatch.setenv("MFTIK_AUTH_ENABLED", "1")
         yield database.scope
 
 
@@ -58,7 +58,7 @@ async def test_the_flag_off_is_exactly_todays_behaviour(
 ) -> None:
     async with a_database(database_url) as database:
         use_database(monkeypatch, database.scope)
-        monkeypatch.setenv("MFT_AUTH_ENABLED", "0")
+        monkeypatch.setenv("MFTIK_AUTH_ENABLED", "0")
 
         async with a_client(an_api()) as client:
             answered = await client.get("/sts/sessions")
@@ -80,7 +80,7 @@ async def test_a_gated_route_without_a_cookie_is_401(db) -> None:
     # Says which gate answered. Until the cutover the Traefik chain is also in
     # front of production and wants the opposite response from the browser —
     # a document navigation rather than a client-side route to /login.
-    assert refused.headers["x-mft-auth"] == "login-required"
+    assert refused.headers["x-mftik-auth"] == "login-required"
 
 
 async def test_the_public_routes_answer_without_one(db) -> None:
@@ -115,13 +115,13 @@ async def test_a_database_that_cannot_answer_is_401_not_500(
     """An outage costs logins, not every route. /health still answers."""
     async with a_database(database_url) as database:
         use_database(monkeypatch, database.scope)
-        monkeypatch.setenv("MFT_AUTH_ENABLED", "1")
+        monkeypatch.setenv("MFTIK_AUTH_ENABLED", "1")
 
         app = an_api()
         async with a_client(app) as client:
             await an_owner_with_a_password(client)
 
-            from mft_api.auth import middleware as auth_middleware
+            from mftik_api.auth import middleware as auth_middleware
 
             def _broken():
                 raise RuntimeError("database is gone")
@@ -199,7 +199,7 @@ def test_the_public_surface_is_the_one_we_meant() -> None:
     and the assertion is what says so.
     """
     from fastapi.routing import APIWebSocketRoute
-    from mft_api.main import app
+    from mftik_api.main import app
 
     paths = set(app.openapi()["paths"]) | {
         route.path for route in app.routes if isinstance(route, APIWebSocketRoute)

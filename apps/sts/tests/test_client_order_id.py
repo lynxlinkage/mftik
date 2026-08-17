@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mft_sts.client_order_id import (
+from mftik_sts.client_order_id import (
     EPOCH_MS,
     ClientOrderIdFactory,
     format_client_order_id,

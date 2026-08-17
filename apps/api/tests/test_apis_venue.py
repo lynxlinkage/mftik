@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 from fastapi import HTTPException
-from mft.exchange import venues
-from mft_api.routes.apis import create_api, list_venues
-from mft_api.schemas import ApiCreateBody
+from mftik.exchange import venues
+from mftik_api.routes.apis import create_api, list_venues
+from mftik_api.schemas import ApiCreateBody
 
 
 def _body(**overrides: object) -> ApiCreateBody:

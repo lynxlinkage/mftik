@@ -25,8 +25,8 @@ from cryptography.hazmat.primitives.serialization import (
     NoEncryption,
     PrivateFormat,
 )
-from mft.exchange.binance.spot import methods as m
-from mft.exchange.binance.spot.protocol import payload_for
+from mftik.exchange.binance.spot import methods as m
+from mftik.exchange.binance.spot.protocol import payload_for
 
 API_KEY = "test-api-key"
 
