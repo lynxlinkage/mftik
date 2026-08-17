@@ -1,18 +1,42 @@
 [project]
-name = "mftik-common"
+# The distribution a strategy author installs, and the one every service in
+# this workspace already shares. It was `mftik-common`, which named its role
+# in the monorepo rather than what it is off one: `pip install mftik` gets
+# you `import mftik` and the `mftik` command, and nothing about "common"
+# survives being read from outside this repository.
+name = "mftik"
 version = "0.1.0"
-description = "Shared MFTIK business logic (protocol, broker, runtime, exchange, strategy)"
+description = "MFTIK — strategy SDK and client for a self-hosted trading node"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.0",
     "redis>=5.0",
     "pyyaml>=6.0",
-    "websockets>=14.0",
     "httpx>=0.27",
+    "websockets>=14.0",
     # Ed25519, for Binance's WebSocket API session logon. Gate signs with
     # HMAC out of hashlib; Binance accepts nothing but Ed25519 there.
     "cryptography>=42.0",
 ]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+[project.urls]
+Homepage = "https://github.com/lynxlinkage/mftik"
+Source = "https://github.com/lynxlinkage/mftik"
+
+# The CLI is argparse and httpx, both of which are here already. A dependency
+# added for it would land in every service image too — they all install this
+# package — so the client stays built out of what the library already needs.
+[project.scripts]
+mftik = "mftik.cli:main"
 
 [build-system]
 requires = ["hatchling"]

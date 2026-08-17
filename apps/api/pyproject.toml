@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "MFTIK FastAPI gateway"
 requires-python = ">=3.12"
 dependencies = [
-    "mftik-common",
+    "mftik",
     "mftik-db",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-mftik-common = { workspace = true }
+mftik = { workspace = true }
 mftik-db = { workspace = true }
 
 [build-system]

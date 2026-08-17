@@ -4,11 +4,11 @@ version = "0.1.0"
 description = "MFTIK paper exchange engine service"
 requires-python = ">=3.12"
 dependencies = [
-    "mftik-common",
+    "mftik",
 ]
 
 [tool.uv.sources]
-mftik-common = { workspace = true }
+mftik = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

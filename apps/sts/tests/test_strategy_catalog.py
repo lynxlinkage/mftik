@@ -1,6 +1,6 @@
 """The catalogue and the registry have to agree.
 
-``mftik.protocol.strategy_catalog`` lives in mftik-common so the API can serve it
+``mftik.protocol.strategy_catalog`` lives in mftik so the API can serve it
 without depending on STS, which means nothing in the type system stops the two
 from drifting: a template can name a strategy that was never registered, or
 carry an ``sts:`` block that the strategy itself would refuse. Either way the

@@ -8,8 +8,8 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "mftik",
     "mftik-api",
-    "mftik-common",
     "mftik-db",
     "mftik-md",
     "mftik-paper",
@@ -584,30 +584,7 @@ wheels = [
 ]
 
 [[package]]
-name = "mftik-api"
-version = "0.1.0"
-source = { editable = "apps/api" }
-dependencies = [
-    { name = "argon2-cffi" },
-    { name = "fastapi" },
-    { name = "mftik-common" },
-    { name = "mftik-db" },
-    { name = "uvicorn", extra = ["standard"] },
-    { name = "websockets" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "argon2-cffi", specifier = ">=23.1" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "mftik-common", editable = "packages/common" },
-    { name = "mftik-db", editable = "packages/db" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
-    { name = "websockets", specifier = ">=13.0" },
-]
-
-[[package]]
-name = "mftik-common"
+name = "mftik"
 version = "0.1.0"
 source = { editable = "packages/common" }
 dependencies = [
@@ -627,6 +604,29 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", specifier = ">=5.0" },
     { name = "websockets", specifier = ">=14.0" },
+]
+
+[[package]]
+name = "mftik-api"
+version = "0.1.0"
+source = { editable = "apps/api" }
+dependencies = [
+    { name = "argon2-cffi" },
+    { name = "fastapi" },
+    { name = "mftik" },
+    { name = "mftik-db" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "argon2-cffi", specifier = ">=23.1" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "mftik", editable = "packages/common" },
+    { name = "mftik-db", editable = "packages/db" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "websockets", specifier = ">=13.0" },
 ]
 
 [[package]]
@@ -653,13 +653,13 @@ name = "mftik-md"
 version = "0.1.0"
 source = { editable = "apps/md" }
 dependencies = [
-    { name = "mftik-common" },
+    { name = "mftik" },
     { name = "mftik-db" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mftik-common", editable = "packages/common" },
+    { name = "mftik", editable = "packages/common" },
     { name = "mftik-db", editable = "packages/db" },
 ]
 
@@ -668,24 +668,24 @@ name = "mftik-paper"
 version = "0.1.0"
 source = { editable = "apps/paper" }
 dependencies = [
-    { name = "mftik-common" },
+    { name = "mftik" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "mftik-common", editable = "packages/common" }]
+requires-dist = [{ name = "mftik", editable = "packages/common" }]
 
 [[package]]
 name = "mftik-sts"
 version = "0.1.0"
 source = { editable = "apps/sts" }
 dependencies = [
-    { name = "mftik-common" },
+    { name = "mftik" },
     { name = "mftik-db" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mftik-common", editable = "packages/common" },
+    { name = "mftik", editable = "packages/common" },
     { name = "mftik-db", editable = "packages/db" },
 ]
 
@@ -694,13 +694,13 @@ name = "mftik-sym"
 version = "0.1.0"
 source = { editable = "apps/sym" }
 dependencies = [
-    { name = "mftik-common" },
+    { name = "mftik" },
     { name = "mftik-db" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mftik-common", editable = "packages/common" },
+    { name = "mftik", editable = "packages/common" },
     { name = "mftik-db", editable = "packages/db" },
 ]
 
@@ -709,13 +709,13 @@ name = "mftik-td"
 version = "0.1.0"
 source = { editable = "apps/td" }
 dependencies = [
-    { name = "mftik-common" },
+    { name = "mftik" },
     { name = "mftik-db" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mftik-common", editable = "packages/common" },
+    { name = "mftik", editable = "packages/common" },
     { name = "mftik-db", editable = "packages/db" },
 ]
 

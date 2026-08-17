@@ -39,7 +39,7 @@ class SymbolCategory(StrEnum):
 
     Mirrors ``mftik.exchange.tickers.Category`` — spelling included, since these
     values are the middle part of a stored universal ticker. This package does
-    not depend on ``mftik-common``, so the two are kept in step by a test rather
+    not depend on ``mftik``, so the two are kept in step by a test rather
     than by an import.
     """
 

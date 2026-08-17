@@ -1,0 +1,126 @@
+"""``mftik`` — the command line for a node you host yourself.
+
+Subcommands are registered in one table rather than as a chain of ``elif``:
+adding one is a row and a function, and the help text is generated from the
+same place the dispatch reads, so the two cannot disagree.
+
+argparse rather than a CLI framework on purpose. Every service in this
+workspace installs this package, so a dependency added for the client lands
+in each of their images too — and the parsing this needs is what argparse is
+for.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
+
+from mftik.cli import profiles
+from mftik.cli.client import CliError, NodeUnreachable
+from mftik.cli.config import ConfigError
+from mftik.cli.output import fail
+
+#: Something the user can fix: a bad argument, a refused request, a 404.
+EXIT_ERROR = 1
+#: The node did not answer. Separated so a script can retry this and not that.
+EXIT_UNREACHABLE = 2
+#: Interrupted. The shell convention, so ``mftik run`` stopped with Ctrl-C
+#: reports the same thing every other program does.
+EXIT_INTERRUPTED = 130
+
+
+@dataclass(frozen=True, slots=True)
+class Command:
+    name: str
+    help: str
+    #: Adds this command's own arguments to its subparser.
+    setup: Callable[[argparse.ArgumentParser], None]
+    run: Callable[[argparse.Namespace], int]
+
+
+def _setup_profiles(parser: argparse.ArgumentParser) -> None:
+    del parser  # takes nothing
+
+
+def _setup_disconnect(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("name", help="profile to forget (see: mftik profiles)")
+
+
+COMMANDS: tuple[Command, ...] = (
+    Command(
+        name="profiles",
+        help="list the nodes this machine is connected to",
+        setup=_setup_profiles,
+        run=profiles.list_profiles,
+    ),
+    Command(
+        name="disconnect",
+        help="forget a node and the key it issued",
+        setup=_setup_disconnect,
+        run=profiles.disconnect,
+    ),
+)
+
+
+def _version() -> str:
+    try:
+        return version("mftik")
+    except PackageNotFoundError:
+        # Running from a source tree that was never installed. Worth saying
+        # so plainly rather than reporting a version that is not on disk.
+        return "unknown (not installed)"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="mftik",
+        description="Client for a self-hosted MFTIK trading node.",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"mftik {_version()}"
+    )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help=(
+            "which connected node to act on; defaults to MFTIK_PROFILE, "
+            "then to the last one connected"
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>")
+    for command in COMMANDS:
+        sub = subparsers.add_parser(command.name, help=command.help)
+        command.setup(sub)
+        sub.set_defaults(_run=command.run)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    run = getattr(args, "_run", None)
+    if run is None:
+        parser.print_help()
+        return EXIT_ERROR
+
+    try:
+        return run(args)
+    except NodeUnreachable as exc:
+        fail(str(exc))
+        return EXIT_UNREACHABLE
+    except (CliError, ConfigError) as exc:
+        fail(str(exc))
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        # Newline first: the ^C landed at the end of whatever was being
+        # printed, and without this the shell prompt continues that line.
+        print(file=sys.stderr)
+        fail("interrupted")
+        return EXIT_INTERRUPTED
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

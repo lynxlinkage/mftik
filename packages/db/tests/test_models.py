@@ -136,7 +136,7 @@ def test_session_row_columns() -> None:
 
 
 def test_symbol_category_matches_the_ticker_vocabulary() -> None:
-    """``mftik_db`` does not depend on ``mftik-common``, so nothing imports one
+    """``mftik_db`` does not depend on ``mftik``, so nothing imports one
     into the other — but these values are the middle part of a stored universal
     ticker, and a drift would write rows nothing can parse."""
     from mftik.exchange.tickers import Category

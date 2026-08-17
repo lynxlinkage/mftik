@@ -4,7 +4,7 @@ The deploy document no longer names a strategy, so something has to tell the
 UI which types exist and what a working config for each looks like. That is
 this catalogue.
 
-It lives in ``mftik-common`` rather than in ``apps/sts`` because the API serves
+It lives in ``mftik`` rather than in ``apps/sts`` because the API serves
 it to the UI and does not depend on the STS package. The STS registry stays
 the authority on which classes exist; a test asserts the two agree, so a
 strategy cannot be added in one place and quietly missing from the other.
