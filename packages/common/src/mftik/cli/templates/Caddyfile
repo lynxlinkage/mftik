@@ -1,0 +1,24 @@
+# One origin for the whole node.
+#
+# The browser asks for /api and opens ws://<this host>/ws, whatever host served
+# the document — see frontend/src/lib/api.ts and ws.ts. Something has to route
+# those to the API, and in the maintainers' own deployment that something is
+# Traefik. A self-hosted stack has no Traefik, so this is it.
+#
+# handle_path strips the matched prefix; handle does not. That difference is
+# the whole configuration: the API's routers have no /api prefix, and the
+# WebSocket paths are literal.
+
+:80 {
+	handle_path /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle /ws/* {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

@@ -1,0 +1,206 @@
+# A whole MFTIK node, on one machine, from published images.
+#
+# Written by `mftik node init`. Nothing here is built: every Python service is
+# the same image differing only by `command:`, and both it and the frontend
+# come from GHCR. Postgres and Redis are part of the stack rather than
+# substrate you have to bring, which is the difference between this and the
+# maintainers' own deploy/docker-compose.yml.
+#
+#   docker compose pull
+#   docker compose run --rm migrate
+#   docker compose run --rm seed
+#   docker compose up -d
+#
+# Then: mftik connect http://localhost:${MFTIK_PORT:-8080} --setup
+#
+# Everything reaches the node through caddy on one port, because the browser
+# asks for /api and /ws on whatever host served the page. See ./Caddyfile.
+
+name: ${MFTIK_PROJECT:-mftik}
+
+# Read from .env by interpolation, not by `env_file:`. Compose drops
+# env_file for a service that has `profiles:` when it is started with
+# `docker compose run` and the profile was not named — migrate and seed are
+# exactly that, and the symptom is a migration that tries localhost:5432 and
+# says nothing about why. Interpolation is not affected, and naming the
+# variables here also says which ones a service actually needs.
+x-env: &env
+  DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+  DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:?set DATABASE_URL_SYNC in .env}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  BROKER_KEY_PREFIX: ${BROKER_KEY_PREFIX:-mftik}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  MFTIK_DEFAULT_USER_ID: ${MFTIK_DEFAULT_USER_ID:-1}
+  API_HOST: ${API_HOST:-0.0.0.0}
+  API_PORT: ${API_PORT:-8000}
+  GATE_SPOT_API_KEY: ${GATE_SPOT_API_KEY:-}
+  GATE_SPOT_API_SECRET: ${GATE_SPOT_API_SECRET:-}
+
+x-app: &app
+  image: ghcr.io/lynxlinkage/mftik:${MFTIK_VERSION:-latest}
+  restart: unless-stopped
+  environment: *env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mftik}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-mftik}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mftik} -d ${POSTGRES_DB:-mftik}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Redis is the whole broker here — order RPC, ledger and OMS state,
+    # liveness, and the recorded tape. noeviction because dropping a key under
+    # memory pressure would silently drop a trade, not degrade a cache.
+    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shots. Deliberately not in the running set: `up -d` should not race a
+  # schema migration, and seeding twice is idempotent but pointless.
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["mftik-db-migrate"]
+    profiles: ["tools"]
+
+  # Creates the Owner row and two paper accounts, so `mftik init` has a real
+  # account name to write and there is something to trade against on day one.
+  seed:
+    <<: *app
+    restart: "no"
+    command: ["python", "scripts/seed_paper_apis.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["tools"]
+
+  api:
+    <<: *app
+    command: ["mftik-api"]
+    environment:
+      <<: *env
+      MFTIK_AUTH_ENABLED: "1"
+      # The registry: public/, private/, pulled/ and remotes.toml. Shared with
+      # sts on one volume — the API writes strategies and sts imports them, and
+      # a separate directory each would mean a push nothing could ever load.
+      MFTIK_DATA: /var/lib/mftik
+      # This stack is http on localhost, and browsers withhold Secure cookies
+      # there. Set to 1 once you put TLS in front of it.
+      MFTIK_COOKIE_SECURE: ${MFTIK_COOKIE_SECURE:-0}
+    volumes:
+      - mftik_data:/var/lib/mftik
+
+  frontend:
+    image: ghcr.io/lynxlinkage/mftik-frontend:${MFTIK_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      PUBLIC_APP_VERSION: ${MFTIK_VERSION:-latest}
+    depends_on:
+      - api
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${MFTIK_PORT:-8080}:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - api
+      - frontend
+
+  td:
+    <<: *app
+    command: ["td"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      paper:
+        condition: service_started
+
+  md:
+    <<: *app
+    command: ["md"]
+    environment:
+      <<: *env
+      # Recorded tape, so a strategy starting later can warm up on prints it
+      # was not running for. One topic, not both: aggtrade and trade describe
+      # the same matches.
+      MD_TAPE_TOPICS: "aggtrade"
+      MD_TAPE_RETENTION_S: "7200"
+      # Memory fuse per feed, in records. This times the number of recorded
+      # feeds has to stay well under the Redis cap above.
+      MD_TAPE_MAXLEN: "150000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      paper:
+        condition: service_started
+
+  sts:
+    <<: *app
+    command: ["sts"]
+    environment:
+      <<: *env
+      MFTIK_DATA: /var/lib/mftik
+      # Interrupted sessions come back when the stack restarts.
+      STS_REBUILD_ON_BOOT: "1"
+      # One jsonl per session: every event it was handed and every call it
+      # made. A named volume, because the moment the log is worth reading is
+      # usually the moment the container went away.
+      STS_EVENTLOG_DIR: "/var/log/mftik/sts"
+      STS_EVENTLOG_QUEUE: "20000"
+      STS_EVENTLOG_MAX_BYTES: "268435456"
+      STS_EVENTLOG_BACKUPS: "2"
+    volumes:
+      - mftik_data:/var/lib/mftik
+      - sts_eventlog:/var/log/mftik/sts
+
+  paper:
+    <<: *app
+    command: ["paper"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  sym:
+    <<: *app
+    command: ["sym"]
+    environment:
+      <<: *env
+      SYM_REFRESH_INTERVAL: "3600"
+
+volumes:
+  postgres_data:
+  redis_data:
+  mftik_data:
+  sts_eventlog:
+  caddy_data:

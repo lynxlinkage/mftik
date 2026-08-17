@@ -21,6 +21,7 @@ from importlib.metadata import PackageNotFoundError, version
 from mftik.cli import check as check_cmd
 from mftik.cli import connect as connect_cmd
 from mftik.cli import init as init_cmd
+from mftik.cli import node as node_cmd
 from mftik.cli import profiles, sessions
 from mftik.cli import push as push_cmd
 from mftik.cli import run as run_cmd
@@ -97,6 +98,34 @@ def _setup_init(parser: argparse.ArgumentParser) -> None:
             "do not ask a node for its accounts and instruments; leaves "
             "placeholders in strategy.yml"
         ),
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="overwrite existing files"
+    )
+
+
+def _setup_node_init(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=".",
+        help="directory to write the stack into; defaults to the current one",
+    )
+    parser.add_argument(
+        "--tag",
+        default="latest",
+        help=(
+            "image tag to run, from the repository's releases. Not the version "
+            "of this package — they are numbered separately"
+        ),
+    )
+    parser.add_argument(
+        "--port", default="8080", help="port the node answers on (default 8080)"
+    )
+    parser.add_argument(
+        "--project",
+        default=None,
+        help="compose project name; defaults to a slug of the directory name",
     )
     parser.add_argument(
         "--force", action="store_true", help="overwrite existing files"
@@ -204,6 +233,12 @@ COMMANDS: tuple[Command, ...] = (
         help="the import gate and on_initialized, offline",
         setup=_setup_check,
         run=check_cmd.check,
+    ),
+    Command(
+        name="node-init",
+        help="write a docker compose stack that hosts a whole node",
+        setup=_setup_node_init,
+        run=node_cmd.node_init,
     ),
     Command(
         name="init",

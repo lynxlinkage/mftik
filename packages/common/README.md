@@ -3,8 +3,9 @@
 The strategy SDK and command-line client for a [MFTIK](https://github.com/lynxlinkage/mftik)
 node — a self-hosted, mid-frequency algorithmic trading platform.
 
-You run the node yourself with Docker Compose. This package is what you install
-on the machine you write strategies on.
+You run the node yourself with Docker Compose — `mftik node-init` writes the
+stack for you. This package is both that and what you install on the machine
+you write strategies on.
 
 ```bash
 pip install mftik
@@ -41,6 +42,7 @@ there. `mftik check` tells you before you push.
 ## The client
 
 ```bash
+mftik node-init ./mynode                 # a whole node: compose, edge, .env
 mftik connect https://node.example.com   # sign in once; stores an API key
 mftik whoami                             # who you are to that node
 mftik profiles                           # every node this machine knows

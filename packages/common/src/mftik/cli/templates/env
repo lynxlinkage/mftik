@@ -1,0 +1,53 @@
+# Settings for the node beside this file. Written by `mftik node init`.
+#
+# This file holds a database password. It is created at 0600 and belongs in
+# .gitignore, not in a repository.
+
+# Which published images to run.
+#
+# `latest` is what a first look wants and not what a running node should sit
+# on: it moves under you on the next release. Pin it to a tag from
+# https://github.com/lynxlinkage/mftik/releases once the node matters.
+#
+# This is not the version of the `mftik` package you installed. The images are
+# tagged from the repository's git tags and the package is versioned on PyPI;
+# they are two numbering schemes and this template will not pretend otherwise.
+MFTIK_VERSION={version}
+
+# Where the node answers. One port for everything — UI, /api and /ws — because
+# the browser opens all three on whatever host served the page.
+MFTIK_PORT={port}
+
+# Compose project name, so containers are {project}-api-1 and two nodes on one
+# machine do not collide.
+MFTIK_PROJECT={project}
+
+# --- database and broker ---------------------------------------------------
+# These name the postgres and redis services in the same compose file, so the
+# only value worth changing is the password, and it was generated for you.
+POSTGRES_USER=mftik
+POSTGRES_PASSWORD={password}
+POSTGRES_DB=mftik
+DATABASE_URL=postgresql+asyncpg://mftik:{password}@postgres:5432/mftik
+DATABASE_URL_SYNC=postgresql+psycopg://mftik:{password}@postgres:5432/mftik
+REDIS_URL=redis://redis:6379/0
+
+# Namespaces every Redis key, stream and subject. Worth setting if this Redis
+# is ever shared; harmless here.
+BROKER_KEY_PREFIX=mftik
+
+# --- the app ---------------------------------------------------------------
+API_HOST=0.0.0.0
+API_PORT=8000
+LOG_LEVEL=INFO
+MFTIK_DEFAULT_USER_ID=1
+
+# Browsers withhold Secure cookies over http, so this stays 0 until there is
+# TLS in front of the node. Turn it on when you put one there.
+MFTIK_COOKIE_SECURE=0
+
+# --- venue credentials -----------------------------------------------------
+# Empty runs paper-only, which is what `seed` sets up and what a first strategy
+# should trade against. Filling these in makes the node trade real money.
+GATE_SPOT_API_KEY=
+GATE_SPOT_API_SECRET=
