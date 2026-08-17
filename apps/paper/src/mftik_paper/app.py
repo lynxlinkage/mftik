@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 from typing import Any
 
@@ -25,6 +26,28 @@ from mftik_paper.rpc import dispatch
 
 SOURCE = "paper"
 logger = logging.getLogger(SOURCE)
+
+#: How often the book is republished with nothing having moved it. Two seconds
+#: is short enough that a strategy attaching to a quiet venue sees a book
+#: before it wonders whether the feed works, and long enough that an idle
+#: stack is not writing to Redis for no reason.
+BOOK_INTERVAL_ENV = "PAPER_BOOK_INTERVAL_S"
+DEFAULT_BOOK_INTERVAL_S = 2.0
+
+
+def _book_interval() -> float:
+    raw = os.getenv(BOOK_INTERVAL_ENV, "").strip()
+    if not raw:
+        return DEFAULT_BOOK_INTERVAL_S
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; using default", BOOK_INTERVAL_ENV, raw)
+        return DEFAULT_BOOK_INTERVAL_S
+    if value <= 0:
+        logger.warning("%s must be positive; using default", BOOK_INTERVAL_ENV)
+        return DEFAULT_BOOK_INTERVAL_S
+    return value
 
 
 class RedisEventBridge:
@@ -71,35 +94,95 @@ class RedisEventBridge:
             logger.exception("paper stream publish failed topic=%s", topic)
 
 
+async def _publish_book(
+    broker: Broker, topic: str, book: OrderBook, symbol: str
+) -> None:
+    try:
+        await broker.publish(
+            topic,
+            UntypedEnvelope.wrap(
+                book.model_dump(mode="json"),
+                type=PAPER_ORDER_BOOK,
+                source=SOURCE,
+            ),
+        )
+    except Exception:
+        logger.exception("paper orderbook publish failed symbol=%s", symbol)
+
+
 async def _pump_order_book(
     broker: Broker,
-    public: Any,
+    exchange: PaperExchange,
     symbol: str,
     stop: asyncio.Event,
 ) -> None:
-    """Bridge in-process public order-book stream → Redis."""
-    from mftik.exchange.paper.public import PaperPublicClient
+    """Publish the book whenever it changes.
 
-    assert isinstance(public, PaperPublicClient)
+    Subscribes to the engine, not to ``PaperPublicClient``: the client's
+    stream methods take a ``UniversalTicker`` and this has a bare symbol. It
+    used to hand the symbol over anyway, which raised ``AttributeError`` on
+    the first call and killed this task before it published anything — with
+    nothing in the log, because a task whose reference is held is never
+    garbage collected and its exception is therefore never retrieved. The
+    feed had not worked once; it had only ever failed quietly.
+    """
     topic = Topics.paper_order_book(symbol)
-    async for book in public.stream_order_book(symbol):
+    async for book in exchange.subscribe_order_book(symbol):
         if stop.is_set():
             return
-        assert isinstance(book, OrderBook)
+        await _publish_book(broker, topic, book, symbol)
+
+
+async def _tick_order_book(
+    broker: Broker,
+    exchange: PaperExchange,
+    symbol: str,
+    stop: asyncio.Event,
+    interval: float,
+) -> None:
+    """And publish it on a cadence, whether or not anything moved it.
+
+    A change-driven feed alone is silent on an idle venue, and an idle venue
+    is what a paper stack is until somebody trades on it. So a strategy would
+    subscribe, attach, and wait forever for a hook that only fires when the
+    book moves — which nothing was going to do, because the only thing that
+    would have was the strategy this feed was supposed to be feeding.
+
+    Real venues push snapshots on a schedule for the same reason: a
+    subscriber that arrives between two changes still needs to know the book.
+    """
+    topic = Topics.paper_order_book(symbol)
+    while not stop.is_set():
         try:
-            await broker.publish(
-                topic,
-                UntypedEnvelope.wrap(
-                    book.model_dump(mode="json"),
-                    type=PAPER_ORDER_BOOK,
-                    source="paper",
-                ),
-            )
-        except Exception:
-            logger.exception(
-                "paper orderbook publish failed symbol=%s", symbol
-            )
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return  # stop was set
+        except TimeoutError:
+            pass
+        await _publish_book(
+            broker, topic, exchange.get_order_book(symbol), symbol
+        )
+
+
+def _watch(task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+    """Say so when a background task dies.
+
+    These are held in a list for their lifetime, so Python never collects them
+    and never reports what they raised. That is how the order book feed stayed
+    broken: it failed on its first line and looked exactly like a feed with
+    nothing to say.
+    """
+
+    def done(finished: asyncio.Task[Any]) -> None:
+        if finished.cancelled():
             return
+        exc = finished.exception()
+        if exc is not None:
+            logger.error(
+                "paper background task %s died: %r", finished.get_name(), exc
+            )
+
+    task.add_done_callback(done)
+    return task
 
 
 async def run_rpc(
@@ -167,13 +250,26 @@ async def amain() -> None:
             ),
             name="paper-heartbeat",
         )
+        book_interval = _book_interval()
         book_tasks = [
-            asyncio.create_task(
-                _pump_order_book(broker, public, inst.symbol, stop),
-                name=f"paper-book-{inst.symbol}",
-            )
+            _watch(task)
             for inst in exchange.list_instruments()
+            for task in (
+                asyncio.create_task(
+                    _pump_order_book(broker, exchange, inst.symbol, stop),
+                    name=f"paper-book-{inst.symbol}",
+                ),
+                asyncio.create_task(
+                    _tick_order_book(
+                        broker, exchange, inst.symbol, stop, book_interval
+                    ),
+                    name=f"paper-book-tick-{inst.symbol}",
+                ),
+            )
         ]
+        logger.info(
+            "Paper publishing order books on change and every %.1fs", book_interval
+        )
         book = exchange.get_order_book("BTCUSDT")
         logger.info(
             "Paper engine started BTCUSDT bids=%s asks=%s",
