@@ -5,7 +5,7 @@
 #
 # Nothing here publishes a port. Traefik (/opt/traefik, compose project
 # `traefik`) owns :80/:443 and discovers containers on the external `web`
-# network. Postgres and Redis are long-lived substrate on DB_HOST and are
+# network. Postgres and Redis are long-lived substrate on another host and are
 # not managed by this file.
 #
 # Routing on the single host mftik.lynkora.com, by priority:
