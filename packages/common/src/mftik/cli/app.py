@@ -20,6 +20,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from mftik.cli import check as check_cmd
 from mftik.cli import connect as connect_cmd
+from mftik.cli import init as init_cmd
 from mftik.cli import profiles, sessions
 from mftik.cli import push as push_cmd
 from mftik.cli import run as run_cmd
@@ -74,6 +75,31 @@ def _setup_check(parser: argparse.ArgumentParser) -> None:
             "show frames when the strategy's own code raises, at import or "
             "in on_initialized"
         ),
+    )
+
+
+def _setup_init(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=".",
+        help="directory to scaffold into; defaults to the current one",
+    )
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="strategy name; defaults to a slug of the directory name",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help=(
+            "do not ask a node for its accounts and instruments; leaves "
+            "placeholders in strategy.yml"
+        ),
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="overwrite existing files"
     )
 
 
@@ -178,6 +204,12 @@ COMMANDS: tuple[Command, ...] = (
         help="the import gate and on_initialized, offline",
         setup=_setup_check,
         run=check_cmd.check,
+    ),
+    Command(
+        name="init",
+        help="scaffold a strategy that runs as generated",
+        setup=_setup_init,
+        run=init_cmd.init,
     ),
     Command(
         name="push",

@@ -45,7 +45,9 @@ mftik connect https://node.example.com   # sign in once; stores an API key
 mftik whoami                             # who you are to that node
 mftik profiles                           # every node this machine knows
 mftik disconnect <name>                  # forget one
+mftik init ./hello                       # scaffold, filled in from that node
 mftik check ./hello                      # import gate and on_initialized, offline
+mftik run ./hello                        # push, deploy, tail; ^C stops it
 mftik push ./hello                       # copy the tree into the node's private registry
 mftik run ./hello                        # push, deploy, tail the session log
 mftik ps                                 # what is running
