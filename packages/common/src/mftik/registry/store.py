@@ -109,6 +109,33 @@ class RegistryStore:
             origin=origin,
         )
 
+    def remove(self, name: str, *, origin: str = PRIVATE_ORIGIN) -> AddedStrategy:
+        """Delete one of this node's own trees. Returns what was deleted.
+
+        Own origins only. A pulled copy is not this node's to delete one tree
+        of — it is a copy of what a peer publishes, and removing a single
+        strategy from it would leave a partial mirror that the next diff
+        reports as missing and the next connect silently restores.
+        :meth:`drop_remote` is how a pulled tree goes away.
+        """
+        if origin not in OWN_ORIGINS:
+            raise RegistryError(
+                f"{origin!r} is a pulled copy — disconnect the remote instead "
+                f"of deleting one of its strategies"
+            )
+        _check_name(name)
+        dest = self._dest(origin, name)
+        rec = self._read_tree(dest, origin=origin) if dest.is_dir() else None
+        if rec is None:
+            raise RegistryError(f"no {origin} strategy named {name!r}")
+        # Resolved before the delete: the cache is keyed on the resolved path,
+        # and a directory that is already gone cannot be resolved to build the
+        # key that has to come out.
+        key = (str(dest.resolve()), origin)
+        shutil.rmtree(dest)
+        self._tree_cache.pop(key, None)
+        return rec
+
     def list_public(self) -> list[AddedStrategy]:
         """Trees this node publishes. Peers pull from here."""
         return self._list_dir(self.public_dir, origin=PUBLIC_ORIGIN)

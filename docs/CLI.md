@@ -130,11 +130,46 @@ mftik ps / logs / stop      what is running, and what it is saying
 separate push step is one a person forgets exactly once before it costs them a
 confusing session. `--no-push` deploys what is already on the node.
 
-### One thing `run` needs that does not exist yet
+## What the node had to learn first
 
-STS imports the registry once, at boot (`mftik_sts/app.py`), and
-`mftik.registry.load` keys each tree's module name on its *path*. Re-pushing a
-strategy under the same name therefore hits a cached module: the edit lands on
-disk and the old code runs. Two changes fix it, and `run` is not honest without
-them — the tree's digest belongs in the module tag, and `POST /registry/v1/add`
-needs to tell STS to reload.
+STS imports the registry into a running process. The API writes to it from a
+different one. Everything below follows from that.
+
+**A push has to reach the process, not just the disk.** `POST /registry/v1/add`
+now sends `sts.registry.reload`, and answers with `loaded` saying whether STS
+came back able to resolve the strategy. Three outcomes, and the client should
+say which:
+
+| `loaded` | `load_error` | What happened |
+|---|---|---|
+| true | — | stored and deployable |
+| false | "STS did not reload…" | stored; STS did not answer. Deployable after a restart |
+| false | "STS did not load it as…" | stored; STS reloaded and rejected the tree. Its log says why |
+
+Only the first means `run` can proceed.
+
+**A re-push has to load the new code.** `mftik.registry.load` keyed each tree's
+module name on its path, which does not change when the source behind it does —
+so a replaced tree returned the module the previous load left in `sys.modules`,
+successfully, with the old code. The tag now covers the tree's digest as well.
+
+**A delete has to stop the deploy.** `DELETE /registry/v1/strategies/{name}
+?origin=` is new, along with `RegistryStore.remove`. `origin` is required:
+`public` and `private` can hold trees of the same name and a default would pick
+between them on a guess. It refuses while a live session is running the
+strategy — that session holds its own instance and would outlive the files,
+which is exactly why the refusal belongs before the delete.
+
+**Registration had to stop being add-only.** `load_local_registry` never
+removed anything, which was invisible while losing a tree meant restarting the
+process that held it. With deletes and disconnects it stopped being invisible:
+the files went, the qualified key stayed, and deploying it built a session from
+source that was nowhere on disk. A reload now drops keys the store no longer
+has — including a tree that stopped importing, which was loadable and is not
+any more.
+
+**A read scope had to become a read scope.** The gate resolved a request's
+required scope from its path alone. Adding any write under
+`/registry/v1/strategies` would therefore have handed it to every peer this
+node has issued a registry key to, since that prefix is the one they are
+allowed to read. `required_scope` now takes the method.

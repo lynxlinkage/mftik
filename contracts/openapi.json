@@ -647,6 +647,58 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Delete Strategy",
+        "description": "Delete one of this node's own trees, then tell STS to forget it.\n\n``origin`` is required rather than defaulted. ``public`` and ``private``\ncan hold trees of the same name, one of which peers pull and one of which\nthey never see, and a default would pick between them on a guess. A\npulled copy is not deletable here at all \u2014 that is ``DELETE /remotes``.\n\nRefuses while a live session is running this strategy. The session holds\nits own instance and would survive the files going away, which is exactly\nwhat makes it worth refusing: an operator who deletes a strategy has\ndecided it should not be running, and finding out that it still is\nbelongs before the delete rather than after.",
+        "operationId": "delete_strategy_registry_v1_strategies__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "origin",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "public or private \u2014 which of this node's own registries",
+              "title": "Origin"
+            },
+            "description": "public or private \u2014 which of this node's own registries"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryRemovedOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/registry/v1/add": {
@@ -655,7 +707,7 @@
           "registry"
         ],
         "summary": "Add Strategy",
-        "description": "Copy a strategy's files into this node's public or private registry.",
+        "description": "Copy a strategy's files into this node's public or private registry.\n\nThen tell STS to re-read the registry, and say whether it worked. Writing\nthe files is only half of an add: STS imports the registry at boot, so\nuntil it re-scans, a deploy naming this strategy answers\n``unknown_strategy`` \u2014 and a *replace* is worse, because the deploy\nsucceeds and runs the code from before the edit.\n\nThe reload not working does not undo the add. The files are on disk and\nthe next STS restart will find them, so this answers 200 with ``loaded``\nfalse rather than a 5xx that would invite a retry of a write that already\nhappened.",
         "operationId": "add_strategy_registry_v1_add_post",
         "requestBody": {
           "content": {
@@ -673,7 +725,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RegistryStrategyOut"
+                  "$ref": "#/components/schemas/RegistryAddOut"
                 }
               }
             }
@@ -716,7 +768,7 @@
           "registry"
         ],
         "summary": "Connect",
-        "description": "Name a peer, check protocol, and pull everything it publishes.",
+        "description": "Name a peer, check protocol, and pull everything it publishes.\n\nThen reload, for the same reason ``add`` does: pulling writes trees into\nthe registry, and the process that runs them imported it at boot.\n``loaded`` is which of the pulled strategies STS can now resolve \u2014 not\nnecessarily all of them, since a pulled tree can collide with a bundled\nname or fail to import here.",
         "operationId": "connect_registry_v1_remotes_post",
         "requestBody": {
           "content": {
@@ -798,7 +850,7 @@
           "registry"
         ],
         "summary": "Disconnect Remote",
-        "description": "Drop the named peer and the copy pulled from it.\n\nRefuses while any live STS session still uses a strategy pulled from\nthis peer \u2014 stop those sessions first.",
+        "description": "Drop the named peer and the copy pulled from it.\n\nRefuses while any live STS session still uses a strategy pulled from\nthis peer \u2014 stop those sessions first.\n\nReloads afterwards so STS stops resolving what it just lost. Unlike the\nother three, this one has nothing useful to put in the response: the\nremote is gone from this node either way, and a reload that could not be\ndelivered leaves stale keys that the next restart clears. It goes to the\nlog instead.",
         "operationId": "disconnect_remote_registry_v1_remotes__name__delete",
         "parameters": [
           {
@@ -3158,6 +3210,63 @@
         "title": "RegistryAddBody",
         "description": "Register a strategy tree on this node.\n\n``files`` is path \u2192 UTF-8 text. Default origin is ``private`` (this node\nonly). ``public`` is what other nodes pull."
       },
+      "RegistryAddOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "digest": {
+            "type": "string",
+            "title": "Digest"
+          },
+          "requires_mftik": {
+            "type": "string",
+            "title": "Requires Mftik"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Files"
+          },
+          "loaded": {
+            "type": "boolean",
+            "title": "Loaded",
+            "default": false
+          },
+          "load_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "digest",
+          "requires_mftik",
+          "origin"
+        ],
+        "title": "RegistryAddOut",
+        "description": "A stored tree, plus whether the running STS picked it up.\n\nIts own shape rather than a field on ``RegistryStrategyOut`` because it\nanswers a question only ``add`` raises. Listing what is on disk has no\nopinion about what STS has imported, and a field that was meaningless on\nevery other response would invite being read as one."
+      },
       "RegistryConnectOut": {
         "properties": {
           "name": {
@@ -3174,6 +3283,24 @@
             },
             "type": "array",
             "title": "Pulled"
+          },
+          "loaded": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Loaded"
+          },
+          "load_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Error"
           }
         },
         "type": "object",
@@ -3368,6 +3495,63 @@
         },
         "type": "object",
         "title": "RegistryRemotesResponse"
+      },
+      "RegistryRemovedOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "digest": {
+            "type": "string",
+            "title": "Digest"
+          },
+          "requires_mftik": {
+            "type": "string",
+            "title": "Requires Mftik"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Files"
+          },
+          "unloaded": {
+            "type": "boolean",
+            "title": "Unloaded",
+            "default": false
+          },
+          "unload_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unload Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "digest",
+          "requires_mftik",
+          "origin"
+        ],
+        "title": "RegistryRemovedOut",
+        "description": "The tree that was deleted, and whether STS has stopped answering to it."
       },
       "RegistryStrategyDetailOut": {
         "properties": {

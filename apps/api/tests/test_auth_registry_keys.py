@@ -149,8 +149,10 @@ async def test_a_session_still_administers_the_registry(db) -> None:
 def test_only_the_two_peer_reads_relax_the_default() -> None:
     """The policy names exceptions, so a route that forgets to ask is closed
     to peers rather than open to them."""
-    assert required_scope("/registry/v1/strategies") == SCOPE_REGISTRY_READ
-    assert required_scope("/registry/v1/strategies/tiny") == SCOPE_REGISTRY_READ
+    assert required_scope("GET", "/registry/v1/strategies") == SCOPE_REGISTRY_READ
+    assert (
+        required_scope("GET", "/registry/v1/strategies/tiny") == SCOPE_REGISTRY_READ
+    )
     for path in (
         "/registry/v1/strategiesX",
         "/registry/v1/private",
@@ -159,4 +161,18 @@ def test_only_the_two_peer_reads_relax_the_default() -> None:
         "/sts/sessions",
         "/auth/keys",
     ):
-        assert required_scope(path) == SCOPE_API, path
+        assert required_scope("GET", path) == SCOPE_API, path
+
+
+def test_a_registry_key_cannot_write_to_the_paths_it_can_read() -> None:
+    """The scope is ``registry:read``, and the method is what makes it read.
+
+    A path prefix says which resource a request is about and nothing about
+    what it intends to do to it. Deciding on the prefix alone would hand
+    every write ever added under ``/registry/v1/strategies`` to every peer
+    this node has issued a key to.
+    """
+    for method in ("DELETE", "POST", "PUT", "PATCH"):
+        assert (
+            required_scope(method, "/registry/v1/strategies/tiny") == SCOPE_API
+        ), method

@@ -352,6 +352,37 @@ class RegistryStrategyOut(BaseModel):
     files: list[str] = Field(default_factory=list)
 
 
+class RegistryAddOut(RegistryStrategyOut):
+    """A stored tree, plus whether the running STS picked it up.
+
+    Its own shape rather than a field on ``RegistryStrategyOut`` because it
+    answers a question only ``add`` raises. Listing what is on disk has no
+    opinion about what STS has imported, and a field that was meaningless on
+    every other response would invite being read as one.
+    """
+
+    #: STS re-scanned and now answers to this strategy's qualified type. False
+    #: means the files are on disk and deploying them will not work yet —
+    #: either STS did not answer, or it answered and skipped this tree (a bad
+    #: import, or a name that collides with a bundled strategy). Its log says
+    #: which.
+    loaded: bool = False
+    #: Why ``loaded`` is false, in a sentence meant for whoever ran the push.
+    load_error: str | None = None
+
+
+class RegistryRemovedOut(RegistryStrategyOut):
+    """The tree that was deleted, and whether STS has stopped answering to it."""
+
+    #: STS re-scanned and no longer resolves this strategy's qualified type.
+    #: False means the files are gone but the process still holds the class it
+    #: imported, so a deploy naming it would build a session from source that
+    #: is no longer on disk. It stops on the next STS restart either way.
+    unloaded: bool = False
+    #: Why ``unloaded`` is false, for whoever ran the delete.
+    unload_error: str | None = None
+
+
 class RegistryStrategyDetailOut(RegistryStrategyOut):
     """Published tree plus file contents, for another node to pull."""
 
@@ -418,3 +449,10 @@ class RegistryConnectOut(BaseModel):
     name: str
     url: str
     pulled: list[RegistryStrategyOut] = Field(default_factory=list)
+    #: Qualified type keys from this remote that STS resolves after the pull.
+    #: A subset of ``pulled``: a copied tree can still fail to import here, or
+    #: collide with a bundled name, and neither is visible from the files.
+    loaded: list[str] = Field(default_factory=list)
+    #: Set when STS could not be asked at all, so ``loaded`` is empty for a
+    #: reason that has nothing to do with the strategies.
+    load_error: str | None = None

@@ -7,23 +7,36 @@ re-exported.
 
 from __future__ import annotations
 
+import logging
+
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from mftik.protocol import (
+    STS_REGISTRY_RELOAD,
+    StsRegistryReloadRequest,
+    StsRegistryReloadRequestEnvelope,
+    StsRegistryReloadResult,
+    Topics,
+)
 from mftik.registry import (
     AddedStrategy,
     RegistryConflict,
     RegistryError,
     connect_remote,
     diff_remote,
+    qualify,
     split_qualified,
 )
 from mftik.registry.protocol import handshake_info
+from mftik.registry.qualify import PRIVATE_ORIGIN, PUBLIC_ORIGIN
 from mftik_db.repositories import StrategyRepository
 from mftik_db.session import session_scope
 
-from mftik_api.deps import RegistryStoreDep
+from mftik_api.broker_rpc import DomainRpcError, request_domain
+from mftik_api.deps import BrokerDep, RegistryStoreDep
 from mftik_api.schemas import (
     RegistryAddBody,
+    RegistryAddOut,
     RegistryConnectOut,
     RegistryDiffOut,
     RegistryInfoOut,
@@ -31,11 +44,14 @@ from mftik_api.schemas import (
     RegistryRemoteDetailOut,
     RegistryRemoteOut,
     RegistryRemotesResponse,
+    RegistryRemovedOut,
     RegistryStrategyDetailOut,
     RegistryStrategyListResponse,
     RegistryStrategyOut,
     RegistrySyncRow,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/registry/v1", tags=["registry"])
 
@@ -92,18 +108,171 @@ async def get_published(
     )
 
 
-@router.post("/add", response_model=RegistryStrategyOut)
+@router.post("/add", response_model=RegistryAddOut)
 async def add_strategy(
-    body: RegistryAddBody, store: RegistryStoreDep
-) -> RegistryStrategyOut:
-    """Copy a strategy's files into this node's public or private registry."""
+    body: RegistryAddBody, store: RegistryStoreDep, broker: BrokerDep
+) -> RegistryAddOut:
+    """Copy a strategy's files into this node's public or private registry.
+
+    Then tell STS to re-read the registry, and say whether it worked. Writing
+    the files is only half of an add: STS imports the registry at boot, so
+    until it re-scans, a deploy naming this strategy answers
+    ``unknown_strategy`` — and a *replace* is worse, because the deploy
+    succeeds and runs the code from before the edit.
+
+    The reload not working does not undo the add. The files are on disk and
+    the next STS restart will find them, so this answers 200 with ``loaded``
+    false rather than a 5xx that would invite a retry of a write that already
+    happened.
+    """
     try:
         added = store.add(body.files, replace=body.replace, origin=body.origin)
     except RegistryConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RegistryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _strategy_out(added)
+
+    key = qualify(added.origin, added.type)
+    keys, rpc_error = await _reload_sts(broker)
+    if rpc_error is not None:
+        return RegistryAddOut(
+            **_strategy_out(added).model_dump(),
+            loaded=False,
+            load_error=(
+                f"the strategy was stored, but STS did not reload ({rpc_error}). "
+                "It will be picked up when STS next restarts."
+            ),
+        )
+    if key in keys:
+        return RegistryAddOut(**_strategy_out(added).model_dump(), loaded=True)
+    # STS answered and did not list it, so the scan reached this tree and
+    # rejected it. Its own log has the reason; what is knowable here is that
+    # deploying will not work, which is the part the caller has to act on.
+    logger.warning("STS reloaded but did not register %s", key)
+    return RegistryAddOut(
+        **_strategy_out(added).model_dump(),
+        loaded=False,
+        load_error=(
+            f"the strategy was stored, but STS did not load it as {key!r} — "
+            "check the STS log for the import error or name collision."
+        ),
+    )
+
+
+async def _reload_sts(
+    broker: BrokerDep,
+) -> tuple[frozenset[str], str | None]:
+    """Ask STS to re-scan the registry.
+
+    Returns the qualified type keys it answers to afterwards, or an empty set
+    and the reason it could not be asked. Deliberately not "did it work" —
+    ``add`` wants a key to be present and ``delete`` wants one to be absent,
+    and a helper that answered either of those directly would have to be read
+    backwards by the other caller.
+    """
+    try:
+        result = await request_domain(
+            broker,
+            Topics.STS,
+            StsRegistryReloadRequestEnvelope.wrap(
+                StsRegistryReloadRequest(),
+                type=STS_REGISTRY_RELOAD,
+                source="api",
+            ),
+            result_type=StsRegistryReloadResult,
+            timeout=30.0,
+        )
+    except DomainRpcError as exc:
+        logger.warning("STS registry reload failed: %s", exc.message)
+        return frozenset(), exc.message
+    return frozenset(result.loaded), None
+
+
+@router.delete("/strategies/{name}", response_model=RegistryRemovedOut)
+async def delete_strategy(
+    name: str,
+    store: RegistryStoreDep,
+    broker: BrokerDep,
+    origin: str = Query(
+        ...,
+        description="public or private — which of this node's own registries",
+    ),
+) -> RegistryRemovedOut:
+    """Delete one of this node's own trees, then tell STS to forget it.
+
+    ``origin`` is required rather than defaulted. ``public`` and ``private``
+    can hold trees of the same name, one of which peers pull and one of which
+    they never see, and a default would pick between them on a guess. A
+    pulled copy is not deletable here at all — that is ``DELETE /remotes``.
+
+    Refuses while a live session is running this strategy. The session holds
+    its own instance and would survive the files going away, which is exactly
+    what makes it worth refusing: an operator who deletes a strategy has
+    decided it should not be running, and finding out that it still is
+    belongs before the delete rather than after.
+    """
+    try:
+        rec = _own_strategy(store, name, origin)
+    except RegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if rec is None:
+        raise HTTPException(
+            status_code=404, detail=f"no {origin} strategy named {name!r}"
+        )
+
+    key = qualify(origin, rec.type)
+    async with session_scope() as db:
+        rows = await StrategyRepository(db).list_live_for_origin(origin)
+    live = [row.sts_session for row in rows if row.type == key]
+    if live:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"cannot delete {key}: live sessions are running it. "
+                f"Stop these first: {', '.join(live)}"
+            ),
+        )
+
+    try:
+        removed = store.remove(name, origin=origin)
+    except RegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    keys, rpc_error = await _reload_sts(broker)
+    if rpc_error is not None:
+        error = (
+            f"the strategy was deleted, but STS did not reload ({rpc_error}). "
+            f"It will go on answering to {key!r} until it restarts."
+        )
+    elif key in keys:
+        # The files are gone and STS still lists the key. Nothing here can do
+        # anything about that, and an operator who deleted a strategy needs to
+        # know it is still deployable.
+        logger.error("STS still answers to %s after it was deleted", key)
+        error = (
+            f"the strategy was deleted, but STS still answers to {key!r}. "
+            "Restart STS."
+        )
+    else:
+        error = None
+    return RegistryRemovedOut(
+        **_strategy_out(removed).model_dump(),
+        unloaded=error is None,
+        unload_error=error,
+    )
+
+
+def _own_strategy(
+    store: RegistryStoreDep, name: str, origin: str
+) -> AddedStrategy | None:
+    if origin == PUBLIC_ORIGIN:
+        return store.get_public(name)
+    if origin == PRIVATE_ORIGIN:
+        return store.get_private(name)
+    raise RegistryError(
+        f"origin must be {PUBLIC_ORIGIN!r} or {PRIVATE_ORIGIN!r}, got {origin!r} — "
+        f"a pulled copy goes away with its remote (DELETE /registry/v1/remotes)"
+    )
 
 
 @router.get("/remotes", response_model=RegistryRemotesResponse)
@@ -167,9 +336,16 @@ async def remote_diff(name: str, store: RegistryStoreDep) -> RegistryDiffOut:
 
 @router.post("/remotes", response_model=RegistryConnectOut)
 async def connect(
-    body: RegistryRemoteBody, store: RegistryStoreDep
+    body: RegistryRemoteBody, store: RegistryStoreDep, broker: BrokerDep
 ) -> RegistryConnectOut:
-    """Name a peer, check protocol, and pull everything it publishes."""
+    """Name a peer, check protocol, and pull everything it publishes.
+
+    Then reload, for the same reason ``add`` does: pulling writes trees into
+    the registry, and the process that runs them imported it at boot.
+    ``loaded`` is which of the pulled strategies STS can now resolve — not
+    necessarily all of them, since a pulled tree can collide with a bundled
+    name or fail to import here.
+    """
     try:
         result = await connect_remote(
             store, name=body.name, url=body.url, token=body.token
@@ -180,21 +356,39 @@ async def connect(
         raise HTTPException(
             status_code=502, detail=f"cannot reach remote: {exc}"
         ) from exc
+
+    keys, rpc_error = await _reload_sts(broker)
+    pulled_keys = {qualify(rec.origin, rec.type) for rec in result.pulled}
     return RegistryConnectOut(
         name=result.name,
         url=result.url,
         pulled=[_strategy_out(rec) for rec in result.pulled],
+        loaded=sorted(pulled_keys & keys),
+        load_error=(
+            None
+            if rpc_error is None
+            else (
+                f"the strategies were pulled, but STS did not reload "
+                f"({rpc_error}). They become deployable when it restarts."
+            )
+        ),
     )
 
 
 @router.delete("/remotes/{name}", response_model=RegistryRemoteOut)
 async def disconnect_remote(
-    name: str, store: RegistryStoreDep
+    name: str, store: RegistryStoreDep, broker: BrokerDep
 ) -> RegistryRemoteOut:
     """Drop the named peer and the copy pulled from it.
 
     Refuses while any live STS session still uses a strategy pulled from
     this peer — stop those sessions first.
+
+    Reloads afterwards so STS stops resolving what it just lost. Unlike the
+    other three, this one has nothing useful to put in the response: the
+    remote is gone from this node either way, and a reload that could not be
+    delivered leaves stale keys that the next restart clears. It goes to the
+    log instead.
     """
     if store.get_remote(name) is None:
         raise HTTPException(status_code=404, detail=f"unknown remote: {name}")
@@ -218,5 +412,13 @@ async def disconnect_remote(
             ),
         )
     remote = store.drop_remote(name)
+    _, rpc_error = await _reload_sts(broker)
+    if rpc_error is not None:
+        logger.warning(
+            "disconnected %s but STS did not reload (%s); it will go on "
+            "resolving that remote's strategies until it restarts",
+            name,
+            rpc_error,
+        )
     return RegistryRemoteOut(name=remote.name, url=remote.url, count=0)
 

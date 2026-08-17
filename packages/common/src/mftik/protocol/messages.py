@@ -269,6 +269,35 @@ class StsEventLogPart(BaseModel):
     modified: float | None = None
 
 
+class StsRegistryReloadRequest(BaseModel):
+    """API → STS: re-scan the registry directory and re-register what is there.
+
+    STS imports the registry at boot. Everything that changes it afterwards —
+    a strategy added through the API, a peer connected, a tree replaced — is
+    invisible to the running process until something says so, and this is
+    that something. It takes no arguments: the store on disk is the whole
+    input, and a reload that trusted the caller to name what changed would be
+    wrong the moment two things changed at once.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+
+class StsRegistryReloadResult(BaseModel):
+    """STS → API: the qualified type keys this process now answers to.
+
+    The list is what came back from the scan, not what was asked for. A tree
+    that failed to import, or whose name collides with a bundled strategy, is
+    absent — so a caller can tell "added and loadable" from "added" by
+    looking for its own key, which is the difference between a deploy that
+    will work and one that will 404.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    loaded: list[str] = Field(default_factory=list)
+
+
 class StsEventLogInfoRequest(BaseModel):
     """API → STS: what event log does this session have, and how big."""
 
@@ -792,6 +821,8 @@ StsCreateSessionResultEnvelope = Envelope[StsCreateSessionResult]
 StsSessionControlRequestEnvelope = Envelope[StsSessionControlRequest]
 StsSessionControlResultEnvelope = Envelope[StsSessionControlResult]
 StsSessionStatusEnvelope = Envelope[StsSessionStatus]
+StsRegistryReloadRequestEnvelope = Envelope[StsRegistryReloadRequest]
+StsRegistryReloadResultEnvelope = Envelope[StsRegistryReloadResult]
 StsEventLogInfoRequestEnvelope = Envelope[StsEventLogInfoRequest]
 StsEventLogInfoEnvelope = Envelope[StsEventLogInfo]
 StsEventLogReadRequestEnvelope = Envelope[StsEventLogReadRequest]
@@ -940,6 +971,7 @@ STS_SESSION_RESUME = "sts.session.resume"
 STS_SESSION_STOP = "sts.session.stop"
 STS_SESSION_STATUS = "sts.session.status"
 STS_EVENTLOG_INFO = "sts.eventlog.info"
+STS_REGISTRY_RELOAD = "sts.registry.reload"
 STS_EVENTLOG_READ = "sts.eventlog.read"
 
 #: ``reason`` written when an operator stopped a session from the UI. A fixed

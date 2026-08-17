@@ -1,10 +1,17 @@
 """Import a registry tree as an isolated package and return its strategy class.
 
-Each tree is loaded under ``_mftik_reg_{source}_{name}_{pathhash}`` so two
+Each tree is loaded under ``_mftik_reg_{source}_{name}_{tag}`` so two
 strategies can both ship ``helpers.py`` without one clobbering the other
 in ``sys.modules``. The directory is on ``sys.path`` only while that tree
 is executing, which is what lets a flat ``from helpers import N`` resolve;
 afterwards those top-level aliases are dropped.
+
+The tag covers the tree's *contents* as well as its path. A path alone is
+stable across an edit, so re-loading a strategy that had been replaced on
+disk returned the module already in ``sys.modules`` — the old code, from a
+directory that no longer held it. Nothing noticed, because the load
+succeeded. Including the digest makes an edited tree a different module,
+which is what it is.
 """
 
 from __future__ import annotations
@@ -24,15 +31,24 @@ def load_class(
     type_name: str,
     source: str,
     name: str,
+    digest: str | None = None,
 ) -> type:
-    """Load ``dest`` and return the class named ``type_name``."""
+    """Load ``dest`` and return the class named ``type_name``.
+
+    ``digest`` is the tree's content hash, as :func:`mftik.registry.digest`
+    computes it and the store records it. Pass it whenever you have one: it
+    is what makes a replaced tree load its new code instead of the module a
+    previous load left in ``sys.modules``. Omitting it keeps the old
+    path-only behaviour, which is right for a caller loading a tree that
+    cannot have changed under it — and wrong for anything reloading.
+    """
     dest = dest.resolve()
     if not dest.is_dir():
         raise RegistryError(f"strategy tree does not exist: {dest}")
-    # Path is in the package name so two tmp trees named ``tiny`` in tests —
-    # and a replace on disk after a process restart — do not reuse a stale
-    # module from ``sys.modules``.
-    tag = hashlib.sha256(str(dest).encode()).hexdigest()[:12]
+    # Path so two tmp trees named ``tiny`` in tests do not collide; digest so
+    # the same path holding different source is a different module.
+    seed = str(dest) if digest is None else f"{dest}\0{digest}"
+    tag = hashlib.sha256(seed.encode()).hexdigest()[:12]
     pkg = f"_mftik_reg_{source}_{name}_{tag}"
     if pkg not in sys.modules:
         _load_tree(dest, pkg)

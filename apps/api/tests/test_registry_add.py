@@ -9,7 +9,12 @@ from typing import Any
 import pytest
 from db_harness import a_database, an_owner
 from fastapi import HTTPException
-from mftik.registry import RegistryStore
+from mftik.protocol import (
+    STS_REGISTRY_RELOAD,
+    StsRegistryReloadResult,
+    StsRegistryReloadResultEnvelope,
+)
+from mftik.registry import RegistryStore, qualify
 from mftik_api.routes import registry as registry_routes
 from mftik_api.routes.registry import (
     add_strategy,
@@ -32,11 +37,47 @@ class Tiny(Strategy):
 """
 
 
+class ReloadingBroker:
+    """Stands in for the STS that answers ``sts.registry.reload``.
+
+    It reports back whatever qualified keys it is told to, so a test can say
+    "STS loaded this" or "STS did not" without a strategy runtime. ``None``
+    means STS answers with every key the store holds, which is what a healthy
+    one does.
+    """
+
+    def __init__(self, loaded: list[str] | None = None) -> None:
+        self._loaded = loaded
+        self.calls = 0
+
+    def with_store(self, store: RegistryStore) -> ReloadingBroker:
+        self._store = store
+        return self
+
+    async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+        assert envelope.type == STS_REGISTRY_RELOAD
+        self.calls += 1
+        loaded = self._loaded
+        if loaded is None:
+            loaded = [
+                qualify(rec.origin, rec.type) for rec in self._store.list_all()
+            ]
+        return StsRegistryReloadResultEnvelope.wrap(
+            StsRegistryReloadResult(loaded=loaded),
+            type=STS_REGISTRY_RELOAD,
+            source="sts",
+        )
+
+
+def _broker(store: RegistryStore, loaded: list[str] | None = None):  # noqa: ANN202
+    return ReloadingBroker(loaded).with_store(store)
+
+
 async def test_add_returns_the_record_and_writes_files(tmp_path: Path) -> None:
     store = RegistryStore(tmp_path)
     body = RegistryAddBody(files={"strategy.py": _TINY})
 
-    out = await add_strategy(body, store=store)
+    out = await add_strategy(body, store=store, broker=_broker(store))
 
     assert out.name == "tiny"
     assert out.type == "Tiny"
@@ -60,7 +101,7 @@ async def test_disallowed_import_is_400(tmp_path: Path) -> None:
         }
     )
     with pytest.raises(HTTPException) as caught:
-        await add_strategy(body, store=store)
+        await add_strategy(body, store=store, broker=_broker(store))
     assert caught.value.status_code == 400
     assert "requests" in str(caught.value.detail)
 
@@ -68,17 +109,23 @@ async def test_disallowed_import_is_400(tmp_path: Path) -> None:
 async def test_duplicate_name_is_409(tmp_path: Path) -> None:
     store = RegistryStore(tmp_path)
     body = RegistryAddBody(files={"strategy.py": _TINY})
-    await add_strategy(body, store=store)
+    await add_strategy(body, store=store, broker=_broker(store))
     with pytest.raises(HTTPException) as caught:
-        await add_strategy(body, store=store)
+        await add_strategy(body, store=store, broker=_broker(store))
     assert caught.value.status_code == 409
 
 
 async def test_types_include_private_and_public(tmp_path: Path) -> None:
     store = RegistryStore(tmp_path)
-    await add_strategy(RegistryAddBody(files={"strategy.py": _TINY}), store=store)
     await add_strategy(
-        RegistryAddBody(files={"strategy.py": _TINY}, origin="public"), store=store
+        RegistryAddBody(files={"strategy.py": _TINY}),
+        store=store,
+        broker=_broker(store),
+    )
+    await add_strategy(
+        RegistryAddBody(files={"strategy.py": _TINY}, origin="public"),
+        store=store,
+        broker=_broker(store),
     )
 
     listed = await list_strategy_types(store=store)
@@ -97,9 +144,15 @@ async def test_types_include_private_and_public(tmp_path: Path) -> None:
 
 async def test_published_list_is_public_only(tmp_path: Path) -> None:
     store = RegistryStore(tmp_path)
-    await add_strategy(RegistryAddBody(files={"strategy.py": _TINY}), store=store)
     await add_strategy(
-        RegistryAddBody(files={"strategy.py": _TINY}, origin="public"), store=store
+        RegistryAddBody(files={"strategy.py": _TINY}),
+        store=store,
+        broker=_broker(store),
+    )
+    await add_strategy(
+        RegistryAddBody(files={"strategy.py": _TINY}, origin="public"),
+        store=store,
+        broker=_broker(store),
     )
     store.add({"strategy.py": _TINY}, origin="node1")
 
@@ -156,12 +209,12 @@ async def test_disconnect_drops_the_remote(
     store = RegistryStore(tmp_path)
     store.add({"strategy.py": _TINY}, origin="node1")
     store.put_remote("node1", "http://example:8000")
-    out = await disconnect_remote("node1", store=store)
+    out = await disconnect_remote("node1", store=store, broker=_broker(store))
     assert out.name == "node1"
     assert store.get_remote("node1") is None
     assert store.list_pulled() == []
     with pytest.raises(HTTPException) as caught:
-        await disconnect_remote("node1", store=store)
+        await disconnect_remote("node1", store=store, broker=_broker(store))
     assert caught.value.status_code == 404
 
 
@@ -193,7 +246,7 @@ async def test_disconnect_refuses_while_a_session_is_live(
     store.put_remote("node1", "http://example:8000")
 
     with pytest.raises(HTTPException) as caught:
-        await disconnect_remote("node1", store=store)
+        await disconnect_remote("node1", store=store, broker=_broker(store))
     assert caught.value.status_code == 409
     assert "s-tiny" in str(caught.value.detail)
     assert "Tiny" in str(caught.value.detail)
@@ -208,7 +261,7 @@ async def test_disconnect_does_not_treat_node10_as_node1(
     store.add({"strategy.py": _TINY}, origin="node1")
     store.put_remote("node1", "http://example:8000")
 
-    out = await disconnect_remote("node1", store=store)
+    out = await disconnect_remote("node1", store=store, broker=_broker(store))
     assert out.name == "node1"
     assert store.get_remote("node1") is None
 

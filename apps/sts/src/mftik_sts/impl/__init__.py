@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 
 from mftik.registry import RegistryStore, load_class, qualify
+from mftik.registry.qualify import SEP
 from mftik.strategy import Strategy
 
 from mftik_sts.impl.chase import ChaseOrder
@@ -45,6 +46,28 @@ def register_qualified(cls: type[Strategy], key: str) -> type[Strategy]:
     """
     _REGISTRY[key] = cls
     return cls
+
+
+def _forget_missing(present: set[str]) -> list[str]:
+    """Drop qualified keys whose tree is no longer in the store.
+
+    Registration used to be add-only, which was invisible while the only way
+    to lose a tree was to restart the process that had loaded it. It stopped
+    being invisible once trees could be deleted and remotes disconnected
+    underneath a running STS: the files went, the key stayed, and deploying
+    it built a session from a class whose source was not on disk anywhere.
+
+    Only qualified keys — the bundled strategies are this package, not the
+    store, and nothing in the store's absence should unregister them.
+    """
+    stale = [
+        key
+        for key in _REGISTRY
+        if key not in _BUILTIN_KEYS and SEP in key and key not in present
+    ]
+    for key in stale:
+        del _REGISTRY[key]
+    return stale
 
 
 register(NoopStrategy)
@@ -95,9 +118,16 @@ def known_strategy_types() -> list[str]:
 def load_local_registry(store: RegistryStore | None = None) -> list[str]:
     """Import ``local/`` and ``pulled/`` trees under qualified type keys.
 
-    Called from STS boot, not at import: tests that merely import this module
-    must not scan whatever ``MFTIK_DATA`` the developer has on disk. A tree that
+    Called from STS boot and again whenever the registry changes under a
+    running process, not at import: tests that merely import this module must
+    not scan whatever ``MFTIK_DATA`` the developer has on disk. A tree that
     fails to import is skipped so one broken add cannot take the process down.
+
+    Re-registering is how a replaced tree takes effect. ``register_qualified``
+    overwrites the key, so the next session built for it gets the new class;
+    sessions already running keep the instance they were built with, which is
+    the only safe answer — swapping a live strategy's class underneath it
+    would leave its state bound to methods that no longer match.
     """
     store = store or RegistryStore.from_env()
     loaded: list[str] = []
@@ -109,6 +139,9 @@ def load_local_registry(store: RegistryStore | None = None) -> list[str]:
                 type_name=rec.type,
                 source=rec.origin,
                 name=rec.name,
+                # Without this a reload returns the module the last one left
+                # in sys.modules, and a re-pushed strategy runs its old code.
+                digest=rec.digest,
             )
         except Exception:
             logger.exception(
@@ -142,4 +175,10 @@ def load_local_registry(store: RegistryStore | None = None) -> list[str]:
             key,
             rec.digest,
         )
+
+    # A tree that failed to import is not in ``loaded``, and this drops its
+    # key — which is right. It was loadable and now is not, and going on
+    # answering to it would deploy the last version that happened to parse.
+    for key in _forget_missing(set(loaded)):
+        logger.info("unregistered %s: no longer in the registry", key)
     return loaded

@@ -68,10 +68,20 @@ DEFAULT_SCOPE = SCOPE_API
 REGISTRY_READ_PATHS = ("/registry/v1/strategies",)
 
 
-def required_scope(path: str) -> str:
-    for prefix in REGISTRY_READ_PATHS:
-        if path == prefix or path.startswith(f"{prefix}/"):
-            return SCOPE_REGISTRY_READ
+#: Methods a registry key may use on the paths below. The name of the scope
+#: is ``registry:read`` and this is what makes that true: a peer holding one
+#: reads what this node publishes and does nothing else. Without the method in
+#: the decision, adding any write under ``/registry/v1/strategies`` would hand
+#: it to every peer that has ever been issued a key — a path prefix says which
+#: resource a request is about, never what it intends to do to it.
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def required_scope(method: str, path: str) -> str:
+    if method.upper() in _READ_METHODS:
+        for prefix in REGISTRY_READ_PATHS:
+            if path == prefix or path.startswith(f"{prefix}/"):
+                return SCOPE_REGISTRY_READ
     return DEFAULT_SCOPE
 
 #: Identity is something this middleware decides. Anything arriving under
@@ -122,7 +132,11 @@ class AuthMiddleware:
                 if not principal.authenticated:
                     await _refuse(scope, receive, send)
                     return
-                if not principal.allows(required_scope(scope["path"])):
+                # A WebSocket handshake has no method; treat it as a read so
+                # the lookup below is well-defined. It cannot reach the
+                # registry paths either way — none of them are sockets.
+                method = scope.get("method", "GET")
+                if not principal.allows(required_scope(method, scope["path"])):
                     await _forbid(scope, receive, send)
                     return
 
