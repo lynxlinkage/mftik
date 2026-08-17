@@ -318,7 +318,7 @@ def _pick_class(classes: list[StrategyClass]) -> StrategyClass:
     if not classes:
         raise RegistryError(
             "no Strategy subclass found — import Strategy from "
-            "mftik_sts.strategy and subclass it"
+            "mftik.strategy and subclass it"
         )
     if len(classes) > 1:
         known = ", ".join(sorted(c.type for c in classes))

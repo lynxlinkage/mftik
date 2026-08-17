@@ -24,7 +24,7 @@ from mftik.protocol import (
 from mftik.protocol.query_codes import describe
 
 if TYPE_CHECKING:
-    from mftik_sts.strategy import Strategy
+    from mftik.strategy.base import Strategy
 
 logger = logging.getLogger(__name__)
 

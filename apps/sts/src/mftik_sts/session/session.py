@@ -63,11 +63,10 @@ from mftik.protocol import (
     UntypedEnvelope,
     publish_sts_log,
 )
+from mftik.strategy import Strategy
+from mftik.strategy.eventlog import EventLog
 from mftik.symbols import SymbolClient
 from pydantic import BaseModel
-
-from mftik_sts.eventlog import EventLog
-from mftik_sts.strategy import Strategy
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +154,7 @@ class StsSession:
         self._remember = remember
         #: Audit trail of every event this session was handed and every call it
         #: made. Off unless ``STS_EVENTLOG_DIR`` is set — see
-        #: :mod:`mftik_sts.eventlog`. Built before ``bind`` so oms / mds / tape
+        #: :mod:`mftik.strategy.eventlog`. Built before ``bind`` so oms / mds / tape
         #: can reach it through the session from their first call.
         self.event_log = event_log or EventLog.from_env(session_id)
 

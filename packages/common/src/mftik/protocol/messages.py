@@ -254,7 +254,7 @@ class StsSessionControlResult(BaseModel):
 
 
 class StsEventLogPart(BaseModel):
-    """One file of a session's event log — see :mod:`mftik_sts.eventlog`.
+    """One file of a session's event log — see :mod:`mftik.strategy.eventlog`.
 
     Rotation splits a long session across several, so a whole log is the parts
     concatenated in the order they are listed, which is oldest first.

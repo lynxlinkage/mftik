@@ -11,7 +11,7 @@ Async, broker-centric trading platform. Domains talk through Redis (Streams + Pu
 | `apps/paper` | Paper exchange engine (Redis RPC + streams) |
 | `apps/md` | Market-data domain |
 | `apps/sts` | Strategy domain |
-| `packages/common` | Shared library (`mftik`) — protocol, broker, runtime, exchange |
+| `packages/common` | Shared library (`mftik`) — protocol, broker, runtime, exchange, strategy |
 | `packages/db` | Schema + Alembic migrations (`mftik_db`) |
 | `contracts/` | OpenAPI contract (Python ↔ JS) |
 | `frontend/` | SvelteKit UI (outside uv workspace) |

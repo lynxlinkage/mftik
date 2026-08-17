@@ -41,8 +41,7 @@ from mftik.protocol import (
     StsEventLogPart,
     StsEventLogReadRequest,
 )
-
-from mftik_sts.eventlog import eventlog_dir, log_parts, part_path
+from mftik.strategy.eventlog import eventlog_dir, log_parts, part_path
 
 if TYPE_CHECKING:
     from mftik_sts.session import SessionManager

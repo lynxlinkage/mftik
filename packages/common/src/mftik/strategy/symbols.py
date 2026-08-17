@@ -19,12 +19,11 @@ from typing import TYPE_CHECKING, Any
 
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol import SymbolInfo
+from mftik.strategy.eventlog import session_log
 from mftik.symbols import SymbolClient
 
-from mftik_sts.eventlog import session_log
-
 if TYPE_CHECKING:
-    from mftik_sts.strategy import Strategy
+    from mftik.strategy.base import Strategy
 
 
 class StrategySymbols:

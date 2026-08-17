@@ -17,9 +17,9 @@ import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.liveness import alive_key, clear_alive, is_alive, mark_alive
 from mftik.protocol import StsCreateSessionRequest
+from mftik.strategy import Strategy
 from mftik_sts.impl import register
 from mftik_sts.session import SessionManager
-from mftik_sts.strategy import Strategy
 
 
 @dataclass

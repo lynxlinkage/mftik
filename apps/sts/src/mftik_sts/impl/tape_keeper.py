@@ -18,7 +18,7 @@ a rule anybody has to remember — there is no account, so there is no order.
 
 **Rebuild.** Safe, and uniquely so. ``rebuildable`` is off by default because a
 restored strategy that does not know it was away will trade alongside orders it
-left resting (see :class:`~mftik_sts.strategy.Strategy`). This one holds no
+left resting (see :class:`~mftik.strategy.Strategy`). This one holds no
 position, no resting order and no venue state of any kind: coming back is
 indistinguishable from starting, which is why it can say yes.
 
@@ -32,8 +32,7 @@ from __future__ import annotations
 from typing import Any
 
 from mftik.exchange.models import AggTrade, Trade
-
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 #: How often to report that the feeds are still being held. Long: this exists
 #: so an operator scanning logs can tell "holding, quiet" from "died an hour

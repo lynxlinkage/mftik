@@ -30,9 +30,9 @@ from mftik.protocol import (
     TdAttachResult,
     Topics,
 )
+from mftik.strategy import Strategy
 from mftik_sts.impl import register
 from mftik_sts.session import SessionManager
-from mftik_sts.strategy import Strategy
 
 
 @dataclass

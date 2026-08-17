@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from mftik_sts.timer import Timer, now_ms
+from mftik.strategy.timer import Timer, now_ms
 
 
 @pytest.mark.asyncio

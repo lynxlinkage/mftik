@@ -25,8 +25,8 @@ from mftik.exchange.models import (
 )
 from mftik.exchange.oms import OmsView, Position
 from mftik.protocol import ReconDone, RejectCode, SymbolInfo
+from mftik.strategy.tape import TapeSlice
 from mftik_sts.impl.macd_dollar import MacdDollarBars, _BarBuilder, _Ema
-from mftik_sts.tape import TapeSlice
 
 TICKER = "BinanceFuture_Perp_BTCUSDT"
 SPOT_TICKER = "Bybit_Spot_BTCUSDT"

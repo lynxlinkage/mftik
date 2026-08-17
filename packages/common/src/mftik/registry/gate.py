@@ -1,7 +1,7 @@
 """Static import check — the registry copies source, not a venv.
 
-Every node already has the stdlib and the MFTIK SDK (``mft``, ``mftik_sts``). A
-third-party import would be a missing module after a pull. Dynamic imports
+Every node already has the stdlib and the MFTIK SDK (``mftik``, ``mftik_sts``).
+A third-party import would be a missing module after a pull. Dynamic imports
 (``importlib``, ``__import__``) are refused because this scan would not see
 the module they load.
 
@@ -23,7 +23,13 @@ from mftik.registry.errors import RegistryError
 HOST_PACKAGES = frozenset({"mftik", "mftik_sts"})
 _DYNAMIC_MODULES = frozenset({"importlib", "runpy"})
 _STDLIB = frozenset(sys.stdlib_module_names) | {"__future__"}
-_STRATEGY_MODULE = "mftik_sts.strategy"
+#: Where ``Strategy`` may be imported from. ``mftik.strategy`` is where the
+#: class lives and what a strategy written against the installed package
+#: imports; ``mftik_sts.strategy`` is where it lived, and what every tree
+#: already on disk — this node's and every copy pulled from a peer — still
+#: says. A scan that knew only one of them would stop recognising half the
+#: strategies in existence as strategies.
+_STRATEGY_MODULES = frozenset({"mftik.strategy", "mftik_sts.strategy"})
 _STRATEGY_ATTR = "Strategy"
 
 
@@ -167,7 +173,7 @@ def _handle_import_from(
 def _bind_from(node: ast.ImportFrom, *, module: str, state: _ImportState) -> None:
     for alias in node.names:
         bound = alias.asname or alias.name
-        if module == _STRATEGY_MODULE and alias.name == _STRATEGY_ATTR:
+        if module in _STRATEGY_MODULES and alias.name == _STRATEGY_ATTR:
             state.strategy_aliases.add(bound)
         else:
             state.modules[bound] = f"{module}.{alias.name}"
@@ -216,7 +222,7 @@ def _check_module(module: str, *, path: str, local: set[str]) -> None:
         return
     raise RegistryError(
         f"{path}: import {module!r} is not allowed — a strategy may use the "
-        f"stdlib, mft, mftik_sts, or files in this tree"
+        f"stdlib, mftik, mftik_sts, or files in this tree"
     )
 
 
@@ -269,7 +275,7 @@ def _is_strategy_base(base: ast.expr, state: _ImportState) -> bool:
     if isinstance(base, ast.Name):
         return base.id in state.strategy_aliases
     if isinstance(base, ast.Attribute) and base.attr == _STRATEGY_ATTR:
-        return _expr_module(base.value, state) == _STRATEGY_MODULE
+        return _expr_module(base.value, state) in _STRATEGY_MODULES
     return False
 
 

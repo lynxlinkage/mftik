@@ -107,7 +107,7 @@ cannot give.
 **Rebuild.** Off. The position is real and recon would report it, but reasoning
 about a restored position against an indicator rebuilt from a different stretch
 of tape is a decision this strategy has not been given. See
-:meth:`~mftik_sts.strategy.Strategy.on_rebuild`.
+:meth:`~mftik.strategy.Strategy.on_rebuild`.
 """
 
 from __future__ import annotations
@@ -132,8 +132,7 @@ from mftik.exchange.models import (
 from mftik.exchange.oms import Position
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol import CancelReject, OrderReject, ReconDone, SymbolInfo
-
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 logger = logging.getLogger(__name__)
 

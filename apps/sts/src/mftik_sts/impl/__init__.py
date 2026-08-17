@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 
 from mftik.registry import RegistryStore, load_class, qualify
+from mftik.strategy import Strategy
 
 from mftik_sts.impl.chase import ChaseOrder
 from mftik_sts.impl.cross_arb import CrossArb
@@ -23,7 +24,6 @@ from mftik_sts.impl.noop import NoopStrategy
 from mftik_sts.impl.oco import OneCancelOther
 from mftik_sts.impl.tape_keeper import TapeKeeper
 from mftik_sts.impl.twap import TwapStrategy
-from mftik_sts.strategy import Strategy
 
 # Keys: short ``name`` (e.g. noop) and class ``__name__`` (e.g. NoopStrategy).
 _REGISTRY: dict[str, type[Strategy]] = {}

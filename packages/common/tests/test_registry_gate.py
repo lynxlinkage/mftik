@@ -12,7 +12,7 @@ from mftik.registry.errors import RegistryError
 from mftik.registry.gate import check_files
 
 _TINY = """\
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -30,8 +30,8 @@ from decimal import Decimal
 from typing import Any
 
 from mftik.exchange.models import Order
-from mftik_sts.strategy import Strategy
-from mftik_sts.timer import TimerToken
+from mftik.strategy import Strategy
+from mftik.strategy.timer import TimerToken
 
 class Tiny(Strategy):
     name = "tiny"
@@ -45,7 +45,7 @@ class Tiny(Strategy):
 def test_third_party_import_is_refused() -> None:
     source = """\
 import numpy
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -57,7 +57,7 @@ class Tiny(Strategy):
 def test_importlib_is_refused() -> None:
     source = """\
 import importlib
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -68,7 +68,7 @@ class Tiny(Strategy):
 
 def test_dunder_import_is_refused() -> None:
     source = """\
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -84,7 +84,7 @@ def test_type_checking_imports_are_ignored() -> None:
     """A TYPE_CHECKING pandas import must not block a strategy that never loads it."""
     source = """\
 from typing import TYPE_CHECKING
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 if TYPE_CHECKING:
     import pandas
@@ -112,7 +112,7 @@ def test_sibling_module_is_allowed() -> None:
 def test_missing_sibling_is_refused() -> None:
     source = """\
 from missing import N
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -138,7 +138,7 @@ def test_relative_import_inside_a_package() -> None:
 def test_relative_import_at_top_level_is_refused() -> None:
     source = """\
 from .helpers import N
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -148,6 +148,18 @@ class Tiny(Strategy):
 
 
 def test_strategy_via_module_attribute() -> None:
+    source = """\
+import mftik.strategy
+
+class Tiny(mftik.strategy.Strategy):
+    name = "tiny"
+"""
+    found = check_files(_py(source))
+    assert found[0].type == "Tiny"
+
+
+def test_strategy_via_legacy_module_attribute() -> None:
+    """``mftik_sts.strategy`` is where the class used to live, and trees say so."""
     source = """\
 import mftik_sts.strategy
 
@@ -160,7 +172,7 @@ class Tiny(mftik_sts.strategy.Strategy):
 
 def test_annotated_name_is_read() -> None:
     source = """\
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name: str = "tiny"
@@ -170,7 +182,7 @@ class Tiny(Strategy):
 
 def test_requires_mftik_is_read() -> None:
     source = """\
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"

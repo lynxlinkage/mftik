@@ -18,7 +18,7 @@ from mftik.protocol import (
     RejectCode,
     Topics,
 )
-from mftik_sts.ledger import StrategyLedger
+from mftik.strategy.ledger import StrategyLedger
 
 
 @pytest.fixture

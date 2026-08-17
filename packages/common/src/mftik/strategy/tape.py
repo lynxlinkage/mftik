@@ -5,7 +5,7 @@ so a strategy that has to see a few hundred prints before it can act does not
 have to spend the first hour of its life watching them arrive.
 
 A direct Redis read rather than a query to MD, for the reason
-:class:`~mftik_sts.ledger.StrategyLedger` reads ``td.ledger.{api_id}`` directly:
+:class:`~mftik.strategy.ledger.StrategyLedger` reads ``td.ledger.{api_id}`` directly:
 the data is already sitting in a key that MD owns and keeps current, and asking
 its owner to hand over a copy would add a round trip and a second answer that
 can disagree with the first. The ``mds.fetch_*`` plane is for the other case —
@@ -27,11 +27,10 @@ from typing import TYPE_CHECKING
 from mftik.exchange.models import AggTrade, Side, Trade
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import Topics
-
-from mftik_sts.eventlog import session_log
+from mftik.strategy.eventlog import session_log
 
 if TYPE_CHECKING:
-    from mftik_sts.strategy import Strategy
+    from mftik.strategy.base import Strategy
 
 logger = logging.getLogger(__name__)
 

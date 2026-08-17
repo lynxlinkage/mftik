@@ -37,11 +37,10 @@ from mftik.protocol import (
     Topics,
 )
 from mftik.protocol.reject_codes import describe
-
-from mftik_sts.eventlog import session_log
+from mftik.strategy.eventlog import session_log
 
 if TYPE_CHECKING:
-    from mftik_sts.strategy import Strategy
+    from mftik.strategy.base import Strategy
 
 logger = logging.getLogger(__name__)
 

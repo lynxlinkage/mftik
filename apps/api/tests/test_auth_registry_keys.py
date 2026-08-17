@@ -20,7 +20,7 @@ from mftik_api.auth.principal import SCOPE_API, SCOPE_REGISTRY_READ
 GOOD = "correct-horse-battery"
 
 _TINY = """\
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"

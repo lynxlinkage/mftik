@@ -16,8 +16,8 @@ from mftik.broker import Broker, BrokerConfig
 from mftik.exchange.models import AggTrade, Side, Trade
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import Topics
-from mftik_sts.eventlog import EventLog
-from mftik_sts.tape import StrategyTape
+from mftik.strategy.eventlog import EventLog
+from mftik.strategy.tape import StrategyTape
 
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
 AGG_FEED = Topics.md_feed("aggtrade", TICKER)

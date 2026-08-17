@@ -84,9 +84,8 @@ from mftik.protocol import (
     Topics,
 )
 from mftik.protocol.reject_codes import describe
-
-from mftik_sts.strategy import Strategy
-from mftik_sts.timer import TimerToken
+from mftik.strategy import Strategy
+from mftik.strategy.timer import TimerToken
 
 #: How long to wait for the two things that arm the pair — TD recon and the
 #: first quote. Past this nothing has been placed and nothing will be, so the

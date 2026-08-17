@@ -15,7 +15,7 @@ import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.exchange.oms import LedgerEntry
 from mftik.protocol import Topics
-from mftik_sts.ledger import StrategyLedger
+from mftik.strategy.ledger import StrategyLedger
 
 
 @pytest.fixture

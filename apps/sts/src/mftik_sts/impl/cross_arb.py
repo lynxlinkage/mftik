@@ -68,8 +68,7 @@ from mftik.protocol import (
     SymbolInfo,
 )
 from mftik.protocol.reject_codes import describe
-
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 BPS = Decimal("10000")
 

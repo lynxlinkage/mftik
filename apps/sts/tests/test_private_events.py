@@ -32,10 +32,10 @@ from mftik.protocol import (
     Topics,
     UntypedEnvelope,
 )
-from mftik_sts.client_order_id import unpack
+from mftik.strategy import Strategy
+from mftik.strategy.client_order_id import unpack
 from mftik_sts.impl import register
 from mftik_sts.session import SessionManager as StsSessionManager
-from mftik_sts.strategy import Strategy
 from mftik_td.session import PaperSessionFactory
 from mftik_td.session import SessionManager as TdSessionManager
 

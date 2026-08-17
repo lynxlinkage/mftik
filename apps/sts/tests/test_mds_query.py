@@ -27,8 +27,8 @@ from mftik.protocol import (
     Topics,
     UntypedEnvelope,
 )
+from mftik.strategy import Strategy
 from mftik_sts.session.session import StsSession
-from mftik_sts.strategy import Strategy
 
 SESSION_ID = "sts-mds-1"
 TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")

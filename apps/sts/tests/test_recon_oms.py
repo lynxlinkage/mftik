@@ -13,9 +13,9 @@ from mftik.protocol import (
     StsCreateSessionRequest,
     TdAttachRequest,
 )
+from mftik.strategy import Strategy
 from mftik_sts.impl import register
 from mftik_sts.session import SessionManager as StsSessionManager
-from mftik_sts.strategy import Strategy
 from mftik_td.session import PaperSessionFactory
 from mftik_td.session import SessionManager as TdSessionManager
 

@@ -6,9 +6,9 @@ import fakeredis.aioredis
 import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.protocol import StsCreateSessionRequest
+from mftik.strategy import Strategy
 from mftik_sts.impl import register, resolve
 from mftik_sts.session import SessionManager
-from mftik_sts.strategy import Strategy
 
 
 class RecordingStrategy(Strategy):

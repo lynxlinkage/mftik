@@ -14,9 +14,9 @@ from mftik.protocol import (
     TdDetachResultEnvelope,
     Topics,
 )
+from mftik.strategy import Strategy
 from mftik_sts.session import session as session_mod
 from mftik_sts.session.session import StsSession
-from mftik_sts.strategy import Strategy
 
 SESSION_ID = "sts-stop-order"
 API_ID = 7

@@ -34,12 +34,12 @@ from mftik.protocol import (
     Topics,
     publish_sts_log,
 )
+from mftik.strategy import Strategy
+from mftik.strategy.client_order_id import SLOT_SPACE
 from mftik_db.models.session import SessionDomain, SessionStatus
 
-from mftik_sts.client_order_id import SLOT_SPACE
 from mftik_sts.impl import resolve as resolve_strategy
 from mftik_sts.session.session import StsSession
-from mftik_sts.strategy import Strategy
 
 logger = logging.getLogger(__name__)
 

@@ -47,9 +47,8 @@ from mftik.protocol import (
     Topics,
 )
 from mftik.protocol.reject_codes import describe
-
-from mftik_sts.strategy import Strategy
-from mftik_sts.timer import TimerToken
+from mftik.strategy import Strategy
+from mftik.strategy.timer import TimerToken
 
 DEFAULT_EXEC_INTERVAL_MS = 1000
 DEFAULT_GAP_BPS = Decimal("10")

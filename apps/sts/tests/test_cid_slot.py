@@ -9,10 +9,10 @@ import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.exchange.models import Side
 from mftik.protocol import StsCreateSessionRequest
-from mftik_sts.client_order_id import SLOT_MASK, ClientOrderIdFactory, slot_of
+from mftik.strategy import Strategy
+from mftik.strategy.client_order_id import SLOT_MASK, ClientOrderIdFactory, slot_of
 from mftik_sts.impl import register
 from mftik_sts.session import SessionManager
-from mftik_sts.strategy import Strategy
 
 
 class SlotStrategy(Strategy):

@@ -8,7 +8,7 @@ from mftik.registry.errors import RegistryConflict, RegistryError
 from mftik.registry.store import RegistryStore
 
 _TINY = """\
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
@@ -118,7 +118,7 @@ def test_pycache_is_ignored_and_does_not_change_digest(tmp_path) -> None:
 
 def test_multiple_subclasses_are_refused(tmp_path) -> None:
     source = """\
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class One(Strategy):
     name = "one"

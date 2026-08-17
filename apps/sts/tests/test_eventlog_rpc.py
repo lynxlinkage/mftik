@@ -30,7 +30,7 @@ from mftik.protocol import (
     StsEventLogReadRequestEnvelope,
     Topics,
 )
-from mftik_sts.eventlog import DIR_ENV
+from mftik.strategy.eventlog import DIR_ENV
 from mftik_sts.rpc import dispatch
 
 

@@ -22,8 +22,8 @@ from mftik.protocol import (
     Topics,
     UntypedEnvelope,
 )
+from mftik.strategy import Strategy
 from mftik_sts.session.session import StsSession
-from mftik_sts.strategy import Strategy
 
 
 @pytest.fixture

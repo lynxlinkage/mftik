@@ -1,7 +1,7 @@
 [project]
 name = "mftik-common"
 version = "0.1.0"
-description = "Shared MFTIK business logic (protocol, broker, runtime, exchange)"
+description = "Shared MFTIK business logic (protocol, broker, runtime, exchange, strategy)"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.0",

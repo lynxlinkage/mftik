@@ -26,9 +26,9 @@ from mftik.protocol import (
     MdLeaseAck,
     Topics,
 )
+from mftik.strategy import Strategy
 from mftik_md.rpc import dispatch
 from mftik_md.session import PaperPublicFactory, SessionManager
-from mftik_sts.strategy import Strategy
 
 
 @dataclass

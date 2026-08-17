@@ -12,7 +12,7 @@ from mftik.registry.store import RegistryStore
 from mftik.registry.sync import connect_remote, diff_remote
 
 _TINY = """\
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"

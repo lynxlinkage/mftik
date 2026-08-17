@@ -25,7 +25,7 @@ from mftik_api.schemas import RegistryAddBody
 from mftik_db.repositories import StrategyRepository, StsSessionRepository
 
 _TINY = """\
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"

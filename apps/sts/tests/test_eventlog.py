@@ -28,10 +28,10 @@ from mftik.protocol import (
     Topics,
     UntypedEnvelope,
 )
-from mftik_sts import tape as tape_module
-from mftik_sts.eventlog import DIR_ENV, EventLog
+from mftik.strategy import Strategy
+from mftik.strategy import tape as tape_module
+from mftik.strategy.eventlog import DIR_ENV, EventLog
 from mftik_sts.session.session import StsSession
-from mftik_sts.strategy import Strategy
 
 
 @pytest.fixture

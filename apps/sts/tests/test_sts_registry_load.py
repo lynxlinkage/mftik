@@ -7,7 +7,7 @@ from mftik_sts.impl import load_local_registry, resolve, resolve_class
 from mftik_sts.impl.noop import NoopStrategy
 
 _TINY = """\
-from mftik_sts.strategy import Strategy
+from mftik.strategy import Strategy
 
 class Tiny(Strategy):
     name = "tiny"
