@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
+
 from mftik.registry.errors import RegistryError
 
 PROTOCOL = "mftik.registry"
 PROTOCOL_VERSION = 1
 PROTOCOL_MIN = 1
-MFTIK_VERSION = "0.1.0"
+
+
+def _installed_version() -> str:
+    """What this node tells a peer it is running.
+
+    Read from the installed distribution rather than written here. A second
+    copy of a version number is a copy that goes stale on the release that
+    forgets it, and this one is stated to other people's nodes — a handshake
+    that misreports itself is worse than one that says nothing.
+    """
+    try:
+        return version("mftik")
+    except PackageNotFoundError:  # pragma: no cover - source tree, not a wheel
+        return "0.0.0"
+
+
+MFTIK_VERSION = _installed_version()
 
 
 def handshake_info(*, mftik_version: str = MFTIK_VERSION) -> dict[str, str | int]:
