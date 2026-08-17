@@ -344,6 +344,46 @@
         }
       }
     },
+    "/admin/update": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get Update",
+        "operationId": "get_update_admin_update_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateStatusOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Start Update",
+        "operationId": "start_update_admin_update_post",
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateStatusOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/stats": {
       "get": {
         "tags": [
@@ -4217,6 +4257,89 @@
           "refcount"
         ],
         "title": "TdAttachOut"
+      },
+      "UpdateStatusOut": {
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "title": "Available"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "running",
+              "failed"
+            ],
+            "title": "State",
+            "default": "idle"
+          },
+          "step": {
+            "type": "string",
+            "title": "Step",
+            "default": "done"
+          },
+          "from_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Version"
+          },
+          "to_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Version"
+          },
+          "feeds_published": {
+            "type": "integer",
+            "title": "Feeds Published",
+            "default": 0
+          },
+          "feeds_total": {
+            "type": "integer",
+            "title": "Feeds Total",
+            "default": 0
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "available"
+        ],
+        "title": "UpdateStatusOut",
+        "description": "In-app update progress. ``available`` is false on hosts with no updater."
       },
       "ValidationError": {
         "properties": {

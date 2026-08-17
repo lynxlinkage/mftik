@@ -15,6 +15,7 @@ from mftik.symbols import SymbolClient
 
 from mftik_md import db as md_db
 from mftik_md.fetch import FetchSession, VenueReaderFactory
+from mftik_md.publish_track import ROLE_MIRROR, ROLE_PRIMARY, PublishTracker
 from mftik_md.rpc import dispatch
 from mftik_md.session import SessionManager, VenuePublicFactory
 from mftik_md.tape import (
@@ -146,6 +147,10 @@ async def trim_loop(
             continue
 
 
+def _mirror_enabled() -> bool:
+    return os.getenv("MD_MIRROR", "").strip().lower() in {"1", "true", "yes"}
+
+
 async def amain() -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -155,46 +160,69 @@ async def amain() -> None:
         except NotImplementedError:
             pass
 
+    mirror = _mirror_enabled()
     async with Broker() as broker:
         factory = VenuePublicFactory(broker)
+        tracker = PublishTracker(
+            broker, role=ROLE_MIRROR if mirror else ROLE_PRIMARY
+        )
         sessions = SessionManager(
             factory,
             broker,
-            persist_live=md_db.persist_live_session,
-            mark_done=md_db.mark_session_done,
-            list_db_sessions=md_db.list_sessions,
+            persist_live=None if mirror else md_db.persist_live_session,
+            mark_done=None if mirror else md_db.mark_session_done,
+            list_db_sessions=None if mirror else md_db.list_sessions,
             recorder=_build_recorder(broker),
+            tracker=tracker,
+            stamp_coverage=not mirror,
         )
+        if mirror:
+            live = await md_db.list_live_sts_feeds()
+            await sessions.pin_live_sessions(live)
+        else:
+            await tracker.reset()
         # Up for as long as the process is, and attached to nothing. A read
         # is owned by nobody, so the fetch plane needs no lease and no
         # subscription to answer — which is the whole point of it being
         # separate from the feed sessions above.
         fetch = FetchSession(broker, VenueReaderFactory(SymbolClient(broker)))
         await fetch.start()
-        logger.info("MD started (venue public factory: %s)", venues.names())
-        rpc_task = asyncio.create_task(
-            run_rpc(broker, sessions, stop), name="md-rpc"
+        logger.info(
+            "MD started (venue public factory: %s%s)",
+            venues.names(),
+            ", mirror" if mirror else "",
         )
-        hb_task = asyncio.create_task(
-            broker.heartbeat_loop(
-                SOURCE,
-                interval=5.0,
-                stop=stop,
-                on_tick=lambda: logger.debug("heartbeat"),
+        tasks: list[asyncio.Task[None]] = [
+            asyncio.create_task(
+                broker.heartbeat_loop(
+                    SOURCE,
+                    interval=5.0,
+                    stop=stop,
+                    on_tick=lambda: logger.debug("heartbeat"),
+                ),
+                name="md-heartbeat",
             ),
-            name="md-heartbeat",
-        )
-        reaper_task = asyncio.create_task(
-            reap_loop(sessions, stop), name="md-reaper"
-        )
-        trim_task = asyncio.create_task(
-            trim_loop(sessions, stop), name="md-tape-trim"
-        )
+            asyncio.create_task(
+                trim_loop(sessions, stop), name="md-tape-trim"
+            ),
+        ]
+        # The sidecar must not take attach RPC: a rebuild landing here would
+        # die when the updater stops this container.
+        if not mirror:
+            tasks.append(
+                asyncio.create_task(
+                    run_rpc(broker, sessions, stop), name="md-rpc"
+                )
+            )
+            tasks.append(
+                asyncio.create_task(
+                    reap_loop(sessions, stop), name="md-reaper"
+                )
+            )
         try:
             await stop.wait()
         finally:
             stop.set()
-            tasks = (rpc_task, hb_task, reaper_task, trim_task)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

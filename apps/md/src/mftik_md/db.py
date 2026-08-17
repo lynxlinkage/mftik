@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from mftik_db.models.session import MdSessionRow
-from mftik_db.repositories import MdSessionRepository
+from mftik_db.models.session import MdSessionRow, SessionStatus
+from mftik_db.repositories import MdSessionRepository, StsSessionRepository
 from mftik_db.session import session_scope
 
 
@@ -57,3 +57,21 @@ async def list_sessions(
                 status=status, created_by=created_by, limit=limit
             )
         )
+
+
+async def list_live_sts_feeds(
+    *, limit: int = 500
+) -> list[tuple[str, list[str]]]:
+    """Live strategy sessions and the feed keys they attached.
+
+    MD session rows only store venues. The feeds themselves live on
+    ``sts_sessions.md_ids``, which is what a sidecar has to pin.
+    """
+    async with session_scope() as db:
+        rows = await StsSessionRepository(db).list_sessions(
+            status=SessionStatus.LIVE.value, limit=limit
+        )
+        return [
+            (row.session_id, [str(feed) for feed in (row.md_ids or [])])
+            for row in rows
+        ]

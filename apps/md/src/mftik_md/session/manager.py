@@ -31,6 +31,7 @@ from mftik.protocol import (
 )
 from mftik_db.models.session import SessionDomain, SessionStatus
 
+from mftik_md.publish_track import PublishTracker
 from mftik_md.session.dispatcher import Dispatcher, FeedKey
 from mftik_md.session.factory import ConnectorFactory
 from mftik_md.session.venue import VenueSession
@@ -66,6 +67,11 @@ _ORPHAN_STRIKES = 2
 #: the limit rather than truncating in silence.
 _REAP_SCAN_LIMIT = 500
 
+#: Quiet-market grace: a feed whose venue socket is up but has not printed
+#: yet still counts as ready after this, so an update is not blocked on a
+#: dead instrument. First publish still wins if it arrives sooner.
+MIRROR_GRACE_S = 15.0
+
 
 @dataclass
 class StsLink:
@@ -92,6 +98,8 @@ class SessionManager:
         list_db_sessions: ListDbSessions | None = None,
         lease_grace: float = LEASE_GRACE_S,
         recorder: TapeRecorder | None = None,
+        tracker: PublishTracker | None = None,
+        stamp_coverage: bool = True,
     ) -> None:
         self._factory = factory
         self._broker = broker
@@ -103,7 +111,11 @@ class SessionManager:
         #: None leaves every feed unrecorded — MD serves live data exactly as
         #: before, and a warm-up simply finds nothing.
         self._recorder = recorder
-        self._dispatcher = Dispatcher(broker, recorder=recorder)
+        #: False on the update sidecar: stamping started/stopped would punch
+        #: a hole in a tape the primary is still writing.
+        self._stamp_coverage = stamp_coverage
+        self._tracker = tracker
+        self._dispatcher = Dispatcher(broker, recorder=recorder, tracker=tracker)
         self._venues: dict[str, VenueSession] = {}
         self._links: dict[str, StsLink] = {}
         #: ``session_id`` → consecutive scans that found no liveness key for a
@@ -207,6 +219,66 @@ class SessionManager:
             subscriptions=feeds,
             refcounts=self._dispatcher.refcounts(),
         )
+
+    async def pin_live_sessions(
+        self,
+        rows: Sequence[tuple[str, Sequence[str]]],
+        *,
+        grace_s: float = MIRROR_GRACE_S,
+    ) -> set[str]:
+        """Hold every live session's feeds without taking the attach RPC.
+
+        Used by the update sidecar. Each ``session_id`` is registered as a
+        dispatcher target so ``md.{session}`` keeps being written, and the
+        venue pumps are refcounted on those links rather than on a lease.
+        Coverage stamps stay with the primary MD.
+        """
+        pinned: set[str] = set()
+        for session_id, feeds in rows:
+            if session_id in self._links:
+                continue
+            link = StsLink(session_id=session_id, created_by=0)
+            self._links[session_id] = link
+            self._dispatcher.register_link(link)
+            for feed in feeds:
+                try:
+                    Topics.parse_md_feed(feed)
+                except ValueError:
+                    logger.warning(
+                        "MD mirror skipped unreadable feed %r session=%s",
+                        feed,
+                        session_id,
+                    )
+                    continue
+                await self._subscribe_feed(link, feed)
+                pinned.add(Topics.normalize_md_feed(feed))
+        if self._tracker is not None:
+            self._tracker.set_pinned(pinned)
+            await self._tracker.reset()
+        if pinned and grace_s > 0:
+            task = asyncio.create_task(
+                self._grace_published(pinned, grace_s),
+                name="md-mirror-grace",
+            )
+            self._disconnects.add(task)
+            task.add_done_callback(self._disconnects.discard)
+        logger.info("MD mirrored %d feed(s) across %d session(s)", len(pinned), len(rows))
+        return pinned
+
+    async def _grace_published(self, feeds: set[str], grace_s: float) -> None:
+        """Count a connected-but-silent feed as published after ``grace_s``."""
+        await asyncio.sleep(grace_s)
+        if self._tracker is None:
+            return
+        for feed in feeds:
+            try:
+                _topic, ticker = Topics.parse_md_feed(feed)
+            except ValueError:
+                continue
+            venue = self._venues.get(ticker.venue)
+            if venue is None or not venue.started:
+                continue
+            await self._tracker.mark_published(feed)
 
     async def detach(
         self, *, session_id: str, reason: str = "detach"
@@ -457,7 +529,11 @@ class SessionManager:
             # Stamped here rather than on the first record: this is the moment
             # continuity broke, and a feed that starts pumping into a silent
             # market would otherwise look like it had been recording all along.
-            if self._recorder is not None and self._recorder.records(topic):
+            if (
+                self._stamp_coverage
+                and self._recorder is not None
+                and self._recorder.records(topic)
+            ):
                 await self._recorder.started(feed)
             await publish_md_log(
                 self._broker,
@@ -517,7 +593,11 @@ class SessionManager:
         # The tape is left where it is. Two hours of history does not stop
         # being true because nobody is subscribed any more — it stops being
         # *current*, and saying so is what this stamp is for.
-        if self._recorder is not None and self._recorder.records(topic):
+        if (
+            self._stamp_coverage
+            and self._recorder is not None
+            and self._recorder.records(topic)
+        ):
             await self._recorder.stopped(Topics.md_feed(topic, ticker))
         await publish_md_log(
             self._broker,

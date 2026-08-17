@@ -13,6 +13,7 @@ from mftik_api.auth import AuthMiddleware, auth_router
 from mftik_api.backfill_cron import run_backfill_cron
 from mftik_api.log_persist import run_log_persist
 from mftik_api.routes import (
+    admin_router,
     apis_router,
     audits_router,
     board_router,
@@ -106,6 +107,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(health_router)
+app.include_router(admin_router)
 app.include_router(stats_router)
 app.include_router(apis_router)
 app.include_router(registry_router)

@@ -418,3 +418,17 @@ class RegistryConnectOut(BaseModel):
     name: str
     url: str
     pulled: list[RegistryStrategyOut] = Field(default_factory=list)
+
+
+class UpdateStatusOut(BaseModel):
+    """In-app update progress. ``available`` is false on hosts with no updater."""
+
+    available: bool
+    state: Literal["idle", "running", "failed"] = "idle"
+    step: str = "done"
+    from_version: str | None = None
+    to_version: str | None = None
+    feeds_published: int = 0
+    feeds_total: int = 0
+    error: str | None = None
+    updated_at: float | None = None

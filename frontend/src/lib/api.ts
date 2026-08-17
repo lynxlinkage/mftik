@@ -354,6 +354,27 @@ export type AuthKey = {
 /** The mint response. The only shape that carries `token`. */
 export type AuthKeyCreated = AuthKey & { token: string };
 
+/** Progress of an in-app update. `available` is false on a host with no updater. */
+export type UpdateStatus = {
+	available: boolean;
+	state: 'idle' | 'running' | 'failed';
+	step: string;
+	from_version: string | null;
+	to_version: string | null;
+	feeds_published: number;
+	feeds_total: number;
+	error: string | null;
+	updated_at: number | null;
+};
+
+/** API overlap or a brief 502 — keep the last step, do not treat as failed. */
+export class UpdateUnreachableError extends Error {
+	constructor() {
+		super('Reconnecting…');
+		this.name = 'UpdateUnreachableError';
+	}
+}
+
 /**
  * One way of proving you are the Owner.
  *
@@ -393,6 +414,34 @@ async function detailOf(res: Response): Promise<string> {
  * the answer — wrong password — not a sign the session lapsed, and routing it
  * to the login page would send someone standing on that page back to it.
  */
+async function requestUpdate(path: string, init?: RequestInit): Promise<UpdateStatus> {
+	let res: Response;
+	try {
+		res = await fetch(`${apiBase()}${path}`, {
+			...init,
+			headers: {
+				'Content-Type': 'application/json',
+				...(init?.headers ?? {})
+			}
+		});
+	} catch {
+		throw new UpdateUnreachableError();
+	}
+	if (res.status === 401 && handleUnauthorized()) {
+		throw new Error('Login session expired — signing in again…');
+	}
+	if (res.status === 502 || res.status === 503) {
+		throw new UpdateUnreachableError();
+	}
+	if (res.status === 409) {
+		return requestUpdate('/admin/update');
+	}
+	if (!res.ok) {
+		throw new Error(await detailOf(res));
+	}
+	return (await res.json()) as UpdateStatus;
+}
+
 async function request<T>(
 	path: string,
 	init?: RequestInit,
@@ -495,6 +544,8 @@ export const api = {
 		}),
 	authKeyRevoke: (id: number) =>
 		request<AuthKey>(`/auth/keys/${encodeURIComponent(String(id))}`, { method: 'DELETE' }),
+	updateStatus: () => requestUpdate('/admin/update'),
+	startUpdate: () => requestUpdate('/admin/update', { method: 'POST' }),
 	stats: () => request<{ domains: DomainStats[] }>('/stats'),
 	boardSessions: (opts: { status?: string; limit?: number } = {}) => {
 		const q = new URLSearchParams();

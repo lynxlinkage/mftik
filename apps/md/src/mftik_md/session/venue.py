@@ -106,6 +106,10 @@ class VenueSession:
         self._started = False
 
     @property
+    def started(self) -> bool:
+        return self._started
+
+    @property
     def feed_count(self) -> int:
         return len(self._feeds)
 

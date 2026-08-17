@@ -4,10 +4,13 @@
 		api,
 		formatTs,
 		startOAuth,
+		UpdateUnreachableError,
 		type AuthKey,
 		type AuthKeyCreated,
-		type Identity
+		type Identity,
+		type UpdateStatus
 	} from '$lib/api';
+	import { appVersion } from '$lib/version';
 
 	/**
 	 * The Owner's account page. Keys today; linked identities join it when
@@ -29,6 +32,102 @@
 	let error = $state<string | null>(null);
 	let loading = $state(true);
 	let busy = $state(false);
+	let update = $state<UpdateStatus | null>(null);
+	let updateReconnecting = $state(false);
+	let updateBusy = $state(false);
+	let sawRunning = false;
+	let poll: ReturnType<typeof setInterval> | null = null;
+
+	const STEP_COPY: Record<string, string> = {
+		resolve: 'Resolving the latest version…',
+		pull: 'Pulling images…',
+		migrate: 'Running database migrations…',
+		api_next: 'Starting the new API…',
+		wait_api_next: 'Waiting for the new API to become healthy…',
+		recreate_api: 'Replacing the API container…',
+		stop_api_next: 'Removing the temporary API…',
+		md_next: 'Starting the market-data sidecar…',
+		wait_md_next: 'Waiting for md_next to publish feeds',
+		stop_md: 'Stopping the old market-data process…',
+		stop_sts: 'Stopping strategies…',
+		stop_td: 'Stopping trading…',
+		recreate: 'Starting the new stack…',
+		wait_md: 'Waiting for the new market-data process to publish feeds',
+		stop_md_next: 'Removing the market-data sidecar…',
+		done: 'Update complete'
+	};
+
+	function stepLabel(status: UpdateStatus): string {
+		const base = STEP_COPY[status.step] ?? status.step;
+		if (
+			(status.step === 'wait_md_next' || status.step === 'wait_md') &&
+			status.feeds_total > 0
+		) {
+			return `${base.replace('feeds', `${status.feeds_published}/${status.feeds_total} feeds`)}`;
+		}
+		return base;
+	}
+
+	function ensurePoll() {
+		if (poll) return;
+		poll = setInterval(() => void loadUpdate(), 1000);
+	}
+
+	function stopPoll() {
+		if (poll) {
+			clearInterval(poll);
+			poll = null;
+		}
+	}
+
+	async function loadUpdate() {
+		try {
+			const next = await api.updateStatus();
+			update = next;
+			updateReconnecting = false;
+			if (next.state === 'running') {
+				sawRunning = true;
+				ensurePoll();
+				return;
+			}
+			stopPoll();
+			if (
+				sawRunning &&
+				next.state === 'idle' &&
+				next.to_version &&
+				next.to_version !== appVersion()
+			) {
+				window.location.reload();
+			}
+		} catch (e) {
+			if (e instanceof UpdateUnreachableError) {
+				updateReconnecting = true;
+				ensurePoll();
+				return;
+			}
+			error = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	async function startUpdate() {
+		if (updateBusy || update?.state === 'running') return;
+		updateBusy = true;
+		error = null;
+		try {
+			update = await api.startUpdate();
+			sawRunning = true;
+			ensurePoll();
+		} catch (e) {
+			if (e instanceof UpdateUnreachableError) {
+				updateReconnecting = true;
+				ensurePoll();
+				return;
+			}
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			updateBusy = false;
+		}
+	}
 
 	async function refresh() {
 		loading = true;
@@ -70,7 +169,11 @@
 		}
 	}
 
-	onMount(refresh);
+	onMount(() => {
+		void refresh();
+		void loadUpdate();
+		return stopPoll;
+	});
 
 	async function mint(event: SubmitEvent) {
 		event.preventDefault();
@@ -126,6 +229,31 @@
 
 {#if error}
 	<div class="error-banner">{error}</div>
+{/if}
+
+{#if update?.available}
+	<section class="update">
+		<h2>Update</h2>
+		<p class="hint">
+			This host is running <code>{appVersion()}</code>{#if update.to_version}
+				; the updater is aiming at <code>{update.to_version}</code>{/if}.
+			STS and TD will pause briefly. Market data and HTTP stay up.
+		</p>
+		{#if updateReconnecting}
+			<p class="hint reconnecting">Reconnecting…</p>
+		{:else if update.state === 'running'}
+			<p class="hint">{stepLabel(update)}</p>
+		{:else if update.state === 'failed'}
+			<div class="error-banner">{update.error ?? 'Update failed. The previous stack should still be running.'}</div>
+		{/if}
+		<button
+			type="button"
+			onclick={startUpdate}
+			disabled={updateBusy || update.state === 'running'}
+		>
+			{update.state === 'running' ? 'Updating…' : updateBusy ? 'Starting…' : 'Update'}
+		</button>
+	</section>
 {/if}
 
 {#if minted}
@@ -310,6 +438,15 @@
 		font-size: 0.82rem;
 		max-width: 46rem;
 		line-height: 1.5;
+	}
+
+	.hint code {
+		font-family: var(--font);
+		font-size: 0.8rem;
+	}
+
+	.reconnecting {
+		color: var(--warn);
 	}
 
 	.reveal {
