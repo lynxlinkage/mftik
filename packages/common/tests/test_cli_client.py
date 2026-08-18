@@ -238,6 +238,21 @@ def test_a_403_does_not_send_you_back_to_connect() -> None:
     assert "registry key" in str(exc.value)
 
 
+def test_a_refusal_names_the_method_and_path() -> None:
+    """A bare status is what made push and deploy look the same."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"detail": "Internal Server Error"})
+
+    with _client(Node("http://n"), handler) as client:
+        with pytest.raises(CliError) as exc:
+            client.post("/sts/deploy/private::Tiny")
+
+    assert str(exc.value) == (
+        "POST /sts/deploy/private::Tiny 500: Internal Server Error"
+    )
+
+
 def test_a_proxy_error_without_json_still_reports_something() -> None:
     """A 502 from Traefik is HTML, and the status is all there is to say."""
 
@@ -245,7 +260,7 @@ def test_a_proxy_error_without_json_still_reports_something() -> None:
         return httpx.Response(502, text="<html>Bad Gateway</html>")
 
     with _client(Node("http://n"), handler) as client:
-        with pytest.raises(CliError, match="HTTP 502"):
+        with pytest.raises(CliError, match=r"GET /health 502"):
             client.get("/health")
 
 
