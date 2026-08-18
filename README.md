@@ -23,6 +23,7 @@ Async, broker-centric trading platform. Domains talk through Redis (Streams + Pu
 ```bash
 cp .env.example .env
 just sync   # uv sync --all-packages + frontend npm install
+just install-hooks   # pre-commit: fail early on a stale OpenAPI contract
 just up     # build the shared image, then docker compose up
 ```
 
@@ -50,6 +51,7 @@ just migrate           # alembic upgrade head
 just seed              # dev user + two paper APIs (idempotent)
 just openapi           # regenerate contracts/openapi.json
 just check-contracts   # fail if OpenAPI is stale
+just install-hooks     # run that check from a pre-commit hook
 just frontend-check
 ```
 

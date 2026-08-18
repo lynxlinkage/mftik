@@ -99,3 +99,9 @@ up *args:
 
 down:
     docker compose down
+
+# Point git at the tracked hooks in scripts/git-hooks. `.git/hooks` is not
+# cloned, so every checkout has to opt in once; run this after `just sync`.
+install-hooks:
+    git config core.hooksPath scripts/git-hooks
+    @echo "hooks installed — pre-commit runs check-contracts (skip once: git commit --no-verify)"

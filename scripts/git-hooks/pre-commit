@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Fail the commit if contracts/openapi.json no longer matches the FastAPI app.
+#
+# CI runs this same gate, but it sits inside the test job, so a stale contract
+# is found a push and a few minutes later. Here it costs about a second.
+#
+# It checks the working tree, not the index — a partial `git add` can pass here
+# and still fail CI. The fix is the same either way: `just openapi`, then stage
+# the regenerated file.
+#
+# Installed by `just install-hooks`. Bypass once with `git commit --no-verify`.
+set -euo pipefail
+
+if ! command -v just >/dev/null 2>&1; then
+  echo "pre-commit: just is not on PATH — skipping the contract check" >&2
+  exit 0
+fi
+
+just check-contracts
