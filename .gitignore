@@ -39,3 +39,6 @@ credentials/
 # Local node data (strategy registry). Default when MFTIK_DATA is unset.
 .mftik/
 mft/
+
+# Sibling repo, tracked separately at lynxlinkage/mjolnir
+mjolnir/
