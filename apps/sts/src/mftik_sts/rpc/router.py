@@ -14,6 +14,7 @@ from mftik.protocol import (
     STS_HEALTH,
     STS_REGISTRY_RELOAD,
     STS_SESSION_CREATE,
+    STS_SESSION_FAIL,
     STS_SESSION_LIST,
     STS_SESSION_PAUSE,
     STS_SESSION_RESUME,
@@ -27,6 +28,7 @@ from mftik_sts.rpc.health import handle_health
 from mftik_sts.rpc.registry import handle_registry_reload
 from mftik_sts.rpc.sessions import (
     handle_session_create,
+    handle_session_fail,
     handle_session_list,
     handle_session_pause,
     handle_session_resume,
@@ -49,6 +51,7 @@ _HANDLERS: dict[str, Handler] = {
     STS_SESSION_LIST: handle_session_list,
     STS_SESSION_PAUSE: handle_session_pause,
     STS_SESSION_RESUME: handle_session_resume,
+    STS_SESSION_FAIL: handle_session_fail,
     STS_SESSION_STOP: handle_session_stop,
 }
 

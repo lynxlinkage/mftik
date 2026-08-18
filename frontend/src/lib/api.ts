@@ -162,7 +162,6 @@ export type RegistryDiff = RegistryRemote & {
 };
 
 export type DeployResponse = {
-	id: number;
 	session_id: string;
 	type: string;
 	config: Record<string, unknown>;
@@ -172,24 +171,22 @@ export type DeployResponse = {
 };
 
 export type StrategyRow = {
-	id: number;
-	type: string;
+	type: string | null;
 	config: Record<string, unknown>;
 	created_by: number;
 	created_at: number;
-	sts_session: string;
+	session_id: string;
 	status: string | null;
 	paused: boolean | null;
 	/** Why a `failed` session ended. Null for live sessions and clean exits. */
 	reason: string | null;
 };
 
-/** The strategy.yml behind a past deploy (`GET /sts/strategies/{id}/yaml`). */
+/** The strategy.yml behind a past deploy (`GET /sts/sessions/{id}/yaml`). */
 export type StrategyYaml = {
-	id: number;
 	/** Strategy class this was deployed as. */
-	type: string;
-	sts_session: string;
+	type: string | null;
+	session_id: string;
 	yaml: string;
 	/** api ids whose account name could not be recovered — their `td` entries
 	 * are placeholders that will not redeploy. Reconstructed documents only. */
@@ -589,8 +586,8 @@ export const api = {
 	strategyTypeTemplate: (type: string) =>
 		request<StrategyTemplate>(`/sts/types/${encodeURIComponent(type)}/template`),
 	strategies: () => request<{ strategies: StrategyRow[] }>('/sts/strategies'),
-	strategyYaml: (id: number) =>
-		request<StrategyYaml>(`/sts/strategies/${encodeURIComponent(String(id))}/yaml`),
+	strategyYaml: (sessionId: string) =>
+		request<StrategyYaml>(`/sts/sessions/${encodeURIComponent(sessionId)}/yaml`),
 	stsSessions: (status: string | null = 'live') =>
 		request<{ sessions: Session[] }>(
 			`/sts/sessions${status ? `?status=${encodeURIComponent(status)}` : ''}`

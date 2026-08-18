@@ -46,6 +46,7 @@ class FakeStsStore:
         st_paras: dict | None = None,
         cid_slot: int | None = None,
         restart: str = "always",
+        **_extra: object,
     ) -> SimpleNamespace:
         row = SimpleNamespace(
             session_id=session_id,
@@ -230,6 +231,31 @@ async def test_an_operator_stop_is_done_and_says_so(broker: Broker) -> None:
     assert result.reason == "operator_stop"
     assert store.rows["s-1"].status == "done"
     assert store.rows["s-1"].reason == "operator_stop"
+
+
+@pytest.mark.asyncio
+async def test_a_rollback_fail_is_failed_not_stopped(broker: Broker) -> None:
+    store = FakeStsStore()
+    manager, _ = _manager(broker, store, ExitingStrategy)
+
+    class Idle(Strategy):
+        name = "idle_fail"
+
+    register(Idle)
+    manager._strategy_factory = lambda name: Idle()  # noqa: SLF001
+    await manager.create_session(
+        StsCreateSessionRequest(
+            session_id="s-fail", created_by=1, strategy="idle_fail"
+        )
+    )
+    result = await manager.fail_session(
+        "s-fail", reason="attach failed — rolled back during deploy"
+    )
+
+    assert result.status == "failed"
+    assert result.reason == "attach failed — rolled back during deploy"
+    assert store.rows["s-fail"].status == "failed"
+    assert store.rows["s-fail"].reason == "attach failed — rolled back during deploy"
 
 
 @pytest.mark.asyncio

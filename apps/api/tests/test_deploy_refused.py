@@ -13,9 +13,12 @@ import pytest
 from mftik.protocol import (
     MD_SESSION_ATTACH,
     STS_SESSION_CREATE,
+    STS_SESSION_FAIL,
     STS_SESSION_STOP,
     StsCreateSessionResult,
     StsCreateSessionResultEnvelope,
+    StsSessionControlResult,
+    StsSessionControlResultEnvelope,
 )
 from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.orchestrate import deploy_strategy
@@ -78,6 +81,7 @@ async def test_a_refused_strategy_never_reaches_the_attach() -> None:
     assert broker.types == [STS_SESSION_CREATE]
     assert MD_SESSION_ATTACH not in broker.types
     assert STS_SESSION_STOP not in broker.types
+    assert STS_SESSION_FAIL not in broker.types
 
 
 async def test_an_early_natural_end_is_reported_the_same_way() -> None:
@@ -103,3 +107,60 @@ async def test_a_terminal_status_with_no_reason_still_says_something() -> None:
         )
 
     assert "failed" in caught.value.message
+
+
+class AttachFailBroker:
+    """STS create succeeds; MD attach raises — the rollback path."""
+
+    def __init__(self) -> None:
+        self.types: list[str] = []
+
+    async def publish_log(self, topic, envelope, **_kwargs):  # noqa: ANN001
+        return 1
+
+    async def publish(self, topic, envelope):  # noqa: ANN001
+        return 1
+
+    async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+        self.types.append(envelope.type)
+        if envelope.type == STS_SESSION_CREATE:
+            return StsCreateSessionResultEnvelope.wrap(
+                StsCreateSessionResult(
+                    session_id=envelope.payload.session_id,
+                    strategy="noop",
+                    td=[],
+                    status="live",
+                ),
+                type=STS_SESSION_CREATE,
+                source="sts",
+            )
+        if envelope.type == MD_SESSION_ATTACH:
+            raise DomainRpcError("attach_failed", "md refused the feed")
+        if envelope.type == STS_SESSION_FAIL:
+            return StsSessionControlResultEnvelope.wrap(
+                StsSessionControlResult(
+                    session_id=envelope.payload.session_id,
+                    status="failed",
+                    reason=envelope.payload.reason,
+                ),
+                type=STS_SESSION_FAIL,
+                source="sts",
+            )
+        raise AssertionError(f"should not have been called: {envelope.type}")
+
+
+async def test_attach_failure_fails_the_session_not_stops_it() -> None:
+    broker = AttachFailBroker()
+
+    with pytest.raises(DomainRpcError) as caught:
+        await deploy_strategy(
+            broker,
+            strategy_id="noop",
+            td=[],
+            md=["orderbook.Paper_Spot_BTCUSDT"],
+            created_by=1,
+        )
+
+    assert caught.value.code == "attach_failed"
+    assert STS_SESSION_FAIL in broker.types
+    assert STS_SESSION_STOP not in broker.types

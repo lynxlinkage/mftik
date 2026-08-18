@@ -1027,7 +1027,7 @@
           "sts"
         ],
         "summary": "List Strategies",
-        "description": "List deployed strategy.yml rows, joined to sts session status.",
+        "description": "List STS sessions as deploys, including ones that failed at attach.",
         "operationId": "list_strategies_sts_strategies_get",
         "parameters": [
           {
@@ -1065,22 +1065,22 @@
         }
       }
     },
-    "/sts/strategies/{strategy_id}/yaml": {
+    "/sts/sessions/{session_id}/yaml": {
       "get": {
         "tags": [
           "sts"
         ],
         "summary": "Strategy Yaml",
         "description": "The strategy.yml behind a past deploy.\n\nServed verbatim from what was submitted. The stored text is what a person\nwrote \u2014 comments, ordering and the account names as typed \u2014 and it is what\neverything else about the deploy was derived from, so it is the document\nto hand back.\n\nDeploys made before the text was kept have nothing to serve, and fall back\nto a reconstruction from the persisted spec (``reconstructed``). That\ndocument parses to the same spec but is not the same document: comments\nand formatting are gone, and ``td`` shows each account's *current* name\nrather than the one that was typed.",
-        "operationId": "strategy_yaml_sts_strategies__strategy_id__yaml_get",
+        "operationId": "strategy_yaml_sts_sessions__session_id__yaml_get",
         "parameters": [
           {
-            "name": "strategy_id",
+            "name": "session_id",
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
-              "title": "Strategy Id"
+              "type": "string",
+              "title": "Session Id"
             }
           }
         ],
@@ -2703,10 +2703,6 @@
       },
       "DeployResponse": {
         "properties": {
-          "id": {
-            "type": "integer",
-            "title": "Id"
-          },
           "session_id": {
             "type": "string",
             "title": "Session Id"
@@ -2742,7 +2738,6 @@
         },
         "type": "object",
         "required": [
-          "id",
           "session_id",
           "type"
         ],
@@ -4022,12 +4017,15 @@
       },
       "StrategyOut": {
         "properties": {
-          "id": {
-            "type": "integer",
-            "title": "Id"
-          },
           "type": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Type"
           },
           "config": {
@@ -4043,9 +4041,9 @@
             "type": "number",
             "title": "Created At"
           },
-          "sts_session": {
+          "session_id": {
             "type": "string",
-            "title": "Sts Session"
+            "title": "Session Id"
           },
           "status": {
             "anyOf": [
@@ -4083,14 +4081,12 @@
         },
         "type": "object",
         "required": [
-          "id",
-          "type",
           "created_by",
           "created_at",
-          "sts_session"
+          "session_id"
         ],
         "title": "StrategyOut",
-        "description": "Deployed strategy.yml row joined to sts_sessions for status."
+        "description": "One STS session as it appears on the strategies list."
       },
       "StrategyTemplateOut": {
         "properties": {
@@ -4158,18 +4154,20 @@
       },
       "StrategyYamlResponse": {
         "properties": {
-          "id": {
-            "type": "integer",
-            "title": "Id"
-          },
           "type": {
-            "type": "string",
-            "title": "Type",
-            "default": ""
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
           },
-          "sts_session": {
+          "session_id": {
             "type": "string",
-            "title": "Sts Session"
+            "title": "Session Id"
           },
           "yaml": {
             "type": "string",
@@ -4190,8 +4188,7 @@
         },
         "type": "object",
         "required": [
-          "id",
-          "sts_session",
+          "session_id",
           "yaml"
         ],
         "title": "StrategyYamlResponse",

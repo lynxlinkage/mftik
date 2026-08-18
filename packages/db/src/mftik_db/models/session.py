@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -92,6 +93,17 @@ class StsSessionRow(Base):
     #: null for a session that is still live or ended naturally.
     reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     strategy: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: Qualified registry key — ``CrossArb``, ``private::Tiny``,
+    #: ``node1::Tiny``. Not the same fact as :attr:`strategy`, which holds
+    #: the short ``Strategy.name``. ``list_live_for_origin`` prefix-matches
+    #: this on ``{origin}::`` to refuse deleting a registry entry a live
+    #: session is using. Null when a deploy failed before the document was
+    #: recorded.
+    type: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    #: The strategy.yml exactly as submitted — the only record of what a
+    #: person wrote, comments and all. Null for deploys that never got that
+    #: far, and for rows written before this column existed.
+    yaml_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     #: The 16-bit slot packed into every ``client_order_id`` this session
     #: mints. Persisted so a rebuilt session can keep it: ``Strategy.owns()``
     #: matches orders by slot, so a new one would leave the strategy unable to
@@ -116,11 +128,6 @@ class StsSessionRow(Base):
     st_facts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     creator = relationship("User", back_populates="sts_sessions")
-    strategy_row = relationship(
-        "StrategyRow",
-        back_populates="session",
-        uselist=False,
-    )
 
 
 class TdSessionRow(Base):

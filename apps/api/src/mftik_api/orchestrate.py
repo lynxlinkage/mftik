@@ -10,7 +10,7 @@ from mftik.broker import Broker
 from mftik.protocol import (
     MD_SESSION_ATTACH,
     STS_SESSION_CREATE,
-    STS_SESSION_STOP,
+    STS_SESSION_FAIL,
     TD_SESSION_ATTACH,
     MdAttachRequest,
     MdAttachRequestEnvelope,
@@ -45,6 +45,8 @@ async def deploy_strategy(
     created_by: int,
     timeout: float = 30.0,
     restart: str = "always",
+    strategy_type: str | None = None,
+    yaml_text: str | None = None,
 ) -> dict[str, Any]:
     """Mint session_id, create STS, attach MD then each TD api_id. Fail-closed."""
     session_id = uuid4().hex
@@ -73,6 +75,8 @@ async def deploy_strategy(
                     md=md,
                     st_paras=st_paras,
                     restart=restart,
+                    type=strategy_type,
+                    yaml_text=yaml_text,
                 ),
                 type=STS_SESSION_CREATE,
                 source="api",
@@ -225,13 +229,16 @@ async def deploy_strategy(
             source="api",
             level="error",
         )
+        fail_reason = f"attach failed — rolled back during deploy: {exc}"
         try:
             await request_domain(
                 broker,
                 Topics.STS,
                 StsSessionControlRequestEnvelope.wrap(
-                    StsSessionControlRequest(session_id=session_id),
-                    type=STS_SESSION_STOP,
+                    StsSessionControlRequest(
+                        session_id=session_id, reason=fail_reason
+                    ),
+                    type=STS_SESSION_FAIL,
                     source="api",
                     session_id=session_id,
                 ),
@@ -241,12 +248,12 @@ async def deploy_strategy(
             await publish_sts_log(
                 broker,
                 session_id,
-                "STS stopped after rollback",
+                "STS failed after rollback",
                 source="api",
                 level="warning",
             )
         except Exception:
-            logger.exception("rollback STS stop failed session=%s", session_id)
+            logger.exception("rollback STS fail failed session=%s", session_id)
         raise
 
     md_out = (

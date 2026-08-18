@@ -170,6 +170,11 @@ class StsCreateSessionRequest(BaseModel):
     st_paras: dict[str, Any] = Field(default_factory=dict)
     #: ``always`` | ``never`` — see ``StrategySpec.restart``.
     restart: str = "always"
+    #: Qualified registry key (``CrossArb``, ``private::Tiny``). Optional so
+    #: an old API and a new STS can pass each other during a rolling upgrade.
+    type: str | None = None
+    #: The submitted ``strategy.yml``. Same upgrade window as ``type``.
+    yaml_text: str | None = None
 
 
 class StsCreateSessionResult(BaseModel):
@@ -233,11 +238,13 @@ class ListSessionsResult(BaseModel):
 
 
 class StsSessionControlRequest(BaseModel):
-    """API → STS: pause / resume / stop a strategy session."""
+    """API → STS: pause / resume / stop / fail a strategy session."""
 
     model_config = ConfigDict(frozen=True)
 
     session_id: str
+    #: Why a fail is being recorded. Ignored by pause / resume / stop.
+    reason: str | None = None
 
 
 class StsSessionControlResult(BaseModel):
@@ -969,6 +976,7 @@ STS_SESSION_LIST = "sts.session.list"
 STS_SESSION_PAUSE = "sts.session.pause"
 STS_SESSION_RESUME = "sts.session.resume"
 STS_SESSION_STOP = "sts.session.stop"
+STS_SESSION_FAIL = "sts.session.fail"
 STS_SESSION_STATUS = "sts.session.status"
 STS_EVENTLOG_INFO = "sts.eventlog.info"
 STS_REGISTRY_RELOAD = "sts.registry.reload"

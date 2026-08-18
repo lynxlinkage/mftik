@@ -32,7 +32,7 @@
 	// The strategy.yml of a past deploy: the submitted document, or a rebuild
 	// from the stored spec for deploys made before the text was kept.
 	let viewing = $state<StrategyYaml | null>(null);
-	let viewingId = $state<number | null>(null);
+	let viewingId = $state<string | null>(null);
 	let copied = $state(false);
 
 	// Matches mftik.protocol.STS_REASON_OPERATOR_STOP. A stopped session is
@@ -63,7 +63,7 @@
 	): string {
 		const known = new Set(available.map((t) => t.type));
 		for (const row of rows) {
-			if (known.has(row.type)) return row.type;
+			if (row.type && known.has(row.type)) return row.type;
 		}
 		if (fallback && known.has(fallback)) return fallback;
 		return available[0]?.type ?? '';
@@ -134,16 +134,16 @@
 
 	async function showYaml(s: StrategyRow) {
 		// Second click on the same row closes the panel.
-		if (viewingId === s.id) {
+		if (viewingId === s.session_id) {
 			viewing = null;
 			viewingId = null;
 			return;
 		}
-		viewingId = s.id;
+		viewingId = s.session_id;
 		viewing = null;
 		error = null;
 		try {
-			viewing = await api.strategyYaml(s.id);
+			viewing = await api.strategyYaml(s.session_id);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 			viewingId = null;
@@ -176,8 +176,8 @@
 		busy = true;
 		error = null;
 		try {
-			if (s.paused) await api.resumeSts(s.sts_session);
-			else await api.pauseSts(s.sts_session);
+			if (s.paused) await api.resumeSts(s.session_id);
+			else await api.pauseSts(s.session_id);
 			await refresh();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -190,7 +190,7 @@
 		busy = true;
 		error = null;
 		try {
-			await api.stopSts(s.sts_session);
+			await api.stopSts(s.session_id);
 			await refresh();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -203,7 +203,7 @@
 		busy = true;
 		error = null;
 		try {
-			await api.ackSts(s.sts_session);
+			await api.ackSts(s.session_id);
 			await refresh();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -213,23 +213,16 @@
 	}
 
 	/**
-	 * Fetch the list because `sessionId` is not in it yet, and try once more if
-	 * it still is not.
+	 * Fetch the list because `sessionId` is not in it yet.
 	 *
-	 * Deploy creates the STS session — which announces itself as live straight
-	 * away — before the API writes the `strategies` row this table is built
-	 * from. So the first fetch legitimately races the row into existence and
-	 * can come back without it. One retry closes that window; beyond that the
-	 * session simply has no strategy row (nothing deployed it) and asking
-	 * again forever would just be a poll.
+	 * A deploy from another tab announces itself as live before this page
+	 * has the row. One refresh is enough: the session is persisted before
+	 * it is announced, so the row is already there.
 	 */
 	async function fetchUnknownSession(sessionId: string) {
 		if (pendingSessions.has(sessionId)) return;
 		pendingSessions.add(sessionId);
 		try {
-			await refresh();
-			if (strategies.some((s) => s.sts_session === sessionId)) return;
-			await new Promise((r) => setTimeout(r, 1500));
 			await refresh();
 		} finally {
 			pendingSessions.delete(sessionId);
@@ -280,16 +273,16 @@
 		if (previous !== undefined && ev.ts < previous) return;
 		lastEventTs.set(ev.session_id, ev.ts);
 
-		const row = strategies.find((s) => s.sts_session === ev.session_id);
+		const row = strategies.find((s) => s.session_id === ev.session_id);
 		if (row === undefined) {
 			// A session this page has never seen — a deploy from another tab, or
-			// this one. The event alone cannot build a row (it carries no strategy
-			// id, config or deploy time), so go and fetch one.
+			// this one. The event alone cannot build a row (it carries no type,
+			// config or deploy time), so go and fetch one.
 			fetchUnknownSession(ev.session_id);
 			return;
 		}
 		strategies = strategies.map((s) =>
-			s.sts_session === ev.session_id
+			s.session_id === ev.session_id
 				? { ...s, status: ev.status, paused: ev.paused, reason: ev.reason }
 				: s
 		);
@@ -388,7 +381,6 @@
 		<table class="data">
 			<thead>
 				<tr>
-					<th>ID</th>
 					<th>Type</th>
 					<th>Session</th>
 					<th>Status</th>
@@ -397,20 +389,25 @@
 				</tr>
 			</thead>
 			<tbody>
-				{#each strategies as s (s.id)}
+				{#each strategies as s (s.session_id)}
 					<tr>
-						<td>{s.id}</td>
-						<td><code>{s.type}</code></td>
+						<td><code>{s.type ?? '—'}</code></td>
 						<td>
-							<a href={`/sts/${s.sts_session}`} title={s.sts_session}>
-								{shortId(s.sts_session)}
+							<a href={`/sts/${s.session_id}`} title={s.session_id}>
+								{shortId(s.session_id)}
 							</a>
 						</td>
 						<td>
 							<!-- The terminal statuses come first: they are final, and a
 							     stale `paused` from the live-session probe must never mask
-							     them. -->
-							{#if s.status === 'failed' || s.status === 'interrupted'}
+							     them. Attach failures that never recorded a type are failed
+							     even when an older rollback path labelled them `done`. -->
+							{#if !s.type}
+								<div class="status-cell">
+									<span class="badge failed">failed</span>
+									{#if s.reason}{@render why(s.reason)}{/if}
+								</div>
+							{:else if s.status === 'failed' || s.status === 'interrupted'}
 								<div class="status-cell">
 									<span class="badge {s.status}">{s.status}</span>
 									{@render why(s.reason)}
@@ -464,25 +461,25 @@
 								<button
 									type="button"
 									class="secondary"
-									class:active={viewingId === s.id}
+									class:active={viewingId === s.session_id}
 									onclick={() => showYaml(s)}
 								>
 									YAML
 								</button>
-								<a class="link-btn" href={`/sts/${s.sts_session}`}>Logs</a>
+								<a class="link-btn" href={`/sts/${s.session_id}`}>Logs</a>
 								<button
 									type="button"
 									class="secondary"
-									onclick={() => (downloadId = s.sts_session)}
+									onclick={() => (downloadId = s.session_id)}
 								>
 									Download
 								</button>
 							</div>
 						</td>
 					</tr>
-					{#if viewingId === s.id}
+					{#if viewingId === s.session_id}
 						<tr class="yaml-row">
-							<td colspan="6">
+							<td colspan="5">
 								{#if viewing === null}
 									<p class="muted small">Loading…</p>
 								{:else}

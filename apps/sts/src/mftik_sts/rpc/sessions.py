@@ -10,6 +10,7 @@ from mftik.broker import IncomingRequest
 from mftik.protocol import (
     STS_ERROR,
     STS_SESSION_CREATE,
+    STS_SESSION_FAIL,
     STS_SESSION_LIST,
     STS_SESSION_PAUSE,
     STS_SESSION_RESUME,
@@ -117,6 +118,41 @@ async def handle_session_stop(
     sessions: SessionManager | None = None,
 ) -> None:
     await _control(req, sessions=sessions, action="stop", reply_type=STS_SESSION_STOP)
+
+
+async def handle_session_fail(
+    req: IncomingRequest,
+    *,
+    sessions: SessionManager | None = None,
+) -> None:
+    if sessions is None:
+        await _error(req, "unavailable", "session manager not configured")
+        return
+    try:
+        payload = StsSessionControlRequest.model_validate(req.envelope.payload)
+    except Exception as exc:
+        await _error(req, "invalid_payload", str(exc))
+        return
+    try:
+        result = await sessions.fail_session(
+            payload.session_id,
+            reason=payload.reason or "failed",
+        )
+    except KeyError as exc:
+        await _error(req, "not_found", str(exc))
+        return
+    except Exception as exc:
+        logger.exception("sts.session.fail failed")
+        await _error(req, "fail_failed", str(exc))
+        return
+    await req.reply(
+        StsSessionControlResultEnvelope.wrap(
+            result,
+            type=STS_SESSION_FAIL,
+            source="sts",
+            session_id=result.session_id,
+        )
+    )
 
 
 async def _control(

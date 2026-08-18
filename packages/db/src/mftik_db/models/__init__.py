@@ -26,7 +26,6 @@ from mftik_db.models.session import (
     TdSessionRow,
 )
 from mftik_db.models.session_log import SessionLog
-from mftik_db.models.strategy import StrategyRow
 from mftik_db.models.symbol import (
     FilterName,
     SymbolCategory,
@@ -58,7 +57,6 @@ __all__ = [
     "FilterName",
     "Source",
     "Stream",
-    "StrategyRow",
     "StsSessionRow",
     "SymbolCategory",
     "SymbolFilter",

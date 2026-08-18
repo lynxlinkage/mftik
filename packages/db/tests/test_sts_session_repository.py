@@ -107,6 +107,22 @@ async def test_list_sessions_accepts_several_statuses(db) -> None:
     assert {r.session_id for r in rows} == {"s-done", "s-ack"}
 
 
+async def test_type_and_yaml_text_are_kept(db) -> None:
+    repo = StsSessionRepository(db)
+    await repo.create_live(
+        session_id="s-doc",
+        created_by=1,
+        strategy="tiny",
+        type="node1::Tiny",
+        yaml_text="sts: {}\n",
+    )
+
+    row = await repo.get_by_session_id("s-doc")
+    assert row is not None
+    assert row.type == "node1::Tiny"
+    assert row.yaml_text == "sts: {}\n"
+
+
 async def test_the_cid_slot_is_kept(db) -> None:
     """A rebuilt session has to mint order ids in the same slot.
 

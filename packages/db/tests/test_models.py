@@ -7,7 +7,6 @@ from mftik_db.models import (
     MdSessionRow,
     SessionDomain,
     SessionStatus,
-    StrategyRow,
     StsSessionRow,
     TdSessionRow,
     User,
@@ -24,8 +23,8 @@ def test_metadata_includes_split_session_tables() -> None:
         "sts_sessions",
         "td_sessions",
         "md_sessions",
-        "strategies",
     } <= tables
+    assert "strategies" not in tables
     assert "sessions" not in tables
 
 
@@ -52,7 +51,6 @@ def test_user_relationships() -> None:
     assert "sts_sessions" in User.__mapper__.relationships
     assert "td_sessions" in User.__mapper__.relationships
     assert "md_sessions" in User.__mapper__.relationships
-    assert "strategies" in User.__mapper__.relationships
     assert "accounts" in User.__mapper__.relationships
 
 
@@ -68,24 +66,6 @@ def test_account_api_one_to_one() -> None:
     assert "api" in Account.__mapper__.relationships
 
 
-def test_strategy_row_columns() -> None:
-    assert StrategyRow.__tablename__ == "strategies"
-    cols = set(StrategyRow.__table__.c.keys())
-    assert {
-        "id",
-        "type",
-        "config",
-        "created_by",
-        "created_at",
-        "sts_session",
-    } <= cols
-    sts_fk = StrategyRow.__table__.c.sts_session
-    assert "sts_sessions.session_id" in {
-        str(fk.column) for fk in sts_fk.foreign_keys
-    }
-    assert "strategy_row" in StsSessionRow.__mapper__.relationships
-
-
 def test_session_row_columns() -> None:
     assert StsSessionRow.__tablename__ == "sts_sessions"
     assert TdSessionRow.__tablename__ == "td_sessions"
@@ -99,6 +79,8 @@ def test_session_row_columns() -> None:
         "finished_at",
         "status",
         "strategy",
+        "type",
+        "yaml_text",
         "td_api_ids",
         "md_ids",
         "st_paras",

@@ -47,6 +47,7 @@ class FakeStsStore:
         st_paras: dict | None = None,
         cid_slot: int | None = None,
         restart: str = "always",
+        **_extra: object,
     ) -> SimpleNamespace:
         existing = self.rows.get(session_id)
         if existing is not None:

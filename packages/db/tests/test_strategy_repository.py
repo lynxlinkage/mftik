@@ -1,11 +1,11 @@
-"""Live strategies for a registry origin — used to refuse a disconnect."""
+"""Live sessions for a registry origin — used to refuse a disconnect."""
 
 from __future__ import annotations
 
 import pytest
 from db_harness import a_database, an_owner
 from mftik_db.models.session import SessionStatus
-from mftik_db.repositories import StrategyRepository, StsSessionRepository
+from mftik_db.repositories import StsSessionRepository
 
 
 @pytest.fixture
@@ -16,7 +16,7 @@ async def db(database_url):
         yield session
 
 
-async def _strategy(
+async def _session(
     db,
     *,
     session_id: str,
@@ -24,24 +24,23 @@ async def _strategy(
     status: str = SessionStatus.LIVE.value,
 ) -> None:
     sts = StsSessionRepository(db)
-    await sts.create_live(session_id=session_id, created_by=1, strategy=type)
+    await sts.create_live(
+        session_id=session_id, created_by=1, strategy=type, type=type
+    )
     if status != SessionStatus.LIVE.value:
         await sts.mark_finished(session_id, status=status)
-    await StrategyRepository(db).create(
-        type=type, created_by=1, sts_session=session_id
-    )
 
 
 async def test_live_rows_match_the_origin_not_a_prefix(db) -> None:
-    await _strategy(db, session_id="s-a", type="node1::Tiny")
-    await _strategy(db, session_id="s-b", type="node10::Tiny")
-    await _strategy(db, session_id="s-done", type="node1::Other", status="done")
+    await _session(db, session_id="s-a", type="node1::Tiny")
+    await _session(db, session_id="s-b", type="node10::Tiny")
+    await _session(db, session_id="s-done", type="node1::Other", status="done")
 
-    repo = StrategyRepository(db)
-    assert [row.sts_session for row in await repo.list_live_for_origin("node1")] == [
+    repo = StsSessionRepository(db)
+    assert [row.session_id for row in await repo.list_live_for_origin("node1")] == [
         "s-a"
     ]
-    assert [row.sts_session for row in await repo.list_live_for_origin("node10")] == [
+    assert [row.session_id for row in await repo.list_live_for_origin("node10")] == [
         "s-b"
     ]
     assert await repo.list_live_for_origin("missing") == []

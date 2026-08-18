@@ -73,6 +73,8 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         session_id: str,
         created_by: int,
         strategy: str | None = None,
+        type: str | None = None,
+        yaml_text: str | None = None,
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_paras: dict[str, Any] | None = None,
@@ -83,6 +85,8 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
             session_id=session_id,
             created_by=created_by,
             strategy=strategy,
+            type=type,
+            yaml_text=yaml_text,
             td_api_ids=list(td_api_ids or []),
             md_ids=list(md_ids or []),
             st_paras=dict(st_paras or {}),
@@ -194,6 +198,31 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         row.status = SessionStatus.ACK.value
         await self.session.flush()
         return row
+
+    async def list_live_for_origin(self, origin: str) -> Sequence[StsSessionRow]:
+        """Sessions whose type is ``{origin}::…`` and that are still live.
+
+        ``type`` is the qualified key (``node1::Tiny``). Matching on
+        ``{origin}::`` so ``node1`` does not catch ``node10``. Paused sessions
+        stay ``live``.
+        """
+        prefix = f"{origin}::"
+        stmt = (
+            select(StsSessionRow)
+            .where(StsSessionRow.status == SessionStatus.LIVE.value)
+            .where(StsSessionRow.type.startswith(prefix))
+            .order_by(StsSessionRow.created_at.desc())
+        )
+        result = await self.session.execute(stmt)
+        rows = result.scalars().all()
+        # ``startswith`` is the SQL prefilter; refuse a type with extra ``::``.
+        return [
+            row
+            for row in rows
+            if row.type is not None
+            and row.type.startswith(prefix)
+            and "::" not in row.type[len(prefix) :]
+        ]
 
 
 class TdSessionRepository(_SessionListMixin[TdSessionRow]):

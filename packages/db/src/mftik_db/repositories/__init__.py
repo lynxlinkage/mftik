@@ -19,7 +19,6 @@ from mftik_db.repositories.session import (
     TdSessionRepository,
 )
 from mftik_db.repositories.session_log import SessionLogRepository
-from mftik_db.repositories.strategy import StrategyRepository
 from mftik_db.repositories.symbol import SymbolRepository
 from mftik_db.repositories.user import UserRepository
 
@@ -37,7 +36,6 @@ __all__ = [
     "MdSessionRepository",
     "OrderRepository",
     "SessionLogRepository",
-    "StrategyRepository",
     "StsSessionRepository",
     "SymbolRepository",
     "TdSessionRepository",

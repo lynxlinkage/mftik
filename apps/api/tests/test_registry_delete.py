@@ -88,7 +88,7 @@ class DeadBroker:
 @dataclass
 class _Row:
     type: str
-    sts_session: str
+    session_id: str
 
 
 def _live_sessions(monkeypatch: pytest.MonkeyPatch, rows: list[_Row]) -> None:
@@ -104,7 +104,7 @@ def _live_sessions(monkeypatch: pytest.MonkeyPatch, rows: list[_Row]) -> None:
         yield object()
 
     monkeypatch.setattr(registry_routes, "session_scope", scope)
-    monkeypatch.setattr(registry_routes, "StrategyRepository", FakeRepo)
+    monkeypatch.setattr(registry_routes, "StsSessionRepository", FakeRepo)
 
 
 async def _add(store: RegistryStore, origin: str = "private") -> None:
@@ -245,7 +245,7 @@ async def test_delete_refuses_while_a_session_is_running_it(
     out afterwards that it still is, from a process holding a class whose
     source is gone, is the wrong order to learn it in.
     """
-    _live_sessions(monkeypatch, [_Row(type="private::Tiny", sts_session="sts-7")])
+    _live_sessions(monkeypatch, [_Row(type="private::Tiny", session_id="sts-7")])
     store = RegistryStore(tmp_path)
     await _add(store)
 
@@ -263,7 +263,7 @@ async def test_another_strategys_session_does_not_block_the_delete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The guard is per strategy, not per origin."""
-    _live_sessions(monkeypatch, [_Row(type="private::Other", sts_session="sts-9")])
+    _live_sessions(monkeypatch, [_Row(type="private::Other", session_id="sts-9")])
     store = RegistryStore(tmp_path)
     await _add(store)
 

@@ -40,7 +40,6 @@ class TdAttachOut(BaseModel):
 
 
 class DeployResponse(BaseModel):
-    id: int
     session_id: str
     type: str
     config: dict[str, Any] = Field(default_factory=dict)
@@ -50,14 +49,13 @@ class DeployResponse(BaseModel):
 
 
 class StrategyOut(BaseModel):
-    """Deployed strategy.yml row joined to sts_sessions for status."""
+    """One STS session as it appears on the strategies list."""
 
-    id: int
-    type: str
+    type: str | None = None
     config: dict[str, Any] = Field(default_factory=dict)
     created_by: int
     created_at: float
-    sts_session: str
+    session_id: str
     status: str | None = None
     paused: bool | None = None
     #: Why a ``failed`` session ended. Null otherwise.
@@ -147,10 +145,9 @@ class StrategyYamlResponse(BaseModel):
     their ``td`` entries are placeholders that will not redeploy.
     """
 
-    id: int
     #: Strategy class this was deployed as — the document no longer carries it.
-    type: str = ""
-    sts_session: str
+    type: str | None = None
+    session_id: str
     yaml: str
     unresolved_td: list[int] = Field(default_factory=list)
     #: False when ``yaml`` is the original text; true when it was rebuilt.

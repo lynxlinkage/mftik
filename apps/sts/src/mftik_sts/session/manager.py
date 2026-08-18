@@ -266,6 +266,8 @@ class SessionManager:
                 session_id=request.session_id,
                 created_by=request.created_by,
                 strategy=strategy.name,
+                type=request.type,
+                yaml_text=request.yaml_text,
                 td_api_ids=list(request.td),
                 md_ids=list(request.md),
                 st_paras=dict(request.st_paras),
@@ -461,6 +463,25 @@ class SessionManager:
             paused=False,
             strategy=strategy,
             reason=STS_REASON_OPERATOR_STOP,
+        )
+
+    async def fail_session(
+        self, session_id: str, *, reason: str
+    ) -> StsSessionControlResult:
+        """Tear down a live session as a failure — attach-rollback, not stop."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise KeyError(f"no active sts session {session_id}")
+        strategy = session.strategy_name
+        await self.close(
+            session_id, status=SessionStatus.FAILED.value, reason=reason
+        )
+        return StsSessionControlResult(
+            session_id=session_id,
+            status=SessionStatus.FAILED.value,
+            paused=False,
+            strategy=strategy,
+            reason=reason,
         )
 
     async def close(

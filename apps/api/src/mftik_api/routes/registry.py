@@ -29,7 +29,7 @@ from mftik.registry import (
 )
 from mftik.registry.protocol import handshake_info
 from mftik.registry.qualify import PRIVATE_ORIGIN, PUBLIC_ORIGIN
-from mftik_db.repositories import StrategyRepository
+from mftik_db.repositories import StsSessionRepository
 from mftik_db.session import session_scope
 
 from mftik_api.broker_rpc import DomainRpcError, request_domain
@@ -222,8 +222,8 @@ async def delete_strategy(
 
     key = qualify(origin, rec.type)
     async with session_scope() as db:
-        rows = await StrategyRepository(db).list_live_for_origin(origin)
-    live = [row.sts_session for row in rows if row.type == key]
+        rows = await StsSessionRepository(db).list_live_for_origin(origin)
+    live = [row.session_id for row in rows if row.type == key]
     if live:
         raise HTTPException(
             status_code=409,
@@ -393,13 +393,13 @@ async def disconnect_remote(
     if store.get_remote(name) is None:
         raise HTTPException(status_code=404, detail=f"unknown remote: {name}")
     async with session_scope() as db:
-        rows = await StrategyRepository(db).list_live_for_origin(name)
+        rows = await StsSessionRepository(db).list_live_for_origin(name)
     live: list[tuple[str, str]] = []
     for row in rows:
         split = split_qualified(row.type)
         if split is None or split[0] != name:
             continue
-        live.append((split[1], row.sts_session))
+        live.append((split[1], row.session_id))
     if live:
         listed = ", ".join(
             f"{type_name} ({session_id})" for type_name, session_id in live

@@ -27,7 +27,7 @@ from mftik_api.routes.registry import (
 )
 from mftik_api.routes.sts import list_strategy_types, strategy_type_template
 from mftik_api.schemas import RegistryAddBody
-from mftik_db.repositories import StrategyRepository, StsSessionRepository
+from mftik_db.repositories import StsSessionRepository
 
 _TINY = """\
 from mftik.strategy import Strategy
@@ -202,7 +202,7 @@ def _no_live_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
         yield object()
 
     monkeypatch.setattr(registry_routes, "session_scope", scope)
-    monkeypatch.setattr(registry_routes, "StrategyRepository", FakeRepo)
+    monkeypatch.setattr(registry_routes, "StsSessionRepository", FakeRepo)
 
 
 async def test_disconnect_drops_the_remote(
@@ -233,10 +233,7 @@ async def registry_db(monkeypatch, database_url):
 async def _live_strategy(scope, *, session_id: str, type: str) -> None:
     async with scope() as db:
         await StsSessionRepository(db).create_live(
-            session_id=session_id, created_by=1, strategy=type
-        )
-        await StrategyRepository(db).create(
-            type=type, created_by=1, sts_session=session_id
+            session_id=session_id, created_by=1, strategy=type, type=type
         )
 
 

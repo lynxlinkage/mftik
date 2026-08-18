@@ -12,7 +12,6 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from mftik.protocol import (
     DEFAULT_STRATEGY_TYPE,
-    RESTART_ALWAYS,
     STS_EVENTLOG_INFO,
     STS_EVENTLOG_READ,
     STS_SESSION_LIST,
@@ -48,7 +47,6 @@ from mftik.registry import AddedStrategy, RegistryStore, qualify
 from mftik_db.models.session import SessionStatus
 from mftik_db.repositories import (
     AccountRepository,
-    StrategyRepository,
     StsSessionRepository,
 )
 from mftik_db.session import session_scope
@@ -178,7 +176,7 @@ async def strategy_type_template(
 async def list_strategies(
     broker: BrokerDep, limit: int = 100
 ) -> StrategyListResponse:
-    """List deployed strategy.yml rows, joined to sts session status."""
+    """List STS sessions as deploys, including ones that failed at attach."""
     paused_by_session: dict[str, bool] = {}
     try:
         live = await request_domain(
@@ -198,22 +196,22 @@ async def list_strategies(
         logger.exception("failed to fetch live STS pause state for strategies list")
 
     async with session_scope() as db:
-        rows = await StrategyRepository(db).list_with_session(limit=limit)
+        rows = await StsSessionRepository(db).list_sessions(
+            status=None, limit=limit
+        )
 
     out: list[StrategyOut] = []
     for row in rows:
-        session = row.session
         out.append(
             StrategyOut(
-                id=row.id,
                 type=row.type,
-                config=dict(row.config or {}),
+                config=dict(row.st_paras or {}),
                 created_by=row.created_by,
                 created_at=row.created_at.timestamp() if row.created_at else 0.0,
-                sts_session=row.sts_session,
-                status=session.status if session is not None else None,
-                paused=paused_by_session.get(row.sts_session),
-                reason=session.reason if session is not None else None,
+                session_id=row.session_id,
+                status=row.status,
+                paused=paused_by_session.get(row.session_id),
+                reason=row.reason,
             )
         )
     return StrategyListResponse(strategies=out)
@@ -226,8 +224,8 @@ def _deleted_td_placeholder(api_id: int) -> str:
     return f"<deleted api_id={api_id}>"
 
 
-@router.get("/strategies/{strategy_id}/yaml", response_model=StrategyYamlResponse)
-async def strategy_yaml(strategy_id: int) -> StrategyYamlResponse:
+@router.get("/sessions/{session_id}/yaml", response_model=StrategyYamlResponse)
+async def strategy_yaml(session_id: str) -> StrategyYamlResponse:
     """The strategy.yml behind a past deploy.
 
     Served verbatim from what was submitted. The stored text is what a person
@@ -242,25 +240,25 @@ async def strategy_yaml(strategy_id: int) -> StrategyYamlResponse:
     rather than the one that was typed.
     """
     async with session_scope() as db:
-        row = await StrategyRepository(db).get_with_session(strategy_id)
+        row = await StsSessionRepository(db).get_by_session_id(session_id)
         if row is None:
             raise HTTPException(
-                status_code=404, detail=f"strategy not found: {strategy_id}"
+                status_code=404, detail=f"session not found: {session_id}"
             )
 
         if row.yaml_text:
             return StrategyYamlResponse(
-                id=row.id,
                 type=row.type,
-                sts_session=row.sts_session,
+                session_id=row.session_id,
                 yaml=row.yaml_text,
                 reconstructed=False,
             )
 
-        session = row.session
-        td_api_ids = [int(v) for v in (session.td_api_ids or [])] if session else []
-        md_ids = [str(v) for v in (session.md_ids or [])] if session else []
-        restart = session.restart if session is not None else RESTART_ALWAYS
+        td_api_ids = [int(v) for v in (row.td_api_ids or [])]
+        md_ids = [str(v) for v in (row.md_ids or [])]
+        restart = row.restart
+        st_paras = dict(row.st_paras or {})
+        row_type = row.type
 
         # strategy.yml names accounts; the session stores api ids. Map back.
         accounts = AccountRepository(db)
@@ -275,12 +273,11 @@ async def strategy_yaml(strategy_id: int) -> StrategyYamlResponse:
             td_names.append(account.name)
 
     spec = StrategySpec(
-        td=td_names, md=md_ids, restart=restart, sts=dict(row.config or {})
+        td=td_names, md=md_ids, restart=restart, sts=st_paras
     )
     return StrategyYamlResponse(
-        id=row.id,
-        type=row.type,
-        sts_session=row.sts_session,
+        type=row_type,
+        session_id=session_id,
         yaml=dump_strategy_yml(spec),
         unresolved_td=unresolved,
         reconstructed=True,
@@ -590,6 +587,8 @@ async def deploy(
             created_by=created_by,
             timeout=body.timeout,
             restart=spec.restart,
+            strategy_type=strategy_type,
+            yaml_text=body.yaml,
         )
     except DomainRpcError as exc:
         code = 404 if exc.code in {"unknown_strategy", "not_found"} else 502
@@ -603,30 +602,16 @@ async def deploy(
         raise HTTPException(status_code=code, detail=str(exc)) from exc
 
     session_id = result["session_id"]
-    async with session_scope() as db:
-        row = await StrategyRepository(db).create(
-            type=strategy_type,
-            # Stored as submitted, not re-dumped from the spec: the point is
-            # to keep the document the operator wrote, which round-tripping
-            # through the parser would strip back down to its parsed shape.
-            yaml_text=body.yaml,
-            config=dict(spec.sts),
-            created_by=created_by,
-            sts_session=session_id,
-        )
-        strategy_id = row.id
-
     await record_audit(
         user_id=created_by,
         operation="sts.deploy",
         result=(
-            f"id={strategy_id} session_id={session_id} type={strategy_type} "
+            f"session_id={session_id} type={strategy_type} "
             f"td_names={list(spec.td)} "
             f"td={[a['api_id'] for a in result['td']]} md={result['md']}"
         ),
     )
     return DeployResponse(
-        id=strategy_id,
         session_id=session_id,
         type=strategy_type,
         config=dict(spec.sts),

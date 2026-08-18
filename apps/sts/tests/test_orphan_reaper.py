@@ -59,6 +59,7 @@ class FakeStsStore:
         st_paras: dict | None = None,
         cid_slot: int | None = None,
         restart: str = "always",
+        **_extra: object,
     ) -> SimpleNamespace:
         return self.seed_live(
             session_id, strategy or "unknown", cid_slot, restart
