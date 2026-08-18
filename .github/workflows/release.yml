@@ -1,4 +1,4 @@
-name: Build, Notify
+name: Build, Deploy, Notify
 
 # Tags only. Nothing ships from this repo any more — a push to main builds
 # nothing, and a tag builds images that a human pulls when they choose to.
@@ -206,8 +206,103 @@ jobs:
             $(printf "${NAME}@sha256:%s " *)
           docker buildx imagetools inspect "${NAME}:${VERSION}"
 
+  # mftik.lynkora.com. `merge` is what makes a tag answer to anything, so this
+  # waits on it and not on `build`: the per-architecture jobs push by digest
+  # and tag nothing, and a deploy that ran between them would pull the tag the
+  # previous release left behind and report success for shipping nothing.
+  #
+  # Prereleases do not deploy, for the reason they do not move :latest —
+  # `v0.0.3-rc1` exists to be pulled by name and tried, not to become what
+  # mftik.lynkora.com is running. The guard is the same `-` test `merge` uses.
+  deploy:
+    needs: merge
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The host pulls from GHCR with the token this job hands it.
+      packages: read
+    environment:
+      name: production
+      url: https://mftik.lynkora.com
+    steps:
+      # Pinned to a commit rather than v1.2.5, because this step is handed a
+      # key that opens a root shell on the host and a tag is a mutable pointer
+      # owned by somebody else. Bump it deliberately, not by re-running.
+      - name: Point the stack at this tag and roll it
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        env:
+          VERSION: ${{ github.ref_name }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # Forwarded as environment, not interpolated. `script` is assembled
+          # as text on the runner, so a `${{ }}` inside it is substitution
+          # into a shell program rather than a value passed to one.
+          envs: VERSION,GHCR_USER,GHCR_TOKEN
+          script: |
+            set -euo pipefail
+            cd /opt/mftik/deploy
+
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+            # Traefik (/opt/traefik, its own compose project) owns this
+            # network and the stack declares it external. Creating it is a
+            # no-op every time except on a host where it has gone missing,
+            # where it is the difference between a deploy and an error.
+            docker network inspect web >/dev/null 2>&1 || docker network create web
+
+            # One line, and only this line. The rest of .env is secrets this
+            # workflow has never held — venue keys, OAuth, database URLs — and
+            # the backup is what makes a bad rewrite recoverable without
+            # having to go and find those values again.
+            cp .env ".env.bak-$(date +%Y%m%d-%H%M%S)"
+            sed -i "s|^MFTIK_VERSION=.*|MFTIK_VERSION=${VERSION}|" .env
+            grep "^MFTIK_VERSION=" .env
+
+            docker compose pull
+
+            # Before `up -d`, not alongside it. The new images expect the new
+            # schema, and a migration that fails should leave the previous
+            # version serving rather than half the stack upgraded. `migrate`
+            # sits in the `tools` profile precisely so `up -d` never runs it.
+            docker compose --profile tools run --rm migrate
+
+            docker compose up -d
+
+            # The images the previous version was running are now untagged.
+            docker image prune -f
+
+      # `docker compose up -d` returning 0 means the containers were created,
+      # which is not the same claim as the site being back. Traefik takes a
+      # moment to notice them, so this retries instead of asserting once.
+      #
+      # 401 from the API is the pass condition, not a failure: auth is on in
+      # production and an unauthenticated probe is supposed to be refused.
+      # What this is looking for is 502 — Traefik routing with nothing behind
+      # it — and 000, which is nothing answering at all.
+      - name: The site answers
+        run: |
+          for attempt in $(seq 1 30); do
+            front=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+              https://mftik.lynkora.com/ || echo 000)
+            api=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+              https://mftik.lynkora.com/api/auth/me || echo 000)
+            echo "attempt ${attempt}: frontend=${front} api=${api}"
+            if [ "$front" = "200" ] && { [ "$api" = "200" ] || [ "$api" = "401" ]; }; then
+              echo "mftik.lynkora.com is serving ${GITHUB_REF_NAME}"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::mftik.lynkora.com did not come back up after the deploy" >&2
+          exit 1
+
   notify:
-    needs: [test, build, merge]
+    needs: [test, build, merge, deploy]
     if: always()
     runs-on: ubuntu-latest
     # Job level, not step level: the `secrets` context is not available in a
@@ -226,6 +321,9 @@ jobs:
           TEST: ${{ needs.test.result }}
           BUILD: ${{ needs.build.result }}
           MERGE: ${{ needs.merge.result }}
+          # `skipped` on a prerelease, which is the intended outcome and not
+          # a failure — the branches below separate the two.
+          DEPLOY: ${{ needs.deploy.result }}
         run: |
           if [ "$TEST" != "success" ]; then
             title="❌ Tests failed"
@@ -243,9 +341,19 @@ jobs:
             title="❌ Manifest merge failed"
             desc="Architectures built but were never tagged. No image was published for this tag."
             color=15158332
-          else
+          elif [ "$DEPLOY" != "success" ] && [ "$DEPLOY" != "skipped" ]; then
+            # The images are real and pullable; only the rollout failed. Worth
+            # saying, because the fix is a re-run of this job and not a retag.
+            title="❌ Deploy failed"
+            desc="Images published, but mftik.lynkora.com is still on the previous version."
+            color=15158332
+          elif [ "$DEPLOY" = "skipped" ]; then
             title="✅ Images published"
-            desc="Tagged images are on GHCR and ready to pull."
+            desc="Tagged images are on GHCR. Prerelease — production was not touched."
+            color=3066993
+          else
+            title="✅ Deployed"
+            desc="Images are on GHCR and mftik.lynkora.com is serving this version."
             color=3066993
           fi
           {
