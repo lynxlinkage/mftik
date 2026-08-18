@@ -4109,6 +4109,15 @@
           "yaml": {
             "type": "string",
             "title": "Yaml"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "bundled",
+              "registry"
+            ],
+            "title": "Source",
+            "default": "bundled"
           }
         },
         "type": "object",
