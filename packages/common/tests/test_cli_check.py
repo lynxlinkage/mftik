@@ -74,6 +74,21 @@ def test_strategy_yml_in_the_tree_is_used_when_cfg_is_omitted(
     assert str(dest / "strategy.yml") in out
 
 
+def test_nested_strategy_yml_is_used_when_cfg_is_omitted(
+    tmp_path: Path, capsys
+) -> None:
+    dest = tmp_path / "hello"
+    pkg = dest / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "strategy.py").write_text(_QTY)
+    (pkg / "strategy.yml").write_text(_OK_YML)
+
+    assert main(["check", str(dest)]) == 0
+    out = capsys.readouterr().out
+    assert "accepted by on_initialized" in out
+    assert str(pkg / "strategy.yml") in out
+
+
 def test_third_party_import_is_refused(tmp_path: Path, capsys) -> None:
     dest = _tree(
         tmp_path,

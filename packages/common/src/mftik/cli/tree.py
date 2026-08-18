@@ -10,7 +10,7 @@ from pathlib import Path
 
 from mftik.cli.client import CliError
 from mftik.registry.errors import RegistryError
-from mftik.registry.files import read_tree
+from mftik.registry.files import find_template, read_tree
 from mftik.registry.inspect import Inspected, inspect_files
 
 #: What ``run`` deploys when the operator gave no document. An empty ``sts``
@@ -37,16 +37,16 @@ def inspect_tree(root: Path) -> Inspected:
 
 
 def cfg_path(cfg: str | None, root: Path) -> Path | None:
-    """The document to parse, if one was given or lives next to the tree."""
+    """The document to parse, if one was given or lives in the tree."""
     if cfg is not None:
         path = Path(cfg)
         if not path.is_file():
             raise CliError(f"strategy.yml does not exist: {path}")
         return path
-    candidate = root / "strategy.yml"
-    if candidate.is_file():
-        return candidate
-    return None
+    try:
+        return find_template(root)
+    except RegistryError as exc:
+        raise CliError(str(exc)) from exc
 
 
 def read_yaml(cfg: str | None, root: Path) -> str:

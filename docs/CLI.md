@@ -142,15 +142,17 @@ mftik stop <session>        stop a live session
 
 `check` does not talk to a node. It runs four layers and stops at the first
 refusal: the import gate, the naming rules `add` uses, `parse_strategy_yml`
-if a document was given or `<path>/strategy.yml` exists, then `load_class`
-and — when there is a document — `on_initialized`. Without a document those
-last two steps about the config are skipped, and the command says so.
+if a document was given or a `strategy.yml` lives in the tree (root, or a
+single copy next to a packaged class), then `load_class` and — when there
+is a document — `on_initialized`. Without a document those last two steps
+about the config are skipped, and the command says so.
 
 `push` is always `origin=private` and always replaces. It copies the
-`.py` tree and, when present, the root `strategy.yml` — that sidecar
-becomes the STS picker's starting document. The node answers `loaded`
-after asking STS to re-scan; only `loaded: true` means a deploy will
-resolve the tree. The other two outcomes (STS did not answer; STS
+`.py` tree and, when present, `strategy.yml` — that sidecar becomes the
+STS picker's starting document. A nested copy is stored as root
+`strategy.yml` so the picker always looks in one place. The node answers
+`loaded` after asking STS to re-scan; only `loaded: true` means a deploy
+will resolve the tree. The other two outcomes (STS did not answer; STS
 answered and skipped the tree) are exit 1, with the node's `load_error`.
 
 `run` pushes by default, because the iteration loop is edit-then-run and a

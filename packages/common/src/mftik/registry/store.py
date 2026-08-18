@@ -82,7 +82,11 @@ class RegistryStore:
         replace: bool = False,
         origin: str = PRIVATE_ORIGIN,
     ) -> AddedStrategy:
-        """Validate, hash, and copy ``.py`` files and optional ``strategy.yml``."""
+        """Validate, hash, and copy ``.py`` files and optional ``strategy.yml``.
+
+        A nested ``strategy.yml`` has already been lifted to the tree root
+        by :func:`inspect_files`.
+        """
         _check_origin(origin)
         inspected = inspect_files(files)
         chosen = inspected.cls

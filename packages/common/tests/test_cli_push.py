@@ -119,6 +119,26 @@ def test_push_sends_strategy_yml(tmp_path: Path, monkeypatch, capsys) -> None:
     assert body["files"]["strategy.py"] == _TINY
 
 
+def test_push_lifts_a_nested_strategy_yml(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    fake = Node_(files=["pkg/strategy.py", "strategy.yml"])
+    _install(monkeypatch, fake)
+    dest = tmp_path / "hello"
+    pkg = dest / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "strategy.py").write_text(_TINY)
+    (pkg / "strategy.yml").write_text("sts:\n  qty: 1\n")
+
+    assert main(["push", str(dest)]) == 0
+    out = capsys.readouterr().out
+    assert "template strategy.yml" in out
+    body = fake.bodies[0]
+    assert isinstance(body, dict)
+    assert body["files"]["strategy.yml"] == "sts:\n  qty: 1\n"
+    assert "pkg/strategy.yml" not in body["files"]
+
+
 def test_push_refuses_bad_strategy_yml(tmp_path: Path, capsys) -> None:
     dest = _tree(tmp_path)
     (dest / "strategy.yml").write_text("td: [\n")
