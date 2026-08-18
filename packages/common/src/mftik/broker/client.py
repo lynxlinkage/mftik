@@ -12,6 +12,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 import redis.asyncio as redis
 from pydantic import BaseModel
+from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from mftik.broker.config import BrokerConfig
 from mftik.broker.errors import BrokerNotConnectedError, RequestTimeoutError
@@ -117,6 +120,49 @@ def _int_or_none(raw: str | None) -> int | None:
         return None
 
 
+def build_redis(config: BrokerConfig) -> redis.Redis:
+    """Build the Redis client every service talks through.
+
+    Module-level rather than inline in :meth:`Broker.connect` because what it
+    encodes is a policy about failure, and a policy that can only be observed
+    by connecting to a real server is one nothing checks.
+    """
+    return redis.from_url(
+        config.redis_url,
+        decode_responses=True,
+        # Pooled connections are handed out newest-first, so one that sinks to
+        # the bottom of the pool can idle past the server's ``timeout`` and be
+        # closed there. Nothing notices until it is borrowed again, and then
+        # the command fails on a socket that was already gone — which is how a
+        # domain gets a burst of ConnectionErrors on a Redis that is perfectly
+        # healthy. Checking a connection's health on checkout is what finds one
+        # of those.
+        health_check_interval=config.health_check_interval,
+        socket_keepalive=True,
+        # Finding it is not the same as surviving it. With no retry, redis-py
+        # raises the health check's own ConnectionError at whichever caller
+        # happened to borrow the connection — and in STS that caller is a feed
+        # pump whose only reading of an exception is that the session can no
+        # longer run. The retry is what turns "this connection is dead" into
+        # "drop it and use a live one", which is what the health check was for.
+        #
+        # ConnectionError alone, deliberately. A retry re-sends the command, so
+        # one that failed while reading its reply is delivered twice — and
+        # ``request`` carries new orders. That duplicate is refused at the venue
+        # on its client_order_id (mftik_td.errors.VENUE_DUPLICATE_CLIENT_ORDER_ID
+        # is already the code for it), so it costs a spurious reject rather than
+        # a doubled position, which is a trade worth making to get the reconnect.
+        # TimeoutError is not: no ``socket_timeout`` is set, so it has no way to
+        # arise here, and listing it would widen the re-send window for nothing.
+        retry=Retry(
+            ExponentialBackoff(cap=0.5, base=0.05),
+            config.command_retries,
+            supported_errors=(RedisConnectionError,),
+        ),
+        retry_on_error=[RedisConnectionError],
+    )
+
+
 class Broker:
     """Async Redis IPC client.
 
@@ -152,20 +198,7 @@ class Broker:
 
     async def connect(self) -> None:
         if self._redis is None:
-            self._redis = redis.from_url(
-                self.config.redis_url,
-                decode_responses=True,
-                # Pooled connections are handed out newest-first, so one that
-                # sinks to the bottom of the pool can idle past the server's
-                # ``timeout`` and be closed there. Nothing notices until it is
-                # borrowed again, and then the command fails on a socket that
-                # was already gone — which is how a domain gets a burst of
-                # ConnectionErrors on a Redis that is perfectly healthy.
-                # Checking a connection's health on checkout retires those
-                # before a caller can trip over one.
-                health_check_interval=self.config.health_check_interval,
-                socket_keepalive=True,
-            )
+            self._redis = build_redis(self.config)
             self._owns_redis = True
         await self._redis.ping()
         logger.info("Connected to Redis at %s", redacted_url(self.config.redis_url))

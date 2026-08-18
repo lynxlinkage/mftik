@@ -17,9 +17,17 @@ class BrokerConfig:
     log_buffer_maxlen: int = 100
     #: How old a pooled connection may be before it is pinged on checkout.
     #: Must stay under the Redis server's ``timeout`` (300s in production) —
-    #: the point is to retire a connection the server has already closed
-    #: before a caller borrows it and fails on it.
+    #: the point is to find a connection the server has already closed before
+    #: a caller borrows it and fails on it. Finding it is all this does; what
+    #: replaces it is :attr:`command_retries`.
     health_check_interval: int = 30
+    #: How many times one command may be retried on a ConnectionError. This is
+    #: what makes the health check above useful: the ping on a dead connection
+    #: raises, and with no retry that exception surfaces at whatever borrowed
+    #: it — which has already failed sessions that had nothing wrong with them.
+    #: Backoff is 50ms doubling to a 500ms cap, so three retries add at most
+    #: ~350ms before giving up for real.
+    command_retries: int = 3
 
     @classmethod
     def from_env(cls) -> BrokerConfig:
@@ -33,5 +41,8 @@ class BrokerConfig:
             ),
             health_check_interval=int(
                 os.getenv("BROKER_HEALTH_CHECK_INTERVAL", "30")
+            ),
+            command_retries=max(
+                0, int(os.getenv("BROKER_COMMAND_RETRIES", "3"))
             ),
         )
