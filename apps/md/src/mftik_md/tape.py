@@ -115,8 +115,12 @@ class TapeRecorder:
     async def started(self, feed: str) -> None:
         """Stamp the moment ``feed`` began recording.
 
-        Also the moment continuity broke: anything already in the stream is on
-        the far side of a gap whose length nobody measured.
+        Also the far edge of whatever interruption preceded it. If the last
+        recorder stopped cleanly it left a stamp, and the two together measure
+        the hole — the records before it stay readable, carrying a gap the
+        reader can weigh. If it did not, the hole is unmeasurable and
+        continuity restarts here. :meth:`Broker.tape_mark_recording` decides
+        which of those happened; this only reports the clock.
         """
         try:
             await self._broker.tape_mark_recording(

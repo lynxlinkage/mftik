@@ -11,6 +11,7 @@ from __future__ import annotations
 import fakeredis.aioredis
 import pytest
 from mftik.broker import Broker, BrokerConfig
+from mftik.broker.client import decode_tape_gaps
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import Envelope, Topics
 from mftik_md.tape import TapeRecorder
@@ -71,8 +72,15 @@ async def test_does_not_record_book_feeds(broker: Broker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_restart_moves_the_continuity_mark(broker: Broker) -> None:
-    """The whole point of the stamps: a reader can see the hole."""
+async def test_a_clean_restart_keeps_continuity_and_records_the_hole(
+    broker: Broker,
+) -> None:
+    """The whole point of the stamps: a reader can see the hole *and* size it.
+
+    Both edges are stamped here — a shutdown that ran, and the start after it —
+    so the interruption is a measured fact. That is a deploy. Ending the series
+    over it would discard the warm-up window to describe a gap of seconds.
+    """
     recorder = TapeRecorder(broker)
     await recorder.started(AGG_FEED)
     first = await broker.tape_coverage(AGG_FEED)
@@ -86,12 +94,36 @@ async def test_a_restart_moves_the_continuity_mark(broker: Broker) -> None:
     resumed = await broker.tape_coverage(AGG_FEED)
 
     assert resumed["recording"] == "1"
+    assert resumed["continuous_since_ms"] == first["continuous_since_ms"]
+    gaps = decode_tape_gaps(resumed["gaps"])
+    assert len(gaps) == 1
+    assert gaps[0][0] == int(stopped["stopped_ms"])
+    # The records from before the break are still in the stream — dropping
+    # them here would throw away history a reader may legitimately want.
+    assert len(await broker.tape_tail(AGG_FEED, count=10)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_restart_nobody_stamped_moves_the_continuity_mark(
+    broker: Broker,
+) -> None:
+    """No ``stopped`` call is what SIGKILL and OOM look like from here.
+
+    Nothing ran to write down when the feed went quiet, so the hole has no
+    measured length and the records behind it are off the series.
+    """
+    recorder = TapeRecorder(broker)
+    await recorder.started(AGG_FEED)
+    first = await broker.tape_coverage(AGG_FEED)
+    await recorder.append("aggtrade", TICKER, _agg_payload("1"))
+
+    await recorder.started(AGG_FEED)
+    resumed = await broker.tape_coverage(AGG_FEED)
+
     assert int(resumed["continuous_since_ms"]) >= int(
         first["continuous_since_ms"]
     )
-    # The records from before the break are still in the stream — dropping
-    # them here would throw away history a reader may legitimately want. What
-    # changed is that the mark now says where the trustworthy part starts.
+    assert decode_tape_gaps(resumed["gaps"]) == []
     assert len(await broker.tape_tail(AGG_FEED, count=10)) == 1
 
 

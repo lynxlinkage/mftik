@@ -12,6 +12,11 @@ import asyncio
 import fakeredis.aioredis
 import pytest
 from mftik.broker import Broker, BrokerConfig
+from mftik.broker.client import (
+    TAPE_MAX_GAPS,
+    decode_tape_gaps,
+    encode_tape_gaps,
+)
 
 FEED = "aggtrade.BinanceFuture_Perp_BTCUSDT"
 
@@ -138,3 +143,109 @@ async def test_append_renews_the_ttl_on_both_keys(broker: Broker) -> None:
 @pytest.mark.asyncio
 async def test_tail_of_a_missing_feed_is_empty(broker: Broker) -> None:
     assert await broker.tape_tail("trade.Paper_Spot_ETHUSDT", count=10) == []
+
+
+@pytest.mark.asyncio
+async def test_a_measured_interruption_keeps_continuity(broker: Broker) -> None:
+    """A deploy is not a discontinuity, it is a hole somebody wrote down.
+
+    Resetting the mark here is what used to throw away the whole warm-up
+    window: two intact hours in the stream, discarded to describe a gap of
+    seconds that both edges of the restart had already stamped.
+    """
+    await broker.tape_mark_recording(FEED, since_ms=1_000, ttl_seconds=3600)
+    await broker.tape_mark_stopped(FEED, at_ms=5_000)
+    await broker.tape_mark_recording(FEED, since_ms=9_000, ttl_seconds=3600)
+
+    coverage = await broker.tape_coverage(FEED)
+
+    assert coverage["continuous_since_ms"] == "1000"
+    assert coverage["recording"] == "1"
+    assert coverage["stopped_ms"] == ""
+    assert decode_tape_gaps(coverage["gaps"]) == [(5_000, 9_000)]
+
+
+@pytest.mark.asyncio
+async def test_an_unmeasured_interruption_restarts_continuity(
+    broker: Broker,
+) -> None:
+    """No stop stamp means nobody was there to write one — SIGKILL, OOM.
+
+    The hole is real and its length is unknown, so the older behaviour is the
+    only honest one: everything before this is off the series.
+    """
+    await broker.tape_mark_recording(FEED, since_ms=1_000, ttl_seconds=3600)
+    await broker.tape_mark_recording(FEED, since_ms=9_000, ttl_seconds=3600)
+
+    coverage = await broker.tape_coverage(FEED)
+
+    assert coverage["continuous_since_ms"] == "9000"
+    assert decode_tape_gaps(coverage["gaps"]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_measured_gap_does_not_erase_the_ones_before_it(
+    broker: Broker,
+) -> None:
+    """Two deploys inside a retention window are two holes, not one."""
+    await broker.tape_mark_recording(FEED, since_ms=1_000, ttl_seconds=3600)
+    for stopped, resumed in ((2_000, 3_000), (4_000, 4_500)):
+        await broker.tape_mark_stopped(FEED, at_ms=stopped)
+        await broker.tape_mark_recording(
+            FEED, since_ms=resumed, ttl_seconds=3600
+        )
+
+    coverage = await broker.tape_coverage(FEED)
+
+    assert coverage["continuous_since_ms"] == "1000"
+    assert decode_tape_gaps(coverage["gaps"]) == [
+        (2_000, 3_000),
+        (4_000, 4_500),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_too_many_gaps_collapse_to_a_fresh_mark(broker: Broker) -> None:
+    """Past some count it is not a recording with holes, it is confetti.
+
+    Also the bound on the field: coverage is a hash value, and a feed in a
+    crash loop would otherwise grow it for as long as Redis kept the key.
+    """
+    await broker.tape_mark_recording(FEED, since_ms=0, ttl_seconds=3600)
+    for n in range(TAPE_MAX_GAPS + 1):
+        await broker.tape_mark_stopped(FEED, at_ms=n * 10 + 1)
+        await broker.tape_mark_recording(
+            FEED, since_ms=n * 10 + 2, ttl_seconds=3600
+        )
+
+    coverage = await broker.tape_coverage(FEED)
+
+    assert decode_tape_gaps(coverage["gaps"]) == []
+    assert coverage["continuous_since_ms"] == str(TAPE_MAX_GAPS * 10 + 2)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_stamped_after_the_resume_is_not_a_gap(
+    broker: Broker,
+) -> None:
+    """A clock that moved backwards measures nothing. Treated as unknown."""
+    await broker.tape_mark_recording(FEED, since_ms=1_000, ttl_seconds=3600)
+    await broker.tape_mark_stopped(FEED, at_ms=9_000)
+    await broker.tape_mark_recording(FEED, since_ms=5_000, ttl_seconds=3600)
+
+    coverage = await broker.tape_coverage(FEED)
+
+    assert coverage["continuous_since_ms"] == "5000"
+    assert decode_tape_gaps(coverage["gaps"]) == []
+
+
+def test_gap_codec_round_trips() -> None:
+    gaps = [(1, 2), (30_000, 41_000)]
+    assert decode_tape_gaps(encode_tape_gaps(gaps)) == gaps
+    assert decode_tape_gaps("") == []
+    assert decode_tape_gaps(None) == []
+
+
+def test_an_unreadable_gap_is_skipped_not_raised() -> None:
+    """Coverage is a nicety for a warm-up; the caller is a feed coming up."""
+    assert decode_tape_gaps("1-2,rubbish,5-6") == [(1, 2), (5, 6)]

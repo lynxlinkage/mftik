@@ -35,6 +35,51 @@ def _to_json(value: BaseModel | dict[str, Any]) -> str:
     return json.dumps(value, default=str)
 
 
+#: How many measured gaps one feed's coverage will carry before the tape stops
+#: being described as one series at all. A feed that was interrupted this often
+#: inside its retention window is not a recording with holes in it, and the
+#: field is a hash value, not a stream — it does not get to grow forever.
+TAPE_MAX_GAPS = 32
+
+
+def encode_tape_gaps(gaps: Sequence[tuple[int, int]]) -> str:
+    """Render measured gaps as ``start-end`` pairs, oldest first.
+
+    A flat string rather than JSON: these are pairs of integers written on
+    every feed restart and read on every warm-up, and the coverage hash is
+    read as ``dict[str, str]`` by everything that touches it.
+    """
+    return ",".join(f"{start}-{end}" for start, end in gaps)
+
+
+def decode_tape_gaps(raw: str | None) -> list[tuple[int, int]]:
+    """Parse :func:`encode_tape_gaps`. Unreadable entries are skipped.
+
+    Never raises. Coverage describes a warm-up that may never happen, while
+    the caller is a feed coming up to serve strategies that trade now — a
+    field that will not parse costs a gap record, not a recording.
+    """
+    if not raw:
+        return []
+    gaps: list[tuple[int, int]] = []
+    for chunk in raw.split(","):
+        head, _, tail = chunk.partition("-")
+        try:
+            gaps.append((int(head), int(tail)))
+        except ValueError:
+            logger.warning("tape coverage has an unreadable gap: %r", chunk)
+    return gaps
+
+
+def _int_or_none(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 class Broker:
     """Async Redis IPC client.
 
@@ -263,22 +308,68 @@ class Broker:
     ) -> None:
         """Record that this feed started recording at ``since_ms``.
 
-        Called when a feed begins pumping, which is also the moment continuity
-        breaks: whatever is already in the stream predates a gap of unknown
-        length. Readers compare against this rather than assuming the records
-        they can see form one series.
+        Called when a feed begins pumping. Whether that breaks continuity
+        depends on what the previous recording left behind:
+
+        * A ``stopped_ms`` stamp means the last recorder shut down cleanly and
+          said when. The interruption is then *measured* — ``since_ms`` minus
+          that stamp — so the records before it are not on the far side of an
+          unknown hole. Continuity is kept and the gap is appended to the
+          ``gaps`` coverage field, for the reader to judge.
+        * No stamp means the last recorder vanished — SIGKILL, OOM, the machine
+          going away — and nobody wrote down when. The hole is unmeasurable, so
+          continuity restarts here and the earlier records fall behind the mark.
+
+        The distinction is the whole point. A deploy interrupts a feed for a few
+        seconds, and resetting continuity for it discards two hours of tape that
+        is sitting intact in the stream — the warm-up window, thrown away to
+        describe a hole shorter than one bar. What cannot be measured is still
+        treated as fatal to continuity; what can is handed over as a fact.
 
         Carries its own TTL because a feed can be subscribed and then print
         nothing at all — a dead instrument, a venue outage — and the appends
         that would otherwise renew it never come.
+
+        Read-modify-write, and safe today because a feed has exactly one
+        recorder: MD refcounts subscribers within one process, so ``started``
+        fires once per feed per process and no second writer exists to race.
+        A second MD writing the same feed — the blue/green handover — changes
+        that, and is the reason it would need a fencing token here.
         """
+        prior = await self.tape_coverage(feed)
+        stopped_ms = _int_or_none(prior.get("stopped_ms"))
+        prior_since = _int_or_none(prior.get("continuous_since_ms"))
+        gaps = decode_tape_gaps(prior.get("gaps"))
+
+        measured = (
+            stopped_ms is not None
+            and prior_since is not None
+            # A stop stamped after the start it precedes is a clock that moved,
+            # not a gap. Unmeasurable, so it is treated as one.
+            and stopped_ms <= since_ms
+        )
+        if measured:
+            assert prior_since is not None and stopped_ms is not None
+            gaps = [*gaps, (stopped_ms, since_ms)]
+            continuous_since = prior_since
+            # A tape this punctured is not one series in any useful sense, and
+            # the field would grow without bound. Collapsing to a fresh mark is
+            # the same answer the unmeasurable case gets, for the same reason.
+            if len(gaps) > TAPE_MAX_GAPS:
+                gaps = []
+                continuous_since = since_ms
+        else:
+            gaps = []
+            continuous_since = since_ms
+
         pipe = self.redis.pipeline()
         pipe.hset(
             self.tape_coverage_key(feed),
             mapping={
-                "continuous_since_ms": str(since_ms),
+                "continuous_since_ms": str(continuous_since),
                 "recording": "1",
                 "stopped_ms": "",
+                "gaps": encode_tape_gaps(gaps),
             },
         )
         pipe.expire(self.tape_coverage_key(feed), ttl_seconds)
@@ -290,6 +381,11 @@ class Broker:
         The stream is left alone. A reader that wants the last two hours before
         a feed went quiet can still have them — it just has to know they end,
         and that is exactly what this says.
+
+        It is also the near edge of any gap that follows. Only a recorder that
+        got to run its shutdown leaves this behind, which is what makes a
+        planned interruption measurable and an unplanned one not — see
+        :meth:`tape_mark_recording`.
         """
         await self.redis.hset(  # type: ignore[misc]
             self.tape_coverage_key(feed),

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
+from mftik.broker.client import decode_tape_gaps
 from mftik.exchange.models import AggTrade, Side, Trade
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import Topics
@@ -51,6 +52,40 @@ DEFAULT_LIMIT = 200_000
 LOG_MAX_RECORDS = 50_000
 LOG_CHUNK = 1_000
 
+#: How long an interruption may be before a read refuses to span it.
+#:
+#: Sized for the thing that actually interrupts a feed on a healthy system: a
+#: deploy, where MD is stopped and started and the venue feed re-established.
+#: That is seconds. A venue outage or a crash loop is not, and reading across
+#: one would hand a strategy a series that is not a series.
+#:
+#: This is a default, not a rule — a strategy whose bars are shorter than this
+#: should pass its own. ``0`` restores the older, absolute behaviour: no gap is
+#: tolerable, and anything before one is dropped.
+DEFAULT_MAX_GAP_MS = 30_000
+
+
+@dataclass(frozen=True)
+class TapeGap:
+    """An interruption somebody measured, between two stretches of recording.
+
+    Only a recorder that shut down cleanly leaves one of these: it stamped when
+    it stopped, and its successor stamped when it started. An interruption
+    nobody was around to write down does not appear here — it ends the
+    recording instead, and the tape before it never reaches the reader.
+    """
+
+    #: When recording stopped, in Redis' clock — the same clock stream ids and
+    #: :attr:`TapeSlice.continuous_since_ms` are stamped against, not the
+    #: venue's event time that rides on each record.
+    start_ms: int
+    #: When recording resumed.
+    end_ms: int
+
+    @property
+    def duration_ms(self) -> int:
+        return max(0, self.end_ms - self.start_ms)
+
 
 @dataclass(frozen=True)
 class TapeSlice:
@@ -62,16 +97,25 @@ class TapeSlice:
     here, so a strategy can decide rather than assume.
     """
 
-    #: Oldest → newest, and continuous: anything from before the recording
-    #: restarted has already been dropped.
+    #: Oldest → newest. Continuous up to :attr:`gaps`, which are short enough
+    #: that the caller said it would rather have the history than the purity;
+    #: anything on the far side of a break too long for that is already gone.
     records: list[Trade] = field(default_factory=list)
-    #: When the current unbroken recording began, or None if never recorded.
+    #: When the current recording began, or None if never recorded. It may
+    #: predate one or more :attr:`gaps` — a measured interruption does not end
+    #: the series, it puts a hole in it.
     continuous_since_ms: int | None = None
     #: Whether the feed is still being recorded. False means these prints end
     #: somewhere in the past — the feed lost its last subscriber.
     recording: bool = False
-    #: How many records were dropped for predating the continuity mark.
+    #: How many records were dropped for falling before the start of the
+    #: series: either the continuity mark, or the end of a gap too long to
+    #: read across.
     dropped_before_gap: int = 0
+    #: Measured holes inside :attr:`records`, oldest first. Only those the
+    #: returned records actually span — a gap whose far side has already been
+    #: trimmed out of the tape is not a hole in what came back.
+    gaps: list[TapeGap] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.records)
@@ -82,6 +126,11 @@ class TapeSlice:
         if len(self.records) < 2:
             return 0
         return int((self.records[-1].ts - self.records[0].ts) * 1000)
+
+    @property
+    def missing_ms(self) -> int:
+        """How much of :attr:`span_ms` is hole rather than history."""
+        return sum(gap.duration_ms for gap in self.gaps)
 
 
 class StrategyTape:
@@ -99,6 +148,7 @@ class StrategyTape:
         *,
         topic: str = "aggtrade",
         limit: int = DEFAULT_LIMIT,
+        max_gap_ms: int = DEFAULT_MAX_GAP_MS,
     ) -> TapeSlice:
         """Read up to ``limit`` of the most recent prints on one feed.
 
@@ -106,6 +156,13 @@ class StrategyTape:
         now, and the tape holds an unknown number of records — two independent
         bounds decide how many survive, so a count from the far end names no
         window anyone chose.
+
+        ``max_gap_ms`` is how long a measured interruption may be before this
+        stops reading across it and treats it as the start of the series. The
+        prints before such a gap are dropped, exactly as they are for a
+        recording that restarted without saying when. What comes back always
+        reports the gaps it does span, on :attr:`TapeSlice.gaps`, so a strategy
+        that wants to be stricter than the number it passed still can be.
 
         An empty slice is a normal answer, not a failure. Nothing has ever
         subscribed to this feed, MD is running with recording off, or the tape
@@ -123,26 +180,61 @@ class StrategyTape:
         coverage = await broker.tape_coverage(feed)
         since_ms = _int_or_none(coverage.get("continuous_since_ms"))
         recording = coverage.get("recording") == "1"
+        gaps = [
+            TapeGap(start_ms=start, end_ms=end)
+            for start, end in decode_tape_gaps(coverage.get("gaps"))
+        ]
+
+        # Where the series actually begins. The continuity mark is the floor;
+        # a gap longer than the caller will tolerate raises it, because reading
+        # across one of those is the failure this whole mechanism exists to
+        # prevent. Only the newest such gap matters — everything before it is
+        # on the far side of it anyway.
+        start_ms = since_ms
+        too_long = [gap for gap in gaps if gap.duration_ms > max_gap_ms]
+        if too_long:
+            resumed = max(gap.end_ms for gap in too_long)
+            start_ms = resumed if start_ms is None else max(start_ms, resumed)
 
         rows = await broker.tape_tail(feed, count=max(0, limit))
         records: list[Trade] = []
         dropped = 0
+        oldest_kept_ms: int | None = None
         for record_id, fields in rows:
             # The stream id is Redis' clock at append time, which is what the
             # continuity mark is stamped against. The venue's own ts rides on
             # the record and is what the strategy reads — the two answer
             # different questions and are not interchangeable here.
-            if since_ms is not None and _id_ms(record_id) < since_ms:
+            record_ms = _id_ms(record_id)
+            if start_ms is not None and record_ms < start_ms:
                 dropped += 1
                 continue
             parsed = _parse(topic, universal_ticker, fields)
             if parsed is not None:
                 records.append(parsed)
+                if oldest_kept_ms is None:
+                    oldest_kept_ms = record_ms
+
+        # A gap the returned records do not reach back to is not a hole in
+        # them. This is also what keeps the list bounded over time: gaps age
+        # out of the answer along with the records around them.
+        gaps = (
+            [gap for gap in gaps if gap.start_ms >= oldest_kept_ms]
+            if oldest_kept_ms is not None
+            else []
+        )
 
         if dropped:
             logger.info(
                 "STS tape dropped %d record(s) from before the gap feed=%s",
                 dropped,
+                feed,
+            )
+        if gaps:
+            logger.info(
+                "STS tape read across %d measured gap(s) totalling %dms feed=%s",
+                len(gaps),
+                sum(gap.duration_ms for gap in gaps),
                 feed,
             )
         log = session_log(self._strategy)
@@ -156,6 +248,11 @@ class StrategyTape:
             continuous_since_ms=since_ms,
             recording=recording,
             dropped_before_gap=dropped,
+            max_gap_ms=max_gap_ms,
+            # The holes are part of what the prints below mean. A replay that
+            # sees the records and not these would rebuild a series the
+            # strategy never actually had.
+            gaps=[[gap.start_ms, gap.end_ms] for gap in gaps],
             logged=min(len(records), LOG_MAX_RECORDS),
             truncated=len(records) > LOG_MAX_RECORDS or None,
         )
@@ -165,6 +262,7 @@ class StrategyTape:
             continuous_since_ms=since_ms,
             recording=recording,
             dropped_before_gap=dropped,
+            gaps=gaps,
         )
 
 

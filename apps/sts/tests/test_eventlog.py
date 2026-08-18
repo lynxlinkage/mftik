@@ -689,6 +689,45 @@ async def test_tape_read_records_the_prints_not_just_the_coverage(
     assert prices == ["68000", "68001", "68002"]
 
 
+async def test_a_spanned_gap_is_written_to_the_log(
+    broker: Broker, tmp_path: Path
+) -> None:
+    """The holes are part of what the prints mean.
+
+    A replay that read the records back without them would rebuild a series
+    the strategy never had — continuous where the real one had a deploy in it.
+    """
+    feed = Topics.md_feed("aggtrade", UniversalTicker.parse("Paper_Spot_BTCUSDT"))
+    await broker.tape_mark_recording(feed, since_ms=1_000, ttl_seconds=3600)
+    await broker.redis.xadd(
+        broker.tape_key(feed),
+        {
+            "trade_id": "0",
+            "price": "68000",
+            "qty": "0.5",
+            "side": "buy",
+            "ts": "1700000000.5",
+            "first_trade_id": "0",
+            "last_trade_id": "0",
+        },
+        id="2000-0",
+    )
+    await broker.tape_mark_stopped(feed, at_ms=3_000)
+    await broker.tape_mark_recording(feed, since_ms=5_000, ttl_seconds=3600)
+
+    strategy = ProbeStrategy()
+    sts = _session(broker, tmp_path, strategy, session_id="ev-tape-gap")
+    await sts.start()
+    slice_ = await strategy.tape.read("Paper_Spot_BTCUSDT")
+    assert slice_.missing_ms == 2_000
+    await sts.stop()
+
+    reads = _events(_read(tmp_path / "ev-tape-gap.jsonl"), "read")
+    summary = [r for r in reads if r["event"] == "tape.read"][0]
+    assert summary["gaps"] == [[3_000, 5_000]]
+    assert summary["max_gap_ms"] == 30_000
+
+
 async def test_a_capped_tape_read_says_it_was_capped(
     broker: Broker, tmp_path: Path, monkeypatch
 ) -> None:  # noqa: ANN001

@@ -451,6 +451,16 @@ class MacdDollarBars(Strategy):
                     if tape.dropped_before_gap
                     else ""
                 )
+                # A spanned gap lands inside one bar, which closes on volume
+                # that took longer to arrive than it appears to have. Worth
+                # saying: it is the one bar in the warm-up whose duration is
+                # not what the prints in it say.
+                + (
+                    f", spanning {len(tape.gaps)} gap(s) totalling "
+                    f"{tape.missing_ms / 1000:.1f}s"
+                    if tape.gaps
+                    else ""
+                )
             )
         else:
             await self.log(

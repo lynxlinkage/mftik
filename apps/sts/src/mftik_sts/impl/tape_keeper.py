@@ -22,9 +22,11 @@ left resting (see :class:`~mftik.strategy.Strategy`). This one holds no
 position, no resting order and no venue state of any kind: coming back is
 indistinguishable from starting, which is why it can say yes.
 
-Its own restart *is* visible where it matters — MD stamps the break in the
-tape's coverage, so a strategy warming up afterwards can see that continuity
-ended and began again rather than reading across the hole.
+Its own restart *is* visible where it matters — MD stamps both edges of the
+break into the tape's coverage, so a strategy warming up afterwards is told how
+long the feed was unheld rather than reading across the hole as if it were not
+there. A restart that got to run its shutdown leaves a hole with a measured
+length, which a reader may decide to span; one that did not ends the series.
 """
 
 from __future__ import annotations

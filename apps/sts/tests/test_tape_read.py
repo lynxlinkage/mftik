@@ -190,3 +190,109 @@ async def test_limit_takes_the_most_recent(broker: Broker) -> None:
     result = await _tape(broker).read(TICKER, limit=2)
 
     assert [r.trade_id for r in result.records] == ["3", "4"]
+
+
+async def _record_at(
+    broker: Broker, feed: str, trade_id: str, ms: int, *, agg: bool = True
+) -> None:
+    """Append with an explicit stream id.
+
+    The id is the clock the continuity mark and the gaps are stamped against,
+    so a test about holes has to be able to place a record on one side of one.
+    Letting Redis stamp them means the only reachable gaps are however long the
+    test slept for.
+    """
+    fields = {
+        "trade_id": trade_id,
+        "price": "68000",
+        "qty": "0.5",
+        "side": "buy",
+        "ts": "1700000000.5",
+    }
+    if agg:
+        fields["first_trade_id"] = trade_id
+        fields["last_trade_id"] = trade_id
+    await broker.redis.xadd(broker.tape_key(feed), fields, id=f"{ms}-0")
+
+
+async def _interrupted(
+    broker: Broker, *, stopped_ms: int, resumed_ms: int
+) -> None:
+    """One clean stop/start cycle — the shape a deploy leaves behind."""
+    await broker.tape_mark_stopped(AGG_FEED, at_ms=stopped_ms)
+    await broker.tape_mark_recording(
+        AGG_FEED, since_ms=resumed_ms, ttl_seconds=3600
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_short_measured_gap_is_read_across_and_reported(
+    broker: Broker,
+) -> None:
+    """A deploy costs seconds. Ending the series over it costs the warm-up."""
+    await broker.tape_mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
+    await _record_at(broker, AGG_FEED, "old", 2_000)
+    await _interrupted(broker, stopped_ms=3_000, resumed_ms=5_000)
+    await _record_at(broker, AGG_FEED, "new", 6_000)
+
+    result = await _tape(broker).read(TICKER)
+
+    assert [r.trade_id for r in result.records] == ["old", "new"]
+    assert result.dropped_before_gap == 0
+    assert [(g.start_ms, g.end_ms) for g in result.gaps] == [(3_000, 5_000)]
+    assert result.missing_ms == 2_000
+
+
+@pytest.mark.asyncio
+async def test_a_gap_too_long_to_span_still_ends_the_series(
+    broker: Broker,
+) -> None:
+    """Measured is not the same as tolerable. An outage is still an outage."""
+    await broker.tape_mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
+    await _record_at(broker, AGG_FEED, "old", 2_000)
+    await _interrupted(broker, stopped_ms=3_000, resumed_ms=123_000)
+    await _record_at(broker, AGG_FEED, "new", 130_000)
+
+    result = await _tape(broker).read(TICKER)
+
+    assert [r.trade_id for r in result.records] == ["new"]
+    assert result.dropped_before_gap == 1
+    # Reported holes are holes in what came back. This one is behind where the
+    # answer starts, so it is not one.
+    assert result.gaps == []
+
+
+@pytest.mark.asyncio
+async def test_a_caller_can_refuse_every_gap(broker: Broker) -> None:
+    """``max_gap_ms=0`` is the absolute rule this used to apply to everyone."""
+    await broker.tape_mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
+    await _record_at(broker, AGG_FEED, "old", 2_000)
+    await _interrupted(broker, stopped_ms=3_000, resumed_ms=5_000)
+    await _record_at(broker, AGG_FEED, "new", 6_000)
+
+    result = await _tape(broker).read(TICKER, max_gap_ms=0)
+
+    assert [r.trade_id for r in result.records] == ["new"]
+    assert result.dropped_before_gap == 1
+
+
+@pytest.mark.asyncio
+async def test_a_gap_the_records_no_longer_reach_is_not_reported(
+    broker: Broker,
+) -> None:
+    """Trimming ages a hole out of the answer along with the prints around it.
+
+    This is what bounds the list a long-lived feed hands back: coverage keeps
+    every gap inside the retention window, and the read reports the ones its
+    own records actually span.
+    """
+    await broker.tape_mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
+    await _interrupted(broker, stopped_ms=3_000, resumed_ms=5_000)
+    # Everything from before the gap has been trimmed out of the stream.
+    await _record_at(broker, AGG_FEED, "new", 6_000)
+
+    result = await _tape(broker).read(TICKER)
+
+    assert [r.trade_id for r in result.records] == ["new"]
+    assert result.dropped_before_gap == 0
+    assert result.gaps == []
