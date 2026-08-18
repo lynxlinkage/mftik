@@ -7,7 +7,7 @@ import logging
 import os
 import signal
 
-from mftik import configure_logging
+from mftik import configure_logging, run_until_stopped
 from mftik.broker import Broker
 from mftik.exchange import venues
 from mftik.protocol import Topics
@@ -27,6 +27,12 @@ from mftik_md.tape import (
 SOURCE = "md"
 logger = logging.getLogger(SOURCE)
 
+#: How long a serve loop waits before rebuilding itself after an exception it
+#: did not expect. ``Broker.serve`` already survives what it knows how to
+#: survive, so this only paces the failures nothing has a name for yet.
+RPC_RESTART_DELAY_SECONDS = 1.0
+
+
 
 async def run_rpc(
     broker: Broker,
@@ -35,15 +41,32 @@ async def run_rpc(
 ) -> None:
     """Serve API→MD request-reply on ``Topics.MD`` until ``stop``."""
     logger.info("MD RPC listening on subject=%s", Topics.MD)
-    async for req in broker.serve(Topics.MD, stop=stop):
+    while not stop.is_set():
         try:
-            await dispatch(req, sessions=sessions)
+            async for req in broker.serve(Topics.MD, stop=stop):
+                try:
+                    await dispatch(req, sessions=sessions)
+                except Exception:
+                    logger.exception(
+                        "MD RPC handler failed type=%s id=%s",
+                        req.envelope.type,
+                        req.envelope.id,
+                    )
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            logger.exception(
-                "MD RPC handler failed type=%s id=%s",
-                req.envelope.type,
-                req.envelope.id,
-            )
+            # Reaching here means something ``serve`` does not already handle,
+            # and the answer is still to serve. This coroutine returning is how
+            # MD ends up running sessions that nobody can list, pause or stop
+            # — the process alive, the subject silent, and no line anywhere
+            # saying so.
+            logger.exception("MD RPC serve loop failed — restarting")
+            try:
+                await asyncio.wait_for(
+                    stop.wait(), timeout=RPC_RESTART_DELAY_SECONDS
+                )
+            except TimeoutError:
+                continue
 
 
 #: How often to look for rows whose MD process died. Well under the window
@@ -146,7 +169,7 @@ async def trim_loop(
             continue
 
 
-async def amain() -> None:
+async def amain() -> bool:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -191,7 +214,9 @@ async def amain() -> None:
             trim_loop(sessions, stop), name="md-tape-trim"
         )
         try:
-            await stop.wait()
+            clean = await run_until_stopped(
+                stop, rpc_task, hb_task, reaper_task, trim_task, logger=logger
+            )
         finally:
             stop.set()
             tasks = (rpc_task, hb_task, reaper_task, trim_task)
@@ -201,8 +226,13 @@ async def amain() -> None:
             await fetch.stop()
             await sessions.close_all()
     logger.info("MD stopped")
+    return clean
 
 
 def main() -> None:
     configure_logging(SOURCE)
-    asyncio.run(amain())
+    # Non-zero when a long-lived task ended on its own: the restart
+    # policy is what puts the process back, and an exit code is what
+    # tells anyone reading ``docker ps`` that MD did not just stop.
+    if not asyncio.run(amain()):
+        raise SystemExit(1)

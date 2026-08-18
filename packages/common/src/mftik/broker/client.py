@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from mftik.broker.config import BrokerConfig
 from mftik.broker.errors import BrokerNotConnectedError, RequestTimeoutError
@@ -73,6 +74,13 @@ def _to_json(value: BaseModel | dict[str, Any]) -> str:
     if isinstance(value, BaseModel):
         return value.model_dump_json()
     return json.dumps(value, default=str)
+
+
+#: How long :meth:`Broker.serve` waits before polling again after a poll that
+#: failed. Matched to the poll's own BLPOP timeout: long enough that a Redis
+#: outage does not fill the log a hundred times a second, short enough that
+#: nobody notices the gap in a control plane once Redis is back.
+_SERVE_POLL_RETRY_S = 1.0
 
 
 #: How many measured gaps one feed's coverage will carry before the tape stops
@@ -152,8 +160,21 @@ def build_redis(config: BrokerConfig) -> redis.Redis:
         # on its client_order_id (mftik_td.errors.VENUE_DUPLICATE_CLIENT_ORDER_ID
         # is already the code for it), so it costs a spurious reject rather than
         # a doubled position, which is a trade worth making to get the reconnect.
-        # TimeoutError is not: no ``socket_timeout`` is set, so it has no way to
-        # arise here, and listing it would widen the re-send window for nothing.
+        # TimeoutError is still not listed, but not for the reason this comment
+        # used to give. It said a TimeoutError cannot arise without a
+        # ``socket_timeout``; it can. redis-py gives a *blocking* command a read
+        # deadline of its own — BLPOP's timeout plus a margin — and a socket
+        # that stalls for a second past it raises ``redis.exceptions.TimeoutError``
+        # from inside ``read_response``. On 2026-08-18 that is what ended STS's
+        # RPC serve loop, and with it every pause, stop and health check for
+        # seven hours, while its sessions went on trading.
+        #
+        # It stays out because retrying a blocking pop is worse than failing
+        # one: the re-sent BLPOP takes the *next* element, so an element the
+        # server had already handed to the reply that got lost is dropped, and
+        # dropped silently. A retry cannot tell those apart from here. The two
+        # loops that issue blocking pops handle it where the semantics are
+        # known instead — see :meth:`Broker.serve` and :meth:`Broker.request`.
         retry=Retry(
             ExponentialBackoff(cap=0.5, base=0.05),
             config.command_retries,
@@ -628,7 +649,20 @@ class Broker:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RequestTimeoutError(subject, outbound.id, wait)
-                result = await self.redis.blpop(reply_key, timeout=1)
+                try:
+                    result = await self.redis.blpop(reply_key, timeout=1)
+                except (RedisTimeoutError, RedisConnectionError):
+                    # Same read deadline as ``serve``'s poll, and the same
+                    # answer: a poll that failed is not a reply and not a
+                    # verdict either. The deadline above is what decides this
+                    # call, so go back and keep asking until it passes.
+                    logger.warning(
+                        "broker reply poll failed subject=%s id=%s — polling again",
+                        subject,
+                        outbound.id,
+                        exc_info=True,
+                    )
+                    continue
                 if result is None:
                     continue
                 _key, data = result
@@ -662,14 +696,45 @@ class Broker:
 
         Call ``await req.reply(envelope)`` to respond. Competing consumers
         on the same subject share work via Redis list ``BLPOP``.
+
+        Only ``stop`` ends this loop. Neither a Redis hiccup nor a message
+        that will not parse does, because this generator *is* a domain's
+        control plane: when it returns, the process stays up, the sessions
+        keep trading and every request piles up in a list nobody is reading —
+        the most expensive way a service can fail, and the quietest. Both
+        failures below cost one request; ending would cost all of them.
         """
         queue = self._rpc_queue(subject)
         while stop is None or not stop.is_set():
-            result = await self.redis.blpop(queue, timeout=1)
+            try:
+                result = await self.redis.blpop(queue, timeout=1)
+            except (RedisTimeoutError, RedisConnectionError):
+                # A blocking pop carries its own read deadline, so a stalled
+                # socket raises here even with no ``socket_timeout`` set, and
+                # a Redis that is really down raises here once the retry in
+                # :func:`build_redis` has given up. Both are reasons to poll
+                # again, not to stop serving.
+                logger.warning(
+                    "broker serve poll failed subject=%s — polling again",
+                    subject,
+                    exc_info=True,
+                )
+                await asyncio.sleep(_SERVE_POLL_RETRY_S)
+                continue
             if result is None:
                 continue
             _key, data = result
-            envelope = UntypedEnvelope.from_json(data)
+            try:
+                envelope = UntypedEnvelope.from_json(data)
+            except Exception:
+                # BLPOP already took it off the list, so there is nothing to
+                # skip past and no way to hand it back: the choice is to drop
+                # this one message or to take the whole subject down with it.
+                logger.exception(
+                    "broker serve dropped an unreadable request subject=%s",
+                    subject,
+                )
+                continue
             yield IncomingRequest(self, envelope)
 
     async def serve_handler(

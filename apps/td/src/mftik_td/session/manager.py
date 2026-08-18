@@ -76,6 +76,12 @@ LEASE_GRACE_S = 5.0
 #: so this only fires when that could not settle the book either.
 RECON_WAIT_TIMEOUT_S = 30.0
 
+#: How long an account's RPC loop waits before rebuilding itself after an
+#: exception it did not expect. Sized like the resubscribe below and for the
+#: same reason: this is the path an order takes, so the gap has to be short
+#: enough that STS's own request timeout does not expire inside it.
+RPC_RESTART_DELAY_S = 0.5
+
 #: How long a lease subscription waits before resubscribing after a transport
 #: failure. Well inside :data:`LEASE_GRACE_S`: reconnecting must not spend so
 #: much of the grace window that a still-live STS reads as expired.
@@ -1012,13 +1018,31 @@ class SessionManager:
         """Answer STS order entry on ``td.order.{api_id}`` while the account lives."""
         subject = Topics.td_order(acct.api_id)
         logger.info("TD order RPC listening api_id=%s subject=%s", acct.api_id, subject)
-        try:
-            async for req in self._broker.serve(subject, stop=acct.global_stop):
-                await self._handle_order_rpc(acct, req)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("TD order RPC loop failed api_id=%s", acct.api_id)
+        while not acct.global_stop.is_set():
+            try:
+                async for req in self._broker.serve(
+                    subject, stop=acct.global_stop
+                ):
+                    await self._handle_order_rpc(acct, req)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Rebuilt rather than abandoned. This loop is how an order
+                # reaches a venue at all, and it ends where the account does —
+                # so giving up on it leaves the account attached, its feeds
+                # live and its lease renewed, with every order STS sends it
+                # timing out.
+                logger.exception(
+                    "TD order RPC loop failed api_id=%s — restarting",
+                    acct.api_id,
+                )
+                try:
+                    await asyncio.wait_for(
+                        acct.global_stop.wait(),
+                        timeout=RPC_RESTART_DELAY_S,
+                    )
+                except TimeoutError:
+                    continue
 
     async def _serve_account(self, acct: TradingAccount) -> None:
         """Answer STS account reads on ``td.account.{api_id}``."""
@@ -1026,13 +1050,31 @@ class SessionManager:
         logger.info(
             "TD account RPC listening api_id=%s subject=%s", acct.api_id, subject
         )
-        try:
-            async for req in self._broker.serve(subject, stop=acct.global_stop):
-                await self._handle_account_rpc(acct, req)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("TD account RPC loop failed api_id=%s", acct.api_id)
+        while not acct.global_stop.is_set():
+            try:
+                async for req in self._broker.serve(
+                    subject, stop=acct.global_stop
+                ):
+                    await self._handle_account_rpc(acct, req)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Rebuilt rather than abandoned. This loop is how an order
+                # reaches a venue at all, and it ends where the account does —
+                # so giving up on it leaves the account attached, its feeds
+                # live and its lease renewed, with every order STS sends it
+                # timing out.
+                logger.exception(
+                    "TD account RPC loop failed api_id=%s — restarting",
+                    acct.api_id,
+                )
+                try:
+                    await asyncio.wait_for(
+                        acct.global_stop.wait(),
+                        timeout=RPC_RESTART_DELAY_S,
+                    )
+                except TimeoutError:
+                    continue
 
     async def _handle_account_rpc(
         self, acct: TradingAccount, req: IncomingRequest

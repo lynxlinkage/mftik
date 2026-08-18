@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 #: caller before an unbounded pile of tasks does.
 MAX_QUERIES_IN_FLIGHT = 32
 
+#: How long the serve loop waits before rebuilding itself after an exception it
+#: did not expect. ``Broker.serve`` already survives what it knows how to
+#: survive, so this only paces the failures nothing has a name for yet.
+SERVE_RESTART_DELAY_SECONDS = 1.0
+
 
 @dataclass(frozen=True)
 class _Kind:
@@ -193,15 +198,28 @@ class FetchSession:
         self._readers.clear()
 
     async def _serve(self) -> None:
-        try:
-            async for req in self._broker.serve(
-                Topics.md_fetch(), stop=self._stop
-            ):
-                await self._handle(req)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("MD fetch serve loop failed")
+        while not self._stop.is_set():
+            try:
+                async for req in self._broker.serve(
+                    Topics.md_fetch(), stop=self._stop
+                ):
+                    await self._handle(req)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Logged and then rebuilt, where this used to be logged and
+                # then abandoned. Giving up left MD up, its feeds running and
+                # its own log carrying the one line that said the fetch plane
+                # was gone — after which every query anyone made sat there
+                # until its caller timed out. On 2026-08-18 that state lasted
+                # six hours because nothing but that line marked it.
+                logger.exception("MD fetch serve loop failed — restarting")
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=SERVE_RESTART_DELAY_SECONDS
+                    )
+                except TimeoutError:
+                    continue
 
     async def _handle(self, req: IncomingRequest) -> None:
         """Ack a query, then run it out of band.

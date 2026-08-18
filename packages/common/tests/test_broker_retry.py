@@ -10,6 +10,13 @@ this, with nothing wrong with it or with Redis, which had been up 13 days.
 
 So these test the policy, not the plumbing: what the client does with a
 ConnectionError, and what it deliberately does not do with a TimeoutError.
+
+The TimeoutError half was written on a wrong premise — that one cannot arise
+without a ``socket_timeout``. It can: a blocking command carries a read
+deadline of its own, and on 2026-08-18 that deadline ended STS's RPC serve
+loop. The policy did not change, but its reason did, and the loops that issue
+blocking pops now handle the exception themselves — see
+``test_broker_serve_survives``.
 """
 
 from __future__ import annotations
@@ -60,12 +67,14 @@ async def test_a_connection_the_server_closed_is_retried_not_raised() -> None:
 
 @pytest.mark.asyncio
 async def test_a_timeout_is_never_re_sent() -> None:
-    """The narrowing, and it is about orders rather than about Redis.
+    """The narrowing, and it is about what a re-sent pop would take.
 
-    A retry re-sends, and ``request`` carries new orders. A ConnectionError is
-    worth that risk because it is the failure that actually happens here; a
-    TimeoutError cannot arise at all without a ``socket_timeout``, so retrying
-    it would only widen the window in which a live order is sent twice.
+    A retry re-sends, and ``request`` carries new orders — reason enough on its
+    own to keep this list short. But the case against retrying a *timeout* is
+    sharper than that: the only commands that can time out here are the
+    blocking pops, and a re-sent BLPOP takes the next element rather than the
+    one whose reply was lost. That element is gone, and gone silently, which is
+    worse than the failed poll a caller can see and repeat.
     """
     conn = _connection()
     calls: list[int] = []
