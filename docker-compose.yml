@@ -1,4 +1,4 @@
-# Local development stack. Production lives in deploy/docker-compose.yml.
+# Local development stack. The production stack is kept outside this repo.
 #
 # Every Python service is the same image (see Dockerfile) and differs only in
 # `command`. Compose builds it once — the services share one `image:` tag — so

@@ -1,6 +1,6 @@
 """Write out a node you can host yourself.
 
-The maintainers' own ``deploy/docker-compose.yml`` is not this: it expects
+The maintainers' own production compose is not this: it expects
 Postgres and Redis to be substrate somebody else runs, and a standalone
 Traefik to own :443 and route to it. Neither is true on a laptop, and neither
 should have to be true to try the thing.

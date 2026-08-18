@@ -4,7 +4,7 @@
 # the same image differing only by `command:`, and both it and the frontend
 # come from GHCR. Postgres and Redis are part of the stack rather than
 # substrate you have to bring, which is the difference between this and the
-# maintainers' own deploy/docker-compose.yml.
+# maintainers' own production compose.
 #
 #   docker compose pull
 #   docker compose run --rm migrate

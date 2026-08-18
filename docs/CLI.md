@@ -33,7 +33,7 @@ Two URL shapes, and the difference is not the client's to guess.
 | Deployment | API | WebSockets |
 |---|---|---|
 | Local (`docker-compose.yml`) | `http://localhost:8000` | `ws://localhost:8000/ws` |
-| Deployed (`deploy/docker-compose.yml`) | `https://host/api` | `wss://host/ws` |
+| Deployed (production compose) | `https://host/api` | `wss://host/ws` |
 
 Traefik routes `/api/*` to the app **after stripping the prefix**, and routes
 `/ws/*` to the same app **without stripping anything**. So a deployed node's API

@@ -442,7 +442,7 @@ the origin is reachable an unclaimed instance belongs to whoever loads
 matters most. The Discord account that gets in today via the `admin`
 group is then **connected**, not used as bootstrap.
 
-The ops runbook and the header comment in `deploy/docker-compose.yml` both state
+The ops runbook and the header comment in the production compose both state
 that the API has no authentication of its own. Both are accurate now and
 become traps the moment the chain comes off.
 
@@ -486,7 +486,7 @@ demonstrated at all, which is what happened to `/login` in step 2.
 
 7. Give the production api service a volume for MFTIK_DATA.
 8. One deploy: MFTIK_AUTH_ENABLED=1, pin CORS, remove discord-auth-chain.
-        Update the ops runbook and deploy/docker-compose.yml together — four
+        Update the ops runbook and the production compose together — four
         statements there stop being true the moment the chain comes off, and
         prose that lags the behaviour it describes is how a comment becomes a
         trap.

@@ -11,7 +11,7 @@ import { env } from '$env/dynamic/public';
  *
  * The fallback is the origin the request actually arrived on — correct in the
  * browser always, and correct under adapter-node whenever ORIGIN is set, which
- * deploy/docker-compose.yml does. So the variable is an override for the case
+ * the production compose does. So the variable is an override for the case
  * the origin lies: a proxy, or a canonical domain that differs from the one
  * being served.
  */

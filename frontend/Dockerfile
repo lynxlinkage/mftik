@@ -25,8 +25,8 @@ RUN npm run build
 # nothing but node: builtins — so no node_modules ships here.
 #
 # There is no Vite dev server in production, which means no `/api` proxy: the
-# edge (Traefik) routes /api and /ws straight to the api service instead. See
-# deploy/docker-compose.yml.
+# edge (Traefik) routes /api and /ws straight to the api service instead —
+# that routing lives in the production compose, outside this repository.
 FROM node:22-bookworm-slim AS prod
 # See the note in the root Dockerfile — this is what links the package to the
 # repo that builds it.

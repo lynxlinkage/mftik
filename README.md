@@ -36,10 +36,10 @@ shares one image tag, so building them all at once races.
 ## Deployment
 
 Tagging `v*` builds and publishes images to GHCR; nothing deploys itself.
-A host runs them with `deploy/docker-compose.yml`, which reads its domain,
-image tag and secrets from a `.env` beside it (`deploy/.env.example`). The
-host-side runbook — addresses, secrets, volumes — is kept outside this
-repository.
+A host runs them with a production compose file that pulls those images
+and reads its domain, image tag and secrets from a `.env` beside it. That
+file and the host-side runbook — addresses, secrets, volumes — are kept
+outside this repository.
 
 ## Common tasks
 

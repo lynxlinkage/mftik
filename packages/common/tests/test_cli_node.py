@@ -1,6 +1,6 @@
 """``mftik node init`` — a stack that a laptop can actually run.
 
-The maintainers' own deploy/docker-compose.yml expects Postgres, Redis and a
+The maintainers' own production compose expects Postgres, Redis and a
 Traefik somebody else runs. None of that is true on a laptop, so what this
 writes has to bring its own — including the edge, because the browser asks
 for ``/api`` and opens ``ws://<this host>/ws`` on whatever host served the
