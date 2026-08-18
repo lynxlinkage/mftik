@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 from mftik.registry.errors import RegistryError
-from mftik.registry.files import TEMPLATE_NAME, find_template, normalize_files, read_tree
+from mftik.registry.files import (
+    TEMPLATE_NAME,
+    find_template,
+    normalize_files,
+    read_tree,
+)
 
 
 def test_non_py_is_dropped() -> None:
