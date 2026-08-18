@@ -12,6 +12,8 @@ from mftik.cli import config
 from mftik.cli.app import EXIT_ERROR, EXIT_INTERRUPTED, main
 from mftik.cli.client import Client, CliError
 from mftik.cli.config import Profile
+from mftik.cli.run import deploy_http_timeout
+from mftik.protocol.strategy_yml import StrategySpec
 
 _TINY = """\
 from mftik.strategy import Strategy
@@ -319,3 +321,82 @@ def test_a_session_that_ended_during_deploy_is_not_followed(
 
     assert followed == []
     assert "session is failed" in capsys.readouterr().out
+
+
+def test_deploy_http_timeout_with_no_attaches() -> None:
+    assert deploy_http_timeout(StrategySpec()) == 20.0
+
+
+def test_deploy_http_timeout_with_one_feed() -> None:
+    assert deploy_http_timeout(StrategySpec(td=["paper"])) == 55.0
+
+
+class _FailingDeploy(Node_):
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/sts/deploy/"):
+            self.paths.append(request.url.path)
+            return httpx.Response(
+                500, json={"detail": "Internal Server Error"}
+            )
+        return super().__call__(request)
+
+
+class _FailingPush(Node_):
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/registry/v1/add":
+            self.paths.append(request.url.path)
+            return httpx.Response(
+                500, json={"detail": "Internal Server Error"}
+            )
+        return super().__call__(request)
+
+
+def test_a_failed_deploy_names_the_route_and_says_to_check_ps(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    fake = _FailingDeploy()
+    _install(monkeypatch, fake)
+    dest = _tree(tmp_path)
+
+    assert main(["run", str(dest), "--no-follow"]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "POST /sts/deploy/private::Tiny 500" in err
+    assert "mftik ps" in err
+    assert "Do not run again" in err
+
+
+def test_a_failed_push_does_not_claim_a_session_started(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    fake = _FailingPush()
+    followed = _install(monkeypatch, fake)
+    dest = _tree(tmp_path)
+
+    assert main(["run", str(dest), "--no-follow"]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "POST /registry/v1/add 500" in err
+    assert "mftik ps" not in err
+    assert "/sts/deploy/private::Tiny" not in fake.paths
+    assert followed == []
+
+
+def test_ctrl_c_during_deploy_says_to_check_ps(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    fake = Node_()
+    _install(monkeypatch, fake)
+    real_post = Client.post
+
+    def interrupt_deploy(self, path, **kwargs):  # noqa: ANN001, ANN002
+        if "/sts/deploy/" in path:
+            raise KeyboardInterrupt
+        return real_post(self, path, **kwargs)
+
+    monkeypatch.setattr(Client, "post", interrupt_deploy)
+    dest = _tree(tmp_path)
+
+    assert main(["run", str(dest), "--no-follow"]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "interrupted during deploy" in err
+    assert "mftik ps" in err
+    assert "Do not run again" in err

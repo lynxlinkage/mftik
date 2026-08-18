@@ -28,9 +28,9 @@ from websockets.sync.client import connect as ws_connect
 from mftik.cli import config
 from mftik.cli.config import Profile
 
-#: How long a plain request may take. Generous for a deploy, which walks TD
-#: and MD attach before it answers, and still short enough that an
-#: unreachable host fails rather than hangs.
+#: How long a plain request may take. Short enough that an unreachable
+#: host fails rather than hangs. ``run`` sizes its own timeout from the
+#: document — a deploy's attach walk is longer than this.
 DEFAULT_TIMEOUT_S = 30.0
 
 #: Prefixes to try when connecting, in order. Empty first: a stack that
@@ -245,11 +245,22 @@ def probe(url: str, *, timeout: float = 10.0) -> Node:
     )
 
 
+def _called(response: httpx.Response) -> str:
+    """``POST /sts/deploy/…`` — what was asked, not the host it was asked of."""
+    try:
+        request = response.request
+    except RuntimeError:
+        return ""
+    return f"{request.method} {request.url.path}"
+
+
 def _refusal(response: httpx.Response, *, login_hint: bool = True) -> CliError:
     """The API's own explanation, when it gave one.
 
     FastAPI puts it in ``detail``; a proxy answering instead of the app will
-    not, and for those the status line is all there is to report.
+    not, and for those the status line is all there is to report. The
+    method and path go in too: ``run`` is two POSTs, and a bare
+    ``HTTP 500`` does not say which one.
     """
     detail = ""
     try:
@@ -274,4 +285,6 @@ def _refusal(response: httpx.Response, *, login_hint: bool = True) -> CliError:
             f"{detail}\nThe key is real but not allowed here. A registry key "
             "can only read published strategies; deploying needs an API key."
         )
-    return CliError(f"HTTP {status}: {detail}")
+    called = _called(response)
+    prefix = f"{called} {status}" if called else f"HTTP {status}"
+    return CliError(f"{prefix}: {detail}")
