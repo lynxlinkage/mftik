@@ -400,14 +400,13 @@
 						<td>
 							<!-- The terminal statuses come first: they are final, and a
 							     stale `paused` from the live-session probe must never mask
-							     them. Attach failures that never recorded a type are failed
-							     even when an older rollback path labelled them `done`. -->
-							{#if !s.type}
-								<div class="status-cell">
-									<span class="badge failed">failed</span>
-									{#if s.reason}{@render why(s.reason)}{/if}
-								</div>
-							{:else if s.status === 'failed' || s.status === 'interrupted'}
+							     them. `status` is the only thing consulted. A null `type`
+							     used to be read as failed here, to cover rollbacks that an
+							     older path recorded as `done` — those rows are fixed and
+							     that path now sends `sts.session.fail`, so inferring from
+							     `type` only served to outrank the real status and left an
+							     acked session showing failed forever. -->
+							{#if s.status === 'failed' || s.status === 'interrupted'}
 								<div class="status-cell">
 									<span class="badge {s.status}">{s.status}</span>
 									{@render why(s.reason)}
