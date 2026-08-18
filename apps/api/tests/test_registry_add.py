@@ -36,6 +36,8 @@ class Tiny(Strategy):
     name = "tiny"
 """
 
+_YML = "td: []\nmd: []\nsts:\n  qty: 1\n"
+
 
 class ReloadingBroker:
     """Stands in for the STS that answers ``sts.registry.reload``.
@@ -142,7 +144,37 @@ async def test_types_include_private_and_public(tmp_path: Path) -> None:
 
     template = await strategy_type_template("public::Tiny", store=store)
     assert template.type == "public::Tiny"
-    assert "sts:" in template.yaml
+    assert template.yaml == "sts: {}\n"
+
+
+async def test_add_keeps_strategy_yml_as_the_template(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    out = await add_strategy(
+        RegistryAddBody(files={"strategy.py": _TINY, "strategy.yml": _YML}),
+        store=store,
+        broker=_broker(store),
+    )
+    assert "strategy.yml" in out.files
+    written = tmp_path / "registry" / "private" / "tiny" / "strategy.yml"
+    assert written.read_text() == _YML
+
+    listed = await list_strategy_types(store=store)
+    tiny = next(t for t in listed.templates if t.type == "private::Tiny")
+    assert tiny.yaml == _YML
+    template = await strategy_type_template("private::Tiny", store=store)
+    assert template.yaml == _YML
+
+
+async def test_bad_strategy_yml_is_400(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    with pytest.raises(HTTPException) as caught:
+        await add_strategy(
+            RegistryAddBody(files={"strategy.py": _TINY, "strategy.yml": "td: [\n"}),
+            store=store,
+            broker=_broker(store),
+        )
+    assert caught.value.status_code == 400
+    assert "strategy.yml" in str(caught.value.detail)
 
 
 async def test_published_list_is_public_only(tmp_path: Path) -> None:

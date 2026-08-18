@@ -12,7 +12,7 @@ from pathlib import Path
 
 from mftik.registry.digest import digest_files
 from mftik.registry.errors import RegistryConflict, RegistryError
-from mftik.registry.files import normalize_files, read_tree
+from mftik.registry.files import TEMPLATE_NAME, normalize_files, read_tree
 from mftik.registry.gate import check_files
 from mftik.registry.inspect import check_name, inspect_files, pick_class
 from mftik.registry.qualify import (
@@ -29,7 +29,11 @@ _DEFAULT_REQUIRES = "0.1.0"
 
 @dataclass(frozen=True, slots=True)
 class AddedStrategy:
-    """What ``add`` wrote. The digest is of the ``.py`` files."""
+    """What ``add`` wrote. The digest is of the ``.py`` files.
+
+    ``files`` may also list a root ``strategy.yml``. That sidecar is the
+    deploy template; it is not part of the digest.
+    """
 
     name: str
     type: str
@@ -78,7 +82,7 @@ class RegistryStore:
         replace: bool = False,
         origin: str = PRIVATE_ORIGIN,
     ) -> AddedStrategy:
-        """Validate, hash, and copy ``.py`` files into public, private, or pulled."""
+        """Validate, hash, and copy ``.py`` files and optional ``strategy.yml``."""
         _check_origin(origin)
         inspected = inspect_files(files)
         chosen = inspected.cls
@@ -177,6 +181,16 @@ class RegistryStore:
             except UnicodeDecodeError as exc:
                 raise RegistryError(f"{rel} is not UTF-8: {exc}") from exc
         return out
+
+    def read_template(self, rec: AddedStrategy) -> str | None:
+        """The sidecar ``strategy.yml``, if this tree shipped one."""
+        if TEMPLATE_NAME not in rec.files:
+            return None
+        dest = Path(rec.path) / TEMPLATE_NAME
+        try:
+            return dest.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
 
     def get_remote(self, name: str) -> Remote | None:
         return _load_remotes(self.remotes_path).get(name)
@@ -289,18 +303,26 @@ class RegistryStore:
 
 
 def _tree_stamp(dest: Path) -> tuple[int, int] | None:
-    """``.py`` count and newest mtime, plus the directory itself."""
+    """Source-file count and newest mtime, plus the directory itself.
+
+    ``strategy.yml`` counts: editing the template must invalidate the
+    cache even when no ``.py`` mtime moved.
+    """
     try:
         newest = dest.stat().st_mtime_ns
-        n_py = 0
+        n = 0
         for py in dest.rglob("*.py"):
             if "__pycache__" in py.parts:
                 continue
-            n_py += 1
+            n += 1
             newest = max(newest, py.stat().st_mtime_ns)
+        template = dest / TEMPLATE_NAME
+        if template.is_file():
+            n += 1
+            newest = max(newest, template.stat().st_mtime_ns)
     except OSError:
         return None
-    return (n_py, newest)
+    return (n, newest)
 
 
 def _scan_tree(dest: Path, *, origin: str) -> AddedStrategy | None:

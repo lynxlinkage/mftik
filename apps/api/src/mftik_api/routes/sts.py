@@ -95,13 +95,13 @@ _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _LOCAL_YAML = "sts: {}\n"
 
 
-def _registry_template(rec: AddedStrategy) -> StrategyTemplate:
+def _registry_template(rec: AddedStrategy, store: RegistryStore) -> StrategyTemplate:
     key = qualify(rec.origin, rec.type)
     return StrategyTemplate(
         type=key,
         label=key,
         description=f"{rec.origin} registry ({rec.digest})",
-        yaml=_LOCAL_YAML,
+        yaml=store.read_template(rec) or _LOCAL_YAML,
         source="registry",
     )
 
@@ -117,7 +117,7 @@ def _deployable_templates(store: RegistryStore) -> list[StrategyTemplate]:
         key = qualify(rec.origin, rec.type)
         if key in seen:
             continue
-        extra.append(_registry_template(rec))
+        extra.append(_registry_template(rec, store))
         seen.add(key)
     extra.sort(key=lambda t: t.type)
     return bundled + extra
@@ -131,7 +131,7 @@ def _deployable_template(
         return template
     for rec in store.list_all():
         if qualify(rec.origin, rec.type) == strategy_type:
-            return _registry_template(rec)
+            return _registry_template(rec, store)
     return None
 
 

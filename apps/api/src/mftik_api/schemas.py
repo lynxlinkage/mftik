@@ -330,8 +330,9 @@ class ErrorBody(BaseModel):
 class RegistryAddBody(BaseModel):
     """Register a strategy tree on this node.
 
-    ``files`` is path → UTF-8 text. Default origin is ``private`` (this node
-    only). ``public`` is what other nodes pull.
+    ``files`` is path → UTF-8 text: the ``.py`` tree plus an optional root
+    ``strategy.yml``. Default origin is ``private`` (this node only).
+    ``public`` is what other nodes pull.
     """
 
     files: dict[str, str] = Field(..., min_length=1)

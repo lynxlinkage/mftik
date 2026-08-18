@@ -117,6 +117,14 @@ def test_bad_yaml_is_refused(tmp_path: Path, capsys) -> None:
     assert "invalid YAML" in capsys.readouterr().err
 
 
+def test_bad_yml_in_the_tree_is_refused(tmp_path: Path, capsys) -> None:
+    dest = _tree(tmp_path, _TINY)
+    (dest / "strategy.yml").write_text("td: [\n")
+
+    assert main(["check", str(dest)]) == EXIT_ERROR
+    assert "strategy.yml" in capsys.readouterr().err
+
+
 def test_illegal_md_is_refused(tmp_path: Path, capsys) -> None:
     dest = _tree(tmp_path, _TINY)
     cfg = tmp_path / "deploy.yml"

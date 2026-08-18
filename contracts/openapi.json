@@ -3203,7 +3203,7 @@
           "files"
         ],
         "title": "RegistryAddBody",
-        "description": "Register a strategy tree on this node.\n\n``files`` is path \u2192 UTF-8 text. Default origin is ``private`` (this node\nonly). ``public`` is what other nodes pull."
+        "description": "Register a strategy tree on this node.\n\n``files`` is path \u2192 UTF-8 text: the ``.py`` tree plus an optional root\n``strategy.yml``. Default origin is ``private`` (this node only).\n``public`` is what other nodes pull."
       },
       "RegistryAddOut": {
         "properties": {

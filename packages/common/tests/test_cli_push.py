@@ -33,9 +33,16 @@ def config_file(tmp_path: Path, monkeypatch) -> Path:
 
 
 class Node_:
-    def __init__(self, *, loaded: bool = True, load_error: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        loaded: bool = True,
+        load_error: str | None = None,
+        files: list[str] | None = None,
+    ) -> None:
         self.loaded = loaded
         self.load_error = load_error
+        self.files = files or ["strategy.py"]
         self.paths: list[str] = []
         self.bodies: list[object] = []
 
@@ -52,7 +59,7 @@ class Node_:
                     "digest": "sha256:abc",
                     "requires_mftik": "0.1.0",
                     "origin": "private",
-                    "files": ["strategy.py"],
+                    "files": self.files,
                     "loaded": self.loaded,
                     "load_error": self.load_error,
                 },
@@ -95,6 +102,28 @@ def test_push_sends_private_replace_and_the_files(
     assert body["origin"] == "private"
     assert body["replace"] is True
     assert body["files"]["strategy.py"] == _TINY
+
+
+def test_push_sends_strategy_yml(tmp_path: Path, monkeypatch, capsys) -> None:
+    fake = Node_(files=["strategy.py", "strategy.yml"])
+    _install(monkeypatch, fake)
+    dest = _tree(tmp_path)
+    (dest / "strategy.yml").write_text("sts: {}\n")
+
+    assert main(["push", str(dest)]) == 0
+    out = capsys.readouterr().out
+    assert "template strategy.yml" in out
+    body = fake.bodies[0]
+    assert isinstance(body, dict)
+    assert body["files"]["strategy.yml"] == "sts: {}\n"
+    assert body["files"]["strategy.py"] == _TINY
+
+
+def test_push_refuses_bad_strategy_yml(tmp_path: Path, capsys) -> None:
+    dest = _tree(tmp_path)
+    (dest / "strategy.yml").write_text("td: [\n")
+    assert main(["push", str(dest)]) == EXIT_ERROR
+    assert "strategy.yml" in capsys.readouterr().err
 
 
 def test_push_exits_one_when_sts_did_not_reload(

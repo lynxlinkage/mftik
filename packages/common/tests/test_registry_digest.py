@@ -18,3 +18,9 @@ def test_path_and_body_both_count() -> None:
     assert a != c
     assert a.startswith("sha256:")
     assert len(a) == len("sha256:") + 64
+
+
+def test_strategy_yml_does_not_change_digest() -> None:
+    py = {"strategy.py": b"x = 1\n"}
+    with_yml = {**py, "strategy.yml": b"sts: {}\n"}
+    assert digest_files(py) == digest_files(with_yml)

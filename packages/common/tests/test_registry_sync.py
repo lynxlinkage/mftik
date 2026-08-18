@@ -6,7 +6,9 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
+from mftik.registry.digest import digest_files
 from mftik.registry.errors import RegistryError
+from mftik.registry.files import TEMPLATE_NAME
 from mftik.registry.protocol import handshake_info
 from mftik.registry.store import RegistryStore
 from mftik.registry.sync import connect_remote, diff_remote
@@ -17,6 +19,8 @@ from mftik.strategy import Strategy
 class Tiny(Strategy):
     name = "tiny"
 """
+
+_YML = "sts: {}\n"
 
 
 def _peer(store: RegistryStore) -> httpx.MockTransport:
@@ -83,6 +87,27 @@ async def test_connect_pulls_into_named_origin(tmp_path) -> None:
     assert local.list_public() == []
     assert local.list_private() == []
     assert local.list_remotes()[0].name == "node1"
+
+
+@pytest.mark.asyncio
+async def test_connect_pulls_strategy_yml_without_changing_digest(tmp_path) -> None:
+    peer = RegistryStore(tmp_path / "peer")
+    added = peer.add(
+        {"strategy.py": _TINY, TEMPLATE_NAME: _YML},
+        origin="public",
+    )
+    assert added.digest == digest_files({"strategy.py": _TINY.encode()})
+    local = RegistryStore(tmp_path / "local")
+    async with httpx.AsyncClient(
+        transport=_peer(peer), base_url="http://node1"
+    ) as client:
+        result = await connect_remote(
+            local, name="node1", url="http://node1", client=client
+        )
+    dest = tmp_path / "local" / "registry" / "pulled" / "node1" / "tiny"
+    assert (dest / TEMPLATE_NAME).read_text() == _YML
+    assert result.pulled[0].digest == added.digest
+    assert TEMPLATE_NAME in result.pulled[0].files
 
 
 @pytest.mark.asyncio

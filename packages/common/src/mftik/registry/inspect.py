@@ -2,9 +2,9 @@
 
 The import gate says whether the files are copyable. These rules say whether
 they name a strategy the registry can store: one subclass, a lowercase
-``name``, a Python identifier for the type. ``add`` and ``mftik check`` both
-run this, so a tree that one accepts the other cannot refuse for a different
-reason.
+``name``, a Python identifier for the type. A shipped ``strategy.yml`` must
+parse. ``add`` and ``mftik check`` both run this, so a tree that one
+accepts the other cannot refuse for a different reason.
 """
 
 from __future__ import annotations
@@ -13,8 +13,9 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from mftik.protocol.strategy_yml import StrategyYamlError, parse_strategy_yml
 from mftik.registry.errors import RegistryError
-from mftik.registry.files import normalize_files
+from mftik.registry.files import TEMPLATE_NAME, normalize_files
 from mftik.registry.gate import StrategyClass, check_files
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -34,6 +35,7 @@ class Inspected:
 def inspect_files(files: Mapping[str, str | bytes]) -> Inspected:
     """Normalise, scan, and name-check. Raises :class:`RegistryError`."""
     normalised = normalize_files(files)
+    _check_template(normalised)
     chosen = pick_class(check_files(normalised))
     name = chosen.name
     if not name:
@@ -43,6 +45,21 @@ def inspect_files(files: Mapping[str, str | bytes]) -> Inspected:
     check_name(name)
     check_type(chosen.type)
     return Inspected(files=normalised, cls=chosen, name=name)
+
+
+def _check_template(files: Mapping[str, bytes]) -> None:
+    """A shipped ``strategy.yml`` must parse. Absence is fine."""
+    body = files.get(TEMPLATE_NAME)
+    if body is None:
+        return
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RegistryError(f"{TEMPLATE_NAME} is not UTF-8: {exc}") from exc
+    try:
+        parse_strategy_yml(text)
+    except StrategyYamlError as exc:
+        raise RegistryError(f"{TEMPLATE_NAME}: {exc}") from exc
 
 
 def pick_class(classes: list[StrategyClass]) -> StrategyClass:

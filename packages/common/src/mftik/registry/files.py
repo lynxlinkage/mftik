@@ -13,13 +13,18 @@ _SKIP_SUFFIX = (".pyc", ".pyo")
 _PATH = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 MAX_FILES = 64
 MAX_FILE_BYTES = 1_048_576
+#: The only non-Python file a tree may ship. Nested copies and other
+#: names are junk — identity is the ``.py`` files, and this sidecar is
+#: the deploy template the picker starts from.
+TEMPLATE_NAME = "strategy.yml"
 
 
 def normalize_files(files: Mapping[str, str | bytes]) -> dict[str, bytes]:
-    """POSIX relative ``.py`` paths, UTF-8 bytes, no parent traversal or junk.
+    """POSIX relative ``.py`` paths plus an optional root ``strategy.yml``.
 
-    Skips ``__pycache__``, ``*.pyc``, and anything that is not Python so a
-    copy-paste of a working tree does not change the digest.
+    Skips ``__pycache__``, ``*.pyc``, and anything that is not Python or
+    the deploy template so a copy-paste of a working tree does not change
+    the digest. The digest itself only hashes ``.py`` files.
     """
     if not files:
         raise RegistryError("strategy has no files")
@@ -32,7 +37,7 @@ def normalize_files(files: Mapping[str, str | bytes]) -> dict[str, bytes]:
             continue
         if path.endswith(_SKIP_SUFFIX):
             continue
-        if not path.endswith(".py"):
+        if not path.endswith(".py") and path != TEMPLATE_NAME:
             continue
         if not _PATH.match(path):
             raise RegistryError(
@@ -47,13 +52,13 @@ def normalize_files(files: Mapping[str, str | bytes]) -> dict[str, bytes]:
         out[path] = body
     if len(out) > MAX_FILES:
         raise RegistryError(f"too many files ({len(out)}); max is {MAX_FILES}")
-    if not out:
+    if not any(path.endswith(".py") for path in out):
         raise RegistryError("strategy has no .py files")
     return out
 
 
 def read_tree(root: Path) -> dict[str, bytes]:
-    """Collect ``.py`` files under ``root`` as a POSIX-relative map.
+    """Collect ``.py`` files and an optional root ``strategy.yml``.
 
     Skips ``__pycache__``. Does not normalise: that is
     :func:`normalize_files`, which is what refuses junk paths and empty
@@ -68,6 +73,9 @@ def read_tree(root: Path) -> dict[str, bytes]:
         if "__pycache__" in py.parts:
             continue
         files[py.relative_to(root).as_posix()] = py.read_bytes()
+    template = root / TEMPLATE_NAME
+    if template.is_file():
+        files[TEMPLATE_NAME] = template.read_bytes()
     return files
 
 

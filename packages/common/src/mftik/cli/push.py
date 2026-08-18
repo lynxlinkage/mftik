@@ -14,6 +14,7 @@ from typing import Any
 
 from mftik.cli.client import Client, CliError, connected
 from mftik.cli.tree import inspect_tree, require_tree, tree_texts
+from mftik.registry.files import TEMPLATE_NAME
 
 
 def push(args: argparse.Namespace) -> int:
@@ -46,6 +47,9 @@ def report_push(out: dict[str, Any]) -> dict[str, Any]:
     digest = out.get("digest")
     if digest:
         print(f"    {digest}")
+    files = out.get("files") or []
+    if TEMPLATE_NAME in files:
+        print(f"    template {TEMPLATE_NAME}")
     if out.get("loaded"):
         return out
     raise CliError(out.get("load_error") or "stored but not deployable")

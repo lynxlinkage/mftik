@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from mftik.registry.digest import digest_files
 from mftik.registry.errors import RegistryConflict, RegistryError
+from mftik.registry.files import TEMPLATE_NAME
 from mftik.registry.store import RegistryStore
 
 _TINY = """\
@@ -13,6 +14,8 @@ from mftik.strategy import Strategy
 class Tiny(Strategy):
     name = "tiny"
 """
+
+_YML = "td: []\nmd: []\nsts:\n  qty: 1\n"
 
 
 def test_add_writes_source(tmp_path) -> None:
@@ -264,3 +267,43 @@ def test_read_contents_is_the_python(tmp_path) -> None:
     added = store.add({"strategy.py": _TINY})
     contents = store.read_contents(added)
     assert contents == {"strategy.py": _TINY}
+
+
+def test_add_writes_strategy_yml_without_changing_digest(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    added = store.add({"strategy.py": _TINY, TEMPLATE_NAME: _YML})
+    dest = tmp_path / "registry" / "private" / "tiny"
+    assert (dest / TEMPLATE_NAME).read_text() == _YML
+    assert added.files == ("strategy.py", TEMPLATE_NAME)
+    assert added.digest == digest_files({"strategy.py": _TINY.encode()})
+    assert store.read_contents(added)[TEMPLATE_NAME] == _YML
+    assert store.read_template(added) == _YML
+
+
+def test_replace_without_yml_drops_the_old_template(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    store.add({"strategy.py": _TINY, TEMPLATE_NAME: _YML})
+    added = store.add({"strategy.py": _TINY}, replace=True)
+    dest = tmp_path / "registry" / "private" / "tiny"
+    assert not (dest / TEMPLATE_NAME).exists()
+    assert added.files == ("strategy.py",)
+    assert store.read_template(added) is None
+
+
+def test_bad_strategy_yml_is_refused(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    with pytest.raises(RegistryError, match="strategy.yml"):
+        store.add({"strategy.py": _TINY, TEMPLATE_NAME: "td: [\n"})
+
+
+def test_yml_mtime_invalidates_the_tree_cache(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    store.add({"strategy.py": _TINY})
+    first = store.list_private()[0]
+    assert store.read_template(first) is None
+    dest = tmp_path / "registry" / "private" / "tiny" / TEMPLATE_NAME
+    dest.write_text(_YML)
+    second = store.list_private()[0]
+    assert second is not first
+    assert TEMPLATE_NAME in second.files
+    assert store.read_template(second) == _YML
