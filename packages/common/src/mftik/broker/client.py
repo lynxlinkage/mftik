@@ -8,6 +8,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import redis.asyncio as redis
 from pydantic import BaseModel
@@ -25,6 +26,42 @@ from mftik.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def redacted_url(url: str) -> str:
+    """``url`` with its password replaced, for logging.
+
+    A Redis URL carries the credential inline and every service logs this
+    line on every connect, so the password lands in ``docker logs`` for the
+    whole fleet and in anything those logs are shipped to.
+
+    Parsed rather than pattern-matched: a password may contain ``@`` and
+    ``:``, so splitting on either finds the wrong one and prints the rest.
+    Anything that will not parse returns a placeholder — falling back to the
+    original would leak exactly the string this exists to hide.
+    """
+    try:
+        parts = urlsplit(url)
+        if not parts.password:
+            return url
+        host = parts.hostname or ""
+        # ``.port`` raises on a non-numeric port, and it raises here rather
+        # than in ``urlsplit`` — which is why the whole reconstruction is
+        # inside the try and not just the parse.
+        if parts.port is not None:
+            host = f"{host}:{parts.port}"
+        user = parts.username or ""
+        return urlunsplit(
+            (
+                parts.scheme,
+                f"{user}:***@{host}",
+                parts.path,
+                parts.query,
+                parts.fragment,
+            )
+        )
+    except ValueError:
+        return "<unparseable url>"
 
 Handler = Callable[[IncomingRequest], Awaitable[None]]
 
@@ -131,7 +168,7 @@ class Broker:
             )
             self._owns_redis = True
         await self._redis.ping()
-        logger.info("Connected to Redis at %s", self.config.redis_url)
+        logger.info("Connected to Redis at %s", redacted_url(self.config.redis_url))
 
     async def close(self) -> None:
         if self._redis is not None and self._owns_redis:
