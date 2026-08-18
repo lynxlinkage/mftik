@@ -11,6 +11,7 @@
 		type StrategyYaml
 	} from '$lib/api';
 	import LogDownloadModal from '$lib/components/LogDownloadModal.svelte';
+	import StrategyPicker from '$lib/components/StrategyPicker.svelte';
 	import {
 		connectStsStatus,
 		type StatusConnection,
@@ -20,7 +21,7 @@
 	let strategies = $state<StrategyRow[]>([]);
 	let yamlText = $state(defaultStrategyYml());
 	let templates = $state<StrategyTemplate[]>([]);
-	let selectedType = $state('NoopStrategy');
+	let selectedType = $state('');
 	// Tracks whether the editor still holds the selected type's template
 	// untouched, so switching type can only discard what nobody typed.
 	let pristineYaml = $state(defaultStrategyYml());
@@ -54,6 +55,20 @@
 	);
 	const dirty = $derived(yamlText !== pristineYaml);
 
+	/** Newest deploy whose type is still on the picker; else the catalogue default. */
+	function pickType(
+		rows: StrategyRow[],
+		available: StrategyTemplate[],
+		fallback: string
+	): string {
+		const known = new Set(available.map((t) => t.type));
+		for (const row of rows) {
+			if (known.has(row.type)) return row.type;
+		}
+		if (fallback && known.has(fallback)) return fallback;
+		return available[0]?.type ?? '';
+	}
+
 	async function refresh() {
 		loading = true;
 		error = null;
@@ -69,7 +84,7 @@
 			strategies = list.strategies;
 			templates = t.templates;
 			if (!templates.some((x) => x.type === selectedType)) {
-				selectedType = t.default || templates[0]?.type || selectedType;
+				selectedType = pickType(list.strategies, templates, t.default);
 			}
 			// Only seed the editor while it is untouched — a refresh must not
 			// throw away a document someone is in the middle of writing.
@@ -319,21 +334,18 @@
 		</div>
 		<label class="type-pick">
 			Strategy
-			<select
+			<StrategyPicker
+				{templates}
 				value={selectedType}
 				disabled={busy || templates.length === 0}
-				onchange={(e) => changeType((e.currentTarget as HTMLSelectElement).value)}
-			>
-				{#each templates as t (t.type)}
-					<option value={t.type}>{t.label}</option>
-				{/each}
-			</select>
+				onchange={changeType}
+			/>
 		</label>
 		<div class="editor-actions">
 			<button type="button" class="secondary" onclick={resetTemplate} disabled={busy}>
 				Reset template
 			</button>
-			<button type="button" onclick={deploy} disabled={busy || !yamlText.trim()}>
+			<button type="button" onclick={deploy} disabled={busy || !yamlText.trim() || !selectedType}>
 				Deploy
 			</button>
 		</div>
@@ -566,15 +578,6 @@
 		gap: 0.3rem;
 		font-size: 0.75rem;
 		color: var(--muted);
-	}
-
-	.type-pick select {
-		background: var(--bg);
-		border: 1px solid var(--border);
-		color: var(--text);
-		padding: 0.45rem 0.6rem;
-		border-radius: var(--radius);
-		min-width: 11rem;
 	}
 
 	.type-note {

@@ -136,6 +136,9 @@ async def test_types_include_private_and_public(tmp_path: Path) -> None:
     assert "NoopStrategy" in listed.types
     tiny = next(t for t in listed.templates if t.type == "private::Tiny")
     assert tiny.label == "private::Tiny"
+    assert tiny.source == "registry"
+    noop = next(t for t in listed.templates if t.type == "NoopStrategy")
+    assert noop.source == "bundled"
 
     template = await strategy_type_template("public::Tiny", store=store)
     assert template.type == "public::Tiny"

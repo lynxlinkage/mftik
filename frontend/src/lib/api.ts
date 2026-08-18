@@ -108,6 +108,8 @@ export type StrategyTemplate = {
 	label: string;
 	description: string;
 	yaml: string;
+	/** Bundled catalogue vs a tree in this node's registry. */
+	source: 'bundled' | 'registry';
 };
 
 export type StrategyTypes = {

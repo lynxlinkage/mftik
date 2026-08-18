@@ -17,6 +17,8 @@ document that deploys and then never receives the data it waits for.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -33,6 +35,9 @@ class StrategyTemplate(BaseModel):
     description: str
     #: A complete strategy.yml — td / md / sts — with no type in it.
     yaml: str
+    #: Where the type comes from. The picker groups on this — bundled
+    #: examples sink below registry strategies the operator actually runs.
+    source: Literal["bundled", "registry"] = "bundled"
 
 
 NOOP = StrategyTemplate(

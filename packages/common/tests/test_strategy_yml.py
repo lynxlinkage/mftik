@@ -60,6 +60,11 @@ def test_templates_are_keyed_by_their_own_type() -> None:
         assert get_template(template.type) is template
 
 
+def test_bundled_templates_are_marked_bundled() -> None:
+    for template in all_templates():
+        assert template.source == "bundled"
+
+
 def test_roundtrip_dump() -> None:
     spec = parse_strategy_yml(default_template().yaml)
     again = parse_strategy_yml(dump_strategy_yml(spec))

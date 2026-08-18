@@ -104,6 +104,7 @@ def _registry_template(rec: AddedStrategy) -> StrategyTemplate:
         label=key,
         description=f"{rec.origin} registry ({rec.digest})",
         yaml=_LOCAL_YAML,
+        source="registry",
     )
 
 

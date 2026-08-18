@@ -75,6 +75,7 @@ class StrategyTemplateOut(BaseModel):
     label: str
     description: str
     yaml: str
+    source: Literal["bundled", "registry"] = "bundled"
 
 
 class StrategyTypesResponse(BaseModel):
