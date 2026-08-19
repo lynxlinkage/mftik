@@ -19,8 +19,9 @@ class Audit(Base):
         index=True,
     )
     #: How the request was proved. Same vocabulary as ``Principal.via``.
-    #: Null on rows written before this column existed.
-    via: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: ``key:{name}`` is 4 + 64 at the name's max, so 128, not 64. Null on
+    #: rows written before this column existed.
+    via: Mapped[str | None] = mapped_column(String(128), nullable=True)
     #: The machine credential that acted, if one did. SET NULL rather than
     #: CASCADE: deleting a key must not take the trail with it.
     key_id: Mapped[int | None] = mapped_column(

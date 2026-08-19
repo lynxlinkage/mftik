@@ -98,3 +98,34 @@ async def test_an_api_key_audit_names_the_key(db) -> None:
     assert row["key_kind"] == "api"
     assert row["key_id"] == key_id
     assert row["user_id"] == 1
+
+
+async def test_a_full_length_key_name_still_fits_via(db) -> None:
+    """Postgres enforces VARCHAR; sqlite does not. The name max is 64."""
+    name = "k" * 64
+    app = an_audit_api()
+    async with a_client(app) as client:
+        await client.post("/auth/setup", json={"username": "yite", "password": GOOD})
+        minted = await client.post("/auth/keys", json={"name": name})
+        token = minted.json()["token"]
+
+    auth = {"Authorization": f"Bearer {token}"}
+    async with a_client(app) as client:
+        created = await client.post(
+            "/apis",
+            json={
+                "name": "paper long",
+                "venue": "Paper",
+                "api_key": "paper-key-long",
+                "api_secret": "paper-secret-long",
+                "type": "HMAC",
+            },
+            headers=auth,
+        )
+        listed = await client.get("/audits", headers=auth)
+
+    assert created.status_code == 201
+    row = _named(listed.json()["audits"], "api.create")
+    assert row["via"] == f"key:{name}"
+    assert len(row["via"]) == 68
+    assert row["key_kind"] == "api"

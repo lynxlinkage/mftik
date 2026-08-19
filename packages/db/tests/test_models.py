@@ -45,6 +45,9 @@ def test_audit_user_fk() -> None:
     assert "users.id" in {str(fk.column) for fk in user_col.foreign_keys}
     cols = Audit.__table__.c
     assert cols.via.nullable
+    assert cols.via.type.length >= 68, (
+        "via is key:{name} and the name is 64; sqlite will not catch a clip"
+    )
     assert cols.key_kind.nullable
     assert "auth_keys.id" in {str(fk.column) for fk in cols.key_id.foreign_keys}
 

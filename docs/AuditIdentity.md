@@ -75,7 +75,7 @@ migration fails on insert against a live database.
 
 | Column | Type | Why |
 |---|---|---|
-| `via` | `VARCHAR(64)` | The same string `Principal.via` already is. |
+| `via` | `VARCHAR(128)` | The same string `Principal.via` already is. `key:` plus a 64-char name is 68. |
 | `key_id` | `INTEGER` FK `auth_keys.id` `ON DELETE SET NULL` | The key that acted, if one did. Revoke keeps the row; a true delete must not take the audit with it. |
 | `key_kind` | `VARCHAR(16)` | `api` or `registry`, snapshotted, so the display does not have to join. |
 

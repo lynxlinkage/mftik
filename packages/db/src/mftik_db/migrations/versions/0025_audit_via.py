@@ -27,7 +27,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("audits", sa.Column("via", sa.String(length=64), nullable=True))
+    # ``key:{name}``: the name is 64, the prefix is 4. 128 leaves room
+    # rather than clipping the rows this column exists to keep.
+    op.add_column("audits", sa.Column("via", sa.String(length=128), nullable=True))
     op.add_column("audits", sa.Column("key_id", sa.Integer(), nullable=True))
     op.add_column(
         "audits", sa.Column("key_kind", sa.String(length=16), nullable=True)
