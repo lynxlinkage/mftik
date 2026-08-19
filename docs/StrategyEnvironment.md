@@ -355,6 +355,16 @@ both. Apply itself:
 - talks to whatever `UV_INDEX_URL` names. Air-gapped nodes set
   that to an internal index or they cannot apply; the 5xx says so.
 
+`--only-binary=:all:` earns its keep twice. Asking for `sklearn`
+without a `dist` reaches a real PyPI project — a deprecation shim
+that ships no wheel — so the resolver refuses it instead of building
+something that is not scikit-learn. The refusal is uv's, and it says
+"no usable wheels", which is true and sends nobody anywhere, so a
+failed apply appends the mechanism: names sent without a distribution
+of their own are listed, with the note that a PyPI name is often not
+an import name. A table of the known pairs would be the catalog under
+Non-goals; a sentence about the split is not.
+
 ### Operations
 
 - **Egress.** Apply needs the API container to reach the index.

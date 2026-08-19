@@ -352,3 +352,40 @@ def test_an_unpinned_request_the_installer_says_nothing_about_fails(
             env, {"pandas": ApplySpec(None, "pandas")}, installer=_write_pkg
         )
     assert env.read_stamp().generation == 0
+
+
+def test_a_failed_resolve_points_at_the_import_name_split(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``sklearn`` is on PyPI as a shim with no wheels.
+
+    So the resolver's answer is "no usable wheels", which is true and sends
+    nobody anywhere. The package wanted is ``scikit-learn``. A table of the
+    known ones would be the catalog this epic refuses to keep; naming the
+    mechanism is not.
+    """
+    def failed(*args: object, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stdout="", stderr="no usable wheels")
+
+    monkeypatch.setattr("subprocess.run", failed)
+    with pytest.raises(ApplyFailed) as caught:
+        run_uv_installer(tmp_path, {"sklearn": ApplySpec(None, "sklearn")})
+    message = str(caught.value)
+    assert "no usable wheels" in message
+    assert "scikit-learn" in message
+    assert "--dist" in message
+
+
+def test_no_hint_when_the_distribution_was_given(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Nothing to point out: the Owner already said which package it is."""
+    def failed(*args: object, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stdout="", stderr="network is down")
+
+    monkeypatch.setattr("subprocess.run", failed)
+    with pytest.raises(ApplyFailed) as caught:
+        run_uv_installer(
+            tmp_path, {"sklearn": ApplySpec("1.9.0", "scikit-learn")}
+        )
+    assert str(caught.value) == "network is down"

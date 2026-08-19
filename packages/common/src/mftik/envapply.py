@@ -322,7 +322,34 @@ def run_uv_installer(dest: Path, packages: Mapping[str, ApplySpec]) -> None:
         raise ApplyFailed(f"installer could not start: {exc}") from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip()
-        raise ApplyFailed(detail or f"installer exited {completed.returncode}")
+        raise ApplyFailed(
+            (detail or f"installer exited {completed.returncode}")
+            + _dist_hint(packages)
+        )
+
+
+def _dist_hint(packages: Mapping[str, ApplySpec]) -> str:
+    """Point at the import-name/PyPI-name split when a resolve fails.
+
+    ``sklearn`` is on PyPI — as a deprecation shim with no wheels — so asking
+    for it gets "no usable wheels", which is true and unhelpful. The package
+    wanted is ``scikit-learn``.
+
+    A mapping of the known ones would be the catalog this epic refuses to
+    keep. This says what the mechanism is and lets the Owner apply it: only
+    for names sent without a distribution of their own, and only after a
+    failure that has already left the stamp untouched.
+    """
+    same = sorted(name for name, spec in packages.items() if spec.dist == name)
+    if not same:
+        return ""
+    return (
+        "\n\nAsked the index for: "
+        + ", ".join(same)
+        + ". A package's PyPI name is often not its import name — sklearn is "
+        "published as scikit-learn. Pass the distribution explicitly if that "
+        "is what happened, e.g. --dist scikit-learn."
+    )
 
 
 def disruptive_names(
