@@ -208,6 +208,22 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         await self.session.flush()
         return row.rebuild_count
 
+    async def reset_rebuild_count(self, session_id: str) -> StsSessionRow | None:
+        """Forget the attempts behind a rebuild that turned out to work.
+
+        The cap counts attempts so a strategy that takes the process down with
+        it is not restored into the same crash forever. A session that came
+        back and then ran is not that: it has answered the question the count
+        was asking, and leaving the total standing would retire a healthy
+        session on some later restart it had nothing to do with.
+        """
+        row = await self.get_by_session_id(session_id)
+        if row is None:
+            return None
+        row.rebuild_count = 0
+        await self.session.flush()
+        return row
+
     async def remember(
         self, session_id: str, key: str, value: str
     ) -> StsSessionRow | None:

@@ -93,3 +93,9 @@ async def bump_rebuild_count(session_id: str) -> int:
     async with session_scope() as db:
         repo = StsSessionRepository(db)
         return await repo.bump_rebuild_count(session_id)
+
+
+async def reset_rebuild_count(session_id: str) -> StsSessionRow | None:
+    async with session_scope() as db:
+        repo = StsSessionRepository(db)
+        return await repo.reset_rebuild_count(session_id)

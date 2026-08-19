@@ -230,6 +230,34 @@ async def test_rebuild_count_accumulates(db) -> None:
     assert row.restart == "always"
 
 
+async def test_rebuild_count_can_be_forgiven(db) -> None:
+    """A rebuild that turned out to work has answered what the count asked.
+
+    Leaving the total standing would retire a healthy session on some later
+    restart it had nothing to do with.
+    """
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-forgive")
+    await repo.bump_rebuild_count("s-forgive")
+    await repo.bump_rebuild_count("s-forgive")
+
+    row = await repo.reset_rebuild_count("s-forgive")
+    assert row is not None
+    assert row.rebuild_count == 0
+
+    db.expire_all()
+    again = await repo.get_by_session_id("s-forgive")
+    assert again is not None
+    assert again.rebuild_count == 0
+    # Only the count is forgiven — the row is otherwise untouched.
+    assert again.status == SessionStatus.LIVE.value
+
+
+async def test_resetting_an_unknown_session_is_not_an_error(db) -> None:
+    repo = StsSessionRepository(db)
+    assert await repo.reset_rebuild_count("s-nobody") is None
+
+
 async def test_mark_ack_keeps_the_reason_and_the_end(db) -> None:
     repo = StsSessionRepository(db)
     await _live(repo, "s-ack")

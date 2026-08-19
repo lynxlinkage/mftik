@@ -76,6 +76,15 @@ _REBUILD_MAX_AGE_S = 1800.0
 #: into the same crash on every boot, for as long as the age window holds.
 _REBUILD_MAX_ATTEMPTS = 3
 
+#: How long a rebuilt session must keep running before its attempt count is
+#: forgiven. The count exists to break a restore-into-crash loop, and only
+#: time can tell that loop from a session that simply lives through deploys:
+#: the rebuild itself returns successfully in both cases. Long enough that a
+#: strategy which dies on the way back has died before this fires, short
+#: enough that a session which is plainly fine is not carrying attempts from
+#: yesterday into tonight's restart.
+_REBUILD_SETTLE_S = 300.0
+
 #: How many interrupted rows one scan will consider. Well above any plausible
 #: number of sessions running at once — the point is that hitting it is
 #: reported rather than silently dropping the rest.
@@ -104,6 +113,8 @@ RememberFact = Callable[..., Awaitable[Any]]
 MarkLive = Callable[..., Awaitable[Any]]
 #: ``(session_id)`` — count one rebuild attempt, returning the new total.
 BumpRebuildCount = Callable[..., Awaitable[Any]]
+#: ``(session_id)`` — clear the attempt count of a rebuild that has settled.
+ResetRebuildCount = Callable[..., Awaitable[Any]]
 #: ``(session_id, *, status, reason)`` — move the row to a terminal status.
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
@@ -123,8 +134,10 @@ class SessionManager:
         remember_fact: RememberFact | None = None,
         mark_live: MarkLive | None = None,
         bump_rebuild_count: BumpRebuildCount | None = None,
+        reset_rebuild_count: ResetRebuildCount | None = None,
         rebuild_max_age_s: float = _REBUILD_MAX_AGE_S,
         rebuild_max_attempts: int = _REBUILD_MAX_ATTEMPTS,
+        rebuild_settle_s: float = _REBUILD_SETTLE_S,
         heartbeat_interval: float = 1.0,
         strategy_factory: StrategyFactory | None = None,
     ) -> None:
@@ -135,11 +148,17 @@ class SessionManager:
         self._remember = remember_fact
         self._mark_live = mark_live
         self._bump_rebuild_count = bump_rebuild_count
+        self._reset_rebuild_count = reset_rebuild_count
         self._rebuild_max_age_s = rebuild_max_age_s
         self._rebuild_max_attempts = rebuild_max_attempts
+        self._rebuild_settle_s = rebuild_settle_s
         self._heartbeat_interval = heartbeat_interval
         self._strategy_factory = strategy_factory or resolve_strategy
         self._sessions: dict[str, StsSession] = {}
+        # Held so shutdown can cancel them: each outlives the rebuild scan
+        # that started it, and a pending task at loop close is a warning
+        # nobody can act on.
+        self._settle_tasks: set[asyncio.Task[None]] = set()
 
     def get(self, session_id: str) -> StsSession | None:
         return self._sessions.get(session_id)
@@ -755,12 +774,65 @@ class SessionManager:
                 await self._abandon_rebuild(session_id)
                 continue
             rebuilt.append(session_id)
+            self._watch_rebuild_settle(session_id)
             logger.info(
                 "STS rebuilt session=%s strategy=%s",
                 session_id,
                 getattr(row, "strategy", None),
             )
         return rebuilt
+
+    def _watch_rebuild_settle(self, session_id: str) -> None:
+        """Start the timer that forgives this session's attempt count.
+
+        The session is read here rather than inside the task: a task does not
+        run until the loop next yields, by which time the session it was
+        started for may already have been replaced by another one under the
+        same id.
+        """
+        if self._reset_rebuild_count is None or self._rebuild_settle_s <= 0:
+            return
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+        task = asyncio.create_task(
+            self._settle_rebuild(session_id, session),
+            name=f"sts-rebuild-settle-{session_id}",
+        )
+        self._settle_tasks.add(task)
+        task.add_done_callback(self._settle_tasks.discard)
+
+    async def _settle_rebuild(self, session_id: str, session: StsSession) -> None:
+        """Clear the attempt count once a rebuilt session has kept running.
+
+        The session is compared by identity, not by id: a session that stopped
+        and was deployed again under the same id is a different run, and
+        clearing the count on its behalf would credit it for surviving
+        something it was never part of.
+        """
+        await asyncio.sleep(self._rebuild_settle_s)
+        if self._sessions.get(session_id) is not session:
+            # Gone, or replaced. Either way the rebuild did not hold, and the
+            # count it was carrying is exactly what the next boot should see.
+            return
+        if self._reset_rebuild_count is None:
+            return
+        try:
+            await self._reset_rebuild_count(session_id)
+        except Exception:
+            # Nothing to recover here: the count stays where it was, which
+            # costs this session one of its future attempts rather than
+            # anything it is doing now.
+            logger.exception(
+                "STS rebuild count reset failed session=%s", session_id
+            )
+            return
+        logger.info(
+            "STS rebuild settled session=%s — attempt count cleared after "
+            "%.0fs",
+            session_id,
+            self._rebuild_settle_s,
+        )
 
     async def _rebuild_one(self, row: Any, strategy: Strategy) -> None:
         """Restore one session, in the order a deploy uses and for the reason.
@@ -940,6 +1012,12 @@ class SessionManager:
         strategy ended, STS did. Telling the two apart is what lets a future
         rebuild know which sessions it would be putting back.
         """
+        # First, and without awaiting: a settle timer that fires during
+        # teardown would clear the attempt count of a session this method is
+        # in the middle of interrupting.
+        for task in list(self._settle_tasks):
+            task.cancel()
+        self._settle_tasks.clear()
         for session_id in list(self._sessions):
             if self._mark_done is not None:
                 try:
