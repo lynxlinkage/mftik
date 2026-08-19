@@ -519,7 +519,15 @@ class RegistryConnectOut(BaseModel):
 
 
 class EnvPackageIn(BaseModel):
-    version: str
+    """One package the Owner is asking for.
+
+    ``version`` may be omitted: the resolver picks, and the stamp records
+    what it picked. Leaving it out is loose for this request only — every
+    later apply rebuilds from the stamped pin, so an untouched row does not
+    drift because something else was added.
+    """
+
+    version: str | None = None
     dist: str | None = None
     source: str = "manual"
 
@@ -536,8 +544,10 @@ class EnvironmentPutBody(BaseModel):
 
 
 class EnvironmentPackageBody(BaseModel):
+    #: Omit ``version`` to let the resolver choose; the stamp keeps the pin
+    #: it resolved to. See :class:`EnvPackageIn`.
     name: str
-    version: str
+    version: str | None = None
     dist: str | None = None
     source: str = "manual"
     force: bool = False

@@ -86,11 +86,25 @@ class ApplyFailed(Exception):
 
 @dataclass(frozen=True, slots=True)
 class ApplySpec:
-    version: str
+    """One package to install.
+
+    ``version`` is ``None`` when the Owner did not pin it and the resolver
+    should choose. That is a property of the *request* only: commit stamps
+    whatever came back, so every later apply rebuilds from an exact pin and
+    an untouched row cannot drift when something else is added.
+
+    ``None`` and ``""`` are different on purpose. Empty means a version was
+    expected and is missing — a peer that published names without pins
+    (``envimport``) — and that must fail, not quietly install the latest.
+    """
+
+    version: str | None
     dist: str
     source: str = "manual"
 
     def requirement(self) -> str:
+        if self.version is None:
+            return self.dist
         if not self.version:
             raise ApplyFailed(f"{self.dist} has no version pin")
         return f"{self.dist}=={self.version}"
@@ -332,12 +346,18 @@ def _records_from_target(
     ``unapproved_present``, which is how the Owner finds out.
     """
     found = resolved_dists(dest)
-    return {
-        name: PackageRecord(
-            version=found.get(normalize_dist(spec.dist)) or spec.version,
-            dist=spec.dist,
-            source=spec.source,
+    records: dict[str, PackageRecord] = {}
+    for name, spec in requested.items():
+        version = found.get(normalize_dist(spec.dist)) or spec.version
+        if not version:
+            # An unpinned request whose installer reported nothing. The stamp
+            # must not carry a row that cannot be reinstalled: the next apply
+            # rebuilds the whole set from it.
+            raise ApplyFailed(
+                f"installer did not report a version for {spec.dist!r}"
+            )
+        records[name] = PackageRecord(
+            version=version, dist=spec.dist, source=spec.source
         )
-        for name, spec in requested.items()
-    }
+    return records
 

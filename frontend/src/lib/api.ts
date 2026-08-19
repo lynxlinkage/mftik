@@ -769,7 +769,8 @@ export const api = {
 	environment: () => request<Environment>('/environment'),
 	upsertEnvironmentPackage: (body: {
 		name: string;
-		version: string;
+		/** Omit to let the node's resolver pick. The stamp keeps what it picked. */
+		version?: string;
 		dist?: string;
 		force?: boolean;
 	}) =>

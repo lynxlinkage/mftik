@@ -279,3 +279,76 @@ def test_uv_installer_pins_and_binary_only(
     assert "https://index.example/simple" in cmd
     assert timeouts == [APPLY_TIMEOUT_S]
 
+
+
+def _resolver(dest: Path, packages: dict[str, ApplySpec]) -> None:
+    """Stand in for uv: unpinned requests come back at a version it chose."""
+    _write_pkg(dest, packages)
+    for spec in packages.values():
+        version = spec.version or "9.9.9"
+        info = dest / f"{spec.dist}-{version}.dist-info"
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {spec.dist}\nVersion: {version}\n"
+        )
+
+
+def test_no_version_asks_the_resolver_for_a_bare_name() -> None:
+    assert ApplySpec(None, "pandas").requirement() == "pandas"
+    assert ApplySpec("2.2.3", "pandas").requirement() == "pandas==2.2.3"
+
+
+def test_an_empty_version_is_not_the_same_as_no_version() -> None:
+    """``""`` means a version was expected and is missing.
+
+    That is a peer publishing names without pins (``envimport``). Installing
+    the latest instead would be the node quietly choosing on their behalf.
+    """
+    with pytest.raises(ApplyFailed):
+        ApplySpec("", "pandas").requirement()
+
+
+def test_an_unpinned_request_is_stamped_at_what_was_resolved(
+    tmp_path: Path,
+) -> None:
+    env = NodeEnv(tmp_path)
+    result = apply_packages(
+        env, {"pandas": ApplySpec(None, "pandas")}, installer=_resolver
+    )
+    assert result.stamp.packages["pandas"].version == "9.9.9"
+    assert env.read_stamp().packages["pandas"].version == "9.9.9"
+
+
+def test_a_stamped_row_does_not_drift_when_something_else_is_added(
+    tmp_path: Path,
+) -> None:
+    """The loose version applies to the request, never to the stamp.
+
+    Every apply rebuilds the whole target set from the stamp, so a row left
+    unpinned there would be re-resolved — and silently moved — each time the
+    Owner added anything at all.
+    """
+    env = NodeEnv(tmp_path)
+    apply_packages(env, {"pandas": ApplySpec(None, "pandas")}, installer=_resolver)
+    seen: list[str] = []
+
+    def recording(dest: Path, packages: dict[str, ApplySpec]) -> None:
+        seen.extend(sorted(spec.requirement() for spec in packages.values()))
+        _resolver(dest, packages)
+
+    with ApplyInProgress(
+        env, upsert={"httpx": ApplySpec("0.27", "httpx")}, installer=recording
+    ) as pending:
+        pending.commit()
+    assert seen == ["httpx==0.27", "pandas==9.9.9"]
+
+
+def test_an_unpinned_request_the_installer_says_nothing_about_fails(
+    tmp_path: Path,
+) -> None:
+    env = NodeEnv(tmp_path)
+    with pytest.raises(ApplyFailed, match="did not report a version"):
+        apply_packages(
+            env, {"pandas": ApplySpec(None, "pandas")}, installer=_write_pkg
+        )
+    assert env.read_stamp().generation == 0

@@ -330,7 +330,17 @@ the same set of names, which is the layer that matters — that is
 where a person types it. One list, `PROVIDED_BY_NODE`, is read by
 both. Apply itself:
 
-- pins with `==` (no bare names, no ranges at install time);
+- pins with `==` **in the stamp**. A request may leave the version out
+  — typing a version you had to look up on PyPI is friction, and it
+  invites picking one that fights the pins already applied — and then
+  the installer gets the bare name and commit records what it resolved
+  to. Loose is a property of the request, never of the stamp: every
+  apply rebuilds the whole target set from stamped pins, so a row left
+  unpinned there would be silently re-resolved every time the Owner
+  added anything at all. No ranges reach the installer either way.
+  (`None` and `""` are different: empty means a version was expected
+  and is missing, which is a peer publishing names without pins, and
+  that is refused rather than resolved.);
 - `uv pip install --target … --only-binary=:all:` so a sdist
   `setup.py` never runs as the API user;
 - talks to whatever `UV_INDEX_URL` names. Air-gapped nodes set

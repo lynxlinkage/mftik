@@ -72,14 +72,16 @@
 
 	async function addPackage(event: SubmitEvent) {
 		event.preventDefault();
-		if (busy || !pkgName.trim() || !pkgVersion.trim()) return;
+		if (busy || !pkgName.trim()) return;
 		busy = true;
 		error = null;
 		broken = null;
 		try {
 			env = await api.upsertEnvironmentPackage({
 				name: pkgName.trim(),
-				version: pkgVersion.trim(),
+				// Blank means "resolver, you pick". The node stamps the version it
+				// resolved to, so the table below fills in with an exact pin.
+				version: pkgVersion.trim() || undefined,
 				dist: pkgDist.trim() || undefined,
 				force
 			});
@@ -185,6 +187,9 @@
 	<p class="hint">
 		Third-party packages this node has applied. A strategy may declare them in
 		<code>requires</code>; they live on the data volume, not in the image.
+		Leave the version blank to let the resolver pick — the node records the
+		pin it resolved to, and every later change reinstalls from that, so an
+		untouched package does not move when you add another one.
 	</p>
 
 	{#if error}
@@ -257,9 +262,9 @@
 
 	<form class="add" onsubmit={addPackage}>
 		<input bind:value={pkgName} placeholder="numpy" disabled={busy} required />
-		<input bind:value={pkgVersion} placeholder="2.2.1" disabled={busy} required />
+		<input bind:value={pkgVersion} placeholder="version (optional)" disabled={busy} />
 		<input bind:value={pkgDist} placeholder="dist (if different)" disabled={busy} />
-		<button type="submit" disabled={busy || !pkgName.trim() || !pkgVersion.trim()}>
+		<button type="submit" disabled={busy || !pkgName.trim()}>
 			{busy ? 'Working…' : 'Add'}
 		</button>
 	</form>

@@ -3140,7 +3140,14 @@
       "EnvPackageIn": {
         "properties": {
           "version": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Version"
           },
           "dist": {
@@ -3161,10 +3168,8 @@
           }
         },
         "type": "object",
-        "required": [
-          "version"
-        ],
-        "title": "EnvPackageIn"
+        "title": "EnvPackageIn",
+        "description": "One package the Owner is asking for.\n\n``version`` may be omitted: the resolver picks, and the stamp records\nwhat it picked. Leaving it out is loose for this request only \u2014 every\nlater apply rebuilds from the stamped pin, so an untouched row does not\ndrift because something else was added."
       },
       "EnvPackageOut": {
         "properties": {
@@ -3400,7 +3405,14 @@
             "title": "Name"
           },
           "version": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Version"
           },
           "dist": {
@@ -3427,8 +3439,7 @@
         },
         "type": "object",
         "required": [
-          "name",
-          "version"
+          "name"
         ],
         "title": "EnvironmentPackageBody"
       },

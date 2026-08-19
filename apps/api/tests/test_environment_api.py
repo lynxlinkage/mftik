@@ -164,7 +164,7 @@ async def _put(
 
 async def _upsert(
     name: str,
-    version: str,
+    version: str | None,
     dist: str,
     broker: EnvBroker,
     *,
@@ -569,4 +569,37 @@ async def test_approving_a_dependency_makes_it_declarable(env_dir: Path) -> None
     assert {row.dist for row in out.installed if not row.approved} == set()
     # Nothing moved: approving at the version already on disk is a no-op
     # install, so no live session had to be stopped for it.
+    assert out.restart_required is False
+
+
+def _resolving_to_latest(dest: Path, packages: dict[str, ApplySpec]) -> None:
+    _write_pkg(dest, packages)
+    for spec in packages.values():
+        _dist_info(dest, spec.dist, spec.version or "9.9.9")
+
+
+async def test_a_package_can_be_added_without_a_version(env_dir: Path) -> None:
+    """Type the name, let the resolver pick, keep an exact pin afterwards.
+
+    Requiring the Owner to look a version up on PyPI first is friction that
+    also invites picking one that fights the pins already applied.
+    """
+    environment_routes.installer_for_apply = _resolving_to_latest
+    out = await _upsert("pandas", None, "pandas", EnvBroker())
+    assert out.packages["pandas"].version == "9.9.9"
+    assert NodeEnv(env_dir).read_stamp().packages["pandas"].version == "9.9.9"
+
+
+async def test_the_resolved_pin_is_what_later_applies_use(env_dir: Path) -> None:
+    environment_routes.installer_for_apply = _resolving_to_latest
+    await _upsert("pandas", None, "pandas", EnvBroker())
+    seen: list[str] = []
+
+    def recording(dest: Path, packages: dict[str, ApplySpec]) -> None:
+        seen.extend(sorted(spec.requirement() for spec in packages.values()))
+        _resolving_to_latest(dest, packages)
+
+    environment_routes.installer_for_apply = recording
+    out = await _upsert("httpx", "0.27", "httpx", EnvBroker())
+    assert seen == ["httpx==0.27", "pandas==9.9.9"]
     assert out.restart_required is False
