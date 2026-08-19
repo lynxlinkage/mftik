@@ -57,7 +57,6 @@ class StrategyOut(BaseModel):
     created_at: float
     session_id: str
     status: str | None = None
-    paused: bool | None = None
     #: Why a ``failed`` session ended. Null otherwise.
     reason: str | None = None
 
@@ -101,7 +100,6 @@ class SessionOut(BaseModel):
     api_name: str | None = None
     sts_session_id: str | None = None
     strategy: str | None = None
-    paused: bool | None = None
     venue: str | None = None
     reason: str | None = None
 
@@ -113,7 +111,6 @@ class SessionListResponse(BaseModel):
 class StsControlResponse(BaseModel):
     session_id: str
     status: str
-    paused: bool = False
     strategy: str | None = None
     reason: str | None = None
 

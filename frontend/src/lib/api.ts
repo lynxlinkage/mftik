@@ -81,7 +81,6 @@ export type Session = {
 	api_name: string | null;
 	sts_session_id: string | null;
 	strategy: string | null;
-	paused: boolean | null;
 	venue: string | null;
 	/** Why a `failed` session ended. Null for live sessions and clean exits. */
 	reason: string | null;
@@ -90,7 +89,6 @@ export type Session = {
 export type StsControl = {
 	session_id: string;
 	status: string;
-	paused: boolean;
 	strategy: string | null;
 	reason: string | null;
 };
@@ -177,7 +175,6 @@ export type StrategyRow = {
 	created_at: number;
 	session_id: string;
 	status: string | null;
-	paused: boolean | null;
 	/** Why a `failed` session ended. Null for live sessions and clean exits. */
 	reason: string | null;
 };
@@ -611,14 +608,6 @@ export const api = {
 				yaml: body.yaml,
 				timeout: body.timeout ?? 30
 			})
-		}),
-	pauseSts: (id: string) =>
-		request<StsControl>(`/sts/sessions/${encodeURIComponent(id)}/pause`, {
-			method: 'POST'
-		}),
-	resumeSts: (id: string) =>
-		request<StsControl>(`/sts/sessions/${encodeURIComponent(id)}/resume`, {
-			method: 'POST'
 		}),
 	stopSts: (id: string) =>
 		request<StsControl>(`/sts/sessions/${encodeURIComponent(id)}/stop`, {

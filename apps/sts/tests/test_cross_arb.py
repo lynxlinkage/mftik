@@ -588,45 +588,7 @@ async def test_refused_cancel_is_paced_not_retried_every_tick() -> None:
     assert strat.oms.cancelled == [cid, cid]
 
 
-# --- pause / resume / rebuild ----------------------------------------------
-
-
-async def test_pause_cancels_quotes_but_keeps_listening() -> None:
-    strat = await _armed(side=["buy", "sell"])
-    await strat.on_best_quote(_hedge_quote("50000", "50000"))
-    assert len(strat.oms.submitted) == 2
-    cids = {r["cid"] for r in strat.oms.submitted}
-
-    await strat.on_pause()
-    assert strat.paused
-    assert cids <= set(strat.oms.cancelled)
-
-    # Still updates the hedge touch while paused, but does not place.
-    before = len(strat.oms.submitted)
-    await strat.on_best_quote(_hedge_quote("50100", "50100"))
-    assert strat._hedge_quote is not None
-    assert strat._hedge_quote.ask == Decimal("50100")
-    assert len(strat.oms.submitted) == before
-
-
-async def test_resume_replaces_quotes() -> None:
-    strat = await _armed(side=["sell"])
-    await strat.on_best_quote(_hedge_quote("50000", "50000"))
-    cid = strat.oms.submitted[0]["cid"]
-    await strat.on_pause()
-    # Venue confirms the pause cancel so the leg is gone.
-    await strat.on_order_update(
-        QUOTE_API,
-        _update(cid, OrderStatus.CANCELED, side=Side.SELL, price="50050"),
-    )
-    assert Side.SELL not in strat._open
-
-    await strat.on_resume()
-    assert not strat.paused
-    quotes = [r for r in strat.oms.submitted if r["api_id"] == QUOTE_API]
-    assert len(quotes) == 2
-    assert quotes[-1]["side"] is Side.SELL
-    assert quotes[-1]["tif"] is TimeInForce.POST_ONLY
+# --- rebuild ---------------------------------------------------------------
 
 
 async def test_rebuild_is_a_clean_restart() -> None:

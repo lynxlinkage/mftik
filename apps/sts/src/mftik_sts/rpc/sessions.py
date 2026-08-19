@@ -12,8 +12,6 @@ from mftik.protocol import (
     STS_SESSION_CREATE,
     STS_SESSION_FAIL,
     STS_SESSION_LIST,
-    STS_SESSION_PAUSE,
-    STS_SESSION_RESUME,
     STS_SESSION_STOP,
     ListSessionsRequest,
     ListSessionsResult,
@@ -94,24 +92,6 @@ async def handle_session_list(
     )
 
 
-async def handle_session_pause(
-    req: IncomingRequest,
-    *,
-    sessions: SessionManager | None = None,
-) -> None:
-    await _control(req, sessions=sessions, action="pause", reply_type=STS_SESSION_PAUSE)
-
-
-async def handle_session_resume(
-    req: IncomingRequest,
-    *,
-    sessions: SessionManager | None = None,
-) -> None:
-    await _control(
-        req, sessions=sessions, action="resume", reply_type=STS_SESSION_RESUME
-    )
-
-
 async def handle_session_stop(
     req: IncomingRequest,
     *,
@@ -172,8 +152,6 @@ async def _control(
         return
 
     fn: ControlFn | None = {
-        "pause": sessions.pause,
-        "resume": sessions.resume,
         "stop": sessions.stop_session,
     }.get(action)
     if fn is None:

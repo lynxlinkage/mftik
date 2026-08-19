@@ -410,24 +410,6 @@ class OneCancelOther(Strategy):
                 await self._cancel(api_id, cid, "session stopping")
         await self.log("OneCancelOther stopped")
 
-    async def on_pause(self) -> None:
-        await super().on_pause()
-        if self._placed:
-            # The legs stay, and so does the cancel-the-other rule: leaving
-            # both live through a pause is the one outcome an OCO must not
-            # have. Only placing something new is held back.
-            await self.log(
-                "OneCancelOther paused — both legs stay resting, and a fill "
-                "still cancels the other"
-            )
-            return
-        await self.log("OneCancelOther paused before placing")
-
-    async def on_resume(self) -> None:
-        await super().on_resume()
-        await self.log("OneCancelOther resumed")
-        await self._maybe_place()
-
     # --- market data -------------------------------------------------------
 
     async def _request_quote(self) -> None:
@@ -488,7 +470,7 @@ class OneCancelOther(Strategy):
 
     async def _maybe_place(self) -> None:
         """Place the pair once recon, a quote and a running session all hold."""
-        if self._done or self._placed or self.paused:
+        if self._done or self._placed:
             return
         if not self._armed or self._quote is None:
             return

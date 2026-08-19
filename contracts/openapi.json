@@ -1192,90 +1192,6 @@
         }
       }
     },
-    "/sts/sessions/{session_id}/pause": {
-      "post": {
-        "tags": [
-          "sts"
-        ],
-        "summary": "Pause Session",
-        "operationId": "pause_session_sts_sessions__session_id__pause_post",
-        "parameters": [
-          {
-            "name": "session_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Session Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StsControlResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/sts/sessions/{session_id}/resume": {
-      "post": {
-        "tags": [
-          "sts"
-        ],
-        "summary": "Resume Session",
-        "operationId": "resume_session_sts_sessions__session_id__resume_post",
-        "parameters": [
-          {
-            "name": "session_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Session Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StsControlResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/sts/sessions/{session_id}/stop": {
       "post": {
         "tags": [
@@ -3910,17 +3826,6 @@
             ],
             "title": "Strategy"
           },
-          "paused": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Paused"
-          },
           "venue": {
             "anyOf": [
               {
@@ -4128,17 +4033,6 @@
             ],
             "title": "Status"
           },
-          "paused": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Paused"
-          },
           "reason": {
             "anyOf": [
               {
@@ -4275,11 +4169,6 @@
           "status": {
             "type": "string",
             "title": "Status"
-          },
-          "paused": {
-            "type": "boolean",
-            "title": "Paused",
-            "default": false
           },
           "strategy": {
             "anyOf": [

@@ -32,11 +32,6 @@ would answer a fill of that leg. Either shortfall skips the leg — it does not
 fail the session. A hedge IOC that still cannot fund at fill time is logged
 and not retried.
 
-**Pause / resume.** Pause cancels every resting quote and stops placing; MD
-keeps updating the hedge touch so resume can re-arm immediately. Resume is
-just ``_maintain_quotes`` again. A fill that races a pause cancel is still
-hedged — inventory risk does not wait for resume.
-
 **Rebuild.** Equivalent to a fresh start with the same config and cid slot:
 no facts are restored, leftover owned quote orders from recon are cancelled,
 and quoting begins again once both ledgers are live. Missed fills while STS
@@ -313,22 +308,6 @@ class CrossArb(Strategy):
             "recon, then quote again"
         )
 
-    async def on_pause(self) -> None:
-        await super().on_pause()
-        api_id = self._quote_api_id()
-        if api_id is not None:
-            for side in list(self._open):
-                await self._cancel_leg(api_id, side)
-        await self.log(
-            "CrossArb paused — quotes cancelled; still listening to bestquote"
-        )
-
-    async def on_resume(self) -> None:
-        await super().on_resume()
-        await self.log("CrossArb resumed — re-arming quotes")
-        if self._armed and self._hedge_quote is not None:
-            await self._maintain_quotes()
-
     async def on_stop(self) -> None:
         self._stopping = True
         api_id = self._quote_api_id()
@@ -410,21 +389,19 @@ class CrossArb(Strategy):
                     f"ask={_fmt(quote.ask)} open={list(self._open)} "
                     f"quotes={self._quotes}"
                 )
-            # Paused: keep the touch warm, but do not place or reprice.
-            if not self.paused:
-                await self._maintain_quotes()
+            await self._maintain_quotes()
             return
 
         if key == str(self._quote_ticker):
             # Quote-venue BBO is not used for pricing; a push still re-arms
             # after a fill cleared the book, once the hedge touch is known.
-            if self._hedge_quote is not None and not self.paused:
+            if self._hedge_quote is not None:
                 await self._maintain_quotes()
 
     # --- quoting -----------------------------------------------------------
 
     async def _maintain_quotes(self) -> None:
-        if self.paused or self._stopping:
+        if self._stopping:
             return
         hedge = self._hedge_quote
         api_id = self._quote_api_id()
@@ -463,7 +440,7 @@ class CrossArb(Strategy):
         side: Side,
         raw_price: Decimal,
     ) -> None:
-        if self.paused or self._stopping:
+        if self._stopping:
             return
         if side in self._open:
             return

@@ -439,24 +439,6 @@ class ChaseOrder(Strategy):
             await self._cancel_open(api_id)
         await self.log("ChaseOrder stopped")
 
-    async def on_pause(self) -> None:
-        await super().on_pause()
-        self._cancel_timer()
-        await self.log(
-            "ChaseOrder paused — the resting order stays, but stops being "
-            "repriced"
-        )
-
-    async def on_resume(self) -> None:
-        await super().on_resume()
-        if self._tick_token is None:
-            self._tick_token = self.timer.token()
-        # Only the chase resumes. Before recon there is no ledger to check an
-        # order against, so re-arming here would place the first one blind.
-        if self._armed:
-            self._arm_timer()
-        await self.log("ChaseOrder resumed")
-
     # --- market data -------------------------------------------------------
 
     async def on_best_quote(self, quote: BestQuote) -> None:

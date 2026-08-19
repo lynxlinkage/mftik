@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -16,8 +16,6 @@ from mftik.protocol import (
     STS_EVENTLOG_INFO,
     STS_EVENTLOG_READ,
     STS_SESSION_LIST,
-    STS_SESSION_PAUSE,
-    STS_SESSION_RESUME,
     STS_SESSION_STATUS,
     STS_SESSION_STOP,
     ListSessionsRequest,
@@ -122,15 +120,6 @@ def _parse_statuses(status: str | None) -> str | list[str] | None:
     return parts
 
 
-def _includes_live(status: str | Sequence[str] | None) -> bool:
-    """Whether this list has any use for the live-session pause probe."""
-    if status is None:
-        return True
-    if isinstance(status, str):
-        return status == SessionStatus.LIVE.value
-    return SessionStatus.LIVE.value in status
-
-
 def _registry_template(rec: AddedStrategy, store: RegistryStore) -> StrategyTemplate:
     key = qualify(rec.origin, rec.type)
     return StrategyTemplate(
@@ -210,7 +199,6 @@ async def strategy_type_template(
 
 @router.get("/strategies", response_model=StrategyListResponse)
 async def list_strategies(
-    broker: BrokerDep,
     status: str | None = None,
     before: str | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
@@ -223,30 +211,6 @@ async def list_strategies(
     the end of history.
     """
     parsed = _parse_statuses(status)
-    paused_by_session: dict[str, bool] = {}
-    # History and Attention have no use for ``paused``. The probe is a
-    # 5s RPC on a process that can stop answering; skip it unless the
-    # page could show a live row.
-    if _includes_live(parsed):
-        try:
-            live = await request_domain(
-                broker,
-                Topics.STS,
-                ListSessionsRequestEnvelope.wrap(
-                    ListSessionsRequest(domain="sts", status="live"),
-                    type=STS_SESSION_LIST,
-                    source="api",
-                ),
-                result_type=ListSessionsResult,
-            )
-            for s in live.sessions:
-                if s.paused is not None:
-                    paused_by_session[s.session_id] = s.paused
-        except DomainRpcError:
-            logger.exception(
-                "failed to fetch live STS pause state for strategies list"
-            )
-
     fetch = limit + 1
     async with session_scope() as db:
         repo = StsSessionRepository(db)
@@ -271,7 +235,6 @@ async def list_strategies(
                 created_at=row.created_at.timestamp() if row.created_at else 0.0,
                 session_id=row.session_id,
                 status=row.status,
-                paused=paused_by_session.get(row.session_id),
                 reason=row.reason,
             )
         )
@@ -367,40 +330,6 @@ async def list_sessions(
     )
 
 
-@router.post("/sessions/{session_id}/pause", response_model=StsControlResponse)
-async def pause_session(
-    session_id: str,
-    broker: BrokerDep,
-    owner: OwnerId = DEFAULT_USER_ID,
-    principal: PrincipalDep = ANONYMOUS,
-) -> StsControlResponse:
-    return await _control(
-        broker,
-        session_id,
-        STS_SESSION_PAUSE,
-        "sts.session.pause",
-        owner,
-        principal,
-    )
-
-
-@router.post("/sessions/{session_id}/resume", response_model=StsControlResponse)
-async def resume_session(
-    session_id: str,
-    broker: BrokerDep,
-    owner: OwnerId = DEFAULT_USER_ID,
-    principal: PrincipalDep = ANONYMOUS,
-) -> StsControlResponse:
-    return await _control(
-        broker,
-        session_id,
-        STS_SESSION_RESUME,
-        "sts.session.resume",
-        owner,
-        principal,
-    )
-
-
 @router.post("/sessions/{session_id}/stop", response_model=StsControlResponse)
 async def stop_session(
     session_id: str,
@@ -474,7 +403,6 @@ async def ack_session(
         StsSessionStatus(
             session_id=session_id_,
             status=status,
-            paused=False,
             strategy=strategy,
             reason=reason,
             created_by=created_by,
@@ -503,7 +431,6 @@ async def ack_session(
     return StsControlResponse(
         session_id=session_id_,
         status=status,
-        paused=False,
         strategy=strategy,
         reason=reason,
     )

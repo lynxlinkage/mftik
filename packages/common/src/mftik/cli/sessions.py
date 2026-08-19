@@ -30,11 +30,10 @@ def list_sessions(args: argparse.Namespace) -> int:
             str(row.get("session_id") or ""),
             str(row.get("strategy") or ""),
             str(row.get("status") or ""),
-            "yes" if row.get("paused") else "",
         )
         for row in sessions
     ]
-    print(table(("SESSION", "STRATEGY", "STATUS", "PAUSED"), rows))
+    print(table(("SESSION", "STRATEGY", "STATUS"), rows))
     return 0
 
 

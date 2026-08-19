@@ -293,25 +293,6 @@
 		window.scrollTo({ top: 0, behavior: 'smooth' });
 	}
 
-	async function togglePause(s: StrategyRow) {
-		busy = true;
-		error = null;
-		try {
-			const result = s.paused
-				? await api.resumeSts(s.session_id)
-				: await api.pauseSts(s.session_id);
-			strategies = strategies.map((row) =>
-				row.session_id === s.session_id
-					? { ...row, paused: result.paused, status: result.status }
-					: row
-			);
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			busy = false;
-		}
-	}
-
 	async function stop(s: StrategyRow) {
 		busy = true;
 		error = null;
@@ -421,7 +402,7 @@
 		}
 		strategies = strategies.map((s) =>
 			s.session_id === ev.session_id
-				? { ...s, status: ev.status, paused: ev.paused, reason: ev.reason }
+				? { ...s, status: ev.status, reason: ev.reason }
 				: s
 		);
 	}
@@ -560,9 +541,8 @@
 							</a>
 						</td>
 						<td>
-							<!-- The terminal statuses come first: they are final, and a
-							     stale `paused` from the live-session probe must never mask
-							     them. `status` is the only thing consulted. A null `type`
+							<!-- The terminal statuses come first: they are final.
+							     `status` is the only thing consulted. A null `type`
 							     used to be read as failed here, to cover rollbacks that an
 							     older path recorded as `done` — those rows are fixed and
 							     that path now sends `sts.session.fail`, so inferring from
@@ -590,8 +570,6 @@
 									     none; there is nothing to offer for those. -->
 									{#if s.reason}{@render why(s.reason)}{/if}
 								</div>
-							{:else if s.paused}
-								<span class="badge paused">paused</span>
 							{:else if s.status === 'live'}
 								<span class="badge live">running</span>
 							{:else}
@@ -602,14 +580,6 @@
 						<td>
 							<div class="actions">
 								{#if s.status === 'live'}
-									<button
-										type="button"
-										class="secondary"
-										disabled={busy}
-										onclick={() => togglePause(s)}
-									>
-										{s.paused ? 'Resume' : 'Pause'}
-									</button>
 									<button type="button" class="danger" disabled={busy} onclick={() => stop(s)}>
 										Stop
 									</button>

@@ -129,15 +129,6 @@ class TimerToken:
                         pass
                 if self._cancelled.is_set():
                     return
-                if not self._timer._should_fire():
-                    # Paused / closed: hold the due time until resumed or cancel.
-                    try:
-                        await asyncio.wait_for(
-                            self._cancelled.wait(), timeout=0.05
-                        )
-                        return
-                    except TimeoutError:
-                        continue
                 # ``due_ms`` alongside the wall clock: a tick that fires late
                 # is the timer's own version of wire latency, and a strategy
                 # that acted on a stale schedule shows it here.
@@ -217,10 +208,3 @@ class Timer:
 
     def _untrack(self, token: TimerToken) -> None:
         self._tokens.discard(token)
-
-    def _should_fire(self) -> bool:
-        if self._closed:
-            return False
-        if self._strategy is not None and self._strategy.paused:
-            return False
-        return True

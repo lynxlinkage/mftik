@@ -27,14 +27,6 @@ class RecordingStrategy(Strategy):
     async def on_stop(self) -> None:
         self.events.append("on_stop")
 
-    async def on_pause(self) -> None:
-        await super().on_pause()
-        self.events.append("on_pause")
-
-    async def on_resume(self) -> None:
-        await super().on_resume()
-        self.events.append("on_resume")
-
 
 class ExitSoonStrategy(Strategy):
     name = "exit_soon"
@@ -100,22 +92,8 @@ async def test_session_strategy_process_control_1_1(broker: Broker) -> None:
     assert strat.session is session
     assert strat.events == ["on_start", "on_ready"]
 
-    await manager.pause(result.session_id)
-    assert strat.paused
-    assert strat.events == ["on_start", "on_ready", "on_pause"]
-
-    await manager.resume(result.session_id)
-    assert not strat.paused
-    assert strat.events == ["on_start", "on_ready", "on_pause", "on_resume"]
-
     await manager.close(result.session_id)
-    assert strat.events == [
-        "on_start",
-        "on_ready",
-        "on_pause",
-        "on_resume",
-        "on_stop",
-    ]
+    assert strat.events == ["on_start", "on_ready", "on_stop"]
 
 
 @pytest.mark.asyncio
@@ -177,32 +155,6 @@ async def test_strategy_exit_triggers_on_stop(broker: Broker) -> None:
         await asyncio.sleep(0.02)
     assert manager.get("exit-1") is None
     assert strat.events == ["on_start", "on_ready", "on_stop"]
-
-
-@pytest.mark.asyncio
-async def test_noop_pause_cancels_and_resume_rearms(broker: Broker) -> None:
-    manager = SessionManager(broker, heartbeat_interval=0.1)
-    await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="noop-pause",
-            created_by=1,
-            strategy="noop",
-            td=[1],
-        )
-    )
-    session = manager.get("noop-pause")
-    assert session is not None
-    strat = session.strategy
-    assert strat._tick_token is not None  # type: ignore[attr-defined]
-    assert strat._tick_token.active  # type: ignore[attr-defined]
-
-    await manager.pause("noop-pause")
-    assert not strat._tick_token.active  # type: ignore[attr-defined]
-
-    await manager.resume("noop-pause")
-    assert strat._tick_token.active  # type: ignore[attr-defined]
-
-    await manager.close_all()
 
 
 @pytest.mark.asyncio

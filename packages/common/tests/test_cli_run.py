@@ -66,7 +66,6 @@ class Node_:
                 json={
                     "session_id": "sess-1",
                     "status": "done",
-                    "paused": False,
                     "strategy": "tiny",
                     "reason": "operator_stop",
                 },
