@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import NodeEnvironment from '$lib/components/NodeEnvironment.svelte';
 	import {
 		api,
 		formatTs,
@@ -117,7 +118,10 @@
 <div class="page-head">
 	<div>
 		<h1>Settings</h1>
-		<p>Credentials this instance has issued. One owner, several ways to act as them.</p>
+		<p>
+			Credentials this instance has issued, and the extras this node has applied. One owner,
+			several ways to act as them.
+		</p>
 	</div>
 	<button type="button" class="secondary" onclick={refresh} disabled={loading}>
 		{loading ? 'Loading…' : 'Refresh'}
@@ -127,6 +131,8 @@
 {#if error}
 	<div class="error-banner">{error}</div>
 {/if}
+
+<NodeEnvironment />
 
 {#if minted}
 	<!-- Deliberately loud, and deliberately dismissed by hand: this is the only

@@ -75,6 +75,46 @@ async def test_a_registry_key_reads_what_this_node_publishes(db) -> None:
     assert "strategy.py" in detail.json()["contents"]
 
 
+async def test_a_registry_key_reads_handshake_extras_not_environment(
+    db, tmp_path: Path
+) -> None:
+    from mftik.envapply import ApplySpec, apply_packages
+    from mftik.environment import NodeEnv
+
+    def plant(dest: Path, packages: dict) -> None:  # noqa: ANN001
+        for name in packages:
+            pkg = dest / name
+            pkg.mkdir()
+            (pkg / "__init__.py").write_text("ok\n")
+
+    apply_packages(
+        NodeEnv(tmp_path),
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=plant,
+    )
+    app = an_api(registry=True)
+    async with a_client(app) as client:
+        peer, _ = await an_owner_with_keys(client)
+
+    auth = {"Authorization": f"Bearer {peer}"}
+    async with a_client(app) as client:
+        info = await client.get("/registry/v1/info", headers=auth)
+        anon = await client.get("/registry/v1/info")
+        env = await client.get("/environment", headers=auth)
+        posted = await client.post("/environment/packages", headers=auth, json={})
+
+    assert info.status_code == 200
+    extra = info.json()["extras"]["numpy"]
+    assert extra["version"] == "1.0"
+    assert extra["dist"] == "numpy"
+    assert "source" not in extra
+    assert anon.status_code == 200
+    assert "numpy" in anon.json()["extras"]
+    assert anon.json()["extras"]["numpy"] == {}
+    assert env.status_code == 403
+    assert posted.status_code == 403
+
+
 @pytest.mark.parametrize(
     "method,path",
     [
@@ -85,6 +125,10 @@ async def test_a_registry_key_reads_what_this_node_publishes(db) -> None:
         ("POST", "/registry/v1/remotes"),
         ("GET", "/auth/keys"),
         ("POST", "/auth/keys"),
+        ("GET", "/environment"),
+        ("PUT", "/environment"),
+        ("POST", "/environment/packages"),
+        ("POST", "/environment/import"),
     ],
 )
 async def test_a_registry_key_reaches_nothing_else(db, method: str, path: str) -> None:
@@ -114,9 +158,11 @@ async def test_the_source_dump_is_no_longer_public(db) -> None:
         listed = await client.get("/registry/v1/strategies")
         detail = await client.get("/registry/v1/strategies/tiny")
         info = await client.get("/registry/v1/info")
+        env = await client.get("/environment")
 
     assert listed.status_code == 401
     assert detail.status_code == 401
+    assert env.status_code == 401
     # Still open, so a peer learns it speaks the wrong protocol before it
     # goes looking for a key it may not even need.
     assert info.status_code == 200
@@ -160,8 +206,11 @@ def test_only_the_two_peer_reads_relax_the_default() -> None:
         "/registry/v1/add",
         "/sts/sessions",
         "/auth/keys",
+        "/environment",
     ):
         assert required_scope("GET", path) == SCOPE_API, path
+    assert required_scope("PUT", "/environment") == SCOPE_API
+    assert required_scope("POST", "/environment/packages") == SCOPE_API
 
 
 def test_a_registry_key_cannot_write_to_the_paths_it_can_read() -> None:

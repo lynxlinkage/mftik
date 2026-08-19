@@ -161,7 +161,10 @@
 							}}
 							onclick={() => pick(t.type)}
 						>
-							{t.label}
+							<span class="opt-label">{t.label}</span>
+							{#if t.requires?.length && t.env_ok === false}
+								<span class="badge paused">needs {t.requires.join(', ')}</span>
+							{/if}
 						</button>
 					{/each}
 				{/if}
@@ -182,7 +185,10 @@
 							}}
 							onclick={() => pick(t.type)}
 						>
-							{t.label}
+							<span class="opt-label">{t.label}</span>
+							{#if t.requires?.length && t.env_ok === false}
+								<span class="badge paused">needs {t.requires.join(', ')}</span>
+							{/if}
 						</button>
 					{/each}
 				{/if}
@@ -273,7 +279,10 @@
 	}
 
 	.option {
-		display: block;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.6rem;
 		width: 100%;
 		background: none;
 		border: none;
@@ -282,6 +291,12 @@
 		font-weight: 400;
 		text-align: left;
 		padding: 0.4rem 0.65rem;
+	}
+
+	.opt-label {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.option.current {

@@ -11,6 +11,7 @@ import logging
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
+from mftik.environment import NodeEnv, unapproved_present
 from mftik.protocol import (
     STS_REGISTRY_RELOAD,
     StsRegistryReloadRequest,
@@ -20,6 +21,7 @@ from mftik.protocol import (
 )
 from mftik.registry import (
     AddedStrategy,
+    MissingRemoteExtras,
     RegistryConflict,
     RegistryError,
     connect_remote,
@@ -32,6 +34,7 @@ from mftik.registry.qualify import PRIVATE_ORIGIN, PUBLIC_ORIGIN
 from mftik_db.repositories import StsSessionRepository
 from mftik_db.session import session_scope
 
+from mftik_api.auth import ANONYMOUS, PrincipalDep
 from mftik_api.broker_rpc import DomainRpcError, request_domain
 from mftik_api.deps import BrokerDep, RegistryStoreDep
 from mftik_api.schemas import (
@@ -62,15 +65,23 @@ def _strategy_out(added: AddedStrategy) -> RegistryStrategyOut:
         type=added.type,
         digest=added.digest,
         requires_mftik=added.requires_mftik,
+        requires=list(added.requires),
         origin=added.origin,
         files=list(added.files),
     )
 
 
-@router.get("/info", response_model=RegistryInfoOut)
-async def registry_info() -> RegistryInfoOut:
-    """Wire version. A peer that cannot speak this refuses to connect."""
-    return RegistryInfoOut.model_validate(handshake_info())
+@router.get("/info", response_model=RegistryInfoOut, response_model_exclude_none=True)
+async def registry_info(principal: PrincipalDep = ANONYMOUS) -> RegistryInfoOut:
+    """Wire version. A peer that cannot speak this refuses to connect.
+
+    Extra *names* are public — ``connect_remote`` only compares those.
+    Exact pins stay off the anonymous response; a registry key, API key,
+    or session gets ``version`` and ``dist``.
+    """
+    return RegistryInfoOut.model_validate(
+        handshake_info(pins=principal.authenticated)
+    )
 
 
 @router.get("/strategies", response_model=RegistryStrategyListResponse)
@@ -108,9 +119,29 @@ async def get_published(
     )
 
 
+def _applied_extras() -> dict[str, str]:
+    stamp = NodeEnv.from_env().read_stamp()
+    if not stamp.matches_runtime():
+        return {}
+    return {name: rec.version for name, rec in stamp.packages.items()}
+
+
+def _present_extras() -> dict[str, str]:
+    """On the volume as somebody's dependency, and not approved.
+
+    The store cannot read this — it reads neither Postgres nor the overlay —
+    so the refusal only tells ``mftik push`` the difference between "not on
+    this node" and "here at 1.26.4, approve it" if this hands it over.
+    """
+    env = NodeEnv.from_env()
+    return unapproved_present(env, env.read_stamp())
+
+
 @router.post("/add", response_model=RegistryAddOut)
 async def add_strategy(
-    body: RegistryAddBody, store: RegistryStoreDep, broker: BrokerDep
+    body: RegistryAddBody,
+    store: RegistryStoreDep,
+    broker: BrokerDep,
 ) -> RegistryAddOut:
     """Copy a strategy's files into this node's public or private registry.
 
@@ -126,7 +157,13 @@ async def add_strategy(
     happened.
     """
     try:
-        added = store.add(body.files, replace=body.replace, origin=body.origin)
+        added = store.add(
+            body.files,
+            replace=body.replace,
+            origin=body.origin,
+            applied_extras=_applied_extras(),
+            present_extras=_present_extras(),
+        )
     except RegistryConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RegistryError as exc:
@@ -331,6 +368,7 @@ async def remote_diff(name: str, store: RegistryStoreDep) -> RegistryDiffOut:
             )
             for row in result.rows
         ],
+        extras_warnings=list(result.extras_warnings),
     )
 
 
@@ -350,6 +388,19 @@ async def connect(
         result = await connect_remote(
             store, name=body.name, url=body.url, token=body.token
         )
+    except MissingRemoteExtras as exc:
+        # Structured, because the caller's next move depends on which names
+        # and whether each is absent or merely unapproved. A client that had
+        # to read this out of the sentence would break the first time the
+        # sentence changed — which is exactly what happened.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": exc.code,
+                "message": str(exc),
+                "missing": exc.rows(),
+            },
+        ) from exc
     except RegistryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPError as exc:

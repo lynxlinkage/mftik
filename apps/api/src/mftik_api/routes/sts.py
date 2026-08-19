@@ -11,6 +11,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from mftik.environment import NodeEnv
 from mftik.protocol import (
     DEFAULT_STRATEGY_TYPE,
     STS_EVENTLOG_INFO,
@@ -120,14 +121,23 @@ def _parse_statuses(status: str | None) -> str | list[str] | None:
     return parts
 
 
-def _registry_template(rec: AddedStrategy, store: RegistryStore) -> StrategyTemplate:
+def _registry_template(
+    rec: AddedStrategy,
+    store: RegistryStore,
+    applied: frozenset[str] | None = None,
+) -> StrategyTemplate:
     key = qualify(rec.origin, rec.type)
+    requires = list(rec.requires)
+    if applied is None:
+        applied = NodeEnv.from_env().extras_names()
     return StrategyTemplate(
         type=key,
         label=key,
         description=f"{rec.origin} registry ({rec.digest})",
         yaml=store.read_template(rec) or _LOCAL_YAML,
         source="registry",
+        requires=requires,
+        env_ok=set(requires) <= applied,
     )
 
 
@@ -136,13 +146,16 @@ def _deployable_templates(store: RegistryStore) -> list[StrategyTemplate]:
     bundled_types = {t.type for t in bundled}
     seen = set(bundled_types)
     extra: list[StrategyTemplate] = []
+    # One read of the stamp for the whole listing — every row judges its
+    # ``requires`` against the same applied set.
+    applied = NodeEnv.from_env().extras_names()
     for rec in store.list_all():
         if rec.type in bundled_types:
             continue
         key = qualify(rec.origin, rec.type)
         if key in seen:
             continue
-        extra.append(_registry_template(rec, store))
+        extra.append(_registry_template(rec, store, applied))
         seen.add(key)
     extra.sort(key=lambda t: t.type)
     return bundled + extra
@@ -615,6 +628,8 @@ async def deploy(
         code = 404 if exc.code in {"unknown_strategy", "not_found"} else 502
         if exc.code == "timeout":
             code = 504
+        if exc.code == "incompatible_environment":
+            code = 409
         if exc.code == "strategy_refused":
             # The document is wrong, not the platform. Nothing upstream failed
             # and retrying will do the same thing, which is what separates this

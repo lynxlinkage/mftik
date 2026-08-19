@@ -350,6 +350,36 @@ class _FailingPush(Node_):
         return super().__call__(request)
 
 
+def test_run_prints_missing_extras_and_does_not_invent_a_session(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    class Missing(Node_):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path.startswith("/sts/deploy/"):
+                self.paths.append(request.url.path)
+                return httpx.Response(
+                    409,
+                    json={
+                        "detail": (
+                            "incompatible_environment: private::Tiny requires "
+                            "numpy which this node does not have"
+                        )
+                    },
+                )
+            return super().__call__(request)
+
+    _install(monkeypatch, Missing())
+    dest = _tree(tmp_path)
+
+    assert main(["run", str(dest), "--no-push", "--no-follow"]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "numpy" in err
+    assert "incompatible_environment" in err
+    assert "unknown_strategy" not in err
+    assert "may already be live" not in err
+    assert "Traceback" not in err
+
+
 def test_a_failed_deploy_names_the_route_and_says_to_check_ps(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

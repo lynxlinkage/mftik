@@ -5,10 +5,12 @@ one imports them, and until it runs the running STS has never heard of the
 tree — a deploy naming it answers ``unknown_strategy``, and a *replaced* tree
 is worse, because the deploy succeeds and runs the code from before the edit.
 
-Scanning is the whole job; ``load_local_registry`` already decides what to
-skip and logs why. What comes back is the qualified keys this process now
-answers to, which is what lets the caller distinguish "written to disk" from
-"loadable".
+Scanning is the whole job; ``refresh`` re-reads the env stamp, ensures
+``current`` is on ``sys.path``, invalidates the import cache, then
+``load_local_registry`` decides what to skip and logs why. What comes back
+is the qualified keys this process now answers to, plus the generation it
+now believes — which is what lets the caller distinguish "written to disk"
+from "loadable", and a committed apply from a process that has not seen it.
 """
 
 from __future__ import annotations
@@ -19,14 +21,17 @@ from typing import TYPE_CHECKING
 from mftik.broker import IncomingRequest
 from mftik.protocol import (
     STS_ERROR,
+    STS_REGISTRY_GENERATION,
     STS_REGISTRY_RELOAD,
     RpcError,
     RpcErrorEnvelope,
+    StsRegistryGenerationResult,
+    StsRegistryGenerationResultEnvelope,
     StsRegistryReloadResult,
     StsRegistryReloadResultEnvelope,
 )
 
-from mftik_sts.impl import load_local_registry
+from mftik_sts.runtime_env import current_stamp, refresh
 
 if TYPE_CHECKING:
     from mftik_sts.session import SessionManager
@@ -45,7 +50,7 @@ async def handle_registry_reload(
         # Python modules, which mutates ``sys.modules`` — running that
         # alongside a session's own imports is not something to arrange
         # casually, and the scan is a directory walk over a handful of trees.
-        loaded = load_local_registry()
+        loaded, stamp = refresh()
     except Exception as exc:
         # A scan that raises is a broken store, not a broken tree: individual
         # trees are already skipped one by one inside. Worth answering as an
@@ -65,8 +70,25 @@ async def handle_registry_reload(
     logger.info("registry reloaded: %d strategy(ies)", len(loaded))
     await req.reply(
         StsRegistryReloadResultEnvelope.wrap(
-            StsRegistryReloadResult(loaded=loaded),
+            StsRegistryReloadResult(loaded=loaded, generation=stamp.generation),
             type=STS_REGISTRY_RELOAD,
+            source="sts",
+            session_id=req.envelope.session_id,
+        )
+    )
+
+
+async def handle_registry_generation(
+    req: IncomingRequest,
+    *,
+    sessions: SessionManager | None = None,
+) -> None:
+    del sessions
+    stamp = current_stamp()
+    await req.reply(
+        StsRegistryGenerationResultEnvelope.wrap(
+            StsRegistryGenerationResult(generation=stamp.generation),
+            type=STS_REGISTRY_GENERATION,
             source="sts",
             session_id=req.envelope.session_id,
         )

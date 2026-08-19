@@ -39,6 +39,7 @@ from mftik.strategy.client_order_id import SLOT_SPACE
 from mftik_db.models.session import SessionDomain, SessionStatus
 
 from mftik_sts.impl import resolve as resolve_strategy
+from mftik_sts.runtime_env import IncompatibleEnvironment, ensure_deployable
 from mftik_sts.session.session import StsSession
 
 logger = logging.getLogger(__name__)
@@ -254,6 +255,7 @@ class SessionManager:
         if request.session_id in self._sessions:
             raise KeyError(f"sts session already exists: {request.session_id}")
 
+        ensure_deployable(request.type or request.strategy)
         strategy = self._strategy_factory(request.strategy)
         cid_slot = await self._allocate_cid_slot()
         session = StsSession(
@@ -679,7 +681,26 @@ class SessionManager:
                 )
                 continue
             try:
+                ensure_deployable(
+                    getattr(row, "type", None) or getattr(row, "strategy", None)
+                )
                 strategy = self._strategy_factory(getattr(row, "strategy", None))
+            except IncompatibleEnvironment as exc:
+                logger.warning(
+                    "STS not rebuilding session=%s: incompatible environment "
+                    "(%s)",
+                    session_id,
+                    exc,
+                )
+                if self._bump_rebuild_count is not None:
+                    try:
+                        await self._bump_rebuild_count(session_id)
+                    except Exception:
+                        logger.exception(
+                            "STS rebuild count bump failed session=%s",
+                            session_id,
+                        )
+                continue
             except KeyError:
                 # A row naming a strategy this build does not have. Expected —
                 # a strategy can be renamed or withdrawn while a session that

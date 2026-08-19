@@ -1,7 +1,14 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { api, type RegistryRemote, type RegistryStrategy } from '$lib/api';
+	import {
+		api,
+		missingRemoteExtras,
+		type EnvironmentImport,
+		type MissingExtra,
+		type RegistryRemote,
+		type RegistryStrategy
+	} from '$lib/api';
 
 	let published = $state<RegistryStrategy[]>([]);
 	let privateStrategies = $state<RegistryStrategy[]>([]);
@@ -14,10 +21,31 @@
 	let url = $state('');
 	let token = $state('');
 	let connectError = $state<string | null>(null);
+	let connectMissing = $state<MissingExtra[]>([]);
+	let extrasPreview = $state<EnvironmentImport | null>(null);
+	let distEdits = $state<Record<string, string>>({});
 	let removing = $state<string | null>(null);
 	let blocked = $state<{ name: string; message: string } | null>(null);
 
 	const canConnect = $derived(!busy && !!name.trim() && !!url.trim());
+	// Rows the dialog cannot settle on its own: a pin clash with what this node
+	// already has, a dist guessed from the import name, or a peer that withheld
+	// versions. Each needs a decision and a field this dialog does not have.
+	// A dist still equal to the import name is one nobody corrected — sklearn
+	// is not on PyPI, and installing it under that name is how you get a
+	// package that is not the one the peer runs.
+	const unfixedGuessed = $derived(
+		(extrasPreview?.added ?? []).some(
+			(row) => row.guessed && (distEdits[row.name] ?? row.dist) === row.name
+		)
+	);
+	// Blocked with nothing this dialog can do about it: a pin clash is settled
+	// by changing this node's own extras, and an unpinned row needs a key from
+	// the peer. Neither is a field.
+	const hardBlocked = $derived(
+		!!extrasPreview &&
+			(extrasPreview.conflicts.length > 0 || extrasPreview.unpinned.length > 0)
+	);
 
 	async function refresh() {
 		loading = true;
@@ -43,7 +71,14 @@
 		name = '';
 		url = '';
 		token = '';
+		clearConnectError();
+	}
+
+	function clearConnectError() {
 		connectError = null;
+		connectMissing = [];
+		extrasPreview = null;
+		distEdits = {};
 	}
 
 	function closeConnect() {
@@ -67,9 +102,59 @@
 			await goto(`/registry/${result.name}`);
 		} catch (e) {
 			connectError = e instanceof Error ? e.message : String(e);
+			connectMissing = missingRemoteExtras(e);
+			extrasPreview = null;
 		} finally {
 			busy = false;
 		}
+	}
+
+	/**
+	 * Import the peer's extras without leaving the dialog.
+	 *
+	 * The URL and the key are already typed here; sending someone to another
+	 * page to enter them a second time is the whole friction. Preview first —
+	 * confirm is what installs into the process this node trades from.
+	 */
+	async function previewExtras() {
+		if (busy || !url.trim()) return;
+		busy = true;
+		try {
+			extrasPreview = await api.importEnvironment({
+				url: url.trim(),
+				token: token.trim() || undefined
+			});
+			distEdits = Object.fromEntries(
+				extrasPreview.added.filter((row) => row.guessed).map((row) => [row.name, row.dist])
+			);
+			connectError = null;
+		} catch (e) {
+			connectError = e instanceof Error ? e.message : String(e);
+			extrasPreview = null;
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function installExtrasAndConnect() {
+		if (busy || !extrasPreview || hardBlocked || unfixedGuessed) return;
+		busy = true;
+		try {
+			await api.importEnvironment({
+				url: url.trim(),
+				token: token.trim() || undefined,
+				confirm: true,
+				dist: distEdits
+			});
+			extrasPreview = null;
+			connectMissing = [];
+		} catch (e) {
+			connectError = e instanceof Error ? e.message : String(e);
+			busy = false;
+			return;
+		}
+		busy = false;
+		await connect();
 	}
 
 	function onConnectKey(event: KeyboardEvent) {
@@ -233,6 +318,86 @@
 			</p>
 			{#if connectError}
 				<p class="err">{connectError}</p>
+			{/if}
+			{#if connectMissing.length}
+				<div class="extras">
+					<p class="hint">
+						This node's approved extras do not cover what the peer advertises. A
+						version difference is not a connect error — these are missing names.
+					</p>
+					<ul class="missing">
+						{#each connectMissing as row (row.name)}
+							<li>
+								<code>{row.name}</code>
+								{#if row.version}
+									<span class="badge paused">here at {row.version}, not approved</span>
+								{:else}
+									<span class="badge failed">not on this node</span>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+					{#if !extrasPreview}
+						<button
+							type="button"
+							class="secondary"
+							onclick={previewExtras}
+							disabled={busy || !url.trim()}
+						>
+							{busy ? 'Reading…' : "Preview this peer's extras"}
+						</button>
+					{:else}
+						<p class="hint">
+							{extrasPreview.added.length} to install, {extrasPreview.kept.length} already
+							here. This installs into the process this node trades from.
+						</p>
+						{#if extrasPreview.guessed.length}
+							<p class="hint">
+								The peer sent a version but no distribution name, so the import
+								name was assumed. <code>sklearn</code> is not on PyPI — correct
+								any that differ before installing.
+							</p>
+							<ul class="missing">
+								{#each extrasPreview.added.filter((row) => row.guessed) as row (row.name)}
+									<li>
+										<code>{row.name}</code>
+										<input
+											value={distEdits[row.name] ?? row.dist}
+											oninput={(e) => {
+												distEdits = { ...distEdits, [row.name]: e.currentTarget.value };
+											}}
+											disabled={busy}
+											aria-label={`PyPI distribution for ${row.name}`}
+										/>
+									</li>
+								{/each}
+							</ul>
+						{/if}
+						{#if extrasPreview.conflicts.length}
+							<p class="hint">
+								{extrasPreview.conflicts.map((row) => row.name).join(', ')}: this
+								node has a different version applied. Change it under Settings →
+								Node extras first; importing must not silently move a pin this
+								node's own strategies are running on.
+							</p>
+						{/if}
+						{#if extrasPreview.unpinned.length}
+							<p class="hint">
+								{extrasPreview.unpinned.join(', ')}: the peer published names
+								without versions. Its <code>/info</code> keeps pins for
+								authenticated callers — ask that node for a registry key, put it
+								in the field above, and preview again.
+							</p>
+						{/if}
+						<button
+							type="button"
+							onclick={installExtrasAndConnect}
+							disabled={busy || !canConnect || hardBlocked || unfixedGuessed}
+						>
+							{busy ? 'Installing…' : 'Install and connect'}
+						</button>
+					{/if}
+				</div>
 			{/if}
 			<div class="modal-actions">
 				<button type="button" class="secondary" onclick={closeConnect} disabled={busy}>
@@ -462,5 +627,36 @@
 		display: flex;
 		justify-content: flex-end;
 		gap: 0.5rem;
+	}
+
+	.extras {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		align-items: flex-start;
+		padding: 0.7rem 0.8rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+	}
+
+	.missing {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		font-size: 0.85rem;
+	}
+
+	.missing li {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+	}
+
+	.missing input {
+		flex: 1;
+		min-width: 8rem;
 	}
 </style>

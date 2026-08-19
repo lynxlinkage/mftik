@@ -546,7 +546,7 @@
           "registry"
         ],
         "summary": "Registry Info",
-        "description": "Wire version. A peer that cannot speak this refuses to connect.",
+        "description": "Wire version. A peer that cannot speak this refuses to connect.\n\nExtra *names* are public \u2014 ``connect_remote`` only compares those.\nExact pins stay off the anonymous response; a registry key, API key,\nor session gets ``version`` and ``dist``.",
         "operationId": "registry_info_registry_v1_info_get",
         "responses": {
           "200": {
@@ -913,6 +913,237 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RegistryDiffOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/environment": {
+      "get": {
+        "tags": [
+          "environment"
+        ],
+        "summary": "Get Environment",
+        "operationId": "get_environment_environment_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "environment"
+        ],
+        "summary": "Put Environment",
+        "operationId": "put_environment_environment_put",
+        "parameters": [
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnvironmentPutBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/environment/packages": {
+      "post": {
+        "tags": [
+          "environment"
+        ],
+        "summary": "Upsert Package",
+        "operationId": "upsert_package_environment_packages_post",
+        "parameters": [
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnvironmentPackageBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/environment/packages/{name}": {
+      "delete": {
+        "tags": [
+          "environment"
+        ],
+        "summary": "Delete Package",
+        "operationId": "delete_package_environment_packages__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/environment/import": {
+      "post": {
+        "tags": [
+          "environment"
+        ],
+        "summary": "Import Environment",
+        "description": "Diff a peer's extras against this stamp; confirm is what applies them.",
+        "operationId": "import_environment_environment_import_post",
+        "parameters": [
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnvironmentImportBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentImportOut"
                 }
               }
             }
@@ -2684,6 +2915,37 @@
         "title": "BoardSession",
         "description": "One strategy run, as the board shows it.\n\nCounts and times, and deliberately no PnL. Deriving a result means matching\nexecutions into positions and valuing whatever is left open, and a number\nproduced before that machinery exists would be believed. What is here is\nwhat the record can already state without arithmetic."
       },
+      "BrokenTreeOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requires"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "origin"
+        ],
+        "title": "BrokenTreeOut",
+        "description": "A stored tree whose ``requires`` names an extra that was just removed."
+      },
       "DeployResponse": {
         "properties": {
           "session_id": {
@@ -2775,6 +3037,437 @@
         ],
         "title": "DomainStats"
       },
+      "EnvImportRowOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "dist": {
+            "type": "string",
+            "title": "Dist"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "added",
+              "kept",
+              "conflict"
+            ],
+            "title": "Status"
+          },
+          "guessed": {
+            "type": "boolean",
+            "title": "Guessed",
+            "default": false
+          },
+          "pinned": {
+            "type": "boolean",
+            "title": "Pinned",
+            "default": true
+          },
+          "local_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Version"
+          },
+          "local_dist": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Dist"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "dist",
+          "status"
+        ],
+        "title": "EnvImportRowOut"
+      },
+      "EnvInstalledOut": {
+        "properties": {
+          "dist": {
+            "type": "string",
+            "title": "Dist"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "approved": {
+            "type": "boolean",
+            "title": "Approved"
+          },
+          "suggested_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggested Name"
+          },
+          "needed_by": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Needed By"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dist",
+          "version",
+          "approved"
+        ],
+        "title": "EnvInstalledOut",
+        "description": "One distribution actually present in the live generation.\n\nThe stamp lists what the Owner approved. A resolver installs that plus\nits dependencies, and those are invisible everywhere else: ``pandas``\nalone brings numpy, python-dateutil, pytz and tzdata. They are on\n``sys.path`` and importable, but a strategy may not declare them \u2014\n``requires`` is checked against the stamp \u2014 so the node refuses a tree\nthat needs numpy while numpy sits right there.\n\nApproving one is a no-op install at the version already on disk; it only\nadds the stamp row. Without this list nobody could know that, or which\nversion to pin it at."
+      },
+      "EnvPackageIn": {
+        "properties": {
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "dist": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dist"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "manual"
+          }
+        },
+        "type": "object",
+        "title": "EnvPackageIn",
+        "description": "One package the Owner is asking for.\n\n``version`` may be omitted: the resolver picks, and the stamp records\nwhat it picked. Leaving it out is loose for this request only \u2014 every\nlater apply rebuilds from the stamped pin, so an untouched row does not\ndrift because something else was added."
+      },
+      "EnvPackageOut": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "dist": {
+            "type": "string",
+            "title": "Dist"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version",
+          "dist",
+          "source"
+        ],
+        "title": "EnvPackageOut"
+      },
+      "EnvironmentImportBody": {
+        "properties": {
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "confirm": {
+            "type": "boolean",
+            "title": "Confirm",
+            "default": false
+          },
+          "force": {
+            "type": "boolean",
+            "title": "Force",
+            "default": false
+          },
+          "dist": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Dist"
+          }
+        },
+        "type": "object",
+        "title": "EnvironmentImportBody",
+        "description": "Fetch a peer's extras. ``confirm`` is what actually installs them."
+      },
+      "EnvironmentImportOut": {
+        "properties": {
+          "added": {
+            "items": {
+              "$ref": "#/components/schemas/EnvImportRowOut"
+            },
+            "type": "array",
+            "title": "Added"
+          },
+          "kept": {
+            "items": {
+              "$ref": "#/components/schemas/EnvImportRowOut"
+            },
+            "type": "array",
+            "title": "Kept"
+          },
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/EnvImportRowOut"
+            },
+            "type": "array",
+            "title": "Conflicts"
+          },
+          "guessed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Guessed"
+          },
+          "unpinned": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unpinned"
+          },
+          "applied": {
+            "type": "boolean",
+            "title": "Applied",
+            "default": false
+          },
+          "environment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EnvironmentOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "EnvironmentImportOut"
+      },
+      "EnvironmentOut": {
+        "properties": {
+          "generation": {
+            "type": "integer",
+            "title": "Generation"
+          },
+          "python": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Python"
+          },
+          "platform": {
+            "type": "string",
+            "title": "Platform"
+          },
+          "bytes": {
+            "type": "integer",
+            "title": "Bytes"
+          },
+          "packages": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/EnvPackageOut"
+            },
+            "type": "object",
+            "title": "Packages"
+          },
+          "installed": {
+            "items": {
+              "$ref": "#/components/schemas/EnvInstalledOut"
+            },
+            "type": "array",
+            "title": "Installed"
+          },
+          "abi_ok": {
+            "type": "boolean",
+            "title": "Abi Ok"
+          },
+          "runtime_python": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Runtime Python"
+          },
+          "runtime_platform": {
+            "type": "string",
+            "title": "Runtime Platform"
+          },
+          "restart_required": {
+            "type": "boolean",
+            "title": "Restart Required",
+            "default": false
+          },
+          "loaded": {
+            "type": "boolean",
+            "title": "Loaded",
+            "default": true
+          },
+          "load_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Error"
+          },
+          "broken": {
+            "items": {
+              "$ref": "#/components/schemas/BrokenTreeOut"
+            },
+            "type": "array",
+            "title": "Broken"
+          }
+        },
+        "type": "object",
+        "required": [
+          "generation",
+          "python",
+          "platform",
+          "bytes",
+          "abi_ok",
+          "runtime_python",
+          "runtime_platform"
+        ],
+        "title": "EnvironmentOut"
+      },
+      "EnvironmentPackageBody": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "dist": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dist"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "manual"
+          },
+          "force": {
+            "type": "boolean",
+            "title": "Force",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "EnvironmentPackageBody"
+      },
+      "EnvironmentPutBody": {
+        "properties": {
+          "packages": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/EnvPackageIn"
+            },
+            "type": "object",
+            "title": "Packages"
+          },
+          "force": {
+            "type": "boolean",
+            "title": "Force",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "EnvironmentPutBody"
+      },
       "EventLogInfoResponse": {
         "properties": {
           "session_id": {
@@ -2826,6 +3519,35 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "HandshakeExtraOut": {
+        "properties": {
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "dist": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dist"
+          }
+        },
+        "type": "object",
+        "title": "HandshakeExtraOut",
+        "description": "One applied extra as a peer advertises it.\n\nThe key on ``extras`` is the import name. An anonymous handshake\npublishes the name only; ``version`` and ``dist`` are filled in for\nan authenticated caller. A legacy peer that published a bare\nversion string is read as ``dist`` = the key."
       },
       "IdentityListOut": {
         "properties": {
@@ -3206,6 +3928,13 @@
             "type": "string",
             "title": "Requires Mftik"
           },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requires"
+          },
           "origin": {
             "type": "string",
             "title": "Origin"
@@ -3330,6 +4059,13 @@
             },
             "type": "array",
             "title": "Strategies"
+          },
+          "extras_warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Extras Warnings"
           }
         },
         "type": "object",
@@ -3356,6 +4092,18 @@
           "mftik_version": {
             "type": "string",
             "title": "Mftik Version"
+          },
+          "extras": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/HandshakeExtraOut"
+            },
+            "type": "object",
+            "title": "Extras"
+          },
+          "env_generation": {
+            "type": "integer",
+            "title": "Env Generation",
+            "default": 0
           }
         },
         "type": "object",
@@ -3492,6 +4240,13 @@
             "type": "string",
             "title": "Requires Mftik"
           },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requires"
+          },
           "origin": {
             "type": "string",
             "title": "Origin"
@@ -3548,6 +4303,13 @@
           "requires_mftik": {
             "type": "string",
             "title": "Requires Mftik"
+          },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requires"
           },
           "origin": {
             "type": "string",
@@ -3609,6 +4371,13 @@
           "requires_mftik": {
             "type": "string",
             "title": "Requires Mftik"
+          },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requires"
           },
           "origin": {
             "type": "string",
@@ -4080,6 +4849,18 @@
             ],
             "title": "Source",
             "default": "bundled"
+          },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requires"
+          },
+          "env_ok": {
+            "type": "boolean",
+            "title": "Env Ok",
+            "default": true
           }
         },
         "type": "object",

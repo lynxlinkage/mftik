@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from mftik.protocol import SymbolInfo
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class DomainStats(BaseModel):
@@ -74,6 +74,8 @@ class StrategyTemplateOut(BaseModel):
     description: str
     yaml: str
     source: Literal["bundled", "registry"] = "bundled"
+    requires: list[str] = Field(default_factory=list)
+    env_ok: bool = True
 
 
 class StrategyTypesResponse(BaseModel):
@@ -348,6 +350,7 @@ class RegistryStrategyOut(BaseModel):
     type: str
     digest: str
     requires_mftik: str
+    requires: list[str] = Field(default_factory=list)
     origin: str
     files: list[str] = Field(default_factory=list)
 
@@ -393,11 +396,75 @@ class RegistryStrategyListResponse(BaseModel):
     strategies: list[RegistryStrategyOut] = Field(default_factory=list)
 
 
+class EnvInstalledOut(BaseModel):
+    """One distribution actually present in the live generation.
+
+    The stamp lists what the Owner approved. A resolver installs that plus
+    its dependencies, and those are invisible everywhere else: ``pandas``
+    alone brings numpy, python-dateutil, pytz and tzdata. They are on
+    ``sys.path`` and importable, but a strategy may not declare them —
+    ``requires`` is checked against the stamp — so the node refuses a tree
+    that needs numpy while numpy sits right there.
+
+    Approving one is a no-op install at the version already on disk; it only
+    adds the stamp row. Without this list nobody could know that, or which
+    version to pin it at.
+    """
+
+    dist: str
+    version: str
+    #: This distribution backs a stamp row.
+    approved: bool
+    #: The import name to approve it under, read off the wheel's
+    #: ``top_level.txt`` or ``RECORD`` — never guessed from ``dist``.
+    #: ``python-dateutil`` provides ``dateutil``, and the guess
+    #: (``python_dateutil``) is a valid identifier that imports nothing.
+    #: ``null`` when the wheel provides several top-level names, because
+    #: which one a strategy means is a choice and not this code's to make.
+    suggested_name: str | None = None
+    #: Installed distributions that directly require this one. Empty for a
+    #: root — something the Owner asked for. Read off ``Requires-Dist``, so
+    #: ``six`` shows as needed by ``python-dateutil`` rather than sitting
+    #: next to ``numpy`` as though the two were equally the Owner's business.
+    needed_by: list[str] = Field(default_factory=list)
+
+
+class HandshakeExtraOut(BaseModel):
+    """One applied extra as a peer advertises it.
+
+    The key on ``extras`` is the import name. An anonymous handshake
+    publishes the name only; ``version`` and ``dist`` are filled in for
+    an authenticated caller. A legacy peer that published a bare
+    version string is read as ``dist`` = the key.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    version: str | None = None
+    dist: str | None = None
+
+
 class RegistryInfoOut(BaseModel):
     protocol: str
     protocol_version: int
     protocol_min: int
     mftik_version: str
+    extras: dict[str, HandshakeExtraOut] = Field(default_factory=dict)
+    env_generation: int = 0
+
+    @field_validator("extras", mode="before")
+    @classmethod
+    def _coerce_legacy_extras(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return {}
+        out: dict[str, object] = {}
+        for name, item in value.items():
+            key = str(name)
+            if isinstance(item, str):
+                out[key] = {"version": item, "dist": key}
+            else:
+                out[key] = item
+        return out
 
 
 class RegistryRemoteBody(BaseModel):
@@ -439,6 +506,7 @@ class RegistryDiffOut(RegistryRemoteOut):
     reachable: bool = True
     error: str | None = None
     strategies: list[RegistrySyncRow] = Field(default_factory=list)
+    extras_warnings: list[str] = Field(default_factory=list)
 
 
 class RegistryRemotesResponse(BaseModel):
@@ -456,3 +524,110 @@ class RegistryConnectOut(BaseModel):
     #: Set when STS could not be asked at all, so ``loaded`` is empty for a
     #: reason that has nothing to do with the strategies.
     load_error: str | None = None
+
+
+class EnvPackageIn(BaseModel):
+    """One package the Owner is asking for.
+
+    ``version`` may be omitted: the resolver picks, and the stamp records
+    what it picked. Leaving it out is loose for this request only — every
+    later apply rebuilds from the stamped pin, so an untouched row does not
+    drift because something else was added.
+    """
+
+    version: str | None = None
+    dist: str | None = None
+    source: str = "manual"
+
+
+class EnvPackageOut(BaseModel):
+    version: str
+    dist: str
+    source: str
+
+
+class EnvironmentPutBody(BaseModel):
+    packages: dict[str, EnvPackageIn] = Field(default_factory=dict)
+    force: bool = False
+
+
+class EnvironmentPackageBody(BaseModel):
+    #: Omit ``version`` to let the resolver choose; the stamp keeps the pin
+    #: it resolved to. See :class:`EnvPackageIn`.
+    name: str
+    version: str | None = None
+    dist: str | None = None
+    source: str = "manual"
+    force: bool = False
+
+
+class BrokenTreeOut(BaseModel):
+    """A stored tree whose ``requires`` names an extra that was just removed."""
+
+    name: str
+    type: str
+    origin: str
+    requires: list[str] = Field(default_factory=list)
+
+
+class EnvironmentOut(BaseModel):
+    generation: int
+    python: list[int]
+    platform: str
+    bytes: int
+    packages: dict[str, EnvPackageOut] = Field(default_factory=dict)
+    #: Everything the resolver actually put in the live generation, approved
+    #: rows and their dependencies alike. See :class:`EnvInstalledOut`.
+    installed: list[EnvInstalledOut] = Field(default_factory=list)
+    abi_ok: bool
+    runtime_python: list[int]
+    runtime_platform: str
+    restart_required: bool = False
+    loaded: bool = True
+    load_error: str | None = None
+    broken: list[BrokenTreeOut] = Field(default_factory=list)
+
+
+class EnvironmentImportBody(BaseModel):
+    """Fetch a peer's extras. ``confirm`` is what actually installs them."""
+
+    url: str | None = None
+    token: str | None = None
+    #: A remote already in ``remotes.toml``. Used when the Owner does not
+    #: want to retype the URL; import still does not write that file.
+    name: str | None = None
+    confirm: bool = False
+    force: bool = False
+    #: Import-name → PyPI distribution, for rows whose ``dist`` was guessed.
+    dist: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _url_or_name(self) -> EnvironmentImportBody:
+        if not (self.url or self.name):
+            raise ValueError("url or name is required")
+        return self
+
+
+class EnvImportRowOut(BaseModel):
+    name: str
+    version: str
+    dist: str
+    status: Literal["added", "kept", "conflict"]
+    guessed: bool = False
+    #: The peer gave a version. False when its ``/info`` published the name
+    #: only, which is what an authenticated node withholds from an anonymous
+    #: caller — no ``dist`` the Owner types here can make such a row
+    #: installable, so the UI must not offer that as the remedy.
+    pinned: bool = True
+    local_version: str | None = None
+    local_dist: str | None = None
+
+
+class EnvironmentImportOut(BaseModel):
+    added: list[EnvImportRowOut] = Field(default_factory=list)
+    kept: list[EnvImportRowOut] = Field(default_factory=list)
+    conflicts: list[EnvImportRowOut] = Field(default_factory=list)
+    guessed: list[str] = Field(default_factory=list)
+    unpinned: list[str] = Field(default_factory=list)
+    applied: bool = False
+    environment: EnvironmentOut | None = None

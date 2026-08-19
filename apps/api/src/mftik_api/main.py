@@ -16,6 +16,7 @@ from mftik_api.routes import (
     apis_router,
     audits_router,
     board_router,
+    environment_router,
     health_router,
     logs_router,
     md_router,
@@ -109,6 +110,7 @@ app.include_router(health_router)
 app.include_router(stats_router)
 app.include_router(apis_router)
 app.include_router(registry_router)
+app.include_router(environment_router)
 app.include_router(sts_router)
 app.include_router(td_router)
 app.include_router(md_router)

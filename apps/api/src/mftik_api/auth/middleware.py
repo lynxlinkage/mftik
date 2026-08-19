@@ -43,8 +43,8 @@ PUBLIC_PATHS = frozenset(
         "/auth/status",
         "/auth/setup",
         "/auth/login/password",
-        # Versions only. A peer should learn it speaks the wrong protocol
-        # before it goes looking for a key it may not need yet.
+        # Versions plus applied extras. A peer should learn it speaks the
+        # wrong protocol before it goes looking for a key it may not need yet.
         "/registry/v1/info",
     }
 )

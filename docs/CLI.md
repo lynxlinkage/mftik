@@ -133,6 +133,7 @@ mftik whoami                who this machine is, to the node it points at
 mftik profiles              the nodes this machine is connected to
 mftik disconnect <name>     forget one, and the key it issued
 mftik check <path> [cfg]    the import gate and on_initialized, offline
+mftik env <verb>            the third-party packages this node has applied
 mftik push <path>           copy a strategy tree into the node's private registry
 mftik run <path> [cfg]      push, deploy, and tail the session's log
 mftik ps                    live sessions
@@ -141,11 +142,17 @@ mftik stop <session>        stop a live session
 ```
 
 `check` does not talk to a node. It runs four layers and stops at the first
-refusal: the import gate, the naming rules `add` uses, `parse_strategy_yml`
+refusal: the import gate (stdlib, the SDK, files in the tree, and names
+declared in ``requires`` — a two-pass scan so a helper can import what a
+later class listed), the naming rules `add` uses, `parse_strategy_yml`
 if a document was given or a `strategy.yml` lives in the tree (root, or a
 single copy next to a packaged class), then `load_class` and — when there
 is a document — `on_initialized`. Without a document those last two steps
-about the config are skipped, and the command says so.
+about the config are skipped, and the command says so. A declared extra
+is still only a declaration: whether this node has it is a push question.
+A push the node refuses for a missing extra prints those names and exits 1.
+`run` that hears `incompatible_environment` does the same — it is not
+`unknown_strategy`, and it is not a session that may already be live.
 
 `push` is always `origin=private` and always replaces. It copies the
 `.py` tree and, when present, `strategy.yml` — that sidecar becomes the
@@ -154,6 +161,59 @@ STS picker's starting document. A nested copy is stored as root
 `loaded` after asking STS to re-scan; only `loaded: true` means a deploy
 will resolve the tree. The other two outcomes (STS did not answer; STS
 answered and skipped the tree) are exit 1, with the node's `load_error`.
+
+### `mftik env`
+
+The Settings page's extras surface, same endpoints. Verbs rather than flags,
+because they are not equally safe: `add` and `rm` reinstall the whole overlay
+into a new generation, `deps` reads, and one parser would put the first two a
+typo away from the third.
+
+```
+mftik env list              the stamp: packages, generation, size, ABI, restart
+mftik env deps              what the resolver installed that nobody approved
+mftik env add <name>        apply one; --version optional, --dist when it differs
+mftik env approve <dist>    stamp a dependency at the version already installed
+mftik env rm <name>         remove one; prints the trees that stop deploying
+mftik env import <url>      preview a peer's extras; --confirm installs them
+```
+
+`add` without `--version` hands the installer a bare name and the node stamps
+what it resolved to. Loose is a property of the request: every later apply
+rebuilds from the stamped pin, so an untouched package does not move because
+you added another one.
+
+`deps` is the one worth knowing about. Installing `pandas` also installs numpy,
+python-dateutil, pytz, tzdata — and six, behind python-dateutil. All of them
+are importable and none of them are declarable: `requires` is checked against
+the stamp, so a tree naming one is refused while the package sits on the very
+`sys.path` the refusal came from. The `NEEDED BY` column is what separates the
+one worth approving from the plumbing under it. `approve` pins at the version
+already on disk, which makes the install a no-op and leaves live sessions
+alone.
+
+`import` reads without `--confirm`. The package names come from another node;
+installing on its say-so alone is how a typosquat reaches this node's trading
+`sys.path`. Rows it will not install name their own remedy — `--dist` for a
+distribution the peer did not send, `--token` for a peer that withholds pins
+from anonymous callers, and for a pin clash, changing this node's own extra
+first.
+
+Writes say what is owed afterwards: a `force`d change or a reload that did not
+land prints that the STS container needs restarting, because a module already
+imported stays in `sys.modules` and no reload evicts it.
+
+### `mftik check --against`
+
+`check` is offline and stays that way. `--against` adds one question that is
+not a local fact: does a node have the extras this tree declares? It reads
+`GET /environment` and gives the refusal `push` would give, before the files
+are sent — naming `mftik env add` for something absent and `mftik env approve`
+for something already there as a dependency.
+
+Note that `check` imports the tree either way, so a strategy that really uses
+numpy can only be checked on a machine that has numpy. `--against` is about
+the node, which is a separate question from what your laptop can import.
 
 `run` pushes by default, because the iteration loop is edit-then-run and a
 separate push step is one a person forgets exactly once before it costs them a

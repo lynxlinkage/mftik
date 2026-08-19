@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import Any
 
-from mftik.registry.errors import RegistryError
+from mftik.registry.errors import MissingRemoteExtras, RegistryError
 
 PROTOCOL = "mftik.registry"
 PROTOCOL_VERSION = 1
@@ -28,13 +31,107 @@ def _installed_version() -> str:
 MFTIK_VERSION = _installed_version()
 
 
-def handshake_info(*, mftik_version: str = MFTIK_VERSION) -> dict[str, str | int]:
+def handshake_info(
+    *,
+    mftik_version: str = MFTIK_VERSION,
+    data_dir: str | Path | None = None,
+    pins: bool = True,
+) -> dict[str, Any]:
+    """Versions, plus applied extras this interpreter can actually import.
+
+    ``source`` is not published — where this node got a package is its own
+    bookkeeping. A stamp whose python/platform do not match is reported as
+    empty extras so a peer does not copy a promise this process cannot keep.
+
+    ``pins`` is the exact ``version`` / ``dist``. The names are not secret
+    (connect compares them) but the pins are: an anonymous ``/info`` keeps
+    the keys and drops the values.
+    """
+    from mftik.environment import NodeEnv
+
+    env = NodeEnv(data_dir) if data_dir is not None else NodeEnv.from_env()
+    stamp = env.read_stamp()
+    extras: dict[str, dict[str, str]] = {}
+    generation = 0
+    if stamp.generation > 0 and stamp.matches_runtime():
+        if pins:
+            extras = {
+                name: {"version": rec.version, "dist": rec.dist}
+                for name, rec in stamp.packages.items()
+            }
+        else:
+            extras = {name: {} for name in stamp.packages}
+        generation = stamp.generation
     return {
         "protocol": PROTOCOL,
         "protocol_version": PROTOCOL_VERSION,
         "protocol_min": PROTOCOL_MIN,
         "mftik_version": mftik_version,
+        "extras": extras,
+        "env_generation": generation,
     }
+
+
+def extra_names(info: object) -> frozenset[str]:
+    """Import names a handshake advertises. Keys only — value shape is ignored."""
+    if not isinstance(info, dict):
+        return frozenset()
+    extras = info.get("extras")
+    if not isinstance(extras, dict):
+        return frozenset()
+    return frozenset(str(name) for name in extras)
+
+
+def check_remote_extras(
+    info: object,
+    local_names: frozenset[str],
+    present: Mapping[str, str] | None = None,
+) -> None:
+    """Refuse a new connect whose extras this node does not have.
+
+    Version and dist are ignored. A pin difference is a ``diff`` warning,
+    not a connect refusal — that is ENV-8's job, per tree, at deploy.
+
+    ``present`` distinguishes an extra that is absent from one a resolver
+    already installed as somebody's dependency. Connect still refuses the
+    second — it has to agree with deploy, which reads the stamp, or this
+    node ends up holding a tree it can never run — but the Owner needs to
+    know the fix is one approval rather than an install.
+    """
+    from mftik.environment import describe_missing
+
+    missing = sorted(extra_names(info) - local_names)
+    if missing:
+        raise MissingRemoteExtras(
+            "remote extras not on this node: "
+            + describe_missing(missing, present),
+            tuple(missing),
+            {name: v for name, v in (present or {}).items() if name in missing},
+        )
+
+
+def extra_version(item: object) -> str:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return str(item.get("version") or "")
+    return ""
+
+
+def extras_version_warnings(remote: object, local: object) -> tuple[str, ...]:
+    if not isinstance(remote, dict) or not isinstance(local, dict):
+        return ()
+    theirs = remote.get("extras") if isinstance(remote.get("extras"), dict) else {}
+    ours = local.get("extras") if isinstance(local.get("extras"), dict) else {}
+    if not isinstance(theirs, dict) or not isinstance(ours, dict):
+        return ()
+    warnings: list[str] = []
+    for name in sorted(set(theirs) & set(ours)):
+        remote_ver = extra_version(theirs[name])
+        local_ver = extra_version(ours[name])
+        if remote_ver and local_ver and remote_ver != local_ver:
+            warnings.append(f"{name}: remote {remote_ver}, local {local_ver}")
+    return tuple(warnings)
 
 
 def check_handshake(info: object) -> None:

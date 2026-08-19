@@ -15,6 +15,7 @@ from mftik.protocol import (
     StsRegistryReloadResultEnvelope,
 )
 from mftik.registry import RegistryStore, qualify
+from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.routes import registry as registry_routes
 from mftik_api.routes.registry import (
     add_strategy,
@@ -25,8 +26,8 @@ from mftik_api.routes.registry import (
     list_published,
     remote_diff,
 )
-from mftik_api.routes.sts import list_strategy_types, strategy_type_template
-from mftik_api.schemas import RegistryAddBody
+from mftik_api.routes.sts import deploy, list_strategy_types, strategy_type_template
+from mftik_api.schemas import RegistryAddBody, StrategyDeployBody
 from mftik_db.repositories import StsSessionRepository
 
 _TINY = """\
@@ -86,8 +87,60 @@ async def test_add_returns_the_record_and_writes_files(tmp_path: Path) -> None:
     assert out.digest.startswith("sha256:")
     assert out.origin == "private"
     assert out.files == ["strategy.py"]
+    assert out.requires == []
     written = tmp_path / "registry" / "private" / "tiny" / "strategy.py"
     assert written.read_text() == _TINY
+
+
+_NUMPY = """\
+from mftik.strategy import Strategy
+class Tiny(Strategy):
+    name = "tiny"
+    requires = ("numpy",)
+"""
+
+
+async def test_add_returns_declared_requires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(registry_routes, "_applied_extras", lambda: {"numpy": "1.0"})
+    store = RegistryStore(tmp_path)
+    body = RegistryAddBody(files={"strategy.py": _NUMPY})
+
+    out = await add_strategy(body, store=store, broker=_broker(store))
+
+    assert out.requires == ["numpy"]
+
+
+async def test_own_add_without_applied_extras_is_400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(registry_routes, "_applied_extras", lambda: {})
+    store = RegistryStore(tmp_path)
+    with pytest.raises(HTTPException) as caught:
+        await add_strategy(
+            RegistryAddBody(files={"strategy.py": _NUMPY}),
+            store=store,
+            broker=_broker(store),
+        )
+    assert caught.value.status_code == 400
+    assert "numpy" in str(caught.value.detail)
+    assert not (tmp_path / "registry" / "private" / "tiny").exists()
+
+
+async def test_own_add_with_applied_extras_is_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(registry_routes, "_applied_extras", lambda: {"numpy": "1.0"})
+    store = RegistryStore(tmp_path)
+    broker = _broker(store)
+    out = await add_strategy(
+        RegistryAddBody(files={"strategy.py": _NUMPY}),
+        store=store,
+        broker=broker,
+    )
+    assert out.loaded is True
+    assert broker.calls == 1
 
 
 async def test_disallowed_import_is_400(tmp_path: Path) -> None:
@@ -145,6 +198,73 @@ async def test_types_include_private_and_public(tmp_path: Path) -> None:
     template = await strategy_type_template("public::Tiny", store=store)
     assert template.type == "public::Tiny"
     assert template.yaml == "sts: {}\n"
+
+
+async def test_picker_marks_a_tree_that_needs_extras(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    monkeypatch.setattr(registry_routes, "_applied_extras", lambda: {"numpy": "1.0"})
+    store = RegistryStore(tmp_path)
+    await add_strategy(
+        RegistryAddBody(files={"strategy.py": _NUMPY}),
+        store=store,
+        broker=_broker(store),
+    )
+    listed = await list_strategy_types(store=store)
+    row = next(t for t in listed.templates if t.type == "private::Tiny")
+    assert row.requires == ["numpy"]
+    assert row.env_ok is False
+    noop = next(t for t in listed.templates if t.type == "NoopStrategy")
+    assert noop.env_ok is True
+    assert noop.requires == []
+
+
+async def test_incompatible_environment_deploy_is_409(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(registry_routes, "_applied_extras", lambda: {"numpy": "1.0"})
+    store = RegistryStore(tmp_path)
+    await add_strategy(
+        RegistryAddBody(files={"strategy.py": _NUMPY}),
+        store=store,
+        broker=_broker(store),
+    )
+
+    class Boom:
+        async def publish_log(self, *args: object, **kwargs: object) -> int:
+            return 1
+
+        async def publish(self, *args: object, **kwargs: object) -> int:
+            return 1
+
+        async def request(self, *args: object, **kwargs: object) -> None:
+            raise DomainRpcError(
+                "incompatible_environment",
+                "private::Tiny requires numpy which this node does not have",
+            )
+
+    with pytest.raises(HTTPException) as caught:
+        await deploy(
+            "private::Tiny",
+            body=StrategyDeployBody(yaml="sts: {}\n"),
+            broker=Boom(),  # type: ignore[arg-type]
+            store=store,
+        )
+    assert caught.value.status_code == 409
+    assert "numpy" in str(caught.value.detail)
+
+
+async def test_unknown_strategy_deploy_is_still_404(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    with pytest.raises(HTTPException) as caught:
+        await deploy(
+            "private::Gone",
+            body=StrategyDeployBody(yaml="sts: {}\n"),
+            broker=_broker(store),
+            store=store,
+        )
+    assert caught.value.status_code == 404
 
 
 async def test_add_keeps_strategy_yml_as_the_template(tmp_path: Path) -> None:

@@ -98,6 +98,24 @@ def test_requires_mftik_comes_from_the_class(tmp_path) -> None:
         }
     )
     assert added.requires_mftik == "0.2.0"
+    assert added.requires == ()
+
+
+def test_requires_comes_from_the_class(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    added = store.add(
+        {
+            "strategy.py": (
+                "from mftik.strategy import Strategy\n"
+                "class Tiny(Strategy):\n"
+                '    name = "tiny"\n'
+                '    requires = ("numpy",)\n'
+            )
+        }
+    )
+    assert added.requires == ("numpy",)
+    listed = store.list_private()
+    assert listed[0].requires == ("numpy",)
 
 
 def test_parent_path_is_refused(tmp_path) -> None:
@@ -191,6 +209,41 @@ def test_read_tree_cache_hits_until_mtime_changes(tmp_path) -> None:
     assert third is not first
     assert third.digest != first.digest
     assert store.get_private("tiny") is third
+
+
+_TORCH = """\
+from mftik.strategy import Strategy
+
+class Tiny(Strategy):
+    name = "tiny"
+    requires = ("torch",)
+"""
+
+
+def test_own_add_refuses_missing_applied_extras(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    with pytest.raises(RegistryError, match="torch"):
+        store.add({"strategy.py": _TORCH}, applied_extras={})
+    assert not (tmp_path / "registry" / "private" / "tiny").exists()
+
+
+def test_own_add_accepts_applied_extras(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    added = store.add({"strategy.py": _TORCH}, applied_extras={"torch": "2.0"})
+    assert added.requires == ("torch",)
+
+
+def test_remote_add_skips_applied_extras_check(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    store.put_remote("node1", "http://peer:8000")
+    added = store.add(
+        {"strategy.py": _TORCH},
+        origin="node1",
+        applied_extras={},
+    )
+    assert added.origin == "node1"
+    dest = tmp_path / "registry" / "pulled" / "node1" / "tiny"
+    assert dest.is_dir()
 
 
 def test_add_with_origin_writes_pulled(tmp_path) -> None:

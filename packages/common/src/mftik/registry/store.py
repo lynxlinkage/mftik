@@ -39,6 +39,9 @@ class AddedStrategy:
     type: str
     digest: str
     requires_mftik: str
+    #: Import names the chosen class declared. Empty when it needs only
+    #: the stdlib and the SDK. Derived at scan time, like ``requires_mftik``.
+    requires: tuple[str, ...]
     files: tuple[str, ...]
     path: str
     origin: str = PRIVATE_ORIGIN
@@ -81,17 +84,40 @@ class RegistryStore:
         *,
         replace: bool = False,
         origin: str = PRIVATE_ORIGIN,
+        applied_extras: Mapping[str, str] | None = None,
+        present_extras: Mapping[str, str] | None = None,
     ) -> AddedStrategy:
         """Validate, hash, and copy ``.py`` files and optional ``strategy.yml``.
 
         A nested ``strategy.yml`` has already been lifted to the tree root
-        by :func:`inspect_files`.
+        by :func:`inspect_files`. Own origins check ``requires`` against
+        ``applied_extras`` when the caller passes one. A remote origin
+        already in ``remotes.toml`` does not — that incompatibility is a
+        deploy error, not a store refusal.
+
+        ``present_extras`` is what the volume holds unapproved, passed in
+        because this store reads neither Postgres nor the overlay. It only
+        shapes the refusal: "not here" and "here but not approved" are
+        different problems with different fixes, and ``mftik push`` is where
+        a person reads the difference.
         """
         _check_origin(origin)
         inspected = inspect_files(files)
         chosen = inspected.cls
         normalised = inspected.files
         requires = chosen.requires_mftik or _DEFAULT_REQUIRES
+        if (
+            applied_extras is not None
+            and origin in OWN_ORIGINS
+        ):
+            missing = [name for name in chosen.requires if name not in applied_extras]
+            if missing:
+                from mftik.environment import describe_missing
+
+                raise RegistryError(
+                    "this node cannot run that tree: "
+                    + describe_missing(missing, present_extras)
+                )
         digest = digest_files(normalised)
         dest = self._dest(origin, inspected.name)
         if dest.exists() and not replace:
@@ -104,6 +130,7 @@ class RegistryStore:
             type=chosen.type,
             digest=digest,
             requires_mftik=requires,
+            requires=chosen.requires,
             files=tuple(sorted(normalised)),
             path=str(dest),
             origin=origin,
@@ -349,6 +376,7 @@ def _scan_tree(dest: Path, *, origin: str) -> AddedStrategy | None:
         type=chosen.type,
         digest=digest,
         requires_mftik=chosen.requires_mftik or _DEFAULT_REQUIRES,
+        requires=chosen.requires,
         files=tuple(sorted(normalised)),
         path=str(dest),
         origin=origin,

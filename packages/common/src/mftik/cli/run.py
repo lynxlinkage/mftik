@@ -18,7 +18,13 @@ from __future__ import annotations
 
 import argparse
 
-from mftik.cli.client import Client, CliError, NodeUnreachable, connected
+from mftik.cli.client import (
+    Client,
+    CliError,
+    NodeUnreachable,
+    connected,
+    is_environment_refusal,
+)
 from mftik.cli.exits import EXIT_INTERRUPTED
 from mftik.cli.push import push_tree, report_push
 from mftik.cli.sessions import follow_logs
@@ -98,6 +104,10 @@ def run(args: argparse.Namespace) -> int:
         except NodeUnreachable as exc:
             raise NodeUnreachable(_deploy_may_be_live(exc)) from exc
         except CliError as exc:
+            # A missing extra never created a session. Saying one may already
+            # be live turns an environment problem into a hunt for a ghost.
+            if is_environment_refusal(exc):
+                raise
             raise CliError(_deploy_may_be_live(exc)) from exc
         session_id = deployed["session_id"]
         status = str(deployed.get("status") or _LIVE)

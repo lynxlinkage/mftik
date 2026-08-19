@@ -102,6 +102,25 @@ def test_third_party_import_is_refused(tmp_path: Path, capsys) -> None:
     assert "Traceback" not in err
 
 
+def test_declared_third_party_import_is_ok(tmp_path: Path, capsys) -> None:
+    """Gate accepts a declared extra without the laptop having the package.
+
+    The import lives in a method so ``load_class`` does not execute it —
+    ``check`` still loads the tree, and looking at site-packages to skip
+    that would be the node question this command does not ask.
+    """
+    dest = _tree(
+        tmp_path,
+        "from mftik.strategy import Strategy\n"
+        "class Tiny(Strategy):\n    name = \"tiny\"\n"
+        '    requires = ("numpy",)\n'
+        "    def on_start(self):\n        import numpy\n",
+    )
+
+    assert main(["check", str(dest)]) == 0
+    assert "tiny" in capsys.readouterr().out
+
+
 def test_uppercase_name_is_refused(tmp_path: Path, capsys) -> None:
     dest = _tree(
         tmp_path,

@@ -296,11 +296,35 @@ class StsRegistryReloadResult(BaseModel):
     absent — so a caller can tell "added and loadable" from "added" by
     looking for its own key, which is the difference between a deploy that
     will work and one that will 404.
+
+    ``generation`` is the env stamp this process now believes — the copy
+    read at boot and on this reload, not a fresh open of ``applied.json``.
+    Apply compares it to the generation it just committed.
     """
 
     model_config = ConfigDict(frozen=True)
 
     loaded: list[str] = Field(default_factory=list)
+    generation: int = 0
+
+
+class StsRegistryGenerationRequest(BaseModel):
+    """API → STS: which env generation this process has already adopted.
+
+    Read-only. It does not re-scan the registry, does not import strategy
+    trees, and does not retarget ``sys.path``. Opening Settings asks this;
+    a write is what sends :data:`STS_REGISTRY_RELOAD`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+
+class StsRegistryGenerationResult(BaseModel):
+    """STS → API: the in-memory env generation, or 0 before the first attach."""
+
+    model_config = ConfigDict(frozen=True)
+
+    generation: int = 0
 
 
 class StsEventLogInfoRequest(BaseModel):
@@ -827,6 +851,8 @@ StsSessionControlResultEnvelope = Envelope[StsSessionControlResult]
 StsSessionStatusEnvelope = Envelope[StsSessionStatus]
 StsRegistryReloadRequestEnvelope = Envelope[StsRegistryReloadRequest]
 StsRegistryReloadResultEnvelope = Envelope[StsRegistryReloadResult]
+StsRegistryGenerationRequestEnvelope = Envelope[StsRegistryGenerationRequest]
+StsRegistryGenerationResultEnvelope = Envelope[StsRegistryGenerationResult]
 StsEventLogInfoRequestEnvelope = Envelope[StsEventLogInfoRequest]
 StsEventLogInfoEnvelope = Envelope[StsEventLogInfo]
 StsEventLogReadRequestEnvelope = Envelope[StsEventLogReadRequest]
@@ -975,6 +1001,7 @@ STS_SESSION_FAIL = "sts.session.fail"
 STS_SESSION_STATUS = "sts.session.status"
 STS_EVENTLOG_INFO = "sts.eventlog.info"
 STS_REGISTRY_RELOAD = "sts.registry.reload"
+STS_REGISTRY_GENERATION = "sts.registry.generation"
 STS_EVENTLOG_READ = "sts.eventlog.read"
 
 #: ``reason`` written when an operator stopped a session from the UI. A fixed

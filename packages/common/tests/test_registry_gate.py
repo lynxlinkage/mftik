@@ -192,6 +192,137 @@ class Tiny(Strategy):
     assert found.requires_mftik == "0.2.0"
 
 
+def test_declared_numpy_import_is_allowed() -> None:
+    source = """\
+import numpy
+from mftik.strategy import Strategy
+
+class Tiny(Strategy):
+    name = "tiny"
+    requires = ("numpy",)
+"""
+    found = check_files(_py(source))
+    assert found[0].requires == ("numpy",)
+
+
+def test_requires_as_a_list_is_read() -> None:
+    source = """\
+import numpy
+from mftik.strategy import Strategy
+
+class Tiny(Strategy):
+    name = "tiny"
+    requires = ["numpy"]
+"""
+    assert check_files(_py(source))[0].requires == ("numpy",)
+
+
+def test_requires_as_a_single_string_is_read() -> None:
+    source = """\
+import numpy
+from mftik.strategy import Strategy
+
+class Tiny(Strategy):
+    name = "tiny"
+    requires = "numpy"
+"""
+    assert check_files(_py(source))[0].requires == ("numpy",)
+
+
+def test_declared_numpy_does_not_allow_sklearn() -> None:
+    source = """\
+import sklearn
+from mftik.strategy import Strategy
+
+class Tiny(Strategy):
+    name = "tiny"
+    requires = ("numpy",)
+"""
+    with pytest.raises(RegistryError, match="sklearn"):
+        check_files(_py(source))
+
+
+def test_dist_name_in_requires_is_refused() -> None:
+    source = """\
+from mftik.strategy import Strategy
+
+class Tiny(Strategy):
+    name = "tiny"
+    requires = ("scikit-learn",)
+"""
+    with pytest.raises(RegistryError, match="import name"):
+        check_files(_py(source))
+
+
+def test_helper_import_is_allowed_when_a_later_class_declares_it() -> None:
+    files = {
+        "helpers.py": b"import numpy\nN = numpy.pi\n",
+        "strategy.py": (
+            b"from helpers import N\n"
+            b"from mftik.strategy import Strategy\n"
+            b"class Tiny(Strategy):\n"
+            b'    name = "tiny"\n'
+            b'    requires = ("numpy",)\n'
+        ),
+    }
+    assert check_files(files)[0].requires == ("numpy",)
+
+
+def test_helper_import_is_allowed_when_an_earlier_class_declares_it() -> None:
+    files = {
+        "pkg/__init__.py": b"",
+        "pkg/strategy.py": (
+            b"from mftik.strategy import Strategy\n"
+            b"class Tiny(Strategy):\n"
+            b'    name = "tiny"\n'
+            b'    requires = ("numpy",)\n'
+        ),
+        "z_later.py": b"import numpy\n",
+    }
+    assert check_files(files)[0].type == "Tiny"
+
+
+def test_helper_import_without_a_declaration_is_refused() -> None:
+    files = {
+        "helpers.py": b"import numpy\n",
+        "strategy.py": (
+            b"from helpers import N\n"
+            b"from mftik.strategy import Strategy\n"
+            b"class Tiny(Strategy):\n"
+            b'    name = "tiny"\n'
+        ),
+    }
+    with pytest.raises(RegistryError, match="numpy"):
+        check_files(files)
+
+
+def test_requires_shadowing_a_local_module_is_refused() -> None:
+    files = {
+        "numpy.py": b"pi = 3\n",
+        "strategy.py": (
+            b"from mftik.strategy import Strategy\n"
+            b"class Tiny(Strategy):\n"
+            b'    name = "tiny"\n'
+            b'    requires = ("numpy",)\n'
+        ),
+    }
+    with pytest.raises(RegistryError, match="shadow"):
+        check_files(files)
+
+
+def test_importlib_is_refused_even_when_listed_in_requires() -> None:
+    source = """\
+import importlib
+from mftik.strategy import Strategy
+
+class Tiny(Strategy):
+    name = "tiny"
+    requires = ("importlib",)
+"""
+    with pytest.raises(RegistryError, match="dynamic"):
+        check_files(_py(source))
+
+
 def test_invalid_python_is_refused() -> None:
     with pytest.raises(RegistryError, match="not valid Python"):
         check_files(_py("def (\n"))

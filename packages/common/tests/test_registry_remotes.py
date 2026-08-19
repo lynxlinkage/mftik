@@ -132,7 +132,7 @@ def a_locked_peer(store: RegistryStore, token: str) -> tuple[httpx.MockTransport
         if path == "/registry/v1/info":
             from mftik.registry.protocol import handshake_info
 
-            return httpx.Response(200, json=handshake_info())
+            return httpx.Response(200, json=handshake_info(data_dir=store.data_dir))
         if auth != f"Bearer {token}":
             return httpx.Response(401, json={"detail": "authentication required"})
         if path == "/registry/v1/strategies":
@@ -227,4 +227,6 @@ async def test_a_later_diff_presents_the_stored_key(tmp_path: Path) -> None:
 
     assert result.reachable is True
     assert [row.status for row in result.rows] == ["synced"]
-    assert seen and all(auth == "Bearer mftik_rk_secret" for _, auth in seen)
+    assert seen
+    # Pin warnings need the pins, and pins are behind the key.
+    assert all(auth == "Bearer mftik_rk_secret" for _path, auth in seen)

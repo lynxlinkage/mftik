@@ -13,8 +13,8 @@ from mftik.broker import Broker
 from mftik.protocol import Topics
 
 from mftik_sts import db as sts_db
-from mftik_sts.impl import load_local_registry
 from mftik_sts.rpc import dispatch
+from mftik_sts.runtime_env import extras_names, refresh
 from mftik_sts.session import SessionManager
 
 SOURCE = "sts"
@@ -154,12 +154,18 @@ async def amain() -> bool:
             pass
 
     async with Broker() as broker:
-        loaded = load_local_registry()
+        loaded, stamp = refresh()
         if loaded:
             logger.info(
                 "STS loaded %d registry strategy(ies): %s",
                 len(loaded),
                 ", ".join(loaded),
+            )
+        if stamp.generation:
+            logger.info(
+                "STS env generation=%s extras=%s",
+                stamp.generation,
+                ", ".join(sorted(extras_names())) or "(none)",
             )
         sessions = SessionManager(
             broker,

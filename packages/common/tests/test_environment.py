@@ -1,0 +1,400 @@
+"""Stamp, generation directories, and the apply lock — no installer."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from mftik.environment import (
+    EnvironmentLocked,
+    EnvStamp,
+    NodeEnv,
+    PackageRecord,
+    dependency_sources,
+    describe_missing,
+    disruptive_dists,
+    provided_imports,
+    unapproved_present,
+)
+
+
+def test_missing_stamp_is_empty(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    stamp = env.read_stamp()
+    assert stamp.generation == 0
+    assert stamp.packages == {}
+    assert env.extras_names() == frozenset()
+
+
+def test_round_trip_preserves_fields(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    rec = _rec("2.2.1")
+    with env.lock():
+        dest = env.begin()
+        (dest / "numpy").mkdir()
+        (dest / "numpy" / "__init__.py").write_text("x = 1\n")
+        stamp = env.commit(dest, {"numpy": rec})
+    assert stamp.generation == 1
+    assert stamp.packages["numpy"] == rec
+    loaded = env.read_stamp()
+    assert loaded.generation == 1
+    assert loaded.packages["numpy"].version == "2.2.1"
+    assert loaded.packages["numpy"].source == "manual"
+    assert loaded.python == stamp.python
+    assert loaded.platform == stamp.platform
+    assert loaded.nbytes == stamp.nbytes
+    assert stamp.nbytes > 0
+
+
+def test_commit_is_atomic_for_readers(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    rec = PackageRecord(version="1.0", dist="foo", source="manual")
+    with env.lock():
+        dest = env.begin()
+        (dest / "foo.py").write_text("n = 1\n")
+        env.commit(dest, {"foo": rec})
+    stamp = env.read_stamp()
+    target = (tmp_path / "env" / "current").resolve()
+    assert target == (tmp_path / "env" / "gen-1" / "site-packages").resolve()
+    assert stamp.generation == 1
+    assert target.is_dir()
+
+
+def test_abort_leaves_the_previous_generation(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    rec = PackageRecord(version="1.0", dist="foo", source="manual")
+    with env.lock():
+        first = env.begin()
+        (first / "foo.py").write_text("n = 1\n")
+        env.commit(first, {"foo": rec})
+    with env.lock():
+        second = env.begin()
+        (second / "half.py").write_text("broken\n")
+        env.abort(second)
+    assert env.read_stamp().generation == 1
+    assert (tmp_path / "env" / "current").resolve() == (
+        tmp_path / "env" / "gen-1" / "site-packages"
+    ).resolve()
+    assert not (tmp_path / "env" / "gen-2").exists()
+
+
+def test_stale_generation_is_not_reported_as_extras(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    leftover = tmp_path / "env" / "gen-9" / "site-packages" / "torch"
+    leftover.mkdir(parents=True)
+    (leftover / "__init__.py").write_text("x = 1\n")
+    assert "torch" not in env.extras_names()
+    assert env.read_stamp().generation == 0
+
+
+def test_commit_drops_the_generation_before_previous(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    rec = PackageRecord(version="1.0", dist="foo", source="manual")
+    for _ in range(3):
+        with env.lock():
+            dest = env.begin()
+            (dest / "foo.py").write_text("n = 1\n")
+            env.commit(dest, {"foo": rec})
+    assert env.read_stamp().generation == 3
+    assert (tmp_path / "env" / "gen-3").is_dir()
+    assert (tmp_path / "env" / "gen-2").is_dir()
+    assert not (tmp_path / "env" / "gen-1").exists()
+
+
+def test_second_lock_raises(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    with env.lock():
+        held = NodeEnv(tmp_path)
+        with pytest.raises(EnvironmentLocked):
+            with held.lock():
+                pass
+
+
+def test_ensure_current_creates_empty_gen0(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    current = env.ensure_current()
+    assert current.is_symlink()
+    assert (tmp_path / "env" / "gen-0" / "site-packages").is_dir()
+    assert env.read_stamp().generation == 0
+
+
+def test_mismatched_python_hides_extras(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    rec = _rec("1.0")
+    with env.lock():
+        dest = env.begin()
+        (dest / "numpy.py").write_text("x = 1\n")
+        committed = env.commit(dest, {"numpy": rec})
+    env._write_stamp(
+        EnvStamp(
+            generation=1,
+            python=(3, 11),
+            platform=committed.platform,
+            nbytes=committed.nbytes,
+            packages={"numpy": rec},
+        )
+    )
+    assert env.extras_names() == frozenset()
+    assert not env.read_stamp().matches_runtime()
+
+
+def _rec(version: str) -> PackageRecord:
+    return PackageRecord(version=version, dist="numpy", source="manual")
+
+
+def test_the_stamp_survives_an_abort_of_the_generation_it_names(
+    tmp_path: Path,
+) -> None:
+    """``commit`` publishes by writing the stamp, so abort must not undo it.
+
+    ``ApplyInProgress.__exit__`` aborts whenever it was not told the commit
+    succeeded. If the caller raises between a successful ``commit`` and that
+    bookkeeping, the abort arrives for a generation the stamp is already
+    naming — and deleting it is the one state nothing downstream recovers
+    from: every reader is sent to a directory that is not there.
+    """
+    env = NodeEnv(tmp_path)
+    with env.lock():
+        dest = env.begin()
+        (dest / "numpy").mkdir()
+        (dest / "numpy" / "__init__.py").write_text("x = 1\n")
+        env.commit(dest, {"numpy": _rec("1.0")})
+        env.abort(dest)
+    assert dest.is_dir()
+    assert env.read_stamp().generation == 1
+    assert env.overlay_for(env.read_stamp()) == dest
+
+
+def test_abort_removes_a_generation_the_stamp_never_named(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    with env.lock():
+        dest = env.begin()
+        (dest / "half").mkdir()
+        env.abort(dest)
+    assert not dest.parent.exists()
+    assert env.read_stamp().generation == 0
+
+
+def test_bytes_counts_every_generation_still_on_disk(tmp_path: Path) -> None:
+    """``bytes`` is what the overlay costs on the volume, not one generation.
+
+    The retained predecessor is real disk on the same volume as the registry,
+    which is the whole reason the number is reported at all. Measuring after
+    the prune keeps the generation this apply just dropped out of it.
+    """
+    env = NodeEnv(tmp_path)
+    with env.lock():
+        first = env.begin()
+        (first / "a.py").write_text("x = 1\n" * 200)
+        stamp_one = env.commit(
+            first, {"numpy": _rec("1.0")}
+        )
+    with env.lock():
+        second = env.begin()
+        (second / "b.py").write_text("y = 2\n" * 200)
+        stamp_two = env.commit(
+            second, {"numpy": _rec("2.0")}
+        )
+    assert first.is_dir(), "the predecessor is kept for a live process"
+    assert stamp_two.nbytes > stamp_one.nbytes
+    assert stamp_two.nbytes == _tree_bytes(env.root)
+
+
+def test_a_dropped_generation_is_not_counted(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    generations = []
+    for n in range(3):
+        with env.lock():
+            dest = env.begin()
+            (dest / "pkg.py").write_text("z = 3\n" * 200)
+            stamp = env.commit(
+                dest, {"numpy": _rec(f"{n}.0")}
+            )
+            generations.append(dest.parent)
+    assert not generations[0].exists()
+    assert generations[1].is_dir() and generations[2].is_dir()
+    assert stamp.nbytes == _tree_bytes(env.root)
+
+
+def _tree_bytes(root: Path) -> int:
+    total = 0
+    for path in root.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            if path.name.endswith((".tmp", ".lock")):
+                continue
+            if "__pycache__" in path.parts:
+                continue
+            total += path.stat().st_size
+    return total
+
+
+def _stamped(env: NodeEnv, dist: str, version: str, deps: dict[str, str]) -> None:
+    """Commit a generation holding ``dist`` plus dependencies nobody named."""
+    with env.lock():
+        dest = env.begin()
+        for name, ver in {dist: version, **deps}.items():
+            info = dest / f"{name}-{ver}.dist-info"
+            info.mkdir(parents=True)
+            (info / "METADATA").write_text(
+                f"Metadata-Version: 2.1\nName: {name}\nVersion: {ver}\n"
+            )
+        env.commit(dest, {dist: PackageRecord(version, dist, "manual")})
+
+
+def test_a_dependency_is_present_but_not_approved(tmp_path: Path) -> None:
+    """pandas brings numpy. numpy is importable and undeclarable.
+
+    ``requires`` is checked against the stamp, so a tree needing numpy is
+    refused while numpy sits in the very directory on ``sys.path``. The
+    Owner has to be able to see that, and at which version — approving it
+    is a no-op install only if the pin matches what is already there.
+    """
+    env = NodeEnv(tmp_path)
+    _stamped(env, "pandas", "2.0", {"numpy": "1.26.4", "pytz": "2024.1"})
+    stamp = env.read_stamp()
+    assert set(stamp.packages) == {"pandas"}
+    assert env.extras_names() == frozenset({"pandas"})
+    assert unapproved_present(env, stamp) == {"numpy": "1.26.4", "pytz": "2024.1"}
+
+
+def test_an_approved_dist_is_not_reported_as_unapproved(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    _stamped(env, "numpy", "1.26.4", {})
+    stamp = env.read_stamp()
+    assert unapproved_present(env, stamp) == {}
+
+
+def test_describe_missing_separates_absent_from_unapproved() -> None:
+    text = describe_missing(["numpy", "torch"], {"numpy": "1.26.4"})
+    assert "numpy (on this node at 1.26.4" in text
+    assert "approve" in text
+    assert "torch (not on this node)" in text
+
+
+def test_describe_missing_without_the_overlay_says_absent() -> None:
+    assert describe_missing(["numpy"]) == "numpy (not on this node)"
+
+
+def test_disruptive_dists_sees_what_the_requested_names_cannot() -> None:
+    previous = {"pandas": "2.0", "numpy": "1.0"}
+    incoming = {"pandas": "2.0", "scipy": "1.0", "numpy": "2.0"}
+    assert disruptive_dists(previous, incoming) == ("numpy",)
+    # A pure addition moves nothing already there.
+    assert disruptive_dists(previous, {**previous, "httpx": "0.27"}) == ()
+    # A drop counts: something that was importable no longer is.
+    assert disruptive_dists(previous, {"pandas": "2.0"}) == ("numpy",)
+
+
+def _install(dest: Path, name: str, version: str, requires: list[str]) -> None:
+    info = dest / f"{name}-{version}.dist-info"
+    info.mkdir(parents=True, exist_ok=True)
+    lines = ["Metadata-Version: 2.1", f"Name: {name}", f"Version: {version}"]
+    lines += [f"Requires-Dist: {req}" for req in requires]
+    (info / "METADATA").write_text("\n".join(lines) + "\n")
+
+
+def test_dependency_sources_tells_six_apart_from_numpy(tmp_path: Path) -> None:
+    """A flat list makes ``six`` look as much the Owner's business as numpy.
+
+    It is not: numpy is what pandas is for, six is two levels down behind
+    python-dateutil. The graph is on disk already — every dist-info records
+    ``Requires-Dist`` — so this costs a read, not a guess.
+    """
+    dest = tmp_path / "site-packages"
+    dest.mkdir()
+    _install(dest, "pandas", "2.2.3", ["numpy>=1.23.2", "python-dateutil>=2.8.2"])
+    _install(dest, "python-dateutil", "2.9.0", ["six>=1.5"])
+    _install(dest, "numpy", "2.1.3", [])
+    _install(dest, "six", "1.16.0", [])
+
+    sources = dependency_sources(dest)
+    assert sources["numpy"] == ("pandas",)
+    assert sources["six"] == ("python-dateutil",)
+    assert sources["python-dateutil"] == ("pandas",)
+    # A root has nobody above it.
+    assert "pandas" not in sources
+
+
+def test_a_requirement_that_is_not_installed_is_not_a_source(
+    tmp_path: Path,
+) -> None:
+    """Optional extras and unmet markers simply are not here.
+
+    Membership in the installed set is the marker evaluation this does not do
+    — an optional dependency nobody took cannot be pulling anything in.
+    """
+    dest = tmp_path / "site-packages"
+    dest.mkdir()
+    _install(dest, "httpx", "0.28.1", ["anyio", "brotli; extra == 'brotli'"])
+    _install(dest, "anyio", "4.0", [])
+
+    sources = dependency_sources(dest)
+    assert sources == {"anyio": ("httpx",)}
+
+
+def test_two_packages_can_need_the_same_dependency(tmp_path: Path) -> None:
+    dest = tmp_path / "site-packages"
+    dest.mkdir()
+    _install(dest, "pandas", "2.2.3", ["numpy"])
+    _install(dest, "scipy", "1.14", ["numpy"])
+    _install(dest, "numpy", "2.1.3", [])
+    assert dependency_sources(dest)["numpy"] == ("pandas", "scipy")
+
+
+def test_the_import_name_comes_off_the_wheel_not_the_dist_name(
+    tmp_path: Path,
+) -> None:
+    """``python-dateutil`` provides ``dateutil``.
+
+    Guessing by swapping the hyphen gives ``python_dateutil`` — a perfectly
+    good identifier that imports nothing — and offering it as the name to
+    approve would stamp a row no strategy can ever satisfy.
+    """
+    dest = tmp_path / "site-packages"
+    (dest / "dateutil").mkdir(parents=True)
+    (dest / "dateutil" / "__init__.py").write_text("")
+    info = dest / "python_dateutil-2.9.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: python-dateutil\nVersion: 2.9.0\n"
+    )
+    (info / "top_level.txt").write_text("dateutil\n")
+
+    assert provided_imports(dest) == {"python-dateutil": ("dateutil",)}
+
+
+def test_a_wheel_without_top_level_falls_back_to_record(tmp_path: Path) -> None:
+    """numpy and pandas ship no ``top_level.txt``; the file list still knows."""
+    dest = tmp_path / "site-packages"
+    (dest / "numpy").mkdir(parents=True)
+    (dest / "numpy" / "__init__.py").write_text("")
+    info = dest / "numpy-2.5.2.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: numpy\nVersion: 2.5.2\n"
+    )
+    (info / "RECORD").write_text(
+        "numpy/__init__.py,sha256=x,10\n"
+        "numpy/core/_mod.py,sha256=y,20\n"
+        "numpy-2.5.2.dist-info/METADATA,sha256=z,30\n"
+        "bin/f2py,sha256=w,40\n"
+        "../../../bin/f2py,sha256=v,40\n"
+    )
+
+    assert provided_imports(dest) == {"numpy": ("numpy",)}
+
+
+def test_a_single_module_wheel_is_found(tmp_path: Path) -> None:
+    dest = tmp_path / "site-packages"
+    dest.mkdir()
+    (dest / "six.py").write_text("")
+    info = dest / "six-1.17.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: six\nVersion: 1.17.0\n"
+    )
+    (info / "RECORD").write_text(
+        "six.py,sha256=x,10\nsix-1.17.0.dist-info/METADATA,,\n"
+    )
+
+    assert provided_imports(dest) == {"six": ("six",)}

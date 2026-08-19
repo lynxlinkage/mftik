@@ -108,6 +108,92 @@ export type StrategyTemplate = {
 	yaml: string;
 	/** Bundled catalogue vs a tree in this node's registry. */
 	source: 'bundled' | 'registry';
+	/** Import names the tree declared. Empty for bundled strategies. */
+	requires?: string[];
+	/** Whether this node's applied extras cover `requires`. */
+	env_ok?: boolean;
+};
+
+export type EnvPackage = {
+	version: string;
+	dist: string;
+	source: string;
+};
+
+export type BrokenTree = {
+	name: string;
+	type: string;
+	origin: string;
+	requires: string[];
+};
+
+/**
+ * One distribution actually in the live generation.
+ *
+ * A resolver installs what was asked for plus its dependencies. Those are on
+ * `sys.path` and importable, but `requires` is checked against the stamp, so a
+ * strategy may not declare them — the node refuses a tree needing numpy while
+ * numpy is in the same directory. Approving one is a no-op install at the
+ * version already here; it only adds the stamp row.
+ */
+export type EnvInstalled = {
+	dist: string;
+	version: string;
+	approved: boolean;
+	/** Import name to approve it under. `null` when the dist name is not one. */
+	suggested_name: string | null;
+	/**
+	 * Installed distributions that directly require this one. Empty for a root
+	 * — something you asked for. This is what tells `six` (needed by
+	 * python-dateutil, which is needed by pandas) apart from `numpy`, which is
+	 * what pandas is actually for.
+	 */
+	needed_by: string[];
+};
+
+export type Environment = {
+	generation: number;
+	python: number[];
+	platform: string;
+	bytes: number;
+	packages: Record<string, EnvPackage>;
+	/** Approved rows and their dependencies alike. See `EnvInstalled`. */
+	installed: EnvInstalled[];
+	abi_ok: boolean;
+	runtime_python: number[];
+	runtime_platform: string;
+	restart_required: boolean;
+	loaded: boolean;
+	load_error: string | null;
+	broken: BrokenTree[];
+};
+
+export type EnvImportRow = {
+	name: string;
+	version: string;
+	dist: string;
+	status: 'added' | 'kept' | 'conflict';
+	/** The dist was assumed from the import name. The Owner can correct it. */
+	guessed: boolean;
+	/**
+	 * The peer gave a version. False when its `/info` published the name only,
+	 * which is what a node with the auth gate on withholds from an anonymous
+	 * caller. No `dist` typed here makes such a row installable — the remedy is
+	 * a registry key from that peer, so the UI must not offer the dist field.
+	 */
+	pinned: boolean;
+	local_version: string | null;
+	local_dist: string | null;
+};
+
+export type EnvironmentImport = {
+	added: EnvImportRow[];
+	kept: EnvImportRow[];
+	conflicts: EnvImportRow[];
+	guessed: string[];
+	unpinned: string[];
+	applied: boolean;
+	environment: Environment | null;
 };
 
 export type StrategyTypes = {
@@ -376,15 +462,56 @@ function apiBase(): string {
 	return '/api';
 }
 
-async function detailOf(res: Response): Promise<string> {
-	let detail = res.statusText;
+/** One extra a connect needs and this node's stamp does not list. */
+export type MissingExtra = {
+	name: string;
+	/**
+	 * Installed here as somebody's dependency, at this version — approve it.
+	 * `null` when it is genuinely not on the node and has to be installed.
+	 */
+	version: string | null;
+};
+
+/** A structured error detail, when the endpoint sends one. */
+export type ApiErrorData = {
+	error?: string;
+	message?: string;
+	missing?: MissingExtra[];
+};
+
+/**
+ * An API failure that may carry data, not just a sentence.
+ *
+ * Reading names out of a message with a regex works until the message is
+ * reworded, and then it silently renders fragments of English as if they were
+ * package names. Endpoints that expect a client to *act* on the specifics send
+ * them as fields.
+ */
+export class ApiError extends Error {
+	data: ApiErrorData | null;
+
+	constructor(message: string, data: ApiErrorData | null = null) {
+		super(message);
+		this.name = 'ApiError';
+		this.data = data;
+	}
+}
+
+async function detailOf(res: Response): Promise<ApiError> {
+	let message = res.statusText;
+	let data: ApiErrorData | null = null;
 	try {
-		const body = (await res.json()) as { detail?: string };
-		if (body.detail) detail = body.detail;
+		const body = (await res.json()) as { detail?: string | ApiErrorData };
+		if (typeof body.detail === 'string') {
+			message = body.detail;
+		} else if (body.detail && typeof body.detail === 'object') {
+			data = body.detail;
+			message = data.message ?? message;
+		}
 	} catch {
 		/* ignore */
 	}
-	return detail || `HTTP ${res.status}`;
+	return new ApiError(message || `HTTP ${res.status}`, data);
 }
 
 /**
@@ -411,7 +538,7 @@ async function request<T>(
 		throw new Error('Login session expired — signing in again…');
 	}
 	if (!res.ok) {
-		throw new Error(await detailOf(res));
+		throw await detailOf(res);
 	}
 	return (await res.json()) as T;
 }
@@ -686,8 +813,46 @@ export const api = {
 	disconnectRegistry: (name: string) =>
 		request<RegistryRemote>(`/registry/v1/remotes/${encodeURIComponent(name)}`, {
 			method: 'DELETE'
+		}),
+	environment: () => request<Environment>('/environment'),
+	upsertEnvironmentPackage: (body: {
+		name: string;
+		/** Omit to let the node's resolver pick. The stamp keeps what it picked. */
+		version?: string;
+		dist?: string;
+		force?: boolean;
+	}) =>
+		request<Environment>('/environment/packages', {
+			method: 'POST',
+			body: JSON.stringify(body)
+		}),
+	deleteEnvironmentPackage: (name: string, force = false) =>
+		request<Environment>(
+			`/environment/packages/${encodeURIComponent(name)}${force ? '?force=true' : ''}`,
+			{ method: 'DELETE' }
+		),
+	importEnvironment: (body: {
+		url?: string;
+		token?: string;
+		name?: string;
+		confirm?: boolean;
+		force?: boolean;
+		dist?: Record<string, string>;
+	}) =>
+		request<EnvironmentImport>('/environment/import', {
+			method: 'POST',
+			body: JSON.stringify(body)
 		})
 };
+
+/** Names a new-connect refusal listed as missing on this node. */
+/** The extras a connect refusal named, or `[]` if it failed for anything else. */
+export function missingRemoteExtras(error: unknown): MissingExtra[] {
+	if (error instanceof ApiError && error.data?.error === 'missing_extras') {
+		return error.data.missing ?? [];
+	}
+	return [];
+}
 
 export function defaultStrategyYml(): string {
 	return DEFAULT_STRATEGY_YML;

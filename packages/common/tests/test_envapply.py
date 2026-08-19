@@ -1,0 +1,391 @@
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from mftik.envapply import (
+    APPLY_TIMEOUT_S,
+    ApplyFailed,
+    ApplyInProgress,
+    ApplySpec,
+    EnvironmentDisruptive,
+    EnvironmentMissing,
+    apply_packages,
+    run_uv_installer,
+)
+from mftik.environment import NodeEnv
+
+
+def _env_root(tmp_path: Path) -> Path:
+    return tmp_path / "env"
+
+
+def _write_pkg(dest: Path, packages: dict[str, ApplySpec]) -> None:
+    for name in packages:
+        pkg = dest / name
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("ok\n")
+
+
+def _boom(dest: Path, packages: dict[str, ApplySpec]) -> None:
+    raise ApplyFailed("nope")
+
+
+def test_apply_writes_generation(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    spec = ApplySpec(version="1.26.4", dist="numpy", source="manual")
+    result = apply_packages(env, {"numpy": spec}, installer=_write_pkg)
+    assert result.restart_required is False
+    assert result.stamp.generation == 1
+    root = _env_root(tmp_path)
+    assert (root / "gen-1" / "site-packages" / "numpy" / "__init__.py").is_file()
+    assert env.current_path.resolve() == (root / "gen-1" / "site-packages").resolve()
+    assert env.extras_names() == frozenset({"numpy"})
+
+
+def test_installer_failure_leaves_stamp(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    spec = ApplySpec(version="1.0", dist="numpy")
+    apply_packages(env, {"numpy": spec}, installer=_write_pkg)
+    before = env.read_stamp()
+    with pytest.raises(ApplyFailed, match="nope"):
+        apply_packages(
+            env,
+            {
+                "numpy": spec,
+                "sklearn": ApplySpec(version="1.4", dist="scikit-learn"),
+            },
+            installer=_boom,
+        )
+    after = env.read_stamp()
+    assert after.generation == before.generation
+    assert after.packages == before.packages
+    root = _env_root(tmp_path)
+    assert env.current_path.resolve() == (root / "gen-1" / "site-packages").resolve()
+    assert not (root / "gen-2").exists()
+
+
+def test_change_without_force_does_not_run_installer(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.26.4", dist="numpy")},
+        installer=_write_pkg,
+    )
+    calls: list[str] = []
+
+    def record(dest: Path, packages: dict[str, ApplySpec]) -> None:
+        calls.append("ran")
+        _write_pkg(dest, packages)
+
+    with pytest.raises(EnvironmentDisruptive) as exc:
+        apply_packages(
+            env,
+            {"numpy": ApplySpec(version="2.0.0", dist="numpy")},
+            installer=record,
+        )
+    assert exc.value.names == ("numpy",)
+    assert calls == []
+    assert env.read_stamp().packages["numpy"].version == "1.26.4"
+
+
+def test_remove_without_force_is_disruptive(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.26.4", dist="numpy")},
+        installer=_write_pkg,
+    )
+    with pytest.raises(EnvironmentDisruptive):
+        apply_packages(env, {}, installer=_write_pkg)
+    assert env.extras_names() == frozenset({"numpy"})
+
+
+def test_change_with_force_sets_restart_required(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.26.4", dist="numpy")},
+        installer=_write_pkg,
+    )
+    result = apply_packages(
+        env,
+        {"numpy": ApplySpec(version="2.0.0", dist="numpy")},
+        allow_disruptive=True,
+        installer=_write_pkg,
+    )
+    assert result.restart_required is True
+    assert result.stamp.generation == 2
+    assert env.read_stamp().packages["numpy"].version == "2.0.0"
+
+
+def test_add_is_not_disruptive(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.26.4", dist="numpy")},
+        installer=_write_pkg,
+    )
+    result = apply_packages(
+        env,
+        {
+            "numpy": ApplySpec(version="1.26.4", dist="numpy"),
+            "sklearn": ApplySpec(version="1.4.0", dist="scikit-learn"),
+        },
+        installer=_write_pkg,
+    )
+    assert result.restart_required is False
+    assert env.extras_names() == frozenset({"numpy", "sklearn"})
+
+
+def test_second_apply_drops_predecessor(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    env.ensure_current()
+    root = _env_root(tmp_path)
+    assert (root / "gen-0").is_dir()
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=_write_pkg,
+    )
+    apply_packages(
+        env,
+        {
+            "numpy": ApplySpec(version="1.0", dist="numpy"),
+            "sklearn": ApplySpec(version="1.4", dist="scikit-learn"),
+        },
+        installer=_write_pkg,
+    )
+    assert env.read_stamp().generation == 2
+    assert (root / "gen-1").is_dir()
+    assert (root / "gen-2").is_dir()
+    assert not (root / "gen-0").exists()
+
+
+def test_stamp_versions_come_from_target_metadata(tmp_path: Path) -> None:
+    def plant(dest: Path, packages: dict[str, ApplySpec]) -> None:
+        _write_pkg(dest, packages)
+        info = dest / "numpy-9.9.9.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: numpy\nVersion: 9.9.9\n",
+            encoding="utf-8",
+        )
+
+    env = NodeEnv(tmp_path)
+    result = apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.26.4", dist="numpy")},
+        installer=plant,
+    )
+    assert result.stamp.packages["numpy"].version == "9.9.9"
+
+
+def test_before_commit_abort_leaves_stamp(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=_write_pkg,
+    )
+    before = env.read_stamp()
+
+    def boom() -> None:
+        raise RuntimeError("session appeared")
+
+    with pytest.raises(RuntimeError, match="session appeared"):
+        apply_packages(
+            env,
+            {
+                "numpy": ApplySpec(version="1.0", dist="numpy"),
+                "sklearn": ApplySpec(version="1.4", dist="scikit-learn"),
+            },
+            installer=_write_pkg,
+            before_commit=boom,
+        )
+    after = env.read_stamp()
+    assert after.generation == before.generation
+    assert after.packages == before.packages
+    assert not (_env_root(tmp_path) / "gen-2").exists()
+
+
+def test_sequential_upserts_keep_both_names(tmp_path: Path) -> None:
+    """Two adds that both started from ``{numpy}`` must not drop one of them.
+
+    That is the two-tab race: each read the stamp, then the later commit
+    used to write a full replacement set built from that stale read.
+    Merge now happens after the flock, so the second add sees the first.
+    """
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=_write_pkg,
+    )
+    with ApplyInProgress(
+        env,
+        upsert={"sklearn": ApplySpec(version="1.4", dist="scikit-learn")},
+        installer=_write_pkg,
+    ) as first:
+        first.commit()
+    with ApplyInProgress(
+        env,
+        upsert={"torch": ApplySpec(version="2.0", dist="torch")},
+        installer=_write_pkg,
+    ) as second:
+        second.commit()
+    assert env.extras_names() == frozenset({"numpy", "sklearn", "torch"})
+    assert env.read_stamp().generation == 3
+
+
+def test_remove_of_a_name_the_lock_no_longer_has(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=_write_pkg,
+    )
+    apply_packages(env, {}, allow_disruptive=True, installer=_write_pkg)
+    with pytest.raises(EnvironmentMissing, match="numpy"):
+        with ApplyInProgress(env, remove={"numpy"}, installer=_write_pkg):
+            pass
+
+
+def test_uv_installer_pins_and_binary_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[list[str]] = []
+    timeouts: list[object] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        seen.append(cmd)
+        timeouts.append(kwargs.get("timeout"))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("mftik.envapply.subprocess.run", fake_run)
+    monkeypatch.setenv("UV_INDEX_URL", "https://index.example/simple")
+    dest = tmp_path / "site-packages"
+    dest.mkdir()
+    run_uv_installer(
+        dest,
+        {"numpy": ApplySpec(version="1.26.4", dist="numpy")},
+    )
+    cmd = seen[0]
+    assert "--only-binary" in cmd
+    assert ":all:" in cmd
+    assert "numpy==1.26.4" in cmd
+    assert "--index-url" in cmd
+    assert "https://index.example/simple" in cmd
+    assert timeouts == [APPLY_TIMEOUT_S]
+
+
+
+def _resolver(dest: Path, packages: dict[str, ApplySpec]) -> None:
+    """Stand in for uv: unpinned requests come back at a version it chose."""
+    _write_pkg(dest, packages)
+    for spec in packages.values():
+        version = spec.version or "9.9.9"
+        info = dest / f"{spec.dist}-{version}.dist-info"
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {spec.dist}\nVersion: {version}\n"
+        )
+
+
+def test_no_version_asks_the_resolver_for_a_bare_name() -> None:
+    assert ApplySpec(None, "pandas").requirement() == "pandas"
+    assert ApplySpec("2.2.3", "pandas").requirement() == "pandas==2.2.3"
+
+
+def test_an_empty_version_is_not_the_same_as_no_version() -> None:
+    """``""`` means a version was expected and is missing.
+
+    That is a peer publishing names without pins (``envimport``). Installing
+    the latest instead would be the node quietly choosing on their behalf.
+    """
+    with pytest.raises(ApplyFailed):
+        ApplySpec("", "pandas").requirement()
+
+
+def test_an_unpinned_request_is_stamped_at_what_was_resolved(
+    tmp_path: Path,
+) -> None:
+    env = NodeEnv(tmp_path)
+    result = apply_packages(
+        env, {"pandas": ApplySpec(None, "pandas")}, installer=_resolver
+    )
+    assert result.stamp.packages["pandas"].version == "9.9.9"
+    assert env.read_stamp().packages["pandas"].version == "9.9.9"
+
+
+def test_a_stamped_row_does_not_drift_when_something_else_is_added(
+    tmp_path: Path,
+) -> None:
+    """The loose version applies to the request, never to the stamp.
+
+    Every apply rebuilds the whole target set from the stamp, so a row left
+    unpinned there would be re-resolved — and silently moved — each time the
+    Owner added anything at all.
+    """
+    env = NodeEnv(tmp_path)
+    apply_packages(env, {"pandas": ApplySpec(None, "pandas")}, installer=_resolver)
+    seen: list[str] = []
+
+    def recording(dest: Path, packages: dict[str, ApplySpec]) -> None:
+        seen.extend(sorted(spec.requirement() for spec in packages.values()))
+        _resolver(dest, packages)
+
+    with ApplyInProgress(
+        env, upsert={"httpx": ApplySpec("0.27", "httpx")}, installer=recording
+    ) as pending:
+        pending.commit()
+    assert seen == ["httpx==0.27", "pandas==9.9.9"]
+
+
+def test_an_unpinned_request_the_installer_says_nothing_about_fails(
+    tmp_path: Path,
+) -> None:
+    env = NodeEnv(tmp_path)
+    with pytest.raises(ApplyFailed, match="did not report a version"):
+        apply_packages(
+            env, {"pandas": ApplySpec(None, "pandas")}, installer=_write_pkg
+        )
+    assert env.read_stamp().generation == 0
+
+
+def test_a_failed_resolve_points_at_the_import_name_split(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``sklearn`` is on PyPI as a shim with no wheels.
+
+    So the resolver's answer is "no usable wheels", which is true and sends
+    nobody anywhere. The package wanted is ``scikit-learn``. A table of the
+    known ones would be the catalog this epic refuses to keep; naming the
+    mechanism is not.
+    """
+    def failed(*args: object, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stdout="", stderr="no usable wheels")
+
+    monkeypatch.setattr("subprocess.run", failed)
+    with pytest.raises(ApplyFailed) as caught:
+        run_uv_installer(tmp_path, {"sklearn": ApplySpec(None, "sklearn")})
+    message = str(caught.value)
+    assert "no usable wheels" in message
+    assert "scikit-learn" in message
+    assert "--dist" in message
+
+
+def test_no_hint_when_the_distribution_was_given(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Nothing to point out: the Owner already said which package it is."""
+    def failed(*args: object, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stdout="", stderr="network is down")
+
+    monkeypatch.setattr("subprocess.run", failed)
+    with pytest.raises(ApplyFailed) as caught:
+        run_uv_installer(
+            tmp_path, {"sklearn": ApplySpec("1.9.0", "scikit-learn")}
+        )
+    assert str(caught.value) == "network is down"
