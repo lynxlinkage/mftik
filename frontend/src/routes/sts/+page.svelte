@@ -524,14 +524,20 @@
 
 <section class="panel table-wrap" onscroll={hideTip}>
 	{#if strategies.length === 0}
+		<!-- `hasMore` first: acking the last row of a full page empties the
+		     table without emptying the tab, and "Nothing needs attention"
+		     over a Load more button offering the other two hundred is the
+		     one thing this panel must not say. -->
 		<p class="empty-state">
 			{loading
 				? 'Loading…'
-				: tab === 'live'
-					? 'No live sessions.'
-					: tab === 'attention'
-						? 'Nothing needs attention.'
-						: 'No STS history yet.'}
+				: hasMore
+					? 'Nothing left on this page — Load more has the rest.'
+					: tab === 'live'
+						? 'No live sessions.'
+						: tab === 'attention'
+							? 'Nothing needs attention.'
+							: 'No STS history yet.'}
 		</p>
 	{:else}
 		<table class="data">

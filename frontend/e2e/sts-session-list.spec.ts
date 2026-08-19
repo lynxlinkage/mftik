@@ -329,6 +329,12 @@ test('Load more survives acking a full Attention page', async ({ page }) => {
 	send(statusEvent('s-fail', 'ack', 2));
 	await expect(page.getByRole('link', { name: 's-fail' })).toHaveCount(0);
 	await expect(page.getByRole('button', { name: 'Load more' })).toBeVisible();
+	// The tab is not empty, only this page of it. Claiming otherwise over a
+	// button that would fetch the rest is the failure, not the empty table.
+	await expect(page.getByText('Nothing needs attention.')).toHaveCount(0);
+	await expect(
+		page.getByText('Nothing left on this page — Load more has the rest.')
+	).toBeVisible();
 
 	await page.getByRole('button', { name: 'Load more' }).click();
 	await expect(page.getByRole('link', { name: 's-int' })).toBeVisible();
