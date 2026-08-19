@@ -585,7 +585,16 @@ export const api = {
 	strategyTypes: () => request<StrategyTypes>('/sts/types'),
 	strategyTypeTemplate: (type: string) =>
 		request<StrategyTemplate>(`/sts/types/${encodeURIComponent(type)}/template`),
-	strategies: () => request<{ strategies: StrategyRow[] }>('/sts/strategies'),
+	strategies: (opts: { status?: string; before?: string; limit?: number } = {}) => {
+		const q = new URLSearchParams();
+		if (opts.status) q.set('status', opts.status);
+		if (opts.before) q.set('before', opts.before);
+		if (opts.limit != null) q.set('limit', String(opts.limit));
+		const qs = q.toString();
+		return request<{ strategies: StrategyRow[]; has_more: boolean }>(
+			`/sts/strategies${qs ? `?${qs}` : ''}`
+		);
+	},
 	strategyYaml: (sessionId: string) =>
 		request<StrategyYaml>(`/sts/sessions/${encodeURIComponent(sessionId)}/yaml`),
 	stsSessions: (status: string | null = 'live') =>

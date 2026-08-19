@@ -18,7 +18,17 @@
 		type StsSessionStatusEvent
 	} from '$lib/logging/status';
 
+	type Tab = 'live' | 'attention' | 'history';
+
+	const TAB_STATUS: Record<Tab, string> = {
+		live: 'live',
+		attention: 'failed,interrupted',
+		history: 'done,ack'
+	};
+
+	let tab = $state<Tab>('live');
 	let strategies = $state<StrategyRow[]>([]);
+	let hasMore = $state(false);
 	let yamlText = $state(defaultStrategyYml());
 	let templates = $state<StrategyTemplate[]>([]);
 	let selectedType = $state('');
@@ -28,6 +38,7 @@
 	let error = $state<string | null>(null);
 	let busy = $state(false);
 	let loading = $state(true);
+	let loadingMore = $state(false);
 
 	// The strategy.yml of a past deploy: the submitted document, or a rebuild
 	// from the stored spec for deploys made before the text was kept.
@@ -45,9 +56,14 @@
 	// cannot overwrite a newer one we already have.
 	let lastEventTs = new Map<string, number>();
 	let downloadId = $state<string | null>(null);
-	// Sessions we are already fetching a row for, so a burst of events for the
-	// same new session does not fan out into a burst of list fetches.
+	// Unknown-session ids waiting on the one in-flight page-one reload.
+	// A restart announcing three rebuilt sessions is one refresh, not three.
 	let pendingSessions = new Set<string>();
+	let pendingUnknown: Promise<void> | null = null;
+
+	function statusesOf(which: Tab): Set<string> {
+		return new Set(TAB_STATUS[which].split(','));
+	}
 
 	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
 	const selected = $derived(
@@ -74,7 +90,7 @@
 		error = null;
 		try {
 			const [list, t] = await Promise.all([
-				api.strategies(),
+				api.strategies({ status: TAB_STATUS[tab] }),
 				api.strategyTypes().catch(() => ({
 					types: [],
 					templates: [],
@@ -82,6 +98,7 @@
 				}))
 			]);
 			strategies = list.strategies;
+			hasMore = list.has_more;
 			templates = t.templates;
 			if (!templates.some((x) => x.type === selectedType)) {
 				selectedType = pickType(list.strategies, templates, t.default);
@@ -93,6 +110,41 @@
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			loading = false;
+		}
+	}
+
+	function setTab(next: Tab) {
+		if (next === tab) return;
+		tab = next;
+		viewing = null;
+		viewingId = null;
+		void refresh();
+	}
+
+	async function loadMore() {
+		const oldest = strategies.at(-1);
+		if (!oldest || loadingMore || !hasMore) return;
+		loadingMore = true;
+		error = null;
+		try {
+			const next = await api.strategies({
+				status: TAB_STATUS[tab],
+				before: oldest.session_id
+			});
+			strategies = [...strategies, ...next.strategies];
+			hasMore = next.has_more;
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			loadingMore = false;
+		}
+	}
+
+	function dropRow(sessionId: string) {
+		strategies = strategies.filter((s) => s.session_id !== sessionId);
+		if (viewingId === sessionId) {
+			viewing = null;
+			viewingId = null;
 		}
 	}
 
@@ -119,6 +171,9 @@
 		error = null;
 		try {
 			const created = await api.deploySts({ type: selectedType, yaml: yamlText });
+			// The new row is live. Someone who deployed from History would
+			// otherwise refresh a tab that cannot show it.
+			tab = 'live';
 			await refresh();
 			await goto(`/sts/${created.session_id}`);
 		} catch (e) {
@@ -176,9 +231,14 @@
 		busy = true;
 		error = null;
 		try {
-			if (s.paused) await api.resumeSts(s.session_id);
-			else await api.pauseSts(s.session_id);
-			await refresh();
+			const result = s.paused
+				? await api.resumeSts(s.session_id)
+				: await api.pauseSts(s.session_id);
+			strategies = strategies.map((row) =>
+				row.session_id === s.session_id
+					? { ...row, paused: result.paused, status: result.status }
+					: row
+			);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -191,7 +251,7 @@
 		error = null;
 		try {
 			await api.stopSts(s.session_id);
-			await refresh();
+			dropRow(s.session_id);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -204,7 +264,7 @@
 		error = null;
 		try {
 			await api.ackSts(s.session_id);
-			await refresh();
+			dropRow(s.session_id);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -217,16 +277,17 @@
 	 *
 	 * A deploy from another tab announces itself as live before this page
 	 * has the row. One refresh is enough: the session is persisted before
-	 * it is announced, so the row is already there.
+	 * it is announced, so the row is already there. Concurrent unknowns
+	 * share that one fetch — three rebuilt sessions is one page-one reload.
 	 */
 	async function fetchUnknownSession(sessionId: string) {
-		if (pendingSessions.has(sessionId)) return;
 		pendingSessions.add(sessionId);
-		try {
-			await refresh();
-		} finally {
-			pendingSessions.delete(sessionId);
-		}
+		if (pendingUnknown) return pendingUnknown;
+		pendingUnknown = refresh().finally(() => {
+			pendingSessions.clear();
+			pendingUnknown = null;
+		});
+		return pendingUnknown;
 	}
 
 	// One shared tooltip node, positioned in viewport coordinates. It lives
@@ -273,12 +334,16 @@
 		if (previous !== undefined && ev.ts < previous) return;
 		lastEventTs.set(ev.session_id, ev.ts);
 
+		const inTab = statusesOf(tab).has(ev.status);
 		const row = strategies.find((s) => s.session_id === ev.session_id);
 		if (row === undefined) {
-			// A session this page has never seen — a deploy from another tab, or
-			// this one. The event alone cannot build a row (it carries no type,
-			// config or deploy time), so go and fetch one.
-			fetchUnknownSession(ev.session_id);
+			// History does not insert from the socket — that would invent an
+			// order the cursor does not have. Live / Attention reload page one.
+			if (inTab && tab !== 'history') fetchUnknownSession(ev.session_id);
+			return;
+		}
+		if (!inTab) {
+			dropRow(ev.session_id);
 			return;
 		}
 		strategies = strategies.map((s) =>
@@ -359,6 +424,16 @@
 	></textarea>
 </section>
 
+<div class="tabs" role="tablist">
+	<button type="button" class:active={tab === 'live'} onclick={() => setTab('live')}>Live</button>
+	<button type="button" class:active={tab === 'attention'} onclick={() => setTab('attention')}>
+		Attention
+	</button>
+	<button type="button" class:active={tab === 'history'} onclick={() => setTab('history')}>
+		History
+	</button>
+</div>
+
 <!-- The reason is detail, not headline: a row is scanned for its status, and
      256 characters of it inline would bury that. No `title` attribute — the
      tooltip replaces it, and having both would show two of them. -->
@@ -376,7 +451,15 @@
 
 <section class="panel table-wrap" onscroll={hideTip}>
 	{#if strategies.length === 0}
-		<p class="empty-state">{loading ? 'Loading…' : 'No strategies deployed yet.'}</p>
+		<p class="empty-state">
+			{loading
+				? 'Loading…'
+				: tab === 'live'
+					? 'No live sessions.'
+					: tab === 'attention'
+						? 'Nothing needs attention.'
+						: 'No STS history yet.'}
+		</p>
 	{:else}
 		<table class="data">
 			<thead>
@@ -516,6 +599,13 @@
 				{/each}
 			</tbody>
 		</table>
+		{#if hasMore}
+			<div class="more">
+				<button type="button" class="secondary" onclick={loadMore} disabled={loadingMore}>
+					{loadingMore ? 'Loading…' : 'Load more'}
+				</button>
+			</div>
+		{/if}
 	{/if}
 </section>
 
@@ -615,6 +705,12 @@
 
 	.table-wrap {
 		overflow-x: auto;
+	}
+
+	.more {
+		display: flex;
+		justify-content: center;
+		padding-top: 1rem;
 	}
 
 	.actions button.active {

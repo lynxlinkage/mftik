@@ -5,10 +5,11 @@ from __future__ import annotations
 import base64
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from mftik.protocol import (
     DEFAULT_STRATEGY_TYPE,
@@ -95,6 +96,27 @@ _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _LOCAL_YAML = "sts: {}\n"
 
 
+def _parse_statuses(status: str | None) -> str | list[str] | None:
+    """``done,ack`` is History; a single value is Live. Same shape as Board."""
+    if status is None or not status.strip():
+        return None
+    parts = [part.strip() for part in status.split(",") if part.strip()]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return parts
+
+
+def _includes_live(status: str | Sequence[str] | None) -> bool:
+    """Whether this list has any use for the live-session pause probe."""
+    if status is None:
+        return True
+    if isinstance(status, str):
+        return status == SessionStatus.LIVE.value
+    return SessionStatus.LIVE.value in status
+
+
 def _registry_template(rec: AddedStrategy, store: RegistryStore) -> StrategyTemplate:
     key = qualify(rec.origin, rec.type)
     return StrategyTemplate(
@@ -174,34 +196,59 @@ async def strategy_type_template(
 
 @router.get("/strategies", response_model=StrategyListResponse)
 async def list_strategies(
-    broker: BrokerDep, limit: int = 100
+    broker: BrokerDep,
+    status: str | None = None,
+    before: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> StrategyListResponse:
-    """List STS sessions as deploys, including ones that failed at attach."""
+    """List STS sessions as deploys, including ones that failed at attach.
+
+    ``status`` is a comma union (``done,ack`` is History). ``before`` is the
+    last ``session_id`` of the previous page. An unknown cursor is 422 —
+    the row may have gone with its user, and an empty page would read as
+    the end of history.
+    """
+    parsed = _parse_statuses(status)
     paused_by_session: dict[str, bool] = {}
-    try:
-        live = await request_domain(
-            broker,
-            Topics.STS,
-            ListSessionsRequestEnvelope.wrap(
-                ListSessionsRequest(domain="sts", status="live"),
-                type=STS_SESSION_LIST,
-                source="api",
-            ),
-            result_type=ListSessionsResult,
-        )
-        for s in live.sessions:
-            if s.paused is not None:
-                paused_by_session[s.session_id] = s.paused
-    except DomainRpcError:
-        logger.exception("failed to fetch live STS pause state for strategies list")
+    # History and Attention have no use for ``paused``. The probe is a
+    # 5s RPC on a process that can stop answering; skip it unless the
+    # page could show a live row.
+    if _includes_live(parsed):
+        try:
+            live = await request_domain(
+                broker,
+                Topics.STS,
+                ListSessionsRequestEnvelope.wrap(
+                    ListSessionsRequest(domain="sts", status="live"),
+                    type=STS_SESSION_LIST,
+                    source="api",
+                ),
+                result_type=ListSessionsResult,
+            )
+            for s in live.sessions:
+                if s.paused is not None:
+                    paused_by_session[s.session_id] = s.paused
+        except DomainRpcError:
+            logger.exception(
+                "failed to fetch live STS pause state for strategies list"
+            )
 
+    fetch = limit + 1
     async with session_scope() as db:
-        rows = await StsSessionRepository(db).list_sessions(
-            status=None, limit=limit
+        repo = StsSessionRepository(db)
+        if before is not None:
+            if await repo.get_by_session_id(before) is None:
+                raise HTTPException(
+                    status_code=422, detail=f"unknown cursor: {before}"
+                )
+        rows = await repo.list_sessions(
+            status=parsed, before_session=before, limit=fetch
         )
 
+    has_more = len(rows) > limit
+    page = rows[:limit]
     out: list[StrategyOut] = []
-    for row in rows:
+    for row in page:
         out.append(
             StrategyOut(
                 type=row.type,
@@ -214,7 +261,7 @@ async def list_strategies(
                 reason=row.reason,
             )
         )
-    return StrategyListResponse(strategies=out)
+    return StrategyListResponse(strategies=out, has_more=has_more)
 
 
 #: Stand-in for a ``td`` account whose credential has since been deleted. The

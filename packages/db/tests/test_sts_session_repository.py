@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from db_harness import a_database, an_owner
 from mftik_db.models.session import SessionStatus
@@ -255,6 +257,59 @@ async def test_mark_ack_accepts_interrupted(db) -> None:
     assert row is not None
     assert row.status == SessionStatus.ACK.value
     assert row.reason == "STS shut down while this was running"
+
+
+async def _stamp(
+    repo: StsSessionRepository, session_id: str, when: datetime
+) -> None:
+    row = await repo.get_by_session_id(session_id)
+    assert row is not None
+    row.created_at = when
+    await repo.session.flush()
+
+
+async def test_list_sessions_pages_on_a_session_cursor(db) -> None:
+    """Newest first; the cursor of the last row is the rest, with no overlap."""
+    repo = StsSessionRepository(db)
+    origin = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    for offset, session_id in enumerate(("s-old", "s-mid", "s-new")):
+        await _live(repo, session_id)
+        await _stamp(repo, session_id, origin + timedelta(minutes=offset))
+
+    first = await repo.list_sessions(status=None, limit=2)
+    assert [r.session_id for r in first] == ["s-new", "s-mid"]
+
+    rest = await repo.list_sessions(
+        status=None, before_session="s-mid", limit=2
+    )
+    assert [r.session_id for r in rest] == ["s-old"]
+
+
+async def test_list_sessions_breaks_a_tied_created_at_on_session_id(db) -> None:
+    repo = StsSessionRepository(db)
+    when = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    await _live(repo, "s-a")
+    await _live(repo, "s-b")
+    await _stamp(repo, "s-a", when)
+    await _stamp(repo, "s-b", when)
+
+    first = await repo.list_sessions(status=None, limit=1)
+    assert [r.session_id for r in first] == ["s-b"]
+
+    rest = await repo.list_sessions(
+        status=None, before_session="s-b", limit=1
+    )
+    assert [r.session_id for r in rest] == ["s-a"]
+
+
+async def test_an_unknown_cursor_returns_nothing_not_the_first_page(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-live")
+
+    rows = await repo.list_sessions(status=None, before_session="nope")
+    assert rows == []
+    still = await repo.list_sessions(status=None)
+    assert [r.session_id for r in still] == ["s-live"]
 
 
 async def test_mark_ack_refuses_live_and_done(db) -> None:

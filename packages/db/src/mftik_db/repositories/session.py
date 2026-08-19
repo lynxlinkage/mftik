@@ -67,6 +67,56 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
     async def get_by_session_id(self, session_id: str) -> StsSessionRow | None:
         return await self.session.get(StsSessionRow, session_id)
 
+    async def list_sessions(
+        self,
+        *,
+        status: str | Sequence[str] | None = SessionStatus.LIVE.value,
+        created_by: int | None = None,
+        limit: int = 100,
+        before_session: str | None = None,
+    ) -> Sequence[StsSessionRow]:
+        """STS list, newest first, optionally older than ``before_session``.
+
+        Overrides the mixin: ``session_id`` is unique here, so it is a total
+        order with ``created_at``. ``td_sessions`` is one row per
+        ``(session_id, api_id)`` — the same cursor would not be.
+
+        An unknown ``before_session`` matches nothing (the subquery is
+        NULL). That is not the first page. The handler turns it into 422
+        so a deleted user is not read as the end of history.
+        """
+        stmt = select(StsSessionRow).order_by(
+            StsSessionRow.created_at.desc(),
+            StsSessionRow.session_id.desc(),
+        )
+        if status is not None:
+            if isinstance(status, str):
+                stmt = stmt.where(StsSessionRow.status == status)
+            else:
+                values = list(status)
+                if len(values) == 1:
+                    stmt = stmt.where(StsSessionRow.status == values[0])
+                elif values:
+                    stmt = stmt.where(StsSessionRow.status.in_(values))
+        if created_by is not None:
+            stmt = stmt.where(StsSessionRow.created_by == created_by)
+        if before_session is not None:
+            anchor = (
+                select(StsSessionRow.created_at)
+                .where(StsSessionRow.session_id == before_session)
+                .scalar_subquery()
+            )
+            stmt = stmt.where(
+                (StsSessionRow.created_at < anchor)
+                | (
+                    (StsSessionRow.created_at == anchor)
+                    & (StsSessionRow.session_id < before_session)
+                )
+            )
+        stmt = stmt.limit(limit)
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
     async def create_live(
         self,
         *,

@@ -1027,16 +1027,50 @@
           "sts"
         ],
         "summary": "List Strategies",
-        "description": "List STS sessions as deploys, including ones that failed at attach.",
+        "description": "List STS sessions as deploys, including ones that failed at attach.\n\n``status`` is a comma union (``done,ack`` is History). ``before`` is the\nlast ``session_id`` of the previous page. An unknown cursor is 422 \u2014\nthe row may have gone with its user, and an empty page would read as\nthe end of history.",
         "operationId": "list_strategies_sts_strategies_get",
         "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
           {
             "name": "limit",
             "in": "query",
             "required": false,
             "schema": {
               "type": "integer",
-              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
               "title": "Limit"
             }
           }
@@ -4010,6 +4044,11 @@
             },
             "type": "array",
             "title": "Strategies"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
           }
         },
         "type": "object",
