@@ -42,6 +42,10 @@ _PROBE_PREFIXES = ("", "/api")
 class CliError(Exception):
     """Something the user can fix — a bad argument, a refusal, a 404."""
 
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
 
 class NodeUnreachable(CliError):
     """The node did not answer. Distinguished so it can exit differently."""
@@ -276,15 +280,28 @@ def _refusal(response: httpx.Response, *, login_hint: bool = True) -> CliError:
     status = response.status_code
     if status == 401:
         if not login_hint:
-            return CliError(detail)
+            return CliError(detail, status=status)
         return CliError(
-            f"{detail}\nThis node wants a credential — run: mftik connect <url>"
+            f"{detail}\nThis node wants a credential — run: mftik connect <url>",
+            status=status,
         )
     if status == 403:
         return CliError(
             f"{detail}\nThe key is real but not allowed here. A registry key "
-            "can only read published strategies; deploying needs an API key."
+            "can only read published strategies; deploying needs an API key.",
+            status=status,
         )
     called = _called(response)
     prefix = f"{called} {status}" if called else f"HTTP {status}"
-    return CliError(f"{prefix}: {detail}")
+    return CliError(f"{prefix}: {detail}", status=status)
+
+
+def is_environment_refusal(exc: BaseException) -> bool:
+    """A missing extra, not a missing strategy and not a half-created session."""
+    text = str(exc).lower()
+    if "incompatible_environment" in text:
+        return True
+    if "does not have" in text and "apply them first" in text:
+        return True
+    status = getattr(exc, "status", None)
+    return status == 409 and "requires" in text and "does not have" in text

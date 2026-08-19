@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { api, type RegistryRemote, type RegistryStrategy } from '$lib/api';
+	import { api, missingRemoteExtras, type RegistryRemote, type RegistryStrategy } from '$lib/api';
 
 	let published = $state<RegistryStrategy[]>([]);
 	let privateStrategies = $state<RegistryStrategy[]>([]);
@@ -18,6 +18,7 @@
 	let blocked = $state<{ name: string; message: string } | null>(null);
 
 	const canConnect = $derived(!busy && !!name.trim() && !!url.trim());
+	const connectMissing = $derived(connectError ? missingRemoteExtras(connectError) : []);
 
 	async function refresh() {
 		loading = true;
@@ -233,6 +234,13 @@
 			</p>
 			{#if connectError}
 				<p class="err">{connectError}</p>
+				{#if connectMissing.length}
+					<p class="hint">
+						This node is missing {connectMissing.join(', ')}.
+						<a href="/settings#extras">Import those extras</a>, then connect again.
+						A version difference is not a connect error.
+					</p>
+				{/if}
 			{/if}
 			<div class="modal-actions">
 				<button type="button" class="secondary" onclick={closeConnect} disabled={busy}>

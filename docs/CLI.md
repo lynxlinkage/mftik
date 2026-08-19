@@ -149,6 +149,9 @@ single copy next to a packaged class), then `load_class` and — when there
 is a document — `on_initialized`. Without a document those last two steps
 about the config are skipped, and the command says so. A declared extra
 is still only a declaration: whether this node has it is a push question.
+A push the node refuses for a missing extra prints those names and exits 1.
+`run` that hears `incompatible_environment` does the same — it is not
+`unknown_strategy`, and it is not a session that may already be live.
 
 `push` is always `origin=private` and always replaces. It copies the
 `.py` tree and, when present, `strategy.yml` — that sidecar becomes the

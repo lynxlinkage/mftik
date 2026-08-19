@@ -174,6 +174,25 @@ def test_push_exits_one_when_sts_skipped_the_tree(
     assert "private::Tiny" in capsys.readouterr().err
 
 
+def test_push_prints_missing_extras(tmp_path: Path, monkeypatch, capsys) -> None:
+    class Missing(Node_):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/registry/v1/add":
+                return httpx.Response(
+                    400,
+                    json={
+                        "detail": "this node does not have numpy — apply them first"
+                    },
+                )
+            return super().__call__(request)
+
+    _install(monkeypatch, Missing())
+    assert main(["push", str(_tree(tmp_path))]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "numpy" in err
+    assert "Traceback" not in err
+
+
 def test_push_refuses_a_file(tmp_path: Path, capsys) -> None:
     path = tmp_path / "strategy.py"
     path.write_text(_TINY)

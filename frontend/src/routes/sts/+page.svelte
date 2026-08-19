@@ -467,6 +467,12 @@
 			<code>{selected.type}</code> · {selected.description}
 			{#if dirty}<span class="edited">edited</span>{/if}
 		</p>
+		{#if selected.env_ok === false && selected.requires?.length}
+			<p class="type-note env-gap">
+				Needs {selected.requires.join(', ')} — this node does not have them yet. Deploy
+				will refuse.
+			</p>
+		{/if}
 	{/if}
 	<textarea
 		class="yml"
@@ -719,6 +725,10 @@
 		margin: 0;
 		font-size: 0.78rem;
 		color: var(--muted);
+	}
+
+	.env-gap {
+		color: var(--warn);
 	}
 
 	.edited {

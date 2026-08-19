@@ -108,6 +108,57 @@ export type StrategyTemplate = {
 	yaml: string;
 	/** Bundled catalogue vs a tree in this node's registry. */
 	source: 'bundled' | 'registry';
+	/** Import names the tree declared. Empty for bundled strategies. */
+	requires?: string[];
+	/** Whether this node's applied extras cover `requires`. */
+	env_ok?: boolean;
+};
+
+export type EnvPackage = {
+	version: string;
+	dist: string;
+	source: string;
+};
+
+export type BrokenTree = {
+	name: string;
+	type: string;
+	origin: string;
+	requires: string[];
+};
+
+export type Environment = {
+	generation: number;
+	python: number[];
+	platform: string;
+	bytes: number;
+	packages: Record<string, EnvPackage>;
+	abi_ok: boolean;
+	runtime_python: number[];
+	runtime_platform: string;
+	restart_required: boolean;
+	loaded: boolean;
+	load_error: string | null;
+	broken: BrokenTree[];
+};
+
+export type EnvImportRow = {
+	name: string;
+	version: string;
+	dist: string;
+	status: 'added' | 'kept' | 'conflict';
+	guessed: boolean;
+	local_version: string | null;
+	local_dist: string | null;
+};
+
+export type EnvironmentImport = {
+	added: EnvImportRow[];
+	kept: EnvImportRow[];
+	conflicts: EnvImportRow[];
+	guessed: string[];
+	applied: boolean;
+	environment: Environment | null;
 };
 
 export type StrategyTypes = {
@@ -686,8 +737,48 @@ export const api = {
 	disconnectRegistry: (name: string) =>
 		request<RegistryRemote>(`/registry/v1/remotes/${encodeURIComponent(name)}`, {
 			method: 'DELETE'
+		}),
+	environment: () => request<Environment>('/environment'),
+	upsertEnvironmentPackage: (body: {
+		name: string;
+		version: string;
+		dist?: string;
+		force?: boolean;
+	}) =>
+		request<Environment>('/environment/packages', {
+			method: 'POST',
+			body: JSON.stringify(body)
+		}),
+	deleteEnvironmentPackage: (name: string, force = false) =>
+		request<Environment>(
+			`/environment/packages/${encodeURIComponent(name)}${force ? '?force=true' : ''}`,
+			{ method: 'DELETE' }
+		),
+	importEnvironment: (body: {
+		url?: string;
+		token?: string;
+		name?: string;
+		confirm?: boolean;
+		force?: boolean;
+		dist?: Record<string, string>;
+	}) =>
+		request<EnvironmentImport>('/environment/import', {
+			method: 'POST',
+			body: JSON.stringify(body)
 		})
 };
+
+/** Names a new-connect refusal listed as missing on this node. */
+export function missingRemoteExtras(message: string): string[] {
+	const marker = 'remote extras not on this node:';
+	const at = message.toLowerCase().indexOf(marker);
+	if (at < 0) return [];
+	return message
+		.slice(at + marker.length)
+		.split(',')
+		.map((part) => part.trim())
+		.filter(Boolean);
+}
 
 export function defaultStrategyYml(): string {
 	return DEFAULT_STRATEGY_YML;
