@@ -466,11 +466,22 @@ async def test_upsert_of_a_provided_name_is_refused(env_dir: Path) -> None:
     assert set(stamp.packages) == {"numpy"}
 
 
-def _dist_info(dest: Path, dist: str, version: str) -> None:
+def _dist_info(
+    dest: Path, dist: str, version: str, top_level: str | None = None
+) -> None:
+    """A stub that carries what a real wheel carries.
+
+    ``top_level.txt`` is part of that: the import name is read off the wheel,
+    never derived from the distribution name, so a stub without one models a
+    package that provides nothing importable.
+    """
     info = dest / f"{dist}-{version}.dist-info"
     info.mkdir(parents=True, exist_ok=True)
     (info / "METADATA").write_text(
         f"Metadata-Version: 2.1\nName: {dist}\nVersion: {version}\n"
+    )
+    (info / "top_level.txt").write_text(
+        f"{top_level or dist.replace('-', '_')}\n"
     )
 
 
@@ -486,6 +497,9 @@ def _resolving_installer(dest: Path, packages: dict[str, ApplySpec]) -> None:
         _dist_info(dest, spec.dist, spec.version)
     if "pandas" in packages:
         _dist_info(dest, "numpy", "2.0" if "scipy" in packages else "1.0")
+        # Its import name is ``dateutil``; the guess from the dist name
+        # would be ``python_dateutil``, which imports nothing.
+        _dist_info(dest, "python-dateutil", "2.9.0", top_level="dateutil")
 
 
 async def test_a_new_name_that_moves_a_dependency_is_disruptive(
@@ -550,13 +564,15 @@ async def test_get_lists_dependencies_the_owner_never_named(
     out = await get_environment(broker=EnvBroker())
 
     rows = {row.dist: row for row in out.installed}
-    assert set(rows) == {"pandas", "numpy"}
+    assert set(rows) == {"pandas", "numpy", "python-dateutil"}
     assert rows["pandas"].approved is True
     assert rows["numpy"].approved is False
     assert rows["numpy"].version == "1.0"
     # The import name to approve it under, so the UI can offer one click at
     # the version already installed rather than asking the Owner to guess.
     assert rows["numpy"].suggested_name == "numpy"
+    # Off the wheel, not off the hyphen.
+    assert rows["python-dateutil"].suggested_name == "dateutil"
 
 
 async def test_approving_a_dependency_makes_it_declarable(env_dir: Path) -> None:
@@ -566,7 +582,8 @@ async def test_approving_a_dependency_makes_it_declarable(env_dir: Path) -> None
 
     out = await _upsert("numpy", "1.0", "numpy", EnvBroker())
     assert set(out.packages) == {"pandas", "numpy"}
-    assert {row.dist for row in out.installed if not row.approved} == set()
+    unapproved = {row.dist for row in out.installed if not row.approved}
+    assert unapproved == {"python-dateutil"}
     # Nothing moved: approving at the version already on disk is a no-op
     # install, so no live session had to be stopped for it.
     assert out.restart_required is False

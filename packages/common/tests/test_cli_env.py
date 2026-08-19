@@ -60,6 +60,15 @@ def _environment(**over: object) -> dict[str, object]:
                 "dist": "python-dateutil",
                 "version": "2.9.0",
                 "approved": False,
+                # Off the wheel's top_level.txt. The guess from the dist name
+                # would be ``python_dateutil``, which imports nothing.
+                "suggested_name": "dateutil",
+                "needed_by": ["pandas"],
+            },
+            {
+                "dist": "ambiguous-pkg",
+                "version": "1.0",
+                "approved": False,
                 "suggested_name": None,
                 "needed_by": ["pandas"],
             },
@@ -134,8 +143,11 @@ def test_deps_names_who_pulled_each_one_in(monkeypatch, capsys) -> None:
     lines = {line.split()[0]: line for line in out.splitlines() if line.strip()}
     assert "pandas" in lines["numpy"]
     assert "python-dateutil" in lines["six"]
-    # No usable import name, so no one-word approval is offered.
-    assert "import name differs" in lines["python-dateutil"]
+    # Read off the wheel, not guessed from the hyphen.
+    assert "dateutil" in lines["python-dateutil"]
+    assert "python_dateutil" not in lines["python-dateutil"]
+    # Several top-level names is a choice; the CLI does not make it.
+    assert "import name differs" in lines["ambiguous-pkg"]
 
 
 def test_add_may_omit_the_version(monkeypatch, capsys) -> None:
@@ -176,9 +188,17 @@ def test_approve_refuses_a_dist_with_no_usable_import_name(
     monkeypatch, capsys
 ) -> None:
     _install(monkeypatch, Node_())
-    assert main(["env", "approve", "python-dateutil"]) == EXIT_ERROR
+    assert main(["env", "approve", "ambiguous-pkg"]) == EXIT_ERROR
     err = capsys.readouterr().err
     assert "--name" in err
+
+
+def test_approve_uses_the_import_name_the_wheel_declares(monkeypatch) -> None:
+    fake = Node_()
+    _install(monkeypatch, fake)
+    assert main(["env", "approve", "python-dateutil"]) == 0
+    assert fake.bodies[-1]["name"] == "dateutil"
+    assert fake.bodies[-1]["dist"] == "python-dateutil"
 
 
 def test_approve_takes_the_import_name_when_told(monkeypatch) -> None:

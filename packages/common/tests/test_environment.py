@@ -13,6 +13,7 @@ from mftik.environment import (
     dependency_sources,
     describe_missing,
     disruptive_dists,
+    provided_imports,
     unapproved_present,
 )
 
@@ -338,3 +339,62 @@ def test_two_packages_can_need_the_same_dependency(tmp_path: Path) -> None:
     _install(dest, "scipy", "1.14", ["numpy"])
     _install(dest, "numpy", "2.1.3", [])
     assert dependency_sources(dest)["numpy"] == ("pandas", "scipy")
+
+
+def test_the_import_name_comes_off_the_wheel_not_the_dist_name(
+    tmp_path: Path,
+) -> None:
+    """``python-dateutil`` provides ``dateutil``.
+
+    Guessing by swapping the hyphen gives ``python_dateutil`` — a perfectly
+    good identifier that imports nothing — and offering it as the name to
+    approve would stamp a row no strategy can ever satisfy.
+    """
+    dest = tmp_path / "site-packages"
+    (dest / "dateutil").mkdir(parents=True)
+    (dest / "dateutil" / "__init__.py").write_text("")
+    info = dest / "python_dateutil-2.9.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: python-dateutil\nVersion: 2.9.0\n"
+    )
+    (info / "top_level.txt").write_text("dateutil\n")
+
+    assert provided_imports(dest) == {"python-dateutil": ("dateutil",)}
+
+
+def test_a_wheel_without_top_level_falls_back_to_record(tmp_path: Path) -> None:
+    """numpy and pandas ship no ``top_level.txt``; the file list still knows."""
+    dest = tmp_path / "site-packages"
+    (dest / "numpy").mkdir(parents=True)
+    (dest / "numpy" / "__init__.py").write_text("")
+    info = dest / "numpy-2.5.2.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: numpy\nVersion: 2.5.2\n"
+    )
+    (info / "RECORD").write_text(
+        "numpy/__init__.py,sha256=x,10\n"
+        "numpy/core/_mod.py,sha256=y,20\n"
+        "numpy-2.5.2.dist-info/METADATA,sha256=z,30\n"
+        "bin/f2py,sha256=w,40\n"
+        "../../../bin/f2py,sha256=v,40\n"
+    )
+
+    assert provided_imports(dest) == {"numpy": ("numpy",)}
+
+
+def test_a_single_module_wheel_is_found(tmp_path: Path) -> None:
+    dest = tmp_path / "site-packages"
+    dest.mkdir()
+    (dest / "six.py").write_text("")
+    info = dest / "six-1.17.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: six\nVersion: 1.17.0\n"
+    )
+    (info / "RECORD").write_text(
+        "six.py,sha256=x,10\nsix-1.17.0.dist-info/METADATA,,\n"
+    )
+
+    assert provided_imports(dest) == {"six": ("six",)}

@@ -243,8 +243,17 @@ Three things follow, and none of them are optional:
    *approve*, not *install*.
 2. **The Owner has to be able to see them.** `GET /environment`
    reports the whole live generation, each row marked `approved` or
-   not, with the version and the import name to approve it under.
-   Approving is a no-op install at that exact version.
+   not, with the version, the distributions that directly require it,
+   and the import name to approve it under. Approving is a no-op
+   install at that exact version.
+
+   The import name is read off the wheel — `top_level.txt`, or
+   `RECORD` for the many wheels that ship none — and never derived
+   from the distribution name. `python-dateutil` provides `dateutil`;
+   swapping the hyphen gives `python_dateutil`, which is a valid
+   identifier that imports nothing, and offering it would stamp a row
+   no strategy can satisfy. A wheel with several top-level names gets
+   no suggestion: which one is meant is a choice, not a derivation.
 3. **Disruption is about what lands on disk, not what was typed.**
    Adding `scipy` changes no stamped name, so the live-session gate
    would never open — and the resolver can still hand back a different

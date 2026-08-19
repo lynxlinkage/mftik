@@ -328,6 +328,70 @@ def _dir_size(root: Path) -> int:
                 continue
     return total
 
+def provided_imports(site_packages: Path) -> dict[str, tuple[str, ...]]:
+    """Normalised dist name → the top-level names it actually provides.
+
+    Not derivable from the distribution name. ``python-dateutil`` provides
+    ``dateutil``; guessing by replacing the hyphen gives ``python_dateutil``,
+    which is a perfectly good identifier and imports nothing. Offering that as
+    the name to approve would stamp a row no strategy can ever satisfy.
+
+    ``top_level.txt`` when the wheel ships one — python-dateutil does, and it
+    says ``dateutil``. Modern wheels often omit it (numpy and pandas do), so
+    the fallback reads ``RECORD`` and keeps the top-level entries that are
+    importable: a directory with an ``__init__.py``, or a module beside it.
+    """
+    out: dict[str, tuple[str, ...]] = {}
+    for info in site_packages.glob("*.dist-info"):
+        try:
+            dist = PathDistribution(info)
+            name = dist.metadata["Name"]
+            if not name:
+                continue
+        except (OSError, KeyError, ValueError):
+            continue
+        names = _top_level_declared(info) or _top_level_from_record(
+            info, site_packages
+        )
+        if names:
+            out[normalize_dist(name)] = names
+    return out
+
+
+def _top_level_declared(info: Path) -> tuple[str, ...]:
+    try:
+        raw = (info / "top_level.txt").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ()
+    return tuple(
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip() and line.strip().isidentifier()
+    )
+
+
+def _top_level_from_record(info: Path, site_packages: Path) -> tuple[str, ...]:
+    try:
+        raw = (info / "RECORD").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ()
+    found: set[str] = set()
+    for line in raw.splitlines():
+        path = line.split(",", 1)[0].strip()
+        if not path or path.startswith(("..", "/")):
+            continue
+        head = path.split("/", 1)[0]
+        if head.endswith((".dist-info", ".data")) or head in {"bin", "lib"}:
+            continue
+        if head.endswith(".py"):
+            head = head[: -len(".py")]
+        elif not (site_packages / head / "__init__.py").is_file():
+            continue
+        if head.isidentifier():
+            found.add(head)
+    return tuple(sorted(found))
+
+
 def dependency_sources(site_packages: Path) -> dict[str, tuple[str, ...]]:
     """Normalised dist name → the installed dists that directly require it.
 

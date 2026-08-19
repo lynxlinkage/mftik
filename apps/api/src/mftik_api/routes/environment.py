@@ -32,6 +32,7 @@ from mftik.environment import (
     NodeEnv,
     dependency_sources,
     normalize_dist,
+    provided_imports,
     resolved_dists,
 )
 from mftik.protocol import (
@@ -112,15 +113,20 @@ def _installed_out(env: NodeEnv, stamp: EnvStamp) -> list[EnvInstalledOut]:
     site_packages = env.site_packages(stamp.generation)
     live = resolved_dists(site_packages)
     sources = dependency_sources(site_packages)
+    provides = provided_imports(site_packages)
     rows: list[EnvInstalledOut] = []
     for dist, version in sorted(live.items()):
-        suggested = dist.replace("-", "_")
+        # Read off the wheel, never guessed from the distribution name:
+        # python-dateutil provides ``dateutil``, and ``python_dateutil`` is a
+        # valid identifier that imports nothing. More than one top-level name
+        # is a choice, and not this code's to make.
+        names = provides.get(dist, ())
         rows.append(
             EnvInstalledOut(
                 dist=dist,
                 version=version,
                 approved=dist in approved,
-                suggested_name=suggested if suggested.isidentifier() else None,
+                suggested_name=names[0] if len(names) == 1 else None,
                 needed_by=list(sources.get(dist, ())),
             )
         )

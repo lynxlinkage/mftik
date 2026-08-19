@@ -415,9 +415,12 @@ class EnvInstalledOut(BaseModel):
     version: str
     #: This distribution backs a stamp row.
     approved: bool
-    #: The import name to approve it under, when the distribution name is a
-    #: usable one. ``null`` for names like ``python-dateutil`` — the import
-    #: name is ``dateutil`` and only the package itself knows that.
+    #: The import name to approve it under, read off the wheel's
+    #: ``top_level.txt`` or ``RECORD`` — never guessed from ``dist``.
+    #: ``python-dateutil`` provides ``dateutil``, and the guess
+    #: (``python_dateutil``) is a valid identifier that imports nothing.
+    #: ``null`` when the wheel provides several top-level names, because
+    #: which one a strategy means is a choice and not this code's to make.
     suggested_name: str | None = None
     #: Installed distributions that directly require this one. Empty for a
     #: root — something the Owner asked for. Read off ``Requires-Dist``, so
