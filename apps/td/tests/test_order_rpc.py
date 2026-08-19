@@ -143,6 +143,49 @@ async def _ack(broker: Broker, envelope: Envelope[Any]) -> OrderAck:
     return OrderAck.model_validate(reply.payload)
 
 
+async def test_the_order_loop_rebuilds_itself_rather_than_going_quiet(
+    broker: Broker,
+    factory: PaperSessionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The subject an order travels on must not be endable by one exception.
+
+    It used to be: the loop caught whatever ended it, logged, and returned.
+    The account stayed attached, its lease renewed and its feeds live, while
+    every order STS sent it timed out — the same shape of failure that took
+    STS's own RPC subject down for seven hours on 2026-08-18.
+    """
+    monkeypatch.setattr("mftik_td.session.manager.RPC_RESTART_DELAY_S", 0.0)
+    subject = Topics.td_order(API_ID)
+    real_serve = broker.serve
+    failures: list[str] = []
+
+    def flaky(name: str, **kwargs: Any) -> Any:
+        if name == subject and not failures:
+            failures.append(name)
+            raise RuntimeError("something serve does not handle")
+        return real_serve(name, **kwargs)
+
+    monkeypatch.setattr(broker, "serve", flaky)
+
+    manager = SessionManager(factory, broker, lease_grace=2.0)
+    stop = asyncio.Event()
+    pub = asyncio.create_task(_lease_publisher(broker, SESSION, stop))
+    await manager.attach(
+        TdAttachRequest(
+            session_id=SESSION, api_id=API_ID, timeout=2.0, created_by=1
+        )
+    )
+    try:
+        ack = await _ack(broker, _submit_envelope())
+        assert failures == [subject]
+        assert ack.accepted is True
+    finally:
+        stop.set()
+        await asyncio.gather(pub, return_exceptions=True)
+        await manager.close_all()
+
+
 async def test_submit_from_attached_session_is_accepted(
     attached: SessionManager, broker: Broker
 ) -> None:

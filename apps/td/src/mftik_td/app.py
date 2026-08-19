@@ -6,7 +6,7 @@ import asyncio
 import logging
 import signal
 
-from mftik import configure_logging
+from mftik import configure_logging, run_until_stopped
 from mftik.broker import Broker
 from mftik.protocol import Topics
 from mftik.symbols import SymbolClient
@@ -25,6 +25,12 @@ from mftik_td.session import SessionManager, VenueSessionFactory
 SOURCE = "td"
 logger = logging.getLogger(SOURCE)
 
+#: How long a serve loop waits before rebuilding itself after an exception it
+#: did not expect. ``Broker.serve`` already survives what it knows how to
+#: survive, so this only paces the failures nothing has a name for yet.
+RPC_RESTART_DELAY_SECONDS = 1.0
+
+
 
 async def run_rpc(
     broker: Broker,
@@ -33,15 +39,32 @@ async def run_rpc(
 ) -> None:
     """Serve API→TD request-reply on ``Topics.TD`` until ``stop``."""
     logger.info("TD RPC listening on subject=%s", Topics.TD)
-    async for req in broker.serve(Topics.TD, stop=stop):
+    while not stop.is_set():
         try:
-            await dispatch(req, sessions=sessions)
+            async for req in broker.serve(Topics.TD, stop=stop):
+                try:
+                    await dispatch(req, sessions=sessions)
+                except Exception:
+                    logger.exception(
+                        "TD RPC handler failed type=%s id=%s",
+                        req.envelope.type,
+                        req.envelope.id,
+                    )
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            logger.exception(
-                "TD RPC handler failed type=%s id=%s",
-                req.envelope.type,
-                req.envelope.id,
-            )
+            # Reaching here means something ``serve`` does not already handle,
+            # and the answer is still to serve. This coroutine returning is how
+            # TD ends up running sessions that nobody can list, pause or stop
+            # — the process alive, the subject silent, and no line anywhere
+            # saying so.
+            logger.exception("TD RPC serve loop failed — restarting")
+            try:
+                await asyncio.wait_for(
+                    stop.wait(), timeout=RPC_RESTART_DELAY_SECONDS
+                )
+            except TimeoutError:
+                continue
 
 
 #: How often to look for attaches whose strategy is gone. Well under the
@@ -77,7 +100,7 @@ async def reap_loop(
             continue
 
 
-async def amain() -> None:
+async def amain() -> bool:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -132,7 +155,9 @@ async def amain() -> None:
             reap_loop(sessions, stop), name="td-reaper"
         )
         try:
-            await stop.wait()
+            clean = await run_until_stopped(
+                stop, rpc_task, hb_task, reaper_task, logger=logger
+            )
         finally:
             stop.set()
             for task in (rpc_task, hb_task, reaper_task):
@@ -153,8 +178,13 @@ async def amain() -> None:
             # queue before it is drained.
             await history.stop()
     logger.info("TD stopped")
+    return clean
 
 
 def main() -> None:
     configure_logging(SOURCE)
-    asyncio.run(amain())
+    # Non-zero when a long-lived task ended on its own: the restart
+    # policy is what puts the process back, and an exit code is what
+    # tells anyone reading ``docker ps`` that TD did not just stop.
+    if not asyncio.run(amain()):
+        raise SystemExit(1)

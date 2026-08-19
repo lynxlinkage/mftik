@@ -8,7 +8,7 @@ import os
 import signal
 from typing import Any
 
-from mftik import configure_logging
+from mftik import configure_logging, run_until_stopped
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange
 from mftik.exchange.models import Balance, Fill, Order, OrderBook
@@ -26,6 +26,12 @@ from mftik_paper.rpc import dispatch
 
 SOURCE = "paper"
 logger = logging.getLogger(SOURCE)
+
+#: How long a serve loop waits before rebuilding itself after an exception it
+#: did not expect. ``Broker.serve`` already survives what it knows how to
+#: survive, so this only paces the failures nothing has a name for yet.
+RPC_RESTART_DELAY_SECONDS = 1.0
+
 
 #: How often the book is republished with nothing having moved it. Two seconds
 #: is short enough that a strategy attaching to a quiet venue sees a book
@@ -189,18 +195,33 @@ async def run_rpc(
     broker: Broker, exchange: PaperExchange, stop: asyncio.Event
 ) -> None:
     logger.info("Paper RPC listening on subject=%s", Topics.PAPER)
-    async for req in broker.serve(Topics.PAPER, stop=stop):
+    while not stop.is_set():
         try:
-            await dispatch(req, exchange=exchange)
+            async for req in broker.serve(Topics.PAPER, stop=stop):
+                try:
+                    await dispatch(req, exchange=exchange)
+                except Exception:
+                    logger.exception(
+                        "Paper RPC handler failed type=%s id=%s",
+                        req.envelope.type,
+                        req.envelope.id,
+                    )
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            logger.exception(
-                "Paper RPC handler failed type=%s id=%s",
-                req.envelope.type,
-                req.envelope.id,
-            )
+            # Reaching here means something ``serve`` does not already handle,
+            # and the answer is still to serve: this coroutine returning is how
+            # the engine keeps ticking and filling while no order can reach it.
+            logger.exception("Paper RPC serve loop failed — restarting")
+            try:
+                await asyncio.wait_for(
+                    stop.wait(), timeout=RPC_RESTART_DELAY_SECONDS
+                )
+            except TimeoutError:
+                continue
 
 
-async def amain() -> None:
+async def amain() -> bool:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -277,7 +298,9 @@ async def amain() -> None:
             [(str(lvl.price), str(lvl.qty)) for lvl in book.asks],
         )
         try:
-            await stop.wait()
+            clean = await run_until_stopped(
+                stop, rpc_task, hb_task, *book_tasks, logger=logger
+            )
         finally:
             stop.set()
             for task in (rpc_task, hb_task, *book_tasks):
@@ -288,8 +311,13 @@ async def amain() -> None:
             await public.close()
             await exchange.stop()
     logger.info("Paper engine stopped")
+    return clean
 
 
 def main() -> None:
     configure_logging(SOURCE)
-    asyncio.run(amain())
+    # Non-zero when a long-lived task ended on its own: the restart
+    # policy is what puts the process back, and an exit code is what
+    # tells anyone reading ``docker ps`` that Paper did not just stop.
+    if not asyncio.run(amain()):
+        raise SystemExit(1)

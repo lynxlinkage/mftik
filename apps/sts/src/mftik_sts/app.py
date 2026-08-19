@@ -8,7 +8,7 @@ import os
 import signal
 from typing import Any
 
-from mftik import configure_logging
+from mftik import configure_logging, run_until_stopped
 from mftik.broker import Broker
 from mftik.protocol import Topics
 
@@ -19,6 +19,12 @@ from mftik_sts.session import SessionManager
 
 SOURCE = "sts"
 logger = logging.getLogger(SOURCE)
+
+#: How long a serve loop waits before rebuilding itself after an exception it
+#: did not expect. ``Broker.serve`` already survives what it knows how to
+#: survive, so this only paces the failures nothing has a name for yet.
+RPC_RESTART_DELAY_SECONDS = 1.0
+
 
 #: Mirrors the manager's own default; kept here so the env override has
 #: something to fall back to without importing a private name.
@@ -31,15 +37,32 @@ async def run_rpc(
     stop: asyncio.Event,
 ) -> None:
     logger.info("STS RPC listening on subject=%s", Topics.STS)
-    async for req in broker.serve(Topics.STS, stop=stop):
+    while not stop.is_set():
         try:
-            await dispatch(req, sessions=sessions)
+            async for req in broker.serve(Topics.STS, stop=stop):
+                try:
+                    await dispatch(req, sessions=sessions)
+                except Exception:
+                    logger.exception(
+                        "STS RPC handler failed type=%s id=%s",
+                        req.envelope.type,
+                        req.envelope.id,
+                    )
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            logger.exception(
-                "STS RPC handler failed type=%s id=%s",
-                req.envelope.type,
-                req.envelope.id,
-            )
+            # Reaching here means something ``serve`` does not already handle,
+            # and the answer is still to serve. This coroutine returning is how
+            # STS ends up running sessions that nobody can list, pause or stop
+            # — the process alive, the subject silent, and no line anywhere
+            # saying so.
+            logger.exception("STS RPC serve loop failed — restarting")
+            try:
+                await asyncio.wait_for(
+                    stop.wait(), timeout=RPC_RESTART_DELAY_SECONDS
+                )
+            except TimeoutError:
+                continue
 
 
 def _rebuild_enabled() -> bool:
@@ -121,7 +144,7 @@ async def _rebuild_on_boot(sessions: SessionManager) -> None:
         logger.info("STS found no interrupted sessions to rebuild")
 
 
-async def amain() -> None:
+async def amain() -> bool:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -179,7 +202,9 @@ async def amain() -> None:
             "STS rebuild window is %.0fs", _rebuild_max_age_s()
         )
         try:
-            await stop.wait()
+            clean = await run_until_stopped(
+                stop, rpc_task, hb_task, reaper_task, logger=logger
+            )
         finally:
             stop.set()
             tasks = [rpc_task, hb_task, reaper_task]
@@ -190,8 +215,13 @@ async def amain() -> None:
             await asyncio.gather(*tasks, return_exceptions=True)
             await sessions.close_all()
     logger.info("STS stopped")
+    return clean
 
 
 def main() -> None:
     configure_logging(SOURCE)
-    asyncio.run(amain())
+    # Non-zero when a long-lived task ended on its own: the restart
+    # policy is what puts the process back, and an exit code is what
+    # tells anyone reading ``docker ps`` that STS did not just stop.
+    if not asyncio.run(amain()):
+        raise SystemExit(1)

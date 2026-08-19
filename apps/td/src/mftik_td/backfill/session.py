@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 #: connection per account all at once.
 MAX_RUNS_IN_FLIGHT = 4
 
+#: How long the serve loop waits before rebuilding itself after an exception it
+#: did not expect. ``Broker.serve`` already survives what it knows how to
+#: survive, so this only paces the failures nothing has a name for yet.
+SERVE_RESTART_DELAY_S = 1.0
+
 #: How long a stop may wait on walks already in flight. A run is up to
 #: ``MAX_PAGES_PER_WALK`` pages per stream per instrument of venue round trips,
 #: which is minutes — and a teardown that outlives the container's stop timeout
@@ -109,15 +114,26 @@ class BackfillSession:
         logger.info("TD backfill session stopped")
 
     async def _serve(self) -> None:
-        try:
-            async for req in self._broker.serve(
-                Topics.td_backfill(), stop=self._stop
-            ):
-                await self._handle(req)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("TD backfill serve loop failed")
+        while not self._stop.is_set():
+            try:
+                async for req in self._broker.serve(
+                    Topics.td_backfill(), stop=self._stop
+                ):
+                    await self._handle(req)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Rebuilt rather than abandoned. A backfill nobody serves is
+                # a hole in the record that no caller is waiting on and no
+                # log line repeats, which is the kind of gap that is found
+                # months later by the report that needed the rows.
+                logger.exception("TD backfill serve loop failed — restarting")
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=SERVE_RESTART_DELAY_S
+                    )
+                except TimeoutError:
+                    continue
 
     async def _handle(self, req: IncomingRequest) -> None:
         try:

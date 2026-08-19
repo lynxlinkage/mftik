@@ -232,6 +232,46 @@ async def caller(broker: Broker):
     await c.close()
 
 
+# --- the loop itself -------------------------------------------------------
+
+
+async def test_the_serve_loop_rebuilds_itself_rather_than_giving_up(
+    broker: Broker, reader: FakeReader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It used to log one line and stop serving, for the life of the process.
+
+    On 2026-08-18 that is what it did: MD stayed up with its feeds running,
+    every query after that line sat until its caller timed out, and the one
+    log line saying so was six hours old by the time anyone read it.
+    """
+    monkeypatch.setattr(
+        "mftik_md.fetch.session.SERVE_RESTART_DELAY_SECONDS", 0.0
+    )
+    real_serve = broker.serve
+    failures: list[str] = []
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        if not failures:
+            failures.append("boom")
+            raise RuntimeError("something serve does not handle")
+        return real_serve(*args, **kwargs)
+
+    monkeypatch.setattr(broker, "serve", flaky)
+
+    session = FetchSession(broker, FakeFactory(reader))
+    await session.start()
+    caller = Caller(broker)
+    await caller.listen()
+    try:
+        ack = await caller.ask(interval="1h", limit=3)
+        assert failures == ["boom"]
+        assert ack.accepted is True
+        assert (await caller.next_result()).ok is True
+    finally:
+        await caller.close()
+        await session.stop()
+
+
 # --- the happy path --------------------------------------------------------
 
 
