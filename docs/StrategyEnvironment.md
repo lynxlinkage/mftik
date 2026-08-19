@@ -1052,7 +1052,11 @@ will be retried as a network fault. A picker that lists
   if push already does it.
 - Settings (or Registry): list the stamp (packages, generation,
   size), add / remove (each call applies), Import shows the diff
-  then confirm — including which rows had their `dist` guessed.
+  then confirm. The diff distinguishes the two unusable rows,
+  because the remedies are different and only one of them is on
+  the page: a guessed `dist` gets an editable field, an unpinned
+  row gets a banner pointing at the registry-key input and **no**
+  dist field at all. Both block Confirm.
 - Surface `abi_ok` and `restart_required` as banners, not as
   table columns. Both are states where the API is healthy and the
   stamp is right and deploys still fail; a list of package names

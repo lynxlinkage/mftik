@@ -147,7 +147,15 @@ export type EnvImportRow = {
 	version: string;
 	dist: string;
 	status: 'added' | 'kept' | 'conflict';
+	/** The dist was assumed from the import name. The Owner can correct it. */
 	guessed: boolean;
+	/**
+	 * The peer gave a version. False when its `/info` published the name only,
+	 * which is what a node with the auth gate on withholds from an anonymous
+	 * caller. No `dist` typed here makes such a row installable — the remedy is
+	 * a registry key from that peer, so the UI must not offer the dist field.
+	 */
+	pinned: boolean;
 	local_version: string | null;
 	local_dist: string | null;
 };
@@ -157,6 +165,7 @@ export type EnvironmentImport = {
 	kept: EnvImportRow[];
 	conflicts: EnvImportRow[];
 	guessed: string[];
+	unpinned: string[];
 	applied: boolean;
 	environment: Environment | null;
 };

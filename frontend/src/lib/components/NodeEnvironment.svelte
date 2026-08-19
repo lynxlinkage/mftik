@@ -29,6 +29,13 @@
 			(row) => row.guessed && (distEdits[row.name] ?? row.dist) === row.name
 		)
 	);
+	// Rows the peer published without a pin. Unlike a guessed dist there is
+	// nothing to correct here, so this blocks confirm on its own and the fix
+	// is a key in the field above.
+	const unpinnedAdded = $derived((preview?.added ?? []).filter((row) => !row.pinned));
+	// Unpinned rows can only be ``added``: a name this node already has takes
+	// the kept branch, so the server's list and the added rows agree.
+	const unpinnedNames = $derived((preview?.unpinned ?? []).join(', '));
 
 	function formatBytes(n: number): string {
 		if (n < 1024) return `${n} B`;
@@ -240,7 +247,8 @@
 	<p class="hint">
 		Preview first. Confirm is what installs. A row whose dist was guessed from
 		the import name must be corrected before confirm — <code>sklearn</code> is not
-		on PyPI.
+		on PyPI. A peer with its auth gate on publishes names without versions
+		unless you send a registry key it issued you.
 	</p>
 	<div class="import">
 		<input bind:value={importUrl} placeholder="http://peer:8000" disabled={busy} />
@@ -254,6 +262,15 @@
 			Preview
 		</button>
 	</div>
+
+	{#if unpinnedNames}
+		<p class="banner warn">
+			This peer published names without versions: <code>{unpinnedNames}</code>. Its
+			<code>/info</code> keeps pins for authenticated callers, so ask that node for a
+			registry key and preview again with it in the field above. Nothing on this page
+			can supply the version — a dist is not what is missing.
+		</p>
+	{/if}
 
 	{#if preview}
 		<table>
@@ -271,6 +288,9 @@
 						<td><code>{row.name}</code></td>
 						<td>
 							{row.status}
+							{#if !row.pinned}
+								<span class="badge failed">no version</span>
+							{/if}
 							{#if row.guessed}
 								<span class="badge paused">guessed dist</span>
 							{/if}
@@ -278,7 +298,7 @@
 								<span class="badge failed">local {row.local_version}</span>
 							{/if}
 						</td>
-						<td>{row.version}</td>
+						<td>{row.pinned ? row.version : '—'}</td>
 						<td>
 							{#if row.status === 'added' && row.guessed}
 								<input
@@ -300,7 +320,11 @@
 			<button
 				type="button"
 				onclick={confirmImport}
-				disabled={busy || preview.conflicts.length > 0 || preview.applied || unfixedGuessed}
+				disabled={busy ||
+					preview.conflicts.length > 0 ||
+					preview.applied ||
+					unfixedGuessed ||
+					unpinnedAdded.length > 0}
 			>
 				{preview.applied ? 'Applied' : busy ? 'Applying…' : 'Confirm'}
 			</button>
