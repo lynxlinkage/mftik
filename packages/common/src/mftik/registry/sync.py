@@ -59,6 +59,27 @@ def _auth(token: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+async def fetch_handshake(
+    url: str,
+    *,
+    token: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> object:
+    """GET ``{url}/registry/v1/info``. Does not write ``remotes.toml``."""
+    base = _normalize_url(url)
+    own = client is None
+    http = client or httpx.AsyncClient(timeout=_TIMEOUT)
+    try:
+        info = await _get_json(
+            http, f"{base}/registry/v1/info", headers=_auth(token)
+        )
+        check_handshake(info)
+        return info
+    finally:
+        if own:
+            await http.aclose()
+
+
 async def connect_remote(
     store: RegistryStore,
     *,

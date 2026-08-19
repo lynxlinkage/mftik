@@ -124,6 +124,7 @@ async def test_a_registry_key_reads_handshake_extras_not_environment(
         ("GET", "/environment"),
         ("PUT", "/environment"),
         ("POST", "/environment/packages"),
+        ("POST", "/environment/import"),
     ],
 )
 async def test_a_registry_key_reaches_nothing_else(db, method: str, path: str) -> None:

@@ -1107,6 +1107,60 @@
         }
       }
     },
+    "/environment/import": {
+      "post": {
+        "tags": [
+          "environment"
+        ],
+        "summary": "Import Environment",
+        "description": "Diff a peer's extras against this stamp; confirm is what applies them.",
+        "operationId": "import_environment_environment_import_post",
+        "parameters": [
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnvironmentImportBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentImportOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/sts/template": {
       "get": {
         "tags": [
@@ -2983,6 +3037,66 @@
         ],
         "title": "DomainStats"
       },
+      "EnvImportRowOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "dist": {
+            "type": "string",
+            "title": "Dist"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "added",
+              "kept",
+              "conflict"
+            ],
+            "title": "Status"
+          },
+          "guessed": {
+            "type": "boolean",
+            "title": "Guessed",
+            "default": false
+          },
+          "local_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Version"
+          },
+          "local_dist": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Dist"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "dist",
+          "status"
+        ],
+        "title": "EnvImportRowOut"
+      },
       "EnvPackageIn": {
         "properties": {
           "version": {
@@ -3034,6 +3148,112 @@
           "source"
         ],
         "title": "EnvPackageOut"
+      },
+      "EnvironmentImportBody": {
+        "properties": {
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "confirm": {
+            "type": "boolean",
+            "title": "Confirm",
+            "default": false
+          },
+          "force": {
+            "type": "boolean",
+            "title": "Force",
+            "default": false
+          },
+          "dist": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Dist"
+          }
+        },
+        "type": "object",
+        "title": "EnvironmentImportBody",
+        "description": "Fetch a peer's extras. ``confirm`` is what actually installs them."
+      },
+      "EnvironmentImportOut": {
+        "properties": {
+          "added": {
+            "items": {
+              "$ref": "#/components/schemas/EnvImportRowOut"
+            },
+            "type": "array",
+            "title": "Added"
+          },
+          "kept": {
+            "items": {
+              "$ref": "#/components/schemas/EnvImportRowOut"
+            },
+            "type": "array",
+            "title": "Kept"
+          },
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/EnvImportRowOut"
+            },
+            "type": "array",
+            "title": "Conflicts"
+          },
+          "guessed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Guessed"
+          },
+          "applied": {
+            "type": "boolean",
+            "title": "Applied",
+            "default": false
+          },
+          "environment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EnvironmentOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "EnvironmentImportOut"
       },
       "EnvironmentOut": {
         "properties": {

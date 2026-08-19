@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from mftik.protocol import SymbolInfo
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class DomainStats(BaseModel):
@@ -537,3 +537,42 @@ class EnvironmentOut(BaseModel):
     loaded: bool = True
     load_error: str | None = None
     broken: list[BrokenTreeOut] = Field(default_factory=list)
+
+
+class EnvironmentImportBody(BaseModel):
+    """Fetch a peer's extras. ``confirm`` is what actually installs them."""
+
+    url: str | None = None
+    token: str | None = None
+    #: A remote already in ``remotes.toml``. Used when the Owner does not
+    #: want to retype the URL; import still does not write that file.
+    name: str | None = None
+    confirm: bool = False
+    force: bool = False
+    #: Import-name → PyPI distribution, for rows whose ``dist`` was guessed.
+    dist: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _url_or_name(self) -> EnvironmentImportBody:
+        if not (self.url or self.name):
+            raise ValueError("url or name is required")
+        return self
+
+
+class EnvImportRowOut(BaseModel):
+    name: str
+    version: str
+    dist: str
+    status: Literal["added", "kept", "conflict"]
+    guessed: bool = False
+    local_version: str | None = None
+    local_dist: str | None = None
+
+
+class EnvironmentImportOut(BaseModel):
+    added: list[EnvImportRowOut] = Field(default_factory=list)
+    kept: list[EnvImportRowOut] = Field(default_factory=list)
+    conflicts: list[EnvImportRowOut] = Field(default_factory=list)
+    guessed: list[str] = Field(default_factory=list)
+    applied: bool = False
+    environment: EnvironmentOut | None = None

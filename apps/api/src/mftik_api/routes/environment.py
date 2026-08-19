@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query
 from mftik.envapply import (
     ApplyFailed,
@@ -13,6 +14,14 @@ from mftik.envapply import (
     Installer,
     disruptive_names,
     run_uv_installer,
+)
+from mftik.envimport import (
+    ImportPreview,
+    ImportRow,
+    confirm_blockers,
+    peer_source,
+    preview_import,
+    union_specs,
 )
 from mftik.environment import EnvironmentLocked, EnvStamp, NodeEnv
 from mftik.protocol import (
@@ -27,6 +36,8 @@ from mftik.protocol import (
     Topics,
 )
 from mftik.registry import RegistryStore
+from mftik.registry.errors import RegistryError
+from mftik.registry.sync import fetch_handshake
 
 from mftik_api.audit_util import record_audit
 from mftik_api.auth import ANONYMOUS, OwnerId, PrincipalDep
@@ -35,6 +46,9 @@ from mftik_api.broker_rpc import DomainRpcError, request_domain
 from mftik_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
 from mftik_api.schemas import (
     BrokenTreeOut,
+    EnvImportRowOut,
+    EnvironmentImportBody,
+    EnvironmentImportOut,
     EnvironmentOut,
     EnvironmentPackageBody,
     EnvironmentPutBody,
@@ -48,6 +62,9 @@ router = APIRouter(prefix="/environment", tags=["environment"])
 
 #: Tests replace this so apply never talks to an index.
 installer_for_apply: Installer | None = None
+
+#: Tests replace this so import never opens a real socket.
+import_client: httpx.AsyncClient | None = None
 
 
 def _installer() -> Installer:
@@ -325,3 +342,88 @@ async def delete_package(
         operation="environment.package.delete",
         broken=broken,
     )
+
+
+def _row_out(row: ImportRow) -> EnvImportRowOut:
+    return EnvImportRowOut(
+        name=row.name,
+        version=row.version,
+        dist=row.dist,
+        status=row.status,
+        guessed=row.guessed,
+        local_version=row.local_version,
+        local_dist=row.local_dist,
+    )
+
+
+def _preview_out(
+    preview: ImportPreview, *, environment: EnvironmentOut | None = None
+) -> EnvironmentImportOut:
+    return EnvironmentImportOut(
+        added=[_row_out(row) for row in preview.added],
+        kept=[_row_out(row) for row in preview.kept],
+        conflicts=[_row_out(row) for row in preview.conflicts],
+        guessed=list(preview.guessed_names),
+        applied=environment is not None,
+        environment=environment,
+    )
+
+
+def _resolve_peer(
+    body: EnvironmentImportBody, store: RegistryStore
+) -> tuple[str, str | None, str | None]:
+    """Return ``(url, token, name)``. Does not write remotes."""
+    if body.url:
+        return body.url, body.token, body.name
+    remote = store.get_remote(body.name or "")
+    if remote is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown remote: {body.name}",
+        )
+    return remote.url, body.token or remote.token, remote.name
+
+
+@router.post("/import", response_model=EnvironmentImportOut)
+async def import_environment(
+    body: EnvironmentImportBody,
+    broker: BrokerDep,
+    store: RegistryStoreDep,
+    force: bool = Query(False),
+    owner: OwnerId = DEFAULT_USER_ID,
+    principal: PrincipalDep = ANONYMOUS,
+) -> EnvironmentImportOut:
+    """Diff a peer's extras against this stamp; confirm is what applies them."""
+    url, token, name = _resolve_peer(body, store)
+    try:
+        info = await fetch_handshake(url, token=token, client=import_client)
+    except RegistryError as exc:
+        message = str(exc)
+        code = 400 if "url must" in message else 502
+        raise HTTPException(status_code=code, detail=message) from exc
+
+    extras = info.get("extras") if isinstance(info, dict) else {}
+    env = _env()
+    stamp = env.read_stamp()
+    preview = preview_import(stamp, extras, dist_overrides=body.dist)
+    if not body.confirm:
+        return _preview_out(preview)
+
+    blockers = confirm_blockers(preview)
+    if blockers:
+        raise HTTPException(status_code=409, detail="; ".join(blockers))
+
+    packages = union_specs(stamp, preview, source=peer_source(url, name))
+    if not preview.added:
+        return _preview_out(preview, environment=_view(stamp))
+
+    applied = await _apply_set(
+        env,
+        broker,
+        packages,
+        force=force or body.force,
+        owner=owner,
+        principal=principal,
+        operation="environment.import",
+    )
+    return _preview_out(preview, environment=applied)
