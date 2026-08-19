@@ -13,7 +13,7 @@ from mftik_db.repositories import (
 from mftik_db.session import session_scope
 
 from mftik_api.audit_util import record_audit
-from mftik_api.auth import OwnerId
+from mftik_api.auth import ANONYMOUS, OwnerId, PrincipalDep
 from mftik_api.deps import DEFAULT_USER_ID
 from mftik_api.schemas import (
     ApiCreateBody,
@@ -78,7 +78,9 @@ async def list_apis() -> ApiListResponse:
 
 @router.post("/apis", response_model=ApiOut, status_code=201)
 async def create_api(
-    body: ApiCreateBody, owner: OwnerId = DEFAULT_USER_ID
+    body: ApiCreateBody,
+    owner: OwnerId = DEFAULT_USER_ID,
+    principal: PrincipalDep = ANONYMOUS,
 ) -> ApiOut:
     api_type = body.type.strip().upper()
     if api_type not in _ALLOWED_TYPES:
@@ -146,12 +148,15 @@ async def create_api(
             f"api_id={result.id} account_id={result.account_id} "
             f"venue={result.venue} name={result.name}"
         ),
+        principal=principal,
     )
     return result
 
 
 @router.patch("/apis/{api_id}", response_model=ApiOut)
-async def rename_api(api_id: int, body: ApiRenameBody) -> ApiOut:
+async def rename_api(
+    api_id: int, body: ApiRenameBody, principal: PrincipalDep = ANONYMOUS
+) -> ApiOut:
     """Rename the trading account bound 1-1 to this credential.
 
     strategy.yml ``td`` entries resolve by account name at deploy time, so a
@@ -198,12 +203,15 @@ async def rename_api(api_id: int, body: ApiRenameBody) -> ApiOut:
                 f"api_id={result.id} account_id={result.account_id} "
                 f"{old_name!r} -> {result.name!r}"
             ),
+            principal=principal,
         )
     return result
 
 
 @router.delete("/apis/{api_id}", response_model=ApiDeleteResponse)
-async def delete_api(api_id: int) -> ApiDeleteResponse:
+async def delete_api(
+    api_id: int, principal: PrincipalDep = ANONYMOUS
+) -> ApiDeleteResponse:
     async with session_scope() as db:
         apis = ApiRepository(db)
         accounts = AccountRepository(db)
@@ -238,5 +246,6 @@ async def delete_api(api_id: int) -> ApiDeleteResponse:
         user_id=owner_id,
         operation="api.delete",
         result=f"api_id={api_id} account_id={account_id}",
+        principal=principal,
     )
     return ApiDeleteResponse(id=api_id, account_id=account_id, deleted=True)

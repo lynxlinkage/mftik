@@ -190,7 +190,10 @@ async def setup(body: SetupBody, request: Request, response: Response) -> MeOut:
     await _start_session(request, response, user=user, via="password")
     _clear_failures(request)
     await record_audit(
-        user_id=user_id, operation="auth.setup", result=f"username={username}"
+        user_id=user_id,
+        operation="auth.setup",
+        result=f"username={username}",
+        via="password",
     )
     return out
 
@@ -214,6 +217,7 @@ async def login_password(
                     user_id=owner.id,
                     operation="auth.login.denied",
                     result=f"username={body.username} ip={_client(request)}",
+                    via="password",
                 )
             raise HTTPException(status_code=401, detail="invalid credentials")
         out = MeOut(
@@ -230,7 +234,8 @@ async def login_password(
     await record_audit(
         user_id=out.user_id,
         operation="auth.login",
-        result=f"via=password ip={_client(request)}",
+        result=f"ip={_client(request)}",
+        via="password",
     )
     return out
 
@@ -248,7 +253,8 @@ async def logout(
         await record_audit(
             user_id=principal.user_id,
             operation="auth.logout",
-            result=f"via={principal.via}",
+            result="",
+            principal=principal,
         )
     return LogoutOut()
 
@@ -359,6 +365,7 @@ async def create_key(
         user_id=principal.user_id,
         operation="auth.key.mint",
         result=f"id={key_id} kind={body.kind} name={body.name}",
+        principal=principal,
     )
     return KeyCreatedOut(**out.model_dump(), token=minted.token)
 
@@ -386,6 +393,7 @@ async def revoke_key(key_id: int, principal: SessionDep) -> KeyOut:
         user_id=principal.user_id,
         operation="auth.key.revoke",
         result=f"id={key_id} name={out.name}",
+        principal=principal,
     )
     return out
 
@@ -467,6 +475,7 @@ async def unlink_identity(identity_id: int, principal: SessionDep) -> IdentityOu
         user_id=principal.user_id,
         operation="auth.identity.unlink",
         result=f"provider={out.provider} label={out.label}",
+        principal=principal,
     )
     return out
 
@@ -584,11 +593,13 @@ async def _finish_connect(
             )
         )
         user_id = live.user_id
+        via = live.via
 
     await record_audit(
         user_id=user_id,
         operation="auth.identity.connect",
         result=f"provider={provider_name} label={profile.label}",
+        via=via,
     )
     return RedirectResponse("/settings", status_code=303)
 
@@ -630,6 +641,7 @@ async def _finish_login(
     await record_audit(
         user_id=user_id,
         operation="auth.login",
-        result=f"via={provider_name} ip={_client(request)}",
+        result=f"ip={_client(request)}",
+        via=provider_name,
     )
     return redirect

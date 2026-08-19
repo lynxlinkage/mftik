@@ -19,8 +19,18 @@ class AuditRepository(BaseRepository[Audit]):
         user_id: int,
         operation: str,
         result: str,
+        via: str | None = None,
+        key_id: int | None = None,
+        key_kind: str | None = None,
     ) -> Audit:
-        entry = Audit(user_id=user_id, operation=operation, result=result)
+        entry = Audit(
+            user_id=user_id,
+            operation=operation,
+            result=result,
+            via=via,
+            key_id=key_id,
+            key_kind=key_kind,
+        )
         return await self.add(entry)
 
     async def list_by_user(

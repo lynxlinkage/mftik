@@ -39,6 +39,10 @@ class Principal:
     #: Set when a machine credential backed it, for audits and for revoking
     #: the thing that is currently making requests.
     key_id: int | None = None
+    #: ``api`` or ``registry`` when ``key_id`` is set. Snapshotted onto the
+    #: audit row so the trail can tell the two kinds of ``key:{name}`` apart
+    #: without joining.
+    key_kind: str | None = None
 
     @property
     def authenticated(self) -> bool:
@@ -64,6 +68,7 @@ class Principal:
         user_id: int,
         *,
         name: str,
+        kind: str,
         scopes: frozenset[str],
         key_id: int,
     ) -> Principal:
@@ -79,6 +84,7 @@ class Principal:
             via=f"key:{name}",
             scopes=scopes,
             key_id=key_id,
+            key_kind=kind,
         )
 
 

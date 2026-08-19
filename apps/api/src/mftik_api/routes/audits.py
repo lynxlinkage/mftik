@@ -25,6 +25,9 @@ async def list_audits(limit: int = 100) -> AuditListResponse:
                 operation=row.operation,
                 result=row.result,
                 created_at=row.created_at.timestamp() if row.created_at else None,
+                via=row.via,
+                key_kind=row.key_kind,
+                key_id=row.key_id,
             )
             for row in rows
         ]
