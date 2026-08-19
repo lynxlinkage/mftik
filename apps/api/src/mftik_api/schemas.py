@@ -419,6 +419,11 @@ class EnvInstalledOut(BaseModel):
     #: usable one. ``null`` for names like ``python-dateutil`` — the import
     #: name is ``dateutil`` and only the package itself knows that.
     suggested_name: str | None = None
+    #: Installed distributions that directly require this one. Empty for a
+    #: root — something the Owner asked for. Read off ``Requires-Dist``, so
+    #: ``six`` shows as needed by ``python-dateutil`` rather than sitting
+    #: next to ``numpy`` as though the two were equally the Owner's business.
+    needed_by: list[str] = Field(default_factory=list)
 
 
 class HandshakeExtraOut(BaseModel):

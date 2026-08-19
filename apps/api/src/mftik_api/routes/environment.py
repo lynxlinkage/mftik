@@ -30,6 +30,7 @@ from mftik.environment import (
     EnvironmentLocked,
     EnvStamp,
     NodeEnv,
+    dependency_sources,
     normalize_dist,
     resolved_dists,
 )
@@ -108,8 +109,10 @@ def _installed_out(env: NodeEnv, stamp: EnvStamp) -> list[EnvInstalledOut]:
     this list is also where the right pin comes from.
     """
     approved = {normalize_dist(rec.dist) for rec in stamp.packages.values()}
+    site_packages = env.site_packages(stamp.generation)
+    live = resolved_dists(site_packages)
+    sources = dependency_sources(site_packages)
     rows: list[EnvInstalledOut] = []
-    live = resolved_dists(env.site_packages(stamp.generation))
     for dist, version in sorted(live.items()):
         suggested = dist.replace("-", "_")
         rows.append(
@@ -118,6 +121,7 @@ def _installed_out(env: NodeEnv, stamp: EnvStamp) -> list[EnvInstalledOut]:
                 version=version,
                 approved=dist in approved,
                 suggested_name=suggested if suggested.isidentifier() else None,
+                needed_by=list(sources.get(dist, ())),
             )
         )
     return rows

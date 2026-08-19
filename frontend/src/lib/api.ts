@@ -142,6 +142,13 @@ export type EnvInstalled = {
 	approved: boolean;
 	/** Import name to approve it under. `null` when the dist name is not one. */
 	suggested_name: string | null;
+	/**
+	 * Installed distributions that directly require this one. Empty for a root
+	 * — something you asked for. This is what tells `six` (needed by
+	 * python-dateutil, which is needed by pandas) apart from `numpy`, which is
+	 * what pandas is actually for.
+	 */
+	needed_by: string[];
 };
 
 export type Environment = {

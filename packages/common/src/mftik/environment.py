@@ -328,6 +328,49 @@ def _dir_size(root: Path) -> int:
                 continue
     return total
 
+def dependency_sources(site_packages: Path) -> dict[str, tuple[str, ...]]:
+    """Normalised dist name → the installed dists that directly require it.
+
+    A flat list of what the resolver dragged in makes ``six`` look as
+    significant as ``numpy``. It is not: numpy is what pandas is for, six is
+    two levels down behind python-dateutil. The graph is already on disk —
+    every ``.dist-info`` records ``Requires-Dist`` — so nothing has to be
+    guessed or asked of an index.
+
+    Direct requirers only. The chain reads itself off the table: six is
+    needed by python-dateutil, which is needed by pandas.
+    """
+    installed: dict[str, list[str]] = {}
+    requirers: dict[str, set[str]] = {}
+    for info in site_packages.glob("*.dist-info"):
+        try:
+            dist = PathDistribution(info)
+            name = dist.metadata["Name"]
+            if not name:
+                continue
+            installed[normalize_dist(name)] = list(dist.requires or ())
+        except (OSError, KeyError, ValueError):
+            continue
+    for holder, reqs in installed.items():
+        for raw in reqs:
+            dep = _requirement_name(raw)
+            # Unresolvable or optional-and-not-taken requirements simply are
+            # not here; membership is the marker evaluation we do not do.
+            if dep and dep in installed and dep != holder:
+                requirers.setdefault(dep, set()).add(holder)
+    return {dep: tuple(sorted(who)) for dep, who in requirers.items()}
+
+
+def _requirement_name(requirement: str) -> str:
+    """The bare distribution name out of ``six>=1.5; extra == "x"``."""
+    head = requirement.split(";", 1)[0].strip()
+    for stop in ("[", "(", "<", ">", "=", "!", "~", " "):
+        cut = head.find(stop)
+        if cut >= 0:
+            head = head[:cut]
+    return normalize_dist(head.strip())
+
+
 def unapproved_present(env: NodeEnv, stamp: EnvStamp) -> dict[str, str]:
     """Import name → version for overlay distributions no stamp row claims.
 

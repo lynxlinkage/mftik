@@ -23,6 +23,7 @@
 	let connectError = $state<string | null>(null);
 	let connectMissing = $state<MissingExtra[]>([]);
 	let extrasPreview = $state<EnvironmentImport | null>(null);
+	let distEdits = $state<Record<string, string>>({});
 	let removing = $state<string | null>(null);
 	let blocked = $state<{ name: string; message: string } | null>(null);
 
@@ -30,13 +31,21 @@
 	// Rows the dialog cannot settle on its own: a pin clash with what this node
 	// already has, a dist guessed from the import name, or a peer that withheld
 	// versions. Each needs a decision and a field this dialog does not have.
-	const needsSettings = $derived(
-		!!extrasPreview &&
-			(extrasPreview.conflicts.length > 0 ||
-				extrasPreview.guessed.length > 0 ||
-				extrasPreview.unpinned.length > 0)
+	// A dist still equal to the import name is one nobody corrected — sklearn
+	// is not on PyPI, and installing it under that name is how you get a
+	// package that is not the one the peer runs.
+	const unfixedGuessed = $derived(
+		(extrasPreview?.added ?? []).some(
+			(row) => row.guessed && (distEdits[row.name] ?? row.dist) === row.name
+		)
 	);
-	const settingsHref = $derived(`/settings?peer=${encodeURIComponent(url.trim())}#extras`);
+	// Blocked with nothing this dialog can do about it: a pin clash is settled
+	// by changing this node's own extras, and an unpinned row needs a key from
+	// the peer. Neither is a field.
+	const hardBlocked = $derived(
+		!!extrasPreview &&
+			(extrasPreview.conflicts.length > 0 || extrasPreview.unpinned.length > 0)
+	);
 
 	async function refresh() {
 		loading = true;
@@ -69,6 +78,7 @@
 		connectError = null;
 		connectMissing = [];
 		extrasPreview = null;
+		distEdits = {};
 	}
 
 	function closeConnect() {
@@ -114,6 +124,9 @@
 				url: url.trim(),
 				token: token.trim() || undefined
 			});
+			distEdits = Object.fromEntries(
+				extrasPreview.added.filter((row) => row.guessed).map((row) => [row.name, row.dist])
+			);
 			connectError = null;
 		} catch (e) {
 			connectError = e instanceof Error ? e.message : String(e);
@@ -124,13 +137,14 @@
 	}
 
 	async function installExtrasAndConnect() {
-		if (busy || !extrasPreview || needsSettings) return;
+		if (busy || !extrasPreview || hardBlocked || unfixedGuessed) return;
 		busy = true;
 		try {
 			await api.importEnvironment({
 				url: url.trim(),
 				token: token.trim() || undefined,
-				confirm: true
+				confirm: true,
+				dist: distEdits
 			});
 			extrasPreview = null;
 			connectMissing = [];
@@ -337,23 +351,51 @@
 							{extrasPreview.added.length} to install, {extrasPreview.kept.length} already
 							here. This installs into the process this node trades from.
 						</p>
-						{#if needsSettings}
+						{#if extrasPreview.guessed.length}
 							<p class="hint">
-								Some rows need a decision this dialog cannot take — a pin clash, a
-								dist guessed from the import name, or a peer that withheld
-								versions.
-								<a href={settingsHref}>Settle them in Settings</a>, then connect
-								again. The URL carries over; the key does not, so have it ready.
+								The peer sent a version but no distribution name, so the import
+								name was assumed. <code>sklearn</code> is not on PyPI — correct
+								any that differ before installing.
 							</p>
-						{:else}
-							<button
-								type="button"
-								onclick={installExtrasAndConnect}
-								disabled={busy || !canConnect}
-							>
-								{busy ? 'Installing…' : 'Install and connect'}
-							</button>
+							<ul class="missing">
+								{#each extrasPreview.added.filter((row) => row.guessed) as row (row.name)}
+									<li>
+										<code>{row.name}</code>
+										<input
+											value={distEdits[row.name] ?? row.dist}
+											oninput={(e) => {
+												distEdits = { ...distEdits, [row.name]: e.currentTarget.value };
+											}}
+											disabled={busy}
+											aria-label={`PyPI distribution for ${row.name}`}
+										/>
+									</li>
+								{/each}
+							</ul>
 						{/if}
+						{#if extrasPreview.conflicts.length}
+							<p class="hint">
+								{extrasPreview.conflicts.map((row) => row.name).join(', ')}: this
+								node has a different version applied. Change it under Settings →
+								Node extras first; importing must not silently move a pin this
+								node's own strategies are running on.
+							</p>
+						{/if}
+						{#if extrasPreview.unpinned.length}
+							<p class="hint">
+								{extrasPreview.unpinned.join(', ')}: the peer published names
+								without versions. Its <code>/info</code> keeps pins for
+								authenticated callers — ask that node for a registry key, put it
+								in the field above, and preview again.
+							</p>
+						{/if}
+						<button
+							type="button"
+							onclick={installExtrasAndConnect}
+							disabled={busy || !canConnect || hardBlocked || unfixedGuessed}
+						>
+							{busy ? 'Installing…' : 'Install and connect'}
+						</button>
 					{/if}
 				</div>
 			{/if}
@@ -611,5 +653,10 @@
 		display: flex;
 		align-items: center;
 		gap: 0.45rem;
+	}
+
+	.missing input {
+		flex: 1;
+		min-width: 8rem;
 	}
 </style>

@@ -3,8 +3,6 @@
 	import {
 		api,
 		type Environment,
-		type EnvironmentImport,
-		type EnvImportRow,
 		type EnvInstalled
 	} from '$lib/api';
 
@@ -19,27 +17,11 @@
 	let pkgVersion = $state('');
 	let pkgDist = $state('');
 
-	let importUrl = $state('');
-	let importToken = $state('');
-	let preview = $state<EnvironmentImport | null>(null);
-	let distEdits = $state<Record<string, string>>({});
 
 	const names = $derived(env ? Object.keys(env.packages).sort() : []);
 	// What the resolver pulled in that nobody approved. Importable, but a
 	// strategy cannot declare it: `requires` is checked against the stamp.
 	const dependencies = $derived((env?.installed ?? []).filter((row) => !row.approved));
-	const unfixedGuessed = $derived(
-		(preview?.added ?? []).some(
-			(row) => row.guessed && (distEdits[row.name] ?? row.dist) === row.name
-		)
-	);
-	// Rows the peer published without a pin. Unlike a guessed dist there is
-	// nothing to correct here, so this blocks confirm on its own and the fix
-	// is a key in the field above.
-	const unpinnedAdded = $derived((preview?.added ?? []).filter((row) => !row.pinned));
-	// Unpinned rows can only be ``added``: a name this node already has takes
-	// the kept branch, so the server's list and the added rows agree.
-	const unpinnedNames = $derived((preview?.unpinned ?? []).join(', '));
 
 	function formatBytes(n: number): string {
 		if (n < 1024) return `${n} B`;
@@ -65,11 +47,6 @@
 
 	onMount(() => {
 		void refresh();
-		// The connect dialog sends people here when a row needs a decision it
-		// cannot take. Carry the peer URL so it is not retyped; the registry key
-		// is deliberately not in the link, and so not in browser history.
-		const peer = new URLSearchParams(location.search).get('peer');
-		if (peer) importUrl = peer;
 		if (location.hash === '#extras') {
 			document.getElementById('extras')?.scrollIntoView();
 		}
@@ -141,50 +118,8 @@
 		}
 	}
 
-	function rowDist(row: EnvImportRow): string {
-		return distEdits[row.name] ?? row.dist;
-	}
 
-	async function previewImport() {
-		if (busy || !importUrl.trim()) return;
-		busy = true;
-		error = null;
-		try {
-			preview = await api.importEnvironment({
-				url: importUrl.trim(),
-				token: importToken.trim() || undefined
-			});
-			distEdits = Object.fromEntries(
-				preview.added.filter((row) => row.guessed).map((row) => [row.name, row.dist])
-			);
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-			preview = null;
-		} finally {
-			busy = false;
-		}
-	}
 
-	async function confirmImport() {
-		if (busy || !importUrl.trim() || !preview) return;
-		busy = true;
-		error = null;
-		try {
-			const out = await api.importEnvironment({
-				url: importUrl.trim(),
-				token: importToken.trim() || undefined,
-				confirm: true,
-				force,
-				dist: distEdits
-			});
-			if (out.environment) env = out.environment;
-			preview = out;
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			busy = false;
-		}
-	}
 </script>
 
 <section id="extras">
@@ -285,13 +220,16 @@
 			<code>sys.path</code> and importable, but a strategy cannot put one in
 			<code>requires</code> until you approve it — the deploy check reads the
 			stamp, not the directory. Approving pins it at the version already here,
-			so nothing is reinstalled and no session is disturbed.
+			so nothing is reinstalled and no session is disturbed. Most of these are
+			nobody's business but the package that asked for them; the column says
+			which one that is.
 		</p>
 		<table>
 			<thead>
 				<tr>
 					<th>Dist</th>
 					<th>Version</th>
+					<th>Needed by</th>
 					<th></th>
 				</tr>
 			</thead>
@@ -300,6 +238,16 @@
 					<tr>
 						<td><code>{row.dist}</code></td>
 						<td>{row.version}</td>
+						<td>
+							{#if row.needed_by.length}
+								{#each row.needed_by as who, i (who)}<code>{who}</code>{i <
+									row.needed_by.length - 1
+										? ', '
+										: ''}{/each}
+							{:else}
+								<span class="hint">—</span>
+							{/if}
+						</td>
 						<td class="right">
 							{#if row.suggested_name}
 								<button
@@ -322,96 +270,6 @@
 		</table>
 	{/if}
 
-	<h3>Import from a peer</h3>
-	<p class="hint">
-		Preview first. Confirm is what installs. A row whose dist was guessed from
-		the import name must be corrected before confirm — <code>sklearn</code> is not
-		on PyPI. A peer with its auth gate on publishes names without versions
-		unless you send a registry key it issued you.
-	</p>
-	<div class="import">
-		<input bind:value={importUrl} placeholder="http://peer:8000" disabled={busy} />
-		<input
-			bind:value={importToken}
-			placeholder="registry key (optional)"
-			disabled={busy}
-			autocomplete="off"
-		/>
-		<button type="button" class="secondary" onclick={previewImport} disabled={busy || !importUrl.trim()}>
-			Preview
-		</button>
-	</div>
-
-	{#if unpinnedNames}
-		<p class="banner warn">
-			This peer published names without versions: <code>{unpinnedNames}</code>. Its
-			<code>/info</code> keeps pins for authenticated callers, so ask that node for a
-			registry key and preview again with it in the field above. Nothing on this page
-			can supply the version — a dist is not what is missing.
-		</p>
-	{/if}
-
-	{#if preview}
-		<table>
-			<thead>
-				<tr>
-					<th>Name</th>
-					<th>Status</th>
-					<th>Version</th>
-					<th>Dist</th>
-				</tr>
-			</thead>
-			<tbody>
-				{#each [...preview.added, ...preview.kept, ...preview.conflicts] as row (row.name + row.status)}
-					<tr>
-						<td><code>{row.name}</code></td>
-						<td>
-							{row.status}
-							{#if !row.pinned}
-								<span class="badge failed">no version</span>
-							{/if}
-							{#if row.guessed}
-								<span class="badge paused">guessed dist</span>
-							{/if}
-							{#if row.status === 'conflict'}
-								<span class="badge failed">local {row.local_version}</span>
-							{/if}
-						</td>
-						<td>{row.pinned ? row.version : '—'}</td>
-						<td>
-							{#if row.status === 'added' && row.guessed}
-								<input
-									value={rowDist(row)}
-									oninput={(e) => {
-										distEdits = { ...distEdits, [row.name]: e.currentTarget.value };
-									}}
-									disabled={busy}
-								/>
-							{:else}
-								<code>{row.dist}</code>
-							{/if}
-						</td>
-					</tr>
-				{/each}
-			</tbody>
-		</table>
-		<div class="import-actions">
-			<button
-				type="button"
-				onclick={confirmImport}
-				disabled={busy ||
-					preview.conflicts.length > 0 ||
-					preview.applied ||
-					unfixedGuessed ||
-					unpinnedAdded.length > 0}
-			>
-				{preview.applied ? 'Applied' : busy ? 'Applying…' : 'Confirm'}
-			</button>
-			{#if preview.conflicts.length > 0}
-				<p class="hint">Resolve pin clashes on this node before confirming.</p>
-			{/if}
-		</div>
-	{/if}
 </section>
 
 <style>
@@ -463,8 +321,7 @@
 		color: var(--text);
 	}
 
-	.add,
-	.import {
+	.add {
 		display: flex;
 		gap: 0.6rem;
 		max-width: 40rem;
@@ -472,8 +329,7 @@
 		flex-wrap: wrap;
 	}
 
-	.add input,
-	.import input {
+	.add input {
 		flex: 1;
 		min-width: 7rem;
 	}
@@ -516,14 +372,5 @@
 		text-align: right;
 	}
 
-	.import-actions {
-		display: flex;
-		align-items: center;
-		gap: 0.8rem;
-		margin-top: 0.8rem;
-	}
 
-	.import-actions .hint {
-		margin: 0;
-	}
 </style>

@@ -1097,13 +1097,15 @@ will be retried as a network fault. A picker that lists
 - Optional `mftik check --against` (later if not in this ticket): GET
   `/environment` and compare. Not required to close the epic
   if push already does it.
-- Settings (or Registry): list the stamp (packages, generation,
-  size), add / remove (each call applies), Import shows the diff
-  then confirm. The diff distinguishes the two unusable rows,
-  because the remedies are different and only one of them is on
-  the page: a guessed `dist` gets an editable field, an unpinned
-  row gets a banner pointing at the registry-key input and **no**
-  dist field at all. Both block Confirm.
+- Settings: list the stamp (packages, generation, size) and
+  add / remove, each call applying. **Not** import — that belongs to
+  the connect flow that needs it.
+- Settings also lists what the resolver installed that nobody
+  approved, with the distributions that directly require each one.
+  Read off `Requires-Dist`, so `six` shows as needed by
+  `python-dateutil` rather than sitting beside `numpy` as though both
+  were equally the Owner's business. Approve pins at the version
+  already on disk.
 - Surface `abi_ok` and `restart_required` as banners, not as
   table columns. Both are states where the API is healthy and the
   stamp is right and deploys still fail; a list of package names
@@ -1117,10 +1119,14 @@ will be retried as a network fault. A picker that lists
   remote name. The dialog lists the missing names (each marked absent
   or present-but-unapproved), previews the peer's extras in place, and
   offers **Install and connect**.
-  Rows that need a decision the dialog has no field for — a pin clash,
-  a guessed `dist`, a peer that withheld versions — link to Settings
-  with the URL carried in the query string. The **key is not**: a
-  registry key in a URL is a registry key in browser history.
+  Import lives **only** here. A second copy in Settings meant the same
+  peer credentials typed on two pages, and a link between them that
+  could carry a URL but must never carry a registry key — a key in a
+  URL is a key in browser history. So the dialog owns all three hard
+  rows too: a guessed `dist` gets its correction field inline, and a
+  pin clash or a withheld version is refused with what to do about it
+  (change this node's own extras; get a key from the peer). Neither of
+  those is a field, which is why neither is a form.
   Version drift is not an error here (ENV-6).
 - The refusal carries the names as **data**, not prose. `MissingRemoteExtras`
   holds `missing` and the subset already present unapproved; the route

@@ -10,6 +10,7 @@ from mftik.environment import (
     EnvStamp,
     NodeEnv,
     PackageRecord,
+    dependency_sources,
     describe_missing,
     disruptive_dists,
     unapproved_present,
@@ -281,3 +282,59 @@ def test_disruptive_dists_sees_what_the_requested_names_cannot() -> None:
     assert disruptive_dists(previous, {**previous, "httpx": "0.27"}) == ()
     # A drop counts: something that was importable no longer is.
     assert disruptive_dists(previous, {"pandas": "2.0"}) == ("numpy",)
+
+
+def _install(dest: Path, name: str, version: str, requires: list[str]) -> None:
+    info = dest / f"{name}-{version}.dist-info"
+    info.mkdir(parents=True, exist_ok=True)
+    lines = ["Metadata-Version: 2.1", f"Name: {name}", f"Version: {version}"]
+    lines += [f"Requires-Dist: {req}" for req in requires]
+    (info / "METADATA").write_text("\n".join(lines) + "\n")
+
+
+def test_dependency_sources_tells_six_apart_from_numpy(tmp_path: Path) -> None:
+    """A flat list makes ``six`` look as much the Owner's business as numpy.
+
+    It is not: numpy is what pandas is for, six is two levels down behind
+    python-dateutil. The graph is on disk already — every dist-info records
+    ``Requires-Dist`` — so this costs a read, not a guess.
+    """
+    dest = tmp_path / "site-packages"
+    dest.mkdir()
+    _install(dest, "pandas", "2.2.3", ["numpy>=1.23.2", "python-dateutil>=2.8.2"])
+    _install(dest, "python-dateutil", "2.9.0", ["six>=1.5"])
+    _install(dest, "numpy", "2.1.3", [])
+    _install(dest, "six", "1.16.0", [])
+
+    sources = dependency_sources(dest)
+    assert sources["numpy"] == ("pandas",)
+    assert sources["six"] == ("python-dateutil",)
+    assert sources["python-dateutil"] == ("pandas",)
+    # A root has nobody above it.
+    assert "pandas" not in sources
+
+
+def test_a_requirement_that_is_not_installed_is_not_a_source(
+    tmp_path: Path,
+) -> None:
+    """Optional extras and unmet markers simply are not here.
+
+    Membership in the installed set is the marker evaluation this does not do
+    — an optional dependency nobody took cannot be pulling anything in.
+    """
+    dest = tmp_path / "site-packages"
+    dest.mkdir()
+    _install(dest, "httpx", "0.28.1", ["anyio", "brotli; extra == 'brotli'"])
+    _install(dest, "anyio", "4.0", [])
+
+    sources = dependency_sources(dest)
+    assert sources == {"anyio": ("httpx",)}
+
+
+def test_two_packages_can_need_the_same_dependency(tmp_path: Path) -> None:
+    dest = tmp_path / "site-packages"
+    dest.mkdir()
+    _install(dest, "pandas", "2.2.3", ["numpy"])
+    _install(dest, "scipy", "1.14", ["numpy"])
+    _install(dest, "numpy", "2.1.3", [])
+    assert dependency_sources(dest)["numpy"] == ("pandas", "scipy")

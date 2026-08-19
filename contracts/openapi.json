@@ -3126,6 +3126,13 @@
               }
             ],
             "title": "Suggested Name"
+          },
+          "needed_by": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Needed By"
           }
         },
         "type": "object",
