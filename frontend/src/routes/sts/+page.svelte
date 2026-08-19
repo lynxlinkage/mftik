@@ -56,13 +56,31 @@
 	// cannot overwrite a newer one we already have.
 	let lastEventTs = new Map<string, number>();
 	let downloadId = $state<string | null>(null);
-	// Unknown-session ids waiting on the one in-flight page-one reload.
-	// A restart announcing three rebuilt sessions is one refresh, not three.
+
+	// One queue writes the table. refresh / loadMore / the socket all go
+	// through it so a tab switch cannot leave live rows under History, and
+	// a rebuilt session that lands after a fetch has left is not discarded.
+	let listEpoch = 0;
+	let listTail: Promise<void> = Promise.resolve();
+	let listCursor: string | null = null;
+	let pendingReload = false;
 	let pendingSessions = new Set<string>();
-	let pendingUnknown: Promise<void> | null = null;
 
 	function statusesOf(which: Tab): Set<string> {
 		return new Set(TAB_STATUS[which].split(','));
+	}
+
+	function bumpListEpoch() {
+		listEpoch += 1;
+	}
+
+	function enqueueList(job: () => Promise<void>): Promise<void> {
+		const run = listTail.then(job, job);
+		listTail = run.then(
+			() => undefined,
+			() => undefined
+		);
+		return run;
 	}
 
 	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
@@ -85,63 +103,108 @@
 		return available[0]?.type ?? '';
 	}
 
-	async function refresh() {
+	async function applyPageOne(epoch: number, withTypes: boolean) {
+		const myTab = tab;
 		loading = true;
 		error = null;
 		try {
-			const [list, t] = await Promise.all([
-				api.strategies({ status: TAB_STATUS[tab] }),
-				api.strategyTypes().catch(() => ({
-					types: [],
-					templates: [],
-					default: 'NoopStrategy'
-				}))
-			]);
+			const listP = api.strategies({ status: TAB_STATUS[myTab] });
+			const typesP = withTypes
+				? api.strategyTypes().catch(() => ({
+						types: [],
+						templates: [],
+						default: 'NoopStrategy'
+					}))
+				: null;
+			const list = await listP;
+			if (epoch !== listEpoch || tab !== myTab) return;
 			strategies = list.strategies;
 			hasMore = list.has_more;
-			templates = t.templates;
-			if (!templates.some((x) => x.type === selectedType)) {
-				selectedType = pickType(list.strategies, templates, t.default);
+			listCursor = strategies.at(-1)?.session_id ?? null;
+			if (typesP) {
+				const t = await typesP;
+				if (epoch !== listEpoch) return;
+				templates = t.templates;
+				if (!templates.some((x) => x.type === selectedType)) {
+					selectedType = pickType(list.strategies, templates, t.default);
+				}
+				// Only seed the editor while it is untouched — a refresh must not
+				// throw away a document someone is in the middle of writing.
+				if (!dirty || !yamlText.trim()) applyTemplate(selectedType);
 			}
-			// Only seed the editor while it is untouched — a refresh must not
-			// throw away a document someone is in the middle of writing.
-			if (!dirty || !yamlText.trim()) applyTemplate(selectedType);
 		} catch (e) {
+			if (epoch !== listEpoch) return;
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
-			loading = false;
+			if (epoch === listEpoch) loading = false;
 		}
+	}
+
+	async function refresh() {
+		bumpListEpoch();
+		const epoch = listEpoch;
+		return enqueueList(() => applyPageOne(epoch, true));
 	}
 
 	function setTab(next: Tab) {
 		if (next === tab) return;
 		tab = next;
+		bumpListEpoch();
+		// Drop the outgoing tab's rows before the fetch. A failed History
+		// load must not leave live rows — and their Stop buttons — under
+		// the History heading, and must not keep a live session id as the
+		// next `before`.
+		strategies = [];
+		hasMore = false;
+		listCursor = null;
 		viewing = null;
 		viewingId = null;
-		void refresh();
+		error = null;
+		loading = true;
+		const epoch = listEpoch;
+		void enqueueList(() => applyPageOne(epoch, true));
 	}
 
 	async function loadMore() {
-		const oldest = strategies.at(-1);
-		if (!oldest || loadingMore || !hasMore) return;
+		if (!hasMore || !listCursor || loadingMore) return;
+		const epoch = listEpoch;
+		const myTab = tab;
 		loadingMore = true;
 		error = null;
-		try {
-			const next = await api.strategies({
-				status: TAB_STATUS[tab],
-				before: oldest.session_id
-			});
-			strategies = [...strategies, ...next.strategies];
-			hasMore = next.has_more;
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			loadingMore = false;
-		}
+		return enqueueList(async () => {
+			if (epoch !== listEpoch || tab !== myTab) {
+				loadingMore = false;
+				return;
+			}
+			const cursor = listCursor;
+			if (!cursor) {
+				loadingMore = false;
+				return;
+			}
+			try {
+				const next = await api.strategies({
+					status: TAB_STATUS[myTab],
+					before: cursor
+				});
+				if (epoch !== listEpoch || tab !== myTab) return;
+				strategies = [...strategies, ...next.strategies];
+				hasMore = next.has_more;
+				listCursor = strategies.at(-1)?.session_id ?? cursor;
+			} catch (e) {
+				if (epoch !== listEpoch) return;
+				error = e instanceof Error ? e.message : String(e);
+			} finally {
+				loadingMore = false;
+			}
+		});
 	}
 
 	function dropRow(sessionId: string) {
+		const last = strategies.at(-1);
 		strategies = strategies.filter((s) => s.session_id !== sessionId);
+		// Keep the dropped tail as the Load more cursor so acking a full
+		// page does not lose the rest of the backlog.
+		listCursor = strategies.at(-1)?.session_id ?? last?.session_id ?? listCursor;
 		if (viewingId === sessionId) {
 			viewing = null;
 			viewingId = null;
@@ -174,6 +237,9 @@
 			// The new row is live. Someone who deployed from History would
 			// otherwise refresh a tab that cannot show it.
 			tab = 'live';
+			strategies = [];
+			hasMore = false;
+			listCursor = null;
 			await refresh();
 			await goto(`/sts/${created.session_id}`);
 		} catch (e) {
@@ -275,19 +341,26 @@
 	/**
 	 * Fetch the list because `sessionId` is not in it yet.
 	 *
-	 * A deploy from another tab announces itself as live before this page
-	 * has the row. One refresh is enough: the session is persisted before
-	 * it is announced, so the row is already there. Concurrent unknowns
-	 * share that one fetch — three rebuilt sessions is one page-one reload.
+	 * Concurrent unknowns share one page-one fetch. An id that arrives
+	 * after that request has gone out stays in `pendingSessions` and sets
+	 * `pendingReload`, so the drain runs again — joining a fetch that
+	 * already left is how the second of two rebuilt sessions vanished.
 	 */
-	async function fetchUnknownSession(sessionId: string) {
+	async function drainUnknownReloads() {
+		while (pendingReload) {
+			pendingReload = false;
+			bumpListEpoch();
+			const epoch = listEpoch;
+			const wanted = [...pendingSessions];
+			await applyPageOne(epoch, false);
+			for (const id of wanted) pendingSessions.delete(id);
+		}
+	}
+
+	function fetchUnknownSession(sessionId: string) {
 		pendingSessions.add(sessionId);
-		if (pendingUnknown) return pendingUnknown;
-		pendingUnknown = refresh().finally(() => {
-			pendingSessions.clear();
-			pendingUnknown = null;
-		});
-		return pendingUnknown;
+		pendingReload = true;
+		return enqueueList(drainUnknownReloads);
 	}
 
 	// One shared tooltip node, positioned in viewport coordinates. It lives
@@ -599,13 +672,13 @@
 				{/each}
 			</tbody>
 		</table>
-		{#if hasMore}
-			<div class="more">
-				<button type="button" class="secondary" onclick={loadMore} disabled={loadingMore}>
-					{loadingMore ? 'Loading…' : 'Load more'}
-				</button>
-			</div>
-		{/if}
+	{/if}
+	{#if hasMore}
+		<div class="more">
+			<button type="button" class="secondary" onclick={loadMore} disabled={loadingMore}>
+				{loadingMore ? 'Loading…' : 'Load more'}
+			</button>
+		</div>
 	{/if}
 </section>
 

@@ -136,3 +136,16 @@ async def test_an_unknown_cursor_is_a_422(db) -> None:
         await sts_routes.list_strategies(QuietBroker(), before="nope")
     assert caught.value.status_code == 422
     assert "nope" in str(caught.value.detail)
+
+
+async def test_an_unknown_status_is_a_422(db) -> None:
+    with pytest.raises(HTTPException) as caught:
+        await sts_routes.list_strategies(QuietBroker(), status="faild")
+    assert caught.value.status_code == 422
+    assert "faild" in str(caught.value.detail)
+
+
+async def test_a_status_of_only_commas_is_a_422(db) -> None:
+    with pytest.raises(HTTPException) as caught:
+        await sts_routes.list_strategies(QuietBroker(), status=" , ")
+    assert caught.value.status_code == 422

@@ -94,9 +94,12 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
                 stmt = stmt.where(StsSessionRow.status == status)
             else:
                 values = list(status)
+                if not values:
+                    # An empty union is "none of these", not "skip the filter".
+                    return []
                 if len(values) == 1:
                     stmt = stmt.where(StsSessionRow.status == values[0])
-                elif values:
+                else:
                     stmt = stmt.where(StsSessionRow.status.in_(values))
         if created_by is not None:
             stmt = stmt.where(StsSessionRow.created_by == created_by)

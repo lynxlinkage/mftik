@@ -191,10 +191,11 @@ change:
 Two guards already in that file survive the change, and the last rule is
 only affordable because they do. `lastEventTs` drops an event older than
 the one already applied to a row, so a straggler cannot trigger a reload.
-`pendingSessions` collapses concurrent unknown sessions into one in-flight
-fetch — without it, an STS restart announcing three rebuilt sessions at
-once is three page-one reloads, which is the shape of the bug this section
-is about.
+`pendingSessions` records unknown ids while a page-one fetch is in flight
+so concurrent announcements share that one request. An id that arrives
+after the request has gone out stays in the set and queues a trailing
+reload — joining a fetch that already left is how a restart announcing
+two rebuilt sessions 150ms apart would drop the second until Refresh.
 
 ```
 tabs ──► GET /sts/strategies ──► list_sessions ──► sts_sessions
@@ -266,6 +267,7 @@ Repository (`packages/db/tests/test_sts_session_repository.py`):
 - A cursor naming a row that is not there returns nothing — the handler
   above it turns that into a 422, and it can only do so if the repository
   reports it rather than falling back to the first page.
+- `status=[]` matches nothing. An empty union is not "skip the filter".
 
 API (`apps/api/tests/test_sts_strategies.py`):
 
@@ -283,6 +285,7 @@ API (`apps/api/tests/test_sts_strategies.py`):
   `request` stands in for one that is not answering at all, and the call
   still returns its rows. That is the Target property, and the API is the
   only place it can be asserted.
+- `status=faild` and `status= , ` are 422, not an empty page.
 
 ## Integration test (Playwright)
 
@@ -313,9 +316,12 @@ Cases:
   reload History and does not drop rows Load more already added.
 - Refresh and a tab switch replace the list. The next strategies request
   carries no `before`.
-- Two status events for unseen sessions arriving together cause one
-  reload, not two — the `pendingSessions` guard, which only a UI test can
-  see.
+- Two status events for unseen sessions share one in-flight fetch and
+  at most one trailing reload — not a request per event.
+- An unseen session that arrives after that fetch has already left
+  queues a trailing reload, and the row appears without Refresh.
+- Acking every visible Attention row while `has_more` is true still
+  shows Load more; the cursor is the last dropped id.
 
 `npm run check` stays the typecheck. Playwright is the UI contract.
 Pytest remains the API and repository contract.

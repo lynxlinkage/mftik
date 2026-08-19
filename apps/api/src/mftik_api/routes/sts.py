@@ -96,13 +96,27 @@ _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _LOCAL_YAML = "sts: {}\n"
 
 
+_KNOWN_STATUSES = frozenset(item.value for item in SessionStatus)
+
+
 def _parse_statuses(status: str | None) -> str | list[str] | None:
-    """``done,ack`` is History; a single value is Live. Same shape as Board."""
+    """``done,ack`` is History; a single value is Live. Same shape as Board.
+
+    Omitted (or blank) means every status. A value that is only commas,
+    or a token that is not a status, is 422 — an empty page would read
+    as the end of history.
+    """
     if status is None or not status.strip():
         return None
     parts = [part.strip() for part in status.split(",") if part.strip()]
     if not parts:
-        return None
+        raise HTTPException(status_code=422, detail="status has no values")
+    unknown = [part for part in parts if part not in _KNOWN_STATUSES]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown status: {', '.join(unknown)}",
+        )
     if len(parts) == 1:
         return parts[0]
     return parts

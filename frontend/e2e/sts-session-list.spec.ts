@@ -58,11 +58,26 @@ const HISTORY = [
 
 async function mockStsPage(
 	page: Page,
-	opts: { live?: StrategyRow[] } = {}
-): Promise<{ urls: URL[]; send: (data: string) => void }> {
+	opts: {
+		live?: StrategyRow[];
+		/** Snapshot taken when the request arrives, so a later push is not in it. */
+		liveAt?: () => StrategyRow[];
+		holdLiveAfter?: number;
+		failHistory?: boolean;
+		attentionPage?: { first: StrategyRow[]; rest: StrategyRow[]; cursor: string };
+	} = {}
+): Promise<{
+	urls: URL[];
+	send: (data: string) => void;
+	releaseLive: () => void;
+}> {
 	const urls: URL[] = [];
 	let statusWs: WebSocketRoute | null = null;
 	const liveRows = opts.live ?? LIVE;
+	let releaseLive: (() => void) | null = null;
+	const held = new Promise<void>((resolve) => {
+		releaseLive = resolve;
+	});
 
 	await page.route('**/api/auth/status', (route) =>
 		route.fulfill({
@@ -110,11 +125,34 @@ async function mockStsPage(
 		const status = url.searchParams.get('status') ?? '';
 		const before = url.searchParams.get('before');
 		if (status === 'live') {
-			await route.fulfill({ json: { strategies: liveRows, has_more: false } });
+			// Copy at request time so a later push is not smuggled into this page.
+			const live = [...(opts.liveAt ? opts.liveAt() : liveRows)];
+			const liveIndex = urls.filter((u) => u.searchParams.get('status') === 'live')
+				.length;
+			if (opts.holdLiveAfter !== undefined && liveIndex > opts.holdLiveAfter) {
+				await held;
+			}
+			await route.fulfill({ json: { strategies: live, has_more: false } });
 			return;
 		}
 		if (status === 'failed,interrupted') {
+			if (opts.attentionPage) {
+				if (before === opts.attentionPage.cursor) {
+					await route.fulfill({
+						json: { strategies: opts.attentionPage.rest, has_more: false }
+					});
+					return;
+				}
+				await route.fulfill({
+					json: { strategies: opts.attentionPage.first, has_more: true }
+				});
+				return;
+			}
 			await route.fulfill({ json: { strategies: ATTENTION, has_more: false } });
+			return;
+		}
+		if (status === 'done,ack' && opts.failHistory) {
+			await route.fulfill({ status: 502, json: { detail: 'STS list failed' } });
 			return;
 		}
 		if (status === 'done,ack') {
@@ -143,7 +181,8 @@ async function mockStsPage(
 		send: (data: string) => {
 			if (statusWs === null) throw new Error('status socket is not open');
 			statusWs.send(data);
-		}
+		},
+		releaseLive: () => releaseLive?.()
 	};
 }
 
@@ -231,7 +270,9 @@ test('Refresh and a tab switch replace the list without a cursor', async ({
 	expect(last?.searchParams.has('before')).toBe(false);
 });
 
-test('two unseen live sessions cause one reload', async ({ page }) => {
+test('two unseen live sessions share an in-flight fetch plus at most one trailing reload', async ({
+	page
+}) => {
 	const { urls, send } = await mockStsPage(page);
 	await expect(page.getByRole('link', { name: 's-live' })).toBeVisible();
 	const afterLoad = urls.length;
@@ -239,7 +280,68 @@ test('two unseen live sessions cause one reload', async ({ page }) => {
 	send(statusEvent('s-rebuilt-a', 'live', 10));
 	send(statusEvent('s-rebuilt-b', 'live', 11));
 
-	await expect.poll(() => urls.length).toBe(afterLoad + 1);
-	await page.waitForTimeout(150);
-	expect(urls.length).toBe(afterLoad + 1);
+	await expect.poll(() => urls.length).toBeGreaterThan(afterLoad);
+	await page.waitForTimeout(200);
+	// One extra if both land before the request leaves; two if the second
+	// queues a trailing reload. A request per event would be three or more.
+	expect(urls.length).toBeLessThanOrEqual(afterLoad + 2);
+});
+
+test('an unseen session that misses the in-flight fetch still appears', async ({
+	page
+}) => {
+	const liveBox = [row('s-live', 'live', 30)];
+	const { urls, send, releaseLive } = await mockStsPage(page, {
+		liveAt: () => liveBox,
+		holdLiveAfter: 1
+	});
+	await expect(page.getByRole('link', { name: 's-live' })).toBeVisible();
+
+	liveBox.push(row('s-rebuilt-a', 'live', 40));
+	send(statusEvent('s-rebuilt-a', 'live', 10));
+	await expect
+		.poll(() => urls.filter((u) => u.searchParams.get('status') === 'live').length)
+		.toBe(2);
+
+	liveBox.push(row('s-rebuilt-b', 'live', 41));
+	send(statusEvent('s-rebuilt-b', 'live', 11));
+	releaseLive();
+
+	await expect(page.getByRole('link', { name: 's-rebuilt-a' })).toBeVisible();
+	await expect(page.getByRole('link', { name: 's-rebuilt-b' })).toBeVisible();
+	await expect
+		.poll(() => urls.filter((u) => u.searchParams.get('status') === 'live').length)
+		.toBe(3);
+});
+
+test('Load more survives acking a full Attention page', async ({ page }) => {
+	const { send } = await mockStsPage(page, {
+		attentionPage: {
+			first: [row('s-fail', 'failed', 20)],
+			rest: [row('s-int', 'interrupted', 10)],
+			cursor: 's-fail'
+		}
+	});
+
+	await page.getByRole('tablist').getByRole('button', { name: 'Attention' }).click();
+	await expect(page.getByRole('link', { name: 's-fail' })).toBeVisible();
+
+	send(statusEvent('s-fail', 'ack', 2));
+	await expect(page.getByRole('link', { name: 's-fail' })).toHaveCount(0);
+	await expect(page.getByRole('button', { name: 'Load more' })).toBeVisible();
+
+	await page.getByRole('button', { name: 'Load more' }).click();
+	await expect(page.getByRole('link', { name: 's-int' })).toBeVisible();
+});
+
+test('a failed tab switch does not keep the previous tab\'s rows', async ({
+	page
+}) => {
+	await mockStsPage(page, { failHistory: true });
+	await expect(page.getByRole('link', { name: 's-live' })).toBeVisible();
+
+	await page.getByRole('tablist').getByRole('button', { name: 'History' }).click();
+	await expect(page.getByRole('link', { name: 's-live' })).toHaveCount(0);
+	await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0);
+	await expect(page.locator('.error-banner')).toBeVisible();
 });

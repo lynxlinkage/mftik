@@ -302,6 +302,16 @@ async def test_list_sessions_breaks_a_tied_created_at_on_session_id(db) -> None:
     assert [r.session_id for r in rest] == ["s-a"]
 
 
+async def test_an_empty_status_list_matches_nothing(db) -> None:
+    repo = StsSessionRepository(db)
+    await _live(repo, "s-live")
+
+    assert await repo.list_sessions(status=[]) == []
+    assert [r.session_id for r in await repo.list_sessions(status=None)] == [
+        "s-live"
+    ]
+
+
 async def test_an_unknown_cursor_returns_nothing_not_the_first_page(db) -> None:
     repo = StsSessionRepository(db)
     await _live(repo, "s-live")
