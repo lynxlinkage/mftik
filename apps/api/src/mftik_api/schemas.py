@@ -231,6 +231,9 @@ class AuditOut(BaseModel):
     operation: str
     result: str
     created_at: float | None = None
+    via: str | None = None
+    key_kind: str | None = None
+    key_id: int | None = None
 
 
 class AuditListResponse(BaseModel):

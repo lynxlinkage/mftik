@@ -18,6 +18,17 @@ class Audit(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )
+    #: How the request was proved. Same vocabulary as ``Principal.via``.
+    #: Null on rows written before this column existed.
+    via: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: The machine credential that acted, if one did. SET NULL rather than
+    #: CASCADE: deleting a key must not take the trail with it.
+    key_id: Mapped[int | None] = mapped_column(
+        ForeignKey("auth_keys.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    #: ``api`` or ``registry``, snapshotted so the display does not join.
+    key_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     operation: Mapped[str] = mapped_column(String(128))
     result: Mapped[str] = mapped_column(Text())
     created_at: Mapped[datetime] = mapped_column(

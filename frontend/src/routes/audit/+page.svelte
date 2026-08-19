@@ -20,6 +20,24 @@
 	}
 
 	onMount(refresh);
+
+	function formatIdentity(
+		via: string | null | undefined,
+		keyKind: string | null | undefined
+	): string {
+		if (via == null || via === '') return '—';
+		if (via === 'password') return 'Password';
+		if (via === 'discord') return 'Discord';
+		if (via === 'google') return 'Google';
+		if (via === 'disabled') return 'Auth disabled';
+		if (via.startsWith('key:')) {
+			const name = via.slice(4);
+			if (keyKind === 'api') return `API key · ${name}`;
+			if (keyKind === 'registry') return `Registry key · ${name}`;
+			return `Key · ${name}`;
+		}
+		return via;
+	}
 </script>
 
 <div class="page-head">
@@ -42,7 +60,7 @@
 			<thead>
 				<tr>
 					<th>When</th>
-					<th>User</th>
+					<th>Identity</th>
 					<th>Operation</th>
 					<th>Result</th>
 				</tr>
@@ -51,7 +69,7 @@
 				{#each audits as a (a.id)}
 					<tr>
 						<td class="muted">{formatTs(a.created_at)}</td>
-						<td>{a.user_id}</td>
+						<td>{formatIdentity(a.via, a.key_kind)}</td>
 						<td><code>{a.operation}</code></td>
 						<td class="result">{a.result}</td>
 					</tr>

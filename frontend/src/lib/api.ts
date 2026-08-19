@@ -202,6 +202,9 @@ export type Audit = {
 	operation: string;
 	result: string;
 	created_at: number | null;
+	via: string | null;
+	key_kind: string | null;
+	key_id: number | null;
 };
 
 export type SessionLog = {

@@ -165,6 +165,7 @@ async def _resolve(scope: Scope) -> Principal:
         return Principal.machine(
             key.user_id,
             name=key.name,
+            kind=key.kind,
             scopes=frozenset(key.scopes),
             key_id=key.id,
         )

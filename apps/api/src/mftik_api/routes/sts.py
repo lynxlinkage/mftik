@@ -53,7 +53,7 @@ from mftik_db.repositories import (
 from mftik_db.session import session_scope
 
 from mftik_api.audit_util import record_audit
-from mftik_api.auth import OwnerId
+from mftik_api.auth import ANONYMOUS, OwnerId, Principal, PrincipalDep
 from mftik_api.broker_rpc import DomainRpcError, request_domain
 from mftik_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
 from mftik_api.orchestrate import deploy_strategy
@@ -369,28 +369,52 @@ async def list_sessions(
 
 @router.post("/sessions/{session_id}/pause", response_model=StsControlResponse)
 async def pause_session(
-    session_id: str, broker: BrokerDep, owner: OwnerId = DEFAULT_USER_ID
+    session_id: str,
+    broker: BrokerDep,
+    owner: OwnerId = DEFAULT_USER_ID,
+    principal: PrincipalDep = ANONYMOUS,
 ) -> StsControlResponse:
     return await _control(
-        broker, session_id, STS_SESSION_PAUSE, "sts.session.pause", owner
+        broker,
+        session_id,
+        STS_SESSION_PAUSE,
+        "sts.session.pause",
+        owner,
+        principal,
     )
 
 
 @router.post("/sessions/{session_id}/resume", response_model=StsControlResponse)
 async def resume_session(
-    session_id: str, broker: BrokerDep, owner: OwnerId = DEFAULT_USER_ID
+    session_id: str,
+    broker: BrokerDep,
+    owner: OwnerId = DEFAULT_USER_ID,
+    principal: PrincipalDep = ANONYMOUS,
 ) -> StsControlResponse:
     return await _control(
-        broker, session_id, STS_SESSION_RESUME, "sts.session.resume", owner
+        broker,
+        session_id,
+        STS_SESSION_RESUME,
+        "sts.session.resume",
+        owner,
+        principal,
     )
 
 
 @router.post("/sessions/{session_id}/stop", response_model=StsControlResponse)
 async def stop_session(
-    session_id: str, broker: BrokerDep, owner: OwnerId = DEFAULT_USER_ID
+    session_id: str,
+    broker: BrokerDep,
+    owner: OwnerId = DEFAULT_USER_ID,
+    principal: PrincipalDep = ANONYMOUS,
 ) -> StsControlResponse:
     return await _control(
-        broker, session_id, STS_SESSION_STOP, "sts.session.stop", owner
+        broker,
+        session_id,
+        STS_SESSION_STOP,
+        "sts.session.stop",
+        owner,
+        principal,
     )
 
 
@@ -404,7 +428,10 @@ def _epoch(value: datetime | None) -> float | None:
 
 @router.post("/sessions/{session_id}/ack", response_model=StsControlResponse)
 async def ack_session(
-    session_id: str, broker: BrokerDep, owner: OwnerId = DEFAULT_USER_ID
+    session_id: str,
+    broker: BrokerDep,
+    owner: OwnerId = DEFAULT_USER_ID,
+    principal: PrincipalDep = ANONYMOUS,
 ) -> StsControlResponse:
     """Mark a failed or interrupted session as acknowledged — a normal stop.
 
@@ -471,6 +498,7 @@ async def ack_session(
         user_id=owner,
         operation="sts.session.ack",
         result=f"session_id={session_id_} status={status}",
+        principal=principal,
     )
     return StsControlResponse(
         session_id=session_id_,
@@ -505,7 +533,10 @@ async def eventlog_info(
 
 @router.get("/sessions/{session_id}/eventlog")
 async def download_eventlog(
-    session_id: str, broker: BrokerDep, owner: OwnerId = DEFAULT_USER_ID
+    session_id: str,
+    broker: BrokerDep,
+    owner: OwnerId = DEFAULT_USER_ID,
+    principal: PrincipalDep = ANONYMOUS,
 ) -> StreamingResponse:
     """Stream the session's event log as one gzip, oldest part first.
 
@@ -527,6 +558,7 @@ async def download_eventlog(
         user_id=owner,
         operation="sts.eventlog.download",
         result=f"session_id={session_id} bytes={info.total_bytes}",
+        principal=principal,
     )
     name = f"{_safe_name(session_id)}.jsonl.gz"
     return StreamingResponse(
@@ -618,6 +650,7 @@ async def deploy(
     broker: BrokerDep,
     store: RegistryStoreDep,
     owner: OwnerId = DEFAULT_USER_ID,
+    principal: PrincipalDep = ANONYMOUS,
 ) -> DeployResponse:
     """Deploy ``strategy_type`` with the td / md / sts document in ``body``.
 
@@ -671,6 +704,7 @@ async def deploy(
             f"td_names={list(spec.td)} "
             f"td={[a['api_id'] for a in result['td']]} md={result['md']}"
         ),
+        principal=principal,
     )
     return DeployResponse(
         session_id=session_id,
@@ -706,6 +740,7 @@ async def _control(
     type_name: str,
     audit_op: str,
     owner: int,
+    principal: Principal | None = None,
 ) -> StsControlResponse:
     try:
         result = await request_domain(
@@ -728,5 +763,6 @@ async def _control(
         user_id=owner,
         operation=audit_op,
         result=f"session_id={result.session_id} status={result.status}",
+        principal=principal,
     )
     return StsControlResponse.model_validate(result.model_dump())
