@@ -34,12 +34,17 @@ def handshake_info(
     *,
     mftik_version: str = MFTIK_VERSION,
     data_dir: str | Path | None = None,
+    pins: bool = True,
 ) -> dict[str, Any]:
     """Versions, plus applied extras this interpreter can actually import.
 
     ``source`` is not published — where this node got a package is its own
     bookkeeping. A stamp whose python/platform do not match is reported as
     empty extras so a peer does not copy a promise this process cannot keep.
+
+    ``pins`` is the exact ``version`` / ``dist``. The names are not secret
+    (connect compares them) but the pins are: an anonymous ``/info`` keeps
+    the keys and drops the values.
     """
     from mftik.environment import NodeEnv
 
@@ -48,10 +53,13 @@ def handshake_info(
     extras: dict[str, dict[str, str]] = {}
     generation = 0
     if stamp.generation > 0 and stamp.matches_runtime():
-        extras = {
-            name: {"version": rec.version, "dist": rec.dist}
-            for name, rec in stamp.packages.items()
-        }
+        if pins:
+            extras = {
+                name: {"version": rec.version, "dist": rec.dist}
+                for name, rec in stamp.packages.items()
+            }
+        else:
+            extras = {name: {} for name in stamp.packages}
         generation = stamp.generation
     return {
         "protocol": PROTOCOL,

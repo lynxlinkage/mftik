@@ -308,6 +308,25 @@ class StsRegistryReloadResult(BaseModel):
     generation: int = 0
 
 
+class StsRegistryGenerationRequest(BaseModel):
+    """API → STS: which env generation this process has already adopted.
+
+    Read-only. It does not re-scan the registry, does not import strategy
+    trees, and does not retarget ``sys.path``. Opening Settings asks this;
+    a write is what sends :data:`STS_REGISTRY_RELOAD`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+
+class StsRegistryGenerationResult(BaseModel):
+    """STS → API: the in-memory env generation, or 0 before the first attach."""
+
+    model_config = ConfigDict(frozen=True)
+
+    generation: int = 0
+
+
 class StsEventLogInfoRequest(BaseModel):
     """API → STS: what event log does this session have, and how big."""
 
@@ -832,6 +851,8 @@ StsSessionControlResultEnvelope = Envelope[StsSessionControlResult]
 StsSessionStatusEnvelope = Envelope[StsSessionStatus]
 StsRegistryReloadRequestEnvelope = Envelope[StsRegistryReloadRequest]
 StsRegistryReloadResultEnvelope = Envelope[StsRegistryReloadResult]
+StsRegistryGenerationRequestEnvelope = Envelope[StsRegistryGenerationRequest]
+StsRegistryGenerationResultEnvelope = Envelope[StsRegistryGenerationResult]
 StsEventLogInfoRequestEnvelope = Envelope[StsEventLogInfoRequest]
 StsEventLogInfoEnvelope = Envelope[StsEventLogInfo]
 StsEventLogReadRequestEnvelope = Envelope[StsEventLogReadRequest]
@@ -980,6 +1001,7 @@ STS_SESSION_FAIL = "sts.session.fail"
 STS_SESSION_STATUS = "sts.session.status"
 STS_EVENTLOG_INFO = "sts.eventlog.info"
 STS_REGISTRY_RELOAD = "sts.registry.reload"
+STS_REGISTRY_GENERATION = "sts.registry.generation"
 STS_EVENTLOG_READ = "sts.eventlog.read"
 
 #: ``reason`` written when an operator stopped a session from the UI. A fixed

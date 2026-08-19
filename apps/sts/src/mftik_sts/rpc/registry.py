@@ -21,14 +21,17 @@ from typing import TYPE_CHECKING
 from mftik.broker import IncomingRequest
 from mftik.protocol import (
     STS_ERROR,
+    STS_REGISTRY_GENERATION,
     STS_REGISTRY_RELOAD,
     RpcError,
     RpcErrorEnvelope,
+    StsRegistryGenerationResult,
+    StsRegistryGenerationResultEnvelope,
     StsRegistryReloadResult,
     StsRegistryReloadResultEnvelope,
 )
 
-from mftik_sts.runtime_env import refresh
+from mftik_sts.runtime_env import current_stamp, refresh
 
 if TYPE_CHECKING:
     from mftik_sts.session import SessionManager
@@ -69,6 +72,23 @@ async def handle_registry_reload(
         StsRegistryReloadResultEnvelope.wrap(
             StsRegistryReloadResult(loaded=loaded, generation=stamp.generation),
             type=STS_REGISTRY_RELOAD,
+            source="sts",
+            session_id=req.envelope.session_id,
+        )
+    )
+
+
+async def handle_registry_generation(
+    req: IncomingRequest,
+    *,
+    sessions: SessionManager | None = None,
+) -> None:
+    del sessions
+    stamp = current_stamp()
+    await req.reply(
+        StsRegistryGenerationResultEnvelope.wrap(
+            StsRegistryGenerationResult(generation=stamp.generation),
+            type=STS_REGISTRY_GENERATION,
             source="sts",
             session_id=req.envelope.session_id,
         )

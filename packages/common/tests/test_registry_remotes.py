@@ -228,8 +228,5 @@ async def test_a_later_diff_presents_the_stored_key(tmp_path: Path) -> None:
     assert result.reachable is True
     assert [row.status for row in result.rows] == ["synced"]
     assert seen
-    assert all(
-        auth == "Bearer mftik_rk_secret"
-        for path, auth in seen
-        if path != "/registry/v1/info"
-    )
+    # Pin warnings need the pins, and pins are behind the key.
+    assert all(auth == "Bearer mftik_rk_secret" for _path, auth in seen)

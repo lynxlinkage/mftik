@@ -9,11 +9,14 @@ from fastapi import HTTPException
 from mftik.envapply import ApplyFailed, ApplySpec
 from mftik.environment import EnvStamp, NodeEnv
 from mftik.protocol import (
+    STS_REGISTRY_GENERATION,
     STS_REGISTRY_RELOAD,
     STS_SESSION_LIST,
     ListSessionsResult,
     ListSessionsResultEnvelope,
     SessionInfo,
+    StsRegistryGenerationResult,
+    StsRegistryGenerationResultEnvelope,
     StsRegistryReloadResult,
     StsRegistryReloadResultEnvelope,
 )
@@ -63,7 +66,7 @@ def _session(session_id: str) -> SessionInfo:
 
 
 class EnvBroker:
-    """Answers session list and registry reload."""
+    """Answers session list, registry reload, and the read-only generation RPC."""
 
     def __init__(
         self,
@@ -72,15 +75,24 @@ class EnvBroker:
         live_after: list[str] | None = None,
         list_silent: bool = False,
         reload_silent: bool = False,
+        generation_silent: bool = False,
         generation: int | None = None,
     ) -> None:
         self.live = list(live or [])
         self.live_after = live_after
         self.list_silent = list_silent
         self.reload_silent = reload_silent
+        self.generation_silent = generation_silent
         self.generation = generation
         self.list_calls = 0
         self.reload_calls = 0
+        self.generation_calls = 0
+
+    def _generation(self) -> int:
+        stamp = NodeEnv.from_env().read_stamp()
+        if self.generation is not None:
+            return self.generation
+        return stamp.generation
 
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
         if envelope.type == STS_SESSION_LIST:
@@ -99,11 +111,18 @@ class EnvBroker:
             self.reload_calls += 1
             if self.reload_silent:
                 raise DomainRpcError("timeout", "no reply from sts")
-            stamp = NodeEnv.from_env().read_stamp()
-            gen = self.generation if self.generation is not None else stamp.generation
             return StsRegistryReloadResultEnvelope.wrap(
-                StsRegistryReloadResult(loaded=[], generation=gen),
+                StsRegistryReloadResult(loaded=[], generation=self._generation()),
                 type=STS_REGISTRY_RELOAD,
+                source="sts",
+            )
+        if envelope.type == STS_REGISTRY_GENERATION:
+            self.generation_calls += 1
+            if self.generation_silent:
+                raise DomainRpcError("timeout", "no reply from sts")
+            return StsRegistryGenerationResultEnvelope.wrap(
+                StsRegistryGenerationResult(generation=self._generation()),
+                type=STS_REGISTRY_GENERATION,
                 source="sts",
             )
         raise AssertionError(f"unexpected type {envelope.type}")
@@ -144,11 +163,24 @@ async def _put(
 
 
 async def test_get_on_a_fresh_node_is_empty(env_dir: Path) -> None:
-    out = await get_environment(broker=EnvBroker())
+    broker = EnvBroker()
+    out = await get_environment(broker=broker)
     assert out.packages == {}
     assert out.generation == 0
     assert out.bytes == 0
     assert out.abi_ok is True
+    assert broker.reload_calls == 0
+    assert broker.generation_calls == 1
+
+
+async def test_get_does_not_reload_the_registry(env_dir: Path) -> None:
+    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
+    broker = EnvBroker(generation=0)
+    got = await get_environment(broker=broker)
+    assert got.generation == 1
+    assert got.restart_required is True
+    assert broker.reload_calls == 0
+    assert broker.generation_calls == 1
 
 
 async def test_put_updates_get_and_info(env_dir: Path) -> None:
@@ -163,10 +195,15 @@ async def test_put_updates_get_and_info(env_dir: Path) -> None:
     assert got.generation == 1
     assert got.packages["numpy"].dist == "numpy"
 
-    info = await registry_info()
-    assert info.env_generation == 1
-    assert info.extras["numpy"].version == "1.26.4"
-    assert info.extras["numpy"].dist == "numpy"
+    anon = await registry_info()
+    assert anon.env_generation == 1
+    assert "numpy" in anon.extras
+    assert anon.extras["numpy"].version is None
+    assert anon.extras["numpy"].dist is None
+
+    keyed = await registry_info(principal=Principal.owner(1, via="password"))
+    assert keyed.extras["numpy"].version == "1.26.4"
+    assert keyed.extras["numpy"].dist == "numpy"
     advertised = handshake_info(data_dir=env_dir)
     assert advertised["extras"]["numpy"]["dist"] == "numpy"
 
@@ -315,6 +352,29 @@ async def test_upsert_adds_without_checking_sessions(env_dir: Path) -> None:
     assert out.generation == 1
     assert broker.list_calls == 0
     assert out.restart_required is False
+
+
+async def test_two_upserts_of_different_names_both_survive(env_dir: Path) -> None:
+    """The merge is under the lock. A stale read-then-replace would drop one."""
+    owner = Principal.owner(1, via="password")
+    first = await upsert_package(
+        EnvironmentPackageBody(name="numpy", version="1.0", dist="numpy"),
+        broker=EnvBroker(),
+        force=False,
+        owner=1,
+        principal=owner,
+    )
+    second = await upsert_package(
+        EnvironmentPackageBody(name="sklearn", version="1.4", dist="scikit-learn"),
+        broker=EnvBroker(),
+        force=False,
+        owner=1,
+        principal=owner,
+    )
+    assert first.generation == 1
+    assert second.generation == 2
+    assert set(second.packages) == {"numpy", "sklearn"}
+    assert NodeEnv(env_dir).extras_names() == frozenset({"numpy", "sklearn"})
 
 
 async def test_mutation_writes_audit_with_via(

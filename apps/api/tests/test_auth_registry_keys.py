@@ -99,6 +99,7 @@ async def test_a_registry_key_reads_handshake_extras_not_environment(
     auth = {"Authorization": f"Bearer {peer}"}
     async with a_client(app) as client:
         info = await client.get("/registry/v1/info", headers=auth)
+        anon = await client.get("/registry/v1/info")
         env = await client.get("/environment", headers=auth)
         posted = await client.post("/environment/packages", headers=auth, json={})
 
@@ -107,6 +108,9 @@ async def test_a_registry_key_reads_handshake_extras_not_environment(
     assert extra["version"] == "1.0"
     assert extra["dist"] == "numpy"
     assert "source" not in extra
+    assert anon.status_code == 200
+    assert "numpy" in anon.json()["extras"]
+    assert anon.json()["extras"]["numpy"] == {}
     assert env.status_code == 403
     assert posted.status_code == 403
 

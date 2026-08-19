@@ -7,6 +7,8 @@ from mftik.registry.protocol import (
     PROTOCOL_MIN,
     PROTOCOL_VERSION,
     check_handshake,
+    check_remote_extras,
+    extra_names,
     handshake_info,
 )
 
@@ -55,11 +57,13 @@ def test_handshake_info_advertises_matching_extras(tmp_path, monkeypatch) -> Non
     assert info["extras"] == {"numpy": {"version": "2.2.1", "dist": "numpy"}}
     assert "source" not in info["extras"]["numpy"]
     check_handshake(info)
+    names_only = handshake_info(data_dir=tmp_path, pins=False)
+    assert names_only["extras"] == {"numpy": {}}
+    assert extra_names(names_only) == frozenset({"numpy"})
+    check_remote_extras(names_only, frozenset({"numpy"}))
 
 
 def test_check_remote_extras_is_names_only() -> None:
-    from mftik.registry.protocol import check_remote_extras, extra_names
-
     info = {
         "protocol": PROTOCOL,
         "extras": {"numpy": {"version": "2.2.1", "dist": "numpy"}},
@@ -67,6 +71,7 @@ def test_check_remote_extras_is_names_only() -> None:
     assert extra_names(info) == frozenset({"numpy"})
     check_remote_extras(info, frozenset({"numpy"}))
     check_remote_extras({"extras": {"numpy": "1.0"}}, frozenset({"numpy"}))
+    check_remote_extras({"extras": {"numpy": {}}}, frozenset({"numpy"}))
     with pytest.raises(RegistryError, match="numpy"):
         check_remote_extras(info, frozenset())
 

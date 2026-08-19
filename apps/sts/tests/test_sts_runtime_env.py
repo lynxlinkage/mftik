@@ -15,7 +15,11 @@ from mftik.broker import Broker, BrokerConfig
 from mftik.envapply import ApplySpec, apply_packages
 from mftik.environment import EnvStamp, NodeEnv
 from mftik.protocol import (
+    STS_REGISTRY_GENERATION,
     STS_REGISTRY_RELOAD,
+    StsRegistryGenerationRequest,
+    StsRegistryGenerationRequestEnvelope,
+    StsRegistryGenerationResult,
     StsRegistryReloadRequest,
     StsRegistryReloadRequestEnvelope,
     StsRegistryReloadResult,
@@ -219,6 +223,98 @@ async def test_reload_rpc_returns_the_generation_it_now_believes(
         result = StsRegistryReloadResult.model_validate(reply.payload)
         assert result.generation == 1
         assert extras_names() == frozenset({"numpy"})
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await broker.close()
+        await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_generation_rpc_is_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    apply_packages(
+        NodeEnv(tmp_path),
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=_plant_numpy,
+    )
+    refresh_calls: list[str] = []
+    real_refresh = refresh
+
+    def wrapped_refresh(*args: object, **kwargs: object):  # noqa: ANN001
+        refresh_calls.append("refresh")
+        return real_refresh(*args, **kwargs)
+
+    monkeypatch.setattr("mftik_sts.rpc.registry.refresh", wrapped_refresh)
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    broker = Broker(
+        BrokerConfig(redis_url="redis://fake", key_prefix="test-envgen"),
+        redis_client=redis,
+    )
+    await broker.connect()
+    stop = asyncio.Event()
+
+    async def serve() -> None:
+        async for req in broker.serve(Topics.STS, stop=stop):
+            await dispatch(req, sessions=SimpleNamespace())
+
+    task = asyncio.create_task(serve())
+    try:
+        unread = await broker.request(
+            Topics.STS,
+            StsRegistryGenerationRequestEnvelope.wrap(
+                StsRegistryGenerationRequest(),
+                type=STS_REGISTRY_GENERATION,
+                source="test",
+            ),
+            timeout=5.0,
+        )
+        unread_gen = StsRegistryGenerationResult.model_validate(
+            unread.payload
+        ).generation
+        assert unread_gen == 0
+        assert refresh_calls == []
+
+        real_refresh(data_dir=tmp_path)
+        adopted = await broker.request(
+            Topics.STS,
+            StsRegistryGenerationRequestEnvelope.wrap(
+                StsRegistryGenerationRequest(),
+                type=STS_REGISTRY_GENERATION,
+                source="test",
+            ),
+            timeout=5.0,
+        )
+        adopted_gen = StsRegistryGenerationResult.model_validate(
+            adopted.payload
+        ).generation
+        assert adopted_gen == 1
+        assert refresh_calls == []
+
+        apply_packages(
+            NodeEnv(tmp_path),
+            {
+                "numpy": ApplySpec(version="1.0", dist="numpy"),
+                "sklearn": ApplySpec(version="1.4", dist="scikit-learn"),
+            },
+            installer=_plant_numpy,
+        )
+        trailing = await broker.request(
+            Topics.STS,
+            StsRegistryGenerationRequestEnvelope.wrap(
+                StsRegistryGenerationRequest(),
+                type=STS_REGISTRY_GENERATION,
+                source="test",
+            ),
+            timeout=5.0,
+        )
+        assert (
+            StsRegistryGenerationResult.model_validate(trailing.payload).generation == 1
+        )
+        assert refresh_calls == []
     finally:
         stop.set()
         task.cancel()

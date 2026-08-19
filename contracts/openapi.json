@@ -546,7 +546,7 @@
           "registry"
         ],
         "summary": "Registry Info",
-        "description": "Wire version. A peer that cannot speak this refuses to connect.",
+        "description": "Wire version. A peer that cannot speak this refuses to connect.\n\nExtra *names* are public \u2014 ``connect_remote`` only compares those.\nExact pins stay off the anonymous response; a registry key, API key,\nor session gets ``version`` and ``dist``.",
         "operationId": "registry_info_registry_v1_info_get",
         "responses": {
           "200": {
@@ -3451,21 +3451,31 @@
       "HandshakeExtraOut": {
         "properties": {
           "version": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Version"
           },
           "dist": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Dist"
           }
         },
         "type": "object",
-        "required": [
-          "version",
-          "dist"
-        ],
         "title": "HandshakeExtraOut",
-        "description": "One applied extra as a peer advertises it.\n\nThe key on ``extras`` is the import name. ``dist`` is the PyPI\ndistribution \u2014 ``sklearn`` is not installable. A legacy peer that\npublished a bare version string is read as ``dist`` = the key."
+        "description": "One applied extra as a peer advertises it.\n\nThe key on ``extras`` is the import name. An anonymous handshake\npublishes the name only; ``version`` and ``dist`` are filled in for\nan authenticated caller. A legacy peer that published a bare\nversion string is read as ``dist`` = the key."
       },
       "IdentityListOut": {
         "properties": {

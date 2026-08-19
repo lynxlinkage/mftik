@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from importlib.metadata import PathDistribution
 from pathlib import Path
@@ -38,6 +38,14 @@ class EnvironmentDisruptive(Exception):
 
 class EnvironmentInvalid(Exception):
     """A package name this node must not install under."""
+
+
+class EnvironmentMissing(Exception):
+    """A delete named an extra the locked stamp no longer has."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        super().__init__(f"no extra named {name!r} on this node")
 
 
 def check_package_name(name: str) -> None:
@@ -91,24 +99,68 @@ class ApplyResult:
 Installer = Callable[[Path, Mapping[str, ApplySpec]], None]
 
 
+def specs_from_stamp(stamp: EnvStamp) -> dict[str, ApplySpec]:
+    return {
+        name: ApplySpec(version=rec.version, dist=rec.dist, source=rec.source)
+        for name, rec in stamp.packages.items()
+    }
+
+
+def merge_packages(
+    stamp: EnvStamp,
+    *,
+    replace: Mapping[str, ApplySpec] | None = None,
+    upsert: Mapping[str, ApplySpec] | None = None,
+    remove: Collection[str] = (),
+    missing_ok: bool = False,
+) -> dict[str, ApplySpec]:
+    """Build the target set from a stamp. Callers hold the apply lock."""
+    if replace is not None:
+        return dict(replace)
+    packages = specs_from_stamp(stamp)
+    if upsert:
+        packages.update(dict(upsert))
+    for name in remove:
+        if name not in packages:
+            if missing_ok:
+                continue
+            raise EnvironmentMissing(name)
+        del packages[name]
+    return packages
+
+
 class ApplyInProgress:
     """Hold the apply lock from install through a caller-chosen commit.
 
     The API re-checks live sessions after the installer returns and before
     ``current`` is retargeted. That gap is why this is not just
     :func:`apply_packages`.
+
+    ``packages`` is a full replace (PUT). ``upsert`` / ``remove`` are
+    merged into the stamp *after* the lock is held, so two tabs that
+    both read ``{numpy}`` and add different names do not silently drop
+    one of the adds.
     """
 
     def __init__(
         self,
         env: NodeEnv,
-        packages: Mapping[str, ApplySpec],
+        packages: Mapping[str, ApplySpec] | None = None,
         *,
+        upsert: Mapping[str, ApplySpec] | None = None,
+        remove: Collection[str] | None = None,
         allow_disruptive: bool = False,
         installer: Installer | None = None,
     ) -> None:
+        if packages is not None and (upsert is not None or remove):
+            raise TypeError("replace cannot be combined with upsert/remove")
+        if packages is None and upsert is None and not remove:
+            raise TypeError("ApplyInProgress needs replace, upsert, or remove")
         self.env = env
-        self.packages = dict(packages)
+        self._replace = dict(packages) if packages is not None else None
+        self._upsert = dict(upsert) if upsert is not None else None
+        self._remove = frozenset(remove or ())
+        self.packages: dict[str, ApplySpec] = {}
         self.allow_disruptive = allow_disruptive
         self.installer = installer or run_uv_installer
         self.changed: tuple[str, ...] = ()
@@ -116,17 +168,29 @@ class ApplyInProgress:
         self._lock_cm: object | None = None
         self._committed = False
 
+    def _intent_specs(self) -> Mapping[str, ApplySpec]:
+        if self._replace is not None:
+            return self._replace
+        return self._upsert or {}
+
     def __enter__(self) -> Self:
-        for name, spec in self.packages.items():
+        for name, spec in self._intent_specs().items():
             check_package_name(name)
             spec.requirement()
-        self.changed = disruptive_names(self.env.read_stamp(), self.packages)
-        if self.changed and not self.allow_disruptive:
-            raise EnvironmentDisruptive(self.changed)
         lock_cm = self.env.lock()
         lock_cm.__enter__()
         self._lock_cm = lock_cm
         try:
+            stamp = self.env.read_stamp()
+            self.packages = merge_packages(
+                stamp,
+                replace=self._replace,
+                upsert=self._upsert,
+                remove=self._remove,
+            )
+            self.changed = disruptive_names(stamp, self.packages)
+            if self.changed and not self.allow_disruptive:
+                raise EnvironmentDisruptive(self.changed)
             dest = self.env.begin()
             self.dest = dest
             if self.packages:

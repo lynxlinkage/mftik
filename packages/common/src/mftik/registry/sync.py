@@ -180,7 +180,11 @@ async def diff_remote(
         )
         warnings: tuple[str, ...] = ()
         try:
-            info = await _get_json(http, f"{remote.url}/registry/v1/info")
+            info = await _get_json(
+                http,
+                f"{remote.url}/registry/v1/info",
+                headers=_auth(remote.token),
+            )
             warnings = extras_version_warnings(
                 info, handshake_info(data_dir=store.data_dir)
             )

@@ -662,6 +662,11 @@ GET    /environment                 stamp, size, ABI status, restart flag
 PUT    /environment                 replace the set, apply, reload STS, new stamp
 POST   /environment/packages        upsert one name, apply, reload, new stamp
 DELETE /environment/packages/{name} remove, apply, reload, new stamp
+
+PUT is a full replace. Upsert, delete, and import-confirm merge
+into the stamp *after* `apply.lock` is held — two tabs that both
+read `{numpy}` and add different names must not silently drop
+one of the adds.
 ```
 
 `GET /environment` answers three things the Owner cannot see
@@ -676,11 +681,14 @@ anywhere else:
   `extras: {}`, every deploy says `incompatible_environment`, and
   the remedy — re-apply, which rebuilds the generation against the
   new interpreter — is nowhere on screen;
-- `restart_required`. ENV-4a's reload answers with the generation
-  STS believes it is on. When that trails the stamp — a `force`d
-  change, or a reload that never landed — say so, and say the fix
-  is restarting the STS container. Until then a live session keeps
-  running the modules it already imported.
+- `restart_required`. A read-only `sts.registry.generation` RPC
+  answers with the generation STS believes it is on. GET must not
+  send `sts.registry.reload` — opening Settings must not re-import
+  every tree in a process that may have live positions. When STS
+  trails the stamp — a `force`d change, or a write-time reload that
+  never landed — say so, and say the fix is restarting the STS
+  container. Until then a live session keeps running the modules it
+  already imported.
 
 `DELETE` also answers with the stored trees whose `requires` the
 removal breaks (ENV-2 put `requires` on the record). The Owner
@@ -749,7 +757,12 @@ that published `{"sklearn": "1.6.1"}` would be advertising a
 package no node could install, which is the same as advertising
 nothing. `source` is *not* published — where this node got a
 package is its own bookkeeping, and the peer it names may be one
-the reader cannot reach.
+the reader cannot reach. The names themselves are public (connect
+compares keys). Exact pins are not: an anonymous `GET /info`
+keeps the keys and drops `version` / `dist` (`"numpy": {}`). A
+registry key, API key, or session gets the objects above.
+`connect_remote` only needs the names, so a first connect without
+a key still works.
 
 `RegistryInfoOut` accepts both shapes: a string value from a node
 that predates this is read as `{"version": v, "dist": <the key>}`.
@@ -1303,7 +1316,7 @@ shape in the tests.
 | File | What it says today | After |
 |---|---|---|
 | `docs/CLI.md` | `check` is gate + naming + yml + `on_initialized` | Gate also accepts declared `requires` (two-pass). Push can fail because the stamp does not list an extra. |
-| `docs/Auth.md` | `/registry/v1/info` is "versions only" | Versions plus applied `extras` (name → `{version, dist}`) and `env_generation`. Still public; `source` is not published. |
+| `docs/Auth.md` | `/registry/v1/info` is "versions only" | Versions, `env_generation`, and applied extra **names**. Exact pins (`version`, `dist`) only for an authenticated caller. `source` is not published. |
 | `packages/common/src/mftik/registry/gate.py` module docstring | "a third-party import would be a missing module after a pull" | Third-party imports must be declared; the destination node's applied extras decide presence. `check_files` is two-pass. |
 
 Update those in the ticket that makes the sentence false (ENV-1, ENV-5,

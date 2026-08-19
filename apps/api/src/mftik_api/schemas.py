@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from mftik.protocol import SymbolInfo
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class DomainStats(BaseModel):
@@ -399,13 +399,16 @@ class RegistryStrategyListResponse(BaseModel):
 class HandshakeExtraOut(BaseModel):
     """One applied extra as a peer advertises it.
 
-    The key on ``extras`` is the import name. ``dist`` is the PyPI
-    distribution — ``sklearn`` is not installable. A legacy peer that
-    published a bare version string is read as ``dist`` = the key.
+    The key on ``extras`` is the import name. An anonymous handshake
+    publishes the name only; ``version`` and ``dist`` are filled in for
+    an authenticated caller. A legacy peer that published a bare
+    version string is read as ``dist`` = the key.
     """
 
-    version: str
-    dist: str
+    model_config = ConfigDict(extra="ignore")
+
+    version: str | None = None
+    dist: str | None = None
 
 
 class RegistryInfoOut(BaseModel):

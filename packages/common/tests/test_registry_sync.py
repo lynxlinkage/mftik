@@ -265,6 +265,23 @@ async def test_connect_refuses_legacy_flat_extras_the_same_way(tmp_path) -> None
 
 
 @pytest.mark.asyncio
+async def test_connect_accepts_names_only_extras(tmp_path) -> None:
+    """Anonymous /info publishes keys, not pins. Connect only compares names."""
+    _plant_numpy(tmp_path / "local")
+    peer = RegistryStore(tmp_path / "peer")
+    peer.add({"strategy.py": _TINY}, origin="public")
+    local = RegistryStore(tmp_path / "local")
+    async with httpx.AsyncClient(
+        transport=_peer(peer, extras={"numpy": {}}), base_url="http://node1"
+    ) as client:
+        result = await connect_remote(
+            local, name="node1", url="http://node1", client=client
+        )
+    assert result.name == "node1"
+    assert local.get_remote("node1") is not None
+
+
+@pytest.mark.asyncio
 async def test_connect_ignores_pin_differences(tmp_path) -> None:
     _plant_numpy(tmp_path / "local", "2.2.2")
     peer = RegistryStore(tmp_path / "peer")

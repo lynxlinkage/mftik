@@ -33,6 +33,7 @@ from mftik.registry.qualify import PRIVATE_ORIGIN, PUBLIC_ORIGIN
 from mftik_db.repositories import StsSessionRepository
 from mftik_db.session import session_scope
 
+from mftik_api.auth import ANONYMOUS, PrincipalDep
 from mftik_api.broker_rpc import DomainRpcError, request_domain
 from mftik_api.deps import BrokerDep, RegistryStoreDep
 from mftik_api.schemas import (
@@ -69,10 +70,17 @@ def _strategy_out(added: AddedStrategy) -> RegistryStrategyOut:
     )
 
 
-@router.get("/info", response_model=RegistryInfoOut)
-async def registry_info() -> RegistryInfoOut:
-    """Wire version. A peer that cannot speak this refuses to connect."""
-    return RegistryInfoOut.model_validate(handshake_info())
+@router.get("/info", response_model=RegistryInfoOut, response_model_exclude_none=True)
+async def registry_info(principal: PrincipalDep = ANONYMOUS) -> RegistryInfoOut:
+    """Wire version. A peer that cannot speak this refuses to connect.
+
+    Extra *names* are public — ``connect_remote`` only compares those.
+    Exact pins stay off the anonymous response; a registry key, API key,
+    or session gets ``version`` and ``dist``.
+    """
+    return RegistryInfoOut.model_validate(
+        handshake_info(pins=principal.authenticated)
+    )
 
 
 @router.get("/strategies", response_model=RegistryStrategyListResponse)

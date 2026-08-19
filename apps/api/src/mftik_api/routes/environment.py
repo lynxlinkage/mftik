@@ -13,8 +13,10 @@ from mftik.envapply import (
     ApplySpec,
     EnvironmentDisruptive,
     EnvironmentInvalid,
+    EnvironmentMissing,
     Installer,
     disruptive_names,
+    merge_packages,
     run_uv_installer,
 )
 from mftik.envimport import (
@@ -23,15 +25,18 @@ from mftik.envimport import (
     confirm_blockers,
     peer_source,
     preview_import,
-    union_specs,
 )
 from mftik.environment import EnvironmentLocked, EnvStamp, NodeEnv
 from mftik.protocol import (
+    STS_REGISTRY_GENERATION,
     STS_REGISTRY_RELOAD,
     STS_SESSION_LIST,
     ListSessionsRequest,
     ListSessionsRequestEnvelope,
     ListSessionsResult,
+    StsRegistryGenerationRequest,
+    StsRegistryGenerationRequestEnvelope,
+    StsRegistryGenerationResult,
     StsRegistryReloadRequest,
     StsRegistryReloadRequestEnvelope,
     StsRegistryReloadResult,
@@ -84,13 +89,6 @@ def _spec(name: str, item: EnvPackageIn) -> ApplySpec:
         dist=item.dist or name,
         source=item.source,
     )
-
-
-def _specs_from_stamp(stamp: EnvStamp) -> dict[str, ApplySpec]:
-    return {
-        name: ApplySpec(version=rec.version, dist=rec.dist, source=rec.source)
-        for name, rec in stamp.packages.items()
-    }
 
 
 def _packages_out(stamp: EnvStamp) -> dict[str, EnvPackageOut]:
@@ -181,6 +179,26 @@ async def _reload_sts(
     return frozenset(result.loaded), result.generation, None
 
 
+async def _sts_generation(
+    broker: BrokerDep,
+) -> tuple[int | None, str | None]:
+    try:
+        result = await request_domain(
+            broker,
+            Topics.STS,
+            StsRegistryGenerationRequestEnvelope.wrap(
+                StsRegistryGenerationRequest(),
+                type=STS_REGISTRY_GENERATION,
+                source="api",
+            ),
+            result_type=StsRegistryGenerationResult,
+        )
+    except DomainRpcError as exc:
+        logger.warning("STS env generation failed: %s", exc.message)
+        return None, exc.message
+    return result.generation, None
+
+
 def _broken_trees(store: RegistryStore, removed: str) -> list[BrokenTreeOut]:
     return [
         BrokenTreeOut(
@@ -197,21 +215,32 @@ def _broken_trees(store: RegistryStore, removed: str) -> list[BrokenTreeOut]:
 async def _apply_set(
     env: NodeEnv,
     broker: BrokerDep,
-    packages: dict[str, ApplySpec],
     *,
+    replace: dict[str, ApplySpec] | None = None,
+    upsert: dict[str, ApplySpec] | None = None,
+    remove: frozenset[str] | None = None,
     force: bool,
     owner: int,
     principal: Principal,
     operation: str,
     broken: list[BrokenTreeOut] | None = None,
 ) -> EnvironmentOut:
-    changed = disruptive_names(env.read_stamp(), packages)
-    if changed and not force:
+    preview = merge_packages(
+        env.read_stamp(),
+        replace=replace,
+        upsert=upsert,
+        remove=remove or (),
+        missing_ok=True,
+    )
+    preview_changed = disruptive_names(env.read_stamp(), preview)
+    if preview_changed and not force:
         await _require_no_live_sessions(broker)
     pending = ApplyInProgress(
         env,
-        packages,
-        allow_disruptive=bool(changed),
+        replace,
+        upsert=upsert,
+        remove=remove,
+        allow_disruptive=force or bool(preview_changed),
         installer=_installer(),
     )
     try:
@@ -219,10 +248,13 @@ async def _apply_set(
         # minutes, and commit walks the new generation. Neither may run on
         # the event loop, or every other request on this node stalls with it.
         # ``__enter__`` cleans up after itself, so a failure here needs no
-        # matching ``__exit__``.
+        # matching ``__exit__``. Merge happens inside ``__enter__``, after
+        # the flock, so a second tab cannot overwrite the first's add.
         await run_in_threadpool(pending.__enter__)
     except EnvironmentInvalid as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except EnvironmentMissing as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except EnvironmentLocked as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except EnvironmentDisruptive as exc:
@@ -230,7 +262,7 @@ async def _apply_set(
     except ApplyFailed as exc:
         raise HTTPException(status_code=502, detail=exc.message) from exc
     try:
-        if changed and not force:
+        if pending.changed and not force:
             await _require_no_live_sessions(broker)
         result = await run_in_threadpool(pending.commit)
     except BaseException:
@@ -258,7 +290,7 @@ async def _apply_set(
         operation=operation,
         result=(
             f"generation={result.stamp.generation} "
-            f"packages={','.join(sorted(packages)) or '(none)'}"
+            f"packages={','.join(sorted(pending.packages)) or '(none)'}"
         ),
         principal=principal,
     )
@@ -274,7 +306,7 @@ async def _apply_set(
 @router.get("", response_model=EnvironmentOut)
 async def get_environment(broker: BrokerDep) -> EnvironmentOut:
     stamp = _env().read_stamp()
-    _keys, sts_generation, rpc_error = await _reload_sts(broker)
+    sts_generation, rpc_error = await _sts_generation(broker)
     if rpc_error is not None:
         restart = stamp.generation > 0
     else:
@@ -296,7 +328,7 @@ async def put_environment(
     return await _apply_set(
         _env(),
         broker,
-        packages,
+        replace=packages,
         force=force or body.force,
         owner=owner,
         principal=principal,
@@ -312,17 +344,16 @@ async def upsert_package(
     owner: OwnerId = DEFAULT_USER_ID,
     principal: PrincipalDep = ANONYMOUS,
 ) -> EnvironmentOut:
-    env = _env()
-    packages = _specs_from_stamp(env.read_stamp())
-    packages[body.name] = ApplySpec(
-        version=body.version,
-        dist=body.dist or body.name,
-        source=body.source,
-    )
     return await _apply_set(
-        env,
+        _env(),
         broker,
-        packages,
+        upsert={
+            body.name: ApplySpec(
+                version=body.version,
+                dist=body.dist or body.name,
+                source=body.source,
+            )
+        },
         force=force or body.force,
         owner=owner,
         principal=principal,
@@ -340,18 +371,15 @@ async def delete_package(
     principal: PrincipalDep = ANONYMOUS,
 ) -> EnvironmentOut:
     env = _env()
-    stamp = env.read_stamp()
-    if name not in stamp.packages:
+    if name not in env.read_stamp().packages:
         raise HTTPException(
             status_code=404, detail=f"no extra named {name!r} on this node"
         )
-    packages = _specs_from_stamp(stamp)
-    del packages[name]
     broken = _broken_trees(store, name)
     return await _apply_set(
         env,
         broker,
-        packages,
+        remove=frozenset({name}),
         force=force,
         owner=owner,
         principal=principal,
@@ -429,14 +457,19 @@ async def import_environment(
     if blockers:
         raise HTTPException(status_code=409, detail="; ".join(blockers))
 
-    packages = union_specs(stamp, preview, source=peer_source(url, name))
     if not preview.added:
         return _preview_out(preview, environment=_view(stamp))
 
+    source = peer_source(url, name)
     applied = await _apply_set(
         env,
         broker,
-        packages,
+        upsert={
+            row.name: ApplySpec(
+                version=row.version, dist=row.dist, source=source
+            )
+            for row in preview.added
+        },
         force=force or body.force,
         owner=owner,
         principal=principal,

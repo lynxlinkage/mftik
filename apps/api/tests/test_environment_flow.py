@@ -183,7 +183,7 @@ async def test_s1_bare_node_stdlib_tree(data_dir: Path) -> None:
     assert out.loaded is True
     dest = data_dir / "registry" / "private" / "tiny" / "strategy.py"
     assert dest.is_file()
-    info = await registry_info()
+    info = await registry_info(principal=_OWNER)
     assert info.extras == {}
     listed = await list_strategy_types(store=store)
     assert "private::Tiny" in listed.types
@@ -259,7 +259,7 @@ async def test_s2_declare_then_apply_then_add(data_dir: Path) -> None:
     applied = await _put({"numpy": ("1.0", "numpy")}, broker)
     assert applied.generation == 1
     assert broker.reload_calls == 1
-    info = await registry_info()
+    info = await registry_info(principal=_OWNER)
     assert info.extras["numpy"].version == "1.0"
 
     added = await add_strategy(
