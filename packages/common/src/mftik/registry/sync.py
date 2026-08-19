@@ -11,7 +11,13 @@ import httpx
 from mftik.registry.digest import digest_files
 from mftik.registry.errors import RegistryError
 from mftik.registry.files import normalize_files
-from mftik.registry.protocol import check_handshake
+from mftik.registry.protocol import (
+    check_handshake,
+    check_remote_extras,
+    extra_names,
+    extras_version_warnings,
+    handshake_info,
+)
 from mftik.registry.store import AddedStrategy, RegistryStore
 
 _TIMEOUT = 15.0
@@ -40,6 +46,7 @@ class DiffResult:
     reachable: bool
     error: str | None
     rows: tuple[SyncRow, ...]
+    extras_warnings: tuple[str, ...] = ()
 
 
 def _auth(token: str | None) -> dict[str, str]:
@@ -68,9 +75,14 @@ async def connect_remote(
     try:
         info = await _get_json(http, f"{base}/registry/v1/info")
         check_handshake(info)
+        check_remote_extras(
+            info, extra_names(handshake_info(data_dir=store.data_dir))
+        )
         # Remembered only once the peer has answered as a registry, so a typo
         # does not leave a broken remote behind — and only after the listing
         # below succeeds would be worse: the token is what makes it succeed.
+        # Extras names are checked first so a missing extra cannot write
+        # remotes.toml and then fail halfway through the copy.
         store.put_remote(name, base, token)
         listed = await _get_json(
             http, f"{base}/registry/v1/strategies", headers=headers
@@ -141,12 +153,21 @@ async def diff_remote(
         rows = tuple(
             _sync_row(short, pulled.get(short), items.get(short)) for short in names
         )
+        warnings: tuple[str, ...] = ()
+        try:
+            info = await _get_json(http, f"{remote.url}/registry/v1/info")
+            warnings = extras_version_warnings(
+                info, handshake_info(data_dir=store.data_dir)
+            )
+        except (RegistryError, httpx.HTTPError):
+            warnings = ()
         return DiffResult(
             name=remote.name,
             url=remote.url,
             reachable=True,
             error=None,
             rows=rows,
+            extras_warnings=warnings,
         )
     finally:
         if own:

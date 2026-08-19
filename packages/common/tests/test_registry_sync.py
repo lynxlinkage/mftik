@@ -9,7 +9,12 @@ import pytest
 from mftik.registry.digest import digest_files
 from mftik.registry.errors import RegistryError
 from mftik.registry.files import TEMPLATE_NAME
-from mftik.registry.protocol import handshake_info
+from mftik.registry.protocol import (
+    PROTOCOL,
+    PROTOCOL_MIN,
+    PROTOCOL_VERSION,
+    handshake_info,
+)
 from mftik.registry.store import RegistryStore
 from mftik.registry.sync import connect_remote, diff_remote
 
@@ -23,11 +28,16 @@ class Tiny(Strategy):
 _YML = "sts: {}\n"
 
 
-def _peer(store: RegistryStore) -> httpx.MockTransport:
+def _peer(
+    store: RegistryStore, extras: object | None = None
+) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         path = urlparse(str(request.url)).path.rstrip("/") or "/"
         if path == "/registry/v1/info":
-            return httpx.Response(200, json=handshake_info())
+            info = handshake_info(data_dir=store.data_dir)
+            if extras is not None:
+                info = {**info, "extras": extras}
+            return httpx.Response(200, json=info)
         if path == "/registry/v1/strategies":
             return httpx.Response(
                 200,
@@ -185,6 +195,92 @@ async def test_diff_unreachable_peer_keeps_the_local_copy(tmp_path) -> None:
     assert result.reachable is False
     assert result.rows[0].status == "unknown"
     assert result.rows[0].local_digest is not None
+
+
+def _info_with_extras(extras: object) -> dict:
+    return {
+        "protocol": PROTOCOL,
+        "protocol_version": PROTOCOL_VERSION,
+        "protocol_min": PROTOCOL_MIN,
+        "mftik_version": "0.1.0",
+        "extras": extras,
+        "env_generation": 0,
+    }
+
+
+def _plant_numpy(data_dir, version: str = "2.2.2") -> None:
+    from mftik.envapply import ApplySpec, apply_packages
+    from mftik.environment import NodeEnv
+
+    def plant(dest, packages):  # noqa: ANN001
+        for name in packages:
+            pkg = dest / name
+            pkg.mkdir()
+            (pkg / "__init__.py").write_text("ok\n")
+
+    apply_packages(
+        NodeEnv(data_dir),
+        {"numpy": ApplySpec(version=version, dist="numpy")},
+        installer=plant,
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_refuses_missing_extra_names(tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_info_with_extras(
+                {"numpy": {"version": "2.2.1", "dist": "numpy"}}
+            ),
+        )
+
+    local = RegistryStore(tmp_path / "local")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://peer"
+    ) as client:
+        with pytest.raises(RegistryError, match="numpy"):
+            await connect_remote(
+                local, name="peer", url="http://peer", client=client
+            )
+    assert local.list_remotes() == []
+    assert not (tmp_path / "local" / "registry" / "remotes.toml").exists()
+    assert not (tmp_path / "local" / "registry" / "pulled").exists()
+
+
+@pytest.mark.asyncio
+async def test_connect_refuses_legacy_flat_extras_the_same_way(tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_info_with_extras({"numpy": "2.2.1"}))
+
+    local = RegistryStore(tmp_path / "local")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://peer"
+    ) as client:
+        with pytest.raises(RegistryError, match="numpy"):
+            await connect_remote(
+                local, name="peer", url="http://peer", client=client
+            )
+    assert local.list_remotes() == []
+
+
+@pytest.mark.asyncio
+async def test_connect_ignores_pin_differences(tmp_path) -> None:
+    _plant_numpy(tmp_path / "local", "2.2.2")
+    peer = RegistryStore(tmp_path / "peer")
+    peer.add({"strategy.py": _TINY}, origin="public")
+    local = RegistryStore(tmp_path / "local")
+    extras = {"numpy": {"version": "2.2.1", "dist": "numpy"}}
+    async with httpx.AsyncClient(
+        transport=_peer(peer, extras=extras), base_url="http://node1"
+    ) as client:
+        result = await connect_remote(
+            local, name="node1", url="http://node1", client=client
+        )
+        diff = await diff_remote(local, name="node1", client=client)
+    assert [rec.name for rec in result.pulled] == ["tiny"]
+    assert local.list_remotes()[0].name == "node1"
+    assert any("2.2.1" in row and "2.2.2" in row for row in diff.extras_warnings)
 
 
 @pytest.mark.asyncio

@@ -57,6 +57,20 @@ def test_handshake_info_advertises_matching_extras(tmp_path, monkeypatch) -> Non
     check_handshake(info)
 
 
+def test_check_remote_extras_is_names_only() -> None:
+    from mftik.registry.protocol import check_remote_extras, extra_names
+
+    info = {
+        "protocol": PROTOCOL,
+        "extras": {"numpy": {"version": "2.2.1", "dist": "numpy"}},
+    }
+    assert extra_names(info) == frozenset({"numpy"})
+    check_remote_extras(info, frozenset({"numpy"}))
+    check_remote_extras({"extras": {"numpy": "1.0"}}, frozenset({"numpy"}))
+    with pytest.raises(RegistryError, match="numpy"):
+        check_remote_extras(info, frozenset())
+
+
 def test_wrong_protocol_name_is_refused() -> None:
     with pytest.raises(RegistryError, match="not an mftik registry"):
         check_handshake(

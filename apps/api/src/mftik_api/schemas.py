@@ -468,6 +468,7 @@ class RegistryDiffOut(RegistryRemoteOut):
     reachable: bool = True
     error: str | None = None
     strategies: list[RegistrySyncRow] = Field(default_factory=list)
+    extras_warnings: list[str] = Field(default_factory=list)
 
 
 class RegistryRemotesResponse(BaseModel):

@@ -3757,6 +3757,13 @@
             },
             "type": "array",
             "title": "Strategies"
+          },
+          "extras_warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Extras Warnings"
           }
         },
         "type": "object",

@@ -332,6 +332,7 @@ async def remote_diff(name: str, store: RegistryStoreDep) -> RegistryDiffOut:
             )
             for row in result.rows
         ],
+        extras_warnings=list(result.extras_warnings),
     )
 
 

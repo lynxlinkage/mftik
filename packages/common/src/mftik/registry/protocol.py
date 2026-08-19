@@ -63,6 +63,53 @@ def handshake_info(
     }
 
 
+def extra_names(info: object) -> frozenset[str]:
+    """Import names a handshake advertises. Keys only — value shape is ignored."""
+    if not isinstance(info, dict):
+        return frozenset()
+    extras = info.get("extras")
+    if not isinstance(extras, dict):
+        return frozenset()
+    return frozenset(str(name) for name in extras)
+
+
+def check_remote_extras(info: object, local_names: frozenset[str]) -> None:
+    """Refuse a new connect whose extras this node does not have.
+
+    Version and dist are ignored. A pin difference is a ``diff`` warning,
+    not a connect refusal — that is ENV-8's job, per tree, at deploy.
+    """
+    missing = sorted(extra_names(info) - local_names)
+    if missing:
+        raise RegistryError(
+            "remote extras not on this node: " + ", ".join(missing)
+        )
+
+
+def extra_version(item: object) -> str:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return str(item.get("version") or "")
+    return ""
+
+
+def extras_version_warnings(remote: object, local: object) -> tuple[str, ...]:
+    if not isinstance(remote, dict) or not isinstance(local, dict):
+        return ()
+    theirs = remote.get("extras") if isinstance(remote.get("extras"), dict) else {}
+    ours = local.get("extras") if isinstance(local.get("extras"), dict) else {}
+    if not isinstance(theirs, dict) or not isinstance(ours, dict):
+        return ()
+    warnings: list[str] = []
+    for name in sorted(set(theirs) & set(ours)):
+        remote_ver = extra_version(theirs[name])
+        local_ver = extra_version(ours[name])
+        if remote_ver and local_ver and remote_ver != local_ver:
+            warnings.append(f"{name}: remote {remote_ver}, local {local_ver}")
+    return tuple(warnings)
+
+
 def check_handshake(info: object) -> None:
     if not isinstance(info, dict):
         raise RegistryError("remote /registry/v1/info is not an object")
