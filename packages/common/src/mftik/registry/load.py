@@ -51,7 +51,15 @@ def load_class(
     tag = hashlib.sha256(seed.encode()).hexdigest()[:12]
     pkg = f"_mftik_reg_{source}_{name}_{tag}"
     if pkg not in sys.modules:
-        _load_tree(dest, pkg)
+        try:
+            _load_tree(dest, pkg)
+        except Exception:
+            # A tree that failed because an extra was missing must be
+            # retryable after the overlay appears. Leaving the half-imported
+            # package in ``sys.modules`` would make every later load skip
+            # ``_load_tree`` and look like the same permanent failure.
+            _drop_package(pkg)
+            raise
     return _class_from_package(pkg, type_name)
 
 
@@ -122,6 +130,12 @@ def _is_under(path: Path, dest: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _drop_package(pkg: str) -> None:
+    for key in list(sys.modules):
+        if key == pkg or key.startswith(pkg + "."):
+            sys.modules.pop(key, None)
 
 
 def _class_from_package(pkg: str, type_name: str) -> type:

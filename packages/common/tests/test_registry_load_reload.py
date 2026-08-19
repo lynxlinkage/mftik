@@ -100,3 +100,38 @@ def test_a_missing_tree_is_a_registry_error(tmp_path: Path) -> None:
     with pytest.raises(RegistryError, match="does not exist"):
         load_class(tmp_path / "gone", type_name="Tiny", source="private",
                    name="gone", digest="sha256:whatever")
+
+
+def test_a_failed_load_can_be_retried_once_the_import_appears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tree that failed for a missing extra must load after it appears.
+
+    The digest does not change — only ``sys.path`` does — so a leftover
+    half-imported package would make every later attempt skip the tree.
+    """
+    dest = tmp_path / "uses"
+    source = (
+        "from mftik.strategy import Strategy\n"
+        "import ghostpkg\n\n"
+        "class Tiny(Strategy):\n"
+        '    name = "tiny"\n'
+    )
+    dest.mkdir()
+    (dest / "strategy.py").write_text(source)
+    digest = digest_files(normalize_files({"strategy.py": source}))
+
+    with pytest.raises(ModuleNotFoundError):
+        load_class(
+            dest, type_name="Tiny", source="private", name="tiny", digest=digest
+        )
+
+    ghost = tmp_path / "ghost"
+    ghost.mkdir()
+    (ghost / "ghostpkg.py").write_text("ok = True\n")
+    monkeypatch.syspath_prepend(str(ghost))
+
+    loaded = load_class(
+        dest, type_name="Tiny", source="private", name="tiny", digest=digest
+    )
+    assert loaded.name == "tiny"

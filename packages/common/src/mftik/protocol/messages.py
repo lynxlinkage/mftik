@@ -296,11 +296,16 @@ class StsRegistryReloadResult(BaseModel):
     absent — so a caller can tell "added and loadable" from "added" by
     looking for its own key, which is the difference between a deploy that
     will work and one that will 404.
+
+    ``generation`` is the env stamp this process now believes — the copy
+    read at boot and on this reload, not a fresh open of ``applied.json``.
+    Apply compares it to the generation it just committed.
     """
 
     model_config = ConfigDict(frozen=True)
 
     loaded: list[str] = Field(default_factory=list)
+    generation: int = 0
 
 
 class StsEventLogInfoRequest(BaseModel):
