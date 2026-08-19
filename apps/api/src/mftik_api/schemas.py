@@ -64,6 +64,7 @@ class StrategyOut(BaseModel):
 
 class StrategyListResponse(BaseModel):
     strategies: list[StrategyOut] = Field(default_factory=list)
+    has_more: bool = False
 
 
 class StrategyTemplateOut(BaseModel):

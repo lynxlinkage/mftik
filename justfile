@@ -89,6 +89,10 @@ check-contracts:
 frontend-check:
     cd frontend && npm run check
 
+# Frontend UI contract. Install browsers once: cd frontend && npx playwright install chromium
+frontend-e2e:
+    cd frontend && npx playwright test
+
 # Docker compose
 up *args:
     # Build the two images explicitly first. Every Python service shares the

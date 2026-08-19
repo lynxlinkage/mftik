@@ -18,7 +18,17 @@
 		type StsSessionStatusEvent
 	} from '$lib/logging/status';
 
+	type Tab = 'live' | 'attention' | 'history';
+
+	const TAB_STATUS: Record<Tab, string> = {
+		live: 'live',
+		attention: 'failed,interrupted',
+		history: 'done,ack'
+	};
+
+	let tab = $state<Tab>('live');
 	let strategies = $state<StrategyRow[]>([]);
+	let hasMore = $state(false);
 	let yamlText = $state(defaultStrategyYml());
 	let templates = $state<StrategyTemplate[]>([]);
 	let selectedType = $state('');
@@ -28,6 +38,7 @@
 	let error = $state<string | null>(null);
 	let busy = $state(false);
 	let loading = $state(true);
+	let loadingMore = $state(false);
 
 	// The strategy.yml of a past deploy: the submitted document, or a rebuild
 	// from the stored spec for deploys made before the text was kept.
@@ -45,9 +56,32 @@
 	// cannot overwrite a newer one we already have.
 	let lastEventTs = new Map<string, number>();
 	let downloadId = $state<string | null>(null);
-	// Sessions we are already fetching a row for, so a burst of events for the
-	// same new session does not fan out into a burst of list fetches.
+
+	// One queue writes the table. refresh / loadMore / the socket all go
+	// through it so a tab switch cannot leave live rows under History, and
+	// a rebuilt session that lands after a fetch has left is not discarded.
+	let listEpoch = 0;
+	let listTail: Promise<void> = Promise.resolve();
+	let listCursor: string | null = null;
+	let pendingReload = false;
 	let pendingSessions = new Set<string>();
+
+	function statusesOf(which: Tab): Set<string> {
+		return new Set(TAB_STATUS[which].split(','));
+	}
+
+	function bumpListEpoch() {
+		listEpoch += 1;
+	}
+
+	function enqueueList(job: () => Promise<void>): Promise<void> {
+		const run = listTail.then(job, job);
+		listTail = run.then(
+			() => undefined,
+			() => undefined
+		);
+		return run;
+	}
 
 	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
 	const selected = $derived(
@@ -69,30 +103,111 @@
 		return available[0]?.type ?? '';
 	}
 
-	async function refresh() {
+	async function applyPageOne(epoch: number, withTypes: boolean) {
+		const myTab = tab;
 		loading = true;
 		error = null;
 		try {
-			const [list, t] = await Promise.all([
-				api.strategies(),
-				api.strategyTypes().catch(() => ({
-					types: [],
-					templates: [],
-					default: 'NoopStrategy'
-				}))
-			]);
+			const listP = api.strategies({ status: TAB_STATUS[myTab] });
+			const typesP = withTypes
+				? api.strategyTypes().catch(() => ({
+						types: [],
+						templates: [],
+						default: 'NoopStrategy'
+					}))
+				: null;
+			const list = await listP;
+			if (epoch !== listEpoch || tab !== myTab) return;
 			strategies = list.strategies;
-			templates = t.templates;
-			if (!templates.some((x) => x.type === selectedType)) {
-				selectedType = pickType(list.strategies, templates, t.default);
+			hasMore = list.has_more;
+			listCursor = strategies.at(-1)?.session_id ?? null;
+			if (typesP) {
+				const t = await typesP;
+				if (epoch !== listEpoch) return;
+				templates = t.templates;
+				if (!templates.some((x) => x.type === selectedType)) {
+					selectedType = pickType(list.strategies, templates, t.default);
+				}
+				// Only seed the editor while it is untouched — a refresh must not
+				// throw away a document someone is in the middle of writing.
+				if (!dirty || !yamlText.trim()) applyTemplate(selectedType);
 			}
-			// Only seed the editor while it is untouched — a refresh must not
-			// throw away a document someone is in the middle of writing.
-			if (!dirty || !yamlText.trim()) applyTemplate(selectedType);
 		} catch (e) {
+			if (epoch !== listEpoch) return;
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
-			loading = false;
+			if (epoch === listEpoch) loading = false;
+		}
+	}
+
+	async function refresh() {
+		bumpListEpoch();
+		const epoch = listEpoch;
+		return enqueueList(() => applyPageOne(epoch, true));
+	}
+
+	function setTab(next: Tab) {
+		if (next === tab) return;
+		tab = next;
+		bumpListEpoch();
+		// Drop the outgoing tab's rows before the fetch. A failed History
+		// load must not leave live rows — and their Stop buttons — under
+		// the History heading, and must not keep a live session id as the
+		// next `before`.
+		strategies = [];
+		hasMore = false;
+		listCursor = null;
+		viewing = null;
+		viewingId = null;
+		error = null;
+		loading = true;
+		const epoch = listEpoch;
+		void enqueueList(() => applyPageOne(epoch, true));
+	}
+
+	async function loadMore() {
+		if (!hasMore || !listCursor || loadingMore) return;
+		const epoch = listEpoch;
+		const myTab = tab;
+		loadingMore = true;
+		error = null;
+		return enqueueList(async () => {
+			if (epoch !== listEpoch || tab !== myTab) {
+				loadingMore = false;
+				return;
+			}
+			const cursor = listCursor;
+			if (!cursor) {
+				loadingMore = false;
+				return;
+			}
+			try {
+				const next = await api.strategies({
+					status: TAB_STATUS[myTab],
+					before: cursor
+				});
+				if (epoch !== listEpoch || tab !== myTab) return;
+				strategies = [...strategies, ...next.strategies];
+				hasMore = next.has_more;
+				listCursor = strategies.at(-1)?.session_id ?? cursor;
+			} catch (e) {
+				if (epoch !== listEpoch) return;
+				error = e instanceof Error ? e.message : String(e);
+			} finally {
+				loadingMore = false;
+			}
+		});
+	}
+
+	function dropRow(sessionId: string) {
+		const last = strategies.at(-1);
+		strategies = strategies.filter((s) => s.session_id !== sessionId);
+		// Keep the dropped tail as the Load more cursor so acking a full
+		// page does not lose the rest of the backlog.
+		listCursor = strategies.at(-1)?.session_id ?? last?.session_id ?? listCursor;
+		if (viewingId === sessionId) {
+			viewing = null;
+			viewingId = null;
 		}
 	}
 
@@ -119,6 +234,12 @@
 		error = null;
 		try {
 			const created = await api.deploySts({ type: selectedType, yaml: yamlText });
+			// The new row is live. Someone who deployed from History would
+			// otherwise refresh a tab that cannot show it.
+			tab = 'live';
+			strategies = [];
+			hasMore = false;
+			listCursor = null;
 			await refresh();
 			await goto(`/sts/${created.session_id}`);
 		} catch (e) {
@@ -176,9 +297,14 @@
 		busy = true;
 		error = null;
 		try {
-			if (s.paused) await api.resumeSts(s.session_id);
-			else await api.pauseSts(s.session_id);
-			await refresh();
+			const result = s.paused
+				? await api.resumeSts(s.session_id)
+				: await api.pauseSts(s.session_id);
+			strategies = strategies.map((row) =>
+				row.session_id === s.session_id
+					? { ...row, paused: result.paused, status: result.status }
+					: row
+			);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -191,7 +317,7 @@
 		error = null;
 		try {
 			await api.stopSts(s.session_id);
-			await refresh();
+			dropRow(s.session_id);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -204,7 +330,7 @@
 		error = null;
 		try {
 			await api.ackSts(s.session_id);
-			await refresh();
+			dropRow(s.session_id);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -215,18 +341,26 @@
 	/**
 	 * Fetch the list because `sessionId` is not in it yet.
 	 *
-	 * A deploy from another tab announces itself as live before this page
-	 * has the row. One refresh is enough: the session is persisted before
-	 * it is announced, so the row is already there.
+	 * Concurrent unknowns share one page-one fetch. An id that arrives
+	 * after that request has gone out stays in `pendingSessions` and sets
+	 * `pendingReload`, so the drain runs again — joining a fetch that
+	 * already left is how the second of two rebuilt sessions vanished.
 	 */
-	async function fetchUnknownSession(sessionId: string) {
-		if (pendingSessions.has(sessionId)) return;
-		pendingSessions.add(sessionId);
-		try {
-			await refresh();
-		} finally {
-			pendingSessions.delete(sessionId);
+	async function drainUnknownReloads() {
+		while (pendingReload) {
+			pendingReload = false;
+			bumpListEpoch();
+			const epoch = listEpoch;
+			const wanted = [...pendingSessions];
+			await applyPageOne(epoch, false);
+			for (const id of wanted) pendingSessions.delete(id);
 		}
+	}
+
+	function fetchUnknownSession(sessionId: string) {
+		pendingSessions.add(sessionId);
+		pendingReload = true;
+		return enqueueList(drainUnknownReloads);
 	}
 
 	// One shared tooltip node, positioned in viewport coordinates. It lives
@@ -273,12 +407,16 @@
 		if (previous !== undefined && ev.ts < previous) return;
 		lastEventTs.set(ev.session_id, ev.ts);
 
+		const inTab = statusesOf(tab).has(ev.status);
 		const row = strategies.find((s) => s.session_id === ev.session_id);
 		if (row === undefined) {
-			// A session this page has never seen — a deploy from another tab, or
-			// this one. The event alone cannot build a row (it carries no type,
-			// config or deploy time), so go and fetch one.
-			fetchUnknownSession(ev.session_id);
+			// History does not insert from the socket — that would invent an
+			// order the cursor does not have. Live / Attention reload page one.
+			if (inTab && tab !== 'history') fetchUnknownSession(ev.session_id);
+			return;
+		}
+		if (!inTab) {
+			dropRow(ev.session_id);
 			return;
 		}
 		strategies = strategies.map((s) =>
@@ -359,6 +497,16 @@
 	></textarea>
 </section>
 
+<div class="tabs" role="tablist">
+	<button type="button" class:active={tab === 'live'} onclick={() => setTab('live')}>Live</button>
+	<button type="button" class:active={tab === 'attention'} onclick={() => setTab('attention')}>
+		Attention
+	</button>
+	<button type="button" class:active={tab === 'history'} onclick={() => setTab('history')}>
+		History
+	</button>
+</div>
+
 <!-- The reason is detail, not headline: a row is scanned for its status, and
      256 characters of it inline would bury that. No `title` attribute — the
      tooltip replaces it, and having both would show two of them. -->
@@ -376,7 +524,21 @@
 
 <section class="panel table-wrap" onscroll={hideTip}>
 	{#if strategies.length === 0}
-		<p class="empty-state">{loading ? 'Loading…' : 'No strategies deployed yet.'}</p>
+		<!-- `hasMore` first: acking the last row of a full page empties the
+		     table without emptying the tab, and "Nothing needs attention"
+		     over a Load more button offering the other two hundred is the
+		     one thing this panel must not say. -->
+		<p class="empty-state">
+			{loading
+				? 'Loading…'
+				: hasMore
+					? 'Nothing left on this page — Load more has the rest.'
+					: tab === 'live'
+						? 'No live sessions.'
+						: tab === 'attention'
+							? 'Nothing needs attention.'
+							: 'No STS history yet.'}
+		</p>
 	{:else}
 		<table class="data">
 			<thead>
@@ -517,6 +679,13 @@
 			</tbody>
 		</table>
 	{/if}
+	{#if hasMore}
+		<div class="more">
+			<button type="button" class="secondary" onclick={loadMore} disabled={loadingMore}>
+				{loadingMore ? 'Loading…' : 'Load more'}
+			</button>
+		</div>
+	{/if}
 </section>
 
 <!-- Rendered outside the scrolling table, in viewport coordinates, so the
@@ -615,6 +784,12 @@
 
 	.table-wrap {
 		overflow-x: auto;
+	}
+
+	.more {
+		display: flex;
+		justify-content: center;
+		padding-top: 1rem;
 	}
 
 	.actions button.active {
