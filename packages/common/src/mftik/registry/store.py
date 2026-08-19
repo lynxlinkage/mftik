@@ -85,6 +85,7 @@ class RegistryStore:
         replace: bool = False,
         origin: str = PRIVATE_ORIGIN,
         applied_extras: Mapping[str, str] | None = None,
+        present_extras: Mapping[str, str] | None = None,
     ) -> AddedStrategy:
         """Validate, hash, and copy ``.py`` files and optional ``strategy.yml``.
 
@@ -93,6 +94,12 @@ class RegistryStore:
         ``applied_extras`` when the caller passes one. A remote origin
         already in ``remotes.toml`` does not — that incompatibility is a
         deploy error, not a store refusal.
+
+        ``present_extras`` is what the volume holds unapproved, passed in
+        because this store reads neither Postgres nor the overlay. It only
+        shapes the refusal: "not here" and "here but not approved" are
+        different problems with different fixes, and ``mftik push`` is where
+        a person reads the difference.
         """
         _check_origin(origin)
         inspected = inspect_files(files)
@@ -105,10 +112,11 @@ class RegistryStore:
         ):
             missing = [name for name in chosen.requires if name not in applied_extras]
             if missing:
+                from mftik.environment import describe_missing
+
                 raise RegistryError(
-                    "this node does not have "
-                    + ", ".join(missing)
-                    + " — apply them first"
+                    "this node cannot run that tree: "
+                    + describe_missing(missing, present_extras)
                 )
         digest = digest_files(normalised)
         dest = self._dest(origin, inspected.name)

@@ -20,6 +20,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from mftik.cli import check as check_cmd
 from mftik.cli import connect as connect_cmd
+from mftik.cli import env as env_cmd
 from mftik.cli import init as init_cmd
 from mftik.cli import node as node_cmd
 from mftik.cli import profiles, sessions
@@ -77,6 +78,100 @@ def _setup_check(parser: argparse.ArgumentParser) -> None:
             "in on_initialized"
         ),
     )
+    parser.add_argument(
+        "--against",
+        action="store_true",
+        help=(
+            "also ask a node whether it has the extras this tree declares; "
+            "everything else stays offline"
+        ),
+    )
+
+
+def _setup_env(parser: argparse.ArgumentParser) -> None:
+    """``env`` has its own verbs, and they are not equally safe.
+
+    ``add`` and ``rm`` reinstall the whole overlay into a new generation;
+    ``deps`` reads. One parser with flags would put the first two a typo away
+    from the third.
+
+    The handler goes on ``_env_run``, not ``_run``: argparse fills a nested
+    parser's defaults only when the attribute is absent, and the outer command
+    has already set ``_run`` by then.
+    """
+    verbs = parser.add_subparsers(dest="env_command", metavar="<verb>")
+
+    listed = verbs.add_parser("list", help="what this node has applied")
+    listed.set_defaults(_env_run=env_cmd.show)
+
+    dependencies = verbs.add_parser(
+        "deps", help="what came along that nobody approved"
+    )
+    dependencies.set_defaults(_env_run=env_cmd.deps)
+
+    added = verbs.add_parser("add", help="apply one extra")
+    added.add_argument("name", help="import name, e.g. numpy (not scikit-learn)")
+    added.add_argument(
+        "--version",
+        default=None,
+        help="omit to let the node's resolver pick; the stamp keeps what it picked",
+    )
+    added.add_argument(
+        "--dist", default=None, help="PyPI name when it differs from the import name"
+    )
+    added.add_argument(
+        "--force",
+        action="store_true",
+        help="apply even though sessions are live (they keep the old modules)",
+    )
+    added.set_defaults(_env_run=env_cmd.add)
+
+    approved = verbs.add_parser(
+        "approve", help="stamp an already-installed dependency"
+    )
+    approved.add_argument("dist", help="distribution name (see: mftik env deps)")
+    approved.add_argument(
+        "--name", default=None, help="import name, when it differs from the dist"
+    )
+    approved.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
+    approved.set_defaults(_env_run=env_cmd.approve)
+
+    removed = verbs.add_parser("rm", help="remove an extra")
+    removed.add_argument("name", help="import name as the stamp lists it")
+    removed.add_argument(
+        "--force",
+        action="store_true",
+        help="remove even though sessions are live",
+    )
+    removed.set_defaults(_env_run=env_cmd.rm)
+
+    imported = verbs.add_parser(
+        "import", help="preview a peer's extras, and install them with --confirm"
+    )
+    imported.add_argument("url", help="the peer, e.g. https://peer.example.com")
+    imported.add_argument(
+        "--token", default=None, help="registry key that peer issued you"
+    )
+    imported.add_argument(
+        "--dist",
+        action="append",
+        default=None,
+        metavar="NAME=PYPI",
+        help="correct a dist the peer did not send, e.g. sklearn=scikit-learn",
+    )
+    imported.add_argument(
+        "--confirm", action="store_true", help="install; without this it only reads"
+    )
+    imported.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
+    imported.set_defaults(_env_run=env_cmd.import_from_peer)
+
+
+def _run_env(args: argparse.Namespace) -> int:
+    run = getattr(args, "_env_run", None)
+    if run is None:
+        print("usage: mftik env {list,deps,add,approve,rm,import}")
+        return EXIT_ERROR
+    return run(args)
 
 
 def _setup_init(parser: argparse.ArgumentParser) -> None:
@@ -233,6 +328,12 @@ COMMANDS: tuple[Command, ...] = (
         help="the import gate and on_initialized, offline",
         setup=_setup_check,
         run=check_cmd.check,
+    ),
+    Command(
+        name="env",
+        help="the third-party packages this node has applied",
+        setup=_setup_env,
+        run=_run_env,
     ),
     Command(
         name="node-init",

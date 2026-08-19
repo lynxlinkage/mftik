@@ -1093,10 +1093,19 @@ will be retried as a network fault. A picker that lists
 - `mftik check`: still offline; refusals already print the gate
   sentence (including identifier / shadow). Mention `requires` in
   `docs/CLI.md` under `check`.
-- `mftik push` / `run`: print the node's missing extras (exit 1).
-- Optional `mftik check --against` (later if not in this ticket): GET
-  `/environment` and compare. Not required to close the epic
-  if push already does it.
+- `mftik push` / `run`: print the node's missing extras (exit 1), and
+  say which kind of missing — `store.add` is handed the unapproved
+  overlay so its refusal reads like connect's and deploy's rather
+  than telling someone to install what they already have.
+- `mftik env {list,deps,add,approve,rm,import}`: the Settings surface
+  from a terminal, same endpoints. Verbs, not flags on one command:
+  `add` and `rm` reinstall the overlay, `deps` reads, and one parser
+  would put the writes a typo away from the read.
+- `mftik check --against`: reads `GET /environment` and gives the
+  refusal `push` would give, before the files are sent. Everything
+  else about `check` stays offline — whether a node has numpy is the
+  one question a laptop cannot answer, and making it the default
+  would cost the command its use on a plane.
 - Settings: list the stamp (packages, generation, size) and
   add / remove, each call applying. **Not** import — that belongs to
   the connect flow that needs it.

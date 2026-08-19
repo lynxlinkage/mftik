@@ -4,6 +4,11 @@ A push copies source a node will import. A deploy then runs that class's
 ``on_initialized`` against a ``strategy.yml``. Both refusals are local facts
 about the tree and the document — reaching the node to hear them is a
 round-trip that says nothing the laptop does not already know.
+
+``--against`` is the exception, and it is opt-in for that reason. Whether a
+*node* has the extras this tree declares is not a local fact, and the answer
+changes when somebody applies one. Without the flag this command still says
+nothing about any node, which is what makes it usable on a plane.
 """
 
 from __future__ import annotations
@@ -65,6 +70,9 @@ def check(args: argparse.Namespace) -> int:
 
     print(f"ok  {inspected.name}  ({inspected.cls.type})")
     print(f"    {len(inspected.files)} file(s), {digest}")
+    requires = tuple(inspected.cls.requires)
+    if requires:
+        print(f"    requires {', '.join(requires)}")
     if spec is not None:
         print(f"    config {document} accepted by on_initialized")
     else:
@@ -73,7 +81,51 @@ def check(args: argparse.Namespace) -> int:
             "    no strategy.yml — imports and naming checked, "
             "parameters were not"
         )
+    if getattr(args, "against", None):
+        return _against_node(args, requires)
     return 0
+
+
+def _against_node(args: argparse.Namespace, requires: tuple[str, ...]) -> int:
+    """Compare this tree's ``requires`` with what a node has applied.
+
+    The gate above proves the tree declared what it imports. This proves the
+    node can supply it — the other half of the same question, and the one a
+    laptop cannot answer on its own. A refusal here is the refusal ``push``
+    would give, said before the files are sent.
+    """
+    from mftik.cli.client import connected
+
+    _, client = connected(args.profile)
+    with client:
+        env = client.get("/environment")
+    if not env.get("abi_ok", True):
+        raise CliError(
+            "that node's overlay was built for a different interpreter, so it "
+            "has no usable extras until it applies again"
+        )
+    applied = set(env.get("packages") or {})
+    missing = [name for name in requires if name not in applied]
+    if not missing:
+        print(f"    node has {len(applied)} extra(s); nothing missing")
+        return 0
+
+    present = {
+        row["dist"]: row["version"]
+        for row in env.get("installed") or []
+        if not row.get("approved")
+    }
+    lines = []
+    for name in missing:
+        version = present.get(name) or present.get(name.replace("_", "-"))
+        if version:
+            lines.append(
+                f"{name}: on that node at {version} as a dependency but not "
+                f"approved — mftik env approve {name}"
+            )
+        else:
+            lines.append(f"{name}: not on that node — mftik env add {name}")
+    raise CliError("that node cannot run this tree:\n  " + "\n  ".join(lines))
 
 
 def _from_your_code(during: str, exc: Exception, args: argparse.Namespace) -> str:

@@ -11,7 +11,7 @@ import logging
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
-from mftik.environment import NodeEnv
+from mftik.environment import NodeEnv, unapproved_present
 from mftik.protocol import (
     STS_REGISTRY_RELOAD,
     StsRegistryReloadRequest,
@@ -126,6 +126,17 @@ def _applied_extras() -> dict[str, str]:
     return {name: rec.version for name, rec in stamp.packages.items()}
 
 
+def _present_extras() -> dict[str, str]:
+    """On the volume as somebody's dependency, and not approved.
+
+    The store cannot read this — it reads neither Postgres nor the overlay —
+    so the refusal only tells ``mftik push`` the difference between "not on
+    this node" and "here at 1.26.4, approve it" if this hands it over.
+    """
+    env = NodeEnv.from_env()
+    return unapproved_present(env, env.read_stamp())
+
+
 @router.post("/add", response_model=RegistryAddOut)
 async def add_strategy(
     body: RegistryAddBody,
@@ -151,6 +162,7 @@ async def add_strategy(
             replace=body.replace,
             origin=body.origin,
             applied_extras=_applied_extras(),
+            present_extras=_present_extras(),
         )
     except RegistryConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
