@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from mftik.protocol import SymbolInfo
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class DomainStats(BaseModel):
@@ -394,11 +394,39 @@ class RegistryStrategyListResponse(BaseModel):
     strategies: list[RegistryStrategyOut] = Field(default_factory=list)
 
 
+class HandshakeExtraOut(BaseModel):
+    """One applied extra as a peer advertises it.
+
+    The key on ``extras`` is the import name. ``dist`` is the PyPI
+    distribution — ``sklearn`` is not installable. A legacy peer that
+    published a bare version string is read as ``dist`` = the key.
+    """
+
+    version: str
+    dist: str
+
+
 class RegistryInfoOut(BaseModel):
     protocol: str
     protocol_version: int
     protocol_min: int
     mftik_version: str
+    extras: dict[str, HandshakeExtraOut] = Field(default_factory=dict)
+    env_generation: int = 0
+
+    @field_validator("extras", mode="before")
+    @classmethod
+    def _coerce_legacy_extras(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return {}
+        out: dict[str, object] = {}
+        for name, item in value.items():
+            key = str(name)
+            if isinstance(item, str):
+                out[key] = {"version": item, "dist": key}
+            else:
+                out[key] = item
+        return out
 
 
 class RegistryRemoteBody(BaseModel):
@@ -457,3 +485,52 @@ class RegistryConnectOut(BaseModel):
     #: Set when STS could not be asked at all, so ``loaded`` is empty for a
     #: reason that has nothing to do with the strategies.
     load_error: str | None = None
+
+
+class EnvPackageIn(BaseModel):
+    version: str
+    dist: str | None = None
+    source: str = "manual"
+
+
+class EnvPackageOut(BaseModel):
+    version: str
+    dist: str
+    source: str
+
+
+class EnvironmentPutBody(BaseModel):
+    packages: dict[str, EnvPackageIn] = Field(default_factory=dict)
+    force: bool = False
+
+
+class EnvironmentPackageBody(BaseModel):
+    name: str
+    version: str
+    dist: str | None = None
+    source: str = "manual"
+    force: bool = False
+
+
+class BrokenTreeOut(BaseModel):
+    """A stored tree whose ``requires`` names an extra that was just removed."""
+
+    name: str
+    type: str
+    origin: str
+    requires: list[str] = Field(default_factory=list)
+
+
+class EnvironmentOut(BaseModel):
+    generation: int
+    python: list[int]
+    platform: str
+    bytes: int
+    packages: dict[str, EnvPackageOut] = Field(default_factory=dict)
+    abi_ok: bool
+    runtime_python: list[int]
+    runtime_platform: str
+    restart_required: bool = False
+    loaded: bool = True
+    load_error: str | None = None
+    broken: list[BrokenTreeOut] = Field(default_factory=list)

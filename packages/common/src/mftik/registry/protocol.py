@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import Any
 
 from mftik.registry.errors import RegistryError
 
@@ -28,12 +30,36 @@ def _installed_version() -> str:
 MFTIK_VERSION = _installed_version()
 
 
-def handshake_info(*, mftik_version: str = MFTIK_VERSION) -> dict[str, str | int]:
+def handshake_info(
+    *,
+    mftik_version: str = MFTIK_VERSION,
+    data_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Versions, plus applied extras this interpreter can actually import.
+
+    ``source`` is not published — where this node got a package is its own
+    bookkeeping. A stamp whose python/platform do not match is reported as
+    empty extras so a peer does not copy a promise this process cannot keep.
+    """
+    from mftik.environment import NodeEnv
+
+    env = NodeEnv(data_dir) if data_dir is not None else NodeEnv.from_env()
+    stamp = env.read_stamp()
+    extras: dict[str, dict[str, str]] = {}
+    generation = 0
+    if stamp.generation > 0 and stamp.matches_runtime():
+        extras = {
+            name: {"version": rec.version, "dist": rec.dist}
+            for name, rec in stamp.packages.items()
+        }
+        generation = stamp.generation
     return {
         "protocol": PROTOCOL,
         "protocol_version": PROTOCOL_VERSION,
         "protocol_min": PROTOCOL_MIN,
         "mftik_version": mftik_version,
+        "extras": extras,
+        "env_generation": generation,
     }
 
 

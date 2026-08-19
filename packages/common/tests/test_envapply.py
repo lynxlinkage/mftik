@@ -180,6 +180,34 @@ def test_stamp_versions_come_from_target_metadata(tmp_path: Path) -> None:
     assert result.stamp.packages["numpy"].version == "9.9.9"
 
 
+def test_before_commit_abort_leaves_stamp(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=_write_pkg,
+    )
+    before = env.read_stamp()
+
+    def boom() -> None:
+        raise RuntimeError("session appeared")
+
+    with pytest.raises(RuntimeError, match="session appeared"):
+        apply_packages(
+            env,
+            {
+                "numpy": ApplySpec(version="1.0", dist="numpy"),
+                "sklearn": ApplySpec(version="1.4", dist="scikit-learn"),
+            },
+            installer=_write_pkg,
+            before_commit=boom,
+        )
+    after = env.read_stamp()
+    assert after.generation == before.generation
+    assert after.packages == before.packages
+    assert not (_env_root(tmp_path) / "gen-2").exists()
+
+
 def test_uv_installer_pins_and_binary_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -10,6 +10,22 @@
 # WebSocket paths are literal.
 
 :80 {
+	# Apply is synchronous and can sit on uv for minutes. The default
+	# reverse-proxy timeout would close the socket and the client would
+	# retry a write that may still hold apply.lock.
+	@environment {
+		path /api/environment /api/environment/*
+	}
+	handle @environment {
+		uri strip_prefix /api
+		reverse_proxy api:8000 {
+			transport http {
+				read_timeout 10m
+				write_timeout 10m
+			}
+		}
+	}
+
 	handle_path /api/* {
 		reverse_proxy api:8000
 	}

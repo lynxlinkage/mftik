@@ -376,7 +376,7 @@ Split the routes:
 
 | Path | Who |
 |---|---|
-| `GET /registry/v1/info` | Public. `handshake_info()` is versions only, and a peer should fail fast on protocol mismatch before it bothers with a key. |
+| `GET /registry/v1/info` | Public. `handshake_info()` is versions plus applied extras (`name → {version, dist}`) and `env_generation`. `source` is not published. A peer should fail fast on protocol mismatch before it bothers with a key. |
 | `GET /registry/v1/strategies` | Registry key, API key, or session |
 | `GET /registry/v1/strategies/{name}` | Same — this is the source dump |
 | `/private`, `/add`, `/remotes*` | Session or API key. **403** for a registry key |

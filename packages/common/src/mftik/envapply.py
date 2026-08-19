@@ -14,6 +14,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import PathDistribution
 from pathlib import Path
+from types import TracebackType
+from typing import Self
 
 from mftik.environment import EnvStamp, NodeEnv, PackageRecord
 
@@ -62,31 +64,93 @@ class ApplyResult:
 Installer = Callable[[Path, Mapping[str, ApplySpec]], None]
 
 
+class ApplyInProgress:
+    """Hold the apply lock from install through a caller-chosen commit.
+
+    The API re-checks live sessions after the installer returns and before
+    ``current`` is retargeted. That gap is why this is not just
+    :func:`apply_packages`.
+    """
+
+    def __init__(
+        self,
+        env: NodeEnv,
+        packages: Mapping[str, ApplySpec],
+        *,
+        allow_disruptive: bool = False,
+        installer: Installer | None = None,
+    ) -> None:
+        self.env = env
+        self.packages = dict(packages)
+        self.allow_disruptive = allow_disruptive
+        self.installer = installer or run_uv_installer
+        self.changed: tuple[str, ...] = ()
+        self.dest: Path | None = None
+        self._lock_cm: object | None = None
+        self._committed = False
+
+    def __enter__(self) -> Self:
+        for spec in self.packages.values():
+            spec.requirement()
+        self.changed = disruptive_names(self.env.read_stamp(), self.packages)
+        if self.changed and not self.allow_disruptive:
+            raise EnvironmentDisruptive(self.changed)
+        lock_cm = self.env.lock()
+        lock_cm.__enter__()
+        self._lock_cm = lock_cm
+        try:
+            dest = self.env.begin()
+            self.dest = dest
+            if self.packages:
+                self.installer(dest, self.packages)
+        except Exception:
+            if self.dest is not None:
+                self.env.abort(self.dest)
+            lock_cm.__exit__(*sys.exc_info())
+            self._lock_cm = None
+            raise
+        return self
+
+    def commit(self) -> ApplyResult:
+        if self.dest is None:
+            raise RuntimeError("ApplyInProgress is not active")
+        stamp = self.env.commit(
+            self.dest, _records_from_target(self.dest, self.packages)
+        )
+        self._committed = True
+        return ApplyResult(stamp=stamp, restart_required=bool(self.changed))
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        if not self._committed and self.dest is not None:
+            self.env.abort(self.dest)
+        lock_cm = self._lock_cm
+        if lock_cm is not None:
+            lock_cm.__exit__(exc_type, exc, tb)  # type: ignore[union-attr]
+
+
 def apply_packages(
     env: NodeEnv,
     packages: Mapping[str, ApplySpec],
     *,
     allow_disruptive: bool = False,
     installer: Installer | None = None,
+    before_commit: Callable[[], None] | None = None,
 ) -> ApplyResult:
     """Replace the overlay with ``packages``. Pins are ``==``."""
-    for spec in packages.values():
-        spec.requirement()
-    current = env.read_stamp()
-    changed = _disruptive_names(current, packages)
-    if changed and not allow_disruptive:
-        raise EnvironmentDisruptive(changed)
-    install = installer or run_uv_installer
-    with env.lock():
-        dest = env.begin()
-        try:
-            if packages:
-                install(dest, packages)
-        except Exception:
-            env.abort(dest)
-            raise
-        stamp = env.commit(dest, _records_from_target(dest, packages))
-    return ApplyResult(stamp=stamp, restart_required=bool(changed))
+    with ApplyInProgress(
+        env,
+        packages,
+        allow_disruptive=allow_disruptive,
+        installer=installer,
+    ) as pending:
+        if before_commit is not None:
+            before_commit()
+        return pending.commit()
 
 
 def run_uv_installer(dest: Path, packages: Mapping[str, ApplySpec]) -> None:
@@ -126,7 +190,7 @@ def run_uv_installer(dest: Path, packages: Mapping[str, ApplySpec]) -> None:
         raise ApplyFailed(detail or f"installer exited {completed.returncode}")
 
 
-def _disruptive_names(
+def disruptive_names(
     current: EnvStamp, packages: Mapping[str, ApplySpec]
 ) -> tuple[str, ...]:
     changed: list[str] = []
