@@ -184,7 +184,7 @@ A framework gives you `on_bar` and a backtest report. A desk has to answer what 
 
 **Leases fence the dangerous verbs.** Only the process that holds the attach may place an order. Heartbeats expire; a ghost session does not keep trading.
 
-**The tape survives a restart.** Redis is long-lived. A recorder that shut down cleanly leaves a *measured* hole; a reader is told about it instead of treating two hours of intact prints as gone. Closing the remaining seconds-wide deploy gap is a handover, not an emergency — see [`docs/MdHandover.md`](docs/MdHandover.md).
+**The tape survives a restart.** Redis is long-lived. A recorder that shut down cleanly leaves a *measured* hole; a reader is told about it instead of treating two hours of intact prints as gone. Closing the remaining seconds-wide deploy gap is a handover, not an emergency.
 
 **Rebuild on boot.** `STS_REBUILD_ON_BOOT` brings interrupted sessions back after the stack returns. A strategy that leaves resting orders must know it was away (`rebuildable`); the default is off because a restored instance that treats recon as a clean account will place alongside what it left at the venue.
 
@@ -195,87 +195,6 @@ A framework gives you `on_bar` and a backtest report. A desk has to answer what 
 **A registry, not a shared disk.** Push your own trees. Publish what another node may pull. A peer connects with a **registry** key, which can only read the peer-facing routes — it cannot mint keys or deploy. Connecting compares the extras each node has applied; a missing `numpy` is a refused connect, not a surprise `ImportError` after the copy.
 
 **Audit is the proof, not the user id.** One Owner. The interesting column is whether it was the password, Discord, Google, or which API key. A CI deploy and a click in the UI must not look the same.
-
-## Control UI
-
-Same origin as the API. Pages an operator actually uses:
-
-| Page | What it is |
-|---|---|
-| Home | Live / history / failed counts per plane |
-| Board | Fills by session — how much it traded, how long it ran. No invented PnL. |
-| APIs | Venue credentials. Ed25519 vs HMAC is enforced here, not at the first order. |
-| STS | Deploy, live sessions, ack failures, YAML, logs |
-| TD / MD | Account and feed sessions, live vs history |
-| Registry | Private trees, published trees, peer remotes |
-| Sym | What the symbol plane knows |
-| Audit | Control-plane mutations and which proof made them |
-| Settings | Identities, API / registry keys, node extras |
-
-## Bundled strategies
-
-Shipped in the STS image so a fresh node can trade against paper without a push. They are also the intended reading list.
-
-| Name | Idea |
-|---|---|
-| `noop` | Lifecycle only — the smallest thing that is a session |
-| `chase` | One post-only order, reprice with the touch, optional IOC finish |
-| `oco` | Two resting prices; first complete fill cancels the other |
-| `twap` | IOC slices at the far touch on a clock |
-| `cross_arb` | Post-only on one account, IOC hedge on another, priced off the *hedge* book |
-| `macd_dollar` | MACD on dollar bars from `trade` / `aggtrade`, not time bars |
-| `tape_keeper` | Hold feeds so the tape keeps recording. Places nothing. |
-
-Your trees land beside these under a qualified type (`private::HelloStrategy`). A name that collides with a bundled strategy is refused rather than silently replacing it.
-
-## Client
-
-```
-mftik node-init ./mynode     # compose + edge + .env
-mftik connect <url>          # sign in once; stores an API key
-mftik whoami
-mftik profiles
-mftik disconnect <name>
-mftik init ./hello           # scaffold from the connected node
-mftik check ./hello          # gate + on_initialized; --against asks the node for extras
-mftik env list|add|rm|…      # third-party packages this node has applied
-mftik push ./hello           # private registry
-mftik run ./hello            # push, deploy, tail
-mftik ps
-mftik logs -f <session>
-mftik stop <session>
-```
-
-The package you install is the same library every service in this workspace already shares — `import mftik` and the `mftik` command. See [`docs/CLI.md`](docs/CLI.md) and [`packages/common/README.md`](packages/common/README.md).
-
-## Layout
-
-| Path | Role |
-|---|---|
-| `apps/api` | FastAPI gateway (auth, STS/TD/MD/registry/audit) |
-| `apps/sts` | Strategy runtime |
-| `apps/td` | Trading domain |
-| `apps/md` | Market-data domain |
-| `apps/sym` | Symbol plane |
-| `apps/paper` | Paper exchange |
-| `packages/common` | `mftik` — protocol, broker, venues, strategy SDK, CLI |
-| `packages/db` | Schema + Alembic (`mftik_db`) |
-| `contracts/` | OpenAPI, Python ↔ JS |
-| `frontend/` | SvelteKit control UI |
-| `docs/` | Design notes that the code is written against |
-| `Dockerfile` | One image; services differ by `command:` |
-
-## Docs
-
-| | |
-|---|---|
-| [`docs/CLI.md`](docs/CLI.md) | Client, profiles, env extras, why a push has to reach the process |
-| [`docs/Auth.md`](docs/Auth.md) | One Owner, many proofs; API keys vs registry keys |
-| [`docs/AuditIdentity.md`](docs/AuditIdentity.md) | Who acted, not which user id |
-| [`docs/StrategyEnvironment.md`](docs/StrategyEnvironment.md) | Node extras on the data volume |
-| [`docs/StsSessionList.md`](docs/StsSessionList.md) | Live / Attention / History |
-| [`docs/MdHandover.md`](docs/MdHandover.md) | Replacing MD without a hole in the tape |
-| [`docs/archive/README.md`](docs/archive/README.md) | Previous root README (layout + `just` recipes) |
 
 ## License
 
