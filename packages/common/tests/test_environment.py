@@ -10,6 +10,9 @@ from mftik.environment import (
     EnvStamp,
     NodeEnv,
     PackageRecord,
+    describe_missing,
+    disruptive_dists,
+    unapproved_present,
 )
 
 
@@ -221,3 +224,60 @@ def _tree_bytes(root: Path) -> int:
                 continue
             total += path.stat().st_size
     return total
+
+
+def _stamped(env: NodeEnv, dist: str, version: str, deps: dict[str, str]) -> None:
+    """Commit a generation holding ``dist`` plus dependencies nobody named."""
+    with env.lock():
+        dest = env.begin()
+        for name, ver in {dist: version, **deps}.items():
+            info = dest / f"{name}-{ver}.dist-info"
+            info.mkdir(parents=True)
+            (info / "METADATA").write_text(
+                f"Metadata-Version: 2.1\nName: {name}\nVersion: {ver}\n"
+            )
+        env.commit(dest, {dist: PackageRecord(version, dist, "manual")})
+
+
+def test_a_dependency_is_present_but_not_approved(tmp_path: Path) -> None:
+    """pandas brings numpy. numpy is importable and undeclarable.
+
+    ``requires`` is checked against the stamp, so a tree needing numpy is
+    refused while numpy sits in the very directory on ``sys.path``. The
+    Owner has to be able to see that, and at which version — approving it
+    is a no-op install only if the pin matches what is already there.
+    """
+    env = NodeEnv(tmp_path)
+    _stamped(env, "pandas", "2.0", {"numpy": "1.26.4", "pytz": "2024.1"})
+    stamp = env.read_stamp()
+    assert set(stamp.packages) == {"pandas"}
+    assert env.extras_names() == frozenset({"pandas"})
+    assert unapproved_present(env, stamp) == {"numpy": "1.26.4", "pytz": "2024.1"}
+
+
+def test_an_approved_dist_is_not_reported_as_unapproved(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    _stamped(env, "numpy", "1.26.4", {})
+    stamp = env.read_stamp()
+    assert unapproved_present(env, stamp) == {}
+
+
+def test_describe_missing_separates_absent_from_unapproved() -> None:
+    text = describe_missing(["numpy", "torch"], {"numpy": "1.26.4"})
+    assert "numpy (on this node at 1.26.4" in text
+    assert "approve" in text
+    assert "torch (not on this node)" in text
+
+
+def test_describe_missing_without_the_overlay_says_absent() -> None:
+    assert describe_missing(["numpy"]) == "numpy (not on this node)"
+
+
+def test_disruptive_dists_sees_what_the_requested_names_cannot() -> None:
+    previous = {"pandas": "2.0", "numpy": "1.0"}
+    incoming = {"pandas": "2.0", "scipy": "1.0", "numpy": "2.0"}
+    assert disruptive_dists(previous, incoming) == ("numpy",)
+    # A pure addition moves nothing already there.
+    assert disruptive_dists(previous, {**previous, "httpx": "0.27"}) == ()
+    # A drop counts: something that was importable no longer is.
+    assert disruptive_dists(previous, {"pandas": "2.0"}) == ("numpy",)

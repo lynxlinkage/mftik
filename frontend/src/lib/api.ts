@@ -127,12 +127,31 @@ export type BrokenTree = {
 	requires: string[];
 };
 
+/**
+ * One distribution actually in the live generation.
+ *
+ * A resolver installs what was asked for plus its dependencies. Those are on
+ * `sys.path` and importable, but `requires` is checked against the stamp, so a
+ * strategy may not declare them — the node refuses a tree needing numpy while
+ * numpy is in the same directory. Approving one is a no-op install at the
+ * version already here; it only adds the stamp row.
+ */
+export type EnvInstalled = {
+	dist: string;
+	version: string;
+	approved: boolean;
+	/** Import name to approve it under. `null` when the dist name is not one. */
+	suggested_name: string | null;
+};
+
 export type Environment = {
 	generation: number;
 	python: number[];
 	platform: string;
 	bytes: number;
 	packages: Record<string, EnvPackage>;
+	/** Approved rows and their dependencies alike. See `EnvInstalled`. */
+	installed: EnvInstalled[];
 	abi_ok: boolean;
 	runtime_python: number[];
 	runtime_platform: string;

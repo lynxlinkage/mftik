@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -81,16 +82,29 @@ def extra_names(info: object) -> frozenset[str]:
     return frozenset(str(name) for name in extras)
 
 
-def check_remote_extras(info: object, local_names: frozenset[str]) -> None:
+def check_remote_extras(
+    info: object,
+    local_names: frozenset[str],
+    present: Mapping[str, str] | None = None,
+) -> None:
     """Refuse a new connect whose extras this node does not have.
 
     Version and dist are ignored. A pin difference is a ``diff`` warning,
     not a connect refusal — that is ENV-8's job, per tree, at deploy.
+
+    ``present`` distinguishes an extra that is absent from one a resolver
+    already installed as somebody's dependency. Connect still refuses the
+    second — it has to agree with deploy, which reads the stamp, or this
+    node ends up holding a tree it can never run — but the Owner needs to
+    know the fix is one approval rather than an install.
     """
+    from mftik.environment import describe_missing
+
     missing = sorted(extra_names(info) - local_names)
     if missing:
         raise RegistryError(
-            "remote extras not on this node: " + ", ".join(missing)
+            "remote extras not on this node: "
+            + describe_missing(missing, present)
         )
 
 

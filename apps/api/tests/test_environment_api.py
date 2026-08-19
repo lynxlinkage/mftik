@@ -162,6 +162,29 @@ async def _put(
     )
 
 
+async def _upsert(
+    name: str,
+    version: str,
+    dist: str,
+    broker: EnvBroker,
+    *,
+    force: bool = False,
+) -> object:
+    """Call the route the way FastAPI would.
+
+    ``force`` must be passed. Called directly, the parameter default is the
+    ``Query(False)`` sentinel, which is truthy — a test that omits it is
+    silently exercising the force path and will not see a 409.
+    """
+    return await upsert_package(
+        EnvironmentPackageBody(name=name, version=version, dist=dist),
+        broker=broker,
+        force=force,
+        owner=1,
+        principal=Principal.owner(1, via="password"),
+    )
+
+
 async def test_get_on_a_fresh_node_is_empty(env_dir: Path) -> None:
     broker = EnvBroker()
     out = await get_environment(broker=broker)
@@ -435,10 +458,115 @@ async def test_a_name_the_node_provides_is_refused(
 
 async def test_upsert_of_a_provided_name_is_refused(env_dir: Path) -> None:
     await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    body = EnvironmentPackageBody(name="json", version="1.0", dist="json")
     with pytest.raises(HTTPException) as exc:
-        await upsert_package(body, EnvBroker())
+        await _upsert("json", "1.0", "json", EnvBroker())
     assert exc.value.status_code == 400
     stamp = NodeEnv(env_dir).read_stamp()
     assert stamp.generation == 1
     assert set(stamp.packages) == {"numpy"}
+
+
+def _dist_info(dest: Path, dist: str, version: str) -> None:
+    info = dest / f"{dist}-{version}.dist-info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: {dist}\nVersion: {version}\n"
+    )
+
+
+def _resolving_installer(dest: Path, packages: dict[str, ApplySpec]) -> None:
+    """A stub that behaves like a resolver: it pulls a dependency in.
+
+    ``pandas`` needs numpy, and which numpy it settles on depends on what
+    else is being installed alongside it — exactly the situation the Owner
+    never typed and cannot see.
+    """
+    _write_pkg(dest, packages)
+    for name, spec in packages.items():
+        _dist_info(dest, spec.dist, spec.version)
+    if "pandas" in packages:
+        _dist_info(dest, "numpy", "2.0" if "scipy" in packages else "1.0")
+
+
+async def test_a_new_name_that_moves_a_dependency_is_disruptive(
+    env_dir: Path,
+) -> None:
+    """Adding scipy changes no stamped name — and still swaps numpy.
+
+    Comparing the requested names says "nothing stamped is changing", so the
+    live-session gate never opens. Then the reload swings ``sys.path`` to a
+    generation with a different numpy while a session is holding the old one
+    in ``sys.modules``. The comparison has to be about what the resolver put
+    on disk.
+    """
+    environment_routes.installer_for_apply = _resolving_installer
+    await _put({"pandas": ("2.0", "pandas")}, EnvBroker())
+    assert NodeEnv(env_dir).read_stamp().generation == 1
+
+    with pytest.raises(HTTPException) as caught:
+        await _upsert("scipy", "1.0", "scipy", EnvBroker(live=["sess-1"]))
+    assert caught.value.status_code == 409
+    assert "sess-1" in str(caught.value.detail)
+
+    stamp = NodeEnv(env_dir).read_stamp()
+    assert stamp.generation == 1, "the generation was aborted, not published"
+    assert set(stamp.packages) == {"pandas"}
+
+
+async def test_the_same_add_goes_through_with_no_live_session(
+    env_dir: Path,
+) -> None:
+    environment_routes.installer_for_apply = _resolving_installer
+    await _put({"pandas": ("2.0", "pandas")}, EnvBroker())
+    out = await _upsert("scipy", "1.0", "scipy", EnvBroker())
+    assert out.generation == 2
+    assert set(out.packages) == {"pandas", "scipy"}
+    # numpy moved 1.0 → 2.0 underneath, so the process has to be restarted
+    # before anything trusts what it imported.
+    assert out.restart_required is True
+
+
+async def test_an_add_that_moves_nothing_is_not_disruptive(
+    env_dir: Path,
+) -> None:
+    environment_routes.installer_for_apply = _resolving_installer
+    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
+    out = await _upsert("httpx", "0.27", "httpx", EnvBroker(live=["sess-1"]))
+    assert out.generation == 2
+    assert out.restart_required is False
+
+
+async def test_get_lists_dependencies_the_owner_never_named(
+    env_dir: Path,
+) -> None:
+    """The stamp says pandas. The volume holds numpy too, and it matters.
+
+    Without this list the Owner sees one row, a jump in ``bytes``, and a
+    deploy refusing a tree over a package that is sitting on the very
+    ``sys.path`` the refusal came from.
+    """
+    environment_routes.installer_for_apply = _resolving_installer
+    await _put({"pandas": ("2.0", "pandas")}, EnvBroker())
+    out = await get_environment(broker=EnvBroker())
+
+    rows = {row.dist: row for row in out.installed}
+    assert set(rows) == {"pandas", "numpy"}
+    assert rows["pandas"].approved is True
+    assert rows["numpy"].approved is False
+    assert rows["numpy"].version == "1.0"
+    # The import name to approve it under, so the UI can offer one click at
+    # the version already installed rather than asking the Owner to guess.
+    assert rows["numpy"].suggested_name == "numpy"
+
+
+async def test_approving_a_dependency_makes_it_declarable(env_dir: Path) -> None:
+    environment_routes.installer_for_apply = _resolving_installer
+    await _put({"pandas": ("2.0", "pandas")}, EnvBroker())
+    assert set(NodeEnv(env_dir).read_stamp().packages) == {"pandas"}
+
+    out = await _upsert("numpy", "1.0", "numpy", EnvBroker())
+    assert set(out.packages) == {"pandas", "numpy"}
+    assert {row.dist for row in out.installed if not row.approved} == set()
+    # Nothing moved: approving at the version already on disk is a no-op
+    # install, so no live session had to be stopped for it.
+    assert out.restart_required is False

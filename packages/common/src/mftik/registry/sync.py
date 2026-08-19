@@ -100,8 +100,16 @@ async def connect_remote(
         # that later advertises more extras is ENV-8's problem, per tree, at
         # deploy — sync must still copy the heavier tree.
         if store.get_remote(name) is None:
+            # Imported here, not at module scope: ``envapply`` reaches back
+            # into ``mftik.registry`` for the provided-name list, and this
+            # module is part of that package. ``protocol`` does the same.
+            from mftik.environment import NodeEnv, unapproved_present
+
+            env = NodeEnv(store.data_dir)
             check_remote_extras(
-                info, extra_names(handshake_info(data_dir=store.data_dir))
+                info,
+                extra_names(handshake_info(data_dir=store.data_dir)),
+                unapproved_present(env, env.read_stamp()),
             )
         # Remembered only once the peer has answered as a registry, so a typo
         # does not leave a broken remote behind — and only after the listing

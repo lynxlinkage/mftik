@@ -14,9 +14,10 @@ import os
 import shutil
 import sys
 import sysconfig
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib.metadata import PathDistribution
 from pathlib import Path
 from typing import Any
 
@@ -326,3 +327,94 @@ def _dir_size(root: Path) -> int:
             except OSError:
                 continue
     return total
+
+def unapproved_present(env: NodeEnv, stamp: EnvStamp) -> dict[str, str]:
+    """Import name → version for overlay distributions no stamp row claims.
+
+    A resolver installs dependencies. They land in the same directory that
+    goes on ``sys.path``, so they are importable — but ``requires`` is
+    checked against the stamp, so declaring one is refused. Telling the Owner
+    "this node does not have numpy" when numpy is in that directory sends
+    them to install something they already have, quite possibly at a
+    different pin, which turns a no-op into a re-resolve of everything.
+
+    Best effort by construction: the key here is the distribution name, which
+    is the import name for numpy, pandas and scipy and is not for
+    scikit-learn. A name this cannot map simply does not appear, and the
+    caller says "not installed" rather than guessing.
+    """
+    approved = {normalize_dist(rec.dist) for rec in stamp.packages.values()}
+    live = resolved_dists(env.site_packages(stamp.generation))
+    return {
+        dist.replace("-", "_"): version
+        for dist, version in live.items()
+        if dist not in approved and dist.replace("-", "_").isidentifier()
+    }
+
+
+def describe_missing(
+    missing: Collection[str], present: Mapping[str, str] | None = None
+) -> str:
+    """Name each missing extra and say which kind of missing it is.
+
+    The two are not the same problem and do not have the same fix. Absent
+    means install it. Present-but-unapproved means approve it — a no-op at
+    the version already on disk, which is why the version is in the sentence.
+    """
+    present = present or {}
+    parts: list[str] = []
+    for name in sorted(missing):
+        version = present.get(name)
+        if version:
+            parts.append(
+                f"{name} (on this node at {version} as a dependency, but not "
+                f"an approved extra — approve it to declare it)"
+            )
+        else:
+            parts.append(f"{name} (not on this node)")
+    return ", ".join(parts)
+
+
+def normalize_dist(name: str) -> str:
+    """PyPI-normalised distribution name, for comparing what is on disk."""
+    return name.replace("_", "-").lower()
+
+def resolved_dists(site_packages: Path) -> dict[str, str]:
+    """Every distribution actually in a generation, normalised name → version.
+
+    The stamp records what the Owner asked for. A resolver installs that plus
+    whatever it depends on, and those are the ones nobody declared and nobody
+    can see: ``pandas`` alone brings numpy, python-dateutil, pytz and tzdata.
+    """
+    out: dict[str, str] = {}
+    for info in site_packages.glob("*.dist-info"):
+        try:
+            dist = PathDistribution(info)
+            name = dist.metadata["Name"]
+            if not name:
+                continue
+            out[normalize_dist(name)] = dist.version or ""
+        except (OSError, KeyError, ValueError):
+            continue
+    return out
+
+
+def disruptive_dists(
+    previous: Mapping[str, str], incoming: Mapping[str, str]
+) -> tuple[str, ...]:
+    """Distributions the new generation changes or drops.
+
+    Comparing the *requested* names cannot see this. Adding ``scipy`` is not
+    a change to any stamped name, but the resolver rebuilds the whole target
+    and may hand back a different numpy — and the reload that follows swings
+    ``sys.path`` to it while a live session still holds the old one in
+    ``sys.modules``. Whether an apply may disturb the interpreter is a
+    question about what lands on disk, not about what was typed.
+    """
+    changed = [
+        name
+        for name, version in previous.items()
+        if incoming.get(name) != version
+    ]
+    return tuple(sorted(changed))
+

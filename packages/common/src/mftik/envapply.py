@@ -12,12 +12,18 @@ import subprocess
 import sys
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
-from importlib.metadata import PathDistribution
 from pathlib import Path
 from types import TracebackType
 from typing import Self
 
-from mftik.environment import EnvStamp, NodeEnv, PackageRecord
+from mftik.environment import (
+    EnvStamp,
+    NodeEnv,
+    PackageRecord,
+    disruptive_dists,
+    normalize_dist,
+    resolved_dists,
+)
 from mftik.registry.gate import PROVIDED_BY_NODE
 
 APPLY_TIMEOUT_S = 600
@@ -167,11 +173,24 @@ class ApplyInProgress:
         self.dest: Path | None = None
         self._lock_cm: object | None = None
         self._committed = False
+        #: Distributions the resolver changed or dropped, including ones
+        #: nobody named. Only knowable after the installer has run.
+        self.resolved_changed: tuple[str, ...] = ()
 
     def _intent_specs(self) -> Mapping[str, ApplySpec]:
         if self._replace is not None:
             return self._replace
         return self._upsert or {}
+
+    @property
+    def disruptive(self) -> tuple[str, ...]:
+        """Everything this apply would move under a running interpreter.
+
+        Declared names the Owner is changing, plus distributions the resolver
+        changed underneath them. The caller asks live sessions about this,
+        not about ``changed`` alone.
+        """
+        return tuple(sorted(set(self.changed) | set(self.resolved_changed)))
 
     def __enter__(self) -> Self:
         for name, spec in self._intent_specs().items():
@@ -191,10 +210,18 @@ class ApplyInProgress:
             self.changed = disruptive_names(stamp, self.packages)
             if self.changed and not self.allow_disruptive:
                 raise EnvironmentDisruptive(self.changed)
+            previous = resolved_dists(self.env.site_packages(stamp.generation))
             dest = self.env.begin()
             self.dest = dest
             if self.packages:
                 self.installer(dest, self.packages)
+            # After the installer, because until it runs nothing knows what
+            # the resolver chose. Not a refusal here: the generation is not
+            # published yet, so the caller can still ask about live sessions
+            # and abort a directory that cost nothing to throw away.
+            self.resolved_changed = disruptive_dists(
+                previous, resolved_dists(dest)
+            )
         except Exception:
             if self.dest is not None:
                 self.env.abort(self.dest)
@@ -210,7 +237,9 @@ class ApplyInProgress:
             self.dest, _records_from_target(self.dest, self.packages)
         )
         self._committed = True
-        return ApplyResult(stamp=stamp, restart_required=bool(self.changed))
+        return ApplyResult(
+            stamp=stamp, restart_required=bool(self.disruptive)
+        )
 
     def __exit__(
         self,
@@ -296,24 +325,19 @@ def disruptive_names(
 def _records_from_target(
     dest: Path, requested: Mapping[str, ApplySpec]
 ) -> dict[str, PackageRecord]:
-    found: dict[str, PathDistribution] = {}
-    for info in dest.glob("*.dist-info"):
-        try:
-            dist = PathDistribution(info)
-            key = _norm_dist(dist.metadata["Name"] or info.name)
-        except (OSError, KeyError, ValueError):
-            continue
-        found[key] = dist
-    records: dict[str, PackageRecord] = {}
-    for name, spec in requested.items():
-        installed = found.get(_norm_dist(spec.dist))
-        records[name] = PackageRecord(
-            version=installed.version if installed else spec.version,
+    """What the stamp records: the requested names, at installed versions.
+
+    Only the requested ones. Whatever else the resolver dragged in is on
+    disk and importable, but it is not an approved extra — see
+    ``unapproved_present``, which is how the Owner finds out.
+    """
+    found = resolved_dists(dest)
+    return {
+        name: PackageRecord(
+            version=found.get(normalize_dist(spec.dist)) or spec.version,
             dist=spec.dist,
             source=spec.source,
         )
-    return records
+        for name, spec in requested.items()
+    }
 
-
-def _norm_dist(name: str) -> str:
-    return name.replace("_", "-").lower()

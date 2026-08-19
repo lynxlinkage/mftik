@@ -24,9 +24,15 @@ import importlib
 import logging
 import sys
 import sysconfig
+from collections.abc import Mapping
 from pathlib import Path
 
-from mftik.environment import EnvStamp, NodeEnv
+from mftik.environment import (
+    EnvStamp,
+    NodeEnv,
+    describe_missing,
+    unapproved_present,
+)
 from mftik.registry import RegistryStore
 from mftik.registry.qualify import qualify
 
@@ -58,12 +64,20 @@ def extras_names() -> frozenset[str]:
 class IncompatibleEnvironment(Exception):
     """This node does not have the extras a stored tree declared."""
 
-    def __init__(self, type_name: str, missing: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        type_name: str,
+        missing: tuple[str, ...],
+        present: Mapping[str, str] | None = None,
+    ) -> None:
         self.type_name = type_name
         self.missing = missing
-        extra = ", ".join(missing) if missing else "applied extras"
+        self.present = dict(present or {})
+        if not missing:
+            super().__init__(f"{type_name} requires applied extras")
+            return
         super().__init__(
-            f"{type_name} requires {extra} which this node does not have"
+            f"{type_name} requires {describe_missing(missing, self.present)}"
         )
 
 
@@ -86,7 +100,13 @@ def ensure_deployable(
     applied = extras_names()
     missing = tuple(name for name in rec.requires if name not in applied)
     if missing:
-        raise IncompatibleEnvironment(type_name, missing)
+        # Only on the refusal path: this globs the overlay, and the answer
+        # is a sentence, not a decision. What the deploy turns on is the
+        # in-memory stamp above.
+        env = NodeEnv.from_env()
+        raise IncompatibleEnvironment(
+            type_name, missing, unapproved_present(env, env.read_stamp())
+        )
 
 
 def _record_for(store: RegistryStore, type_name: str):

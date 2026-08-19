@@ -3102,6 +3102,41 @@
         ],
         "title": "EnvImportRowOut"
       },
+      "EnvInstalledOut": {
+        "properties": {
+          "dist": {
+            "type": "string",
+            "title": "Dist"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "approved": {
+            "type": "boolean",
+            "title": "Approved"
+          },
+          "suggested_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggested Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dist",
+          "version",
+          "approved"
+        ],
+        "title": "EnvInstalledOut",
+        "description": "One distribution actually present in the live generation.\n\nThe stamp lists what the Owner approved. A resolver installs that plus\nits dependencies, and those are invisible everywhere else: ``pandas``\nalone brings numpy, python-dateutil, pytz and tzdata. They are on\n``sys.path`` and importable, but a strategy may not declare them \u2014\n``requires`` is checked against the stamp \u2014 so the node refuses a tree\nthat needs numpy while numpy sits right there.\n\nApproving one is a no-op install at the version already on disk; it only\nadds the stamp row. Without this list nobody could know that, or which\nversion to pin it at."
+      },
       "EnvPackageIn": {
         "properties": {
           "version": {
@@ -3294,6 +3329,13 @@
             },
             "type": "object",
             "title": "Packages"
+          },
+          "installed": {
+            "items": {
+              "$ref": "#/components/schemas/EnvInstalledOut"
+            },
+            "type": "array",
+            "title": "Installed"
           },
           "abi_ok": {
             "type": "boolean",

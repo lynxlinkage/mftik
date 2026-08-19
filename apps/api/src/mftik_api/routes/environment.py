@@ -26,7 +26,13 @@ from mftik.envimport import (
     peer_source,
     preview_import,
 )
-from mftik.environment import EnvironmentLocked, EnvStamp, NodeEnv
+from mftik.environment import (
+    EnvironmentLocked,
+    EnvStamp,
+    NodeEnv,
+    normalize_dist,
+    resolved_dists,
+)
 from mftik.protocol import (
     STS_REGISTRY_GENERATION,
     STS_REGISTRY_RELOAD,
@@ -55,6 +61,7 @@ from mftik_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
 from mftik_api.schemas import (
     BrokenTreeOut,
     EnvImportRowOut,
+    EnvInstalledOut,
     EnvironmentImportBody,
     EnvironmentImportOut,
     EnvironmentOut,
@@ -91,6 +98,31 @@ def _spec(name: str, item: EnvPackageIn) -> ApplySpec:
     )
 
 
+def _installed_out(env: NodeEnv, stamp: EnvStamp) -> list[EnvInstalledOut]:
+    """What is on disk in the live generation, and what the stamp claims.
+
+    A dependency the Owner never named is importable but not declarable: the
+    deploy check reads the stamp, so a tree needing numpy is refused while
+    numpy sits in the same directory. Listing them is what makes approving
+    one possible — and approving is a no-op install at the version here, so
+    this list is also where the right pin comes from.
+    """
+    approved = {normalize_dist(rec.dist) for rec in stamp.packages.values()}
+    rows: list[EnvInstalledOut] = []
+    live = resolved_dists(env.site_packages(stamp.generation))
+    for dist, version in sorted(live.items()):
+        suggested = dist.replace("-", "_")
+        rows.append(
+            EnvInstalledOut(
+                dist=dist,
+                version=version,
+                approved=dist in approved,
+                suggested_name=suggested if suggested.isidentifier() else None,
+            )
+        )
+    return rows
+
+
 def _packages_out(stamp: EnvStamp) -> dict[str, EnvPackageOut]:
     return {
         name: EnvPackageOut(version=rec.version, dist=rec.dist, source=rec.source)
@@ -113,6 +145,7 @@ def _view(
         platform=stamp.platform,
         bytes=stamp.nbytes,
         packages=_packages_out(stamp),
+        installed=_installed_out(_env(), stamp),
         abi_ok=stamp.matches_runtime(),
         runtime_python=list(runtime.python),
         runtime_platform=runtime.platform,
@@ -262,7 +295,11 @@ async def _apply_set(
     except ApplyFailed as exc:
         raise HTTPException(status_code=502, detail=exc.message) from exc
     try:
-        if pending.changed and not force:
+        # ``pending.disruptive``, not ``changed``: the installer has run by
+        # now, so this is the first point that knows whether the resolver
+        # moved a dependency nobody named. Adding scipy is not a change to
+        # any stamped name and can still swap numpy under a live session.
+        if pending.disruptive and not force:
             await _require_no_live_sessions(broker)
         result = await run_in_threadpool(pending.commit)
     except BaseException:

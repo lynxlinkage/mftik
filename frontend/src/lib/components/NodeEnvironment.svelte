@@ -4,7 +4,8 @@
 		api,
 		type Environment,
 		type EnvironmentImport,
-		type EnvImportRow
+		type EnvImportRow,
+		type EnvInstalled
 	} from '$lib/api';
 
 	let env = $state<Environment | null>(null);
@@ -24,6 +25,9 @@
 	let distEdits = $state<Record<string, string>>({});
 
 	const names = $derived(env ? Object.keys(env.packages).sort() : []);
+	// What the resolver pulled in that nobody approved. Importable, but a
+	// strategy cannot declare it: `requires` is checked against the stamp.
+	const dependencies = $derived((env?.installed ?? []).filter((row) => !row.approved));
 	const unfixedGuessed = $derived(
 		(preview?.added ?? []).some(
 			(row) => row.guessed && (distEdits[row.name] ?? row.dist) === row.name
@@ -102,6 +106,27 @@
 			} else {
 				broken = null;
 			}
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function approve(row: EnvInstalled) {
+		if (busy || !row.suggested_name) return;
+		busy = true;
+		error = null;
+		try {
+			// The version already on disk, so the installer has nothing to do
+			// and no live session is disturbed. Typing a different one would
+			// re-resolve the whole set.
+			env = await api.upsertEnvironmentPackage({
+				name: row.suggested_name,
+				version: row.version,
+				dist: row.dist,
+				force
+			});
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -242,6 +267,50 @@
 		<input type="checkbox" bind:checked={force} disabled={busy} />
 		Force changes while sessions are live
 	</label>
+
+	{#if dependencies.length > 0}
+		<h3>Came along as dependencies</h3>
+		<p class="hint">
+			Installed because something above needs them. They are on
+			<code>sys.path</code> and importable, but a strategy cannot put one in
+			<code>requires</code> until you approve it — the deploy check reads the
+			stamp, not the directory. Approving pins it at the version already here,
+			so nothing is reinstalled and no session is disturbed.
+		</p>
+		<table>
+			<thead>
+				<tr>
+					<th>Dist</th>
+					<th>Version</th>
+					<th></th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each dependencies as row (row.dist)}
+					<tr>
+						<td><code>{row.dist}</code></td>
+						<td>{row.version}</td>
+						<td class="right">
+							{#if row.suggested_name}
+								<button
+									type="button"
+									class="secondary"
+									onclick={() => approve(row)}
+									disabled={busy}
+								>
+									Approve as <code>{row.suggested_name}</code>
+								</button>
+							{:else}
+								<span class="hint">
+									Import name differs from <code>{row.dist}</code> — add it above.
+								</span>
+							{/if}
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	{/if}
 
 	<h3>Import from a peer</h3>
 	<p class="hint">

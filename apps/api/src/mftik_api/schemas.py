@@ -396,6 +396,31 @@ class RegistryStrategyListResponse(BaseModel):
     strategies: list[RegistryStrategyOut] = Field(default_factory=list)
 
 
+class EnvInstalledOut(BaseModel):
+    """One distribution actually present in the live generation.
+
+    The stamp lists what the Owner approved. A resolver installs that plus
+    its dependencies, and those are invisible everywhere else: ``pandas``
+    alone brings numpy, python-dateutil, pytz and tzdata. They are on
+    ``sys.path`` and importable, but a strategy may not declare them —
+    ``requires`` is checked against the stamp — so the node refuses a tree
+    that needs numpy while numpy sits right there.
+
+    Approving one is a no-op install at the version already on disk; it only
+    adds the stamp row. Without this list nobody could know that, or which
+    version to pin it at.
+    """
+
+    dist: str
+    version: str
+    #: This distribution backs a stamp row.
+    approved: bool
+    #: The import name to approve it under, when the distribution name is a
+    #: usable one. ``null`` for names like ``python-dateutil`` — the import
+    #: name is ``dateutil`` and only the package itself knows that.
+    suggested_name: str | None = None
+
+
 class HandshakeExtraOut(BaseModel):
     """One applied extra as a peer advertises it.
 
@@ -533,6 +558,9 @@ class EnvironmentOut(BaseModel):
     platform: str
     bytes: int
     packages: dict[str, EnvPackageOut] = Field(default_factory=dict)
+    #: Everything the resolver actually put in the live generation, approved
+    #: rows and their dependencies alike. See :class:`EnvInstalledOut`.
+    installed: list[EnvInstalledOut] = Field(default_factory=list)
     abi_ok: bool
     runtime_python: list[int]
     runtime_platform: str

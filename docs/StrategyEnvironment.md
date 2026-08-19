@@ -217,6 +217,43 @@ a gigabyte overlay is not a free `du` on every poll. It is there so
 the Owner can see numpy/torch sitting on the same volume as the
 registry.
 
+### Dependencies the Owner never named
+
+`uv pip install --target … pandas==2.2.3` installs numpy,
+python-dateutil, pytz and tzdata as well. They land in the generation
+directory, which **is** the `sys.path` entry, so they are importable.
+The stamp does not list them: `_records_from_target` records the
+requested names only.
+
+That split is deliberate. The whitelist is what the Owner approved, not
+what a resolver reached for — pandas can change its dependencies on a
+minor release, and a strategy leaning on a transitive numpy would break
+with nothing to point at. So `requires = ("numpy",)` is refused on a
+node whose stamp lists only `pandas`, and a connect to a peer
+advertising `numpy` is refused too. Connect has to give the same answer
+as deploy, or the node ends up holding a tree it can never run.
+
+Three things follow, and none of them are optional:
+
+1. **The refusal has to say which kind of missing it is.** "This node
+   does not have numpy" is false when numpy is in that directory, and
+   it sends the Owner to install a package they already have — quite
+   possibly at a different pin, which turns a no-op into a re-resolve
+   of everything. `describe_missing` names the version and says
+   *approve*, not *install*.
+2. **The Owner has to be able to see them.** `GET /environment`
+   reports the whole live generation, each row marked `approved` or
+   not, with the version and the import name to approve it under.
+   Approving is a no-op install at that exact version.
+3. **Disruption is about what lands on disk, not what was typed.**
+   Adding `scipy` changes no stamped name, so the live-session gate
+   would never open — and the resolver can still hand back a different
+   numpy, after which the reload swings `sys.path` to it while a
+   session holds the old one in `sys.modules`. `disruptive_dists`
+   compares the resolved contents of the new generation against the
+   live one, after the installer runs and before the commit. That is
+   the same window ENV-5 already re-checks live sessions in.
+
 ### `requires` on the class
 
 A sequence of import names, not the string attribute
