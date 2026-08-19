@@ -141,11 +141,14 @@ mftik stop <session>        stop a live session
 ```
 
 `check` does not talk to a node. It runs four layers and stops at the first
-refusal: the import gate, the naming rules `add` uses, `parse_strategy_yml`
+refusal: the import gate (stdlib, the SDK, files in the tree, and names
+declared in ``requires`` — a two-pass scan so a helper can import what a
+later class listed), the naming rules `add` uses, `parse_strategy_yml`
 if a document was given or a `strategy.yml` lives in the tree (root, or a
 single copy next to a packaged class), then `load_class` and — when there
 is a document — `on_initialized`. Without a document those last two steps
-about the config are skipped, and the command says so.
+about the config are skipped, and the command says so. A declared extra
+is still only a declaration: whether this node has it is a push question.
 
 `push` is always `origin=private` and always replaces. It copies the
 `.py` tree and, when present, `strategy.yml` — that sidecar becomes the
