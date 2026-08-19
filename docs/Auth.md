@@ -376,7 +376,7 @@ Split the routes:
 
 | Path | Who |
 |---|---|
-| `GET /registry/v1/info` | Public. Protocol versions and `env_generation` always. Applied extra **names** are public (`name → {}`). Exact pins (`version`, `dist`) are only on an authenticated request (registry key, API key, or session). `source` is not published. `connect_remote` compares names, so a first connect without a key still works. A peer should fail fast on protocol mismatch before it bothers with a key. |
+| `GET /registry/v1/info` | Public. Protocol versions and `env_generation` always. Applied extra **names** are public (`name → {}`). Exact pins (`version`, `dist`) are only on an authenticated request (registry key, API key, or session). `source` is not published. `connect_remote` compares names, so a first connect without a key still works. A peer should fail fast on protocol mismatch before it bothers with a key. **Only while the gate is on**: with `MFTIK_AUTH_ENABLED=0` every request is the Owner (see above), so such a node publishes pins to anyone. |
 | `GET /registry/v1/strategies` | Registry key, API key, or session |
 | `GET /registry/v1/strategies/{name}` | Same — this is the source dump |
 | `/private`, `/add`, `/remotes*` | Session or API key. **403** for a registry key |

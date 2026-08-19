@@ -267,3 +267,37 @@ async def test_unknown_named_remote_is_404(env_dir: Path) -> None:
             principal=Principal.owner(1, via="password"),
         )
     assert caught.value.status_code == 404
+
+
+async def test_a_peer_that_withholds_pins_is_refused_with_the_real_reason(
+    env_dir: Path,
+) -> None:
+    """A peer with the auth gate on gives an anonymous caller names only.
+
+    The row is unusable, but not for the reason a guessed ``dist`` is: there
+    is no version to install and no field the Owner can fill in here that
+    supplies one. Saying "set dist" would clear the blocker and hand the
+    installer an empty pin.
+    """
+    store = RegistryStore(env_dir)
+    calls: list[str] = []
+
+    def record(dest: Path, packages: dict[str, ApplySpec]) -> None:
+        calls.append("ran")
+        _write_pkg(dest, packages)
+
+    environment_routes.installer_for_apply = record
+    extras = {"numpy": {}}
+    preview = await _call(extras, store, EnvBroker())
+    assert preview.added[0].pinned is False
+    assert preview.unpinned == ["numpy"]
+    assert preview.guessed == []
+
+    with pytest.raises(HTTPException) as caught:
+        await _call(extras, store, EnvBroker(), confirm=True)
+    assert caught.value.status_code == 409
+    detail = str(caught.value.detail)
+    assert "registry key" in detail
+    assert "dist" not in detail
+    assert calls == []
+    assert NodeEnv(env_dir).read_stamp().generation == 0

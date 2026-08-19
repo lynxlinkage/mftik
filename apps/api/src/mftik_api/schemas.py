@@ -568,6 +568,11 @@ class EnvImportRowOut(BaseModel):
     dist: str
     status: Literal["added", "kept", "conflict"]
     guessed: bool = False
+    #: The peer gave a version. False when its ``/info`` published the name
+    #: only, which is what an authenticated node withholds from an anonymous
+    #: caller — no ``dist`` the Owner types here can make such a row
+    #: installable, so the UI must not offer that as the remedy.
+    pinned: bool = True
     local_version: str | None = None
     local_dist: str | None = None
 
@@ -577,5 +582,6 @@ class EnvironmentImportOut(BaseModel):
     kept: list[EnvImportRowOut] = Field(default_factory=list)
     conflicts: list[EnvImportRowOut] = Field(default_factory=list)
     guessed: list[str] = Field(default_factory=list)
+    unpinned: list[str] = Field(default_factory=list)
     applied: bool = False
     environment: EnvironmentOut | None = None

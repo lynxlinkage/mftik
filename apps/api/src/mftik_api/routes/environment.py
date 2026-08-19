@@ -395,6 +395,7 @@ def _row_out(row: ImportRow) -> EnvImportRowOut:
         dist=row.dist,
         status=row.status,
         guessed=row.guessed,
+        pinned=row.pinned,
         local_version=row.local_version,
         local_dist=row.local_dist,
     )
@@ -408,6 +409,7 @@ def _preview_out(
         kept=[_row_out(row) for row in preview.kept],
         conflicts=[_row_out(row) for row in preview.conflicts],
         guessed=list(preview.guessed_names),
+        unpinned=list(preview.unpinned_names),
         applied=environment is not None,
         environment=environment,
     )

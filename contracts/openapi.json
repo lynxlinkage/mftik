@@ -3065,6 +3065,11 @@
             "title": "Guessed",
             "default": false
           },
+          "pinned": {
+            "type": "boolean",
+            "title": "Pinned",
+            "default": true
+          },
           "local_version": {
             "anyOf": [
               {
@@ -3235,6 +3240,13 @@
             },
             "type": "array",
             "title": "Guessed"
+          },
+          "unpinned": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unpinned"
           },
           "applied": {
             "type": "boolean",

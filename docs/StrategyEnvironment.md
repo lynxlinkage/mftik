@@ -964,7 +964,7 @@ connect — or import that applies in one shot — lets a peer
 **Solution.** Two steps, Owner in the middle:
 
 1. Fetch extras from the peer's `/info` — name → `{version, dist}`
-   (ENV-5). Compute the union with the local stamp. Return the diff:
+   with a key, name → `{}` without one (ENV-5). Compute the union with the local stamp. Return the diff:
    added names with the `version` **and the `dist` that will be
    installed**, same-name same-version (kept), same-name
    different-version (conflict). Do not lock, do not install.
@@ -975,18 +975,32 @@ connect — or import that applies in one shot — lets a peer
    union (ENV-4, installing `dist==version`, `source=peer:<url-or-name>`
    on new rows) and ENV-4a reload.
 
-The preview flags any row whose `dist` was **guessed** — a peer on
-the legacy flat shape gives a version and no dist, so the fallback
-is the import name. Right for `numpy`, wrong for `sklearn`, and
-the difference is a package name this node is about to install from
-an index. A guessed row the Owner does not correct is refused at
-confirm; the diff is the place to fix it.
+Two kinds of row cannot be installed, and they must not share a
+message:
+
+- **guessed `dist`** — a peer on the legacy flat shape gives a
+  version and no dist, so the fallback is the import name. Right
+  for `numpy`, wrong for `sklearn`, and the difference is a package
+  name this node is about to fetch from an index. The Owner
+  supplies the real one in the diff and confirms.
+- **unpinned** — the peer published `{name: {}}`. That is what an
+  authenticated `/info` gives an anonymous caller, so it is the
+  normal answer from any peer with the gate on that has not issued
+  us a key. There is no version, and no field in the diff supplies
+  one: telling the Owner to "set dist" would clear the blocker and
+  hand the installer an empty pin. The blocker says what is true —
+  ask that node for a registry key and import again with it.
+
+An unpinned name this node already has is **kept**, not a conflict.
+There is no peer version to conflict with, and refusing a confirm
+over a value the peer never published would be a refusal the Owner
+cannot act on.
 
 Prefer body `{url, token?}` so a refused connect can preview
-without writing `remotes.toml`. `/info` is public (`docs/Auth.md`),
-so the token is only for a peer that has put its whole origin
-behind a proxy — import never reads the source dump. Do not
-`put_remote` on import.
+without writing `remotes.toml`. The token is what turns names into
+pins (`docs/Auth.md`) — and, for a peer that has put its whole
+origin behind a proxy, what gets a response at all. Import never
+reads the source dump. Do not `put_remote` on import.
 
 **Verify.**
 
@@ -999,6 +1013,12 @@ behind a proxy — import never reads the source dump. Do not
 - Peer on the legacy flat shape `{sklearn: "1.6.1"}`: preview
   marks the `dist` as guessed; confirm without a correction is
   refused, not installed as `sklearn`.
+- Peer answering `{numpy: {}}` (names only, no key): row is
+  `pinned: false`, not `guessed`; the blocker names the registry
+  key and does not mention `dist`; a `dist` override does **not**
+  unblock it; installer never runs.
+- Same peer, but this node already has `numpy`: the row is kept,
+  `conflicts` is empty, confirm is not blocked.
 - Confirm with stub installer ok → stamp has numpy; connect
   succeeds.
 - Confirm, installer fails → generation `0`; connect refused.
