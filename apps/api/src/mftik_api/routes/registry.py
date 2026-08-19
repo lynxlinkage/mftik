@@ -11,6 +11,7 @@ import logging
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
+from mftik.environment import NodeEnv
 from mftik.protocol import (
     STS_REGISTRY_RELOAD,
     StsRegistryReloadRequest,
@@ -109,9 +110,18 @@ async def get_published(
     )
 
 
+def _applied_extras() -> dict[str, str]:
+    stamp = NodeEnv.from_env().read_stamp()
+    if not stamp.matches_runtime():
+        return {}
+    return {name: rec.version for name, rec in stamp.packages.items()}
+
+
 @router.post("/add", response_model=RegistryAddOut)
 async def add_strategy(
-    body: RegistryAddBody, store: RegistryStoreDep, broker: BrokerDep
+    body: RegistryAddBody,
+    store: RegistryStoreDep,
+    broker: BrokerDep,
 ) -> RegistryAddOut:
     """Copy a strategy's files into this node's public or private registry.
 
@@ -127,7 +137,12 @@ async def add_strategy(
     happened.
     """
     try:
-        added = store.add(body.files, replace=body.replace, origin=body.origin)
+        added = store.add(
+            body.files,
+            replace=body.replace,
+            origin=body.origin,
+            applied_extras=_applied_extras(),
+        )
     except RegistryConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RegistryError as exc:

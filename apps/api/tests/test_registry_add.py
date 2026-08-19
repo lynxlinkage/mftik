@@ -91,22 +91,55 @@ async def test_add_returns_the_record_and_writes_files(tmp_path: Path) -> None:
     assert written.read_text() == _TINY
 
 
-async def test_add_returns_declared_requires(tmp_path: Path) -> None:
+_NUMPY = """\
+from mftik.strategy import Strategy
+class Tiny(Strategy):
+    name = "tiny"
+    requires = ("numpy",)
+"""
+
+
+async def test_add_returns_declared_requires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(registry_routes, "_applied_extras", lambda: {"numpy": "1.0"})
     store = RegistryStore(tmp_path)
-    body = RegistryAddBody(
-        files={
-            "strategy.py": (
-                "from mftik.strategy import Strategy\n"
-                "class Tiny(Strategy):\n"
-                '    name = "tiny"\n'
-                '    requires = ("numpy",)\n'
-            )
-        }
-    )
+    body = RegistryAddBody(files={"strategy.py": _NUMPY})
 
     out = await add_strategy(body, store=store, broker=_broker(store))
 
     assert out.requires == ["numpy"]
+
+
+async def test_own_add_without_applied_extras_is_400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(registry_routes, "_applied_extras", lambda: {})
+    store = RegistryStore(tmp_path)
+    with pytest.raises(HTTPException) as caught:
+        await add_strategy(
+            RegistryAddBody(files={"strategy.py": _NUMPY}),
+            store=store,
+            broker=_broker(store),
+        )
+    assert caught.value.status_code == 400
+    assert "numpy" in str(caught.value.detail)
+    assert not (tmp_path / "registry" / "private" / "tiny").exists()
+
+
+async def test_own_add_with_applied_extras_is_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(registry_routes, "_applied_extras", lambda: {"numpy": "1.0"})
+    store = RegistryStore(tmp_path)
+    broker = _broker(store)
+    out = await add_strategy(
+        RegistryAddBody(files={"strategy.py": _NUMPY}),
+        store=store,
+        broker=broker,
+    )
+    assert out.loaded is True
+    assert broker.calls == 1
 
 
 async def test_disallowed_import_is_400(tmp_path: Path) -> None:

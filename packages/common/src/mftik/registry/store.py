@@ -84,17 +84,32 @@ class RegistryStore:
         *,
         replace: bool = False,
         origin: str = PRIVATE_ORIGIN,
+        applied_extras: Mapping[str, str] | None = None,
     ) -> AddedStrategy:
         """Validate, hash, and copy ``.py`` files and optional ``strategy.yml``.
 
         A nested ``strategy.yml`` has already been lifted to the tree root
-        by :func:`inspect_files`.
+        by :func:`inspect_files`. Own origins check ``requires`` against
+        ``applied_extras`` when the caller passes one. A remote origin
+        already in ``remotes.toml`` does not — that incompatibility is a
+        deploy error, not a store refusal.
         """
         _check_origin(origin)
         inspected = inspect_files(files)
         chosen = inspected.cls
         normalised = inspected.files
         requires = chosen.requires_mftik or _DEFAULT_REQUIRES
+        if (
+            applied_extras is not None
+            and origin in OWN_ORIGINS
+        ):
+            missing = [name for name in chosen.requires if name not in applied_extras]
+            if missing:
+                raise RegistryError(
+                    "this node does not have "
+                    + ", ".join(missing)
+                    + " — apply them first"
+                )
         digest = digest_files(normalised)
         dest = self._dest(origin, inspected.name)
         if dest.exists() and not replace:
