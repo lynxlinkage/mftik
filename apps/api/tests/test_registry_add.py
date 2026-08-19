@@ -86,8 +86,27 @@ async def test_add_returns_the_record_and_writes_files(tmp_path: Path) -> None:
     assert out.digest.startswith("sha256:")
     assert out.origin == "private"
     assert out.files == ["strategy.py"]
+    assert out.requires == []
     written = tmp_path / "registry" / "private" / "tiny" / "strategy.py"
     assert written.read_text() == _TINY
+
+
+async def test_add_returns_declared_requires(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    body = RegistryAddBody(
+        files={
+            "strategy.py": (
+                "from mftik.strategy import Strategy\n"
+                "class Tiny(Strategy):\n"
+                '    name = "tiny"\n'
+                '    requires = ("numpy",)\n'
+            )
+        }
+    )
+
+    out = await add_strategy(body, store=store, broker=_broker(store))
+
+    assert out.requires == ["numpy"]
 
 
 async def test_disallowed_import_is_400(tmp_path: Path) -> None:

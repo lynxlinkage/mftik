@@ -98,6 +98,24 @@ def test_requires_mftik_comes_from_the_class(tmp_path) -> None:
         }
     )
     assert added.requires_mftik == "0.2.0"
+    assert added.requires == ()
+
+
+def test_requires_comes_from_the_class(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    added = store.add(
+        {
+            "strategy.py": (
+                "from mftik.strategy import Strategy\n"
+                "class Tiny(Strategy):\n"
+                '    name = "tiny"\n'
+                '    requires = ("numpy",)\n'
+            )
+        }
+    )
+    assert added.requires == ("numpy",)
+    listed = store.list_private()
+    assert listed[0].requires == ("numpy",)
 
 
 def test_parent_path_is_refused(tmp_path) -> None:

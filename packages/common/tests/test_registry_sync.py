@@ -38,6 +38,7 @@ def _peer(store: RegistryStore) -> httpx.MockTransport:
                             "type": rec.type,
                             "digest": rec.digest,
                             "requires_mftik": rec.requires_mftik,
+                            "requires": list(rec.requires),
                             "origin": rec.origin,
                             "files": list(rec.files),
                         }
@@ -58,6 +59,7 @@ def _peer(store: RegistryStore) -> httpx.MockTransport:
                     "type": rec.type,
                     "digest": rec.digest,
                     "requires_mftik": rec.requires_mftik,
+                    "requires": list(rec.requires),
                     "origin": rec.origin,
                     "files": list(rec.files),
                     "contents": store.read_contents(rec),

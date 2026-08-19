@@ -348,6 +348,7 @@ class RegistryStrategyOut(BaseModel):
     type: str
     digest: str
     requires_mftik: str
+    requires: list[str] = Field(default_factory=list)
     origin: str
     files: list[str] = Field(default_factory=list)
 

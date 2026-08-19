@@ -39,6 +39,9 @@ class AddedStrategy:
     type: str
     digest: str
     requires_mftik: str
+    #: Import names the chosen class declared. Empty when it needs only
+    #: the stdlib and the SDK. Derived at scan time, like ``requires_mftik``.
+    requires: tuple[str, ...]
     files: tuple[str, ...]
     path: str
     origin: str = PRIVATE_ORIGIN
@@ -104,6 +107,7 @@ class RegistryStore:
             type=chosen.type,
             digest=digest,
             requires_mftik=requires,
+            requires=chosen.requires,
             files=tuple(sorted(normalised)),
             path=str(dest),
             origin=origin,
@@ -349,6 +353,7 @@ def _scan_tree(dest: Path, *, origin: str) -> AddedStrategy | None:
         type=chosen.type,
         digest=digest,
         requires_mftik=chosen.requires_mftik or _DEFAULT_REQUIRES,
+        requires=chosen.requires,
         files=tuple(sorted(normalised)),
         path=str(dest),
         origin=origin,

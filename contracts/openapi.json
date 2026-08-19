@@ -3206,6 +3206,13 @@
             "type": "string",
             "title": "Requires Mftik"
           },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requires"
+          },
           "origin": {
             "type": "string",
             "title": "Origin"
@@ -3492,6 +3499,13 @@
             "type": "string",
             "title": "Requires Mftik"
           },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requires"
+          },
           "origin": {
             "type": "string",
             "title": "Origin"
@@ -3548,6 +3562,13 @@
           "requires_mftik": {
             "type": "string",
             "title": "Requires Mftik"
+          },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requires"
           },
           "origin": {
             "type": "string",
@@ -3609,6 +3630,13 @@
           "requires_mftik": {
             "type": "string",
             "title": "Requires Mftik"
+          },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requires"
           },
           "origin": {
             "type": "string",
