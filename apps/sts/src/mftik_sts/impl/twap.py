@@ -277,15 +277,6 @@ class TwapStrategy(Strategy):
         )
         return True
 
-    def _rearm_timer(self) -> None:
-        """Resume mid-window: next fire is one interval from now."""
-        if self._tick_token is None or self._end_ms is None:
-            return
-        interval_ms = int(self.paras["exec_interval_s"] * 1000)
-        self._tick_token.register(
-            self.timer.now_ms() + interval_ms, interval_ms, self._on_tick
-        )
-
     # --- execution ---------------------------------------------------------
 
     async def _on_tick(self) -> None:

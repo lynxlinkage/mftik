@@ -116,11 +116,9 @@ the `paused_by_session` probe in `list_strategies` exist only to write
 GET /sts/strategies ──► list_sessions ──► sts_sessions
 ```
 
-`QuietBroker` / `DeadBroker` in
-`apps/api/tests/test_sts_strategies.py` were standing in for that
-probe. History already uses `DeadBroker` to prove STS is not touched.
-Live can use the same stand-in: a request that raises on `request` is
-still a valid Live page.
+`list_strategies` takes no broker. The probe's stand-ins
+(`QuietBroker` / `DeadBroker`) go with it. The property is
+structural: a handler that cannot talk to STS cannot wait on one.
 
 Status events lose the field for the same reason they gained it.
 `StsSessionStatus` in `packages/common/src/mftik/protocol/messages.py`
@@ -366,12 +364,11 @@ API (`apps/api/tests/test_sts_strategies.py`):
 - `test_an_attach_failure_still_appears_on_the_list` still calls the
   handler with no `status`. Both rows are present; `has_more` is
   false; nothing on the response is named `paused`.
-- `status=live` does not touch the broker. `DeadBroker` stands in
-  for an STS that is not answering, the way `status=done,ack`
-  already does. That is the Target property, and the API is the only
-  place it can be asserted.
-- `QuietBroker` can go. Nothing lists live sessions over RPC to
-  decorate this table.
+- `test_live_is_the_database_alone` lists `status=live` with no
+  broker argument. The handler takes none. That is the Target
+  property, and the API is the only place it can be asserted.
+- `QuietBroker` / `DeadBroker` are gone. Nothing lists live
+  sessions over RPC to decorate this table.
 
 CLI (`packages/common/tests/test_cli_sessions.py`,
 `packages/common/tests/test_cli_run.py`):
