@@ -99,6 +99,20 @@ class FakeStsStore:
         row.reason = None
         return row
 
+    async def bump_rebuild_count(self, session_id: str) -> int:
+        row = self.rows.get(session_id)
+        if row is None:
+            return 0
+        row.rebuild_count = int(row.rebuild_count or 0) + 1
+        return row.rebuild_count
+
+    async def reset_rebuild_count(self, session_id: str) -> SimpleNamespace | None:
+        row = self.rows.get(session_id)
+        if row is None:
+            return None
+        row.rebuild_count = 0
+        return row
+
     async def list_sessions(
         self,
         *,
@@ -162,6 +176,8 @@ def _manager(
         mark_done=store.mark_finished,
         mark_live=store.mark_live,
         list_db_sessions=store.list_sessions,
+        bump_rebuild_count=store.bump_rebuild_count,
+        reset_rebuild_count=store.reset_rebuild_count,
     )
 
 
@@ -477,6 +493,8 @@ def _manager_with_factory(
         mark_done=store.mark_finished,
         mark_live=store.mark_live,
         list_db_sessions=store.list_sessions,
+        bump_rebuild_count=store.bump_rebuild_count,
+        reset_rebuild_count=store.reset_rebuild_count,
     )
 
 
@@ -556,3 +574,94 @@ async def test_one_unresolvable_row_does_not_stop_the_scan(
     assert await manager.rebuild_interrupted() == ["r-good"]
     assert store.rows["r-gone"].status == "interrupted"
     await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_that_keeps_running_forgives_its_attempts(
+    broker: Broker,
+) -> None:
+    """The cap counts attempts, not the deploys a healthy session lives through.
+
+    Without this, a session that comes back and then trades all day still
+    carries the attempt into the next restart, and the fourth one retires it
+    for no reason anybody could see from the row.
+    """
+    store = FakeStsStore()
+    store.seed("r-settle", rebuild_count=2)
+    manager = _manager(broker, store, [])
+    manager._rebuild_settle_s = 0.05  # noqa: SLF001
+
+    assert await manager.rebuild_interrupted() == ["r-settle"]
+    # Counted on the way in — the reset is what takes it back down.
+    assert store.rows["r-settle"].rebuild_count == 3
+    await asyncio.sleep(0.15)
+
+    assert store.rows["r-settle"].rebuild_count == 0
+    await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_that_does_not_hold_keeps_its_attempts(
+    broker: Broker,
+) -> None:
+    """The loop the cap exists to break: restored, dead, restored again.
+
+    A rebuild returning successfully says nothing about whether the strategy
+    can survive being back — only running for a while does.
+    """
+    store = FakeStsStore()
+    store.seed("r-nohold", rebuild_count=2)
+    manager = _manager(broker, store, [])
+    manager._rebuild_settle_s = 0.05  # noqa: SLF001
+
+    assert await manager.rebuild_interrupted() == ["r-nohold"]
+    await manager.close(
+        "r-nohold", status="failed", reason="took the process down"
+    )
+    await asyncio.sleep(0.15)
+
+    assert store.rows["r-nohold"].rebuild_count == 3
+
+
+@pytest.mark.asyncio
+async def test_a_later_run_under_the_same_id_is_not_credited(
+    broker: Broker,
+) -> None:
+    """Identity, not id: a session that stopped and was deployed again is a
+    different run, and clearing the count on its behalf would credit it for
+    surviving something it was never part of."""
+    store = FakeStsStore()
+    store.seed("r-reused", rebuild_count=1)
+    manager = _manager(broker, store, [])
+    manager._rebuild_settle_s = 0.05  # noqa: SLF001
+
+    assert await manager.rebuild_interrupted() == ["r-reused"]
+    rebuilt = manager.get("r-reused")
+    assert rebuilt is not None
+    # Stands in for the operator stopping it and deploying it again.
+    manager._sessions["r-reused"] = SimpleNamespace()  # noqa: SLF001
+    await asyncio.sleep(0.15)
+
+    assert store.rows["r-reused"].rebuild_count == 2
+    manager._sessions["r-reused"] = rebuilt  # noqa: SLF001
+    await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_mid_settle_leaves_the_count_alone(
+    broker: Broker,
+) -> None:
+    """`close_all` is interrupting these sessions, not blessing them. A timer
+    that fired during teardown would clear the count of a session STS is in
+    the middle of taking away."""
+    store = FakeStsStore()
+    store.seed("r-shutdown", rebuild_count=2)
+    manager = _manager(broker, store, [])
+    manager._rebuild_settle_s = 0.05  # noqa: SLF001
+
+    assert await manager.rebuild_interrupted() == ["r-shutdown"]
+    await manager.close_all()
+    await asyncio.sleep(0.15)
+
+    assert store.rows["r-shutdown"].rebuild_count == 3
+    assert store.rows["r-shutdown"].status == "interrupted"
