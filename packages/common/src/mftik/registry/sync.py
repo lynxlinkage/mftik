@@ -96,9 +96,13 @@ async def connect_remote(
     try:
         info = await _get_json(http, f"{base}/registry/v1/info")
         check_handshake(info)
-        check_remote_extras(
-            info, extra_names(handshake_info(data_dir=store.data_dir))
-        )
+        # A *new* connect compares names (ENV-6). An already-connected remote
+        # that later advertises more extras is ENV-8's problem, per tree, at
+        # deploy — sync must still copy the heavier tree.
+        if store.get_remote(name) is None:
+            check_remote_extras(
+                info, extra_names(handshake_info(data_dir=store.data_dir))
+            )
         # Remembered only once the peer has answered as a registry, so a typo
         # does not leave a broken remote behind — and only after the listing
         # below succeeds would be worse: the token is what makes it succeed.

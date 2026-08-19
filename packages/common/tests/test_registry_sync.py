@@ -284,6 +284,48 @@ async def test_connect_ignores_pin_differences(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_reconnect_accepts_extras_the_first_connect_would_refuse(
+    tmp_path,
+) -> None:
+    _plant_numpy(tmp_path / "local", "1.0")
+    peer = RegistryStore(tmp_path / "peer")
+    peer.add({"strategy.py": _TINY}, origin="public")
+    local = RegistryStore(tmp_path / "local")
+    async with httpx.AsyncClient(
+        transport=_peer(peer, extras={"numpy": {"version": "1.0", "dist": "numpy"}}),
+        base_url="http://node1",
+    ) as client:
+        await connect_remote(local, name="node1", url="http://node1", client=client)
+
+    peer.add(
+        {
+            "strategy.py": (
+                "from mftik.strategy import Strategy\n\n"
+                "class UsesTorch(Strategy):\n"
+                '    name = "uses_torch"\n'
+                '    requires = ("torch",)\n'
+            )
+        },
+        origin="public",
+    )
+    heavier = {
+        "numpy": {"version": "1.0", "dist": "numpy"},
+        "torch": {"version": "2.0", "dist": "torch"},
+    }
+    async with httpx.AsyncClient(
+        transport=_peer(peer, extras=heavier), base_url="http://node1"
+    ) as client:
+        result = await connect_remote(
+            local, name="node1", url="http://node1", client=client
+        )
+    names = {rec.name for rec in result.pulled}
+    assert "tiny" in names
+    assert "uses_torch" in names
+    assert local.get_remote("node1") is not None
+
+
+@pytest.mark.asyncio
 async def test_connect_refuses_a_bad_handshake(tmp_path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
