@@ -223,7 +223,6 @@ class SessionInfo(BaseModel):
     api_id: int | None = None
     sts_session_id: str | None = None
     strategy: str | None = None
-    paused: bool | None = None
     venue: str | None = None
     #: Why a ``failed`` session ended. Null for live and natural ends.
     reason: str | None = None
@@ -238,12 +237,12 @@ class ListSessionsResult(BaseModel):
 
 
 class StsSessionControlRequest(BaseModel):
-    """API → STS: pause / resume / stop / fail a strategy session."""
+    """API → STS: stop / fail a strategy session."""
 
     model_config = ConfigDict(frozen=True)
 
     session_id: str
-    #: Why a fail is being recorded. Ignored by pause / resume / stop.
+    #: Why a fail is being recorded. Ignored by stop.
     reason: str | None = None
 
 
@@ -254,7 +253,6 @@ class StsSessionControlResult(BaseModel):
 
     session_id: str
     status: str
-    paused: bool = False
     strategy: str | None = None
     #: Set when the action left the session in ``failed``.
     reason: str | None = None
@@ -383,7 +381,7 @@ class StsEventLogChunk(BaseModel):
 class StsSessionStatus(BaseModel):
     """STS → UI: one session's control-plane state, as a full snapshot.
 
-    Deliberately not a delta (``{"event": "paused"}``): pub/sub drops messages
+    Deliberately not a delta (``{"event": "stopped"}``): pub/sub drops messages
     whenever nobody is subscribed, and a consumer that has to replay
     transitions to know where it stands ends up permanently wrong after one
     missed line. A snapshot is idempotent — apply the newest one per
@@ -398,7 +396,6 @@ class StsSessionStatus(BaseModel):
     session_id: str
     #: live | done | failed | interrupted | ack
     status: str
-    paused: bool = False
     strategy: str | None = None
     reason: str | None = None
     created_by: int | None = None
@@ -973,8 +970,6 @@ STS_HEALTH = "sts.health"
 STS_ERROR = "sts.error"
 STS_SESSION_CREATE = "sts.session.create"
 STS_SESSION_LIST = "sts.session.list"
-STS_SESSION_PAUSE = "sts.session.pause"
-STS_SESSION_RESUME = "sts.session.resume"
 STS_SESSION_STOP = "sts.session.stop"
 STS_SESSION_FAIL = "sts.session.fail"
 STS_SESSION_STATUS = "sts.session.status"

@@ -1,7 +1,7 @@
 # STS session list — tabs and a page, not a pile
 
 The STS page is the place an operator deploys a strategy and then lives with
-the runs. Pause, stop, ack, open YAML, pull logs: those actions sit on the
+the runs. Stop, ack, open YAML, pull logs: those actions sit on the
 same table that lists every session this node has ever recorded. That was
 fine while the table was short. It is not fine now: as this is written the
 production node has recorded 39 sessions and 36 of them are finished, so
@@ -22,7 +22,7 @@ StsSessionRepository.list_sessions(status=None, limit=limit)
 ```
 
 with `limit` defaulting to 100. `status=None` means every status: `live`
-(Pause / Stop), `failed` and `interrupted` (Ack), `done` and `ack` (YAML /
+(Stop), `failed` and `interrupted` (Ack), `done` and `ack` (YAML /
 Logs / Download). They share one scan.
 
 TD and MD already split Live / History. Board already filters by status
@@ -44,8 +44,8 @@ The rows that do not belong on the same screen should not be on it.
 
 `GET /sts/sessions` already takes `status`. It is the wrong endpoint for
 this table, and the reason is not the columns. It returns `SessionOut`,
-which does carry `paused`; what it lacks is `type` and the deploy document
-the YAML button reads. The disqualifying part is where its rows come from.
+which lacks `type` and the deploy document the YAML button reads. The
+disqualifying part is where its rows come from.
 That route asks the STS process over RPC, and STS answers it by reading
 this same table (`SessionManager.list_sessions` → `list_db_sessions`) — a
 database list routed through a process that can stop answering. On
@@ -62,8 +62,7 @@ The strategies list is the one that already knows how to build a row.
   because a default `LIMIT` ran out.
 - One list endpoint keeps serving this table. The page does not move to
   `GET /sts/sessions`.
-- History and Attention do not depend on the STS process. Only Live does,
-  and only for `paused`.
+- No tab depends on the STS process. The list is the database.
 - A live status event on `/ws/status/sts` must not reset a History cursor
   the operator has already walked.
 
@@ -74,20 +73,11 @@ share in `frontend/src/app.css`:
 
 | Tab | `status` query | What the row is for |
 |---|---|---|
-| Live | `live` | Pause / Resume / Stop |
+| Live | `live` | Stop |
 | Attention | `failed,interrupted` | Ack |
 | History | `done,ack` | YAML / Logs / Download |
 
-`paused` is not a status. It is a flag on a `live` row, filled from the
-STS process the way the list already does — and that fill becomes
-conditional. `list_strategies` opens with a blocking `request_domain` to
-`Topics.STS`, five seconds of default timeout in front of a query that does
-not need it. Once the table is tabbed, only a request whose status set
-includes `live` has any use for the answer. Skipping the probe otherwise is
-one condition, and it is what makes History and Attention readable while
-STS is down.
-
-The endpoint stays `GET /sts/strategies`. A new route would be a second
+No tab probes STS. The endpoint stays `GET /sts/strategies`. A new route would be a second
 list of the same rows. The change is query parameters and a `has_more`
 flag on `StrategyListResponse`.
 
@@ -167,7 +157,7 @@ Tab switch, Refresh, and a successful deploy replace page one. A deploy
 also switches to Live: the row it just created is a `live` one, and an
 operator who deployed while reading History would otherwise watch nothing
 happen. Load more appends, using the last rendered row's `session_id` as
-the cursor, and only while `has_more` is true. Pause / Stop / Ack update or
+the cursor, and only while `has_more` is true. Stop / Ack update or
 remove that one row. They do not refetch History and throw away pages the
 operator already loaded.
 
@@ -182,7 +172,7 @@ change:
 - The event's status left the current tab and the row is on screen →
   remove the row (live → done leaves Live; failed → ack leaves Attention).
 - The event belongs to the current tab and the row is on screen → patch
-  `status` / `paused` / `reason` in place.
+  `status` / `reason` in place.
 - The event belongs to Live or Attention and the row is new → reload
   page one of that tab. History does not insert from the socket. Refresh
   is enough; inserting "somewhere" would invent an order the cursor does
@@ -216,8 +206,8 @@ in a shippable state; the page keeps working until step 4 lands.
    mixin rather than widening it. Tests in
    `packages/db/tests/test_sts_session_repository.py`.
 2. **API.** `status`, `before`, bounded `limit`, and `has_more` on
-   `StrategyListResponse`; the pause-state probe only when the status set
-   includes `live`. Tests in `apps/api/tests/test_sts_strategies.py`.
+   `StrategyListResponse`. No STS probe. Tests in
+   `apps/api/tests/test_sts_strategies.py`.
    `just openapi` so `contracts/openapi.json` matches.
 3. **Client.** `api.strategies(opts)` in `frontend/src/lib/api.ts`. The
    no-argument call still means "first page of everything", which is what
@@ -280,11 +270,8 @@ API (`apps/api/tests/test_sts_strategies.py`):
 - Three rows, `limit=2`: the first page has `has_more=true`; the second
   page, using the last row's `session_id` as `before`, is the remaining id
   and `has_more=false`.
-- `status=done,ack` never touches the broker. `QuietBroker` in that file
-  stands in for an STS with nothing live; a second stand-in that raises on
-  `request` stands in for one that is not answering at all, and the call
-  still returns its rows. That is the Target property, and the API is the
-  only place it can be asserted.
+- No status set talks to STS. The handler takes no broker. That is the
+  Target property, and the API is the only place it can be asserted.
 - `status=faild` and `status= , ` are 422, not an empty page.
 
 ## Integration test (Playwright)
@@ -305,8 +292,8 @@ spec that will not be run.
 
 Cases:
 
-- The default tab is Live. Only `live` rows render. Pause and Stop are
-  on those rows; Ack is not.
+- The default tab is Live. Only `live` rows render. Stop is on those
+  rows; Pause is not; Ack is not.
 - Attention renders `failed` and `interrupted`, with Ack. History
   renders `done` and `ack`.
 - History with `has_more`: Load more sends the last row's `session_id` as

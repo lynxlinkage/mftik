@@ -366,8 +366,6 @@ async def test_list_sessions_reports_the_reason(broker: Broker) -> None:
     assert [(r.session_id, r.status, r.reason) for r in rows] == [
         ("f-2", "failed", "no tradable account attached")
     ]
-    # A closed session has no live strategy, so pause state is unknown.
-    assert rows[0].paused is None
 
 
 @pytest.mark.asyncio

@@ -155,18 +155,6 @@ class NoopStrategy(Strategy):
             await self._cancel_open(api_id)
         await self.log("NoopStrategy stopped")
 
-    async def on_pause(self) -> None:
-        await super().on_pause()
-        self._cancel_timer()
-        await self.log("NoopStrategy paused")
-
-    async def on_resume(self) -> None:
-        await super().on_resume()
-        if self._tick_token is None:
-            self._tick_token = self.timer.token()
-        self._arm_timer()
-        await self.log("NoopStrategy resumed")
-
     # --- market data -------------------------------------------------------
 
     async def on_order_book(self, book: OrderBook) -> None:

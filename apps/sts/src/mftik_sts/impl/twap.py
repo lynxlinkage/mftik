@@ -176,19 +176,6 @@ class TwapStrategy(Strategy):
             f"successes={self._successes}/{self.paras['num_round']}"
         )
 
-    async def on_pause(self) -> None:
-        await super().on_pause()
-        self._cancel_timer()
-        await self.log("TwapStrategy paused")
-
-    async def on_resume(self) -> None:
-        await super().on_resume()
-        if self._tick_token is None:
-            self._tick_token = self.timer.token()
-        if self._armed and not self._done:
-            self._rearm_timer()
-        await self.log("TwapStrategy resumed")
-
     async def on_recon_done(self, msg: ReconDone) -> None:
         if msg.api_id != self._primary_api_id():
             return
@@ -289,15 +276,6 @@ class TwapStrategy(Strategy):
             f"TwapStrategy leverage={_fmt(lev)} ticker={info.ticker}"
         )
         return True
-
-    def _rearm_timer(self) -> None:
-        """Resume mid-window: next fire is one interval from now."""
-        if self._tick_token is None or self._end_ms is None:
-            return
-        interval_ms = int(self.paras["exec_interval_s"] * 1000)
-        self._tick_token.register(
-            self.timer.now_ms() + interval_ms, interval_ms, self._on_tick
-        )
 
     # --- execution ---------------------------------------------------------
 

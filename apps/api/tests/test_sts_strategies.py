@@ -13,25 +13,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from db_harness import a_database, an_owner
 from fastapi import HTTPException
-from mftik.protocol import (
-    STS_SESSION_LIST,
-    ListSessionsResult,
-    ListSessionsResultEnvelope,
-)
 from mftik_api.routes import sts as sts_routes
 from mftik_db.models.session import SessionStatus
 from mftik_db.repositories import StsSessionRepository
-
-
-class QuietBroker:
-    """Pause-state probe: no live sessions, so the list is the database alone."""
-
-    async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
-        return ListSessionsResultEnvelope.wrap(
-            ListSessionsResult(sessions=[]),
-            type=STS_SESSION_LIST,
-            source="sts",
-        )
 
 
 @pytest.fixture
@@ -58,7 +42,7 @@ async def test_an_attach_failure_still_appears_on_the_list(db) -> None:
             "s-orphan", "attach failed — rolled back during deploy"
         )
 
-    result = await sts_routes.list_strategies(QuietBroker())
+    result = await sts_routes.list_strategies()
     by_id = {row.session_id: row for row in result.strategies}
 
     assert set(by_id) == {"s-ok", "s-orphan"}
@@ -66,13 +50,7 @@ async def test_an_attach_failure_still_appears_on_the_list(db) -> None:
     assert by_id["s-orphan"].type is None
     assert by_id["s-orphan"].status == "failed"
     assert result.has_more is False
-
-
-class DeadBroker:
-    """STS is not answering. History and Attention must still list."""
-
-    async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
-        raise AssertionError("STS must not be probed")
+    assert all("paused" not in row.model_dump() for row in result.strategies)
 
 
 async def test_attention_is_only_failed_and_interrupted(db) -> None:
@@ -88,10 +66,20 @@ async def test_attention_is_only_failed_and_interrupted(db) -> None:
         await repo.create_live(session_id="s-done", created_by=1)
         await repo.mark_done("s-done")
 
-    result = await sts_routes.list_strategies(
-        DeadBroker(), status="failed,interrupted"
-    )
+    result = await sts_routes.list_strategies(status="failed,interrupted")
     assert {row.session_id for row in result.strategies} == {"s-fail", "s-int"}
+    assert result.has_more is False
+
+
+async def test_live_is_the_database_alone(db) -> None:
+    async with db() as session:
+        repo = StsSessionRepository(session)
+        await repo.create_live(session_id="s-live", created_by=1)
+        await repo.create_live(session_id="s-done", created_by=1)
+        await repo.mark_done("s-done")
+
+    result = await sts_routes.list_strategies(status="live")
+    assert [row.session_id for row in result.strategies] == ["s-live"]
     assert result.has_more is False
 
 
@@ -108,44 +96,32 @@ async def test_the_list_pages_on_a_session_cursor(db) -> None:
             # mark_done does not touch created_at; keep the stamp we just set.
             row.created_at = origin + timedelta(minutes=offset)
 
-    first = await sts_routes.list_strategies(
-        DeadBroker(), status="done,ack", limit=2
-    )
+    first = await sts_routes.list_strategies(status="done,ack", limit=2)
     assert [row.session_id for row in first.strategies] == ["s-new", "s-mid"]
     assert first.has_more is True
 
     second = await sts_routes.list_strategies(
-        DeadBroker(), status="done,ack", before="s-mid", limit=2
+        status="done,ack", before="s-mid", limit=2
     )
     assert [row.session_id for row in second.strategies] == ["s-old"]
     assert second.has_more is False
 
 
-async def test_history_does_not_touch_the_broker(db) -> None:
-    async with db() as session:
-        repo = StsSessionRepository(session)
-        await repo.create_live(session_id="s-done", created_by=1)
-        await repo.mark_done("s-done")
-
-    result = await sts_routes.list_strategies(DeadBroker(), status="done,ack")
-    assert [row.session_id for row in result.strategies] == ["s-done"]
-
-
 async def test_an_unknown_cursor_is_a_422(db) -> None:
     with pytest.raises(HTTPException) as caught:
-        await sts_routes.list_strategies(QuietBroker(), before="nope")
+        await sts_routes.list_strategies(before="nope")
     assert caught.value.status_code == 422
     assert "nope" in str(caught.value.detail)
 
 
 async def test_an_unknown_status_is_a_422(db) -> None:
     with pytest.raises(HTTPException) as caught:
-        await sts_routes.list_strategies(QuietBroker(), status="faild")
+        await sts_routes.list_strategies(status="faild")
     assert caught.value.status_code == 422
     assert "faild" in str(caught.value.detail)
 
 
 async def test_a_status_of_only_commas_is_a_422(db) -> None:
     with pytest.raises(HTTPException) as caught:
-        await sts_routes.list_strategies(QuietBroker(), status=" , ")
+        await sts_routes.list_strategies(status=" , ")
     assert caught.value.status_code == 422

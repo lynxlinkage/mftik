@@ -272,8 +272,7 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         """Sessions whose type is ``{origin}::…`` and that are still live.
 
         ``type`` is the qualified key (``node1::Tiny``). Matching on
-        ``{origin}::`` so ``node1`` does not catch ``node10``. Paused sessions
-        stay ``live``.
+        ``{origin}::`` so ``node1`` does not catch ``node10``.
         """
         prefix = f"{origin}::"
         stmt = (

@@ -46,7 +46,7 @@ class Strategy:
     Session ↔ Strategy is 1-1. Override hooks as needed.
 
     Process control (wired):
-        on_start, on_ready, on_stop, on_pause, on_resume
+        on_start, on_ready, on_stop
         exit() — natural end → session stop → on_stop → status "done"
         fail(reason) — same teardown, but status "failed" and reason is
         persisted for the UI
@@ -147,7 +147,6 @@ class Strategy:
 
     def __init__(self) -> None:
         self.session: SessionView | None = None
-        self._paused = False
         self.paras: dict[str, Any] = {}
         self.oms = StrategyOms()
         #: On-demand market-data reads — history the feeds do not carry.
@@ -202,10 +201,6 @@ class Strategy:
     @property
     def session_id(self) -> str | None:
         return self.session.session_id if self.session is not None else None
-
-    @property
-    def paused(self) -> bool:
-        return self._paused
 
     @property
     def symbols(self):
@@ -274,14 +269,6 @@ class Strategy:
         filled, been cancelled or been rejected, and a stale copy would have
         you act on something that is no longer true.
         """
-
-    async def on_pause(self) -> None:
-        """Called when the strategy is paused."""
-        self._paused = True
-
-    async def on_resume(self) -> None:
-        """Called when the strategy resumes from pause."""
-        self._paused = False
 
     # --- TD recon ----------------------------------------------------------
 

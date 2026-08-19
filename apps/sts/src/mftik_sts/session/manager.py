@@ -184,7 +184,6 @@ class SessionManager:
         session_id: str,
         *,
         status: str,
-        paused: bool = False,
         strategy: str | None = None,
         reason: str | None = None,
         created_by: int | None = None,
@@ -203,7 +202,6 @@ class SessionManager:
         payload = StsSessionStatus(
             session_id=session_id,
             status=status,
-            paused=paused,
             strategy=strategy,
             reason=reason,
             created_by=created_by,
@@ -399,7 +397,6 @@ class SessionManager:
                             if live is not None
                             else getattr(row, "strategy", None)
                         ),
-                        paused=live.strategy.paused if live is not None else None,
                         reason=getattr(row, "reason", None),
                     )
                 )
@@ -424,48 +421,9 @@ class SessionManager:
                     status=SessionStatus.LIVE.value,
                     sts_session_id=session.session_id,
                     strategy=session.strategy_name,
-                    paused=session.strategy.paused,
                 )
             )
         return rows
-
-    async def pause(self, session_id: str) -> StsSessionControlResult:
-        session = self._sessions.get(session_id)
-        if session is None:
-            raise KeyError(f"no active sts session {session_id}")
-        await session.pause()
-        await self._publish_status(
-            session_id,
-            status=SessionStatus.LIVE.value,
-            paused=session.strategy.paused,
-            strategy=session.strategy_name,
-            created_by=session.created_by,
-        )
-        return StsSessionControlResult(
-            session_id=session_id,
-            status=SessionStatus.LIVE.value,
-            paused=session.strategy.paused,
-            strategy=session.strategy_name,
-        )
-
-    async def resume(self, session_id: str) -> StsSessionControlResult:
-        session = self._sessions.get(session_id)
-        if session is None:
-            raise KeyError(f"no active sts session {session_id}")
-        await session.resume()
-        await self._publish_status(
-            session_id,
-            status=SessionStatus.LIVE.value,
-            paused=session.strategy.paused,
-            strategy=session.strategy_name,
-            created_by=session.created_by,
-        )
-        return StsSessionControlResult(
-            session_id=session_id,
-            status=SessionStatus.LIVE.value,
-            paused=session.strategy.paused,
-            strategy=session.strategy_name,
-        )
 
     async def stop_session(self, session_id: str) -> StsSessionControlResult:
         session = self._sessions.get(session_id)
@@ -479,7 +437,6 @@ class SessionManager:
         return StsSessionControlResult(
             session_id=session_id,
             status=SessionStatus.DONE.value,
-            paused=False,
             strategy=strategy,
             reason=STS_REASON_OPERATOR_STOP,
         )
@@ -498,7 +455,6 @@ class SessionManager:
         return StsSessionControlResult(
             session_id=session_id,
             status=SessionStatus.FAILED.value,
-            paused=False,
             strategy=strategy,
             reason=reason,
         )

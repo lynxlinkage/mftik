@@ -289,22 +289,6 @@ class StsSession:
         self.event_log.record("remember", key, dir="out", value=value)
         await self._remember(self.session_id, key, value)
 
-    async def pause(self) -> None:
-        if self._destroyed or not self._started:
-            return
-        if self.strategy.paused:
-            return
-        self.event_log.record("lifecycle", "on_pause", dir="self")
-        await self.strategy.on_pause()
-
-    async def resume(self) -> None:
-        if self._destroyed or not self._started:
-            return
-        if not self.strategy.paused:
-            return
-        self.event_log.record("lifecycle", "on_resume", dir="self")
-        await self.strategy.on_resume()
-
     def request_exit(
         self, reason: str = "strategy_exit", *, failed: bool = False
     ) -> None:

@@ -14,7 +14,6 @@ type StrategyRow = {
 	created_at: number;
 	session_id: string;
 	status: string;
-	paused: boolean | null;
 	reason: string | null;
 };
 
@@ -26,7 +25,6 @@ function row(session_id: string, status: string, created_at = 1): StrategyRow {
 		created_at,
 		session_id,
 		status,
-		paused: false,
 		reason: status === 'failed' || status === 'interrupted' ? 'boom' : null
 	};
 }
@@ -38,7 +36,6 @@ function statusEvent(session_id: string, status: string, ts: number): string {
 		payload: {
 			session_id,
 			status,
-			paused: false,
 			strategy: 'NoopStrategy',
 			reason: null
 		}
@@ -190,7 +187,7 @@ test('the default tab is Live', async ({ page }) => {
 	const { urls } = await mockStsPage(page);
 
 	await expect(page.getByRole('link', { name: 's-live' })).toBeVisible();
-	await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible();
+	await expect(page.getByRole('button', { name: 'Pause' })).toHaveCount(0);
 	await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
 	await expect(page.getByRole('button', { name: 'Ack' })).toHaveCount(0);
 	expect(urls[0]?.searchParams.get('status')).toBe('live');
@@ -204,7 +201,6 @@ test('Attention and History list the rows that belong there', async ({ page }) =
 	await expect(page.getByRole('link', { name: 's-fail' })).toBeVisible();
 	await expect(page.getByRole('link', { name: 's-int' })).toBeVisible();
 	await expect(page.getByRole('button', { name: 'Ack' })).toHaveCount(2);
-	await expect(page.getByRole('button', { name: 'Pause' })).toHaveCount(0);
 
 	await page.getByRole('tablist').getByRole('button', { name: 'History' }).click();
 	await expect(page.getByRole('link', { name: 's-done-new' })).toBeVisible();

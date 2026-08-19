@@ -78,24 +78,6 @@ async def test_close_cancels_all() -> None:
 
 
 @pytest.mark.asyncio
-async def test_skips_while_paused() -> None:
-    class _Paused:
-        paused = True
-
-    timer = Timer()
-    timer.bind(_Paused())  # type: ignore[arg-type]
-    hits: list[int] = []
-    token = timer.token()
-    token.register(now_ms(), 30, lambda: hits.append(1))
-    await asyncio.sleep(0.1)
-    assert hits == []
-    timer._strategy.paused = False  # type: ignore[union-attr]
-    await asyncio.sleep(0.08)
-    assert len(hits) >= 1
-    token.cancel()
-
-
-@pytest.mark.asyncio
 async def test_a_callback_can_cancel_its_own_token_and_keep_going() -> None:
     """Self-cancel must not kill the coroutine that asked for it.
 

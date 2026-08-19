@@ -81,20 +81,13 @@ async def test_the_lifecycle_is_announced_as_snapshots(broker: Broker) -> None:
             session_id="st-1", created_by=9, strategy="idle_status"
         )
     )
-    await manager.pause("st-1")
-    await manager.resume("st-1")
     await manager.stop_session("st-1")
 
-    events = await _wait_for(broker, 4)
-    assert [e["type"] for e in events] == [STS_SESSION_STATUS] * 4
-    assert [
-        (e["payload"]["status"], e["payload"]["paused"]) for e in events
-    ] == [
-        ("live", False),
-        ("live", True),
-        ("live", False),
-        ("done", False),
-    ]
+    events = await _wait_for(broker, 2)
+    assert [e["type"] for e in events] == [STS_SESSION_STATUS] * 2
+    assert [e["payload"]["status"] for e in events] == ["live", "done"]
+    for e in events:
+        assert "paused" not in e["payload"]
     # A snapshot names its session and strategy, so a consumer never has to
     # remember what an earlier event said.
     for e in events:

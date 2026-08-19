@@ -32,7 +32,6 @@ class Node_:
                 "session_id": "sess-1",
                 "strategy": "private::Tiny",
                 "status": "live",
-                "paused": False,
             }
         ]
         self.logs: list[dict] = [
@@ -50,7 +49,6 @@ class Node_:
                 json={
                     "session_id": "sess-1",
                     "status": "done",
-                    "paused": False,
                 },
             )
         if request.url.path == "/logs/sts/sess-1":

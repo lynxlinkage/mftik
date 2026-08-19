@@ -14,7 +14,6 @@ export type StsSessionStatusEvent = {
 	session_id: string;
 	/** live | done | failed | interrupted | ack */
 	status: string;
-	paused: boolean;
 	strategy: string | null;
 	reason: string | null;
 	created_by: number | null;
@@ -83,7 +82,6 @@ export function connectStsStatus(
 			onEvent({
 				session_id: p.session_id,
 				status: p.status,
-				paused: p.paused ?? false,
 				strategy: p.strategy ?? null,
 				reason: p.reason ?? null,
 				created_by: p.created_by ?? null,

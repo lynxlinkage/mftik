@@ -754,17 +754,7 @@ async def test_a_refused_cancel_is_not_an_error() -> None:
     assert _filled_leg(strat) is not None
 
 
-# --- pause and stop --------------------------------------------------------
-
-
-async def test_a_paused_strategy_places_nothing_until_it_resumes() -> None:
-    strat = await _armed()
-    await strat.on_pause()
-    await strat.on_fetch_bestquote(_quote())
-    assert strat.oms.submitted == []
-
-    await strat.on_resume()
-    assert len(strat.oms.submitted) == 2
+# --- stop ------------------------------------------------------------------
 
 
 async def test_stopping_leaves_nothing_resting() -> None:
