@@ -166,10 +166,9 @@ async def test_s3_restart_does_not_install(
     assert installs == 1
     assert stamp.generation == 1
     assert "numpy" in extras_names()
-    current = str(NodeEnv(tmp_path).current_path)
     import sys
 
-    assert current in sys.path
+    assert str(NodeEnv(tmp_path).site_packages(1)) in sys.path
     assert any(key.endswith("UsesNumpy") for key in loaded)
     resolve(loaded[0])
 
@@ -236,8 +235,7 @@ async def test_s12_orphan_generation_is_not_on_sys_path(
     import sys
 
     attach_overlay(tmp_path)
-    current = str(env.current_path)
-    assert current in sys.path
+    assert str(env.site_packages(1)) in sys.path
     assert str(dest) not in sys.path
     assert "numpy" in extras_names()
     store = RegistryStore(tmp_path)

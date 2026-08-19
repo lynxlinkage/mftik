@@ -28,6 +28,12 @@ from mftik.registry.errors import RegistryError
 HOST_PACKAGES = frozenset({"mftik", "mftik_sts"})
 _DYNAMIC_MODULES = frozenset({"importlib", "runpy"})
 _STDLIB = frozenset(sys.stdlib_module_names) | {"__future__"}
+#: Import names the node itself answers to. A strategy may not declare one
+#: in ``requires`` and the Owner may not install an extra under one: the
+#: overlay sits ahead of both on ``sys.path``, so a distribution named
+#: ``json`` or ``mftik`` would shadow the real module for every session in
+#: the process. Both refusals read this one set.
+PROVIDED_BY_NODE = _STDLIB | HOST_PACKAGES
 #: Where ``Strategy`` may be imported from. ``mftik.strategy`` is where the
 #: class lives and what a strategy written against the installed package
 #: imports; ``mftik_sts.strategy`` is where it lived, and what every tree
@@ -127,6 +133,14 @@ def _declared_extras(
                 f"requires entry {name!r} is not a Python identifier — "
                 f"use the import name (sklearn), not the dist name "
                 f"(scikit-learn)"
+            )
+        if name in PROVIDED_BY_NODE:
+            # The overlay goes on the front of ``sys.path``, so an extra
+            # installed under a stdlib or SDK name would shadow it for the
+            # whole STS process — and the import was already allowed anyway.
+            raise RegistryError(
+                f"requires entry {name!r} is already provided by the node — "
+                f"list only third-party import names"
             )
         if name in local:
             raise RegistryError(

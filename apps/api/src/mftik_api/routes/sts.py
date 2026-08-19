@@ -121,10 +121,15 @@ def _parse_statuses(status: str | None) -> str | list[str] | None:
     return parts
 
 
-def _registry_template(rec: AddedStrategy, store: RegistryStore) -> StrategyTemplate:
+def _registry_template(
+    rec: AddedStrategy,
+    store: RegistryStore,
+    applied: frozenset[str] | None = None,
+) -> StrategyTemplate:
     key = qualify(rec.origin, rec.type)
     requires = list(rec.requires)
-    applied = NodeEnv.from_env().extras_names()
+    if applied is None:
+        applied = NodeEnv.from_env().extras_names()
     return StrategyTemplate(
         type=key,
         label=key,
@@ -141,13 +146,16 @@ def _deployable_templates(store: RegistryStore) -> list[StrategyTemplate]:
     bundled_types = {t.type for t in bundled}
     seen = set(bundled_types)
     extra: list[StrategyTemplate] = []
+    # One read of the stamp for the whole listing — every row judges its
+    # ``requires`` against the same applied set.
+    applied = NodeEnv.from_env().extras_names()
     for rec in store.list_all():
         if rec.type in bundled_types:
             continue
         key = qualify(rec.origin, rec.type)
         if key in seen:
             continue
-        extra.append(_registry_template(rec, store))
+        extra.append(_registry_template(rec, store, applied))
         seen.add(key)
     extra.sort(key=lambda t: t.type)
     return bundled + extra

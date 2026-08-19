@@ -4,10 +4,18 @@ Read at boot and on every registry reload. Deploy and ``/info`` use this
 copy, not a fresh open of ``applied.json``: one process must not answer two
 different extras questions a second apart because a PUT landed between them.
 
-``current`` is a symlink already on ``sys.path``, so a committed generation
-is physically importable the moment the API retargets it. What stays stale
-until :func:`refresh` runs is the negative import cache, ``_REGISTRY``, and
-this in-memory stamp.
+The ``sys.path`` entry is the generation the stamp names, not the ``current``
+symlink. Both would work while they agree, and they do not have to: ``commit``
+writes the stamp and retargets the symlink as two steps, so a crash between
+them would leave this process reporting one set of extras and importing
+another — and on a removal that means ``ensure_deployable`` passing a tree
+that then dies on ``ModuleNotFoundError``, which is the failure this module
+exists to replace. Deriving the path from ``generation`` moves both together.
+
+The cost is that a committed generation is not importable until
+:func:`refresh` runs. That is the same reload that clears the negative import
+cache, rebuilds ``_REGISTRY``, and adopts the new stamp, so it is one moment
+rather than three.
 """
 
 from __future__ import annotations
@@ -30,6 +38,10 @@ _ABI_MISMATCH = "env overlay ABI mismatch"
 
 _stamp = EnvStamp.empty()
 _sys_path_entry: str | None = None
+#: Whether the stamped generation is the one on ``sys.path``. False when the
+#: ABI does not match or the directory is missing, and then this process has
+#: no extras no matter what the stamp lists.
+_overlay_live = False
 RUNTIME_EMPTY = "runtime-empty"
 
 
@@ -38,7 +50,7 @@ def current_stamp() -> EnvStamp:
 
 
 def extras_names() -> frozenset[str]:
-    if not _stamp.matches_runtime():
+    if not _overlay_live or not _stamp.matches_runtime():
         return frozenset()
     return _stamp.names()
 
@@ -88,17 +100,20 @@ def _record_for(store: RegistryStore, type_name: str):
 
 
 def attach_overlay(data_dir: str | Path | None = None) -> EnvStamp:
-    """Put ``env/current`` on ``sys.path`` and adopt the stamp into memory.
+    """Put the stamped generation on ``sys.path`` and adopt the stamp.
 
-    The path string is the symlink itself, not its target, so a later
-    retarget needs no second insert. A stamp whose ``python`` / ``platform``
-    do not match this interpreter is kept in memory for ABI reporting, but
-    extras are treated as empty and ``sys.path`` points at a fresh empty
-    directory so this process cannot import the mismatched wheels.
+    A stamp whose ``python`` / ``platform`` do not match this interpreter is
+    kept in memory for ABI reporting, but extras are treated as empty and
+    ``sys.path`` points at a fresh empty directory so this process cannot
+    import the mismatched wheels. A stamp naming a generation that is not on
+    disk is treated the same way — reporting extras this process cannot
+    import is the one answer that helps nobody.
     """
-    global _stamp
+    global _stamp, _overlay_live
     env = NodeEnv(data_dir) if data_dir is not None else NodeEnv.from_env()
-    current = env.ensure_current()
+    # Still maintained: ``current`` is how a person reading the volume finds
+    # the live generation, and on a bare node this is what creates gen-0.
+    env.ensure_current()
     stamp = env.read_stamp()
     if stamp.generation > 0 and not stamp.matches_runtime():
         logger.warning(
@@ -109,14 +124,31 @@ def attach_overlay(data_dir: str | Path | None = None) -> EnvStamp:
             stamp.platform,
             sysconfig.get_platform(),
         )
-        safe = env.root / RUNTIME_EMPTY / "site-packages"
-        safe.mkdir(parents=True, exist_ok=True)
-        _set_sys_path(safe)
+        _set_sys_path(_empty_overlay(env))
+        _overlay_live = False
     else:
-        _set_sys_path(current)
+        overlay = env.overlay_for(stamp)
+        if overlay is None:
+            logger.warning(
+                "stamp names gen-%d but that overlay is not on disk — "
+                "extras treated as empty",
+                stamp.generation,
+            )
+            overlay = _empty_overlay(env)
+            _overlay_live = False
+        else:
+            _overlay_live = True
+        _set_sys_path(overlay)
     importlib.invalidate_caches()
     _stamp = stamp
     return _stamp
+
+
+def _empty_overlay(env: NodeEnv) -> Path:
+    """A directory with nothing in it, for a stamp this process cannot use."""
+    safe = env.root / RUNTIME_EMPTY / "site-packages"
+    safe.mkdir(parents=True, exist_ok=True)
+    return safe
 
 
 def refresh(
@@ -133,10 +165,11 @@ def refresh(
 
 def reset_for_tests() -> None:
     """Drop process state so overlay tests do not leak onto ``sys.path``."""
-    global _stamp, _sys_path_entry
+    global _stamp, _sys_path_entry, _overlay_live
     if _sys_path_entry is not None:
         _remove_entry(_sys_path_entry)
     _sys_path_entry = None
+    _overlay_live = False
     _stamp = EnvStamp.empty()
     for key in list(sys.modules):
         if key == "numpy" or key.startswith("numpy."):

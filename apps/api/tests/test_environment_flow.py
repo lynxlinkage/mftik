@@ -43,7 +43,7 @@ from mftik_api.schemas import (
     RegistryAddBody,
     StrategyDeployBody,
 )
-from test_environment import EnvBroker, _write_pkg
+from test_environment_api import EnvBroker, _write_pkg
 from test_registry_add import ReloadingBroker
 
 _TINY = """\

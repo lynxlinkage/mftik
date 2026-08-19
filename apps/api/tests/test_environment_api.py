@@ -345,3 +345,40 @@ def test_info_accepts_legacy_flat_extras() -> None:
     assert info.extras["numpy"].version == "2.2.1"
     assert info.extras["numpy"].dist == "numpy"
     assert info.env_generation == 0
+
+
+@pytest.mark.parametrize("name", ["json", "logging", "mftik", "mftik_sts"])
+async def test_a_name_the_node_provides_is_refused(
+    env_dir: Path, name: str
+) -> None:
+    """The overlay is ahead of the stdlib and the SDK on ``sys.path``.
+
+    ``gate.py`` already refuses a strategy that declares ``requires =
+    ("json",)``. This is the layer that matters more: here the Owner types
+    the name, and an extra installed under it would shadow the real module
+    for every session in the STS process, including the running ones.
+    """
+    calls: list[str] = []
+
+    def record(dest: Path, packages: dict[str, ApplySpec]) -> None:
+        calls.append("ran")
+        _write_pkg(dest, packages)
+
+    environment_routes.installer_for_apply = record
+    with pytest.raises(HTTPException) as exc:
+        await _put({name: ("1.0", name)}, EnvBroker())
+    assert exc.value.status_code == 400
+    assert name in str(exc.value.detail)
+    assert calls == [], "refused before the installer, not after"
+    assert NodeEnv(env_dir).read_stamp().generation == 0
+
+
+async def test_upsert_of_a_provided_name_is_refused(env_dir: Path) -> None:
+    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
+    body = EnvironmentPackageBody(name="json", version="1.0", dist="json")
+    with pytest.raises(HTTPException) as exc:
+        await upsert_package(body, EnvBroker())
+    assert exc.value.status_code == 400
+    stamp = NodeEnv(env_dir).read_stamp()
+    assert stamp.generation == 1
+    assert set(stamp.packages) == {"numpy"}

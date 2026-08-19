@@ -71,10 +71,13 @@ logs "no strategy named X in this build". Putting extras in
    stamp, the previous directory, and the previous `current` symlink.
    `applied.json` is written with `tmp` + `os.replace`.
 2. **Restart does not install.** `$MFTIK_DATA/env/` outlives the container.
-   STS puts `env/current` on `sys.path` — the symlink to the live
-   generation's `site-packages`, created empty on first boot — and
-   loads. Missing or ABI-mismatched overlay = stdlib + SDK, same as
-   today — deploy then uses `incompatible_environment`,
+   STS puts the generation **the stamp names** on `sys.path` —
+   `gen-{generation}/site-packages`, created empty on first boot — and
+   loads. Not the `current` symlink: commit writes the stamp and
+   retargets the symlink as two steps, and a process that read the
+   symlink could report one set of extras while importing another.
+   Missing, ABI-mismatched, or absent-from-disk overlay = stdlib +
+   SDK, same as today — deploy then uses `incompatible_environment`,
    not a raw `ImportError`.
 3. **A tree must declare what it imports.** Third-party `import X` is
    legal only if `X` is in the union of `requires` on every `Strategy`
@@ -112,7 +115,7 @@ target
   tree ──gate──► stdlib + SDK + declared requires (two-pass scan)
   add (own) / new connect ──► requires ⊆ applied extra *names*
   already-connected pull ──► store the tree anyway
-  STS  sys.path = image venv + $MFTIK_DATA/env/current
+  STS  sys.path = image venv + $MFTIK_DATA/env/gen-{stamped}/site-packages
   deploy / rebuild ──► requires ⊆ applied extras
                        else incompatible_environment
 ```
@@ -150,7 +153,7 @@ $MFTIK_DATA/
   registry/                 unchanged
   env/
     applied.json            {generation, packages, python, platform, bytes}
-    current                 symlink -> gen-3/site-packages; the sys.path entry
+    current                 symlink -> gen-3/site-packages; for a person
     gen-3/site-packages/    the generation the stamp names
     gen-2/site-packages/    previous; live process may still hold it
     apply.lock              fcntl.flock, not O_EXCL
@@ -162,17 +165,22 @@ says numpy, disk is half a numpy"; writing `gen-{N}` and switching
 only on success makes that structurally impossible.
 
 `current` points at the generation's `site-packages` itself, not at
-`gen-{N}`. The symlink **is** the `sys.path` entry, so a commit is one
-`os.replace` and nothing downstream has to join two path fragments or
-know which generation it is on.
+`gen-{N}`, so a person who follows it lands on an importable directory.
+It is **not** what STS puts on `sys.path`. Commit publishes by writing
+the stamp and retargets the symlink afterwards as a convenience, so the
+two can disagree for an instant — and the half that matters is a
+removal, where a reader following the symlink would report a package it
+can no longer import, pass the deploy check, and die on
+`ModuleNotFoundError`. Deriving the path from `generation` moves the
+extras a process reports and the extras it can import together.
 
 STS, on start:
 
-1. Ensure `env/current` exists (empty `gen-0/site-packages` + symlink
-   if this is a bare node). **Always** insert that symlink path on
-   `sys.path` — the path string, not its target, so a later retarget
-   needs no second insert — so that the first apply does not require
-   a process restart for *new* imports. Then
+1. Ensure `gen-0/site-packages` and the `current` symlink exist if this
+   is a bare node. Read the stamp, then insert
+   `gen-{stamp.generation}/site-packages` on `sys.path`. A generation the
+   stamp names but the disk does not have is treated as no extras at all
+   — reporting what this process cannot import helps nobody. Then
    `importlib.invalidate_caches()`.
 2. Read the stamp **into memory**. It is read at boot and on every
    reload, never per deploy: one process must not answer two different
@@ -275,7 +283,15 @@ for that reason, not because extras are "just metadata".
 `POST /environment/import` is **not** the same. The package names
 come from a peer. A typosquat on their stamp becomes this node's
 `sys.path`. Import therefore returns a diff and does not install
-until the Owner confirms (ENV-9). Apply itself:
+until the Owner confirms (ENV-9).
+
+The overlay also goes **ahead** of the stdlib and the SDK on
+`sys.path`, so an extra installed as `json` or `mftik` would shadow
+the real module for every session in the process. `gate.py` refuses
+a strategy that declares one in `requires`; the write API refuses
+the same set of names, which is the layer that matters — that is
+where a person types it. One list, `PROVIDED_BY_NODE`, is read by
+both. Apply itself:
 
 - pins with `==` (no bare names, no ranges at install time);
 - `uv pip install --target … --only-binary=:all:` so a sdist
@@ -499,9 +515,12 @@ upsert). Pins at install time are `==`. Flags:
    --target` **that** directory. Do not write `/app/.venv`. Do not
    write the live `current` tree. On installer failure: abort
    (ENV-3), unlock, raise with stderr.
-4. On success: commit stamp (`generation`, `python`, `platform`,
-   packages from `importlib.metadata` against that target) and
-   retarget `current`. Unlock.
+4. On success: prune, measure, then commit the stamp (`generation`,
+   `python`, `platform`, `bytes`, packages from `importlib.metadata`
+   against that target). Writing the stamp **is** the publish, and it is
+   the last thing that can fail an apply; retargeting `current` after it
+   is cosmetic and must never raise, or `__exit__` would go on to abort
+   an overlay the stamp is already naming. Unlock.
 5. **Do not** restart STS here. ENV-4a tells STS to see the new
    generation. A `force`d change or removal still needs a process
    restart — the old modules stay in `sys.modules` and no reload
@@ -531,7 +550,7 @@ so a Caddy retry does not stack.
   `sys.path`. Assert apply itself never runs from `amain`
   (subprocess call count 0 on boot, in 4a).
 
-### ENV-4a — STS puts `current` on `sys.path` and reloads it
+### ENV-4a — STS puts the stamped generation on `sys.path` and reloads it
 
 **Scope.** `apps/sts/src/mftik_sts/app.py` before
 `load_local_registry`; `apps/sts/src/mftik_sts/rpc/registry.py` (or
@@ -558,14 +577,15 @@ still has to make *new* extras visible without a restart.
 
 **Solution.**
 
-- Boot: create `env/current` if needed, **unconditionally** insert
-  that symlink path, `invalidate_caches()`, then
-  `load_local_registry`. If the stamp's `python` / `platform` do
-  not match, log and treat extras as empty (do not import the
-  overlay; the empty-or-stale `current` must not be the 3.13
-  process loading 3.12 wheels — retarget `sys.path` to a fresh
-  empty dir for this boot, leave the disk overlay for a matching
-  image).
+- Boot: create `gen-0` and `current` if needed, read the stamp, and
+  insert `gen-{stamp.generation}/site-packages`,
+  `invalidate_caches()`, then `load_local_registry`. Two cases put a
+  fresh empty directory on the path instead and treat extras as
+  empty: the stamp's `python` / `platform` do not match (a 3.13
+  process must not load 3.12 wheels — leave the overlay on disk for
+  a matching image), or the stamp names a generation that is not
+  there. In both, `extras_names()` is empty regardless of what the
+  stamp lists; deploy then answers `incompatible_environment`.
 - Reload: extend `sts.registry.reload` **or** add
   `sts.env.reload` that (1) re-reads the stamp into memory, (2)
   ensures `current` is on `sys.path`, (3) `invalidate_caches()`,
@@ -575,15 +595,13 @@ still has to make *new* extras visible without a restart.
   The scan stays on the event loop for the same reason the
   current handler comments: it mutates `sys.modules`.
 
-  Be clear about what the reload is *for*, or it will look
-  optional. `current` is a symlink already on `sys.path`, so a
-  committed generation is physically importable the moment
-  `os.replace` returns — no RPC needed for that. What is stale
-  until this runs is everything that decides: the negative import
-  cache, `_REGISTRY` (a numpy tree skipped at boot is still
-  skipped), and the in-memory stamp that ENV-8 and `/info` read.
-  A node that skipped the reload would report `extras: {}` and
-  refuse the deploy while the package sat on its own `sys.path`.
+  Because the path follows the stamp, this reload is what makes a
+  committed generation importable at all — `sys.path`, the negative
+  import cache, `_REGISTRY`, and the in-memory stamp all move here,
+  in one moment rather than four. That is the point: a node that
+  skipped it reports the old extras *and* imports the old overlay,
+  which is a consistent node one generation behind, not a node
+  lying about itself.
 
 - Step (5)'s generation is what ENV-5 compares against the stamp
   to answer `restart_required`. A reload that lands makes them
@@ -593,10 +611,16 @@ still has to make *new* extras visible without a restart.
 
 **Verify.**
 
-- Boot on a bare volume: `env/current` exists, is on `sys.path`,
-  no installer ran, bundled strategies load.
+- Boot on a bare volume: `gen-0/site-packages` exists and is on
+  `sys.path`, `current` exists but is *not* the path entry, no
+  installer ran, bundled strategies load.
 - Boot with a planted `gen-1` + stamp + `current` → numpy stub
   tree loads.
+- Stamp names `gen-2` while `current` still points at `gen-1`
+  (crash between the two writes): `sys.path` is `gen-2`, extras are
+  `gen-2`'s. Point the symlink anywhere; nothing changes.
+- Stamp names a generation that is not on disk: extras empty, that
+  path not inserted, log line exists.
 - Boot with a stamp whose `python` is `[3, 11]`: extras treated
   empty, overlay not imported, log line exists.
 - After apply (test plants `gen-2` and commits), the reload RPC
@@ -752,6 +776,9 @@ upgraded.
   closed, installer never started.
 - A session appears between install and commit: generation
   aborted, stamp and `current` unchanged, 409.
+- `PUT` naming a package `json`, `logging`, `mftik`, or any other
+  name the node already provides: **400** before the lock, installer
+  never started.
 - Same write with `force`: 200, stamp moves, `restart_required`
   true.
 - Stamp tags do not match the interpreter: `abi_ok` false with

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
@@ -11,6 +12,7 @@ from mftik.envapply import (
     ApplyInProgress,
     ApplySpec,
     EnvironmentDisruptive,
+    EnvironmentInvalid,
     Installer,
     disruptive_names,
     run_uv_installer,
@@ -38,6 +40,7 @@ from mftik.protocol import (
 from mftik.registry import RegistryStore
 from mftik.registry.errors import RegistryError
 from mftik.registry.sync import fetch_handshake
+from starlette.concurrency import run_in_threadpool
 
 from mftik_api.audit_util import record_audit
 from mftik_api.auth import ANONYMOUS, OwnerId, PrincipalDep
@@ -205,22 +208,35 @@ async def _apply_set(
     changed = disruptive_names(env.read_stamp(), packages)
     if changed and not force:
         await _require_no_live_sessions(broker)
+    pending = ApplyInProgress(
+        env,
+        packages,
+        allow_disruptive=bool(changed),
+        installer=_installer(),
+    )
     try:
-        with ApplyInProgress(
-            env,
-            packages,
-            allow_disruptive=bool(changed),
-            installer=_installer(),
-        ) as pending:
-            if changed and not force:
-                await _require_no_live_sessions(broker)
-            result = pending.commit()
+        # ``uv`` is a blocking subprocess that can sit on an index for
+        # minutes, and commit walks the new generation. Neither may run on
+        # the event loop, or every other request on this node stalls with it.
+        # ``__enter__`` cleans up after itself, so a failure here needs no
+        # matching ``__exit__``.
+        await run_in_threadpool(pending.__enter__)
+    except EnvironmentInvalid as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except EnvironmentLocked as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except EnvironmentDisruptive as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ApplyFailed as exc:
         raise HTTPException(status_code=502, detail=exc.message) from exc
+    try:
+        if changed and not force:
+            await _require_no_live_sessions(broker)
+        result = await run_in_threadpool(pending.commit)
+    except BaseException:
+        await run_in_threadpool(pending.__exit__, *sys.exc_info())
+        raise
+    await run_in_threadpool(pending.__exit__, None, None, None)
 
     _keys, sts_generation, rpc_error = await _reload_sts(broker)
     if rpc_error is not None:

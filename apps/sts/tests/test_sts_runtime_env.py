@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,13 +67,18 @@ def _plant_exploding_numpy(dest: Path, packages: dict[str, ApplySpec]) -> None:
     )
 
 
-def test_boot_on_a_bare_volume_inserts_current(tmp_path: Path) -> None:
+def test_boot_on_a_bare_volume_inserts_the_stamped_generation(
+    tmp_path: Path,
+) -> None:
     env = NodeEnv(tmp_path)
     loaded, stamp = refresh(data_dir=tmp_path)
     assert stamp.generation == 0
+    # ``current`` is still maintained for a person reading the volume, but
+    # what goes on ``sys.path`` is the generation the stamp names — so the
+    # extras this process reports and the ones it can import cannot drift.
     assert env.current_path.is_symlink()
-    assert str(env.current_path) in sys.path
-    assert str(env.current_path.resolve()) not in sys.path
+    assert str(env.site_packages(0)) in sys.path
+    assert str(env.current_path) not in sys.path
     assert extras_names() == frozenset()
     assert loaded == []
     assert resolve_class("noop") is NoopStrategy
@@ -219,3 +225,58 @@ async def test_reload_rpc_returns_the_generation_it_now_believes(
         await asyncio.gather(task, return_exceptions=True)
         await broker.close()
         await redis.aclose()
+
+
+def test_the_stamp_not_the_symlink_decides_sys_path(tmp_path: Path) -> None:
+    """``commit`` writes the stamp and retargets ``current`` as two steps.
+
+    Between them the node is describable two ways, and the dangerous half is
+    a removal: a process that read ``current`` would have the old overlay on
+    ``sys.path`` while the stamp said the package was gone — or, with the
+    steps the other way round, report a package it could no longer import,
+    pass ``ensure_deployable``, and die on ``ModuleNotFoundError``. That is
+    the failure this module exists to replace, so the path follows the stamp
+    and a stale symlink changes nothing.
+    """
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=_plant_numpy,
+    )
+    apply_packages(
+        env,
+        {},
+        allow_disruptive=True,
+        installer=_plant_numpy,
+    )
+    stamp_now = env.read_stamp()
+    assert stamp_now.generation == 2
+    assert stamp_now.packages == {}
+    # Crash after the stamp, before the retarget: ``current`` still names the
+    # generation that has numpy in it.
+    env.current_path.unlink()
+    env.current_path.symlink_to("gen-1/site-packages")
+
+    stamp = attach_overlay(tmp_path)
+    assert stamp.generation == 2
+    assert extras_names() == frozenset()
+    assert str(env.site_packages(2)) in sys.path
+    assert str(env.site_packages(1)) not in sys.path
+
+
+def test_a_stamp_naming_a_missing_generation_has_no_extras(
+    tmp_path: Path,
+) -> None:
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=_plant_exploding_numpy,
+    )
+    shutil.rmtree(env.site_packages(1).parent)
+
+    stamp = attach_overlay(tmp_path)
+    assert stamp.generation == 1, "the stamp is still what it says it is"
+    assert extras_names() == frozenset(), "but this process has none of it"
+    assert str(env.site_packages(1)) not in sys.path

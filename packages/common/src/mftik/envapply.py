@@ -18,6 +18,7 @@ from types import TracebackType
 from typing import Self
 
 from mftik.environment import EnvStamp, NodeEnv, PackageRecord
+from mftik.registry.gate import PROVIDED_BY_NODE
 
 APPLY_TIMEOUT_S = 600
 _UV = os.environ.get("UV", "uv")
@@ -32,6 +33,32 @@ class EnvironmentDisruptive(Exception):
             "changing or removing "
             + ", ".join(names)
             + " is disruptive — pass allow_disruptive if the caller has checked"
+        )
+
+
+class EnvironmentInvalid(Exception):
+    """A package name this node must not install under."""
+
+
+def check_package_name(name: str) -> None:
+    """Refuse an import name the node already answers to.
+
+    ``gate.py`` refuses a *strategy* that declares ``requires = ("json",)``.
+    This is the same rule one layer up, where the Owner types the name into
+    the API — and it is the layer that matters, because the overlay goes on
+    the front of ``sys.path`` for the whole STS process. A distribution
+    installed as ``json`` or ``mftik`` would shadow the real module for every
+    session, including the ones already running.
+    """
+    if not name.isidentifier():
+        raise EnvironmentInvalid(
+            f"{name!r} is not a Python identifier — the key is the import "
+            f"name (sklearn); put the PyPI name (scikit-learn) in dist"
+        )
+    if name in PROVIDED_BY_NODE:
+        raise EnvironmentInvalid(
+            f"{name!r} is provided by the node — an extra installed under "
+            f"that import name would shadow it for every session"
         )
 
 
@@ -90,7 +117,8 @@ class ApplyInProgress:
         self._committed = False
 
     def __enter__(self) -> Self:
-        for spec in self.packages.values():
+        for name, spec in self.packages.items():
+            check_package_name(name)
             spec.requirement()
         self.changed = disruptive_names(self.env.read_stamp(), self.packages)
         if self.changed and not self.allow_disruptive:

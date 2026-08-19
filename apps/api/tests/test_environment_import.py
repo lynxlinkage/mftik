@@ -23,7 +23,7 @@ from mftik_api.routes import environment as environment_routes
 from mftik_api.routes.environment import import_environment
 from mftik_api.routes.sts import list_strategy_types
 from mftik_api.schemas import EnvironmentImportBody
-from test_environment import EnvBroker, _write_pkg
+from test_environment_api import EnvBroker, _write_pkg
 
 _SKLEARN = """\
 from mftik.strategy import Strategy
