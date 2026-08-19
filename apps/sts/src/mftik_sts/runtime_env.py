@@ -20,8 +20,9 @@ from pathlib import Path
 
 from mftik.environment import EnvStamp, NodeEnv
 from mftik.registry import RegistryStore
+from mftik.registry.qualify import qualify
 
-from mftik_sts.impl import load_local_registry
+from mftik_sts.impl import _BUILTIN_KEYS, load_local_registry
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,50 @@ def extras_names() -> frozenset[str]:
     if not _stamp.matches_runtime():
         return frozenset()
     return _stamp.names()
+
+
+class IncompatibleEnvironment(Exception):
+    """This node does not have the extras a stored tree declared."""
+
+    def __init__(self, type_name: str, missing: tuple[str, ...]) -> None:
+        self.type_name = type_name
+        self.missing = missing
+        extra = ", ".join(missing) if missing else "applied extras"
+        super().__init__(
+            f"{type_name} requires {extra} which this node does not have"
+        )
+
+
+def ensure_deployable(
+    type_name: str | None,
+    store: RegistryStore | None = None,
+) -> None:
+    """Refuse a registry tree whose ``requires`` this process cannot honour.
+
+    Bundled strategies skip the check. A type the store does not have is left
+    to ``resolve`` as ``unknown_strategy``. Deploy reads the in-memory stamp,
+    not the volume, so two creates a second apart cannot disagree.
+    """
+    if not type_name or type_name in _BUILTIN_KEYS:
+        return
+    store = store or RegistryStore.from_env()
+    rec = _record_for(store, type_name)
+    if rec is None:
+        return
+    applied = extras_names()
+    missing = tuple(name for name in rec.requires if name not in applied)
+    if missing:
+        raise IncompatibleEnvironment(type_name, missing)
+
+
+def _record_for(store: RegistryStore, type_name: str):
+    for rec in store.list_all():
+        if qualify(rec.origin, rec.type) == type_name:
+            return rec
+    for rec in store.list_all():
+        if rec.type == type_name or rec.name == type_name:
+            return rec
+    return None
 
 
 def attach_overlay(data_dir: str | Path | None = None) -> EnvStamp:

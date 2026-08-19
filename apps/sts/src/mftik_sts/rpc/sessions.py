@@ -25,6 +25,8 @@ from mftik.protocol import (
     StsSessionControlResultEnvelope,
 )
 
+from mftik_sts.runtime_env import IncompatibleEnvironment
+
 if TYPE_CHECKING:
     from mftik_sts.session import SessionManager
 
@@ -48,6 +50,9 @@ async def handle_session_create(
         return
     try:
         result = await sessions.create_session(payload)
+    except IncompatibleEnvironment as exc:
+        await _error(req, "incompatible_environment", str(exc))
+        return
     except KeyError as exc:
         await _error(req, "unknown_strategy", str(exc))
         return

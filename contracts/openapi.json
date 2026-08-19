@@ -4547,6 +4547,18 @@
             ],
             "title": "Source",
             "default": "bundled"
+          },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requires"
+          },
+          "env_ok": {
+            "type": "boolean",
+            "title": "Env Ok",
+            "default": true
           }
         },
         "type": "object",

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StrategyTemplate(BaseModel):
@@ -38,6 +38,10 @@ class StrategyTemplate(BaseModel):
     #: Where the type comes from. The picker groups on this — bundled
     #: examples sink below registry strategies the operator actually runs.
     source: Literal["bundled", "registry"] = "bundled"
+    #: Import names the tree declared. Empty for bundled strategies.
+    requires: list[str] = Field(default_factory=list)
+    #: Whether this node's applied extras cover ``requires``.
+    env_ok: bool = True
 
 
 NOOP = StrategyTemplate(

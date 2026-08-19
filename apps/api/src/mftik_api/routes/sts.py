@@ -11,6 +11,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from mftik.environment import NodeEnv
 from mftik.protocol import (
     DEFAULT_STRATEGY_TYPE,
     STS_EVENTLOG_INFO,
@@ -122,12 +123,16 @@ def _parse_statuses(status: str | None) -> str | list[str] | None:
 
 def _registry_template(rec: AddedStrategy, store: RegistryStore) -> StrategyTemplate:
     key = qualify(rec.origin, rec.type)
+    requires = list(rec.requires)
+    applied = NodeEnv.from_env().extras_names()
     return StrategyTemplate(
         type=key,
         label=key,
         description=f"{rec.origin} registry ({rec.digest})",
         yaml=store.read_template(rec) or _LOCAL_YAML,
         source="registry",
+        requires=requires,
+        env_ok=set(requires) <= applied,
     )
 
 
@@ -615,6 +620,8 @@ async def deploy(
         code = 404 if exc.code in {"unknown_strategy", "not_found"} else 502
         if exc.code == "timeout":
             code = 504
+        if exc.code == "incompatible_environment":
+            code = 409
         if exc.code == "strategy_refused":
             # The document is wrong, not the platform. Nothing upstream failed
             # and retrying will do the same thing, which is what separates this

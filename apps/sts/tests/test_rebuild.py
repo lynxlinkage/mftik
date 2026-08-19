@@ -13,6 +13,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -52,6 +53,7 @@ class FakeStsStore:
         finished_ago_s: float = 0.0,
         restart: str = "always",
         rebuild_count: int = 0,
+        type: str | None = None,
     ) -> SimpleNamespace:
         row = SimpleNamespace(
             session_id=session_id,
@@ -61,6 +63,7 @@ class FakeStsStore:
             status=status,
             reason="STS shut down while this was running",
             strategy=strategy,
+            type=type,
             cid_slot=cid_slot,
             restart=restart,
             rebuild_count=rebuild_count,
@@ -665,3 +668,40 @@ async def test_a_shutdown_mid_settle_leaves_the_count_alone(
 
     assert store.rows["r-shutdown"].rebuild_count == 3
     assert store.rows["r-shutdown"].status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_incompatible_environment_is_not_rebuilt_and_counts(
+    broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mftik.registry import RegistryStore
+    from mftik_sts.runtime_env import attach_overlay, reset_for_tests
+
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    reset_for_tests()
+    attach_overlay(tmp_path)
+    registry = RegistryStore(tmp_path)
+    registry.put_remote("peer", "http://peer:8000")
+    added = registry.add(
+        {
+            "strategy.py": (
+                "from mftik.strategy import Strategy\n\n"
+                "class UsesNumpy(Strategy):\n"
+                '    name = "uses_numpy"\n'
+                '    requires = ("numpy",)\n'
+            )
+        },
+        origin="peer",
+        applied_extras={},
+    )
+    key = f"{added.origin}::{added.type}"
+    store = FakeStsStore()
+    store.seed("r-env", strategy="uses_numpy", type=key)
+    instances: list[Rebuildable] = []
+    manager = _manager(broker, store, instances)
+
+    assert await manager.rebuild_interrupted() == []
+    assert instances == []
+    assert store.rows["r-env"].rebuild_count == 1
+    assert store.rows["r-env"].status == "interrupted"
+    reset_for_tests()

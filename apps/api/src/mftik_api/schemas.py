@@ -74,6 +74,8 @@ class StrategyTemplateOut(BaseModel):
     description: str
     yaml: str
     source: Literal["bundled", "registry"] = "bundled"
+    requires: list[str] = Field(default_factory=list)
+    env_ok: bool = True
 
 
 class StrategyTypesResponse(BaseModel):
