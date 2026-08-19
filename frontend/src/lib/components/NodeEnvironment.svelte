@@ -65,6 +65,11 @@
 
 	onMount(() => {
 		void refresh();
+		// The connect dialog sends people here when a row needs a decision it
+		// cannot take. Carry the peer URL so it is not retyped; the registry key
+		// is deliberately not in the link, and so not in browser history.
+		const peer = new URLSearchParams(location.search).get('peer');
+		if (peer) importUrl = peer;
 		if (location.hash === '#extras') {
 			document.getElementById('extras')?.scrollIntoView();
 		}

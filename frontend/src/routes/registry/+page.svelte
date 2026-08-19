@@ -1,7 +1,14 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { api, missingRemoteExtras, type RegistryRemote, type RegistryStrategy } from '$lib/api';
+	import {
+		api,
+		missingRemoteExtras,
+		type EnvironmentImport,
+		type MissingExtra,
+		type RegistryRemote,
+		type RegistryStrategy
+	} from '$lib/api';
 
 	let published = $state<RegistryStrategy[]>([]);
 	let privateStrategies = $state<RegistryStrategy[]>([]);
@@ -14,11 +21,22 @@
 	let url = $state('');
 	let token = $state('');
 	let connectError = $state<string | null>(null);
+	let connectMissing = $state<MissingExtra[]>([]);
+	let extrasPreview = $state<EnvironmentImport | null>(null);
 	let removing = $state<string | null>(null);
 	let blocked = $state<{ name: string; message: string } | null>(null);
 
 	const canConnect = $derived(!busy && !!name.trim() && !!url.trim());
-	const connectMissing = $derived(connectError ? missingRemoteExtras(connectError) : []);
+	// Rows the dialog cannot settle on its own: a pin clash with what this node
+	// already has, a dist guessed from the import name, or a peer that withheld
+	// versions. Each needs a decision and a field this dialog does not have.
+	const needsSettings = $derived(
+		!!extrasPreview &&
+			(extrasPreview.conflicts.length > 0 ||
+				extrasPreview.guessed.length > 0 ||
+				extrasPreview.unpinned.length > 0)
+	);
+	const settingsHref = $derived(`/settings?peer=${encodeURIComponent(url.trim())}#extras`);
 
 	async function refresh() {
 		loading = true;
@@ -44,7 +62,13 @@
 		name = '';
 		url = '';
 		token = '';
+		clearConnectError();
+	}
+
+	function clearConnectError() {
 		connectError = null;
+		connectMissing = [];
+		extrasPreview = null;
 	}
 
 	function closeConnect() {
@@ -68,9 +92,55 @@
 			await goto(`/registry/${result.name}`);
 		} catch (e) {
 			connectError = e instanceof Error ? e.message : String(e);
+			connectMissing = missingRemoteExtras(e);
+			extrasPreview = null;
 		} finally {
 			busy = false;
 		}
+	}
+
+	/**
+	 * Import the peer's extras without leaving the dialog.
+	 *
+	 * The URL and the key are already typed here; sending someone to another
+	 * page to enter them a second time is the whole friction. Preview first —
+	 * confirm is what installs into the process this node trades from.
+	 */
+	async function previewExtras() {
+		if (busy || !url.trim()) return;
+		busy = true;
+		try {
+			extrasPreview = await api.importEnvironment({
+				url: url.trim(),
+				token: token.trim() || undefined
+			});
+			connectError = null;
+		} catch (e) {
+			connectError = e instanceof Error ? e.message : String(e);
+			extrasPreview = null;
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function installExtrasAndConnect() {
+		if (busy || !extrasPreview || needsSettings) return;
+		busy = true;
+		try {
+			await api.importEnvironment({
+				url: url.trim(),
+				token: token.trim() || undefined,
+				confirm: true
+			});
+			extrasPreview = null;
+			connectMissing = [];
+		} catch (e) {
+			connectError = e instanceof Error ? e.message : String(e);
+			busy = false;
+			return;
+		}
+		busy = false;
+		await connect();
 	}
 
 	function onConnectKey(event: KeyboardEvent) {
@@ -234,13 +304,58 @@
 			</p>
 			{#if connectError}
 				<p class="err">{connectError}</p>
-				{#if connectMissing.length}
+			{/if}
+			{#if connectMissing.length}
+				<div class="extras">
 					<p class="hint">
-						This node is missing {connectMissing.join(', ')}.
-						<a href="/settings#extras">Import those extras</a>, then connect again.
-						A version difference is not a connect error.
+						This node's approved extras do not cover what the peer advertises. A
+						version difference is not a connect error — these are missing names.
 					</p>
-				{/if}
+					<ul class="missing">
+						{#each connectMissing as row (row.name)}
+							<li>
+								<code>{row.name}</code>
+								{#if row.version}
+									<span class="badge paused">here at {row.version}, not approved</span>
+								{:else}
+									<span class="badge failed">not on this node</span>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+					{#if !extrasPreview}
+						<button
+							type="button"
+							class="secondary"
+							onclick={previewExtras}
+							disabled={busy || !url.trim()}
+						>
+							{busy ? 'Reading…' : "Preview this peer's extras"}
+						</button>
+					{:else}
+						<p class="hint">
+							{extrasPreview.added.length} to install, {extrasPreview.kept.length} already
+							here. This installs into the process this node trades from.
+						</p>
+						{#if needsSettings}
+							<p class="hint">
+								Some rows need a decision this dialog cannot take — a pin clash, a
+								dist guessed from the import name, or a peer that withheld
+								versions.
+								<a href={settingsHref}>Settle them in Settings</a>, then connect
+								again. The URL carries over; the key does not, so have it ready.
+							</p>
+						{:else}
+							<button
+								type="button"
+								onclick={installExtrasAndConnect}
+								disabled={busy || !canConnect}
+							>
+								{busy ? 'Installing…' : 'Install and connect'}
+							</button>
+						{/if}
+					{/if}
+				</div>
 			{/if}
 			<div class="modal-actions">
 				<button type="button" class="secondary" onclick={closeConnect} disabled={busy}>
@@ -470,5 +585,31 @@
 		display: flex;
 		justify-content: flex-end;
 		gap: 0.5rem;
+	}
+
+	.extras {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		align-items: flex-start;
+		padding: 0.7rem 0.8rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+	}
+
+	.missing {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		font-size: 0.85rem;
+	}
+
+	.missing li {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
 	}
 </style>

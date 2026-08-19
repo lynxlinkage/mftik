@@ -21,6 +21,7 @@ from mftik.protocol import (
 )
 from mftik.registry import (
     AddedStrategy,
+    MissingRemoteExtras,
     RegistryConflict,
     RegistryError,
     connect_remote,
@@ -375,6 +376,19 @@ async def connect(
         result = await connect_remote(
             store, name=body.name, url=body.url, token=body.token
         )
+    except MissingRemoteExtras as exc:
+        # Structured, because the caller's next move depends on which names
+        # and whether each is absent or merely unapproved. A client that had
+        # to read this out of the sentence would break the first time the
+        # sentence changed — which is exactly what happened.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": exc.code,
+                "message": str(exc),
+                "missing": exc.rows(),
+            },
+        ) from exc
     except RegistryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPError as exc:

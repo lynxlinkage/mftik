@@ -21,7 +21,7 @@ from mftik.protocol import (
     StsCreateSessionResultEnvelope,
 )
 from mftik.registry import RegistryStore
-from mftik.registry.errors import RegistryError
+from mftik.registry.errors import MissingRemoteExtras, RegistryError
 from mftik.registry.inspect import inspect_files
 from mftik.registry.protocol import handshake_info
 from mftik.registry.sync import connect_remote
@@ -288,6 +288,30 @@ async def test_s4_new_connect_blocked_on_names(data_dir: Path) -> None:
             )
     assert store.list_remotes() == []
     assert not (data_dir / "registry" / "pulled").exists()
+
+
+async def test_s4_refusal_hands_the_names_to_the_client(data_dir: Path) -> None:
+    """The connect dialog offers "import these", so it needs *these* as data.
+
+    Reading them back out of the sentence is what the UI used to do, and it
+    turned into rendering half-sentences as package names the moment the
+    message started naming versions.
+    """
+    peer = RegistryStore(data_dir / "peer")
+    peer.add({"strategy.py": _TINY}, origin="public")
+    store = _store(data_dir)
+    extras = {
+        "numpy": {"version": "1.0", "dist": "numpy"},
+        "torch": {"version": "2.0", "dist": "torch"},
+    }
+    async with httpx.AsyncClient(transport=_peer_transport(peer, extras)) as client:
+        with pytest.raises(MissingRemoteExtras) as caught:
+            await connect_remote(
+                store, name="peer", url="http://peer", client=client
+            )
+    assert caught.value.missing == ("numpy", "torch")
+    assert [row["name"] for row in caught.value.rows()] == ["numpy", "torch"]
+    assert caught.value.code == "missing_extras"
 
 
 async def test_s4b_new_connect_allows_pin_drift(data_dir: Path) -> None:

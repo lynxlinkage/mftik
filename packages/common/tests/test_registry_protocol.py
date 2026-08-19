@@ -1,7 +1,7 @@
 """Handshake: refuse a remote whose registry protocol we cannot speak."""
 
 import pytest
-from mftik.registry.errors import RegistryError
+from mftik.registry.errors import MissingRemoteExtras, RegistryError
 from mftik.registry.protocol import (
     PROTOCOL,
     PROTOCOL_MIN,
@@ -85,3 +85,40 @@ def test_wrong_protocol_name_is_refused() -> None:
                 "protocol_min": 1,
             }
         )
+
+
+def test_a_missing_extra_refusal_carries_the_names_as_data() -> None:
+    """The message is for a person; the names are for the client.
+
+    A UI that offered "import these" by regexing the sentence broke the first
+    time the sentence learned to mention versions, and rendered fragments of
+    English as package names.
+    """
+    info = {
+        "protocol": "mftik.registry",
+        "protocol_version": 1,
+        "protocol_min": 1,
+        "extras": {"numpy": {"version": "2.0", "dist": "numpy"}, "torch": {}},
+    }
+    with pytest.raises(MissingRemoteExtras) as caught:
+        check_remote_extras(info, frozenset({"pandas"}), {"numpy": "1.26.4"})
+    exc = caught.value
+    assert exc.missing == ("numpy", "torch")
+    assert exc.rows() == [
+        {"name": "numpy", "version": "1.26.4"},
+        {"name": "torch", "version": None},
+    ]
+    # Still a RegistryError, so every existing handler keeps working.
+    assert isinstance(exc, RegistryError)
+    assert "1.26.4" in str(exc)
+
+
+def test_no_refusal_when_the_names_are_covered() -> None:
+    info = {
+        "protocol": "mftik.registry",
+        "protocol_version": 1,
+        "protocol_min": 1,
+        "extras": {"numpy": {"version": "9.9", "dist": "numpy"}},
+    }
+    # A version difference is not a connect error.
+    check_remote_extras(info, frozenset({"numpy"}))

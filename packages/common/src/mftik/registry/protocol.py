@@ -7,7 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-from mftik.registry.errors import RegistryError
+from mftik.registry.errors import MissingRemoteExtras, RegistryError
 
 PROTOCOL = "mftik.registry"
 PROTOCOL_VERSION = 1
@@ -102,9 +102,11 @@ def check_remote_extras(
 
     missing = sorted(extra_names(info) - local_names)
     if missing:
-        raise RegistryError(
+        raise MissingRemoteExtras(
             "remote extras not on this node: "
-            + describe_missing(missing, present)
+            + describe_missing(missing, present),
+            tuple(missing),
+            {name: v for name, v in (present or {}).items() if name in missing},
         )
 
 

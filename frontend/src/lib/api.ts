@@ -455,15 +455,56 @@ function apiBase(): string {
 	return '/api';
 }
 
-async function detailOf(res: Response): Promise<string> {
-	let detail = res.statusText;
+/** One extra a connect needs and this node's stamp does not list. */
+export type MissingExtra = {
+	name: string;
+	/**
+	 * Installed here as somebody's dependency, at this version — approve it.
+	 * `null` when it is genuinely not on the node and has to be installed.
+	 */
+	version: string | null;
+};
+
+/** A structured error detail, when the endpoint sends one. */
+export type ApiErrorData = {
+	error?: string;
+	message?: string;
+	missing?: MissingExtra[];
+};
+
+/**
+ * An API failure that may carry data, not just a sentence.
+ *
+ * Reading names out of a message with a regex works until the message is
+ * reworded, and then it silently renders fragments of English as if they were
+ * package names. Endpoints that expect a client to *act* on the specifics send
+ * them as fields.
+ */
+export class ApiError extends Error {
+	data: ApiErrorData | null;
+
+	constructor(message: string, data: ApiErrorData | null = null) {
+		super(message);
+		this.name = 'ApiError';
+		this.data = data;
+	}
+}
+
+async function detailOf(res: Response): Promise<ApiError> {
+	let message = res.statusText;
+	let data: ApiErrorData | null = null;
 	try {
-		const body = (await res.json()) as { detail?: string };
-		if (body.detail) detail = body.detail;
+		const body = (await res.json()) as { detail?: string | ApiErrorData };
+		if (typeof body.detail === 'string') {
+			message = body.detail;
+		} else if (body.detail && typeof body.detail === 'object') {
+			data = body.detail;
+			message = data.message ?? message;
+		}
 	} catch {
 		/* ignore */
 	}
-	return detail || `HTTP ${res.status}`;
+	return new ApiError(message || `HTTP ${res.status}`, data);
 }
 
 /**
@@ -490,7 +531,7 @@ async function request<T>(
 		throw new Error('Login session expired — signing in again…');
 	}
 	if (!res.ok) {
-		throw new Error(await detailOf(res));
+		throw await detailOf(res);
 	}
 	return (await res.json()) as T;
 }
@@ -798,15 +839,12 @@ export const api = {
 };
 
 /** Names a new-connect refusal listed as missing on this node. */
-export function missingRemoteExtras(message: string): string[] {
-	const marker = 'remote extras not on this node:';
-	const at = message.toLowerCase().indexOf(marker);
-	if (at < 0) return [];
-	return message
-		.slice(at + marker.length)
-		.split(',')
-		.map((part) => part.trim())
-		.filter(Boolean);
+/** The extras a connect refusal named, or `[]` if it failed for anything else. */
+export function missingRemoteExtras(error: unknown): MissingExtra[] {
+	if (error instanceof ApiError && error.data?.error === 'missing_extras') {
+		return error.data.missing ?? [];
+	}
+	return [];
 }
 
 export function defaultStrategyYml(): string {

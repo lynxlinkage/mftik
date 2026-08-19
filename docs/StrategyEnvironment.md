@@ -1109,8 +1109,24 @@ will be retried as a network fault. A picker that lists
   stamp is right and deploys still fail; a list of package names
   explains neither. A removal's response names the trees it
   broke — show them.
-- Connect form: on missing names, show them and a link to import.
+- Connect form: import belongs **in this flow**, not only behind a link.
+  A refusal is the moment the Owner learns extras are missing, and the
+  peer URL and key are already typed here — sending them to another
+  page to type both again is the friction, and the reason for
+  `POST /environment/import` taking `{url, token?}` instead of a
+  remote name. The dialog lists the missing names (each marked absent
+  or present-but-unapproved), previews the peer's extras in place, and
+  offers **Install and connect**.
+  Rows that need a decision the dialog has no field for — a pin clash,
+  a guessed `dist`, a peer that withheld versions — link to Settings
+  with the URL carried in the query string. The **key is not**: a
+  registry key in a URL is a registry key in browser history.
   Version drift is not an error here (ENV-6).
+- The refusal carries the names as **data**, not prose. `MissingRemoteExtras`
+  holds `missing` and the subset already present unapproved; the route
+  returns `{error, message, missing:[{name, version}]}`. A client that
+  regexed the sentence broke the day the sentence started naming
+  versions, and rendered fragments of English as package names.
 - Picker: badge when `requires` is not covered; deploy button may
   stay enabled — the API is the authority.
 
