@@ -331,7 +331,7 @@ the migrations against a scratch database and will catch getting this wrong.
 Postgres permits many NULLs under a unique constraint, so uniqueness still
 holds for the one real username.
 
-Idle window slides on use, same order of magnitude as today's 30 minutes.
+Idle window slides on use — 12 hours, under a 7-day absolute cap.
 Write `last_seen_at` only when the window has actually moved — on the order of
 a minute — rather than on every request; the Traefik chain already does this
 and the reason is noted in `frontend/src/lib/auth.ts`.

@@ -20,16 +20,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 COOKIE_NAME = "mftik_session"
 
 #: Sliding: a session dies this long after the last request that used it.
-#: Matches the order of magnitude the Traefik chain has been enforcing.
-IDLE_TTL = timedelta(minutes=30)
+IDLE_TTL = timedelta(hours=12)
 
 #: Hard ceiling from login, never extended. A seat left logged in forever is
 #: the one an attacker inherits with the laptop.
-ABSOLUTE_TTL = timedelta(hours=12)
+ABSOLUTE_TTL = timedelta(days=7)
 
 #: How stale ``last_seen_at`` may get before a request pays to write it.
 #: Sliding the window on *every* request would put a row update in front of
-#: every read the UI makes; a minute of imprecision on a thirty-minute window
+#: every read the UI makes; a minute of imprecision on a twelve-hour window
 #: costs nothing.
 TOUCH_INTERVAL = timedelta(minutes=1)
 

@@ -30,7 +30,7 @@ export const LOGIN_PATH = '/login';
  * dashboard someone is actively watching otherwise generates no requests at
  * all and idles out mid-use. Hence a deliberate heartbeat.
  *
- * Comfortably under the 30-minute idle TTL, and cheap: the API only writes
+ * Comfortably under the 12-hour idle TTL, and cheap: the API only writes
  * `last_seen_at` back when the window has actually moved by about a minute.
  */
 const KEEPALIVE_INTERVAL_MS = 5 * 60_000;
