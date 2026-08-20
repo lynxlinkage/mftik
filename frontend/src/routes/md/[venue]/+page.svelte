@@ -5,7 +5,7 @@
 	const venue = $derived(page.params.venue ?? '');
 </script>
 
-<p class="back"><a href="/md">← MD</a></p>
+<p class="back"><a href="/strategy">← Strategy</a></p>
 <LogViewer
 	domain="md"
 	streamId={venue}

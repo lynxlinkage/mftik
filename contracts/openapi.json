@@ -1330,6 +1330,49 @@
         }
       }
     },
+    "/sts/sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "Get Strategy",
+        "description": "One STS session from the database, including the TD/MD it attached.\n\nReads ``sts_sessions`` directly. ``GET /sts/sessions`` still asks the\nSTS process; this one must not \u2014 the strategy page shows attaches\nwhether or not STS, TD, or MD are answering.",
+        "operationId": "get_strategy_sts_sessions__session_id__get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrategyOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/sts/sessions/{session_id}/yaml": {
       "get": {
         "tags": [
@@ -4812,6 +4855,20 @@
               }
             ],
             "title": "Reason"
+          },
+          "td_api_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Td Api Ids"
+          },
+          "md_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Md Ids"
           }
         },
         "type": "object",

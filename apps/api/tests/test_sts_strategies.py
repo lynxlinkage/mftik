@@ -49,8 +49,53 @@ async def test_an_attach_failure_still_appears_on_the_list(db) -> None:
     assert by_id["s-ok"].type == "private::Tiny"
     assert by_id["s-orphan"].type is None
     assert by_id["s-orphan"].status == "failed"
+    assert by_id["s-ok"].td_api_ids == []
+    assert by_id["s-ok"].md_ids == []
     assert result.has_more is False
     assert all("paused" not in row.model_dump() for row in result.strategies)
+
+
+async def test_the_list_carries_attaches_from_the_row(db) -> None:
+    async with db() as session:
+        repo = StsSessionRepository(session)
+        await repo.create_live(
+            session_id="s-att",
+            created_by=1,
+            type="NoopStrategy",
+            td_api_ids=[3, 7],
+            md_ids=["orderbook.Paper_Spot_BTCUSDT"],
+        )
+
+    result = await sts_routes.list_strategies()
+    row = result.strategies[0]
+    assert row.session_id == "s-att"
+    assert row.td_api_ids == [3, 7]
+    assert row.md_ids == ["orderbook.Paper_Spot_BTCUSDT"]
+
+
+async def test_one_session_is_the_database_row(db) -> None:
+    async with db() as session:
+        repo = StsSessionRepository(session)
+        await repo.create_live(
+            session_id="s-one",
+            created_by=1,
+            type="NoopStrategy",
+            td_api_ids=[2],
+            md_ids=["ticker.Paper_Spot_ETHUSDT"],
+        )
+
+    row = await sts_routes.get_strategy("s-one")
+    assert row.session_id == "s-one"
+    assert row.type == "NoopStrategy"
+    assert row.td_api_ids == [2]
+    assert row.md_ids == ["ticker.Paper_Spot_ETHUSDT"]
+
+
+async def test_a_missing_session_is_a_404(db) -> None:
+    with pytest.raises(HTTPException) as caught:
+        await sts_routes.get_strategy("nope")
+    assert caught.value.status_code == 404
+    assert "nope" in str(caught.value.detail)
 
 
 async def test_attention_is_only_failed_and_interrupted(db) -> None:

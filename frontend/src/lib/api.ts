@@ -263,6 +263,10 @@ export type StrategyRow = {
 	status: string | null;
 	/** Why a `failed` session ended. Null for live sessions and clean exits. */
 	reason: string | null;
+	/** Trading accounts this deploy attached. Empty when attach never ran. */
+	td_api_ids?: number[];
+	/** Market-data feeds (`topic.UniversalTicker`). */
+	md_ids?: string[];
 };
 
 /** The strategy.yml behind a past deploy (`GET /sts/sessions/{id}/yaml`). */
@@ -724,6 +728,9 @@ export const api = {
 	},
 	strategyYaml: (sessionId: string) =>
 		request<StrategyYaml>(`/sts/sessions/${encodeURIComponent(sessionId)}/yaml`),
+	/** One STS session from the database, including the TD/MD it attached. */
+	strategySession: (sessionId: string) =>
+		request<StrategyRow>(`/sts/sessions/${encodeURIComponent(sessionId)}`),
 	stsSessions: (status: string | null = 'live') =>
 		request<{ sessions: Session[] }>(
 			`/sts/sessions${status ? `?status=${encodeURIComponent(status)}` : ''}`
@@ -744,14 +751,6 @@ export const api = {
 		request<StsControl>(`/sts/sessions/${encodeURIComponent(id)}/ack`, {
 			method: 'POST'
 		}),
-	tdSessions: (status: string | null = 'live') =>
-		request<{ sessions: Session[] }>(
-			`/td/sessions${status ? `?status=${encodeURIComponent(status)}` : ''}`
-		),
-	mdSessions: (status: string | null = 'live') =>
-		request<{ sessions: Session[] }>(
-			`/md/sessions${status ? `?status=${encodeURIComponent(status)}` : ''}`
-		),
 	audits: (limit = 100) =>
 		request<{ audits: Audit[] }>(`/audits?limit=${limit}`),
 	logs: (
@@ -879,6 +878,28 @@ export function formatDecimal(value: string | number | null | undefined): string
 export function formatTs(ts: number | null | undefined): string {
 	if (ts == null || ts === 0) return '—';
 	return new Date(ts * 1000).toLocaleString();
+}
+
+/** Venue of an MD feed key (``topic.Venue_Category_SYMBOL``). */
+export function venueFromMdFeed(feed: string): string | null {
+	const dot = feed.indexOf('.');
+	const ticker = dot >= 0 ? feed.slice(dot + 1) : feed;
+	const venue = ticker.split('_')[0];
+	return venue || null;
+}
+
+/** Unique venues implied by a session's MD feeds, in first-seen order. */
+export function venuesFromMdFeeds(feeds: string[]): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const feed of feeds) {
+		const venue = venueFromMdFeed(feed);
+		if (venue && !seen.has(venue)) {
+			seen.add(venue);
+			out.push(venue);
+		}
+	}
+	return out;
 }
 
 /** Display label for a TD api: ``venue/name`` (falls back to api_id). */

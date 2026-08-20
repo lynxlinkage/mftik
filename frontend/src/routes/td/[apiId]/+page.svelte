@@ -34,7 +34,7 @@
 	});
 </script>
 
-<p class="back"><a href="/td">← TD</a></p>
+<p class="back"><a href="/strategy">← Strategy</a></p>
 <LogViewer
 	domain="td"
 	streamId={apiId}

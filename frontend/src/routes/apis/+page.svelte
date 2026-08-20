@@ -154,7 +154,7 @@
 
 <div class="page-head">
 	<div>
-		<h1>APIs</h1>
+		<h1>API Key</h1>
 		<p>
 			Venue credentials bound 1-1 to trading accounts. Reference the account
 			<strong>name</strong> in strategy.yml <code>td</code> (resolved to api_id on deploy).
@@ -231,7 +231,7 @@
 
 <section class="panel table-wrap">
 	{#if rows.length === 0}
-		<p class="empty-state">{loading ? 'Loading…' : 'No APIs yet.'}</p>
+		<p class="empty-state">{loading ? 'Loading…' : 'No API keys yet.'}</p>
 	{:else}
 		<table class="data">
 			<thead>

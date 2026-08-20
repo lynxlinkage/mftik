@@ -31,7 +31,7 @@
 <div class="page-head">
 	<div>
 		<h1>Home</h1>
-		<p>Live and historical session counts across STS, TD, and MD.</p>
+		<p>Process health. STS deploys live on Strategy; TD and MD are the infra those deploys attach.</p>
 	</div>
 	<button type="button" class="secondary" onclick={refresh} disabled={loading}>
 		{loading ? 'Loading…' : 'Refresh'}
@@ -44,50 +44,60 @@
 
 <div class="stats">
 	{#each domains as d (d.domain)}
-		<a class="stat" href={`/${d.domain}`} data-sveltekit-preload-data="hover">
-			<header>
-				<span class="domain">{d.domain}</span>
-				<span class="badge" class:live={d.healthy === true} class:down={d.healthy === false}>
-					{healthLabel(d.healthy)}
-				</span>
-			</header>
-			<div class="nums">
-				<div>
-					<span class="n">{d.live}</span>
-					<span class="l">live</span>
-				</div>
-				<div>
-					<span class="n muted-n">{d.done}</span>
-					<span class="l">history</span>
-				</div>
-				<!-- Only shown when there is something to see: a permanent zero
-				     trains people to stop reading it. -->
-				{#if d.failed > 0}
-					<div>
-						<span class="n failed-n">{d.failed}</span>
-						<span class="l">failed</span>
-					</div>
-				{/if}
-				{#if d.interrupted > 0}
-					<div>
-						<span class="n stopped-n">{d.interrupted}</span>
-						<span class="l">interrupted</span>
-					</div>
-				{/if}
-				{#if d.ack > 0}
-					<div>
-						<span class="n muted-n">{d.ack}</span>
-						<span class="l">ack</span>
-					</div>
-				{/if}
+		{#if d.domain === 'sts'}
+			<a class="stat" href="/strategy" data-sveltekit-preload-data="hover">
+				{@render card(d)}
+			</a>
+		{:else}
+			<div class="stat">
+				{@render card(d)}
 			</div>
-		</a>
+		{/if}
 	{:else}
 		{#if !loading && !error}
 			<p class="empty-state">No domain stats yet.</p>
 		{/if}
 	{/each}
 </div>
+
+{#snippet card(d: DomainStats)}
+	<header>
+		<span class="domain">{d.domain}</span>
+		<span class="badge" class:live={d.healthy === true} class:down={d.healthy === false}>
+			{healthLabel(d.healthy)}
+		</span>
+	</header>
+	<div class="nums">
+		<div>
+			<span class="n">{d.live}</span>
+			<span class="l">live</span>
+		</div>
+		<div>
+			<span class="n muted-n">{d.done}</span>
+			<span class="l">history</span>
+		</div>
+		<!-- Only shown when there is something to see: a permanent zero
+		     trains people to stop reading it. -->
+		{#if d.failed > 0}
+			<div>
+				<span class="n failed-n">{d.failed}</span>
+				<span class="l">failed</span>
+			</div>
+		{/if}
+		{#if d.interrupted > 0}
+			<div>
+				<span class="n stopped-n">{d.interrupted}</span>
+				<span class="l">interrupted</span>
+			</div>
+		{/if}
+		{#if d.ack > 0}
+			<div>
+				<span class="n muted-n">{d.ack}</span>
+				<span class="l">ack</span>
+			</div>
+		{/if}
+	</div>
+{/snippet}
 
 <style>
 	.stats {
@@ -113,7 +123,7 @@
 			box-shadow 180ms ease;
 	}
 
-	.stat:hover {
+	a.stat:hover {
 		border-color: rgba(61, 156, 240, 0.45);
 		transform: translateY(-2px);
 		box-shadow: 0 10px 28px rgba(0, 0, 0, 0.25);

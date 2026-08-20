@@ -9,6 +9,8 @@
 		type AuthKeyCreated,
 		type Identity
 	} from '$lib/api';
+	import { hasBrandMark, providerLabel } from '$lib/brands';
+	import BrandMark from '$lib/components/BrandMark.svelte';
 
 	/**
 	 * The Owner's account page. Keys today; linked identities join it when
@@ -185,7 +187,14 @@
 			<tbody>
 				{#each identities as identity (identity.provider + (identity.id ?? ''))}
 					<tr>
-						<td>{identity.provider}</td>
+						<td>
+							<span class="provider">
+								{#if hasBrandMark(identity.provider)}
+									<BrandMark name={identity.provider} size={14} />
+								{/if}
+								{providerLabel(identity.provider)}
+							</span>
+						</td>
 						<!-- Discord gives a username, Google only the address. Either
 						     is enough to notice the wrong account is attached, which is
 						     what this column is for. -->
@@ -215,8 +224,11 @@
 	{#if connectable.length > 0}
 		<div class="connect">
 			{#each connectable as provider (provider)}
-				<button type="button" onclick={() => startOAuth(provider, 'connect')}>
-					Connect {provider}
+				<button type="button" class="brand" onclick={() => startOAuth(provider, 'connect')}>
+					{#if hasBrandMark(provider)}
+						<BrandMark name={provider} size={16} />
+					{/if}
+					Connect {providerLabel(provider)}
 				</button>
 			{/each}
 		</div>
@@ -361,6 +373,13 @@
 		display: flex;
 		gap: 0.6rem;
 		margin-top: 0.9rem;
+	}
+
+	.provider,
+	button.brand {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
 	}
 
 	.mint form {

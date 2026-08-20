@@ -307,7 +307,7 @@
 
 <div class="page-head">
 	<div>
-		<h1>Sym</h1>
+		<h1>Symbol</h1>
 		<p>
 			Instruments the symbol plane tracks — the golden record for tick sizes and lot steps. The
 			<strong>Ticker</strong> column is the platform's identity for an instrument

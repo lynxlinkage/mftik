@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api, formatTs, type Audit } from '$lib/api';
+	import { hasBrandMark } from '$lib/brands';
+	import BrandMark from '$lib/components/BrandMark.svelte';
 
 	let audits = $state<Audit[]>([]);
 	let error = $state<string | null>(null);
@@ -69,7 +71,14 @@
 				{#each audits as a (a.id)}
 					<tr>
 						<td class="muted">{formatTs(a.created_at)}</td>
-						<td>{formatIdentity(a.via, a.key_kind)}</td>
+						<td>
+							<span class="identity">
+								{#if a.via && hasBrandMark(a.via)}
+									<BrandMark name={a.via} size={14} />
+								{/if}
+								{formatIdentity(a.via, a.key_kind)}
+							</span>
+						</td>
 						<td><code>{a.operation}</code></td>
 						<td class="result">{a.result}</td>
 					</tr>
@@ -80,6 +89,12 @@
 </section>
 
 <style>
+	.identity {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
 	code {
 		font-family: var(--font);
 		font-size: 0.82rem;
