@@ -4,6 +4,9 @@
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
 	import { LOGIN_PATH, startSessionKeepalive } from '$lib/auth';
+	import { GITHUB_REPO } from '$lib/brands';
+	import BrandMark from '$lib/components/BrandMark.svelte';
+	import NavGlyph from '$lib/components/NavGlyph.svelte';
 	import { siteUrl } from '$lib/site';
 	import { appVersion, appVersionShort } from '$lib/version';
 	import '../app.css';
@@ -44,7 +47,7 @@
 
 	const SITE_NAME = 'MFTIK Control';
 	const SITE_DESCRIPTION =
-		'Control plane for the Mid-Frequency Algo Trading platform — STS, TD, MD sessions, APIs, and audit.';
+		'Control plane for the Mid-Frequency Algo Trading platform — strategy sessions, API keys, and audit.';
 	// Absolute, and not written down here — see `$lib/site`.
 	const siteOrigin = $derived(siteUrl(page.url.origin));
 	const ogImage = $derived(`${siteOrigin}/og-image.png`);
@@ -52,12 +55,10 @@
 	const nav = [
 		{ href: '/', label: 'Home' },
 		{ href: '/board', label: 'Board' },
-		{ href: '/apis', label: 'APIs' },
-		{ href: '/sts', label: 'STS' },
-		{ href: '/td', label: 'TD' },
-		{ href: '/md', label: 'MD' },
+		{ href: '/apis', label: 'API Key' },
+		{ href: '/strategy', label: 'Strategy' },
 		{ href: '/registry', label: 'Registry' },
-		{ href: '/sym', label: 'Sym' },
+		{ href: '/sym', label: 'Symbol' },
 		{ href: '/audit', label: 'Audit' },
 		{ href: '/settings', label: 'Settings' }
 	] as const;
@@ -113,6 +114,7 @@
 					class:active={isActive(item.href, page.url.pathname)}
 					data-sveltekit-preload-data="hover"
 				>
+					<NavGlyph href={item.href} />
 					{item.label}
 				</a>
 			{/each}
@@ -122,7 +124,19 @@
 			{#if signedIn && page.url.pathname !== LOGIN_PATH}
 				<button type="button" class="signout" onclick={signOut}>Sign out</button>
 			{/if}
-			<span class="version" title={`build ${appVersion()}`}>{appVersionShort()}</span>
+			<div class="meta">
+				<a
+					class="social"
+					href={GITHUB_REPO}
+					target="_blank"
+					rel="noreferrer"
+					aria-label="GitHub"
+					title="GitHub"
+				>
+					<BrandMark name="github" size={16} />
+				</a>
+				<span class="version" title={`build ${appVersion()}`}>{appVersionShort()}</span>
+			</div>
 		</div>
 	</aside>
 
@@ -179,7 +193,9 @@
 	}
 
 	nav a {
-		display: block;
+		display: flex;
+		align-items: center;
+		gap: 0.55rem;
 		padding: 0.55rem 0.7rem;
 		border-radius: var(--radius);
 		color: var(--muted);
@@ -227,6 +243,26 @@
 	.signout:hover {
 		color: var(--text);
 		border-color: var(--muted);
+	}
+
+	.meta {
+		display: flex;
+		align-items: center;
+		gap: 0.55rem;
+	}
+
+	.social {
+		display: inline-flex;
+		align-items: center;
+		color: var(--muted);
+		opacity: 0.7;
+		line-height: 0;
+	}
+
+	.social:hover {
+		color: var(--text);
+		opacity: 1;
+		text-decoration: none;
 	}
 
 	.version {

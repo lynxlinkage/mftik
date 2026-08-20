@@ -59,6 +59,10 @@ class StrategyOut(BaseModel):
     status: str | None = None
     #: Why a ``failed`` session ended. Null otherwise.
     reason: str | None = None
+    #: Trading accounts this deploy attached. Empty when attach never ran.
+    td_api_ids: list[int] = Field(default_factory=list)
+    #: Market-data feeds this deploy attached (``topic.UniversalTicker``).
+    md_ids: list[str] = Field(default_factory=list)
 
 
 class StrategyListResponse(BaseModel):

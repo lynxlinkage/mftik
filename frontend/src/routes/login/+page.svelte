@@ -2,6 +2,8 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import { api, startOAuth, type AuthStatus } from '$lib/api';
+	import { hasBrandMark, providerLabel } from '$lib/brands';
+	import BrandMark from '$lib/components/BrandMark.svelte';
 
 	/**
 	 * One form, two jobs. An instance with no password yet is claimed here;
@@ -149,11 +151,14 @@
 			{#each oauth as provider (provider)}
 				<button
 					type="button"
-					class="secondary"
+					class="secondary brand"
 					disabled={busy}
 					onclick={() => startOAuth(provider, 'login')}
 				>
-					Continue with {provider}
+					{#if hasBrandMark(provider)}
+						<BrandMark name={provider} size={16} />
+					{/if}
+					Continue with {providerLabel(provider)}
 				</button>
 			{/each}
 		{/if}
@@ -209,6 +214,13 @@
 
 	button {
 		margin-top: 0.25rem;
+	}
+
+	button.brand {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.5rem;
 	}
 
 	.or {

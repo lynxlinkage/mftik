@@ -44,7 +44,7 @@ from mftik.protocol import (
     parse_strategy_yml,
 )
 from mftik.registry import AddedStrategy, RegistryStore, qualify
-from mftik_db.models.session import SessionStatus
+from mftik_db.models.session import SessionStatus, StsSessionRow
 from mftik_db.repositories import (
     AccountRepository,
     StsSessionRepository,
@@ -238,20 +238,30 @@ async def list_strategies(
 
     has_more = len(rows) > limit
     page = rows[:limit]
-    out: list[StrategyOut] = []
-    for row in page:
-        out.append(
-            StrategyOut(
-                type=row.type,
-                config=dict(row.st_paras or {}),
-                created_by=row.created_by,
-                created_at=row.created_at.timestamp() if row.created_at else 0.0,
-                session_id=row.session_id,
-                status=row.status,
-                reason=row.reason,
-            )
-        )
-    return StrategyListResponse(strategies=out, has_more=has_more)
+    return StrategyListResponse(
+        strategies=[_strategy_out(row) for row in page],
+        has_more=has_more,
+    )
+
+
+def _strategy_out(row: StsSessionRow) -> StrategyOut:
+    """Map a ``sts_sessions`` row to the list/detail shape.
+
+    ``td_api_ids`` and ``md_ids`` come from this row, not from TD/MD RPC —
+    the page that shows a deploy's attaches must still load when those
+    processes are silent.
+    """
+    return StrategyOut(
+        type=row.type,
+        config=dict(row.st_paras or {}),
+        created_by=row.created_by,
+        created_at=row.created_at.timestamp() if row.created_at else 0.0,
+        session_id=row.session_id,
+        status=row.status,
+        reason=row.reason,
+        td_api_ids=[int(v) for v in (row.td_api_ids or [])],
+        md_ids=[str(v) for v in (row.md_ids or [])],
+    )
 
 
 #: Stand-in for a ``td`` account whose credential has since been deleted. The
@@ -259,6 +269,23 @@ async def list_strategies(
 #: than something that silently deploys against fewer accounts.
 def _deleted_td_placeholder(api_id: int) -> str:
     return f"<deleted api_id={api_id}>"
+
+
+@router.get("/sessions/{session_id}", response_model=StrategyOut)
+async def get_strategy(session_id: str) -> StrategyOut:
+    """One STS session from the database, including the TD/MD it attached.
+
+    Reads ``sts_sessions`` directly. ``GET /sts/sessions`` still asks the
+    STS process; this one must not — the strategy page shows attaches
+    whether or not STS, TD, or MD are answering.
+    """
+    async with session_scope() as db:
+        row = await StsSessionRepository(db).get_by_session_id(session_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"session not found: {session_id}"
+            )
+        return _strategy_out(row)
 
 
 @router.get("/sessions/{session_id}/yaml", response_model=StrategyYamlResponse)
