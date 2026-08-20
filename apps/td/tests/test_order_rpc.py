@@ -596,6 +596,51 @@ async def test_reduce_only_on_spot_is_refused_not_dropped(
     assert "spot" in ack.reason
 
 
+async def test_both_sizes_on_a_market_order_are_refused_before_booking(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """Shape is the request's own: neither size wins, and nothing is reserved."""
+    before = await broker.state_all(Topics.td_oms(API_ID))
+    ack = await _ack(
+        broker,
+        _submit_envelope(
+            type=OrderType.MARKET,
+            price=None,
+            qty=Decimal("0.01"),
+            quote_qty=Decimal("100"),
+        ),
+    )
+    assert ack.accepted is False
+    assert ack.error_code == RejectCode.TD_INVALID_REQUEST
+    assert await broker.state_all(Topics.td_oms(API_ID)) == before
+
+
+def test_a_gate_market_buy_sized_in_base_is_unsupported_shape() -> None:
+    """The check TD runs before reserve — no Gate session needed to see 115."""
+    from mftik.exchange.order_check import VENUE, classify
+    from mftik_td.session.manager import (
+        _place_order_request,
+        _refusal_code,
+    )
+
+    payload = OrderSubmit.model_validate(
+        {
+            "session_id": SESSION,
+            "api_id": API_ID,
+            "universal_ticker": "Gate_Spot_BTCUSDT",
+            "side": Side.BUY,
+            "type": OrderType.MARKET,
+            "qty": Decimal("0.001"),
+            "client_order_id": "cid-1",
+        }
+    )
+    request = _place_order_request(payload, cid="cid-1")
+    found = classify(request)
+    assert found is not None
+    assert found[0] == VENUE
+    assert _refusal_code(found[0]) is RejectCode.TD_UNSUPPORTED_ORDER_SHAPE
+
+
 async def test_a_refused_reduce_only_reserves_nothing(
     attached: SessionManager, broker: Broker
 ) -> None:

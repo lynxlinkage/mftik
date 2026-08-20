@@ -64,6 +64,33 @@ def test_a_market_buy_cannot_be_priced() -> None:
     )
 
 
+def test_a_market_buy_sized_in_quote_commits_that_amount() -> None:
+    held = reservation_for(
+        _request(
+            type=OrderType.MARKET,
+            price=None,
+            qty=None,
+            quote_qty=Decimal("100"),
+        ),
+        BTCUSDT,
+    )
+    assert held == ("USDT", Decimal("100"))
+
+
+def test_a_perp_market_sized_in_quote_commits_margin() -> None:
+    held = reservation_for(
+        _perp(
+            type=OrderType.MARKET,
+            price=None,
+            qty=None,
+            quote_qty=Decimal("100"),
+        ),
+        BTCUSDT,
+        leverage=Decimal("10"),
+    )
+    assert held == ("USDT", Decimal("10"))
+
+
 def test_a_market_sell_still_commits_base() -> None:
     """Selling commits quantity, which a market order does know."""
     held = reservation_for(

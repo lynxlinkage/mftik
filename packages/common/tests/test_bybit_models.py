@@ -93,6 +93,27 @@ def test_a_market_order_reports_no_limit_price() -> None:
     assert order.price is None
     assert order.type is OrderType.MARKET
     assert order.avg_price == Decimal("60000")
+    assert order.quote_qty is None
+
+
+def test_a_quote_sized_market_order_does_not_copy_qty_as_base() -> None:
+    order = BybitOrderUpdate.model_validate(
+        {
+            "symbol": "BTCUSDT",
+            "orderId": "ord-1",
+            "side": "Buy",
+            "orderType": "Market",
+            "orderStatus": "Filled",
+            "price": "0",
+            "qty": "100",
+            "marketUnit": "quoteCoin",
+            "cumExecQty": "0.002",
+            "cumExecValue": "100",
+        }
+    ).to_order(TICKER)
+    assert order.qty == Decimal("0.002")
+    assert order.filled_qty == Decimal("0.002")
+    assert order.quote_qty == Decimal("100")
 
 
 @pytest.mark.parametrize(

@@ -172,6 +172,26 @@ async def test_private_market_order_and_streams(exchange: PaperExchange) -> None
 
 
 @pytest.mark.asyncio
+async def test_private_market_order_sized_in_quote(exchange: PaperExchange) -> None:
+    await _seed_book(exchange)
+    private = _private(exchange)
+    await private.connect()
+    order = await private.place_order(
+        market_order(
+            ticker="Paper_Spot_BTCUSDT",
+            side=Side.BUY,
+            quote_qty=Decimal("50001"),
+        )
+    )
+    assert order.status is OrderStatus.FILLED
+    assert order.quote_qty == Decimal("50001")
+    assert order.filled_qty == Decimal("1")
+    assert order.qty == Decimal("1")
+    assert order.avg_price == Decimal("50001")
+    await private.close()
+
+
+@pytest.mark.asyncio
 async def test_limit_rest_cancel(exchange: PaperExchange) -> None:
     private = _private(exchange)
     await private.connect()

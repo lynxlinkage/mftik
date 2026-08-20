@@ -53,6 +53,36 @@ def from_text(text: str | None) -> str | None:
     return text
 
 
+def _market_buy(type: OrderType, side: Side) -> bool:
+    return type is OrderType.MARKET and side is Side.BUY
+
+
+def _shared_size(
+    *,
+    type: OrderType,
+    side: Side,
+    amount: Decimal,
+    filled_amount: Decimal | None,
+    filled_total: Decimal | None,
+    avg: Decimal | None,
+    filled_qty: Decimal,
+) -> tuple[Decimal, Decimal, Decimal | None]:
+    """``(qty, filled_qty, quote_qty)`` in the shared model's units.
+
+    A Gate market buy sizes ``amount`` in quote. ``qty`` stays base — zero
+    until a fill reports one — and the requested spend rides on
+    ``quote_qty``.
+    """
+    if not _market_buy(type, side):
+        return amount, filled_qty, None
+    filled = Decimal("0")
+    if filled_amount is not None:
+        filled = filled_amount
+    elif avg and filled_total:
+        filled = filled_total / avg
+    return filled, filled, amount
+
+
 def _secs(value: Any) -> float:
     """Gate sends ms as int or as a string with a fractional tail."""
     if value is None or value == "":
@@ -267,6 +297,11 @@ class GateOrderUpdate(GateMessage):
 
     @property
     def filled_qty(self) -> Decimal:
+        if _market_buy(self.type, self.side):
+            # ``amount`` / ``left`` are quote; do not subtract them into base.
+            if self.filled_amount is None:
+                return Decimal("0")
+            return self.filled_amount
         if self.filled_amount is not None:
             return self.filled_amount
         return self.amount - self.left
@@ -289,6 +324,15 @@ class GateOrderUpdate(GateMessage):
         )
 
     def to_order(self, ticker: UniversalTicker) -> Order:
+        qty, filled, quote_qty = _shared_size(
+            type=self.type,
+            side=self.side,
+            amount=self.amount,
+            filled_amount=self.filled_amount,
+            filled_total=self.filled_total,
+            avg=self.avg_deal_price,
+            filled_qty=self.filled_qty,
+        )
         return Order(
             order_id=self.id,
             client_order_id=self.client_order_id,
@@ -296,9 +340,10 @@ class GateOrderUpdate(GateMessage):
             side=self.side,
             type=self.type,
             status=self.status,
-            qty=self.amount,
+            qty=qty,
+            quote_qty=quote_qty,
             price=self.price,
-            filled_qty=self.filled_qty,
+            filled_qty=filled,
             avg_price=self.avg_deal_price or None,
             ts=_secs(self.update_time_ms or self.create_time_ms),
         )
@@ -375,6 +420,10 @@ class GateOrderAck(GateMessage):
 
     @property
     def filled_qty(self) -> Decimal:
+        if _market_buy(self.type, self.side):
+            if self.avg_deal_price and self.filled_total:
+                return self.filled_total / self.avg_deal_price
+            return Decimal("0")
         return self.amount - self.left
 
     @property
@@ -387,13 +436,23 @@ class GateOrderAck(GateMessage):
             return OrderStatus.CANCELED
         if self.finish_as == "filled":
             return OrderStatus.FILLED
+        consumed = self.amount - self.left
         return (
             OrderStatus.PARTIALLY_FILLED
-            if self.filled_qty > 0
+            if consumed > 0
             else OrderStatus.NEW
         )
 
     def to_order(self, ticker: UniversalTicker) -> Order:
+        qty, filled, quote_qty = _shared_size(
+            type=self.type,
+            side=self.side,
+            amount=self.amount,
+            filled_amount=None,
+            filled_total=self.filled_total,
+            avg=self.avg_deal_price,
+            filled_qty=self.filled_qty,
+        )
         return Order(
             order_id=self.id,
             client_order_id=self.client_order_id,
@@ -401,9 +460,10 @@ class GateOrderAck(GateMessage):
             side=self.side,
             type=self.type,
             status=self.order_status,
-            qty=self.amount,
+            qty=qty,
+            quote_qty=quote_qty,
             price=self.price,
-            filled_qty=self.filled_qty,
+            filled_qty=filled,
             avg_price=self.avg_deal_price or None,
             ts=_secs(self.update_time_ms or self.create_time_ms),
         )

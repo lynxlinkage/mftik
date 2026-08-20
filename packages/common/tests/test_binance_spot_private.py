@@ -165,6 +165,26 @@ async def test_a_market_buy_sizes_in_base_currency(
     assert "quoteOrderQty" not in params
 
 
+async def test_a_market_order_sized_in_quote_sends_quote_order_qty(
+    binance_api: FakeBinanceApi, binance_key
+) -> None:
+    _key, pem = binance_key
+    binance_api.results[m.ORDER_PLACE] = {**OPEN_ORDER, "type": "MARKET"}
+    async with _client(binance_api, pem) as client:
+        await client.place_order(
+            _limit(
+                type=OrderType.MARKET,
+                price=None,
+                qty=None,
+                quote_qty=Decimal("100"),
+            )
+        )
+
+    params = binance_api.call(m.ORDER_PLACE)["params"]
+    assert params["quoteOrderQty"] == "100"
+    assert "quantity" not in params
+
+
 async def test_post_only_becomes_an_order_type_not_a_time_in_force(
     binance_api: FakeBinanceApi, binance_key
 ) -> None:
@@ -195,14 +215,9 @@ async def test_time_in_force_mapping(
     assert binance_api.call(m.ORDER_PLACE)["params"]["timeInForce"] == expected
 
 
-async def test_a_limit_order_without_a_price_is_refused_locally(
-    binance_api: FakeBinanceApi, binance_key
-) -> None:
-    _key, pem = binance_key
-    async with _client(binance_api, pem) as client:
-        with pytest.raises(OrderError, match="requires a price"):
-            await client.place_order(_limit(price=None))
-    assert binance_api.calls(m.ORDER_PLACE) == []
+def test_a_limit_order_without_a_price_is_refused_locally() -> None:
+    with pytest.raises(ValueError, match="requires a price"):
+        _limit(price=None)
 
 
 async def test_params_that_shadow_a_request_field_are_dropped(

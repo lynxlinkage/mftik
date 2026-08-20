@@ -37,9 +37,9 @@ from mftik.exchange.models import (
     Order,
     OrderType,
     PlaceOrderRequest,
-    Side,
     TimeInForce,
 )
+from mftik.exchange.order_check import require_legal, sized_amount
 from mftik.exchange.symbols import SymbolResolver, check_venue
 from mftik.exchange.tickers import Category, UniversalTicker
 
@@ -133,16 +133,7 @@ class GateSpotPrivateClient(BaseClient):
 
     async def place_order(self, request: PlaceOrderRequest) -> Order:
         self._ensure_connected()
-        if request.type is OrderType.LIMIT and request.price is None:
-            raise OrderError("limit order requires a price")
-        if request.type is OrderType.MARKET and request.side is Side.BUY:
-            # Gate reads `amount` as QUOTE currency for a spot market buy,
-            # while PlaceOrderRequest.qty is base. Passing qty straight through
-            # would size the order wrong by the price. Refuse rather than guess.
-            raise OrderError(
-                "Gate market buy sizes in quote currency, which "
-                "PlaceOrderRequest.qty (base) cannot express; use a limit order"
-            )
+        require_legal(request)
         extras = dict(request.params or {})
         # params comes from strategy code; a key that shadows a common field
         # would be a silent contradiction, so drop it rather than let it win.
@@ -163,7 +154,7 @@ class GateSpotPrivateClient(BaseClient):
             ack = await self.ws.place_order(
                 currency_pair=pair,
                 side=request.side,
-                amount=request.qty,
+                amount=sized_amount(request),
                 price=request.price,
                 type=request.type,
                 account=extras.pop("account", self.account),

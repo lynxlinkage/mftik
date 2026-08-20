@@ -30,6 +30,7 @@ from mftik.exchange.models import (
     TimeInForce,
     Trade,
 )
+from mftik.exchange.order_check import require_legal
 from mftik.exchange.stream import EventStream
 from mftik.exchange.symbols import check_venue
 from mftik.exchange.tickers import Category, UniversalTicker
@@ -389,11 +390,8 @@ class PaperExchange:
 
     def _place_order_locked(self, account: str, request: PlaceOrderRequest) -> Order:
         check_venue(request.ticker, PAPER_VENUE, {PAPER_CATEGORY})
+        require_legal(request)
         inst = self._require_instrument(request.symbol)
-        if request.qty <= 0:
-            raise OrderError("qty must be positive")
-        if request.type is OrderType.LIMIT and request.price is None:
-            raise OrderError("limit orders require price")
 
         client_order_id = self._allocate_client_order_id(
             account, request.client_order_id
@@ -406,22 +404,29 @@ class PaperExchange:
         if request.tif is TimeInForce.FOK:
             # All-or-nothing has to be decided before anything trades, so it
             # is depth that is checked, not the result of a partial match.
-            available = sum(
-                (
-                    row[2]
-                    for row in self._sorted_makers(
-                        request.symbol,
-                        request.side,
-                        exclude_account=account,
-                        limit_price=limit_price,
-                    )
-                ),
-                Decimal("0"),
+            makers = self._sorted_makers(
+                request.symbol,
+                request.side,
+                exclude_account=account,
+                limit_price=limit_price,
             )
-            if available < request.qty:
-                raise OrderError(
-                    f"fill-or-kill needs {request.qty}, book has {available}"
+            if request.quote_qty is not None:
+                available_notional = sum(
+                    (rem * (order.price or Decimal("0")) for _a, order, rem in makers),
+                    Decimal("0"),
                 )
+                if available_notional < request.quote_qty:
+                    raise OrderError(
+                        f"fill-or-kill needs {request.quote_qty} quote, "
+                        f"book has {available_notional}"
+                    )
+            else:
+                available = sum((row[2] for row in makers), Decimal("0"))
+                assert request.qty is not None
+                if available < request.qty:
+                    raise OrderError(
+                        f"fill-or-kill needs {request.qty}, book has {available}"
+                    )
 
         if request.tif is TimeInForce.POST_ONLY:
             # Refuse before the order exists rather than matching and undoing
@@ -448,7 +453,8 @@ class PaperExchange:
             type=request.type,
             # Not yet matched — the engine overwrites this before it emits.
             status=OrderStatus.PENDING_NEW,
-            qty=request.qty,
+            qty=request.qty if request.qty is not None else Decimal("0"),
+            quote_qty=request.quote_qty,
             price=limit_price,
             filled_qty=Decimal("0"),
             avg_price=None,
@@ -459,8 +465,15 @@ class PaperExchange:
             account,
             order,
             limit_price=limit_price,
+            quote_budget=request.quote_qty,
         )
-        remaining = request.qty - filled_qty
+        if request.quote_qty is not None:
+            remaining = request.quote_qty - notional
+            order = order.model_copy(update={"qty": filled_qty})
+            self._orders[order.order_id] = order
+        else:
+            assert request.qty is not None
+            remaining = request.qty - filled_qty
 
         if remaining > 0 and request.type is OrderType.MARKET:
             raise OrderError("insufficient liquidity for market order")
@@ -719,13 +732,18 @@ class PaperExchange:
         taker: Order,
         *,
         limit_price: Decimal | None,
+        quote_budget: Decimal | None = None,
     ) -> tuple[Decimal, Decimal]:
         """Match ``taker`` against opposite resting orders.
 
-        Returns ``(filled_qty, notional)``.
+        Returns ``(filled_qty, notional)``. ``quote_budget`` walks the book
+        until that much quote is spent or received, rather than a base size.
         """
         inst = self._instruments[taker.symbol]
-        remaining = taker.qty - taker.filled_qty
+        remaining_qty = (
+            None if quote_budget is not None else taker.qty - taker.filled_qty
+        )
+        remaining_quote = quote_budget
         filled = Decimal("0")
         notional = Decimal("0")
         makers = self._sorted_makers(
@@ -735,11 +753,19 @@ class PaperExchange:
             limit_price=limit_price,
         )
         for maker_account, maker, maker_rem in makers:
-            if remaining <= 0:
-                break
-            qty = min(remaining, maker_rem)
             assert maker.price is not None
             fill_price = maker.price
+            if remaining_quote is not None:
+                if remaining_quote <= 0:
+                    break
+                qty = min(maker_rem, remaining_quote / fill_price)
+            else:
+                assert remaining_qty is not None
+                if remaining_qty <= 0:
+                    break
+                qty = min(remaining_qty, maker_rem)
+            if qty <= 0:
+                break
             # Maker: unlock locked size then settle at trade price.
             self._unlock(
                 maker_account, inst, maker.side, qty, maker.price
@@ -815,7 +841,11 @@ class PaperExchange:
             )
             filled += qty
             notional += fill_price * qty
-            remaining -= qty
+            if remaining_quote is not None:
+                remaining_quote -= fill_price * qty
+            else:
+                assert remaining_qty is not None
+                remaining_qty -= qty
         return filled, notional
 
     def _sorted_makers(

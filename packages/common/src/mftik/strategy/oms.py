@@ -194,13 +194,18 @@ class StrategyOms:
         *,
         ticker: UniversalTicker | str,
         side: Side,
-        qty: Decimal,
+        qty: Decimal | None = None,
+        quote_qty: Decimal | None = None,
         type: OrderType = OrderType.LIMIT,
         price: Decimal | None = None,
         tif: TimeInForce | None = None,
         reduce_only: bool = False,
     ) -> bool:
         """Submit an order via TD. True if TD accepted the request.
+
+        Size is ``qty`` (base) or, on a market order, ``quote_qty`` (quote).
+        Exactly one. TD refuses a pairing the venue cannot express
+        (``TD_UNSUPPORTED_ORDER_SHAPE``) before anything is reserved.
 
         ``ticker`` names the instrument — ``Bybit_Perp_BTCUSDT``, not
         ``BTCUSDT``. ``api_id`` says which account, which on a unified venue
@@ -244,6 +249,7 @@ class StrategyOms:
                     side=side,
                     type=type,
                     qty=qty,
+                    quote_qty=quote_qty,
                     price=price,
                     tif=tif,
                     reduce_only=reduce_only,

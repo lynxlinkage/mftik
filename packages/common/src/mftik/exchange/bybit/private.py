@@ -18,9 +18,9 @@ Five Bybit shapes drive most of what follows:
 
 * **A spot market buy sizes in the quote currency by default.** ``qty=0.5`` on
   BTCUSDT means half a dollar unless ``marketUnit`` says otherwise. The shared
-  model's quantity is always in the base asset, so this connector sends
-  ``marketUnit: "baseCoin"`` on every spot market order — the single most
-  expensive thing to get wrong here.
+  model sizes in base (``qty``) or quote (``quote_qty``), so this connector
+  sends ``marketUnit: "baseCoin"`` or ``"quoteCoin"`` to match — the single
+  most expensive thing to get wrong here.
 * **Post-only is a time-in-force**, spelled ``PostOnly``. Unlike Binance, no
   order type has to be swapped for it.
 * **The order ack carries no status.** Bybit acknowledges receipt with an id;
@@ -77,6 +77,7 @@ from mftik.exchange.models import (
     TimeInForce,
 )
 from mftik.exchange.oms import Position
+from mftik.exchange.order_check import require_legal, sized_amount
 from mftik.exchange.symbols import SymbolResolver, check_venue
 from mftik.exchange.tickers import Category, UniversalTicker
 
@@ -114,8 +115,10 @@ _MARKET = "Market"
 _LIMIT = "Limit"
 
 #: What ``qty`` is denominated in on a spot market order. Bybit's default for a
-#: market **buy** is the quote currency; the shared model always means base.
+#: market **buy** is the quote currency; the shared model always means base
+#: unless ``quote_qty`` asked for the other unit.
 _BASE_UNIT = "baseCoin"
+_QUOTE_UNIT = "quoteCoin"
 
 
 class BybitPrivateClient(BaseClient):
@@ -190,6 +193,9 @@ class BybitPrivateClient(BaseClient):
         # with. Both maps are pruned together when an order finishes, so
         # neither grows with a long-running session.
         self._last: dict[str, Order] = {}
+        # order_id / client_order_id → whether we sized this order in quote.
+        # Bybit's ``qty`` is then quote, and must not become Order.qty.
+        self._quote_sized: dict[str, bool] = {}
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -212,6 +218,7 @@ class BybitPrivateClient(BaseClient):
     async def close(self) -> None:
         self._connected = False
         self._venue_symbols.clear()
+        self._quote_sized.clear()
         await self.trade.close()
         await self.stream.close()
         await self.rest.close()
@@ -230,8 +237,7 @@ class BybitPrivateClient(BaseClient):
 
     async def place_order(self, request: PlaceOrderRequest) -> Order:
         self._ensure_connected()
-        if request.type is OrderType.LIMIT and request.price is None:
-            raise OrderError("limit order requires a price")
+        require_legal(request)
 
         extras = dict(request.params or {})
         # params comes from strategy code; a key that shadows a field the
@@ -257,7 +263,7 @@ class BybitPrivateClient(BaseClient):
                 symbol=symbol,
                 side=request.side,
                 order_type=order_type,
-                qty=request.qty,
+                qty=sized_amount(request),
                 price=request.price,
                 time_in_force=extras.pop("timeInForce", self._tif(request)),
                 order_link_id=request.client_order_id,
@@ -285,7 +291,8 @@ class BybitPrivateClient(BaseClient):
             # away. Claiming NEW here would claim the order is resting, which
             # is exactly what an order that filled on arrival is not.
             status=OrderStatus.PENDING_NEW,
-            qty=request.qty,
+            qty=request.qty if request.qty is not None else Decimal("0"),
+            quote_qty=request.quote_qty,
             price=request.price,
         )
         # Indexed here rather than on the first push: a cancel can arrive
@@ -318,7 +325,7 @@ class BybitPrivateClient(BaseClient):
         """
         if product != SPOT or request.type is not OrderType.MARKET:
             return None
-        return _BASE_UNIT
+        return _QUOTE_UNIT if request.quote_qty is not None else _BASE_UNIT
 
     async def cancel_order(self, order_id: str) -> Order:
         self._ensure_connected()
@@ -594,8 +601,23 @@ class BybitPrivateClient(BaseClient):
         """
         ticker = await self._resolve(row.symbol, row.category)
         order = row.to_order(ticker)
+        if order.quote_qty is None and self._was_quote_sized(order):
+            # Stream/REST omitted marketUnit; we still know what we sent.
+            order = order.model_copy(
+                update={
+                    "qty": row.cum_exec_qty,
+                    "quote_qty": row.qty,
+                    "filled_qty": row.cum_exec_qty,
+                }
+            )
         self._remember(order, row.symbol)
         return order
+
+    def _was_quote_sized(self, order: Order) -> bool:
+        for key in (order.order_id, order.client_order_id):
+            if key and self._quote_sized.get(key):
+                return True
+        return False
 
     def _remember(self, order: Order, native_symbol: str) -> None:
         """Index an order by every id it can be addressed with.
@@ -607,15 +629,18 @@ class BybitPrivateClient(BaseClient):
         keys = [order.order_id]
         if order.client_order_id:
             keys.append(order.client_order_id)
+        quote_sized = order.quote_qty is not None
         if order.status in TERMINAL:
             for key in keys:
                 self._venue_symbols.pop(key, None)
                 self._last.pop(key, None)
+                self._quote_sized.pop(key, None)
             return
         for key in keys:
             if key:
                 self._venue_symbols[key] = native_symbol
                 self._last[key] = order
+                self._quote_sized[key] = quote_sized
 
 
 __all__ = ["BybitPrivateClient"]

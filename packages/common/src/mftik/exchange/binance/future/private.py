@@ -67,6 +67,7 @@ from mftik.exchange.models import (
     TimeInForce,
 )
 from mftik.exchange.oms import Position
+from mftik.exchange.order_check import require_legal
 from mftik.exchange.symbols import SymbolResolver, check_venue
 from mftik.exchange.tickers import Category, UniversalTicker
 
@@ -209,8 +210,7 @@ class BinanceFuturePrivateClient(BaseClient):
 
     async def place_order(self, request: PlaceOrderRequest) -> Order:
         self._ensure_connected()
-        if request.type is OrderType.LIMIT and request.price is None:
-            raise OrderError("limit order requires a price")
+        require_legal(request)
 
         extras = dict(request.params or {})
         # params comes from strategy code; a key that shadows a field the

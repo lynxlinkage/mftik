@@ -716,7 +716,12 @@ class OrderSubmit(BaseModel):
     universal_ticker: str
     side: Side
     type: OrderType
-    qty: Decimal
+    #: Base size. Required on a limit; on a market, exactly one of this and
+    #: ``quote_qty``.
+    qty: Decimal | None = None
+    #: Quote-currency size for a market order. ``qty`` is always base; this
+    #: is the spend (or proceeds) when the venue sizes the order in quote.
+    quote_qty: Decimal | None = None
     price: Decimal | None = None
     #: ``None`` leaves it to the adapter's default for this order type.
     tif: TimeInForce | None = None
@@ -945,7 +950,8 @@ class PaperPlaceOrderRequest(BaseModel):
     universal_ticker: str
     side: Side
     type: OrderType
-    qty: Decimal
+    qty: Decimal | None = None
+    quote_qty: Decimal | None = None
     price: Decimal | None = None
     tif: TimeInForce | None = None
     client_order_id: str | None = None

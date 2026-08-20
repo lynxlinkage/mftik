@@ -53,16 +53,30 @@ def reservation_for(
 ) -> tuple[str, Decimal] | None:
     """What an order commits: ``(asset, amount)``, or None if unknowable.
 
-    Spot: a buy commits quote currency, a sell commits base. A market buy has
-    no price to size the commitment with, so it returns None — the caller
-    decides whether to let it through unreserved rather than having a guess
-    baked in here.
+    Spot: a buy commits quote currency, a sell commits base. A market buy
+    sized in base has no price to size the commitment with, so it returns
+    None — the caller decides whether to let it through unreserved rather
+    than having a guess baked in here. A market order sized in
+    ``quote_qty`` commits that amount of quote, on either book.
 
     Perp: both sides commit margin in the quote (settle) asset. The amount is
     ``notional / leverage``. Missing or non-positive ``leverage`` is treated
     as ``1`` — conservative until :meth:`Session.ensure_leverage` has filled
     the cache.
     """
+    if request.quote_qty is not None:
+        lev = (
+            leverage
+            if request.category is Category.PERP
+            and leverage is not None
+            and leverage > ZERO
+            else ONE
+        )
+        if request.category is Category.PERP:
+            return instrument.quote, request.quote_qty / lev
+        return instrument.quote, request.quote_qty
+    if request.qty is None:
+        return None
     if request.category is Category.PERP:
         if request.type is OrderType.MARKET or request.price is None:
             return None

@@ -19,7 +19,13 @@ from mftik.exchange.models import (
     is_terminal,
 )
 from mftik.exchange.oms import OmsView
-from mftik.exchange.tickers import Category, InvalidTickerError, UniversalTicker
+from mftik.exchange.order_check import (
+    REDUCE_ONLY,
+    SHAPE,
+    VENUE,
+    classify,
+)
+from mftik.exchange.tickers import InvalidTickerError, UniversalTicker
 from mftik.liveness import is_alive
 from mftik.protocol import (
     STS_DETACH,
@@ -1293,30 +1299,33 @@ class SessionManager:
                     RejectCode.TD_WRONG_INSTRUMENT,
                 )
                 return
-            # Checked here, beside the instrument check and before the
-            # pre-lock, because this is where the category is known and
-            # nothing has been committed yet.
-            refusal = _reduce_only_unsupported(payload)
-            if refusal is not None:
+            # Shape, reduce_only, and whether this venue can express the
+            # size unit — all before anything is reserved, so a refusal
+            # here never books PENDING_NEW.
+            try:
+                request = _place_order_request(payload, cid=cid)
+            except ValueError as exc:
                 await self._reply_order_ack(
                     req,
                     acct.api_id,
                     cid,
                     False,
-                    refusal,
-                    RejectCode.TD_REDUCE_ONLY_UNSUPPORTED,
+                    str(exc),
+                    RejectCode.TD_INVALID_REQUEST,
                 )
                 return
-            request = PlaceOrderRequest(
-                universal_ticker=payload.universal_ticker,
-                side=payload.side,
-                type=payload.type,
-                qty=payload.qty,
-                price=payload.price,
-                tif=payload.tif,
-                reduce_only=payload.reduce_only,
-                client_order_id=cid,
-            )
+            classified = classify(request)
+            if classified is not None:
+                kind, reason = classified
+                await self._reply_order_ack(
+                    req,
+                    acct.api_id,
+                    cid,
+                    False,
+                    reason,
+                    _refusal_code(kind),
+                )
+                return
             refusal = await acct.trading.reserve(request)
             if refusal is not None:
                 await self._reply_order_ack(
@@ -1449,22 +1458,15 @@ class SessionManager:
         acct.cid_owner[req.client_order_id] = link.session_id
         try:
             await acct.trading.private.place_order(
-                PlaceOrderRequest(
-                    universal_ticker=req.universal_ticker,
-                    side=req.side,
-                    type=req.type,
-                    qty=req.qty,
-                    price=req.price,
-                    tif=req.tif,
-                    client_order_id=req.client_order_id,
-                )
+                _place_order_request(req, cid=req.client_order_id)
             )
+            size = req.qty if req.qty is not None else req.quote_qty
             await publish_td_log(
                 self._broker,
                 link.api_id,
                 (
                     f"order submitted sts={link.session_id} "
-                    f"cid={req.client_order_id} {req.side} {req.qty} "
+                    f"cid={req.client_order_id} {req.side} {size} "
                     f"{req.universal_ticker}"
                 ),
                 source="td",
@@ -1618,28 +1620,44 @@ def _wrong_instrument(universal_ticker: str, acct: TradingAccount) -> str | None
     return None
 
 
+def _place_order_request(payload: OrderSubmit, *, cid: str) -> PlaceOrderRequest:
+    """The shared request TD reserves and the adapter sends."""
+    return PlaceOrderRequest(
+        universal_ticker=payload.universal_ticker,
+        side=payload.side,
+        type=payload.type,
+        qty=payload.qty,
+        quote_qty=payload.quote_qty,
+        price=payload.price,
+        tif=payload.tif,
+        reduce_only=payload.reduce_only,
+        client_order_id=cid,
+    )
+
+
+def _refusal_code(kind: str) -> RejectCode:
+    if kind == REDUCE_ONLY:
+        return RejectCode.TD_REDUCE_ONLY_UNSUPPORTED
+    if kind == VENUE:
+        return RejectCode.TD_UNSUPPORTED_ORDER_SHAPE
+    if kind == SHAPE:
+        return RejectCode.TD_INVALID_REQUEST
+    return RejectCode.TD_INVALID_REQUEST
+
+
 def _reduce_only_unsupported(payload: OrderSubmit) -> str | None:
     """Why this order cannot carry ``reduce_only``, or None.
 
-    Spot is the whole of it. There is no position to reduce, so no venue has
-    anywhere to apply the flag — and the order would go out as an ordinary one
-    that can open exposure in either direction.
-
-    Refused rather than quietly stripped. A caller sets this to be certain an
-    order cannot go the other way, and dropping it would hand back the same
-    ``True`` as an order that really is protected. The one case this exists to
-    prevent looks, from the strategy's side, exactly like success.
+    Kept as a thin read of :func:`classify` so existing tests still ask the
+    question without constructing the request themselves. A malformed ticker
+    is left to the instrument check — answering here would report the wrong
+    reason.
     """
-    if not payload.reduce_only:
-        return None
     try:
-        ticker = UniversalTicker.parse(payload.universal_ticker)
-    except InvalidTickerError:
-        # The instrument check above already refused this one.
+        request = _place_order_request(payload, cid=payload.client_order_id)
+    except ValueError:
         return None
-    if ticker.category is Category.SPOT:
-        return (
-            f"reduce_only is not a spot concept; {payload.universal_ticker} "
-            "has no position to reduce"
-        )
-    return None
+    found = classify(request)
+    if found is None or found[0] != REDUCE_ONLY:
+        return None
+    return found[1]

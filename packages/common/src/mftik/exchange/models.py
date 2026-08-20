@@ -473,7 +473,13 @@ class Order(InstrumentScoped):
     side: Side
     type: OrderType
     status: OrderStatus
+    #: Requested size in the base asset. Zero when the order was sized in
+    #: quote and the venue has not yet reported a base quantity.
     qty: Decimal
+    #: Requested spend (or proceeds) in quote, when the order was sized that
+    #: way. ``None`` on a base-sized order. Not a second quantity — ``qty``
+    #: stays the base figure.
+    quote_qty: Decimal | None = None
     price: Decimal | None = None
     filled_qty: Decimal = Decimal("0")
     avg_price: Decimal | None = None
@@ -518,11 +524,17 @@ class PlaceOrderRequest(InstrumentScoped):
     like one that honours it — right up until the order flips a position.
     Spot has no position to reduce, so a spot order carrying it is refused
     rather than sent (see TD's submit path).
+
+    ``qty`` is always base; ``quote_qty`` is always an amount of quote. A
+    market order takes exactly one. A limit order takes ``qty`` (and a
+    price). Whether a given venue can express that pairing is
+    :meth:`refusal_reason`, not a guess at a conversion price.
     """
 
     side: Side
     type: OrderType
-    qty: Decimal
+    qty: Decimal | None = None
+    quote_qty: Decimal | None = None
     price: Decimal | None = None
     client_order_id: str | None = None
     tif: TimeInForce | None = None
@@ -532,7 +544,7 @@ class PlaceOrderRequest(InstrumentScoped):
     params: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _post_only_must_rest(self) -> PlaceOrderRequest:
+    def _legal_shape(self) -> PlaceOrderRequest:
         # A market order exists to take; post-only exists to never take. No
         # venue can honour both, so catch it here rather than let each
         # adapter discover it as a rejection.
@@ -541,14 +553,50 @@ class PlaceOrderRequest(InstrumentScoped):
                 f"{TimeInForce.POST_ONLY} requires a limit order, "
                 f"got {self.type}"
             )
+        if self.qty is not None and self.qty <= 0:
+            raise ValueError(f"qty must be positive, got {self.qty}")
+        if self.quote_qty is not None and self.quote_qty <= 0:
+            raise ValueError(f"quote_qty must be positive, got {self.quote_qty}")
+        if self.type is OrderType.LIMIT:
+            if self.qty is None:
+                raise ValueError("limit order requires qty")
+            if self.price is None:
+                raise ValueError("limit order requires a price")
+            if self.quote_qty is not None:
+                raise ValueError(
+                    "quote_qty is a market-order size; use qty on a limit"
+                )
+        elif self.type is OrderType.MARKET:
+            if (self.qty is None) == (self.quote_qty is None):
+                raise ValueError(
+                    "market order requires exactly one of qty or quote_qty"
+                )
         return self
+
+    def refusal_reason(self) -> str | None:
+        """Why this request must not be sent, or ``None``.
+
+        Shape is already enforced on construction. This adds what depends on
+        the instrument: ``reduce_only`` on spot, and a venue that cannot
+        express the chosen size unit. Does not talk to the venue.
+        """
+        from mftik.exchange.order_check import refusal_reason
+
+        return refusal_reason(self)
+
+    def check(self) -> None:
+        """Raise ``ValueError`` if :meth:`refusal_reason` is set."""
+        reason = self.refusal_reason()
+        if reason is not None:
+            raise ValueError(reason)
 
 
 def market_order(
     *,
     ticker: UniversalTicker | str,
     side: Side,
-    qty: Decimal,
+    qty: Decimal | None = None,
+    quote_qty: Decimal | None = None,
     client_order_id: str | None = None,
     **extra: Any,
 ) -> PlaceOrderRequest:
@@ -558,12 +606,15 @@ def market_order(
     the same job at every venue, so it is nobody's implementation — and a
     connector that had to carry it would be carrying a shared interface's worth
     of convenience it never chose.
+
+    Size is ``qty`` (base) or ``quote_qty`` (quote), exactly one.
     """
     return PlaceOrderRequest(
         universal_ticker=str(ticker),
         side=side,
         type=OrderType.MARKET,
         qty=qty,
+        quote_qty=quote_qty,
         client_order_id=client_order_id,
         **extra,
     )

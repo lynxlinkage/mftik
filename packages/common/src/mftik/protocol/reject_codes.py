@@ -101,6 +101,11 @@ class RejectCode(IntEnum):
     #: order cannot open exposure, and silently ignoring it would leave that
     #: caller believing in a guarantee it does not have.
     TD_REDUCE_ONLY_UNSUPPORTED = 114
+    #: The order's size unit cannot be expressed on this venue — a Gate spot
+    #: market buy sized in base, a perp market sized in quote. Refused
+    #: before anything is reserved: sending it would size the order wrong
+    #: or be rejected by the venue for a parameter it does not have.
+    TD_UNSUPPORTED_ORDER_SHAPE = 115
 
     # --- 2xx: the venue said no, in a way we recognise ---------------------
 

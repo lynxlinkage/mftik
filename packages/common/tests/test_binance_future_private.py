@@ -308,16 +308,9 @@ async def test_a_param_that_shadows_a_request_field_is_dropped(
     assert params["side"] == "BUY"
 
 
-async def test_a_limit_order_without_a_price_never_reaches_the_venue(
-    future_api: FakeBinanceFutureApi,
-    future_user: FakeBinanceFutureUser,
-    binance_key,
-) -> None:
-    _key, pem = binance_key
-    async with _client(future_api, future_user, pem) as client:
-        with pytest.raises(OrderError, match="requires a price"):
-            await client.place_order(_order(price=None))
-    assert not future_api.calls(m.ORDER_PLACE)
+def test_a_limit_order_without_a_price_never_reaches_the_venue() -> None:
+    with pytest.raises(ValueError, match="requires a price"):
+        _order(price=None)
 
 
 async def test_a_venue_rejection_surfaces_as_an_order_error(

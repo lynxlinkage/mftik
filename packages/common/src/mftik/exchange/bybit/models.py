@@ -222,6 +222,7 @@ class BybitOrderUpdate(BybitMessage):
     time_in_force: str = Field(default="", alias="timeInForce")
     price: Dec = Decimal("0")
     qty: Dec = Decimal("0")
+    market_unit: str = Field(default="", alias="marketUnit")
     cum_exec_qty: Dec = Field(default=Decimal("0"), alias="cumExecQty")
     cum_exec_value: Dec = Field(default=Decimal("0"), alias="cumExecValue")
     cum_exec_fee: Dec = Field(default=Decimal("0"), alias="cumExecFee")
@@ -261,6 +262,8 @@ class BybitOrderUpdate(BybitMessage):
         ~mftik.exchange.models.Order` states the instrument. The connector has
         both by the time it converts.
         """
+        quote_sized = self.market_unit == "quoteCoin"
+        filled = self.cum_exec_qty
         return Order(
             universal_ticker=str(ticker),
             order_id=self.order_id,
@@ -268,11 +271,14 @@ class BybitOrderUpdate(BybitMessage):
             side=self.side,
             type=self.type,
             status=self.status,
-            qty=self.qty,
+            # ``qty`` on a quote-sized market order is quote; do not copy it
+            # into the shared model's base quantity.
+            qty=filled if quote_sized else self.qty,
+            quote_qty=self.qty if quote_sized else None,
             # A market order reports price 0; None reads as "no limit price",
             # which is what it is.
             price=self.price or None,
-            filled_qty=self.cum_exec_qty,
+            filled_qty=filled,
             avg_price=self.avg_price,
             ts=self.ts,
         )

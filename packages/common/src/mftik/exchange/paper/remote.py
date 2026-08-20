@@ -100,6 +100,7 @@ class PaperRemotePrivateClient(BaseClient):
                     side=request.side,
                     type=request.type,
                     qty=request.qty,
+                    quote_qty=request.quote_qty,
                     price=request.price,
                     tif=request.tif,
                     client_order_id=request.client_order_id,

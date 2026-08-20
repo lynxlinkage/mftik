@@ -226,6 +226,26 @@ def test_order_put_is_open() -> None:
     assert order.ts == pytest.approx(1774613210.391)
 
 
+def test_a_market_buy_does_not_treat_quote_amount_as_base_qty() -> None:
+    o = GateOrderUpdate.model_validate(
+        _order(
+            type="market",
+            amount="100",
+            left="0",
+            filled_amount="0.002",
+            filled_total="100",
+            avg_deal_price="50000",
+            event="finish",
+            finish_as="filled",
+            price="0",
+        )
+    )
+    order = o.to_order(TICKER)
+    assert order.qty == Decimal("0.002")
+    assert order.filled_qty == Decimal("0.002")
+    assert order.quote_qty == Decimal("100")
+
+
 def test_order_partial_fill() -> None:
     o = GateOrderUpdate.model_validate(
         _order(event="update", left="0.04", filled_amount="0.06",

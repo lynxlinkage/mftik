@@ -16,9 +16,9 @@ Three Binance shapes drive most of what follows:
   :attr:`~mftik.exchange.models.TimeInForce.POST_ONLY` is translated into the
   type here — which is the case :class:`~mftik.exchange.models.TimeInForce`
   anticipates.
-* **A market buy sizes in base currency.** ``quantity`` means the same thing
-  for every order type, so a market buy needs no conversion and no refusal —
-  the thing Gate cannot do.
+* **A market order sizes in base or quote.** ``quantity`` is base for every
+  type; ``quoteOrderQty`` spends a fixed amount of quote. The request
+  carries exactly one.
 * **Fills come from the order stream.** There is no user-trade channel;
   ``executionReport`` with ``x == "TRADE"`` is the fill, and its ``l``/``L``
   are that execution while ``z``/``Z`` are the order's totals.
@@ -53,6 +53,7 @@ from mftik.exchange.models import (
     PlaceOrderRequest,
     TimeInForce,
 )
+from mftik.exchange.order_check import require_legal
 from mftik.exchange.symbols import SymbolResolver, check_venue
 from mftik.exchange.tickers import Category, UniversalTicker
 
@@ -66,6 +67,7 @@ _RESERVED_PARAMS = (
     "side",
     "type",
     "quantity",
+    "quoteOrderQty",
     "price",
     "newClientOrderId",
 )
@@ -151,8 +153,7 @@ class BinanceSpotPrivateClient(BaseClient):
 
     async def place_order(self, request: PlaceOrderRequest) -> Order:
         self._ensure_connected()
-        if request.type is OrderType.LIMIT and request.price is None:
-            raise OrderError("limit order requires a price")
+        require_legal(request)
 
         extras = dict(request.params or {})
         # params comes from strategy code; a key that shadows a field the
@@ -174,6 +175,7 @@ class BinanceSpotPrivateClient(BaseClient):
                 side=request.side,
                 type=order_type,
                 quantity=request.qty,
+                quote_order_qty=request.quote_qty,
                 price=request.price,
                 time_in_force=extras.pop("timeInForce", tif),
                 client_order_id=request.client_order_id,

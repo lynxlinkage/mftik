@@ -251,13 +251,13 @@ async def test_place_order_goes_over_the_websocket(
     assert rest_stub.requests == []
 
 
-async def test_market_buy_is_refused(
+async def test_market_buy_sized_in_base_is_refused(
     gate: FakeGate, rest_stub: FakeGateRest
 ) -> None:
     """Gate sizes a spot market buy in quote; PlaceOrderRequest.qty is base."""
     client = await _private(gate, rest_stub)
     async with client:
-        with pytest.raises(OrderError, match="quote currency"):
+        with pytest.raises(OrderError, match="quote_qty"):
             await client.place_order(
                 PlaceOrderRequest(
                     universal_ticker="Gate_Spot_BTCUSDT",
@@ -267,6 +267,29 @@ async def test_market_buy_is_refused(
                 )
             )
     assert not any(c["channel"] == ch.ORDER_PLACE for c in gate.api_calls)
+
+
+async def test_market_buy_sized_in_quote_goes_out(
+    gate: FakeGate, rest_stub: FakeGateRest
+) -> None:
+    gate.api_data[ch.ORDER_PLACE] = {
+        "result": {**OPEN_ORDER, "type": "market", "amount": "100", "price": "0"}
+    }
+    client = await _private(gate, rest_stub)
+    async with client:
+        await client.place_order(
+            PlaceOrderRequest(
+                universal_ticker="Gate_Spot_BTCUSDT",
+                side=Side.BUY,
+                type=OrderType.MARKET,
+                quote_qty=Decimal("100"),
+            )
+        )
+
+    param = gate.api_call(ch.ORDER_PLACE)["payload"]["req_param"]
+    assert param["type"] == "market"
+    assert param["amount"] == "100"
+    assert param["side"] == "buy"
 
 
 async def test_market_sell_is_ioc(
@@ -356,20 +379,14 @@ def test_post_only_market_order_is_refused_before_any_venue_sees_it() -> None:
         )
 
 
-async def test_limit_order_without_price_is_refused(
-    gate: FakeGate, rest_stub: FakeGateRest
-) -> None:
-    client = await _private(gate, rest_stub)
-    async with client:
-        with pytest.raises(OrderError, match="requires a price"):
-            await client.place_order(
-                PlaceOrderRequest(
-                    universal_ticker="Gate_Spot_BTCUSDT",
-                    side=Side.BUY,
-                    type=OrderType.LIMIT,
-                    qty=Decimal("1"),
-                )
-            )
+def test_limit_order_without_price_is_refused() -> None:
+    with pytest.raises(ValueError, match="requires a price"):
+        PlaceOrderRequest(
+            universal_ticker="Gate_Spot_BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            qty=Decimal("1"),
+        )
 
 
 async def test_placing_an_order_caches_its_pair_for_cancel(

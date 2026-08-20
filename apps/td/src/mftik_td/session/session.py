@@ -542,7 +542,8 @@ class Session:
             side=request.side,
             type=request.type,
             status=OrderStatus.PENDING_NEW,
-            qty=request.qty,
+            qty=request.qty if request.qty is not None else Decimal("0"),
+            quote_qty=request.quote_qty,
             price=request.price,
         )
         self.oms.handle_order(order)

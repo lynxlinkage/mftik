@@ -214,6 +214,39 @@ async def test_a_spot_market_order_is_sized_in_the_base_asset(
     assert "timeInForce" not in args
 
 
+async def test_a_spot_market_order_sized_in_quote_sends_quote_coin(
+    bybit: FakeBybit, api: FakeApi
+) -> None:
+    async with _client(bybit, api) as client:
+        await client.place_order(
+            PlaceOrderRequest(
+                universal_ticker="Bybit_Spot_BTCUSDT",
+                side=Side.BUY,
+                type=OrderType.MARKET,
+                quote_qty=Decimal("100"),
+            )
+        )
+    args = bybit.call("order.create")["args"][0]
+    assert args["marketUnit"] == "quoteCoin"
+    assert args["qty"] == "100"
+
+
+async def test_a_perp_market_order_sized_in_quote_is_refused(
+    bybit: FakeBybit, api: FakeApi
+) -> None:
+    async with _client(bybit, api) as client:
+        with pytest.raises(OrderError, match="quote_qty"):
+            await client.place_order(
+                PlaceOrderRequest(
+                    universal_ticker="Bybit_Perp_BTCUSDT",
+                    side=Side.BUY,
+                    type=OrderType.MARKET,
+                    quote_qty=Decimal("100"),
+                )
+            )
+    assert not bybit.frames_for("order.create")
+
+
 async def test_one_session_places_on_both_books(
     bybit: FakeBybit, api: FakeApi
 ) -> None:
@@ -264,20 +297,14 @@ async def test_an_order_for_another_venue_never_reaches_the_wire(
     assert not bybit.frames_for("order.create")
 
 
-async def test_a_limit_order_with_no_price_never_reaches_the_venue(
-    bybit: FakeBybit, api: FakeApi
-) -> None:
-    async with _client(bybit, api) as client:
-        with pytest.raises(OrderError, match="requires a price"):
-            await client.place_order(
-                PlaceOrderRequest(
-                    universal_ticker="Bybit_Spot_BTCUSDT",
-                    side=Side.BUY,
-                    type=OrderType.LIMIT,
-                    qty=Decimal("1"),
-                )
-            )
-    assert not bybit.frames_for("order.create")
+def test_a_limit_order_with_no_price_never_reaches_the_venue() -> None:
+    with pytest.raises(ValueError, match="requires a price"):
+        PlaceOrderRequest(
+            universal_ticker="Bybit_Spot_BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            qty=Decimal("1"),
+        )
 
 
 async def test_params_may_not_shadow_a_field_the_request_carries(
