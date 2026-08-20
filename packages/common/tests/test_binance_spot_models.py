@@ -704,3 +704,87 @@ def test_an_unfilled_historical_order_has_no_average_price() -> None:
         }
     ).to_order(TICKER)
     assert order.avg_price is None
+
+
+# --- orders sized in quote -------------------------------------------------
+
+
+def test_a_quote_sized_report_carries_the_budget_not_a_zero_quantity() -> None:
+    """``quoteOrderQty`` orders come back with ``q`` at zero.
+
+    Copying that zero into ``qty`` and dropping ``Q`` would make a 1000 USDT
+    market buy indistinguishable from a base-sized order of size zero.
+    """
+    order = BinanceExecutionReport.model_validate(
+        {
+            **EXECUTION_REPORT,
+            "o": "MARKET",
+            "p": "0.00000000",
+            "q": "0.00000000",
+            "Q": "1000.00000000",
+            "x": "TRADE",
+            "X": "FILLED",
+            "l": "0.02000000",
+            "z": "0.02000000",
+            "L": "50000.00000000",
+            "Z": "1000.00000000",
+        }
+    ).to_order(TICKER)
+    assert order.quote_qty == Decimal("1000")
+    assert order.qty == Decimal("0.02")
+    assert order.filled_qty == Decimal("0.02")
+
+
+def test_a_base_sized_report_reports_no_quote_size() -> None:
+    order = BinanceExecutionReport.model_validate(EXECUTION_REPORT).to_order(TICKER)
+    assert order.quote_qty is None
+    assert order.qty == Decimal("1")
+
+
+def test_a_quote_sized_ack_carries_the_budget() -> None:
+    order = BinanceOrderAck.model_validate(
+        {
+            **ORDER_ACK,
+            "type": "MARKET",
+            "side": "BUY",
+            "price": "0.00000000",
+            "origQty": "0.00000000",
+            "origQuoteOrderQty": "1000.00000000",
+            "executedQty": "0.04270000",
+            "cummulativeQuoteQty": "1000.00000000",
+            "status": "FILLED",
+        }
+    ).to_order(TICKER)
+    assert order.quote_qty == Decimal("1000")
+    assert order.qty == Decimal("0.0427")
+
+
+def test_a_base_sized_ack_reports_no_quote_size() -> None:
+    order = BinanceOrderAck.model_validate(ORDER_ACK).to_order(TICKER)
+    assert order.quote_qty is None
+    assert order.qty == Decimal("0.00847")
+
+
+def test_a_quote_sized_historical_order_carries_the_budget() -> None:
+    order = BinanceSpotHistoricalOrder.model_validate(
+        {
+            **HISTORICAL_ORDER,
+            "type": "MARKET",
+            "price": "0.00000000",
+            "origQty": "0.00000000",
+            "origQuoteOrderQty": "1000.00000000",
+            "executedQty": "0.04270000",
+            "cummulativeQuoteQty": "1000.00000000",
+            "status": "FILLED",
+        }
+    ).to_order(TICKER)
+    assert order.quote_qty == Decimal("1000")
+    assert order.qty == Decimal("0.0427")
+
+
+def test_a_base_sized_historical_order_reports_no_quote_size() -> None:
+    order = BinanceSpotHistoricalOrder.model_validate(HISTORICAL_ORDER).to_order(
+        TICKER
+    )
+    assert order.quote_qty is None
+    assert order.qty == Decimal("1")

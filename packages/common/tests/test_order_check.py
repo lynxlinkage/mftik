@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from mftik.exchange import venues
 from mftik.exchange.models import (
     OrderType,
     PlaceOrderRequest,
@@ -12,9 +13,11 @@ from mftik.exchange.models import (
     market_order,
 )
 from mftik.exchange.order_check import (
+    _MARKET_SIZE,
     REDUCE_ONLY,
     SHAPE,
     VENUE,
+    check_rules,
     classify,
     refusal_reason,
 )
@@ -146,3 +149,24 @@ def test_unknown_venue_skips_capability_rules() -> None:
     )
     found = classify(request)
     assert found is None or found[0] == SHAPE
+
+
+def test_every_registered_book_says_how_its_market_orders_are_sized() -> None:
+    """A missing row reads as permission, so it must not be possible to omit.
+
+    Without this, adding a venue to the registry silently signs this module
+    up to approve a size unit nobody confirmed its adapter can send.
+    """
+    for name, venue in venues.VENUES.items():
+        for category in venue.categories:
+            assert (name, category) in _MARKET_SIZE, f"{name}/{category.value}"
+
+
+def test_a_registry_entry_with_no_size_rule_is_an_error() -> None:
+    added = venues.Venue(name="Nowhere", label="Nowhere")
+    venues.VENUES[added.name] = added
+    try:
+        with pytest.raises(ValueError, match="Nowhere/Spot"):
+            check_rules()
+    finally:
+        del venues.VENUES[added.name]

@@ -6,7 +6,7 @@ from decimal import Decimal
 import fakeredis.aioredis
 import pytest
 from mftik.broker import Broker, BrokerConfig
-from mftik.exchange import PaperExchange, Side
+from mftik.exchange import OrderError, PaperExchange, Side
 from mftik.exchange.models import OrderStatus, OrderType, PlaceOrderRequest, limit_order
 from mftik.exchange.paper.remote import PaperRemotePrivateClient
 from mftik_paper.app import RedisEventBridge
@@ -105,3 +105,60 @@ async def _serve(
 
     async for req in broker.serve(Topics.PAPER, stop=stop):
         await dispatch(req, exchange=exchange)
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_order_is_a_venue_rejection_not_an_internal_error(
+    broker: Broker,
+) -> None:
+    """Shape rules live on the request model, and still answer ``order``.
+
+    They used to be enforced inside the engine, which raised ``OrderError``.
+    Now they raise pydantic's ``ValidationError`` at construction, and if that
+    reached the catch-all the reply would be ``internal`` — which the client
+    reads as ``ExchangeError``, i.e. a transport failure, sending TD off to
+    chase an order the engine never accepted.
+    """
+    from mftik.protocol import PAPER_PLACE_ORDER, Topics, UntypedEnvelope
+
+    exchange = PaperExchange(tick_interval=10.0)
+    exchange.register_api(
+        "paper-key-1", "paper-secret-1", balances={"USDT": Decimal("100000")}
+    )
+    await exchange.start()
+    stop = asyncio.Event()
+    rpc_task = asyncio.create_task(_serve(broker, exchange, stop))
+
+    private = PaperRemotePrivateClient(
+        broker, api_key="paper-key-1", api_secret="paper-secret-1"
+    )
+    await private.connect()
+
+    # A limit order with no price — refused by the model, not the engine.
+    reply = await broker.request(
+        Topics.PAPER,
+        UntypedEnvelope.wrap(
+            {
+                "credentials": {
+                    "api_key": "paper-key-1",
+                    "api_secret": "paper-secret-1",
+                },
+                "universal_ticker": "Paper_Spot_BTCUSDT",
+                "side": "BUY",
+                "type": "LIMIT",
+                "qty": "1",
+                "price": None,
+            },
+            type=PAPER_PLACE_ORDER,
+            source="td",
+        ),
+    )
+    assert reply.payload.get("code") == "order"
+    with pytest.raises(OrderError):
+        private._raise_if_error(reply)
+
+    await private.close()
+    stop.set()
+    rpc_task.cancel()
+    await asyncio.gather(rpc_task, return_exceptions=True)
+    await exchange.stop()

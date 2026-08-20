@@ -317,9 +317,14 @@ class GateOrderUpdate(GateMessage):
             return OrderStatus.FILLED if self.left == 0 else OrderStatus.CANCELED
         if self.event == "put":
             return OrderStatus.NEW
+        # ``amount``/``left`` share a unit — quote on a market buy, base
+        # otherwise — so their difference answers "has any of this been
+        # consumed" on either. ``filled_qty`` cannot: it is base, and it
+        # reads zero for a market buy that has not reported ``filled_amount``.
+        consumed = self.amount - self.left
         return (
             OrderStatus.PARTIALLY_FILLED
-            if self.filled_qty > 0
+            if consumed > 0
             else OrderStatus.NEW
         )
 

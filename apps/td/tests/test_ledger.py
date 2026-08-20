@@ -77,6 +77,26 @@ def test_a_market_buy_sized_in_quote_commits_that_amount() -> None:
     assert held == ("USDT", Decimal("100"))
 
 
+def test_a_spot_sell_sized_in_quote_commits_nothing_knowable() -> None:
+    """Quote-sized, but base is what leaves the account.
+
+    Reserving the quote would hold the asset the sell is about to *receive*:
+    the order would be refused on an account that can perfectly well afford
+    it, and the base actually going out would never be pre-locked at all.
+    """
+    held = reservation_for(
+        _request(
+            side=Side.SELL,
+            type=OrderType.MARKET,
+            price=None,
+            qty=None,
+            quote_qty=Decimal("100"),
+        ),
+        BTCUSDT,
+    )
+    assert held is None
+
+
 def test_a_perp_market_sized_in_quote_commits_margin() -> None:
     held = reservation_for(
         _perp(
@@ -110,6 +130,22 @@ def _perp(**overrides: object) -> PlaceOrderRequest:
     }
     payload.update(overrides)
     return PlaceOrderRequest.model_validate(payload)
+
+
+def test_a_perp_sell_sized_in_quote_still_commits_margin() -> None:
+    """Unlike spot, both perp sides commit margin in the settle asset."""
+    held = reservation_for(
+        _perp(
+            side=Side.SELL,
+            type=OrderType.MARKET,
+            price=None,
+            qty=None,
+            quote_qty=Decimal("100"),
+        ),
+        BTCUSDT,
+        leverage=Decimal("10"),
+    )
+    assert held == ("USDT", Decimal("10"))
 
 
 def test_a_perp_buy_commits_quote_margin_over_leverage() -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from mftik.exchange import venues
 from mftik.exchange.errors import OrderError
 from mftik.exchange.models import OrderType, PlaceOrderRequest, Side
 from mftik.exchange.tickers import Category, InvalidTickerError
@@ -24,6 +25,42 @@ VENUE = "venue"
 _EITHER = "either"
 _QTY = "qty"
 _QUOTE = "quote"
+
+_BOTH_QTY = {Side.BUY: _QTY, Side.SELL: _QTY}
+_BOTH_EITHER = {Side.BUY: _EITHER, Side.SELL: _EITHER}
+
+#: ``(venue, category)`` → what a market order there may be sized in, per side.
+#: Every book in :mod:`~mftik.exchange.venues` needs a row. A missing one reads
+#: as "no opinion", which :func:`_venue_reason` treats as permission — so
+#: without the check below, adding a venue to the registry would silently sign
+#: this module up to approve a size unit nobody had confirmed its adapter can
+#: send, which is the one thing this module exists to prevent.
+_MARKET_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
+    ("Paper", Category.SPOT): _BOTH_EITHER,
+    ("Gate", Category.SPOT): {Side.BUY: _QUOTE, Side.SELL: _QTY},
+    ("Binance", Category.SPOT): _BOTH_EITHER,
+    ("BinanceFuture", Category.PERP): _BOTH_QTY,
+    ("Bybit", Category.SPOT): _BOTH_EITHER,
+    ("Bybit", Category.PERP): _BOTH_QTY,
+}
+
+
+def check_rules() -> None:
+    """Assert every registered book says how its market orders are sized."""
+    missing = [
+        f"{name}/{category.value}"
+        for name, venue in venues.VENUES.items()
+        for category in sorted(venue.categories)
+        if (name, category) not in _MARKET_SIZE
+    ]
+    if missing:
+        raise ValueError(
+            "no market-order size rule for " + ", ".join(sorted(missing))
+            + "; add one to order_check._MARKET_SIZE"
+        )
+
+
+check_rules()
 
 
 def classify(request: PlaceOrderRequest) -> tuple[str, str] | None:
@@ -135,15 +172,11 @@ def _venue_reason(request: PlaceOrderRequest) -> str | None:
 def _market_size_rule(
     venue: str, category: Category, side: Side
 ) -> str | None:
-    """How this book sizes a market order, or ``None`` if we have no opinion."""
-    if venue == "Gate" and category is Category.SPOT:
-        return _QUOTE if side is Side.BUY else _QTY
-    if venue in {"Binance", "Paper"} and category is Category.SPOT:
-        return _EITHER
-    if venue == "Bybit" and category is Category.SPOT:
-        return _EITHER
-    if venue == "BinanceFuture" and category is Category.PERP:
-        return _QTY
-    if venue == "Bybit" and category is Category.PERP:
-        return _QTY
-    return None
+    """How this book sizes a market order, or ``None`` if we have no opinion.
+
+    ``None`` only for a venue the registry does not have — nothing can route
+    such a ticker anyway, so there is no table to invent. Every *registered*
+    book has a row, which :func:`check_rules` enforces at import.
+    """
+    by_side = _MARKET_SIZE.get((venues.normalize(venue), category))
+    return None if by_side is None else by_side[side]

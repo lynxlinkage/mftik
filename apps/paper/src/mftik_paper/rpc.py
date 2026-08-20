@@ -139,6 +139,15 @@ async def _place(req: IncomingRequest, exchange: PaperExchange) -> None:
     except OrderError as exc:
         await _error(req, "order", str(exc))
         return
+    except ValueError as exc:
+        # Shape rules live on ``PlaceOrderRequest``'s validator now, so a limit
+        # without a price or a market with no size raises here rather than
+        # inside the engine. Pydantic's ValidationError is a ValueError; it is
+        # still the venue refusing an order, and letting it reach the
+        # catch-all would answer "internal", which the client reads as a
+        # transport failure and goes chasing an order that was never sent.
+        await _error(req, "order", str(exc))
+        return
     await req.reply(_model_reply(order, PAPER_PLACE_ORDER))
 
 

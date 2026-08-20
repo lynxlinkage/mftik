@@ -101,6 +101,22 @@ def type_of(value: str | None) -> OrderType:
     return _TYPE.get((value or "").upper(), OrderType.LIMIT)
 
 
+def sizes(
+    orig_qty: Decimal, quote_order_qty: Decimal, executed_qty: Decimal
+) -> tuple[Decimal, Decimal | None]:
+    """``(qty, quote_qty)`` for the shared model, given Binance's three sizes.
+
+    An order placed with ``quoteOrderQty`` states its size in quote, and
+    Binance reports ``origQty`` as zero for it. Copying that zero into ``qty``
+    would be indistinguishable from a base-sized order of size zero, so the
+    budget is reported as ``quote_qty`` and ``qty`` carries whatever base has
+    actually traded — the only base figure such an order ever has.
+    """
+    if orig_qty == 0 and quote_order_qty > 0:
+        return executed_qty, quote_order_qty
+    return orig_qty, None
+
+
 # --- market streams --------------------------------------------------------
 
 
@@ -449,6 +465,7 @@ class BinanceExecutionReport(BinanceMessage):
         return self.exec_type.upper() == "TRADE" and self.last_qty > 0
 
     def to_order(self, ticker: UniversalTicker) -> Order:
+        qty, quote_qty = sizes(self.q, self.quote_order_qty, self.filled_qty_total)
         return Order(
             universal_ticker=str(ticker),
             order_id=str(self.order_id),
@@ -456,7 +473,8 @@ class BinanceExecutionReport(BinanceMessage):
             side=self.side,
             type=self.type,
             status=self.status,
-            qty=self.q,
+            qty=qty,
+            quote_qty=quote_qty,
             # A market order reports price 0; None reads as "no limit price",
             # which is what it is.
             price=self.p or None,
@@ -572,6 +590,9 @@ class BinanceSpotHistoricalOrder(BinanceMessage):
     quote_total: Decimal = Field(
         default=Decimal("0"), alias="cummulativeQuoteQty"
     )
+    orig_quote_order_qty: Decimal = Field(
+        default=Decimal("0"), alias="origQuoteOrderQty"
+    )
     order_status: str = Field(default="", alias="status")
     order_type: str = Field(default="LIMIT", alias="type")
     side: VenueSide = Field(default=Side.BUY)
@@ -603,6 +624,9 @@ class BinanceSpotHistoricalOrder(BinanceMessage):
         reached the state being reported. Falls back to ``time`` for an order
         that has not moved since.
         """
+        qty, quote_qty = sizes(
+            self.orig_qty, self.orig_quote_order_qty, self.executed_qty
+        )
         return Order(
             universal_ticker=str(ticker),
             order_id=str(self.order_id),
@@ -610,7 +634,8 @@ class BinanceSpotHistoricalOrder(BinanceMessage):
             side=self.side,
             type=self.type,
             status=self.status,
-            qty=self.orig_qty,
+            qty=qty,
+            quote_qty=quote_qty,
             # A market order reports price 0; None reads as "no limit price",
             # which is what it is.
             price=self.price or None,
@@ -708,6 +733,9 @@ class BinanceOrderAck(BinanceMessage):
     orig_qty: Decimal = Field(default=Decimal("0"), alias="origQty")
     executed_qty: Decimal = Field(default=Decimal("0"), alias="executedQty")
     quote_qty: Decimal = Field(default=Decimal("0"), alias="cummulativeQuoteQty")
+    orig_quote_order_qty: Decimal = Field(
+        default=Decimal("0"), alias="origQuoteOrderQty"
+    )
     status: str = ""
     time_in_force: str = Field(default="", alias="timeInForce")
     type: str = "LIMIT"
@@ -743,6 +771,9 @@ class BinanceOrderAck(BinanceMessage):
         )
 
     def to_order(self, ticker: UniversalTicker) -> Order:
+        qty, quote_qty = sizes(
+            self.orig_qty, self.orig_quote_order_qty, self.executed_qty
+        )
         return Order(
             universal_ticker=str(ticker),
             order_id=str(self.order_id),
@@ -750,7 +781,8 @@ class BinanceOrderAck(BinanceMessage):
             side=self.side,
             type=type_of(self.type),
             status=self.order_status,
-            qty=self.orig_qty,
+            qty=qty,
+            quote_qty=quote_qty,
             price=self.price or None,
             filled_qty=self.executed_qty,
             avg_price=self.avg_price,

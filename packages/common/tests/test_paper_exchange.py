@@ -192,6 +192,70 @@ async def test_private_market_order_sized_in_quote(exchange: PaperExchange) -> N
 
 
 @pytest.mark.asyncio
+async def test_quote_budget_that_does_not_divide_evenly_still_fills(
+    exchange: PaperExchange,
+) -> None:
+    """A budget is spent, not left unfilled, once it cannot buy another lot.
+
+    100 USDT at 50001 is 0.00199996… BTC, which is not a whole number of
+    lots. Treating the residue as an unfilled remainder used to raise
+    "insufficient liquidity" against a book holding 10 BTC — after the fill
+    had already settled.
+    """
+    await _seed_book(exchange)
+    private = _private(exchange)
+    await private.connect()
+    before = {b.asset: b.free for b in await private.fetch_balances()}
+
+    order = await private.place_order(
+        market_order(
+            ticker="Paper_Spot_BTCUSDT",
+            side=Side.BUY,
+            quote_qty=Decimal("100"),
+        )
+    )
+
+    assert order.status is OrderStatus.FILLED
+    assert order.quote_qty == Decimal("100")
+    # A whole number of lots, and no more than the budget could buy.
+    lot = next(
+        i.lot_size for i in exchange.list_instruments() if i.symbol == "BTCUSDT"
+    )
+    assert order.filled_qty % lot == 0
+    assert order.avg_price is not None
+    assert order.filled_qty * order.avg_price <= Decimal("100")
+    after = {b.asset: b.free for b in await private.fetch_balances()}
+    assert after["BTC"] - before["BTC"] == order.filled_qty
+    await private.close()
+
+
+@pytest.mark.asyncio
+async def test_quote_budget_beyond_the_book_is_still_refused(
+    exchange: PaperExchange,
+) -> None:
+    """Dust tolerance must not swallow a genuinely under-supplied book."""
+    await _seed_book(exchange)
+    # Funded past the book so it is liquidity that runs out, not the balance.
+    exchange.register_api(
+        "whale", "secret-for-whale", balances={"USDT": Decimal("100000000")}
+    )
+    private = exchange.private(
+        api_key="whale", api_secret="secret-for-whale", auto_register=False
+    )
+    await private.connect()
+
+    with pytest.raises(OrderError, match="insufficient liquidity"):
+        await private.place_order(
+            market_order(
+                ticker="Paper_Spot_BTCUSDT",
+                side=Side.BUY,
+                quote_qty=Decimal("100000000"),
+            )
+        )
+    await private.close()
+
+
+@pytest.mark.asyncio
 async def test_limit_rest_cancel(exchange: PaperExchange) -> None:
     private = _private(exchange)
     await private.connect()

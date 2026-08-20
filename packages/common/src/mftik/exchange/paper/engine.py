@@ -7,7 +7,7 @@ import logging
 import random
 import uuid
 from collections.abc import Callable
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any
 
 from mftik.exchange.errors import (
@@ -461,14 +461,17 @@ class PaperExchange:
         )
         self._register_order(account, order)
 
-        filled_qty, notional = self._match_taker_locked(
+        filled_qty, notional, unfilled_quote = self._match_taker_locked(
             account,
             order,
             limit_price=limit_price,
             quote_budget=request.quote_qty,
         )
         if request.quote_qty is not None:
-            remaining = request.quote_qty - notional
+            # Not ``quote_qty - notional``: walking a book in quote leaves a
+            # residue whenever the budget is not a whole number of lots at the
+            # prices on offer, and that residue is spent, not unfilled.
+            remaining = unfilled_quote
             order = order.model_copy(update={"qty": filled_qty})
             self._orders[order.order_id] = order
         else:
@@ -736,8 +739,10 @@ class PaperExchange:
     ) -> tuple[Decimal, Decimal]:
         """Match ``taker`` against opposite resting orders.
 
-        Returns ``(filled_qty, notional)``. ``quote_budget`` walks the book
-        until that much quote is spent or received, rather than a base size.
+        Returns ``(filled_qty, notional, unfilled)``. ``quote_budget`` walks
+        the book until that much quote is spent or received, rather than a
+        base size; ``unfilled`` is then the budget the book could not absorb,
+        already net of the dust no whole lot could have consumed.
         """
         inst = self._instruments[taker.symbol]
         remaining_qty = (
@@ -746,6 +751,9 @@ class PaperExchange:
         remaining_quote = quote_budget
         filled = Decimal("0")
         notional = Decimal("0")
+        #: Price the walk stopped at — the last one traded, or the one that
+        #: proved unaffordable. What one more lot would have cost.
+        last_price: Decimal | None = None
         makers = self._sorted_makers(
             taker.symbol,
             taker.side,
@@ -755,17 +763,24 @@ class PaperExchange:
         for maker_account, maker, maker_rem in makers:
             assert maker.price is not None
             fill_price = maker.price
+            last_price = fill_price
             if remaining_quote is not None:
                 if remaining_quote <= 0:
                     break
-                qty = min(maker_rem, remaining_quote / fill_price)
+                affordable = remaining_quote / fill_price
+                if affordable >= maker_rem:
+                    qty = maker_rem
+                else:
+                    qty = _floor_to_lot(affordable, inst.lot_size)
+                if qty <= 0:
+                    break
             else:
                 assert remaining_qty is not None
                 if remaining_qty <= 0:
                     break
                 qty = min(remaining_qty, maker_rem)
-            if qty <= 0:
-                break
+                if qty <= 0:
+                    break
             # Maker: unlock locked size then settle at trade price.
             self._unlock(
                 maker_account, inst, maker.side, qty, maker.price
@@ -846,7 +861,18 @@ class PaperExchange:
             else:
                 assert remaining_qty is not None
                 remaining_qty -= qty
-        return filled, notional
+        if remaining_quote is None:
+            return filled, notional, Decimal("0")
+        if (
+            remaining_quote > 0
+            and last_price is not None
+            and remaining_quote < last_price * inst.lot_size
+        ):
+            # Too little left to buy one more lot where the walk stopped. That
+            # is the residue of dividing a budget by a price, not liquidity the
+            # book failed to supply, so the budget counts as spent.
+            remaining_quote = Decimal("0")
+        return filled, notional, max(remaining_quote, Decimal("0"))
 
     def _sorted_makers(
         self,
@@ -1039,6 +1065,17 @@ def _round_price(price: Decimal, tick: Decimal) -> Decimal:
     if tick <= 0:
         return price
     return (price / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick
+
+
+def _floor_to_lot(qty: Decimal, lot: Decimal) -> Decimal:
+    """Largest whole number of lots that fits in ``qty``.
+
+    A quote budget divided by a price is an arbitrary-precision number; the
+    book only trades lots. Rounding down keeps the spend inside the budget.
+    """
+    if lot <= 0:
+        return qty
+    return (qty / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
 
 
 def _fee(price: Decimal, qty: Decimal, fee_bps: Decimal) -> Decimal:

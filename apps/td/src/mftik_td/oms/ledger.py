@@ -56,8 +56,9 @@ def reservation_for(
     Spot: a buy commits quote currency, a sell commits base. A market buy
     sized in base has no price to size the commitment with, so it returns
     None — the caller decides whether to let it through unreserved rather
-    than having a guess baked in here. A market order sized in
-    ``quote_qty`` commits that amount of quote, on either book.
+    than having a guess baked in here. A spot buy sized in ``quote_qty``
+    commits that amount of quote; a spot sell sized that way delivers base
+    we cannot size without a price, so it is unknowable too.
 
     Perp: both sides commit margin in the quote (settle) asset. The amount is
     ``notional / leverage``. Missing or non-positive ``leverage`` is treated
@@ -65,15 +66,12 @@ def reservation_for(
     the cache.
     """
     if request.quote_qty is not None:
-        lev = (
-            leverage
-            if request.category is Category.PERP
-            and leverage is not None
-            and leverage > ZERO
-            else ONE
-        )
         if request.category is Category.PERP:
+            lev = leverage if leverage is not None and leverage > ZERO else ONE
             return instrument.quote, request.quote_qty / lev
+        if request.side is Side.SELL:
+            # Quote-sized, but base is what leaves. No price, no amount.
+            return None
         return instrument.quote, request.quote_qty
     if request.qty is None:
         return None

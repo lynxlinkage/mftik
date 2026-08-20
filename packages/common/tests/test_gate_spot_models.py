@@ -246,6 +246,51 @@ def test_a_market_buy_does_not_treat_quote_amount_as_base_qty() -> None:
     assert order.quote_qty == Decimal("100")
 
 
+def test_a_partly_filled_market_buy_is_not_reported_as_untouched() -> None:
+    """``filled_qty`` is base and reads zero here; ``amount``/``left`` do not.
+
+    A market buy sizes ``amount`` in quote, and a mid-flight update need not
+    carry ``filled_amount``. Deciding the status off the base figure produced
+    an order that claimed NEW and a non-zero ``filled_qty`` in one payload.
+    """
+    payload = _order(
+        type="market",
+        side="buy",
+        event="update",
+        amount="100",
+        left="50",
+        filled_total="50",
+        avg_deal_price="50000",
+        price="0",
+    )
+    del payload["filled_amount"]
+    o = GateOrderUpdate.model_validate(payload)
+
+    assert o.status is OrderStatus.PARTIALLY_FILLED
+    order = o.to_order(TICKER)
+    assert order.status is OrderStatus.PARTIALLY_FILLED
+    assert order.filled_qty == Decimal("0.001")
+    assert order.quote_qty == Decimal("100")
+
+
+def test_an_untouched_market_buy_is_still_new() -> None:
+    payload = _order(
+        type="market",
+        side="buy",
+        event="update",
+        amount="100",
+        left="100",
+        filled_total="0",
+        avg_deal_price="0",
+        price="0",
+    )
+    del payload["filled_amount"]
+    o = GateOrderUpdate.model_validate(payload)
+
+    assert o.status is OrderStatus.NEW
+    assert o.to_order(TICKER).filled_qty == Decimal("0")
+
+
 def test_order_partial_fill() -> None:
     o = GateOrderUpdate.model_validate(
         _order(event="update", left="0.04", filled_amount="0.06",
