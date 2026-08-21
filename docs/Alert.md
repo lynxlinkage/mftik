@@ -20,8 +20,10 @@ so a session that ends does not take the Alert with it. A new deploy
 of `private::Tiny` walks into the same Source. The webhook fires on a
 window, not once per line.
 
-Nothing here is built yet. The files and endpoints named below are
-what the change rests on, all of them checkable in the tree today.
+ALT-1 through ALT-8 shipped in 0.3.0. ALT-9 — the same graph from a
+terminal — is the open one. This stays the design record rather than
+becoming a changelog: what the tickets say is what was built, and
+where a ticket and the tree disagree the tree is the bug.
 
 ## Epic
 
@@ -145,10 +147,14 @@ would make an optional disk trail the control plane for alerts.
    `max_fires_per_interval`: under quiesce a window ends
    in exactly one flush, so a cap of 1 could never bind.
    Discord 429 is a delivery row, not a retry loop.
-6. **The webhook URL never appears in audit `result` or process
-   logs.** GET returns a mask. Create/update/delete audit the
-   Alert id and name. Same class of secret as `apis.api_secret`,
-   which `ApiOut` already refuses to echo.
+6. **The webhook URL never appears in audit `result`, process
+   logs, or a command line.** GET returns a mask.
+   Create/update/delete audit the Alert id and name. Same class
+   of secret as `apis.api_secret`, which `ApiOut` already refuses
+   to echo. The third place is the CLI's: an argument is written
+   to shell history and is readable in `ps` while the process
+   runs, so there is no `--webhook-url` flag to type it into
+   (ALT-9).
 7. **Matcher search never runs on the API event loop.**
    `run_log_persist` and `run_alert_match` are asyncio tasks
    in one thread. `re.search` plus a deadline is not a thing
@@ -1191,6 +1197,83 @@ fakes `psubscribe`.
 **Verify.** The scenarios exist and pass. Do not invent
 a second HTTP shape in the tests.
 
+### ALT-9 — `mftik alert`
+
+**Scope.** `packages/common/src/mftik/cli/alert.py`, the
+`Command` row and `_setup_alert` in
+`packages/common/src/mftik/cli/app.py`, `put` / `patch` on
+`Client` in `cli/client.py`. Tests in
+`packages/common/tests/test_cli_alert.py`, against a mock
+transport the way `test_cli_env.py` does.
+
+**Problem.** ALT-7 gave the graph a page and nothing else, so
+wiring a webhook on a headless node means curl and a hand-built
+JSON body. The endpoints are already there; what is missing is
+the surface that does not need a browser.
+
+**Solution.** One command with verbs, named `alert` in the
+singular. The split in this CLI is not singular against plural
+but listing against namespace: `profiles` and `logs` are
+terminal and take no verb, `env` is an entry point and is
+singular. `source` and `matcher` nest under `alert` rather than
+taking two more top-level names — a Source with nothing wired
+to it is a subscription nobody reads.
+
+```
+mftik alert list | graph | add | rm | test | deliveries | types
+mftik alert wire   --source <id> --matcher <id>
+mftik alert wire   --matcher <id> --alert <id>
+mftik alert unwire  … same grammar
+mftik alert source  list | add | rm
+mftik alert matcher list | add | rm
+```
+
+The webhook URL is prompted for with `getpass`, or piped in
+with `--webhook-url-stdin`. There is no flag that takes it —
+see invariant 6. The stdin path is an explicit flag rather than
+an `isatty()` guess, because a cron job or CI runner has no TTY
+*and* often nothing on stdin, and guessing there reads an empty
+string and sends a 422 that has to be worked backwards from.
+
+`wire` names an edge with two of three ids.
+`--source X --alert Y` fails locally, without a request, and
+prints the two commands that do what was meant. The schema
+already makes that edge unrepresentable; this is so a person
+does not learn it from a 404.
+
+`--value` is coerced against `--as` before the body is built.
+A spec whose value is the wrong type stores fine and dies at
+match time, in the worker, on a line nobody is watching.
+`matcher list` prints `disabled_reason` to stderr for the same
+reason — a Matcher the worker disabled must not read like one
+that is judging.
+
+No `mftik alert edit`. `PATCH /alerts/{id}` exists and the UI
+uses it; rotating a webhook from a terminal is `rm` then `add`
+until someone needs otherwise.
+
+**Verify.**
+
+- `alert list` prints `webhook_masked` and no test asserts a
+  raw URL anywhere in stdout or stderr.
+- `alert add --webhook-url <url>` is not a valid invocation.
+- `alert add` with no TTY and no `--webhook-url-stdin` fails
+  and names the flag.
+- `--webhook-url-stdin` with an empty pipe says the pipe was
+  empty rather than sending one.
+- `wire --source X --alert Y` exits non-zero having made no
+  request at all.
+- `matcher add --as float --value high` exits non-zero with
+  nothing stored.
+- `source add --domain sts` with 32 hex characters warns on
+  stderr and stores it anyway — the API cannot tell, a person
+  can, and it will never match.
+- `alert test` exits non-zero when the delivery carries an
+  error, or a CI job that "checked the webhook" checked
+  nothing.
+- Every path the CLI builds matches a route in
+  `contracts/openapi.json` — method and body fields included.
+
 ---
 
 ## Integration scenarios (ALT-8)
@@ -1311,7 +1394,8 @@ ALT-1 stamp type on log/status
 ALT-2 tables
   └── ALT-3 CRUD + mask + audit + test
         ├── ALT-6 (needs Alert rows and the client)
-        └── ALT-7 UI (can mock fire; needs CRUD)
+        ├── ALT-7 UI (can mock fire; needs CRUD)
+        └── ALT-9 CLI (same endpoints; needs CRUD)
 ```
 
 ALT-1 and ALT-2 start in parallel. ALT-4 needs the
@@ -1319,7 +1403,10 @@ stamp (or it is cache-only for STS, which is the
 fallback, not the path). ALT-7 may merge once ALT-3
 exists; it must not invent a second JSON shape the
 route does not return. ALT-8 is written against the
-names ALT-3–6 actually shipped.
+names ALT-3–6 actually shipped. ALT-9 sits beside
+ALT-7 rather than after it: they are two front ends on
+one set of endpoints, and neither is the other's
+prerequisite.
 
 ## Docs that become wrong when this ships
 
@@ -1351,3 +1438,5 @@ the webhook.
 - Playwright beyond the ALT-7 smoke.
 - Retention / compaction of `alert_deliveries`.
 - `type` on `session_logs` (history search, not match).
+- `mftik alert edit`. Rotating a webhook from a
+  terminal is `rm` then `add` until it is not enough.
