@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { api, formatTs, shortId, type BoardFill, type BoardSession } from '$lib/api';
 	import { connectFills, type FillConnection } from '$lib/logging/fills';
+	import { formatTickerTag, visibleTags } from '$lib/ticker';
 
 	/**
 	 * One card per strategy run: how much it traded and how long it ran.
@@ -259,6 +260,18 @@
 					</span>
 				</header>
 
+				{#if s.tickers.length}
+					{@const tags = visibleTags(s.tickers)}
+					<div class="tags" title={s.tickers.join(', ')}>
+						{#each tags.shown as ticker (ticker)}
+							<span class="badge">{formatTickerTag(ticker)}</span>
+						{/each}
+						{#if tags.extra}
+							<span class="badge">+{tags.extra}</span>
+						{/if}
+					</div>
+				{/if}
+
 				<div class="figure">
 					<span class="count">{fillsOf(s)}</span>
 					<span class="unit">
@@ -352,6 +365,12 @@
 
 	.strategy {
 		font-weight: 700;
+	}
+
+	.tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.3rem;
 	}
 
 	.figure {

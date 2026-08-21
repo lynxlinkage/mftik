@@ -25,6 +25,8 @@ export type BoardSession = {
 	td_api_ids: number[];
 	confirmed_through_ts: number | null;
 	settled: boolean;
+	/** Instruments this run placed an order on. Empty when it never sent one. */
+	tickers: string[];
 };
 
 /**

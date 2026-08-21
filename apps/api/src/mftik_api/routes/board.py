@@ -96,18 +96,17 @@ def _epoch(value: datetime | None) -> float | None:
 
 async def _settlement_lines(
     db: Any, rows: list[Any]
-) -> tuple[dict[str, float], set[str]]:
-    """Lines by session, and which sessions have anything to confirm at all.
+) -> tuple[dict[str, float], dict[str, list[str]]]:
+    """Lines by session, and the instruments each run placed an order on.
 
     A result is only as settled as its least-confirmed input, so one unwalked
-    account or instrument leaves the whole run provisional. Instruments are
-    read for this and never reported: which ones a strategy listened to is a
-    property of the strategy, not of how the run went.
+    account or instrument leaves the whole run provisional. The instruments
+    are the orders' tickers, not the strategy's subscriptions: a chase that
+    never filled still names the book, and a subscribe-only run does not.
 
-    The second half of the answer is the set of sessions with an order on file.
     A run that placed none has no scope for a walk to cover, so no cursor will
-    ever mention it — which is not the same fact as an unwalked run, and the
-    caller needs to tell them apart.
+    ever mention it — which is not the same fact as an unwalked run. The
+    caller tells them apart by whether the ticker list is empty.
     """
     session_ids = [row.session_id for row in rows]
     tickers = await OrderRepository(db).tickers_by_session(session_ids)
@@ -139,7 +138,7 @@ async def _settlement_lines(
             for stream in streams
             for scope in scopes
         )
-    return lines, {sid for sid, names in tickers.items() if names}
+    return lines, tickers
 
 
 def _summary(
@@ -148,16 +147,17 @@ def _summary(
     fills: int,
     line: float | None,
     now: float,
-    has_orders: bool = True,
+    tickers: list[str] | None = None,
 ) -> BoardSession:
     created = _epoch(row.created_at) or 0.0
     finished = _epoch(row.finished_at)
+    instruments = list(tickers or [])
     # A run that ended having recorded nothing at all has nothing to confirm,
     # and no cursor will ever mention it. Calling that provisional forever
     # would report "not yet checked" about a run where there is nothing to
     # check. Fills without an order on file is a different thing entirely — an
     # anomaly — and stays provisional so it does not get hidden behind a badge.
-    nothing_to_settle = not has_orders and fills == 0
+    nothing_to_settle = not instruments and fills == 0
     return BoardSession(
         session_id=row.session_id,
         strategy=row.strategy,
@@ -177,6 +177,7 @@ def _summary(
             finished is not None
             and ((line and line >= finished) or nothing_to_settle)
         ),
+        tickers=instruments,
     )
 
 
@@ -236,7 +237,7 @@ async def list_board_sessions(
         fills = await FillRepository(db).count_by_session(
             [row.session_id for row in rows]
         )
-        lines, scoped = await _settlement_lines(db, rows)
+        lines, tickers = await _settlement_lines(db, rows)
 
     return BoardResponse(
         sessions=[
@@ -245,7 +246,7 @@ async def list_board_sessions(
                 fills=fills.get(row.session_id, 0),
                 line=lines.get(row.session_id),
                 now=now,
-                has_orders=row.session_id in scoped,
+                tickers=tickers.get(row.session_id, []),
             )
             for row in rows
         ]
@@ -261,14 +262,14 @@ async def get_board_session(session_id: str) -> BoardSession:
         if row is None:
             raise HTTPException(status_code=404, detail=f"no session {session_id}")
         fills = await FillRepository(db).count_by_session([session_id])
-        lines, scoped = await _settlement_lines(db, [row])
+        lines, tickers = await _settlement_lines(db, [row])
 
     return _summary(
         row,
         fills=fills.get(session_id, 0),
         line=lines.get(session_id),
         now=now,
-        has_orders=session_id in scoped,
+        tickers=tickers.get(session_id, []),
     )
 
 
@@ -294,7 +295,7 @@ async def list_board_fills(
         lines: dict[str, float] = {}
         summary_row = await StsSessionRepository(db).get_by_session_id(session_id)
         if summary_row is not None:
-            lines, _scoped = await _settlement_lines(db, [summary_row])
+            lines, _tickers = await _settlement_lines(db, [summary_row])
 
     has_more = len(rows) > limit
     line = lines.get(session_id)
@@ -312,7 +313,7 @@ async def export_board_fills_csv(session_id: str) -> Response:
         if summary_row is None:
             raise HTTPException(status_code=404, detail=f"no session {session_id}")
         fills = await FillRepository(db).replay_for_session(session_id)
-        lines, _scoped = await _settlement_lines(db, [summary_row])
+        lines, _tickers = await _settlement_lines(db, [summary_row])
 
     line = lines.get(session_id)
     buf = io.StringIO()

@@ -213,6 +213,29 @@ async def test_a_run_that_never_traded_reports_zero_not_nothing(db) -> None:
     (row,) = await rows()
 
     assert row.fills == 0
+    assert row.tickers == []
+
+
+async def test_a_run_reports_the_instruments_it_placed_on(db) -> None:
+    """The books it sent an order to, not the ones it subscribed to."""
+    await a_session(db, "s1")
+    await an_order(
+        db, "s1", key="cid-1", ts=START.timestamp(), ticker="Gate_Spot_BTCUSDT"
+    )
+    await an_order(
+        db,
+        "s1",
+        key="cid-2",
+        ts=START.timestamp(),
+        ticker="GateFutures_Perp_BTCUSDT",
+    )
+
+    (row,) = await rows()
+
+    assert row.tickers == [
+        "GateFutures_Perp_BTCUSDT",
+        "Gate_Spot_BTCUSDT",
+    ]
 
 
 async def test_counts_do_not_leak_between_sessions(db) -> None:
@@ -329,6 +352,7 @@ async def test_a_run_summary_is_readable_on_its_own(db) -> None:
     assert row.session_id == "s1"
     assert row.fills == 1
     assert row.duration_s == pytest.approx(600.0)
+    assert row.tickers == [TICKER]
 
 
 async def test_asking_for_a_run_that_does_not_exist_is_a_404(db) -> None:

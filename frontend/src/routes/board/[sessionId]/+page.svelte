@@ -9,6 +9,7 @@
 		type BoardSession
 	} from '$lib/api';
 	import { connectFills, type FillConnection } from '$lib/logging/fills';
+	import { formatTickerTag } from '$lib/ticker';
 
 	/**
 	 * Every execution this run recorded, newest first.
@@ -202,6 +203,16 @@
 					{/each}
 				</dd>
 			</div>
+			{#if summary.tickers.length}
+				<div class="instruments">
+					<dt>Instruments</dt>
+					<dd class="tags">
+						{#each summary.tickers as ticker (ticker)}
+							<span class="badge" title={ticker}>{formatTickerTag(ticker)}</span>
+						{/each}
+					</dd>
+				</div>
+			{/if}
 		</dl>
 	</section>
 {/if}
@@ -336,6 +347,17 @@
 	.summary dd {
 		margin: 0;
 		font-weight: 600;
+	}
+
+	.summary .instruments {
+		grid-column: 1 / -1;
+	}
+
+	.tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.3rem;
+		font-weight: 500;
 	}
 
 	.num {

@@ -289,6 +289,9 @@ class BoardSession(BaseModel):
     confirmed_through_ts: float | None = None
     #: Whether every count above sits at or before that line.
     settled: bool = False
+    #: Instruments this run placed an order on, as stored on ``orders``.
+    #: Empty when it never sent one. Not what it subscribed to.
+    tickers: list[str] = Field(default_factory=list)
 
 
 class BoardResponse(BaseModel):

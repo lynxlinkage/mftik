@@ -4282,6 +4282,13 @@
             "type": "boolean",
             "title": "Settled",
             "default": false
+          },
+          "tickers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tickers"
           }
         },
         "type": "object",
