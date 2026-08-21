@@ -1,7 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
 
 /**
- * Alert page — Sources / Matchers / Alerts. Stubs the API the same way
+ * Alert page — three-lane Svelte Flow editor. Stubs the API the same way
  * strategy-page.spec.ts does: authenticated: false, never the live backend.
  */
 
@@ -341,27 +341,44 @@ test('nav shows Alert and the page wires a graph without exposing the webhook', 
 	await expect(page.getByRole('heading', { name: 'Matchers' })).toBeVisible();
 	await expect(page.getByText('No graph yet.')).toBeVisible();
 
+	await page.getByRole('button', { name: 'Add source node' }).click();
 	const picker = page.getByTestId('sts-picker');
 	await expect(picker.locator('option', { hasText: 'NoopStrategy' })).toHaveCount(1);
 	await expect(picker).not.toContainText(HEX_SESSION);
+	await page.getByRole('button', { name: 'Add source', exact: true }).click();
+	await expect(page.getByRole('heading', { name: 'New source' })).toHaveCount(0);
+	await expect(page.locator('code', { hasText: 'sts:*' })).toBeVisible();
 
-	await page.getByRole('button', { name: 'Add source' }).click();
+	await page.getByRole('button', { name: 'Add matcher node' }).click();
+	await expect(page.getByRole('heading', { name: 'New matcher' })).toBeVisible();
 	await page.getByLabel('Matcher name').fill('warns');
-	await page.getByRole('button', { name: 'Add matcher' }).click();
+	const matcherPosted = page.waitForRequest(
+		(req) => req.method() === 'POST' && req.url().includes('/api/alerts/matchers')
+	);
+	await page.getByTestId('submit-matcher').click();
+	await matcherPosted;
+	await expect(page.locator('strong', { hasText: 'warns' })).toBeVisible();
+
+	await page.getByRole('button', { name: 'Add alert node' }).click();
+	await expect(page.getByRole('heading', { name: 'New alert' })).toBeVisible();
 	await page.getByLabel('Alert name').fill('ops');
 	await page.getByLabel('Webhook URL').fill(WEBHOOK);
-	await page.getByRole('button', { name: 'Add alert' }).click();
+	await page.getByRole('button', { name: 'Add alert', exact: true }).click();
 
 	await expect(page.locator('code', { hasText: 'sts:*' })).toBeVisible();
 	await expect(page.locator('strong', { hasText: 'warns' })).toBeVisible();
-	await expect(page.getByRole('button', { name: 'ops' })).toBeVisible();
+	await expect(page.locator('strong', { hasText: 'ops' })).toBeVisible();
 	await expect(page.getByText('https://discord.com/api/webhooks/…/***')).toBeVisible();
 	await expect(page.getByText('No graph yet.')).toHaveCount(0);
 
-	await page.getByLabel('Matcher for source 1').selectOption({ label: 'warns' });
-	await page.getByRole('button', { name: 'Wire' }).first().click();
-	await page.getByLabel('Alert for matcher 2').selectOption({ label: 'ops' });
-	await page.getByRole('button', { name: 'Wire' }).nth(1).click();
+	await page.evaluate(async () => {
+		await fetch('/api/alerts/sources/1/matchers/2', { method: 'PUT' });
+		await fetch('/api/alerts/matchers/2/alerts/3', { method: 'PUT' });
+	});
+	await page.getByRole('button', { name: 'Refresh' }).click();
+	await expect(page.locator('.svelte-flow__node[data-id="source-1"]')).toBeVisible();
+	await expect(page.locator('[data-id="sm-1-2"]')).toBeVisible();
+	await expect(page.locator('[data-id="ma-2-3"]')).toBeVisible();
 
 	for (const body of getBodies) {
 		expect(jsonHasWebhook(body)).toBe(false);
