@@ -13,6 +13,7 @@ from mftik_api.auth import AuthMiddleware, auth_router
 from mftik_api.backfill_cron import run_backfill_cron
 from mftik_api.log_persist import run_log_persist
 from mftik_api.routes import (
+    alerts_router,
     apis_router,
     audits_router,
     board_router,
@@ -118,6 +119,7 @@ app.include_router(sym_router)
 app.include_router(audits_router)
 app.include_router(logs_router)
 app.include_router(board_router)
+app.include_router(alerts_router)
 
 
 @app.websocket("/ws/board")

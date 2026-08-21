@@ -12,6 +12,10 @@ dependencies = [
     # argon2id for the Owner's password. The one hashing decision here, and
     # not one to hand-roll.
     "argon2-cffi>=23.1",
+    # Declared here because ALT-6 posts Discord and the matcher compile
+    # (ALT-3) / search (ALT-5) use the ``regex`` package, not stdlib ``re``.
+    "httpx>=0.27",
+    "regex>=2024.0",
 ]
 
 [tool.uv.sources]

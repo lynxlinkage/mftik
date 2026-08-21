@@ -74,6 +74,17 @@ class AlertSourceRepository(BaseRepository[AlertSource]):
         )
         return result.scalars().all()
 
+    async def get_by_domain_selector(
+        self, domain: str, selector: str
+    ) -> AlertSource | None:
+        result = await self.session.execute(
+            select(AlertSource).where(
+                AlertSource.domain == domain,
+                AlertSource.selector == selector,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def delete(self, source_id: int) -> bool:
         row = await self.get(source_id)
         if row is None:
@@ -103,6 +114,18 @@ class AlertMatcherRepository(BaseRepository[AlertMatcher]):
                 spec=dict(spec or {}),
             )
         )
+
+    async def get_by_name(self, name: str) -> AlertMatcher | None:
+        result = await self.session.execute(
+            select(AlertMatcher).where(AlertMatcher.name == name)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_all(self) -> Sequence[AlertMatcher]:
+        result = await self.session.execute(
+            select(AlertMatcher).order_by(AlertMatcher.id)
+        )
+        return result.scalars().all()
 
     async def delete(self, matcher_id: int) -> bool:
         row = await self.get(matcher_id)
@@ -143,6 +166,33 @@ class AlertRepository(BaseRepository[Alert]):
                 dedupe=dedupe,
             )
         )
+
+    async def get_by_name(self, name: str) -> Alert | None:
+        result = await self.session.execute(select(Alert).where(Alert.name == name))
+        return result.scalar_one_or_none()
+
+    async def list_all(self) -> Sequence[Alert]:
+        result = await self.session.execute(select(Alert).order_by(Alert.id))
+        return result.scalars().all()
+
+    async def list_source_matcher_wires(self) -> Sequence[AlertSourceMatcher]:
+        result = await self.session.execute(select(AlertSourceMatcher))
+        return result.scalars().all()
+
+    async def list_matcher_alert_wires(self) -> Sequence[AlertMatcherAlert]:
+        result = await self.session.execute(select(AlertMatcherAlert))
+        return result.scalars().all()
+
+    async def list_deliveries(
+        self, alert_id: int, *, limit: int = 50
+    ) -> Sequence[AlertDelivery]:
+        result = await self.session.execute(
+            select(AlertDelivery)
+            .where(AlertDelivery.alert_id == alert_id)
+            .order_by(AlertDelivery.ts.desc())
+            .limit(limit)
+        )
+        return result.scalars().all()
 
     async def delete(self, alert_id: int) -> bool:
         row = await self.get(alert_id)

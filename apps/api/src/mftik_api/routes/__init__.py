@@ -1,5 +1,6 @@
 """API routes."""
 
+from mftik_api.routes.alerts import router as alerts_router
 from mftik_api.routes.apis import router as apis_router
 from mftik_api.routes.audits import router as audits_router
 from mftik_api.routes.board import router as board_router
@@ -14,6 +15,7 @@ from mftik_api.routes.sym import router as sym_router
 from mftik_api.routes.td import router as td_router
 
 __all__ = [
+    "alerts_router",
     "apis_router",
     "audits_router",
     "board_router",
