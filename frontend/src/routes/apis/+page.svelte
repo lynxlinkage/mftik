@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import { api, formatTs, type ApiCredential, type Venue } from '$lib/api';
+	import { maskApiKey } from '$lib/mask';
 
 	let rows = $state<ApiCredential[]>([]);
 	let venues = $state<Venue[]>([]);
@@ -281,7 +282,7 @@
 							{/if}
 						</td>
 						<td><code>{row.venue}</code></td>
-						<td><code>{row.api_key}</code></td>
+						<td><code>{maskApiKey(row.api_key)}</code></td>
 						<td>{row.type}</td>
 						<td class="muted">{formatTs(row.created_at)}</td>
 						<td>
