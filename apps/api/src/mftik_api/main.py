@@ -9,6 +9,7 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from mftik.broker import Broker
 
+from mftik_api.alert_match import run_alert_match
 from mftik_api.auth import AuthMiddleware, auth_router
 from mftik_api.backfill_cron import run_backfill_cron
 from mftik_api.log_persist import run_log_persist
@@ -72,14 +73,17 @@ async def lifespan(app: FastAPI):
 
     persist_stop = asyncio.Event()
     persist_task = asyncio.create_task(run_log_persist(persist_stop))
+    match_stop = asyncio.Event()
+    match_task = asyncio.create_task(run_alert_match(match_stop))
     backfill_stop = asyncio.Event()
     backfill_task = asyncio.create_task(run_backfill_cron(backfill_stop))
     try:
         yield
     finally:
         persist_stop.set()
+        match_stop.set()
         backfill_stop.set()
-        for task in (persist_task, backfill_task):
+        for task in (persist_task, match_task, backfill_task):
             try:
                 await asyncio.wait_for(task, timeout=10)
             except (TimeoutError, asyncio.CancelledError):
