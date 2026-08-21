@@ -55,12 +55,17 @@ async def deploy_strategy(
     attached_td: list[dict[str, Any]] = []
     attached_md: dict[str, Any] | None = None
 
-    await publish_sts_log(
-        broker,
-        session_id,
-        f"deploy start strategy={strategy_id} td={td} md={md}",
-        source="api",
-    )
+    async def sts_log(message: str, *, level: str = "info") -> None:
+        await publish_sts_log(
+            broker,
+            session_id,
+            message,
+            source="api",
+            level=level,
+            type=strategy_type,
+        )
+
+    await sts_log(f"deploy start strategy={strategy_id} td={td} md={md}")
 
     try:
         sts = await request_domain(
@@ -85,20 +90,9 @@ async def deploy_strategy(
             result_type=StsCreateSessionResult,
             timeout=10.0,
         )
-        await publish_sts_log(
-            broker,
-            session_id,
-            f"STS created strategy={sts.strategy}",
-            source="api",
-        )
+        await sts_log(f"STS created strategy={sts.strategy}")
     except DomainRpcError as exc:
-        await publish_sts_log(
-            broker,
-            session_id,
-            f"STS create failed: {exc.message}",
-            source="api",
-            level="error",
-        )
+        await sts_log(f"STS create failed: {exc.message}", level="error")
         raise
 
     if sts.status != SessionStatus.LIVE.value:
@@ -113,23 +107,14 @@ async def deploy_strategy(
             session_id,
             reason,
         )
-        await publish_sts_log(
-            broker,
-            session_id,
-            f"strategy refused this configuration: {reason}",
-            source="api",
-            level="error",
+        await sts_log(
+            f"strategy refused this configuration: {reason}", level="error"
         )
         raise DomainRpcError("strategy_refused", reason)
 
     try:
         if md:
-            await publish_sts_log(
-                broker,
-                session_id,
-                f"MD attach starting feeds={md}",
-                source="api",
-            )
+            await sts_log(f"MD attach starting feeds={md}")
             for venue in _md_venues(md):
                 await publish_md_log(
                     broker,
@@ -158,12 +143,7 @@ async def deploy_strategy(
                 "subscriptions": list(md_result.subscriptions),
                 "refcounts": dict(md_result.refcounts),
             }
-            await publish_sts_log(
-                broker,
-                session_id,
-                f"MD attached feeds={md_result.subscriptions}",
-                source="api",
-            )
+            await sts_log(f"MD attached feeds={md_result.subscriptions}")
             for venue in _md_venues(md_result.subscriptions):
                 await publish_md_log(
                     broker,
@@ -176,12 +156,7 @@ async def deploy_strategy(
                 )
 
         for api_id in td:
-            await publish_sts_log(
-                broker,
-                session_id,
-                f"TD attach starting api_id={api_id}",
-                source="api",
-            )
+            await sts_log(f"TD attach starting api_id={api_id}")
             result = await request_domain(
                 broker,
                 Topics.TD,
@@ -205,11 +180,8 @@ async def deploy_strategy(
                     "refcount": result.refcount,
                 }
             )
-            await publish_sts_log(
-                broker,
-                session_id,
-                f"TD attached api_id={result.api_id} refcount={result.refcount}",
-                source="api",
+            await sts_log(
+                f"TD attached api_id={result.api_id} refcount={result.refcount}"
             )
     except Exception as exc:
         if isinstance(exc, DomainRpcError):
@@ -222,12 +194,8 @@ async def deploy_strategy(
             logger.exception(
                 "MD/TD attach failed — rolling back STS session=%s", session_id
             )
-        await publish_sts_log(
-            broker,
-            session_id,
-            f"attach failed — rolling back STS: {exc}",
-            source="api",
-            level="error",
+        await sts_log(
+            f"attach failed — rolling back STS: {exc}", level="error"
         )
         fail_reason = f"attach failed — rolled back during deploy: {exc}"
         try:
@@ -245,13 +213,7 @@ async def deploy_strategy(
                 result_type=StsSessionControlResult,
                 timeout=10.0,
             )
-            await publish_sts_log(
-                broker,
-                session_id,
-                "STS failed after rollback",
-                source="api",
-                level="warning",
-            )
+            await sts_log("STS failed after rollback", level="warning")
         except Exception:
             logger.exception("rollback STS fail failed session=%s", session_id)
         raise
@@ -261,11 +223,8 @@ async def deploy_strategy(
         if attached_md is not None
         else list(md)
     )
-    await publish_sts_log(
-        broker,
-        session_id,
-        f"deploy complete strategy={sts.strategy} td={attached_td} md={md_out}",
-        source="api",
+    await sts_log(
+        f"deploy complete strategy={sts.strategy} td={attached_td} md={md_out}"
     )
     return {
         "session_id": session_id,

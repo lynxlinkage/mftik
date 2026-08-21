@@ -635,3 +635,121 @@ class EnvironmentImportOut(BaseModel):
     unpinned: list[str] = Field(default_factory=list)
     applied: bool = False
     environment: EnvironmentOut | None = None
+
+
+class AlertSourceCreateBody(BaseModel):
+    domain: str
+    selector: str
+    created_by: int | None = None
+
+
+class AlertSourceOut(BaseModel):
+    id: int
+    created_by: int
+    domain: str
+    selector: str
+    matcher_ids: list[int] = Field(default_factory=list)
+
+
+class AlertSourceListResponse(BaseModel):
+    sources: list[AlertSourceOut] = Field(default_factory=list)
+
+
+class AlertMatcherCreateBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    kind: str
+    spec: dict[str, Any] = Field(default_factory=dict)
+    created_by: int | None = None
+
+
+class AlertMatcherPatchBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    kind: str | None = None
+    spec: dict[str, Any] | None = None
+
+
+class AlertMatcherOut(BaseModel):
+    id: int
+    created_by: int
+    name: str
+    kind: str
+    spec: dict[str, Any] = Field(default_factory=dict)
+    source_ids: list[int] = Field(default_factory=list)
+    alert_ids: list[int] = Field(default_factory=list)
+    #: Set when the in-process worker has disabled this Matcher (timeouts).
+    disabled_reason: str | None = None
+
+
+class AlertMatcherListResponse(BaseModel):
+    matchers: list[AlertMatcherOut] = Field(default_factory=list)
+
+
+class AlertCreateBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    webhook_url: str = Field(..., min_length=1)
+    kind: Literal["discord_webhook"] = "discord_webhook"
+    enabled: bool = True
+    flush_interval_s: int = Field(default=30, ge=1, le=3600)
+    max_events_in_payload: int = Field(default=15, ge=1, le=25)
+    max_buffer_events: int = Field(default=200, ge=1, le=5000)
+    dedupe: bool = True
+    created_by: int | None = None
+
+
+class AlertPatchBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    webhook_url: str | None = None
+    enabled: bool | None = None
+    flush_interval_s: int | None = Field(default=None, ge=1, le=3600)
+    max_events_in_payload: int | None = Field(default=None, ge=1, le=25)
+    max_buffer_events: int | None = Field(default=None, ge=1, le=5000)
+    dedupe: bool | None = None
+
+
+class AlertOut(BaseModel):
+    id: int
+    created_by: int
+    name: str
+    kind: str
+    webhook_masked: str
+    enabled: bool
+    flush_interval_s: int
+    max_events_in_payload: int
+    max_buffer_events: int
+    dedupe: bool
+    matcher_ids: list[int] = Field(default_factory=list)
+
+
+class AlertListResponse(BaseModel):
+    alerts: list[AlertOut] = Field(default_factory=list)
+
+
+class AlertDeleteResponse(BaseModel):
+    id: int
+    deleted: bool = True
+
+
+class AlertWireResponse(BaseModel):
+    wired: bool = True
+    source_id: int | None = None
+    matcher_id: int
+    alert_id: int | None = None
+
+
+class AlertDeliveryOut(BaseModel):
+    id: int
+    alert_id: int
+    window_start: float
+    event_count: int
+    dropped_count: int
+    http_status: int | None = None
+    error: str | None = None
+    ts: float
+
+
+class AlertDeliveryListResponse(BaseModel):
+    deliveries: list[AlertDeliveryOut] = Field(default_factory=list)
+
+
+class AlertTestResponse(BaseModel):
+    delivery: AlertDeliveryOut

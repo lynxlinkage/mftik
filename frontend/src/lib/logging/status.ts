@@ -15,6 +15,8 @@ export type StsSessionStatusEvent = {
 	/** live | done | failed | interrupted | ack */
 	status: string;
 	strategy: string | null;
+	/** Qualified registry key. Null when the deploy never recorded one. */
+	type: string | null;
 	reason: string | null;
 	created_by: number | null;
 	finished_at: number | null;
@@ -83,6 +85,7 @@ export function connectStsStatus(
 				session_id: p.session_id,
 				status: p.status,
 				strategy: p.strategy ?? null,
+				type: p.type ?? null,
 				reason: p.reason ?? null,
 				created_by: p.created_by ?? null,
 				finished_at: p.finished_at ?? null,

@@ -188,6 +188,7 @@ class SessionManager:
         strategy: str | None = None,
         reason: str | None = None,
         created_by: int | None = None,
+        type: str | None = None,
     ) -> None:
         """Announce a session's state on the shared status channel.
 
@@ -207,6 +208,7 @@ class SessionManager:
             reason=reason,
             created_by=created_by,
             finished_at=time.time() if terminal else None,
+            type=type,
         )
         envelope = StsSessionStatusEnvelope.wrap(
             payload,
@@ -270,6 +272,7 @@ class SessionManager:
             st_paras=dict(request.st_paras),
             heartbeat_interval=self._heartbeat_interval,
             on_exit=self._on_session_exit,
+            strategy_type=request.type,
         )
         # Register before start so Strategy.exit() during on_start/on_ready works.
         self._sessions[request.session_id] = session
@@ -311,6 +314,7 @@ class SessionManager:
                 strategy=strategy.name,
                 created_by=request.created_by,
                 reason=reason,
+                type=request.type,
             )
             raise
 
@@ -328,6 +332,7 @@ class SessionManager:
                 status=SessionStatus.LIVE.value,
                 strategy=strategy.name,
                 created_by=request.created_by,
+                type=request.type,
             )
         if session_exited:
             status = (
@@ -400,6 +405,10 @@ class SessionManager:
                             else getattr(row, "strategy", None)
                         ),
                         reason=getattr(row, "reason", None),
+                        type=(
+                            (live.type if live is not None else None)
+                            or getattr(row, "type", None)
+                        ),
                     )
                 )
             return out
@@ -423,6 +432,7 @@ class SessionManager:
                     status=SessionStatus.LIVE.value,
                     sts_session_id=session.session_id,
                     strategy=session.strategy_name,
+                    type=session.type,
                 )
             )
         return rows
@@ -474,6 +484,7 @@ class SessionManager:
         broker = session.broker
         strategy_name = session.strategy_name
         created_by = session.created_by
+        session_type = session.type
         await session.stop()
         if self._mark_done is not None:
             await self._mark_done(session_id, status=status, reason=reason)
@@ -489,6 +500,7 @@ class SessionManager:
             strategy=strategy_name,
             reason=reason,
             created_by=created_by,
+            type=session_type,
         )
         if status == SessionStatus.FAILED.value:
             # The row carries the reason for later, but the operator watching
@@ -500,6 +512,7 @@ class SessionManager:
                     f"session failed: {reason or 'no reason given'}",
                     source="sts",
                     level="error",
+                    type=session_type,
                 )
             except Exception:
                 logger.exception(
@@ -592,6 +605,7 @@ class SessionManager:
                 strategy=getattr(row, "strategy", None),
                 reason=reason,
                 created_by=getattr(row, "created_by", None),
+                type=getattr(row, "type", None),
             )
             reaped.append(session_id)
             logger.warning(
@@ -834,6 +848,7 @@ class SessionManager:
             heartbeat_interval=self._heartbeat_interval,
             on_exit=self._on_session_exit,
             remember=self._remember_fact,
+            strategy_type=getattr(row, "type", None),
         )
         self._sessions[session_id] = session
 
@@ -854,6 +869,7 @@ class SessionManager:
             f"rebuilding session strategy={session.strategy_name} "
             f"td={td_api_ids} md={md_ids}",
             source="sts",
+            type=session.type,
         )
         await session.start()
 
@@ -878,6 +894,7 @@ class SessionManager:
             status=SessionStatus.LIVE.value,
             strategy=session.strategy_name,
             created_by=created_by,
+            type=session.type,
         )
 
     async def _abandon_rebuild(self, session_id: str) -> None:

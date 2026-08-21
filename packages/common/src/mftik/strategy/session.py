@@ -26,6 +26,10 @@ class SessionView(Protocol):
 
     #: Identifies this run. Names its md topic, its log stream, and its row.
     session_id: str
+    #: Qualified registry key (``CrossArb``, ``private::Tiny``). Null when
+    #: the deploy never recorded one. The kind id Alert matches on — not
+    #: ``session_id`` and not the short ``Strategy.name``.
+    type: str | None
     #: The 16-bit slot packed into every ``client_order_id`` this session
     #: mints — how a fill on an account-wide feed is traced back to one run.
     cid_slot: int
