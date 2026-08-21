@@ -8,6 +8,7 @@ import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from mftik.broker import Broker
@@ -20,6 +21,7 @@ from mftik_db.repositories import (
 )
 from mftik_db.session import session_scope
 
+from mftik_api.alert_discord import post_webhook
 from mftik_api.alert_eval import Hit, warm_patterns
 from mftik_api.alert_eval import evaluate as judge
 from mftik_api.log_persist import LOG_PATTERN, parse_log_topic
@@ -47,6 +49,11 @@ class AlertRec:
     id: int
     name: str
     enabled: bool
+    webhook_url: str = ""
+    flush_interval_s: float = 30
+    max_events_in_payload: int = 15
+    max_buffer_events: int = 200
+    dedupe: bool = True
 
 
 @dataclass
@@ -94,6 +101,14 @@ class MatchEvent:
     captures: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class Window:
+    events: list[MatchEvent] = field(default_factory=list)
+    dropped: int = 0
+    started: float = 0.0
+    task: asyncio.Task[None] | None = None
+
+
 class TypeCache:
     """``session_id → type | None``. A cached null is a hit, not a miss."""
 
@@ -116,12 +131,13 @@ class TypeCache:
 
 
 class MatchRuntime:
-    def __init__(self) -> None:
+    def __init__(self, *, arm_timers: bool = False) -> None:
         self.graph = Graph()
         self.cache = TypeCache(
             ttl=max(1.0, float(os.getenv("ALERT_TYPE_CACHE_TTL", "30")))
         )
-        self.pending: dict[int, list[MatchEvent]] = defaultdict(list)
+        self.windows: dict[int, Window] = {}
+        self.arm_timers = arm_timers
         self.lookup_calls = 0
         self.disabled: dict[int, str] = {}
         self.timeout_streak: dict[int, int] = {}
@@ -131,7 +147,8 @@ class MatchRuntime:
         self.timeout_streak.clear()
 
     def pending_events(self, alert_id: int) -> list[MatchEvent]:
-        return list(self.pending.get(alert_id, ()))
+        window = self.windows.get(alert_id)
+        return list(window.events) if window is not None else []
 
 
 _runtime: MatchRuntime | None = None
@@ -158,7 +175,16 @@ async def load_graph() -> Graph:
             for row in await AlertMatcherRepository(db).list_all()
         }
         alerts = {
-            row.id: AlertRec(id=row.id, name=row.name, enabled=row.enabled)
+            row.id: AlertRec(
+                id=row.id,
+                name=row.name,
+                enabled=row.enabled,
+                webhook_url=row.webhook_url,
+                flush_interval_s=float(row.flush_interval_s),
+                max_events_in_payload=row.max_events_in_payload,
+                max_buffer_events=row.max_buffer_events,
+                dedupe=row.dedupe,
+            )
             for row in await AlertRepository(db).list_all()
         }
         repo = AlertRepository(db)
@@ -232,6 +258,111 @@ async def evaluate(
     return await judge(line, candidates, runtime)
 
 
+_LEVEL_RANK = {"info": 0, "warn": 1, "warning": 1, "error": 2}
+_LEVEL_COLOR = {"error": 0xE74C3C, "warn": 0xF1C40F, "warning": 0xF1C40F}
+
+
+def fold_events(events: list[MatchEvent], *, dedupe: bool) -> list[MatchEvent]:
+    by_envelope: dict[str, MatchEvent] = {}
+    order: list[str] = []
+    for event in events:
+        if event.envelope_id in by_envelope:
+            continue
+        by_envelope[event.envelope_id] = event
+        order.append(event.envelope_id)
+    folded = [by_envelope[key] for key in order]
+    if not dedupe:
+        return folded
+    seen: set[str] = set()
+    out: list[MatchEvent] = []
+    for event in folded:
+        if event.message in seen:
+            continue
+        seen.add(event.message)
+        out.append(event)
+    return out
+
+
+def render_embed(
+    alert: AlertRec, folded: list[MatchEvent], dropped: int
+) -> dict[str, Any]:
+    shown = folded[: alert.max_events_in_payload]
+    extra = len(folded) - len(shown)
+    lines: list[str] = []
+    worst = "info"
+    for event in shown:
+        if _LEVEL_RANK.get(event.level.lower(), 0) > _LEVEL_RANK.get(worst, 0):
+            worst = event.level.lower()
+        loc = event.type or event.stream_id
+        extras = ""
+        if event.captures:
+            extras = " " + ", ".join(f"{k}={v}" for k, v in event.captures.items())
+        lines.append(f"{event.level} {loc} {event.message}{extras}")
+    description = "\n".join(lines)
+    if extra > 0:
+        description += f"\n+{extra} more"
+    if len(description) > 2000:
+        description = description[:1997] + "..."
+    return {
+        "embeds": [
+            {
+                "title": alert.name,
+                "description": description,
+                "color": _LEVEL_COLOR.get(worst, 0x3498DB),
+                "footer": {
+                    "text": f"events={len(folded)} dropped={dropped}",
+                },
+            }
+        ]
+    }
+
+
+async def record_delivery(
+    *,
+    alert_id: int,
+    window_start: datetime,
+    event_count: int,
+    dropped_count: int,
+    http_status: int | None,
+    error: str | None,
+    ts: datetime,
+) -> None:
+    async with session_scope() as db:
+        await AlertRepository(db).record_delivery(
+            alert_id=alert_id,
+            window_start=window_start,
+            event_count=event_count,
+            dropped_count=dropped_count,
+            http_status=http_status,
+            error=error,
+            ts=ts,
+        )
+
+
+def _arm(runtime: MatchRuntime, alert: AlertRec) -> None:
+    if not runtime.arm_timers:
+        return
+    window = runtime.windows[alert.id]
+
+    async def _wait() -> None:
+        await asyncio.sleep(alert.flush_interval_s)
+        await flush_alert(runtime, alert.id)
+
+    window.task = asyncio.create_task(_wait())
+
+
+def _buffer(runtime: MatchRuntime, alert: AlertRec, event: MatchEvent) -> None:
+    window = runtime.windows.get(alert.id)
+    if window is None:
+        window = Window(started=time.time())
+        runtime.windows[alert.id] = window
+        _arm(runtime, alert)
+    if len(window.events) >= alert.max_buffer_events:
+        window.dropped += 1
+        return
+    window.events.append(event)
+
+
 def _inject(runtime: MatchRuntime, line: dict[str, Any], hits: list[Hit]) -> None:
     for hit in hits:
         matcher = hit.matcher
@@ -252,7 +383,43 @@ def _inject(runtime: MatchRuntime, line: dict[str, Any], hits: list[Hit]) -> Non
                 matcher_id=matcher.id,
                 captures=dict(hit.captures),
             )
-            runtime.pending[alert_id].append(event)
+            _buffer(runtime, alert, event)
+
+
+async def flush_alert(runtime: MatchRuntime, alert_id: int) -> None:
+    window = runtime.windows.pop(alert_id, None)
+    if window is None:
+        return
+    if window.task is not None and not window.task.done():
+        window.task.cancel()
+    alert = runtime.graph.alerts.get(alert_id)
+    if alert is None or not window.events:
+        return
+    folded = fold_events(window.events, dedupe=alert.dedupe)
+    payload = render_embed(alert, folded, window.dropped)
+    http_status: int | None = None
+    error: str | None = None
+    try:
+        response = await post_webhook(alert.webhook_url, payload)
+        http_status = response.status_code
+        if response.status_code >= 400:
+            error = f"discord returned {response.status_code}"
+    except Exception as exc:
+        error = exc.__class__.__name__
+    now = datetime.now(UTC)
+    started = datetime.fromtimestamp(window.started, tz=UTC)
+    try:
+        await record_delivery(
+            alert_id=alert_id,
+            window_start=started,
+            event_count=len(folded),
+            dropped_count=window.dropped,
+            http_status=http_status,
+            error=error,
+            ts=now,
+        )
+    except Exception:
+        logger.exception("alert delivery persist failed alert_id=%s", alert_id)
 
 
 async def ingest(runtime: MatchRuntime, topic: str, envelope: UntypedEnvelope) -> None:
@@ -284,7 +451,7 @@ async def run_alert_match(stop: asyncio.Event) -> None:
     Does not subscribe ``status.sts``.
     """
     global _runtime
-    runtime = MatchRuntime()
+    runtime = MatchRuntime(arm_timers=True)
     _runtime = runtime
     broker = Broker()
     await broker.connect()
@@ -326,6 +493,9 @@ async def run_alert_match(stop: asyncio.Event) -> None:
             await poll_task
         except asyncio.CancelledError:
             pass
+        for window in runtime.windows.values():
+            if window.task is not None:
+                window.task.cancel()
         await broker.close()
         _runtime = None
         logger.info("alert match worker stopped")
