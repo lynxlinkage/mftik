@@ -24,7 +24,9 @@ class FakeHttp:
         self.requests.append(request)
         payload = self.routes.get(request.url.path)
         if payload is None:
-            return httpx.Response(404, json={"label": "NOT_FOUND", "message": request.url.path})
+            return httpx.Response(
+                404, json={"label": "NOT_FOUND", "message": request.url.path}
+            )
         return httpx.Response(200, json=payload)
 
     def client(self) -> httpx.AsyncClient:

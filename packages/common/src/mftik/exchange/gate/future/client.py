@@ -361,7 +361,9 @@ class GateFuturesWebSocket:
     def _drop_stream(self, stream: EventStream[Any]) -> None:
         self._subs = [s for s in self._subs if s.stream is not stream]
 
-    async def subscribe_tickers(self, *contracts: str) -> EventStream[GateFuturesTicker]:
+    async def subscribe_tickers(
+        self, *contracts: str
+    ) -> EventStream[GateFuturesTicker]:
         return await self._subscribe(
             ch.TICKERS, ch.tickers(*contracts), GateFuturesTicker.model_validate
         )

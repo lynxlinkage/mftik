@@ -129,7 +129,8 @@ class GateFuturesPrivateClient(BaseClient):
         )
         if request.type is OrderType.MARKET:
             price: Decimal | str | None = "0"
-            tif = extras.pop("tif", _TIF.get(request.tif, "ioc") if request.tif else "ioc")
+            default_tif = _TIF.get(request.tif, "ioc") if request.tif else "ioc"
+            tif = extras.pop("tif", default_tif)
         else:
             price = request.price
             tif = extras.pop(

@@ -6,9 +6,9 @@ here is only making user input uniform before a lookup.
 
 from __future__ import annotations
 
-import pytest
 from decimal import Decimal
 
+import pytest
 from mftik.exchange import symbols
 from mftik.exchange.symbols import canonical, join
 from mftik.exchange.tickers import UniversalTicker

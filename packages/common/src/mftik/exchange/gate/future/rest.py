@@ -144,7 +144,9 @@ class GateFuturesRest(_Transport):
         """
         row = await self._get(f"{FUTURES_PREFIX}/get_leverage/{contract}")
         if not isinstance(row, dict):
-            raise ExchangeError(f"GateFutures leverage for {contract} was not an object")
+            raise ExchangeError(
+                f"GateFutures leverage for {contract} was not an object"
+            )
         isolated = _dec(row.get("leverage"))
         cross = _dec(row.get("cross_leverage_limit"))
         if isolated > 0:
@@ -243,10 +245,11 @@ class GateFuturesPublicRest(_Transport):
             return GateFuturesOrderBook.model_validate(
                 {**row, "s": contract}
             ).to_order_book(ticker, contract_size)
+        levels = row if isinstance(row, dict) else {}
         return OrderBook(
             universal_ticker=str(ticker),
-            bids=_book_levels(row.get("bids") if isinstance(row, dict) else None, contract_size),
-            asks=_book_levels(row.get("asks") if isinstance(row, dict) else None, contract_size),
+            bids=_book_levels(levels.get("bids"), contract_size),
+            asks=_book_levels(levels.get("asks"), contract_size),
             ts=_rest_ts(row),
         )
 

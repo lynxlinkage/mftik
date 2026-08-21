@@ -68,9 +68,10 @@ class FakeRest:
         for route, payload in self.routes.items():
             if path == route or path.startswith(route + "/"):
                 if "get_leverage" in path:
-                    return httpx.Response(
-                        200, json=self.routes["/api/v4/futures/usdt/get_leverage/BTC_USDT"]
-                    )
+                    leverage = self.routes[
+                        "/api/v4/futures/usdt/get_leverage/BTC_USDT"
+                    ]
+                    return httpx.Response(200, json=leverage)
                 return httpx.Response(200, json=payload)
         return httpx.Response(404, json={"label": "NOT_FOUND", "message": path})
 
@@ -105,7 +106,9 @@ async def _private(
     )
 
 
-def _limit(*, qty: str = "0.001", side: Side = Side.BUY, **kw: Any) -> PlaceOrderRequest:
+def _limit(
+    *, qty: str = "0.001", side: Side = Side.BUY, **kw: Any
+) -> PlaceOrderRequest:
     return PlaceOrderRequest(
         universal_ticker=str(TICKER),
         side=side,
