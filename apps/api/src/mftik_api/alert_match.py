@@ -104,6 +104,7 @@ class MatchEvent:
 @dataclass
 class Window:
     events: list[MatchEvent] = field(default_factory=list)
+    seen: set[str] = field(default_factory=set)
     dropped: int = 0
     started: float = 0.0
     task: asyncio.Task[None] | None = None
@@ -112,8 +113,9 @@ class Window:
 class TypeCache:
     """``session_id → type | None``. A cached null is a hit, not a miss."""
 
-    def __init__(self, ttl: float = 30.0) -> None:
+    def __init__(self, ttl: float = 30.0, max_size: int = 2048) -> None:
         self._ttl = ttl
+        self._max_size = max_size
         self._data: dict[str, tuple[str | None, float]] = {}
 
     def get(self, session_id: str) -> tuple[bool, str | None]:
@@ -127,7 +129,16 @@ class TypeCache:
         return True, value
 
     def put(self, session_id: str, value: str | None) -> None:
-        self._data[session_id] = (value, time.monotonic() + self._ttl)
+        now = time.monotonic()
+        self._sweep(now)
+        self._data[session_id] = (value, now + self._ttl)
+
+    def _sweep(self, now: float) -> None:
+        expired = [key for key, (_, expires) in self._data.items() if now >= expires]
+        for key in expired:
+            del self._data[key]
+        while len(self._data) >= self._max_size:
+            del self._data[next(iter(self._data))]
 
 
 class MatchRuntime:
@@ -357,6 +368,15 @@ def _buffer(runtime: MatchRuntime, alert: AlertRec, event: MatchEvent) -> None:
         window = Window(started=time.time())
         runtime.windows[alert.id] = window
         _arm(runtime, alert)
+    if event.envelope_id in window.seen:
+        return
+    # Marked seen before the cap, not after: a line the cap turns away is still
+    # one line. Adding it afterwards would let every other Matcher wired to this
+    # Alert count the same dropped line again, which is the pre-fold arithmetic
+    # the buffer fold exists to end. ``seen`` therefore counts distinct lines in
+    # the window rather than buffered ones — bounded by the window, not by
+    # ``max_buffer_events``.
+    window.seen.add(event.envelope_id)
     if len(window.events) >= alert.max_buffer_events:
         window.dropped += 1
         return
@@ -390,8 +410,13 @@ async def flush_alert(runtime: MatchRuntime, alert_id: int) -> None:
     window = runtime.windows.pop(alert_id, None)
     if window is None:
         return
-    if window.task is not None and not window.task.done():
-        window.task.cancel()
+    task = window.task
+    if (
+        task is not None
+        and task is not asyncio.current_task()
+        and not task.done()
+    ):
+        task.cancel()
     alert = runtime.graph.alerts.get(alert_id)
     if alert is None or not window.events:
         return

@@ -3238,6 +3238,7 @@
           },
           "kind": {
             "type": "string",
+            "const": "discord_webhook",
             "title": "Kind",
             "default": "discord_webhook"
           },
@@ -3248,16 +3249,22 @@
           },
           "flush_interval_s": {
             "type": "integer",
+            "maximum": 3600.0,
+            "minimum": 1.0,
             "title": "Flush Interval S",
             "default": 30
           },
           "max_events_in_payload": {
             "type": "integer",
+            "maximum": 25.0,
+            "minimum": 1.0,
             "title": "Max Events In Payload",
             "default": 15
           },
           "max_buffer_events": {
             "type": "integer",
+            "maximum": 5000.0,
+            "minimum": 1.0,
             "title": "Max Buffer Events",
             "default": 200
           },
@@ -3643,7 +3650,9 @@
           "flush_interval_s": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "maximum": 3600.0,
+                "minimum": 1.0
               },
               {
                 "type": "null"
@@ -3654,7 +3663,9 @@
           "max_events_in_payload": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "maximum": 25.0,
+                "minimum": 1.0
               },
               {
                 "type": "null"
@@ -3665,7 +3676,9 @@
           "max_buffer_events": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "maximum": 5000.0,
+                "minimum": 1.0
               },
               {
                 "type": "null"

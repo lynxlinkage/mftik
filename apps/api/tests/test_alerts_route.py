@@ -7,7 +7,11 @@ import pytest
 from auth_harness import a_client, an_api, use_database
 from db_harness import a_database, an_owner
 from fastapi import FastAPI
-from mftik_api.alert_discord import set_http_client
+from mftik_api.alert_discord import (
+    InvalidWebhookUrl,
+    set_http_client,
+    validate_webhook_url,
+)
 from mftik_api.alert_spec import InvalidMatcherSpec, compile_matcher_spec
 from mftik_api.auth import AuthMiddleware
 from mftik_api.auth.middleware import REGISTRY_READ_PATHS, required_scope
@@ -184,6 +188,59 @@ async def test_bad_regex_is_422_and_uses_the_regex_package() -> None:
         )
     assert answered.status_code == 422
     assert "invalid pattern" in answered.json()["detail"]
+
+
+def test_extract_null_value_is_refused() -> None:
+    with pytest.raises(InvalidMatcherSpec, match="must be a number"):
+        compile_matcher_spec(
+            "extract",
+            {
+                "pattern": r"risk value = \{\%f\}, ([\d.]+)",
+                "group": 1,
+                "as": "float",
+                "op": ">",
+                "value": None,
+            },
+        )
+
+
+def test_webhook_url_must_be_https_discord() -> None:
+    with pytest.raises(InvalidWebhookUrl):
+        validate_webhook_url("http://169.254.169.254/latest/meta-data/")
+    with pytest.raises(InvalidWebhookUrl):
+        validate_webhook_url("https://example.invalid/api/webhooks/1/x")
+    assert validate_webhook_url(HOOK) == HOOK
+
+
+async def test_zero_flush_interval_is_422(db) -> None:
+    async with a_client(_app()) as client:
+        answered = await client.post(
+            "/alerts",
+            json={"name": "ops", "webhook_url": HOOK, "flush_interval_s": 0},
+        )
+    assert answered.status_code == 422
+
+
+async def test_internal_webhook_is_422(db) -> None:
+    async with a_client(_app()) as client:
+        answered = await client.post(
+            "/alerts",
+            json={
+                "name": "ops",
+                "webhook_url": "http://127.0.0.1:8000/alerts/1",
+            },
+        )
+    assert answered.status_code == 422
+
+
+async def test_missing_created_by_is_not_already_exists(db) -> None:
+    async with a_client(_app()) as client:
+        answered = await client.post(
+            "/alerts/sources",
+            json={"domain": "sts", "selector": "*", "created_by": 999_999},
+        )
+    assert answered.status_code == 422
+    assert "already exists" not in answered.json()["detail"]
 
 
 def test_alerts_are_not_a_registry_read_path() -> None:

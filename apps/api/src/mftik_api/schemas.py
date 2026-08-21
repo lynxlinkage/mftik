@@ -687,11 +687,11 @@ class AlertMatcherListResponse(BaseModel):
 class AlertCreateBody(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     webhook_url: str = Field(..., min_length=1)
-    kind: str = "discord_webhook"
+    kind: Literal["discord_webhook"] = "discord_webhook"
     enabled: bool = True
-    flush_interval_s: int = 30
-    max_events_in_payload: int = 15
-    max_buffer_events: int = 200
+    flush_interval_s: int = Field(default=30, ge=1, le=3600)
+    max_events_in_payload: int = Field(default=15, ge=1, le=25)
+    max_buffer_events: int = Field(default=200, ge=1, le=5000)
     dedupe: bool = True
     created_by: int | None = None
 
@@ -700,9 +700,9 @@ class AlertPatchBody(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     webhook_url: str | None = None
     enabled: bool | None = None
-    flush_interval_s: int | None = None
-    max_events_in_payload: int | None = None
-    max_buffer_events: int | None = None
+    flush_interval_s: int | None = Field(default=None, ge=1, le=3600)
+    max_events_in_payload: int | None = Field(default=None, ge=1, le=25)
+    max_buffer_events: int | None = Field(default=None, ge=1, le=5000)
     dedupe: bool | None = None
 
 

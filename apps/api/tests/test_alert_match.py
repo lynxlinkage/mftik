@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from mftik_api.alert_match import (
     MatcherRec,
     MatchRuntime,
     SourceRec,
+    TypeCache,
     ingest,
     run_alert_match,
 )
@@ -232,3 +234,15 @@ async def test_killing_the_match_worker_does_not_block_persist(
     await log_persist.run_log_persist(persist_stop)
     assert flushed
     assert flushed[0][0]["message"] == "kept"
+
+
+def test_type_cache_sweeps_expired_on_put() -> None:
+    cache = TypeCache(ttl=0.01, max_size=2)
+    cache.put("old", "gone")
+    cache.put("keep", "private::Tiny")
+    time.sleep(0.02)
+    cache.put("next", "CrossArb")
+    hit, value = cache.get("old")
+    assert hit is False
+    assert "old" not in cache._data
+    assert cache.get("next") == (True, "CrossArb")

@@ -406,9 +406,8 @@ class SessionManager:
                         ),
                         reason=getattr(row, "reason", None),
                         type=(
-                            live.type
-                            if live is not None
-                            else getattr(row, "type", None)
+                            (live.type if live is not None else None)
+                            or getattr(row, "type", None)
                         ),
                     )
                 )

@@ -288,6 +288,76 @@ async def test_timer_flushes_once(
     assert runtime.pending_events(1) == []
 
 
+async def test_timer_flush_posts_when_webhook_suspends(
+    monkeypatch: pytest.MonkeyPatch, deliveries: list[dict[str, Any]]
+) -> None:
+    posted = {"n": 0}
+
+    async def slow_post(_url: str, _payload: dict[str, Any]) -> httpx.Response:
+        await asyncio.sleep(0.02)
+        posted["n"] += 1
+        return httpx.Response(204)
+
+    async def capture(**kwargs: object) -> None:
+        deliveries.append(dict(kwargs))
+
+    monkeypatch.setattr(alert_match, "evaluate", _accept_all)
+    monkeypatch.setattr(alert_match, "record_delivery", capture)
+    monkeypatch.setattr(alert_match, "post_webhook", slow_post)
+    runtime = MatchRuntime(arm_timers=True)
+    runtime.graph = _graph(_alert(flush_interval_s=0.01, dedupe=False))
+    await ingest(runtime, "log.td.12", _log("tick"))
+    await asyncio.sleep(0.08)
+    assert posted["n"] == 1
+    assert deliveries[0]["event_count"] == 1
+    assert runtime.pending_events(1) == []
+
+
+async def test_two_matchers_share_the_buffer_cap(
+    runtime: MatchRuntime, deliveries: list[dict[str, Any]]
+) -> None:
+    runtime.graph = _graph(
+        _alert(dedupe=False, max_buffer_events=200), matchers=2
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(204))
+    ) as client:
+        set_http_client(client)
+        try:
+            for i in range(150):
+                await ingest(runtime, "log.td.12", _log(f"n-{i}"))
+            await flush_alert(runtime, 1)
+        finally:
+            set_http_client(None)
+
+    assert deliveries[0]["dropped_count"] == 0
+    assert deliveries[0]["event_count"] == 150
+
+
+async def test_dropped_counts_lines_not_matcher_hits(
+    runtime: MatchRuntime, deliveries: list[dict[str, Any]]
+) -> None:
+    """A dropped line is one drop, however many Matchers wanted it.
+
+    The cap is reached at 100, so the last 50 lines are turned away — by two
+    Matchers each. Counting the hits rather than the lines would say 100.
+    """
+    runtime.graph = _graph(_alert(dedupe=False, max_buffer_events=100), matchers=2)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(204))
+    ) as client:
+        set_http_client(client)
+        try:
+            for i in range(150):
+                await ingest(runtime, "log.td.12", _log(f"n-{i}"))
+            await flush_alert(runtime, 1)
+        finally:
+            set_http_client(None)
+
+    assert deliveries[0]["event_count"] == 100
+    assert deliveries[0]["dropped_count"] == 50
+
+
 def test_render_clips_to_2000() -> None:
     alert = _alert(max_events_in_payload=15)
     events = [

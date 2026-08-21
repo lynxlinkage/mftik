@@ -22,7 +22,9 @@
 		buildNodes,
 		FALLBACK_SIZE,
 		isAllowedWire,
+		loadPositions,
 		parseNodeId,
+		savePositions,
 		type AlertGraphNode,
 		type GraphKind
 	} from '$lib/alerts/graph';
@@ -71,7 +73,24 @@
 	);
 
 	function rememberedPositions() {
-		return new Map(nodes.map((node) => [node.id, node.position]));
+		const stored = loadPositions();
+		for (const node of nodes) {
+			if (!stored.has(node.id)) stored.set(node.id, node.position);
+		}
+		return stored;
+	}
+
+	/**
+	 * Only ever called from `onnodedragstop` — where a node's position is
+	 * something a person chose. Never after `buildNodes`, which clamps to the
+	 * current canvas: saving there would let a narrow window overwrite the
+	 * stored layout with its own collapsed version, and widening again would
+	 * not bring it back. A node this has never seen keeps its computed spot
+	 * until someone drags it.
+	 */
+	function persistPositions() {
+		if (nodes.length === 0) return;
+		savePositions(new Map(nodes.map((node) => [node.id, node.position])));
 	}
 
 	function syncGraph(nextSources: AlertSource[], nextMatchers: AlertMatcher[], nextAlerts: Alert[]) {
@@ -385,6 +404,7 @@
 			{isValidConnection}
 			{onconnect}
 			{ondelete}
+			onnodedragstop={persistPositions}
 			colorMode="dark"
 			clickConnect
 			connectionRadius={28}
@@ -398,7 +418,7 @@
 			autoPanOnNodeDrag={false}
 			preventScrolling
 			proOptions={{ hideAttribution: true }}
-			defaultEdgeOptions={{ type: 'smoothstep', animated: true }}
+			defaultEdgeOptions={{ type: 'default', animated: true }}
 			nodeExtent={[
 				[0, 0],
 				[canvasWidth, canvasHeight]

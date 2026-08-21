@@ -27,6 +27,7 @@ def _m(kind: str, spec: dict, matcher_id: int = 1) -> MatcherRec:
 def test_level_is_case_insensitive_membership() -> None:
     spec = {"levels": ["warn", "error"]}
     assert match_level("WARN", spec)
+    assert match_level("warning", spec)
     assert match_level("error", spec)
     assert not match_level("info", spec)
 

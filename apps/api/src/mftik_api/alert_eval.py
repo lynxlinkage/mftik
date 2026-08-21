@@ -63,9 +63,14 @@ def warm_patterns(matchers: list[MatcherRec]) -> None:
                 logger.warning("matcher %s pattern will not compile", matcher.id)
 
 
+def _canon_level(level: str) -> str:
+    name = level.lower()
+    return "warn" if name == "warning" else name
+
+
 def match_level(level: str, spec: dict[str, Any]) -> bool:
-    allowed = {str(item).lower() for item in spec.get("levels") or []}
-    return level.lower() in allowed
+    allowed = {_canon_level(str(item)) for item in spec.get("levels") or []}
+    return _canon_level(level) in allowed
 
 
 def _coerce(raw: str, as_: str) -> Any:

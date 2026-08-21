@@ -17,9 +17,11 @@ from mftik_db.session import session_scope
 from sqlalchemy.exc import IntegrityError
 
 from mftik_api.alert_discord import (
+    InvalidWebhookUrl,
     mask_webhook_url,
     post_webhook,
     test_fire_payload,
+    validate_webhook_url,
 )
 from mftik_api.alert_match import current_runtime
 from mftik_api.alert_spec import InvalidMatcherSpec, compile_matcher_spec
@@ -46,6 +48,17 @@ from mftik_api.schemas import (
 )
 
 router = APIRouter(tags=["alerts"])
+
+
+def _integrity_http(exc: IntegrityError, duplicate: str) -> HTTPException:
+    orig = getattr(exc, "orig", None)
+    text = str(orig or exc).lower()
+    pgcode = getattr(orig, "pgcode", None)
+    if pgcode == "23505" or "unique" in text:
+        return HTTPException(status_code=409, detail=duplicate)
+    if pgcode == "23503" or "foreign key" in text:
+        return HTTPException(status_code=422, detail="created_by does not exist")
+    return HTTPException(status_code=422, detail="could not store row")
 
 
 def _epoch(value: datetime | None) -> float:
@@ -173,9 +186,8 @@ async def create_source(
     except InvalidAlertSelector as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except IntegrityError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"source already exists: {body.domain}:{body.selector}",
+        raise _integrity_http(
+            exc, f"source already exists: {body.domain}:{body.selector}"
         ) from exc
     await record_audit(
         user_id=created_by,
@@ -256,8 +268,8 @@ async def create_matcher(
             )
             result = _matcher_out(row, [], [])
     except IntegrityError as exc:
-        raise HTTPException(
-            status_code=409, detail=f"matcher name already exists: {name}"
+        raise _integrity_http(
+            exc, f"matcher name already exists: {name}"
         ) from exc
     await record_audit(
         user_id=created_by,
@@ -471,9 +483,10 @@ async def create_alert(
 ) -> AlertOut:
     created_by = body.created_by if body.created_by is not None else owner
     name = body.name.strip()
-    url = body.webhook_url.strip()
-    if not url:
-        raise HTTPException(status_code=422, detail="webhook_url is required")
+    try:
+        url = validate_webhook_url(body.webhook_url)
+    except InvalidWebhookUrl as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         async with session_scope() as db:
             alerts = AlertRepository(db)
@@ -494,9 +507,7 @@ async def create_alert(
             )
             result = _alert_out(row, [])
     except IntegrityError as exc:
-        raise HTTPException(
-            status_code=409, detail=f"alert name already exists: {name}"
-        ) from exc
+        raise _integrity_http(exc, f"alert name already exists: {name}") from exc
     await record_audit(
         user_id=created_by,
         operation="alert.create",
@@ -595,12 +606,10 @@ async def patch_alert(
                 )
             row.name = name
         if "webhook_url" in body.model_fields_set:
-            url = (body.webhook_url or "").strip()
-            if not url:
-                raise HTTPException(
-                    status_code=422, detail="webhook_url is required"
-                )
-            row.webhook_url = url
+            try:
+                row.webhook_url = validate_webhook_url(body.webhook_url or "")
+            except InvalidWebhookUrl as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
         if body.enabled is not None:
             row.enabled = body.enabled
         if body.flush_interval_s is not None:

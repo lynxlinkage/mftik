@@ -59,6 +59,7 @@
 	let dedupe = $state(true);
 	let alertEnabled = $state(true);
 	let busy = $state(false);
+	let formError = $state<string | null>(null);
 
 	const title = $derived(
 		kind === 'source' ? 'New source' : kind === 'matcher' ? 'New matcher' : 'New alert'
@@ -77,12 +78,25 @@
 			return { levels };
 		}
 		if (matcherKind === 'regex') return { pattern: matcherPattern };
+		if (extractAs === 'str') {
+			return {
+				pattern: matcherPattern,
+				group: extractGroup,
+				as: extractAs,
+				op: extractOp,
+				value: String(extractValue)
+			};
+		}
+		const numeric = Number(String(extractValue).trim());
+		if (!Number.isFinite(numeric)) {
+			throw new Error('extract value must be a number');
+		}
 		return {
 			pattern: matcherPattern,
 			group: extractGroup,
 			as: extractAs,
 			op: extractOp,
-			value: extractAs === 'str' ? extractValue : Number(extractValue)
+			value: extractAs === 'int' ? Math.trunc(numeric) : numeric
 		};
 	}
 
@@ -104,8 +118,11 @@
 
 	async function submit() {
 		busy = true;
+		formError = null;
 		try {
 			await oncreate(draft());
+		} catch (e) {
+			formError = e instanceof Error ? e.message : String(e);
 		} finally {
 			busy = false;
 		}
@@ -120,11 +137,11 @@
 	class="popover"
 	role="dialog"
 	aria-modal="true"
-	aria-labelledby="create-title"
+	aria-labelledby={`create-title-${kind}`}
 	tabindex="-1"
 	onkeydown={onKey}
 >
-	<h2 id="create-title">{title}</h2>
+	<h2 id={`create-title-${kind}`}>{title}</h2>
 		<form
 			onsubmit={(e) => {
 				e.preventDefault();
@@ -193,7 +210,16 @@
 								<option value="!=">!=</option>
 							</select>
 						</label>
-						<label>Value <input bind:value={extractValue} /></label>
+						{#if extractAs === 'str'}
+							<!-- A number input coerces the binding, so `str` would send a
+							     number and 422 — and a non-numeric string cannot be typed
+							     into one at all. -->
+							<label>Value <input bind:value={extractValue} required /></label>
+						{:else}
+							<label>Value
+								<input type="number" step="any" bind:value={extractValue} required />
+							</label>
+						{/if}
 					{/if}
 				{/if}
 			{:else}
@@ -206,6 +232,9 @@
 				<label>Buffer cap <input type="number" min="1" bind:value={maxBuffer} /></label>
 				<label><input type="checkbox" bind:checked={dedupe} /> Dedupe identical messages</label>
 				<label><input type="checkbox" bind:checked={alertEnabled} /> Enable</label>
+			{/if}
+			{#if formError}
+				<p class="form-error">{formError}</p>
 			{/if}
 			<div class="actions">
 				<button type="button" class="secondary" onclick={oncancel} disabled={busy}>Cancel</button>
@@ -224,6 +253,7 @@
 	h2 {
 		margin: 0 0 0.85rem;
 		font-size: 1.1rem;
+		color: #fff;
 	}
 	form {
 		display: flex;
@@ -248,6 +278,11 @@
 		color: var(--text);
 		padding: 0.5rem 0.6rem;
 		border-radius: var(--radius);
+	}
+	.form-error {
+		margin: 0;
+		color: var(--err);
+		font-size: 0.78rem;
 	}
 	.actions {
 		display: flex;

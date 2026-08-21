@@ -61,3 +61,9 @@ def compile_matcher_spec(kind: str, spec: dict[str, Any]) -> None:
             )
         if "value" not in spec:
             raise InvalidMatcherSpec("extract value is required")
+        value = spec["value"]
+        if as_ in {"float", "int"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise InvalidMatcherSpec("extract value must be a number")
+        elif not isinstance(value, str):
+            raise InvalidMatcherSpec("extract value must be a string")

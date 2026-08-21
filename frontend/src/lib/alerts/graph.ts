@@ -4,6 +4,7 @@ import type { Alert, AlertMatcher, AlertSource } from '$lib/api';
 export const GAP = 148;
 export const LANE_PAD = 20;
 export const FALLBACK_SIZE = { w: 960, h: 560 };
+const POSITIONS_KEY = 'mftik.alerts.nodePositions';
 
 export type CanvasSize = { w: number; h: number };
 
@@ -48,6 +49,34 @@ export function laneX(kind: GraphKind, width: number): number {
 
 export function nodeSize(kind: GraphKind): { w: number; h: number } {
 	return NODE_SIZE[kind];
+}
+
+export function loadPositions(): Map<string, XYPosition> {
+	const out = new Map<string, XYPosition>();
+	try {
+		const raw = localStorage.getItem(POSITIONS_KEY);
+		if (!raw) return out;
+		const parsed = JSON.parse(raw) as Record<string, { x?: unknown; y?: unknown }>;
+		for (const [id, pos] of Object.entries(parsed)) {
+			if (!parseNodeId(id)) continue;
+			if (typeof pos?.x !== 'number' || typeof pos?.y !== 'number') continue;
+			if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y)) continue;
+			out.set(id, { x: pos.x, y: pos.y });
+		}
+	} catch {
+		/* private mode / quota / bad JSON */
+	}
+	return out;
+}
+
+export function savePositions(positions: Map<string, XYPosition>): void {
+	const obj: Record<string, XYPosition> = {};
+	for (const [id, pos] of positions) obj[id] = { x: pos.x, y: pos.y };
+	try {
+		localStorage.setItem(POSITIONS_KEY, JSON.stringify(obj));
+	} catch {
+		/* private mode / quota */
+	}
 }
 
 export function clampPosition(
@@ -122,7 +151,7 @@ export function buildEdges(sources: AlertSource[], matchers: AlertMatcher[]): Ed
 				id: `sm-${source.id}-${matcherId}`,
 				source: nodeId('source', source.id),
 				target: nodeId('matcher', matcherId),
-				type: 'smoothstep',
+				type: 'default',
 				animated: true,
 				markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 }
 			});
@@ -134,7 +163,7 @@ export function buildEdges(sources: AlertSource[], matchers: AlertMatcher[]): Ed
 				id: `ma-${matcher.id}-${alertId}`,
 				source: nodeId('matcher', matcher.id),
 				target: nodeId('alert', alertId),
-				type: 'smoothstep',
+				type: 'default',
 				animated: true,
 				markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 }
 			});
