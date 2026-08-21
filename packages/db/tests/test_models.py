@@ -23,9 +23,16 @@ def test_metadata_includes_split_session_tables() -> None:
         "sts_sessions",
         "td_sessions",
         "md_sessions",
+        "alert_sources",
+        "alert_matchers",
+        "alerts",
+        "alert_source_matcher",
+        "alert_matcher_alert",
+        "alert_deliveries",
     } <= tables
     assert "strategies" not in tables
     assert "sessions" not in tables
+    assert "alert_edges" not in tables
 
 
 def test_api_owner_fk_and_type() -> None:
@@ -59,6 +66,9 @@ def test_user_relationships() -> None:
     assert "td_sessions" in User.__mapper__.relationships
     assert "md_sessions" in User.__mapper__.relationships
     assert "accounts" in User.__mapper__.relationships
+    assert "alert_sources" in User.__mapper__.relationships
+    assert "alert_matchers" in User.__mapper__.relationships
+    assert "alerts" in User.__mapper__.relationships
 
 
 def test_account_api_one_to_one() -> None:

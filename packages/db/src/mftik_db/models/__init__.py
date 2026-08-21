@@ -1,4 +1,15 @@
 from mftik_db.models.account import Account
+from mftik_db.models.alert import (
+    Alert,
+    AlertDelivery,
+    AlertKind,
+    AlertMatcher,
+    AlertMatcherAlert,
+    AlertMatcherKind,
+    AlertSource,
+    AlertSourceDomain,
+    AlertSourceMatcher,
+)
 from mftik_db.models.api import Api, ApiType
 from mftik_db.models.audit import Audit
 from mftik_db.models.auth import (
@@ -36,6 +47,15 @@ from mftik_db.models.user import User
 
 __all__ = [
     "Account",
+    "Alert",
+    "AlertDelivery",
+    "AlertKind",
+    "AlertMatcher",
+    "AlertMatcherAlert",
+    "AlertMatcherKind",
+    "AlertSource",
+    "AlertSourceDomain",
+    "AlertSourceMatcher",
     "Api",
     "ApiType",
     "Attribution",

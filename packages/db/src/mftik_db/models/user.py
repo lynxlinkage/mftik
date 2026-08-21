@@ -58,3 +58,12 @@ class User(Base):
     auth_identities = relationship(
         "AuthIdentity", back_populates="user", cascade="all, delete-orphan"
     )
+    alert_sources = relationship(
+        "AlertSource", back_populates="creator", cascade="all, delete-orphan"
+    )
+    alert_matchers = relationship(
+        "AlertMatcher", back_populates="creator", cascade="all, delete-orphan"
+    )
+    alerts = relationship(
+        "Alert", back_populates="creator", cascade="all, delete-orphan"
+    )

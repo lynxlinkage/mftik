@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -16,11 +17,39 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
+def _enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:
+    """SQLite ignores foreign keys unless a pragma asks. The harness
+    already sets this for tests; the runtime engine must too, or a
+    SQLite-backed node would drop a Matcher and keep its join rows.
+    """
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _pragma(dbapi_connection, _record) -> None:  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+
+def build_engine(url: str) -> AsyncEngine:
+    """An engine with the SQLite FK listener attached when needed.
+
+    ``get_engine`` is a process singleton; tests that must not touch
+    it call this instead.
+    """
+    kwargs: dict = {"pool_pre_ping": True}
+    if url.startswith("sqlite"):
+        kwargs["connect_args"] = {"check_same_thread": False}
+    engine = create_async_engine(url, **kwargs)
+    if url.startswith("sqlite"):
+        _enable_sqlite_foreign_keys(engine)
+    return engine
+
+
 def get_engine(config: DatabaseConfig | None = None) -> AsyncEngine:
     global _engine
     if _engine is None:
         cfg = config or DatabaseConfig.from_env()
-        _engine = create_async_engine(cfg.url, pool_pre_ping=True)
+        _engine = build_engine(cfg.url)
     return _engine
 
 
