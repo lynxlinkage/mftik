@@ -333,6 +333,50 @@ export type ApiCredential = {
 };
 
 /** A venue a credential can be registered against (`GET /venues`). */
+export type AlertSource = {
+	id: number;
+	created_by: number;
+	domain: string;
+	selector: string;
+	matcher_ids: number[];
+};
+
+export type AlertMatcher = {
+	id: number;
+	created_by: number;
+	name: string;
+	kind: string;
+	spec: Record<string, unknown>;
+	source_ids: number[];
+	alert_ids: number[];
+	disabled_reason: string | null;
+};
+
+export type Alert = {
+	id: number;
+	created_by: number;
+	name: string;
+	kind: string;
+	webhook_masked: string;
+	enabled: boolean;
+	flush_interval_s: number;
+	max_events_in_payload: number;
+	max_buffer_events: number;
+	dedupe: boolean;
+	matcher_ids: number[];
+};
+
+export type AlertDelivery = {
+	id: number;
+	alert_id: number;
+	window_start: number;
+	event_count: number;
+	dropped_count: number;
+	http_status: number | null;
+	error: string | null;
+	ts: number;
+};
+
 export type Venue = {
 	name: string;
 	label: string;
@@ -712,6 +756,87 @@ export const api = {
 			`/apis/${encodeURIComponent(String(id))}`,
 			{ method: 'DELETE' }
 		),
+	alertSources: () => request<{ sources: AlertSource[] }>('/alerts/sources'),
+	createAlertSource: (body: { domain: string; selector: string }) =>
+		request<AlertSource>('/alerts/sources', {
+			method: 'POST',
+			body: JSON.stringify(body)
+		}),
+	deleteAlertSource: (id: number) =>
+		request<{ id: number; deleted: boolean }>(`/alerts/sources/${id}`, {
+			method: 'DELETE'
+		}),
+	alertMatchers: () => request<{ matchers: AlertMatcher[] }>('/alerts/matchers'),
+	createAlertMatcher: (body: { name: string; kind: string; spec: Record<string, unknown> }) =>
+		request<AlertMatcher>('/alerts/matchers', {
+			method: 'POST',
+			body: JSON.stringify(body)
+		}),
+	patchAlertMatcher: (
+		id: number,
+		body: { name?: string; kind?: string; spec?: Record<string, unknown> }
+	) =>
+		request<AlertMatcher>(`/alerts/matchers/${id}`, {
+			method: 'PATCH',
+			body: JSON.stringify(body)
+		}),
+	deleteAlertMatcher: (id: number) =>
+		request<{ id: number; deleted: boolean }>(`/alerts/matchers/${id}`, {
+			method: 'DELETE'
+		}),
+	alerts: () => request<{ alerts: Alert[] }>('/alerts'),
+	createAlert: (body: {
+		name: string;
+		webhook_url: string;
+		flush_interval_s?: number;
+		max_events_in_payload?: number;
+		max_buffer_events?: number;
+		dedupe?: boolean;
+		enabled?: boolean;
+	}) =>
+		request<Alert>('/alerts', {
+			method: 'POST',
+			body: JSON.stringify(body)
+		}),
+	patchAlert: (
+		id: number,
+		body: {
+			name?: string;
+			webhook_url?: string;
+			flush_interval_s?: number;
+			max_events_in_payload?: number;
+			max_buffer_events?: number;
+			dedupe?: boolean;
+			enabled?: boolean;
+		}
+	) =>
+		request<Alert>(`/alerts/${id}`, {
+			method: 'PATCH',
+			body: JSON.stringify(body)
+		}),
+	deleteAlert: (id: number) =>
+		request<{ id: number; deleted: boolean }>(`/alerts/${id}`, { method: 'DELETE' }),
+	testAlert: (id: number) => request<{ delivery: AlertDelivery }>(`/alerts/${id}/test`, {
+		method: 'POST'
+	}),
+	alertDeliveries: (id: number) =>
+		request<{ deliveries: AlertDelivery[] }>(`/alerts/${id}/deliveries`),
+	wireSourceMatcher: (sourceId: number, matcherId: number) =>
+		request<{ wired: boolean }>(`/alerts/sources/${sourceId}/matchers/${matcherId}`, {
+			method: 'PUT'
+		}),
+	unwireSourceMatcher: (sourceId: number, matcherId: number) =>
+		request<{ wired: boolean }>(`/alerts/sources/${sourceId}/matchers/${matcherId}`, {
+			method: 'DELETE'
+		}),
+	wireMatcherAlert: (matcherId: number, alertId: number) =>
+		request<{ wired: boolean }>(`/alerts/matchers/${matcherId}/alerts/${alertId}`, {
+			method: 'PUT'
+		}),
+	unwireMatcherAlert: (matcherId: number, alertId: number) =>
+		request<{ wired: boolean }>(`/alerts/matchers/${matcherId}/alerts/${alertId}`, {
+			method: 'DELETE'
+		}),
 	strategyTemplate: () => request<{ yaml: string }>('/sts/template'),
 	strategyTypes: () => request<StrategyTypes>('/sts/types'),
 	strategyTypeTemplate: (type: string) =>

@@ -47,7 +47,7 @@
 
 	const SITE_NAME = 'MFTIK Control';
 	const SITE_DESCRIPTION =
-		'Control plane for the Mid-Frequency Algo Trading platform — strategy sessions, API keys, and audit.';
+		'Control plane for the Mid-Frequency Algo Trading platform — strategy sessions, alerts, API keys, and audit.';
 	// Absolute, and not written down here — see `$lib/site`.
 	const siteOrigin = $derived(siteUrl(page.url.origin));
 	const ogImage = $derived(`${siteOrigin}/og-image.png`);
@@ -57,6 +57,7 @@
 		{ href: '/board', label: 'Board' },
 		{ href: '/apis', label: 'API Key' },
 		{ href: '/strategy', label: 'Strategy' },
+		{ href: '/alerts', label: 'Alert' },
 		{ href: '/registry', label: 'Registry' },
 		{ href: '/sym', label: 'Symbol' },
 		{ href: '/audit', label: 'Audit' },
