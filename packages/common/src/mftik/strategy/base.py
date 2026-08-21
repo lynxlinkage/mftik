@@ -490,11 +490,13 @@ class Strategy:
     async def log(self, message: str, *, level: str = "info", **extra: Any) -> None:
         if self.session is None:
             return
+        extra.pop("type", None)
         await publish_sts_log(
             self.session.broker,
             self.session.session_id,
             message,
             source=f"strategy.{self.name}",
             level=level,
+            type=getattr(self.session, "type", None),
             **extra,
         )

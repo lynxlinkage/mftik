@@ -135,10 +135,16 @@ class StsSession:
         on_exit: ExitHandler | None = None,
         remember: RememberHandler | None = None,
         event_log: EventLog | None = None,
+        strategy_type: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.broker = broker
         self.created_by = created_by
+        #: Qualified registry key. Distinct from :attr:`strategy_name`.
+        #: Named ``type`` on the instance so it matches ``sts_sessions.type``
+        #: and :class:`SessionView`; the constructor argument is
+        #: ``strategy_type`` so it does not shadow the builtin.
+        self.type = strategy_type
         self.strategy = strategy
         self.td_api_ids = list(td_api_ids or [])
         self.md_ids = list(md_ids or [])
@@ -203,6 +209,18 @@ class StsSession:
     def strategy_name(self) -> str:
         return self.strategy.name
 
+    async def _publish_log(
+        self, message: str, *, source: str = "sts", level: str = "info"
+    ) -> None:
+        await publish_sts_log(
+            self.broker,
+            self.session_id,
+            message,
+            source=source,
+            level=level,
+            type=self.type,
+        )
+
     async def start(self) -> None:
         if self._started:
             return
@@ -265,14 +283,9 @@ class StsSession:
         await self.strategy.on_start()
         self.event_log.record("lifecycle", "on_ready", dir="self")
         await self.strategy.on_ready()
-        await publish_sts_log(
-            self.broker,
-            self.session_id,
-            (
-                f"session started strategy={self.strategy_name} "
-                f"td={self.td_api_ids} md={self.md_ids}"
-            ),
-            source="sts",
+        await self._publish_log(
+            f"session started strategy={self.strategy_name} "
+            f"td={self.td_api_ids} md={self.md_ids}"
         )
         logger.info(
             "STS session started id=%s strategy=%s td=%s md=%s",
@@ -362,12 +375,7 @@ class StsSession:
         self._tasks.clear()
         self._started = False
         try:
-            await publish_sts_log(
-                self.broker,
-                self.session_id,
-                "session stopped",
-                source="sts",
-            )
+            await self._publish_log("session stopped")
         except Exception:
             pass
         self.event_log.record("lifecycle", "session_stop", dir="self")
@@ -495,12 +503,7 @@ class StsSession:
             )
             return
         try:
-            await publish_sts_log(
-                self.broker,
-                self.session_id,
-                f"detach sent {what}",
-                source="sts",
-            )
+            await self._publish_log(f"detach sent {what}")
         except Exception:
             logger.exception(
                 "STS detach log failed session=%s", self.session_id
@@ -634,12 +637,7 @@ class StsSession:
         if self._md_lease_logged:
             return
         self._md_lease_logged = True
-        await publish_sts_log(
-            self.broker,
-            self.session_id,
-            "MD lease established",
-            source="sts",
-        )
+        await self._publish_log("MD lease established")
 
     async def _on_market_data(self, env: UntypedEnvelope) -> None:
         name, model = MD_HANDLERS[env.type]
@@ -772,11 +770,8 @@ class StsSession:
         self._recon_sent.add(api_id)
         try:
             await self.strategy.send_recon(api_id)
-            await publish_sts_log(
-                self.broker,
-                self.session_id,
-                f"TD lease established — sent recon api_id={api_id}",
-                source="sts",
+            await self._publish_log(
+                f"TD lease established — sent recon api_id={api_id}"
             )
             logger.info(
                 "STS sent recon session=%s api_id=%s",
@@ -796,12 +791,7 @@ class StsSession:
             msg = ReconDone.model_validate(env.payload)
         except Exception:
             return
-        await publish_sts_log(
-            self.broker,
-            self.session_id,
-            f"recon done api_id={msg.api_id}",
-            source="sts",
-        )
+        await self._publish_log(f"recon done api_id={msg.api_id}")
         try:
             await self.strategy.on_recon_done(msg)
         except Exception as exc:

@@ -78,7 +78,10 @@ async def test_the_lifecycle_is_announced_as_snapshots(broker: Broker) -> None:
     manager = _manager(broker, Idle)
     await manager.create_session(
         StsCreateSessionRequest(
-            session_id="st-1", created_by=9, strategy="idle_status"
+            session_id="st-1",
+            created_by=9,
+            strategy="idle_status",
+            type="private::Tiny",
         )
     )
     await manager.stop_session("st-1")
@@ -93,8 +96,19 @@ async def test_the_lifecycle_is_announced_as_snapshots(broker: Broker) -> None:
     for e in events:
         assert e["payload"]["session_id"] == "st-1"
         assert e["payload"]["strategy"] == "idle_status"
+        assert e["payload"]["type"] == "private::Tiny"
         assert e["payload"]["created_by"] == 9
         assert e["session_id"] == "st-1"
+
+    start_logs = [
+        json.loads(line)
+        for line in await broker.fetch_log_buffer(Topics.log_sts("st-1"))
+    ]
+    started = [
+        e for e in start_logs if "session started" in e["payload"]["message"]
+    ]
+    assert started
+    assert started[0]["payload"]["type"] == "private::Tiny"
 
 
 @pytest.mark.asyncio
@@ -102,7 +116,10 @@ async def test_a_failure_is_announced_with_its_reason(broker: Broker) -> None:
     manager = _manager(broker, FailsOnReady)
     await manager.create_session(
         StsCreateSessionRequest(
-            session_id="st-2", created_by=1, strategy="fails_on_ready"
+            session_id="st-2",
+            created_by=1,
+            strategy="fails_on_ready",
+            type="private::Tiny",
         )
     )
     events = await _wait_for(broker, 1)
@@ -112,6 +129,7 @@ async def test_a_failure_is_announced_with_its_reason(broker: Broker) -> None:
     payload = events[0]["payload"]
     assert payload["status"] == "failed"
     assert payload["reason"] == "no tradable account attached"
+    assert payload["type"] == "private::Tiny"
     assert payload["finished_at"] is not None
 
 

@@ -18,15 +18,22 @@ async def publish_sts_log(
     *,
     source: str,
     level: str = "info",
+    type: str | None = None,
     **extra: Any,
 ) -> None:
-    """Fan out a log line for ``/ws/sts/{session_id}`` (buffered + live)."""
+    """Fan out a log line for ``/ws/sts/{session_id}`` (buffered + live).
+
+    ``type`` is the qualified registry key and the only way
+    :attr:`Log.type` is set. A ``type`` key in ``extra`` is dropped so a
+    strategy cannot reroute the line by ``self.log(..., type=...)``.
+    """
     from mftik.protocol.messages import Log, LogEnvelope
     from mftik.protocol.topics import Topics
 
+    extra.pop("type", None)
     topic = Topics.log_sts(session_id)
     envelope = LogEnvelope.wrap(
-        Log(level=level, message=message, **extra),
+        Log(level=level, message=message, type=type, **extra),
         type="log",
         source=source,
         session_id=session_id,
@@ -100,6 +107,7 @@ async def publish_session_log(
     *,
     source: str,
     level: str = "info",
+    type: str | None = None,
     **extra: Any,
 ) -> None:
     await publish_sts_log(
@@ -108,5 +116,6 @@ async def publish_session_log(
         message,
         source=source,
         level=level,
+        type=type,
         **extra,
     )

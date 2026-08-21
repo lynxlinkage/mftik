@@ -436,9 +436,12 @@ async def ack_session(
             row.reason,
             row.created_by,
             _epoch(row.finished_at),
+            row.type,
         )
 
-    session_id_, status, strategy, reason, created_by, finished_at = snapshot
+    session_id_, status, strategy, reason, created_by, finished_at, type_ = (
+        snapshot
+    )
     envelope = StsSessionStatusEnvelope.wrap(
         StsSessionStatus(
             session_id=session_id_,
@@ -447,6 +450,7 @@ async def ack_session(
             reason=reason,
             created_by=created_by,
             finished_at=finished_at,
+            type=type_,
         ),
         type=STS_SESSION_STATUS,
         source="api",

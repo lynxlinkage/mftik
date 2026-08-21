@@ -37,6 +37,10 @@ class Log(BaseModel):
 
     level: str = "info"
     message: str
+    #: Qualified registry key (``CrossArb``, ``private::Tiny``). STS only —
+    #: TD and MD leave this unset. Distinct from :class:`Envelope`.type
+    #: (``"log"``). Set only through ``publish_sts_log(..., type=)``.
+    type: str | None = None
 
 
 class HealthCheck(BaseModel):
@@ -226,6 +230,9 @@ class SessionInfo(BaseModel):
     venue: str | None = None
     #: Why a ``failed`` session ended. Null for live and natural ends.
     reason: str | None = None
+    #: Qualified registry key. Null when the deploy never recorded one.
+    #: Same fact as :attr:`StsSessionStatus.type`.
+    type: str | None = None
 
 
 class ListSessionsResult(BaseModel):
@@ -424,6 +431,9 @@ class StsSessionStatus(BaseModel):
     reason: str | None = None
     created_by: int | None = None
     finished_at: float | None = None
+    #: Qualified registry key (``CrossArb``, ``private::Tiny``). Not the
+    #: short ``strategy`` name. Null when the deploy never recorded one.
+    type: str | None = None
 
 
 class LeaseHeartbeat(BaseModel):
