@@ -21,6 +21,7 @@ from mftik_api.alert_discord import (
     post_webhook,
     test_fire_payload,
 )
+from mftik_api.alert_match import current_runtime
 from mftik_api.alert_spec import InvalidMatcherSpec, compile_matcher_spec
 from mftik_api.audit_util import record_audit
 from mftik_api.auth import ANONYMOUS, OwnerId, PrincipalDep
@@ -68,6 +69,8 @@ def _source_out(row: AlertSource, matcher_ids: list[int]) -> AlertSourceOut:
 def _matcher_out(
     row: AlertMatcher, source_ids: list[int], alert_ids: list[int]
 ) -> AlertMatcherOut:
+    runtime = current_runtime()
+    reason = None if runtime is None else runtime.disabled.get(row.id)
     return AlertMatcherOut(
         id=row.id,
         created_by=row.created_by,
@@ -76,6 +79,7 @@ def _matcher_out(
         spec=dict(row.spec or {}),
         source_ids=source_ids,
         alert_ids=alert_ids,
+        disabled_reason=reason,
     )
 
 

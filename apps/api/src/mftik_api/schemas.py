@@ -676,6 +676,8 @@ class AlertMatcherOut(BaseModel):
     spec: dict[str, Any] = Field(default_factory=dict)
     source_ids: list[int] = Field(default_factory=list)
     alert_ids: list[int] = Field(default_factory=list)
+    #: Set when the in-process worker has disabled this Matcher (timeouts).
+    disabled_reason: str | None = None
 
 
 class AlertMatcherListResponse(BaseModel):

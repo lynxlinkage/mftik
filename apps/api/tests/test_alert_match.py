@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from mftik.protocol import Envelope
 from mftik_api import alert_match, log_persist
+from mftik_api.alert_eval import Hit
 from mftik_api.alert_match import (
     AlertRec,
     Graph,
@@ -60,9 +61,11 @@ def _graph(*, td: bool = False, sts: bool = False, wildcard_sts: bool = False) -
 
 
 async def _accept_all(
-    _line: dict[str, Any], candidates: list[MatcherRec]
-) -> list[MatcherRec]:
-    return list(candidates)
+    _line: dict[str, Any],
+    candidates: list[MatcherRec],
+    _runtime=None,
+) -> list[Hit]:
+    return [Hit(matcher) for matcher in candidates]
 
 
 def _log(topic: str, message: str = "hello", **payload: object) -> Envelope[dict]:
@@ -154,6 +157,9 @@ async def test_cached_null_is_not_a_miss(monkeypatch: pytest.MonkeyPatch) -> Non
 async def test_unknown_kind_does_not_inject() -> None:
     runtime = MatchRuntime()
     runtime.graph = _graph(td=True)
+    runtime.graph.matchers[100] = MatcherRec(
+        id=100, name="owner", kind="python", spec={}
+    )
     await ingest(runtime, "log.td.12", _log("log.td.12"))
     assert runtime.pending_events(1) == []
     assert runtime.pending_events(3) == []

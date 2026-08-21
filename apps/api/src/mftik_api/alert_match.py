@@ -20,13 +20,11 @@ from mftik_db.repositories import (
 )
 from mftik_db.session import session_scope
 
+from mftik_api.alert_eval import Hit, warm_patterns
+from mftik_api.alert_eval import evaluate as judge
 from mftik_api.log_persist import LOG_PATTERN, parse_log_topic
 
 logger = logging.getLogger("mftik_api.alert_match")
-
-#: Kinds ``evaluate`` knows. Empty until ALT-5; unknown kinds are skipped
-#: so a regex Matcher created in ALT-3 does not dump every line.
-IMPLEMENTED_KINDS: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -125,6 +123,12 @@ class MatchRuntime:
         )
         self.pending: dict[int, list[MatchEvent]] = defaultdict(list)
         self.lookup_calls = 0
+        self.disabled: dict[int, str] = {}
+        self.timeout_streak: dict[int, int] = {}
+
+    def clear_disabled(self) -> None:
+        self.disabled.clear()
+        self.timeout_streak.clear()
 
     def pending_events(self, alert_id: int) -> list[MatchEvent]:
         return list(self.pending.get(alert_id, ()))
@@ -221,25 +225,16 @@ def line_from_envelope(
 
 
 async def evaluate(
-    _line: dict[str, Any], candidates: list[MatcherRec]
-) -> list[MatcherRec]:
-    """Return the Matchers that hit. Unknown kinds are skipped, not accept-all."""
-    hits: list[MatcherRec] = []
-    for matcher in candidates:
-        if matcher.kind not in IMPLEMENTED_KINDS:
-            logger.info(
-                "skipping unknown matcher kind=%s id=%s", matcher.kind, matcher.id
-            )
-            continue
-        hits.append(matcher)
-    return hits
+    line: dict[str, Any],
+    candidates: list[MatcherRec],
+    runtime: MatchRuntime | None = None,
+) -> list[Hit]:
+    return await judge(line, candidates, runtime)
 
 
-def _inject(
-    runtime: MatchRuntime, line: dict[str, Any], hits: list[MatcherRec]
-) -> None:
-    seen_alerts: set[int] = set()
-    for matcher in hits:
+def _inject(runtime: MatchRuntime, line: dict[str, Any], hits: list[Hit]) -> None:
+    for hit in hits:
+        matcher = hit.matcher
         for alert_id in runtime.graph.matcher_to_alerts.get(matcher.id, ()):
             alert = runtime.graph.alerts.get(alert_id)
             if alert is None or not alert.enabled:
@@ -255,10 +250,9 @@ def _inject(
                 envelope_id=line["envelope_id"],
                 ts=line["ts"],
                 matcher_id=matcher.id,
-                captures=dict(line.get("captures") or {}),
+                captures=dict(hit.captures),
             )
             runtime.pending[alert_id].append(event)
-            seen_alerts.add(alert_id)
 
 
 async def ingest(runtime: MatchRuntime, topic: str, envelope: UntypedEnvelope) -> None:
@@ -279,7 +273,7 @@ async def ingest(runtime: MatchRuntime, topic: str, envelope: UntypedEnvelope) -
     candidates = runtime.graph.successors(sources)
     if not candidates:
         return
-    hits = await evaluate(line, candidates)
+    hits = await evaluate(line, candidates, runtime)
     _inject(runtime, line, hits)
 
 
@@ -296,6 +290,8 @@ async def run_alert_match(stop: asyncio.Event) -> None:
     await broker.connect()
     try:
         runtime.graph = await load_graph()
+        warm_patterns(list(runtime.graph.matchers.values()))
+        runtime.clear_disabled()
     except Exception:
         logger.exception("alert graph load failed; starting empty")
     logger.info("alert match worker started sources=%d", len(runtime.graph.sources))
@@ -311,6 +307,8 @@ async def run_alert_match(stop: asyncio.Event) -> None:
                 return
             try:
                 runtime.graph = await load_graph()
+                warm_patterns(list(runtime.graph.matchers.values()))
+                runtime.clear_disabled()
             except Exception:
                 logger.exception("alert graph refresh failed")
 

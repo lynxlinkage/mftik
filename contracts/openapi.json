@@ -3474,6 +3474,17 @@
             },
             "type": "array",
             "title": "Alert Ids"
+          },
+          "disabled_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disabled Reason"
           }
         },
         "type": "object",
