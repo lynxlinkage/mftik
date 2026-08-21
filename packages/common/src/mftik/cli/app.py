@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 
+from mftik.cli import alert as alert_cmd
 from mftik.cli import check as check_cmd
 from mftik.cli import connect as connect_cmd
 from mftik.cli import env as env_cmd
@@ -170,6 +171,183 @@ def _run_env(args: argparse.Namespace) -> int:
     run = getattr(args, "_env_run", None)
     if run is None:
         print("usage: mftik env {list,deps,add,approve,rm,import}")
+        return EXIT_ERROR
+    return run(args)
+
+
+def _setup_alert(parser: argparse.ArgumentParser) -> None:
+    """``alert`` owns the whole graph, including ``source`` and ``matcher``.
+
+    Singular, and nested, for the same reason ``env`` is: this is a namespace
+    with verbs, not a listing. ``source`` and ``matcher`` are verbs of it
+    rather than top-level commands because neither does anything alone — a
+    Source with no Matcher is a subscription nobody reads.
+
+    As with ``env``, the handler goes on ``_alert_run``: argparse fills a
+    nested parser's defaults only when the attribute is absent, and the outer
+    command has already set ``_run``.
+    """
+    verbs = parser.add_subparsers(dest="alert_command", metavar="<verb>")
+
+    listed = verbs.add_parser("list", help="every Alert, with its masked webhook")
+    listed.set_defaults(_alert_run=alert_cmd.list_alerts)
+
+    graph = verbs.add_parser("graph", help="the whole wiring, as a tree")
+    graph.set_defaults(_alert_run=alert_cmd.show_graph)
+
+    added = verbs.add_parser(
+        "add", help="create an Alert; the URL is prompted for, never an argument"
+    )
+    added.add_argument("--name", required=True, help="Owner label, unique")
+    added.add_argument(
+        "--webhook-url-stdin",
+        action="store_true",
+        help="read the URL from stdin instead of prompting (for scripts)",
+    )
+    added.add_argument(
+        "--window",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="quiesce window; one POST per window (default 30)",
+    )
+    added.add_argument(
+        "--max-events", type=int, default=None, help="lines in the embed (default 15)"
+    )
+    added.add_argument(
+        "--max-buffer",
+        type=int,
+        default=None,
+        help="hard cap on buffered events per window (default 200)",
+    )
+    added.add_argument(
+        "--no-dedupe",
+        action="store_true",
+        help="keep identical messages apart in the window",
+    )
+    added.add_argument(
+        "--disabled", action="store_true", help="create it, but drop injects for now"
+    )
+    added.set_defaults(_alert_run=alert_cmd.add_alert)
+
+    removed = verbs.add_parser("rm", help="delete an Alert, its wires and deliveries")
+    removed.add_argument("alert_id", type=int)
+    removed.set_defaults(_alert_run=alert_cmd.rm_alert)
+
+    tested = verbs.add_parser("test", help="fire a fixed embed at the webhook")
+    tested.add_argument("alert_id", type=int)
+    tested.set_defaults(_alert_run=alert_cmd.test_alert)
+
+    fired = verbs.add_parser("deliveries", help="the fire log for one Alert")
+    fired.add_argument("alert_id", type=int)
+    fired.set_defaults(_alert_run=alert_cmd.deliveries)
+
+    types = verbs.add_parser("types", help="what an sts selector may be")
+    types.set_defaults(_alert_run=alert_cmd.list_types)
+
+    wired = verbs.add_parser("wire", help="draw one edge of the graph")
+    _setup_wire_flags(wired)
+    wired.set_defaults(_alert_run=alert_cmd.wire)
+
+    unwired = verbs.add_parser("unwire", help="remove one edge; the nodes stay")
+    _setup_wire_flags(unwired)
+    unwired.set_defaults(_alert_run=alert_cmd.unwire)
+
+    _setup_alert_source(verbs.add_parser("source", help="the log streams to watch"))
+    _setup_alert_matcher(verbs.add_parser("matcher", help="the judgements to apply"))
+
+
+def _alert_group_usage(
+    name: str, verbs: str
+) -> Callable[[argparse.Namespace], int]:
+    """The fallback for a group named without a verb.
+
+    Without this, ``mftik alert source`` falls through to the outer command's
+    handler and is told about ``list,graph,add,…`` — the verbs of the wrong
+    noun. A group answers for itself.
+    """
+
+    def _usage(_args: argparse.Namespace) -> int:
+        print(f"usage: mftik alert {name} {verbs}")
+        return EXIT_ERROR
+
+    return _usage
+
+
+def _setup_wire_flags(parser: argparse.ArgumentParser) -> None:
+    """Two of the three, naming one legal edge. ``alert.py`` refuses the rest."""
+    parser.add_argument("--source", type=int, default=None)
+    parser.add_argument("--matcher", type=int, default=None)
+    parser.add_argument("--alert", type=int, default=None)
+
+
+def _setup_alert_source(parser: argparse.ArgumentParser) -> None:
+    parser.set_defaults(_alert_run=_alert_group_usage("source", "{list,add,rm}"))
+    verbs = parser.add_subparsers(dest="source_command", metavar="<verb>")
+
+    listed = verbs.add_parser("list", help="every Source")
+    listed.set_defaults(_alert_run=alert_cmd.list_sources)
+
+    added = verbs.add_parser("add", help="subscribe to a stream")
+    added.add_argument("--domain", required=True, choices=("sts", "td", "md"))
+    added.add_argument(
+        "--selector",
+        required=True,
+        help=(
+            "for sts a strategy type (see: mftik alert types) or *; "
+            "for td an api_id; for md a venue"
+        ),
+    )
+    added.set_defaults(_alert_run=alert_cmd.add_source)
+
+    removed = verbs.add_parser("rm", help="delete a Source and its wires")
+    removed.add_argument("source_id", type=int)
+    removed.set_defaults(_alert_run=alert_cmd.rm_source)
+
+
+def _setup_alert_matcher(parser: argparse.ArgumentParser) -> None:
+    parser.set_defaults(_alert_run=_alert_group_usage("matcher", "{list,add,rm}"))
+    verbs = parser.add_subparsers(dest="matcher_command", metavar="<verb>")
+
+    listed = verbs.add_parser("list", help="every Matcher, and what it judges")
+    listed.set_defaults(_alert_run=alert_cmd.list_matchers)
+
+    added = verbs.add_parser("add", help="create a judgement")
+    added.add_argument("--name", required=True, help="Owner label, unique")
+    added.add_argument("--kind", required=True, choices=("level", "regex", "extract"))
+    added.add_argument(
+        "--level",
+        action="append",
+        default=None,
+        help="for --kind level; repeatable, e.g. --level warn --level error",
+    )
+    added.add_argument("--pattern", default=None, help="for --kind regex / extract")
+    added.add_argument("--group", type=int, default=1, help="capture group to read")
+    added.add_argument(
+        "--as",
+        dest="as_",
+        default="float",
+        choices=("float", "int", "str"),
+        help="how to read the captured group before comparing",
+    )
+    added.add_argument(
+        "--op", default=">", choices=(">", ">=", "<", "<=", "==", "!=")
+    )
+    added.add_argument("--value", default=None, help="the right-hand side")
+    added.set_defaults(_alert_run=alert_cmd.add_matcher)
+
+    removed = verbs.add_parser("rm", help="delete a Matcher and its wires")
+    removed.add_argument("matcher_id", type=int)
+    removed.set_defaults(_alert_run=alert_cmd.rm_matcher)
+
+
+def _run_alert(args: argparse.Namespace) -> int:
+    run = getattr(args, "_alert_run", None)
+    if run is None:
+        print(
+            "usage: mftik alert "
+            "{list,graph,add,rm,test,deliveries,types,wire,unwire,source,matcher}"
+        )
         return EXIT_ERROR
     return run(args)
 
@@ -334,6 +512,12 @@ COMMANDS: tuple[Command, ...] = (
         help="the third-party packages this node has applied",
         setup=_setup_env,
         run=_run_env,
+    ),
+    Command(
+        name="alert",
+        help="the Source → Matcher → Alert graph that reaches a Discord webhook",
+        setup=_setup_alert,
+        run=_run_alert,
     ),
     Command(
         name="node-init",
