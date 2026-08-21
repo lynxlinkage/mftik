@@ -120,6 +120,17 @@ GATE = Venue(
     requires_passphrase=False,
 )
 
+GATE_FUTURES = Venue(
+    name="GateFutures",
+    label="Gate USD-M Futures",
+    # A venue of its own rather than a category of ``Gate``: Gate's futures
+    # plane has its own host, its own wallet and its own API key. Same HMAC
+    # algorithm as spot, different login channel and a different credential.
+    categories=frozenset({Category.PERP}),
+    api_types=frozenset({HMAC}),
+    requires_passphrase=False,
+)
+
 BINANCE = Venue(
     name="Binance",
     label="Binance Spot",
@@ -165,7 +176,8 @@ BYBIT = Venue(
 #: of truth — :func:`get` scans it rather than keeping a second index, so a
 #: test or a plugin that adds an entry here is immediately visible to lookups.
 VENUES: dict[str, Venue] = {
-    v.name: v for v in (PAPER, GATE, BINANCE, BINANCE_FUTURE, BYBIT)
+    v.name: v
+    for v in (PAPER, GATE, GATE_FUTURES, BINANCE, BINANCE_FUTURE, BYBIT)
 }
 
 
@@ -265,6 +277,7 @@ __all__ = [
     "BYBIT",
     "ED25519",
     "GATE",
+    "GATE_FUTURES",
     "HMAC",
     "PAPER",
     "VENUES",

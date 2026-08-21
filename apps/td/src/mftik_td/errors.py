@@ -356,6 +356,7 @@ VENUES: dict[str, VenueErrors] = {
     "BinanceFuture": BINANCE_FUTURE,
     "Bybit": BYBIT,
     "Gate": GATE,
+    "GateFutures": GATE,
     "Paper": PAPER,
 }
 

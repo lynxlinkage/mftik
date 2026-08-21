@@ -17,6 +17,7 @@ from mftik_sym.sources.binance import BinanceSpotInstrumentSource
 from mftik_sym.sources.binance_future import BinanceFutureInstrumentSource
 from mftik_sym.sources.bybit import BybitInstrumentSource
 from mftik_sym.sources.gate import GateSpotInstrumentSource
+from mftik_sym.sources.gate_future import GateFuturesInstrumentSource
 from mftik_sym.sources.paper import PaperInstrumentSource
 
 
@@ -31,11 +32,13 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
 
     Binance appears twice too, and for the opposite reason: ``Binance`` and
     ``BinanceFuture`` are two venues with two credentials and two listing
-    endpoints, so their sources share nothing but a brand.
+    endpoints, so their sources share nothing but a brand. ``Gate`` /
+    ``GateFutures`` is the same split.
     """
     return [
         PaperInstrumentSource(broker),
         GateSpotInstrumentSource(),
+        GateFuturesInstrumentSource(),
         BinanceSpotInstrumentSource(),
         BinanceFutureInstrumentSource(),
         BybitInstrumentSource(category=Category.SPOT),
@@ -47,6 +50,7 @@ __all__ = [
     "BinanceFutureInstrumentSource",
     "BinanceSpotInstrumentSource",
     "BybitInstrumentSource",
+    "GateFuturesInstrumentSource",
     "GateSpotInstrumentSource",
     "Instrument",
     "InstrumentSource",

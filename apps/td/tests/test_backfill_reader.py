@@ -25,6 +25,7 @@ from mftik.exchange.tickers import UniversalTicker
 from mftik_td.backfill.reader import (
     BinanceSpotHistoryReader,
     BybitHistoryReader,
+    GateFuturesHistoryReader,
     GateSpotHistoryReader,
     HistoryReaderFactory,
     NoHistoryReaderError,
@@ -39,6 +40,9 @@ class FakeSymbols:
 
     async def exch_ticker(self, ticker: UniversalTicker) -> str:
         return ticker.symbol
+
+    async def contract_size(self, ticker: UniversalTicker) -> Decimal | None:
+        return Decimal("0.0001")
 
 
 class FakeApi:
@@ -425,6 +429,59 @@ async def test_a_gate_fill_arrives_already_attributable() -> None:
     assert page.rows[0].client_order_id == "281474976710656001"
 
 
+def gate_futures_trade(trade_id: int) -> Any:
+    from mftik.exchange.gate.future.models import GateFuturesUserTrade
+
+    return GateFuturesUserTrade.model_validate(
+        {
+            "id": trade_id,
+            "order_id": "500",
+            "contract": "BTC_USDT",
+            "size": "4",
+            "price": "63863.5",
+            "text": "t-281474976710656001",
+            "create_time": 1_699_999_999,
+        }
+    )
+
+
+class FakeGateFuturesRest:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.trades: list[Any] = []
+
+    async def connect(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def fetch_my_trades(self, pair, **kw):
+        self.calls.append({"pair": pair, **kw})
+        return self.trades
+
+    async def fetch_orders(self, pair, **kw):
+        self.calls.append({"pair": pair, **kw})
+        return []
+
+
+async def test_gate_futures_pages_by_offset_in_seconds() -> None:
+    rest = FakeGateFuturesRest()
+    rest.trades = [gate_futures_trade(i) for i in range(3)]
+    reader = GateFuturesHistoryReader(symbols=FakeSymbols(), rest=rest)
+    ticker = UniversalTicker.parse("GateFutures_Perp_BTCUSDT")
+
+    page = await reader.fetch_my_trades(ticker, since_ts=1_600_000_000.75, limit=3)
+
+    assert rest.calls[0]["offset"] == 0
+    assert rest.calls[0]["since"] == 1_600_000_000
+    assert page.next_cursor == "1600000000:3"
+    assert page.rows[0].qty == Decimal("0.0004")
+    assert page.rows[0].client_order_id == "281474976710656001"
+
+    await reader.fetch_my_trades(ticker, cursor=page.next_cursor)
+    assert rest.calls[1]["offset"] == 3
+    assert rest.calls[1]["since"] == 1_600_000_000
+
+
 async def test_every_venue_but_paper_has_a_reader() -> None:
     """Paper's book is invented in another process; there is nothing to re-read.
 
@@ -436,7 +493,7 @@ async def test_every_venue_but_paper_has_a_reader() -> None:
     factory = HistoryReaderFactory(FakeSymbols())
     row = type("Row", (), {"api_key": "k", "api_secret": pem})()
 
-    for venue in ("Bybit", "Gate", "BinanceFuture"):
+    for venue in ("Bybit", "Gate", "GateFutures", "BinanceFuture"):
         reader = await factory.create(venue, row)
         assert reader.venue == venue
 

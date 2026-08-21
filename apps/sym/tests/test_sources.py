@@ -12,6 +12,7 @@ from mftik_sym.sources.binance import BinanceSpotInstrumentSource
 from mftik_sym.sources.binance_future import BinanceFutureInstrumentSource
 from mftik_sym.sources.bybit import BybitInstrumentSource
 from mftik_sym.sources.gate import GateSpotInstrumentSource
+from mftik_sym.sources.gate_future import GateFuturesInstrumentSource
 
 # Trimmed rows in Gate's /spot/currency_pairs shape.
 GATE_ROWS = [
@@ -620,3 +621,67 @@ async def test_a_contract_not_yet_trading_is_listed_but_inactive() -> None:
 async def test_malformed_binance_future_rows_are_skipped() -> None:
     instruments = await _binance_future(BINANCE_FUTURE_ROWS).fetch()
     assert "BAD" not in {i.base for i in instruments}
+
+
+GATE_FUTURE_ROWS = [
+    {
+        "name": "BTC_USDT",
+        "type": "direct",
+        "quanto_multiplier": "0.0001",
+        "order_price_round": "0.1",
+        "order_size_min": "1",
+        "order_size_max": "1000000",
+        "settle": "usdt",
+        "in_delisting": False,
+        "expire_time": 0,
+    },
+    {
+        "name": "BTC_USDT_20250926",
+        "type": "direct",
+        "quanto_multiplier": "0.0001",
+        "order_price_round": "0.1",
+        "order_size_min": "1",
+        "order_size_max": "1000",
+        "expire_time": 1758844800,
+        "in_delisting": False,
+    },
+    {
+        "name": "OLD_USDT",
+        "quanto_multiplier": "1",
+        "in_delisting": True,
+    },
+    {"name": "BAD"},
+]
+
+
+def _gate_future(rows: list[dict]) -> GateFuturesInstrumentSource:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v4/futures/usdt/contracts"
+        return httpx.Response(200, json=rows)
+
+    return GateFuturesInstrumentSource(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://api.gateio.ws",
+        )
+    )
+
+
+async def test_gate_futures_rows_become_perp_instruments() -> None:
+    instruments = await _gate_future(GATE_FUTURE_ROWS).fetch()
+
+    assert [i.exch_ticker for i in instruments] == ["BTC_USDT"]
+    btc = instruments[0]
+    assert str(btc.ticker) == "GateFutures_Perp_BTCUSDT"
+    assert btc.category is Category.PERP
+    assert btc.contract_size == Decimal("0.0001")
+    assert btc.settlement_asset == "USDT"
+    assert btc.filters["price_tick"] == Decimal("0.1")
+    assert btc.filters["qty_step"] == Decimal("0.0001")
+    assert btc.filters["min_qty"] == Decimal("0.0001")
+    assert btc.filters["max_qty"] == Decimal("100")
+
+
+async def test_gate_futures_drops_dated_and_delisting_contracts() -> None:
+    instruments = await _gate_future(GATE_FUTURE_ROWS).fetch()
+    assert {i.symbol for i in instruments} == {"BTCUSDT"}

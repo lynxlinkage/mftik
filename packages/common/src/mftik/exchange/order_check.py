@@ -38,6 +38,7 @@ _BOTH_EITHER = {Side.BUY: _EITHER, Side.SELL: _EITHER}
 _MARKET_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     ("Paper", Category.SPOT): _BOTH_EITHER,
     ("Gate", Category.SPOT): {Side.BUY: _QUOTE, Side.SELL: _QTY},
+    ("GateFutures", Category.PERP): _BOTH_QTY,
     ("Binance", Category.SPOT): _BOTH_EITHER,
     ("BinanceFuture", Category.PERP): _BOTH_QTY,
     ("Bybit", Category.SPOT): _BOTH_EITHER,

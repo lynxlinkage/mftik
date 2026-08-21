@@ -12,6 +12,7 @@ from mftik.exchange.binance.future.public import BinanceFuturePublicClient
 from mftik.exchange.binance.spot.public import BinanceSpotPublicClient
 from mftik.exchange.bybit.public import BybitPublicClient
 from mftik.exchange.errors import ExchangeError
+from mftik.exchange.gate.future.public import GateFuturesPublicClient
 from mftik.exchange.gate.spot.public import GateSpotPublicClient
 from mftik.exchange.paper.public import PaperPublicClient
 from mftik.exchange.venues import UnknownVenueError
@@ -55,6 +56,18 @@ async def test_gate_spot_venue_builds_a_gate_public_client(
     assert isinstance(client, GateSpotPublicClient)
     assert client.name == "Gate"
     # Public market data only — the socket carries no credentials.
+    assert not client.ws.authenticated
+
+
+async def test_gate_futures_venue_builds_a_perp_public_client(
+    broker: Broker,
+) -> None:
+    factory = VenuePublicFactory(broker)
+    client = await factory.create("GateFutures")
+    assert isinstance(client, GateFuturesPublicClient)
+    assert client.name == "GateFutures"
+    assert hasattr(client, "stream_liquidation")
+    assert not hasattr(client, "stream_agg_trades")
     assert not client.ws.authenticated
 
 

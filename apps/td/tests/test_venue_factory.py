@@ -20,6 +20,7 @@ from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mftik.exchange.binance.spot.protocol import BinanceAuthError
 from mftik.exchange.bybit.private import BybitPrivateClient
 from mftik.exchange.errors import ExchangeError
+from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
 from mftik.exchange.tickers import Category
 from mftik_td.session import PaperSessionFactory, VenueSessionFactory
@@ -106,6 +107,24 @@ async def test_gate_spot_venue_builds_a_gate_client(broker: Broker) -> None:
     assert session.private.api_key == "gk"
     assert session.api_id == 7
     # Built but not connected — the manager starts it.
+    assert not session.private.connected
+
+
+async def test_gate_futures_venue_builds_a_perp_client(broker: Broker) -> None:
+    rows = {
+        17: FakeApiRow(
+            id=17, venue="GateFutures", api_key="gfk", api_secret="gfs"
+        ),
+    }
+    factory = _factory(broker, rows)
+
+    session = await factory.create(17)
+
+    assert isinstance(session.private, GateFuturesPrivateClient)
+    assert session.private.name == "GateFutures"
+    assert session.private.category is Category.PERP
+    assert hasattr(session.private, "fetch_positions")
+    assert hasattr(session.private, "fetch_leverage")
     assert not session.private.connected
 
 

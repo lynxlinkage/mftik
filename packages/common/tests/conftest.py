@@ -6,6 +6,7 @@ import pytest
 from binance_future_stub import FakeBinanceFutureApi, FakeBinanceFutureUser
 from binance_stub import FakeBinanceApi, FakeBinanceStream, keypair
 from bybit_stub import FakeBybit
+from gate_future_stub import FakeGateFutures
 from gate_stub import FakeGate
 from websockets.asyncio.server import serve
 
@@ -14,6 +15,17 @@ from websockets.asyncio.server import serve
 async def gate():
     """A FakeGate listening on an ephemeral port; ``gate.url`` points at it."""
     fake = FakeGate()
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def gate_futures():
+    """A FakeGateFutures on an ephemeral port; ``.url`` points at it."""
+    fake = FakeGateFutures()
     server = await serve(fake.handler, "127.0.0.1", 0)
     fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
     yield fake

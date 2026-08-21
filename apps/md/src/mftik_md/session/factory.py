@@ -11,6 +11,7 @@ from mftik.exchange.binance.future.public import BinanceFuturePublicClient
 from mftik.exchange.binance.spot.public import BinanceSpotPublicClient
 from mftik.exchange.bybit.public import BybitPublicClient
 from mftik.exchange.errors import ExchangeError
+from mftik.exchange.gate.future.public import GateFuturesPublicClient
 from mftik.exchange.gate.spot.public import GateSpotPublicClient
 from mftik.exchange.paper.remote_public import PaperRemotePublicClient
 from mftik.symbols import SymbolClient
@@ -109,6 +110,9 @@ class VenuePublicFactory:
         if resolved is venues.GATE:
             logger.info("MD building Gate public client")
             return GateSpotPublicClient(symbols=self._symbols)
+        if resolved is venues.GATE_FUTURES:
+            logger.info("MD building GateFutures public client")
+            return GateFuturesPublicClient(symbols=self._symbols)
         if resolved is venues.BINANCE:
             logger.info("MD building Binance public client")
             return BinanceSpotPublicClient(symbols=self._symbols)

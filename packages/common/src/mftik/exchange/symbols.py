@@ -18,6 +18,7 @@ kept only for normalizing user input before a lookup.
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:  # Only for the annotation; tickers is built on this module.
@@ -46,6 +47,14 @@ UniversalTicker` rather than a bare symbol: on a unified-account venue the
         self, venue: str, exch_ticker: str, *, category: str
     ) -> UniversalTicker:
         """The venue's spelling → the universal ticker."""
+
+    async def contract_size(self, ticker: UniversalTicker) -> Decimal | None:
+        """How much base one venue-native size unit is.
+
+        ``None`` on books that already size in the asset (spot, Binance
+        USD-M). Gate futures sizes in contracts; the adapter converts at the
+        wire using this, and refuses rather than guessing ``1``.
+        """
 
 
 def check_venue(ticker: UniversalTicker, venue: str, categories=None) -> None:

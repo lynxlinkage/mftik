@@ -28,6 +28,7 @@ def test_registry_lists_every_venue() -> None:
         "BinanceFuture",
         "Bybit",
         "Gate",
+        "GateFutures",
         "Paper",
     ]
     assert [v.name for v in venues.all_venues()] == venues.names()
@@ -139,6 +140,18 @@ def test_venue_is_immutable() -> None:
 def test_a_venue_builds_tickers_on_its_own_markets() -> None:
     assert str(venues.GATE.ticker("spot", "btc/usdt")) == "Gate_Spot_BTCUSDT"
     assert str(venues.ticker("gate", "BTCUSDT")) == "Gate_Spot_BTCUSDT"
+
+
+def test_gate_futures_is_its_own_perp_venue() -> None:
+    """Separate credential, separate host — not a category of ``Gate``."""
+    fut = venues.require("GateFutures")
+    assert fut is venues.GATE_FUTURES
+    assert fut.categories == frozenset({Category.PERP})
+    assert fut.api_types == frozenset({venues.HMAC})
+    assert fut.ticker_example == "GateFutures_Perp_BTCUSDT"
+    assert str(fut.ticker(None, "BTCUSDT")) == "GateFutures_Perp_BTCUSDT"
+    with pytest.raises(venues.UnsupportedCategoryError, match="does not trade"):
+        fut.ticker("spot", "BTCUSDT")
 
 
 def test_a_category_the_venue_does_not_trade_is_refused() -> None:

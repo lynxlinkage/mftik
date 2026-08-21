@@ -7,8 +7,11 @@ here is only making user input uniform before a lookup.
 from __future__ import annotations
 
 import pytest
+from decimal import Decimal
+
 from mftik.exchange import symbols
 from mftik.exchange.symbols import canonical, join
+from mftik.exchange.tickers import UniversalTicker
 
 
 @pytest.mark.parametrize(
@@ -44,15 +47,16 @@ def test_resolver_protocol_shape() -> None:
     """Adapters depend on this, not on the plane's transport."""
 
     class Stub:
-        async def exch_ticker(
-            self, venue: str, symbol: str, *, category: str = "spot"
-        ) -> str:
+        async def exch_ticker(self, ticker: UniversalTicker) -> str:
             return "BTC_USDT"
 
         async def symbol_for(
-            self, venue: str, exch_ticker: str, *, category: str = "spot"
-        ) -> str:
-            return "BTCUSDT"
+            self, venue: str, exch_ticker: str, *, category: str
+        ) -> UniversalTicker:
+            return UniversalTicker.of(venue, category, "BTCUSDT")
+
+        async def contract_size(self, ticker: UniversalTicker) -> Decimal | None:
+            return None
 
     resolver: symbols.SymbolResolver = Stub()
     assert resolver is not None

@@ -19,6 +19,7 @@ from mftik.exchange.errors import (
     InsufficientBalanceError,
     OrderError,
 )
+from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
 from mftik.exchange.gate.spot.protocol import GateApiError, GateWsError
 from mftik.exchange.gate.spot.rest import GateRestError
@@ -34,6 +35,7 @@ from mftik.protocol.reject_codes import (
 from mftik_td.errors import VENUES, normalize
 
 GATE = "Gate"
+GATE_FUTURES = "GateFutures"
 PAPER = "Paper"
 BINANCE = "Binance"
 BINANCE_FUTURE = "BinanceFuture"
@@ -86,6 +88,14 @@ def test_the_four_named_in_the_spec_all_land_in_the_venue_band() -> None:
 def test_labels_are_matched_regardless_of_case() -> None:
     code = normalize(GateApiError("balance_not_enough", "x"), venue=GATE)
 
+    assert code is RejectCode.VENUE_INSUFFICIENT_BALANCE
+
+
+def test_gate_futures_reuses_the_spot_label_table() -> None:
+    assert GATE_FUTURES in VENUES
+    code = normalize(
+        GateApiError("BALANCE_NOT_ENOUGH", "x"), venue=GATE_FUTURES
+    )
     assert code is RejectCode.VENUE_INSUFFICIENT_BALANCE
 
 
@@ -411,6 +421,7 @@ def test_each_private_client_names_itself_after_its_venue() -> None:
     for client in (
         BinanceSpotPrivateClient,
         GateSpotPrivateClient,
+        GateFuturesPrivateClient,
         PaperPrivateClient,
         PaperRemotePrivateClient,
     ):

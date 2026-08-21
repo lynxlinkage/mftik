@@ -34,6 +34,7 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
         "BinanceFuture",
         "Bybit",
         "Gate",
+        "GateFutures",
         "Paper",
     }
     gate = by_name["Gate"]
@@ -54,6 +55,9 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     assert by_name["BinanceFuture"].categories == ["Perp"]
     assert by_name["BinanceFuture"].api_types == ["ED25519"]
     assert by_name["BinanceFuture"].ticker_example == "BinanceFuture_Perp_BTCUSDT"
+    assert by_name["GateFutures"].categories == ["Perp"]
+    assert by_name["GateFutures"].api_types == ["HMAC"]
+    assert by_name["GateFutures"].ticker_example == "GateFutures_Perp_BTCUSDT"
 
 
 async def test_unknown_venue_is_rejected_with_400() -> None:

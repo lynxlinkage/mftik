@@ -42,6 +42,11 @@ from mftik.exchange.binance.spot.public import venue_interval as binance_interva
 from mftik.exchange.bybit.protocol import BYBIT_REST_URL, product_of
 from mftik.exchange.bybit.public import venue_interval as bybit_interval
 from mftik.exchange.bybit.rest import BybitPublicRest
+from mftik.exchange.gate.future.public import GATE_FUTURES_INTERVALS
+from mftik.exchange.gate.future.rest import (
+    GATE_FUTURES_REST_URL,
+    GateFuturesPublicRest,
+)
 from mftik.exchange.gate.spot.public import GATE_INTERVALS
 from mftik.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
@@ -160,6 +165,91 @@ class GateSpotReader:
         against it, and a zero bid would answer that question wrongly rather
         than declining to answer it.
         """
+        book = await self.fetch_order_book(ticker, depth=1)
+        if not book.bids or not book.asks:
+            return None
+        bid, ask = book.bids[0], book.asks[0]
+        return BestQuote(
+            universal_ticker=book.universal_ticker,
+            bid=bid.price,
+            bid_qty=bid.qty,
+            ask=ask.price,
+            ask_qty=ask.qty,
+            ts=book.ts,
+        )
+
+
+class GateFuturesReader:
+    """Gate USDT-perp reads over REST, with sizes converted to base."""
+
+    venue = "GateFutures"
+
+    def __init__(
+        self,
+        *,
+        symbols: SymbolResolver,
+        rest: GateFuturesPublicRest | None = None,
+        rest_url: str = GATE_FUTURES_REST_URL,
+    ) -> None:
+        self.symbols = symbols
+        self.rest = rest or GateFuturesPublicRest(base_url=rest_url)
+
+    async def connect(self) -> None:
+        await self.rest.connect()
+
+    async def close(self) -> None:
+        await self.rest.close()
+
+    async def _pair(self, ticker: UniversalTicker) -> str:
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return await self.symbols.exch_ticker(ticker)
+
+    async def _multiplier(self, ticker: UniversalTicker):
+        size = await self.symbols.contract_size(ticker)
+        if size is None or size <= 0:
+            raise ValueError(f"no contract_size for {ticker}")
+        return size
+
+    async def fetch_klines(
+        self, ticker: UniversalTicker, interval: str, *, limit: int
+    ) -> list[Kline]:
+        canonical_interval = normalize_interval(interval)
+        gate_interval = GATE_FUTURES_INTERVALS.get(canonical_interval)
+        if gate_interval is None:
+            raise InvalidIntervalError(
+                f"{self.venue} serves no {canonical_interval} candles; "
+                f"supported: {sorted(GATE_FUTURES_INTERVALS)}"
+            )
+        pair = await self._pair(ticker)
+        klines = await self.rest.fetch_klines(
+            pair,
+            gate_interval,
+            ticker=ticker,
+            contract_size=await self._multiplier(ticker),
+            limit=limit,
+        )
+        return [
+            kline.model_copy(update={"interval": canonical_interval})
+            for kline in klines
+        ]
+
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int
+    ) -> OrderBook:
+        pair = await self._pair(ticker)
+        return await self.rest.fetch_order_book(
+            pair,
+            ticker=ticker,
+            contract_size=await self._multiplier(ticker),
+            depth=depth,
+        )
+
+    async def fetch_best_quote(
+        self, ticker: UniversalTicker
+    ) -> BestQuote | None:
         book = await self.fetch_order_book(ticker, depth=1)
         if not book.bids or not book.asks:
             return None
@@ -480,6 +570,8 @@ class VenueReaderFactory:
     async def create(self, venue: str) -> VenueReader:
         if venue == venues.GATE.name:
             return GateSpotReader(symbols=self._symbols)
+        if venue == venues.GATE_FUTURES.name:
+            return GateFuturesReader(symbols=self._symbols)
         if venue == venues.BINANCE.name:
             return BinanceSpotReader(symbols=self._symbols)
         if venue == venues.BINANCE_FUTURE.name:

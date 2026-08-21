@@ -33,6 +33,8 @@ from mftik.exchange.binance.spot.rest import BinanceSpotRest
 from mftik.exchange.bybit.protocol import LINEAR, SPOT
 from mftik.exchange.bybit.rest import MAX_HISTORY as BYBIT_MAX
 from mftik.exchange.bybit.rest import BybitRest
+from mftik.exchange.gate.future.rest import MAX_HISTORY as GATE_FUTURES_MAX
+from mftik.exchange.gate.future.rest import GateFuturesRest
 from mftik.exchange.gate.spot.rest import MAX_HISTORY as GATE_MAX
 from mftik.exchange.gate.spot.rest import GateSpotRest
 from mftik.exchange.models import Fill, Order
@@ -498,6 +500,95 @@ class GateSpotHistoryReader:
         )
 
 
+class GateFuturesHistoryReader:
+    """Gate USDT-perp ``my_trades`` and ``orders``.
+
+    Offset pagination against a fixed ``from`` window, same seconds-not-millis
+    trap as spot. Cursor is ``"{since_s}:{offset}"``. Trade rows carry
+    ``text``, so fills arrive already attributable.
+    """
+
+    venue = venues.GATE_FUTURES.name
+    pages_newest_first = True
+    max_page = GATE_FUTURES_MAX
+
+    def __init__(self, *, symbols: SymbolClient, rest: GateFuturesRest) -> None:
+        self.symbols = symbols
+        self.rest = rest
+
+    async def connect(self) -> None:
+        await self.rest.connect()
+
+    async def close(self) -> None:
+        await self.rest.close()
+
+    async def _pair(self, ticker: UniversalTicker) -> str:
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return await self.symbols.exch_ticker(ticker)
+
+    async def _multiplier(self, ticker: UniversalTicker):
+        size = await self.symbols.contract_size(ticker)
+        if size is None or size <= 0:
+            raise ValueError(f"no contract_size for {ticker}")
+        return size
+
+    @staticmethod
+    def _resume(cursor: str | None, since_ts: float | None) -> tuple[int, int | None]:
+        if cursor:
+            window, _, offset = cursor.partition(":")
+            return max(0, int(offset or 0)), int(window) if window else None
+        return 0, _sec(since_ts)
+
+    @staticmethod
+    def _next(offset: int, since: int | None, served: int, limit: int) -> str | None:
+        if served < limit:
+            return None
+        return f"{since if since is not None else ''}:{offset + served}"
+
+    async def fetch_my_trades(
+        self,
+        ticker: UniversalTicker,
+        *,
+        cursor: str | None = None,
+        since_ts: float | None = None,
+        limit: int = DEFAULT_PAGE,
+    ) -> HistoryPage[Fill]:
+        limit = min(limit, self.max_page)
+        pair = await self._pair(ticker)
+        size = await self._multiplier(ticker)
+        offset, since = self._resume(cursor, since_ts)
+        rows = await self.rest.fetch_my_trades(
+            pair, offset=offset, since=since, limit=limit
+        )
+        return HistoryPage(
+            rows=[row.to_fill(ticker, size) for row in rows],
+            next_cursor=self._next(offset, since, len(rows), limit),
+        )
+
+    async def fetch_orders(
+        self,
+        ticker: UniversalTicker,
+        *,
+        cursor: str | None = None,
+        since_ts: float | None = None,
+        limit: int = DEFAULT_PAGE,
+    ) -> HistoryPage[Order]:
+        limit = min(limit, self.max_page)
+        pair = await self._pair(ticker)
+        size = await self._multiplier(ticker)
+        offset, since = self._resume(cursor, since_ts)
+        rows = await self.rest.fetch_orders(
+            pair, offset=offset, since=since, limit=limit
+        )
+        return HistoryPage(
+            rows=[row.to_order(ticker, size) for row in rows],
+            next_cursor=self._next(offset, since, len(rows), limit),
+        )
+
+
 class HistoryReaderFactory:
     """Venue name → reader. The only place the backfill names a venue.
 
@@ -540,6 +631,13 @@ class HistoryReaderFactory:
                     api_key=row.api_key, api_secret=row.api_secret
                 ),
             )
+        if venue == venues.GATE_FUTURES.name:
+            return GateFuturesHistoryReader(
+                symbols=self._symbols,
+                rest=GateFuturesRest(
+                    api_key=row.api_key, api_secret=row.api_secret
+                ),
+            )
         # Paper lands here, and should: its book is invented tick by tick in
         # another process and there is no venue to re-read it from. A paper
         # account's record is whatever TD caught, and calling it provisional
@@ -554,6 +652,7 @@ __all__ = [
     "BinanceFutureHistoryReader",
     "BinanceSpotHistoryReader",
     "BybitHistoryReader",
+    "GateFuturesHistoryReader",
     "GateSpotHistoryReader",
     "HistoryPage",
     "HistoryReaderFactory",

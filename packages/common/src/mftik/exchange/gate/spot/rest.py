@@ -21,16 +21,13 @@ holes only.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
-import time
 from decimal import Decimal
 from typing import Any
 
 import httpx
 
-from mftik.exchange.errors import ExchangeError
+from mftik.exchange.gate.protocol import GateRestError, sign_rest
 from mftik.exchange.gate.spot.models import (
     GateOrderAck,
     GateTicker,
@@ -58,40 +55,6 @@ MAX_CANDLES = 1000
 
 #: Most history rows ``my_trades`` / ``orders`` return per page.
 MAX_HISTORY = 1000
-
-
-class GateRestError(ExchangeError):
-    """Non-2xx or error-bodied response from Gate's REST API."""
-
-    def __init__(self, status: int, label: str, message: str) -> None:
-        self.status = status
-        self.label = label
-        super().__init__(f"[{status}] {label}: {message}")
-
-
-def sign_rest(
-    api_secret: str,
-    method: str,
-    path: str,
-    query: str = "",
-    body: str = "",
-    ts: float | None = None,
-) -> tuple[str, str]:
-    """Return ``(signature, timestamp)`` for a REST call.
-
-    Signs ``METHOD\\nPATH\\nQUERY\\nSHA512(body)\\nTIMESTAMP``. The timestamp is
-    a float rendered as-is, matching Gate's own SDK — an int works too, but the
-    same value must appear in the header and in the signed string.
-    """
-    ts = time.time() if ts is None else ts
-    hashed_payload = hashlib.sha512(body.encode("utf-8")).hexdigest()
-    message = f"{method}\n{path}\n{query}\n{hashed_payload}\n{ts}"
-    signature = hmac.new(
-        api_secret.encode("utf-8"),
-        message.encode("utf-8"),
-        hashlib.sha512,
-    ).hexdigest()
-    return signature, str(ts)
 
 
 class _GateRestTransport:

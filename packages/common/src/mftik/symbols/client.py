@@ -93,6 +93,10 @@ class SymbolClient:
         """Universal → the venue's spelling. The authoritative translation."""
         return (await self.get(ticker)).exch_ticker
 
+    async def contract_size(self, ticker: UniversalTicker) -> Decimal | None:
+        """How much base one venue-native size unit is, or ``None``."""
+        return (await self.get(ticker)).contract_size
+
     async def symbol_for(
         self, venue: str, exch_ticker: str, *, category: Category | str
     ) -> UniversalTicker:

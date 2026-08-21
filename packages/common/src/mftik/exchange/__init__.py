@@ -63,6 +63,15 @@ from mftik.exchange.errors import (
     InsufficientBalanceError,
     OrderError,
 )
+from mftik.exchange.gate.future import (
+    GATE_FUTURES_REST_URL,
+    GATE_FUTURES_WS_URL,
+    GateFuturesPrivateClient,
+    GateFuturesPublicClient,
+    GateFuturesPublicRest,
+    GateFuturesRest,
+    GateFuturesWebSocket,
+)
 from mftik.exchange.gate.spot import (
     GATE_SPOT_REST_URL,
     GATE_SPOT_WS_URL,
@@ -215,8 +224,15 @@ __all__ = [
     "ExchangeError",
     "ExchangeNotConnectedError",
     "Fill",
+    "GATE_FUTURES_REST_URL",
+    "GATE_FUTURES_WS_URL",
     "GateApiError",
     "GateBalance",
+    "GateFuturesPrivateClient",
+    "GateFuturesPublicClient",
+    "GateFuturesPublicRest",
+    "GateFuturesRest",
+    "GateFuturesWebSocket",
     "GateBookTicker",
     "GateCandlestick",
     "GateOrderAck",

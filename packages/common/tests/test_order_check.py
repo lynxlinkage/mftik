@@ -105,6 +105,17 @@ def test_perp_market_rejects_quote_qty() -> None:
     assert reason is not None and "quote_qty is not expressible" in reason
 
 
+def test_gate_futures_market_orders_size_in_base() -> None:
+    request = _req(
+        universal_ticker="GateFutures_Perp_BTCUSDT",
+        qty=None,
+        quote_qty=Decimal("100"),
+    )
+    kind, reason = classify(request) or (None, None)
+    assert kind == VENUE
+    assert reason is not None and "quote_qty is not expressible" in reason
+
+
 def test_binance_and_paper_accept_either_unit() -> None:
     for ticker in (BINANCE_SPOT, PAPER_SPOT):
         assert (

@@ -12,6 +12,7 @@ from mftik.exchange.binance.future.private import BinanceFuturePrivateClient
 from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mftik.exchange.bybit.private import BybitPrivateClient
 from mftik.exchange.errors import ExchangeError
+from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
 from mftik.exchange.paper.remote import PaperRemotePrivateClient
 from mftik.symbols import SymbolClient
@@ -172,6 +173,19 @@ class VenueSessionFactory:
             )
             logger.info(
                 "TD building Gate session api_id=%s key=%s…",
+                api_id,
+                row.api_key[:6],
+            )
+            return self._session(api_id, private)
+
+        if venue is venues.GATE_FUTURES:
+            private = GateFuturesPrivateClient(
+                api_key=row.api_key,
+                api_secret=row.api_secret,
+                symbols=self._symbols,
+            )
+            logger.info(
+                "TD building GateFutures session api_id=%s key=%s…",
                 api_id,
                 row.api_key[:6],
             )
