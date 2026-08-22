@@ -26,6 +26,7 @@ from mftik.cli import init as init_cmd
 from mftik.cli import node as node_cmd
 from mftik.cli import profiles, sessions
 from mftik.cli import push as push_cmd
+from mftik.cli import rm as rm_cmd
 from mftik.cli import run as run_cmd
 from mftik.cli.client import CliError, NodeUnreachable
 from mftik.cli.config import ConfigError
@@ -409,6 +410,16 @@ def _setup_push(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("path", help="strategy directory")
 
 
+def _setup_rm(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("name", help="strategy name as the registry lists it")
+    parser.add_argument(
+        "--origin",
+        choices=("private", "public"),
+        default="private",
+        help="which of this node's own registries (default: private, same as push)",
+    )
+
+
 def _setup_run(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("path", help="strategy directory")
     parser.add_argument(
@@ -536,6 +547,12 @@ COMMANDS: tuple[Command, ...] = (
         help="copy a strategy tree into the node's private registry",
         setup=_setup_push,
         run=push_cmd.push,
+    ),
+    Command(
+        name="rm",
+        help="delete a strategy from this node's registry",
+        setup=_setup_rm,
+        run=rm_cmd.rm,
     ),
     Command(
         name="run",

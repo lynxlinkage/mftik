@@ -121,6 +121,7 @@ async def test_a_registry_key_reads_handshake_extras_not_environment(
         ("GET", "/sts/sessions"),
         ("GET", "/registry/v1/private"),
         ("POST", "/registry/v1/add"),
+        ("DELETE", "/registry/v1/strategies/tiny"),
         ("GET", "/registry/v1/remotes"),
         ("POST", "/registry/v1/remotes"),
         ("GET", "/auth/keys"),

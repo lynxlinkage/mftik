@@ -7,9 +7,21 @@
 		sync?: RegistrySyncRow[];
 		loading?: boolean;
 		empty: string;
+		removing?: string | null;
+		onRemove?: (name: string) => void;
 	}
 
-	let { origin, strategies = [], sync, loading = false, empty }: Props = $props();
+	let {
+		origin,
+		strategies = [],
+		sync,
+		loading = false,
+		empty,
+		removing = null,
+		onRemove
+	}: Props = $props();
+
+	const canRemove = $derived(onRemove != null && sync == null);
 
 	const rows = $derived(
 		sync ??
@@ -82,6 +94,9 @@
 				{:else}
 					<th>Digest</th>
 				{/if}
+				{#if canRemove}
+					<th></th>
+				{/if}
 			</tr>
 		</thead>
 		<tbody>
@@ -100,6 +115,18 @@
 					{:else}
 						<td class="muted" title={s.local_digest ?? ''}>{shortDigest(s.local_digest)}</td>
 					{/if}
+					{#if canRemove}
+						<td class="right">
+							<button
+								type="button"
+								class="secondary"
+								onclick={() => onRemove?.(s.name)}
+								disabled={removing === s.name}
+							>
+								{removing === s.name ? 'Removing…' : 'Remove'}
+							</button>
+						</td>
+					{/if}
 				</tr>
 			{/each}
 		</tbody>
@@ -110,5 +137,9 @@
 	code {
 		font-family: var(--font);
 		font-size: 0.82rem;
+	}
+
+	.right {
+		text-align: right;
 	}
 </style>

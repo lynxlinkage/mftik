@@ -135,6 +135,7 @@ mftik disconnect <name>     forget one, and the key it issued
 mftik check <path> [cfg]    the import gate and on_initialized, offline
 mftik env <verb>            the third-party packages this node has applied
 mftik push <path>           copy a strategy tree into the node's private registry
+mftik rm <name>             delete a strategy from the node's private registry
 mftik run <path> [cfg]      push, deploy, and tail the session's log
 mftik ps                    live sessions
 mftik logs <session>        a session's log; -f tails the live stream
@@ -161,6 +162,16 @@ STS picker's starting document. A nested copy is stored as root
 `loaded` after asking STS to re-scan; only `loaded: true` means a deploy
 will resolve the tree. The other two outcomes (STS did not answer; STS
 answered and skipped the tree) are exit 1, with the node's `load_error`.
+
+`rm` is the other half of a push. It names the tree as the registry lists it
+(the `name` `push` printed), not a local path, and defaults to
+`origin=private` — same as push. `--origin public` is for a tree this node
+published. A pulled copy is not this command's: disconnect the remote. The
+node answers `unloaded` after asking STS to forget the type; only
+`unloaded: true` means a deploy will no longer resolve it. The other two
+outcomes (STS did not answer; STS reloaded and still lists the key) are
+exit 1, with the node's `unload_error`. A live session running it is a 409:
+stop it first.
 
 ### `mftik env`
 

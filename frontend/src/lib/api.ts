@@ -214,6 +214,12 @@ export type RegistryStrategy = {
 	files: string[];
 };
 
+/** The tree that was deleted, and whether STS has stopped answering to it. */
+export type RegistryRemoved = RegistryStrategy & {
+	unloaded: boolean;
+	unload_error: string | null;
+};
+
 export type RegistryRemote = {
 	name: string;
 	url: string;
@@ -926,6 +932,11 @@ export const api = {
 		request<{ strategies: RegistryStrategy[] }>('/registry/v1/strategies'),
 	registryPrivate: () =>
 		request<{ strategies: RegistryStrategy[] }>('/registry/v1/private'),
+	registryDelete: (name: string, origin: 'public' | 'private') =>
+		request<RegistryRemoved>(
+			`/registry/v1/strategies/${encodeURIComponent(name)}?origin=${encodeURIComponent(origin)}`,
+			{ method: 'DELETE' }
+		),
 	registryRemotes: () => request<{ remotes: RegistryRemote[] }>('/registry/v1/remotes'),
 	registryRemote: (name: string) =>
 		request<RegistryRemoteDetail>(`/registry/v1/remotes/${encodeURIComponent(name)}`),

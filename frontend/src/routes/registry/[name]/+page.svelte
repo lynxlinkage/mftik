@@ -14,12 +14,16 @@
 	let error = $state<string | null>(null);
 	let loading = $state(true);
 	let busy = $state(false);
+	let removing = $state<string | null>(null);
+	let blocked = $state<{ name: string; message: string } | null>(null);
+	let unloadError = $state<string | null>(null);
 
 	$effect(() => {
 		const origin = name;
 		loading = true;
 		error = null;
 		remoteError = null;
+		unloadError = null;
 		if (origin === 'public' || origin === 'private') {
 			const fetchOwn =
 				origin === 'public' ? api.registryStrategies() : api.registryPrivate();
@@ -81,6 +85,37 @@
 			if (origin === name) busy = false;
 		}
 	}
+
+	async function removeStrategy(strategyName: string) {
+		if (!isOwn || removing) return;
+		const origin = name;
+		if (origin !== 'public' && origin !== 'private') return;
+		removing = strategyName;
+		error = null;
+		unloadError = null;
+		try {
+			const out = await api.registryDelete(strategyName, origin);
+			if (origin !== name) return;
+			localStrategies = localStrategies.filter((s) => s.name !== strategyName);
+			if (!out.unloaded) unloadError = out.unload_error;
+		} catch (e) {
+			if (origin !== name) return;
+			blocked = {
+				name: strategyName,
+				message: e instanceof Error ? e.message : String(e)
+			};
+		} finally {
+			if (origin === name) removing = null;
+		}
+	}
+
+	function closeBlocked() {
+		blocked = null;
+	}
+
+	function onBlockedKey(event: KeyboardEvent) {
+		if (event.key === 'Escape') closeBlocked();
+	}
 </script>
 
 <p class="back"><a href="/registry">← Registry</a></p>
@@ -123,6 +158,9 @@
 {:else if remoteError && !reachable}
 	<div class="error-banner">Peer unreachable — showing the local copy. {remoteError}</div>
 {/if}
+{#if unloadError}
+	<div class="error-banner">{unloadError}</div>
+{/if}
 
 <section class="panel table-wrap">
 	<RegistryStrategies
@@ -130,6 +168,8 @@
 		strategies={localStrategies}
 		sync={isOwn ? undefined : sync}
 		{loading}
+		{removing}
+		onRemove={isOwn ? removeStrategy : undefined}
 		empty={name === 'public'
 			? 'No strategies in the public registry yet.'
 			: name === 'private'
@@ -137,6 +177,31 @@
 				: 'No strategies on this node or its local copy.'}
 	/>
 </section>
+
+{#if blocked}
+	<div
+		class="backdrop"
+		role="presentation"
+		onclick={closeBlocked}
+		onkeydown={onBlockedKey}
+	>
+		<div
+			class="modal"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="blocked-title"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+			onkeydown={(e) => e.stopPropagation()}
+		>
+			<h2 id="blocked-title">Cannot remove {blocked.name}</h2>
+			<p class="hint">{blocked.message}</p>
+			<div class="modal-actions">
+				<button type="button" onclick={closeBlocked}>OK</button>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <style>
 	.back {
@@ -157,5 +222,43 @@
 		display: flex;
 		align-items: center;
 		gap: 0.65rem;
+	}
+
+	.backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 40;
+		background: rgba(4, 8, 14, 0.72);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 1.5rem;
+	}
+
+	.modal {
+		width: min(28rem, 100%);
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		padding: 1.15rem 1.2rem 1.1rem;
+		display: grid;
+		gap: 0.85rem;
+	}
+
+	.modal h2 {
+		margin: 0;
+		font-size: 1.1rem;
+	}
+
+	.hint {
+		margin: 0;
+		color: var(--muted);
+		font-size: 0.82rem;
+	}
+
+	.modal-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.5rem;
 	}
 </style>
