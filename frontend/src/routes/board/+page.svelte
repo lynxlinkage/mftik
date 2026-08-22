@@ -2,8 +2,6 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { api, formatTs, shortId, type BoardFill, type BoardSession } from '$lib/api';
 	import { connectFills, type FillConnection } from '$lib/logging/fills';
-	import { formatTickerTag, visibleTags } from '$lib/ticker';
-
 	/**
 	 * One card per strategy run: how much it traded and how long it ran.
 	 *
@@ -16,14 +14,16 @@
 	 * running session moves before the writer's next flush — it is a hint, never
 	 * a total, and a refresh replaces it with the real figure.
 	 *
-	 * The last tab shows rows instead of cards, because what it lists has no run
-	 * to be a card of: executions belonging to no session. A card would need a
-	 * heading naming whose they are, which is the one thing nobody knows — so
-	 * they are listed one execution per line, the way the drill-in lists a run's,
-	 * and read rather than counted.
+	 * Sessions can be cards or a table — same facts, the switch only changes
+	 * layout. The last tab is always rows: what it lists has no run to be a
+	 * card of. A card would need a heading naming whose they are, which is the
+	 * one thing nobody knows.
 	 */
 
 	type Tab = 'all' | 'live' | 'done' | 'external';
+	type Layout = 'cards' | 'table';
+
+	const LAYOUT_KEY = 'mftik.board.layout';
 
 	let sessions = $state<BoardSession[]>([]);
 	let external = $state<BoardFill[]>([]);
@@ -31,6 +31,7 @@
 	let live = $state<Record<string, number>>({});
 	let connection = $state<FillConnection>('connecting');
 	let filter = $state<Tab>('all');
+	let layout = $state<Layout>('cards');
 	let error = $state<string | null>(null);
 	let loading = $state(true);
 	let loadingMore = $state(false);
@@ -86,6 +87,15 @@
 		void refresh();
 	}
 
+	function setLayout(next: Layout) {
+		layout = next;
+		try {
+			localStorage.setItem(LAYOUT_KEY, next);
+		} catch {
+			// private mode — the switch still works for this visit
+		}
+	}
+
 	function duration(seconds: number): string {
 		if (!seconds || seconds < 0) return '—';
 		const s = Math.floor(seconds % 60);
@@ -101,6 +111,12 @@
 	}
 
 	onMount(() => {
+		try {
+			const stored = localStorage.getItem(LAYOUT_KEY);
+			if (stored === 'cards' || stored === 'table') layout = stored;
+		} catch {
+			// ignore
+		}
 		void refresh();
 		disconnect = connectFills(
 			(event) => {
@@ -140,24 +156,44 @@
 	<div class="error-banner">{error}</div>
 {/if}
 
-<div class="tabs" role="tablist">
-	<button type="button" class:active={filter === 'all'} onclick={() => setFilter('all')}>
-		All
-	</button>
-	<button type="button" class:active={filter === 'live'} onclick={() => setFilter('live')}>
-		Live
-	</button>
-	<button type="button" class:active={filter === 'done'} onclick={() => setFilter('done')}>
-		Finished
-	</button>
-	<button
-		type="button"
-		class:active={filter === 'external'}
-		onclick={() => setFilter('external')}
-		title="executions on these accounts that no run of ours placed"
-	>
-		External
-	</button>
+<div class="toolbar">
+	<div class="tabs" role="tablist">
+		<button type="button" class:active={filter === 'all'} onclick={() => setFilter('all')}>
+			All
+		</button>
+		<button type="button" class:active={filter === 'live'} onclick={() => setFilter('live')}>
+			Live
+		</button>
+		<button type="button" class:active={filter === 'done'} onclick={() => setFilter('done')}>
+			Finished
+		</button>
+		<button
+			type="button"
+			class:active={filter === 'external'}
+			onclick={() => setFilter('external')}
+			title="executions on these accounts that no run of ours placed"
+		>
+			External
+		</button>
+	</div>
+	{#if filter !== 'external'}
+		<div class="view-switch" role="group" aria-label="Session layout">
+			<button
+				type="button"
+				class:active={layout === 'cards'}
+				onclick={() => setLayout('cards')}
+			>
+				Cards
+			</button>
+			<button
+				type="button"
+				class:active={layout === 'table'}
+				onclick={() => setLayout('table')}
+			>
+				Table
+			</button>
+		</div>
+	{/if}
 </div>
 
 {#if filter === 'external'}
@@ -242,6 +278,70 @@
 	<section class="panel">
 		<p class="empty-state">{loading ? 'Loading…' : 'No sessions yet.'}</p>
 	</section>
+{:else if layout === 'table'}
+	<section class="panel">
+		<table class="data">
+			<thead>
+				<tr>
+					<th>Strategy</th>
+					<th>Status</th>
+					<th class="num">Fills</th>
+					<th>Started</th>
+					<th>Ran for</th>
+					<th>Session</th>
+					<th>Record</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each sessions as s (s.session_id)}
+					<tr>
+						<td>
+							<a href={`/board/${s.session_id}`}>{s.strategy ?? 'unknown'}</a>
+						</td>
+						<td>
+							<span
+								class="badge"
+								class:live={s.status === 'live'}
+								class:done={s.status === 'done' || s.status === 'ack'}
+								class:failed={s.status === 'failed'}
+								class:interrupted={s.status === 'interrupted'}
+								title={s.reason ?? ''}
+							>
+								{s.status}
+							</span>
+						</td>
+						<td class="num">
+							{fillsOf(s)}
+							{#if live[s.session_id]}
+								<span class="delta" title="arrived on the live stream since this page loaded">
+									+{live[s.session_id]}
+								</span>
+							{/if}
+						</td>
+						<td class="muted">{formatTs(s.created_at)}</td>
+						<td>{duration(s.duration_s)}</td>
+						<td class="mono muted" title={s.session_id}>{shortId(s.session_id)}</td>
+						<td>
+							{#if s.settled}
+								<span class="badge done" title="the venue has been re-read across this whole run">
+									settled
+								</span>
+							{:else}
+								<span
+									class="badge pending"
+									title={s.confirmed_through_ts
+										? `confirmed against the venue through ${formatTs(s.confirmed_through_ts)}`
+										: 'not yet re-read against the venue'}
+								>
+									provisional
+								</span>
+							{/if}
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	</section>
 {:else}
 	<div class="cards">
 		{#each sessions as s (s.session_id)}
@@ -259,18 +359,6 @@
 						{s.status}
 					</span>
 				</header>
-
-				{#if s.tickers.length}
-					{@const tags = visibleTags(s.tickers)}
-					<div class="tags" title={s.tickers.join(', ')}>
-						{#each tags.shown as ticker (ticker)}
-							<span class="badge">{formatTickerTag(ticker)}</span>
-						{/each}
-						{#if tags.extra}
-							<span class="badge">+{tags.extra}</span>
-						{/if}
-					</div>
-				{/if}
 
 				<div class="figure">
 					<span class="count">{fillsOf(s)}</span>
@@ -319,6 +407,38 @@
 		gap: 0.75rem;
 	}
 
+	.toolbar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		flex-wrap: wrap;
+		margin-bottom: 1rem;
+	}
+
+	.toolbar .tabs {
+		margin-bottom: 0;
+	}
+
+	.view-switch {
+		display: flex;
+		gap: 0.35rem;
+	}
+
+	.view-switch button {
+		background: transparent;
+		color: var(--muted);
+		border: 1px solid transparent;
+		font-weight: 500;
+		padding: 0.4rem 0.7rem;
+	}
+
+	.view-switch button.active {
+		color: var(--text);
+		border-color: var(--border);
+		background: var(--accent-dim);
+	}
+
 	.conn {
 		font-size: 0.8rem;
 		font-weight: 600;
@@ -365,12 +485,6 @@
 
 	.strategy {
 		font-weight: 700;
-	}
-
-	.tags {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.3rem;
 	}
 
 	.figure {
