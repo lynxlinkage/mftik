@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api, formatTs, shortId, type BoardFill, type BoardSession } from '$lib/api';
+	import BindingChips from '$lib/components/BindingChips.svelte';
 	import { connectFills, type FillConnection } from '$lib/logging/fills';
+	import { symbolsFromTickers, venuesFromTickers } from '$lib/ticker';
 	/**
 	 * One card per strategy run: how much it traded and how long it ran.
 	 *
@@ -286,6 +288,8 @@
 					<th>Strategy</th>
 					<th>Status</th>
 					<th class="num">Fills</th>
+					<th>Symbols</th>
+					<th>Venues</th>
 					<th>Started</th>
 					<th>Ran for</th>
 					<th>Session</th>
@@ -318,6 +322,16 @@
 								</span>
 							{/if}
 						</td>
+						<td class="bindings-cell">
+							<BindingChips items={symbolsFromTickers(s.tickers)} maxChips={2} />
+						</td>
+						<td class="bindings-cell">
+							<BindingChips
+								kind="venue"
+								items={venuesFromTickers(s.tickers)}
+								maxChips={2}
+							/>
+						</td>
 						<td class="muted">{formatTs(s.created_at)}</td>
 						<td>{duration(s.duration_s)}</td>
 						<td class="mono muted" title={s.session_id}>{shortId(s.session_id)}</td>
@@ -347,7 +361,7 @@
 		{#each sessions as s (s.session_id)}
 			<a class="card" href={`/board/${s.session_id}`} title={s.session_id}>
 				<header>
-					<span class="strategy">{s.strategy ?? 'unknown'}</span>
+					<h3 class="name">{s.strategy ?? 'unknown'}</h3>
 					<span
 						class="badge"
 						class:live={s.status === 'live'}
@@ -360,23 +374,35 @@
 					</span>
 				</header>
 
-				<div class="figure">
-					<span class="count">{fillsOf(s)}</span>
-					<span class="unit">
-						fills
-						{#if live[s.session_id]}
-							<span class="delta" title="arrived on the live stream since this page loaded">
-								+{live[s.session_id]}
-							</span>
-						{/if}
-					</span>
+				<div class="figures">
+					<div class="figure">
+						<div class="value">{fillsOf(s)}</div>
+						<div class="label">
+							fills
+							{#if live[s.session_id]}
+								<span class="delta" title="arrived on the live stream since this page loaded">
+									+{live[s.session_id]}
+								</span>
+							{/if}
+						</div>
+					</div>
 				</div>
 
-				<dl class="facts">
-					<div><dt>Started</dt><dd>{formatTs(s.created_at)}</dd></div>
-					<div><dt>Ran for</dt><dd>{duration(s.duration_s)}</dd></div>
-					<div><dt>Session</dt><dd class="mono">{shortId(s.session_id)}</dd></div>
+				<dl class="run">
+					<dt>started</dt>
+					<dd>{formatTs(s.created_at)}</dd>
+					<dt>ran for</dt>
+					<dd>{duration(s.duration_s)}</dd>
 				</dl>
+
+				<div class="bindings">
+					<BindingChips label="symbols" items={symbolsFromTickers(s.tickers)} />
+					<BindingChips
+						label="venues"
+						kind="venue"
+						items={venuesFromTickers(s.tickers)}
+					/>
+				</div>
 
 				<footer>
 					{#if s.settled}
@@ -455,15 +481,14 @@
 
 	.cards {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
 		gap: 1rem;
 	}
 
 	.card {
 		display: flex;
 		flex-direction: column;
-		gap: 0.85rem;
-		padding: 1rem;
+		padding: 1rem 1.125rem;
 		border: 1px solid var(--border);
 		border-radius: var(--radius);
 		background: var(--panel, transparent);
@@ -483,53 +508,76 @@
 		gap: 0.5rem;
 	}
 
-	.strategy {
-		font-weight: 700;
+	.name {
+		margin: 0;
+		font-family: var(--font);
+		font-size: 0.9375rem;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
-	.figure {
+	.figures {
 		display: flex;
-		align-items: baseline;
-		gap: 0.4rem;
+		gap: 1.75rem;
+		margin-top: 0.875rem;
 	}
 
-	.count {
-		font-size: 2rem;
-		font-weight: 700;
+	.value {
+		font-family: var(--font);
+		font-size: 1.375rem;
+		font-weight: 500;
+		line-height: 1.1;
 		font-variant-numeric: tabular-nums;
-		line-height: 1;
 	}
 
-	.unit {
+	.label {
+		margin-top: 0.25rem;
+		font-family: var(--font);
+		font-size: 0.625rem;
+		letter-spacing: 0.09em;
+		text-transform: uppercase;
 		color: var(--muted);
-		font-size: 0.85rem;
 	}
 
 	.delta {
 		color: var(--accent);
 		font-weight: 600;
+		letter-spacing: 0;
+		text-transform: none;
 	}
 
-	.facts {
-		display: flex;
-		flex-direction: column;
-		gap: 0.3rem;
-		margin: 0;
-		font-size: 0.85rem;
+	.run {
+		display: grid;
+		grid-template-columns: max-content 1fr;
+		gap: 0.25rem 0.875rem;
+		margin: 0.875rem 0 0;
+		padding-top: 0.75rem;
+		border-top: 1px solid var(--border);
+		font-family: var(--font);
+		font-size: 0.75rem;
 	}
 
-	.facts > div {
-		display: flex;
-		justify-content: space-between;
-		gap: 0.5rem;
-	}
-
-	.facts dt {
+	.run dt {
 		color: var(--muted);
+		letter-spacing: 0.04em;
 	}
 
-	.facts dd {
+	.run dd {
 		margin: 0;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.bindings {
+		margin-top: 0.75rem;
+		display: grid;
+		gap: 0.375rem;
+	}
+
+	.bindings-cell {
+		max-width: 12rem;
 	}
 
 	.mono {
@@ -563,6 +611,7 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.5rem;
+		margin-top: 0.75rem;
 		padding-top: 0.6rem;
 		border-top: 1px solid var(--border);
 	}
