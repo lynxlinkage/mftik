@@ -113,7 +113,9 @@ def test_rm_exits_one_when_sts_did_not_reload(monkeypatch, capsys) -> None:
 def test_rm_exits_one_when_sts_still_answers(monkeypatch, capsys) -> None:
     fake = Node_(
         unloaded=False,
-        unload_error="the strategy was deleted, but STS still answers to 'private::Tiny'.",
+        unload_error=(
+            "the strategy was deleted, but STS still answers to 'private::Tiny'."
+        ),
     )
     _install(monkeypatch, fake)
 
@@ -126,7 +128,10 @@ def test_rm_exits_one_when_a_session_is_still_running_it(
 ) -> None:
     fake = Node_(
         status=409,
-        detail="cannot delete private::Tiny: live sessions are running it. Stop these first: sts-7",
+        detail=(
+            "cannot delete private::Tiny: live sessions are running it. "
+            "Stop these first: sts-7"
+        ),
     )
     _install(monkeypatch, fake)
 
