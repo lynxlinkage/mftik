@@ -7,8 +7,6 @@
 # maintainers' own production compose.
 #
 #   docker compose pull
-#   docker compose run --rm migrate
-#   docker compose run --rm seed
 #   docker compose up -d
 #
 # Then: mftik connect http://localhost:${MFTIK_PORT:-8080} --setup
@@ -18,12 +16,11 @@
 
 name: ${MFTIK_PROJECT:-mftik}
 
-# Read from .env by interpolation, not by `env_file:`. Compose drops
-# env_file for a service that has `profiles:` when it is started with
-# `docker compose run` and the profile was not named — migrate and seed are
-# exactly that, and the symptom is a migration that tries localhost:5432 and
-# says nothing about why. Interpolation is not affected, and naming the
-# variables here also says which ones a service actually needs.
+# Read from .env by interpolation, not by `env_file:`. Compose has
+# dropped env_file on `docker compose run` often enough that a
+# migration would try localhost:5432 and say nothing about why.
+# Interpolation is not affected, and naming the variables here also
+# says which ones a service actually needs.
 x-env: &env
   DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
   DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:?set DATABASE_URL_SYNC in .env}
@@ -45,6 +42,8 @@ x-app: &app
       condition: service_healthy
     redis:
       condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
   logging:
     driver: json-file
     options:
@@ -82,16 +81,19 @@ services:
       timeout: 3s
       retries: 10
 
-  # One-shots. Deliberately not in the running set: `up -d` should not race a
-  # schema migration, and seeding twice is idempotent but pointless.
+  # alembic upgrade head. Idempotent: already at head is a no-op. The planes
+  # wait for this, so `up` is how a first node gets a schema and how a later
+  # `pull` applies new revisions before anything queries them.
   migrate:
     <<: *app
     restart: "no"
     command: ["mftik-db-migrate"]
-    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-  # Creates the Owner row and two paper accounts, so `mftik init` has a real
-  # account name to write and there is something to trade against on day one.
+  # Owner row + two paper accounts. Idempotent; `mftik init` needs a real
+  # account name on day one.
   seed:
     <<: *app
     restart: "no"
@@ -99,7 +101,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    profiles: ["tools"]
+      migrate:
+        condition: service_completed_successfully
 
   api:
     <<: *app
@@ -114,6 +117,15 @@ services:
       # This stack is http on localhost, and browsers withhold Secure cookies
       # there. Set to 1 once you put TLS in front of it.
       MFTIK_COOKIE_SECURE: ${MFTIK_COOKIE_SECURE:-0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
     volumes:
       - mftik_data:/var/lib/mftik
 
@@ -143,6 +155,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       paper:
         condition: service_started
 
@@ -162,6 +178,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       paper:
         condition: service_started
 

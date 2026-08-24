@@ -73,8 +73,6 @@ def node_init(args: argparse.Namespace) -> int:
     where = "" if str(root) in {".", ""} else f"cd {root} && "
     print(
         f"\n  {where}docker compose pull\n"
-        f"  {where}docker compose run --rm migrate\n"
-        f"  {where}docker compose run --rm seed\n"
         f"  {where}docker compose up -d\n"
         f"\n  mftik connect http://localhost:{args.port} --setup\n"
         f"  mftik init ./my-strategy\n"

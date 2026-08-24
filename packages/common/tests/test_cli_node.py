@@ -37,6 +37,7 @@ def test_it_writes_a_stack(tmp_path: Path, capsys) -> None:
     assert set(_written(root)) == {"docker-compose.yml", "Caddyfile", ".env"}
     out = capsys.readouterr().out
     assert "docker compose up -d" in out
+    assert "docker compose run --rm migrate" not in out
     assert "mftik connect http://localhost:8080" in out
 
 
@@ -114,14 +115,30 @@ def test_the_registry_volume_is_shared_by_api_and_sts(tmp_path: Path) -> None:
         assert services[name]["environment"]["MFTIK_DATA"] == "/var/lib/mftik"
 
 
-def test_migrations_and_seed_are_not_in_the_running_set(tmp_path: Path) -> None:
-    """`up -d` must not race a schema migration."""
+def test_up_applies_schema_before_the_planes_start(tmp_path: Path) -> None:
+    """`alembic upgrade head` is idempotent, so `up` can run it."""
     root = tmp_path / "mynode"
     main(["node-init", str(root)])
     services = _compose(root)["services"]
 
-    assert services["migrate"]["profiles"] == ["tools"]
-    assert services["seed"]["profiles"] == ["tools"]
+    assert "profiles" not in services["migrate"]
+    assert "profiles" not in services["seed"]
+    assert services["migrate"]["depends_on"] == {
+        "postgres": {"condition": "service_healthy"}
+    }
+    assert (
+        services["seed"]["depends_on"]["migrate"]["condition"]
+        == "service_completed_successfully"
+    )
+    for name in ("api", "sts", "md", "td", "sym"):
+        deps = services[name]["depends_on"]
+        assert (
+            deps["migrate"]["condition"] == "service_completed_successfully"
+        ), name
+    assert (
+        services["api"]["depends_on"]["seed"]["condition"]
+        == "service_completed_successfully"
+    )
 
 
 # --- the .env --------------------------------------------------------------
