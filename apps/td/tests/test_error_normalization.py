@@ -23,6 +23,7 @@ from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
 from mftik.exchange.gate.spot.protocol import GateApiError, GateWsError
 from mftik.exchange.gate.spot.rest import GateRestError
+from mftik.exchange.okx.protocol import OkxRestError, OkxWsError
 from mftik.exchange.paper.private import PaperAuthError, PaperPrivateClient
 from mftik.exchange.paper.remote import PaperRemotePrivateClient
 from mftik.protocol.reject_codes import (
@@ -487,3 +488,42 @@ def test_a_rest_refusal_normalizes_like_a_socket_one() -> None:
     """Same numbers over both transports, which is why one table covers them."""
     rest = BybitRestError(170213, "Order does not exist", status=200)
     assert normalize(rest, venue="Bybit") == RejectCode.VENUE_ORDER_NOT_FOUND
+
+
+# --- OKX --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (51008, RejectCode.VENUE_INSUFFICIENT_BALANCE),
+        (51400, RejectCode.VENUE_ORDER_NOT_FOUND),
+        (51603, RejectCode.VENUE_ORDER_NOT_FOUND),
+        (50101, RejectCode.VENUE_AUTH_FAILED),
+        (50110, RejectCode.VENUE_IP_NOT_WHITELISTED),
+        (50011, RejectCode.VENUE_RATE_LIMITED),
+        (51020, RejectCode.VENUE_BELOW_MINIMUM),
+        (51024, RejectCode.VENUE_RISK_LIMIT),
+    ],
+)
+def test_okx_codes_normalize(code: int, expected: RejectCode) -> None:
+    assert normalize(OkxWsError(code, "refused"), venue="Okx") == expected
+
+
+def test_an_okx_code_survives_being_wrapped_as_an_order_error() -> None:
+    cause = OkxWsError(51008, "Insufficient balance", op="order")
+    wrapped = OrderError(str(cause))
+    wrapped.__cause__ = cause
+
+    assert (
+        normalize(wrapped, venue="Okx") == RejectCode.VENUE_INSUFFICIENT_BALANCE
+    )
+
+
+def test_an_unmapped_okx_code_passes_through_as_itself() -> None:
+    assert normalize(OkxWsError(59999, "new one"), venue="Okx") == 59999
+
+
+def test_an_okx_rest_refusal_normalizes_like_a_socket_one() -> None:
+    rest = OkxRestError(51603, "Order does not exist", status=200)
+    assert normalize(rest, venue="Okx") == RejectCode.VENUE_ORDER_NOT_FOUND

@@ -14,6 +14,7 @@ from mftik.exchange.bybit.public import BybitPublicClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.public import GateFuturesPublicClient
 from mftik.exchange.gate.spot.public import GateSpotPublicClient
+from mftik.exchange.okx.public import OkxPublicClient
 from mftik.exchange.paper.public import PaperPublicClient
 from mftik.exchange.venues import UnknownVenueError
 from mftik_md.session import PaperPublicFactory, VenuePublicFactory
@@ -127,6 +128,28 @@ async def test_bybit_venue_builds_one_client_for_every_category(
     assert client.name == "Bybit"
     # Nothing connected eagerly, and no credentials: market data is open.
     assert client._feeds == {}
+
+
+async def test_okx_venue_builds_one_client_for_every_category(
+    broker: Broker,
+) -> None:
+    """A unified venue is still one connector here.
+
+    Same optional-feed set as Bybit: kline, best-quote, liquidations (SWAP
+    only). No aggregated tape — OKX's ``trades-all`` is a fuller print, not
+    Binance's coalesced one — so ``aggtrade`` is refused by name.
+    """
+    factory = VenuePublicFactory(broker)
+    client = await factory.create("Okx")
+
+    assert isinstance(client, OkxPublicClient)
+    assert client.name == "Okx"
+    assert client._public is None
+    assert client._business is None
+    assert hasattr(client, "stream_kline")
+    assert hasattr(client, "stream_best_quote")
+    assert hasattr(client, "stream_liquidation")
+    assert not hasattr(client, "stream_agg_trades")
 
 
 async def test_registered_venue_without_a_client_is_rejected(

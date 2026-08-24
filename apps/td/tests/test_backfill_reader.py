@@ -29,6 +29,7 @@ from mftik_td.backfill.reader import (
     GateSpotHistoryReader,
     HistoryReaderFactory,
     NoHistoryReaderError,
+    OkxHistoryReader,
 )
 
 TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")
@@ -482,6 +483,180 @@ async def test_gate_futures_pages_by_offset_in_seconds() -> None:
     assert rest.calls[1]["since"] == 1_600_000_000
 
 
+class FakeOkxRest:
+    """Answers the shape ``OkxRest`` returns: a list, newest first."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.fills: list = []
+        self.orders: list = []
+
+    async def connect(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def fetch_fills(self, product, inst_id=None, **kw):
+        self.calls.append(("fills", {"product": product, "inst_id": inst_id, **kw}))
+        return self.fills
+
+    async def fetch_order_history(self, product, inst_id=None, **kw):
+        self.calls.append(("orders", {"product": product, "inst_id": inst_id, **kw}))
+        return self.orders
+
+
+def okx_fill(
+    trade_id: str,
+    *,
+    bill_id: str = "",
+    fill_sz: str = "0.25",
+) -> Any:
+    from mftik.exchange.okx.models import OkxFill
+
+    return OkxFill.model_validate(
+        {
+            "instId": "BTC-USDT",
+            "ordId": "500",
+            "clOrdId": "281474976710656001",
+            "tradeId": trade_id,
+            "billId": bill_id,
+            "side": "buy",
+            "fillPx": "63863.5",
+            "fillSz": fill_sz,
+            "fillFee": "-0.001",
+            "fillFeeCcy": "USDT",
+            "ts": "1699999999000",
+        }
+    )
+
+
+def okx_order(ord_id: str, *, sz: str = "0.25") -> Any:
+    from mftik.exchange.okx.models import OkxOrderUpdate
+
+    return OkxOrderUpdate.model_validate(
+        {
+            "instId": "BTC-USDT",
+            "ordId": ord_id,
+            "clOrdId": "281474976710656001",
+            "side": "buy",
+            "ordType": "limit",
+            "state": "filled",
+            "px": "63863.5",
+            "sz": sz,
+            "accFillSz": sz,
+            "uTime": "1699999999000",
+        }
+    )
+
+
+async def test_okx_asks_in_milliseconds_and_pages_by_bill_id() -> None:
+    """``after`` is a billId, not a tradeId — OKX's own pagination key."""
+    rest = FakeOkxRest()
+    rest.fills = [okx_fill("t1", bill_id="b1"), okx_fill("t2", bill_id="b2")]
+    reader = OkxHistoryReader(symbols=FakeSymbols(), rest=rest)
+    ticker = UniversalTicker.parse("Okx_Spot_BTCUSDT")
+
+    page = await reader.fetch_my_trades(ticker, since_ts=1_600_000_000.5, limit=2)
+
+    assert rest.calls[0][1]["begin"] == 1_600_000_000_500
+    assert rest.calls[0][1]["after"] is None
+    assert rest.calls[0][1]["product"] == "SPOT"
+    assert page.next_cursor == "b2"
+    assert [f.fill_id for f in page.rows] == ["t1", "t2"]
+    assert page.rows[0].client_order_id == "281474976710656001"
+
+    await reader.fetch_my_trades(
+        ticker, cursor=page.next_cursor, since_ts=1_600_000_000
+    )
+    assert rest.calls[1][1]["after"] == "b2"
+    assert rest.calls[1][1]["begin"] is None
+
+
+async def test_okx_orders_page_on_the_ord_id() -> None:
+    rest = FakeOkxRest()
+    rest.orders = [okx_order("o1"), okx_order("o2")]
+    reader = OkxHistoryReader(symbols=FakeSymbols(), rest=rest)
+
+    page = await reader.fetch_orders(
+        UniversalTicker.parse("Okx_Spot_BTCUSDT"), limit=2
+    )
+
+    assert page.next_cursor == "o2"
+    assert [o.order_id for o in page.rows] == ["o1", "o2"]
+
+
+async def test_okx_reads_the_book_off_the_ticker() -> None:
+    """One credential covers every category, so the book is a parameter."""
+    rest = FakeOkxRest()
+    reader = OkxHistoryReader(symbols=FakeSymbols(), rest=rest)
+
+    await reader.fetch_my_trades(UniversalTicker.parse("Okx_Spot_BTCUSDT"))
+    await reader.fetch_my_trades(UniversalTicker.parse("Okx_Perp_BTCUSDT"))
+
+    assert [c[1]["product"] for c in rest.calls] == ["SPOT", "SWAP"]
+
+
+async def test_okx_swap_qty_is_converted_at_the_reader() -> None:
+    """SWAP sizes are contracts; the symbol plane holds the multiplier."""
+    rest = FakeOkxRest()
+    rest.fills = [okx_fill("t1", bill_id="b1", fill_sz="4")]
+    rest.orders = [okx_order("o1", sz="4")]
+    reader = OkxHistoryReader(symbols=FakeSymbols(), rest=rest)
+    ticker = UniversalTicker.parse("Okx_Perp_BTCUSDT")
+
+    fills = await reader.fetch_my_trades(ticker)
+    orders = await reader.fetch_orders(ticker)
+
+    assert fills.rows[0].qty == Decimal("0.0004")
+    assert orders.rows[0].qty == Decimal("0.0004")
+
+
+async def test_okx_refuses_a_swap_with_no_contract_size() -> None:
+    """Guessing ``1`` would book contracts as base."""
+
+    class NoSize(FakeSymbols):
+        async def contract_size(self, ticker: UniversalTicker) -> Decimal | None:
+            return None
+
+    rest = FakeOkxRest()
+    reader = OkxHistoryReader(symbols=NoSize(), rest=rest)
+
+    with pytest.raises(ValueError, match="contract_size"):
+        await reader.fetch_my_trades(UniversalTicker.parse("Okx_Perp_BTCUSDT"))
+
+
+async def test_okx_drops_a_zero_size_row() -> None:
+    rest = FakeOkxRest()
+    rest.fills = [
+        okx_fill("t1", bill_id="b1"),
+        okx_fill("t2", bill_id="b2", fill_sz="0"),
+    ]
+    reader = OkxHistoryReader(symbols=FakeSymbols(), rest=rest)
+
+    page = await reader.fetch_my_trades(UniversalTicker.parse("Okx_Spot_BTCUSDT"))
+
+    assert [f.fill_id for f in page.rows] == ["t1"]
+
+
+async def test_okx_stops_on_a_short_page() -> None:
+    rest = FakeOkxRest()
+    rest.fills = [okx_fill("t1", bill_id="b1")]
+    reader = OkxHistoryReader(symbols=FakeSymbols(), rest=rest)
+
+    page = await reader.fetch_my_trades(
+        UniversalTicker.parse("Okx_Spot_BTCUSDT"), limit=10
+    )
+
+    assert page.next_cursor is None
+
+
+async def test_okx_refuses_another_venues_ticker() -> None:
+    rest = FakeOkxRest()
+    reader = OkxHistoryReader(symbols=FakeSymbols(), rest=rest)
+
+    with pytest.raises(ValueError, match="Bybit"):
+        await reader.fetch_my_trades(UniversalTicker.parse("Bybit_Spot_BTCUSDT"))
+
+
 async def test_every_venue_but_paper_has_a_reader() -> None:
     """Paper's book is invented in another process; there is nothing to re-read.
 
@@ -491,9 +666,9 @@ async def test_every_venue_but_paper_has_a_reader() -> None:
     """
     _key, pem = keypair()
     factory = HistoryReaderFactory(FakeSymbols())
-    row = type("Row", (), {"api_key": "k", "api_secret": pem})()
+    row = type("Row", (), {"api_key": "k", "api_secret": pem, "passphrase": "p"})()
 
-    for venue in ("Bybit", "Gate", "GateFutures", "BinanceFuture"):
+    for venue in ("Bybit", "Gate", "GateFutures", "BinanceFuture", "Okx"):
         reader = await factory.create(venue, row)
         assert reader.venue == venue
 

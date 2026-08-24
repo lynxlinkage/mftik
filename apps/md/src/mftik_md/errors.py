@@ -126,6 +126,15 @@ BINANCE = VenueErrors(
 #: futures serves one window fewer than spot.
 BINANCE_FUTURE = BINANCE
 
+OKX = VenueErrors(
+    codes={
+        51000: QueryCode.VENUE_INVALID_PARAM,
+        50011: QueryCode.VENUE_RATE_LIMITED,
+        50001: QueryCode.VENUE_INTERNAL_ERROR,
+        50013: QueryCode.VENUE_INTERNAL_ERROR,
+    },
+)
+
 #: Bybit v5. Numeric codes only, five and six digit, so an unmapped one passes
 #: through as itself with no risk of being read as a code this platform
 #: assigned.
@@ -161,6 +170,7 @@ VENUES: dict[str, VenueErrors] = {
     "Binance": BINANCE,
     "BinanceFuture": BINANCE_FUTURE,
     "Bybit": BYBIT,
+    "Okx": OKX,
     "Gate": GATE,
     "GateFutures": GATE,
     "Paper": PAPER,

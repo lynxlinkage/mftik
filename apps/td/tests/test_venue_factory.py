@@ -22,6 +22,7 @@ from mftik.exchange.bybit.private import BybitPrivateClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
+from mftik.exchange.okx.private import OkxPrivateClient
 from mftik.exchange.tickers import Category
 from mftik_td.session import PaperSessionFactory, VenueSessionFactory
 
@@ -197,6 +198,33 @@ async def test_bybit_venue_builds_one_client_for_the_whole_account(
     assert hasattr(session.private, "stream_positions")
     assert hasattr(session.private, "fetch_positions")
     # Built but not connected — the manager starts it.
+    assert not session.private.connected
+
+
+async def test_okx_venue_builds_one_client_for_the_whole_account(
+    broker: Broker,
+) -> None:
+    """One credential, a passphrase, one connector — every book."""
+    rows = {
+        12: FakeApiRow(
+            id=12,
+            venue="Okx",
+            api_key="ok",
+            api_secret="os",
+            passphrase="op",
+        ),
+    }
+    factory = _factory(broker, rows)
+
+    session = await factory.create(12)
+
+    assert isinstance(session.private, OkxPrivateClient)
+    assert session.private.name == "Okx"
+    assert session.private.api_key == "ok"
+    assert session.private.passphrase == "op"
+    assert session.private.category is Category.SPOT
+    assert hasattr(session.private, "stream_positions")
+    assert hasattr(session.private, "fetch_positions")
     assert not session.private.connected
 
 

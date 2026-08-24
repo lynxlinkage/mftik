@@ -271,6 +271,29 @@ BINANCE_FUTURE = VenueErrors(
     },
 )
 
+OKX = VenueErrors(
+    codes={
+        50101: RejectCode.VENUE_AUTH_FAILED,
+        50102: RejectCode.VENUE_AUTH_FAILED,
+        50111: RejectCode.VENUE_AUTH_FAILED,
+        50113: RejectCode.VENUE_AUTH_FAILED,
+        50119: RejectCode.VENUE_AUTH_FAILED,
+        50114: RejectCode.VENUE_PERMISSION_DENIED,
+        50110: RejectCode.VENUE_IP_NOT_WHITELISTED,
+        50011: RejectCode.VENUE_RATE_LIMITED,
+        51000: RejectCode.VENUE_INVALID_PARAM,
+        51008: RejectCode.VENUE_INSUFFICIENT_BALANCE,
+        51119: RejectCode.VENUE_INSUFFICIENT_BALANCE,
+        51131: RejectCode.VENUE_INSUFFICIENT_BALANCE,
+        51020: RejectCode.VENUE_BELOW_MINIMUM,
+        51400: RejectCode.VENUE_ORDER_NOT_FOUND,
+        51603: RejectCode.VENUE_ORDER_NOT_FOUND,
+        51024: RejectCode.VENUE_RISK_LIMIT,
+        50001: RejectCode.VENUE_INTERNAL_ERROR,
+        50013: RejectCode.VENUE_INTERNAL_ERROR,
+    },
+)
+
 #: Bybit v5. Numeric codes only — Bybit publishes no label, and the numbers
 #: are its documented contract, the same ones over REST and over the sockets.
 #:
@@ -355,6 +378,7 @@ VENUES: dict[str, VenueErrors] = {
     "Binance": BINANCE,
     "BinanceFuture": BINANCE_FUTURE,
     "Bybit": BYBIT,
+    "Okx": OKX,
     "Gate": GATE,
     "GateFutures": GATE,
     "Paper": PAPER,
@@ -456,6 +480,7 @@ __all__ = [
     "BINANCE",
     "BY_TYPE",
     "GATE",
+    "OKX",
     "PAPER",
     "BYBIT",
     "VENUES",

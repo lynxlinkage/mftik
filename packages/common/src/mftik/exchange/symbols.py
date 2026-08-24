@@ -52,8 +52,9 @@ UniversalTicker` rather than a bare symbol: on a unified-account venue the
         """How much base one venue-native size unit is.
 
         ``None`` on books that already size in the asset (spot, Binance
-        USD-M). Gate futures sizes in contracts; the adapter converts at the
-        wire using this, and refuses rather than guessing ``1``.
+        USD-M, Bybit linear). Gate futures and OKX SWAP size in contracts;
+        the adapter converts at the wire using this, and refuses rather
+        than guessing ``1``.
         """
 
 

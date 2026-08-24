@@ -13,6 +13,7 @@ from mftik.exchange.bybit.public import BybitPublicClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.public import GateFuturesPublicClient
 from mftik.exchange.gate.spot.public import GateSpotPublicClient
+from mftik.exchange.okx.public import OkxPublicClient
 from mftik.exchange.paper.remote_public import PaperRemotePublicClient
 from mftik.symbols import SymbolClient
 
@@ -72,15 +73,15 @@ class VenuePublicFactory:
     is in the registry but has no public client fails here rather than
     attaching a session that would never produce a tick.
 
-    Venues do not all publish the same feeds — Gate and Binance serve all five
-    topics, ``BinanceFuture`` and Bybit add liquidations, paper serves a subset
-    — so a subscribe to a topic the venue has no stream for fails at
+    Venues do not all publish the same feeds — Gate and Binance serve kline
+    and best-quote, ``BinanceFuture`` / GateFutures / Bybit / OKX add
+    liquidations, only Binance coalesces the tape, paper serves a subset —
+    so a subscribe to a topic the venue has no stream for fails at
     ``ensure_feed``, which is where that difference belongs.
 
-    One client per venue, including Bybit: its category-per-socket shape is
-    the connector's business, not this factory's. ``BybitPublicClient`` opens a
-    socket per category on first use, so a session streaming only spot never
-    holds one to the perp book.
+    One client per venue, including Bybit and OKX: their category-per-socket
+    shape is the connector's business, not this factory's. A session
+    streaming only spot never holds a socket to the perp book.
 
     Neither real client is given credentials. Market data is open at both
     venues, and a feed that needed a trading account would make MD wait on one.
@@ -122,6 +123,9 @@ class VenuePublicFactory:
         if resolved is venues.BYBIT:
             logger.info("MD building Bybit public client")
             return BybitPublicClient(symbols=self._symbols)
+        if resolved is venues.OKX:
+            logger.info("MD building Okx public client")
+            return OkxPublicClient(symbols=self._symbols)
         raise ExchangeError(
             f"venue {resolved.name!r} is registered but MD has no public "
             f"client for it"

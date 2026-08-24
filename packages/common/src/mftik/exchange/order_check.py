@@ -43,6 +43,10 @@ _MARKET_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     ("BinanceFuture", Category.PERP): _BOTH_QTY,
     ("Bybit", Category.SPOT): _BOTH_EITHER,
     ("Bybit", Category.PERP): _BOTH_QTY,
+    # Spot market buys default to quote unless ``tgtCcy=base_ccy``; we send
+    # that flag, so both units are expressible. SWAP sizes in contracts.
+    ("Okx", Category.SPOT): _BOTH_EITHER,
+    ("Okx", Category.PERP): _BOTH_QTY,
 }
 
 

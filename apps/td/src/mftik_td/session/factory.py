@@ -14,6 +14,7 @@ from mftik.exchange.bybit.private import BybitPrivateClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
+from mftik.exchange.okx.private import OkxPrivateClient
 from mftik.exchange.paper.remote import PaperRemotePrivateClient
 from mftik.symbols import SymbolClient
 
@@ -224,6 +225,22 @@ class VenueSessionFactory:
             )
             logger.info(
                 "TD building Binance session api_id=%s key=%s…",
+                api_id,
+                row.api_key[:6],
+            )
+            return self._session(api_id, private)
+
+        if venue is venues.OKX:
+            # Same unified-account story as Bybit: one connector, one
+            # credential (plus the passphrase OKX requires), every book.
+            private = OkxPrivateClient(
+                api_key=row.api_key,
+                api_secret=row.api_secret,
+                passphrase=row.passphrase or "",
+                symbols=self._symbols,
+            )
+            logger.info(
+                "TD building Okx session api_id=%s key=%s…",
                 api_id,
                 row.api_key[:6],
             )

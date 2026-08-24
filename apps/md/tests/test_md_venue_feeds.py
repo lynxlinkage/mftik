@@ -235,7 +235,7 @@ async def test_a_venue_without_agg_trades_refuses_that_topic() -> None:
 
 @pytest.mark.asyncio
 async def test_a_venue_without_liquidations_refuses_that_topic() -> None:
-    """Only Bybit publishes public liquidations today."""
+    """A venue without the method refuses; Bybit/OKX/GateFutures have one."""
 
     class NoLiquidations(FakePublic):
         stream_liquidation = None

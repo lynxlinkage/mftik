@@ -13,6 +13,7 @@ from mftik_sym.sources.binance_future import BinanceFutureInstrumentSource
 from mftik_sym.sources.bybit import BybitInstrumentSource
 from mftik_sym.sources.gate import GateSpotInstrumentSource
 from mftik_sym.sources.gate_future import GateFuturesInstrumentSource
+from mftik_sym.sources.okx import OkxInstrumentSource
 
 # Trimmed rows in Gate's /spot/currency_pairs shape.
 GATE_ROWS = [
@@ -685,3 +686,206 @@ async def test_gate_futures_rows_become_perp_instruments() -> None:
 async def test_gate_futures_drops_dated_and_delisting_contracts() -> None:
     instruments = await _gate_future(GATE_FUTURE_ROWS).fetch()
     assert {i.symbol for i in instruments} == {"BTCUSDT"}
+
+
+# --- OKX -------------------------------------------------------------------
+
+# Trimmed rows in OKX's /api/v5/public/instruments shape.
+OKX_SPOT_ROWS = [
+    {
+        "instId": "BTC-USDT",
+        "baseCcy": "BTC",
+        "quoteCcy": "USDT",
+        "state": "live",
+        "tickSz": "0.1",
+        "lotSz": "0.00000001",
+        "minSz": "0.00001",
+        "maxLmtSz": "10000000000",
+    },
+    {
+        "instId": "SOON-USDT",
+        "baseCcy": "SOON",
+        "quoteCcy": "USDT",
+        "state": "preopen",
+        "tickSz": "0.0001",
+        "lotSz": "0.01",
+        "minSz": "1",
+    },
+    # Malformed — no base; must be skipped, not crash the refresh.
+    {"instId": "BAD-USDT", "quoteCcy": "USDT", "state": "live"},
+]
+
+OKX_SWAP_ROWS = [
+    {
+        "instId": "BTC-USDT-SWAP",
+        "ctType": "linear",
+        "state": "live",
+        "baseCcy": "",
+        "quoteCcy": "",
+        "ctValCcy": "BTC",
+        "settleCcy": "USDT",
+        "ctVal": "0.01",
+        "ctMult": "1",
+        "tickSz": "0.1",
+        "lotSz": "1",
+        "minSz": "1",
+        "maxLmtSz": "10000",
+    },
+    {
+        # USDC-quoted linear: native ticker is not base+quote.
+        "instId": "BTC-USDC-SWAP",
+        "ctType": "linear",
+        "state": "live",
+        "ctValCcy": "BTC",
+        "settleCcy": "USDC",
+        "ctVal": "0.01",
+        "ctMult": "1",
+        "tickSz": "0.1",
+        "lotSz": "1",
+        "minSz": "1",
+    },
+    {
+        # Inverse — same underlier, different settlement. Must not land as
+        # a Perp or it would collide with BTCUSDT after canonicalize.
+        "instId": "BTC-USD-SWAP",
+        "ctType": "inverse",
+        "state": "live",
+        "ctValCcy": "USD",
+        "settleCcy": "BTC",
+        "ctVal": "100",
+        "lotSz": "1",
+        "minSz": "1",
+    },
+    {
+        "instId": "ETH-USDT-SWAP",
+        "ctType": "linear",
+        "state": "suspend",
+        "ctValCcy": "ETH",
+        "settleCcy": "USDT",
+        "ctVal": "0.1",
+        "lotSz": "1",
+        "minSz": "1",
+    },
+]
+
+
+def _okx(
+    rows: list[dict],
+    *,
+    category: Category = Category.SPOT,
+) -> OkxInstrumentSource:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v5/public/instruments"
+        assert request.url.params["instType"] == (
+            "SPOT" if category is Category.SPOT else "SWAP"
+        )
+        return httpx.Response(200, json={"code": "0", "msg": "", "data": rows})
+
+    return OkxInstrumentSource(
+        category=category,
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://www.okx.com",
+        ),
+    )
+
+
+async def test_okx_spot_rows_become_canonical_instruments() -> None:
+    instruments = await _okx(OKX_SPOT_ROWS).fetch()
+
+    assert [i.symbol for i in instruments] == ["BTCUSDT", "SOONUSDT"]
+    btc = instruments[0]
+    assert btc.base == "BTC" and btc.quote == "USDT"
+    assert btc.exch_ticker == "BTC-USDT"
+    assert str(btc.ticker) == "Okx_Spot_BTCUSDT"
+    assert btc.is_active
+    assert btc.contract_size is None
+    # Spot settles in its quote currency; repeating that says nothing.
+    assert btc.settlement_asset is None
+
+
+async def test_okx_spot_filters_are_already_base() -> None:
+    btc = (await _okx(OKX_SPOT_ROWS).fetch())[0]
+
+    assert btc.filters["price_tick"] == Decimal("0.1")
+    assert btc.filters["qty_step"] == Decimal("0.00000001")
+    assert btc.filters["min_qty"] == Decimal("0.00001")
+    assert btc.filters["max_qty"] == Decimal("10000000000")
+    assert "min_notional" in btc.filters
+    assert btc.filters["min_notional"] is None
+
+
+async def test_okx_preopen_symbols_are_marked_inactive() -> None:
+    soon = (await _okx(OKX_SPOT_ROWS).fetch())[1]
+    assert soon.symbol == "SOONUSDT"
+    assert not soon.is_active
+
+
+async def test_malformed_okx_rows_are_skipped() -> None:
+    instruments = await _okx(OKX_SPOT_ROWS).fetch()
+    assert "BAD" not in {i.base for i in instruments}
+    assert len(instruments) == 2
+
+
+async def test_okx_perp_filters_are_converted_to_base() -> None:
+    """SWAP sizes in contracts; the plane stores base so STS never sees a
+    quanto. ``ctVal=0.01`` and ``lotSz=1`` is a 0.01 BTC step."""
+    instruments = await _okx(OKX_SWAP_ROWS, category=Category.PERP).fetch()
+    btc = instruments[0]
+
+    assert str(btc.ticker) == "Okx_Perp_BTCUSDT"
+    assert btc.exch_ticker == "BTC-USDT-SWAP"
+    assert btc.contract_size == Decimal("0.01")
+    assert btc.settlement_asset == "USDT"
+    assert btc.filters["qty_step"] == Decimal("0.01")
+    assert btc.filters["min_qty"] == Decimal("0.01")
+    assert btc.filters["max_qty"] == Decimal("100")
+    assert btc.filters["price_tick"] == Decimal("0.1")
+
+
+async def test_an_inverse_swap_is_not_published_as_a_perp() -> None:
+    """SWAP lists inverse beside linear. One stored as a Perp would
+    canonicalize to a colliding symbol and send every order there."""
+    instruments = await _okx(OKX_SWAP_ROWS, category=Category.PERP).fetch()
+
+    assert [i.exch_ticker for i in instruments] == [
+        "BTC-USDT-SWAP",
+        "BTC-USDC-SWAP",
+        "ETH-USDT-SWAP",
+    ]
+    assert len({str(i.ticker) for i in instruments}) == len(instruments)
+    assert instruments[1].symbol == "BTCUSDC"
+    assert str(instruments[1].ticker) == "Okx_Perp_BTCUSDC"
+    assert not instruments[2].is_active
+
+
+async def test_okx_http_failure_propagates() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"code": "50001", "msg": "busy"})
+
+    source = OkxInstrumentSource(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://www.okx.com",
+        )
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await source.fetch()
+
+
+async def test_okx_envelope_refusal_does_not_empty_delist() -> None:
+    """A 200 with ``code != 0`` must not look like an empty listing."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"code": "50011", "msg": "Rate limit", "data": []}
+        )
+
+    source = OkxInstrumentSource(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://www.okx.com",
+        )
+    )
+    with pytest.raises(RuntimeError, match="50011"):
+        await source.fetch()
