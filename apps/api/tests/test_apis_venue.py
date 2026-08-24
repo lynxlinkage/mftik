@@ -35,6 +35,7 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
         "Bybit",
         "Gate",
         "GateFutures",
+        "Okx",
         "Paper",
     }
     gate = by_name["Gate"]
@@ -50,6 +51,9 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     # Bybit is the venue that makes ``categories`` matter: one credential, two
     # books, so the UI cannot infer which market a ticker is on from the venue.
     assert by_name["Bybit"].categories == ["Perp", "Spot"]
+    assert by_name["Okx"].categories == ["Perp", "Spot"]
+    assert by_name["Okx"].requires_passphrase is True
+    assert by_name["Okx"].api_types == ["HMAC"]
     # Binance's USD-M plane is a venue of its own, on one category: separate
     # keys and a separate wallet, so it cannot be a category of "Binance".
     assert by_name["BinanceFuture"].categories == ["Perp"]
@@ -92,3 +96,11 @@ async def test_garbage_api_type_is_rejected() -> None:
 
     assert exc.value.status_code == 400
     assert "type must be one of" in exc.value.detail
+
+
+async def test_okx_refuses_a_credential_without_a_passphrase() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await create_api(_body(venue="Okx"))
+
+    assert exc.value.status_code == 400
+    assert "passphrase" in exc.value.detail

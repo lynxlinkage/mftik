@@ -13,6 +13,7 @@ from mftik.exchange.bybit.public import BybitPublicClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.public import GateFuturesPublicClient
 from mftik.exchange.gate.spot.public import GateSpotPublicClient
+from mftik.exchange.okx.public import OkxPublicClient
 from mftik.exchange.paper.remote_public import PaperRemotePublicClient
 from mftik.symbols import SymbolClient
 
@@ -122,6 +123,9 @@ class VenuePublicFactory:
         if resolved is venues.BYBIT:
             logger.info("MD building Bybit public client")
             return BybitPublicClient(symbols=self._symbols)
+        if resolved is venues.OKX:
+            logger.info("MD building Okx public client")
+            return OkxPublicClient(symbols=self._symbols)
         raise ExchangeError(
             f"venue {resolved.name!r} is registered but MD has no public "
             f"client for it"

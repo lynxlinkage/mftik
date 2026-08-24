@@ -29,6 +29,7 @@ def test_registry_lists_every_venue() -> None:
         "Bybit",
         "Gate",
         "GateFutures",
+        "Okx",
         "Paper",
     ]
     assert [v.name for v in venues.all_venues()] == venues.names()
@@ -37,6 +38,7 @@ def test_registry_lists_every_venue() -> None:
     assert not venues.BINANCE.simulated
     assert not venues.BINANCE_FUTURE.simulated
     assert not venues.BYBIT.simulated
+    assert not venues.OKX.simulated
 
 
 def test_bybit_is_one_venue_trading_two_books() -> None:
@@ -52,6 +54,17 @@ def test_bybit_is_one_venue_trading_two_books() -> None:
     assert not bybit.requires_passphrase
     assert str(bybit.ticker("spot", "btc/usdt")) == "Bybit_Spot_BTCUSDT"
     assert str(bybit.ticker("perp", "BTCUSDT")) == "Bybit_Perp_BTCUSDT"
+
+
+def test_okx_is_one_venue_trading_two_books_and_needs_a_passphrase() -> None:
+    """Same unified-account shape as Bybit, plus the passphrase the API key
+    is signed with."""
+    okx = venues.require("Okx")
+    assert okx.categories == frozenset({Category.SPOT, Category.PERP})
+    assert okx.api_types == frozenset({venues.HMAC})
+    assert okx.requires_passphrase
+    assert str(okx.ticker("spot", "btc/usdt")) == "Okx_Spot_BTCUSDT"
+    assert str(okx.ticker("perp", "BTCUSDT")) == "Okx_Perp_BTCUSDT"
 
 
 def test_a_unified_venue_refuses_to_guess_a_category() -> None:

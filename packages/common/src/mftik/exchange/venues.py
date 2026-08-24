@@ -172,12 +172,24 @@ BYBIT = Venue(
     requires_passphrase=False,
 )
 
+OKX = Venue(
+    name="Okx",
+    label="OKX",
+    # Same shape as Bybit: one v5 credential (plus a passphrase) trades the
+    # spot book and the USDT-margined swap book. Classic OKX accounts — a
+    # separate wallet per market — are not modelled; the adapter talks to the
+    # unified trading account and nowhere else.
+    categories=frozenset({Category.SPOT, Category.PERP}),
+    api_types=frozenset({HMAC}),
+    requires_passphrase=True,
+)
+
 #: Every venue the platform knows, keyed by canonical name. The single source
 #: of truth — :func:`get` scans it rather than keeping a second index, so a
 #: test or a plugin that adds an entry here is immediately visible to lookups.
 VENUES: dict[str, Venue] = {
     v.name: v
-    for v in (PAPER, GATE, GATE_FUTURES, BINANCE, BINANCE_FUTURE, BYBIT)
+    for v in (PAPER, GATE, GATE_FUTURES, BINANCE, BINANCE_FUTURE, BYBIT, OKX)
 }
 
 
@@ -279,6 +291,7 @@ __all__ = [
     "GATE",
     "GATE_FUTURES",
     "HMAC",
+    "OKX",
     "PAPER",
     "VENUES",
     "UnknownVenueError",

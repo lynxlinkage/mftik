@@ -51,6 +51,9 @@ from mftik.exchange.gate.spot.public import GATE_INTERVALS
 from mftik.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.models import BestQuote, Kline, OrderBook
+from mftik.exchange.okx.protocol import OKX_REST_URL
+from mftik.exchange.okx.public import venue_interval as okx_interval
+from mftik.exchange.okx.rest import OkxPublicRest
 from mftik.exchange.symbols import SymbolResolver
 from mftik.exchange.tickers import UniversalTicker
 from mftik.symbols import SymbolClient
@@ -542,6 +545,65 @@ class BybitReader:
         )
 
 
+class OkxReader:
+    """OKX reads over REST, across every category the venue trades.
+
+    Same unified-account shape as :class:`BybitReader`: the ticker names the
+    book, and one reader answers for spot and perps alike.
+    """
+
+    venue = "Okx"
+
+    def __init__(
+        self,
+        *,
+        symbols: SymbolResolver,
+        rest: OkxPublicRest | None = None,
+        base_url: str = OKX_REST_URL,
+    ) -> None:
+        self.symbols = symbols
+        self.rest = rest or OkxPublicRest(base_url=base_url)
+
+    async def connect(self) -> None:
+        await self.rest.connect()
+
+    async def close(self) -> None:
+        await self.rest.close()
+
+    async def _resolve(self, ticker: UniversalTicker) -> str:
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return await self.symbols.exch_ticker(ticker)
+
+    async def fetch_klines(
+        self, ticker: UniversalTicker, interval: str, *, limit: int
+    ) -> list[Kline]:
+        canonical = normalize_interval(interval)
+        bar = okx_interval(canonical)
+        native = await self._resolve(ticker)
+        klines = await self.rest.fetch_klines(
+            native, bar, ticker=ticker, limit=limit
+        )
+        return [
+            kline.model_copy(update={"interval": canonical}) for kline in klines
+        ]
+
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int
+    ) -> OrderBook:
+        native = await self._resolve(ticker)
+        return await self.rest.fetch_order_book(
+            native, ticker=ticker, depth=depth
+        )
+
+    async def fetch_best_quote(self, ticker: UniversalTicker) -> BestQuote | None:
+        native = await self._resolve(ticker)
+        row = await self.rest.fetch_ticker_row(native)
+        return row.to_best_quote(ticker)
+
+
 class ReaderFactory(Protocol):
     """Builds the reader for a venue name."""
 
@@ -578,6 +640,8 @@ class VenueReaderFactory:
             return BinanceFutureReader(symbols=self._symbols)
         if venue == venues.BYBIT.name:
             return BybitReader(symbols=self._symbols)
+        if venue == venues.OKX.name:
+            return OkxReader(symbols=self._symbols)
         if venue == venues.PAPER.name:
             # The paper engine's book lives in another process and its prices
             # are invented tick by tick; nothing here can be read out of band.
