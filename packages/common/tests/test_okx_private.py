@@ -34,6 +34,9 @@ PASSPHRASE = "phrase"
 
 
 class StubSymbols:
+    def __init__(self, *, contract_size: Decimal | None = Decimal("0.01")) -> None:
+        self._contract_size = contract_size
+
     async def exch_ticker(self, ticker: UniversalTicker) -> str:
         return NATIVE_SWAP if ticker.category is Category.PERP else NATIVE
 
@@ -42,6 +45,11 @@ class StubSymbols:
     ) -> UniversalTicker:
         symbol = "BTCUSDT"
         return UniversalTicker.of(venue, category, symbol)
+
+    async def contract_size(self, ticker: UniversalTicker) -> Decimal | None:
+        if ticker.category is Category.PERP:
+            return self._contract_size
+        return None
 
 
 class FakeApi:
@@ -108,12 +116,17 @@ class FakeStream:
         return self.positions
 
 
-def _client(api: FakeApi, stream: FakeStream | None = None) -> OkxPrivateClient:
+def _client(
+    api: FakeApi,
+    stream: FakeStream | None = None,
+    *,
+    symbols: StubSymbols | None = None,
+) -> OkxPrivateClient:
     return OkxPrivateClient(
         api_key=API_KEY,
         api_secret=API_SECRET,
         passphrase=PASSPHRASE,
-        symbols=StubSymbols(),
+        symbols=symbols or StubSymbols(),
         rest=OkxRest(
             api_key=API_KEY,
             api_secret=API_SECRET,
@@ -219,7 +232,7 @@ async def test_a_perp_order_is_cross_and_net(api: FakeApi) -> None:
                 universal_ticker="Okx_Perp_BTCUSDT",
                 side=Side.SELL,
                 type=OrderType.LIMIT,
-                qty=Decimal("1"),
+                qty=Decimal("0.01"),
                 price=Decimal("60000"),
                 reduce_only=True,
             )
@@ -229,6 +242,8 @@ async def test_a_perp_order_is_cross_and_net(api: FakeApi) -> None:
     assert sent["tdMode"] == "cross"
     assert sent["posSide"] == "net"
     assert sent["reduceOnly"] is True
+    # 0.01 BTC / 0.01 ctVal = 1 contract.
+    assert sent["sz"] == "1"
     assert "tgtCcy" not in sent
 
 
@@ -293,5 +308,19 @@ async def test_a_fill_push_resolves_the_row_own_book() -> None:
         fill = await agen.__anext__()
         await agen.aclose()
     assert fill.ticker == PERP
-    assert fill.qty == Decimal("1")
+    assert fill.qty == Decimal("0.01")
     assert fill.fee == Decimal("0.1")
+
+
+async def test_a_perp_order_refuses_to_guess_contract_size(api: FakeApi) -> None:
+    async with _client(api, symbols=StubSymbols(contract_size=None)) as client:
+        with pytest.raises(OrderError, match="contract_size"):
+            await client.place_order(
+                PlaceOrderRequest(
+                    universal_ticker="Okx_Perp_BTCUSDT",
+                    side=Side.SELL,
+                    type=OrderType.LIMIT,
+                    qty=Decimal("0.01"),
+                    price=Decimal("60000"),
+                )
+            )

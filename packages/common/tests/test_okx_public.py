@@ -10,7 +10,7 @@ import pytest
 from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.okx.public import OkxPublicClient, venue_interval
 from mftik.exchange.okx.rest import OkxPublicRest
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
 
 TICKER = UniversalTicker.parse("Okx_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Okx_Perp_BTCUSDT")
@@ -20,12 +20,17 @@ BASE = "https://okx.test"
 
 class StubSymbols:
     async def exch_ticker(self, ticker: UniversalTicker) -> str:
-        return "BTC-USDT-SWAP" if ticker.category.value == "Perp" else NATIVE
+        return "BTC-USDT-SWAP" if ticker.category is Category.PERP else NATIVE
 
     async def symbol_for(
         self, venue: str, exch_ticker: str, *, category: str
     ) -> UniversalTicker:
         return UniversalTicker.of(venue, category, "BTCUSDT")
+
+    async def contract_size(self, ticker: UniversalTicker) -> Decimal | None:
+        if ticker.category is Category.PERP:
+            return Decimal("0.01")
+        return None
 
 
 class FakeApi:

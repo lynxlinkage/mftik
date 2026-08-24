@@ -55,7 +55,7 @@ from mftik.exchange.okx.protocol import OKX_REST_URL
 from mftik.exchange.okx.public import venue_interval as okx_interval
 from mftik.exchange.okx.rest import OkxPublicRest
 from mftik.exchange.symbols import SymbolResolver
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.symbols import SymbolClient
 
 logger = logging.getLogger(__name__)
@@ -577,6 +577,14 @@ class OkxReader:
             )
         return await self.symbols.exch_ticker(ticker)
 
+    async def _multiplier(self, ticker: UniversalTicker):
+        if ticker.category is not Category.PERP:
+            return None
+        size = await self.symbols.contract_size(ticker)
+        if size is None or size <= 0:
+            raise ValueError(f"no contract_size for {ticker}")
+        return size
+
     async def fetch_klines(
         self, ticker: UniversalTicker, interval: str, *, limit: int
     ) -> list[Kline]:
@@ -584,7 +592,11 @@ class OkxReader:
         bar = okx_interval(canonical)
         native = await self._resolve(ticker)
         klines = await self.rest.fetch_klines(
-            native, bar, ticker=ticker, limit=limit
+            native,
+            bar,
+            ticker=ticker,
+            limit=limit,
+            contract_size=await self._multiplier(ticker),
         )
         return [
             kline.model_copy(update={"interval": canonical}) for kline in klines
@@ -595,13 +607,18 @@ class OkxReader:
     ) -> OrderBook:
         native = await self._resolve(ticker)
         return await self.rest.fetch_order_book(
-            native, ticker=ticker, depth=depth
+            native,
+            ticker=ticker,
+            depth=depth,
+            contract_size=await self._multiplier(ticker),
         )
 
     async def fetch_best_quote(self, ticker: UniversalTicker) -> BestQuote | None:
         native = await self._resolve(ticker)
         row = await self.rest.fetch_ticker_row(native)
-        return row.to_best_quote(ticker)
+        return row.to_best_quote(
+            ticker, contract_size=await self._multiplier(ticker)
+        )
 
 
 class ReaderFactory(Protocol):

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from typing import TypeVar
 
 from mftik.exchange.base import BaseClient
@@ -43,7 +44,7 @@ from mftik.exchange.okx.protocol import (
 from mftik.exchange.okx.rest import OkxPublicRest
 from mftik.exchange.stream import EventStream
 from mftik.exchange.symbols import SymbolResolver
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,12 @@ class OkxPublicClient(BaseClient):
     ) -> OrderBook:
         self._ensure_connected()
         native, _ = await self._resolve(ticker)
-        return await self.rest.fetch_order_book(native, ticker=ticker, depth=depth)
+        return await self.rest.fetch_order_book(
+            native,
+            ticker=ticker,
+            depth=depth,
+            contract_size=await self._multiplier(ticker),
+        )
 
     async def fetch_klines(
         self, ticker: UniversalTicker, interval: str, *, limit: int = 100
@@ -162,7 +168,11 @@ class OkxPublicClient(BaseClient):
         bar = venue_interval(canonical)
         native, _ = await self._resolve(ticker)
         klines = await self.rest.fetch_klines(
-            native, bar, ticker=ticker, limit=limit
+            native,
+            bar,
+            ticker=ticker,
+            limit=limit,
+            contract_size=await self._multiplier(ticker),
         )
         return [kline.model_copy(update={"interval": canonical}) for kline in klines]
 
@@ -219,21 +229,23 @@ class OkxPublicClient(BaseClient):
 
     async def _trades(self, ticker: UniversalTicker) -> AsyncIterator[Trade]:
         native, _ = await self._resolve(ticker)
+        scale = await self._multiplier(ticker)
         feed = await self.public_feed()
         stream = await feed.subscribe_trades(native)
         async for row in self._rows(stream):
             if row.symbol and row.symbol != native:
                 continue
-            yield row.to_trade(ticker)
+            yield row.to_trade(ticker, contract_size=scale)
 
     async def _order_books(self, ticker: UniversalTicker) -> AsyncIterator[OrderBook]:
         native, _ = await self._resolve(ticker)
+        scale = await self._multiplier(ticker)
         feed = await self.public_feed()
         stream = await feed.subscribe_order_book(native, channel=DEFAULT_BOOK_CHANNEL)
         async for snapshot in self._rows(stream):
             if snapshot.symbol != native:
                 continue
-            yield snapshot.to_order_book(ticker)
+            yield snapshot.to_order_book(ticker, contract_size=scale)
 
     async def _klines(
         self, ticker: UniversalTicker, interval: str
@@ -241,20 +253,24 @@ class OkxPublicClient(BaseClient):
         canonical = normalize_interval(interval)
         bar = venue_interval(canonical)
         native, _ = await self._resolve(ticker)
+        scale = await self._multiplier(ticker)
         feed = await self.business_feed()
         stream = await feed.subscribe_klines(native, bar)
         async for row in self._rows(stream):
             if not isinstance(row, list):
                 continue
-            candle = kline_from_row(row, ticker, bar)
+            candle = kline_from_row(row, ticker, bar, contract_size=scale)
             yield candle.model_copy(update={"interval": canonical})
 
     async def _best_quotes(self, ticker: UniversalTicker) -> AsyncIterator[BestQuote]:
         native, _ = await self._resolve(ticker)
+        scale = await self._multiplier(ticker)
         feed = await self.public_feed()
         stream = await feed.subscribe_best_quote(native)
         async for row in self._rows(stream):
-            quote = row.to_best_quote(ticker, ts=time.time())
+            quote = row.to_best_quote(
+                ticker, ts=time.time(), contract_size=scale
+            )
             if quote is None:
                 continue
             yield quote
@@ -263,12 +279,13 @@ class OkxPublicClient(BaseClient):
         self, ticker: UniversalTicker
     ) -> AsyncIterator[Liquidation]:
         native, product = await self._resolve(ticker)
+        scale = await self._multiplier(ticker)
         feed = await self.public_feed()
         stream = await feed.subscribe_liquidations(product)
         async for row in self._rows(stream):
             if row.symbol and row.symbol != native:
                 continue
-            for event in row.to_liquidations(ticker):
+            for event in row.to_liquidations(ticker, contract_size=scale):
                 yield event
 
     @staticmethod
@@ -278,6 +295,14 @@ class OkxPublicClient(BaseClient):
                 yield row
         finally:
             stream.close()
+
+    async def _multiplier(self, ticker: UniversalTicker) -> Decimal | None:
+        if ticker.category is not Category.PERP:
+            return None
+        size = await self.symbols.contract_size(ticker)
+        if size is None or size <= 0:
+            raise ValueError(f"no contract_size for {ticker}")
+        return size
 
     async def _resolve(self, ticker: UniversalTicker) -> tuple[str, str]:
         if ticker.venue != self.name:

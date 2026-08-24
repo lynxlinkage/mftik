@@ -20,6 +20,7 @@ answer is labelled with. Only the symbol plane can map between them.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -178,14 +179,21 @@ class OkxPublicRest(_OkxRestTransport):
         return (await self.fetch_ticker_row(inst_id)).to_ticker(ticker)
 
     async def fetch_order_book(
-        self, inst_id: str, *, ticker: UniversalTicker, depth: int = 50
+        self,
+        inst_id: str,
+        *,
+        ticker: UniversalTicker,
+        depth: int = 50,
+        contract_size: Decimal | None = None,
     ) -> OrderBook:
         rows = await self._get(
             ch.MARKET_BOOKS, {"instId": inst_id, "sz": str(depth)}
         )
         if not rows:
             raise OkxRestError(None, f"no book for {inst_id}", op=ch.MARKET_BOOKS)
-        return order_book_from_result(rows[0], ticker)
+        return order_book_from_result(
+            rows[0], ticker, contract_size=contract_size
+        )
 
     async def fetch_klines(
         self,
@@ -194,6 +202,7 @@ class OkxPublicRest(_OkxRestTransport):
         *,
         ticker: UniversalTicker,
         limit: int = 100,
+        contract_size: Decimal | None = None,
     ) -> list[Kline]:
         """Recent candles, **reversed to oldest first**.
 
@@ -209,7 +218,8 @@ class OkxPublicRest(_OkxRestTransport):
             },
         )
         return [
-            kline_from_row(row, ticker, bar) for row in reversed(rows or [])
+            kline_from_row(row, ticker, bar, contract_size=contract_size)
+            for row in reversed(rows or [])
         ]
 
     async def server_time(self) -> float:

@@ -59,11 +59,33 @@ class OkxBookSnapshot(BaseModel):
     asks: list[BookLevel]
     ts: float = Field(default_factory=time.time)
 
-    def to_order_book(self, ticker: UniversalTicker) -> OrderBook:
+    def to_order_book(
+        self,
+        ticker: UniversalTicker,
+        *,
+        contract_size: Decimal | None = None,
+    ) -> OrderBook:
+        bids = self.bids
+        asks = self.asks
+        if contract_size is not None:
+            bids = [
+                BookLevel(
+                    price=level.price,
+                    qty=level.qty * contract_size,
+                )
+                for level in bids
+            ]
+            asks = [
+                BookLevel(
+                    price=level.price,
+                    qty=level.qty * contract_size,
+                )
+                for level in asks
+            ]
         return OrderBook(
             universal_ticker=str(ticker),
-            bids=self.bids,
-            asks=self.asks,
+            bids=bids,
+            asks=asks,
             ts=self.ts,
         )
 

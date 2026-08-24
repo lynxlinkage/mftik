@@ -122,13 +122,36 @@ VenueSide = Annotated[Side, BeforeValidator(_lower)]
 Ms = Annotated[float, BeforeValidator(_secs)]
 
 
-def _levels(rows: Any) -> list[BookLevel]:
+def contracts_to_base(size: Decimal, contract_size: Decimal) -> Decimal:
+    return size * contract_size
+
+
+def base_to_contracts(qty: Decimal, contract_size: Decimal) -> Decimal:
+    if contract_size <= 0:
+        raise ValueError(f"contract_size must be positive, got {contract_size}")
+    return qty / contract_size
+
+
+def _in_base(size: Decimal, contract_size: Decimal | None) -> Decimal:
+    if contract_size is None:
+        return size
+    return contracts_to_base(size, contract_size)
+
+
+def _levels(
+    rows: Any, contract_size: Decimal | None = None
+) -> list[BookLevel]:
     out: list[BookLevel] = []
     for row in rows or []:
         if len(row) < 2:
             continue
         try:
-            out.append(BookLevel(price=Decimal(str(row[0])), qty=Decimal(str(row[1]))))
+            out.append(
+                BookLevel(
+                    price=Decimal(str(row[0])),
+                    qty=_in_base(Decimal(str(row[1])), contract_size),
+                )
+            )
         except (InvalidOperation, ValueError):
             continue
     return out
@@ -196,8 +219,11 @@ class OkxOrderUpdate(OkxMessage):
     def ts(self) -> float:
         return self.u_time or self.c_time
 
-    def to_order(self, ticker: UniversalTicker) -> Order:
-        filled = self.acc_fill_sz
+    def to_order(
+        self, ticker: UniversalTicker, *, contract_size: Decimal | None = None
+    ) -> Order:
+        filled = _in_base(self.acc_fill_sz, contract_size)
+        qty = filled if self.quote_sized else _in_base(self.sz, contract_size)
         return Order(
             universal_ticker=str(ticker),
             order_id=self.ord_id,
@@ -205,7 +231,7 @@ class OkxOrderUpdate(OkxMessage):
             side=self.side,
             type=self.type,
             status=self.status,
-            qty=filled if self.quote_sized else self.sz,
+            qty=qty,
             quote_qty=self.sz if self.quote_sized else None,
             price=self.px or None,
             filled_qty=filled,
@@ -242,7 +268,9 @@ class OkxFill(OkxMessage):
     def is_fill(self) -> bool:
         return self.fill_sz > 0
 
-    def to_fill(self, ticker: UniversalTicker) -> Fill:
+    def to_fill(
+        self, ticker: UniversalTicker, *, contract_size: Decimal | None = None
+    ) -> Fill:
         fee = self.fill_fee
         if fee < 0:
             fee = -fee
@@ -253,7 +281,7 @@ class OkxFill(OkxMessage):
             client_order_id=self.client_order_id,
             side=self.side,
             price=self.fill_px,
-            qty=self.fill_sz,
+            qty=_in_base(self.fill_sz, contract_size),
             fee=fee,
             fee_asset=self.fill_fee_ccy,
             ts=self.ts,
@@ -321,10 +349,12 @@ class OkxPosition(OkxMessage):
             return abs(self.pos)
         return self.pos
 
-    def to_position(self, ticker: UniversalTicker) -> Position:
+    def to_position(
+        self, ticker: UniversalTicker, *, contract_size: Decimal | None = None
+    ) -> Position:
         return Position(
             universal_ticker=str(ticker),
-            qty=self.signed_size,
+            qty=_in_base(self.signed_size, contract_size),
             entry_price=self.avg_px,
             unrealised_pnl=self.upl,
         )
@@ -356,12 +386,14 @@ class OkxPublicTrade(OkxMessage):
     def symbol(self) -> str:
         return self.inst_id
 
-    def to_trade(self, ticker: UniversalTicker) -> Trade:
+    def to_trade(
+        self, ticker: UniversalTicker, *, contract_size: Decimal | None = None
+    ) -> Trade:
         return Trade(
             universal_ticker=str(ticker),
             trade_id=self.trade_id,
             price=self.px,
-            qty=self.sz,
+            qty=_in_base(self.sz, contract_size),
             side=self.side,
             ts=self.ts,
         )
@@ -386,7 +418,9 @@ class OkxLiquidation(OkxMessage):
     def symbol(self) -> str:
         return self.inst_id
 
-    def to_liquidations(self, ticker: UniversalTicker) -> list[Liquidation]:
+    def to_liquidations(
+        self, ticker: UniversalTicker, *, contract_size: Decimal | None = None
+    ) -> list[Liquidation]:
         out: list[Liquidation] = []
         for row in self.details:
             if row.sz <= 0:
@@ -395,7 +429,7 @@ class OkxLiquidation(OkxMessage):
                 Liquidation(
                     universal_ticker=str(ticker),
                     price=row.bk_px or Decimal("0"),
-                    qty=row.sz,
+                    qty=_in_base(row.sz, contract_size),
                     side=row.side,
                     ts=row.ts,
                 )
@@ -440,7 +474,11 @@ class OkxTicker(OkxMessage):
         )
 
     def to_best_quote(
-        self, ticker: UniversalTicker, *, ts: float = 0.0
+        self,
+        ticker: UniversalTicker,
+        *,
+        ts: float = 0.0,
+        contract_size: Decimal | None = None,
     ) -> BestQuote | None:
         if not self.bid_px or not self.ask_px or not self.bid_sz or not self.ask_sz:
             return None
@@ -450,9 +488,9 @@ class OkxTicker(OkxMessage):
         return BestQuote(
             universal_ticker=str(ticker),
             bid=self.bid_px,
-            bid_qty=self.bid_sz,
+            bid_qty=_in_base(self.bid_sz, contract_size),
             ask=self.ask_px,
-            ask_qty=self.ask_sz,
+            ask_qty=_in_base(self.ask_sz, contract_size),
             **fields,
         )
 
@@ -477,30 +515,42 @@ class OkxOrderBook(OkxMessage):
     def symbol(self) -> str:
         return self.inst_id
 
-    def bid_levels(self) -> list[BookLevel]:
-        return _levels(self.bids)
+    def bid_levels(
+        self, contract_size: Decimal | None = None
+    ) -> list[BookLevel]:
+        return _levels(self.bids, contract_size)
 
-    def ask_levels(self) -> list[BookLevel]:
-        return _levels(self.asks)
+    def ask_levels(
+        self, contract_size: Decimal | None = None
+    ) -> list[BookLevel]:
+        return _levels(self.asks, contract_size)
 
     def to_order_book(
-        self, ticker: UniversalTicker, *, ts: float = 0.0
+        self,
+        ticker: UniversalTicker,
+        *,
+        ts: float = 0.0,
+        contract_size: Decimal | None = None,
     ) -> OrderBook:
         fields: dict[str, Any] = {} if ts <= 0 else {"ts": ts}
         if not fields and self.ts:
             fields = {"ts": self.ts}
         return OrderBook(
             universal_ticker=str(ticker),
-            bids=self.bid_levels(),
-            asks=self.ask_levels(),
+            bids=self.bid_levels(contract_size),
+            asks=self.ask_levels(contract_size),
             **fields,
         )
 
     def to_best_quote(
-        self, ticker: UniversalTicker, *, ts: float = 0.0
+        self,
+        ticker: UniversalTicker,
+        *,
+        ts: float = 0.0,
+        contract_size: Decimal | None = None,
     ) -> BestQuote | None:
-        bids = self.bid_levels()
-        asks = self.ask_levels()
+        bids = self.bid_levels(contract_size)
+        asks = self.ask_levels(contract_size)
         if not bids or not asks:
             return None
         fields: dict[str, Any] = {} if ts <= 0 else {"ts": ts}
@@ -568,14 +618,23 @@ def instrument_from_row(row: dict[str, Any]) -> Instrument:
 
 
 def kline_from_row(
-    row: list[Any], ticker: UniversalTicker, interval: str
+    row: list[Any],
+    ticker: UniversalTicker,
+    interval: str,
+    *,
+    contract_size: Decimal | None = None,
 ) -> Kline:
     """One row of ``GET /api/v5/market/candles`` — a positional array.
 
         [0] window start, ms    [4] close
-        [1] open                [5] volume, base
-        [2] high                [6] volume, quote (ccy)
-        [3] low                 [8] confirm (``0`` in progress, ``1`` closed)
+        [1] open                [5] volume (base on spot, contracts on SWAP)
+        [2] high                [6] volume, quote on spot / base on SWAP
+        [3] low                 [7] volume, quote on SWAP
+                                [8] confirm (``0`` in progress, ``1`` closed)
+
+    ``contract_size`` is how the SWAP row is read: ``[5]`` is converted to
+    base and ``[7]`` is the quote volume. Spot passes none and keeps
+    ``[5]`` / ``[6]``.
     """
     if len(row) < 7:
         raise ValueError(
@@ -585,6 +644,12 @@ def kline_from_row(
     closed = True
     if len(row) > 8:
         closed = str(row[8]) == "1"
+    volume = Decimal(str(row[5]))
+    quote_volume = Decimal(str(row[6]))
+    if contract_size is not None:
+        volume = contracts_to_base(volume, contract_size)
+        if len(row) > 7 and row[7] not in (None, ""):
+            quote_volume = Decimal(str(row[7]))
     return Kline(
         universal_ticker=str(ticker),
         interval=interval,
@@ -593,20 +658,23 @@ def kline_from_row(
         high=Decimal(str(row[2])),
         low=Decimal(str(row[3])),
         close=Decimal(str(row[4])),
-        volume=Decimal(str(row[5])),
-        quote_volume=Decimal(str(row[6])),
+        volume=volume,
+        quote_volume=quote_volume,
         closed=closed,
     )
 
 
 def order_book_from_result(
-    result: dict[str, Any], ticker: UniversalTicker
+    result: dict[str, Any],
+    ticker: UniversalTicker,
+    *,
+    contract_size: Decimal | None = None,
 ) -> OrderBook:
     """``GET /api/v5/market/books`` — a whole book, dated by the venue."""
     return OrderBook(
         universal_ticker=str(ticker),
-        bids=_levels(result.get("bids")),
-        asks=_levels(result.get("asks")),
+        bids=_levels(result.get("bids"), contract_size),
+        asks=_levels(result.get("asks"), contract_size),
         ts=float(result.get("ts", 0) or 0) / 1000.0,
     )
 
@@ -639,7 +707,9 @@ __all__ = [
     "OkxTicker",
     "OptDec",
     "VenueSide",
+    "base_to_contracts",
     "category_of",
+    "contracts_to_base",
     "instrument_from_row",
     "kline_from_row",
     "order_book_from_result",

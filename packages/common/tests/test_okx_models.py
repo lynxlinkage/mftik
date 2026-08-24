@@ -269,6 +269,44 @@ def test_liquidation_details_become_one_event_each() -> None:
     assert events[0].price == Decimal("59900")
 
 
+def test_swap_sizes_convert_through_contract_size() -> None:
+    """SWAP ``sz`` is contracts. The shared model is base."""
+    ct = Decimal("0.01")
+    order = OkxOrderUpdate.model_validate(
+        {
+            "instId": "BTC-USDT-SWAP",
+            "ordId": "ord-1",
+            "side": "buy",
+            "ordType": "limit",
+            "state": "live",
+            "px": "60000",
+            "sz": "2",
+            "accFillSz": "1",
+        }
+    ).to_order(PERP, contract_size=ct)
+    assert order.qty == Decimal("0.02")
+    assert order.filled_qty == Decimal("0.01")
+
+    fill = OkxFill.model_validate(
+        {"fillSz": "3", "fillPx": "1", "fillFee": "0", "tradeId": "t"}
+    ).to_fill(PERP, contract_size=ct)
+    assert fill.qty == Decimal("0.03")
+
+    pos = OkxPosition.model_validate(
+        {"pos": "-4", "posSide": "net"}
+    ).to_position(PERP, contract_size=ct)
+    assert pos.qty == Decimal("-0.04")
+
+    candle = kline_from_row(
+        ["1700000000000", "1", "1", "1", "1", "10", "0.1", "600", "1"],
+        PERP,
+        "1m",
+        contract_size=ct,
+    )
+    assert candle.volume == Decimal("0.1")
+    assert candle.quote_volume == Decimal("600")
+
+
 def test_a_book_update_sets_levels_and_a_zero_deletes_one() -> None:
     book = OkxBook("BTC-USDT")
     book.apply(

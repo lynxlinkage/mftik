@@ -34,11 +34,12 @@ class MarketDataConnector(Protocol):
 
     ``stream_kline``, ``stream_best_quote``, ``stream_agg_trades`` and
     ``stream_liquidation`` are deliberately absent. Gate serves the first two
-    and paper does not; only Binance has the third; only Bybit has the fourth
-    today. A venue that cannot should have no such method rather than one that
-    raises — :meth:`VenueSession._open` looks for them and refuses the
-    subscribe when they are missing, which is the same answer one venue short
-    of the full set was always going to give.
+    and paper does not; only Binance has the third; Bybit, OKX, GateFutures
+    and ``BinanceFuture`` have the fourth. A venue that cannot should have
+    no such method rather than one that raises — :meth:`VenueSession._open`
+    looks for them and refuses the subscribe when they are missing, which
+    is the same answer one venue short of the full set was always going to
+    give.
 
     Streams are opened on a :class:`~mftik.exchange.tickers.UniversalTicker`, not
     a symbol. A unified-account venue is one connector serving several markets,
@@ -68,8 +69,8 @@ TOPIC_TRADE = "trade"
 #: subscribe is refused by name, same as ``kline`` and ``bestquote``.
 TOPIC_AGG_TRADE = "aggtrade"
 TOPIC_BEST_QUOTE = "bestquote"
-#: Public forced-liquidation prints. Bybit publishes them; other venues in
-#: this codebase do not, so a subscribe there is refused by name.
+#: Public forced-liquidation prints. Bybit, OKX (SWAP only), GateFutures and
+#: BinanceFuture publish them; a venue without the method refuses by name.
 TOPIC_LIQUIDATION = "liquidation"
 #: Klines need an interval, and a feed key is only ``topic.ticker`` — so the
 #: interval rides in the topic: ``kline_1m.Paper_Spot_BTCUSDT``. The split is

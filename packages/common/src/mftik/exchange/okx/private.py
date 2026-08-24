@@ -45,7 +45,11 @@ from mftik.exchange.models import (
     TimeInForce,
 )
 from mftik.exchange.okx.account import OkxPrivateStream
-from mftik.exchange.okx.models import OkxOrderUpdate, category_of
+from mftik.exchange.okx.models import (
+    OkxOrderUpdate,
+    base_to_contracts,
+    category_of,
+)
 from mftik.exchange.okx.protocol import (
     OKX_REST_URL,
     SPOT,
@@ -181,7 +185,7 @@ class OkxPrivateClient(BaseClient):
             "tdMode": extras.pop("tdMode", _CASH if product == SPOT else _CROSS),
             "side": request.side.value,
             "ordType": extras.pop("ordType", self._ord_type(request)),
-            "sz": sized_amount(request),
+            "sz": await self._size(request, ticker),
         }
         if request.price is not None:
             args["px"] = request.price
@@ -316,7 +320,11 @@ class OkxPrivateClient(BaseClient):
         out: list[Position] = []
         for row in rows:
             ticker = await self._resolve(row.symbol, row.inst_type or SWAP)
-            out.append(row.to_position(ticker))
+            out.append(
+                row.to_position(
+                    ticker, contract_size=await self._multiplier(ticker)
+                )
+            )
         return out
 
     async def fetch_leverage(self, ticker: UniversalTicker) -> Decimal:
@@ -366,7 +374,10 @@ class OkxPrivateClient(BaseClient):
             async for row in stream:
                 if not row.is_fill:
                     continue
-                yield row.to_fill(await self._resolve(row.symbol, row.inst_type))
+                ticker = await self._resolve(row.symbol, row.inst_type)
+                yield row.to_fill(
+                    ticker, contract_size=await self._multiplier(ticker)
+                )
         finally:
             stream.close()
 
@@ -374,8 +385,9 @@ class OkxPrivateClient(BaseClient):
         stream = await self.stream.subscribe_positions()
         try:
             async for row in stream:
+                ticker = await self._resolve(row.symbol, row.inst_type)
                 yield row.to_position(
-                    await self._resolve(row.symbol, row.inst_type)
+                    ticker, contract_size=await self._multiplier(ticker)
                 )
         finally:
             stream.close()
@@ -397,6 +409,25 @@ class OkxPrivateClient(BaseClient):
     async def _venue_symbol(self, symbol: str) -> str:
         return await self.symbols.exch_ticker(self._ticker(symbol))
 
+    async def _size(
+        self, request: PlaceOrderRequest, ticker: UniversalTicker
+    ) -> Decimal:
+        """Venue ``sz``: base on spot, contracts on SWAP."""
+        scale = await self._multiplier(ticker)
+        if scale is None:
+            return sized_amount(request)
+        if request.qty is None:
+            raise OrderError("OKX SWAP orders size in base; set qty")
+        return base_to_contracts(request.qty, scale)
+
+    async def _multiplier(self, ticker: UniversalTicker) -> Decimal | None:
+        if ticker.category is not Category.PERP:
+            return None
+        size = await self.symbols.contract_size(ticker)
+        if size is None or size <= 0:
+            raise OrderError(f"no contract_size for {ticker}; refuse to guess")
+        return size
+
     async def _resolve(
         self, native_symbol: str, inst_type: str = ""
     ) -> UniversalTicker:
@@ -408,7 +439,9 @@ class OkxPrivateClient(BaseClient):
 
     async def _inbound(self, row: OkxOrderUpdate) -> Order:
         ticker = await self._resolve(row.symbol, row.inst_type)
-        order = row.to_order(ticker)
+        order = row.to_order(
+            ticker, contract_size=await self._multiplier(ticker)
+        )
         if order.quote_qty is None and self._was_quote_sized(order):
             order = order.model_copy(
                 update={
