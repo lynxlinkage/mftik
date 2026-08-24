@@ -38,6 +38,9 @@ from mftik.exchange.gate.future.rest import GateFuturesRest
 from mftik.exchange.gate.spot.rest import MAX_HISTORY as GATE_MAX
 from mftik.exchange.gate.spot.rest import GateSpotRest
 from mftik.exchange.models import Fill, Order
+from mftik.exchange.okx.protocol import product_of
+from mftik.exchange.okx.rest import MAX_HISTORY as OKX_MAX
+from mftik.exchange.okx.rest import OkxRest
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.symbols import SymbolClient
 
@@ -202,7 +205,7 @@ class BinanceSpotHistoryReader:
 
 
 def _ms(ts: float | None) -> int | None:
-    """Epoch seconds → milliseconds, which is what Binance and Bybit want."""
+    """Epoch seconds → milliseconds. Binance, Bybit and OKX all want these."""
     return None if ts is None else int(ts * 1000)
 
 
@@ -397,6 +400,121 @@ class BybitHistoryReader:
         return HistoryPage(
             rows=[row.to_order(ticker) for row in rows],
             next_cursor=next_cursor,
+        )
+
+
+class OkxHistoryReader:
+    """OKX's ``/trade/fills`` and ``/trade/orders-history``.
+
+    Newest first. Pagination is ``after``: a billId on fills, an ordId on
+    orders — the oldest id on the page just read, which is how OKX walks
+    backwards. The cursor is that id, passed back untouched.
+
+    Fills carry ``clOrdId``, so a re-read is already attributable, same as
+    Bybit and Gate. SWAP sizes are contracts; conversion uses
+    ``contract_size`` from the symbol plane and refuses rather than
+    guessing ``1``.
+    """
+
+    venue = venues.OKX.name
+    #: Verified against the docs: both endpoints answer newest first.
+    pages_newest_first = True
+    max_page = OKX_MAX
+
+    def __init__(self, *, symbols: SymbolClient, rest: OkxRest) -> None:
+        self.symbols = symbols
+        self.rest = rest
+
+    async def connect(self) -> None:
+        await self.rest.connect()
+
+    async def close(self) -> None:
+        await self.rest.close()
+
+    async def _pair(self, ticker: UniversalTicker) -> tuple[str, str]:
+        """``(product, instId)`` — OKX takes the book as a parameter.
+
+        One credential covers every category on this venue, so which book a
+        read is about travels beside the symbol rather than in the client.
+        """
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return product_of(ticker.category), await self.symbols.exch_ticker(ticker)
+
+    async def _multiplier(self, ticker: UniversalTicker):
+        if ticker.category is not Category.PERP:
+            return None
+        size = await self.symbols.contract_size(ticker)
+        if size is None or size <= 0:
+            raise ValueError(f"no contract_size for {ticker}")
+        return size
+
+    @staticmethod
+    def _next(rows: list[Any], *, limit: int, attr: str) -> str | None:
+        if len(rows) < limit:
+            return None
+        cursor = getattr(rows[-1], attr, "") or ""
+        if cursor:
+            return cursor
+        logger.warning(
+            "OKX history page was full but the last row had no %s; "
+            "treating the walk as drained rather than looping",
+            attr,
+        )
+        return None
+
+    async def fetch_my_trades(
+        self,
+        ticker: UniversalTicker,
+        *,
+        cursor: str | None = None,
+        since_ts: float | None = None,
+        limit: int = DEFAULT_PAGE,
+    ) -> HistoryPage[Fill]:
+        limit = min(limit, self.max_page)
+        product, inst_id = await self._pair(ticker)
+        scale = await self._multiplier(ticker)
+        rows = await self.rest.fetch_fills(
+            product,
+            inst_id,
+            after=cursor,
+            begin=_ms(since_ts) if cursor is None else None,
+            limit=limit,
+        )
+        # ``is_fill`` drops a zero-size row rather than booking it. This
+        # endpoint is trades only; funding is not on it.
+        return HistoryPage(
+            rows=[
+                row.to_fill(ticker, contract_size=scale)
+                for row in rows
+                if row.is_fill
+            ],
+            next_cursor=self._next(rows, limit=limit, attr="bill_id"),
+        )
+
+    async def fetch_orders(
+        self,
+        ticker: UniversalTicker,
+        *,
+        cursor: str | None = None,
+        since_ts: float | None = None,
+        limit: int = DEFAULT_PAGE,
+    ) -> HistoryPage[Order]:
+        limit = min(limit, self.max_page)
+        product, inst_id = await self._pair(ticker)
+        scale = await self._multiplier(ticker)
+        rows = await self.rest.fetch_order_history(
+            product,
+            inst_id,
+            after=cursor,
+            begin=_ms(since_ts) if cursor is None else None,
+            limit=limit,
+        )
+        return HistoryPage(
+            rows=[row.to_order(ticker, contract_size=scale) for row in rows],
+            next_cursor=self._next(rows, limit=limit, attr="ord_id"),
         )
 
 
@@ -638,6 +756,15 @@ class HistoryReaderFactory:
                     api_key=row.api_key, api_secret=row.api_secret
                 ),
             )
+        if venue == venues.OKX.name:
+            return OkxHistoryReader(
+                symbols=self._symbols,
+                rest=OkxRest(
+                    api_key=row.api_key,
+                    api_secret=row.api_secret,
+                    passphrase=row.passphrase or "",
+                ),
+            )
         # Paper lands here, and should: its book is invented tick by tick in
         # another process and there is no venue to re-read it from. A paper
         # account's record is whatever TD caught, and calling it provisional
@@ -654,6 +781,7 @@ __all__ = [
     "BybitHistoryReader",
     "GateFuturesHistoryReader",
     "GateSpotHistoryReader",
+    "OkxHistoryReader",
     "HistoryPage",
     "HistoryReaderFactory",
     "NoHistoryReaderError",

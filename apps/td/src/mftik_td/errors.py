@@ -480,6 +480,7 @@ __all__ = [
     "BINANCE",
     "BY_TYPE",
     "GATE",
+    "OKX",
     "PAPER",
     "BYBIT",
     "VENUES",

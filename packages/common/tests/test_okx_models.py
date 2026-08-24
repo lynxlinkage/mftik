@@ -131,6 +131,13 @@ def test_a_fill_carries_this_execution_alone_and_a_positive_fee() -> None:
     assert fill.ts == 1700000000.0
 
 
+def test_a_fill_keeps_the_bill_id_pagination_needs() -> None:
+    row = OkxFill.model_validate(
+        {"tradeId": "t-1", "billId": "b-9", "fillSz": "1"}
+    )
+    assert row.bill_id == "b-9"
+
+
 def test_a_zero_fill_is_not_a_fill() -> None:
     assert not OkxFill.model_validate(
         {"fillSz": "0", "fillPx": "1", "tradeId": "t"}

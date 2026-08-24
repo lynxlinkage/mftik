@@ -396,6 +396,7 @@ class OkxRest(_OkxRestTransport):
         inst_id: str | None = None,
         *,
         after: str | None = None,
+        begin: int | None = None,
         limit: int = MAX_HISTORY,
     ) -> list[OkxFill]:
         params: dict[str, Any] = {
@@ -406,6 +407,8 @@ class OkxRest(_OkxRestTransport):
             params["instId"] = inst_id
         if after:
             params["after"] = after
+        if begin is not None:
+            params["begin"] = str(begin)
         rows = await self._get(ch.FILLS_HISTORY, params)
         return [OkxFill.model_validate(row) for row in rows or []]
 
@@ -415,6 +418,7 @@ class OkxRest(_OkxRestTransport):
         inst_id: str | None = None,
         *,
         after: str | None = None,
+        begin: int | None = None,
         limit: int = MAX_HISTORY,
     ) -> list[OkxOrderUpdate]:
         params: dict[str, Any] = {
@@ -425,6 +429,8 @@ class OkxRest(_OkxRestTransport):
             params["instId"] = inst_id
         if after:
             params["after"] = after
+        if begin is not None:
+            params["begin"] = str(begin)
         rows = await self._get(ch.ORDERS_HISTORY, params)
         return [OkxOrderUpdate.model_validate(row) for row in rows or []]
 

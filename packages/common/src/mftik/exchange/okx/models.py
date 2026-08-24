@@ -254,6 +254,7 @@ class OkxFill(OkxMessage):
     fill_fee: Dec = Field(default=Decimal("0"), alias="fillFee")
     fill_fee_ccy: str = Field(default="", alias="fillFeeCcy")
     exec_type: str = Field(default="", alias="execType")
+    bill_id: str = Field(default="", alias="billId")
     ts: Ms = 0.0
 
     @property

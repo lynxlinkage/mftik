@@ -195,6 +195,24 @@ async def test_instruments_drop_inverse_swaps_and_anything_not_live(
     assert [row.symbol for row in rows] == ["BTC-USDT-SWAP"]
 
 
+async def test_fill_history_pages_by_bill_id_and_opens_on_begin(
+    api: FakeApi,
+) -> None:
+    """``after`` is a billId; ``begin`` is milliseconds. Both ride the query."""
+    api.results["/api/v5/trade/fills"] = [
+        {"tradeId": "t-1", "billId": "b-1", "fillSz": "1"}
+    ]
+    rows = await _signed(api).fetch_fills(
+        "SPOT", "BTC-USDT", after="b-0", begin=1_600_000_000_000, limit=50
+    )
+    assert rows[0].bill_id == "b-1"
+    query = api.request_for("/api/v5/trade/fills").url.query.decode()
+    assert "after=b-0" in query
+    assert "begin=1600000000000" in query
+    assert "instType=SPOT" in query
+    assert "instId=BTC-USDT" in query
+
+
 async def test_flat_positions_are_dropped(api: FakeApi) -> None:
     api.results["/api/v5/account/positions"] = [
         {"instId": "BTC-USDT-SWAP", "pos": "1", "posSide": "net"},
