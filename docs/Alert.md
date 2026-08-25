@@ -1131,7 +1131,7 @@ client helpers in `frontend/src/lib/api.ts`, a nav entry
 in `frontend/src/routes/+layout.svelte`. STS picker uses
 `GET /sts/types` plus live distinct types (the strategies
 list already loads `type`). TD picker from the APIs /
-accounts list the `/apis` page uses. MD picker from
+accounts list the `/keys` page uses. MD picker from
 `GET /venues` or `GET /sym/venues`. No Settings section.
 
 **Problem.** Settings is the Owner's identities and keys.

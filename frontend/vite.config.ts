@@ -10,7 +10,12 @@ export default defineConfig({
 		host: '0.0.0.0',
 		port: 5173,
 		proxy: {
-			'/api': {
+			// Trailing slash on purpose. Vite's prefix match is string-prefix,
+			// so `/api` also swallows `/apis` — the UI document — and that is
+			// issue #19 on production Traefik (`PathPrefix(/api)`). The page
+			// now lives at `/keys`; this keeps local `/apis` on SvelteKit so
+			// the 308 to `/keys` can fire. Browser API calls are `/api/…`.
+			'/api/': {
 				target: apiProxyTarget,
 				changeOrigin: true,
 				rewrite: (path) => path.replace(/^\/api/, '')
