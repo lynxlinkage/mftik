@@ -12,139 +12,43 @@ satisfied by a single venue topic. When a product refcount hits zero,
 same venue topic may still be feeding another pump, or the pump that just
 died may have been only one of two streams that pump was holding.
 
-This is the work to do before adding feeds that share a venue topic
-(`funding_rate` on Bybit's `tickers.{symbol}`) or before treating
-refcount-zero as permission to drop a venue subscription.
+MDS-1 shipped on `exchange/wire-ledger` (`c555593`, [#16]). The tree now
+shares a wire identity across pumps and reserves it before the ack — on
+every venue except Gate, where the key it shipped is still too coarse to
+deliver I2. MDS-1b through MDS-5 are open; MDS-6 is deliberately parked.
+This stays the design record rather than becoming a changelog: what the
+tickets say is what was built, and where a ticket and the tree disagree the
+tree is the bug.
 
-OKX's public socket already keeps a wire-side set. Bybit's private stream
-already derives the live set for reconnect. Neither is a complete model
-for I2 as written below: both decide "already subscribed" *after* a
-concurrent caller can have started the same round trip, and MD's pumps
-race that path by construction.
+[#16]: https://github.com/lynxlinkage/mftik/pull/16
 
-## What is already true
+## Epic
 
-Facts this design rests on, all of them checkable in the tree today.
+**Move the subscribe decision off MD's product refcount and onto a
+per-socket ledger of opaque wire identities, so several product feeds can
+share one venue topic — and drop one — without blinding each other.**
 
-**MD's unit is the product feed.** `Dispatcher` keys subscriptions by
-`(topic, UniversalTicker)` — exactly what `Topics.md_feed` renders
-(`ticker.BinanceFuture_Perp_BTCUSDT`). `_subscribe_feed` calls
-`ensure_feed` on the first STS link and `_stop_feed_if_unused` stops the
-pump at zero. Two sessions on the same key share one pump. Two keys never
-share a pump, even when they name the same instrument.
+### Why now
 
-**STS hooks stay 1-1 with MD topics.** `on_ticker` is `ticker`,
-`on_best_quote` is `bestquote`. The mismatch is not hook ↔ topic. It is
-`stream_*` ↔ the venue's own stream names.
+The next feeds on the list are funding and open interest, and every venue
+serves them on a topic something else already reads:
 
-**MD does not name venue channels.** `VenueSession._open` resolves a topic
-to a connector method (`stream_ticker`, `stream_best_quote`, …). A venue
-that cannot serve a topic has no such method and the subscribe is refused
-by name. Which Binance streams make a `Ticker` is the connector's
-business; see `mftik.exchange.base`.
+| Venue | Funding arrives on | Open interest arrives on |
+|---|---|---|
+| BinanceFuture | `@markPrice` (`r`, `T`); `subscribe_mark_prices` exists, unwired | No USD-M WS channel; REST `/fapi/v1/openInterest` |
+| Bybit perp | `tickers.{symbol}` — the topic `stream_ticker` reads | Same `tickers.{symbol}` |
+| GateFutures | `futures.tickers` (`funding_rate`, parsed then dropped) | `total_size` on the same ticker |
+| OKX SWAP | Dedicated `funding-rate` channel | Dedicated `open-interest` channel |
+| Spot / Paper | N/A — refuse | N/A — refuse |
 
-**`_open` does not subscribe.** It returns an async generator. The
-connector's `subscribe_*` runs on the first iteration, inside the pump
-task `ensure_feed` just spawned (`venue.py`). The comment there — opened
-here so a missing method fails the attach — is about `hasattr` and topic
-parsing, not about the venue ack. Two pumps started one after another
-therefore race their `subscribe_*` calls. Ticker and bestquote on the
-same instrument are the headline case.
+Bybit is the shape that forces this work. A `funding_rate` product feed has
+to read `tickers.BTCUSDT` while `ticker` is already reading it, must not go
+through `stream_ticker` (that pump drops unquoted deltas, which is exactly
+what a funding-only update is), and must not send a second `SUBSCRIBE`.
+Two product keys, one wire identity, and neither key's refcount describes
+the identity.
 
-**One-to-many already exists.** `BinanceFuturePublicClient._tickers` opens
-`@ticker` *and* `@bookTicker` for one MD `ticker` feed, because the 24h
-ticker has no quote. Nothing is emitted until both halves have arrived.
-One product key, two venue subscriptions, two sockets (futures splits
-those names across `/market` and `/public`).
-
-**Many-to-one already exists.** `stream_trades` and `stream_agg_trades` on
-Binance futures both call `subscribe_agg_trades` — there is no raw tape,
-only `@aggTrade`. `stream_ticker` and `stream_best_quote` both read
-`@bookTicker`. Bybit's linear `tickers.{symbol}` already carries
-`fundingRate` on the same topic the ticker pump reads; a funding-only
-delta is dropped today because it has no price.
-
-**A venue topic is a set membership, not a second pipe.** One WebSocket
-either is or is not subscribed to a given wire identity. A second
-`SUBSCRIBE` for the same identity does not give a second stream of
-prints. Binance typically acks it as a no-op. Bybit's *private* socket
-answers a duplicate subscribe with an error.
-
-**OKX public already shares.** `OkxPublicStream` keeps `_subscribed`,
-skips the frame when `ch.arg_key(arg)` is already in the set, and
-re-fills the set in `_restore` (`okx/feed.py`). That is the public
-reference for the *shape*. It is not a complete I2: the check is
-`wanted = [arg for arg in args if key not in self._subscribed]`, then
-`await self.request(...)`, then `update`. Two concurrent `_subscribe`
-calls both see the key absent and both send. Bybit private is the same
-window (`account.py`: check, `await _send_subscribe`, then update).
-
-**Binance and Bybit public do not share.** `BinanceStreamSocket.subscribe`
-and `BybitPublicStream._subscribe` append a `_Sub` and send `SUBSCRIBE`
-every time. `_push` then copies the one venue print to every matching
-`_Sub`. Two pumps that want `@bookTicker` therefore send the name twice,
-restore it twice on reconnect, and still receive each print once. That
-duplicate send is also what *accidentally* redraws a venue snapshot for
-the late joiner — see below.
-
-**A late joiner gets no snapshot.** Bybit and OKX push a snapshot when a
-subscription *starts*, then deltas. Under a shared wire ledger the
-second consumer of a live identity joins mid-stream. Today's
-duplicate-`SUBSCRIBE` papers over this by asking the venue for another
-snapshot. Sharing without a local replay means:
-
-- a `funding_rate` pump joining an already-live `tickers.BTCUSDT`
-  publishes nothing until the next `fundingRate` field — possibly hours;
-- `subscribe_book_deltas` joining a live `orderbook.N` can never build a
-  book (it will only ever see deltas);
-- a *folded* book (`subscribe_order_book`, `BybitBook` / OKX `_books`)
-  is the exception: the next applied delta already yields a whole book,
-  so the late joiner waits one update, not forever.
-
-"Not REST inside a push" (below) forecloses polling the venue for a
-fresh snapshot. The remaining answers are "silent until the venue
-pushes" or a per-identity cache the socket replays to joiners. Folded
-books are already the second shape.
-
-**Something already unsubscribes.** `BybitPublicStream._resync` →
-`_resubscribe` and `OkxPublicStream._resubscribe` send `UNSUBSCRIBE`
-then `SUBSCRIBE` on a wire identity when a book gap is detected. That
-is a second writer to wire state. A shared ledger must not swallow the
-resync `SUBSCRIBE` as a duplicate (or the snapshot never arrives) and
-must not treat the resync `UNSUBSCRIBE` as "this name is free" for
-another consumer. The round trip already blinds every co-reader of that
-identity.
-
-**`unsubscribe()` is a loaded gun.** `BinanceStreamSocket.unsubscribe`
-and `BybitPublicStream.unsubscribe` close every `_Sub` whose index
-intersects the named topics; Bybit also drops the shared `_books`
-entry. Tests call both. Gate is worse: `unsubscribe(channel, payload)`
-closes every sub on the *channel* and ignores the payload
-(`gate/future/client.py`, `gate/spot/client.py`), so one contract's
-unsubscribe takes the others with it. These methods are the I3
-violation as public API. They have to be restricted or re-keyed before
-any optional last-consumer unsubscribe lands.
-
-**A wire identity is not a string on every venue.** Binance and Bybit
-name streams as strings. OKX's unit is a subscribe arg, reduced by
-`ch.arg_key()` to `(channel, instId, instType)`. Gate's unit is a
-payload item *inside* a channel, not the channel. The second ledger's
-key is **per-socket and opaque**. Keying Gate on the channel recreates
-the `unsubscribe()` bug.
-
-**Liveness is derived, not counted.** Both existing shared
-implementations decide "still wanted" by scanning `_subs`
-(`BybitPrivateStream._wanted()` is the named shape).
-`EventStream.close()` is idempotent (`stream.py`). A numeric
-refcount plus a double-close is a silent blinding.
-
-**`_restore` order is load-bearing.** OKX clears `_subscribed` *before*
-the restore request, then updates after the ack. A failed restore
-leaves the set empty, so the next `subscribe_*` re-sends. Updating the
-set first, then failing the request, sticks the name as subscribed
-with nothing on the wire.
-
-## Why product refcount zero is the wrong unsubscribe signal
+### The problem
 
 ```
 one STS session
@@ -160,169 +64,734 @@ MD's ledger after attach:
 | `ticker.BinanceFuture_Perp_BTCUSDT` | 1 |
 | `bestquote.BinanceFuture_Perp_BTCUSDT` | 1 |
 
-What the futures sockets actually hold (today, without sharing):
+What the futures sockets hold:
 
-| Venue stream | Who opened it |
+| Venue stream | Who needs it |
 |---|---|
 | `@ticker` | pump A |
-| `@bookTicker` | pump A *and* pump B (two `_Sub`s, one data path) |
+| `@bookTicker` | pump A *and* pump B |
 
 Detach `bestquote` only. MD refcount for that key goes `1 → 0`. The
-bestquote pump stops. `@bookTicker` is still required by the ticker
-pump. A naive `UNSUBSCRIBE @bookTicker` at product-zero would blind the
-feed that is still live.
+bestquote pump stops. `@bookTicker` is still required by the ticker pump.
+A naive `UNSUBSCRIBE @bookTicker` at product-zero would blind a feed that
+is still live.
 
-The other direction is the same bug. Detach `ticker` only: product
-refcount for `ticker` is zero, but that pump was holding `@ticker` *and*
-`@bookTicker`. `@ticker` can go; `@bookTicker` cannot, because
-bestquote is still up.
+The other direction is the same bug. Detach `ticker` only: product refcount
+for `ticker` is zero, but that pump was holding `@ticker` *and*
+`@bookTicker`. `@ticker` can go; `@bookTicker` cannot, because bestquote is
+still up.
 
-Two sessions on the *same* product key do not create this problem. That
-is what MD's refcount already does: the venue pump exists once, and
-zero means stop it. The gap is **across product keys that share or
-split venue topics**. That cross-key case is the test; "Dispatcher
-keys on a tuple" is not.
+Two sessions on the *same* product key do not create this problem. That is
+what MD's refcount already does correctly: the venue pump exists once, and
+zero means stop it. The gap is **across product keys that share or split
+venue topics**. That cross-key case is the test; "Dispatcher keys on a
+tuple" is not.
 
-A future `funding_rate.Bybit_Perp_BTCUSDT` next to
-`ticker.Bybit_Perp_BTCUSDT` is the same many-to-one on
-`tickers.BTCUSDT`. Treating either key's zero as "drop the Bybit
-topic" is wrong while the other pump is alive.
+### The shape that stays
 
-## Where the second ledger belongs
+- MD's unit stays the product feed. `Dispatcher` keys `(topic,
+  UniversalTicker)`, `ensure_feed` on the first STS link,
+  `_stop_feed_if_unused` at zero.
+- STS hooks stay 1-1 with MD topics. `on_ticker` is `ticker`,
+  `on_best_quote` is `bestquote`. The mismatch is not hook ↔ topic; it is
+  `stream_*` ↔ the venue's own stream names.
+- `VenueSession._open` stays a resolve-to-`stream_*`. A venue that cannot
+  serve a topic has no such method and the subscribe is refused by name.
+- Feeds keep yielding what the venue pushed. REST stays `fetch_*` /
+  `md.fetch`.
+- `EventStream.close()` stays idempotent (`stream.py`), so liveness is
+  derived by scanning `_subs`, never counted.
+
+### Non-goals
+
+- **Not a product-level merge.** Subscribing `ticker.` must not start
+  delivering `on_funding_rate`, and the reverse. Two product keys remain
+  two pumps, two STS hooks, two refcounts. Sharing is a socket
+  implementation detail.
+- **Not REST inside a push.** Filling a live feed's missing field from
+  REST (Gate's `funding_next_apply` on every ticker, or a snapshot for a
+  late joiner) is a different contract, and not one the tree states. A feed
+  yields what the venue pushed; a query answers once. See `Strategy` on
+  `md.fetch` versus the feed hooks, and `mftik_md.fetch.readers`. Composing
+  two *pushes* into one model (`@ticker` + `@bookTicker`) is already
+  allowed; polling REST to invent a field is not. A late-joiner snapshot,
+  if there is one, is an in-process replay of a push the socket already
+  applied.
+- **Not MD growing venue-specific refcounts.** If a dashboard needs to
+  explain why `@bookTicker` is still up after `bestquote` went to zero, the
+  answer is read off the socket's wire ledger, not off
+  `Dispatcher.refcounts()`.
+- **Not new product topics.** `funding_rate` and `open_interest` are the
+  reason this epic exists and are not in it. See *Out of scope*.
+
+### Invariants
+
+Each is meant to be a test.
+
+1. **I1 — Cross-key safety.** Stopping one product pump never drops a wire
+   identity another live pump still reads. `bestquote` to zero must not
+   `UNSUBSCRIBE @bookTicker` while `ticker` is up.
+2. **I2 — One identity, one subscribe.** A venue socket holds a given wire
+   identity at most once. Two *concurrent* `subscribe_*` calls for the same
+   identity send one frame, not two. Reservation before the ack is part of
+   I2, not an implementation hint.
+3. **I3 — Resync is not a ledger op.** A book-gap `UNSUBSCRIBE` then
+   `SUBSCRIBE` is not swallowed as a duplicate subscribe, and does not mark
+   the identity free for a co-reader.
+4. **I4 — Restore is a unique set.** `_restore` after reconnect subscribes
+   each live identity once, in first-seen order — the shape
+   `BybitPrivateStream._wanted()` returns. A fresh socket starts reserving
+   nothing: *both* halves of the reservation — the acked `_held` and the
+   in-flight futures — are empty after `clear()`, and a failed restore
+   leaves them empty. `_held` alone is not the reserved set. (Today
+   `clear()` only empties `_held`; MDS-1b.)
+5. **I5 — A late joiner is defined.** Joining a live identity either
+   replays a cached snapshot or is documented as silent until the venue's
+   next qualifying push. It does not send a second `SUBSCRIBE` to redraw
+   one.
+6. **I6 — MD stays out of venue vocabulary.** MD does not import venue
+   stream names. Sharing, reservation, resync and (later) unsubscribing are
+   invisible above `stream_*`.
+
+### Where the second ledger belongs
 
 Not in MD.
 
-MD must not grow a table of hook → venue channels. That table is
-per-venue, changes when a venue splits hosts or folds fields into an
-existing topic, and is exactly the shared interface
-`mftik.exchange.base` refused: a contract a caller has to branch on is
-not one it can rely on. `VenueSession` already stops at `stream_*`.
-
-The second ledger lives on **the socket that sends `SUBSCRIBE`**, keyed
-by an opaque per-socket identity (string, `arg_key` tuple, or
-channel+payload item). Bybit private already derives the live set;
-OKX public already stores one. Neither reserves before the ack.
+MD must not grow a table of hook → venue channels. That table is per-venue,
+changes when a venue splits hosts or folds fields into an existing topic,
+and is exactly the shared interface `mftik.exchange.base` refused: a
+contract a caller has to branch on is not one it can rely on.
 
 | Ledger | Owner | Key | Zero means |
 |---|---|---|---|
 | Product | MD `Dispatcher` | `topic.UniversalTicker` | stop that `stream_*` pump |
-| Wire | venue feed / socket | opaque identity on that socket | (optional) `UNSUBSCRIBE` that identity |
+| Wire | venue feed / socket | opaque identity on that socket | (later) `UNSUBSCRIBE` that identity |
 
-A pump still opens whatever `stream_*` it needs. Each `subscribe_*`
-either sends `SUBSCRIBE` (first local consumer of that identity) or
-only hangs another `EventStream` on the existing subscription. When MD
-stops a pump, the iterator closes its streams; the socket *derives*
-whether the identity still has a `_Sub`. Only the last consumer of an
-identity is allowed to think about `UNSUBSCRIBE`.
+A wire identity is **per-socket and opaque**: a Binance stream name, a
+Bybit topic string, an OKX `ch.arg_key()` tuple `(channel, instId,
+instType)`, and on Gate a `(channel, payload item)` — one contract, not one
+call. Keying Gate on the channel alone recreates the `unsubscribe()` bug
+below.
 
-**Reservation, then ack, then commit.** Checking `_subscribed` and
-awaiting the venue is a race: two pumps both find the identity absent
-and both send. The fix is to reserve the identity *before* the await
-(or hold a per-socket lock — `BinanceFutureStream._socket_lock` already
-guards socket creation for the same kind of double-open), and roll the
-reservation back if the ack fails. Without that, I2 as "at most one
-SUBSCRIBE" is not delivered by a straight port of the code this
-document used to cite as the model.
+Gate is the one venue where the tree does not yet match that. MDS-1 keyed it
+`(channel, tuple(payload))` — the whole call's payload
+(`gate/spot/client.py`, `gate/future/client.py`) — so
+`subscribe_tickers("BTC_USDT")` and
+`subscribe_tickers("BTC_USDT", "ETH_USDT")` are two different keys and
+`BTC_USDT` goes out twice, on the first subscribe and again on every
+restore. I2 is still broken on Gate. MDS-4 owns the re-key.
 
-Reconnect `_restore` sends each live identity **once**, from
-`_wanted()`-shaped scan of `_subs`, not from flattening every `_Sub`'s
-args. Clear the reserved set before the restore request so a failed
-restore can be retried.
+Binance futures holds one ledger per endpoint socket (`/public`,
+`/market`), which is right: they are two connections, and `st.group_of`
+decides which one a name lands on.
 
-## Invariants
+### Current → target
 
-Each is meant to be a test.
+| | Before MDS-1 | Now (MDS-1) | Target |
+|---|---|---|---|
+| Duplicate `subscribe_*` | second `SUBSCRIBE` on Binance / Bybit public / Gate | one frame, second stream attached | unchanged |
+| Concurrent `subscribe_*` | both callers sent (OKX, Bybit private) | leader sends, waiter awaits | unchanged |
+| Reconnect `_restore` | flattened every `_Sub`, duplicates on the wire | `first_seen` unique set | unchanged |
+| Failed restore | set could stick as "subscribed" | `_held` cleared before the request, `_inflight` not | MDS-1b |
+| Gate identity | none | `(channel, whole payload)` — overlapping calls still double-subscribe | MDS-4 |
+| OKX / futures sharing tests | n/a | none — OKX has no WS stub at all | MDS-1b |
+| Late joiner | accidental snapshot from the duplicate frame | **nothing** — silent, and a folded book is reset | MDS-2 |
+| Book-gap resync | direct `request`, bypasses the ledger | same, unpinned by any test | MDS-3 |
+| `unsubscribe()` | closed every intersecting `_Sub` | same, and now frees the ledger key too | MDS-4 |
+| Refcount-zero → wire | never wired | never wired | MDS-6, or never |
 
-- **I1** Stopping one product pump never drops a wire identity another
-  live pump still reads. (The cross-key case above — `bestquote` to
-  zero must not `UNSUBSCRIBE @bookTicker` while `ticker` is up.)
-- **I2** A venue socket holds a given wire identity at most once. Two
-  concurrent `subscribe_*` calls for the same identity send one frame,
-  not two. Reservation (or a lock) is part of I2, not an
-  implementation hint.
-- **I3** A resync (`UNSUBSCRIBE` then `SUBSCRIBE` on a gapped book)
-  is not a ledger open/close. It is not swallowed as a duplicate
-  subscribe, and it does not mark the identity free for a co-reader.
-- **I4** `_restore` after reconnect subscribes the set that
-  `BybitPrivateStream._wanted()` would return: each live identity
-  once, in first-seen order. The reserved set is empty if that
-  request fails.
-- **I5** A late joiner of a live identity is either handed a cached
-  snapshot (folded books) or is defined as silent until the venue's
-  next qualifying push. It does not send a second `SUBSCRIBE` to
-  redraw one.
-- **I6** MD still does not import venue stream vocabularies. Sharing,
-  reservation, resync, and (later) unsubscribing are invisible above
-  `stream_*`.
+## What is already true
 
-I2 is false on Binance and Bybit public, and false under concurrency
-on OKX public and Bybit private. I3 is already live: resync is a
-second writer, and `unsubscribe()` closes every intersecting `_Sub`.
+Facts this design rests on, all of them checkable in the tree today.
 
-## What to build
+**`_open` does not subscribe.** It returns an async generator. The
+connector's `subscribe_*` runs on the first iteration, inside the pump task
+`ensure_feed` just spawned (`apps/md/src/mftik_md/session/venue.py`). The
+comment there — opened here so a missing method fails the attach — is about
+`hasattr` and topic parsing, not about the venue ack. Two pumps started one
+after another therefore race their `subscribe_*` calls. Ticker and bestquote
+on the same instrument are the headline case, and that race is why I2 needs
+a reservation rather than a check.
 
-**First: share, with a reservation, and say what a late joiner sees.**
+**One-to-many already exists.** `BinanceFuturePublicClient._tickers` opens
+`@ticker` *and* `@bookTicker` for one MD `ticker` feed, because the 24h
+ticker has no quote. Nothing is emitted until both halves have arrived. One
+product key, two venue subscriptions, two sockets.
 
-- **OKX public** is the existing reference. It needs I2's reservation
-  (or a lock) plus rollback, and I4 (`_wanted()` instead of flattening
-  `sub.args`). Its key is already `arg_key`.
-- **Bybit private** needs the same reservation; `_wanted()` is already
-  the restore shape.
-- **Binance public, Bybit public, Gate** get a wire ledger for the
-  first time. Gate's key is the payload item inside the channel, not
-  the channel name. Binance's concurrent socket creation already uses
-  `_socket_lock`; the subscribe reservation can follow that or be its
-  own per-identity future.
+**Many-to-one already exists.** `stream_trades` and `stream_agg_trades` on
+Binance futures both call `subscribe_agg_trades` — there is no raw tape,
+only `@aggTrade`. `stream_ticker` and `stream_best_quote` both read
+`@bookTicker`.
 
-Late-joiner policy, per `subscribe_*`, has to be chosen when the
-method starts sharing — not later:
+**A venue topic is a set membership, not a second pipe.** One WebSocket
+either is or is not subscribed to a given wire identity. A second
+`SUBSCRIBE` for the same identity does not give a second stream of prints.
+Binance typically acks it as a no-op. Bybit's *private* socket answers a
+duplicate subscribe with an error.
+
+**Every venue socket now shares — with two caveats.** `WireLedger`
+(`packages/common/src/mftik/exchange/wire.py`) holds `_held` after the ack
+and `_inflight` futures as the reservation before the send. It is wired into
+`BinanceStreamSocket`, `BybitPublicStream`, `BybitPrivateStream`,
+`OkxPublicStream`, `OkxPrivateStream`, `GateSpotWebSocket` and
+`GateFuturesWebSocket`. `first_seen` is the `_wanted()` shape for restore.
+Concurrent callers of one key wait on the leader's future; a failed send
+rolls the reservation back and fails the waiters.
+
+The caveats are that Gate's key is the whole call's payload rather than the
+contract (MDS-4), and that `clear()` empties only `_held` and leaves
+`_inflight` holding futures from a socket that is gone (MDS-1b). Both are
+narrower than the pre-MDS-1 behaviour and neither is what the invariants
+claim.
+
+**A late joiner gets no snapshot.** Bybit and OKX push a snapshot when a
+subscription *starts*, then deltas. Before MDS-1, the duplicate `SUBSCRIBE`
+accidentally redrew one. Now the second consumer of a live identity joins
+mid-stream with nothing. Three cases, and they differ:
+
+- a `funding_rate` pump joining an already-live `tickers.BTCUSDT` publishes
+  nothing until the next `fundingRate` field — possibly hours;
+- `subscribe_book_deltas` joining a live `orderbook.N` can never build a
+  book; it will only ever see deltas;
+- a *folded* book (`subscribe_order_book`) is the recoverable one: the next
+  applied delta already yields a whole book, so the joiner waits one update
+  — **except** that `subscribe_order_book` assigns
+  `self._books[topic] = BybitBook(...)` unconditionally
+  (`bybit/feed.py:339`, and `okx/feed.py:241` for `OkxBook`), so a second
+  caller wipes the fold the first one depends on and no fresh snapshot is
+  coming.
+
+That last one is a regression MDS-1 introduced and MDS-2 owns.
+
+**Something already unsubscribes.** `BybitPublicStream._resync` →
+`_resubscribe` and `OkxPublicStream._resubscribe` send `UNSUBSCRIBE` then
+`SUBSCRIBE` on a wire identity when a book gap is detected. Both call
+`self.request` directly, so they bypass the ledger — correct by
+construction, and pinned by nothing. The round trip blinds every co-reader
+of that identity for one RTT.
+
+**`unsubscribe()` is a loaded gun.** `BinanceStreamSocket.unsubscribe` and
+`BybitPublicStream.unsubscribe` close every `_Sub` whose index intersects
+the named topics; Bybit also drops the shared `_books` entry. Gate is worse:
+`unsubscribe(channel, payload)` closes every sub on the *channel* and
+ignores the payload (`gate/future/client.py`, `gate/spot/client.py`), so one
+contract's unsubscribe takes the others with it. `BinanceFutureStream.unsubscribe`
+inherits the Binance behaviour by fanning names out to each group's socket.
+MDS-1 made all of them call `WireLedger.discard`, which means they now also
+hand the identity back while a co-reader is still on it. They are the I1
+violation as public API — reachable only from tests today, since MD's detach
+path never calls them, but reachable.
+
+**Liveness is derived, not counted.** Both pre-existing shared
+implementations decided "still wanted" by scanning `_subs`
+(`BybitPrivateStream._wanted()` is the named shape) and `WireLedger` keeps
+that: it stores no consumer count. `EventStream.close()` is idempotent, so a
+numeric refcount plus a double-close would be a silent blinding.
+
+**Handover already decouples pump lifetime from refcount.** `docs/MdHandover.md`
+pins feeds during a blue/green swap: a pinned feed pumps with refcount zero,
+and `_stop_feed_if_unused` respects the pin. Product-zero is already not
+"stop", which is one more reason it cannot be "unsubscribe". Blue and green
+are separate processes with separate sockets, so their ledgers are
+independent — a handover is not a shared-identity case.
+
+## Tickets
+
+Each ticket leaves the tree shippable. Later tickets may be empty behaviour
+so earlier ones can merge.
+
+### MDS-1 — Per-socket wire ledger with reservation — **shipped** (`c555593`)
+
+**Goal.** Two consumers of one venue identity on one socket cause one
+`SUBSCRIBE`, including when they race, and a reconnect replays each
+identity once.
+
+**Scope.** New `packages/common/src/mftik/exchange/wire.py`. Wired into
+`binance/feed.py`, `bybit/feed.py`, `bybit/account.py`, `okx/feed.py`,
+`okx/account.py`, `gate/spot/client.py`, `gate/future/client.py`. Tests in
+`packages/common/tests/test_wire_ledger.py` plus a sharing case on the
+venues that already had a WebSocket stub.
+
+**Problem.** OKX public and Bybit private already skipped a duplicate
+subscribe, but both did check-then-`await`: two concurrent callers each saw
+the key absent and each sent. Binance public, Bybit public and Gate did not
+share at all — they sent the name twice, replayed it twice on reconnect, and
+relied on the venue no-op. Meanwhile MD's pumps race `subscribe_*` by
+construction, because `_open` defers the real call into the pump task.
+
+**Solution.** `WireLedger[K]` with `_held` (acked) and `_inflight`
+(reserved, a future per key). `acquire(keys, send)` reserves under a lock
+*before* awaiting `send`, so the second caller of an in-flight key waits on
+the leader instead of sending. A failed send drops the reservation and fails
+the waiters, so a later `acquire` retries. `clear()` runs *before* a restore
+request, so a failed restore leaves the set empty rather than sticking a
+name as subscribed with nothing on the wire. `first_seen` gives `_restore`
+the unique, first-seen-order set. `discard` exists for an explicit venue
+unsubscribe and is deliberately not called by resync.
+
+**Verify.** What shipped, exactly — not "a case per venue":
+
+- `test_wire_ledger.py`: first-seen order, held-skip, concurrent single
+  send, rollback, waiter failure, clear-before-restore, discard.
+- `test_two_consumers_share_one_venue_subscription`: Bybit private, Bybit
+  public, Binance spot, Gate spot, Gate futures.
+- `test_concurrent_consumers_share_one_venue_subscription`: Bybit private.
+- `test_reconnect_resubscribes_a_shared_topic_once`: Bybit private and
+  Bybit public. `test_reconnect_resubscribes_a_shared_stream_once`:
+  Binance spot.
+
+Not covered: OKX public, OKX private, Binance futures. MDS-1b.
+
+**Depends.** Nothing. Blocks every other ticket.
+
+### MDS-1b — Finish MDS-1: `_inflight` on clear, and the untested sockets
+
+**Goal.** `clear()` empties the whole reservation, so I4 is true as written;
+and every socket MDS-1 touched has a sharing test.
+
+**Scope.** `packages/common/src/mftik/exchange/wire.py` (`clear`), its tests,
+a new `packages/common/tests/okx_stub.py`, an OKX socket test module, and a
+futures case in `packages/common/tests/test_binance_future_feed.py`.
+
+**Problem.** Two gaps, both left by MDS-1.
+
+`clear()` empties `_held` and leaves `_inflight` alone. A future parked
+there belongs to a round trip on a socket that no longer exists, and
+`acquire` treats it as "somebody is already sending this" — so the next
+caller becomes its waiter and sends no frame of its own. The window is real
+on a flapping socket: reconnect does **not** cancel pending requests (only
+`close()` does, `socket.py:154-161`), it goes straight
+`_open` → `_on_open` → `_restore`. So a drop *during* a restore leaves the
+previous lap's `request` parked on `asyncio.wait_for(..., ack_timeout)`,
+and the new lap's `acquire` waits behind it instead of re-sending. It
+self-heals — the old `wait_for` eventually raises, the failure path fails
+the waiters, the lap fails and retries — but the cost is a wasted reconnect
+lap and up to `ack_timeout` of a feed that is not restored, for a socket
+that is already unhealthy. `_held` being empty is not the invariant; the
+reservation being empty is.
+
+Second, MDS-1 changed `OkxPublicStream` and `OkxPrivateStream` and tested
+neither, because there is no OKX WebSocket stub in the tree at all —
+`tests/*stub*.py` is Binance, Binance futures, Bybit, Gate and Gate futures.
+OKX is also the only implementation whose `send` does a key → arg reverse
+lookup (`by_key[key]` in `okx/feed.py` and `okx/account.py`); a wrong
+mapping there subscribes to the wrong channel and says nothing. Binance
+futures is untested for a different reason: it is the venue in this epic's
+headline example and its two-socket split means one ledger per endpoint,
+which nothing asserts.
+
+**Solution.** Make `clear()` fail every `_inflight` future with a
+`ConnectionError`-shaped exception and drop the map, so a caller parked on a
+dead leader is released immediately rather than at `ack_timeout`, and the
+next `acquire` sends. Keep `clear()` synchronous — it is called from
+`_teardown` and from `_restore`, neither of which can await a lock — which
+means `_inflight` mutation has to stay safe outside `self._lock`; the
+simplest correct form is to swap the dict out under a plain reference and
+resolve the futures from the copy.
+
+Failing the waiters is only half of it: the *leader* also has to learn its
+reservation was voided. Today `acquire`'s success path does
+`self._held.update(to_send)` unconditionally, so a send that acks after a
+`clear()` marks the key held on a socket that no longer exists — and the
+next `subscribe_*` would then skip it and subscribe to nothing. Give the
+ledger a generation counter that `clear()` bumps, snapshot it when the
+reservation is taken, and commit to `_held` only if it is unchanged. A
+leader from an older generation drops its result on the floor, which is the
+right outcome: its frame went to a dead connection.
+
+For OKX, write `okx_stub.py` against the same shape as `bybit_stub.py`
+(subscribe/unsubscribe acks, a `subscribed` set, `frames_for`, `push`,
+`drop`), then the sharing and restore cases. For Binance futures, add a
+sharing case beside `test_unsubscribing_goes_to_the_socket_that_carries_it`
+using the existing `future_public_stream` / `future_market_stream`
+fixtures.
+
+**Verify.**
+
+- `clear()` with a key in flight: the parked waiter raises at once, and the
+  next `acquire` for that key sends a frame.
+- Ledger-level: reserve, `clear()`, `acquire` same key → exactly one new
+  send, no wait on the dead future.
+- A leader whose `send` returns *after* a `clear()` does not add its key to
+  `_held`, and a later `acquire` for that key still sends.
+- Socket-level: drop a Bybit public socket while a first-time subscribe for
+  a topic is awaiting its ack, then drop again during the restore; the
+  topic ends up subscribed without waiting out `ack_timeout`.
+- OKX public: two consumers on `tickers.BTC-USDT` → one `subscribe` frame,
+  both receive; reconnect replays it once; the arg reaching the wire has
+  the `instId` the caller asked for, not another key's.
+- OKX private: two `subscribe_orders` → one frame, both receive.
+- Binance futures: two consumers on `btcusdt@bookTicker` → one `SUBSCRIBE`
+  on `/public` and none on `/market`; the same name on the other socket
+  would be a separate identity.
+
+**Depends.** MDS-1. Independent of MDS-2, MDS-3 and MDS-4.
+
+### MDS-2 — Late-joiner policy, per `subscribe_*`
+
+**Goal.** Every shared `subscribe_*` states what its second consumer sees,
+and no shared path is silently unrecoverable. I5.
+
+**Scope.** `bybit/feed.py` (`subscribe_order_book`, `subscribe_book_deltas`,
+`_fold_book`), `okx/feed.py` (`subscribe_order_book`, `_fold_book`),
+docstrings on the ticker-family methods. No MD change.
+
+**Problem.** MDS-1 removed the duplicate `SUBSCRIBE` that was accidentally
+redrawing a venue snapshot, and nothing replaced it. Two concrete failures.
+First, `subscribe_order_book` assigns a fresh `BybitBook` / `OkxBook` on
+every call, so a second consumer resets a fold the first consumer is reading
+and no new snapshot is coming — the book recovers only by the gap path
+firing a resync, which is a round trip of blindness for a case that should
+need none. Second, `subscribe_book_deltas` joining an identity a folder
+already holds sees deltas from mid-stream forever and can never build a
+book; it does not fail, it just never becomes correct.
+
+**Solution.** Fix the reset first: `setdefault`, not assign, so an existing
+fold survives a joiner. Then replay — if the book is already complete, push
+one `snapshot()` into the new `EventStream` before returning it, so the
+joiner starts from state the socket already had. That is an in-process
+replay of a push, not REST.
+
+**The replay and the `_subs.append` must be in the same event-loop step,
+with no `await` between them.** Read the snapshot, build the stream, push
+the snapshot, append the `_Sub` — one synchronous block after `acquire`
+returns. Append first, or yield in the middle, and `_push` can enqueue a
+newer book ahead of the replay, so the joiner reads a fresh book and then
+an older one. Nothing downstream can detect that; it just quietly rewinds.
+
+The two mixed orders are not symmetric, and both need an answer:
+
+- **Folder first, then `subscribe_book_deltas`.** Refuse. The joiner sees
+  deltas from mid-stream forever and can never build a book — it does not
+  fail, it just never becomes correct, which is the worst shape available.
+- **`subscribe_book_deltas` first, then folder.** Allow, at a stated cost.
+  `_books` has no entry, `setdefault` builds a stale one, the first delta
+  makes `apply` return `False` and triggers a resync — so the topic is
+  blind for one RTT and the existing raw consumer pays for it too. That is
+  acceptable and refusing is not: `subscribe_order_book` is MD's normal
+  path and `subscribe_book_deltas` is the escape hatch, so the escape hatch
+  must not be able to lock out the main path. Make the resync deliberate
+  and log it as "folding a raw-held topic" rather than letting it surface
+  as a gap warning.
+
+Then write the policy down per method, because it has to be chosen when a
+method starts sharing and not later:
 
 | Method | Late joiner |
 |---|---|
-| Folded book (`subscribe_order_book`) | Replay from `BybitBook` / OKX `_books` on the next fold, or immediately if a book is already complete |
-| Unfolded book (`subscribe_book_deltas`) | Do not share this path with the folder, or refuse a second consumer — a joiner can never recover |
-| Bybit / Gate `tickers` split into `ticker` + `funding_rate` | Silent until the field the pump cares about next appears. Document that; do not REST-fill |
+| Folded book (`subscribe_order_book`), folder already present | Replay `BybitBook` / OKX `_books` if complete, else the next fold |
+| Folded book joining a raw-held topic | One deliberate resync; blind for one RTT, including for the raw consumer |
+| Unfolded book (`subscribe_book_deltas`) joining a folder | Refuse — a joiner can never recover |
+| Unfolded book joining another unfolded consumer | Shared, no replay, deltas from here on |
+| Bybit / Gate `tickers` split across `ticker` + `funding_rate` | Silent until the field that pump reads next appears. Documented, not REST-filled |
 | Binance `@bookTicker` shared by `ticker` + `bestquote` | Every push is a snapshot, so the next print is enough |
+| OKX `bbo-tbt`, `books5` | Always-snapshot channels; next push is enough |
 
-That is also what a Bybit `funding_rate` pump needs: it must read
-`tickers.{symbol}` without a second subscribe, and without going
-through `stream_ticker` (that pump drops unquoted deltas — the
-funding updates).
+**Verify.**
 
-**Then, only if a live unsubscribe is worth the race:** when the last
-`EventStream` for an identity closes, send `UNSUBSCRIBE`. Before that
-lands, restrict or re-key the existing `unsubscribe()` methods so they
-cannot close a co-reader's `_Sub` or (on Gate) every sub on the
-channel. The private stream's comment still applies — do this only
-with a story for reconnect overlapping the unsubscribe, and without
-confusing it with resync. Until that story exists, leaving the venue
-topic up on an already-open socket is the known, cheaper wrong.
+- Two `subscribe_order_book` calls on one live topic: one `SUBSCRIBE`
+  frame; the first stream keeps delivering; the second receives a complete
+  book without the venue pushing anything new.
+- The same, with the first book mid-fold: the joiner's first book equals
+  the first consumer's latest, and the fold's `update_id` / `seq_id` is not
+  reset.
+- Replay ordering: push a newer book to the topic immediately after the
+  joiner subscribes; the joiner reads the replay first and the newer book
+  second, never the reverse.
+- `subscribe_book_deltas` after `subscribe_order_book` on the same identity
+  raises, with a message that names the folder.
+- `subscribe_order_book` after `subscribe_book_deltas` on the same identity
+  succeeds, sends no second `SUBSCRIBE` from `acquire`, triggers exactly one
+  resync, and both consumers are correct once the snapshot lands.
+- `subscribe_book_deltas` alone still works, shares with a second delta
+  consumer, and neither gets a replay.
+- A gap on the shared topic still resyncs exactly once (MDS-3's assertion,
+  re-run here to catch a `setdefault` that broke `resyncing`).
 
-**MD's refcount and lifecycle do not change** — same feed keys, same
-`ensure_feed` / `stop_feed`. A new product topic (`funding_rate`,
-later `open_interest`) is still new surface: `TOPIC_*` and an `_open`
-branch in `apps/md/.../venue.py`, `MD_*` in `protocol/messages.py`, a
-shared model, and a row in the STS hook table. That is not a wire-ledger
-change.
+**Depends.** MDS-1. Independent of every other open ticket; expect textual
+conflicts with MDS-3 in `bybit/feed.py` and `okx/feed.py`.
 
-## What this is not
+### MDS-3 — Pin resync as a force path, not a ledger operation
 
-**Not a product-level merge.** Subscribing `ticker.` must not start
-delivering `on_funding_rate`, and the reverse. Two product keys remain
-two pumps, two STS hooks, two refcounts. Sharing is a socket
-implementation detail.
+**Goal.** I3 becomes a test, so a later refactor cannot route resync
+through `acquire` or `discard`.
 
-**Not REST inside a push.** Filling a live feed's missing field from
-REST (Gate's `funding_next_apply` on every ticker, or a snapshot for a
-late joiner) is a different contract, and not one the tree states. A
-feed yields what the venue pushed. A query answers once. See
-`Strategy` on `md.fetch` versus the feed hooks, and
-`mftik_md.fetch.readers`. Composing two *pushes* into one model
-(`@ticker` + `@bookTicker`) is already allowed; polling REST to invent
-a field is not. The late-joiner snapshot, if there is one, is an
-in-process replay of a push the socket already applied.
+**Scope.** `bybit/feed.py._resubscribe`, `okx/feed.py._resubscribe`, and a
+test per venue. Possibly a rename (`_force_resubscribe`) to make the intent
+unmissable at the call site.
 
-**Not MD growing venue-specific refcounts.** If a comment or a
-dashboard needs to explain why `@bookTicker` is still up after
-`bestquote` went to zero, the answer is read off the socket's wire
-ledger, not off `Dispatcher.refcounts()`.
+**Problem.** Resync is a second writer to wire state, and both mistakes are
+one-line changes an unaware refactor would make. Route it through
+`acquire` and the identity is already `_held`, so no frame goes out, so no
+snapshot arrives, so the gapped book stays dead — silently, because the
+subscribe "succeeded". Call `discard` on the way out and a co-reader's
+identity is marked free, so the next `acquire` for it sends a duplicate
+frame and, once MDS-6 exists, a last-consumer close could unsubscribe a
+topic somebody else is reading. Today the code is correct only because it
+happens to call `self.request` directly.
+
+**Solution.** Keep the direct-`request` path and state why in the docstring.
+Assert the ledger is untouched across a resync: `held()` before equals
+`held()` after, and the frame count is exactly one `UNSUBSCRIBE` plus one
+`SUBSCRIBE`. Record the co-reader cost (blind for one RTT) next to
+`_resync`, so nobody reaches for a per-consumer resync as the fix.
+
+**Verify.**
+
+- Bybit: two folded consumers on `orderbook.50.BTCUSDT`; force a gap;
+  exactly one `unsubscribe` frame and one extra `subscribe`; `held()`
+  unchanged; both consumers recover on the fresh snapshot. Two folded
+  rather than one folded plus one raw, because MDS-2 refuses that pair.
+- OKX: the same against `books` with a `prevSeqId` gap.
+- A resync while a concurrent `subscribe_*` for the same identity is
+  in flight does not produce two `SUBSCRIBE` frames from `acquire`.
+
+**Depends.** MDS-1. Independent of every other open ticket; expect textual
+conflicts with MDS-2 in `bybit/feed.py` and `okx/feed.py`.
+
+### MDS-4 — Re-key Gate to the payload item, and make `unsubscribe()` last-reader-only
+
+**Goal.** Gate holds one identity per contract, not per call, so I2 holds
+there too; and no public method can close a co-reader's stream or hand back
+an identity another `_Sub` still holds. I1 and I2 at the socket boundary.
+
+**Scope.** Two halves, one re-key.
+
+- Subscribe side: `gate/spot/client.py._subscribe`,
+  `gate/future/client.py._subscribe` and their `_resubscribe`, moving the
+  ledger key from `(channel, tuple(payload))` to one key per payload item.
+- Unsubscribe side: `binance/feed.py.unsubscribe`,
+  `bybit/feed.py.unsubscribe`, `binance/future/feed.py.unsubscribe`,
+  `gate/spot/client.py.unsubscribe`, `gate/future/client.py.unsubscribe`.
+- Tests that already call these: `test_binance_spot_client.py`,
+  `test_binance_future_feed.py` (`test_unsubscribing_goes_to_the_socket_that_carries_it`),
+  `test_gate_spot_client.py`.
+
+**Problem.** Two defects, and they share a cause: the key is the call, not
+the thing.
+
+On Gate, MDS-1 keyed the ledger by the whole payload tuple, so
+`subscribe_tickers("BTC_USDT")` and
+`subscribe_tickers("BTC_USDT", "ETH_USDT")` reserve two different
+identities and `BTC_USDT` is subscribed twice — on the first call and again
+on every reconnect replay. I2 is simply not delivered on Gate, and a verify
+built from two disjoint payloads would never notice.
+
+On the unsubscribe side, Binance and Bybit close every `_Sub` whose index
+intersects the named identities, and Gate ignores the payload entirely and
+closes the whole channel. `BinanceFutureStream.unsubscribe` inherits this
+by fanning out to each group's socket — and BinanceFuture is the venue in
+this epic's headline example. Before MDS-1 that was already wrong; after
+MDS-1 it is worse, because each one now calls `WireLedger.discard` and so
+also hands back an identity a surviving reader depends on.
+
+Neither defect is reachable from MD today — the detach path never calls
+these methods (see MDS-5) — but both are reachable from the public API, and
+both have to be safe before MDS-6 can exist.
+
+**Solution.** Re-key Gate to the payload item: one ledger key per
+`(channel, item)`, so overlapping calls share the item they have in common
+and `_resubscribe` sends each contract once. The `_Sub` still records the
+call's full payload for routing; only the ledger identity gets finer.
+
+Make `unsubscribe()` mean "I am the last reader", and **raise** when it is
+not — do not no-op with a warning. A silent no-op is a new member of the
+category this whole document argues against: an operation that appears to
+succeed and quietly does nothing. On Gate the re-key makes the common case
+legal rather than an error, because unsubscribing one contract no longer
+touches another's identity; close only the `_Sub`s whose payload matches and
+discard only those keys.
+
+The existing tests unsubscribe an identity nobody else holds, so they stay
+legal and unchanged.
+
+**Verify.**
+
+- Gate spot: `subscribe_tickers("BTC_USDT")` then
+  `subscribe_tickers("BTC_USDT", "ETH_USDT")` → the second call sends
+  `ETH_USDT` only; `BTC_USDT` appears in exactly one subscribe frame.
+- Gate spot reconnect after those two calls: each contract replayed once.
+- Gate futures: subscribe `BTC_USDT` and `ETH_USDT` on `futures.trades`
+  separately; `unsubscribe(TRADES, ["BTC_USDT"])` leaves the ETH stream
+  open and its ledger key held.
+- Binance spot: two consumers on `btcusdt@aggTrade`; `unsubscribe` raises
+  and both streams keep delivering; with one consumer it closes and sends
+  `UNSUBSCRIBE`.
+- Binance futures: two consumers on `btcusdt@bookTicker` (`/public`);
+  `unsubscribe` raises; the `/market` socket is untouched either way.
+- Bybit public: the same as Binance spot, and the shared `_books` entry is
+  not dropped while a co-reader holds the topic.
+- Existing `test_unsubscribe_closes_the_streams_reading_it`,
+  `test_unsubscribe_closes_the_stream` and
+  `test_unsubscribing_goes_to_the_socket_that_carries_it` pass unchanged.
+
+**Depends.** MDS-1. Blocks MDS-6. Blocks nothing in MDS-5.
+
+### MDS-5 — Cross-key scenarios at the MD boundary
+
+**Goal.** I1 and I6 asserted where the epic's claim actually lives: two MD
+product pumps over one venue identity, with a detach.
+
+**Scope.** `apps/md/tests/test_md_venue_feeds.py` is the home for the attach
+half — it already drives topic → venue stream resolution. The detach
+scenarios want their own file (`test_md_shared_venue_topics.py`), because
+`test_md_detach_disconnect.py` is about a detach not blocking the control
+plane, not about what a detach leaves subscribed. Both drive `VenueSession` /
+`Dispatcher` against the fake Binance and Bybit sockets. No production change
+expected; if one is needed, it is a bug this ticket found.
+
+**Problem.** Every ticket above is socket-local. None of them says anything
+about MD. The claim that matters is the one in *The problem* section:
+`ticker.` and `bestquote.` on one BinanceFuture instrument open one
+`@bookTicker`, and dropping `bestquote` leaves `ticker` fed. Nothing in the
+tree tests two product keys against one wire identity, so the epic's
+headline case is currently unpinned.
+
+The detach half is testable **now**, and passes now. A detach never reaches
+a socket's `unsubscribe()`: `_stop_feed_if_unused` calls
+`VenueSession.stop_feed`, which cancels the pump task, which runs the
+generator's `finally: stream.close()`, which fires `_drop`. Nothing on that
+path sends a frame — the only callers of a socket `unsubscribe()` anywhere
+in the tree are tests. So S2 and S3 assert behaviour that is already
+correct, which is exactly why they are worth writing: the epic's central
+claim is true today and nothing would notice if a later change made it
+false.
+
+**Solution.** Scenario tests, named and stable:
+
+- **S1 — Split.** Attach `ticker.BinanceFuture_Perp_BTCUSDT` and
+  `bestquote.` for the same instrument. Assert exactly one `SUBSCRIBE` for
+  `btcusdt@bookTicker` across both pumps, plus one for `btcusdt@ticker`,
+  and that both product feeds publish.
+- **S2 — Detach one key.** Drop `bestquote`. Its pump stops, the product
+  refcount is zero, `@bookTicker` stays subscribed, and `ticker.` keeps
+  publishing on the next push.
+- **S3 — Detach the other.** From S1, drop `ticker` instead. `bestquote`
+  keeps publishing.
+- **S4 — Same key, two sessions.** Two STS links on `ticker.` share one
+  pump and one identity; dropping one leaves the other fed. This already
+  works; the test states that the new ledger did not change it.
+- **S5 — Many-to-one on one venue topic.** `trade.` and `aggtrade.` on
+  BinanceFuture both resolve to `@aggTrade`: one `SUBSCRIBE`, two product
+  feeds, and dropping one leaves the other.
+- **S6 — MD names no venue channel.** MD imports connectors and REST
+  readers because it must (`session/factory.py`, `fetch/readers.py`); what
+  it must never import is a venue's stream-name vocabulary. Assert that no
+  module under `apps/md/src` imports a venue `channels` or `streams`
+  module. Verified true today, so this is a lint-shaped test that starts
+  green and stays that way.
+
+**Verify.** The scenarios exist and pass against the names MDS-1 actually
+shipped. Do not write them against imagined helpers.
+
+**Depends.** MDS-1, and nothing else. All six scenarios can be written as
+soon as the ledger is in, which is now. MDS-4 does not gate S2/S3 — the
+detach path does not go through `unsubscribe()` — and MDS-4 carries its own
+tests for the API it changes.
+
+### MDS-6 — Last-consumer `UNSUBSCRIBE` — parked
+
+**Goal.** An identity nothing reads stops arriving, without racing
+reconnect, resync or a handover pin.
+
+**Scope.** `WireLedger` plus each socket's `_drop`. Not started, and not
+scheduled.
+
+**Problem.** An idle topic on an already-open socket costs bandwidth and
+parse time, and a long-lived MD process accumulates them. That is the whole
+upside, and it is small.
+
+The downside is a race with three writers. `BybitPrivateStream._drop`
+already documents one: TD closes and reopens the order stream around a
+reconnect, and a socket that had unsubscribed in between would miss
+whatever arrived in the gap. Resync is the second — MDS-3 exists because an
+unsubscribe and a resync look identical on the wire. Handover pins are the
+third: `docs/MdHandover.md` has a feed pumping at refcount zero, so "no
+consumer" is not a stable fact during a swap.
+
+**Solution.** Only with a story for all three. Derive the last reader by
+scanning `_subs` (never a counter — `EventStream.close()` is idempotent and
+a double-close would decrement twice). Send `UNSUBSCRIBE` then `discard`,
+under the same lock `acquire` uses, so a concurrent `acquire` for that
+identity either waits and re-sends or is serialised behind the close.
+
+Until that story exists, leaving the venue topic up on an already-open
+socket is the known, cheaper wrong.
+
+**Verify.** Not specified. Write it with the ticket, not before.
+
+**Depends.** MDS-1b, MDS-2, MDS-3, MDS-4 — the reservation has to be
+complete (MDS-1b) before a close can be serialised against it. Blocked on a
+decision that the bandwidth is worth the race, which has not been made.
+
+## Order
+
+```
+MDS-1 wire ledger + reservation             [shipped, c555593]
+  ├── MDS-1b _inflight on clear, OKX + futures coverage
+  ├── MDS-2  late-joiner policy
+  ├── MDS-3  pin resync as a force path
+  ├── MDS-4  Gate per-item key + last-reader-only unsubscribe()
+  └── MDS-5  cross-key scenarios (all six)
+
+MDS-1b + MDS-2 + MDS-3 + MDS-4
+  └── MDS-6  last-consumer UNSUBSCRIBE      [parked]
+```
+
+Everything below MDS-1 is unblocked today and nothing in that row gates
+anything else in it. The coupling that exists is textual: MDS-2 and MDS-3
+both edit `bybit/feed.py` and `okx/feed.py`, so expect conflicts rather than
+ordering constraints.
+
+Recommended order if they land one at a time:
+
+1. **MDS-2** — the only one with a live regression behind it. MDS-1 removed
+   the accidental snapshot and `subscribe_order_book` still resets the fold.
+2. **MDS-4** — I2 is not actually delivered on Gate. The epic claims it is.
+3. **MDS-5** — test-only, no production change, and it pins the headline
+   claim. Cheap enough to run in parallel with any of the others.
+4. **MDS-1b** — correctness plus the two sockets MDS-1 changed blind. The
+   OKX half is the largest single piece of work in the epic because it
+   needs a stub that does not exist.
+5. **MDS-3** — a guard rail on behaviour that is already correct.
+
+MDS-6 is not scheduled and its `Verify` is deliberately empty.
+
+## Docs that stay right
+
+`docs/MdHandover.md` needs no edit. "A feed exists because somebody holds
+it" is still true of the product ledger, and feed pinning is still the
+exception to refcount-zero. This epic adds a second ledger below it and
+changes neither `ensure_feed` nor `_stop_feed_if_unused`.
+
+Update a doc in the ticket that makes its sentence false, not in a mop-up
+ticket.
+
+## Out of scope (later epics)
+
+- **`funding_rate` as a product topic.** The payoff, and a separate epic:
+  `TOPIC_FUNDING_RATE` and an `_open` branch in
+  `apps/md/src/mftik_md/session/venue.py`, `MD_FUNDING_RATE` in
+  `packages/common/src/mftik/protocol/messages.py`, a shared model, a row
+  in `MD_HANDLERS` (`apps/sts/src/mftik_sts/session/session.py`), and
+  `on_funding_rate` on `Strategy`. Per venue: `stream_funding_rate` off
+  `BybitTicker.funding_rate` (same wire topic as `ticker`, separate MD
+  topic and hook), off `BinanceFutureMarkPrice` (`subscribe_mark_prices`
+  exists already), off Gate's `futures.tickers`, and off OKX's dedicated
+  `funding-rate` channel.
+- **`open_interest` as a product topic.** Same shape. Note that
+  BinanceFuture USD-M has no WS channel for it, so that venue would have to
+  refuse the feed rather than poll REST inside a push.
+- **`next_funding_time`.** Bybit sends it on the ticker and the model drops
+  it (`extra="ignore"`); Gate does not send it on the wire at all
+  (`funding_next_apply` is REST, in unix seconds). Deriving it needs either
+  a model change plus a venue that pushes it, or a symbol-plane field —
+  not a feed that polls.
+- **A shared `Ticker` carrying funding.** The shared model is
+  bid/ask/last/ts. Conversion belongs on the venue wire models, not on
+  `Ticker`.
+- **Per-identity metrics or a dashboard of the wire ledger.** `held()` is
+  enough to answer "why is `@bookTicker` still up" from a REPL.
+- **Cross-socket sharing.** Two sockets to the same host are two ledgers.
+  Collapsing Binance futures' `/public` and `/market` into one connection
+  is a venue-shape question, not a ledger one.
