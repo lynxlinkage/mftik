@@ -34,6 +34,12 @@ before the session started, `self.symbols` gives you the tick and step sizes to
 round to, and `self.timer` schedules work. See `Strategy`'s docstring for the
 full set of hooks.
 
+A session that was running when STS went away can come back. Override
+`on_rebuild` and set `rebuildable = True`. Facts you `remember` while running
+are handed back there, before `on_start`; resting orders, fills and position
+come from recon, not from anything you stored. Leave `rebuildable` off if
+coming back would mean trading beside orders you no longer know are yours.
+
 A strategy may import the standard library, `mftik`, and other files in its own
 directory — nothing else. The node runs the source you send it rather than an
 environment you built, so a third-party import would be a module that is not

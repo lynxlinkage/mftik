@@ -187,7 +187,7 @@ A framework gives you `on_bar` and a backtest report. A desk has to answer what 
 
 **The tape survives a restart.** Redis is long-lived. A recorder that shut down cleanly leaves a *measured* hole; a reader is told about it instead of treating two hours of intact prints as gone. Closing the remaining seconds-wide deploy gap is a handover, not an emergency.
 
-**Rebuild on boot.** `STS_REBUILD_ON_BOOT` brings interrupted sessions back after the stack returns. A strategy that leaves resting orders must know it was away (`rebuildable`); the default is off because a restored instance that treats recon as a clean account will place alongside what it left at the venue.
+**Rebuild on boot.** `STS_REBUILD_ON_BOOT` brings interrupted sessions back after the stack returns. Facts the strategy `remember`ed come back through `on_rebuild` before `on_start`; resting orders come from recon, not from anything stored. A strategy that leaves orders at the venue must know it was away (`rebuildable`); the process default is off because a restored instance that treats recon as a clean account will place alongside what it left.
 
 **An event log per session.** Every hook the strategy was offered, and every order, cancel, and query it sent — written whether or not the strategy handled the event. Separate from `self.log`, which is what you meant and what the UI tails.
 

@@ -47,11 +47,13 @@ class Strategy:
 
     Process control (wired):
         on_start, on_ready, on_stop
+        on_rebuild(remembered) — this session ran before; runs before
+        on_start. remembered is what remember() wrote (st_facts)
         exit() — natural end → session stop → on_stop → status "done"
         fail(reason) — same teardown, but status "failed" and reason is
         persisted for the UI
         remember(key, value) — keep a fact a rebuilt session could not
-        re-derive; handed back to on_rebuild (not wired yet)
+        re-derive; handed back to on_rebuild
 
     TD recon (wired):
         send_recon (auto on first lease ACK), on_recon_done
@@ -255,19 +257,24 @@ class Strategy:
     async def on_rebuild(self, remembered: dict[str, str]) -> None:
         """Called when this session ran before and is being restored.
 
-        Not wired to anything yet — rebuilding sessions is not implemented.
-        The contract it will have:
-
-        Recon follows as usual, and what it brings is *yours*: the orders it
-        reports are the ones this session placed before the restart, not
-        another session's. ``remembered`` carries whatever was written with
-        :meth:`remember`.
+        STS calls this from the rebuild scan, before :meth:`on_start`, so
+        every later hook already sees whatever this restores — including
+        :meth:`on_recon_done`, which is where a strategy has to know these
+        orders are its own. Recon follows as usual, and what it brings is
+        *yours*: the orders it reports are the ones this session placed
+        before the restart, not another session's. ``remembered`` carries
+        whatever was written with :meth:`remember`.
 
         Restore from those two, not from a saved copy of your own attributes.
         Anything the venue can tell you (resting orders, fills, position) must
         come from recon, because between the restart and now an order can have
         filled, been cancelled or been rejected, and a stale copy would have
         you act on something that is no longer true.
+
+        The class must also set :attr:`rebuildable`. Without that the scan
+        leaves the session interrupted: a strategy that does not know it was
+        away treats recon as a clean account and places beside what it left
+        resting.
         """
 
     # --- TD recon ----------------------------------------------------------

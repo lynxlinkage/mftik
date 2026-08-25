@@ -740,9 +740,9 @@ class SessionManager:
                 )
                 continue
             if not strategy.rebuildable:
-                # The class has not implemented on_rebuild, so it would treat
-                # recon as a clean account and start over — placing orders
-                # beside the ones this session left resting.
+                # Readiness is the class flag, not the env var. Without it a
+                # rebuilt instance would treat recon as a clean account and
+                # place beside the orders this session left resting.
                 logger.warning(
                     "STS not rebuilding session=%s: %s does not support it",
                     session_id,

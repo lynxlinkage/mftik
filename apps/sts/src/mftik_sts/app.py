@@ -69,8 +69,9 @@ def _rebuild_enabled() -> bool:
     """Whether to restore interrupted sessions on boot.
 
     Off by default. Restoring a session puts a strategy back in front of a
-    live account, and until at least one strategy has implemented
-    ``on_rebuild`` that is a strategy which does not know it was ever away.
+    live account. The scan only restores classes that set
+    ``rebuildable`` — a strategy that does not know it was away would treat
+    recon as a clean account and place beside the orders it left resting.
     Opt in per deployment with ``STS_REBUILD_ON_BOOT=1``.
     """
     return os.getenv("STS_REBUILD_ON_BOOT", "0").strip().lower() in {
