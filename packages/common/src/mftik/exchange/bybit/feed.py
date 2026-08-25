@@ -50,7 +50,7 @@ from mftik.exchange.bybit.socket import DEFAULT_PING_INTERVAL, BybitSocket
 from mftik.exchange.models import BookLevel, OrderBook
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import UniversalTicker
-from mftik.exchange.wire import WireLedger, first_seen
+from mftik.exchange.wire import WireLedger, assert_last_reader, first_seen
 
 logger = logging.getLogger(__name__)
 
@@ -261,16 +261,27 @@ class BybitPublicStream(BybitSocket):
         return await self._subscribe(topics, lambda _t, _k, row: row)
 
     async def unsubscribe(self, *topics: str) -> None:
-        """Unsubscribe topics and close every stream reading them."""
-        frame, req_id = subscribe_frame(list(topics), op=UNSUBSCRIBE)
-        await self.request(frame, req_id, op=UNSUBSCRIBE)
-        self._ledger.discard(topics)
+        """Unsubscribe topics. Last-reader only.
+
+        A co-reader or a wider ``_Sub`` that is only partly covered
+        raises. The local half runs even if the venue frame fails.
+        """
         wanted = frozenset(topics)
-        for topic in wanted:
-            self._books.pop(topic, None)
-        for sub in [s for s in self._subs if s.index & wanted]:
-            # close() fires on_close → _drop, which does the removal.
-            sub.stream.close()
+        assert_last_reader(
+            {
+                topic: [s.index for s in self._subs if topic in s.index]
+                for topic in wanted
+            }
+        )
+        try:
+            frame, req_id = subscribe_frame(list(topics), op=UNSUBSCRIBE)
+            await self.request(frame, req_id, op=UNSUBSCRIBE)
+        finally:
+            self._ledger.discard(topics)
+            for topic in wanted:
+                self._books.pop(topic, None)
+            for sub in [s for s in self._subs if s.index <= wanted and s.index]:
+                sub.stream.close()
 
     async def _acquire(self, topics: tuple[str, ...]) -> None:
         async def send(missing: list[str]) -> None:

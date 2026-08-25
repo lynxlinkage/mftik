@@ -139,9 +139,10 @@ async def test_reconnect_resubscribes_a_shared_stream_once(
         second = await feed.subscribe_agg_trades("BTCUSDT")
         await binance_stream.drop()
         for _ in range(200):
-            if binance_stream.connections > 1 and len(
-                binance_stream.frames_for(st.SUBSCRIBE)
-            ) >= 2:
+            if (
+                binance_stream.connections > 1
+                and len(binance_stream.frames_for(st.SUBSCRIBE)) >= 2
+            ):
                 break
             await asyncio.sleep(0.01)
         assert len(binance_stream.frames_for(st.SUBSCRIBE)) == 2
@@ -150,6 +151,44 @@ async def test_reconnect_resubscribes_a_shared_stream_once(
         await binance_stream.push("btcusdt@aggTrade", AGG_TRADE)
         assert (await asyncio.wait_for(anext(first), timeout=2.0)).s == "BTCUSDT"
         assert (await asyncio.wait_for(anext(second), timeout=2.0)).s == "BTCUSDT"
+
+
+async def test_unsubscribe_raises_when_a_co_reader_still_holds_the_name(
+    binance_stream: FakeBinanceStream,
+) -> None:
+    async with _feed(binance_stream) as feed:
+        first, second = await asyncio.gather(
+            feed.subscribe_agg_trades("BTCUSDT"),
+            feed.subscribe_agg_trades("BTCUSDT"),
+        )
+        with pytest.raises(ValueError, match="2 readers"):
+            await feed.unsubscribe("btcusdt@aggTrade")
+        await binance_stream.push("btcusdt@aggTrade", AGG_TRADE)
+        assert (await asyncio.wait_for(anext(first), timeout=2.0)).s == "BTCUSDT"
+        assert (await asyncio.wait_for(anext(second), timeout=2.0)).s == "BTCUSDT"
+
+
+async def test_unsubscribe_in_the_reconnect_gap_closes_locally(
+    binance_stream: FakeBinanceStream,
+) -> None:
+    async with _feed(binance_stream, retry_backoff=2.0) as feed:
+        trades = await feed.subscribe_agg_trades("BTCUSDT")
+        await binance_stream.drop()
+        await asyncio.sleep(0.05)
+        with pytest.raises(Exception):
+            await feed.unsubscribe("btcusdt@aggTrade")
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(trades), timeout=2.0)
+        for _ in range(80):
+            if binance_stream.connections > 1:
+                break
+            await asyncio.sleep(0.05)
+        replayed = [
+            name
+            for frame in binance_stream.frames_for(st.SUBSCRIBE)
+            for name in (frame.get("params") or [])
+        ]
+        assert replayed.count("btcusdt@aggTrade") == 1
 
 
 async def test_unsubscribe_closes_the_streams_reading_it(
@@ -178,9 +217,10 @@ async def test_reconnect_replays_every_live_subscription(
         await binance_stream.drop()
 
         for _ in range(200):
-            if binance_stream.connections > 1 and len(
-                binance_stream.frames_for(st.SUBSCRIBE)
-            ) > 1:
+            if (
+                binance_stream.connections > 1
+                and len(binance_stream.frames_for(st.SUBSCRIBE)) > 1
+            ):
                 break
             await asyncio.sleep(0.01)
 

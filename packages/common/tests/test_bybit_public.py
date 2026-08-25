@@ -420,7 +420,7 @@ async def test_two_delta_consumers_share_and_neither_is_replayed(
 async def test_a_gap_on_a_shared_fold_resyncs_exactly_once(
     bybit_public: FakeBybit,
 ) -> None:
-    """Resync is a force path. The ledger is not opened or closed."""
+    """MDS-3: resync is a force path. The ledger is not opened or closed."""
     topic = "orderbook.50.BTCUSDT"
     async with _feed(bybit_public) as feed:
         first = await feed.subscribe_order_book(NATIVE, depth=50)
@@ -446,6 +446,21 @@ async def test_a_gap_on_a_shared_fold_resyncs_exactly_once(
         recovered_second = await asyncio.wait_for(second.__anext__(), 2)
         assert [level.price for level in recovered_first.bids] == [Decimal("3")]
         assert [level.price for level in recovered_second.bids] == [Decimal("3")]
+
+
+async def test_unsubscribe_raises_while_a_co_reader_holds_the_topic(
+    bybit_public: FakeBybit,
+) -> None:
+    topic = "orderbook.50.BTCUSDT"
+    async with _feed(bybit_public) as feed:
+        first = await feed.subscribe_order_book(NATIVE, depth=50)
+        await bybit_public.push(topic, _book(1, [["1", "1"]], []), kind="snapshot")
+        await asyncio.wait_for(first.__anext__(), 2)
+        await feed.subscribe_order_book(NATIVE, depth=50)
+        with pytest.raises(ValueError, match="readers"):
+            await feed.unsubscribe(topic)
+        assert topic in feed._ledger.held()
+        assert topic in feed._books
 
 
 async def test_an_unsupported_depth_is_refused_locally(

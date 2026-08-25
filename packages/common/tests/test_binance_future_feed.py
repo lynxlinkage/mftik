@@ -17,9 +17,7 @@ from mftik.exchange.binance.future import streams as st
 from mftik.exchange.binance.future.feed import BinanceFutureStream
 
 
-def _feed(
-    public: FakeBinanceStream, market: FakeBinanceStream
-) -> BinanceFutureStream:
+def _feed(public: FakeBinanceStream, market: FakeBinanceStream) -> BinanceFutureStream:
     return BinanceFutureStream(
         public_url=public.url,  # type: ignore[attr-defined]
         market_url=market.url,  # type: ignore[attr-defined]
@@ -161,6 +159,30 @@ async def test_two_consumers_share_one_book_ticker_on_public_only(
         await future_public_stream.push("btcusdt@bookTicker", BOOK_TICKER)
         assert (await asyncio.wait_for(anext(first), timeout=2.0)).s == "BTCUSDT"
         assert (await asyncio.wait_for(anext(second), timeout=2.0)).s == "BTCUSDT"
+
+
+async def test_unsubscribe_raises_when_a_co_reader_holds_book_ticker(
+    future_public_stream: FakeBinanceStream,
+    future_market_stream: FakeBinanceStream,
+) -> None:
+    async with _feed(future_public_stream, future_market_stream) as feed:
+        await asyncio.gather(
+            feed.subscribe_book_tickers("BTCUSDT"),
+            feed.subscribe_book_tickers("BTCUSDT"),
+        )
+        with pytest.raises(ValueError, match="readers"):
+            await feed.unsubscribe("btcusdt@bookTicker")
+        assert future_market_stream.frames_for(st.UNSUBSCRIBE) == []
+
+
+async def test_unsubscribe_of_a_group_that_was_never_opened_is_a_noop(
+    future_public_stream: FakeBinanceStream,
+    future_market_stream: FakeBinanceStream,
+) -> None:
+    async with _feed(future_public_stream, future_market_stream) as feed:
+        await feed.unsubscribe("btcusdt@aggTrade")
+    assert future_market_stream.frames_for(st.SUBSCRIBE) == []
+    assert future_market_stream.frames_for(st.UNSUBSCRIBE) == []
 
 
 async def test_unsubscribing_goes_to_the_socket_that_carries_it(

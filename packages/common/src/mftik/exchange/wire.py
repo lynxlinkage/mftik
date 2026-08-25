@@ -21,6 +21,27 @@ from typing import Generic, TypeVar
 K = TypeVar("K", bound=Hashable)
 
 
+def assert_last_reader[T: Hashable](
+    held_by: dict[T, Sequence[Iterable[T]]],
+) -> None:
+    """Raise unless every key is held by at most one fully-covered reader.
+
+    ``held_by`` maps each identity being unsubscribed to the claim-sets of
+    the ``_Sub`` s that hold it. A claim-set that is not a subset of the
+    keys is a wider subscription — half-unsubscribing it would leave a
+    stream silently missing a contract. More than one holder is a
+    co-reader. Either way this is not a last-reader close, so raise
+    rather than no-op: a silent success is the failure mode this ledger
+    exists to argue against.
+    """
+    wanted = frozenset(held_by)
+    for key, claims in held_by.items():
+        if any(not frozenset(claim) <= wanted for claim in claims):
+            raise ValueError(f"unsubscribe {key!r} is claimed by a wider subscription")
+        if len(claims) > 1:
+            raise ValueError(f"unsubscribe {key!r} still has {len(claims)} readers")
+
+
 def first_seen[T: Hashable](keys: Iterable[T]) -> list[T]:
     """Each key once, in the order it first appeared.
 
@@ -137,4 +158,4 @@ class WireLedger(Generic[K]):
             await asyncio.gather(*waiters)
 
 
-__all__ = ["WireLedger", "first_seen"]
+__all__ = ["WireLedger", "assert_last_reader", "first_seen"]

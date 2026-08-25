@@ -179,14 +179,21 @@ class BinanceFutureStream:
         return await self._subscribe(names, lambda _name, row: row)
 
     async def unsubscribe(self, *names: str) -> None:
-        """Unsubscribe stream names, each on the socket that carries it."""
+        """Unsubscribe stream names, each on the socket that carries it.
+
+        A group that was never opened is a legal no-op — no ``_Sub`` can
+        hold those names. A socket that exists is always asked, even if
+        it is mid-reconnect: the local half of ``unsubscribe`` still
+        closes the stream so restore cannot resurrect it.
+        """
         by_group: dict[str, list[str]] = {}
         for name in names:
             by_group.setdefault(st.group_of(name), []).append(name)
         for group, group_names in by_group.items():
             socket = self._sockets.get(group)
-            if socket is not None and socket.connected:
-                await socket.unsubscribe(*group_names)
+            if socket is None:
+                continue
+            await socket.unsubscribe(*group_names)
 
     async def _subscribe(
         self, names: tuple[str, ...], parse: StreamParse

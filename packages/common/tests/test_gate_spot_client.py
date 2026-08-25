@@ -87,9 +87,7 @@ async def test_private_subscribe_is_signed(gate: FakeGate) -> None:
         auth = frame["auth"]
         assert auth["method"] == "api_key"
         assert auth["KEY"] == API_KEY
-        assert auth["SIGN"] == sign(
-            API_SECRET, ch.ORDERS, ch.SUBSCRIBE, frame["time"]
-        )
+        assert auth["SIGN"] == sign(API_SECRET, ch.ORDERS, ch.SUBSCRIBE, frame["time"])
 
         await gate.push(
             ch.ORDERS,
@@ -252,6 +250,47 @@ async def test_ping_gets_pong(gate: FakeGate) -> None:
     async with ws:
         await asyncio.sleep(0.25)
         assert ws.stats.last_pong_at > 0
+
+
+async def test_overlapping_ticker_calls_subscribe_the_new_pair_only(
+    gate: FakeGate,
+) -> None:
+    async with await _client(gate) as ws:
+        await ws.subscribe_tickers("BTC_USDT")
+        await ws.subscribe_tickers("BTC_USDT", "ETH_USDT")
+        payloads = [frame.get("payload") for frame in gate.frames_for(ch.TICKERS)]
+        assert payloads == [["BTC_USDT"], ["ETH_USDT"]]
+
+
+async def test_reconnect_replays_each_ticker_contract_once(gate: FakeGate) -> None:
+    ws = GateSpotWebSocket(url=gate.url, ping_interval=0, retry_backoff=0.05)  # type: ignore[attr-defined]
+    async with ws:
+        await ws.subscribe_tickers("BTC_USDT")
+        await ws.subscribe_tickers("BTC_USDT", "ETH_USDT")
+        gate.drop_next = True
+        await ws.subscribe_trades("BTC_USDT")
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if ws.stats.reconnects:
+                break
+        assert ws.stats.reconnects == 1
+        flat = [
+            item
+            for frame in gate.frames_for(ch.TICKERS)
+            for item in (frame.get("payload") or [])
+        ]
+        # One live subscribe each, plus one restore each — not the overlapping
+        # second call replaying BTC a third time.
+        assert flat.count("BTC_USDT") == 2
+        assert flat.count("ETH_USDT") == 2
+
+
+async def test_partial_unsubscribe_of_a_multi_item_sub_raises(gate: FakeGate) -> None:
+    async with await _client(gate) as ws:
+        await ws.subscribe_tickers("BTC_USDT", "ETH_USDT")
+        with pytest.raises(ValueError, match="wider subscription"):
+            await ws.unsubscribe(ch.TICKERS, ["BTC_USDT"])
+        await ws.unsubscribe(ch.TICKERS, ["BTC_USDT", "ETH_USDT"])
 
 
 async def test_unsubscribe_closes_the_stream(gate: FakeGate) -> None:

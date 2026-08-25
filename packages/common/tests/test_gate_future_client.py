@@ -6,6 +6,7 @@ import asyncio
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from gate_future_stub import API_KEY, API_SECRET, UID, FakeGateFutures
 from mftik.exchange.gate.future import channels as ch
 from mftik.exchange.gate.future.client import GateFuturesWebSocket
@@ -72,6 +73,32 @@ async def test_two_consumers_share_one_venue_subscription(
         for stream in (first, second):
             row = await asyncio.wait_for(anext(stream), timeout=2.0)
             assert row.contract == "BTC_USDT"
+
+
+async def test_unsubscribe_one_contract_leaves_the_other(
+    gate_futures: FakeGateFutures,
+) -> None:
+    async with await _client(gate_futures) as ws:
+        btc = await ws.subscribe_trades("BTC_USDT")
+        eth = await ws.subscribe_trades("ETH_USDT")
+        await ws.unsubscribe(ch.TRADES, ["BTC_USDT"])
+        assert (ch.TRADES, ("ETH_USDT",)) in ws._ledger.held()
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(btc), timeout=2.0)
+        await gate_futures.push(
+            ch.TRADES,
+            [
+                {
+                    "id": 2,
+                    "contract": "ETH_USDT",
+                    "size": "1",
+                    "price": "3000",
+                    "create_time": 1_700_000_000,
+                }
+            ],
+        )
+        row = await asyncio.wait_for(anext(eth), timeout=2.0)
+        assert row.contract == "ETH_USDT"
 
 
 async def test_place_order_sends_a_negative_sell_size(

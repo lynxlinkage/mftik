@@ -29,7 +29,7 @@ from typing import Any, TypeVar
 from mftik.exchange.binance.protocol import BinanceResponse, subscribe_frame
 from mftik.exchange.binance.socket import BinanceSocket
 from mftik.exchange.stream import EventStream
-from mftik.exchange.wire import WireLedger, first_seen
+from mftik.exchange.wire import WireLedger, assert_last_reader, first_seen
 
 logger = logging.getLogger(__name__)
 
@@ -96,14 +96,24 @@ class BinanceStreamSocket(BinanceSocket):
         return await self.subscribe(names, lambda _name, row: row)
 
     async def unsubscribe(self, *names: str) -> None:
-        """Unsubscribe stream names and close every stream reading them."""
-        frame, req_id = subscribe_frame(UNSUBSCRIBE, list(names))
-        await self.request(frame, req_id, method=UNSUBSCRIBE)
-        self._ledger.discard(names)
+        """Unsubscribe stream names. Last-reader only.
+
+        A co-reader or a wider ``_Sub`` that is only partly covered
+        raises. The local half — discard the ledger keys and close the
+        matching streams — runs even if the venue frame fails, so a
+        reconnect cannot resurrect a name the caller just dropped.
+        """
         wanted = frozenset(names)
-        for sub in [s for s in self._subs if s.index & wanted]:
-            # close() fires on_close → _drop, which does the removal.
-            sub.stream.close()
+        assert_last_reader(
+            {name: [s.index for s in self._subs if name in s.index] for name in wanted}
+        )
+        try:
+            frame, req_id = subscribe_frame(UNSUBSCRIBE, list(names))
+            await self.request(frame, req_id, method=UNSUBSCRIBE)
+        finally:
+            self._ledger.discard(names)
+            for sub in [s for s in self._subs if s.index <= wanted and s.index]:
+                sub.stream.close()
 
     async def list_subscriptions(self) -> list[str]:
         """What this socket is currently subscribed to, per Binance."""
