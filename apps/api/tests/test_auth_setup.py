@@ -242,3 +242,37 @@ async def test_sessions_survive_a_row_the_owner_created(db) -> None:
             select(func.count()).select_from(StsSessionRow)
         )
     assert still == 1
+
+
+async def test_status_withholds_the_owner_name_until_you_have_proved_something(
+    db,
+) -> None:
+    """``/auth/status`` is open, so what it says anonymously is public.
+
+    The login screen has to reach this route before anybody has proved
+    anything, which is why the gate lets it through. That made every field on
+    it world-readable, and one of them was the Owner's username (issue #20).
+    What the login card actually needs — is the gate on, has this node been
+    claimed, which providers — stays public; the name does not.
+    """
+    app = an_api()
+    async with a_client(app) as client:
+        await client.post("/auth/setup", json={"username": "yite", "password": GOOD})
+        # Setup signs you in, so this one is authenticated and does get it.
+        assert (await client.get("/auth/status")).json()["username"] == "yite"
+        await client.post("/auth/logout")
+
+    async with a_client(app) as anon:
+        body = (await anon.get("/auth/status")).json()
+
+    assert body["username"] is None
+    # The rest of the card is still answerable without a session, or the
+    # login page cannot render and nobody can ever sign in.
+    assert body["authenticated"] is False
+    assert body["setup_required"] is False
+    assert body["enabled"] is True
+    assert body["providers"] == ["password"]
+    # Published on purpose, unlike the name: `_claim` and the login form both
+    # validate against it before anyone has a session, which is what
+    # `test_the_minimum_password_length_is_where_it_says_it_is` pins.
+    assert body["min_password_length"] == passwords.MIN_LENGTH
