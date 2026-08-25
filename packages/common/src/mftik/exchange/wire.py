@@ -40,6 +40,9 @@ class WireLedger(Generic[K]):
         self._held: set[K] = set()
         self._inflight: dict[K, asyncio.Future[None]] = {}
         self._lock = asyncio.Lock()
+        #: Bumped by :meth:`clear`. A leader that acks after a clear
+        #: must not write its keys back onto ``_held``.
+        self._generation = 0
 
     def held(self) -> frozenset[K]:
         return frozenset(self._held)
@@ -50,8 +53,21 @@ class WireLedger(Generic[K]):
         A fresh socket is subscribed to nothing. Clearing first means a
         failed restore leaves the set empty, so the next ``subscribe_*``
         re-sends instead of treating the name as live.
+
+        Both halves of the reservation go: ``_held`` and the in-flight
+        futures. Waiters of a dead leader are failed immediately rather
+        than at ``ack_timeout``. Synchronous because ``_teardown`` is a
+        plain ``def``; ``_restore`` is async and could await, but the
+        sync caller decides the signature.
         """
         self._held.clear()
+        self._generation += 1
+        inflight = self._inflight
+        self._inflight = {}
+        for fut in inflight.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError("socket cleared"))
+                fut.exception()
 
     def discard(self, keys: Iterable[K]) -> None:
         """Drop keys after an explicit venue unsubscribe.
@@ -83,6 +99,7 @@ class WireLedger(Generic[K]):
         waiters: list[asyncio.Future[None]] = []
         to_send: list[K] = []
         async with self._lock:
+            generation = self._generation
             for key in keys:
                 if key in self._held:
                     continue
@@ -103,13 +120,18 @@ class WireLedger(Generic[K]):
                         fut = self._inflight.pop(key, None)
                         if fut is not None and not fut.done():
                             fut.set_exception(exc)
+                            fut.exception()
                 raise
             async with self._lock:
-                self._held.update(to_send)
-                for key in to_send:
-                    fut = self._inflight.pop(key, None)
-                    if fut is not None and not fut.done():
-                        fut.set_result(None)
+                if generation == self._generation:
+                    self._held.update(to_send)
+                    for key in to_send:
+                        fut = self._inflight.pop(key, None)
+                        if fut is not None and not fut.done():
+                            fut.set_result(None)
+                # else: clear() ran. The frame went to a dead socket;
+                # do not mark the keys held, and the waiters already
+                # failed when the dict was swapped out.
 
         if waiters:
             await asyncio.gather(*waiters)

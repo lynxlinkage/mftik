@@ -132,6 +132,37 @@ async def test_an_unknown_stream_name_is_refused_before_it_is_sent(
     assert future_market_stream.received == []
 
 
+BOOK_TICKER = {
+    "e": "bookTicker",
+    "u": 1,
+    "s": "BTCUSDT",
+    "b": "40000",
+    "B": "1",
+    "a": "40001",
+    "A": "2",
+    "T": 1672515782136,
+    "E": 1672515782136,
+}
+
+
+async def test_two_consumers_share_one_book_ticker_on_public_only(
+    future_public_stream: FakeBinanceStream,
+    future_market_stream: FakeBinanceStream,
+) -> None:
+    """The epic's headline identity: two readers, one ``@bookTicker``, one socket."""
+    async with _feed(future_public_stream, future_market_stream) as feed:
+        first, second = await asyncio.gather(
+            feed.subscribe_book_tickers("BTCUSDT"),
+            feed.subscribe_book_tickers("BTCUSDT"),
+        )
+        await asyncio.sleep(0.05)
+        assert len(future_public_stream.frames_for(st.SUBSCRIBE)) == 1
+        assert future_market_stream.frames_for(st.SUBSCRIBE) == []
+        await future_public_stream.push("btcusdt@bookTicker", BOOK_TICKER)
+        assert (await asyncio.wait_for(anext(first), timeout=2.0)).s == "BTCUSDT"
+        assert (await asyncio.wait_for(anext(second), timeout=2.0)).s == "BTCUSDT"
+
+
 async def test_unsubscribing_goes_to_the_socket_that_carries_it(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,

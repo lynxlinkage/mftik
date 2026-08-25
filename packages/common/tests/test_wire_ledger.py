@@ -128,6 +128,65 @@ async def test_clear_before_restore_sends_again_and_a_failed_restore_stays_empty
     assert sent == [["a", "b"], ["a", "b"], ["a", "b"]]
 
 
+async def test_clear_fails_inflight_waiters_at_once() -> None:
+    ledger: WireLedger[str] = WireLedger()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hang(keys: list[str]) -> None:
+        started.set()
+        await release.wait()
+
+    leader = asyncio.create_task(ledger.acquire(["tickers.BTC"], hang))
+    await started.wait()
+    waiter = asyncio.create_task(ledger.acquire(["tickers.BTC"], hang))
+    for _ in range(20):
+        if not waiter.done():
+            await asyncio.sleep(0)
+
+    ledger.clear()
+    assert not ledger.held()
+    with pytest.raises(ConnectionError, match="cleared"):
+        await waiter
+    release.set()
+    await leader
+    assert not ledger.held()
+
+    sent: list[list[str]] = []
+
+    async def send(keys: list[str]) -> None:
+        sent.append(list(keys))
+
+    await ledger.acquire(["tickers.BTC"], send)
+    assert sent == [["tickers.BTC"]]
+
+
+async def test_a_leader_that_acks_after_clear_does_not_mark_held() -> None:
+    ledger: WireLedger[str] = WireLedger()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hang(keys: list[str]) -> None:
+        started.set()
+        await release.wait()
+
+    leader = asyncio.create_task(ledger.acquire(["tickers.BTC"], hang))
+    await started.wait()
+    ledger.clear()
+    release.set()
+    await leader
+    assert not ledger.held()
+
+    sent: list[list[str]] = []
+
+    async def send(keys: list[str]) -> None:
+        sent.append(list(keys))
+
+    await ledger.acquire(["tickers.BTC"], send)
+    assert sent == [["tickers.BTC"]]
+    assert ledger.held() == frozenset({"tickers.BTC"})
+
+
 async def test_discard_forgets_an_explicit_unsubscribe() -> None:
     ledger: WireLedger[str] = WireLedger()
     sent: list[list[str]] = []

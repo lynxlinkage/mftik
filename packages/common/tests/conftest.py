@@ -8,6 +8,7 @@ from binance_stub import FakeBinanceApi, FakeBinanceStream, keypair
 from bybit_stub import FakeBybit
 from gate_future_stub import FakeGateFutures
 from gate_stub import FakeGate
+from okx_stub import FakeOkx
 from websockets.asyncio.server import serve
 
 
@@ -131,6 +132,28 @@ async def bybit():
 async def bybit_public():
     """A FakeBybit standing in for a public socket — no credential expected."""
     fake = FakeBybit(api_secret=None)
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def okx():
+    """A FakeOkx that verifies login signatures; ``.url`` points at it."""
+    fake = FakeOkx()
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def okx_public():
+    """A FakeOkx standing in for a public socket — no login expected."""
+    fake = FakeOkx(api_secret=None)
     server = await serve(fake.handler, "127.0.0.1", 0)
     fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
     yield fake
