@@ -112,9 +112,7 @@ def test_a_delta_sets_levels_and_a_zero_deletes_one() -> None:
         "snapshot",
     )
     book.apply(
-        BybitOrderBook.model_validate(
-            _book(2, [["59998", "0"], ["59997", "5"]], [])
-        ),
+        BybitOrderBook.model_validate(_book(2, [["59998", "0"], ["59997", "5"]], [])),
         "delta",
     )
     folded = book.snapshot()
@@ -131,15 +129,27 @@ def test_a_gap_empties_the_book_rather_than_drifting() -> None:
     downstream could detect."""
     book = BybitBook(NATIVE)
     book.apply(BybitOrderBook.model_validate(_book(1, [["1", "1"]], [])), "snapshot")
-    assert book.apply(
-        BybitOrderBook.model_validate(_book(9, [["2", "1"]], [])), "delta"
-    ) is False
+    assert (
+        book.apply(BybitOrderBook.model_validate(_book(9, [["2", "1"]], [])), "delta")
+        is False
+    )
     assert book.stale
     assert book.snapshot().bids == []
     # And a fresh snapshot puts it back.
     assert book.apply(
         BybitOrderBook.model_validate(_book(1, [["3", "1"]], [])), "snapshot"
     )
+    assert not book.stale
+
+
+def test_applying_the_same_delta_twice_is_not_a_gap() -> None:
+    """Two folders share one book; ``_push`` calls apply once per stream."""
+    book = BybitBook(NATIVE)
+    book.apply(BybitOrderBook.model_validate(_book(1, [["1", "1"]], [])), "snapshot")
+    delta = BybitOrderBook.model_validate(_book(2, [["2", "1"]], []))
+    assert book.apply(delta, "delta")
+    assert book.apply(delta, "delta")
+    assert book.update_id == 2
     assert not book.stale
 
 
@@ -290,6 +300,148 @@ async def test_a_gapped_book_resubscribes_instead_of_publishing(
         )
         book = await asyncio.wait_for(books.__anext__(), 2)
         assert [level.price for level in book.bids] == [Decimal("3")]
+
+
+async def test_a_second_folder_is_replayed_the_live_book_without_a_second_subscribe(
+    bybit_public: FakeBybit,
+) -> None:
+    """MDS-2: the joiner starts from state the socket already has."""
+    topic = "orderbook.50.BTCUSDT"
+    async with _feed(bybit_public) as feed:
+        first = await feed.subscribe_order_book(NATIVE, depth=50)
+        await bybit_public.push(
+            topic, _book(1, [["59999", "1"]], [["60001", "2"]]), kind="snapshot"
+        )
+        await asyncio.wait_for(first.__anext__(), 2)
+
+        second = await feed.subscribe_order_book(NATIVE, depth=50)
+        replay = await asyncio.wait_for(second.__anext__(), 2)
+
+    assert [level.price for level in replay.bids] == [Decimal("59999")]
+    assert len(bybit_public.frames_for("subscribe")) == 1
+
+
+async def test_a_mid_fold_joiner_sees_the_same_book_and_does_not_reset_u(
+    bybit_public: FakeBybit,
+) -> None:
+    topic = "orderbook.50.BTCUSDT"
+    async with _feed(bybit_public) as feed:
+        first = await feed.subscribe_order_book(NATIVE, depth=50)
+        await bybit_public.push(
+            topic, _book(1, [["1", "1"]], [["9", "1"]]), kind="snapshot"
+        )
+        await asyncio.wait_for(first.__anext__(), 2)
+        await bybit_public.push(topic, _book(2, [["2", "1"]], []), kind="delta")
+        latest = await asyncio.wait_for(first.__anext__(), 2)
+        update_id = feed._books[topic].update_id
+
+        second = await feed.subscribe_order_book(NATIVE, depth=50)
+        replay = await asyncio.wait_for(second.__anext__(), 2)
+
+        assert feed._books[topic].update_id == update_id
+        assert [level.price for level in replay.bids] == [
+            level.price for level in latest.bids
+        ]
+
+
+async def test_a_joiner_reads_the_replay_before_a_newer_push(
+    bybit_public: FakeBybit,
+) -> None:
+    """Replay and ``_subs.append`` share a step; ``_push`` cannot land first."""
+    topic = "orderbook.50.BTCUSDT"
+    async with _feed(bybit_public) as feed:
+        first = await feed.subscribe_order_book(NATIVE, depth=50)
+        await bybit_public.push(topic, _book(1, [["1", "1"]], []), kind="snapshot")
+        await asyncio.wait_for(first.__anext__(), 2)
+
+        second = await feed.subscribe_order_book(NATIVE, depth=50)
+        await bybit_public.push(topic, _book(2, [["2", "1"]], []), kind="delta")
+
+        replay = await asyncio.wait_for(second.__anext__(), 2)
+        newer = await asyncio.wait_for(second.__anext__(), 2)
+        assert [level.price for level in replay.bids] == [Decimal("1")]
+        assert [level.price for level in newer.bids] == [Decimal("2"), Decimal("1")]
+
+
+async def test_book_deltas_refuse_a_topic_a_folder_already_holds(
+    bybit_public: FakeBybit,
+) -> None:
+    async with _feed(bybit_public) as feed:
+        await feed.subscribe_order_book(NATIVE, depth=50)
+        with pytest.raises(ValueError, match="orderbook.50.BTCUSDT") as raised:
+            await feed.subscribe_book_deltas(NATIVE, depth=50)
+        assert "already folded" in str(raised.value)
+
+
+async def test_a_folder_joining_a_raw_held_topic_resyncs_once(
+    bybit_public: FakeBybit,
+) -> None:
+    """The escape hatch must not lock out ``subscribe_order_book``."""
+    topic = "orderbook.50.BTCUSDT"
+    async with _feed(bybit_public) as feed:
+        raw = await feed.subscribe_book_deltas(NATIVE, depth=50)
+        assert len(bybit_public.frames_for("subscribe")) == 1
+
+        books = await feed.subscribe_order_book(NATIVE, depth=50)
+        assert len(bybit_public.frames_for("subscribe")) == 1
+        for _ in range(200):
+            if bybit_public.frames_for("unsubscribe"):
+                break
+            await asyncio.sleep(0.01)
+        assert len(bybit_public.frames_for("unsubscribe")) == 1
+        assert len(bybit_public.frames_for("subscribe")) == 2
+
+        await bybit_public.push(
+            topic, _book(1, [["5", "1"]], [["6", "1"]]), kind="snapshot"
+        )
+        folded = await asyncio.wait_for(books.__anext__(), 2)
+        kind, payload = await asyncio.wait_for(raw.__anext__(), 2)
+
+    assert [level.price for level in folded.bids] == [Decimal("5")]
+    assert kind == "snapshot"
+    assert payload.bid_levels()[0].price == Decimal("5")
+
+
+async def test_two_delta_consumers_share_and_neither_is_replayed(
+    bybit_public: FakeBybit,
+) -> None:
+    topic = "orderbook.50.BTCUSDT"
+    async with _feed(bybit_public) as feed:
+        first, second = await asyncio.gather(
+            feed.subscribe_book_deltas(NATIVE, depth=50),
+            feed.subscribe_book_deltas(NATIVE, depth=50),
+        )
+        assert len(bybit_public.frames_for("subscribe")) == 1
+        await bybit_public.push(topic, _book(1, [["1", "1"]], []), kind="snapshot")
+        assert (await asyncio.wait_for(first.__anext__(), 2))[0] == "snapshot"
+        assert (await asyncio.wait_for(second.__anext__(), 2))[0] == "snapshot"
+
+
+async def test_a_gap_on_a_shared_fold_resyncs_exactly_once(
+    bybit_public: FakeBybit,
+) -> None:
+    topic = "orderbook.50.BTCUSDT"
+    async with _feed(bybit_public) as feed:
+        first = await feed.subscribe_order_book(NATIVE, depth=50)
+        await bybit_public.push(topic, _book(1, [["1", "1"]], []), kind="snapshot")
+        await asyncio.wait_for(first.__anext__(), 2)
+        second = await feed.subscribe_order_book(NATIVE, depth=50)
+        await asyncio.wait_for(second.__anext__(), 2)
+
+        await bybit_public.push(topic, _book(99, [["2", "1"]], []), kind="delta")
+        for _ in range(200):
+            if bybit_public.frames_for("unsubscribe"):
+                break
+            await asyncio.sleep(0.01)
+
+        assert len(bybit_public.frames_for("unsubscribe")) == 1
+        assert len(bybit_public.frames_for("subscribe")) == 2
+
+        await bybit_public.push(topic, _book(1, [["3", "1"]], []), kind="snapshot")
+        recovered_first = await asyncio.wait_for(first.__anext__(), 2)
+        recovered_second = await asyncio.wait_for(second.__anext__(), 2)
+        assert [level.price for level in recovered_first.bids] == [Decimal("3")]
+        assert [level.price for level in recovered_second.bids] == [Decimal("3")]
 
 
 async def test_an_unsupported_depth_is_refused_locally(

@@ -77,9 +77,7 @@ class BinanceSpotStream(BinanceStreamSocket):
 
     # --- public streams ----------------------------------------------------
 
-    async def subscribe_agg_trades(
-        self, *symbols: str
-    ) -> EventStream[BinanceAggTrade]:
+    async def subscribe_agg_trades(self, *symbols: str) -> EventStream[BinanceAggTrade]:
         """``<symbol>@aggTrade`` — the tape, same-price fills coalesced.
 
         The default tape for a feed: it carries the same volume as ``@trade``
@@ -117,7 +115,12 @@ class BinanceSpotStream(BinanceStreamSocket):
     async def subscribe_book_tickers(
         self, *symbols: str
     ) -> EventStream[BinanceBookTicker]:
-        """``<symbol>@bookTicker`` — best bid/ask on every change."""
+        """``<symbol>@bookTicker`` — best bid/ask on every change.
+
+        Every push is a complete quote, so a late joiner waits for the
+        next print. ``ticker`` and ``bestquote`` share this identity; that
+        is enough, there is nothing to replay.
+        """
         return await self.subscribe(
             tuple(st.book_ticker(s) for s in symbols),
             lambda _name, row: BinanceBookTicker.model_validate(row),

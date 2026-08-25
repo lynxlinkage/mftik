@@ -243,7 +243,12 @@ class BinanceFutureStream:
     async def subscribe_book_tickers(
         self, *symbols: str
     ) -> EventStream[BinanceFutureBookTicker]:
-        """``<symbol>@bookTicker`` — best bid/ask on every change."""
+        """``<symbol>@bookTicker`` — best bid/ask on every change.
+
+        Every push is a complete quote, so a late joiner waits for the
+        next print. ``ticker`` and ``bestquote`` share this identity; that
+        is enough, there is nothing to replay.
+        """
         return await self._subscribe(
             tuple(st.book_ticker(s) for s in symbols),
             lambda _name, row: BinanceFutureBookTicker.model_validate(row),

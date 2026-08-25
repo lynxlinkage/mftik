@@ -277,9 +277,7 @@ class GateSpotWebSocket:
                 continue
             if resp.ack:
                 continue
-            if resp.is_api and (
-                resp.req_id == req_id or resp.channel == ch.LOGIN
-            ):
+            if resp.is_api and (resp.req_id == req_id or resp.channel == ch.LOGIN):
                 resp.raise_for_error()
                 self._logged_in = True
                 logger.info("gate.spot logged in")
@@ -402,7 +400,11 @@ class GateSpotWebSocket:
     # --- public channels ---------------------------------------------------
 
     async def subscribe_tickers(self, *pairs: str) -> EventStream[GateTicker]:
-        """``spot.tickers`` — 24h rolling stats."""
+        """``spot.tickers`` — 24h rolling stats.
+
+        A late joiner is silent until the next push that carries the field
+        it reads. Nothing is REST-filled for a joiner.
+        """
         return await self._subscribe(
             ch.TICKERS, ch.tickers(*pairs), GateTicker.model_validate
         )
@@ -589,9 +591,7 @@ class GateSpotWebSocket:
         result = await self.api_request(ch.ORDER_CANCEL, param)
         return GateOrderAck.model_validate(result)
 
-    async def cancel_orders(
-        self, orders: list[dict[str, Any]]
-    ) -> list[GateOrderAck]:
+    async def cancel_orders(self, orders: list[dict[str, Any]]) -> list[GateOrderAck]:
         """``spot.order_cancel_ids`` — batch cancel.
 
         Each entry is ``{"id": ..., "currency_pair": ...}``. Legs fail
@@ -637,9 +637,7 @@ class GateSpotWebSocket:
                 return
             retries += 1
             if 0 <= self.max_retries < retries:
-                logger.error(
-                    "gate.spot giving up after %s reconnect attempts", retries
-                )
+                logger.error("gate.spot giving up after %s reconnect attempts", retries)
                 self._fail_streams()
                 return
             delay = min(

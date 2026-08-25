@@ -156,9 +156,7 @@ class GateFuturesWebSocket:
             ]
             if self.ping_interval > 0:
                 self._tasks.append(
-                    asyncio.create_task(
-                        self._ping_loop(), name="gate-futures-ping"
-                    )
+                    asyncio.create_task(self._ping_loop(), name="gate-futures-ping")
                 )
             self._connected = True
         except Exception:
@@ -217,9 +215,7 @@ class GateFuturesWebSocket:
 
     async def _authenticate_socket(self) -> None:
         if self._conn is None or not self.api_key or not self.api_secret:
-            raise ExchangeError(
-                "futures.login requires a live socket and credentials"
-            )
+            raise ExchangeError("futures.login requires a live socket and credentials")
         frame, req_id = login_frame(
             api_key=self.api_key,
             api_secret=self.api_secret,
@@ -252,9 +248,7 @@ class GateFuturesWebSocket:
                 continue
             if resp.ack:
                 continue
-            if resp.is_api and (
-                resp.req_id == req_id or resp.channel == ch.LOGIN
-            ):
+            if resp.is_api and (resp.req_id == req_id or resp.channel == ch.LOGIN):
                 resp.raise_for_error()
                 uid = ""
                 if isinstance(resp.result, dict):
@@ -373,6 +367,12 @@ class GateFuturesWebSocket:
     async def subscribe_tickers(
         self, *contracts: str
     ) -> EventStream[GateFuturesTicker]:
+        """``futures.tickers`` — mark, last, and funding on one channel.
+
+        A late joiner is silent until the next push that carries the field
+        it reads. The quote and the funding rate share this topic; neither
+        is REST-filled for a joiner.
+        """
         return await self._subscribe(
             ch.TICKERS, ch.tickers(*contracts), GateFuturesTicker.model_validate
         )
@@ -418,9 +418,7 @@ class GateFuturesWebSocket:
             GateFuturesLiquidation.model_validate,
         )
 
-    async def subscribe_orders(
-        self, *contracts: str
-    ) -> EventStream[GateFuturesOrder]:
+    async def subscribe_orders(self, *contracts: str) -> EventStream[GateFuturesOrder]:
         return await self._subscribe(
             ch.ORDERS,
             ch.orders(self._require_uid(), *contracts),

@@ -108,6 +108,9 @@ class _Sub:
     stream: EventStream[Any]
     parse: Parse
     index: frozenset[str] = field(default_factory=frozenset)
+    #: True when this stream is folding the topic into whole books.
+    #: ``subscribe_book_deltas`` refuses a topic a folder already holds.
+    folder: bool = False
 
 
 class BybitBook:
@@ -152,6 +155,10 @@ class BybitBook:
         if self.stale:
             # Deltas before the first snapshot have nothing to apply to.
             return False
+        if payload.u == self.update_id:
+            # Two folders share one book; ``_push`` calls apply once per
+            # ``_Sub``. The second call is the same push, not a gap.
+            return True
         if payload.u != self.update_id + 1:
             logger.warning(
                 "bybit book gap on %s: have u=%s, got u=%s",
@@ -265,12 +272,15 @@ class BybitPublicStream(BybitSocket):
             # close() fires on_close → _drop, which does the removal.
             sub.stream.close()
 
-    async def _subscribe(self, topics: tuple[str, ...], parse: Parse) -> EventStream[T]:
+    async def _acquire(self, topics: tuple[str, ...]) -> None:
         async def send(missing: list[str]) -> None:
             frame, req_id = subscribe_frame(list(missing))
             await self.request(frame, req_id, op=SUBSCRIBE)
 
         await self._ledger.acquire(list(topics), send)
+
+    async def _subscribe(self, topics: tuple[str, ...], parse: Parse) -> EventStream[T]:
+        await self._acquire(topics)
         stream: EventStream[T] = EventStream(on_close=self._drop)
         self._subs.append(
             _Sub(
@@ -284,6 +294,19 @@ class BybitPublicStream(BybitSocket):
 
     def _drop(self, stream: EventStream[Any]) -> None:
         self._subs = [s for s in self._subs if s.stream is not stream]
+        self._forget_orphaned_books()
+
+    def _forget_orphaned_books(self) -> None:
+        """Drop folds nobody is reading, so a later folder does not replay them."""
+        live = {topic for sub in self._subs if sub.folder for topic in sub.index}
+        for topic in list(self._books):
+            if topic not in live:
+                self._books.pop(topic)
+
+    def _topics_of(self, *, folder: bool) -> set[str]:
+        return {
+            topic for sub in self._subs if sub.folder is folder for topic in sub.index
+        }
 
     # --- streams -----------------------------------------------------------
 
@@ -300,6 +323,10 @@ class BybitPublicStream(BybitSocket):
         Snapshots on spot, deltas on the contract books; a delta carries only
         the fields that changed, so a row here can be almost empty. See
         :class:`~mftik.exchange.bybit.models.BybitTicker`.
+
+        A late joiner is silent until the next push that carries the field
+        it reads. The quote and the funding rate share this topic; neither
+        is REST-filled for a joiner.
         """
         return await self._subscribe(
             tuple(ch.tickers(s) for s in symbols),
@@ -332,12 +359,41 @@ class BybitPublicStream(BybitSocket):
         would otherwise have to fold them and only one of them could do it
         correctly per socket. A push that leaves the book unusable — a gap —
         yields nothing and triggers a re-subscribe instead.
+
+        A late joiner of a live fold is replayed the current book in the
+        same step that attaches the stream — no ``await`` between the
+        replay and ``_subs.append``, so a later ``_push`` cannot land
+        first. Joining a topic only a raw consumer holds is allowed: the
+        fold starts stale and a deliberate resync draws a snapshot, at the
+        cost of one RTT of blindness for everyone on the topic.
         """
         self._check_depth(depth)
         topics = tuple(ch.order_book(s, depth=depth) for s in symbols)
+        await self._acquire(topics)
+        # Replay, attach, and the optional raw-held resync are one
+        # synchronous block. An await here would let ``_push`` enqueue a
+        # newer book ahead of the snapshot the joiner is supposed to see first.
+        stream: EventStream[BybitBookSnapshot] = EventStream(on_close=self._drop)
         for topic in topics:
-            self._books[topic] = BybitBook(ch.symbol_of(topic))
-        return await self._subscribe(topics, self._fold_book)
+            created = topic not in self._books
+            book = self._books.setdefault(topic, BybitBook(ch.symbol_of(topic)))
+            if not book.stale:
+                stream.push(book.snapshot())
+            elif created and topic in self._topics_of(folder=False):
+                logger.info("%s folding a raw-held topic %s", self.name, topic)
+                if not book.resyncing:
+                    book.resyncing = True
+                    self._resync(topic)
+        self._subs.append(
+            _Sub(
+                topics=topics,
+                stream=stream,
+                parse=self._fold_book,
+                index=frozenset(topics),
+                folder=True,
+            )
+        )
+        return stream
 
     async def subscribe_book_deltas(
         self, *symbols: str, depth: int = DEFAULT_BOOK_DEPTH
@@ -348,21 +404,38 @@ class BybitPublicStream(BybitSocket):
         itself. ``type`` is ``snapshot`` or ``delta``, and telling them apart is
         the caller's problem from here on.
 
-        A late joiner of a live ``orderbook.N`` is silent until the next
-        push, which may be a delta it cannot recover from. Do not pair
-        this with :meth:`subscribe_order_book` on the same topic.
+        Refuses a topic :meth:`subscribe_order_book` already folds — a
+        joiner would see deltas from mid-stream forever and never recover.
+        Two unfolded consumers share, with no replay.
         """
         self._check_depth(depth)
-        return await self._subscribe(
-            tuple(ch.order_book(s, depth=depth) for s in symbols),
-            lambda _t, kind, row: (kind, BybitOrderBook.model_validate(row)),
+        topics = tuple(ch.order_book(s, depth=depth) for s in symbols)
+        await self._acquire(topics)
+        folders = sorted(self._topics_of(folder=True) & set(topics))
+        if folders:
+            raise ValueError(
+                f"{self.name} subscribe_book_deltas cannot join "
+                f"{', '.join(folders)}: that topic is already folded"
+            )
+        stream: EventStream[tuple[str, BybitOrderBook]] = EventStream(
+            on_close=self._drop
         )
+        self._subs.append(
+            _Sub(
+                topics=topics,
+                stream=stream,
+                parse=lambda _t, kind, row: (kind, BybitOrderBook.model_validate(row)),
+                index=frozenset(topics),
+            )
+        )
+        return stream
 
     async def subscribe_best_quote(self, *symbols: str) -> EventStream[BybitOrderBook]:
         """``orderbook.1.<symbol>`` — top of book, on every change.
 
         Bybit's equivalent of a book-ticker feed, and a snapshot every time, so
-        nothing is folded: depth 1 needs no history to be complete.
+        nothing is folded: depth 1 needs no history to be complete. A late
+        joiner waits for the next push.
         """
         return await self._subscribe(
             tuple(ch.order_book(s, depth=1) for s in symbols),
