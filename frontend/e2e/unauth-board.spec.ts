@@ -24,7 +24,8 @@ const GATED = [
 	'/settings',
 	'/sym',
 	'/alerts',
-	'/sts'
+	'/sts',
+	'/keys'
 ] as const;
 
 async function mockGateOnAndSignedOut(page: Page) {
@@ -118,5 +119,11 @@ test.describe('unauthenticated documents', () => {
 		expect(html).not.toContain('Failed to fetch');
 		expect(html).not.toContain('this node');
 		expect(html).not.toMatch(/<h1>Registry<\/h1>/);
+	});
+
+	test('legacy /apis redirects to /keys', async ({ request }) => {
+		const res = await request.get('/apis', { maxRedirects: 0 });
+		expect(res.status()).toBe(308);
+		expect(res.headers().location).toBe('/keys');
 	});
 });

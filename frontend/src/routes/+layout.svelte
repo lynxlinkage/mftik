@@ -85,7 +85,7 @@
 	const nav = [
 		{ href: '/', label: 'Home' },
 		{ href: '/board', label: 'Board' },
-		{ href: '/apis', label: 'API Key' },
+		{ href: '/keys', label: 'API Key' },
 		{ href: '/strategy', label: 'Strategy' },
 		{ href: '/alerts', label: 'Alert' },
 		{ href: '/registry', label: 'Registry' },

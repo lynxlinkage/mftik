@@ -22,7 +22,7 @@
 	<RiHome5Line {size} />
 {:else if href === '/board'}
 	<RiDashboardLine {size} />
-{:else if href === '/apis'}
+{:else if href === '/keys'}
 	<RiKey2Line {size} />
 {:else if href === '/strategy'}
 	<RiPulseLine {size} />
