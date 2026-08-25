@@ -215,6 +215,32 @@ async def test_concurrent_subscribes_to_one_channel_all_get_acked(
             assert row.currency_pair == "ETH_USDT"
 
 
+async def test_two_consumers_share_one_venue_subscription(gate: FakeGate) -> None:
+    async with await _client(gate) as ws:
+        first, second = await asyncio.gather(
+            ws.subscribe_trades("BTC_USDT"),
+            ws.subscribe_trades("BTC_USDT"),
+        )
+        assert len(gate.frames_for(ch.TRADES)) == 1
+        await gate.push(
+            ch.TRADES,
+            [
+                {
+                    "id": 1,
+                    "create_time": 1648725035,
+                    "create_time_ms": "1648725035923.0",
+                    "side": "buy",
+                    "currency_pair": "BTC_USDT",
+                    "amount": "1",
+                    "price": "60000",
+                }
+            ],
+        )
+        for stream in (first, second):
+            row = await asyncio.wait_for(anext(stream), timeout=2.0)
+            assert row.currency_pair == "BTC_USDT"
+
+
 async def test_subscribe_before_connect_raises(gate: FakeGate) -> None:
     ws = await _client(gate)
     with pytest.raises(ExchangeNotConnectedError):

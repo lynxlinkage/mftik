@@ -51,6 +51,7 @@ from mftik.exchange.gate.spot.protocol import (
 )
 from mftik.exchange.models import OrderType, Side
 from mftik.exchange.stream import EventStream
+from mftik.exchange.wire import WireLedger
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,7 @@ class GateSpotWebSocket:
 
         self._conn: ClientConnection | None = None
         self._subs: list[_Sub] = []
+        self._ledger: WireLedger[tuple[str, tuple[str, ...]]] = WireLedger()
         self._pending: list[_Pending] = []
         self._tasks: list[asyncio.Task[Any]] = []
         self._connected = False
@@ -211,6 +213,7 @@ class GateSpotWebSocket:
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
+        self._ledger.clear()
         if self._conn is not None:
             with contextlib.suppress(Exception):
                 await self._conn.close()
@@ -358,6 +361,7 @@ class GateSpotWebSocket:
     ) -> None:
         """Unsubscribe a channel and close every stream reading it."""
         await self.request(channel, ch.UNSUBSCRIBE, payload, private=private)
+        self._ledger.discard(key for key in self._ledger.held() if key[0] == channel)
         for sub in [s for s in self._subs if s.channel == channel]:
             # close() fires on_close → _drop_stream, which does the removal.
             sub.stream.close()
@@ -374,7 +378,12 @@ class GateSpotWebSocket:
         *,
         private: bool = False,
     ) -> EventStream[T]:
-        await self.request(channel, ch.SUBSCRIBE, payload, private=private)
+        key = (channel, tuple(payload or ()))
+
+        async def send(_keys: list[tuple[str, tuple[str, ...]]]) -> None:
+            await self.request(channel, ch.SUBSCRIBE, payload, private=private)
+
+        await self._ledger.acquire([key], send)
         stream: EventStream[T] = EventStream(on_close=self._drop_stream)
         self._subs.append(
             _Sub(
@@ -725,20 +734,32 @@ class GateSpotWebSocket:
 
     async def _resubscribe(self) -> None:
         """Replay every live subscription onto a fresh socket."""
-        for sub in list(self._subs):
-            frame = request_frame(
-                sub.channel,
-                ch.SUBSCRIBE,
-                sub.payload,
-                api_key=self.api_key if sub.private else None,
-                api_secret=self.api_secret if sub.private else None,
-            )
-            await self.send(frame)
-        logger.info("gate.spot resubscribed %s channels", len(self._subs))
+        seen: dict[tuple[str, tuple[str, ...]], _Sub] = {}
+        for sub in self._subs:
+            seen.setdefault((sub.channel, tuple(sub.payload)), sub)
+        self._ledger.clear()
+        if not seen:
+            return
+
+        async def send(keys: list[tuple[str, tuple[str, ...]]]) -> None:
+            for key in keys:
+                sub = seen[key]
+                frame = request_frame(
+                    sub.channel,
+                    ch.SUBSCRIBE,
+                    sub.payload,
+                    api_key=self.api_key if sub.private else None,
+                    api_secret=self.api_secret if sub.private else None,
+                )
+                await self.send(frame)
+
+        await self._ledger.acquire(list(seen), send)
+        logger.info("gate.spot resubscribed %s channels", len(seen))
 
     def _fail_streams(self) -> None:
         self._connected = False
         self._logged_in = False
+        self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()

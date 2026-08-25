@@ -191,6 +191,37 @@ async def test_a_public_socket_subscribes_without_authenticating(
     assert bybit_public.subscribed == {"publicTrade.BTCUSDT", "kline.1.BTCUSDT"}
 
 
+async def test_two_consumers_share_one_venue_subscription(
+    bybit_public: FakeBybit,
+) -> None:
+    async with _feed(bybit_public) as feed:
+        first, second = await asyncio.gather(
+            feed.subscribe_trades(NATIVE),
+            feed.subscribe_trades(NATIVE),
+        )
+        assert len(bybit_public.frames_for("subscribe")) == 1
+        await bybit_public.push("publicTrade.BTCUSDT", [TRADE_ROW])
+        assert (await asyncio.wait_for(first.__anext__(), 2)).trade_id == "trade-1"
+        assert (await asyncio.wait_for(second.__anext__(), 2)).trade_id == "trade-1"
+
+
+async def test_reconnect_resubscribes_a_shared_topic_once(
+    bybit_public: FakeBybit,
+) -> None:
+    async with _feed(bybit_public, retry_backoff=0.01) as feed:
+        first = await feed.subscribe_trades(NATIVE)
+        second = await feed.subscribe_trades(NATIVE)
+        await bybit_public.drop()
+        for _ in range(200):
+            if len(bybit_public.frames_for("subscribe")) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(bybit_public.frames_for("subscribe")) == 2
+        await bybit_public.push("publicTrade.BTCUSDT", [TRADE_ROW])
+        assert (await asyncio.wait_for(first.__anext__(), 2)).trade_id == "trade-1"
+        assert (await asyncio.wait_for(second.__anext__(), 2)).trade_id == "trade-1"
+
+
 async def test_klines_arrive_with_the_symbol_off_the_topic(
     bybit_public: FakeBybit,
 ) -> None:

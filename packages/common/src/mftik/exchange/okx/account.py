@@ -39,6 +39,7 @@ from mftik.exchange.okx.protocol import (
 )
 from mftik.exchange.okx.socket import DEFAULT_PING_INTERVAL, OkxSocket
 from mftik.exchange.stream import EventStream
+from mftik.exchange.wire import WireLedger, first_seen
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ class OkxPrivateStream(OkxSocket):
         self._api_secret = api_secret
         self.passphrase = passphrase
         self._subs: list[_Sub] = []
-        self._subscribed: set[tuple[str, str, str]] = set()
+        self._ledger: WireLedger[tuple[str, str, str]] = WireLedger()
         self._authenticated = False
 
     @property
@@ -99,7 +100,7 @@ class OkxPrivateStream(OkxSocket):
 
     async def _on_open(self) -> None:
         self._authenticated = False
-        self._subscribed.clear()
+        self._ledger.clear()
         frame, req_id = login_frame(
             api_key=self.api_key,
             api_secret=self._api_secret,
@@ -118,7 +119,7 @@ class OkxPrivateStream(OkxSocket):
 
     def _teardown(self) -> None:
         self._authenticated = False
-        self._subscribed.clear()
+        self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
@@ -140,30 +141,30 @@ class OkxPrivateStream(OkxSocket):
     ) -> EventStream[T]:
         self._ensure_connected()
         key = ch.arg_key(arg)
-        if key not in self._subscribed:
-            await self._send_subscribe([arg])
+        await self._send_subscribe([arg])
         stream: EventStream[T] = EventStream(on_close=self._drop)
         self._subs.append(_Sub(key=key, stream=stream, parse=parse))
         return stream
 
     async def _send_subscribe(self, args: list[dict[str, Any]]) -> None:
-        frame, req_id = subscribe_frame(args)
-        await self.request(frame, req_id, op=SUBSCRIBE)
-        self._subscribed.update(ch.arg_key(arg) for arg in args)
+        by_key = {ch.arg_key(item): item for item in args}
+
+        async def send(keys: list[tuple[str, str, str]]) -> None:
+            wanted = [by_key[key] for key in keys]
+            frame, req_id = subscribe_frame(wanted)
+            await self.request(frame, req_id, op=SUBSCRIBE)
+
+        await self._ledger.acquire([ch.arg_key(item) for item in args], send)
 
     def _wanted_args(self) -> list[dict[str, Any]]:
-        seen: dict[tuple[str, str, str], dict[str, Any]] = {}
         builders = {
             ch.arg_key(ch.orders()): ch.orders(),
             ch.arg_key(ch.fills()): ch.fills(),
             ch.arg_key(ch.account()): ch.account(),
             ch.arg_key(ch.positions()): ch.positions(),
         }
-        for sub in self._subs:
-            arg = builders.get(sub.key)
-            if arg is not None:
-                seen.setdefault(sub.key, arg)
-        return list(seen.values())
+        keys = first_seen(sub.key for sub in self._subs)
+        return [builders[key] for key in keys if key in builders]
 
     def _drop(self, stream: EventStream[Any]) -> None:
         self._subs = [s for s in self._subs if s.stream is not stream]

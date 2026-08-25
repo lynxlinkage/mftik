@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from typing import Any
 
@@ -45,6 +46,32 @@ async def test_private_subscribe_includes_uid(
     assert gate_futures.frames_for(ch.ORDERS)[0]["payload"] == [UID, "!all"]
     assert gate_futures.frames_for(ch.POSITIONS)[0]["payload"] == [UID, "!all"]
     assert gate_futures.frames_for(ch.BALANCES)[0]["payload"] == [UID]
+
+
+async def test_two_consumers_share_one_venue_subscription(
+    gate_futures: FakeGateFutures,
+) -> None:
+    async with await _client(gate_futures) as ws:
+        first, second = await asyncio.gather(
+            ws.subscribe_trades("BTC_USDT"),
+            ws.subscribe_trades("BTC_USDT"),
+        )
+        assert len(gate_futures.frames_for(ch.TRADES)) == 1
+        await gate_futures.push(
+            ch.TRADES,
+            [
+                {
+                    "id": 1,
+                    "contract": "BTC_USDT",
+                    "size": "-10",
+                    "price": "60000",
+                    "create_time": 1_700_000_000,
+                }
+            ],
+        )
+        for stream in (first, second):
+            row = await asyncio.wait_for(anext(stream), timeout=2.0)
+            assert row.contract == "BTC_USDT"
 
 
 async def test_place_order_sends_a_negative_sell_size(

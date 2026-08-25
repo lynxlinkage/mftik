@@ -39,6 +39,7 @@ from mftik.exchange.okx.protocol import (
 from mftik.exchange.okx.socket import DEFAULT_PING_INTERVAL, OkxSocket
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.wire import WireLedger
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +196,7 @@ class OkxPublicStream(OkxSocket):
         )
         self._subs: list[_Sub] = []
         self._books: dict[tuple[str, str, str], OkxBook] = {}
-        self._subscribed: set[tuple[str, str, str]] = set()
+        self._ledger: WireLedger[tuple[str, str, str]] = WireLedger()
 
     async def subscribe_trades(self, inst_id: str) -> EventStream[OkxPublicTrade]:
         return await self._subscribe(
@@ -276,11 +277,14 @@ class OkxPublicStream(OkxSocket):
         self, args: tuple[dict[str, Any], ...], parse: Parse
     ) -> EventStream[T]:
         self._ensure_connected()
-        wanted = [arg for arg in args if ch.arg_key(arg) not in self._subscribed]
-        if wanted:
+        by_key = {ch.arg_key(arg): arg for arg in args}
+
+        async def send(keys: list[tuple[str, str, str]]) -> None:
+            wanted = [by_key[key] for key in keys]
             frame, req_id = subscribe_frame(wanted)
             await self.request(frame, req_id, op=SUBSCRIBE)
-            self._subscribed.update(ch.arg_key(arg) for arg in wanted)
+
+        await self._ledger.acquire([ch.arg_key(arg) for arg in args], send)
         stream: EventStream[T] = EventStream(on_close=self._drop)
         self._subs.append(
             _Sub(
@@ -295,16 +299,29 @@ class OkxPublicStream(OkxSocket):
     def _drop(self, stream: EventStream[Any]) -> None:
         self._subs = [s for s in self._subs if s.stream is not stream]
 
+    def _wanted(self) -> list[dict[str, Any]]:
+        """Live subscribe args, each identity once, in first-seen order."""
+        seen: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for sub in self._subs:
+            for arg in sub.args:
+                seen.setdefault(ch.arg_key(arg), arg)
+        return list(seen.values())
+
     async def _restore(self) -> None:
-        args = [arg for sub in self._subs for arg in sub.args]
+        args = self._wanted()
+        self._ledger.clear()
         if not args:
             return
         for key, book in list(self._books.items()):
             self._books[key] = OkxBook(book.symbol)
-        self._subscribed.clear()
-        frame, req_id = subscribe_frame(args)
-        await self.request(frame, req_id, op=SUBSCRIBE)
-        self._subscribed.update(ch.arg_key(arg) for arg in args)
+        by_key = {ch.arg_key(arg): arg for arg in args}
+
+        async def send(keys: list[tuple[str, str, str]]) -> None:
+            wanted = [by_key[key] for key in keys]
+            frame, req_id = subscribe_frame(wanted)
+            await self.request(frame, req_id, op=SUBSCRIBE)
+
+        await self._ledger.acquire([ch.arg_key(arg) for arg in args], send)
         logger.info("%s resubscribed %s channels", self.name, len(args))
 
     def _push(self, resp: OkxResponse) -> None:
@@ -350,7 +367,7 @@ class OkxPublicStream(OkxSocket):
                     sub.stream.push(parsed)
 
     def _teardown(self) -> None:
-        self._subscribed.clear()
+        self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()

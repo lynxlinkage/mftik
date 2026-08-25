@@ -50,6 +50,7 @@ from mftik.exchange.bybit.socket import DEFAULT_PING_INTERVAL, BybitSocket
 from mftik.exchange.models import BookLevel, OrderBook
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.wire import WireLedger, first_seen
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,7 @@ class BybitPublicStream(BybitSocket):
         self._subs: list[_Sub] = []
         #: topic → the book being folded for it.
         self._books: dict[str, BybitBook] = {}
+        self._ledger: WireLedger[str] = WireLedger()
 
     # --- raw plumbing ------------------------------------------------------
 
@@ -255,6 +257,7 @@ class BybitPublicStream(BybitSocket):
         """Unsubscribe topics and close every stream reading them."""
         frame, req_id = subscribe_frame(list(topics), op=UNSUBSCRIBE)
         await self.request(frame, req_id, op=UNSUBSCRIBE)
+        self._ledger.discard(topics)
         wanted = frozenset(topics)
         for topic in wanted:
             self._books.pop(topic, None)
@@ -263,8 +266,11 @@ class BybitPublicStream(BybitSocket):
             sub.stream.close()
 
     async def _subscribe(self, topics: tuple[str, ...], parse: Parse) -> EventStream[T]:
-        frame, req_id = subscribe_frame(list(topics))
-        await self.request(frame, req_id, op=SUBSCRIBE)
+        async def send(missing: list[str]) -> None:
+            frame, req_id = subscribe_frame(list(missing))
+            await self.request(frame, req_id, op=SUBSCRIBE)
+
+        await self._ledger.acquire(list(topics), send)
         stream: EventStream[T] = EventStream(on_close=self._drop)
         self._subs.append(
             _Sub(
@@ -341,6 +347,10 @@ class BybitPublicStream(BybitSocket):
         For a caller keeping its own book, or measuring the update stream
         itself. ``type`` is ``snapshot`` or ``delta``, and telling them apart is
         the caller's problem from here on.
+
+        A late joiner of a live ``orderbook.N`` is silent until the next
+        push, which may be a delta it cannot recover from. Do not pair
+        this with :meth:`subscribe_order_book` on the same topic.
         """
         self._check_depth(depth)
         return await self._subscribe(
@@ -425,13 +435,18 @@ class BybitPublicStream(BybitSocket):
         that no longer exists, and Bybit opens the new subscription with a
         snapshot anyway.
         """
-        topics = [topic for sub in self._subs for topic in sub.topics]
+        topics = first_seen(topic for sub in self._subs for topic in sub.topics)
+        self._ledger.clear()
         if not topics:
             return
         for topic in list(self._books):
             self._books[topic] = BybitBook(ch.symbol_of(topic))
-        frame, req_id = subscribe_frame(topics)
-        await self.request(frame, req_id, op=SUBSCRIBE)
+
+        async def send(missing: list[str]) -> None:
+            frame, req_id = subscribe_frame(list(missing))
+            await self.request(frame, req_id, op=SUBSCRIBE)
+
+        await self._ledger.acquire(topics, send)
         logger.info("%s resubscribed %s topics", self.name, len(topics))
 
     def _push(self, resp: BybitResponse) -> None:
@@ -457,6 +472,7 @@ class BybitPublicStream(BybitSocket):
                     sub.stream.push(parsed)
 
     def _teardown(self) -> None:
+        self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
