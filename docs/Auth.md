@@ -202,9 +202,12 @@ packages/common  registry/sync.py   send Authorization on peer pulls
 frontend/src/
   routes/login/+page.svelte         claim or sign in; OAuth buttons later
   routes/settings/+page.svelte      identities, and the keys this node issued
+  routes/+layout.server.ts          document 303 to /login when the gate is on
   routes/+layout.svelte             sign out, and hide it when the gate is off
   lib/api.ts                        the /auth/* calls and their types
   lib/auth.ts                       401 handling and session keepalive
+  lib/login-path.ts                 /login and a safe `next`
+  lib/document-gate.ts              whether a path should 303
   lib/ws.ts                         same-origin sockets, so the cookie travels
 frontend/vite.config.ts             proxy /ws as well as /api
 ```
@@ -230,16 +233,34 @@ trail cannot tell the Owner apart from a CI key acting as the Owner.
 
 ## Unauthenticated answers
 
-**401, always.** No proof or expired proof gets the same answer whatever
-asked, with a JSON body the SPA can act on.
+**API: 401, always.** No proof or expired proof gets the same answer whatever
+asked, with a JSON body the SPA can act on. The API does not 302. It never
+sees a navigation to `/board` — the edge sends documents to the frontend
+container.
 
-Nothing needs the 302-on-navigation split the Traefik chain forced. After
-cutover, a document navigation to `$MFTIK_DOMAIN/sts` reaches the *frontend*
-container, which is not gated — the SPA loads, its first `fetch` gets 401, and
-it routes to `/login` client-side. Locally there was never a gate in front of
-the document at all. `location.reload()` was only ever a way to hand an
-expired session back to an external redirect that lived outside the app; there
-is no such redirect any more.
+**Documents: 303 to `/login`.** `+layout.server.ts` decides before the
+control chrome renders. Cheapest test first: this process has
+`MFTIK_AUTH_ENABLED` on and the browser sent no `mftik_session` — 303, no
+API hop. Otherwise it asks `/auth/status` (public, cookie-aware) on the
+API's internal origin (`API_INTERNAL_URL`, falling back to
+`API_PROXY_TARGET`). That catches an expired cookie, and the case the
+frontend was not given the flag but the API's gate is on.
+
+Either way the page does not render. That is what stops an unauthenticated
+cold load of `/board` hydrating against 401 REST and a refused `/ws/board`
+handshake (issue #17), and what stops `/registry` painting cards and a
+`Failed to fetch` banner before `/login` (issue #18). A return path is
+carried as `?next=`; only same-origin relative paths are honoured.
+
+If the API cannot be reached and this process was not told the gate is on,
+the document gate fails open rather than turning every page into a 500.
+The layout still withholds the chrome until the browser can ask
+`/api/auth/status` itself. The SPA also routes to `/login` on a 401, for a
+session that dies after the page is already open.
+
+`location.reload()` was only ever a way to hand an expired session back to an
+external redirect that lived outside the app; there is no such redirect any
+more.
 
 `frontend/src/lib/auth.ts` — the reload marker, the cooldown, the
 visibility-gated keepalive, the comment about a subresource burning the CSRF

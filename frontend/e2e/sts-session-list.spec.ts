@@ -171,6 +171,9 @@ async function mockStsPage(
 	});
 
 	await page.goto('/sts');
+	// Layout withholds chrome until /auth/status returns; the socket is
+	// opened from the page's onMount, so wait for the page before the poll.
+	await expect(page.getByRole('button', { name: 'Live' })).toBeVisible();
 	await expect.poll(() => statusWs).not.toBeNull();
 
 	return {

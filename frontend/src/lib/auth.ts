@@ -1,5 +1,8 @@
 import { browser } from '$app/environment';
 import { goto } from '$app/navigation';
+import { LOGIN_PATH, loginUrl } from '$lib/login-path';
+
+export { LOGIN_PATH, loginUrl, safeNextPath } from '$lib/login-path';
 
 /**
  * Keeping the login session alive, and recovering when it dies anyway.
@@ -7,7 +10,9 @@ import { goto } from '$app/navigation';
  * There is one gate now, and it is this app's own (see docs/Auth.md). An
  * expired session is answered with 401 whatever asked, and the answer to a
  * 401 is to route to /login — a page this app serves, reachable without
- * leaving it.
+ * leaving it. Cold document loads never get that far: `+layout.server.ts`
+ * 303s them first. This handler is for a session that dies after the page
+ * is already open, and for the case the document gate could not ask.
  *
  * Everything that used to live here existed because the gate was outside the
  * app: a reload marker in `sessionStorage`, a cooldown to stop it spinning,
@@ -16,9 +21,6 @@ import { goto } from '$app/navigation';
  * the SPA could not issue, so a full page reload was the missing document
  * navigation. There is no such redirect to reach any more.
  */
-
-/** Where the app's own gate sends someone who has not proved anything. */
-export const LOGIN_PATH = '/login';
 
 /**
  * How often to prove the session is still in use.
@@ -45,7 +47,8 @@ const KEEPALIVE_INTERVAL_MS = 5 * 60_000;
  */
 export function handleUnauthorized(): boolean {
 	if (!browser) return false;
-	if (location.pathname !== LOGIN_PATH) void goto(LOGIN_PATH);
+	if (location.pathname === LOGIN_PATH) return true;
+	void goto(loginUrl(location.pathname + location.search), { replaceState: true });
 	return true;
 }
 

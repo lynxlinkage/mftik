@@ -27,4 +27,6 @@ services:
       - "5174:5173"
     environment:
       API_PROXY_TARGET: http://api:8000
+      API_INTERNAL_URL: http://api:8000
+      MFTIK_AUTH_ENABLED: "1"
       PUBLIC_APP_VERSION: ${MFTIK_VERSION:-dev}

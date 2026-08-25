@@ -200,6 +200,12 @@ services:
       # now /ws alike. WebSockets are opened on this origin rather than the
       # API's own, so the session cookie rides the handshake; see src/lib/ws.ts.
       API_PROXY_TARGET: http://api:8000
+      # Same origin as the proxy target. +layout.server.ts asks /auth/status
+      # here because a relative /api fetch would hit this container, not api.
+      API_INTERNAL_URL: http://api:8000
+      # Same flag as the API. No cookie + gate on → 303, no /auth/status hop.
+      # Keep this in sync with the API: on here and off there locks the UI out.
+      MFTIK_AUTH_ENABLED: "1"
       # Production gets sha-<commit> from MFTIK_VERSION; locally it is just "dev".
       PUBLIC_APP_VERSION: ${MFTIK_VERSION:-dev}
     ports:
