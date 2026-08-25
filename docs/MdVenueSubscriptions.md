@@ -360,7 +360,7 @@ there belongs to a round trip on a socket that no longer exists, and
 `acquire` treats it as "somebody is already sending this" — so the next
 caller becomes its waiter and sends no frame of its own. The window is real
 on a flapping socket: reconnect does **not** cancel pending requests (only
-`close()` does, `socket.py:154-161`), it goes straight
+`close()` does, `socket.py:158-161`), it goes straight
 `_open` → `_on_open` → `_restore`. So a drop *during* a restore leaves the
 previous lap's `request` parked on `asyncio.wait_for(..., ack_timeout)`,
 and the new lap's `acquire` waits behind it instead of re-sending. It
@@ -383,11 +383,11 @@ which nothing asserts.
 **Solution.** Make `clear()` fail every `_inflight` future with a
 `ConnectionError`-shaped exception and drop the map, so a caller parked on a
 dead leader is released immediately rather than at `ack_timeout`, and the
-next `acquire` sends. Keep `clear()` synchronous — it is called from
-`_teardown` and from `_restore`, neither of which can await a lock — which
-means `_inflight` mutation has to stay safe outside `self._lock`; the
-simplest correct form is to swap the dict out under a plain reference and
-resolve the futures from the copy.
+next `acquire` sends. `clear()` has to stay synchronous because `_teardown`
+is a plain `def` on every socket — `_restore` is `async` and could await,
+but the sync caller decides the signature — so `_inflight` mutation has to
+be safe outside `self._lock`; the simplest correct form is to swap the dict
+out under a plain reference and resolve the futures from the copy.
 
 Failing the waiters is only half of it: the *leader* also has to learn its
 reservation was voided. Today `acquire`'s success path does
@@ -406,6 +406,21 @@ sharing case beside `test_unsubscribing_goes_to_the_socket_that_carries_it`
 using the existing `future_public_stream` / `future_market_stream`
 fixtures.
 
+**What this ticket deliberately does not fix.** Failing fast makes an
+existing hole easier to fall into. A `subscribe_*` that raises propagates
+out of `acquire`, up through the connector, into `VenueSession._pump`, which
+catches `Exception`, logs `MD %s pump failed`, and returns — leaving the
+`self._feeds` entry in place, so every later `ensure_feed` for that key
+early-returns and the pump is never restarted. The product refcount says the
+feed is alive and nothing is reading the socket. `ensure_feed` opens the
+source outside the task on purpose, "so an unsupported topic … fails the
+subscribe call instead of dying silently in a background pump", but `_open`
+only constructs the generator; the connector's `subscribe_*` runs on the
+first iteration, which is inside the pump. So that guard does not cover this
+class at all. Before MDS-1b a waiter reached that path after burning
+`ack_timeout`; after it, immediately. Restarting a dead pump is an MD-side
+fix, not a ledger one — see *Out of scope*.
+
 **Verify.**
 
 - `clear()` with a key in flight: the parked waiter raises at once, and the
@@ -423,7 +438,9 @@ fixtures.
 - OKX private: two `subscribe_orders` → one frame, both receive.
 - Binance futures: two consumers on `btcusdt@bookTicker` → one `SUBSCRIBE`
   on `/public` and none on `/market`; the same name on the other socket
-  would be a separate identity.
+  would be a separate identity. **This is where the epic's headline case is
+  counted** — `ticker.` and `bestquote.` reach `@bookTicker` through this
+  client, and MDS-5 asserts the MD half without counting frames.
 
 **Depends.** MDS-1. Independent of MDS-2, MDS-3 and MDS-4.
 
@@ -602,6 +619,30 @@ legal rather than an error, because unsubscribing one contract no longer
 touches another's identity; close only the `_Sub`s whose payload matches and
 discard only those keys.
 
+Two edge cases the current code answers by accident, and this ticket has to
+answer on purpose.
+
+**A Binance futures group that is not open.** `unsubscribe` forwards only
+when `socket is not None and socket.connected`, so anything else is skipped
+in silence. Split it: `socket is None` means the group was never opened, so
+no `_Sub` can hold those names and the no-op is genuinely correct — say so
+in the docstring rather than leaving it as a fallthrough. `socket is not
+None and not socket.connected` is **not** a no-op: the frame cannot be sent,
+but the `_Sub` must still be closed locally, because a surviving `_Sub` is
+what `_restore` replays from. Skipping both means the caller unsubscribed, saw
+success, and the name comes back on the next reconnect.
+
+**A Gate `_Sub` that spans several items.** Routing stays at channel
+granularity (`_push` matches `s.channel == resp.channel`), so a `_Sub` built
+by `subscribe_tickers("BTC_USDT", "ETH_USDT")` cannot be half-unsubscribed:
+drop `BTC_USDT` on the wire and it survives, still matching the channel,
+silently missing one contract. Do not document that as a cost — make it
+unrepresentable. The last-reader rule already covers it if the `_Sub`'s
+payload is read as its claim: `unsubscribe(channel, ["BTC_USDT"])` raises
+when a live `_Sub` on that channel claims `BTC_USDT` and is not itself fully
+covered by this call. A multi-item `_Sub` is then closed by naming all of its
+items, and never by naming some.
+
 The existing tests unsubscribe an identity nobody else holds, so they stay
 legal and unchanged.
 
@@ -619,6 +660,14 @@ legal and unchanged.
   `UNSUBSCRIBE`.
 - Binance futures: two consumers on `btcusdt@bookTicker` (`/public`);
   `unsubscribe` raises; the `/market` socket is untouched either way.
+- Binance futures, group never opened: `unsubscribe("btcusdt@aggTrade")`
+  with no `/market` socket returns quietly and sends nothing.
+- Binance futures, socket down: subscribe, drop the connection, call
+  `unsubscribe` before it reconnects — the stream closes, and the restore
+  after reconnect does **not** replay that name.
+- Gate spot, partial unsubscribe of a multi-item `_Sub`:
+  `subscribe_tickers("BTC_USDT", "ETH_USDT")` then
+  `unsubscribe(TICKERS, ["BTC_USDT"])` raises, and naming both closes it.
 - Bybit public: the same as Binance spot, and the shared `_books` entry is
   not dropped while a co-reader holds the topic.
 - Existing `test_unsubscribe_closes_the_streams_reading_it`,
@@ -632,20 +681,32 @@ legal and unchanged.
 **Goal.** I1 and I6 asserted where the epic's claim actually lives: two MD
 product pumps over one venue identity, with a detach.
 
-**Scope.** `apps/md/tests/test_md_venue_feeds.py` is the home for the attach
-half — it already drives topic → venue stream resolution. The detach
-scenarios want their own file (`test_md_shared_venue_topics.py`), because
+**Scope.** `apps/md/tests/test_md_venue_feeds.py` for the attach half — it
+already drives topic → venue stream resolution. The detach scenarios want
+their own file (`test_md_shared_venue_topics.py`), because
 `test_md_detach_disconnect.py` is about a detach not blocking the control
-plane, not about what a detach leaves subscribed. Both drive `VenueSession` /
-`Dispatcher` against the fake Binance and Bybit sockets. No production change
+plane, not about what a detach leaves subscribed. No production change
 expected; if one is needed, it is a bug this ticket found.
+
+**Stay at the MD layer.** These tests assert against `VenueSession` and
+`Dispatcher` with a recording `FakePublic`, not against sockets.
+`test_md_venue_feeds.py`'s connector is a hand-written `FakePublic` whose
+`stream_*` methods return `_once()` generators; there is no socket under it
+and no frame to count. Counting frames from here would mean standing up a
+real `BinanceFuturePublicClient`, two `FakeBinanceStream`s for `/public` and
+`/market`, and a `StubSymbols` — a different harness than this file uses,
+for an assertion that belongs one layer down anyway. **The wire-frame count
+is MDS-1b's Binance futures case.** What MD can and should assert is which
+`stream_*` the connector was asked for and which pumps stay fed, so extend
+`FakePublic` to record its calls and assert on that.
 
 **Problem.** Every ticket above is socket-local. None of them says anything
 about MD. The claim that matters is the one in *The problem* section:
 `ticker.` and `bestquote.` on one BinanceFuture instrument open one
 `@bookTicker`, and dropping `bestquote` leaves `ticker` fed. Nothing in the
-tree tests two product keys against one wire identity, so the epic's
-headline case is currently unpinned.
+tree tests it. The claim splits cleanly in two: *one identity* is counted on
+the socket in MDS-1b, and *the survivor keeps eating* is asserted here,
+where MD's refcount is the thing that could get it wrong.
 
 The detach half is testable **now**, and passes now. A detach never reaches
 a socket's `unsubscribe()`: `_stop_feed_if_unused` calls
@@ -659,10 +720,10 @@ false.
 
 **Solution.** Scenario tests, named and stable:
 
-- **S1 — Split.** Attach `ticker.BinanceFuture_Perp_BTCUSDT` and
-  `bestquote.` for the same instrument. Assert exactly one `SUBSCRIBE` for
-  `btcusdt@bookTicker` across both pumps, plus one for `btcusdt@ticker`,
-  and that both product feeds publish.
+- **S1 — Split.** Attach `ticker.` and `bestquote.` for one instrument.
+  Assert two pumps exist, each asked the connector for its own `stream_*`,
+  and both product feeds publish. That the two land on one wire identity is
+  MDS-1b's assertion, not this one.
 - **S2 — Detach one key.** Drop `bestquote`. Its pump stops, the product
   refcount is zero, `@bookTicker` stays subscribed, and `ticker.` keeps
   publishing on the next push.
@@ -671,9 +732,11 @@ false.
 - **S4 — Same key, two sessions.** Two STS links on `ticker.` share one
   pump and one identity; dropping one leaves the other fed. This already
   works; the test states that the new ledger did not change it.
-- **S5 — Many-to-one on one venue topic.** `trade.` and `aggtrade.` on
-  BinanceFuture both resolve to `@aggTrade`: one `SUBSCRIBE`, two product
-  feeds, and dropping one leaves the other.
+- **S5 — Many-to-one on one venue topic.** Two product topics that resolve
+  to one venue stream: two product feeds, and dropping one leaves the other
+  publishing. Again the pair-to-one-identity mapping is checked at the
+  socket layer; here the claim is that MD's refcount does not close the
+  survivor.
 - **S6 — MD names no venue channel.** MD imports connectors and REST
   readers because it must (`session/factory.py`, `fetch/readers.py`); what
   it must never import is a venue's stream-name vocabulary. Assert that no
@@ -748,11 +811,12 @@ Recommended order if they land one at a time:
 1. **MDS-2** — the only one with a live regression behind it. MDS-1 removed
    the accidental snapshot and `subscribe_order_book` still resets the fold.
 2. **MDS-4** — I2 is not actually delivered on Gate. The epic claims it is.
-3. **MDS-5** — test-only, no production change, and it pins the headline
-   claim. Cheap enough to run in parallel with any of the others.
-4. **MDS-1b** — correctness plus the two sockets MDS-1 changed blind. The
-   OKX half is the largest single piece of work in the epic because it
-   needs a stub that does not exist.
+3. **MDS-5** — test-only, no production change, and it stays inside
+   `test_md_venue_feeds.py`'s existing `FakePublic` idiom, which is what
+   keeps it cheap. Runs in parallel with any of the others.
+4. **MDS-1b** — correctness plus the two sockets MDS-1 changed blind, and
+   the home of the headline frame count. The OKX half is the largest single
+   piece of work in the epic because it needs a stub that does not exist.
 5. **MDS-3** — a guard rail on behaviour that is already correct.
 
 MDS-6 is not scheduled and its `Verify` is deliberately empty.
@@ -790,6 +854,15 @@ ticket.
 - **A shared `Ticker` carrying funding.** The shared model is
   bid/ask/last/ts. Conversion belongs on the venue wire models, not on
   `Ticker`.
+- **A dead pump that never restarts.** Its own epic, and the largest
+  silent-failure left in MD. `VenueSession._pump` catches `Exception`, logs,
+  and returns with the `self._feeds` entry still present, so `ensure_feed`
+  early-returns forever: the product refcount claims a live feed that has no
+  reader. Any `subscribe_*` failure reaches it — MDS-1b only changes how
+  fast. Fixing it means deciding what a dead pump should do (drop the
+  `_feeds` entry and let the next `ensure_feed` rebuild, or retry with
+  backoff and a give-up that tells STS), which is a control-plane question
+  this epic has no business answering.
 - **Per-identity metrics or a dashboard of the wire ledger.** `held()` is
   enough to answer "why is `@bookTicker` still up" from a REPL.
 - **Cross-socket sharing.** Two sockets to the same host are two ledgers.
