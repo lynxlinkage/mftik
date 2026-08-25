@@ -67,18 +67,28 @@ def _wire_keys(channel: str, payload: list[str] | None) -> list[WireKey]:
             return [(channel, ())]
         return [(channel, (item,)) for item in items]
     if channel in _SCOPED:
+        if not items:
+            raise ValueError(f"{channel} needs a uid")
         uid, *rest = items
         return [(channel, (uid, contract)) for contract in (rest or (ch.ALL,))]
     return [(channel, tuple(items))]
 
 
-def _payload_of(channel: str, idents: list[tuple[str, ...]]) -> list[str]:
+def _payloads_of(channel: str, idents: list[tuple[str, ...]]) -> list[list[str]]:
+    """Venue payloads to send for these identities.
+
+    Split and scoped channels pack into one frame. Structured channels
+    (order book, candlesticks) cannot: each ident *is* the payload, and
+    collapsing them onto ``idents[0]`` would restore only the first.
+    """
     if channel in _SPLIT:
-        return [ident[0] for ident in idents if ident]
+        return [[ident[0] for ident in idents if ident]] if idents else []
     if channel in _SCOPED:
+        if not idents:
+            return []
         uid = idents[0][0]
-        return [uid, *[ident[1] for ident in idents]]
-    return list(idents[0]) if idents else []
+        return [[uid, *[ident[1] for ident in idents]]]
+    return [list(ident) for ident in idents]
 
 
 @dataclass
@@ -355,7 +365,11 @@ class GateFuturesWebSocket:
     async def unsubscribe(
         self, channel: str, payload: list[str] | None = None, *, private: bool = False
     ) -> None:
-        """Unsubscribe payload items. Last-reader only."""
+        """Unsubscribe payload items. Last-reader only.
+
+        Streams close even if the venue frame fails; the ledger key is
+        discarded only after the venue acks.
+        """
         wanted = frozenset(_wire_keys(channel, payload))
         assert_last_reader(
             {
@@ -370,7 +384,6 @@ class GateFuturesWebSocket:
         try:
             await self.request(channel, ch.UNSUBSCRIBE, payload, private=private)
         finally:
-            self._ledger.discard(wanted)
             for sub in [
                 s
                 for s in self._subs
@@ -379,6 +392,7 @@ class GateFuturesWebSocket:
                 and _wire_keys(s.channel, s.payload)
             ]:
                 sub.stream.close()
+        self._ledger.discard(wanted)
 
     async def ping(self) -> None:
         await self.send(ping_frame(ch.PING))
@@ -394,8 +408,9 @@ class GateFuturesWebSocket:
         keys = _wire_keys(channel, payload)
 
         async def send(missing: list[WireKey]) -> None:
-            items = _payload_of(channel, [ident for _ch, ident in missing])
-            await self.request(channel, ch.SUBSCRIBE, items, private=private)
+            idents = [ident for _ch, ident in missing]
+            for items in _payloads_of(channel, idents):
+                await self.request(channel, ch.SUBSCRIBE, items, private=private)
 
         await self._ledger.acquire(keys, send)
         stream: EventStream[T] = EventStream(on_close=self._drop_stream)
@@ -738,14 +753,15 @@ class GateFuturesWebSocket:
                 by_channel.setdefault(channel, []).append(ident)
             for channel, idents in by_channel.items():
                 sub = owner[channel]
-                frame = request_frame(
-                    channel,
-                    ch.SUBSCRIBE,
-                    _payload_of(channel, idents),
-                    api_key=self.api_key if sub.private else None,
-                    api_secret=self.api_secret if sub.private else None,
-                )
-                await self.send(frame)
+                for payload in _payloads_of(channel, idents):
+                    frame = request_frame(
+                        channel,
+                        ch.SUBSCRIBE,
+                        payload,
+                        api_key=self.api_key if sub.private else None,
+                        api_secret=self.api_secret if sub.private else None,
+                    )
+                    await self.send(frame)
 
         await self._ledger.acquire(keys, send)
         logger.info("gate.futures resubscribed %s identities", len(keys))

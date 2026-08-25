@@ -184,16 +184,24 @@ class BinanceFutureStream:
         A group that was never opened is a legal no-op — no ``_Sub`` can
         hold those names. A socket that exists is always asked, even if
         it is mid-reconnect: the local half of ``unsubscribe`` still
-        closes the stream so restore cannot resurrect it.
+        closes the stream so restore cannot resurrect it. One group's
+        send failure does not skip the rest — each socket is asked, then
+        the first error is re-raised.
         """
         by_group: dict[str, list[str]] = {}
         for name in names:
             by_group.setdefault(st.group_of(name), []).append(name)
+        failed: list[Exception] = []
         for group, group_names in by_group.items():
             socket = self._sockets.get(group)
             if socket is None:
                 continue
-            await socket.unsubscribe(*group_names)
+            try:
+                await socket.unsubscribe(*group_names)
+            except Exception as exc:
+                failed.append(exc)
+        if failed:
+            raise failed[0]
 
     async def _subscribe(
         self, names: tuple[str, ...], parse: StreamParse

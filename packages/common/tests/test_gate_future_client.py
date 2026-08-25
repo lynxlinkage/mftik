@@ -75,6 +75,43 @@ async def test_two_consumers_share_one_venue_subscription(
             assert row.contract == "BTC_USDT"
 
 
+async def test_reconnect_replays_each_order_book_payload(
+    gate_futures: FakeGateFutures,
+) -> None:
+    ws = GateFuturesWebSocket(  # type: ignore[attr-defined]
+        url=gate_futures.url, ping_interval=0, retry_backoff=0.05
+    )
+    async with ws:
+        await ws.subscribe_order_book("BTC_USDT")
+        await ws.subscribe_order_book("ETH_USDT")
+        gate_futures.drop_next = True
+        await ws.subscribe_trades("BTC_USDT")
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if ws.stats.reconnects:
+                break
+        assert ws.stats.reconnects == 1
+        payloads = [
+            tuple(frame.get("payload") or [])
+            for frame in gate_futures.frames_for(ch.ORDER_BOOK)
+        ]
+        assert payloads.count(("BTC_USDT", "20", "1000ms")) == 2
+        assert payloads.count(("ETH_USDT", "20", "1000ms")) == 2
+
+
+async def test_unsubscribe_scoped_without_uid_is_refused(
+    gate_futures: FakeGateFutures,
+) -> None:
+    async with await _client(
+        gate_futures, api_key=API_KEY, api_secret=API_SECRET
+    ) as ws:
+        await ws.subscribe_orders()
+        with pytest.raises(ValueError, match="uid"):
+            await ws.unsubscribe(ch.ORDERS)
+        with pytest.raises(ValueError, match="uid"):
+            await ws.unsubscribe(ch.POSITIONS, [])
+
+
 async def test_unsubscribe_one_contract_leaves_the_other(
     gate_futures: FakeGateFutures,
 ) -> None:

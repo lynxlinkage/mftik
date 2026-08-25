@@ -264,7 +264,10 @@ class BybitPublicStream(BybitSocket):
         """Unsubscribe topics. Last-reader only.
 
         A co-reader or a wider ``_Sub`` that is only partly covered
-        raises. The local half runs even if the venue frame fails.
+        raises. Streams close even if the venue frame fails. The ledger
+        key is discarded only after the venue acks — a rejected
+        ``UNSUBSCRIBE`` leaves the name held, so the next subscribe
+        does not send a duplicate Bybit would refuse.
         """
         wanted = frozenset(topics)
         assert_last_reader(
@@ -277,11 +280,11 @@ class BybitPublicStream(BybitSocket):
             frame, req_id = subscribe_frame(list(topics), op=UNSUBSCRIBE)
             await self.request(frame, req_id, op=UNSUBSCRIBE)
         finally:
-            self._ledger.discard(topics)
             for topic in wanted:
                 self._books.pop(topic, None)
             for sub in [s for s in self._subs if s.index <= wanted and s.index]:
                 sub.stream.close()
+        self._ledger.discard(topics)
 
     async def _acquire(self, topics: tuple[str, ...]) -> None:
         async def send(missing: list[str]) -> None:
@@ -421,13 +424,13 @@ class BybitPublicStream(BybitSocket):
         """
         self._check_depth(depth)
         topics = tuple(ch.order_book(s, depth=depth) for s in symbols)
-        await self._acquire(topics)
         folders = sorted(self._topics_of(folder=True) & set(topics))
         if folders:
             raise ValueError(
                 f"{self.name} subscribe_book_deltas cannot join "
                 f"{', '.join(folders)}: that topic is already folded"
             )
+        await self._acquire(topics)
         stream: EventStream[tuple[str, BybitOrderBook]] = EventStream(
             on_close=self._drop
         )

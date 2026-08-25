@@ -373,6 +373,20 @@ async def test_book_deltas_refuse_a_topic_a_folder_already_holds(
         assert "already folded" in str(raised.value)
 
 
+async def test_book_deltas_do_not_subscribe_a_sibling_when_one_topic_is_folded(
+    bybit_public: FakeBybit,
+) -> None:
+    async with _feed(bybit_public) as feed:
+        await feed.subscribe_order_book(NATIVE, depth=50)
+        with pytest.raises(ValueError, match="orderbook.50.BTCUSDT"):
+            await feed.subscribe_book_deltas(NATIVE, "ETHUSDT", depth=50)
+        assert "orderbook.50.ETHUSDT" not in feed._ledger.held()
+        assert all(
+            "orderbook.50.ETHUSDT" not in (frame.get("args") or [])
+            for frame in bybit_public.frames_for("subscribe")
+        )
+
+
 async def test_a_folder_joining_a_raw_held_topic_resyncs_once(
     bybit_public: FakeBybit,
 ) -> None:

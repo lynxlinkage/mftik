@@ -191,6 +191,23 @@ async def test_unsubscribe_in_the_reconnect_gap_closes_locally(
         assert replayed.count("btcusdt@aggTrade") == 1
 
 
+async def test_a_failed_unsubscribe_keeps_the_name_held(
+    binance_stream: FakeBinanceStream,
+) -> None:
+    async with _feed(binance_stream) as feed:
+        trades = await feed.subscribe_agg_trades("BTCUSDT")
+        binance_stream.errors[st.UNSUBSCRIBE] = {"code": 1, "msg": "nope"}
+        with pytest.raises(BinanceWsError, match="nope"):
+            await feed.unsubscribe("btcusdt@aggTrade")
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(trades), timeout=2.0)
+        assert "btcusdt@aggTrade" in feed._ledger.held()
+        again = await feed.subscribe_agg_trades("BTCUSDT")
+        assert len(binance_stream.frames_for(st.SUBSCRIBE)) == 1
+        await binance_stream.push("btcusdt@aggTrade", AGG_TRADE)
+        assert (await asyncio.wait_for(anext(again), timeout=2.0)).s == "BTCUSDT"
+
+
 async def test_unsubscribe_closes_the_streams_reading_it(
     binance_stream: FakeBinanceStream,
 ) -> None:

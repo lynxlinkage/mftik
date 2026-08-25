@@ -646,12 +646,13 @@ and `BinanceStreamSocket.unsubscribe` raises with it — *before*
 sees a failure, the `_Sub` is still in `_subs`, and `_restore` replays the
 name after the reconnect. The subscription comes back from the dead.
 
-So this is an ordering problem, not a branching one. Make the local half of
-`unsubscribe` unconditional — close the matching `_Sub`s and discard the
-ledger keys in a `finally` — and let the wire error propagate. "I no longer
-read this" is a local fact that cannot fail; only delivery can. Being wrong
-in the discard direction costs one redundant `SUBSCRIBE` later, which is
-safe; being wrong in the other direction resurrects a feed nobody asked for.
+So this is an ordering problem, not a branching one. Close the matching
+`_Sub`s in a `finally` so restore cannot resurrect the name, and let the
+wire error propagate. Discard the ledger keys only after the venue acks:
+a rejected `UNSUBSCRIBE` means the socket is still carrying the identity,
+and a follow-up `SUBSCRIBE` (which Bybit refuses) must not go out.
+Closing the stream is the local fact that cannot fail; the reservation
+is a claim about the venue.
 
 **A Gate `_Sub` that spans several items.** Routing stays at channel
 granularity (`_push` matches `s.channel == resp.channel`), so a `_Sub` built

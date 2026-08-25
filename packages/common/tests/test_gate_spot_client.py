@@ -262,6 +262,27 @@ async def test_overlapping_ticker_calls_subscribe_the_new_pair_only(
         assert payloads == [["BTC_USDT"], ["ETH_USDT"]]
 
 
+async def test_reconnect_replays_each_order_book_payload(gate: FakeGate) -> None:
+    """Structured channels cannot share a restore frame — each book is one payload."""
+    ws = GateSpotWebSocket(url=gate.url, ping_interval=0, retry_backoff=0.05)  # type: ignore[attr-defined]
+    async with ws:
+        await ws.subscribe_order_book("BTC_USDT")
+        await ws.subscribe_order_book("ETH_USDT")
+        gate.drop_next = True
+        await ws.subscribe_trades("BTC_USDT")
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if ws.stats.reconnects:
+                break
+        assert ws.stats.reconnects == 1
+        payloads = [
+            tuple(frame.get("payload") or [])
+            for frame in gate.frames_for(ch.ORDER_BOOK)
+        ]
+        assert payloads.count(("BTC_USDT", "20", "1000ms")) == 2
+        assert payloads.count(("ETH_USDT", "20", "1000ms")) == 2
+
+
 async def test_reconnect_replays_each_ticker_contract_once(gate: FakeGate) -> None:
     ws = GateSpotWebSocket(url=gate.url, ping_interval=0, retry_backoff=0.05)  # type: ignore[attr-defined]
     async with ws:

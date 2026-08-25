@@ -15,6 +15,7 @@ import pytest
 from binance_stub import FakeBinanceStream
 from mftik.exchange.binance.future import streams as st
 from mftik.exchange.binance.future.feed import BinanceFutureStream
+from mftik.exchange.binance.future.protocol import BinanceWsError
 
 
 def _feed(public: FakeBinanceStream, market: FakeBinanceStream) -> BinanceFutureStream:
@@ -198,6 +199,24 @@ async def test_unsubscribing_goes_to_the_socket_that_carries_it(
 
         assert future_market_stream.subscribed == set()
         assert future_public_stream.subscribed == {"btcusdt@bookTicker"}
+
+
+async def test_unsubscribe_across_groups_still_asks_after_one_fails(
+    future_public_stream: FakeBinanceStream,
+    future_market_stream: FakeBinanceStream,
+) -> None:
+    async with _feed(future_public_stream, future_market_stream) as feed:
+        books = await feed.subscribe_book_tickers("BTCUSDT")
+        tape = await feed.subscribe_agg_trades("BTCUSDT")
+        await asyncio.sleep(0.05)
+        future_public_stream.errors[st.UNSUBSCRIBE] = {"code": 1, "msg": "nope"}
+        with pytest.raises(BinanceWsError, match="nope"):
+            await feed.unsubscribe("btcusdt@bookTicker", "btcusdt@aggTrade")
+        assert future_market_stream.frames_for(st.UNSUBSCRIBE)
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(books), timeout=2.0)
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(tape), timeout=2.0)
 
 
 async def test_a_reconnect_replays_only_the_streams_that_socket_carried(

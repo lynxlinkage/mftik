@@ -99,9 +99,11 @@ class BinanceStreamSocket(BinanceSocket):
         """Unsubscribe stream names. Last-reader only.
 
         A co-reader or a wider ``_Sub`` that is only partly covered
-        raises. The local half — discard the ledger keys and close the
-        matching streams — runs even if the venue frame fails, so a
-        reconnect cannot resurrect a name the caller just dropped.
+        raises. Matching streams close even if the venue frame fails, so
+        a reconnect cannot resurrect a name the caller just dropped.
+        The ledger key is discarded only after the venue acks: a
+        rejected ``UNSUBSCRIBE`` means the socket is still carrying it,
+        and the next subscribe must not send again.
         """
         wanted = frozenset(names)
         assert_last_reader(
@@ -111,9 +113,9 @@ class BinanceStreamSocket(BinanceSocket):
             frame, req_id = subscribe_frame(UNSUBSCRIBE, list(names))
             await self.request(frame, req_id, method=UNSUBSCRIBE)
         finally:
-            self._ledger.discard(names)
             for sub in [s for s in self._subs if s.index <= wanted and s.index]:
                 sub.stream.close()
+        self._ledger.discard(names)
 
     async def list_subscriptions(self) -> list[str]:
         """What this socket is currently subscribed to, per Binance."""

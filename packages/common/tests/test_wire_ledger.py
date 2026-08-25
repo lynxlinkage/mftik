@@ -187,6 +187,42 @@ async def test_a_leader_that_acks_after_clear_does_not_mark_held() -> None:
     assert ledger.held() == frozenset({"tickers.BTC"})
 
 
+async def test_a_leader_that_fails_after_clear_does_not_kill_a_fresh_reservation() -> (
+    None
+):
+    ledger: WireLedger[str] = WireLedger()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hang_then_fail(keys: list[str]) -> None:
+        started.set()
+        await release.wait()
+        raise ConnectionError("old socket")
+
+    leader_a = asyncio.create_task(ledger.acquire(["k"], hang_then_fail))
+    await started.wait()
+    ledger.clear()
+
+    sent: list[list[str]] = []
+    restored = asyncio.Event()
+
+    async def restore(keys: list[str]) -> None:
+        sent.append(list(keys))
+        restored.set()
+
+    leader_b = asyncio.create_task(ledger.acquire(["k"], restore))
+    waiter = asyncio.create_task(ledger.acquire(["k"], restore))
+    await restored.wait()
+
+    release.set()
+    with pytest.raises(ConnectionError, match="old socket"):
+        await leader_a
+    await leader_b
+    await waiter
+    assert sent == [["k"]]
+    assert ledger.held() == frozenset({"k"})
+
+
 async def test_discard_forgets_an_explicit_unsubscribe() -> None:
     ledger: WireLedger[str] = WireLedger()
     sent: list[list[str]] = []

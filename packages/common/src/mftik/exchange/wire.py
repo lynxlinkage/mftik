@@ -137,11 +137,14 @@ class WireLedger(Generic[K]):
                 await send(to_send)
             except BaseException as exc:
                 async with self._lock:
-                    for key in to_send:
-                        fut = self._inflight.pop(key, None)
-                        if fut is not None and not fut.done():
-                            fut.set_exception(exc)
-                            fut.exception()
+                    if generation == self._generation:
+                        for key in to_send:
+                            fut = self._inflight.pop(key, None)
+                            if fut is not None and not fut.done():
+                                fut.set_exception(exc)
+                                fut.exception()
+                    # else: clear() already failed the old waiters and
+                    # swapped the dict. Do not pop the new leader's future.
                 raise
             async with self._lock:
                 if generation == self._generation:
