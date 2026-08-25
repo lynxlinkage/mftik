@@ -97,8 +97,12 @@ async def test_login_then_mint_on_a_claimed_node(db) -> None:
     async with a_client(app) as client:
         status = (await client.get("/auth/status")).json()
         assert status["setup_required"] is False
-        # The client offers this as the default at the username prompt.
-        assert status["username"] == "yite"
+        # Not to an anonymous caller, it does not (issue #20). The client
+        # used to offer this as the default at the username prompt; the
+        # prompt simply has no default now, which `_login_and_mint` already
+        # handles because a node that has never been claimed has no Owner
+        # name to offer either.
+        assert status["username"] is None
 
         signed_in = await client.post(
             "/auth/login/password", json={"username": "yite", "password": GOOD}

@@ -51,6 +51,12 @@ class StatusOut(BaseModel):
     setup_required: bool
     providers: list[str]
     authenticated: bool
+    #: The Owner's name, and only once the caller has proved they are
+    #: someone. This route is deliberately open — the login screen has to
+    #: reach it before anybody has proved anything — so filling this in
+    #: unconditionally published the Owner's username to the internet
+    #: (issue #20). Anonymous callers get ``None``; the login form and
+    #: ``mftik connect`` both lose a prefilled default and nothing else.
     username: str | None = None
     #: Published rather than duplicated. The rule is enforced here, and a
     #: number the login form also hard-codes is a number that drifts from it.
@@ -136,7 +142,9 @@ async def status(principal: PrincipalDep) -> StatusOut:
         setup_required=owner is None or owner.password_hash is None,
         providers=[_PASSWORD_PROVIDER, *oauth.configured()],
         authenticated=principal.authenticated,
-        username=owner.username if owner is not None else None,
+        username=(
+            owner.username if principal.authenticated and owner is not None else None
+        ),
         min_password_length=passwords.MIN_LENGTH,
     )
 
