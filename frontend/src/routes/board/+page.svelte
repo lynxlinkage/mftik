@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api, formatTs, shortId, type BoardFill, type BoardSession } from '$lib/api';
+	import { handleUnauthorized } from '$lib/auth';
 	import BindingChips from '$lib/components/BindingChips.svelte';
 	import { connectFills, type FillConnection } from '$lib/logging/fills';
 	import { symbolsFromTickers, venuesFromTickers } from '$lib/ticker';
@@ -112,6 +113,33 @@
 		return s.fills + (live[s.session_id] ?? 0);
 	}
 
+	async function start() {
+		try {
+			const status = await api.authStatus();
+			if (status.enabled && !status.authenticated) {
+				handleUnauthorized();
+				loading = false;
+				return;
+			}
+		} catch {
+			/* status is public; a network error is not a verdict */
+		}
+		void refresh();
+		try {
+			disconnect = connectFills(
+				(event) => {
+					live = {
+						...live,
+						[event.session_id]: (live[event.session_id] ?? 0) + 1
+					};
+				},
+				(state) => (connection = state)
+			);
+		} catch {
+			connection = 'error';
+		}
+	}
+
 	onMount(() => {
 		try {
 			const stored = localStorage.getItem(LAYOUT_KEY);
@@ -119,16 +147,7 @@
 		} catch {
 			// ignore
 		}
-		void refresh();
-		disconnect = connectFills(
-			(event) => {
-				live = {
-					...live,
-					[event.session_id]: (live[event.session_id] ?? 0) + 1
-				};
-			},
-			(state) => (connection = state)
-		);
+		void start();
 	});
 
 	onDestroy(() => disconnect?.());

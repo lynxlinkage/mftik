@@ -8,6 +8,7 @@
 		type BoardFill,
 		type BoardSession
 	} from '$lib/api';
+	import { handleUnauthorized } from '$lib/auth';
 	import { connectFills, type FillConnection } from '$lib/logging/fills';
 	import { formatTickerTag } from '$lib/ticker';
 
@@ -98,33 +99,51 @@
 		return `${s}s`;
 	}
 
-	onMount(() => {
+	async function start() {
+		try {
+			const status = await api.authStatus();
+			if (status.enabled && !status.authenticated) {
+				handleUnauthorized();
+				loading = false;
+				return;
+			}
+		} catch {
+			/* status is public; a network error is not a verdict */
+		}
 		void refresh();
-		disconnect = connectFills(
-			(event) => {
-				if (event.session_id !== sessionId) return;
-				pending = [
-					{
-						id: -pending.length - 1,
-						fill_id: '',
-						universal_ticker: event.universal_ticker ?? '',
-						side: event.side ?? '',
-						price: event.price ?? '',
-						qty: event.qty ?? '',
-						fee: '',
-						fee_asset: '',
-						client_order_id: null,
-						venue_order_id: null,
-						api_id: event.api_id,
-						ts: event.ts,
-						source: 'stream',
-						settled: false
-					},
-					...pending
-				];
-			},
-			(state) => (connection = state)
-		);
+		try {
+			disconnect = connectFills(
+				(event) => {
+					if (event.session_id !== sessionId) return;
+					pending = [
+						{
+							id: -pending.length - 1,
+							fill_id: '',
+							universal_ticker: event.universal_ticker ?? '',
+							side: event.side ?? '',
+							price: event.price ?? '',
+							qty: event.qty ?? '',
+							fee: '',
+							fee_asset: '',
+							client_order_id: null,
+							venue_order_id: null,
+							api_id: event.api_id,
+							ts: event.ts,
+							source: 'stream',
+							settled: false
+						},
+						...pending
+					];
+				},
+				(state) => (connection = state)
+			);
+		} catch {
+			connection = 'error';
+		}
+	}
+
+	onMount(() => {
+		void start();
 	});
 
 	onDestroy(() => disconnect?.());

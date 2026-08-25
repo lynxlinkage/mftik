@@ -1,8 +1,10 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { api, startOAuth, type AuthStatus } from '$lib/api';
 	import { hasBrandMark, providerLabel } from '$lib/brands';
+	import { safeNextPath } from '$lib/login-path';
 	import BrandMark from '$lib/components/BrandMark.svelte';
 
 	/**
@@ -32,13 +34,17 @@
 	// Password is always there and is not a button; the rest are.
 	const oauth = $derived((status?.providers ?? []).filter((p) => p !== 'password'));
 
+	function afterLogin(): string {
+		return safeNextPath(page.url.searchParams.get('next'));
+	}
+
 	onMount(async () => {
 		try {
 			status = await api.authStatus();
 			// Only bounce a signed-in visitor away. An unclaimed instance with
 			// the gate off still has something for them to do here.
 			if (status.enabled && status.authenticated) {
-				await goto('/');
+				await goto(afterLogin());
 				return;
 			}
 			if (status.username) username = status.username;
@@ -59,7 +65,7 @@
 				await api.authLogin(username.trim(), password);
 			}
 			password = '';
-			await goto('/');
+			await goto(afterLogin());
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {

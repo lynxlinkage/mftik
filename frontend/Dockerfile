@@ -27,6 +27,8 @@ RUN npm run build
 # There is no Vite dev server in production, which means no `/api` proxy: the
 # edge (Traefik) routes /api and /ws straight to the api service instead —
 # that routing lives in the production compose, outside this repository.
+# The document gate still has to ask /auth/status from this process; set
+# API_INTERNAL_URL=http://api:8000 on the frontend service so it can.
 FROM node:22-bookworm-slim AS prod
 # See the note in the root Dockerfile — this is what links the package to the
 # repo that builds it.

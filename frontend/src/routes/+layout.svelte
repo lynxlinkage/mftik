@@ -11,7 +11,7 @@
 	import { appVersion, appVersionShort } from '$lib/version';
 	import '../app.css';
 
-	let { children } = $props();
+	let { children, data } = $props();
 
 	/**
 	 * Only offer to sign out where signing out means something. With the gate
@@ -20,7 +20,13 @@
 	 */
 	let signedIn = $state(false);
 
+	$effect(() => {
+		const auth = data.auth;
+		if (auth) signedIn = auth.enabled && auth.authenticated;
+	});
+
 	onMount(async () => {
+		if (data.auth) return;
 		try {
 			const status = await api.authStatus();
 			signedIn = status.enabled && status.authenticated;

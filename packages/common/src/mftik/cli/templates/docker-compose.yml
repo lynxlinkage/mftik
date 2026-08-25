@@ -134,6 +134,9 @@ services:
     restart: unless-stopped
     environment:
       PUBLIC_APP_VERSION: ${MFTIK_VERSION:-latest}
+      # adapter-node has no Vite proxy. The document gate asks /auth/status
+      # on this origin (see frontend/src/lib/server/auth-status.ts).
+      API_INTERNAL_URL: http://api:8000
     depends_on:
       - api
 
