@@ -296,9 +296,15 @@ class OkxPublicStream(OkxSocket):
         return book.snapshot(ts=payload.ts or time.time())
 
     def _resync(self, arg: dict[str, Any]) -> None:
-        asyncio.create_task(self._resubscribe(arg), name=f"{self.name}-resync")
+        asyncio.create_task(self._force_resubscribe(arg), name=f"{self.name}-resync")
 
-    async def _resubscribe(self, arg: dict[str, Any]) -> None:
+    async def _force_resubscribe(self, arg: dict[str, Any]) -> None:
+        """End and restart one channel so the venue sends a fresh snapshot.
+
+        Not a ledger open or close: the identity stays held. ``acquire``
+        would no-op (already reserved); ``discard`` would free a
+        co-reader's key. Everyone on the topic is blind for this RTT.
+        """
         try:
             frame, req_id = subscribe_frame([arg], op=UNSUBSCRIBE)
             await self.request(frame, req_id, op=UNSUBSCRIBE)

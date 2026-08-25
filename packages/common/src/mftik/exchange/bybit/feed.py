@@ -485,10 +485,22 @@ class BybitPublicStream(BybitSocket):
         from a gap is to end the subscription and start it again. Done in a
         task because this runs inside the read loop, which must not block on a
         round trip it is itself supposed to deliver.
-        """
-        asyncio.create_task(self._resubscribe(topic), name=f"{self.name}-resync")
 
-    async def _resubscribe(self, topic: str) -> None:
+        Everyone on the topic is blind for that RTT — including a raw
+        co-reader. That is the cost of one fold per socket, not a reason
+        to resync per consumer.
+        """
+        asyncio.create_task(self._force_resubscribe(topic), name=f"{self.name}-resync")
+
+    async def _force_resubscribe(self, topic: str) -> None:
+        """End and restart one topic so the venue sends a fresh snapshot.
+
+        This is not a ledger open or close. The identity stays held — a
+        co-reader is still on it, and routing the ``SUBSCRIBE`` through
+        ``acquire`` would no-op because the key is already reserved, so
+        no snapshot would arrive. ``discard`` on the way out would mark
+        the identity free and let the next ``acquire`` double-subscribe.
+        """
         try:
             frame, req_id = subscribe_frame([topic], op=UNSUBSCRIBE)
             await self.request(frame, req_id, op=UNSUBSCRIBE)

@@ -420,6 +420,7 @@ async def test_two_delta_consumers_share_and_neither_is_replayed(
 async def test_a_gap_on_a_shared_fold_resyncs_exactly_once(
     bybit_public: FakeBybit,
 ) -> None:
+    """Resync is a force path. The ledger is not opened or closed."""
     topic = "orderbook.50.BTCUSDT"
     async with _feed(bybit_public) as feed:
         first = await feed.subscribe_order_book(NATIVE, depth=50)
@@ -427,6 +428,7 @@ async def test_a_gap_on_a_shared_fold_resyncs_exactly_once(
         await asyncio.wait_for(first.__anext__(), 2)
         second = await feed.subscribe_order_book(NATIVE, depth=50)
         await asyncio.wait_for(second.__anext__(), 2)
+        held = feed._ledger.held()
 
         await bybit_public.push(topic, _book(99, [["2", "1"]], []), kind="delta")
         for _ in range(200):
@@ -434,6 +436,8 @@ async def test_a_gap_on_a_shared_fold_resyncs_exactly_once(
                 break
             await asyncio.sleep(0.01)
 
+        assert feed._ledger.held() == held
+        assert topic in held
         assert len(bybit_public.frames_for("unsubscribe")) == 1
         assert len(bybit_public.frames_for("subscribe")) == 2
 
