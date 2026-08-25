@@ -19,6 +19,14 @@ The bundled examples are that kind of work: a chase that reclines a post-only or
 
 It is also for the person who has to keep that work alive. A desk is sessions, credentials, peers, and a trail of who did what. Those are first-class here, not an exercise left to the reader.
 
+## Control
+
+The operator lives in the browser: sessions on the Board, deploys from Strategy. This is the desk, not a chart from a backtest.
+
+![Board — running sessions](docs/readme/board.png)
+
+![Strategy — deploy a session](docs/readme/strategy.png)
+
 ## What a node is
 
 One machine (or one compose project) that owns:
