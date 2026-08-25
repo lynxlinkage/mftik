@@ -137,6 +137,9 @@ services:
       # adapter-node has no Vite proxy. The document gate asks /auth/status
       # on this origin (see frontend/src/lib/server/auth-status.ts).
       API_INTERNAL_URL: http://api:8000
+      # Must match the API service. No session cookie then 303s to /login
+      # without waiting on /auth/status (issue #18).
+      MFTIK_AUTH_ENABLED: "1"
     depends_on:
       - api
 

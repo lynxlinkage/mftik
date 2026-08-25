@@ -1,5 +1,5 @@
 import { env } from '$env/dynamic/private';
-import type { DocumentAuth } from '$lib/server/document-gate';
+import type { DocumentAuth } from '$lib/document-gate';
 
 /** Same name the API sets. Duplicated so this file does not import the client. */
 const SESSION_COOKIE = 'mftik_session';
@@ -25,9 +25,12 @@ export function internalApiOrigin(): string {
  * document gate then fails open: a down API must not turn every page into a
  * 500, and the client 401 handler still routes to /login.
  */
-export async function fetchAuthStatus(cookie: string | undefined): Promise<DocumentAuth | null> {
+export async function fetchAuthStatus(
+	cookie: string | undefined,
+	fetcher: typeof fetch = fetch
+): Promise<DocumentAuth | null> {
 	try {
-		const res = await fetch(`${internalApiOrigin()}/auth/status`, {
+		const res = await fetcher(`${internalApiOrigin()}/auth/status`, {
 			headers: cookie ? { cookie: `${SESSION_COOKIE}=${cookie}` } : {},
 			signal: AbortSignal.timeout(2_000)
 		});

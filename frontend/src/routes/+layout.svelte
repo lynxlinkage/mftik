@@ -3,8 +3,9 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
-	import { LOGIN_PATH, startSessionKeepalive } from '$lib/auth';
+	import { handleUnauthorized, LOGIN_PATH, startSessionKeepalive } from '$lib/auth';
 	import { GITHUB_REPO } from '$lib/brands';
+	import { documentNeedsLogin } from '$lib/document-gate';
 	import BrandMark from '$lib/components/BrandMark.svelte';
 	import NavGlyph from '$lib/components/NavGlyph.svelte';
 	import { siteUrl } from '$lib/site';
@@ -19,6 +20,21 @@
 	 * session that does not exist and land back on a page that redirects home.
 	 */
 	let signedIn = $state(false);
+	/**
+	 * Fail-open SSR must not paint the control chrome. Issue #18 is that
+	 * leak: nav, page copy, and a `Failed to fetch` banner before /login.
+	 * The server 303s when it can; this is the case it cannot (API down,
+	 * Playwright's closed-port gate, a cookie the API has not answered yet).
+	 */
+	let clientReady = $state(false);
+
+	const onLogin = $derived(
+		page.url.pathname === LOGIN_PATH || page.url.pathname.startsWith(`${LOGIN_PATH}/`)
+	);
+	const serverAllows = $derived(
+		data.auth != null && !documentNeedsLogin(data.auth, page.url.pathname)
+	);
+	const showApp = $derived(onLogin || serverAllows || clientReady);
 
 	$effect(() => {
 		const auth = data.auth;
@@ -26,12 +42,20 @@
 	});
 
 	onMount(async () => {
-		if (data.auth) return;
+		if (data.auth) {
+			if (documentNeedsLogin(data.auth, page.url.pathname)) handleUnauthorized();
+			return;
+		}
 		try {
 			const status = await api.authStatus();
 			signedIn = status.enabled && status.authenticated;
+			if (documentNeedsLogin(status, page.url.pathname)) {
+				handleUnauthorized();
+				return;
+			}
+			clientReady = true;
 		} catch {
-			/* the gate will answer for itself on the next request */
+			clientReady = true;
 		}
 	});
 
@@ -108,6 +132,7 @@
 	<meta name="twitter:image" content={ogImage} />
 </svelte:head>
 
+{#if showApp}
 <div class="shell">
 	<aside class="nav">
 		<a class="brand" href="/">
@@ -151,6 +176,7 @@
 		{@render children()}
 	</main>
 </div>
+{/if}
 
 <style>
 	.shell {

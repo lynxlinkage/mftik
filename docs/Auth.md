@@ -207,6 +207,7 @@ frontend/src/
   lib/api.ts                        the /auth/* calls and their types
   lib/auth.ts                       401 handling and session keepalive
   lib/login-path.ts                 /login and a safe `next`
+  lib/document-gate.ts              whether a path should 303
   lib/ws.ts                         same-origin sockets, so the cookie travels
 frontend/vite.config.ts             proxy /ws as well as /api
 ```
@@ -237,17 +238,25 @@ asked, with a JSON body the SPA can act on. The API does not 302. It never
 sees a navigation to `/board` — the edge sends documents to the frontend
 container.
 
-**Documents: 303 to `/login`.** `+layout.server.ts` asks `/auth/status`
-(public, cookie-aware) on the API's internal origin (`API_INTERNAL_URL`,
-falling back to `API_PROXY_TARGET`). When the gate is on and the visitor is
-not authenticated, the page does not render. That is what stops an
-unauthenticated cold load of `/board` hydrating against 401 REST and a
-refused `/ws/board` handshake (issue #17). A return path is carried as
-`?next=`; only same-origin relative paths are honoured.
+**Documents: 303 to `/login`.** `+layout.server.ts` decides before the
+control chrome renders. Cheapest test first: this process has
+`MFTIK_AUTH_ENABLED` on and the browser sent no `mftik_session` — 303, no
+API hop. Otherwise it asks `/auth/status` (public, cookie-aware) on the
+API's internal origin (`API_INTERNAL_URL`, falling back to
+`API_PROXY_TARGET`). That catches an expired cookie, and the case the
+frontend was not given the flag but the API's gate is on.
 
-If the API cannot be reached, the document gate fails open rather than
-turning every page into a 500. The SPA still routes to `/login` on a 401, for
-that case and for a session that dies after the page is already open.
+Either way the page does not render. That is what stops an unauthenticated
+cold load of `/board` hydrating against 401 REST and a refused `/ws/board`
+handshake (issue #17), and what stops `/registry` painting cards and a
+`Failed to fetch` banner before `/login` (issue #18). A return path is
+carried as `?next=`; only same-origin relative paths are honoured.
+
+If the API cannot be reached and this process was not told the gate is on,
+the document gate fails open rather than turning every page into a 500.
+The layout still withholds the chrome until the browser can ask
+`/api/auth/status` itself. The SPA also routes to `/login` on a 401, for a
+session that dies after the page is already open.
 
 `location.reload()` was only ever a way to hand an expired session back to an
 external redirect that lived outside the app; there is no such redirect any

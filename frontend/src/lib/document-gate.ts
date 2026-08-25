@@ -1,9 +1,14 @@
-import { LOGIN_PATH } from '../login-path';
+import { LOGIN_PATH } from './login-path';
 
 export type DocumentAuth = {
 	enabled: boolean;
 	authenticated: boolean;
 };
+
+/** Same values the API accepts for `MFTIK_AUTH_ENABLED`. */
+export function authEnvEnabled(value: string | undefined): boolean {
+	return ['1', 'true', 'yes'].includes((value ?? '').trim().toLowerCase());
+}
 
 /**
  * Whether this document should 303 to /login rather than render.
