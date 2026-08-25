@@ -50,6 +50,7 @@ from mftik.exchange.bybit.socket import DEFAULT_PING_INTERVAL, BybitSocket
 from mftik.exchange.models import BookLevel, OrderBook
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.wire import WireLedger, assert_last_reader, first_seen
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,9 @@ class _Sub:
     stream: EventStream[Any]
     parse: Parse
     index: frozenset[str] = field(default_factory=frozenset)
+    #: True when this stream is folding the topic into whole books.
+    #: ``subscribe_book_deltas`` refuses a topic a folder already holds.
+    folder: bool = False
 
 
 class BybitBook:
@@ -151,6 +155,10 @@ class BybitBook:
         if self.stale:
             # Deltas before the first snapshot have nothing to apply to.
             return False
+        if payload.u == self.update_id:
+            # Two folders share one book; ``_push`` calls apply once per
+            # ``_Sub``. The second call is the same push, not a gap.
+            return True
         if payload.u != self.update_id + 1:
             logger.warning(
                 "bybit book gap on %s: have u=%s, got u=%s",
@@ -244,6 +252,7 @@ class BybitPublicStream(BybitSocket):
         self._subs: list[_Sub] = []
         #: topic → the book being folded for it.
         self._books: dict[str, BybitBook] = {}
+        self._ledger: WireLedger[str] = WireLedger()
 
     # --- raw plumbing ------------------------------------------------------
 
@@ -252,19 +261,40 @@ class BybitPublicStream(BybitSocket):
         return await self._subscribe(topics, lambda _t, _k, row: row)
 
     async def unsubscribe(self, *topics: str) -> None:
-        """Unsubscribe topics and close every stream reading them."""
-        frame, req_id = subscribe_frame(list(topics), op=UNSUBSCRIBE)
-        await self.request(frame, req_id, op=UNSUBSCRIBE)
+        """Unsubscribe topics. Last-reader only.
+
+        A co-reader or a wider ``_Sub`` that is only partly covered
+        raises. Streams close even if the venue frame fails. The ledger
+        key is discarded only after the venue acks — a rejected
+        ``UNSUBSCRIBE`` leaves the name held, so the next subscribe
+        does not send a duplicate Bybit would refuse.
+        """
         wanted = frozenset(topics)
-        for topic in wanted:
-            self._books.pop(topic, None)
-        for sub in [s for s in self._subs if s.index & wanted]:
-            # close() fires on_close → _drop, which does the removal.
-            sub.stream.close()
+        assert_last_reader(
+            {
+                topic: [s.index for s in self._subs if topic in s.index]
+                for topic in wanted
+            }
+        )
+        try:
+            frame, req_id = subscribe_frame(list(topics), op=UNSUBSCRIBE)
+            await self.request(frame, req_id, op=UNSUBSCRIBE)
+        finally:
+            for topic in wanted:
+                self._books.pop(topic, None)
+            for sub in [s for s in self._subs if s.index <= wanted and s.index]:
+                sub.stream.close()
+        self._ledger.discard(topics)
+
+    async def _acquire(self, topics: tuple[str, ...]) -> None:
+        async def send(missing: list[str]) -> None:
+            frame, req_id = subscribe_frame(list(missing))
+            await self.request(frame, req_id, op=SUBSCRIBE)
+
+        await self._ledger.acquire(list(topics), send)
 
     async def _subscribe(self, topics: tuple[str, ...], parse: Parse) -> EventStream[T]:
-        frame, req_id = subscribe_frame(list(topics))
-        await self.request(frame, req_id, op=SUBSCRIBE)
+        await self._acquire(topics)
         stream: EventStream[T] = EventStream(on_close=self._drop)
         self._subs.append(
             _Sub(
@@ -278,6 +308,19 @@ class BybitPublicStream(BybitSocket):
 
     def _drop(self, stream: EventStream[Any]) -> None:
         self._subs = [s for s in self._subs if s.stream is not stream]
+        self._forget_orphaned_books()
+
+    def _forget_orphaned_books(self) -> None:
+        """Drop folds nobody is reading, so a later folder does not replay them."""
+        live = {topic for sub in self._subs if sub.folder for topic in sub.index}
+        for topic in list(self._books):
+            if topic not in live:
+                self._books.pop(topic)
+
+    def _topics_of(self, *, folder: bool) -> set[str]:
+        return {
+            topic for sub in self._subs if sub.folder is folder for topic in sub.index
+        }
 
     # --- streams -----------------------------------------------------------
 
@@ -294,6 +337,10 @@ class BybitPublicStream(BybitSocket):
         Snapshots on spot, deltas on the contract books; a delta carries only
         the fields that changed, so a row here can be almost empty. See
         :class:`~mftik.exchange.bybit.models.BybitTicker`.
+
+        A late joiner is silent until the next push that carries the field
+        it reads. The quote and the funding rate share this topic; neither
+        is REST-filled for a joiner.
         """
         return await self._subscribe(
             tuple(ch.tickers(s) for s in symbols),
@@ -326,12 +373,41 @@ class BybitPublicStream(BybitSocket):
         would otherwise have to fold them and only one of them could do it
         correctly per socket. A push that leaves the book unusable — a gap —
         yields nothing and triggers a re-subscribe instead.
+
+        A late joiner of a live fold is replayed the current book in the
+        same step that attaches the stream — no ``await`` between the
+        replay and ``_subs.append``, so a later ``_push`` cannot land
+        first. Joining a topic only a raw consumer holds is allowed: the
+        fold starts stale and a deliberate resync draws a snapshot, at the
+        cost of one RTT of blindness for everyone on the topic.
         """
         self._check_depth(depth)
         topics = tuple(ch.order_book(s, depth=depth) for s in symbols)
+        await self._acquire(topics)
+        # Replay, attach, and the optional raw-held resync are one
+        # synchronous block. An await here would let ``_push`` enqueue a
+        # newer book ahead of the snapshot the joiner is supposed to see first.
+        stream: EventStream[BybitBookSnapshot] = EventStream(on_close=self._drop)
         for topic in topics:
-            self._books[topic] = BybitBook(ch.symbol_of(topic))
-        return await self._subscribe(topics, self._fold_book)
+            created = topic not in self._books
+            book = self._books.setdefault(topic, BybitBook(ch.symbol_of(topic)))
+            if not book.stale:
+                stream.push(book.snapshot())
+            elif created and topic in self._topics_of(folder=False):
+                logger.info("%s folding a raw-held topic %s", self.name, topic)
+                if not book.resyncing:
+                    book.resyncing = True
+                    self._resync(topic)
+        self._subs.append(
+            _Sub(
+                topics=topics,
+                stream=stream,
+                parse=self._fold_book,
+                index=frozenset(topics),
+                folder=True,
+            )
+        )
+        return stream
 
     async def subscribe_book_deltas(
         self, *symbols: str, depth: int = DEFAULT_BOOK_DEPTH
@@ -341,18 +417,39 @@ class BybitPublicStream(BybitSocket):
         For a caller keeping its own book, or measuring the update stream
         itself. ``type`` is ``snapshot`` or ``delta``, and telling them apart is
         the caller's problem from here on.
+
+        Refuses a topic :meth:`subscribe_order_book` already folds — a
+        joiner would see deltas from mid-stream forever and never recover.
+        Two unfolded consumers share, with no replay.
         """
         self._check_depth(depth)
-        return await self._subscribe(
-            tuple(ch.order_book(s, depth=depth) for s in symbols),
-            lambda _t, kind, row: (kind, BybitOrderBook.model_validate(row)),
+        topics = tuple(ch.order_book(s, depth=depth) for s in symbols)
+        folders = sorted(self._topics_of(folder=True) & set(topics))
+        if folders:
+            raise ValueError(
+                f"{self.name} subscribe_book_deltas cannot join "
+                f"{', '.join(folders)}: that topic is already folded"
+            )
+        await self._acquire(topics)
+        stream: EventStream[tuple[str, BybitOrderBook]] = EventStream(
+            on_close=self._drop
         )
+        self._subs.append(
+            _Sub(
+                topics=topics,
+                stream=stream,
+                parse=lambda _t, kind, row: (kind, BybitOrderBook.model_validate(row)),
+                index=frozenset(topics),
+            )
+        )
+        return stream
 
     async def subscribe_best_quote(self, *symbols: str) -> EventStream[BybitOrderBook]:
         """``orderbook.1.<symbol>`` — top of book, on every change.
 
         Bybit's equivalent of a book-ticker feed, and a snapshot every time, so
-        nothing is folded: depth 1 needs no history to be complete.
+        nothing is folded: depth 1 needs no history to be complete. A late
+        joiner waits for the next push.
         """
         return await self._subscribe(
             tuple(ch.order_book(s, depth=1) for s in symbols),
@@ -402,10 +499,22 @@ class BybitPublicStream(BybitSocket):
         from a gap is to end the subscription and start it again. Done in a
         task because this runs inside the read loop, which must not block on a
         round trip it is itself supposed to deliver.
-        """
-        asyncio.create_task(self._resubscribe(topic), name=f"{self.name}-resync")
 
-    async def _resubscribe(self, topic: str) -> None:
+        Everyone on the topic is blind for that RTT — including a raw
+        co-reader. That is the cost of one fold per socket, not a reason
+        to resync per consumer.
+        """
+        asyncio.create_task(self._force_resubscribe(topic), name=f"{self.name}-resync")
+
+    async def _force_resubscribe(self, topic: str) -> None:
+        """End and restart one topic so the venue sends a fresh snapshot.
+
+        This is not a ledger open or close. The identity stays held — a
+        co-reader is still on it, and routing the ``SUBSCRIBE`` through
+        ``acquire`` would no-op because the key is already reserved, so
+        no snapshot would arrive. ``discard`` on the way out would mark
+        the identity free and let the next ``acquire`` double-subscribe.
+        """
         try:
             frame, req_id = subscribe_frame([topic], op=UNSUBSCRIBE)
             await self.request(frame, req_id, op=UNSUBSCRIBE)
@@ -425,13 +534,18 @@ class BybitPublicStream(BybitSocket):
         that no longer exists, and Bybit opens the new subscription with a
         snapshot anyway.
         """
-        topics = [topic for sub in self._subs for topic in sub.topics]
+        topics = first_seen(topic for sub in self._subs for topic in sub.topics)
+        self._ledger.clear()
         if not topics:
             return
         for topic in list(self._books):
             self._books[topic] = BybitBook(ch.symbol_of(topic))
-        frame, req_id = subscribe_frame(topics)
-        await self.request(frame, req_id, op=SUBSCRIBE)
+
+        async def send(missing: list[str]) -> None:
+            frame, req_id = subscribe_frame(list(missing))
+            await self.request(frame, req_id, op=SUBSCRIBE)
+
+        await self._ledger.acquire(topics, send)
         logger.info("%s resubscribed %s topics", self.name, len(topics))
 
     def _push(self, resp: BybitResponse) -> None:
@@ -457,6 +571,7 @@ class BybitPublicStream(BybitSocket):
                     sub.stream.push(parsed)
 
     def _teardown(self) -> None:
+        self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()

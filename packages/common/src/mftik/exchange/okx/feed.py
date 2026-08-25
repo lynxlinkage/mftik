@@ -39,6 +39,7 @@ from mftik.exchange.okx.protocol import (
 from mftik.exchange.okx.socket import DEFAULT_PING_INTERVAL, OkxSocket
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.wire import WireLedger
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ class _Sub:
     stream: EventStream[Any]
     parse: Parse
     index: frozenset[tuple[str, str, str]] = field(default_factory=frozenset)
+    folder: bool = False
 
 
 class OkxBook:
@@ -122,6 +124,9 @@ class OkxBook:
             return True
         if self.stale:
             return False
+        if payload.seq_id == self.seq_id:
+            # Two folders share one book; the second ``apply`` is the same push.
+            return True
         if payload.prev_seq_id != self.seq_id:
             logger.warning(
                 "okx book gap on %s: have seqId=%s, got prevSeqId=%s",
@@ -195,7 +200,7 @@ class OkxPublicStream(OkxSocket):
         )
         self._subs: list[_Sub] = []
         self._books: dict[tuple[str, str, str], OkxBook] = {}
-        self._subscribed: set[tuple[str, str, str]] = set()
+        self._ledger: WireLedger[tuple[str, str, str]] = WireLedger()
 
     async def subscribe_trades(self, inst_id: str) -> EventStream[OkxPublicTrade]:
         return await self._subscribe(
@@ -204,20 +209,23 @@ class OkxPublicStream(OkxSocket):
         )
 
     async def subscribe_tickers(self, inst_id: str) -> EventStream[OkxTicker]:
+        """``tickers`` — a snapshot every push. A late joiner waits for the next."""
         return await self._subscribe(
             (ch.tickers(inst_id),),
             lambda _resp, row: OkxTicker.model_validate(row),
         )
 
     async def subscribe_best_quote(self, inst_id: str) -> EventStream[OkxOrderBook]:
+        """``bbo-tbt`` — top of book, a snapshot every time.
+
+        A late joiner waits for the next push; there is nothing to fold.
+        """
         return await self._subscribe(
             (ch.bbo(inst_id),),
             lambda _resp, row: OkxOrderBook.model_validate(row),
         )
 
-    async def subscribe_klines(
-        self, inst_id: str, bar: str
-    ) -> EventStream[list[Any]]:
+    async def subscribe_klines(self, inst_id: str, bar: str) -> EventStream[list[Any]]:
         """``candle<bar>`` — raw rows; the connector stamps the interval."""
         return await self._subscribe(
             (ch.candle(inst_id, bar),),
@@ -235,10 +243,39 @@ class OkxPublicStream(OkxSocket):
     async def subscribe_order_book(
         self, inst_id: str, *, channel: str = DEFAULT_BOOK_CHANNEL
     ) -> EventStream[OkxBookSnapshot]:
+        """Folded books. ``books5`` is a snapshot every push; the 400-level
+        channels are a snapshot then updates.
+
+        A late joiner of a live fold is replayed the current book in the
+        same step that attaches the stream. ``books5`` joiners can also
+        just wait for the next push — every one is complete.
+        """
+        self._ensure_connected()
         arg = ch.books(inst_id, channel=channel)
         key = ch.arg_key(arg)
-        self._books[key] = OkxBook(inst_id)
-        return await self._subscribe((arg,), self._fold_book)
+        by_key = {key: arg}
+
+        async def send(keys: list[tuple[str, str, str]]) -> None:
+            wanted = [by_key[k] for k in keys]
+            frame, req_id = subscribe_frame(wanted)
+            await self.request(frame, req_id, op=SUBSCRIBE)
+
+        await self._ledger.acquire([key], send)
+        # Replay and append in one step so ``_push`` cannot land first.
+        stream: EventStream[OkxBookSnapshot] = EventStream(on_close=self._drop)
+        book = self._books.setdefault(key, OkxBook(inst_id))
+        if not book.stale:
+            stream.push(book.snapshot())
+        self._subs.append(
+            _Sub(
+                args=(arg,),
+                stream=stream,
+                parse=self._fold_book,
+                index=frozenset((key,)),
+                folder=True,
+            )
+        )
+        return stream
 
     def _fold_book(
         self, resp: OkxResponse, row: dict[str, Any]
@@ -259,9 +296,15 @@ class OkxPublicStream(OkxSocket):
         return book.snapshot(ts=payload.ts or time.time())
 
     def _resync(self, arg: dict[str, Any]) -> None:
-        asyncio.create_task(self._resubscribe(arg), name=f"{self.name}-resync")
+        asyncio.create_task(self._force_resubscribe(arg), name=f"{self.name}-resync")
 
-    async def _resubscribe(self, arg: dict[str, Any]) -> None:
+    async def _force_resubscribe(self, arg: dict[str, Any]) -> None:
+        """End and restart one channel so the venue sends a fresh snapshot.
+
+        Not a ledger open or close: the identity stays held. ``acquire``
+        would no-op (already reserved); ``discard`` would free a
+        co-reader's key. Everyone on the topic is blind for this RTT.
+        """
         try:
             frame, req_id = subscribe_frame([arg], op=UNSUBSCRIBE)
             await self.request(frame, req_id, op=UNSUBSCRIBE)
@@ -276,11 +319,14 @@ class OkxPublicStream(OkxSocket):
         self, args: tuple[dict[str, Any], ...], parse: Parse
     ) -> EventStream[T]:
         self._ensure_connected()
-        wanted = [arg for arg in args if ch.arg_key(arg) not in self._subscribed]
-        if wanted:
+        by_key = {ch.arg_key(arg): arg for arg in args}
+
+        async def send(keys: list[tuple[str, str, str]]) -> None:
+            wanted = [by_key[key] for key in keys]
             frame, req_id = subscribe_frame(wanted)
             await self.request(frame, req_id, op=SUBSCRIBE)
-            self._subscribed.update(ch.arg_key(arg) for arg in wanted)
+
+        await self._ledger.acquire([ch.arg_key(arg) for arg in args], send)
         stream: EventStream[T] = EventStream(on_close=self._drop)
         self._subs.append(
             _Sub(
@@ -294,23 +340,42 @@ class OkxPublicStream(OkxSocket):
 
     def _drop(self, stream: EventStream[Any]) -> None:
         self._subs = [s for s in self._subs if s.stream is not stream]
+        live = {key for sub in self._subs if sub.folder for key in sub.index}
+        for key in list(self._books):
+            if key not in live:
+                self._books.pop(key)
+
+    def _wanted(self) -> list[dict[str, Any]]:
+        """Live subscribe args, each identity once, in first-seen order."""
+        seen: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for sub in self._subs:
+            for arg in sub.args:
+                seen.setdefault(ch.arg_key(arg), arg)
+        return list(seen.values())
 
     async def _restore(self) -> None:
-        args = [arg for sub in self._subs for arg in sub.args]
+        args = self._wanted()
+        self._ledger.clear()
         if not args:
             return
         for key, book in list(self._books.items()):
             self._books[key] = OkxBook(book.symbol)
-        self._subscribed.clear()
-        frame, req_id = subscribe_frame(args)
-        await self.request(frame, req_id, op=SUBSCRIBE)
-        self._subscribed.update(ch.arg_key(arg) for arg in args)
+        by_key = {ch.arg_key(arg): arg for arg in args}
+
+        async def send(keys: list[tuple[str, str, str]]) -> None:
+            wanted = [by_key[key] for key in keys]
+            frame, req_id = subscribe_frame(wanted)
+            await self.request(frame, req_id, op=SUBSCRIBE)
+
+        await self._ledger.acquire([ch.arg_key(arg) for arg in args], send)
         logger.info("%s resubscribed %s channels", self.name, len(args))
 
     def _push(self, resp: OkxResponse) -> None:
         key = ch.arg_key(resp.arg)
-        rows = resp.rows() if resp.channel != ch.BBO else (
-            resp.rows() or ([resp.data] if isinstance(resp.data, dict) else [])
+        rows = (
+            resp.rows()
+            if resp.channel != ch.BBO
+            else (resp.rows() or ([resp.data] if isinstance(resp.data, dict) else []))
         )
         # candle payloads are lists of lists, not dicts
         if resp.channel.startswith("candle"):
@@ -350,7 +415,7 @@ class OkxPublicStream(OkxSocket):
                     sub.stream.push(parsed)
 
     def _teardown(self) -> None:
-        self._subscribed.clear()
+        self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()

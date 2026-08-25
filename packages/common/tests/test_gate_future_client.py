@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from gate_future_stub import API_KEY, API_SECRET, UID, FakeGateFutures
 from mftik.exchange.gate.future import channels as ch
 from mftik.exchange.gate.future.client import GateFuturesWebSocket
@@ -45,6 +47,95 @@ async def test_private_subscribe_includes_uid(
     assert gate_futures.frames_for(ch.ORDERS)[0]["payload"] == [UID, "!all"]
     assert gate_futures.frames_for(ch.POSITIONS)[0]["payload"] == [UID, "!all"]
     assert gate_futures.frames_for(ch.BALANCES)[0]["payload"] == [UID]
+
+
+async def test_two_consumers_share_one_venue_subscription(
+    gate_futures: FakeGateFutures,
+) -> None:
+    async with await _client(gate_futures) as ws:
+        first, second = await asyncio.gather(
+            ws.subscribe_trades("BTC_USDT"),
+            ws.subscribe_trades("BTC_USDT"),
+        )
+        assert len(gate_futures.frames_for(ch.TRADES)) == 1
+        await gate_futures.push(
+            ch.TRADES,
+            [
+                {
+                    "id": 1,
+                    "contract": "BTC_USDT",
+                    "size": "-10",
+                    "price": "60000",
+                    "create_time": 1_700_000_000,
+                }
+            ],
+        )
+        for stream in (first, second):
+            row = await asyncio.wait_for(anext(stream), timeout=2.0)
+            assert row.contract == "BTC_USDT"
+
+
+async def test_reconnect_replays_each_order_book_payload(
+    gate_futures: FakeGateFutures,
+) -> None:
+    ws = GateFuturesWebSocket(  # type: ignore[attr-defined]
+        url=gate_futures.url, ping_interval=0, retry_backoff=0.05
+    )
+    async with ws:
+        await ws.subscribe_order_book("BTC_USDT")
+        await ws.subscribe_order_book("ETH_USDT")
+        gate_futures.drop_next = True
+        await ws.subscribe_trades("BTC_USDT")
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if ws.stats.reconnects:
+                break
+        assert ws.stats.reconnects == 1
+        payloads = [
+            tuple(frame.get("payload") or [])
+            for frame in gate_futures.frames_for(ch.ORDER_BOOK)
+        ]
+        assert payloads.count(("BTC_USDT", "20", "1000ms")) == 2
+        assert payloads.count(("ETH_USDT", "20", "1000ms")) == 2
+
+
+async def test_unsubscribe_scoped_without_uid_is_refused(
+    gate_futures: FakeGateFutures,
+) -> None:
+    async with await _client(
+        gate_futures, api_key=API_KEY, api_secret=API_SECRET
+    ) as ws:
+        await ws.subscribe_orders()
+        with pytest.raises(ValueError, match="uid"):
+            await ws.unsubscribe(ch.ORDERS)
+        with pytest.raises(ValueError, match="uid"):
+            await ws.unsubscribe(ch.POSITIONS, [])
+
+
+async def test_unsubscribe_one_contract_leaves_the_other(
+    gate_futures: FakeGateFutures,
+) -> None:
+    async with await _client(gate_futures) as ws:
+        btc = await ws.subscribe_trades("BTC_USDT")
+        eth = await ws.subscribe_trades("ETH_USDT")
+        await ws.unsubscribe(ch.TRADES, ["BTC_USDT"])
+        assert (ch.TRADES, ("ETH_USDT",)) in ws._ledger.held()
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(btc), timeout=2.0)
+        await gate_futures.push(
+            ch.TRADES,
+            [
+                {
+                    "id": 2,
+                    "contract": "ETH_USDT",
+                    "size": "1",
+                    "price": "3000",
+                    "create_time": 1_700_000_000,
+                }
+            ],
+        )
+        row = await asyncio.wait_for(anext(eth), timeout=2.0)
+        assert row.contract == "ETH_USDT"
 
 
 async def test_place_order_sends_a_negative_sell_size(

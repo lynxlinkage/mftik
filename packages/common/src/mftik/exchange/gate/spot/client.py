@@ -51,10 +51,38 @@ from mftik.exchange.gate.spot.protocol import (
 )
 from mftik.exchange.models import OrderType, Side
 from mftik.exchange.stream import EventStream
+from mftik.exchange.wire import WireLedger, assert_last_reader
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+#: Channels whose payload is a list of independently subscribeable pairs.
+_SPLIT = frozenset({ch.TICKERS, ch.TRADES, ch.BOOK_TICKER, ch.ORDERS, ch.USER_TRADES})
+
+WireKey = tuple[str, tuple[str, ...]]
+
+
+def _wire_keys(channel: str, payload: list[str] | None) -> list[WireKey]:
+    items = list(payload or ())
+    if channel in _SPLIT:
+        if not items:
+            return [(channel, ())]
+        return [(channel, (item,)) for item in items]
+    return [(channel, tuple(items))]
+
+
+def _payloads_of(channel: str, idents: list[tuple[str, ...]]) -> list[list[str]]:
+    """Venue payloads to send for these identities.
+
+    Split channels pack every pair into one frame. Structured channels
+    (order book, candlesticks) cannot: each ident *is* the payload, and
+    collapsing them onto ``idents[0]`` would restore only the first.
+    """
+    if channel in _SPLIT:
+        return [[ident[0] for ident in idents if ident]] if idents else []
+    return [list(ident) for ident in idents]
+
 
 GATE_SPOT_WS_URL = "wss://api.gateio.ws/ws/v4/"
 
@@ -149,6 +177,7 @@ class GateSpotWebSocket:
 
         self._conn: ClientConnection | None = None
         self._subs: list[_Sub] = []
+        self._ledger: WireLedger[WireKey] = WireLedger()
         self._pending: list[_Pending] = []
         self._tasks: list[asyncio.Task[Any]] = []
         self._connected = False
@@ -211,6 +240,7 @@ class GateSpotWebSocket:
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
+        self._ledger.clear()
         if self._conn is not None:
             with contextlib.suppress(Exception):
                 await self._conn.close()
@@ -274,9 +304,7 @@ class GateSpotWebSocket:
                 continue
             if resp.ack:
                 continue
-            if resp.is_api and (
-                resp.req_id == req_id or resp.channel == ch.LOGIN
-            ):
+            if resp.is_api and (resp.req_id == req_id or resp.channel == ch.LOGIN):
                 resp.raise_for_error()
                 self._logged_in = True
                 logger.info("gate.spot logged in")
@@ -356,11 +384,38 @@ class GateSpotWebSocket:
     async def unsubscribe(
         self, channel: str, payload: list[str] | None = None, *, private: bool = False
     ) -> None:
-        """Unsubscribe a channel and close every stream reading it."""
-        await self.request(channel, ch.UNSUBSCRIBE, payload, private=private)
-        for sub in [s for s in self._subs if s.channel == channel]:
-            # close() fires on_close → _drop_stream, which does the removal.
-            sub.stream.close()
+        """Unsubscribe payload items. Last-reader only.
+
+        A multi-item ``_Sub`` cannot be half-unsubscribed — routing is
+        per channel, so the stream would survive and silently miss a
+        contract. A co-reader raises too. Streams close even if the
+        venue frame fails; the ledger key is discarded only after the
+        venue acks, so a rejected ``UNSUBSCRIBE`` does not free a name
+        the socket is still carrying.
+        """
+        wanted = frozenset(_wire_keys(channel, payload))
+        assert_last_reader(
+            {
+                key: [
+                    frozenset(_wire_keys(sub.channel, sub.payload))
+                    for sub in self._subs
+                    if key in _wire_keys(sub.channel, sub.payload)
+                ]
+                for key in wanted
+            }
+        )
+        try:
+            await self.request(channel, ch.UNSUBSCRIBE, payload, private=private)
+        finally:
+            for sub in [
+                s
+                for s in self._subs
+                if s.channel == channel
+                and frozenset(_wire_keys(s.channel, s.payload)) <= wanted
+                and _wire_keys(s.channel, s.payload)
+            ]:
+                sub.stream.close()
+        self._ledger.discard(wanted)
 
     async def ping(self) -> None:
         """Send one application-level ping (Gate answers on ``spot.pong``)."""
@@ -374,7 +429,14 @@ class GateSpotWebSocket:
         *,
         private: bool = False,
     ) -> EventStream[T]:
-        await self.request(channel, ch.SUBSCRIBE, payload, private=private)
+        keys = _wire_keys(channel, payload)
+
+        async def send(missing: list[WireKey]) -> None:
+            idents = [ident for _ch, ident in missing]
+            for items in _payloads_of(channel, idents):
+                await self.request(channel, ch.SUBSCRIBE, items, private=private)
+
+        await self._ledger.acquire(keys, send)
         stream: EventStream[T] = EventStream(on_close=self._drop_stream)
         self._subs.append(
             _Sub(
@@ -393,7 +455,11 @@ class GateSpotWebSocket:
     # --- public channels ---------------------------------------------------
 
     async def subscribe_tickers(self, *pairs: str) -> EventStream[GateTicker]:
-        """``spot.tickers`` — 24h rolling stats."""
+        """``spot.tickers`` — 24h rolling stats.
+
+        A late joiner is silent until the next push that carries the field
+        it reads. Nothing is REST-filled for a joiner.
+        """
         return await self._subscribe(
             ch.TICKERS, ch.tickers(*pairs), GateTicker.model_validate
         )
@@ -580,9 +646,7 @@ class GateSpotWebSocket:
         result = await self.api_request(ch.ORDER_CANCEL, param)
         return GateOrderAck.model_validate(result)
 
-    async def cancel_orders(
-        self, orders: list[dict[str, Any]]
-    ) -> list[GateOrderAck]:
+    async def cancel_orders(self, orders: list[dict[str, Any]]) -> list[GateOrderAck]:
         """``spot.order_cancel_ids`` — batch cancel.
 
         Each entry is ``{"id": ..., "currency_pair": ...}``. Legs fail
@@ -628,9 +692,7 @@ class GateSpotWebSocket:
                 return
             retries += 1
             if 0 <= self.max_retries < retries:
-                logger.error(
-                    "gate.spot giving up after %s reconnect attempts", retries
-                )
+                logger.error("gate.spot giving up after %s reconnect attempts", retries)
                 self._fail_streams()
                 return
             delay = min(
@@ -725,20 +787,42 @@ class GateSpotWebSocket:
 
     async def _resubscribe(self) -> None:
         """Replay every live subscription onto a fresh socket."""
-        for sub in list(self._subs):
-            frame = request_frame(
-                sub.channel,
-                ch.SUBSCRIBE,
-                sub.payload,
-                api_key=self.api_key if sub.private else None,
-                api_secret=self.api_secret if sub.private else None,
-            )
-            await self.send(frame)
-        logger.info("gate.spot resubscribed %s channels", len(self._subs))
+        keys: list[WireKey] = []
+        owner: dict[str, _Sub] = {}
+        seen: set[WireKey] = set()
+        for sub in self._subs:
+            owner.setdefault(sub.channel, sub)
+            for key in _wire_keys(sub.channel, sub.payload):
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(key)
+        self._ledger.clear()
+        if not keys:
+            return
+
+        async def send(missing: list[WireKey]) -> None:
+            by_channel: dict[str, list[tuple[str, ...]]] = {}
+            for channel, ident in missing:
+                by_channel.setdefault(channel, []).append(ident)
+            for channel, idents in by_channel.items():
+                sub = owner[channel]
+                for payload in _payloads_of(channel, idents):
+                    frame = request_frame(
+                        channel,
+                        ch.SUBSCRIBE,
+                        payload,
+                        api_key=self.api_key if sub.private else None,
+                        api_secret=self.api_secret if sub.private else None,
+                    )
+                    await self.send(frame)
+
+        await self._ledger.acquire(keys, send)
+        logger.info("gate.spot resubscribed %s identities", len(keys))
 
     def _fail_streams(self) -> None:
         self._connected = False
         self._logged_in = False
+        self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()

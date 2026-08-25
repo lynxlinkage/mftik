@@ -29,6 +29,7 @@ from typing import Any, TypeVar
 from mftik.exchange.binance.protocol import BinanceResponse, subscribe_frame
 from mftik.exchange.binance.socket import BinanceSocket
 from mftik.exchange.stream import EventStream
+from mftik.exchange.wire import WireLedger, assert_last_reader, first_seen
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ class BinanceStreamSocket(BinanceSocket):
             keepalive=keepalive,
         )
         self._subs: list[_Sub] = []
+        self._ledger: WireLedger[str] = WireLedger()
 
     # --- raw plumbing ------------------------------------------------------
 
@@ -94,13 +96,26 @@ class BinanceStreamSocket(BinanceSocket):
         return await self.subscribe(names, lambda _name, row: row)
 
     async def unsubscribe(self, *names: str) -> None:
-        """Unsubscribe stream names and close every stream reading them."""
-        frame, req_id = subscribe_frame(UNSUBSCRIBE, list(names))
-        await self.request(frame, req_id, method=UNSUBSCRIBE)
+        """Unsubscribe stream names. Last-reader only.
+
+        A co-reader or a wider ``_Sub`` that is only partly covered
+        raises. Matching streams close even if the venue frame fails, so
+        a reconnect cannot resurrect a name the caller just dropped.
+        The ledger key is discarded only after the venue acks: a
+        rejected ``UNSUBSCRIBE`` means the socket is still carrying it,
+        and the next subscribe must not send again.
+        """
         wanted = frozenset(names)
-        for sub in [s for s in self._subs if s.index & wanted]:
-            # close() fires on_close → _drop, which does the removal.
-            sub.stream.close()
+        assert_last_reader(
+            {name: [s.index for s in self._subs if name in s.index] for name in wanted}
+        )
+        try:
+            frame, req_id = subscribe_frame(UNSUBSCRIBE, list(names))
+            await self.request(frame, req_id, method=UNSUBSCRIBE)
+        finally:
+            for sub in [s for s in self._subs if s.index <= wanted and s.index]:
+                sub.stream.close()
+        self._ledger.discard(names)
 
     async def list_subscriptions(self) -> list[str]:
         """What this socket is currently subscribed to, per Binance."""
@@ -118,8 +133,12 @@ class BinanceStreamSocket(BinanceSocket):
         The one entry point every typed ``subscribe_*`` is built on, here and
         in the classes that own several of these sockets at once.
         """
-        frame, req_id = subscribe_frame(SUBSCRIBE, list(names))
-        await self.request(frame, req_id, method=SUBSCRIBE)
+
+        async def send(missing: list[str]) -> None:
+            frame, req_id = subscribe_frame(SUBSCRIBE, list(missing))
+            await self.request(frame, req_id, method=SUBSCRIBE)
+
+        await self._ledger.acquire(list(names), send)
         stream: EventStream[T] = EventStream(on_close=self._drop)
         self._subs.append(
             _Sub(
@@ -144,11 +163,16 @@ class BinanceStreamSocket(BinanceSocket):
         silently dead. The ack is awaited — :meth:`.socket.BinanceSocket.request`
         reads it inline here, because the read loop has not resumed yet.
         """
-        names = [name for sub in self._subs for name in sub.names]
+        names = first_seen(name for sub in self._subs for name in sub.names)
+        self._ledger.clear()
         if not names:
             return
-        frame, req_id = subscribe_frame(SUBSCRIBE, names)
-        await self.request(frame, req_id, method=SUBSCRIBE)
+
+        async def send(missing: list[str]) -> None:
+            frame, req_id = subscribe_frame(SUBSCRIBE, list(missing))
+            await self.request(frame, req_id, method=SUBSCRIBE)
+
+        await self._ledger.acquire(names, send)
         logger.info("%s resubscribed %s streams", self.name, len(names))
 
     def _push(self, resp: BinanceResponse) -> None:
@@ -167,6 +191,7 @@ class BinanceStreamSocket(BinanceSocket):
                 )
 
     def _teardown(self) -> None:
+        self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()

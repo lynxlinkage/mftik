@@ -179,14 +179,29 @@ class BinanceFutureStream:
         return await self._subscribe(names, lambda _name, row: row)
 
     async def unsubscribe(self, *names: str) -> None:
-        """Unsubscribe stream names, each on the socket that carries it."""
+        """Unsubscribe stream names, each on the socket that carries it.
+
+        A group that was never opened is a legal no-op — no ``_Sub`` can
+        hold those names. A socket that exists is always asked, even if
+        it is mid-reconnect: the local half of ``unsubscribe`` still
+        closes the stream so restore cannot resurrect it. One group's
+        send failure does not skip the rest — each socket is asked, then
+        the first error is re-raised.
+        """
         by_group: dict[str, list[str]] = {}
         for name in names:
             by_group.setdefault(st.group_of(name), []).append(name)
+        failed: list[Exception] = []
         for group, group_names in by_group.items():
             socket = self._sockets.get(group)
-            if socket is not None and socket.connected:
+            if socket is None:
+                continue
+            try:
                 await socket.unsubscribe(*group_names)
+            except Exception as exc:
+                failed.append(exc)
+        if failed:
+            raise failed[0]
 
     async def _subscribe(
         self, names: tuple[str, ...], parse: StreamParse
@@ -243,7 +258,12 @@ class BinanceFutureStream:
     async def subscribe_book_tickers(
         self, *symbols: str
     ) -> EventStream[BinanceFutureBookTicker]:
-        """``<symbol>@bookTicker`` — best bid/ask on every change."""
+        """``<symbol>@bookTicker`` — best bid/ask on every change.
+
+        Every push is a complete quote, so a late joiner waits for the
+        next print. ``ticker`` and ``bestquote`` share this identity; that
+        is enough, there is nothing to replay.
+        """
         return await self._subscribe(
             tuple(st.book_ticker(s) for s in symbols),
             lambda _name, row: BinanceFutureBookTicker.model_validate(row),

@@ -50,6 +50,7 @@ from mftik.exchange.bybit.protocol import (
 )
 from mftik.exchange.bybit.socket import DEFAULT_PING_INTERVAL, BybitSocket
 from mftik.exchange.stream import EventStream
+from mftik.exchange.wire import WireLedger, first_seen
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +123,9 @@ class BybitPrivateStream(BybitSocket):
         self.product = product
         self.auth_window_ms = auth_window_ms
         self._subs: list[_Sub] = []
-        #: Topics this socket has a live subscription for. Cleared on a drop,
-        #: because a fresh connection is subscribed to nothing.
-        self._subscribed: set[str] = set()
+        #: Wire identities this socket has reserved or acked. Cleared on a
+        #: drop, because a fresh connection is subscribed to nothing.
+        self._ledger: WireLedger[str] = WireLedger()
         self._authenticated = False
 
     # --- lifecycle ---------------------------------------------------------
@@ -136,7 +137,7 @@ class BybitPrivateStream(BybitSocket):
 
     async def _on_open(self) -> None:
         self._authenticated = False
-        self._subscribed.clear()
+        self._ledger.clear()
         kwargs: dict[str, Any] = {}
         if self.auth_window_ms is not None:
             kwargs["window_ms"] = self.auth_window_ms
@@ -164,7 +165,7 @@ class BybitPrivateStream(BybitSocket):
 
     def _teardown(self) -> None:
         self._authenticated = False
-        self._subscribed.clear()
+        self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
@@ -215,9 +216,9 @@ class BybitPrivateStream(BybitSocket):
         wire_topic = ch.scoped(topic, self.product)
         # Only if this socket is not already carrying it: Bybit refuses a
         # duplicate subscribe, and a second consumer of orders should get a
-        # second stream rather than an error.
-        if wire_topic not in self._subscribed:
-            await self._send_subscribe([wire_topic])
+        # second stream rather than an error. Reservation happens inside
+        # the ledger so two concurrent callers send one frame.
+        await self._send_subscribe([wire_topic])
         stream: EventStream[T] = EventStream(on_close=self._drop)
         self._subs.append(
             _Sub(topic=topic, wire_topic=wire_topic, stream=stream, parse=parse)
@@ -225,16 +226,15 @@ class BybitPrivateStream(BybitSocket):
         return stream
 
     async def _send_subscribe(self, topics: list[str]) -> None:
-        frame, req_id = subscribe_frame(topics)
-        await self.request(frame, req_id, op=SUBSCRIBE)
-        self._subscribed.update(topics)
+        async def send(missing: list[str]) -> None:
+            frame, req_id = subscribe_frame(list(missing))
+            await self.request(frame, req_id, op=SUBSCRIBE)
+
+        await self._ledger.acquire(topics, send)
 
     def _wanted(self) -> list[str]:
         """Wire topics with at least one live consumer, in subscribe order."""
-        seen: dict[str, None] = {}
-        for sub in self._subs:
-            seen.setdefault(sub.wire_topic, None)
-        return list(seen)
+        return first_seen(sub.wire_topic for sub in self._subs)
 
     def _drop(self, stream: EventStream[Any]) -> None:
         """Forget a closed consumer's stream.

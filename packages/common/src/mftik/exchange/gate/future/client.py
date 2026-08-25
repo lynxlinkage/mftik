@@ -46,10 +46,49 @@ from mftik.exchange.gate.future.protocol import (
     session_api_frame,
 )
 from mftik.exchange.stream import EventStream
+from mftik.exchange.wire import WireLedger, assert_last_reader
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+#: Channels whose payload is a list of independently subscribeable contracts.
+_SPLIT = frozenset({ch.TICKERS, ch.TRADES, ch.BOOK_TICKER, ch.PUBLIC_LIQUIDATES})
+#: Private channels keyed ``(channel, (uid, contract))``.
+_SCOPED = frozenset({ch.ORDERS, ch.USER_TRADES, ch.POSITIONS})
+
+WireKey = tuple[str, tuple[str, ...]]
+
+
+def _wire_keys(channel: str, payload: list[str] | None) -> list[WireKey]:
+    items = list(payload or ())
+    if channel in _SPLIT:
+        if not items:
+            return [(channel, ())]
+        return [(channel, (item,)) for item in items]
+    if channel in _SCOPED:
+        if not items:
+            raise ValueError(f"{channel} needs a uid")
+        uid, *rest = items
+        return [(channel, (uid, contract)) for contract in (rest or (ch.ALL,))]
+    return [(channel, tuple(items))]
+
+
+def _payloads_of(channel: str, idents: list[tuple[str, ...]]) -> list[list[str]]:
+    """Venue payloads to send for these identities.
+
+    Split and scoped channels pack into one frame. Structured channels
+    (order book, candlesticks) cannot: each ident *is* the payload, and
+    collapsing them onto ``idents[0]`` would restore only the first.
+    """
+    if channel in _SPLIT:
+        return [[ident[0] for ident in idents if ident]] if idents else []
+    if channel in _SCOPED:
+        if not idents:
+            return []
+        uid = idents[0][0]
+        return [[uid, *[ident[1] for ident in idents]]]
+    return [list(ident) for ident in idents]
 
 
 @dataclass
@@ -120,6 +159,7 @@ class GateFuturesWebSocket:
 
         self._conn: ClientConnection | None = None
         self._subs: list[_Sub] = []
+        self._ledger: WireLedger[WireKey] = WireLedger()
         self._pending: list[_Pending] = []
         self._tasks: list[asyncio.Task[Any]] = []
         self._connected = False
@@ -154,9 +194,7 @@ class GateFuturesWebSocket:
             ]
             if self.ping_interval > 0:
                 self._tasks.append(
-                    asyncio.create_task(
-                        self._ping_loop(), name="gate-futures-ping"
-                    )
+                    asyncio.create_task(self._ping_loop(), name="gate-futures-ping")
                 )
             self._connected = True
         except Exception:
@@ -180,6 +218,7 @@ class GateFuturesWebSocket:
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
+        self._ledger.clear()
         if self._conn is not None:
             with contextlib.suppress(Exception):
                 await self._conn.close()
@@ -214,9 +253,7 @@ class GateFuturesWebSocket:
 
     async def _authenticate_socket(self) -> None:
         if self._conn is None or not self.api_key or not self.api_secret:
-            raise ExchangeError(
-                "futures.login requires a live socket and credentials"
-            )
+            raise ExchangeError("futures.login requires a live socket and credentials")
         frame, req_id = login_frame(
             api_key=self.api_key,
             api_secret=self.api_secret,
@@ -249,9 +286,7 @@ class GateFuturesWebSocket:
                 continue
             if resp.ack:
                 continue
-            if resp.is_api and (
-                resp.req_id == req_id or resp.channel == ch.LOGIN
-            ):
+            if resp.is_api and (resp.req_id == req_id or resp.channel == ch.LOGIN):
                 resp.raise_for_error()
                 uid = ""
                 if isinstance(resp.result, dict):
@@ -330,9 +365,34 @@ class GateFuturesWebSocket:
     async def unsubscribe(
         self, channel: str, payload: list[str] | None = None, *, private: bool = False
     ) -> None:
-        await self.request(channel, ch.UNSUBSCRIBE, payload, private=private)
-        for sub in [s for s in self._subs if s.channel == channel]:
-            sub.stream.close()
+        """Unsubscribe payload items. Last-reader only.
+
+        Streams close even if the venue frame fails; the ledger key is
+        discarded only after the venue acks.
+        """
+        wanted = frozenset(_wire_keys(channel, payload))
+        assert_last_reader(
+            {
+                key: [
+                    frozenset(_wire_keys(sub.channel, sub.payload))
+                    for sub in self._subs
+                    if key in _wire_keys(sub.channel, sub.payload)
+                ]
+                for key in wanted
+            }
+        )
+        try:
+            await self.request(channel, ch.UNSUBSCRIBE, payload, private=private)
+        finally:
+            for sub in [
+                s
+                for s in self._subs
+                if s.channel == channel
+                and frozenset(_wire_keys(s.channel, s.payload)) <= wanted
+                and _wire_keys(s.channel, s.payload)
+            ]:
+                sub.stream.close()
+        self._ledger.discard(wanted)
 
     async def ping(self) -> None:
         await self.send(ping_frame(ch.PING))
@@ -345,7 +405,14 @@ class GateFuturesWebSocket:
         *,
         private: bool = False,
     ) -> EventStream[T]:
-        await self.request(channel, ch.SUBSCRIBE, payload, private=private)
+        keys = _wire_keys(channel, payload)
+
+        async def send(missing: list[WireKey]) -> None:
+            idents = [ident for _ch, ident in missing]
+            for items in _payloads_of(channel, idents):
+                await self.request(channel, ch.SUBSCRIBE, items, private=private)
+
+        await self._ledger.acquire(keys, send)
         stream: EventStream[T] = EventStream(on_close=self._drop_stream)
         self._subs.append(
             _Sub(
@@ -364,6 +431,12 @@ class GateFuturesWebSocket:
     async def subscribe_tickers(
         self, *contracts: str
     ) -> EventStream[GateFuturesTicker]:
+        """``futures.tickers`` — mark, last, and funding on one channel.
+
+        A late joiner is silent until the next push that carries the field
+        it reads. The quote and the funding rate share this topic; neither
+        is REST-filled for a joiner.
+        """
         return await self._subscribe(
             ch.TICKERS, ch.tickers(*contracts), GateFuturesTicker.model_validate
         )
@@ -409,9 +482,7 @@ class GateFuturesWebSocket:
             GateFuturesLiquidation.model_validate,
         )
 
-    async def subscribe_orders(
-        self, *contracts: str
-    ) -> EventStream[GateFuturesOrder]:
+    async def subscribe_orders(self, *contracts: str) -> EventStream[GateFuturesOrder]:
         return await self._subscribe(
             ch.ORDERS,
             ch.orders(self._require_uid(), *contracts),
@@ -663,20 +734,42 @@ class GateFuturesWebSocket:
         logger.debug("gate.futures unmatched reply %s/%s", resp.channel, resp.event)
 
     async def _resubscribe(self) -> None:
-        for sub in list(self._subs):
-            frame = request_frame(
-                sub.channel,
-                ch.SUBSCRIBE,
-                sub.payload,
-                api_key=self.api_key if sub.private else None,
-                api_secret=self.api_secret if sub.private else None,
-            )
-            await self.send(frame)
-        logger.info("gate.futures resubscribed %s channels", len(self._subs))
+        keys: list[WireKey] = []
+        owner: dict[str, _Sub] = {}
+        seen: set[WireKey] = set()
+        for sub in self._subs:
+            owner.setdefault(sub.channel, sub)
+            for key in _wire_keys(sub.channel, sub.payload):
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(key)
+        self._ledger.clear()
+        if not keys:
+            return
+
+        async def send(missing: list[WireKey]) -> None:
+            by_channel: dict[str, list[tuple[str, ...]]] = {}
+            for channel, ident in missing:
+                by_channel.setdefault(channel, []).append(ident)
+            for channel, idents in by_channel.items():
+                sub = owner[channel]
+                for payload in _payloads_of(channel, idents):
+                    frame = request_frame(
+                        channel,
+                        ch.SUBSCRIBE,
+                        payload,
+                        api_key=self.api_key if sub.private else None,
+                        api_secret=self.api_secret if sub.private else None,
+                    )
+                    await self.send(frame)
+
+        await self._ledger.acquire(keys, send)
+        logger.info("gate.futures resubscribed %s identities", len(keys))
 
     def _fail_streams(self) -> None:
         self._connected = False
         self._logged_in = False
+        self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()

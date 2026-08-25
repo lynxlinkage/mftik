@@ -152,6 +152,43 @@ async def test_two_consumers_share_one_venue_subscription(
         assert (await asyncio.wait_for(second.__anext__(), 2)).order_id == "ord-1"
 
 
+async def test_concurrent_consumers_share_one_venue_subscription(
+    bybit: FakeBybit,
+) -> None:
+    """Reservation is the concurrent half of sharing: both callers race."""
+    async with _stream(bybit) as stream:
+        first, second = await asyncio.gather(
+            stream.subscribe_orders(),
+            stream.subscribe_orders(),
+        )
+        assert len(bybit.frames_for("subscribe")) == 1
+        await bybit.push("order", [ORDER_ROW])
+        assert (await asyncio.wait_for(first.__anext__(), 2)).order_id == "ord-1"
+        assert (await asyncio.wait_for(second.__anext__(), 2)).order_id == "ord-1"
+
+
+async def test_reconnect_resubscribes_a_shared_topic_once(
+    bybit: FakeBybit,
+) -> None:
+    async with _stream(bybit, retry_backoff=0.01) as stream:
+        first = await stream.subscribe_orders()
+        second = await stream.subscribe_orders()
+        await bybit.push("order", [ORDER_ROW])
+        await asyncio.wait_for(first.__anext__(), 2)
+        await asyncio.wait_for(second.__anext__(), 2)
+        await bybit.drop()
+
+        for _ in range(200):
+            if bybit.auths >= 2 and len(bybit.frames_for("subscribe")) >= 2:
+                break
+            await asyncio.sleep(0.01)
+
+        assert len(bybit.frames_for("subscribe")) == 2
+        await bybit.push("order", [{**ORDER_ROW, "orderId": "ord-9"}])
+        assert (await asyncio.wait_for(first.__anext__(), 2)).order_id == "ord-9"
+        assert (await asyncio.wait_for(second.__anext__(), 2)).order_id == "ord-9"
+
+
 # --- pushes ----------------------------------------------------------------
 
 
