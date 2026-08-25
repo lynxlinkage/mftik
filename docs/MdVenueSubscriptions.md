@@ -579,7 +579,9 @@ an identity another `_Sub` still holds. I1 and I2 at the socket boundary.
   ledger key from `(channel, tuple(payload))` to one key per payload item.
 - Unsubscribe side: `binance/feed.py.unsubscribe`,
   `bybit/feed.py.unsubscribe`, `binance/future/feed.py.unsubscribe`,
-  `gate/spot/client.py.unsubscribe`, `gate/future/client.py.unsubscribe`.
+  `gate/spot/client.py.unsubscribe`, `gate/future/client.py.unsubscribe` —
+  the last-reader rule, and making each one's local half survive a send
+  that fails.
 - Tests that already call these: `test_binance_spot_client.py`,
   `test_binance_future_feed.py` (`test_unsubscribing_goes_to_the_socket_that_carries_it`),
   `test_gate_spot_client.py`.
@@ -622,15 +624,34 @@ discard only those keys.
 Two edge cases the current code answers by accident, and this ticket has to
 answer on purpose.
 
-**A Binance futures group that is not open.** `unsubscribe` forwards only
-when `socket is not None and socket.connected`, so anything else is skipped
-in silence. Split it: `socket is None` means the group was never opened, so
-no `_Sub` can hold those names and the no-op is genuinely correct — say so
-in the docstring rather than leaving it as a fallthrough. `socket is not
-None and not socket.connected` is **not** a no-op: the frame cannot be sent,
-but the `_Sub` must still be closed locally, because a surviving `_Sub` is
-what `_restore` replays from. Skipping both means the caller unsubscribed, saw
-success, and the name comes back on the next reconnect.
+**An unsubscribe that cannot reach the venue.** `BinanceFutureStream.unsubscribe`
+forwards only when `socket is not None and socket.connected`, which reads
+like a disconnect guard and is not one. `_connected` goes False in exactly
+three places — `__init__`, `close()`, and `_fail()` — and the reconnect loop
+touches none of them; `_open()` only rebinds `_conn`. So during a reconnect
+gap `connected` is still True, and the one path that clears it, `_fail()`,
+calls `_teardown()` on the next line, which has already closed every `_Sub`.
+Both branches are therefore correct no-ops, but for a reason worth writing
+in the docstring: `socket is None` means the group was never opened, and
+`not connected` means the socket already gave up and took its streams with
+it. Neither can strand a `_Sub`.
+
+The strandable case is the one the guard lets through. In the reconnect gap
+`connected` is True and `_conn` still points at the dead connection
+(`_conn = None` only in `close()`), so `_ensure_connected()` passes;
+`_pumping` is False for that whole window, so `request()` takes the
+`handshake()` path and writes straight to a socket that is gone. It raises,
+and `BinanceStreamSocket.unsubscribe` raises with it — *before*
+`self._ledger.discard(names)` and before `sub.stream.close()`. The caller
+sees a failure, the `_Sub` is still in `_subs`, and `_restore` replays the
+name after the reconnect. The subscription comes back from the dead.
+
+So this is an ordering problem, not a branching one. Make the local half of
+`unsubscribe` unconditional — close the matching `_Sub`s and discard the
+ledger keys in a `finally` — and let the wire error propagate. "I no longer
+read this" is a local fact that cannot fail; only delivery can. Being wrong
+in the discard direction costs one redundant `SUBSCRIBE` later, which is
+safe; being wrong in the other direction resurrects a feed nobody asked for.
 
 **A Gate `_Sub` that spans several items.** Routing stays at channel
 granularity (`_push` matches `s.channel == resp.channel`), so a `_Sub` built
@@ -662,9 +683,10 @@ legal and unchanged.
   `unsubscribe` raises; the `/market` socket is untouched either way.
 - Binance futures, group never opened: `unsubscribe("btcusdt@aggTrade")`
   with no `/market` socket returns quietly and sends nothing.
-- Binance futures, socket down: subscribe, drop the connection, call
-  `unsubscribe` before it reconnects — the stream closes, and the restore
-  after reconnect does **not** replay that name.
+- Binance, unsubscribe inside the reconnect gap: subscribe, drop the
+  connection, call `unsubscribe` before it reconnects. The call raises, the
+  stream is closed anyway, the ledger key is free, and the restore after
+  reconnect does **not** replay that name.
 - Gate spot, partial unsubscribe of a multi-item `_Sub`:
   `subscribe_tickers("BTC_USDT", "ETH_USDT")` then
   `unsubscribe(TICKERS, ["BTC_USDT"])` raises, and naming both closes it.
@@ -697,8 +719,11 @@ real `BinanceFuturePublicClient`, two `FakeBinanceStream`s for `/public` and
 `/market`, and a `StubSymbols` — a different harness than this file uses,
 for an assertion that belongs one layer down anyway. **The wire-frame count
 is MDS-1b's Binance futures case.** What MD can and should assert is which
-`stream_*` the connector was asked for and which pumps stay fed, so extend
-`FakePublic` to record its calls and assert on that.
+`stream_*` the connector was asked for, which sources were closed, and which
+pumps stay fed. Extend `FakePublic` to record both — the calls, and a
+`finally` in `_once()` that records the closure — and assert on that. Every
+scenario below is phrased against those recordings; if one of them needs a
+frame count, it is in the wrong ticket.
 
 **Problem.** Every ticket above is socket-local. None of them says anything
 about MD. The claim that matters is the one in *The problem* section:
@@ -724,14 +749,17 @@ false.
   Assert two pumps exist, each asked the connector for its own `stream_*`,
   and both product feeds publish. That the two land on one wire identity is
   MDS-1b's assertion, not this one.
-- **S2 — Detach one key.** Drop `bestquote`. Its pump stops, the product
-  refcount is zero, `@bookTicker` stays subscribed, and `ticker.` keeps
-  publishing on the next push.
+- **S2 — Detach one key.** Drop `bestquote`. Its pump stops, its source is
+  closed, and the product refcount is zero — while the `ticker` source is
+  *not* closed and `ticker.` publishes on the next push. Whether the venue
+  identity is still subscribed is MDS-1b's question; MD's obligation is to
+  not close the survivor.
 - **S3 — Detach the other.** From S1, drop `ticker` instead. `bestquote`
   keeps publishing.
 - **S4 — Same key, two sessions.** Two STS links on `ticker.` share one
-  pump and one identity; dropping one leaves the other fed. This already
-  works; the test states that the new ledger did not change it.
+  pump — the connector is asked for `stream_ticker` once — and dropping one
+  link leaves the pump running and the other link fed. This already works;
+  the test states that the new ledger did not change it.
 - **S5 — Many-to-one on one venue topic.** Two product topics that resolve
   to one venue stream: two product feeds, and dropping one leaves the other
   publishing. Again the pair-to-one-identity mapping is checked at the
