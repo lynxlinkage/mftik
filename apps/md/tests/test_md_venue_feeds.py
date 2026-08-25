@@ -50,6 +50,9 @@ class FakePublic:
 
     def __init__(self) -> None:
         self.kline_calls: list[tuple[str, str]] = []
+        self.opened: list[str] = []
+        self.closed: list[str] = []
+        self._more: dict[str, asyncio.Queue[object]] = {}
         self.connected = False
 
     async def connect(self) -> None:
@@ -58,37 +61,51 @@ class FakePublic:
     async def close(self) -> None:
         self.connected = False
 
-    async def _once(self, item) -> AsyncIterator:  # noqa: ANN001
-        yield item
-        await asyncio.Event().wait()
+    def push(self, name: str, item: object) -> None:
+        self._more[name].put_nowait(item)
+
+    async def _once(self, name: str, item) -> AsyncIterator:  # noqa: ANN001
+        self.opened.append(name)
+        more: asyncio.Queue[object] = asyncio.Queue()
+        self._more[name] = more
+        try:
+            yield item
+            while True:
+                yield await more.get()
+        finally:
+            self.closed.append(name)
+            self._more.pop(name, None)
 
     def stream_ticker(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         return self._once(
+            "ticker",
             Ticker(
                 universal_ticker=str(ticker),
                 bid=Decimal("100"),
                 ask=Decimal("101"),
                 last=Decimal("100.5"),
-            )
+            ),
         )
 
     def stream_trades(self, ticker: UniversalTicker) -> AsyncIterator[Trade]:
         return self._once(
+            "trades",
             Trade(
                 universal_ticker=str(ticker),
                 price=Decimal("100"),
                 qty=Decimal("1"),
                 side="buy",
-            )
+            ),
         )
 
     def stream_order_book(self, ticker: UniversalTicker) -> AsyncIterator[OrderBook]:
         return self._once(
+            "order_book",
             OrderBook(
                 universal_ticker=str(ticker),
                 bids=[BookLevel(price=Decimal("100"), qty=Decimal("1"))],
                 asks=[BookLevel(price=Decimal("101"), qty=Decimal("1"))],
-            )
+            ),
         )
 
     def stream_kline(
@@ -96,6 +113,7 @@ class FakePublic:
     ) -> AsyncIterator[Kline]:
         self.kline_calls.append((ticker.symbol, interval))
         return self._once(
+            "kline",
             Kline(
                 universal_ticker=str(ticker),
                 interval=interval,
@@ -104,11 +122,12 @@ class FakePublic:
                 high=Decimal("101"),
                 low=Decimal("99"),
                 close=Decimal("100.5"),
-            )
+            ),
         )
 
     def stream_agg_trades(self, ticker: UniversalTicker) -> AsyncIterator[AggTrade]:
         return self._once(
+            "agg_trades",
             AggTrade(
                 universal_ticker=str(ticker),
                 price=Decimal("100"),
@@ -116,30 +135,30 @@ class FakePublic:
                 side="buy",
                 first_trade_id="10",
                 last_trade_id="13",
-            )
+            ),
         )
 
     def stream_best_quote(self, ticker: UniversalTicker) -> AsyncIterator[BestQuote]:
         return self._once(
+            "best_quote",
             BestQuote(
                 universal_ticker=str(ticker),
                 bid=Decimal("100"),
                 bid_qty=Decimal("1"),
                 ask=Decimal("101"),
                 ask_qty=Decimal("2"),
-            )
+            ),
         )
 
-    def stream_liquidation(
-        self, ticker: UniversalTicker
-    ) -> AsyncIterator[Liquidation]:
+    def stream_liquidation(self, ticker: UniversalTicker) -> AsyncIterator[Liquidation]:
         return self._once(
+            "liquidation",
             Liquidation(
                 universal_ticker=str(ticker),
                 price=Decimal("99"),
                 qty=Decimal("5"),
                 side="sell",
-            )
+            ),
         )
 
 
@@ -156,9 +175,7 @@ class FakePublic:
         ("kline_1m", MD_KLINE),
     ],
 )
-async def test_feed_topic_publishes_its_message_type(
-    topic: str, msg_type: str
-) -> None:
+async def test_feed_topic_publishes_its_message_type(topic: str, msg_type: str) -> None:
     seen: list[tuple[str, UniversalTicker, UntypedEnvelope]] = []
 
     async def _on_update(topic_, ticker, env) -> None:  # noqa: ANN001
@@ -249,6 +266,25 @@ async def test_a_venue_without_liquidations_refuses_that_topic() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_ticker_and_bestquote_each_open_their_own_stream() -> None:
+    """S1 — two product pumps, two connector calls. The wire identity is MDS-1b."""
+    public = FakePublic()
+    seen: list[str] = []
+
+    async def _on_update(topic, ticker, env) -> None:  # noqa: ANN001
+        seen.append(topic)
+
+    sess = VenueSession(FAKE.venue, public, on_update=_on_update)
+    await sess.start()
+    await sess.ensure_feed("ticker", FAKE)
+    await sess.ensure_feed("bestquote", FAKE)
+    await _wait_until(lambda: set(seen) == {"ticker", "bestquote"})
+    assert public.opened == ["ticker", "best_quote"]
+    assert sess.feed_count == 2
+    await sess.stop()
+
+
 async def test_a_ticker_from_another_venue_is_refused() -> None:
     """A session owns one venue's connector; a stray ticker is a routing bug."""
     sess = VenueSession(FAKE.venue, FakePublic(), on_update=_noop_update)
