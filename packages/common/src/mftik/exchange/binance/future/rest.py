@@ -24,12 +24,12 @@ import logging
 from decimal import Decimal
 from typing import Any
 
+from mftik.exchange.binance.future.listing import PERPETUAL, TRADING, to_listed
 from mftik.exchange.binance.future.models import (
     BinanceFutureDepth,
     BinanceFutureMyTrade,
     BinanceFutureOrderAck,
     BinanceFutureSymbolConfig,
-    instrument_from_row,
     kline_from_row,
 )
 from mftik.exchange.binance.future.protocol import BINANCE_FUTURE_REST_URL
@@ -39,8 +39,9 @@ from mftik.exchange.binance.rest import (
     BinanceRestTransport,
     BinanceSignedRest,
 )
-from mftik.exchange.models import Instrument, Kline, OrderBook, Ticker
+from mftik.exchange.models import Kline, OrderBook, Ticker
 from mftik.exchange.tickers import UniversalTicker
+from mftik.symbols.listed import ListedInstrument
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +54,6 @@ MAX_KLINES = 1500
 #: Most history rows ``userTrades`` / ``allOrders`` return in one call.
 MAX_HISTORY = 1000
 
-#: The only ``status`` that means a contract can be traded right now.
-TRADING = "TRADING"
-
-#: The only ``contractType`` this venue trades here. ``exchangeInfo`` also
-#: lists dated futures (``BTCUSDT_250926``), which are different instruments
-#: that canonicalize onto the perpetual's symbol — see
-#: :mod:`mftik_sym.sources.binance_future` for what that would collide with.
-PERPETUAL = "PERPETUAL"
-
 
 class BinanceFutureRestError(BinanceRestError):
     """A non-2xx answer from Binance's futures REST API."""
@@ -73,26 +65,15 @@ class BinanceFuturePublicRest(BinanceRestTransport):
     default_base_url = BINANCE_FUTURE_REST_URL
     error_type = BinanceFutureRestError
 
-    async def fetch_instruments(self) -> list[Instrument]:
-        """``GET /fapi/v1/exchangeInfo`` — every perpetual, in Binance's spelling.
-
-        Left native on purpose: this is what the symbol plane ingests to
-        *build* the canonical mapping, so it cannot depend on that mapping
-        existing.
-
-        Dated futures are dropped. They are listed on the same endpoint and
-        their base and quote are the perpetual's, so ``BTCUSDT_250926`` and
-        ``BTCUSDT`` canonicalize to one symbol — keeping both would mean one
-        overwriting the other and orders for the perp routing to a contract
-        that expires.
-        """
+    async def fetch_instruments(self) -> list[ListedInstrument]:
+        """``GET /fapi/v1/exchangeInfo`` — every live perpetual."""
         payload = await self._get(f"{API_PREFIX}/exchangeInfo")
-        return [
-            instrument_from_row(row)
-            for row in (payload or {}).get("symbols") or []
-            if row.get("status") == TRADING
-            and str(row.get("contractType") or "") == PERPETUAL
-        ]
+        out: list[ListedInstrument] = []
+        for row in (payload or {}).get("symbols") or []:
+            listed = to_listed(row)
+            if listed is not None and listed.is_active:
+                out.append(listed)
+        return out
 
     async def fetch_klines(
         self,

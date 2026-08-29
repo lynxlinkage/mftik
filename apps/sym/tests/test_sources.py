@@ -630,8 +630,9 @@ GATE_FUTURE_ROWS = [
         "type": "direct",
         "quanto_multiplier": "0.0001",
         "order_price_round": "0.1",
-        "order_size_min": "1",
-        "order_size_max": "1000000",
+        # Gate publishes these as JSON numbers, not strings.
+        "order_size_min": 1,
+        "order_size_max": 1000000,
         "settle": "usdt",
         "in_delisting": False,
         "expire_time": 0,

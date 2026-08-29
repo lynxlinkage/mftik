@@ -9,14 +9,13 @@ engine, and it keeps paper on the same code path as everything else.
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
 
 from mftik.broker import Broker
 from mftik.exchange import venues
-from mftik.exchange.models import Instrument as VenueInstrument
+from mftik.exchange.paper.models import PaperListed
 from mftik.exchange.paper.remote_public import PaperRemotePublicClient
 from mftik.exchange.tickers import Category
-from mftik_db.models.symbol import FilterName
+from mftik.symbols.listed import MIN_NOTIONAL, MIN_QTY, PRICE_TICK, QTY_STEP
 
 from mftik_sym.sources.base import Instrument
 
@@ -47,17 +46,11 @@ class PaperInstrumentSource:
             self._owns_public = True
 
         rows = await public.fetch_instruments()
-        out = [self._to_instrument(row) for row in rows]
+        out = [self._to_listed(row) for row in rows]
         logger.info("%s instruments fetched=%s", VENUE, len(out))
         return out
 
-    def _to_instrument(self, row: VenueInstrument) -> Instrument:
-        filters: dict[str, Decimal | None] = {
-            FilterName.PRICE_TICK.value: row.tick_size,
-            FilterName.QTY_STEP.value: row.lot_size,
-            FilterName.MIN_QTY.value: row.min_qty,
-            FilterName.MIN_NOTIONAL.value: row.min_notional,
-        }
+    def _to_listed(self, row: PaperListed) -> Instrument:
         return Instrument(
             venue=self.venue,
             base=row.base,
@@ -65,7 +58,12 @@ class PaperInstrumentSource:
             # Paper already spells pairs the canonical way.
             exch_ticker=row.symbol,
             category=self.category,
-            filters=filters,
+            filters={
+                PRICE_TICK: row.tick_size,
+                QTY_STEP: row.lot_size,
+                MIN_QTY: row.min_qty,
+                MIN_NOTIONAL: row.min_notional,
+            },
         )
 
     async def close(self) -> None:

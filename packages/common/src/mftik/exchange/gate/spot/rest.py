@@ -28,6 +28,7 @@ from typing import Any
 import httpx
 
 from mftik.exchange.gate.protocol import GateRestError, sign_rest
+from mftik.exchange.gate.spot.listing import to_listed
 from mftik.exchange.gate.spot.models import (
     GateOrderAck,
     GateTicker,
@@ -36,13 +37,13 @@ from mftik.exchange.gate.spot.models import (
 from mftik.exchange.models import (
     Balance,
     BookLevel,
-    Instrument,
     Kline,
     Order,
     OrderBook,
     Ticker,
 )
 from mftik.exchange.tickers import UniversalTicker
+from mftik.symbols.listed import ListedInstrument
 
 logger = logging.getLogger(__name__)
 
@@ -274,18 +275,19 @@ class GateSpotPublicRest(_GateRestTransport):
     a trading account.
     """
 
-    async def fetch_instruments(self) -> list[Instrument]:
-        """``GET /spot/currency_pairs`` — tradeable pairs and their filters."""
+    async def fetch_instruments(self) -> list[ListedInstrument]:
+        """``GET /spot/currency_pairs`` — pairs the plane treats as active.
+
+        Gate's ``tradable`` / ``buyable`` / ``sellable`` all mean the pair
+        can be traded on at least one side; ``untradable`` is dropped here.
+        """
         rows = await self._get("/spot/currency_pairs")
-        return [
-            _to_instrument(row)
-            for row in rows or []
-            # The endpoint also lists delisted and pre-launch pairs; the shared
-            # contract is "tradeable", and Instrument has nowhere to say
-            # otherwise, so a non-tradable pair is dropped rather than returned
-            # looking live.
-            if row.get("trade_status") == "tradable"
-        ]
+        out: list[ListedInstrument] = []
+        for row in rows or []:
+            listed = to_listed(row)
+            if listed is not None and listed.is_active:
+                out.append(listed)
+        return out
 
     async def fetch_ticker(
         self, currency_pair: str, *, ticker: UniversalTicker
@@ -386,33 +388,6 @@ def _book_levels(rows: list[Any] | None) -> list[BookLevel]:
         for row in rows or []
         if len(row) >= 2
     ]
-
-
-def _to_instrument(row: dict[str, Any]) -> Instrument:
-    """Gate publishes precision as decimal places; Instrument wants a step."""
-    return Instrument(
-        symbol=str(row.get("id", "")),
-        base=str(row.get("base", "")),
-        quote=str(row.get("quote", "")),
-        tick_size=_step(row.get("precision")),
-        lot_size=_step(row.get("amount_precision")),
-        min_qty=_opt_dec(row.get("min_base_amount")),
-        min_notional=_opt_dec(row.get("min_quote_amount")),
-    )
-
-
-def _step(precision: Any) -> Decimal:
-    """``6`` → ``0.000001``. Gate omits it on a few pairs; assume whole units."""
-    if precision is None or precision == "":
-        return Decimal("1")
-    return Decimal(1).scaleb(-int(precision))
-
-
-def _opt_dec(value: Any) -> Decimal | None:
-    """``None`` where Gate publishes no bound, so the filter reads as absent."""
-    if value is None or value == "":
-        return None
-    return Decimal(str(value))
 
 
 def _dec(value: Any) -> Decimal:

@@ -1,30 +1,21 @@
 """Gate spot instrument source — ``GET /api/v4/spot/currency_pairs``.
 
-Public endpoint, no signing. Gate reports granularity as decimal-place counts
-(``precision`` for price, ``amount_precision`` for quantity), which are
-converted to step sizes here.
+Public endpoint, no signing. Gate reports granularity as decimal-place counts;
+the adapter converts those to step sizes.
 """
 
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
-from typing import Any
 
 import httpx
-from mftik.exchange import venues
+from mftik.exchange.gate.spot.listing import TRADABLE, VENUE, to_listed
 from mftik.exchange.gate.spot.rest import API_PREFIX, GATE_SPOT_REST_URL
 from mftik.exchange.tickers import Category
-from mftik_db.models.symbol import FilterName
 
-from mftik_sym.sources.base import Instrument, tick_from_precision
+from mftik_sym.sources.base import Instrument
 
 logger = logging.getLogger(__name__)
-
-VENUE = venues.GATE.name
-
-#: Gate's trade_status values that mean the pair can actually be traded.
-TRADABLE = frozenset({"tradable", "buyable", "sellable"})
 
 
 class GateSpotInstrumentSource:
@@ -65,53 +56,11 @@ class GateSpotInstrumentSource:
         rows = response.json()
         out: list[Instrument] = []
         for row in rows or []:
-            instrument = self._to_instrument(row)
+            instrument = to_listed(row, venue=self.venue, category=self.category)
             if instrument is not None:
                 out.append(instrument)
         logger.info("%s instruments fetched=%s", VENUE, len(out))
         return out
-
-    def _to_instrument(self, row: dict[str, Any]) -> Instrument | None:
-        base = str(row.get("base") or "").upper()
-        quote = str(row.get("quote") or "").upper()
-        exch_ticker = str(row.get("id") or "")
-        if not base or not quote or not exch_ticker:
-            logger.warning("%s skipping malformed pair: %r", VENUE, row)
-            return None
-
-        filters: dict[str, Decimal | None] = {
-            FilterName.PRICE_TICK.value: tick_from_precision(
-                row.get("precision")
-            ),
-            FilterName.QTY_STEP.value: tick_from_precision(
-                row.get("amount_precision")
-            ),
-            # Gate publishes these with null meaning "no limit"; keep the key
-            # so a caller can tell "unbounded" from "not published".
-            FilterName.MIN_QTY.value: _dec(row.get("min_base_amount")),
-            FilterName.MAX_QTY.value: _dec(row.get("max_base_amount")),
-            FilterName.MIN_NOTIONAL.value: _dec(row.get("min_quote_amount")),
-            FilterName.MAX_NOTIONAL.value: _dec(row.get("max_quote_amount")),
-        }
-
-        return Instrument(
-            venue=self.venue,
-            base=base,
-            quote=quote,
-            exch_ticker=exch_ticker,
-            category=self.category,
-            is_active=str(row.get("trade_status", "")) in TRADABLE,
-            filters=filters,
-        )
-
-
-def _dec(value: Any) -> Decimal | None:
-    if value is None or value == "":
-        return None
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return None
 
 
 __all__ = ["TRADABLE", "VENUE", "GateSpotInstrumentSource"]

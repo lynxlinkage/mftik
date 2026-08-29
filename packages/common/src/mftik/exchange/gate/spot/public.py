@@ -37,7 +37,6 @@ from mftik.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.models import (
     BestQuote,
-    Instrument,
     Kline,
     OrderBook,
     Ticker,
@@ -142,12 +141,8 @@ class GateSpotPublicClient(BaseClient):
 
     # --- snapshots (REST) --------------------------------------------------
 
-    async def fetch_instruments(self) -> list[Instrument]:
-        """Tradeable pairs, in Gate's own ``BTC_USDT`` spelling.
-
-        Left native on purpose: this is what the symbol plane ingests to *build*
-        the canonical mapping, so it cannot depend on that mapping existing.
-        """
+    async def fetch_instruments(self):
+        """Tradeable pairs, mapped for the plane."""
         self._ensure_connected()
         return await self.rest.fetch_instruments()
 

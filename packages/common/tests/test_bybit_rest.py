@@ -203,7 +203,7 @@ async def test_instruments_follow_the_cursor_to_the_end(api: FakeApi) -> None:
                     "lotSizeFilter": {"basePrecision": "0.000001"},
                     "priceFilter": {"tickSize": "0.01"},
                 },
-                # Pre-launch, and Instrument has nowhere to say "not yet".
+                # Pre-launch: listed as inactive and dropped from this snapshot.
                 {
                     "symbol": "SOONUSDT",
                     "baseCoin": "SOON",
@@ -234,6 +234,27 @@ async def test_instruments_follow_the_cursor_to_the_end(api: FakeApi) -> None:
     assert "cursor=page-2" in api.requests_for("/v5/market/instruments-info")[
         1
     ].url.query.decode()
+
+
+async def test_instruments_stamp_option_as_option_not_perp(api: FakeApi) -> None:
+    api.pages["/v5/market/instruments-info"] = [
+        {
+            "list": [
+                {
+                    "symbol": "BTC-26SEP25-70000-C",
+                    "baseCoin": "BTC",
+                    "quoteCoin": "USDC",
+                    "status": "Trading",
+                    "lotSizeFilter": {},
+                    "priceFilter": {},
+                }
+            ],
+            "nextPageCursor": "",
+        }
+    ]
+    instruments = await _public(api).fetch_instruments("option")
+    assert [i.exch_ticker for i in instruments] == ["BTC-26SEP25-70000-C"]
+    assert instruments[0].category.value == "Option"
 
 
 async def test_a_ticker_with_no_rows_is_an_error_not_an_empty_answer(

@@ -26,8 +26,9 @@ from typing import Any
 import httpx
 
 from mftik.exchange.errors import ExchangeError
-from mftik.exchange.models import Balance, Instrument, Kline, OrderBook, Ticker
+from mftik.exchange.models import Balance, Kline, OrderBook, Ticker
 from mftik.exchange.okx import channels as ch
+from mftik.exchange.okx.listing import LINEAR, LIVE, to_listed
 from mftik.exchange.okx.models import (
     OkxAccount,
     OkxFill,
@@ -36,7 +37,7 @@ from mftik.exchange.okx.models import (
     OkxOrderUpdate,
     OkxPosition,
     OkxTicker,
-    instrument_from_row,
+    category_of,
     kline_from_row,
     order_book_from_result,
 )
@@ -51,12 +52,11 @@ from mftik.exchange.okx.protocol import (
     query_string,
     rest_headers,
 )
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
+from mftik.symbols.listed import ListedInstrument
 
 MAX_KLINES = 300
 MAX_HISTORY = 100
-LIVE = "live"
-LINEAR = "linear"
 
 
 class _OkxRestTransport:
@@ -148,25 +148,18 @@ class OkxPublicRest(_OkxRestTransport):
 
     async def fetch_instruments(
         self, product: str = SPOT, *, inst_id: str | None = None
-    ) -> list[Instrument]:
-        """``instruments`` — tradeable symbols, left in OKX's own spelling.
-
-        This is what the symbol plane ingests to *build* the canonical
-        mapping, so it cannot depend on that mapping existing. SWAP rows that
-        are not live linear perpetuals are dropped: dated futures and inverse
-        contracts would otherwise collide on the canonical symbol.
-        """
+    ) -> list[ListedInstrument]:
+        """``instruments`` — tradeable symbols, mapped for the plane."""
         params: dict[str, Any] = {"instType": product}
         if inst_id:
             params["instId"] = inst_id
         rows = await self._get(ch.MARKET_INSTRUMENTS, params)
-        instruments: list[Instrument] = []
+        category = category_of(product, Category.SPOT)
+        instruments: list[ListedInstrument] = []
         for row in rows or []:
-            if str(row.get("state") or "") != LIVE:
-                continue
-            if product == SWAP and str(row.get("ctType") or "") != LINEAR:
-                continue
-            instruments.append(instrument_from_row(row))
+            listed = to_listed(row, category=category)
+            if listed is not None and listed.is_active:
+                instruments.append(listed)
         return instruments
 
     async def fetch_ticker_row(self, inst_id: str) -> OkxTicker:

@@ -646,10 +646,11 @@ async def test_exchange_info_drops_symbols_that_cannot_be_traded(
 
     assert [i.symbol for i in instruments] == ["BTCUSDT"]
     btc = instruments[0]
-    assert btc.tick_size == Decimal("0.01")
-    assert btc.lot_size == Decimal("0.00001")
-    assert btc.min_qty == Decimal("0.00001")
-    assert btc.min_notional == Decimal("5")
+    assert btc.exch_ticker == "BTCUSDT"
+    assert btc.filters["price_tick"] == Decimal("0.01")
+    assert btc.filters["qty_step"] == Decimal("0.00001")
+    assert btc.filters["min_qty"] == Decimal("0.00001")
+    assert btc.filters["min_notional"] == Decimal("5")
 
 
 async def test_a_zero_filter_reads_as_absent_not_as_a_zero_step(
@@ -673,5 +674,5 @@ async def test_a_zero_filter_reads_as_absent_not_as_a_zero_step(
     async with _api(binance_api) as api:
         instrument = (await api.fetch_instruments())[0]
 
-    assert instrument.tick_size > 0
-    assert instrument.min_notional is None
+    assert instrument.filters["price_tick"] is None
+    assert instrument.filters["min_notional"] is None

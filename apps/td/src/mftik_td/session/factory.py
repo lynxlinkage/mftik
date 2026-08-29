@@ -198,7 +198,7 @@ class VenueSessionFactory:
             #
             # ``category`` says which book *orders* go to, and defaults to
             # spot because ``OrderSubmit`` still carries a bare symbol — see
-            # ``Session._instrument``. It does not narrow what the session
+            # ``Session._symbol_info``. It does not narrow what the session
             # reports: the account stream is unscoped, so perp fills and perp
             # positions reach recon and the OMS either way, which is what
             # makes them true of the account rather than of one book.

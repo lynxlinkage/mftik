@@ -266,30 +266,6 @@ class InstrumentScoped(BaseModel):
         return self.ticker.category
 
 
-class Instrument(BaseModel):
-    """A tradeable instrument and the restrictions on trading it.
-
-    ``tick_size`` / ``lot_size`` are the price and quantity steps; ``min_qty``
-    and ``min_notional`` are floors an order has to clear. ``None`` means the
-    venue publishes no such floor.
-
-    The one model here that is *not* an :class:`InstrumentScoped`, and the only
-    one whose ``symbol`` is the venue's own spelling. It has to be: a venue's
-    instrument listing is what the symbol plane ingests to *build* the
-    canonical mapping, so it cannot be stated in terms of one.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    symbol: str
-    base: str
-    quote: str
-    tick_size: Decimal = Decimal("0.01")
-    lot_size: Decimal = Decimal("0.0001")
-    min_qty: Decimal | None = None
-    min_notional: Decimal | None = None
-
-
 class Ticker(InstrumentScoped):
     bid: Decimal
     ask: Decimal

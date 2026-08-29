@@ -45,7 +45,6 @@ from mftik.exchange.bybit.rest import BybitPublicRest
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.models import (
     BestQuote,
-    Instrument,
     Kline,
     Liquidation,
     OrderBook,
@@ -174,12 +173,10 @@ class BybitPublicClient(BaseClient):
 
     # --- snapshots (REST) --------------------------------------------------
 
-    async def fetch_instruments(self, product: str | None = None) -> list[Instrument]:
-        """Tradeable symbols, in Bybit's own spelling.
+    async def fetch_instruments(self, product: str | None = None):
+        """Tradeable symbols, mapped for the plane.
 
-        Left native on purpose: this is what the symbol plane ingests to
-        *build* the canonical mapping, so it cannot depend on that mapping
-        existing. ``product`` defaults to spot because a caller that wants the
+        ``product`` defaults to spot because a caller that wants the
         contract books says so — they are different instrument universes, not
         pages of one.
         """

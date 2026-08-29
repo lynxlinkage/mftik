@@ -19,7 +19,6 @@ from mftik.exchange.models import (
     Balance,
     BookLevel,
     Fill,
-    Instrument,
     Order,
     OrderBook,
     OrderStatus,
@@ -31,6 +30,7 @@ from mftik.exchange.models import (
     Trade,
 )
 from mftik.exchange.order_check import require_legal
+from mftik.exchange.paper.models import PaperListed
 from mftik.exchange.stream import EventStream
 from mftik.exchange.symbols import check_venue
 from mftik.exchange.tickers import Category, UniversalTicker
@@ -110,11 +110,11 @@ def paper_ticker(symbol: str) -> UniversalTicker:
     return UniversalTicker.of(PAPER_VENUE, PAPER_CATEGORY, symbol)
 
 
-def _instrument(symbol: str, base: str, quote: str) -> Instrument:
+def _instrument(symbol: str, base: str, quote: str) -> PaperListed:
     tick, lot, min_qty, min_notional = _DEFAULT_FILTERS.get(
         symbol, _FALLBACK_FILTERS
     )
-    return Instrument(
+    return PaperListed(
         symbol=symbol,
         base=base,
         quote=quote,
@@ -168,7 +168,7 @@ class PaperExchange:
         self._on_fill = on_fill
         self._on_balance = on_balance
 
-        self._instruments: dict[str, Instrument] = {}
+        self._instruments: dict[str, PaperListed] = {}
         self._mid: dict[str, Decimal] = {}
         # symbol → (bid_px, bid_qty, ask_px, ask_qty)
         self._books: dict[str, tuple[Decimal, Decimal, Decimal, Decimal]] = {}
@@ -343,7 +343,7 @@ class PaperExchange:
 
     # --- market data (req-reply) -------------------------------------------
 
-    def list_instruments(self) -> list[Instrument]:
+    def list_instruments(self) -> list[PaperListed]:
         return list(self._instruments.values())
 
     def get_ticker(self, symbol: str) -> Ticker:
@@ -682,7 +682,7 @@ class PaperExchange:
 
     # --- internals ---------------------------------------------------------
 
-    def _require_instrument(self, symbol: str) -> Instrument:
+    def _require_instrument(self, symbol: str) -> PaperListed:
         inst = self._instruments.get(symbol)
         if inst is None:
             raise InstrumentNotFoundError(symbol)
@@ -951,7 +951,7 @@ class PaperExchange:
     def _reserve_and_settle(
         self,
         account: str,
-        inst: Instrument,
+        inst: PaperListed,
         side: Side,
         qty: Decimal,
         price: Decimal,
@@ -1006,7 +1006,7 @@ class PaperExchange:
     def _unlock(
         self,
         account: str,
-        inst: Instrument,
+        inst: PaperListed,
         side: Side,
         qty: Decimal,
         price: Decimal,

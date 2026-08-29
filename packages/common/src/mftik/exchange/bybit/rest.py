@@ -40,6 +40,7 @@ from typing import Any
 import httpx
 
 from mftik.exchange.bybit import channels as ch
+from mftik.exchange.bybit.listing import to_listed
 from mftik.exchange.bybit.models import (
     EXEC_TYPE_TRADE,
     BybitExecution,
@@ -48,7 +49,7 @@ from mftik.exchange.bybit.models import (
     BybitPosition,
     BybitTicker,
     BybitWallet,
-    instrument_from_row,
+    category_of,
     kline_from_row,
     order_book_from_result,
 )
@@ -65,12 +66,12 @@ from mftik.exchange.bybit.protocol import (
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.models import (
     Balance,
-    Instrument,
     Kline,
     OrderBook,
     Ticker,
 )
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
+from mftik.symbols.listed import ListedInstrument
 
 logger = logging.getLogger(__name__)
 
@@ -182,18 +183,20 @@ class BybitPublicRest(_BybitRestTransport):
 
     async def fetch_instruments(
         self, product: str = SPOT, *, symbol: str | None = None
-    ) -> list[Instrument]:
-        """``instruments-info`` — tradeable symbols and their filters.
-
-        Left in Bybit's own spelling: this is what the symbol plane ingests to
-        *build* the canonical mapping, so it cannot depend on that mapping
-        existing.
+    ) -> list[ListedInstrument]:
+        """``instruments-info`` — tradeable symbols, mapped for the plane.
 
         Paginated, and followed to the end. Bybit returns a cursor rather than
         a total, and a caller that read only the first page would silently see
         a fraction of the venue — which for spot is several hundred symbols.
+
+        ``product`` is Bybit's book name. ``linear`` / ``inverse`` both stamp
+        :attr:`~mftik.exchange.tickers.Category.PERP` (dated linear futures
+        are still dropped so they cannot collide with the perpetual).
+        ``option`` stamps :attr:`~mftik.exchange.tickers.Category.OPTION`.
         """
-        instruments: list[Instrument] = []
+        category = category_of(product, Category.SPOT)
+        instruments: list[ListedInstrument] = []
         cursor: str | None = None
         while True:
             params: dict[str, Any] = {
@@ -206,12 +209,9 @@ class BybitPublicRest(_BybitRestTransport):
                 params["cursor"] = cursor
             result = await self._get(ch.MARKET_INSTRUMENTS, params)
             for row in result.get("list") or []:
-                # The endpoint also lists pre-launch and delisted symbols;
-                # Instrument has nowhere to say "not yet", so one that cannot
-                # be traded is dropped rather than returned looking live.
-                if str(row.get("status", "")) != "Trading":
-                    continue
-                instruments.append(instrument_from_row(row))
+                listed = to_listed(row, category=category)
+                if listed is not None and listed.is_active:
+                    instruments.append(listed)
             cursor = str(result.get("nextPageCursor") or "")
             if not cursor:
                 return instruments
