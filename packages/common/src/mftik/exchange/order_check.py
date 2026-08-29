@@ -21,7 +21,7 @@ REDUCE_ONLY = "reduce_only"
 #: This venue cannot express that size unit on this order.
 VENUE = "venue"
 
-#: What a spot/perp market order may be sized in, when we know the venue.
+#: What an order may be sized in, when we know the venue.
 _EITHER = "either"
 _QTY = "qty"
 _QUOTE = "quote"
@@ -30,11 +30,6 @@ _BOTH_QTY = {Side.BUY: _QTY, Side.SELL: _QTY}
 _BOTH_EITHER = {Side.BUY: _EITHER, Side.SELL: _EITHER}
 
 #: ``(venue, category)`` → what a market order there may be sized in, per side.
-#: Every book in :mod:`~mftik.exchange.venues` needs a row. A missing one reads
-#: as "no opinion", which :func:`_venue_reason` treats as permission — so
-#: without the check below, adding a venue to the registry would silently sign
-#: this module up to approve a size unit nobody had confirmed its adapter can
-#: send, which is the one thing this module exists to prevent.
 _MARKET_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     ("Paper", Category.SPOT): _BOTH_EITHER,
     ("Gate", Category.SPOT): {Side.BUY: _QUOTE, Side.SELL: _QTY},
@@ -49,19 +44,50 @@ _MARKET_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     ("Okx", Category.PERP): _BOTH_QTY,
 }
 
+#: The same question for a limit order. Uniformly base today, which is why it
+#: reads as one rule rather than a table — but it is a table because it is a
+#: venue capability and not a property of the order type: an inverse
+#: (coin-margined) book sizes *every* order in the quote asset, limits
+#: included, so the book has to be able to say so. Stated per book rather than
+#: assumed, so adding such a book is a row here and not an exception in
+#: :func:`_shape_reason`.
+_LIMIT_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
+    ("Paper", Category.SPOT): _BOTH_QTY,
+    ("Gate", Category.SPOT): _BOTH_QTY,
+    ("GateFutures", Category.PERP): _BOTH_QTY,
+    ("Binance", Category.SPOT): _BOTH_QTY,
+    ("BinanceFuture", Category.PERP): _BOTH_QTY,
+    ("Bybit", Category.SPOT): _BOTH_QTY,
+    ("Bybit", Category.PERP): _BOTH_QTY,
+    ("Okx", Category.SPOT): _BOTH_QTY,
+    ("Okx", Category.PERP): _BOTH_QTY,
+}
+
+#: Every book in :mod:`~mftik.exchange.venues` needs a row in *both* tables. A
+#: missing one reads as "no opinion", which :func:`_venue_reason` treats as
+#: permission — so without the check below, adding a venue to the registry
+#: would silently sign this module up to approve a size unit nobody had
+#: confirmed its adapter can send, which is the one thing this module exists to
+#: prevent.
+_SIZE_TABLES: dict[OrderType, dict[tuple[str, Category], dict[Side, str]]] = {
+    OrderType.MARKET: _MARKET_SIZE,
+    OrderType.LIMIT: _LIMIT_SIZE,
+}
+
 
 def check_rules() -> None:
-    """Assert every registered book says how its market orders are sized."""
+    """Assert every registered book says how each order type is sized."""
     missing = [
-        f"{name}/{category.value}"
+        f"{name}/{category.value}/{order_type.value}"
+        for order_type, table in _SIZE_TABLES.items()
         for name, venue in venues.VENUES.items()
         for category in sorted(venue.categories)
-        if (name, category) not in _MARKET_SIZE
+        if (name, category) not in table
     ]
     if missing:
         raise ValueError(
-            "no market-order size rule for " + ", ".join(sorted(missing))
-            + "; add one to order_check._MARKET_SIZE"
+            "no order size rule for " + ", ".join(sorted(missing))
+            + "; add one to order_check._SIZE_TABLES"
         )
 
 
@@ -114,22 +140,21 @@ def sized_amount(request: PlaceOrderRequest) -> Decimal:
 
 
 def _shape_reason(request: PlaceOrderRequest) -> str | None:
+    """What is wrong with the request on its own terms, whatever the venue.
+
+    Which *unit* a size may be in is deliberately not here: that is a venue
+    capability, which is what :data:`VENUE` and :func:`_venue_reason` are for.
+    Shape only asks whether the request says one coherent thing — one size, and
+    a price where a price is the difference between a limit and a market order.
+    """
     if request.qty is not None and request.qty <= 0:
         return f"qty must be positive, got {request.qty}"
     if request.quote_qty is not None and request.quote_qty <= 0:
         return f"quote_qty must be positive, got {request.quote_qty}"
-    if request.type is OrderType.LIMIT:
-        if request.qty is None:
-            return "limit order requires qty"
-        if request.price is None:
-            return "limit order requires a price"
-        if request.quote_qty is not None:
-            return "quote_qty is a market-order size; use qty on a limit"
-        return None
-    has_qty = request.qty is not None
-    has_quote = request.quote_qty is not None
-    if has_qty == has_quote:
-        return "market order requires exactly one of qty or quote_qty"
+    if request.type is OrderType.LIMIT and request.price is None:
+        return "limit order requires a price"
+    if (request.qty is None) == (request.quote_qty is None):
+        return f"{request.type} order requires exactly one of qty or quote_qty"
     return None
 
 
@@ -150,38 +175,39 @@ def _reduce_only_reason(request: PlaceOrderRequest) -> str | None:
 
 
 def _venue_reason(request: PlaceOrderRequest) -> str | None:
-    if request.type is not OrderType.MARKET:
-        return None
     try:
         ticker = request.ticker
     except InvalidTickerError:
         return None
-    rule = _market_size_rule(ticker.venue, ticker.category, request.side)
+    rule = _size_rule(
+        ticker.venue, ticker.category, request.type, request.side
+    )
     if rule is None:
         return None
     if rule is _EITHER:
         return None
     if rule is _QUOTE and request.quote_qty is None:
         return (
-            f"{ticker.venue} market {request.side} sizes in quote currency; "
-            "set quote_qty, not qty"
+            f"{ticker.venue} {request.type} {request.side} sizes in quote "
+            "currency; set quote_qty, not qty"
         )
     if rule is _QTY and request.quote_qty is not None:
         return (
-            f"{ticker.venue} market orders size in base; "
+            f"{ticker.venue} {request.type} orders size in base; "
             "quote_qty is not expressible"
         )
     return None
 
 
-def _market_size_rule(
-    venue: str, category: Category, side: Side
+def _size_rule(
+    venue: str, category: Category, order_type: OrderType, side: Side
 ) -> str | None:
-    """How this book sizes a market order, or ``None`` if we have no opinion.
+    """How this book sizes that order, or ``None`` if we have no opinion.
 
     ``None`` only for a venue the registry does not have — nothing can route
     such a ticker anyway, so there is no table to invent. Every *registered*
-    book has a row, which :func:`check_rules` enforces at import.
+    book has a row for every order type, which :func:`check_rules` enforces at
+    import.
     """
-    by_side = _MARKET_SIZE.get((venues.normalize(venue), category))
+    by_side = _SIZE_TABLES[order_type].get((venues.normalize(venue), category))
     return None if by_side is None else by_side[side]

@@ -13,7 +13,7 @@ from mftik.exchange.models import (
     market_order,
 )
 from mftik.exchange.order_check import (
-    _MARKET_SIZE,
+    _SIZE_TABLES,
     REDUCE_ONLY,
     SHAPE,
     VENUE,
@@ -56,8 +56,9 @@ def test_market_requires_exactly_one_size() -> None:
         )
 
 
-def test_limit_rejects_quote_qty() -> None:
-    with pytest.raises(ValueError, match="market-order size"):
+def test_limit_requires_exactly_one_size() -> None:
+    """Two sizes is a shape problem on a limit exactly as on a market."""
+    with pytest.raises(ValueError, match="exactly one"):
         PlaceOrderRequest(
             universal_ticker=GATE_SPOT,
             side=Side.BUY,
@@ -66,6 +67,33 @@ def test_limit_rejects_quote_qty() -> None:
             quote_qty=Decimal("100"),
             price=Decimal("1"),
         )
+    with pytest.raises(ValueError, match="exactly one"):
+        PlaceOrderRequest(
+            universal_ticker=GATE_SPOT,
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            price=Decimal("1"),
+        )
+
+
+def test_a_quote_sized_limit_is_refused_by_the_venue_not_by_its_shape() -> None:
+    """No wired book can express it, but that is the table's answer to give.
+
+    A quote-sized limit is a coherent request — the size unit a book accepts is
+    a capability, so refusing it as :data:`SHAPE` would state as a universal
+    truth something only true of the venues wired today.
+    """
+    request = PlaceOrderRequest(
+        universal_ticker=GATE_SPOT,
+        side=Side.BUY,
+        type=OrderType.LIMIT,
+        quote_qty=Decimal("100"),
+        price=Decimal("1"),
+    )
+    kind, reason = classify(request) or (None, None)
+    assert kind == VENUE
+    assert reason is not None and "quote_qty is not expressible" in reason
+    assert "limit" in reason
 
 
 def test_gate_market_buy_requires_quote_qty() -> None:
@@ -162,15 +190,20 @@ def test_unknown_venue_skips_capability_rules() -> None:
     assert found is None or found[0] == SHAPE
 
 
-def test_every_registered_book_says_how_its_market_orders_are_sized() -> None:
+def test_every_registered_book_says_how_each_order_type_is_sized() -> None:
     """A missing row reads as permission, so it must not be possible to omit.
 
     Without this, adding a venue to the registry silently signs this module
-    up to approve a size unit nobody confirmed its adapter can send.
+    up to approve a size unit nobody confirmed its adapter can send. Both
+    tables are checked: a book that stated only its market rule would be
+    approving whatever unit reached its limit path.
     """
-    for name, venue in venues.VENUES.items():
-        for category in venue.categories:
-            assert (name, category) in _MARKET_SIZE, f"{name}/{category.value}"
+    for order_type, table in _SIZE_TABLES.items():
+        for name, venue in venues.VENUES.items():
+            for category in venue.categories:
+                assert (name, category) in table, (
+                    f"{name}/{category.value}/{order_type.value}"
+                )
 
 
 def test_a_registry_entry_with_no_size_rule_is_an_error() -> None:

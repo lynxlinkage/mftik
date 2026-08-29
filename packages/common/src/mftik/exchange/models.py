@@ -525,10 +525,12 @@ class PlaceOrderRequest(InstrumentScoped):
     Spot has no position to reduce, so a spot order carrying it is refused
     rather than sent (see TD's submit path).
 
-    ``qty`` is always base; ``quote_qty`` is always an amount of quote. A
-    market order takes exactly one. A limit order takes ``qty`` (and a
-    price). Whether a given venue can express that pairing is
-    :meth:`refusal_reason`, not a guess at a conversion price.
+    ``qty`` is always base; ``quote_qty`` is always an amount of quote. Every
+    order takes exactly one of the two, and a limit order also takes a price.
+    Which of them a given book can express is :meth:`refusal_reason` — a venue
+    capability rather than a property of the order type, because a book that
+    quotes its size in the quote asset does so on limits as much as on markets
+    — and never a guess at a conversion price.
     """
 
     side: Side
@@ -557,20 +559,12 @@ class PlaceOrderRequest(InstrumentScoped):
             raise ValueError(f"qty must be positive, got {self.qty}")
         if self.quote_qty is not None and self.quote_qty <= 0:
             raise ValueError(f"quote_qty must be positive, got {self.quote_qty}")
-        if self.type is OrderType.LIMIT:
-            if self.qty is None:
-                raise ValueError("limit order requires qty")
-            if self.price is None:
-                raise ValueError("limit order requires a price")
-            if self.quote_qty is not None:
-                raise ValueError(
-                    "quote_qty is a market-order size; use qty on a limit"
-                )
-        elif self.type is OrderType.MARKET:
-            if (self.qty is None) == (self.quote_qty is None):
-                raise ValueError(
-                    "market order requires exactly one of qty or quote_qty"
-                )
+        if self.type is OrderType.LIMIT and self.price is None:
+            raise ValueError("limit order requires a price")
+        if (self.qty is None) == (self.quote_qty is None):
+            raise ValueError(
+                f"{self.type} order requires exactly one of qty or quote_qty"
+            )
         return self
 
     def refusal_reason(self) -> str | None:
