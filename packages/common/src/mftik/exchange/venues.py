@@ -160,10 +160,10 @@ BINANCE_FUTURE = Venue(
 BINANCE_DELIVERY = Venue(
     name="BinanceDelivery",
     label="Binance COIN-M Futures",
-    # dapi, Binance's historical "delivery" plane: coin-margined perps and
-    # dated contracts on their own hosts, wallet and API key. The live book
-    # is mostly perpetuals (``BTCUSD_PERP``); the package name is the API's.
-    categories=frozenset({Category.PERP}),
+    # dapi: coin-margined book on its own hosts, wallet and API key. Inverse
+    # is the product, not a category of the USD-M perp venue — the ticker is
+    # ``BinanceDelivery_Inverse_BTCUSD``, never ``…_Perp_BTCUSD``.
+    categories=frozenset({Category.INVERSE}),
     api_types=frozenset({ED25519}),
     requires_passphrase=False,
 )

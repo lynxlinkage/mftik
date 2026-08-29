@@ -10,10 +10,10 @@ the frames go*.
 no WebSocket API method on dapi either. The host is ``dapi.binance.com``,
 prefix ``/dapi/v1``.
 
-**Sockets are documented here for the next slice, not used yet.** Unlike
-USD-M's 2026 ``fstream`` split, coin-margined market data still answers on
-one combined stream (``dstream.binance.com/stream``). The WebSocket API is
-``ws-dapi.binance.com``.
+**Sockets are the live market path.** Unlike USD-M's 2026 ``fstream``
+split, coin-margined market data still answers on one combined stream
+(``dstream.binance.com/stream``). The WebSocket API is
+``ws-dapi.binance.com`` and is unused until the private client lands.
 """
 
 from __future__ import annotations

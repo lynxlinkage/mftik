@@ -4,12 +4,12 @@ Public endpoint, no signing. HTTP for the same reason the USD-M source uses
 it: the plane refreshes a whole venue's listing on a timer, and dapi serves
 no ``exchangeInfo`` over its WebSocket API.
 
-**Only perpetuals.** The endpoint lists dated contracts beside them
-(``BTCUSD_260925``) whose ``baseAsset`` and ``quoteAsset`` are the
-perpetual's, so both canonicalize to ``BTCUSD`` and the upsert would keep
-whichever was written last. The adapter's ``to_listed`` keeps
-``contractType == "PERPETUAL"``; a ``Future`` source that does not exist yet
-would take the rest.
+**Only the perpetual contract, stamped Inverse.** The endpoint lists dated
+contracts beside them (``BTCUSD_260925``) whose ``baseAsset`` and
+``quoteAsset`` are the perpetual's, so both canonicalize to ``BTCUSD``. The
+adapter keeps ``contractType == "PERPETUAL"`` and the source stamps
+``Category.INVERSE`` — coin-margined is its own product, not a linear perp.
+A ``Future`` source that does not exist yet would take the rest.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class BinanceDeliveryInstrumentSource:
     """Every perpetual Binance's COIN-M plane lists, as canonical instruments."""
 
     venue = VENUE
-    category = Category.PERP
+    category = Category.INVERSE
 
     def __init__(
         self,

@@ -703,9 +703,9 @@ async def test_binance_delivery_rows_become_perp_instruments() -> None:
     instruments = await _binance_delivery(BINANCE_DELIVERY_ROWS).fetch()
 
     btc = instruments[0]
-    assert str(btc.ticker) == "BinanceDelivery_Perp_BTCUSD"
+    assert str(btc.ticker) == "BinanceDelivery_Inverse_BTCUSD"
     assert btc.exch_ticker == "BTCUSD_PERP"
-    assert btc.category is Category.PERP
+    assert btc.category is Category.INVERSE
     assert btc.contract_size == Decimal("100")
     assert btc.settlement_asset == "BTC"
     assert btc.filters["min_notional"] is None

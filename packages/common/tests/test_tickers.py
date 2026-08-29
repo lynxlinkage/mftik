@@ -30,6 +30,7 @@ def test_parse_round_trips() -> None:
         "Bybit_Spot_ETHUSDT",
         "Bybit_Perp_ETHUSDT",
         "Paper_Spot_BTCUSDT",
+        "BinanceDelivery_Inverse_BTCUSD",
     ):
         assert str(UniversalTicker.parse(text)) == text
 
@@ -137,6 +138,7 @@ def test_of_normalizes_its_parts() -> None:
 
 def test_category_lookup_ignores_case() -> None:
     assert category("perp") is Category.PERP
+    assert category("inverse") is Category.INVERSE
     assert category(" SPOT ") is Category.SPOT
     with pytest.raises(InvalidTickerError, match="unknown category"):
         category("futures")

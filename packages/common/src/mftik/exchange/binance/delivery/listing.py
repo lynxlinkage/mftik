@@ -61,7 +61,7 @@ def to_listed(
     row: dict[str, Any] | BinanceDeliveryExchangeSymbol,
     *,
     venue: str = VENUE,
-    category: Category = Category.PERP,
+    category: Category = Category.INVERSE,
 ) -> ListedInstrument | None:
     parsed = parse_listing_row(BinanceDeliveryExchangeSymbol, row)
     if parsed is None:

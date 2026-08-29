@@ -48,6 +48,11 @@ def commitment_for(
     ``notional / leverage``. Missing or non-positive ``leverage`` is treated
     as ``1`` — conservative until the leverage cache has been filled.
 
+    Inverse: unknowable here. Margin is in the settle coin and the size is a
+    contract count worth a fixed amount of quote; both need
+    ``contract_size``, which this function does not take. Returning a spot
+    or linear figure would lock the wrong asset.
+
     ``None`` means unknowable, never nothing: a caller that then reserves
     nothing has *decided* to, which is not the same as reserving zero.
 
@@ -55,6 +60,8 @@ def commitment_for(
     asks this to decide whether to build one at all. See
     :func:`reservation_for` for the reading of an order already built.
     """
+    if category is Category.INVERSE:
+        return None
     if quote_qty is not None:
         if category is Category.PERP:
             return quote, quote_qty / _leverage_or_one(leverage)

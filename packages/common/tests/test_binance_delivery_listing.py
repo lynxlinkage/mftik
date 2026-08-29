@@ -38,9 +38,9 @@ def test_a_perp_row_keeps_quote_per_contract_and_lot_in_contracts() -> None:
     listed = to_listed(PERP)
 
     assert listed is not None
-    assert str(listed.ticker) == "BinanceDelivery_Perp_BTCUSD"
+    assert str(listed.ticker) == "BinanceDelivery_Inverse_BTCUSD"
     assert listed.exch_ticker == "BTCUSD_PERP"
-    assert listed.category is Category.PERP
+    assert listed.category is Category.INVERSE
     assert listed.contract_size == Decimal("100")
     assert listed.settlement_asset == "BTC"
     assert listed.is_active

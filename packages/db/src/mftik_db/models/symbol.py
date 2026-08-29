@@ -45,6 +45,7 @@ class SymbolCategory(StrEnum):
 
     SPOT = "Spot"
     PERP = "Perp"
+    INVERSE = "Inverse"
     FUTURE = "Future"
     OPTION = "Option"
 
