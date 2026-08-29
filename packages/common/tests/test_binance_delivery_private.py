@@ -39,7 +39,6 @@ OPEN_ORDER = {
     "avgPrice": "0",
     "origQty": "1.5",
     "executedQty": "0",
-    "cumQuote": "0",
     "status": "NEW",
     "timeInForce": "GTC",
     "type": "LIMIT",

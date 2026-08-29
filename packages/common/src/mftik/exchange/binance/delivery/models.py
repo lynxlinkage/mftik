@@ -446,7 +446,6 @@ class BinanceDeliveryOrderAck(BinanceMessage):
     average_price: Decimal = Field(default=Decimal("0"), alias="avgPrice")
     orig_qty: Decimal = Field(default=Decimal("0"), alias="origQty")
     executed_qty: Decimal = Field(default=Decimal("0"), alias="executedQty")
-    cum_quote: Decimal = Field(default=Decimal("0"), alias="cumQuote")
     status: str = ""
     time_in_force: str = Field(default="", alias="timeInForce")
     type: str = "LIMIT"
