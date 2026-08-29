@@ -8,6 +8,7 @@ import fakeredis.aioredis
 import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.exchange import PaperExchange
+from mftik.exchange.binance.delivery.public import BinanceDeliveryPublicClient
 from mftik.exchange.binance.future.public import BinanceFuturePublicClient
 from mftik.exchange.binance.spot.public import BinanceSpotPublicClient
 from mftik.exchange.bybit.public import BybitPublicClient
@@ -110,6 +111,18 @@ async def test_binance_future_venue_builds_its_own_public_client(
     assert client.name == "BinanceFuture"
     # Liquidations are this venue's own feed; MD refuses the topic elsewhere.
     assert hasattr(client, "stream_liquidation")
+
+
+async def test_binance_delivery_venue_builds_its_own_public_client(
+    broker: Broker,
+) -> None:
+    """A separate venue, not a category of ``BinanceFuture``: Inverse, dapi."""
+    factory = VenuePublicFactory(broker)
+    client = await factory.create("BinanceDelivery")
+    assert isinstance(client, BinanceDeliveryPublicClient)
+    assert client.name == "BinanceDelivery"
+    assert hasattr(client, "stream_liquidation")
+    assert hasattr(client, "stream_agg_trades")
 
 
 async def test_bybit_venue_builds_one_client_for_every_category(

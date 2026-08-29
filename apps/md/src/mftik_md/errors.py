@@ -126,6 +126,9 @@ BINANCE = VenueErrors(
 #: futures serves one window fewer than spot.
 BINANCE_FUTURE = BINANCE
 
+#: Binance COIN-M. Same numeric codes as the other Binance planes.
+BINANCE_DELIVERY = BINANCE
+
 OKX = VenueErrors(
     codes={
         51000: QueryCode.VENUE_INVALID_PARAM,
@@ -168,6 +171,7 @@ PAPER = VenueErrors()
 #: reports as its ``name``.
 VENUES: dict[str, VenueErrors] = {
     "Binance": BINANCE,
+    "BinanceDelivery": BINANCE_DELIVERY,
     "BinanceFuture": BINANCE_FUTURE,
     "Bybit": BYBIT,
     "Okx": OKX,

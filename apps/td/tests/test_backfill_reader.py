@@ -19,10 +19,12 @@ from typing import Any
 import httpx
 import pytest
 from binance_stub import keypair
+from mftik.exchange.binance.delivery.rest import BinanceDeliveryRest
 from mftik.exchange.binance.spot.rest import BinanceSpotRest
 from mftik.exchange.models import Side
 from mftik.exchange.tickers import UniversalTicker
 from mftik_td.backfill.reader import (
+    BinanceDeliveryHistoryReader,
     BinanceSpotHistoryReader,
     BybitHistoryReader,
     GateFuturesHistoryReader,
@@ -214,6 +216,191 @@ async def test_a_venue_with_no_reader_says_so_by_name() -> None:
 
     with pytest.raises(NoHistoryReaderError, match="Nowhere"):
         await factory.create("Nowhere", row)
+
+
+# --- Binance COIN-M --------------------------------------------------------
+
+
+DELIVERY = UniversalTicker.parse("BinanceDelivery_Inverse_BTCUSD")
+
+
+def delivery_trade(trade_id: int, order_id: int = 28) -> dict:
+    return {
+        "symbol": "BTCUSD_PERP",
+        "id": trade_id,
+        "orderId": order_id,
+        "pair": "BTCUSD",
+        "side": "SELL",
+        "price": "8800",
+        "qty": "2",
+        "realizedPnl": "0.01",
+        "marginAsset": "BTC",
+        "baseQty": "0.0227",
+        "commission": "0.00000454",
+        "commissionAsset": "BTC",
+        "time": 1590743483586,
+        "positionSide": "BOTH",
+        "buyer": False,
+        "maker": False,
+    }
+
+
+def delivery_order(order_id: int, cid: str = "c-1") -> dict:
+    return {
+        "symbol": "BTCUSD_PERP",
+        "orderId": order_id,
+        "clientOrderId": cid,
+        "price": "8800",
+        "origQty": "2",
+        "executedQty": "2",
+        "status": "FILLED",
+        "type": "LIMIT",
+        "side": "BUY",
+        "updateTime": 1590743483586,
+    }
+
+
+def delivery_reader(api: FakeApi) -> BinanceDeliveryHistoryReader:
+    _key, pem = keypair()
+    return BinanceDeliveryHistoryReader(
+        symbols=FakeSymbols(),
+        rest=BinanceDeliveryRest(
+            api_key="k", api_secret=pem, base_url=BASE, client=api.client()
+        ),
+    )
+
+
+async def test_delivery_a_short_page_means_the_walk_is_drained() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/userTrades"] = [delivery_trade(1), delivery_trade(2)]
+
+    page = await delivery_reader(api).fetch_my_trades(DELIVERY, limit=10)
+
+    assert page.next_cursor is None
+    assert [f.fill_id for f in page.rows] == ["1", "2"]
+
+
+async def test_delivery_a_full_page_resumes_one_past_the_highest_id() -> None:
+    """``fromId`` is inclusive: resuming from the last id read re-reads it."""
+    api = FakeApi()
+    api.results["/dapi/v1/userTrades"] = [
+        delivery_trade(7),
+        delivery_trade(9),
+        delivery_trade(8),
+    ]
+
+    page = await delivery_reader(api).fetch_my_trades(DELIVERY, limit=3)
+
+    assert page.next_cursor == "10"
+
+
+async def test_delivery_a_cursor_is_sent_as_from_id_and_suppresses_the_time() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/userTrades"] = []
+
+    await delivery_reader(api).fetch_my_trades(
+        DELIVERY, cursor="42", since_ts=1_600_000_000
+    )
+
+    params = params_of(api.requests[0])
+    assert params["fromId"] == "42"
+    assert "startTime" not in params, "Binance ignores the range when an id is set"
+
+
+async def test_delivery_an_opening_walk_is_addressed_by_time_in_milliseconds() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/userTrades"] = []
+
+    await delivery_reader(api).fetch_my_trades(DELIVERY, since_ts=1_600_000_000.5)
+
+    params = params_of(api.requests[0])
+    assert params["startTime"] == "1600000000500"
+    assert "fromId" not in params
+
+
+async def test_delivery_a_backfilled_fill_is_contracts_and_has_no_client_id() -> None:
+    """``qty`` is contracts; ``baseQty`` is not a fill size.
+
+    ``client_order_id`` stays unset — dapi puts none on a trade row, and
+    inventing one would make an execution look attributable when it is not.
+    """
+    api = FakeApi()
+    api.results["/dapi/v1/userTrades"] = [delivery_trade(6)]
+
+    page = await delivery_reader(api).fetch_my_trades(DELIVERY)
+
+    fill = page.rows[0]
+    assert fill.client_order_id is None
+    assert fill.order_id == "28"
+    assert fill.side is Side.SELL
+    assert fill.qty == Decimal("2")
+    assert fill.universal_ticker == str(DELIVERY)
+
+
+async def test_delivery_orders_page_on_the_order_id() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/allOrders"] = [delivery_order(11), delivery_order(12)]
+
+    page = await delivery_reader(api).fetch_orders(DELIVERY, limit=2)
+
+    assert page.next_cursor == "13"
+    assert [o.order_id for o in page.rows] == ["11", "12"]
+
+
+async def test_delivery_orders_cap_lower_than_trades() -> None:
+    """dapi caps ``allOrders`` at 100 where ``userTrades`` takes 1000.
+
+    Asking for the larger number is a ``-1130``, not a truncated page, so one
+    ``max_page`` shared by both walks would fail the order backfill on its
+    first call rather than degrade.
+    """
+    api = FakeApi()
+    api.results["/dapi/v1/allOrders"] = [delivery_order(11)]
+    api.results["/dapi/v1/userTrades"] = [delivery_trade(1)]
+    reader = delivery_reader(api)
+
+    await reader.fetch_orders(DELIVERY)
+    await reader.fetch_my_trades(DELIVERY)
+
+    sent = {r.url.path: r.url.params for r in api.requests}
+    assert sent["/dapi/v1/allOrders"]["limit"] == "100"
+    assert sent["/dapi/v1/userTrades"]["limit"] == "1000"
+
+
+async def test_delivery_a_full_order_page_is_not_read_as_drained() -> None:
+    """The order walk has to be drained against ``allOrders``' own cap.
+
+    dapi answers a 1000-row ask with its 100-row cap, so a walk comparing a
+    full page against ``max_page`` would read 100 rows as a short page and
+    stop — silently leaving the rest of the account's history unread.
+    """
+    api = FakeApi()
+    api.results["/dapi/v1/allOrders"] = [delivery_order(i) for i in range(1, 101)]
+
+    page = await delivery_reader(api).fetch_orders(DELIVERY)
+
+    assert len(page.rows) == 100
+    assert page.next_cursor == "101"
+
+
+async def test_delivery_orders_carry_the_client_order_id_trades_lack() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/allOrders"] = [
+        delivery_order(11, cid="281474976710656001")
+    ]
+
+    page = await delivery_reader(api).fetch_orders(DELIVERY)
+
+    assert page.rows[0].client_order_id == "281474976710656001"
+    assert page.rows[0].qty == Decimal("2")
+
+
+async def test_delivery_refuses_another_venues_ticker() -> None:
+    api = FakeApi()
+    with pytest.raises(ValueError, match="BinanceFuture"):
+        await delivery_reader(api).fetch_my_trades(
+            UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
+        )
 
 
 # --- the other venues ------------------------------------------------------
@@ -668,7 +855,14 @@ async def test_every_venue_but_paper_has_a_reader() -> None:
     factory = HistoryReaderFactory(FakeSymbols())
     row = type("Row", (), {"api_key": "k", "api_secret": pem, "passphrase": "p"})()
 
-    for venue in ("Bybit", "Gate", "GateFutures", "BinanceFuture", "Okx"):
+    for venue in (
+        "Bybit",
+        "Gate",
+        "GateFutures",
+        "BinanceFuture",
+        "BinanceDelivery",
+        "Okx",
+    ):
         reader = await factory.create(venue, row)
         assert reader.venue == venue
 

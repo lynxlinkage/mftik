@@ -26,6 +26,11 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeVar
 
 from mftik.exchange import venues
+from mftik.exchange.binance.delivery.rest import MAX_HISTORY as BINANCE_DELIVERY_MAX
+from mftik.exchange.binance.delivery.rest import (
+    MAX_ORDERS as BINANCE_DELIVERY_ORDER_MAX,
+)
+from mftik.exchange.binance.delivery.rest import BinanceDeliveryRest
 from mftik.exchange.binance.future.rest import MAX_HISTORY as BINANCE_FUTURE_MAX
 from mftik.exchange.binance.future.rest import BinanceFutureRest
 from mftik.exchange.binance.spot.rest import MAX_ROWS as BINANCE_SPOT_MAX
@@ -291,6 +296,93 @@ class BinanceFutureHistoryReader:
         limit: int = DEFAULT_PAGE,
     ) -> HistoryPage[Order]:
         limit = min(limit, self.max_page)
+        symbol = await self._symbol(ticker)
+        rows = await self.rest.fetch_orders(
+            symbol,
+            from_order_id=int(cursor) if cursor is not None else None,
+            start_time=_ms(since_ts) if cursor is None else None,
+            limit=limit,
+        )
+        return HistoryPage(
+            rows=[row.to_order(ticker) for row in rows],
+            next_cursor=(
+                str(max(int(row.order_id) for row in rows) + 1)
+                if len(rows) >= limit
+                else None
+            ),
+        )
+
+
+class BinanceDeliveryHistoryReader:
+    """Binance COIN-M's ``userTrades`` and ``allOrders``.
+
+    The same shape as USD-M — per-symbol, paginated by id — on ``dapi``
+    and a separate credential. ``qty`` stays in contracts; multiplying by
+    ``contractSize`` would invent a dollar notional, not BTC.
+
+    ``realizedPnl`` is dropped for the same reason as USD-M: Binance
+    computes it against the account's position basis.
+    """
+
+    venue = venues.BINANCE_DELIVERY.name
+    pages_newest_first = False
+    max_page = BINANCE_DELIVERY_MAX
+    #: dapi is the one venue whose two history endpoints cap differently:
+    #: ``allOrders`` takes 100 where ``userTrades`` takes 1000. ``max_page``
+    #: is the trades cap; the order walk is drained against this one instead.
+    max_order_page = BINANCE_DELIVERY_ORDER_MAX
+
+    def __init__(self, *, symbols: SymbolClient, rest: BinanceDeliveryRest) -> None:
+        self.symbols = symbols
+        self.rest = rest
+
+    async def connect(self) -> None:
+        await self.rest.connect()
+
+    async def close(self) -> None:
+        await self.rest.close()
+
+    async def _symbol(self, ticker: UniversalTicker) -> str:
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return await self.symbols.exch_ticker(ticker)
+
+    async def fetch_my_trades(
+        self,
+        ticker: UniversalTicker,
+        *,
+        cursor: str | None = None,
+        since_ts: float | None = None,
+        limit: int = DEFAULT_PAGE,
+    ) -> HistoryPage[Fill]:
+        limit = min(limit, self.max_page)
+        symbol = await self._symbol(ticker)
+        rows = await self.rest.fetch_my_trades(
+            symbol,
+            from_id=int(cursor) if cursor is not None else None,
+            start_time=_ms(since_ts) if cursor is None else None,
+            limit=limit,
+        )
+        return HistoryPage(
+            rows=[row.to_fill(ticker) for row in rows],
+            next_cursor=(
+                str(max(int(row.trade_id) for row in rows) + 1)
+                if len(rows) >= limit
+                else None
+            ),
+        )
+
+    async def fetch_orders(
+        self,
+        ticker: UniversalTicker,
+        *,
+        cursor: str | None = None,
+        since_ts: float | None = None,
+        limit: int = DEFAULT_PAGE,
+    ) -> HistoryPage[Order]:
+        limit = min(limit, self.max_order_page)
         symbol = await self._symbol(ticker)
         rows = await self.rest.fetch_orders(
             symbol,
@@ -735,6 +827,13 @@ class HistoryReaderFactory:
                     api_key=row.api_key, api_secret=row.api_secret
                 ),
             )
+        if venue == venues.BINANCE_DELIVERY.name:
+            return BinanceDeliveryHistoryReader(
+                symbols=self._symbols,
+                rest=BinanceDeliveryRest(
+                    api_key=row.api_key, api_secret=row.api_secret
+                ),
+            )
         if venue == venues.BYBIT.name:
             return BybitHistoryReader(
                 symbols=self._symbols,
@@ -776,6 +875,7 @@ class HistoryReaderFactory:
 
 __all__ = [
     "DEFAULT_PAGE",
+    "BinanceDeliveryHistoryReader",
     "BinanceFutureHistoryReader",
     "BinanceSpotHistoryReader",
     "BybitHistoryReader",

@@ -100,6 +100,33 @@ def test_a_spot_sell_sized_in_quote_commits_nothing_knowable() -> None:
     assert held is None
 
 
+def test_an_inverse_order_commits_nothing_knowable() -> None:
+    """Margin is in the coin and size is a contract count.
+
+    A linear or spot reading would lock USD or BTC at the wrong figure.
+    ``contract_size`` is not an argument here, so the answer is None until
+    the inverse formula lands beside it.
+    """
+    request = _request(universal_ticker="BinanceDelivery_Inverse_BTCUSD")
+    assert (
+        commitment_for(
+            category=Category.INVERSE,
+            side=request.side,
+            order_type=request.type,
+            base="BTC",
+            quote="USD",
+            qty=request.qty,
+            price=request.price,
+            leverage=Decimal("10"),
+        )
+        is None
+    )
+    assert (
+        reservation_for(request, base="BTC", quote="USD", leverage=Decimal("10"))
+        is None
+    )
+
+
 def test_a_perp_market_sized_in_quote_commits_margin() -> None:
     held = _held(
         _perp(

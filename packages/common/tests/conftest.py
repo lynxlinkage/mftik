@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from binance_delivery_stub import FakeBinanceDeliveryApi, FakeBinanceDeliveryUser
 from binance_future_stub import FakeBinanceFutureApi, FakeBinanceFutureUser
 from binance_stub import FakeBinanceApi, FakeBinanceStream, keypair
 from bybit_stub import FakeBybit
@@ -68,6 +69,29 @@ async def future_api(binance_key):
     """A FakeBinanceFutureApi verifying logon signatures against ``binance_key``."""
     private_key, _pem = binance_key
     fake = FakeBinanceFutureApi(public_key=private_key.public_key())
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def delivery_api(binance_key):
+    """A FakeBinanceDeliveryApi verifying logon signatures against ``binance_key``."""
+    private_key, _pem = binance_key
+    fake = FakeBinanceDeliveryApi(public_key=private_key.public_key())
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def delivery_user():
+    """The COIN-M user data socket — the listen-key connection."""
+    fake = FakeBinanceDeliveryUser()
     server = await serve(fake.handler, "127.0.0.1", 0)
     fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
     yield fake

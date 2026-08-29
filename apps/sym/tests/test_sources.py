@@ -9,6 +9,7 @@ import pytest
 from mftik.exchange.tickers import Category
 from mftik_sym.sources import PaperInstrumentSource, tick_from_precision
 from mftik_sym.sources.binance import BinanceSpotInstrumentSource
+from mftik_sym.sources.binance_delivery import BinanceDeliveryInstrumentSource
 from mftik_sym.sources.binance_future import BinanceFutureInstrumentSource
 from mftik_sym.sources.bybit import BybitInstrumentSource
 from mftik_sym.sources.gate import GateSpotInstrumentSource
@@ -621,6 +622,112 @@ async def test_a_contract_not_yet_trading_is_listed_but_inactive() -> None:
 
 async def test_malformed_binance_future_rows_are_skipped() -> None:
     instruments = await _binance_future(BINANCE_FUTURE_ROWS).fetch()
+    assert "BAD" not in {i.base for i in instruments}
+
+
+# --- Binance COIN-M futures ------------------------------------------------
+
+#: Pinned to a live ``GET /dapi/v1/exchangeInfo`` row (2026-08-29):
+#: ``contractStatus`` not ``status``, ``contractSize`` an unquoted int, no
+#: ``MIN_NOTIONAL``. The dated quarterly shares the perp's base and quote.
+BINANCE_DELIVERY_ROWS = [
+    {
+        "symbol": "BTCUSD_PERP",
+        "pair": "BTCUSD",
+        "contractType": "PERPETUAL",
+        "contractStatus": "TRADING",
+        "contractSize": 100,
+        "baseAsset": "BTC",
+        "quoteAsset": "USD",
+        "marginAsset": "BTC",
+        "filters": [
+            {
+                "filterType": "PRICE_FILTER",
+                "tickSize": "0.1",
+                "minPrice": "1000",
+                "maxPrice": "4520958",
+            },
+            {
+                "filterType": "LOT_SIZE",
+                "stepSize": "1",
+                "minQty": "1",
+                "maxQty": "1000000",
+            },
+        ],
+    },
+    {
+        "symbol": "BTCUSD_260925",
+        "pair": "BTCUSD",
+        "contractType": "CURRENT_QUARTER",
+        "contractStatus": "TRADING",
+        "contractSize": 100,
+        "baseAsset": "BTC",
+        "quoteAsset": "USD",
+        "marginAsset": "BTC",
+        "filters": [],
+    },
+    {
+        "symbol": "SOONUSD_PERP",
+        "contractType": "PERPETUAL",
+        "contractStatus": "PENDING_TRADING",
+        "contractSize": 10,
+        "baseAsset": "SOON",
+        "quoteAsset": "USD",
+        "marginAsset": "SOON",
+        "filters": [],
+    },
+    # Malformed — no baseAsset and no contractSize; must be skipped.
+    {
+        "symbol": "BADUSD_PERP",
+        "contractType": "PERPETUAL",
+        "contractStatus": "TRADING",
+        "quoteAsset": "USD",
+    },
+]
+
+
+def _binance_delivery(rows: list[dict]) -> BinanceDeliveryInstrumentSource:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/dapi/v1/exchangeInfo"
+        return httpx.Response(200, json={"symbols": rows})
+
+    return BinanceDeliveryInstrumentSource(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://dapi.binance.com",
+        )
+    )
+
+
+async def test_binance_delivery_rows_become_perp_instruments() -> None:
+    instruments = await _binance_delivery(BINANCE_DELIVERY_ROWS).fetch()
+
+    btc = instruments[0]
+    assert str(btc.ticker) == "BinanceDelivery_Inverse_BTCUSD"
+    assert btc.exch_ticker == "BTCUSD_PERP"
+    assert btc.category is Category.INVERSE
+    assert btc.contract_size == Decimal("100")
+    assert btc.settlement_asset == "BTC"
+    assert btc.filters["min_notional"] is None
+    assert btc.filters["qty_step"] == Decimal("1")
+    assert btc.filters["min_qty"] == Decimal("1")
+
+
+async def test_dated_delivery_contracts_are_not_stored_as_perpetuals() -> None:
+    """``BTCUSD_260925`` canonicalizes to ``BTCUSD`` — the perpetual's symbol."""
+    instruments = await _binance_delivery(BINANCE_DELIVERY_ROWS).fetch()
+
+    assert [i.exch_ticker for i in instruments] == ["BTCUSD_PERP", "SOONUSD_PERP"]
+
+
+async def test_a_delivery_contract_not_yet_trading_is_listed_but_inactive() -> None:
+    soon = (await _binance_delivery(BINANCE_DELIVERY_ROWS).fetch())[1]
+    assert soon.symbol == "SOONUSD"
+    assert not soon.is_active
+
+
+async def test_malformed_binance_delivery_rows_are_skipped() -> None:
+    instruments = await _binance_delivery(BINANCE_DELIVERY_ROWS).fetch()
     assert "BAD" not in {i.base for i in instruments}
 
 

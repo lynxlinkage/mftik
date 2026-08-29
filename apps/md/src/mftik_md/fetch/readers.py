@@ -31,6 +31,11 @@ import logging
 from typing import Protocol
 
 from mftik.exchange import venues
+from mftik.exchange.binance.delivery.protocol import BINANCE_DELIVERY_REST_URL
+from mftik.exchange.binance.delivery.public import (
+    venue_interval as binance_delivery_interval,
+)
+from mftik.exchange.binance.delivery.rest import BinanceDeliveryPublicRest
 from mftik.exchange.binance.future.protocol import BINANCE_FUTURE_REST_URL
 from mftik.exchange.binance.future.public import (
     venue_interval as binance_future_interval,
@@ -453,6 +458,93 @@ class BinanceFutureReader:
         )
 
 
+class BinanceDeliveryReader:
+    """Binance COIN-M reads over REST, in canonical symbol and interval.
+
+    REST, same reason as USD-M: dapi's WebSocket API serves no ``klines``.
+    Book and quote sizes stay in contracts. Candles need
+    ``quote_per_contract`` — dapi's volume columns are swapped relative to
+    a linear bar, and ``contractSize`` is USD per contract, not base.
+    """
+
+    venue = "BinanceDelivery"
+
+    def __init__(
+        self,
+        *,
+        symbols: SymbolResolver,
+        rest: BinanceDeliveryPublicRest | None = None,
+        base_url: str = BINANCE_DELIVERY_REST_URL,
+    ) -> None:
+        self.symbols = symbols
+        self.rest = rest or BinanceDeliveryPublicRest(base_url=base_url)
+
+    async def connect(self) -> None:
+        await self.rest.connect()
+
+    async def close(self) -> None:
+        await self.rest.close()
+
+    async def _symbol(self, ticker: UniversalTicker) -> str:
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return await self.symbols.exch_ticker(ticker)
+
+    async def _quote_per_contract(self, ticker: UniversalTicker):
+        size = await self.symbols.contract_size(ticker)
+        if size is None or size <= 0:
+            raise ValueError(f"no contract_size for {ticker}")
+        return size
+
+    async def fetch_klines(
+        self, ticker: UniversalTicker, interval: str, *, limit: int
+    ) -> list[Kline]:
+        """Recent candles, oldest first, answering in the caller's spelling.
+
+        Refuses when the plane has no ``contract_size``: a linear read of a
+        dapi bar is silently wrong rather than short.
+        """
+        canonical = normalize_interval(interval)
+        native_interval = binance_delivery_interval(canonical)
+        native = await self._symbol(ticker)
+        klines = await self.rest.fetch_klines(
+            native,
+            native_interval,
+            ticker=ticker,
+            quote_per_contract=await self._quote_per_contract(ticker),
+            limit=limit,
+        )
+        return [kline.model_copy(update={"interval": canonical}) for kline in klines]
+
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int
+    ) -> OrderBook:
+        """``GET /dapi/v1/depth`` — a whole book, sizes in contracts."""
+        native = await self._symbol(ticker)
+        return await self.rest.fetch_order_book(native, ticker=ticker, depth=depth)
+
+    async def fetch_best_quote(self, ticker: UniversalTicker) -> BestQuote | None:
+        """Top of book with sizes, or None when a side is empty.
+
+        Sizes stay in contracts. None rather than zeros when a side has
+        nothing resting.
+        """
+        book = await self.fetch_order_book(ticker, depth=1)
+        if not book.bids or not book.asks:
+            return None
+        bid, ask = book.bids[0], book.asks[0]
+        return BestQuote(
+            universal_ticker=book.universal_ticker,
+            bid=bid.price,
+            bid_qty=bid.qty,
+            ask=ask.price,
+            ask_qty=ask.qty,
+            ts=book.ts,
+        )
+
+
 class BybitReader:
     """Bybit reads over REST, across every category the venue trades.
 
@@ -655,6 +747,8 @@ class VenueReaderFactory:
             return BinanceSpotReader(symbols=self._symbols)
         if venue == venues.BINANCE_FUTURE.name:
             return BinanceFutureReader(symbols=self._symbols)
+        if venue == venues.BINANCE_DELIVERY.name:
+            return BinanceDeliveryReader(symbols=self._symbols)
         if venue == venues.BYBIT.name:
             return BybitReader(symbols=self._symbols)
         if venue == venues.OKX.name:

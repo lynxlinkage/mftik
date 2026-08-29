@@ -377,6 +377,7 @@ PAPER = VenueErrors(
 VENUES: dict[str, VenueErrors] = {
     "Binance": BINANCE,
     "BinanceFuture": BINANCE_FUTURE,
+    "BinanceDelivery": BINANCE_FUTURE,
     "Bybit": BYBIT,
     "Okx": OKX,
     "Gate": GATE,

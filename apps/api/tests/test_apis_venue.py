@@ -31,6 +31,7 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
 
     assert set(by_name) == {
         "Binance",
+        "BinanceDelivery",
         "BinanceFuture",
         "Bybit",
         "Gate",
@@ -59,6 +60,11 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     assert by_name["BinanceFuture"].categories == ["Perp"]
     assert by_name["BinanceFuture"].api_types == ["ED25519"]
     assert by_name["BinanceFuture"].ticker_example == "BinanceFuture_Perp_BTCUSDT"
+    assert by_name["BinanceDelivery"].categories == ["Inverse"]
+    assert by_name["BinanceDelivery"].api_types == ["ED25519"]
+    assert by_name["BinanceDelivery"].ticker_example == (
+        "BinanceDelivery_Inverse_BTCUSD"
+    )
     assert by_name["GateFutures"].categories == ["Perp"]
     assert by_name["GateFutures"].api_types == ["HMAC"]
     assert by_name["GateFutures"].ticker_example == "GateFutures_Perp_BTCUSDT"
