@@ -11,6 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from mftik.exchange.binance.future.listing import to_listed
 from mftik.exchange.binance.future.models import (
     BinanceFutureAccountUpdate,
     BinanceFutureAggTrade,
@@ -25,7 +26,6 @@ from mftik.exchange.binance.future.models import (
     BinanceFutureOrderTradeUpdate,
     BinanceFuturePosition,
     BinanceFutureTicker,
-    instrument_from_row,
     status_of,
     type_of,
 )
@@ -424,9 +424,10 @@ def test_a_position_reply_carries_the_signed_size() -> None:
 
 def test_instruments_read_the_futures_notional_key() -> None:
     """``notional``, not spot's ``minNotional`` — the floor vanishes otherwise."""
-    instrument = instrument_from_row(
+    instrument = to_listed(
         {
             "symbol": "BTCUSDT",
+            "contractType": "PERPETUAL",
             "baseAsset": "BTC",
             "quoteAsset": "USDT",
             "filters": [
@@ -436,22 +437,26 @@ def test_instruments_read_the_futures_notional_key() -> None:
             ],
         }
     )
-    assert instrument.tick_size == Decimal("0.10")
-    assert instrument.lot_size == Decimal("0.001")
-    assert instrument.min_notional == Decimal("100")
+    assert instrument is not None
+    assert instrument.exch_ticker == "BTCUSDT"
+    assert instrument.filters["price_tick"] == Decimal("0.10")
+    assert instrument.filters["qty_step"] == Decimal("0.001")
+    assert instrument.filters["min_notional"] == Decimal("100")
 
 
 def test_a_step_the_venue_does_not_enforce_reads_as_absent() -> None:
     """A zero step would divide."""
-    instrument = instrument_from_row(
+    instrument = to_listed(
         {
             "symbol": "BTCUSDT",
+            "contractType": "PERPETUAL",
             "baseAsset": "BTC",
             "quoteAsset": "USDT",
             "filters": [{"filterType": "MIN_NOTIONAL", "notional": "0"}],
         }
     )
-    assert instrument.min_notional is None
+    assert instrument is not None
+    assert instrument.filters["min_notional"] is None
 
 
 # --- vocabulary ------------------------------------------------------------

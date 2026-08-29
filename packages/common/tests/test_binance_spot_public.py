@@ -369,7 +369,8 @@ async def test_fetch_instruments_stays_in_the_venues_spelling(
     async with client:
         instruments = await client.fetch_instruments()
 
-    assert instruments[0].symbol == "BTC-USDT"
+    assert instruments[0].exch_ticker == "BTC-USDT"
+    assert instruments[0].symbol == "BTCUSDT"
 
 
 # --- guards ----------------------------------------------------------------

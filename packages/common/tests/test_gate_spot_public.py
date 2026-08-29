@@ -150,14 +150,15 @@ async def test_fetch_instruments_drops_untradable_and_maps_precision(
     async with await _public(gate, rest_stub, resolver) as client:
         instruments = await client.fetch_instruments()
 
-    assert [i.symbol for i in instruments] == ["BTC_USDT"]
+    assert [i.exch_ticker for i in instruments] == ["BTC_USDT"]
+    assert [i.symbol for i in instruments] == ["BTCUSDT"]
     btc = instruments[0]
     assert (btc.base, btc.quote) == ("BTC", "USDT")
     # precision 2 → 0.01 price step; amount_precision 4 → 0.0001 size step.
-    assert btc.tick_size == Decimal("0.01")
-    assert btc.lot_size == Decimal("0.0001")
-    assert btc.min_qty == Decimal("0.0001")
-    assert btc.min_notional == Decimal("1")
+    assert btc.filters["price_tick"] == Decimal("0.01")
+    assert btc.filters["qty_step"] == Decimal("0.0001")
+    assert btc.filters["min_qty"] == Decimal("0.0001")
+    assert btc.filters["min_notional"] == Decimal("1")
 
 
 async def test_fetch_instruments_stays_in_the_venue_spelling(
@@ -167,7 +168,8 @@ async def test_fetch_instruments_stays_in_the_venue_spelling(
     async with await _public(gate, rest_stub, resolver) as client:
         instruments = await client.fetch_instruments()
 
-    assert instruments[0].symbol == "BTC_USDT"
+    assert instruments[0].exch_ticker == "BTC_USDT"
+    assert instruments[0].symbol == "BTCUSDT"
     assert resolver.lookups == 0
 
 

@@ -33,7 +33,6 @@ from mftik.exchange.models import (
     BestQuote,
     BookLevel,
     Fill,
-    Instrument,
     Kline,
     Liquidation,
     Order,
@@ -593,31 +592,6 @@ class OkxOrderAck(OkxMessage):
         return self.s_code in ("", "0")
 
 
-def instrument_from_row(row: dict[str, Any]) -> Instrument:
-    """One ``/public/instruments`` row, whichever book it came from.
-
-    Spot publishes ``baseCcy`` / ``quoteCcy``. SWAP leaves those empty and
-    puts the underlier in ``ctValCcy`` / ``settleCcy`` — both are read so
-    callers see one :class:`~mftik.exchange.models.Instrument` whatever the
-    category.
-    """
-    base = str(row.get("baseCcy") or row.get("ctValCcy") or "")
-    quote = str(row.get("quoteCcy") or row.get("settleCcy") or "")
-    fields: dict[str, Any] = {
-        "symbol": str(row.get("instId") or ""),
-        "base": base,
-        "quote": quote,
-        "min_qty": _step_or_none(row.get("minSz")),
-    }
-    tick = _step_or_none(row.get("tickSz"))
-    if tick is not None:
-        fields["tick_size"] = tick
-    step = _step_or_none(row.get("lotSz"))
-    if step is not None:
-        fields["lot_size"] = step
-    return Instrument(**fields)
-
-
 def kline_from_row(
     row: list[Any],
     ticker: UniversalTicker,
@@ -680,16 +654,6 @@ def order_book_from_result(
     )
 
 
-def _step_or_none(value: Any) -> Decimal | None:
-    if value is None or value == "":
-        return None
-    try:
-        parsed = Decimal(str(value))
-    except InvalidOperation:
-        return None
-    return parsed if parsed > 0 else None
-
-
 __all__ = [
     "Dec",
     "Ms",
@@ -711,7 +675,6 @@ __all__ = [
     "base_to_contracts",
     "category_of",
     "contracts_to_base",
-    "instrument_from_row",
     "kline_from_row",
     "order_book_from_result",
     "status_of",

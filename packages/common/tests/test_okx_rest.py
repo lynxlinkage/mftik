@@ -170,6 +170,7 @@ async def test_instruments_drop_inverse_swaps_and_anything_not_live(
             "instId": "BTC-USDT-SWAP",
             "ctType": "linear",
             "state": "live",
+            "ctVal": "0.01",
             "ctValCcy": "BTC",
             "settleCcy": "USDT",
             "tickSz": "0.1",
@@ -192,7 +193,8 @@ async def test_instruments_drop_inverse_swaps_and_anything_not_live(
         },
     ]
     rows = await _public(api).fetch_instruments("SWAP")
-    assert [row.symbol for row in rows] == ["BTC-USDT-SWAP"]
+    assert [row.exch_ticker for row in rows] == ["BTC-USDT-SWAP"]
+    assert rows[0].symbol == "BTCUSDT"
 
 
 async def test_fill_history_pages_by_bill_id_and_opens_on_begin(

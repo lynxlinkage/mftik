@@ -24,7 +24,6 @@ from mftik.exchange.base import BaseClient
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.models import (
     BestQuote,
-    Instrument,
     Kline,
     Liquidation,
     OrderBook,
@@ -139,7 +138,7 @@ class OkxPublicClient(BaseClient):
 
     # --- snapshots ---------------------------------------------------------
 
-    async def fetch_instruments(self, product: str | None = None) -> list[Instrument]:
+    async def fetch_instruments(self, product: str | None = None):
         self._ensure_connected()
         return await self.rest.fetch_instruments(product or SPOT)
 

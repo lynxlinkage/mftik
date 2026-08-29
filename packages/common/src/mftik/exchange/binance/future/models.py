@@ -49,7 +49,6 @@ from mftik.exchange.models import (
     BestQuote,
     BookLevel,
     Fill,
-    Instrument,
     Kline,
     Liquidation,
     Order,
@@ -967,48 +966,6 @@ class BinanceFuturePrice(BinanceMessage):
         return secs(self.time)
 
 
-def instrument_from_row(row: dict[str, Any]) -> Instrument:
-    """One ``exchangeInfo`` symbol, with its steps pulled out of ``filters``.
-
-    Binance keeps the steps in a list of typed filter objects rather than as
-    fields, and publishes ``0`` for a step it does not enforce — a zero step is
-    dropped rather than stored, because a zero here would divide.
-
-    Futures spells the notional floor ``notional`` inside a ``MIN_NOTIONAL``
-    filter, where spot spells it ``minNotional``; reading spot's key here
-    returns nothing and the floor silently disappears.
-    """
-    filters = {
-        str(f.get("filterType", "")): f for f in row.get("filters", []) or []
-    }
-    price = filters.get("PRICE_FILTER", {})
-    lot = filters.get("LOT_SIZE", {})
-    notional = filters.get("MIN_NOTIONAL", {})
-
-    fields: dict[str, Any] = {
-        "symbol": str(row.get("symbol", "")),
-        "base": str(row.get("baseAsset", "")),
-        "quote": str(row.get("quoteAsset", "")),
-        "min_qty": _dec_or_none(lot.get("minQty")),
-        "min_notional": _dec_or_none(notional.get("notional")),
-    }
-    tick = _dec_or_none(price.get("tickSize"))
-    if tick is not None:
-        fields["tick_size"] = tick
-    step = _dec_or_none(lot.get("stepSize"))
-    if step is not None:
-        fields["lot_size"] = step
-    return Instrument(**fields)
-
-
-def _dec_or_none(value: Any) -> Decimal | None:
-    """``None`` where Binance publishes no bound, so the filter reads as absent."""
-    if value is None or value == "":
-        return None
-    parsed = Decimal(str(value))
-    return parsed if parsed > 0 else None
-
-
 __all__ = [
     "BOTH",
     "BinanceFutureAccountUpdate",
@@ -1033,7 +990,6 @@ __all__ = [
     "BinanceFutureTicker",
     "BinanceFutureWalletBalance",
     "BinanceListenKeyExpired",
-    "instrument_from_row",
     "kline_from_row",
     "status_of",
     "type_of",

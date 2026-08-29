@@ -16,12 +16,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from mftik.exchange.models import (
-    Instrument,
-    OrderType,
-    PlaceOrderRequest,
-    Side,
-)
+from mftik.exchange.models import OrderType, PlaceOrderRequest, Side
 from mftik.exchange.tickers import Category
 
 ZERO = Decimal("0")
@@ -82,21 +77,23 @@ def commitment_for(
 
 def reservation_for(
     request: PlaceOrderRequest,
-    instrument: Instrument,
     *,
+    base: str,
+    quote: str,
     leverage: Decimal | None = None,
 ) -> tuple[str, Decimal] | None:
     """:func:`commitment_for` read off an order that has already been built.
 
     What TD calls at submit, where the request is the thing being reserved
-    against and the instrument is where the two asset names come from.
+    against and ``base`` / ``quote`` come from the plane's :class:`~mftik.
+    protocol.messages.SymbolInfo`.
     """
     return commitment_for(
         category=request.category,
         side=request.side,
         order_type=request.type,
-        base=instrument.base,
-        quote=instrument.quote,
+        base=base,
+        quote=quote,
         qty=request.qty,
         quote_qty=request.quote_qty,
         price=request.price,

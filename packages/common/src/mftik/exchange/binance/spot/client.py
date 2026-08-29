@@ -42,6 +42,7 @@ from decimal import Decimal
 from typing import Any, TypeVar
 
 from mftik.exchange.binance.spot import methods as m
+from mftik.exchange.binance.spot.listing import to_listed
 from mftik.exchange.binance.spot.models import (
     BinanceAccountInfo,
     BinanceAccountPosition,
@@ -63,9 +64,10 @@ from mftik.exchange.binance.spot.protocol import (
 )
 from mftik.exchange.binance.spot.socket import BinanceSocket
 from mftik.exchange.errors import ExchangeError
-from mftik.exchange.models import Instrument, Kline, OrderBook, OrderType, Side, Ticker
+from mftik.exchange.models import Kline, OrderBook, OrderType, Side, Ticker
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import UniversalTicker
+from mftik.symbols.listed import ListedInstrument
 
 logger = logging.getLogger(__name__)
 
@@ -237,13 +239,8 @@ class BinanceSpotWsApi(BinanceSocket):
 
     # --- market data (open) ------------------------------------------------
 
-    async def fetch_instruments(self, *symbols: str) -> list[Instrument]:
-        """``exchangeInfo`` — tradeable symbols and their filters.
-
-        Left in Binance's own spelling: this is what the symbol plane ingests
-        to *build* the canonical mapping, so it cannot depend on that mapping
-        existing.
-        """
+    async def fetch_instruments(self, *symbols: str) -> list[ListedInstrument]:
+        """``exchangeInfo`` — tradeable symbols, mapped for the plane."""
         params: dict[str, Any] = {}
         if len(symbols) == 1:
             params["symbol"] = symbols[0]
@@ -253,14 +250,12 @@ class BinanceSpotWsApi(BinanceSocket):
             params["symbols"] = list(symbols)
         result = await self.call(m.EXCHANGE_INFO, params or None)
         rows = (result or {}).get("symbols") or []
-        return [
-            _to_instrument(row)
-            for row in rows
-            # ``exchangeInfo`` also lists halted and pre-launch symbols;
-            # Instrument has nowhere to say "not yet", so one that cannot be
-            # traded is dropped rather than returned looking live.
-            if row.get("status") == "TRADING"
-        ]
+        out: list[ListedInstrument] = []
+        for row in rows:
+            listed = to_listed(row)
+            if listed is not None and listed.is_active:
+                out.append(listed)
+        return out
 
     async def fetch_order_book(
         self, symbol: str, *, ticker: UniversalTicker, depth: int = 100
@@ -486,46 +481,6 @@ def _by_id(
     if client_order_id:
         params["origClientOrderId"] = client_order_id
     return params
-
-
-def _to_instrument(row: dict[str, Any]) -> Instrument:
-    """One ``exchangeInfo`` symbol, with its steps pulled out of ``filters``.
-
-    Binance keeps the steps in a list of typed filter objects rather than as
-    fields, and publishes ``0`` for a step it does not enforce. A zero step is
-    dropped rather than stored, because a zero here would divide.
-    """
-    filters = {
-        str(f.get("filterType", "")): f for f in row.get("filters", []) or []
-    }
-    price = filters.get("PRICE_FILTER", {})
-    lot = filters.get("LOT_SIZE", {})
-    # ``NOTIONAL`` superseded ``MIN_NOTIONAL``; older symbols still carry the
-    # latter and a few carry both.
-    notional = filters.get("NOTIONAL") or filters.get("MIN_NOTIONAL") or {}
-
-    fields: dict[str, Any] = {
-        "symbol": str(row.get("symbol", "")),
-        "base": str(row.get("baseAsset", "")),
-        "quote": str(row.get("quoteAsset", "")),
-        "min_qty": _opt_dec(lot.get("minQty")),
-        "min_notional": _opt_dec(notional.get("minNotional")),
-    }
-    tick = _opt_dec(price.get("tickSize"))
-    if tick is not None:
-        fields["tick_size"] = tick
-    step = _opt_dec(lot.get("stepSize"))
-    if step is not None:
-        fields["lot_size"] = step
-    return Instrument(**fields)
-
-
-def _opt_dec(value: Any) -> Decimal | None:
-    """``None`` where Binance publishes no bound, so the filter reads as absent."""
-    if value is None or value == "":
-        return None
-    parsed = Decimal(str(value))
-    return parsed if parsed > 0 else None
 
 
 __all__ = ["MAX_DEPTH", "MAX_KLINES", "BinanceSpotWsApi"]

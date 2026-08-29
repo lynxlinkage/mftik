@@ -13,7 +13,6 @@ from mftik.exchange.errors import ExchangeError
 from mftik.exchange.models import (
     Balance,
     Fill,
-    Instrument,
     Order,
     OrderStatus,
     PlaceOrderRequest,
@@ -34,6 +33,7 @@ from mftik.protocol import (
     CancelReject,
     OrderReject,
     RejectCode,
+    SymbolInfo,
     Topics,
     UntypedEnvelope,
     publish_td_log,
@@ -1006,8 +1006,8 @@ class Session:
         rather than being blocked — the ledger is a guard against overspending
         what we know about, not a gate that fails closed on missing data.
         """
-        instrument = await self._instrument(request.ticker)
-        if instrument is None:
+        info = await self._symbol_info(request.ticker)
+        if info is None:
             logger.debug(
                 "TD no instrument for %s api_id=%s; submitting unreserved",
                 request.universal_ticker,
@@ -1019,7 +1019,9 @@ class Session:
             if request.category is Category.PERP
             else None
         )
-        held = reservation_for(request, instrument, leverage=leverage)
+        held = reservation_for(
+            request, base=info.base, quote=info.quote, leverage=leverage
+        )
         if held is None:
             logger.debug(
                 "TD cannot price %s %s; submitting unreserved",
@@ -1068,8 +1070,8 @@ class Session:
                 asset,
             )
 
-    async def _instrument(self, ticker: UniversalTicker) -> Instrument | None:
-        """The instrument an order is for, or None if the plane cannot say.
+    async def _symbol_info(self, ticker: UniversalTicker) -> SymbolInfo | None:
+        """The plane's row for an order, or None if it cannot say.
 
         The order names it. TD used to build the ticker here from the
         connector's own venue and category, which worked only because every
@@ -1079,13 +1081,10 @@ class Session:
         if self.symbols is None:
             return None
         try:
-            info = await self.symbols.get(ticker)
+            return await self.symbols.get(ticker)
         except Exception:
             logger.debug("TD symbol lookup failed ticker=%s", ticker, exc_info=True)
             return None
-        return Instrument(
-            symbol=info.symbol, base=info.base, quote=info.quote
-        )
 
     def ledger_view(self) -> LedgerView:
         """Balances as TD knows them, pre-locks included."""

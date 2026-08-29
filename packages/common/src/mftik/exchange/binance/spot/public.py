@@ -47,7 +47,6 @@ from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.models import (
     AggTrade,
     BestQuote,
-    Instrument,
     Kline,
     OrderBook,
     Ticker,
@@ -167,13 +166,8 @@ class BinanceSpotPublicClient(BaseClient):
 
     # --- snapshots (WebSocket API) -----------------------------------------
 
-    async def fetch_instruments(self) -> list[Instrument]:
-        """Tradeable symbols, in Binance's own spelling.
-
-        Left native on purpose: this is what the symbol plane ingests to
-        *build* the canonical mapping, so it cannot depend on that mapping
-        existing.
-        """
+    async def fetch_instruments(self):
+        """Tradeable symbols, mapped for the plane."""
         self._ensure_connected()
         return await self.api.fetch_instruments()
 

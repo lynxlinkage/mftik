@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 from mftik.exchange.models import OrderStatus, OrderType, Side
 from mftik.exchange.okx.feed import OkxBook
+from mftik.exchange.okx.listing import to_listed
 from mftik.exchange.okx.models import (
     OkxAccount,
     OkxFill,
@@ -17,7 +18,6 @@ from mftik.exchange.okx.models import (
     OkxPublicTrade,
     OkxTicker,
     category_of,
-    instrument_from_row,
     kline_from_row,
     status_of,
 )
@@ -197,23 +197,29 @@ def test_category_of_reads_the_row_not_the_connector() -> None:
 
 
 def test_a_swap_instrument_takes_base_and_quote_from_the_contract_fields() -> None:
-    inst = instrument_from_row(
+    inst = to_listed(
         {
             "instId": "BTC-USDT-SWAP",
             "baseCcy": "",
             "quoteCcy": "",
             "ctValCcy": "BTC",
             "settleCcy": "USDT",
+            "ctType": "linear",
+            "ctVal": "0.01",
             "tickSz": "0.1",
             "lotSz": "1",
             "minSz": "1",
-        }
+        },
+        category=Category.PERP,
     )
-    assert inst.symbol == "BTC-USDT-SWAP"
+    assert inst is not None
+    assert inst.exch_ticker == "BTC-USDT-SWAP"
+    assert inst.symbol == "BTCUSDT"
     assert inst.base == "BTC"
     assert inst.quote == "USDT"
-    assert inst.tick_size == Decimal("0.1")
-    assert inst.min_qty == Decimal("1")
+    assert inst.filters["price_tick"] == Decimal("0.1")
+    assert inst.filters["min_qty"] == Decimal("0.01")
+    assert inst.contract_size == Decimal("0.01")
 
 
 def test_a_kline_row_is_ohlc_then_volumes() -> None:

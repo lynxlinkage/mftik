@@ -203,7 +203,7 @@ async def test_instruments_follow_the_cursor_to_the_end(api: FakeApi) -> None:
                     "lotSizeFilter": {"basePrecision": "0.000001"},
                     "priceFilter": {"tickSize": "0.01"},
                 },
-                # Pre-launch, and Instrument has nowhere to say "not yet".
+                # Pre-launch: listed as inactive and dropped from this snapshot.
                 {
                     "symbol": "SOONUSDT",
                     "baseCoin": "SOON",

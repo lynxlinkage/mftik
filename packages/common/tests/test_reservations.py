@@ -9,7 +9,6 @@ from __future__ import annotations
 from decimal import Decimal
 
 from mftik.exchange.models import (
-    Instrument,
     OrderType,
     PlaceOrderRequest,
     Side,
@@ -17,7 +16,8 @@ from mftik.exchange.models import (
 from mftik.exchange.reservations import commitment_for, reservation_for
 from mftik.exchange.tickers import Category
 
-BTCUSDT = Instrument(symbol="BTCUSDT", base="BTC", quote="USDT")
+BASE = "BTC"
+QUOTE = "USDT"
 
 
 def _request(**overrides: object) -> PlaceOrderRequest:
@@ -46,37 +46,37 @@ def _perp(**overrides: object) -> PlaceOrderRequest:
     return PlaceOrderRequest.model_validate(payload)
 
 
+def _held(
+    request: PlaceOrderRequest, *, leverage: Decimal | None = None
+) -> tuple[str, Decimal] | None:
+    return reservation_for(request, base=BASE, quote=QUOTE, leverage=leverage)
+
+
 # --- what an order commits ------------------------------------------------
 
 
 def test_a_buy_commits_quote_currency() -> None:
-    assert reservation_for(_request(), BTCUSDT) == ("USDT", Decimal("500"))
+    assert _held(_request()) == ("USDT", Decimal("500"))
 
 
 def test_a_sell_commits_base_currency() -> None:
-    held = reservation_for(_request(side=Side.SELL), BTCUSDT)
+    held = _held(_request(side=Side.SELL))
     assert held == ("BTC", Decimal("0.01"))
 
 
 def test_a_market_buy_cannot_be_priced() -> None:
     """No price means no notional; the caller decides what to do about it."""
-    assert (
-        reservation_for(
-            _request(type=OrderType.MARKET, price=None), BTCUSDT
-        )
-        is None
-    )
+    assert _held(_request(type=OrderType.MARKET, price=None)) is None
 
 
 def test_a_market_buy_sized_in_quote_commits_that_amount() -> None:
-    held = reservation_for(
+    held = _held(
         _request(
             type=OrderType.MARKET,
             price=None,
             qty=None,
             quote_qty=Decimal("100"),
-        ),
-        BTCUSDT,
+        )
     )
     assert held == ("USDT", Decimal("100"))
 
@@ -88,28 +88,26 @@ def test_a_spot_sell_sized_in_quote_commits_nothing_knowable() -> None:
     the order would be refused on an account that can perfectly well afford
     it, and the base actually going out would never be pre-locked at all.
     """
-    held = reservation_for(
+    held = _held(
         _request(
             side=Side.SELL,
             type=OrderType.MARKET,
             price=None,
             qty=None,
             quote_qty=Decimal("100"),
-        ),
-        BTCUSDT,
+        )
     )
     assert held is None
 
 
 def test_a_perp_market_sized_in_quote_commits_margin() -> None:
-    held = reservation_for(
+    held = _held(
         _perp(
             type=OrderType.MARKET,
             price=None,
             qty=None,
             quote_qty=Decimal("100"),
         ),
-        BTCUSDT,
         leverage=Decimal("10"),
     )
     assert held == ("USDT", Decimal("10"))
@@ -117,15 +115,13 @@ def test_a_perp_market_sized_in_quote_commits_margin() -> None:
 
 def test_a_market_sell_still_commits_base() -> None:
     """Selling commits quantity, which a market order does know."""
-    held = reservation_for(
-        _request(side=Side.SELL, type=OrderType.MARKET, price=None), BTCUSDT
-    )
+    held = _held(_request(side=Side.SELL, type=OrderType.MARKET, price=None))
     assert held == ("BTC", Decimal("0.01"))
 
 
 def test_a_perp_sell_sized_in_quote_still_commits_margin() -> None:
     """Unlike spot, both perp sides commit margin in the settle asset."""
-    held = reservation_for(
+    held = _held(
         _perp(
             side=Side.SELL,
             type=OrderType.MARKET,
@@ -133,36 +129,32 @@ def test_a_perp_sell_sized_in_quote_still_commits_margin() -> None:
             qty=None,
             quote_qty=Decimal("100"),
         ),
-        BTCUSDT,
         leverage=Decimal("10"),
     )
     assert held == ("USDT", Decimal("10"))
 
 
 def test_a_perp_buy_commits_quote_margin_over_leverage() -> None:
-    held = reservation_for(_perp(), BTCUSDT, leverage=Decimal("10"))
+    held = _held(_perp(), leverage=Decimal("10"))
     assert held == ("USDT", Decimal("50"))  # 500 / 10
 
 
 def test_a_perp_sell_also_commits_quote_margin() -> None:
     """Perp sells do not lock base inventory — both sides need margin."""
-    held = reservation_for(
-        _perp(side=Side.SELL), BTCUSDT, leverage=Decimal("5")
-    )
+    held = _held(_perp(side=Side.SELL), leverage=Decimal("5"))
     assert held == ("USDT", Decimal("100"))  # 500 / 5
 
 
 def test_a_perp_without_leverage_defaults_to_one() -> None:
     """Conservative until ensure_leverage has filled the cache."""
-    held = reservation_for(_perp(), BTCUSDT, leverage=None)
+    held = _held(_perp(), leverage=None)
     assert held == ("USDT", Decimal("500"))
 
 
 def test_a_perp_market_order_cannot_be_priced() -> None:
     assert (
-        reservation_for(
+        _held(
             _perp(type=OrderType.MARKET, price=None),
-            BTCUSDT,
             leverage=Decimal("10"),
         )
         is None
@@ -193,10 +185,12 @@ def test_the_scalar_form_answers_exactly_what_the_request_form_does() -> None:
             category=category,
             side=request.side,
             order_type=request.type,
-            base=BTCUSDT.base,
-            quote=BTCUSDT.quote,
+            base=BASE,
+            quote=QUOTE,
             qty=request.qty,
             quote_qty=request.quote_qty,
             price=request.price,
             leverage=leverage,
-        ) == reservation_for(request, BTCUSDT, leverage=leverage)
+        ) == reservation_for(
+            request, base=BASE, quote=QUOTE, leverage=leverage
+        )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from mftik.exchange.bybit.listing import to_listed
 from mftik.exchange.bybit.models import (
     BybitExecution,
     BybitKline,
@@ -17,7 +18,6 @@ from mftik.exchange.bybit.models import (
     BybitWallet,
     BybitWalletCoin,
     category_of,
-    instrument_from_row,
     kline_from_row,
     order_book_from_result,
     status_of,
@@ -468,7 +468,7 @@ def test_a_short_kline_row_is_an_error_not_a_partial_candle() -> None:
 def test_spot_and_contract_instruments_read_the_same_way() -> None:
     """The two books spell the quantity step and the notional floor
     differently, and callers should not have to know which."""
-    spot = instrument_from_row(
+    spot = to_listed(
         {
             "symbol": "BTCUSDT",
             "baseCoin": "BTC",
@@ -482,30 +482,34 @@ def test_spot_and_contract_instruments_read_the_same_way() -> None:
             "priceFilter": {"tickSize": "0.01"},
         }
     )
-    assert spot.lot_size == Decimal("0.000001")
-    assert spot.min_notional == Decimal("1")
+    assert spot is not None
+    assert spot.filters["qty_step"] == Decimal("0.000001")
+    assert spot.filters["min_notional"] == Decimal("1")
 
-    perp = instrument_from_row(
+    perp = to_listed(
         {
             "symbol": "BTCUSDT",
             "baseCoin": "BTC",
             "quoteCoin": "USDT",
+            "contractType": "LinearPerpetual",
             "lotSizeFilter": {
                 "qtyStep": "0.001",
                 "minOrderQty": "0.001",
                 "minNotionalValue": "5",
             },
             "priceFilter": {"tickSize": "0.1"},
-        }
+        },
+        category=Category.PERP,
     )
-    assert perp.lot_size == Decimal("0.001")
-    assert perp.tick_size == Decimal("0.1")
-    assert perp.min_notional == Decimal("5")
+    assert perp is not None
+    assert perp.filters["qty_step"] == Decimal("0.001")
+    assert perp.filters["price_tick"] == Decimal("0.1")
+    assert perp.filters["min_notional"] == Decimal("5")
 
 
 def test_a_zero_step_is_dropped_rather_than_stored() -> None:
     """A zero here would divide."""
-    row = instrument_from_row(
+    row = to_listed(
         {
             "symbol": "X",
             "baseCoin": "X",
@@ -514,10 +518,10 @@ def test_a_zero_step_is_dropped_rather_than_stored() -> None:
             "priceFilter": {"tickSize": ""},
         }
     )
-    assert row.min_qty is None
-    # Left at the model's own default rather than zeroed.
-    assert row.tick_size > 0
-    assert row.lot_size > 0
+    assert row is not None
+    assert row.filters["min_qty"] is None
+    assert row.filters["price_tick"] is None
+    assert row.filters["qty_step"] is None
 
 
 def test_a_rest_book_is_dated_by_the_venue() -> None:

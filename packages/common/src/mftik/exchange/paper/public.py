@@ -6,7 +6,8 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 from mftik.exchange.base import BaseClient
-from mftik.exchange.models import Instrument, OrderBook, Ticker, Trade
+from mftik.exchange.models import OrderBook, Ticker, Trade
+from mftik.exchange.paper.models import PaperListed
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import Category, UniversalTicker
 
@@ -42,7 +43,7 @@ class PaperPublicClient(BaseClient):
 
     # --- request-reply -----------------------------------------------------
 
-    async def fetch_instruments(self) -> list[Instrument]:
+    async def fetch_instruments(self) -> list[PaperListed]:
         self._ensure_connected()
         return self._exchange.list_instruments()
 

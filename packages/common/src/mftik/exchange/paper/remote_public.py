@@ -9,7 +9,8 @@ from typing import Any
 from mftik.broker import Broker
 from mftik.exchange.base import BaseClient
 from mftik.exchange.errors import ExchangeError
-from mftik.exchange.models import Instrument, OrderBook, Ticker, Trade
+from mftik.exchange.models import OrderBook, Ticker, Trade
+from mftik.exchange.paper.models import PaperListed
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol import (
     PAPER_ERROR,
@@ -51,7 +52,7 @@ class PaperRemotePublicClient(BaseClient):
         self._stream_stops.clear()
         self._connected = False
 
-    async def fetch_instruments(self) -> list[Instrument]:
+    async def fetch_instruments(self) -> list[PaperListed]:
         self._ensure_connected()
         reply = await self._rpc(
             PAPER_FETCH_INSTRUMENTS,
@@ -59,7 +60,7 @@ class PaperRemotePublicClient(BaseClient):
         )
         self._raise_if_error(reply)
         rows = reply.payload.get("instruments", [])
-        return [Instrument.model_validate(r) for r in rows]
+        return [PaperListed.model_validate(r) for r in rows]
 
     async def fetch_ticker(self, ticker: UniversalTicker) -> Ticker:
         self._ensure_connected()

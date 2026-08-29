@@ -90,7 +90,8 @@ async def test_only_perpetuals_are_listed() -> None:
     ).fetch_instruments()
 
     assert [i.symbol for i in instruments] == ["BTCUSDT"]
-    assert instruments[0].min_notional == Decimal("100")
+    assert instruments[0].exch_ticker == "BTCUSDT"
+    assert instruments[0].filters["min_notional"] == Decimal("100")
 
 
 async def test_candles_are_asked_for_within_binances_ceiling() -> None:
