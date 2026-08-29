@@ -59,6 +59,10 @@ class Venue:
     categories: frozenset[Category] = field(
         default_factory=lambda: frozenset({Category.SPOT})
     )
+    #: Symbol used to spell out a well-formed ticker in UI hints. Almost
+    #: every venue quotes in USDT; a coin-margined one does not, and a hint
+    #: naming an instrument the venue cannot list is worse than none.
+    example_symbol: str = "BTCUSDT"
     #: Credential algorithms this venue's adapter can sign with.
     api_types: frozenset[str] = field(default_factory=lambda: frozenset({HMAC}))
     #: Whether a passphrase is part of the credential (OKX-style venues).
@@ -84,7 +88,7 @@ class Venue:
     def ticker_example(self) -> str:
         """A well-formed ticker on this venue, for UI hints."""
         example = sorted(self.categories)[0]
-        return str(UniversalTicker(self.name, example, "BTCUSDT"))
+        return str(UniversalTicker(self.name, example, self.example_symbol))
 
     def ticker(self, category: str | None, symbol: str) -> UniversalTicker:
         """Build a ticker on this venue, refusing a category it does not trade.
@@ -164,6 +168,9 @@ BINANCE_DELIVERY = Venue(
     # is the product, not a category of the USD-M perp venue — the ticker is
     # ``BinanceDelivery_Inverse_BTCUSD``, never ``…_Perp_BTCUSD``.
     categories=frozenset({Category.INVERSE}),
+    # COIN-M is quoted in USD, not USDT: ``BTCUSD_PERP`` is the venue's own
+    # spelling and ``BTCUSDT`` is not an instrument dapi lists at all.
+    example_symbol="BTCUSD",
     api_types=frozenset({ED25519}),
     requires_passphrase=False,
 )
