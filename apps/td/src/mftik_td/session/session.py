@@ -22,6 +22,7 @@ from mftik.exchange.models import (
     is_terminal,
 )
 from mftik.exchange.oms import LedgerEntry, LedgerView, OmsView, Position
+from mftik.exchange.reservations import reservation_for
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol import (
     TD_BALANCE_UPDATE,
@@ -47,7 +48,6 @@ from mftik_td.oms import (
     Ledger,
     Oms,
     order_key,
-    reservation_for,
 )
 
 logger = logging.getLogger(__name__)

@@ -65,6 +65,7 @@ from mftik.exchange.models import (
     Side,
     TimeInForce,
 )
+from mftik.exchange.reservations import commitment_for
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     CancelReject,
@@ -579,16 +580,25 @@ class ChaseOrder(Strategy):
     ) -> str | None:
         """Why the ledger cannot fund this order, or None if it can.
 
-        Mirrors what TD pre-locks (``reservation_for``): a sell commits base,
-        a buy commits ``qty * price`` of quote. Asking here rather than
-        letting TD refuse is what turns "not enough money" into one answer
-        instead of one per tick — and ``available`` already nets off the
-        pre-locks of orders this session has in flight.
+        Asking here rather than letting TD refuse is what turns "not enough
+        money" into one answer instead of one per tick — and ``available``
+        already nets off the pre-locks of orders this session has in flight.
+        The commitment itself is TD's arithmetic, called rather than copied,
+        so the two cannot answer differently.
         """
-        if self.paras["side"] is Side.SELL:
-            asset, need = info.base, qty
-        else:
-            asset, need = info.quote, qty * price
+        held = commitment_for(
+            category=info.category,
+            side=self.paras["side"],
+            order_type=OrderType.LIMIT,
+            base=info.base,
+            quote=info.quote,
+            qty=qty,
+            price=price,
+            leverage=self.ledger.leverage(info.ticker, api_id),
+        )
+        if held is None:
+            return None
+        asset, need = held
         have = await self.ledger.available(asset, api_id)
         if have >= need:
             return None

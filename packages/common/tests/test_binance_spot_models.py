@@ -503,6 +503,42 @@ def test_a_short_kline_row_is_refused_rather_than_misread() -> None:
         kline_from_row([1, "2", "3"], "BTCUSDT", "1m")
 
 
+def test_a_coin_margined_row_swaps_which_column_is_which_volume() -> None:
+    """``dapi`` counts contracts in ``[5]`` and puts base volume in ``[7]``.
+
+    A linear read of the same row is silently wrong rather than short, so the
+    two volumes are checked against the bar's own price: quote over base has to
+    land on the close, which it cannot do if the columns were taken the other
+    way round.
+    """
+    row = [
+        1591258320000,
+        "9640.7",
+        "9642.4",
+        "9640.6",
+        "9642.0",
+        "206",
+        1591258379999,
+        "2.13660389",
+        48,
+        "119",
+        "1.23400000",
+        "0",
+    ]
+    kline = kline_from_row(
+        row, "BTCUSD_PERP", "1m", quote_per_contract=Decimal("100")
+    )
+    assert kline.volume == Decimal("2.13660389")
+    assert kline.quote_volume == Decimal("20600")
+    assert kline.quote_volume / kline.volume == pytest.approx(
+        Decimal("9642.0"), rel=Decimal("0.001")
+    )
+
+    linear = kline_from_row(row, "BTCUSD_PERP", "1m")
+    assert linear.volume == Decimal("206")
+    assert linear.quote_volume == Decimal("2.13660389")
+
+
 # --- enum mapping ----------------------------------------------------------
 
 

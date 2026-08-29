@@ -30,6 +30,7 @@ from mftik.exchange.models import (
     Side,
     TimeInForce,
 )
+from mftik.exchange.reservations import commitment_for
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol import (
     OrderReject,
@@ -45,7 +46,6 @@ from mftik.strategy.timer import TimerToken
 _TERMINAL = frozenset({OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED})
 
 _NO_FUNDS = "insufficient balance"
-_ONE = Decimal("1")
 
 
 def _positive_int(paras: dict[str, Any], name: str) -> int:
@@ -388,19 +388,22 @@ class TwapStrategy(Strategy):
     ) -> str | None:
         """Why the ledger cannot fund this IOC, or None if it can.
 
-        Mirrors TD ``reservation_for``: Spot sells lock base and buys lock
-        ``qty * price`` quote; Perp locks ``(qty * price) / leverage`` quote
-        on either side (missing leverage treated as 1x).
+        The commitment is TD's arithmetic, asked here rather than reproduced:
+        a copy that drifted would size against a figure TD does not enforce.
         """
-        if info.category is Category.PERP:
-            lev = self.ledger.leverage(info.ticker, api_id)
-            if lev is None or lev <= 0:
-                lev = _ONE
-            asset, need = info.quote, (qty * price) / lev
-        elif self.paras["side"] is Side.SELL:
-            asset, need = info.base, qty
-        else:
-            asset, need = info.quote, qty * price
+        held = commitment_for(
+            category=info.category,
+            side=self.paras["side"],
+            order_type=OrderType.LIMIT,
+            base=info.base,
+            quote=info.quote,
+            qty=qty,
+            price=price,
+            leverage=self.ledger.leverage(info.ticker, api_id),
+        )
+        if held is None:
+            return None
+        asset, need = held
         have = await self.ledger.available(asset, api_id)
         if have >= need:
             return None

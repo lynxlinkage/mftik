@@ -76,7 +76,11 @@ def avg(quote_total: Decimal, base_total: Decimal) -> Decimal | None:
 
 
 def kline_from_row(
-    row: list[Any], ticker: UniversalTicker, interval: str
+    row: list[Any],
+    ticker: UniversalTicker,
+    interval: str,
+    *,
+    quote_per_contract: Decimal | None = None,
 ) -> Kline:
     """One row of the ``klines`` reply — a positional array, not an object.
 
@@ -90,6 +94,15 @@ def kline_from_row(
         [3] low                [8] trade count
         [4] close              ...
 
+    ``quote_per_contract`` reads a coin-margined (``dapi``) row instead, where
+    those two columns mean each other's thing: ``[5]`` counts contracts, each
+    worth a fixed amount of quote, and ``[7]`` is the base volume. Read as a
+    linear row, a dapi row yields a contract count as a base volume and a base
+    volume as a quote volume — two plausible numbers and no error, which is why
+    the caller states which book it is holding rather than leaving the shape of
+    the row to decide. Named for its unit, because OKX's ``contract_size``
+    counts *base* per contract and the two must not be passed to each other.
+
     A row from this endpoint is always a closed window except the last one,
     which is the bar in progress — and the reply says nothing about which is
     which. It is reported as closed here and the caller drops or keeps the tail
@@ -101,6 +114,12 @@ def kline_from_row(
             f"kline row for {ticker} {interval} has {len(row)} columns, "
             f"expected at least 8: {row!r}"
         )
+    if quote_per_contract is None:
+        volume = Decimal(str(row[5]))
+        quote_volume = Decimal(str(row[7]))
+    else:
+        volume = Decimal(str(row[7]))
+        quote_volume = Decimal(str(row[5])) * quote_per_contract
     return Kline(
         universal_ticker=str(ticker),
         interval=interval,
@@ -109,8 +128,8 @@ def kline_from_row(
         high=Decimal(str(row[2])),
         low=Decimal(str(row[3])),
         close=Decimal(str(row[4])),
-        volume=Decimal(str(row[5])),
-        quote_volume=Decimal(str(row[7])),
+        volume=volume,
+        quote_volume=quote_volume,
         closed=True,
     )
 

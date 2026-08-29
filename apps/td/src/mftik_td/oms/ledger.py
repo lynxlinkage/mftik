@@ -19,18 +19,12 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from typing import TYPE_CHECKING
 
-from mftik.exchange.models import Balance, OrderType, Side
-from mftik.exchange.tickers import Category
-
-if TYPE_CHECKING:
-    from mftik.exchange.models import Instrument, PlaceOrderRequest
+from mftik.exchange.models import Balance
 
 logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
-ONE = Decimal("1")
 
 
 class InsufficientAvailable(Exception):
@@ -43,48 +37,6 @@ class InsufficientAvailable(Exception):
         super().__init__(
             f"{asset}: need {wanted}, available {available}"
         )
-
-
-def reservation_for(
-    request: PlaceOrderRequest,
-    instrument: Instrument,
-    *,
-    leverage: Decimal | None = None,
-) -> tuple[str, Decimal] | None:
-    """What an order commits: ``(asset, amount)``, or None if unknowable.
-
-    Spot: a buy commits quote currency, a sell commits base. A market buy
-    sized in base has no price to size the commitment with, so it returns
-    None — the caller decides whether to let it through unreserved rather
-    than having a guess baked in here. A spot buy sized in ``quote_qty``
-    commits that amount of quote; a spot sell sized that way delivers base
-    we cannot size without a price, so it is unknowable too.
-
-    Perp: both sides commit margin in the quote (settle) asset. The amount is
-    ``notional / leverage``. Missing or non-positive ``leverage`` is treated
-    as ``1`` — conservative until :meth:`Session.ensure_leverage` has filled
-    the cache.
-    """
-    if request.quote_qty is not None:
-        if request.category is Category.PERP:
-            lev = leverage if leverage is not None and leverage > ZERO else ONE
-            return instrument.quote, request.quote_qty / lev
-        if request.side is Side.SELL:
-            # Quote-sized, but base is what leaves. No price, no amount.
-            return None
-        return instrument.quote, request.quote_qty
-    if request.qty is None:
-        return None
-    if request.category is Category.PERP:
-        if request.type is OrderType.MARKET or request.price is None:
-            return None
-        lev = leverage if leverage is not None and leverage > ZERO else ONE
-        return instrument.quote, (request.qty * request.price) / lev
-    if request.side is Side.SELL:
-        return instrument.base, request.qty
-    if request.type is OrderType.MARKET or request.price is None:
-        return None
-    return instrument.quote, request.qty * request.price
 
 
 class Ledger:

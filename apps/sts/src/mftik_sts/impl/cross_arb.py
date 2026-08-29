@@ -54,6 +54,7 @@ from mftik.exchange.models import (
     Side,
     TimeInForce,
 )
+from mftik.exchange.reservations import commitment_for
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     CancelReject,
@@ -713,10 +714,26 @@ class CrossArb(Strategy):
         qty: Decimal,
         price: Decimal,
     ) -> str | None:
-        if side is Side.SELL:
-            asset, need = info.base, qty
-        else:
-            asset, need = info.quote, qty * price
+        """Why this leg's account cannot fund the order, or None if it can.
+
+        The commitment is TD's arithmetic rather than a copy of it: this
+        strategy funds two accounts against one signal, so a figure that
+        disagreed with what TD pre-locks would strand one leg of a filled
+        pair.
+        """
+        held = commitment_for(
+            category=info.category,
+            side=side,
+            order_type=OrderType.LIMIT,
+            base=info.base,
+            quote=info.quote,
+            qty=qty,
+            price=price,
+            leverage=self.ledger.leverage(info.ticker, api_id),
+        )
+        if held is None:
+            return None
+        asset, need = held
         have = await self.ledger.available(asset, api_id)
         if have >= need:
             return None
