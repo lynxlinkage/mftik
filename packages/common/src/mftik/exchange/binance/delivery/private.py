@@ -141,6 +141,9 @@ class BinanceDeliveryPrivateClient(BaseClient):
         # to cancel or query, but the shared interface addresses an order by
         # id alone.
         self._venue_symbols: dict[str, str] = {}
+        # Venue symbols the plane does not carry, so the warning is logged
+        # once per contract rather than once per stream update.
+        self._unlisted: set[str] = set()
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -286,7 +289,8 @@ class BinanceDeliveryPrivateClient(BaseClient):
         self._ensure_connected()
         native = await self._venue_symbol(symbol) if symbol else None
         acks = await self.rest.fetch_open_orders(native)
-        return [await self._inbound(ack) for ack in acks]
+        orders = [await self._inbound_or_skip(ack) for ack in acks]
+        return [order for order in orders if order is not None]
 
     async def fetch_balances(self) -> list[Balance]:
         self._ensure_connected()
@@ -304,7 +308,9 @@ class BinanceDeliveryPrivateClient(BaseClient):
         rows = await self.api.fetch_positions()
         out: list[Position] = []
         for row in rows:
-            ticker = await self._resolve(row.symbol)
+            ticker = await self._resolve_or_skip(row.symbol)
+            if ticker is None:
+                continue
             out.append(row.to_position(ticker))
         return out
 
@@ -330,7 +336,9 @@ class BinanceDeliveryPrivateClient(BaseClient):
         stream = await self.user.subscribe_order_updates()
         try:
             async for update in stream:
-                ticker = await self._resolve(update.symbol)
+                ticker = await self._resolve_or_skip(update.symbol)
+                if ticker is None:
+                    continue
                 order = update.to_order(ticker)
                 self._remember(order, update.symbol)
                 yield order
@@ -343,7 +351,10 @@ class BinanceDeliveryPrivateClient(BaseClient):
             async for update in stream:
                 if not update.is_fill:
                     continue
-                yield update.to_fill(await self._resolve(update.symbol))
+                ticker = await self._resolve_or_skip(update.symbol)
+                if ticker is None:
+                    continue
+                yield update.to_fill(ticker)
         finally:
             stream.close()
 
@@ -361,7 +372,9 @@ class BinanceDeliveryPrivateClient(BaseClient):
         try:
             async for update in stream:
                 for row in update.position_rows():
-                    ticker = await self._resolve(row.symbol)
+                    ticker = await self._resolve_or_skip(row.symbol)
+                    if ticker is None:
+                        continue
                     yield row.to_position(ticker)
         finally:
             stream.close()
@@ -379,12 +392,39 @@ class BinanceDeliveryPrivateClient(BaseClient):
             self.name, native_symbol, category=self.category
         )
 
+    async def _resolve_or_skip(self, native_symbol: str) -> UniversalTicker | None:
+        """The canonical ticker, or ``None`` for a contract we do not carry.
+
+        dapi answers for every contract listed on the venue, dated ones
+        included, where the symbol plane ingests only perpetuals — so a
+        quarterly the account happens to hold is a row nothing can name. It
+        must not abort an account-wide read or tear down a stream that is
+        also carrying the perpetuals we do trade. Reads that were asked about
+        one specific order still use :meth:`_resolve` and raise: there,
+        answering with nothing would be the worse lie.
+        """
+        # Imported here, not at module scope: the exchange barrel is what
+        # ``mftik.symbols`` itself loads, so naming it up top is a cycle.
+        from mftik.symbols import SymbolNotFoundError
+
+        try:
+            return await self._resolve(native_symbol)
+        except SymbolNotFoundError:
+            if native_symbol not in self._unlisted:
+                self._unlisted.add(native_symbol)
+                logger.warning(
+                    "BinanceDelivery symbol plane does not carry %s — "
+                    "skipping its rows",
+                    native_symbol,
+                )
+            return None
+
     async def _symbol_for(self, order_id: str) -> str:
         native = self._venue_symbols.get(order_id)
         if native is not None:
             return native
         for ack in await self.rest.fetch_open_orders():
-            await self._inbound(ack)
+            await self._inbound_or_skip(ack)
         native = self._venue_symbols.get(order_id)
         if native is None:
             raise OrderError(f"no open BinanceDelivery order for id {order_id!r}")
@@ -392,6 +432,17 @@ class BinanceDeliveryPrivateClient(BaseClient):
 
     async def _inbound(self, ack: BinanceDeliveryOrderAck) -> Order:
         ticker = await self._resolve(ack.symbol)
+        order = ack.to_order(ticker)
+        self._remember(order, ack.symbol)
+        return order
+
+    async def _inbound_or_skip(
+        self, ack: BinanceDeliveryOrderAck
+    ) -> Order | None:
+        """:meth:`_inbound` for a listing read, where one bad row is not fatal."""
+        ticker = await self._resolve_or_skip(ack.symbol)
+        if ticker is None:
+            return None
         order = ack.to_order(ticker)
         self._remember(order, ack.symbol)
         return order

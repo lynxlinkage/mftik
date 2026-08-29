@@ -27,8 +27,12 @@ from mftik.exchange.models import (
     TimeInForce,
 )
 from mftik.exchange.tickers import UniversalTicker
+from mftik.symbols import SymbolNotFoundError
 
 NATIVE = "BTCUSD_PERP"
+#: A quarterly. dapi lists and answers for these; the plane never
+#: ingests them, because ``to_listed`` keeps only ``PERPETUAL``.
+DATED = "BTCUSD_260626"
 TICKER = UniversalTicker.parse("BinanceDelivery_Inverse_BTCUSD")
 
 OPEN_ORDER = {
@@ -62,6 +66,17 @@ class StubSymbols:
         return UniversalTicker.of(venue, category, "BTCUSD")
 
 
+class PerpOnlySymbols(StubSymbols):
+    """The real plane's shape: perpetuals are in it and nothing else is."""
+
+    async def symbol_for(
+        self, venue: str, exch_ticker: str, *, category: str
+    ) -> UniversalTicker:
+        if exch_ticker != NATIVE:
+            raise SymbolNotFoundError(f"no such instrument: {exch_ticker}")
+        return UniversalTicker.of(venue, category, "BTCUSD")
+
+
 class StubRest:
     """The one read dapi has no WebSocket method for."""
 
@@ -89,6 +104,7 @@ def _client(
     pem: str,
     *,
     rest: StubRest | None = None,
+    symbols: Any | None = None,
 ) -> BinanceDeliveryPrivateClient:
     api = BinanceDeliveryWsApi(
         api_key=API_KEY,
@@ -100,7 +116,7 @@ def _client(
     return BinanceDeliveryPrivateClient(
         api_key=API_KEY,
         api_secret=pem,
-        symbols=StubSymbols(),
+        symbols=symbols or StubSymbols(),
         api=api,
         user=BinanceDeliveryUserStream(
             start_key=api.start_user_stream,
@@ -441,3 +457,72 @@ async def test_there_is_still_no_leverage_read(
     _key, pem = binance_key
     async with _client(delivery_api, delivery_user, pem) as client:
         assert not hasattr(client, "fetch_leverage")
+
+
+async def test_a_dated_contract_does_not_sink_the_whole_position_read(
+    delivery_api: FakeBinanceDeliveryApi,
+    delivery_user: FakeBinanceDeliveryUser,
+    binance_key,
+) -> None:
+    """One unnameable row is skipped, not raised over the whole account.
+
+    ``account.position`` answers for every contract listed on the venue, and
+    the plane carries only the perpetuals — so an account holding a quarterly
+    would otherwise get no positions at all, including the ones it trades.
+    """
+    _key, pem = binance_key
+    delivery_api.results[m.ACCOUNT_POSITION] = [
+        {"symbol": DATED, "positionAmt": "3", "entryPrice": "40000"},
+        {"symbol": NATIVE, "positionAmt": "-2", "entryPrice": "40000"},
+    ]
+    async with _client(
+        delivery_api, delivery_user, pem, symbols=PerpOnlySymbols()
+    ) as client:
+        positions = await client.fetch_positions()
+
+    assert [p.universal_ticker for p in positions] == [str(TICKER)]
+
+
+async def test_a_dated_contract_is_dropped_from_the_open_order_listing(
+    delivery_api: FakeBinanceDeliveryApi,
+    delivery_user: FakeBinanceDeliveryUser,
+    binance_key,
+) -> None:
+    _key, pem = binance_key
+    rest = StubRest([{**OPEN_ORDER, "symbol": DATED, "orderId": 99}, OPEN_ORDER])
+    async with _client(
+        delivery_api, delivery_user, pem, rest=rest, symbols=PerpOnlySymbols()
+    ) as client:
+        orders = await client.fetch_open_orders()
+
+    assert [o.order_id for o in orders] == ["22542179"]
+
+
+async def test_a_dated_contract_does_not_tear_down_the_order_stream(
+    delivery_api: FakeBinanceDeliveryApi,
+    delivery_user: FakeBinanceDeliveryUser,
+    binance_key,
+) -> None:
+    """A quarterly's update is dropped; the socket keeps carrying the perp.
+
+    Raising here would end the generator, and with it every order update for
+    the instruments the account actually trades.
+    """
+    _key, pem = binance_key
+    async with _client(
+        delivery_api, delivery_user, pem, symbols=PerpOnlySymbols()
+    ) as client:
+        orders = client.stream_orders()
+        pump = asyncio.ensure_future(anext(orders))
+        await asyncio.sleep(0.05)
+
+        await delivery_user.push(
+            {**ORDER_UPDATE, "o": {**ORDER_UPDATE["o"], "s": DATED}}
+        )
+        await asyncio.sleep(0.05)
+        assert not pump.done()
+
+        await delivery_user.push(ORDER_UPDATE)
+        order = await asyncio.wait_for(pump, timeout=2.0)
+
+    assert order.universal_ticker == str(TICKER)
