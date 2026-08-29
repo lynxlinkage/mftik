@@ -733,6 +733,49 @@ class BinanceDeliveryListenKeyExpired(BinanceMessage):
     listen_key: str = Field(default="", alias="listenKey")
 
 
+class BinanceDeliveryMyTrade(BinanceMessage):
+    """One row of ``GET /dapi/v1/userTrades`` — an execution, after the fact.
+
+    ``qty`` is a contract count. ``id`` here is the user stream's ``t``, so a
+    backfilled fill and a streamed one collapse onto one record.
+
+    ``realizedPnl`` is not carried onto the fill. Binance computes it against
+    the account's position basis, not this session's.
+    """
+
+    symbol: str = ""
+    trade_id: int = Field(default=-1, alias="id")
+    order_id: int = Field(default=0, alias="orderId")
+    pair: str = ""
+    side: VenueSide = Side.BUY
+    price: Decimal = Decimal("0")
+    qty: Decimal = Decimal("0")
+    realized_pnl: Decimal = Field(default=Decimal("0"), alias="realizedPnl")
+    margin_asset: str = Field(default="", alias="marginAsset")
+    base_qty: Decimal = Field(default=Decimal("0"), alias="baseQty")
+    commission: Decimal = Decimal("0")
+    commission_asset: str = Field(default="", alias="commissionAsset")
+    position_side: str = Field(default=BOTH, alias="positionSide")
+    buyer: bool = False
+    maker: bool = False
+    time: int = 0
+
+    def to_fill(self, ticker: UniversalTicker) -> Fill:
+        """This execution as the shared model, ``client_order_id`` unset."""
+        return Fill(
+            universal_ticker=str(ticker),
+            fill_id=str(self.trade_id),
+            order_id=str(self.order_id),
+            client_order_id=None,
+            side=self.side,
+            price=self.price,
+            qty=self.qty,
+            fee=self.commission,
+            fee_asset=self.commission_asset,
+            ts=secs(self.time),
+        )
+
+
 __all__ = [
     "BOTH",
     "BinanceDeliveryAccountUpdate",
@@ -747,6 +790,7 @@ __all__ = [
     "BinanceDeliveryLiquidation",
     "BinanceDeliveryLiquidationOrder",
     "BinanceDeliveryMarkPrice",
+    "BinanceDeliveryMyTrade",
     "BinanceDeliveryOrderAck",
     "BinanceDeliveryOrderTradeUpdate",
     "BinanceDeliveryOrderUpdate",

@@ -1,8 +1,10 @@
-"""Binance COIN-M REST — public reads, and the one signed recon list.
+"""Binance COIN-M REST — public reads, open orders, and history.
 
 dapi has no ``exchangeInfo`` or ``klines`` on its WebSocket API, same as
 USD-M. It also has no ``openOrders.status``: recon asks
-``GET /dapi/v1/openOrders`` over signed REST.
+``GET /dapi/v1/openOrders`` over signed REST. History
+(``userTrades`` / ``allOrders``) is here for the same reason as USD-M: a
+batch job should not open an authenticated socket to walk a window.
 
 ``contractSize`` is USD per contract. :meth:`fetch_klines` therefore takes
 ``quote_per_contract`` and will not guess — passing that number to a Gate/OKX
@@ -17,6 +19,7 @@ from typing import Any
 from mftik.exchange.binance.delivery.listing import to_listed
 from mftik.exchange.binance.delivery.models import (
     BinanceDeliveryDepth,
+    BinanceDeliveryMyTrade,
     BinanceDeliveryOrderAck,
 )
 from mftik.exchange.binance.delivery.protocol import BINANCE_DELIVERY_REST_URL
@@ -35,6 +38,9 @@ API_PREFIX = "/dapi/v1"
 #: Most candles ``/dapi/v1/klines`` returns in one call. Asking for more is a
 #: 400, not a truncated answer.
 MAX_KLINES = 1500
+
+#: Most history rows ``userTrades`` / ``allOrders`` return in one call.
+MAX_HISTORY = 1000
 
 
 class BinanceDeliveryRestError(BinanceRestError):
@@ -117,10 +123,11 @@ class BinanceDeliveryPublicRest(BinanceRestTransport):
 
 
 class BinanceDeliveryRest(BinanceSignedRest):
-    """The one signed read dapi has nowhere else: what is open right now.
+    """Signed reads dapi has nowhere else, or wants off a socket.
 
-    Order entry stays on the WebSocket API. History and ``symbolConfig`` are
-    a later slice.
+    ``openOrders`` has no WebSocket method. The history pair does, but a
+    batch job walking a window should not build an authenticated session
+    to ask it. Order entry stays on the WebSocket API.
     """
 
     default_base_url = BINANCE_DELIVERY_REST_URL
@@ -139,6 +146,64 @@ class BinanceDeliveryRest(BinanceSignedRest):
         )
         return [BinanceDeliveryOrderAck.model_validate(row) for row in rows or []]
 
+    async def fetch_my_trades(
+        self,
+        symbol: str,
+        *,
+        from_id: int | None = None,
+        start_time: int | None = None,
+        limit: int = MAX_HISTORY,
+    ) -> list[BinanceDeliveryMyTrade]:
+        """``GET /dapi/v1/userTrades`` — this account's executions, oldest first.
+
+        Per-symbol and paginated by trade id. ``qty`` is contracts. Time
+        opens a walk that has no id to resume from and nothing else.
+        """
+        if from_id is not None and start_time is not None:
+            raise ValueError(
+                "pass from_id or start_time, not both: Binance ignores the "
+                "range when fromId is set"
+            )
+        rows = await self._signed_get(
+            f"{API_PREFIX}/userTrades",
+            {
+                "symbol": symbol,
+                "fromId": from_id,
+                "startTime": start_time,
+                "limit": min(limit, MAX_HISTORY),
+            },
+        )
+        return [BinanceDeliveryMyTrade.model_validate(row) for row in rows or []]
+
+    async def fetch_orders(
+        self,
+        symbol: str,
+        *,
+        from_order_id: int | None = None,
+        start_time: int | None = None,
+        limit: int = MAX_HISTORY,
+    ) -> list[BinanceDeliveryOrderAck]:
+        """``GET /dapi/v1/allOrders`` — every order on ``symbol``, open or not.
+
+        A trade row carries no client order id, so this is the only read
+        that can tie an execution back to the session that placed it.
+        """
+        if from_order_id is not None and start_time is not None:
+            raise ValueError(
+                "pass from_order_id or start_time, not both: Binance ignores "
+                "the range when orderId is set"
+            )
+        rows = await self._signed_get(
+            f"{API_PREFIX}/allOrders",
+            {
+                "symbol": symbol,
+                "orderId": from_order_id,
+                "startTime": start_time,
+                "limit": min(limit, MAX_HISTORY),
+            },
+        )
+        return [BinanceDeliveryOrderAck.model_validate(row) for row in rows or []]
+
 
 def _first(payload: Any) -> dict[str, Any]:
     """One row, whether Binance answered with an object or a one-item array."""
@@ -149,6 +214,7 @@ def _first(payload: Any) -> dict[str, Any]:
 
 __all__ = [
     "API_PREFIX",
+    "MAX_HISTORY",
     "MAX_KLINES",
     "BinanceDeliveryPublicRest",
     "BinanceDeliveryRest",

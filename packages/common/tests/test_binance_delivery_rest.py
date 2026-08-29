@@ -1,4 +1,4 @@
-"""The COIN-M REST client — public reads and the signed open-orders list."""
+"""The COIN-M REST client — public reads, open orders, and history."""
 
 from __future__ import annotations
 
@@ -200,3 +200,110 @@ async def test_the_whole_account_is_asked_for_when_no_symbol_is_known() -> None:
     await rest.fetch_open_orders()
 
     assert "symbol" not in dict(parse_qsl(api.requests[0].url.query.decode()))
+
+
+def _signed(api: FakeApi) -> BinanceDeliveryRest:
+    _key, pem = keypair()
+    return BinanceDeliveryRest(
+        api_key="fk", api_secret=pem, base_url=BASE, client=api.client()
+    )
+
+
+async def test_user_trades_are_contracts_and_paginated_by_id() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/userTrades"] = [
+        {
+            "symbol": "BTCUSD_PERP",
+            "id": 6,
+            "orderId": 28,
+            "pair": "BTCUSD",
+            "side": "SELL",
+            "price": "8800",
+            "qty": "2",
+            "realizedPnl": "0.01",
+            "marginAsset": "BTC",
+            "baseQty": "0.0227",
+            "commission": "0.00000454",
+            "commissionAsset": "BTC",
+            "time": 1590743483586,
+            "positionSide": "BOTH",
+            "buyer": False,
+            "maker": False,
+        }
+    ]
+
+    rows = await _signed(api).fetch_my_trades("BTCUSD_PERP", from_id=6)
+
+    assert api.requests[0].url.path == "/dapi/v1/userTrades"
+    params = dict(parse_qsl(api.requests[0].url.query.decode()))
+    assert params["fromId"] == "6"
+    assert "startTime" not in params
+    fill = rows[0].to_fill(TICKER)
+    assert fill.qty == Decimal("2"), "contracts, not baseQty"
+    assert fill.client_order_id is None
+    assert fill.fee_asset == "BTC"
+    assert fill.fill_id == "6"
+
+
+async def test_user_trades_refuse_id_and_time_together() -> None:
+    api = FakeApi()
+    with pytest.raises(ValueError, match="from_id or start_time"):
+        await _signed(api).fetch_my_trades(
+            "BTCUSD_PERP", from_id=1, start_time=1
+        )
+
+
+async def test_all_orders_refuse_id_and_time_together() -> None:
+    api = FakeApi()
+    with pytest.raises(ValueError, match="from_order_id or start_time"):
+        await _signed(api).fetch_orders(
+            "BTCUSD_PERP", from_order_id=1, start_time=1
+        )
+
+
+async def test_a_first_history_page_may_be_addressed_by_time() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/userTrades"] = []
+
+    await _signed(api).fetch_my_trades("BTCUSD_PERP", start_time=1590743483586)
+
+    params = dict(parse_qsl(api.requests[0].url.query.decode()))
+    assert params["startTime"] == "1590743483586"
+    assert "fromId" not in params
+
+
+async def test_all_orders_page_from_order_id() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/allOrders"] = [
+        {
+            "symbol": "BTCUSD_PERP",
+            "orderId": 11,
+            "clientOrderId": "c-1",
+            "price": "8800",
+            "origQty": "2",
+            "executedQty": "2",
+            "status": "FILLED",
+            "type": "LIMIT",
+            "side": "BUY",
+            "updateTime": 1590743483586,
+        }
+    ]
+
+    rows = await _signed(api).fetch_orders("BTCUSD_PERP", from_order_id=11)
+
+    assert api.requests[0].url.path == "/dapi/v1/allOrders"
+    params = dict(parse_qsl(api.requests[0].url.query.decode()))
+    assert params["orderId"] == "11"
+    order = rows[0].to_order(TICKER)
+    assert order.qty == Decimal("2")
+    assert order.client_order_id == "c-1"
+
+
+async def test_history_asks_are_clamped_to_binances_ceiling() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/userTrades"] = []
+
+    await _signed(api).fetch_my_trades("BTCUSD_PERP", limit=99999)
+
+    params = dict(parse_qsl(api.requests[0].url.query.decode()))
+    assert params["limit"] == "1000"
