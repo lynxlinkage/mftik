@@ -25,6 +25,7 @@ def test_gate_is_registered_as_its_own_venue() -> None:
 def test_registry_lists_every_venue() -> None:
     assert venues.names() == [
         "Binance",
+        "BinanceDelivery",
         "BinanceFuture",
         "Bybit",
         "Gate",
@@ -37,6 +38,7 @@ def test_registry_lists_every_venue() -> None:
     assert not venues.GATE.simulated
     assert not venues.BINANCE.simulated
     assert not venues.BINANCE_FUTURE.simulated
+    assert not venues.BINANCE_DELIVERY.simulated
     assert not venues.BYBIT.simulated
     assert not venues.OKX.simulated
 
@@ -165,6 +167,21 @@ def test_gate_futures_is_its_own_perp_venue() -> None:
     assert str(fut.ticker(None, "BTCUSDT")) == "GateFutures_Perp_BTCUSDT"
     with pytest.raises(venues.UnsupportedCategoryError, match="does not trade"):
         fut.ticker("spot", "BTCUSDT")
+
+
+def test_binance_delivery_is_its_own_perp_venue() -> None:
+    """dapi — separate credential and host from spot and from USD-M."""
+    coin = venues.require("BinanceDelivery")
+    assert coin is venues.BINANCE_DELIVERY
+    assert coin.label == "Binance COIN-M Futures"
+    assert coin.categories == frozenset({Category.PERP})
+    assert coin.api_types == frozenset({venues.ED25519})
+    assert coin.ticker_example == "BinanceDelivery_Perp_BTCUSDT"
+    assert str(coin.ticker(None, "BTCUSD")) == "BinanceDelivery_Perp_BTCUSD"
+    with pytest.raises(venues.UnsupportedCategoryError, match="does not trade"):
+        coin.ticker("spot", "BTCUSD")
+    with pytest.raises(venues.UnsupportedApiTypeError, match="ED25519"):
+        venues.validate_credential("BinanceDelivery", venues.HMAC)
 
 
 def test_a_category_the_venue_does_not_trade_is_refused() -> None:

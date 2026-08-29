@@ -8,7 +8,8 @@
 
 const BRAND: Record<string, string> = {
 	GateFutures: 'Gate',
-	BinanceFuture: 'Binance'
+	BinanceFuture: 'Binance',
+	BinanceDelivery: 'Binance'
 };
 
 export type TickerParts = {

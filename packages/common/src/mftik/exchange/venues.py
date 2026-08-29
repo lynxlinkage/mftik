@@ -157,6 +157,17 @@ BINANCE_FUTURE = Venue(
     requires_passphrase=False,
 )
 
+BINANCE_DELIVERY = Venue(
+    name="BinanceDelivery",
+    label="Binance COIN-M Futures",
+    # dapi, Binance's historical "delivery" plane: coin-margined perps and
+    # dated contracts on their own hosts, wallet and API key. The live book
+    # is mostly perpetuals (``BTCUSD_PERP``); the package name is the API's.
+    categories=frozenset({Category.PERP}),
+    api_types=frozenset({ED25519}),
+    requires_passphrase=False,
+)
+
 BYBIT = Venue(
     name="Bybit",
     label="Bybit",
@@ -189,7 +200,16 @@ OKX = Venue(
 #: test or a plugin that adds an entry here is immediately visible to lookups.
 VENUES: dict[str, Venue] = {
     v.name: v
-    for v in (PAPER, GATE, GATE_FUTURES, BINANCE, BINANCE_FUTURE, BYBIT, OKX)
+    for v in (
+        PAPER,
+        GATE,
+        GATE_FUTURES,
+        BINANCE,
+        BINANCE_FUTURE,
+        BINANCE_DELIVERY,
+        BYBIT,
+        OKX,
+    )
 }
 
 
@@ -285,6 +305,7 @@ def _categories(venue: Venue) -> str:
 
 __all__ = [
     "BINANCE",
+    "BINANCE_DELIVERY",
     "BINANCE_FUTURE",
     "BYBIT",
     "ED25519",

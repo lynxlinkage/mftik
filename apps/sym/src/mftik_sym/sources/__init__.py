@@ -14,6 +14,7 @@ from mftik_sym.sources.base import (
     tick_from_precision,
 )
 from mftik_sym.sources.binance import BinanceSpotInstrumentSource
+from mftik_sym.sources.binance_delivery import BinanceDeliveryInstrumentSource
 from mftik_sym.sources.binance_future import BinanceFutureInstrumentSource
 from mftik_sym.sources.bybit import BybitInstrumentSource
 from mftik_sym.sources.gate import GateSpotInstrumentSource
@@ -32,10 +33,10 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
     independently — see :mod:`mftik_sym.sources.bybit` and
     :mod:`mftik_sym.sources.okx`.
 
-    Binance appears twice too, and for the opposite reason: ``Binance`` and
-    ``BinanceFuture`` are two venues with two credentials and two listing
-    endpoints, so their sources share nothing but a brand. ``Gate`` /
-    ``GateFutures`` is the same split.
+    Binance appears three times, and for the opposite reason: ``Binance``,
+    ``BinanceFuture`` and ``BinanceDelivery`` are three venues with three
+    credentials and three listing endpoints, so their sources share nothing
+    but a brand. ``Gate`` / ``GateFutures`` is the same split.
     """
     return [
         PaperInstrumentSource(broker),
@@ -43,6 +44,7 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
         GateFuturesInstrumentSource(),
         BinanceSpotInstrumentSource(),
         BinanceFutureInstrumentSource(),
+        BinanceDeliveryInstrumentSource(),
         BybitInstrumentSource(category=Category.SPOT),
         BybitInstrumentSource(category=Category.PERP),
         OkxInstrumentSource(category=Category.SPOT),
@@ -51,6 +53,7 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
 
 
 __all__ = [
+    "BinanceDeliveryInstrumentSource",
     "BinanceFutureInstrumentSource",
     "BinanceSpotInstrumentSource",
     "BybitInstrumentSource",
