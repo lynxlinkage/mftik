@@ -1,4 +1,4 @@
-"""Binance COIN-M wire models — public REST reads and market-stream pushes.
+"""Binance COIN-M wire models — public reads, market-stream pushes, trading replies.
 
 These mirror Binance's wire format field-for-field and keep its
 ``BTCUSD_PERP`` spelling. Shared primitives live in
@@ -41,16 +41,64 @@ from mftik.exchange.binance.models import (
 )
 from mftik.exchange.models import (
     AggTrade,
+    Balance,
     BestQuote,
     BookLevel,
+    Fill,
     Kline,
     Liquidation,
+    Order,
     OrderBook,
+    OrderStatus,
+    OrderType,
     Side,
     Ticker,
     Trade,
 )
+from mftik.exchange.oms import Position
 from mftik.exchange.tickers import UniversalTicker
+
+#: dapi order status → ours. ``EXPIRED`` / ``EXPIRED_IN_MATCH`` end an
+#: order without filling it. ``NEW_INSURANCE`` / ``NEW_ADL`` name a
+#: resting insurance or ADL order.
+_STATUS: dict[str, OrderStatus] = {
+    "NEW": OrderStatus.NEW,
+    "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
+    "FILLED": OrderStatus.FILLED,
+    "CANCELED": OrderStatus.CANCELED,
+    "REJECTED": OrderStatus.REJECTED,
+    "EXPIRED": OrderStatus.CANCELED,
+    "EXPIRED_IN_MATCH": OrderStatus.CANCELED,
+    "NEW_INSURANCE": OrderStatus.NEW,
+    "NEW_ADL": OrderStatus.NEW,
+}
+
+_TYPE: dict[str, OrderType] = {
+    "MARKET": OrderType.MARKET,
+    "LIMIT": OrderType.LIMIT,
+    "STOP": OrderType.LIMIT,
+    "STOP_MARKET": OrderType.MARKET,
+    "TAKE_PROFIT": OrderType.LIMIT,
+    "TAKE_PROFIT_MARKET": OrderType.MARKET,
+    "TRAILING_STOP_MARKET": OrderType.MARKET,
+    "LIQUIDATION": OrderType.MARKET,
+}
+
+BOTH = "BOTH"
+
+
+def status_of(value: str | None) -> OrderStatus:
+    """dapi ``status``, or UNKNOWN for one we have no name for."""
+    return _STATUS.get((value or "").upper(), OrderStatus.UNKNOWN)
+
+
+def type_of(value: str | None) -> OrderType:
+    return _TYPE.get((value or "").upper(), OrderType.LIMIT)
+
+
+def _opt(value: Decimal | None) -> Decimal | None:
+    """A number the venue writes as ``0`` where it means "none"."""
+    return value if value else None
 
 
 class BinanceDeliveryDepth(BinanceMessage):
@@ -384,15 +432,328 @@ class BinanceDeliveryLiquidation(BinanceMessage):
         )
 
 
+class BinanceDeliveryOrderAck(BinanceMessage):
+    """The reply to ``order.place`` / ``order.cancel`` / ``order.status``.
+
+    ``origQty`` / ``executedQty`` are contract counts. ``avgPrice`` is
+    published; nothing here divides a quote total by a fill.
+    """
+
+    symbol: str = ""
+    order_id: int = Field(default=0, alias="orderId")
+    client_order_id: str = Field(default="", alias="clientOrderId")
+    price: Decimal = Decimal("0")
+    average_price: Decimal = Field(default=Decimal("0"), alias="avgPrice")
+    orig_qty: Decimal = Field(default=Decimal("0"), alias="origQty")
+    executed_qty: Decimal = Field(default=Decimal("0"), alias="executedQty")
+    cum_quote: Decimal = Field(default=Decimal("0"), alias="cumQuote")
+    status: str = ""
+    time_in_force: str = Field(default="", alias="timeInForce")
+    type: str = "LIMIT"
+    orig_type: str = Field(default="", alias="origType")
+    side: VenueSide = Side.BUY
+    position_side: str = Field(default=BOTH, alias="positionSide")
+    reduce_only: bool = Field(default=False, alias="reduceOnly")
+    close_position: bool = Field(default=False, alias="closePosition")
+    time: int = 0
+    update_time: int = Field(default=0, alias="updateTime")
+
+    @property
+    def order_status(self) -> OrderStatus:
+        return status_of(self.status)
+
+    @property
+    def ts(self) -> float:
+        return secs(self.update_time or self.time)
+
+    def to_order(self, ticker: UniversalTicker) -> Order:
+        return Order(
+            universal_ticker=str(ticker),
+            order_id=str(self.order_id),
+            client_order_id=self.client_order_id or None,
+            side=self.side,
+            type=type_of(self.orig_type or self.type),
+            status=self.order_status,
+            qty=self.orig_qty,
+            price=_opt(self.price),
+            filled_qty=self.executed_qty,
+            avg_price=_opt(self.average_price),
+            ts=self.ts,
+        )
+
+
+class BinanceDeliveryBalance(BinanceMessage):
+    """One row of ``account.balance``.
+
+    ``availableBalance`` is what can still open something; older dapi
+    rows spell the same number ``withdrawAvailable``.
+    """
+
+    account_alias: str = Field(default="", alias="accountAlias")
+    asset: str = ""
+    balance: Decimal = Decimal("0")
+    cross_wallet_balance: Decimal = Field(
+        default=Decimal("0"), alias="crossWalletBalance"
+    )
+    cross_unrealized: Decimal = Field(default=Decimal("0"), alias="crossUnPnl")
+    available_balance: Decimal | None = Field(default=None, alias="availableBalance")
+    withdraw_available: Decimal | None = Field(default=None, alias="withdrawAvailable")
+    max_withdraw: Decimal = Field(default=Decimal("0"), alias="maxWithdrawAmount")
+    update_time: int = Field(default=0, alias="updateTime")
+
+    @property
+    def available(self) -> Decimal:
+        if self.available_balance is not None:
+            return self.available_balance
+        if self.withdraw_available is not None:
+            return self.withdraw_available
+        return Decimal("0")
+
+    def to_balance(self) -> Balance:
+        """``free`` is what can still be committed; ``locked`` is the rest."""
+        locked = self.balance - self.available
+        return Balance(
+            asset=self.asset,
+            free=self.available,
+            locked=locked if locked > 0 else Decimal("0"),
+        )
+
+
+class BinanceDeliveryPosition(BinanceMessage):
+    """One row of ``account.position``.
+
+    ``positionAmt`` is signed and already in contracts. Flat rows are
+    kept: that is how the OMS learns to drop a position it was carrying.
+    """
+
+    symbol: str = ""
+    position_side: str = Field(default=BOTH, alias="positionSide")
+    position_amount: Decimal = Field(default=Decimal("0"), alias="positionAmt")
+    entry_price: Decimal = Field(default=Decimal("0"), alias="entryPrice")
+    break_even_price: Decimal = Field(default=Decimal("0"), alias="breakEvenPrice")
+    mark_price: Decimal = Field(default=Decimal("0"), alias="markPrice")
+    unrealized_profit: Decimal = Field(default=Decimal("0"), alias="unRealizedProfit")
+    liquidation_price: Decimal = Field(default=Decimal("0"), alias="liquidationPrice")
+    leverage: Decimal | None = None
+    margin_asset: str = Field(default="", alias="marginAsset")
+    update_time: int = Field(default=0, alias="updateTime")
+
+    def to_position(self, ticker: UniversalTicker) -> Position:
+        return Position(
+            universal_ticker=str(ticker),
+            qty=self.position_amount,
+            entry_price=_opt(self.entry_price),
+            unrealised_pnl=self.unrealized_profit,
+        )
+
+
+class BinanceDeliveryOrderUpdate(BinanceMessage):
+    """The ``o`` block of ``ORDER_TRADE_UPDATE``.
+
+    ``q`` / ``l`` / ``z`` are contract counts. ``x`` is what happened and
+    ``X`` is where the order now stands.
+    """
+
+    s: str
+    client_order_id: str = Field(default="", alias="c")
+    side: VenueSide = Field(alias="S")
+    order_type: str = Field(default="LIMIT", alias="o")
+    time_in_force: str = Field(default="", alias="f")
+    q: Decimal = Decimal("0")
+    p: Decimal = Decimal("0")
+    average_price: Decimal = Field(default=Decimal("0"), alias="ap")
+    stop_price: Decimal = Field(default=Decimal("0"), alias="sp")
+    exec_type: str = Field(default="", alias="x")
+    order_status: str = Field(default="", alias="X")
+    order_id: int = Field(default=0, alias="i")
+    last_qty: Decimal = Field(default=Decimal("0"), alias="l")
+    filled_qty_total: Decimal = Field(default=Decimal("0"), alias="z")
+    last_price: Decimal = Field(default=Decimal("0"), alias="L")
+    commission_asset: str | None = Field(default=None, alias="N")
+    commission: Decimal = Field(default=Decimal("0"), alias="n")
+    trade_time: int = Field(default=0, alias="T")
+    trade_id: int = Field(default=-1, alias="t")
+    is_maker: bool = Field(default=False, alias="m")
+    reduce_only: bool = Field(default=False, alias="R")
+    position_side: str = Field(default=BOTH, alias="ps")
+    realized_pnl: Decimal = Field(default=Decimal("0"), alias="rp")
+
+    @property
+    def symbol(self) -> str:
+        return self.s
+
+    @property
+    def status(self) -> OrderStatus:
+        return status_of(self.order_status)
+
+    @property
+    def type(self) -> OrderType:
+        return type_of(self.order_type)
+
+    @property
+    def is_fill(self) -> bool:
+        return self.exec_type.upper() == "TRADE" and self.last_qty > 0
+
+
+class BinanceDeliveryOrderTradeUpdate(BinanceMessage):
+    """``ORDER_TRADE_UPDATE`` — the envelope around one order event."""
+
+    e: str = "ORDER_TRADE_UPDATE"
+    event_time: int = Field(default=0, alias="E")
+    transact_time: int = Field(default=0, alias="T")
+    o: BinanceDeliveryOrderUpdate
+
+    @property
+    def symbol(self) -> str:
+        return self.o.s
+
+    @property
+    def client_order_id(self) -> str | None:
+        return self.o.client_order_id or None
+
+    @property
+    def ts(self) -> float:
+        return secs(self.o.trade_time or self.transact_time or self.event_time)
+
+    @property
+    def is_fill(self) -> bool:
+        return self.o.is_fill
+
+    def to_order(self, ticker: UniversalTicker) -> Order:
+        return Order(
+            universal_ticker=str(ticker),
+            order_id=str(self.o.order_id),
+            client_order_id=self.client_order_id,
+            side=self.o.side,
+            type=self.o.type,
+            status=self.o.status,
+            qty=self.o.q,
+            price=_opt(self.o.p),
+            filled_qty=self.o.filled_qty_total,
+            avg_price=_opt(self.o.average_price),
+            ts=self.ts,
+        )
+
+    def to_fill(self, ticker: UniversalTicker) -> Fill:
+        """This update's own execution — ``l``/``L``, never the running totals."""
+        return Fill(
+            universal_ticker=str(ticker),
+            fill_id=str(self.o.trade_id),
+            order_id=str(self.o.order_id),
+            client_order_id=self.client_order_id,
+            side=self.o.side,
+            price=self.o.last_price,
+            qty=self.o.last_qty,
+            fee=self.o.commission,
+            fee_asset=self.o.commission_asset or "",
+            ts=self.ts,
+        )
+
+
+class BinanceDeliveryWalletBalance(BinanceMessage):
+    """One asset inside an ``ACCOUNT_UPDATE``'s ``B`` array."""
+
+    a: str
+    wallet_balance: Decimal = Field(default=Decimal("0"), alias="wb")
+    cross_wallet_balance: Decimal = Field(default=Decimal("0"), alias="cw")
+    balance_change: Decimal = Field(default=Decimal("0"), alias="bc")
+
+    def to_balance(self) -> Balance:
+        locked = self.wallet_balance - self.cross_wallet_balance
+        return Balance(
+            asset=self.a,
+            free=self.cross_wallet_balance,
+            locked=locked if locked > 0 else Decimal("0"),
+        )
+
+
+class BinanceDeliveryPositionRow(BinanceMessage):
+    """One position inside an ``ACCOUNT_UPDATE``'s ``P`` array.
+
+    ``pa`` is signed and already in contracts.
+    """
+
+    s: str
+    position_amount: Decimal = Field(default=Decimal("0"), alias="pa")
+    entry_price: Decimal = Field(default=Decimal("0"), alias="ep")
+    break_even_price: Decimal = Field(default=Decimal("0"), alias="bep")
+    accumulated_realized: Decimal = Field(default=Decimal("0"), alias="cr")
+    unrealized_pnl: Decimal = Field(default=Decimal("0"), alias="up")
+    margin_type: str = Field(default="", alias="mt")
+    isolated_wallet: Decimal = Field(default=Decimal("0"), alias="iw")
+    position_side: str = Field(default=BOTH, alias="ps")
+
+    @property
+    def symbol(self) -> str:
+        return self.s
+
+    def to_position(self, ticker: UniversalTicker) -> Position:
+        return Position(
+            universal_ticker=str(ticker),
+            qty=self.position_amount,
+            entry_price=_opt(self.entry_price),
+            unrealised_pnl=self.unrealized_pnl,
+        )
+
+
+class BinanceDeliveryAccountUpdate(BinanceMessage):
+    """``ACCOUNT_UPDATE`` — the balances and positions one event moved."""
+
+    e: str = "ACCOUNT_UPDATE"
+    event_time: int = Field(default=0, alias="E")
+    transact_time: int = Field(default=0, alias="T")
+    a: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def reason(self) -> str:
+        return str(self.a.get("m") or "")
+
+    @property
+    def ts(self) -> float:
+        return secs(self.transact_time or self.event_time)
+
+    def to_balances(self) -> list[Balance]:
+        return [
+            BinanceDeliveryWalletBalance.model_validate(row).to_balance()
+            for row in self.a.get("B") or []
+        ]
+
+    def position_rows(self) -> list[BinanceDeliveryPositionRow]:
+        return [
+            BinanceDeliveryPositionRow.model_validate(row)
+            for row in self.a.get("P") or []
+        ]
+
+
+class BinanceDeliveryListenKeyExpired(BinanceMessage):
+    """``listenKeyExpired`` — this socket has stopped carrying anything."""
+
+    e: str = "listenKeyExpired"
+    event_time: int = Field(default=0, alias="E")
+    listen_key: str = Field(default="", alias="listenKey")
+
+
 __all__ = [
+    "BOTH",
+    "BinanceDeliveryAccountUpdate",
     "BinanceDeliveryAggTrade",
+    "BinanceDeliveryBalance",
     "BinanceDeliveryBookTicker",
     "BinanceDeliveryDepth",
     "BinanceDeliveryDepthUpdate",
     "BinanceDeliveryKlineEvent",
     "BinanceDeliveryKlineWindow",
+    "BinanceDeliveryListenKeyExpired",
     "BinanceDeliveryLiquidation",
     "BinanceDeliveryLiquidationOrder",
     "BinanceDeliveryMarkPrice",
+    "BinanceDeliveryOrderAck",
+    "BinanceDeliveryOrderTradeUpdate",
+    "BinanceDeliveryOrderUpdate",
+    "BinanceDeliveryPosition",
+    "BinanceDeliveryPositionRow",
     "BinanceDeliveryTicker",
+    "BinanceDeliveryWalletBalance",
+    "status_of",
+    "type_of",
 ]

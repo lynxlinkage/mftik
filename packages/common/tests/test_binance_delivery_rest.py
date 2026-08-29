@@ -1,13 +1,17 @@
-"""The COIN-M public REST client — listing and candles dapi has no socket for."""
+"""The COIN-M REST client — public reads and the signed open-orders list."""
 
 from __future__ import annotations
 
+import base64
 from decimal import Decimal
+from urllib.parse import parse_qsl, unquote
 
 import httpx
 import pytest
+from binance_stub import keypair
 from mftik.exchange.binance.delivery.rest import (
     BinanceDeliveryPublicRest,
+    BinanceDeliveryRest,
     BinanceDeliveryRestError,
 )
 from mftik.exchange.tickers import UniversalTicker
@@ -152,3 +156,47 @@ async def test_a_venue_refusal_keeps_its_code() -> None:
 
     assert caught.value.code == -1121
     assert caught.value.status == 400
+
+
+async def test_open_orders_are_signed_the_way_the_venue_verifies_them() -> None:
+    """Ed25519 over the query string that was sent, key named in the header."""
+    private_key, pem = keypair()
+    api = FakeApi()
+    api.results["/dapi/v1/openOrders"] = []
+
+    rest = BinanceDeliveryRest(
+        api_key="fk",
+        api_secret=pem,
+        base_url=BASE,
+        client=api.client(),
+        recv_window=5000,
+    )
+    await rest.fetch_open_orders("BTCUSD_PERP")
+
+    request = api.requests[0]
+    assert request.headers["X-MBX-APIKEY"] == "fk"
+    assert request.url.path == "/dapi/v1/openOrders"
+
+    query = request.url.query.decode()
+    signed, _, signature = query.rpartition("&signature=")
+    params = dict(parse_qsl(signed))
+    assert params["symbol"] == "BTCUSD_PERP"
+    assert "timestamp" in params
+    assert params["recvWindow"] == "5000"
+
+    private_key.public_key().verify(
+        base64.b64decode(unquote(signature)), signed.encode("utf-8")
+    )
+
+
+async def test_the_whole_account_is_asked_for_when_no_symbol_is_known() -> None:
+    _key, pem = keypair()
+    api = FakeApi()
+    api.results["/dapi/v1/openOrders"] = []
+
+    rest = BinanceDeliveryRest(
+        api_key="fk", api_secret=pem, base_url=BASE, client=api.client()
+    )
+    await rest.fetch_open_orders()
+
+    assert "symbol" not in dict(parse_qsl(api.requests[0].url.query.decode()))

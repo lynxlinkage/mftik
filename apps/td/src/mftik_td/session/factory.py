@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange, venues
+from mftik.exchange.binance.delivery.private import BinanceDeliveryPrivateClient
 from mftik.exchange.binance.future.private import BinanceFuturePrivateClient
 from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mftik.exchange.bybit.private import BybitPrivateClient
@@ -261,6 +262,21 @@ class VenueSessionFactory:
             )
             logger.info(
                 "TD building BinanceFuture session api_id=%s key=%s…",
+                api_id,
+                row.api_key[:6],
+            )
+            return self._session(api_id, private)
+
+        if venue is venues.BINANCE_DELIVERY:
+            # Same Ed25519 PEM shape as the other Binance venues, and a
+            # different key / wallet: coin-margined is its own account.
+            private = BinanceDeliveryPrivateClient(
+                api_key=row.api_key,
+                api_secret=row.api_secret,
+                symbols=self._symbols,
+            )
+            logger.info(
+                "TD building BinanceDelivery session api_id=%s key=%s…",
                 api_id,
                 row.api_key[:6],
             )

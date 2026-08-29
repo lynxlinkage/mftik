@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from mftik.broker import Broker, BrokerConfig
 from mftik.exchange import PaperExchange
+from mftik.exchange.binance.delivery.private import BinanceDeliveryPrivateClient
 from mftik.exchange.binance.future.private import BinanceFuturePrivateClient
 from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mftik.exchange.binance.spot.protocol import BinanceAuthError
@@ -167,6 +168,27 @@ async def test_binance_future_venue_builds_a_futures_client(
     assert isinstance(session.private, BinanceFuturePrivateClient)
     assert session.private.name == "BinanceFuture"
     assert session.private.category is Category.PERP
+    assert hasattr(session.private, "fetch_positions")
+    assert hasattr(session.private, "stream_positions")
+    assert not session.private.connected
+
+
+async def test_binance_delivery_venue_builds_an_inverse_client(
+    broker: Broker,
+) -> None:
+    """Same Ed25519 PEM shape, different wallet; positions come off the listen key."""
+    rows = {
+        13: FakeApiRow(
+            id=13, venue="BinanceDelivery", api_key="dk", api_secret=ED25519_PEM
+        ),
+    }
+    factory = _factory(broker, rows)
+
+    session = await factory.create(13)
+
+    assert isinstance(session.private, BinanceDeliveryPrivateClient)
+    assert session.private.name == "BinanceDelivery"
+    assert session.private.category is Category.INVERSE
     assert hasattr(session.private, "fetch_positions")
     assert hasattr(session.private, "stream_positions")
     assert not session.private.connected

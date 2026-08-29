@@ -2,12 +2,18 @@
 
 from mftik.exchange.base import BaseClient
 from mftik.exchange.binance.delivery import (
+    BINANCE_DELIVERY_PRIVATE_STREAM_URL,
     BINANCE_DELIVERY_REST_URL,
     BINANCE_DELIVERY_STREAM_URL,
+    BINANCE_DELIVERY_WS_API_URL,
+    BinanceDeliveryPrivateClient,
     BinanceDeliveryPublicClient,
     BinanceDeliveryPublicRest,
+    BinanceDeliveryRest,
     BinanceDeliveryRestError,
     BinanceDeliveryStream,
+    BinanceDeliveryUserStream,
+    BinanceDeliveryWsApi,
 )
 from mftik.exchange.binance.future import (
     BINANCE_FUTURE_MARKET_STREAM_URL,
@@ -182,8 +188,10 @@ from mftik.exchange.venues import (
 __all__ = [
     "BINANCE",
     "BINANCE_DELIVERY",
+    "BINANCE_DELIVERY_PRIVATE_STREAM_URL",
     "BINANCE_DELIVERY_REST_URL",
     "BINANCE_DELIVERY_STREAM_URL",
+    "BINANCE_DELIVERY_WS_API_URL",
     "BINANCE_FUTURE",
     "BINANCE_FUTURE_MARKET_STREAM_URL",
     "BINANCE_FUTURE_PRIVATE_STREAM_URL",
@@ -219,10 +227,14 @@ __all__ = [
     "BaseClient",
     "BestQuote",
     "BinanceAuthError",
+    "BinanceDeliveryPrivateClient",
     "BinanceDeliveryPublicClient",
     "BinanceDeliveryPublicRest",
+    "BinanceDeliveryRest",
     "BinanceDeliveryRestError",
     "BinanceDeliveryStream",
+    "BinanceDeliveryUserStream",
+    "BinanceDeliveryWsApi",
     "BinanceExecutionReport",
     "BinanceFutureAccountUpdate",
     "BinanceFutureLiquidation",

@@ -294,6 +294,7 @@ def test_a_known_binance_future_code_becomes_a_venue_code(
 def test_the_futures_venue_is_normalized_at_all() -> None:
     """A venue missing from the table would fall through as unrecognised."""
     assert BINANCE_FUTURE in VENUES
+    assert VENUES["BinanceDelivery"] is VENUES[BINANCE_FUTURE]
 
 
 def test_a_2010_with_a_message_we_do_not_know_stays_a_plain_reject() -> None:

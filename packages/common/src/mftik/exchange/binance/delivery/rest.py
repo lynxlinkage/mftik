@@ -1,8 +1,8 @@
-"""Binance COIN-M public REST — listing, candles, ticker and depth.
+"""Binance COIN-M REST — public reads, and the one signed recon list.
 
 dapi has no ``exchangeInfo`` or ``klines`` on its WebSocket API, same as
-USD-M. This client is the public half only; signed recon reads wait for the
-private connector.
+USD-M. It also has no ``openOrders.status``: recon asks
+``GET /dapi/v1/openOrders`` over signed REST.
 
 ``contractSize`` is USD per contract. :meth:`fetch_klines` therefore takes
 ``quote_per_contract`` and will not guess — passing that number to a Gate/OKX
@@ -15,10 +15,17 @@ from decimal import Decimal
 from typing import Any
 
 from mftik.exchange.binance.delivery.listing import to_listed
-from mftik.exchange.binance.delivery.models import BinanceDeliveryDepth
+from mftik.exchange.binance.delivery.models import (
+    BinanceDeliveryDepth,
+    BinanceDeliveryOrderAck,
+)
 from mftik.exchange.binance.delivery.protocol import BINANCE_DELIVERY_REST_URL
 from mftik.exchange.binance.models import kline_from_row, secs
-from mftik.exchange.binance.rest import BinanceRestError, BinanceRestTransport
+from mftik.exchange.binance.rest import (
+    BinanceRestError,
+    BinanceRestTransport,
+    BinanceSignedRest,
+)
 from mftik.exchange.models import Kline, OrderBook, Ticker
 from mftik.exchange.tickers import UniversalTicker
 from mftik.symbols.listed import ListedInstrument
@@ -109,6 +116,30 @@ class BinanceDeliveryPublicRest(BinanceRestTransport):
         )
 
 
+class BinanceDeliveryRest(BinanceSignedRest):
+    """The one signed read dapi has nowhere else: what is open right now.
+
+    Order entry stays on the WebSocket API. History and ``symbolConfig`` are
+    a later slice.
+    """
+
+    default_base_url = BINANCE_DELIVERY_REST_URL
+    error_type = BinanceDeliveryRestError
+
+    async def fetch_open_orders(
+        self, symbol: str | None = None
+    ) -> list[BinanceDeliveryOrderAck]:
+        """``GET /dapi/v1/openOrders`` — one symbol's resting orders, or all.
+
+        Asking across the account is heavily weighted by Binance (it scans
+        every symbol), so pass a symbol when one is known.
+        """
+        rows = await self._signed_get(
+            f"{API_PREFIX}/openOrders", {"symbol": symbol} if symbol else {}
+        )
+        return [BinanceDeliveryOrderAck.model_validate(row) for row in rows or []]
+
+
 def _first(payload: Any) -> dict[str, Any]:
     """One row, whether Binance answered with an object or a one-item array."""
     if isinstance(payload, list):
@@ -120,5 +151,6 @@ __all__ = [
     "API_PREFIX",
     "MAX_KLINES",
     "BinanceDeliveryPublicRest",
+    "BinanceDeliveryRest",
     "BinanceDeliveryRestError",
 ]

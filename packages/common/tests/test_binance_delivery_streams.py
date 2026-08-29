@@ -6,8 +6,14 @@ split that this market does not have, so the builders are names only.
 
 from __future__ import annotations
 
+import pytest
 from mftik.exchange.binance.delivery import streams as st
-from mftik.exchange.binance.delivery.protocol import BINANCE_DELIVERY_STREAM_URL
+from mftik.exchange.binance.delivery.protocol import (
+    BINANCE_DELIVERY_PRIVATE_STREAM_URL,
+    BINANCE_DELIVERY_STREAM_URL,
+    user_stream_url,
+)
+from mftik.exchange.binance.protocol import BinanceAuthError
 
 
 def test_stream_names_are_lowercase() -> None:
@@ -34,3 +40,14 @@ def test_there_is_no_group_routing() -> None:
 
 def test_the_live_feed_is_the_combined_dstream() -> None:
     assert BINANCE_DELIVERY_STREAM_URL == "wss://dstream.binance.com/stream"
+
+
+def test_the_user_stream_is_the_classic_ws_path() -> None:
+    """dapi was not part of the 2026 ``/private`` split."""
+    assert BINANCE_DELIVERY_PRIVATE_STREAM_URL == "wss://dstream.binance.com/ws"
+    assert user_stream_url("k1") == "wss://dstream.binance.com/ws/k1"
+
+
+def test_a_user_stream_without_a_key_is_refused() -> None:
+    with pytest.raises(BinanceAuthError, match="listen key"):
+        user_stream_url("")

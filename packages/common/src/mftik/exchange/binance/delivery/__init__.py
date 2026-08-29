@@ -1,4 +1,4 @@
-"""Binance COIN-M adapter — listing, public REST, and the live dstream feed.
+"""Binance COIN-M adapter — listing, public REST, dstream, ws-dapi, listen-key.
 
 Registered as the venue ``BinanceDelivery`` and addressed as
 ``BinanceDelivery_Inverse_BTCUSD``. Inverse is the product — not a kind of
@@ -19,8 +19,11 @@ liquidation quantities stay in contracts; only klines use the size, as
 ``quote_per_contract``.
 """
 
+from mftik.exchange.binance.delivery.client import BinanceDeliveryWsApi
 from mftik.exchange.binance.delivery.feed import BinanceDeliveryStream
+from mftik.exchange.binance.delivery.private import BinanceDeliveryPrivateClient
 from mftik.exchange.binance.delivery.protocol import (
+    BINANCE_DELIVERY_PRIVATE_STREAM_URL,
     BINANCE_DELIVERY_REST_TESTNET_URL,
     BINANCE_DELIVERY_REST_URL,
     BINANCE_DELIVERY_STREAM_TESTNET_URL,
@@ -31,18 +34,25 @@ from mftik.exchange.binance.delivery.protocol import (
 from mftik.exchange.binance.delivery.public import BinanceDeliveryPublicClient
 from mftik.exchange.binance.delivery.rest import (
     BinanceDeliveryPublicRest,
+    BinanceDeliveryRest,
     BinanceDeliveryRestError,
 )
+from mftik.exchange.binance.delivery.user import BinanceDeliveryUserStream
 
 __all__ = [
+    "BINANCE_DELIVERY_PRIVATE_STREAM_URL",
     "BINANCE_DELIVERY_REST_TESTNET_URL",
     "BINANCE_DELIVERY_REST_URL",
     "BINANCE_DELIVERY_STREAM_TESTNET_URL",
     "BINANCE_DELIVERY_STREAM_URL",
     "BINANCE_DELIVERY_WS_API_TESTNET_URL",
     "BINANCE_DELIVERY_WS_API_URL",
+    "BinanceDeliveryPrivateClient",
     "BinanceDeliveryPublicClient",
     "BinanceDeliveryPublicRest",
+    "BinanceDeliveryRest",
     "BinanceDeliveryRestError",
     "BinanceDeliveryStream",
+    "BinanceDeliveryUserStream",
+    "BinanceDeliveryWsApi",
 ]
