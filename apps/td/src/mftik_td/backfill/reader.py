@@ -27,6 +27,9 @@ from typing import Any, Protocol, TypeVar
 
 from mftik.exchange import venues
 from mftik.exchange.binance.delivery.rest import MAX_HISTORY as BINANCE_DELIVERY_MAX
+from mftik.exchange.binance.delivery.rest import (
+    MAX_ORDERS as BINANCE_DELIVERY_ORDER_MAX,
+)
 from mftik.exchange.binance.delivery.rest import BinanceDeliveryRest
 from mftik.exchange.binance.future.rest import MAX_HISTORY as BINANCE_FUTURE_MAX
 from mftik.exchange.binance.future.rest import BinanceFutureRest
@@ -324,6 +327,10 @@ class BinanceDeliveryHistoryReader:
     venue = venues.BINANCE_DELIVERY.name
     pages_newest_first = False
     max_page = BINANCE_DELIVERY_MAX
+    #: dapi is the one venue whose two history endpoints cap differently:
+    #: ``allOrders`` takes 100 where ``userTrades`` takes 1000. ``max_page``
+    #: is the trades cap; the order walk is drained against this one instead.
+    max_order_page = BINANCE_DELIVERY_ORDER_MAX
 
     def __init__(self, *, symbols: SymbolClient, rest: BinanceDeliveryRest) -> None:
         self.symbols = symbols
@@ -375,7 +382,7 @@ class BinanceDeliveryHistoryReader:
         since_ts: float | None = None,
         limit: int = DEFAULT_PAGE,
     ) -> HistoryPage[Order]:
-        limit = min(limit, self.max_page)
+        limit = min(limit, self.max_order_page)
         symbol = await self._symbol(ticker)
         rows = await self.rest.fetch_orders(
             symbol,

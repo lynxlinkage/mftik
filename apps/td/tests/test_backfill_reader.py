@@ -347,6 +347,42 @@ async def test_delivery_orders_page_on_the_order_id() -> None:
     assert [o.order_id for o in page.rows] == ["11", "12"]
 
 
+async def test_delivery_orders_cap_lower_than_trades() -> None:
+    """dapi caps ``allOrders`` at 100 where ``userTrades`` takes 1000.
+
+    Asking for the larger number is a ``-1130``, not a truncated page, so one
+    ``max_page`` shared by both walks would fail the order backfill on its
+    first call rather than degrade.
+    """
+    api = FakeApi()
+    api.results["/dapi/v1/allOrders"] = [delivery_order(11)]
+    api.results["/dapi/v1/userTrades"] = [delivery_trade(1)]
+    reader = delivery_reader(api)
+
+    await reader.fetch_orders(DELIVERY)
+    await reader.fetch_my_trades(DELIVERY)
+
+    sent = {r.url.path: r.url.params for r in api.requests}
+    assert sent["/dapi/v1/allOrders"]["limit"] == "100"
+    assert sent["/dapi/v1/userTrades"]["limit"] == "1000"
+
+
+async def test_delivery_a_full_order_page_is_not_read_as_drained() -> None:
+    """The order walk has to be drained against ``allOrders``' own cap.
+
+    dapi answers a 1000-row ask with its 100-row cap, so a walk comparing a
+    full page against ``max_page`` would read 100 rows as a short page and
+    stop — silently leaving the rest of the account's history unread.
+    """
+    api = FakeApi()
+    api.results["/dapi/v1/allOrders"] = [delivery_order(i) for i in range(1, 101)]
+
+    page = await delivery_reader(api).fetch_orders(DELIVERY)
+
+    assert len(page.rows) == 100
+    assert page.next_cursor == "101"
+
+
 async def test_delivery_orders_carry_the_client_order_id_trades_lack() -> None:
     api = FakeApi()
     api.results["/dapi/v1/allOrders"] = [

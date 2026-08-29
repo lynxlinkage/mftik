@@ -39,8 +39,13 @@ API_PREFIX = "/dapi/v1"
 #: 400, not a truncated answer.
 MAX_KLINES = 1500
 
-#: Most history rows ``userTrades`` / ``allOrders`` return in one call.
+#: Most history rows ``userTrades`` returns in one call.
 MAX_HISTORY = 1000
+
+#: ``allOrders`` caps far lower than ``userTrades`` on dapi — 100, where the
+#: USD-M endpoint of the same name takes 1000. Asking for more is a ``-1130``,
+#: not a truncated page, so the walk has to ask for the smaller number.
+MAX_ORDERS = 100
 
 
 class BinanceDeliveryRestError(BinanceRestError):
@@ -181,7 +186,7 @@ class BinanceDeliveryRest(BinanceSignedRest):
         *,
         from_order_id: int | None = None,
         start_time: int | None = None,
-        limit: int = MAX_HISTORY,
+        limit: int = MAX_ORDERS,
     ) -> list[BinanceDeliveryOrderAck]:
         """``GET /dapi/v1/allOrders`` — every order on ``symbol``, open or not.
 
@@ -199,7 +204,7 @@ class BinanceDeliveryRest(BinanceSignedRest):
                 "symbol": symbol,
                 "orderId": from_order_id,
                 "startTime": start_time,
-                "limit": min(limit, MAX_HISTORY),
+                "limit": min(limit, MAX_ORDERS),
             },
         )
         return [BinanceDeliveryOrderAck.model_validate(row) for row in rows or []]
@@ -216,6 +221,7 @@ __all__ = [
     "API_PREFIX",
     "MAX_HISTORY",
     "MAX_KLINES",
+    "MAX_ORDERS",
     "BinanceDeliveryPublicRest",
     "BinanceDeliveryRest",
     "BinanceDeliveryRestError",
