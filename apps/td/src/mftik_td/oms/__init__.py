@@ -3,7 +3,6 @@
 from mftik_td.oms.ledger import (
     InsufficientAvailable,
     Ledger,
-    reservation_for,
 )
 from mftik_td.oms.oms import Oms, order_key
 from mftik_td.oms.view import OmsView, Position
@@ -15,5 +14,4 @@ __all__ = [
     "OmsView",
     "Position",
     "order_key",
-    "reservation_for",
 ]

@@ -122,9 +122,15 @@ class FakeLedger:
     def __init__(self) -> None:
         self.balances: dict[tuple[int, str], Decimal] = {}
         self.default = Decimal("1000000")
+        #: ticker → leverage. Unset reads as 1x, as it does before an
+        #: ``ensure_leverage`` and on every spot book.
+        self.leverages: dict[str, Decimal] = {}
 
     async def available(self, asset: str, api_id=None) -> Decimal:
         return self.balances.get((api_id, asset), self.default)
+
+    def leverage(self, ticker, api_id=None) -> Decimal | None:
+        return self.leverages.get(str(ticker))
 
 
 class FakeSymbols:

@@ -155,9 +155,15 @@ class FakeLedger:
     def __init__(self) -> None:
         self.balances: dict[str, Decimal] = {}
         self.default = Decimal("1000000")
+        #: ticker → leverage. Unset reads as 1x, which is what a spot book
+        #: gets and what a perp gets before ``ensure_leverage``.
+        self.leverages: dict[str, Decimal] = {}
 
     async def available(self, asset: str, api_id=None) -> Decimal:
         return self.balances.get(asset, self.default)
+
+    def leverage(self, ticker, api_id=None) -> Decimal | None:
+        return self.leverages.get(str(ticker))
 
 
 class FakeSession:
