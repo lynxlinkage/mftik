@@ -222,6 +222,26 @@ def test_a_swap_instrument_takes_base_and_quote_from_the_contract_fields() -> No
     assert inst.contract_size == Decimal("0.01")
 
 
+def test_a_null_exp_time_does_not_abort_the_listing() -> None:
+    """OKX publishes JSON null for fields that do not apply."""
+    inst = to_listed(
+        {
+            "instId": "BTC-USDT-SWAP",
+            "baseCcy": None,
+            "quoteCcy": None,
+            "ctValCcy": "BTC",
+            "settleCcy": "USDT",
+            "ctType": "linear",
+            "ctVal": "0.01",
+            "expTime": None,
+            "state": "live",
+        },
+        category=Category.PERP,
+    )
+    assert inst is not None
+    assert inst.exch_ticker == "BTC-USDT-SWAP"
+
+
 def test_a_kline_row_is_ohlc_then_volumes() -> None:
     candle = kline_from_row(
         ["1700000000000", "1", "3", "0.5", "2", "10", "20", "20", "1"],

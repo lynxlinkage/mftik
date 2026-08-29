@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,7 +20,12 @@ from mftik.symbols.listed import (
     PRICE_TICK,
     QTY_STEP,
     ListedInstrument,
+    WireList,
+    WireStr,
+    parse_listing_row,
 )
+
+logger = logging.getLogger(__name__)
 
 PERPETUAL = "PERPETUAL"
 TRADING = "TRADING"
@@ -32,13 +38,13 @@ class BinanceFutureExchangeSymbol(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    symbol: str = ""
-    base_asset: str = Field(default="", alias="baseAsset")
-    quote_asset: str = Field(default="", alias="quoteAsset")
-    margin_asset: str = Field(default="", alias="marginAsset")
-    status: str = ""
-    contract_type: str = Field(default="", alias="contractType")
-    filters: list[dict[str, Any]] = Field(default_factory=list)
+    symbol: WireStr = ""
+    base_asset: WireStr = Field(default="", alias="baseAsset")
+    quote_asset: WireStr = Field(default="", alias="quoteAsset")
+    margin_asset: WireStr = Field(default="", alias="marginAsset")
+    status: WireStr = ""
+    contract_type: WireStr = Field(default="", alias="contractType")
+    filters: WireList = Field(default_factory=list)
 
 
 def to_listed(
@@ -47,17 +53,17 @@ def to_listed(
     venue: str = VENUE,
     category: Category = Category.PERP,
 ) -> ListedInstrument | None:
-    parsed = (
-        row
-        if isinstance(row, BinanceFutureExchangeSymbol)
-        else BinanceFutureExchangeSymbol.model_validate(row)
-    )
+    parsed = parse_listing_row(BinanceFutureExchangeSymbol, row)
+    if parsed is None:
+        logger.warning("%s skipping malformed symbol: %r", venue, row)
+        return None
     if parsed.contract_type != PERPETUAL:
         return None
     base = parsed.base_asset.upper()
     quote = parsed.quote_asset.upper()
     exch_ticker = parsed.symbol
     if not base or not quote or not exch_ticker:
+        logger.warning("%s skipping malformed symbol: %r", venue, row)
         return None
 
     filters = filters_by_type(parsed.filters)

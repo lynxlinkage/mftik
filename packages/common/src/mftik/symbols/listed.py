@@ -6,6 +6,10 @@ plane persists these rows and is the only thing that serves
 
 ``symbol`` is derived from ``base`` + ``quote`` rather than by splitting the
 venue's ticker — the venue tells us both, so no guessing is involved.
+
+This module must not import :mod:`mftik.exchange` at load time. Adapters load
+it while the exchange package is still initializing; a reverse import would
+cycle through the barrel and fail ``from mftik.symbols import SymbolClient``.
 """
 
 from __future__ import annotations
@@ -13,9 +17,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Annotated, Any
 
-from mftik.exchange.tickers import Category, UniversalTicker
+from pydantic import BeforeValidator
+
+if TYPE_CHECKING:
+    from mftik.exchange.tickers import Category, UniversalTicker
 
 #: Filter keys the plane stores. Same strings as ``mftik_db`` ``FilterName``.
 PRICE_TICK = "price_tick"
@@ -28,13 +35,53 @@ MIN_PRICE = "min_price"
 MAX_PRICE = "max_price"
 
 
+def _spot() -> Category:
+    """The default category, resolved on use so the import stays one-way."""
+    from mftik.exchange.tickers import Category
+
+    return Category.SPOT
+
+
+def coerce_wire_str(value: Any) -> str:
+    """JSON null and missing both read as empty, matching ``str(x or "")``."""
+    if value is None:
+        return ""
+    return str(value)
+
+
+def coerce_wire_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def coerce_wire_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+WireStr = Annotated[str, BeforeValidator(coerce_wire_str)]
+WireDict = Annotated[dict[str, Any], BeforeValidator(coerce_wire_dict)]
+WireList = Annotated[list[Any], BeforeValidator(coerce_wire_list)]
+
+
+def parse_listing_row[T](model: type[T], row: dict[str, Any] | T) -> T | None:
+    """Validate a venue row, or ``None`` if the payload is not that shape.
+
+    Callers skip the row rather than aborting the whole listing refresh.
+    """
+    if isinstance(row, model):
+        return row
+    try:
+        return model.model_validate(row)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class ListedInstrument:
     venue: str
     base: str
     quote: str
     exch_ticker: str
-    category: Category = Category.SPOT
+    category: Category = field(default_factory=_spot)
     contract_size: Decimal | None = None
     settlement_asset: str | None = None
     expiry: datetime | None = None
@@ -51,6 +98,8 @@ class ListedInstrument:
     @property
     def ticker(self) -> UniversalTicker:
         """The row's identity in the golden tables."""
+        from mftik.exchange.tickers import UniversalTicker
+
         return UniversalTicker.of(self.venue, self.category, self.symbol)
 
 
@@ -99,6 +148,10 @@ __all__ = [
     "MIN_QTY",
     "PRICE_TICK",
     "QTY_STEP",
+    "WireDict",
+    "WireList",
+    "WireStr",
     "listing_decimal",
+    "parse_listing_row",
     "tick_from_precision",
 ]

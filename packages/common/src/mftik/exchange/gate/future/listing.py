@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -19,27 +20,36 @@ from mftik.symbols.listed import (
     PRICE_TICK,
     QTY_STEP,
     ListedInstrument,
+    WireStr,
     listing_decimal,
+    parse_listing_row,
 )
+
+logger = logging.getLogger(__name__)
 
 VENUE = venues.GATE_FUTURES.name
 
 
 class GateFuturesContract(BaseModel):
-    """One row of ``GET /api/v4/futures/{settle}/contracts``."""
+    """One row of ``GET /api/v4/futures/{settle}/contracts``.
+
+    Size and price fields are untyped: Gate publishes them as JSON numbers
+    (int64 order sizes, decimal strings on some older rows).
+    :func:`~mftik.symbols.listed.listing_decimal` accepts either.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
-    name: str = ""
-    in_delisting: bool = False
+    name: WireStr = ""
+    in_delisting: Any = False
     expire_time: Any = None
-    quanto_multiplier: str | None = None
-    order_size_min: str | None = None
-    order_size_max: str | None = None
-    order_price_round: str | None = None
-    settle: str = ""
-    settle_currency: str = ""
-    settlement_currency: str = ""
+    quanto_multiplier: Any = None
+    order_size_min: Any = None
+    order_size_max: Any = None
+    order_price_round: Any = None
+    settle: WireStr = ""
+    settle_currency: WireStr = ""
+    settlement_currency: WireStr = ""
 
 
 def to_listed(
@@ -48,22 +58,23 @@ def to_listed(
     venue: str = VENUE,
     category: Category = Category.PERP,
 ) -> ListedInstrument | None:
-    parsed = (
-        row
-        if isinstance(row, GateFuturesContract)
-        else GateFuturesContract.model_validate(row)
-    )
+    parsed = parse_listing_row(GateFuturesContract, row)
+    if parsed is None:
+        logger.warning("%s skipping malformed contract: %r", venue, row)
+        return None
     if parsed.in_delisting:
         return None
     if parsed.expire_time not in (None, "", 0, "0"):
         return None
     exch_ticker = parsed.name
     if not exch_ticker or "_" not in exch_ticker:
+        logger.warning("%s skipping malformed contract: %r", venue, row)
         return None
     base, _, quote = exch_ticker.rpartition("_")
     base = base.upper()
     quote = quote.upper()
     if not base or not quote:
+        logger.warning("%s skipping malformed contract: %r", venue, row)
         return None
 
     multiplier = listing_decimal(parsed.quanto_multiplier)
@@ -73,7 +84,10 @@ def to_listed(
     min_size = listing_decimal(parsed.order_size_min)
     max_size = listing_decimal(parsed.order_size_max)
     settle = (
-        parsed.settle or parsed.settle_currency or parsed.settlement_currency or SETTLE
+        parsed.settle
+        or parsed.settle_currency
+        or parsed.settlement_currency
+        or SETTLE
     ).upper()
 
     return ListedInstrument(

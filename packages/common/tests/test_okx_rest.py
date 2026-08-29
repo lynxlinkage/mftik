@@ -197,6 +197,24 @@ async def test_instruments_drop_inverse_swaps_and_anything_not_live(
     assert rows[0].symbol == "BTCUSDT"
 
 
+async def test_instruments_stamp_futures_as_future_not_perp(api: FakeApi) -> None:
+    api.results["/api/v5/public/instruments"] = [
+        {
+            "instId": "BTC-USDT-250926",
+            "instType": "FUTURES",
+            "ctType": "linear",
+            "state": "live",
+            "ctValCcy": "BTC",
+            "settleCcy": "USDT",
+            "ctVal": "0.01",
+            "expTime": "1758844800000",
+        }
+    ]
+    rows = await _public(api).fetch_instruments("FUTURES")
+    assert [row.exch_ticker for row in rows] == ["BTC-USDT-250926"]
+    assert rows[0].category.value == "Future"
+
+
 async def test_fill_history_pages_by_bill_id_and_opens_on_begin(
     api: FakeApi,
 ) -> None:

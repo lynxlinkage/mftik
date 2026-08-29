@@ -276,7 +276,11 @@ class GateSpotPublicRest(_GateRestTransport):
     """
 
     async def fetch_instruments(self) -> list[ListedInstrument]:
-        """``GET /spot/currency_pairs`` — tradeable pairs, mapped for the plane."""
+        """``GET /spot/currency_pairs`` — pairs the plane treats as active.
+
+        Gate's ``tradable`` / ``buyable`` / ``sellable`` all mean the pair
+        can be traded on at least one side; ``untradable`` is dropped here.
+        """
         rows = await self._get("/spot/currency_pairs")
         out: list[ListedInstrument] = []
         for row in rows or []:

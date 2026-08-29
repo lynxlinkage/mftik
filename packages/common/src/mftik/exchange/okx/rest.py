@@ -37,6 +37,7 @@ from mftik.exchange.okx.models import (
     OkxOrderUpdate,
     OkxPosition,
     OkxTicker,
+    category_of,
     kline_from_row,
     order_book_from_result,
 )
@@ -153,7 +154,7 @@ class OkxPublicRest(_OkxRestTransport):
         if inst_id:
             params["instId"] = inst_id
         rows = await self._get(ch.MARKET_INSTRUMENTS, params)
-        category = Category.SPOT if product == SPOT else Category.PERP
+        category = category_of(product, Category.SPOT)
         instruments: list[ListedInstrument] = []
         for row in rows or []:
             listed = to_listed(row, category=category)

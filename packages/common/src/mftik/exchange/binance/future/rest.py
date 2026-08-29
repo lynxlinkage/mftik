@@ -24,7 +24,7 @@ import logging
 from decimal import Decimal
 from typing import Any
 
-from mftik.exchange.binance.future.listing import to_listed
+from mftik.exchange.binance.future.listing import PERPETUAL, TRADING, to_listed
 from mftik.exchange.binance.future.models import (
     BinanceFutureDepth,
     BinanceFutureMyTrade,
@@ -53,15 +53,6 @@ MAX_KLINES = 1500
 
 #: Most history rows ``userTrades`` / ``allOrders`` return in one call.
 MAX_HISTORY = 1000
-
-#: The only ``status`` that means a contract can be traded right now.
-TRADING = "TRADING"
-
-#: The only ``contractType`` this venue trades here. ``exchangeInfo`` also
-#: lists dated futures (``BTCUSDT_250926``), which are different instruments
-#: that canonicalize onto the perpetual's symbol — see
-#: :mod:`mftik_sym.sources.binance_future` for what that would collide with.
-PERPETUAL = "PERPETUAL"
 
 
 class BinanceFutureRestError(BinanceRestError):

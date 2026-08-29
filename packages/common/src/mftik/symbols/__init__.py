@@ -1,8 +1,9 @@
 """Symbol plane access for the trading domains.
 
-``ListedInstrument`` is imported eagerly: adapters map venue rows onto it
-during ``mftik.exchange`` import, which is still initializing the broker.
-The client stays lazy so that cycle does not close.
+``ListedInstrument`` is imported eagerly so adapters can map venue rows onto
+it. It does not import :mod:`mftik.exchange` at load time, so
+``from mftik.symbols import SymbolClient`` does not cycle through the adapter
+barrel. The client stays lazy for the same reason.
 """
 
 from mftik.symbols.listed import ListedInstrument

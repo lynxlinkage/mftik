@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,8 +19,13 @@ from mftik.symbols.listed import (
     PRICE_TICK,
     QTY_STEP,
     ListedInstrument,
+    WireDict,
+    WireStr,
     listing_decimal,
+    parse_listing_row,
 )
+
+logger = logging.getLogger(__name__)
 
 VENUE = venues.BYBIT.name
 TRADING = "Trading"
@@ -31,18 +37,14 @@ class BybitInstrumentRow(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    symbol: str = ""
-    base_coin: str = Field(default="", alias="baseCoin")
-    quote_coin: str = Field(default="", alias="quoteCoin")
-    settle_coin: str = Field(default="", alias="settleCoin")
-    status: str = ""
-    contract_type: str = Field(default="", alias="contractType")
-    lot_size_filter: dict[str, Any] = Field(
-        default_factory=dict, alias="lotSizeFilter"
-    )
-    price_filter: dict[str, Any] = Field(
-        default_factory=dict, alias="priceFilter"
-    )
+    symbol: WireStr = ""
+    base_coin: WireStr = Field(default="", alias="baseCoin")
+    quote_coin: WireStr = Field(default="", alias="quoteCoin")
+    settle_coin: WireStr = Field(default="", alias="settleCoin")
+    status: WireStr = ""
+    contract_type: WireStr = Field(default="", alias="contractType")
+    lot_size_filter: WireDict = Field(default_factory=dict, alias="lotSizeFilter")
+    price_filter: WireDict = Field(default_factory=dict, alias="priceFilter")
 
 
 def to_listed(
@@ -51,15 +53,15 @@ def to_listed(
     venue: str = VENUE,
     category: Category = Category.SPOT,
 ) -> ListedInstrument | None:
-    parsed = (
-        row
-        if isinstance(row, BybitInstrumentRow)
-        else BybitInstrumentRow.model_validate(row)
-    )
+    parsed = parse_listing_row(BybitInstrumentRow, row)
+    if parsed is None:
+        logger.warning("%s skipping malformed instrument: %r", venue, row)
+        return None
     base = parsed.base_coin.upper()
     quote = parsed.quote_coin.upper()
     exch_ticker = parsed.symbol
     if not base or not quote or not exch_ticker:
+        logger.warning("%s skipping malformed instrument: %r", venue, row)
         return None
     if category is Category.PERP and parsed.contract_type not in PERPETUAL:
         return None

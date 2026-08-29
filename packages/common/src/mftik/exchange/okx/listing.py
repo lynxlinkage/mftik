@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Any
 
@@ -19,8 +20,12 @@ from mftik.symbols.listed import (
     PRICE_TICK,
     QTY_STEP,
     ListedInstrument,
+    WireStr,
     listing_decimal,
+    parse_listing_row,
 )
+
+logger = logging.getLogger(__name__)
 
 VENUE = venues.OKX.name
 LIVE = "live"
@@ -32,20 +37,20 @@ class OkxInstrumentRow(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    inst_id: str = Field(default="", alias="instId")
-    base_ccy: str = Field(default="", alias="baseCcy")
-    quote_ccy: str = Field(default="", alias="quoteCcy")
-    ct_val_ccy: str = Field(default="", alias="ctValCcy")
-    settle_ccy: str = Field(default="", alias="settleCcy")
-    ct_type: str = Field(default="", alias="ctType")
-    ct_val: str = Field(default="", alias="ctVal")
-    ct_mult: str = Field(default="", alias="ctMult")
-    state: str = ""
-    exp_time: str = Field(default="", alias="expTime")
-    tick_sz: str = Field(default="", alias="tickSz")
-    lot_sz: str = Field(default="", alias="lotSz")
-    min_sz: str = Field(default="", alias="minSz")
-    max_lmt_sz: str = Field(default="", alias="maxLmtSz")
+    inst_id: WireStr = Field(default="", alias="instId")
+    base_ccy: WireStr = Field(default="", alias="baseCcy")
+    quote_ccy: WireStr = Field(default="", alias="quoteCcy")
+    ct_val_ccy: WireStr = Field(default="", alias="ctValCcy")
+    settle_ccy: WireStr = Field(default="", alias="settleCcy")
+    ct_type: WireStr = Field(default="", alias="ctType")
+    ct_val: WireStr = Field(default="", alias="ctVal")
+    ct_mult: WireStr = Field(default="", alias="ctMult")
+    state: WireStr = ""
+    exp_time: WireStr = Field(default="", alias="expTime")
+    tick_sz: WireStr = Field(default="", alias="tickSz")
+    lot_sz: WireStr = Field(default="", alias="lotSz")
+    min_sz: WireStr = Field(default="", alias="minSz")
+    max_lmt_sz: WireStr = Field(default="", alias="maxLmtSz")
 
 
 def to_listed(
@@ -54,11 +59,10 @@ def to_listed(
     venue: str = VENUE,
     category: Category = Category.SPOT,
 ) -> ListedInstrument | None:
-    parsed = (
-        row
-        if isinstance(row, OkxInstrumentRow)
-        else OkxInstrumentRow.model_validate(row)
-    )
+    parsed = parse_listing_row(OkxInstrumentRow, row)
+    if parsed is None:
+        logger.warning("%s skipping malformed instrument: %r", venue, row)
+        return None
     if category is Category.PERP:
         if parsed.ct_type != LINEAR:
             return None
@@ -69,6 +73,7 @@ def to_listed(
     quote = (parsed.quote_ccy or parsed.settle_ccy).upper()
     exch_ticker = parsed.inst_id
     if not base or not quote or not exch_ticker:
+        logger.warning("%s skipping malformed instrument: %r", venue, row)
         return None
 
     contract_size = _contract_size(parsed, category)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,9 +17,13 @@ from mftik.symbols.listed import (
     PRICE_TICK,
     QTY_STEP,
     ListedInstrument,
+    WireStr,
     listing_decimal,
+    parse_listing_row,
     tick_from_precision,
 )
+
+logger = logging.getLogger(__name__)
 
 VENUE = venues.GATE.name
 TRADABLE = frozenset({"tradable", "buyable", "sellable"})
@@ -29,16 +34,16 @@ class GateSpotCurrencyPair(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    id: str = ""
-    base: str = ""
-    quote: str = ""
-    trade_status: str = ""
-    precision: int | None = None
-    amount_precision: int | None = Field(default=None, alias="amount_precision")
-    min_base_amount: str | None = None
-    max_base_amount: str | None = None
-    min_quote_amount: str | None = None
-    max_quote_amount: str | None = None
+    id: WireStr = ""
+    base: WireStr = ""
+    quote: WireStr = ""
+    trade_status: WireStr = ""
+    precision: Any = None
+    amount_precision: Any = Field(default=None, alias="amount_precision")
+    min_base_amount: Any = None
+    max_base_amount: Any = None
+    min_quote_amount: Any = None
+    max_quote_amount: Any = None
 
 
 def to_listed(
@@ -47,15 +52,15 @@ def to_listed(
     venue: str = VENUE,
     category: Category = Category.SPOT,
 ) -> ListedInstrument | None:
-    parsed = (
-        row
-        if isinstance(row, GateSpotCurrencyPair)
-        else GateSpotCurrencyPair.model_validate(row)
-    )
+    parsed = parse_listing_row(GateSpotCurrencyPair, row)
+    if parsed is None:
+        logger.warning("%s skipping malformed pair: %r", venue, row)
+        return None
     base = parsed.base.upper()
     quote = parsed.quote.upper()
     exch_ticker = parsed.id
     if not base or not quote or not exch_ticker:
+        logger.warning("%s skipping malformed pair: %r", venue, row)
         return None
 
     return ListedInstrument(

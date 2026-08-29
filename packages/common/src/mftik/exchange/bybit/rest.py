@@ -49,6 +49,7 @@ from mftik.exchange.bybit.models import (
     BybitPosition,
     BybitTicker,
     BybitWallet,
+    category_of,
     kline_from_row,
     order_book_from_result,
 )
@@ -188,8 +189,13 @@ class BybitPublicRest(_BybitRestTransport):
         Paginated, and followed to the end. Bybit returns a cursor rather than
         a total, and a caller that read only the first page would silently see
         a fraction of the venue — which for spot is several hundred symbols.
+
+        ``product`` is Bybit's book name. ``linear`` / ``inverse`` both stamp
+        :attr:`~mftik.exchange.tickers.Category.PERP` (dated linear futures
+        are still dropped so they cannot collide with the perpetual).
+        ``option`` stamps :attr:`~mftik.exchange.tickers.Category.OPTION`.
         """
-        category = Category.SPOT if product == SPOT else Category.PERP
+        category = category_of(product, Category.SPOT)
         instruments: list[ListedInstrument] = []
         cursor: str | None = None
         while True:

@@ -524,6 +524,22 @@ def test_a_zero_step_is_dropped_rather_than_stored() -> None:
     assert row.filters["qty_step"] is None
 
 
+def test_a_null_settle_coin_does_not_abort_the_listing() -> None:
+    inst = to_listed(
+        {
+            "symbol": "BTCUSDT",
+            "baseCoin": "BTC",
+            "quoteCoin": "USDT",
+            "settleCoin": None,
+            "status": "Trading",
+            "lotSizeFilter": None,
+            "priceFilter": None,
+        }
+    )
+    assert inst is not None
+    assert inst.settlement_asset is None
+
+
 def test_a_rest_book_is_dated_by_the_venue() -> None:
     book = order_book_from_result(
         {"s": "BTCUSDT", "b": [["1", "2"]], "a": [["3", "4"]], "ts": 1700000000000},
