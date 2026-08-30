@@ -48,3 +48,25 @@ async def test_same_key_on_the_same_venue_is_refused(db) -> None:
     await apis.add(_row(venue="BinanceFuture"))
     with pytest.raises(IntegrityError):
         await apis.add(_row(venue="BinanceFuture"))
+
+
+async def test_lookup_finds_a_non_canonical_venue_spelling(db) -> None:
+    """Rows written by older code may hold e.g. ``binancefuture``.
+
+    Venue identity is case-insensitive everywhere else, so the pre-check
+    has to see such a row — the exact-match constraint will not.
+    """
+    apis = ApiRepository(db)
+    legacy = await apis.add(_row(venue="binancefuture"))
+    await db.flush()
+
+    assert await apis.get_by_venue_and_api_key(
+        "BinanceFuture", "shared-key"
+    ) is legacy
+    assert await apis.get_by_venue_and_api_key(
+        " BinanceFuture ", "shared-key"
+    ) is legacy
+    assert (
+        await apis.get_by_venue_and_api_key("BinanceDelivery", "shared-key")
+        is None
+    )

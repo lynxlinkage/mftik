@@ -22,6 +22,12 @@ class Api(Base):
     Uniqueness is ``(venue, api_key)``, not the key string alone. Binance
     issues one key for spot, USD-M and COIN-M; each plane is its own venue
     and needs its own row, so the same key must be allowed on more than one.
+
+    ``venue`` holds the canonical registry spelling — writers resolve it
+    through ``venues`` first, and 0028 folded the older rows — because the
+    constraint compares it exactly while venue identity is otherwise
+    case-insensitive. :meth:`ApiRepository.get_by_venue_and_api_key` matches
+    case-blind so a stray spelling is still caught before a write.
     """
 
     __tablename__ = "apis"

@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from mftik_api.auth import AuthMiddleware
 from mftik_api.routes import apis as apis_routes
 from mftik_api.routes.apis import router as apis_router
+from mftik_db.models.api import Api
 
 
 @pytest.fixture
@@ -70,5 +71,27 @@ async def test_same_key_on_the_same_venue_is_409(db) -> None:
         )
 
     assert first.status_code == 201, first.text
+    assert again.status_code == 409
+    assert "BinanceFuture" in again.json()["detail"]
+
+
+async def test_key_on_a_legacy_venue_spelling_is_409(db) -> None:
+    """A pre-0028 row may spell the venue differently; it still collides."""
+    async with db() as session:
+        session.add(
+            Api(
+                owner_id=1,
+                venue="binancefuture",
+                api_key="shared-ed25519-key",
+                api_secret="shared-ed25519-secret",
+                type="ED25519",
+            )
+        )
+
+    async with a_client(_app()) as client:
+        again = await client.post(
+            "/apis", json=_body(name="binance um", venue="BinanceFuture")
+        )
+
     assert again.status_code == 409
     assert "BinanceFuture" in again.json()["detail"]
