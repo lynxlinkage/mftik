@@ -279,6 +279,13 @@ class BybitOrderUpdate(BybitMessage):
             price=self.price or None,
             filled_qty=filled,
             avg_price=self.avg_price,
+            # Bybit refuses a crossed post-only on this topic rather than at
+            # the call, so this string is the only thing that says which
+            # refusal it was. ``EC_NoError`` rides along on rows that are not
+            # refusals at all; it says nothing, so it is not carried.
+            reject_reason=(
+                "" if self.reject_reason == "EC_NoError" else self.reject_reason
+            ),
             ts=self.ts,
         )
 

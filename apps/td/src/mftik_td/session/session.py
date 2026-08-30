@@ -42,6 +42,7 @@ from mftik.protocol.reject_codes import describe
 from mftik.symbols import SymbolClient
 from pydantic import BaseModel
 
+from mftik_td.errors import normalize_reason
 from mftik_td.history import HistoryWriter
 from mftik_td.oms import (
     InsufficientAvailable,
@@ -1130,15 +1131,24 @@ class Session:
 
         ``reason`` is what a human reads; ``error_code`` is what a strategy
         branches on. Callers that have an exception should run it through
-        :func:`mftik_td.errors.normalize` rather than picking a code by hand.
+        :func:`mftik_td.errors.normalize` rather than picking a code by hand;
+        one holding a venue's ``rejectReason`` wants
+        :func:`mftik_td.errors.normalize_reason`.
+
+        A crossed post-only logs at ``info``. It is not a fault: post-only
+        exists to be refused when the price crossed, so a strategy quoting
+        passively earns one every time the book moves under it, and a node
+        with an alert matcher on TD warnings would page someone for each.
+        Every other refusal stays a warning.
         """
+        crossed = error_code == RejectCode.VENUE_POST_ONLY_WOULD_CROSS
         await self._td_log(
             (
                 f"order rejected cid={client_order_id or '?'} "
                 f"[{describe(error_code)}]: {reason}"
                 + (f" {universal_ticker}" if universal_ticker else "")
             ),
-            level="warn",
+            level="info" if crossed else "warn",
         )
         await self._publish_global(
             TD_ORDER_REJECT,
@@ -1235,20 +1245,22 @@ class Session:
             )
         if order.status is OrderStatus.REJECTED:
             # A reject that arrived on the order stream, not as a failed call:
-            # the venue said no after accepting the request, and the stream
-            # carries no reason with it. VENUE_REJECTED is the honest code —
-            # the venue refused it, and that is all anyone knows.
+            # the venue said no after accepting the request. Some venues put
+            # their reason on the row — Bybit refuses a crossed post-only only
+            # here, never as an exception — so it goes through the same tables
+            # a raised refusal would. A row that carries no reason still comes
+            # back VENUE_REJECTED, which is what that code means.
             #
             # Recorded before the refusal goes out, because this branch skips
             # ``_publish_order_update`` and would otherwise leave the order in
             # history at whatever state it last reached.
             self._record_order(order)
             await self.publish_order_reject(
-                reason="rejected",
+                reason=order.reject_reason or "rejected",
                 client_order_id=order.client_order_id,
                 order_id=order.order_id,
                 universal_ticker=order.universal_ticker,
-                error_code=RejectCode.VENUE_REJECTED,
+                error_code=normalize_reason(order.reject_reason, venue=self.venue),
             )
         else:
             await self._publish_order_update(order)

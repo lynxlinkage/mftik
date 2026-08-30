@@ -321,6 +321,22 @@ def test_execution_report_converts_a_resting_order() -> None:
     assert order.filled_qty == Decimal("0")
     # Nothing filled, so there is no average to report.
     assert order.avg_price is None
+    # ``r`` is "NONE" on every report that is not a refusal — that means "no
+    # reason", not a reason named NONE.
+    assert order.reject_reason == ""
+
+
+def test_a_rejected_report_carries_binances_own_reason() -> None:
+    order = BinanceExecutionReport.model_validate(
+        {
+            **EXECUTION_REPORT,
+            "x": "REJECTED",
+            "X": "REJECTED",
+            "r": "INSUFFICIENT_BALANCES",
+        }
+    ).to_order(TICKER)
+    assert order.status is OrderStatus.REJECTED
+    assert order.reject_reason == "INSUFFICIENT_BALANCES"
 
 
 def test_a_partial_fill_reports_this_execution_not_the_running_total() -> None:
