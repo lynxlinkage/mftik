@@ -114,10 +114,11 @@ async def create_api(
         apis = ApiRepository(db)
         accounts = AccountRepository(db)
 
-        existing = await apis.get_by_api_key(api_key)
+        existing = await apis.get_by_venue_and_api_key(venue, api_key)
         if existing is not None:
             raise HTTPException(
-                status_code=409, detail=f"api_key already exists: {api_key}"
+                status_code=409,
+                detail=f"api_key already exists on {venue}: {api_key}",
             )
         if await accounts.get_by_name(name) is not None:
             raise HTTPException(

@@ -11,6 +11,7 @@ from mftik_db.models import (
     TdSessionRow,
     User,
 )
+from sqlalchemy import UniqueConstraint
 
 
 def test_metadata_includes_split_session_tables() -> None:
@@ -41,6 +42,14 @@ def test_api_owner_fk_and_type() -> None:
     assert ApiType.ED25519.value == "ED25519"
     assert "venue" in Api.__table__.c
     assert not Api.__table__.c.venue.nullable
+    # Binance's one key trades more than one venue; the pair is unique, the
+    # key string is not.
+    assert not Api.__table__.c.api_key.unique
+    assert {
+        c.name
+        for c in Api.__table__.constraints
+        if isinstance(c, UniqueConstraint)
+    } == {"uq_apis_venue_api_key"}
     owner_col = Api.__table__.c.owner_id
     assert owner_col.foreign_keys
     assert "users.id" in {str(fk.column) for fk in owner_col.foreign_keys}

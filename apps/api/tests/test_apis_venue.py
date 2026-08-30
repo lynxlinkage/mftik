@@ -56,7 +56,7 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     assert by_name["Okx"].requires_passphrase is True
     assert by_name["Okx"].api_types == ["HMAC"]
     # Binance's USD-M plane is a venue of its own, on one category: separate
-    # keys and a separate wallet, so it cannot be a category of "Binance".
+    # hosts and a separate wallet, so it cannot be a category of "Binance".
     assert by_name["BinanceFuture"].categories == ["Perp"]
     assert by_name["BinanceFuture"].api_types == ["ED25519"]
     assert by_name["BinanceFuture"].ticker_example == "BinanceFuture_Perp_BTCUSDT"

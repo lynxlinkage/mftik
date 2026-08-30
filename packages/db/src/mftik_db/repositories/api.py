@@ -13,9 +13,11 @@ class ApiRepository(BaseRepository[Api]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, Api)
 
-    async def get_by_api_key(self, api_key: str) -> Api | None:
+    async def get_by_venue_and_api_key(
+        self, venue: str, api_key: str
+    ) -> Api | None:
         result = await self.session.execute(
-            select(Api).where(Api.api_key == api_key)
+            select(Api).where(Api.venue == venue, Api.api_key == api_key)
         )
         return result.scalar_one_or_none()
 
