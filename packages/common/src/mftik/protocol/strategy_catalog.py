@@ -138,6 +138,8 @@ md:
   - bestquote.Binance_Spot_BTCUSDT
   - bestquote.Gate_Spot_BTCUSDT
 sts:
+  quote_account: binance quoter
+  hedge_account: gate hedger
   quote_ticker: Binance_Spot_BTCUSDT
   hedge_ticker: Gate_Spot_BTCUSDT
   # One or both sides.
