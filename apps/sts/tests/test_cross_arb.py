@@ -27,6 +27,7 @@ from mftik.protocol import (
 )
 from mftik_sts.impl.cross_arb import (
     CrossArb,
+    _OpenLeg,
     edge_bps,
     edge_in_band,
     hedge_raw_price,
@@ -350,6 +351,27 @@ async def test_on_start_fails_if_account_is_missing() -> None:
     assert strat.session.failures
     assert "binance quoter" in strat.session.failures[0]
     assert strat.oms.submitted == []
+
+
+async def test_on_stop_still_runs_when_quote_account_is_missing() -> None:
+    """on_start already failed; on_stop must not KeyError and skip cleanup."""
+    strat = _strategy()
+    strat._open[Side.SELL] = _OpenLeg(
+        cid="resting", side=Side.SELL, price=Decimal("1")
+    )
+    del strat.session.td["binance quoter"]
+    await strat.on_stop()
+    assert strat._stopping
+    assert strat.oms.cancelled == []
+
+
+async def test_on_recon_done_is_quiet_when_an_account_is_missing() -> None:
+    """Recon from the account that *did* attach must not raise."""
+    strat = _strategy()
+    del strat.session.td["binance quoter"]
+    await strat.on_recon_done(ReconDone(session_id="s", api_id=HEDGE_API))
+    assert strat._recon == set()
+    assert not strat._armed
 
 
 async def test_quote_and_hedge_follow_names_not_insert_order() -> None:

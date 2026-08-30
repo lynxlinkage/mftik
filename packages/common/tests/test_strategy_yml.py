@@ -136,6 +136,48 @@ sts: {}
         )
 
 
+def test_rejects_td_keys_that_collide_after_strip() -> None:
+    """The event scan used to compare raw keys; strip happens later."""
+    with pytest.raises(StrategyYamlError, match="duplicate account name"):
+        parse_strategy_yml(
+            """
+td:
+  paper trader:
+  "paper trader ":
+md: []
+sts: {}
+"""
+        )
+
+
+def test_rejects_duplicate_td_keys_when_the_value_is_an_alias() -> None:
+    """``*anchor`` as a value used to desync the key scan."""
+    with pytest.raises(StrategyYamlError, match="duplicate account name"):
+        parse_strategy_yml(
+            """
+td:
+  paper trader: &s {}
+  binance quoter: *s
+  paper trader: *s
+md: []
+sts: {}
+"""
+        )
+
+
+def test_shared_td_settings_via_anchor_are_fine() -> None:
+    spec = parse_strategy_yml(
+        """
+td:
+  paper trader: &s {}
+  binance quoter: *s
+md: []
+sts: {}
+"""
+    )
+    assert set(spec.td) == {"paper trader", "binance quoter"}
+
+
 def test_rejects_unknown_td_settings() -> None:
     with pytest.raises(StrategyYamlError, match="Extra inputs"):
         parse_strategy_yml(

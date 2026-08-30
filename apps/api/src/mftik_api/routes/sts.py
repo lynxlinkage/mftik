@@ -22,6 +22,7 @@ from mftik.protocol import (
     ListSessionsRequest,
     ListSessionsRequestEnvelope,
     ListSessionsResult,
+    StrategySpec,
     StrategyTemplate,
     StrategyYamlError,
     StsEventLogChunk,
@@ -605,6 +606,7 @@ async def deploy(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     created_by = body.created_by if body.created_by is not None else owner
+    _refuse_sts_accounts_missing_from_td(spec)
     td = await _resolve_td(spec.td)
     try:
         result = await deploy_strategy(
@@ -651,6 +653,24 @@ async def deploy(
         md=result["md"],
         status=result["status"],
     )
+
+
+def _refuse_sts_accounts_missing_from_td(spec: StrategySpec) -> None:
+    """Refuse ``quote_account`` / ``hedge_account`` that are not td keys.
+
+    Deploy holds both mappings. A name that is not under ``td:`` is a
+    document error (400), the same class as a bad YAML — not a missing
+    account row (404).
+    """
+    for field in ("quote_account", "hedge_account"):
+        name = spec.sts.get(field)
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if name.strip() not in spec.td:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field} {name!r} is not a key under td",
+            )
 
 
 async def _resolve_td(

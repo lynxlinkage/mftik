@@ -13,6 +13,7 @@ from pydantic import (
     field_validator,
 )
 from yaml.events import (
+    AliasEvent,
     MappingEndEvent,
     MappingStartEvent,
     ScalarEvent,
@@ -180,6 +181,8 @@ class StrategySpec(BaseModel):
             name = key.strip()
             if not name:
                 raise ValueError("td account name must be a non-empty string")
+            if name in out:
+                raise ValueError(f"duplicate account name: {name!r}")
             if settings is None:
                 settings = {}
             if not isinstance(settings, dict):
@@ -246,9 +249,10 @@ def _refuse_duplicate_td_keys(text: str) -> None:
     keys = _td_account_keys(text)
     seen: set[str] = set()
     for key in keys:
-        if key in seen:
-            raise StrategyYamlError(f"td: duplicate account name: {key!r}")
-        seen.add(key)
+        name = key.strip()
+        if name in seen:
+            raise StrategyYamlError(f"td: duplicate account name: {name!r}")
+        seen.add(name)
 
 
 def _td_account_keys(text: str) -> list[str]:
@@ -271,9 +275,9 @@ def _td_account_keys(text: str) -> list[str]:
             depth -= 1
             if depth == 1:
                 expecting_key = True
-        elif isinstance(ev, ScalarEvent) and depth == 1:
+        elif depth == 1 and isinstance(ev, (ScalarEvent, AliasEvent)):
             if expecting_key:
-                if ev.value == "td":
+                if isinstance(ev, ScalarEvent) and ev.value == "td":
                     nxt = i + 1
                     if nxt < len(events) and isinstance(
                         events[nxt], MappingStartEvent
@@ -302,9 +306,10 @@ def _mapping_keys(events: list[Any], start: int) -> list[str]:
             depth -= 1
             if depth == 1:
                 expecting_key = True
-        elif isinstance(ev, ScalarEvent) and depth == 1:
+        elif depth == 1 and isinstance(ev, (ScalarEvent, AliasEvent)):
             if expecting_key:
-                keys.append(str(ev.value))
+                if isinstance(ev, ScalarEvent):
+                    keys.append(str(ev.value))
                 expecting_key = False
             else:
                 expecting_key = True

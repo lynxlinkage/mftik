@@ -338,13 +338,16 @@ class CrossArb(Strategy):
     async def on_stop(self) -> None:
         self._stopping = True
         api_id = self._quote_api_id()
-        for side in list(self._open):
-            await self._cancel_leg(api_id, side)
+        if api_id is not None:
+            for side in list(self._open):
+                await self._cancel_leg(api_id, side)
         await self.log("CrossArb stopped")
 
     async def on_recon_done(self, msg: ReconDone) -> None:
         quote_id = self._quote_api_id()
         hedge_id = self._hedge_api_id()
+        if quote_id is None or hedge_id is None:
+            return
         if msg.api_id not in (quote_id, hedge_id):
             return
         self._recon.add(msg.api_id)
@@ -431,7 +434,7 @@ class CrossArb(Strategy):
             return
         hedge = self._hedge_quote
         api_id = self._quote_api_id()
-        if hedge is None:
+        if hedge is None or api_id is None:
             return
         info = await self._instrument(quote=True)
         if info is None:
@@ -569,13 +572,14 @@ class CrossArb(Strategy):
         # Drop the filled leg and cancel the sibling, if any.
         self._open.pop(quote_side, None)
         quote_api = self._quote_api_id()
-        for side in list(self._open):
-            await self._cancel_leg(quote_api, side)
+        if quote_api is not None:
+            for side in list(self._open):
+                await self._cancel_leg(quote_api, side)
 
         hedge = self._hedge_quote
         hedge_api = self._hedge_api_id()
         info = await self._instrument(quote=False)
-        if hedge is None or info is None:
+        if hedge is None or info is None or hedge_api is None:
             await self.log(
                 f"CrossArb cannot hedge cid={cid} — missing hedge quote "
                 f"or instrument",
@@ -639,7 +643,7 @@ class CrossArb(Strategy):
         self._filled[key] = order.filled_qty
 
         quote_api = self._quote_api_id()
-        if api_id == quote_api:
+        if quote_api is not None and api_id == quote_api:
             side = self._side_of(key)
             if key in self._hedged:
                 await self.log(
@@ -770,7 +774,7 @@ class CrossArb(Strategy):
         hedge = self._hedge_quote
         hedge_api = self._hedge_api_id()
         info = await self._instrument(quote=False)
-        if hedge is None or info is None:
+        if hedge is None or info is None or hedge_api is None:
             return "no hedge quote or instrument"
         hedge_side = Side.BUY if quote_side is Side.SELL else Side.SELL
         raw = hedge_raw_price(hedge_side, hedge, self.paras["x_hi_bps"])
@@ -811,8 +815,21 @@ class CrossArb(Strategy):
             self._hedge_info = info
         return info
 
-    def _quote_api_id(self) -> int:
-        return self.session.td_account(self.paras["quote_account"]).api_id
+    def _named_api_id(self, name: str) -> int | None:
+        """``api_id`` for ``name``, or None if the session never attached it.
 
-    def _hedge_api_id(self) -> int:
-        return self.session.td_account(self.paras["hedge_account"]).api_id
+        ``on_start`` refuses a missing name. ``on_stop`` / ``on_recon_done``
+        still run after that refusal, and must not KeyError — a swallowed
+        ``on_stop`` skips the cancel pass, and a ReconDone from an account
+        that *did* attach would log ``on_recon_done failed`` on every tick.
+        """
+        if self.session is None or not name:
+            return None
+        ref = self.session.td.get(name)
+        return None if ref is None else ref.api_id
+
+    def _quote_api_id(self) -> int | None:
+        return self._named_api_id(self.paras.get("quote_account", ""))
+
+    def _hedge_api_id(self) -> int | None:
+        return self._named_api_id(self.paras.get("hedge_account", ""))
