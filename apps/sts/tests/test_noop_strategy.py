@@ -91,6 +91,12 @@ class FakeSession:
         if failed:
             self.failures.append(reason)
 
+    def td_sole(self) -> int:
+        ids = list(self.td_api_ids)
+        if len(ids) != 1:
+            raise RuntimeError(f"needs exactly one td account, got {ids}")
+        return ids[0]
+
 
 def _strategy(**paras) -> NoopStrategy:
     """A strategy wired to fakes, bypassing the real session plumbing."""

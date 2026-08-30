@@ -34,7 +34,16 @@ async def broker() -> Broker:
 def _ledger(broker: Broker, *api_ids: int) -> StrategyLedger:
     """A ledger bound to a strategy whose session attaches ``api_ids``."""
     ledger = StrategyLedger()
-    session = SimpleNamespace(broker=broker, td_api_ids=list(api_ids))
+
+    def td_sole() -> int:
+        ids = list(api_ids)
+        if len(ids) != 1:
+            raise RuntimeError(f"needs exactly one td account, got {ids}")
+        return ids[0]
+
+    session = SimpleNamespace(
+        broker=broker, td_api_ids=list(api_ids), td_sole=td_sole
+    )
     ledger.bind(SimpleNamespace(session=session))
     return ledger
 

@@ -138,8 +138,7 @@ class StrategyOms:
         """Pick the account: the one asked for, or the only one attached."""
         if api_id is not None:
             return api_id
-        attached = self.api_ids
-        return attached[0] if len(attached) == 1 else None
+        return self._require_session().td_sole()
 
     def _session_broker(self):
         return self._require_session().broker

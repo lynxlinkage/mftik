@@ -5,7 +5,7 @@ import asyncio
 import fakeredis.aioredis
 import pytest
 from mftik.broker import Broker, BrokerConfig
-from mftik.protocol import StsCreateSessionRequest
+from mftik.protocol import StsCreateSessionRequest, TdAccountRef
 from mftik.strategy import Strategy
 from mftik_sts.impl import register, resolve
 from mftik_sts.session import SessionManager
@@ -117,6 +117,7 @@ async def test_default_strategy_is_noop(broker: Broker) -> None:
             session_id="noop-1",
             created_by=1,
             strategy="noop",
+            td={"paper": TdAccountRef(api_id=1)},
         )
     )
     assert result.strategy == "noop"

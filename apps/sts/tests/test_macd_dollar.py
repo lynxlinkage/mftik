@@ -101,6 +101,12 @@ class FakeSession:
         if failed:
             self.failures.append(reason)
 
+    def td_sole(self) -> int:
+        ids = list(self.td_api_ids)
+        if len(ids) != 1:
+            raise RuntimeError(f"needs exactly one td account, got {ids}")
+        return ids[0]
+
 
 class FakeTape:
     def __init__(self, slice_: TapeSlice | None = None) -> None:

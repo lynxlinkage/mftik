@@ -9,7 +9,7 @@ import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.envapply import ApplySpec, apply_packages
 from mftik.environment import EnvStamp, NodeEnv
-from mftik.protocol import StsCreateSessionRequest
+from mftik.protocol import StsCreateSessionRequest, TdAccountRef
 from mftik.registry import RegistryStore
 from mftik_sts.impl.noop import NoopStrategy
 from mftik_sts.runtime_env import (
@@ -192,6 +192,7 @@ async def test_bundled_noop_on_a_bare_node(
             session_id="noop-1",
             created_by=1,
             strategy="noop",
+            td={"paper": TdAccountRef(api_id=1)},
         )
     )
     assert result.strategy == "noop"
