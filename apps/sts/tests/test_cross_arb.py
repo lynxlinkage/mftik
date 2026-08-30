@@ -21,9 +21,13 @@ from mftik.protocol import (
     ReconDone,
     RejectCode,
     SymbolInfo,
+    TdAccountRef,
+    get_template,
+    parse_strategy_yml,
 )
 from mftik_sts.impl.cross_arb import (
     CrossArb,
+    _OpenLeg,
     edge_bps,
     edge_in_band,
     hedge_raw_price,
@@ -146,7 +150,10 @@ class FakeSymbols:
 
 class FakeSession:
     def __init__(self) -> None:
-        self.td_api_ids = [QUOTE_API, HEDGE_API]
+        self.td = {
+            "binance quoter": TdAccountRef(api_id=QUOTE_API),
+            "gate hedger": TdAccountRef(api_id=HEDGE_API),
+        }
         self.md_ids = [
             f"bestquote.{QUOTE_TICKER}",
             f"bestquote.{HEDGE_TICKER}",
@@ -154,6 +161,13 @@ class FakeSession:
         self.exits: list[str] = []
         self.failures: list[str] = []
         self.symbols = FakeSymbols()
+
+    @property
+    def td_api_ids(self) -> list[int]:
+        return [ref.api_id for ref in self.td.values()]
+
+    def td_account(self, name: str) -> TdAccountRef:
+        return self.td[name]
 
     def request_exit(self, reason: str, *, failed: bool = False) -> None:
         self.exits.append(reason)
@@ -169,6 +183,8 @@ def _paras(**overrides) -> dict:
         "qty": Decimal("0.001"),
         "x_lo_bps": Decimal("5"),
         "x_hi_bps": Decimal("15"),
+        "quote_account": "binance quoter",
+        "hedge_account": "gate hedger",
     }
     payload.update(overrides)
     return payload
@@ -305,7 +321,69 @@ def test_on_initialized_rejects_missing_tickers() -> None:
         CrossArb.on_initialized({})
 
 
+def test_on_initialized_requires_distinct_accounts() -> None:
+    with pytest.raises(ValueError, match="quote_account is required"):
+        CrossArb.on_initialized(_paras(quote_account=""))
+    with pytest.raises(ValueError, match="hedge_account is required"):
+        CrossArb.on_initialized(_paras(hedge_account=""))
+    with pytest.raises(ValueError, match="must be different"):
+        CrossArb.on_initialized(
+            _paras(quote_account="same", hedge_account="same")
+        )
+
+
+def test_catalog_quote_and_hedge_accounts_are_td_keys() -> None:
+    template = get_template("CrossArb")
+    assert template is not None
+    spec = parse_strategy_yml(template.yaml)
+    assert spec.sts["quote_account"] in spec.td
+    assert spec.sts["hedge_account"] in spec.td
+    assert spec.sts["quote_account"] != spec.sts["hedge_account"]
+
+
 # --- arming / quoting ------------------------------------------------------
+
+
+async def test_on_start_fails_if_account_is_missing() -> None:
+    strat = _strategy()
+    del strat.session.td["binance quoter"]
+    await strat.on_start()
+    assert strat.session.failures
+    assert "binance quoter" in strat.session.failures[0]
+    assert strat.oms.submitted == []
+
+
+async def test_on_stop_still_runs_when_quote_account_is_missing() -> None:
+    """on_start already failed; on_stop must not KeyError and skip cleanup."""
+    strat = _strategy()
+    strat._open[Side.SELL] = _OpenLeg(
+        cid="resting", side=Side.SELL, price=Decimal("1")
+    )
+    del strat.session.td["binance quoter"]
+    await strat.on_stop()
+    assert strat._stopping
+    assert strat.oms.cancelled == []
+
+
+async def test_on_recon_done_is_quiet_when_an_account_is_missing() -> None:
+    """Recon from the account that *did* attach must not raise."""
+    strat = _strategy()
+    del strat.session.td["binance quoter"]
+    await strat.on_recon_done(ReconDone(session_id="s", api_id=HEDGE_API))
+    assert strat._recon == set()
+    assert not strat._armed
+
+
+async def test_quote_and_hedge_follow_names_not_insert_order() -> None:
+    strat = _strategy()
+    strat.session.td = {
+        "gate hedger": TdAccountRef(api_id=HEDGE_API),
+        "binance quoter": TdAccountRef(api_id=QUOTE_API),
+    }
+    await strat.on_start()
+    assert strat._quote_api_id() == QUOTE_API
+    assert strat._hedge_api_id() == HEDGE_API
+    assert not strat.session.failures
 
 
 async def test_needs_both_recons_before_quoting() -> None:

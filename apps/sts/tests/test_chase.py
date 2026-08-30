@@ -182,6 +182,12 @@ class FakeSession:
         if failed:
             self.failures.append(reason)
 
+    def td_sole(self) -> int:
+        ids = list(self.td_api_ids)
+        if len(ids) != 1:
+            raise RuntimeError(f"needs exactly one td account, got {ids}")
+        return ids[0]
+
     async def remember(self, key: str, value: str) -> None:
         self.remembered[key] = value
 
@@ -644,6 +650,15 @@ async def test_no_td_account_exits() -> None:
     strat.session.td_api_ids = []
     await strat._on_tick()
     assert strat.session.exits == ["chase_no_td"]
+
+
+@pytest.mark.asyncio
+async def test_two_td_accounts_fail_on_start() -> None:
+    strat = _strategy()
+    strat.session.td_api_ids = [7, 8]
+    await strat.on_start()
+    assert strat.session.failures
+    assert "exactly one" in strat.session.failures[0]
 
 
 @pytest.mark.asyncio

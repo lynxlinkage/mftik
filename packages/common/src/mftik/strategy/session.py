@@ -12,10 +12,12 @@ session without this package importing the app that runs it.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from mftik.broker import Broker
+    from mftik.protocol.strategy_yml import TdAccountRef
     from mftik.strategy.eventlog import EventLog
     from mftik.symbols import SymbolClient
 
@@ -39,6 +41,17 @@ class SessionView(Protocol):
     #: strategy never calls this; the accessors it does call record through
     #: :func:`mftik.strategy.eventlog.session_log`.
     event_log: EventLog
+    #: Account name → resolved attach. ``td_api_ids`` is derived from this.
+    td: Mapping[str, TdAccountRef]
+    td_api_ids: list[int]
+
+    def td_account(self, name: str) -> TdAccountRef:
+        """The attach named ``name``, or KeyError."""
+        ...
+
+    def td_sole(self) -> int:
+        """The only attached api_id. Raises if the session has not exactly one."""
+        ...
 
     def request_exit(
         self, reason: str = "strategy_exit", *, failed: bool = False

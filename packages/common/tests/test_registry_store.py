@@ -15,7 +15,7 @@ class Tiny(Strategy):
     name = "tiny"
 """
 
-_YML = "td: []\nmd: []\nsts:\n  qty: 1\n"
+_YML = "td: {}\nmd: []\nsts:\n  qty: 1\n"
 
 
 def test_add_writes_source(tmp_path) -> None:

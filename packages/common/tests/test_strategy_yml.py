@@ -1,8 +1,9 @@
-"""strategy.yml parse / dump tests.
+"""strategy.yml parse tests.
 
 The document describes *where* a strategy runs (td / md) and *how* it is
 configured (sts) — but not *which* strategy. That is chosen at deploy time, so
 the two shapes that used to carry it are now errors with a message saying so.
+``td`` is account name → settings, not a list.
 """
 
 from __future__ import annotations
@@ -10,18 +11,23 @@ from __future__ import annotations
 import pytest
 from mftik.protocol import (
     StrategyYamlError,
+    TdAccountRef,
+    TdSettings,
     all_templates,
+    attached_api_ids,
     default_template,
-    dump_strategy_yml,
+    dump_td,
     get_template,
+    load_td,
     parse_strategy_yml,
     strategy_types,
+    td_api_ids_of,
 )
 
 
 def test_parse_default_template() -> None:
     spec = parse_strategy_yml(default_template().yaml)
-    assert spec.td == ["paper trader"]
+    assert spec.td == {"paper trader": TdSettings()}
     assert spec.md == ["orderbook.Paper_Spot_BTCUSDT"]
     # No mid: the strategy reads one from the order book feed above.
     assert "mid" not in spec.sts
@@ -65,42 +71,185 @@ def test_bundled_templates_are_marked_bundled() -> None:
         assert template.source == "bundled"
 
 
-def test_roundtrip_dump() -> None:
-    spec = parse_strategy_yml(default_template().yaml)
-    again = parse_strategy_yml(dump_strategy_yml(spec))
-    assert again == spec
+def test_null_settings_are_empty() -> None:
+    spec = parse_strategy_yml(
+        """
+td:
+  paper trader:
+md: []
+sts: {}
+"""
+    )
+    assert spec.td == {"paper trader": TdSettings()}
+
+
+def test_rejects_a_td_list() -> None:
+    with pytest.raises(StrategyYamlError, match="mapping of account name") as caught:
+        parse_strategy_yml(
+            """
+td: [paper trader]
+md: []
+sts: {}
+"""
+        )
+    message = str(caught.value)
+    assert message.startswith("td: ")
+    assert "td: [paper trader]" in message
+    assert "paper trader:" in message
+
+
+def test_rejects_a_non_string_td_key() -> None:
+    with pytest.raises(StrategyYamlError, match="must be a string") as caught:
+        parse_strategy_yml(
+            """
+td:
+  1234:
+md: []
+sts: {}
+"""
+        )
+    assert "1234" in str(caught.value)
+
+
+def test_rejects_an_empty_td_key() -> None:
+    with pytest.raises(StrategyYamlError, match="non-empty"):
+        parse_strategy_yml(
+            """
+td:
+  "  ":
+md: []
+sts: {}
+"""
+        )
+
+
+def test_rejects_duplicate_td_keys() -> None:
+    with pytest.raises(StrategyYamlError, match="duplicate account name"):
+        parse_strategy_yml(
+            """
+td:
+  paper trader:
+  paper trader:
+md: []
+sts: {}
+"""
+        )
+
+
+def test_rejects_td_keys_that_collide_after_strip() -> None:
+    """The event scan used to compare raw keys; strip happens later."""
+    with pytest.raises(StrategyYamlError, match="duplicate account name"):
+        parse_strategy_yml(
+            """
+td:
+  paper trader:
+  "paper trader ":
+md: []
+sts: {}
+"""
+        )
+
+
+def test_rejects_duplicate_td_keys_when_the_value_is_an_alias() -> None:
+    """``*anchor`` as a value used to desync the key scan."""
+    with pytest.raises(StrategyYamlError, match="duplicate account name"):
+        parse_strategy_yml(
+            """
+td:
+  paper trader: &s {}
+  binance quoter: *s
+  paper trader: *s
+md: []
+sts: {}
+"""
+        )
+
+
+def test_rejects_a_merge_key_under_td() -> None:
+    """``<<`` folds an anchored account in, and an explicit key wins over it.
+
+    The settings that vanish are the merged ones, and nothing reports it.
+    """
+    with pytest.raises(StrategyYamlError, match="merge keys"):
+        parse_strategy_yml(
+            """
+sts:
+  base: &b
+    paper trader:
+      unknown_setting: 1
+td:
+  <<: *b
+  paper trader:
+md: []
+"""
+        )
+
+
+def test_rejects_a_merge_key_under_td_even_alone() -> None:
+    """Nothing to collide with yet, but the next edited line is the collision."""
+    with pytest.raises(StrategyYamlError, match="merge keys"):
+        parse_strategy_yml(
+            """
+sts:
+  base: &b
+    paper trader:
+td:
+  <<: *b
+md: []
+"""
+        )
+
+
+def test_a_merge_key_elsewhere_is_not_td_business() -> None:
+    """Only ``td:`` is scanned — ``sts`` is the strategy's own bag."""
+    spec = parse_strategy_yml(
+        """
+sts:
+  base: &b
+    x: 1
+  more:
+    <<: *b
+td:
+  paper trader:
+md: []
+"""
+    )
+    assert set(spec.td) == {"paper trader"}
+    assert spec.sts["more"] == {"x": 1}
+
+
+def test_shared_td_settings_via_anchor_are_fine() -> None:
+    spec = parse_strategy_yml(
+        """
+td:
+  paper trader: &s {}
+  binance quoter: *s
+md: []
+sts: {}
+"""
+    )
+    assert set(spec.td) == {"paper trader", "binance quoter"}
+
+
+def test_rejects_unknown_td_settings() -> None:
+    with pytest.raises(StrategyYamlError, match="Extra inputs"):
+        parse_strategy_yml(
+            """
+td:
+  paper trader:
+    leverage: 5
+md: []
+sts: {}
+"""
+        )
 
 
 def test_rejects_bad_md_feed() -> None:
     with pytest.raises(StrategyYamlError, match="topic.UniversalTicker"):
         parse_strategy_yml(
             """
-td: [paper trader]
+td: {}
 md: [not-a-feed]
-sts: {}
-"""
-        )
-
-
-def test_rejects_td_api_id() -> None:
-    with pytest.raises(StrategyYamlError, match="account name"):
-        parse_strategy_yml(
-            """
-td: [1]
-md: []
-sts: {}
-"""
-        )
-
-
-def test_rejects_duplicate_td_name() -> None:
-    with pytest.raises(StrategyYamlError, match="duplicate"):
-        parse_strategy_yml(
-            """
-td:
-  - paper trader
-  - paper trader
-md: []
 sts: {}
 """
         )
@@ -111,7 +260,7 @@ def test_a_type_in_the_document_is_refused_with_a_pointer() -> None:
     with pytest.raises(StrategyYamlError, match="chosen at deploy time"):
         parse_strategy_yml(
             """
-td: [paper trader]
+td: {}
 md: []
 sts:
   type: NoopStrategy
@@ -123,7 +272,7 @@ def test_a_nested_config_block_is_refused_with_a_pointer() -> None:
     with pytest.raises(StrategyYamlError, match="directly under sts"):
         parse_strategy_yml(
             """
-td: [paper trader]
+td: {}
 md: []
 sts:
   config:
@@ -136,18 +285,23 @@ def test_sts_may_be_omitted_entirely() -> None:
     """A strategy with no parameters still deploys."""
     spec = parse_strategy_yml(
         """
-td: []
+td: {}
 md: []
 """
     )
     assert spec.sts == {}
 
 
+def test_omitted_td_is_empty() -> None:
+    spec = parse_strategy_yml("md: []\nsts: {}\n")
+    assert spec.td == {}
+
+
 def test_sts_must_be_a_mapping() -> None:
     with pytest.raises(StrategyYamlError, match="mapping"):
         parse_strategy_yml(
             """
-td: []
+td: {}
 md: []
 sts: [1, 2]
 """
@@ -159,21 +313,20 @@ def test_restart_defaults_to_always() -> None:
     it and the strategy class supporting it. A deploy that reaches this
     question is one whose run was cut short and would rather continue.
     """
-    spec = parse_strategy_yml("td: []\nmd: []\nsts: {}\n")
+    spec = parse_strategy_yml("td: {}\nmd: []\nsts: {}\n")
     assert spec.restart == "always"
 
 
-def test_restart_never_is_kept_through_a_round_trip() -> None:
-    spec = parse_strategy_yml("td: []\nmd: []\nrestart: never\nsts: {}\n")
+def test_restart_never_is_kept() -> None:
+    spec = parse_strategy_yml("td: {}\nmd: []\nrestart: never\nsts: {}\n")
     assert spec.restart == "never"
-    assert parse_strategy_yml(dump_strategy_yml(spec)).restart == "never"
 
 
 def test_an_unknown_restart_mode_is_refused() -> None:
     """Silently treating a typo as `always` would resume a run that asked not
     to be, which is the one direction this must not fail in."""
     with pytest.raises(StrategyYamlError, match="restart must be one of"):
-        parse_strategy_yml("td: []\nmd: []\nrestart: maybe\nsts: {}\n")
+        parse_strategy_yml("td: {}\nmd: []\nrestart: maybe\nsts: {}\n")
 
 
 def test_a_refusal_reads_as_a_sentence_about_the_field() -> None:
@@ -185,7 +338,7 @@ def test_a_refusal_reads_as_a_sentence_about_the_field() -> None:
     the class name, an echo of the input, a type tag and a docs URL.
     """
     with pytest.raises(StrategyYamlError) as caught:
-        parse_strategy_yml("td: []\nmd: ['bestquote.NotATicker']\nsts: {}\n")
+        parse_strategy_yml("td: {}\nmd: ['bestquote.NotATicker']\nsts: {}\n")
 
     message = str(caught.value)
     assert message.startswith("md: ")
@@ -204,8 +357,29 @@ def test_a_refusal_reads_as_a_sentence_about_the_field() -> None:
 def test_every_bad_field_gets_its_own_line() -> None:
     """One round trip should not have to be spent finding the second mistake."""
     with pytest.raises(StrategyYamlError) as caught:
-        parse_strategy_yml("td: [x, x]\nmd: ['nope']\nsts: {}\n")
+        parse_strategy_yml("td: [x]\nmd: ['nope']\nsts: {}\n")
 
     lines = str(caught.value).splitlines()
-    assert len(lines) == 2
-    assert {line.split(":")[0] for line in lines} == {"td", "md"}
+    # The list-hint spans several lines; the field names still both appear.
+    assert any(line.startswith("td:") for line in lines)
+    assert any(line.startswith("md:") for line in lines)
+
+
+def test_load_td_round_trips_named_refs() -> None:
+    td = {
+        "paper trader": TdAccountRef(api_id=3),
+        "binance quoter": TdAccountRef(api_id=7),
+    }
+    loaded = load_td(dump_td(td))
+    assert list(loaded) == ["paper trader", "binance quoter"]
+    assert loaded["paper trader"].api_id == 3
+    assert td_api_ids_of(loaded) == [3, 7]
+
+
+def test_attached_api_ids_reads_mapping_or_legacy_list() -> None:
+    from types import SimpleNamespace
+
+    assert attached_api_ids(
+        SimpleNamespace(td={"paper trader": {"api_id": 3}})
+    ) == [3]
+    assert attached_api_ids(SimpleNamespace(td_api_ids=[3, 7])) == [3, 7]

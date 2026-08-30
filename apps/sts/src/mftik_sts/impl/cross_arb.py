@@ -1,7 +1,8 @@
 """Cross-venue maker/hedge — quote PostOnly on one account, IOC-hedge on another.
 
-Two TD accounts, two ``bestquote`` feeds. ``td[0]`` + ``quote_ticker`` rest
-passively; ``td[1]`` + ``hedge_ticker`` take when a quote order fills.
+Two named TD accounts, two ``bestquote`` feeds. ``quote_account`` +
+``quote_ticker`` rest passively; ``hedge_account`` + ``hedge_ticker`` take
+when a quote order fills.
 
 **Pricing.** Quote prices are anchored on the *hedge* book's touch, not the
 quote book's. A SELL posts ``x_mid`` bps above the hedge ask; a BUY posts
@@ -228,6 +229,19 @@ class CrossArb(Strategy):
                 "quote_ticker and hedge_ticker must name different instruments"
             )
 
+        quote_account = str(out.get("quote_account") or "").strip()
+        hedge_account = str(out.get("hedge_account") or "").strip()
+        if not quote_account:
+            raise ValueError("quote_account is required")
+        if not hedge_account:
+            raise ValueError("hedge_account is required")
+        if quote_account == hedge_account:
+            raise ValueError(
+                "quote_account and hedge_account must be different"
+            )
+        out["quote_account"] = quote_account
+        out["hedge_account"] = hedge_account
+
         raw_sides = out.get("side")
         if not isinstance(raw_sides, list) or not raw_sides:
             raise ValueError(
@@ -269,12 +283,24 @@ class CrossArb(Strategy):
     async def on_start(self) -> None:
         self._quote_ticker = UniversalTicker.parse(self.paras["quote_ticker"])
         self._hedge_ticker = UniversalTicker.parse(self.paras["hedge_ticker"])
-        if self.session is None or len(self.session.td_api_ids) < 2:
+        if self.session is None:
+            self.fail("CrossArb has no session")
+            return
+        missing = [
+            name
+            for name in (
+                self.paras["quote_account"],
+                self.paras["hedge_account"],
+            )
+            if name not in self.session.td
+        ]
+        if missing:
+            who = ", ".join(repr(n) for n in missing)
             await self.log(
-                "CrossArb needs two TD accounts (quote then hedge) — exiting",
+                f"CrossArb td is missing {who} — exiting",
                 level="error",
             )
-            self.fail("cross_arb_need_two_td")
+            self.fail(f"td has no account named {who}")
             return
         sides = ",".join(s.value for s in self.paras["side"])
         await self.log(
@@ -320,6 +346,8 @@ class CrossArb(Strategy):
     async def on_recon_done(self, msg: ReconDone) -> None:
         quote_id = self._quote_api_id()
         hedge_id = self._hedge_api_id()
+        if quote_id is None or hedge_id is None:
+            return
         if msg.api_id not in (quote_id, hedge_id):
             return
         self._recon.add(msg.api_id)
@@ -551,7 +579,7 @@ class CrossArb(Strategy):
         hedge = self._hedge_quote
         hedge_api = self._hedge_api_id()
         info = await self._instrument(quote=False)
-        if hedge is None or hedge_api is None or info is None:
+        if hedge is None or info is None or hedge_api is None:
             await self.log(
                 f"CrossArb cannot hedge cid={cid} — missing hedge quote "
                 f"or instrument",
@@ -615,7 +643,7 @@ class CrossArb(Strategy):
         self._filled[key] = order.filled_qty
 
         quote_api = self._quote_api_id()
-        if api_id == quote_api:
+        if quote_api is not None and api_id == quote_api:
             side = self._side_of(key)
             if key in self._hedged:
                 await self.log(
@@ -746,7 +774,7 @@ class CrossArb(Strategy):
         hedge = self._hedge_quote
         hedge_api = self._hedge_api_id()
         info = await self._instrument(quote=False)
-        if hedge is None or hedge_api is None or info is None:
+        if hedge is None or info is None or hedge_api is None:
             return "no hedge quote or instrument"
         hedge_side = Side.BUY if quote_side is Side.SELL else Side.SELL
         raw = hedge_raw_price(hedge_side, hedge, self.paras["x_hi_bps"])
@@ -787,12 +815,21 @@ class CrossArb(Strategy):
             self._hedge_info = info
         return info
 
-    def _quote_api_id(self) -> int | None:
-        if self.session is None or len(self.session.td_api_ids) < 1:
+    def _named_api_id(self, name: str) -> int | None:
+        """``api_id`` for ``name``, or None if the session never attached it.
+
+        ``on_start`` refuses a missing name. ``on_stop`` / ``on_recon_done``
+        still run after that refusal, and must not KeyError — a swallowed
+        ``on_stop`` skips the cancel pass, and a ReconDone from an account
+        that *did* attach would log ``on_recon_done failed`` on every tick.
+        """
+        if self.session is None or not name:
             return None
-        return self.session.td_api_ids[0]
+        ref = self.session.td.get(name)
+        return None if ref is None else ref.api_id
+
+    def _quote_api_id(self) -> int | None:
+        return self._named_api_id(self.paras.get("quote_account", ""))
 
     def _hedge_api_id(self) -> int | None:
-        if self.session is None or len(self.session.td_api_ids) < 2:
-            return None
-        return self.session.td_api_ids[1]
+        return self._named_api_id(self.paras.get("hedge_account", ""))

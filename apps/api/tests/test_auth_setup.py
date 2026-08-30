@@ -224,7 +224,7 @@ async def test_sessions_survive_a_row_the_owner_created(db) -> None:
                 created_by=owner_id,
                 status="live",
                 strategy="twap",
-                td_api_ids=[],
+                td={},
                 md_ids=[],
                 st_paras={},
                 st_facts={},

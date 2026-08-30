@@ -362,7 +362,9 @@ class MacdDollarBars(Strategy):
         except ValueError as exc:
             self.fail(str(exc))
             return
-        if len(self.session.td_api_ids) != 1:
+        try:
+            self.session.td_sole()
+        except RuntimeError:
             self.fail(
                 "macd_dollar trades one account; attach exactly one td, got "
                 f"{self.session.td_api_ids}"
@@ -718,7 +720,7 @@ class MacdDollarBars(Strategy):
         *,
         reduce_only: bool = False,
     ) -> None:
-        api_id = self.session.td_api_ids[0]
+        api_id = self.session.td_sole()
         accepted = await self.oms.submit_order(
             api_id,
             ticker=self._ticker,

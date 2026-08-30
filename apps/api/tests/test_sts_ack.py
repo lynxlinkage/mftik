@@ -50,7 +50,7 @@ async def a_session(
                 status=status,
                 reason=reason,
                 strategy="twap",
-                td_api_ids=[],
+                td={},
                 md_ids=[],
                 st_paras={},
                 st_facts={},

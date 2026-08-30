@@ -12,7 +12,7 @@ import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.envapply import ApplySpec, apply_packages
 from mftik.environment import EnvStamp, NodeEnv
-from mftik.protocol import StsCreateSessionRequest
+from mftik.protocol import StsCreateSessionRequest, TdAccountRef
 from mftik.registry import RegistryStore
 from mftik.strategy import Strategy
 from mftik_sts.impl import load_local_registry, resolve
@@ -92,7 +92,7 @@ class FakeStsStore:
             cid_slot=7,
             restart="always",
             rebuild_count=rebuild_count,
-            td_api_ids=[],
+            td={},
             md_ids=[],
             st_paras={},
             st_facts={},
@@ -296,7 +296,12 @@ async def test_s3_bundled_noop_still_deploys_on_a_bare_overlay(
     attach_overlay(tmp_path)
     manager = SessionManager(broker, heartbeat_interval=0.05)
     result = await manager.create_session(
-        StsCreateSessionRequest(session_id="noop-1", created_by=1, strategy="noop")
+        StsCreateSessionRequest(
+            session_id="noop-1",
+            created_by=1,
+            strategy="noop",
+            td={"paper": TdAccountRef(api_id=1)},
+        )
     )
     assert result.strategy == "noop"
     await manager.close_all()

@@ -1379,7 +1379,7 @@
           "sts"
         ],
         "summary": "Strategy Yaml",
-        "description": "The strategy.yml behind a past deploy.\n\nServed verbatim from what was submitted. The stored text is what a person\nwrote \u2014 comments, ordering and the account names as typed \u2014 and it is what\neverything else about the deploy was derived from, so it is the document\nto hand back.\n\nDeploys made before the text was kept have nothing to serve, and fall back\nto a reconstruction from the persisted spec (``reconstructed``). That\ndocument parses to the same spec but is not the same document: comments\nand formatting are gone, and ``td`` shows each account's *current* name\nrather than the one that was typed.",
+        "description": "The strategy.yml behind a past deploy.\n\nServed verbatim from what was submitted. Deploys that never stored a\ndocument \u2014 they ended before the text was kept \u2014 have nothing to serve.",
         "operationId": "strategy_yaml_sts_sessions__session_id__yaml_get",
         "parameters": [
           {
@@ -6320,18 +6320,6 @@
           "yaml": {
             "type": "string",
             "title": "Yaml"
-          },
-          "unresolved_td": {
-            "items": {
-              "type": "integer"
-            },
-            "type": "array",
-            "title": "Unresolved Td"
-          },
-          "reconstructed": {
-            "type": "boolean",
-            "title": "Reconstructed",
-            "default": false
           }
         },
         "type": "object",
@@ -6340,7 +6328,7 @@
           "yaml"
         ],
         "title": "StrategyYamlResponse",
-        "description": "The strategy.yml behind a past deploy.\n\nNormally ``yaml`` is the document as submitted. When ``reconstructed`` is\ntrue it is not: that deploy predates the text being stored, so this was\nrebuilt from the persisted spec, with comments and formatting gone and\n``td`` showing accounts' current names. ``unresolved_td`` (reconstructed\ndocuments only) lists api ids whose account name could not be recovered \u2014\ntheir ``td`` entries are placeholders that will not redeploy."
+        "description": "The strategy.yml behind a past deploy, verbatim as submitted."
       },
       "StsControlResponse": {
         "properties": {

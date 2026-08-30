@@ -250,6 +250,11 @@ class OneCancelOther(Strategy):
     # --- lifecycle ---------------------------------------------------------
 
     async def on_start(self) -> None:
+        try:
+            self.session.td_sole()
+        except RuntimeError as exc:
+            self.fail(str(exc))
+            return
         self._resolve_market()
         first, second = self.paras["orders"]
         await self.log(
@@ -360,7 +365,12 @@ class OneCancelOther(Strategy):
 
     async def on_recon_done(self, msg: ReconDone) -> None:
         """TD's ledger is real now — half of what placement waits for."""
-        if msg.api_id != self._primary_api_id():
+        try:
+            sole = self.session.td_sole()
+        except RuntimeError as exc:
+            self.fail(str(exc))
+            return
+        if msg.api_id != sole:
             return
         if self._restoring and not self._armed:
             self._armed = True
@@ -404,8 +414,8 @@ class OneCancelOther(Strategy):
         self._cancel_timer()
         # Whatever ended the session, neither leg may outlive it: nothing is
         # left watching for the fill that would cancel the other.
-        api_id = self._primary_api_id()
-        if api_id is not None:
+        if self.session is not None and len(self.session.td_api_ids) == 1:
+            api_id = self.session.td_sole()
             for cid in list(self._open):
                 await self._cancel(api_id, cid, "session stopping")
         await self.log("OneCancelOther stopped")
@@ -486,8 +496,9 @@ class OneCancelOther(Strategy):
             await self._abort("oco_place_failed")
 
     async def _place(self) -> None:
-        api_id = self._primary_api_id()
-        if api_id is None:
+        try:
+            api_id = self.session.td_sole()
+        except RuntimeError:
             await self.log("OneCancelOther has no TD api_id", level="error")
             self._done = True
             self.fail("oco_no_td")
@@ -715,8 +726,8 @@ class OneCancelOther(Strategy):
             return
         self._done = True
         self._cancel_timer()
-        api_id = self._primary_api_id()
-        if api_id is not None:
+        if self.session is not None and len(self.session.td_api_ids) == 1:
+            api_id = self.session.td_sole()
             for cid in list(self._open):
                 await self._cancel(api_id, cid, reason)
         self.fail(reason)
@@ -793,11 +804,6 @@ class OneCancelOther(Strategy):
             _topic, self._ticker = Topics.parse_md_feed(md_ids[0])
         except ValueError:
             return
-
-    def _primary_api_id(self) -> int | None:
-        if self.session is None or not self.session.td_api_ids:
-            return None
-        return self.session.td_api_ids[0]
 
     def _cancel_timer(self) -> None:
         if self._arm_token is not None:

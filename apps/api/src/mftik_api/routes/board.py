@@ -40,6 +40,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
+from mftik.protocol import attached_api_ids
 from mftik_db.models.history import Stream
 from mftik_db.models.session import SessionStatus
 from mftik_db.repositories import (
@@ -111,7 +112,7 @@ async def _settlement_lines(
     session_ids = [row.session_id for row in rows]
     tickers = await OrderRepository(db).tickers_by_session(session_ids)
     every_api_id = [
-        int(x) for row in rows for x in (row.td_api_ids or [])
+        int(x) for row in rows for x in attached_api_ids(row)
     ]
     # One statement for the whole page. A query per session per account is the
     # shape the counts beside it were batched away from, and this list goes up
@@ -124,7 +125,7 @@ async def _settlement_lines(
     lines: dict[str, float] = {}
     for row in rows:
         scopes = tickers.get(row.session_id, [])
-        api_ids = [int(x) for x in (row.td_api_ids or [])]
+        api_ids = attached_api_ids(row)
         if not api_ids:
             continue
         if not scopes:
@@ -168,7 +169,7 @@ def _summary(
         duration_s=max(0.0, (finished if finished else now) - created),
         running=row.status == SessionStatus.LIVE.value,
         fills=fills,
-        td_api_ids=[int(x) for x in (row.td_api_ids or [])],
+        td_api_ids=attached_api_ids(row),
         confirmed_through_ts=line if line else None,
         # A run is settled only once it has ended *and* the line has passed its
         # end. A live one never is, however far the line has come — it is still

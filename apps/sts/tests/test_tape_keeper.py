@@ -25,6 +25,12 @@ class FakeSession:
         if failed:
             self.failures.append(reason)
 
+    def td_sole(self) -> int:
+        ids = list(self.td_api_ids)
+        if len(ids) != 1:
+            raise RuntimeError(f"needs exactly one td account, got {ids}")
+        return ids[0]
+
 
 def _keeper(md_ids: list[str]) -> TapeKeeper:
     strat = TapeKeeper()
@@ -92,4 +98,4 @@ def test_it_is_registered_and_catalogued() -> None:
     assert template is not None
     # The template must not hand anyone an account: this strategy's safety is
     # that it structurally cannot trade, and a td entry would undo that.
-    assert parse_strategy_yml(template.yaml).td == []
+    assert parse_strategy_yml(template.yaml).td == {}

@@ -20,6 +20,7 @@ from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol.envelope import Envelope
 from mftik.protocol.query_codes import QueryCode
 from mftik.protocol.reject_codes import RejectCode
+from mftik.protocol.strategy_yml import TdAccountRef
 
 
 class Heartbeat(BaseModel):
@@ -169,7 +170,7 @@ class StsCreateSessionRequest(BaseModel):
     session_id: str
     created_by: int
     strategy: str
-    td: list[int] = Field(default_factory=list)
+    td: dict[str, TdAccountRef] = Field(default_factory=dict)
     md: list[str] = Field(default_factory=list)
     st_paras: dict[str, Any] = Field(default_factory=dict)
     #: ``always`` | ``never`` — see ``StrategySpec.restart``.
@@ -196,7 +197,6 @@ class StsCreateSessionResult(BaseModel):
 
     session_id: str
     strategy: str
-    td: list[int] = Field(default_factory=list)
     #: ``live`` | ``failed`` | ``done``.
     status: str = "live"
     #: Why it is not live. The strategy's own words, meant for an operator.
@@ -906,7 +906,6 @@ MdBestQuoteResultEnvelope = Envelope[MdBestQuoteResult]
 TD_HEALTH = "td.health"
 TD_ERROR = "td.error"
 TD_SESSION_ATTACH = "td.session.attach"
-TD_SESSION_CREATE = TD_SESSION_ATTACH  # alias
 TD_SESSION_DETACH = "td.session.detach"
 TD_SESSION_LIST = "td.session.list"
 TD_LEASE_ACK = "td.lease.ack"

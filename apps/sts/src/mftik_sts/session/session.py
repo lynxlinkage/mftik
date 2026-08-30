@@ -57,11 +57,14 @@ from mftik.protocol import (
     MdOrderBookResult,
     OrderReject,
     ReconDone,
+    TdAccountRef,
     TdDetachRequest,
     TdDetachRequestEnvelope,
     Topics,
     UntypedEnvelope,
+    load_td,
     publish_sts_log,
+    td_api_ids_of,
 )
 from mftik.strategy import Strategy
 from mftik.strategy.eventlog import EventLog
@@ -126,6 +129,7 @@ class StsSession:
         broker: Broker,
         created_by: int,
         strategy: Strategy,
+        td: dict[str, TdAccountRef] | None = None,
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_paras: dict[str, Any] | None = None,
@@ -146,7 +150,10 @@ class StsSession:
         #: ``strategy_type`` so it does not shadow the builtin.
         self.type = strategy_type
         self.strategy = strategy
-        self.td_api_ids = list(td_api_ids or [])
+        if td is not None:
+            self.td = dict(td)
+        else:
+            self.td = load_td(list(td_api_ids or []))
         self.md_ids = list(md_ids or [])
         self.st_paras = dict(st_paras or {})
         self.heartbeat_interval = heartbeat_interval
@@ -181,6 +188,30 @@ class StsSession:
         self._md_lease_logged = False
         self._on_stop_task: asyncio.Task[Any] | None = None
         self._recon_sent: set[int] = set()
+
+    @property
+    def td_api_ids(self) -> list[int]:
+        return td_api_ids_of(self.td)
+
+    @td_api_ids.setter
+    def td_api_ids(self, ids: list[int]) -> None:
+        self.td = load_td(list(ids or []))
+
+    def td_account(self, name: str) -> TdAccountRef:
+        try:
+            return self.td[name]
+        except KeyError:
+            raise KeyError(
+                f"session {self.session_id} has no td account named {name!r}"
+            ) from None
+
+    def td_sole(self) -> int:
+        if len(self.td) != 1:
+            raise RuntimeError(
+                f"session {self.session_id} needs exactly one td account, "
+                f"got {list(self.td)}"
+            )
+        return next(iter(self.td.values())).api_id
 
     @property
     def destroyed(self) -> bool:

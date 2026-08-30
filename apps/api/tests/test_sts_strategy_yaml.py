@@ -1,9 +1,8 @@
 """GET /sts/sessions/{session_id}/yaml — the strategy.yml behind a past deploy.
 
-Two paths to cover: a deploy whose submitted text was kept, which must come
-back byte for byte, and one from before the text was stored, where the
-guarantee is only that the rebuild parses to the spec that *was* stored. The
-repositories are stubbed: none of this needs a database.
+The stored text comes back byte for byte. A deploy that never stored a
+document has nothing to serve. The repositories are stubbed: none of this
+needs a database.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException
-from mftik.protocol import parse_strategy_yml
 from mftik_api.routes import sts as sts_routes
 
 
@@ -31,13 +29,8 @@ def _session_scope_stub():
     return scope
 
 
-def _install(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    session: Any,
-    accounts: dict[int, str],
-) -> None:
-    """Point the handler at canned rows instead of Postgres."""
+def _install(monkeypatch: pytest.MonkeyPatch, *, session: Any) -> None:
+    """Point the handler at a canned row instead of Postgres."""
 
     class FakeSessionRepo:
         def __init__(self, _db: Any) -> None:
@@ -48,46 +41,27 @@ def _install(
                 return None
             return session
 
-    class FakeAccountRepo:
-        def __init__(self, _db: Any) -> None:
-            pass
-
-        async def get_by_api_id(self, api_id: int) -> Any:
-            name = accounts.get(api_id)
-            return None if name is None else SimpleNamespace(name=name)
-
     monkeypatch.setattr(sts_routes, "session_scope", _session_scope_stub())
     monkeypatch.setattr(sts_routes, "StsSessionRepository", FakeSessionRepo)
-    monkeypatch.setattr(sts_routes, "AccountRepository", FakeAccountRepo)
 
 
 def _row(
     *,
     session_id: str = "sess-abc",
     type: str | None = "NoopStrategy",
-    st_paras: dict[str, Any] | None = None,
-    td_api_ids: list[int] | None = None,
-    md_ids: list[str] | None = None,
-    restart: str = "always",
-    #: Default None — most cases here exercise the rebuild, which is what a
-    #: row without stored text falls back to.
     yaml_text: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         session_id=session_id,
         type=type,
         yaml_text=yaml_text,
-        st_paras=dict(st_paras or {}),
-        td_api_ids=list(td_api_ids or []),
-        md_ids=list(md_ids or []),
-        restart=restart,
     )
 
 
 SUBMITTED = """\
 # how the desk runs this one
 td:
-  - paper trader      # the only live credential
+  paper trader:      # the only live credential
 md: [orderbook.Paper_Spot_BTCUSDT]
 
 sts:
@@ -98,120 +72,31 @@ sts:
 async def test_submitted_document_comes_back_verbatim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install(
-        monkeypatch,
-        session=_row(
-            yaml_text=SUBMITTED,
-            # Deliberately disagreeing with the text: nothing derived may be
-            # allowed to leak into what is served back.
-            st_paras={"gap_bps": 999},
-            td_api_ids=[3],
-        ),
-        accounts={3: "renamed since"},
-    )
+    _install(monkeypatch, session=_row(yaml_text=SUBMITTED))
 
     result = await sts_routes.strategy_yaml("sess-abc")
 
     assert result.yaml == SUBMITTED
-    assert result.reconstructed is False
-    # No account lookup happened, so there is nothing to report unresolved.
-    assert result.unresolved_td == []
-
-
-async def test_rebuild_is_flagged_as_reconstructed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install(monkeypatch, session=_row(td_api_ids=[3]), accounts={3: "a"})
-
-    result = await sts_routes.strategy_yaml("sess-abc")
-
-    assert result.reconstructed is True
-
-
-async def test_rebuild_keeps_the_restart_mode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install(monkeypatch, session=_row(restart="never"), accounts={})
-
-    result = await sts_routes.strategy_yaml("sess-abc")
-
-    # A one-shot rebuilt as ``always`` would come back as a document that
-    # redeploys into a different run than the one it describes.
-    assert parse_strategy_yml(result.yaml).restart == "never"
-
-
-async def test_rebuilt_yaml_round_trips_to_the_stored_spec(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install(
-        monkeypatch,
-        session=_row(
-            st_paras={"exec_interval_ms": 1000, "gap_bps": 10},
-            td_api_ids=[3],
-            md_ids=["orderbook.Paper_Spot_BTCUSDT"],
-        ),
-        accounts={3: "paper trader"},
-    )
-
-    result = await sts_routes.strategy_yaml("sess-abc")
-
-    # The type is reported alongside, not baked into the document.
     assert result.type == "NoopStrategy"
     assert result.session_id == "sess-abc"
-    assert result.unresolved_td == []
-
-    spec = parse_strategy_yml(result.yaml)
-    assert spec.td == ["paper trader"]
-    assert spec.md == ["orderbook.Paper_Spot_BTCUSDT"]
-    assert spec.sts == {"exec_interval_ms": 1000, "gap_bps": 10}
+    assert not hasattr(result, "reconstructed")
+    assert not hasattr(result, "unresolved_td")
 
 
-async def test_td_order_is_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(
-        monkeypatch,
-        session=_row(td_api_ids=[9, 2, 5]),
-        accounts={2: "b", 5: "c", 9: "a"},
-    )
-
-    result = await sts_routes.strategy_yaml("sess-abc")
-
-    # td is positional in strategy.yml; the rebuilt list must not be reordered.
-    assert parse_strategy_yml(result.yaml).td == ["a", "b", "c"]
-
-
-async def test_deleted_credential_becomes_a_flagged_placeholder(
+async def test_a_session_without_yaml_text_is_404(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install(
-        monkeypatch,
-        session=_row(td_api_ids=[3, 4]),
-        accounts={3: "paper trader"},
-    )
+    _install(monkeypatch, session=_row(yaml_text=None))
 
-    result = await sts_routes.strategy_yaml("sess-abc")
+    with pytest.raises(HTTPException) as exc:
+        await sts_routes.strategy_yaml("sess-abc")
 
-    assert result.unresolved_td == [4]
-    spec = parse_strategy_yml(result.yaml)
-    # The document stays valid so it can still be read, but the entry names no
-    # real account — redeploying it 404s rather than silently dropping the leg.
-    assert spec.td == ["paper trader", "<deleted api_id=4>"]
-
-
-async def test_empty_attach_lists_rebuild_an_empty_document(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install(monkeypatch, session=_row(), accounts={})
-
-    result = await sts_routes.strategy_yaml("sess-abc")
-
-    spec = parse_strategy_yml(result.yaml)
-    assert spec.td == []
-    assert spec.md == []
-    assert result.type == "NoopStrategy"
+    assert exc.value.status_code == 404
+    assert "predates document storage" in exc.value.detail
 
 
 async def test_unknown_session_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, session=None, accounts={})
+    _install(monkeypatch, session=None)
 
     with pytest.raises(HTTPException) as exc:
         await sts_routes.strategy_yaml("missing")

@@ -22,7 +22,7 @@ class Tiny(Strategy):
     name = "tiny"
 """
 
-_OK_YML = "td: []\nmd: []\nsts: {}\n"
+_OK_YML = "td: {}\nmd: []\nsts: {}\n"
 _REAL_HTTPX = httpx.Client
 
 
@@ -327,7 +327,7 @@ def test_deploy_http_timeout_with_no_attaches() -> None:
 
 
 def test_deploy_http_timeout_with_one_feed() -> None:
-    assert deploy_http_timeout(StrategySpec(td=["paper"])) == 55.0
+    assert deploy_http_timeout(StrategySpec(td={"paper": {}})) == 55.0
 
 
 class _FailingDeploy(Node_):

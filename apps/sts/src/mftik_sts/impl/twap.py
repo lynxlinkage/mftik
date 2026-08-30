@@ -155,6 +155,11 @@ class TwapStrategy(Strategy):
     # --- lifecycle ---------------------------------------------------------
 
     async def on_start(self) -> None:
+        try:
+            self.session.td_sole()
+        except RuntimeError as exc:
+            self.fail(str(exc))
+            return
         self._resolve_feed()
         await self.log(
             f"TwapStrategy started ticker={self._ticker} "
@@ -177,7 +182,12 @@ class TwapStrategy(Strategy):
         )
 
     async def on_recon_done(self, msg: ReconDone) -> None:
-        if msg.api_id != self._primary_api_id():
+        try:
+            sole = self.session.td_sole()
+        except RuntimeError as exc:
+            self.fail(str(exc))
+            return
+        if msg.api_id != sole:
             return
         if self._recon_done:
             return
@@ -247,8 +257,9 @@ class TwapStrategy(Strategy):
         if self._ticker is None or self._ticker.category is not Category.PERP:
             return True
 
-        api_id = self._primary_api_id()
-        if api_id is None:
+        try:
+            api_id = self.session.td_sole()
+        except RuntimeError:
             await self.log("TwapStrategy has no TD api_id — exiting", level="warn")
             self._done = True
             self.fail("twap_no_td")
@@ -295,8 +306,9 @@ class TwapStrategy(Strategy):
             # Previous IOC has not gone terminal yet — skip rather than stack.
             return
 
-        api_id = self._primary_api_id()
-        if api_id is None:
+        try:
+            api_id = self.session.td_sole()
+        except RuntimeError:
             await self.log("TwapStrategy has no TD api_id — exiting", level="warn")
             self._done = True
             self._cancel_timer()
@@ -513,11 +525,6 @@ class TwapStrategy(Strategy):
             _topic, self._ticker = Topics.parse_md_feed(md_ids[0])
         except ValueError:
             return
-
-    def _primary_api_id(self) -> int | None:
-        if self.session is None or not self.session.td_api_ids:
-            return None
-        return self.session.td_api_ids[0]
 
     def _cancel_timer(self) -> None:
         if self._tick_token is not None:

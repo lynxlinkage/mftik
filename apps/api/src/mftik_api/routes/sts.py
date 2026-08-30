@@ -36,10 +36,12 @@ from mftik.protocol import (
     StsSessionControlResult,
     StsSessionStatus,
     StsSessionStatusEnvelope,
+    TdAccountRef,
+    TdSettings,
     Topics,
     all_templates,
+    attached_api_ids,
     default_template,
-    dump_strategy_yml,
     get_template,
     parse_strategy_yml,
 )
@@ -259,16 +261,9 @@ def _strategy_out(row: StsSessionRow) -> StrategyOut:
         session_id=row.session_id,
         status=row.status,
         reason=row.reason,
-        td_api_ids=[int(v) for v in (row.td_api_ids or [])],
+        td_api_ids=attached_api_ids(row),
         md_ids=[str(v) for v in (row.md_ids or [])],
     )
-
-
-#: Stand-in for a ``td`` account whose credential has since been deleted. The
-#: name is unrecoverable, so emit something that fails loudly at deploy rather
-#: than something that silently deploys against fewer accounts.
-def _deleted_td_placeholder(api_id: int) -> str:
-    return f"<deleted api_id={api_id}>"
 
 
 @router.get("/sessions/{session_id}", response_model=StrategyOut)
@@ -292,16 +287,8 @@ async def get_strategy(session_id: str) -> StrategyOut:
 async def strategy_yaml(session_id: str) -> StrategyYamlResponse:
     """The strategy.yml behind a past deploy.
 
-    Served verbatim from what was submitted. The stored text is what a person
-    wrote — comments, ordering and the account names as typed — and it is what
-    everything else about the deploy was derived from, so it is the document
-    to hand back.
-
-    Deploys made before the text was kept have nothing to serve, and fall back
-    to a reconstruction from the persisted spec (``reconstructed``). That
-    document parses to the same spec but is not the same document: comments
-    and formatting are gone, and ``td`` shows each account's *current* name
-    rather than the one that was typed.
+    Served verbatim from what was submitted. Deploys that never stored a
+    document — they ended before the text was kept — have nothing to serve.
     """
     async with session_scope() as db:
         row = await StsSessionRepository(db).get_by_session_id(session_id)
@@ -315,36 +302,14 @@ async def strategy_yaml(session_id: str) -> StrategyYamlResponse:
                 type=row.type,
                 session_id=row.session_id,
                 yaml=row.yaml_text,
-                reconstructed=False,
             )
 
-        td_api_ids = [int(v) for v in (row.td_api_ids or [])]
-        md_ids = [str(v) for v in (row.md_ids or [])]
-        restart = row.restart
-        st_paras = dict(row.st_paras or {})
-        row_type = row.type
-
-        # strategy.yml names accounts; the session stores api ids. Map back.
-        accounts = AccountRepository(db)
-        td_names: list[str] = []
-        unresolved: list[int] = []
-        for api_id in td_api_ids:
-            account = await accounts.get_by_api_id(api_id)
-            if account is None:
-                unresolved.append(api_id)
-                td_names.append(_deleted_td_placeholder(api_id))
-                continue
-            td_names.append(account.name)
-
-    spec = StrategySpec(
-        td=td_names, md=md_ids, restart=restart, sts=st_paras
-    )
-    return StrategyYamlResponse(
-        type=row_type,
-        session_id=session_id,
-        yaml=dump_strategy_yml(spec),
-        unresolved_td=unresolved,
-        reconstructed=True,
+    raise HTTPException(
+        status_code=404,
+        detail=(
+            f"session {session_id} has no stored strategy.yml — "
+            "this deploy predates document storage"
+        ),
     )
 
 
@@ -641,12 +606,13 @@ async def deploy(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     created_by = body.created_by if body.created_by is not None else owner
-    td_api_ids = await _resolve_td_names(list(spec.td))
+    _refuse_sts_accounts_missing_from_td(spec)
+    td = await _resolve_td(spec.td)
     try:
         result = await deploy_strategy(
             broker,
             strategy_id=strategy_type,
-            td=td_api_ids,
+            td=td,
             md=list(spec.md),
             st_paras=dict(spec.sts),
             created_by=created_by,
@@ -689,22 +655,42 @@ async def deploy(
     )
 
 
-async def _resolve_td_names(names: list[str]) -> list[int]:
-    """Map strategy.yml account names → api ids (order preserved)."""
-    if not names:
-        return []
+def _refuse_sts_accounts_missing_from_td(spec: StrategySpec) -> None:
+    """Refuse ``quote_account`` / ``hedge_account`` that are not td keys.
+
+    Deploy holds both mappings. A name that is not under ``td:`` is a
+    document error (400), the same class as a bad YAML — not a missing
+    account row (404).
+    """
+    for field in ("quote_account", "hedge_account"):
+        name = spec.sts.get(field)
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if name.strip() not in spec.td:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field} {name!r} is not a key under td",
+            )
+
+
+async def _resolve_td(
+    accounts: dict[str, TdSettings],
+) -> dict[str, TdAccountRef]:
+    """Map strategy.yml account names → resolved attaches."""
+    if not accounts:
+        return {}
     async with session_scope() as db:
-        accounts = AccountRepository(db)
-        api_ids: list[int] = []
-        for name in names:
-            account = await accounts.get_by_name(name)
+        repo = AccountRepository(db)
+        out: dict[str, TdAccountRef] = {}
+        for name, settings in accounts.items():
+            account = await repo.get_by_name(name)
             if account is None or account.api is None:
                 raise HTTPException(
                     status_code=404,
                     detail=f"unknown td account name: {name!r}",
                 )
-            api_ids.append(account.api_id)
-        return api_ids
+            out[name] = TdAccountRef(api_id=account.api_id, settings=settings)
+        return out
 
 
 async def _control(

@@ -59,7 +59,10 @@ async def a_session(
                 finished_at=(started + ran_for) if ran_for else None,
                 status=status,
                 strategy=strategy,
-                td_api_ids=api_ids if api_ids is not None else [API_ID],
+                td={
+                    f"account-{i}": {"api_id": i}
+                    for i in (api_ids if api_ids is not None else [API_ID])
+                },
                 md_ids=[],
                 st_paras={},
                 st_facts={},

@@ -98,7 +98,7 @@ def test_session_row_columns() -> None:
         "strategy",
         "type",
         "yaml_text",
-        "td_api_ids",
+        "td",
         "md_ids",
         "st_paras",
     } <= sts_cols

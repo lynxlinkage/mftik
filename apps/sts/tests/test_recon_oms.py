@@ -11,6 +11,7 @@ from mftik.exchange.models import Side, is_terminal, limit_order
 from mftik.protocol import (
     ReconDone,
     StsCreateSessionRequest,
+    TdAccountRef,
     TdAttachRequest,
 )
 from mftik.strategy import Strategy
@@ -87,7 +88,7 @@ async def test_recon_handshake_and_strategy_oms(broker: Broker) -> None:
             session_id="recon-1",
             created_by=1,
             strategy="recon_probe",
-            td=[1],
+            td={"paper": TdAccountRef(api_id=1)},
         )
     )
     await td.attach(

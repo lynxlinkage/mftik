@@ -62,7 +62,7 @@ async def test_the_list_carries_attaches_from_the_row(db) -> None:
             session_id="s-att",
             created_by=1,
             type="NoopStrategy",
-            td_api_ids=[3, 7],
+            td={"a": {"api_id": 3}, "b": {"api_id": 7}},
             md_ids=["orderbook.Paper_Spot_BTCUSDT"],
         )
 
@@ -80,7 +80,7 @@ async def test_one_session_is_the_database_row(db) -> None:
             session_id="s-one",
             created_by=1,
             type="NoopStrategy",
-            td_api_ids=[2],
+            td={"a": {"api_id": 2}},
             md_ids=["ticker.Paper_Spot_ETHUSDT"],
         )
 

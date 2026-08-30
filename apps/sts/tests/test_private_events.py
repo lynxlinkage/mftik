@@ -28,6 +28,7 @@ from mftik.protocol import (
     ReconDone,
     RejectCode,
     StsCreateSessionRequest,
+    TdAccountRef,
     TdAttachRequest,
     Topics,
     UntypedEnvelope,
@@ -157,7 +158,7 @@ async def _boot(
             session_id="priv-1",
             created_by=1,
             strategy="private_events",
-            td=[7],
+            td={"paper": TdAccountRef(api_id=7)},
         )
     )
     await td.attach(

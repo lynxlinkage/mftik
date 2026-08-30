@@ -37,7 +37,7 @@ class Tiny(Strategy):
     name = "tiny"
 """
 
-_YML = "td: []\nmd: []\nsts:\n  qty: 1\n"
+_YML = "td: {}\nmd: []\nsts:\n  qty: 1\n"
 
 
 class ReloadingBroker:
@@ -265,6 +265,39 @@ async def test_unknown_strategy_deploy_is_still_404(tmp_path: Path) -> None:
             store=store,
         )
     assert caught.value.status_code == 404
+
+
+async def test_cross_arb_deploy_refuses_sts_account_not_in_td(
+    tmp_path: Path,
+) -> None:
+    """quote_account / hedge_account must name a key under td:."""
+    store = RegistryStore(tmp_path)
+    with pytest.raises(HTTPException) as caught:
+        await deploy(
+            "CrossArb",
+            body=StrategyDeployBody(
+                yaml="""\
+td:
+  binance quoter:
+  gate hedger:
+md: []
+sts:
+  quote_account: not-a-td-name
+  hedge_account: gate hedger
+  quote_ticker: Binance_Spot_BTCUSDT
+  hedge_ticker: Gate_Spot_BTCUSDT
+  side: [buy]
+  qty: 0.001
+  x_lo_bps: 5
+  x_hi_bps: 15
+"""
+            ),
+            broker=_broker(store),
+            store=store,
+        )
+    assert caught.value.status_code == 400
+    assert "quote_account" in str(caught.value.detail)
+    assert "not-a-td-name" in str(caught.value.detail)
 
 
 async def test_add_keeps_strategy_yml_as_the_template(tmp_path: Path) -> None:

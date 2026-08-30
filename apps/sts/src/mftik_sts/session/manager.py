@@ -32,7 +32,10 @@ from mftik.protocol import (
     TdAttachRequest,
     TdAttachRequestEnvelope,
     Topics,
+    dump_td,
+    load_td,
     publish_sts_log,
+    td_api_ids_of,
 )
 from mftik.strategy import Strategy
 from mftik.strategy.client_order_id import SLOT_SPACE
@@ -267,7 +270,7 @@ class SessionManager:
             strategy=strategy,
             cid_slot=cid_slot,
             remember=self._remember_fact,
-            td_api_ids=list(request.td),
+            td=dict(request.td),
             md_ids=list(request.md),
             st_paras=dict(request.st_paras),
             heartbeat_interval=self._heartbeat_interval,
@@ -290,7 +293,7 @@ class SessionManager:
                 strategy=strategy.name,
                 type=request.type,
                 yaml_text=request.yaml_text,
-                td_api_ids=list(request.td),
+                td=dump_td(dict(request.td)),
                 md_ids=list(request.md),
                 st_paras=dict(request.st_paras),
                 cid_slot=cid_slot,
@@ -355,7 +358,6 @@ class SessionManager:
             return StsCreateSessionResult(
                 session_id=request.session_id,
                 strategy=strategy.name,
-                td=list(request.td),
                 status=status,
                 reason=session.exit_reason,
             )
@@ -363,12 +365,11 @@ class SessionManager:
             "STS session created id=%s strategy=%s td=%s",
             request.session_id,
             strategy.name,
-            request.td,
+            list(request.td),
         )
         return StsCreateSessionResult(
             session_id=request.session_id,
             strategy=strategy.name,
-            td=list(request.td),
         )
 
     async def list_sessions(
@@ -832,7 +833,8 @@ class SessionManager:
         the session has to be running before anything can be attached to it.
         """
         session_id = row.session_id
-        td_api_ids = [int(v) for v in (getattr(row, "td_api_ids", None) or [])]
+        td = load_td(getattr(row, "td", None))
+        td_api_ids = td_api_ids_of(td)
         md_ids = [str(v) for v in (getattr(row, "md_ids", None) or [])]
         created_by = int(getattr(row, "created_by", 0) or 0)
 
@@ -842,7 +844,7 @@ class SessionManager:
             created_by=created_by,
             strategy=strategy,
             cid_slot=int(row.cid_slot),
-            td_api_ids=td_api_ids,
+            td=td,
             md_ids=md_ids,
             st_paras=dict(getattr(row, "st_paras", None) or {}),
             heartbeat_interval=self._heartbeat_interval,

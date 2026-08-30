@@ -135,7 +135,14 @@ class StrategyOms:
         return None if row is None else Order.model_validate(row)
 
     def _resolve(self, api_id: int | None) -> int | None:
-        """Pick the account: the one asked for, or the only one attached."""
+        """Pick the account: the one asked for, or the only one attached.
+
+        ``None`` when the session has zero or several accounts — ``td: {}``
+        is a legal MD-only run, and guessing among several would pick the
+        wrong book. :meth:`~mftik.strategy.session.SessionView.td_sole`
+        raises in those cases; this path must not. Same shape as
+        :meth:`mftik.strategy.ledger.StrategyLedger._resolve`.
+        """
         if api_id is not None:
             return api_id
         attached = self.api_ids

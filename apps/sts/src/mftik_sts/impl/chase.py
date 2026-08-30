@@ -288,6 +288,11 @@ class ChaseOrder(Strategy):
     # --- lifecycle ---------------------------------------------------------
 
     async def on_start(self) -> None:
+        try:
+            self.session.td_sole()
+        except RuntimeError as exc:
+            self.fail(str(exc))
+            return
         self._resolve_feed()
         await self.log(
             f"ChaseOrder started ticker={self._ticker} "
@@ -390,7 +395,12 @@ class ChaseOrder(Strategy):
 
     async def on_recon_done(self, msg: ReconDone) -> None:
         """TD's ledger is real now: start chasing, and start the clock."""
-        if msg.api_id != self._primary_api_id():
+        try:
+            sole = self.session.td_sole()
+        except RuntimeError as exc:
+            self.fail(str(exc))
+            return
+        if msg.api_id != sole:
             return
         if self._restoring and not self._armed:
             # Restored, so the clock and the anchor are already set and must
@@ -435,9 +445,12 @@ class ChaseOrder(Strategy):
         self._cancel_timer()
         # Whatever the reason for stopping, an order of ours must not outlive
         # the session that can no longer manage it.
-        api_id = self._primary_api_id()
-        if api_id is not None and self._open_cid is not None:
-            await self._cancel_open(api_id)
+        if (
+            self.session is not None
+            and len(self.session.td_api_ids) == 1
+            and self._open_cid is not None
+        ):
+            await self._cancel_open(self.session.td_sole())
         await self.log("ChaseOrder stopped")
 
     # --- market data -------------------------------------------------------
@@ -503,8 +516,9 @@ class ChaseOrder(Strategy):
             # before recon that ledger reads empty — which would look exactly
             # like having no money.
             return
-        api_id = self._primary_api_id()
-        if api_id is None:
+        try:
+            api_id = self.session.td_sole()
+        except RuntimeError:
             await self.log("ChaseOrder has no TD api_id — exiting", level="warn")
             self.fail("chase_no_td")
             return
@@ -989,11 +1003,6 @@ class ChaseOrder(Strategy):
             _topic, self._ticker = Topics.parse_md_feed(md_ids[0])
         except ValueError:
             return
-
-    def _primary_api_id(self) -> int | None:
-        if self.session is None or not self.session.td_api_ids:
-            return None
-        return self.session.td_api_ids[0]
 
     def _arm_timer(self) -> None:
         if self._tick_token is None:

@@ -135,6 +135,11 @@ class NoopStrategy(Strategy):
     # --- lifecycle ---------------------------------------------------------
 
     async def on_start(self) -> None:
+        try:
+            self.session.td_sole()
+        except RuntimeError as exc:
+            self.fail(str(exc))
+            return
         self._resolve_feed()
         await self.log(
             f"NoopStrategy started ticker={self._ticker} "
@@ -150,9 +155,8 @@ class NoopStrategy(Strategy):
 
     async def on_stop(self) -> None:
         self._cancel_timer()
-        api_id = self._primary_api_id()
-        if api_id is not None:
-            await self._cancel_open(api_id)
+        if self.session is not None and len(self.session.td_api_ids) == 1:
+            await self._cancel_open(self.session.td_sole())
         await self.log("NoopStrategy stopped")
 
     # --- market data -------------------------------------------------------
@@ -173,8 +177,9 @@ class NoopStrategy(Strategy):
     # --- execution ---------------------------------------------------------
 
     async def _on_tick(self) -> None:
-        api_id = self._primary_api_id()
-        if api_id is None:
+        try:
+            api_id = self.session.td_sole()
+        except RuntimeError:
             await self.log(
                 "NoopStrategy has no TD api_id — exiting", level="warn"
             )
@@ -381,8 +386,3 @@ class NoopStrategy(Strategy):
     def _cancel_timer(self) -> None:
         if self._tick_token is not None:
             self._tick_token.cancel()
-
-    def _primary_api_id(self) -> int | None:
-        if self.session is None or not self.session.td_api_ids:
-            return None
-        return self.session.td_api_ids[0]

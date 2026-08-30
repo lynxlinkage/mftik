@@ -53,7 +53,7 @@ NOOP = StrategyTemplate(
     ),
     yaml="""\
 td:
-  - paper trader
+  paper trader:
 md:
   - orderbook.Paper_Spot_BTCUSDT
 sts:
@@ -74,7 +74,7 @@ CHASE = StrategyTemplate(
     ),
     yaml="""\
 td:
-  - paper trader
+  paper trader:
 md:
   # Chases top of book, so it needs bestquote rather than orderbook.
   - bestquote.Paper_Spot_BTCUSDT
@@ -102,7 +102,7 @@ OCO = StrategyTemplate(
     ),
     yaml="""\
 td:
-  - paper trader
+  paper trader:
 md:
   # One quote is read — the pair is checked against it, then it is ignored.
   - bestquote.Paper_Spot_BTCUSDT
@@ -131,13 +131,15 @@ CROSS_ARB = StrategyTemplate(
     ),
     yaml="""\
 td:
-  # td[0] quotes; td[1] hedges. Two different venue accounts.
-  - binance quoter
-  - gate hedger
+  # Two different venue accounts. CrossArb names them in sts.
+  binance quoter:
+  gate hedger:
 md:
   - bestquote.Binance_Spot_BTCUSDT
   - bestquote.Gate_Spot_BTCUSDT
 sts:
+  quote_account: binance quoter
+  hedge_account: gate hedger
   quote_ticker: Binance_Spot_BTCUSDT
   hedge_ticker: Gate_Spot_BTCUSDT
   # One or both sides.
@@ -159,7 +161,7 @@ TWAP = StrategyTemplate(
     ),
     yaml="""\
 td:
-  - paper trader
+  paper trader:
 md:
   # Spot or Perp (e.g. bestquote.BinanceFuture_Perp_BTCUSDT).
   - bestquote.Paper_Spot_BTCUSDT
@@ -205,7 +207,7 @@ MACD_DOLLAR = StrategyTemplate(
     ),
     yaml="""\
 td:
-  - paper trader
+  paper trader:
 md:
   # Two feeds, two jobs. The trade feed builds the bars; the quote feed prices
   # the orders. Both are required — a session with only the first computes its
