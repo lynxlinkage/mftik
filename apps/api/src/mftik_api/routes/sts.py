@@ -35,8 +35,11 @@ from mftik.protocol import (
     StsSessionControlResult,
     StsSessionStatus,
     StsSessionStatusEnvelope,
+    TdAccountRef,
+    TdSettings,
     Topics,
     all_templates,
+    attached_api_ids,
     default_template,
     get_template,
     parse_strategy_yml,
@@ -257,7 +260,7 @@ def _strategy_out(row: StsSessionRow) -> StrategyOut:
         session_id=row.session_id,
         status=row.status,
         reason=row.reason,
-        td_api_ids=[int(v) for v in (row.td_api_ids or [])],
+        td_api_ids=attached_api_ids(row),
         md_ids=[str(v) for v in (row.md_ids or [])],
     )
 
@@ -602,12 +605,12 @@ async def deploy(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     created_by = body.created_by if body.created_by is not None else owner
-    td_api_ids = await _resolve_td_names(list(spec.td))
+    td = await _resolve_td(spec.td)
     try:
         result = await deploy_strategy(
             broker,
             strategy_id=strategy_type,
-            td=td_api_ids,
+            td=td,
             md=list(spec.md),
             st_paras=dict(spec.sts),
             created_by=created_by,
@@ -650,22 +653,24 @@ async def deploy(
     )
 
 
-async def _resolve_td_names(names: list[str]) -> list[int]:
-    """Map strategy.yml account names → api ids (order preserved)."""
-    if not names:
-        return []
+async def _resolve_td(
+    accounts: dict[str, TdSettings],
+) -> dict[str, TdAccountRef]:
+    """Map strategy.yml account names → resolved attaches."""
+    if not accounts:
+        return {}
     async with session_scope() as db:
-        accounts = AccountRepository(db)
-        api_ids: list[int] = []
-        for name in names:
-            account = await accounts.get_by_name(name)
+        repo = AccountRepository(db)
+        out: dict[str, TdAccountRef] = {}
+        for name, settings in accounts.items():
+            account = await repo.get_by_name(name)
             if account is None or account.api is None:
                 raise HTTPException(
                     status_code=404,
                     detail=f"unknown td account name: {name!r}",
                 )
-            api_ids.append(account.api_id)
-        return api_ids
+            out[name] = TdAccountRef(api_id=account.api_id, settings=settings)
+        return out
 
 
 async def _control(

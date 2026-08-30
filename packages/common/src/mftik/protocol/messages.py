@@ -20,6 +20,7 @@ from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol.envelope import Envelope
 from mftik.protocol.query_codes import QueryCode
 from mftik.protocol.reject_codes import RejectCode
+from mftik.protocol.strategy_yml import TdAccountRef
 
 
 class Heartbeat(BaseModel):
@@ -169,7 +170,7 @@ class StsCreateSessionRequest(BaseModel):
     session_id: str
     created_by: int
     strategy: str
-    td: list[int] = Field(default_factory=list)
+    td: dict[str, TdAccountRef] = Field(default_factory=dict)
     md: list[str] = Field(default_factory=list)
     st_paras: dict[str, Any] = Field(default_factory=dict)
     #: ``always`` | ``never`` — see ``StrategySpec.restart``.

@@ -7,7 +7,12 @@ import fakeredis.aioredis
 import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.exchange import PaperExchange
-from mftik.protocol import StsCreateSessionRequest, TdAttachRequest, Topics
+from mftik.protocol import (
+    StsCreateSessionRequest,
+    TdAccountRef,
+    TdAttachRequest,
+    Topics,
+)
 from mftik_sts.session import SessionManager as StsSessionManager
 from mftik_td.rpc import dispatch as td_dispatch
 from mftik_td.session import PaperSessionFactory
@@ -49,12 +54,18 @@ async def test_stop_one_sts_drops_td_refcount(broker: Broker) -> None:
 
     await sts.create_session(
         StsCreateSessionRequest(
-            session_id="a", created_by=1, strategy="noop", td=[1]
+            session_id="a",
+            created_by=1,
+            strategy="noop",
+            td={"paper": TdAccountRef(api_id=1)},
         )
     )
     await sts.create_session(
         StsCreateSessionRequest(
-            session_id="b", created_by=1, strategy="noop", td=[1]
+            session_id="b",
+            created_by=1,
+            strategy="noop",
+            td={"paper": TdAccountRef(api_id=1)},
         )
     )
     r1 = await td.attach(

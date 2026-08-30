@@ -47,6 +47,7 @@ class FakeStsStore:
         status: str = "interrupted",
         strategy: str = "rebuildable",
         cid_slot: int | None = 7,
+        td: dict[str, Any] | None = None,
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_facts: dict[str, str] | None = None,
@@ -67,7 +68,12 @@ class FakeStsStore:
             cid_slot=cid_slot,
             restart=restart,
             rebuild_count=rebuild_count,
-            td_api_ids=list(td_api_ids or []),
+            td=td
+            if td is not None
+            else {
+                f"account-{int(i)}": {"api_id": int(i)}
+                for i in (td_api_ids or [])
+            },
             md_ids=list(md_ids or []),
             st_paras={},
             st_facts=dict(st_facts or {}),
@@ -234,7 +240,11 @@ async def _serve_attaches(
 @pytest.mark.asyncio
 async def test_an_interrupted_session_comes_back(broker: Broker) -> None:
     store = FakeStsStore()
-    store.seed("r-1", td_api_ids=[3], md_ids=["bestquote.Paper_Spot_BTCUSDT"])
+    store.seed(
+        "r-1",
+        td={"paper trader": {"api_id": 3}},
+        md_ids=["bestquote.Paper_Spot_BTCUSDT"],
+    )
     instances: list[Rebuildable] = []
     manager = _manager(broker, store, instances)
 
@@ -253,7 +263,9 @@ async def test_an_interrupted_session_comes_back(broker: Broker) -> None:
     # A session that is running again has no end and no reason for one.
     assert row.finished_at is None
     assert row.reason is None
-    assert manager.get("r-1") is not None
+    session = manager.get("r-1")
+    assert session is not None
+    assert session.td["paper trader"].api_id == 3
     await manager.close_all()
 
 

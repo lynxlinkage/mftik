@@ -19,6 +19,7 @@ from mftik.protocol import (
     StsCreateSessionResultEnvelope,
     StsSessionControlResult,
     StsSessionControlResultEnvelope,
+    TdAccountRef,
 )
 from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.orchestrate import deploy_strategy
@@ -67,7 +68,7 @@ async def test_a_refused_strategy_never_reaches_the_attach() -> None:
         await deploy_strategy(
             broker,
             strategy_id="MacdDollarBars",
-            td=[1],
+            td={"paper": TdAccountRef(api_id=1)},
             md=["aggtrade.BinanceFuture_Perp_BTCUSDT"],
             created_by=1,
         )
@@ -89,7 +90,7 @@ async def test_an_early_natural_end_is_reported_the_same_way() -> None:
 
     with pytest.raises(DomainRpcError) as caught:
         await deploy_strategy(
-            broker, strategy_id="noop", td=[], md=[], created_by=1
+            broker, strategy_id="noop", td={}, md=[], created_by=1
         )
 
     assert caught.value.code == "strategy_refused"
@@ -102,7 +103,7 @@ async def test_a_terminal_status_with_no_reason_still_says_something() -> None:
 
     with pytest.raises(DomainRpcError) as caught:
         await deploy_strategy(
-            broker, strategy_id="noop", td=[], md=[], created_by=1
+            broker, strategy_id="noop", td={}, md=[], created_by=1
         )
 
     assert "failed" in caught.value.message
@@ -154,7 +155,7 @@ async def test_attach_failure_fails_the_session_not_stops_it() -> None:
         await deploy_strategy(
             broker,
             strategy_id="noop",
-            td=[],
+            td={},
             md=["orderbook.Paper_Spot_BTCUSDT"],
             created_by=1,
         )

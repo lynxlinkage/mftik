@@ -23,6 +23,7 @@ from mftik.protocol import (
     StsCreateSessionRequest,
     StsCreateSessionRequestEnvelope,
     StsCreateSessionResult,
+    TdAccountRef,
     TdAttachRequest,
     Topics,
 )
@@ -187,7 +188,7 @@ async def test_sts_session_lives_independently(
             session_id="s1",
             created_by=1,
             strategy="noop",
-            td=[],
+            td={"paper": TdAccountRef(api_id=1)},
         )
     )
     assert result.session_id == "s1"
@@ -212,9 +213,12 @@ async def test_sts_lease_enables_td_attach(
             session_id="lease1",
             created_by=2,
             strategy="noop",
-            td=[11],
+            td={"paper": TdAccountRef(api_id=11)},
         )
     )
+    session = sts_manager.get("lease1")
+    assert session is not None
+    assert session.td["paper"].api_id == 11
 
     paper = PaperExchange(
         symbols={"BTCUSDT": Decimal("50000")}, tick_interval=0.05, seed=1
@@ -283,7 +287,7 @@ async def test_sts_rpc_create_list_health(
                 session_id="rpc1",
                 created_by=5,
                 strategy="noop",
-                td=[],
+                td={"paper": TdAccountRef(api_id=1)},
             ),
             type=STS_SESSION_CREATE,
             source="api",

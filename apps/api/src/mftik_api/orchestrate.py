@@ -21,6 +21,7 @@ from mftik.protocol import (
     StsSessionControlRequest,
     StsSessionControlRequestEnvelope,
     StsSessionControlResult,
+    TdAccountRef,
     TdAttachRequest,
     TdAttachRequestEnvelope,
     TdAttachResult,
@@ -39,7 +40,7 @@ async def deploy_strategy(
     broker: Broker,
     *,
     strategy_id: str,
-    td: list[int],
+    td: dict[str, TdAccountRef] | None = None,
     md: list[str] | None = None,
     st_paras: dict[str, Any] | None = None,
     created_by: int,
@@ -50,6 +51,7 @@ async def deploy_strategy(
 ) -> dict[str, Any]:
     """Mint session_id, create STS, attach MD then each TD api_id. Fail-closed."""
     session_id = uuid4().hex
+    td = dict(td or {})
     md = list(md or [])
     st_paras = dict(st_paras or {})
     attached_td: list[dict[str, Any]] = []
@@ -76,7 +78,7 @@ async def deploy_strategy(
                     session_id=session_id,
                     created_by=created_by,
                     strategy=strategy_id,
-                    td=list(td),
+                    td=td,
                     md=md,
                     st_paras=st_paras,
                     restart=restart,
@@ -155,14 +157,14 @@ async def deploy_strategy(
                     source="api",
                 )
 
-        for api_id in td:
-            await sts_log(f"TD attach starting api_id={api_id}")
+        for name, ref in td.items():
+            await sts_log(f"TD attach starting {name} api_id={ref.api_id}")
             result = await request_domain(
                 broker,
                 Topics.TD,
                 TdAttachRequestEnvelope.wrap(
                     TdAttachRequest(
-                        api_id=api_id,
+                        api_id=ref.api_id,
                         session_id=session_id,
                         created_by=created_by,
                         timeout=timeout,
