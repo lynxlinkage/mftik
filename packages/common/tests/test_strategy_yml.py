@@ -165,6 +165,59 @@ sts: {}
         )
 
 
+def test_rejects_a_merge_key_under_td() -> None:
+    """``<<`` folds an anchored account in, and an explicit key wins over it.
+
+    The settings that vanish are the merged ones, and nothing reports it.
+    """
+    with pytest.raises(StrategyYamlError, match="merge keys"):
+        parse_strategy_yml(
+            """
+sts:
+  base: &b
+    paper trader:
+      unknown_setting: 1
+td:
+  <<: *b
+  paper trader:
+md: []
+"""
+        )
+
+
+def test_rejects_a_merge_key_under_td_even_alone() -> None:
+    """Nothing to collide with yet, but the next edited line is the collision."""
+    with pytest.raises(StrategyYamlError, match="merge keys"):
+        parse_strategy_yml(
+            """
+sts:
+  base: &b
+    paper trader:
+td:
+  <<: *b
+md: []
+"""
+        )
+
+
+def test_a_merge_key_elsewhere_is_not_td_business() -> None:
+    """Only ``td:`` is scanned — ``sts`` is the strategy's own bag."""
+    spec = parse_strategy_yml(
+        """
+sts:
+  base: &b
+    x: 1
+  more:
+    <<: *b
+td:
+  paper trader:
+md: []
+"""
+    )
+    assert set(spec.td) == {"paper trader"}
+    assert spec.sts["more"] == {"x": 1}
+
+
 def test_shared_td_settings_via_anchor_are_fine() -> None:
     spec = parse_strategy_yml(
         """

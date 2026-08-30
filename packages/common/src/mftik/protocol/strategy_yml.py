@@ -36,6 +36,10 @@ RESTART_ALWAYS = "always"
 RESTART_NEVER = "never"
 RESTART_MODES = frozenset({RESTART_ALWAYS, RESTART_NEVER})
 
+#: YAML's merge key. Under ``td:`` it is refused rather than expanded — see
+#: :func:`_refuse_collapsing_td_keys`.
+_MERGE_KEY = "<<"
+
 #: What ``mftik check`` prints when someone still has a list under ``td:``.
 #: The parser prefixes the field name, so this sentence starts at "is".
 _TD_LIST_HINT = (
@@ -226,7 +230,7 @@ def parse_strategy_yml(text: str) -> StrategySpec:
     if not isinstance(text, str) or not text.strip():
         raise StrategyYamlError("strategy.yml is empty")
     try:
-        _refuse_duplicate_td_keys(text)
+        _refuse_collapsing_td_keys(text)
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise StrategyYamlError(f"invalid YAML: {exc}") from exc
@@ -240,16 +244,28 @@ def parse_strategy_yml(text: str) -> StrategySpec:
         raise StrategyYamlError(str(exc)) from exc
 
 
-def _refuse_duplicate_td_keys(text: str) -> None:
-    """Refuse a ``td:`` mapping that names the same account twice.
+def _refuse_collapsing_td_keys(text: str) -> None:
+    """Refuse a ``td:`` mapping whose keys ``safe_load`` would silently fold.
 
-    ``yaml.safe_load`` keeps the last key silently. Harmless while settings
-    are empty; disastrous once leverage lives here.
+    Two ways one account can end up written twice and loaded once, and the
+    loader reports neither. A repeated key keeps the last one. A merge key
+    pulls an anchored mapping in, and an explicit key of the same name
+    quietly wins over what was merged — so the settings a person wrote under
+    the anchor are the ones that disappear.
+
+    Harmless while settings are empty; disastrous once leverage lives here,
+    which is the whole reason the scan runs before ``safe_load`` rather than
+    inspecting what it returned.
     """
-    keys = _td_account_keys(text)
     seen: set[str] = set()
-    for key in keys:
+    for key in _td_account_keys(text):
         name = key.strip()
+        if name == _MERGE_KEY:
+            raise StrategyYamlError(
+                "td: merge keys (<<) are not accepted — an account merged in "
+                "from an anchor is silently replaced by an explicit key of "
+                "the same name. Write each account out."
+            )
         if name in seen:
             raise StrategyYamlError(f"td: duplicate account name: {name!r}")
         seen.add(name)
