@@ -11,7 +11,6 @@ from pydantic import (
     Field,
     ValidationError,
     field_validator,
-    model_validator,
 )
 
 from mftik.protocol.topics import Topics
@@ -127,11 +126,6 @@ class StrategySpec(BaseModel):
                     f"bestquote.Gate_Spot_BTCUSDT), got {item!r}: {exc}"
                 ) from exc
         return out
-
-    @model_validator(mode="after")
-    def _cross_field(self) -> StrategySpec:
-        # Hook for future cross-field rules.
-        return self
 
 
 class StrategyYamlError(ValueError):

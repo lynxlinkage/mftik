@@ -196,7 +196,6 @@ class StsCreateSessionResult(BaseModel):
 
     session_id: str
     strategy: str
-    td: list[int] = Field(default_factory=list)
     #: ``live`` | ``failed`` | ``done``.
     status: str = "live"
     #: Why it is not live. The strategy's own words, meant for an operator.
@@ -906,7 +905,6 @@ MdBestQuoteResultEnvelope = Envelope[MdBestQuoteResult]
 TD_HEALTH = "td.health"
 TD_ERROR = "td.error"
 TD_SESSION_ATTACH = "td.session.attach"
-TD_SESSION_CREATE = TD_SESSION_ATTACH  # alias
 TD_SESSION_DETACH = "td.session.detach"
 TD_SESSION_LIST = "td.session.list"
 TD_LEASE_ACK = "td.lease.ack"

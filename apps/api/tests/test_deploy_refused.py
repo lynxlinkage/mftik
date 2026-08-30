@@ -51,7 +51,6 @@ class FakeBroker:
                 StsCreateSessionResult(
                     session_id=envelope.payload.session_id,
                     strategy="macd_dollar",
-                    td=[1],
                     status=self.status,
                     reason=self.reason,
                 ),
@@ -128,7 +127,6 @@ class AttachFailBroker:
                 StsCreateSessionResult(
                     session_id=envelope.payload.session_id,
                     strategy="noop",
-                    td=[],
                     status="live",
                 ),
                 type=STS_SESSION_CREATE,

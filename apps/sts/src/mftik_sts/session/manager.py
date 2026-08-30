@@ -355,7 +355,6 @@ class SessionManager:
             return StsCreateSessionResult(
                 session_id=request.session_id,
                 strategy=strategy.name,
-                td=list(request.td),
                 status=status,
                 reason=session.exit_reason,
             )
@@ -368,7 +367,6 @@ class SessionManager:
         return StsCreateSessionResult(
             session_id=request.session_id,
             strategy=strategy.name,
-            td=list(request.td),
         )
 
     async def list_sessions(

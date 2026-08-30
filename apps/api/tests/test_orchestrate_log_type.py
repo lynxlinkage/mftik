@@ -27,7 +27,6 @@ class RecordingBroker:
                 StsCreateSessionResult(
                     session_id=envelope.payload.session_id,
                     strategy="tiny",
-                    td=[],
                     status="live",
                 ),
                 type=STS_SESSION_CREATE,

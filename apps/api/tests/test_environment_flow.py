@@ -209,7 +209,6 @@ class _LiveDeploy(ReloadingBroker):
                 StsCreateSessionResult(
                     session_id=envelope.payload.session_id,
                     strategy=envelope.payload.strategy,
-                    td=[],
                     status="live",
                 ),
                 type=STS_SESSION_CREATE,
