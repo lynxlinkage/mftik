@@ -37,7 +37,7 @@ class Tiny(Strategy):
     name = "tiny"
 """
 
-_YML = "td: []\nmd: []\nsts:\n  qty: 1\n"
+_YML = "td: {}\nmd: []\nsts:\n  qty: 1\n"
 
 
 class ReloadingBroker:

@@ -139,23 +139,12 @@ class EventLogInfoResponse(BaseModel):
 
 
 class StrategyYamlResponse(BaseModel):
-    """The strategy.yml behind a past deploy.
-
-    Normally ``yaml`` is the document as submitted. When ``reconstructed`` is
-    true it is not: that deploy predates the text being stored, so this was
-    rebuilt from the persisted spec, with comments and formatting gone and
-    ``td`` showing accounts' current names. ``unresolved_td`` (reconstructed
-    documents only) lists api ids whose account name could not be recovered —
-    their ``td`` entries are placeholders that will not redeploy.
-    """
+    """The strategy.yml behind a past deploy, verbatim as submitted."""
 
     #: Strategy class this was deployed as — the document no longer carries it.
     type: str | None = None
     session_id: str
     yaml: str
-    unresolved_td: list[int] = Field(default_factory=list)
-    #: False when ``yaml`` is the original text; true when it was rebuilt.
-    reconstructed: bool = False
 
 
 class VenueOut(BaseModel):

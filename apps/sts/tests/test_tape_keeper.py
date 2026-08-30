@@ -92,4 +92,4 @@ def test_it_is_registered_and_catalogued() -> None:
     assert template is not None
     # The template must not hand anyone an account: this strategy's safety is
     # that it structurally cannot trade, and a td entry would undo that.
-    assert parse_strategy_yml(template.yaml).td == []
+    assert parse_strategy_yml(template.yaml).td == {}

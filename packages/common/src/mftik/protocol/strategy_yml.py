@@ -12,6 +12,13 @@ from pydantic import (
     ValidationError,
     field_validator,
 )
+from yaml.events import (
+    MappingEndEvent,
+    MappingStartEvent,
+    ScalarEvent,
+    SequenceEndEvent,
+    SequenceStartEvent,
+)
 
 from mftik.protocol.topics import Topics
 
@@ -28,16 +35,87 @@ RESTART_ALWAYS = "always"
 RESTART_NEVER = "never"
 RESTART_MODES = frozenset({RESTART_ALWAYS, RESTART_NEVER})
 
+#: What ``mftik check`` prints when someone still has a list under ``td:``.
+#: The parser prefixes the field name, so this sentence starts at "is".
+_TD_LIST_HINT = (
+    "is now a mapping of account name to settings, not a list. Change:\n"
+    "  td: [paper trader]\nto:\n  td:\n    paper trader:"
+)
 
-class StrategySpec(BaseModel):
-    """Parsed strategy.yml document.
 
-    td / md are infra attach lists; sts is the only customized runtime piece.
+class TdSettings(BaseModel):
+    """Per-account attach options.
+
+    Empty this round — ``extra="forbid"`` so a leverage / margin key is a
+    parse error rather than a silently dropped bag.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    td: list[str] = Field(default_factory=list)
+
+class TdAccountRef(BaseModel):
+    """One attached account after names have been resolved to api ids."""
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    settings: TdSettings = Field(default_factory=TdSettings)
+
+    def dump(self) -> dict[str, Any]:
+        return {"api_id": self.api_id, "settings": self.settings.model_dump()}
+
+
+def load_td(raw: Any) -> dict[str, TdAccountRef]:
+    """JSON / wire mapping → name → :class:`TdAccountRef`."""
+    if not raw:
+        return {}
+    if isinstance(raw, list):
+        return {
+            f"account-{int(api_id)}": TdAccountRef(api_id=int(api_id))
+            for api_id in raw
+        }
+    out: dict[str, TdAccountRef] = {}
+    for name, value in dict(raw).items():
+        if isinstance(value, TdAccountRef):
+            out[str(name)] = value
+        elif isinstance(value, dict):
+            out[str(name)] = TdAccountRef.model_validate(value)
+        else:
+            out[str(name)] = TdAccountRef(api_id=int(value))
+    return out
+
+
+def dump_td(td: dict[str, TdAccountRef]) -> dict[str, Any]:
+    return {name: ref.dump() for name, ref in td.items()}
+
+
+def td_api_ids_of(td: dict[str, TdAccountRef] | None) -> list[int]:
+    return [ref.api_id for ref in (td or {}).values()]
+
+
+def attached_api_ids(row: Any) -> list[int]:
+    """Attach ids from a session row, whether it holds ``td`` or ``td_api_ids``.
+
+    Board / list still speak ``td_api_ids``. The column is gone; a mapping
+    row and a test double that only set the old attribute both work.
+    """
+    raw = getattr(row, "td", None)
+    if isinstance(raw, dict) and raw:
+        return td_api_ids_of(load_td(raw))
+    return [int(x) for x in (getattr(row, "td_api_ids", None) or [])]
+
+
+
+class StrategySpec(BaseModel):
+    """Parsed strategy.yml document.
+
+    ``td`` is account name → settings; ``md`` is still a feed-key list.
+    ``sts`` is the strategy's own parameters.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    td: dict[str, TdSettings] = Field(default_factory=dict)
     md: list[str] = Field(default_factory=list)
     #: Whether this run wants to be restored if STS restarts under it.
     #: ``always`` by default: two gates already stand in front of a rebuild —
@@ -83,24 +161,32 @@ class StrategySpec(BaseModel):
 
     @field_validator("td", mode="before")
     @classmethod
-    def _td_names(cls, value: Any) -> list[str]:
-        """Account names (resolved to api ids at deploy time)."""
+    def _td_mapping(cls, value: Any) -> dict[str, Any]:
+        """Account name → settings (resolved to api ids at deploy time)."""
         if value is None:
-            return []
-        if not isinstance(value, list):
-            raise ValueError("td must be a list of api account names")
-        out: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            if not isinstance(item, str) or not item.strip():
+            return {}
+        if isinstance(value, list):
+            raise ValueError(_TD_LIST_HINT)
+        if not isinstance(value, dict):
+            raise ValueError(
+                "td must be a mapping of account name to settings"
+            )
+        out: dict[str, Any] = {}
+        for key, settings in value.items():
+            if not isinstance(key, str):
                 raise ValueError(
-                    f"td entry must be a non-empty account name, got {item!r}"
+                    f"td account name must be a string, got {key!r}"
                 )
-            name = item.strip()
-            if name in seen:
-                raise ValueError(f"duplicate td account name: {name!r}")
-            seen.add(name)
-            out.append(name)
+            name = key.strip()
+            if not name:
+                raise ValueError("td account name must be a non-empty string")
+            if settings is None:
+                settings = {}
+            if not isinstance(settings, dict):
+                raise ValueError(
+                    f"td[{name!r}] settings must be a mapping, got {settings!r}"
+                )
+            out[name] = settings
         return out
 
     @field_validator("md", mode="before")
@@ -137,6 +223,7 @@ def parse_strategy_yml(text: str) -> StrategySpec:
     if not isinstance(text, str) or not text.strip():
         raise StrategyYamlError("strategy.yml is empty")
     try:
+        _refuse_duplicate_td_keys(text)
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise StrategyYamlError(f"invalid YAML: {exc}") from exc
@@ -148,6 +235,81 @@ def parse_strategy_yml(text: str) -> StrategySpec:
         raise StrategyYamlError(_readable(exc)) from exc
     except Exception as exc:
         raise StrategyYamlError(str(exc)) from exc
+
+
+def _refuse_duplicate_td_keys(text: str) -> None:
+    """Refuse a ``td:`` mapping that names the same account twice.
+
+    ``yaml.safe_load`` keeps the last key silently. Harmless while settings
+    are empty; disastrous once leverage lives here.
+    """
+    keys = _td_account_keys(text)
+    seen: set[str] = set()
+    for key in keys:
+        if key in seen:
+            raise StrategyYamlError(f"td: duplicate account name: {key!r}")
+        seen.add(key)
+
+
+def _td_account_keys(text: str) -> list[str]:
+    """Scalar keys under the root ``td:`` mapping, in document order."""
+    events = list(yaml.parse(text, Loader=yaml.SafeLoader))
+    i = 0
+    while i < len(events) and not isinstance(events[i], MappingStartEvent):
+        i += 1
+    if i >= len(events):
+        return []
+    i += 1
+    depth = 1
+    expecting_key = True
+    while i < len(events) and depth > 0:
+        ev = events[i]
+        if isinstance(ev, (MappingStartEvent, SequenceStartEvent)):
+            depth += 1
+            expecting_key = False
+        elif isinstance(ev, (MappingEndEvent, SequenceEndEvent)):
+            depth -= 1
+            if depth == 1:
+                expecting_key = True
+        elif isinstance(ev, ScalarEvent) and depth == 1:
+            if expecting_key:
+                if ev.value == "td":
+                    nxt = i + 1
+                    if nxt < len(events) and isinstance(
+                        events[nxt], MappingStartEvent
+                    ):
+                        return _mapping_keys(events, nxt)
+                    return []
+                expecting_key = False
+            else:
+                expecting_key = True
+        i += 1
+    return []
+
+
+def _mapping_keys(events: list[Any], start: int) -> list[str]:
+    """Keys of the mapping that starts at ``events[start]``."""
+    keys: list[str] = []
+    i = start + 1
+    depth = 1
+    expecting_key = True
+    while i < len(events) and depth > 0:
+        ev = events[i]
+        if isinstance(ev, (MappingStartEvent, SequenceStartEvent)):
+            depth += 1
+            expecting_key = False
+        elif isinstance(ev, (MappingEndEvent, SequenceEndEvent)):
+            depth -= 1
+            if depth == 1:
+                expecting_key = True
+        elif isinstance(ev, ScalarEvent) and depth == 1:
+            if expecting_key:
+                keys.append(str(ev.value))
+                expecting_key = False
+            else:
+                expecting_key = True
+        i += 1
+    return keys
 
 
 def _readable(exc: ValidationError) -> str:
@@ -171,14 +333,3 @@ def _readable(exc: ValidationError) -> str:
                 message = message[len(prefix) :]
         lines.append(f"{where}: {message}")
     return "\n".join(lines) or str(exc)
-
-
-def dump_strategy_yml(spec: StrategySpec) -> str:
-    """Serialize a StrategySpec to YAML text."""
-    payload = {
-        "td": list(spec.td),
-        "md": list(spec.md),
-        "restart": spec.restart,
-        "sts": dict(spec.sts),
-    }
-    return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)

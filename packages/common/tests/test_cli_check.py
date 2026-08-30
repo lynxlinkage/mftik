@@ -27,7 +27,7 @@ class Tiny(Strategy):
         return params
 """
 
-_OK_YML = "td: []\nmd: []\nsts:\n  qty: 1\n"
+_OK_YML = "td: {}\nmd: []\nsts:\n  qty: 1\n"
 
 
 def _tree(tmp_path: Path, source: str, name: str = "hello") -> Path:
@@ -162,7 +162,7 @@ def test_bad_yml_in_the_tree_is_refused(tmp_path: Path, capsys) -> None:
 def test_illegal_md_is_refused(tmp_path: Path, capsys) -> None:
     dest = _tree(tmp_path, _TINY)
     cfg = tmp_path / "deploy.yml"
-    cfg.write_text("td: []\nmd: [not-a-ticker]\nsts: {}\n")
+    cfg.write_text("td: {}\nmd: [not-a-ticker]\nsts: {}\n")
 
     assert main(["check", str(dest), str(cfg)]) == EXIT_ERROR
     assert "md entry" in capsys.readouterr().err
@@ -185,7 +185,7 @@ def test_a_name_error_at_import_is_refused(tmp_path: Path, capsys) -> None:
 def test_on_initialized_refusal_is_named(tmp_path: Path, capsys) -> None:
     dest = _tree(tmp_path, _QTY)
     cfg = tmp_path / "deploy.yml"
-    cfg.write_text("td: []\nmd: []\nsts: {}\n")
+    cfg.write_text("td: {}\nmd: []\nsts: {}\n")
 
     assert main(["check", str(dest), str(cfg)]) == EXIT_ERROR
     err = capsys.readouterr().err
@@ -200,7 +200,7 @@ def test_traceback_shows_where_the_strategy_raised(tmp_path: Path, capsys) -> No
     """The message alone rarely locates a line in somebody's own code."""
     dest = _tree(tmp_path, _QTY)
     cfg = tmp_path / "deploy.yml"
-    cfg.write_text("td: []\nmd: []\nsts: {}\n")
+    cfg.write_text("td: {}\nmd: []\nsts: {}\n")
 
     assert main(["check", str(dest), str(cfg), "--traceback"]) == EXIT_ERROR
     err = capsys.readouterr().err

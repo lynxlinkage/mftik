@@ -243,8 +243,13 @@ from mftik.protocol.strategy_yml import (
     RESTART_NEVER,
     StrategySpec,
     StrategyYamlError,
-    dump_strategy_yml,
+    TdAccountRef,
+    TdSettings,
+    attached_api_ids,
+    dump_td,
+    load_td,
     parse_strategy_yml,
+    td_api_ids_of,
 )
 from mftik.protocol.topics import Topics
 
@@ -362,7 +367,12 @@ __all__ = [
     "default_template",
     "get_template",
     "strategy_types",
-    "dump_strategy_yml",
+    "TdAccountRef",
+    "TdSettings",
+    "attached_api_ids",
+    "dump_td",
+    "load_td",
+    "td_api_ids_of",
     "Envelope",
     "HealthCheck",
     "HealthCheckEnvelope",

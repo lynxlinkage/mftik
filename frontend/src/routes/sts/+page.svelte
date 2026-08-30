@@ -621,15 +621,7 @@
 									<p class="muted small">Loading…</p>
 								{:else}
 									<div class="yaml-head">
-										<span class="muted small">
-											{#if viewing.reconstructed}
-												Rebuilt from the stored spec — this deploy predates the submitted document
-												being kept, so comments and formatting are gone and <code>td</code> shows
-												accounts' current names.
-											{:else}
-												The document as submitted.
-											{/if}
-										</span>
+										<span class="muted small">The document as submitted.</span>
 										<div class="actions">
 											<button type="button" class="secondary" onclick={copyYaml}>
 												{copied ? 'Copied' : 'Copy'}
@@ -639,13 +631,6 @@
 											</button>
 										</div>
 									</div>
-									{#if viewing.unresolved_td.length > 0}
-										<p class="warn small">
-											api {viewing.unresolved_td.join(', ')} no longer exists — the account name
-											could not be recovered, so those <code>td</code> entries are placeholders and
-											will not redeploy as-is.
-										</p>
-									{/if}
 									<pre class="yml-view">{viewing.yaml}</pre>
 								{/if}
 							</td>

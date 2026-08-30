@@ -22,7 +22,6 @@ from mftik.protocol import (
     ListSessionsRequest,
     ListSessionsRequestEnvelope,
     ListSessionsResult,
-    StrategySpec,
     StrategyTemplate,
     StrategyYamlError,
     StsEventLogChunk,
@@ -39,7 +38,6 @@ from mftik.protocol import (
     Topics,
     all_templates,
     default_template,
-    dump_strategy_yml,
     get_template,
     parse_strategy_yml,
 )
@@ -264,13 +262,6 @@ def _strategy_out(row: StsSessionRow) -> StrategyOut:
     )
 
 
-#: Stand-in for a ``td`` account whose credential has since been deleted. The
-#: name is unrecoverable, so emit something that fails loudly at deploy rather
-#: than something that silently deploys against fewer accounts.
-def _deleted_td_placeholder(api_id: int) -> str:
-    return f"<deleted api_id={api_id}>"
-
-
 @router.get("/sessions/{session_id}", response_model=StrategyOut)
 async def get_strategy(session_id: str) -> StrategyOut:
     """One STS session from the database, including the TD/MD it attached.
@@ -292,16 +283,8 @@ async def get_strategy(session_id: str) -> StrategyOut:
 async def strategy_yaml(session_id: str) -> StrategyYamlResponse:
     """The strategy.yml behind a past deploy.
 
-    Served verbatim from what was submitted. The stored text is what a person
-    wrote — comments, ordering and the account names as typed — and it is what
-    everything else about the deploy was derived from, so it is the document
-    to hand back.
-
-    Deploys made before the text was kept have nothing to serve, and fall back
-    to a reconstruction from the persisted spec (``reconstructed``). That
-    document parses to the same spec but is not the same document: comments
-    and formatting are gone, and ``td`` shows each account's *current* name
-    rather than the one that was typed.
+    Served verbatim from what was submitted. Deploys that never stored a
+    document — they ended before the text was kept — have nothing to serve.
     """
     async with session_scope() as db:
         row = await StsSessionRepository(db).get_by_session_id(session_id)
@@ -315,36 +298,14 @@ async def strategy_yaml(session_id: str) -> StrategyYamlResponse:
                 type=row.type,
                 session_id=row.session_id,
                 yaml=row.yaml_text,
-                reconstructed=False,
             )
 
-        td_api_ids = [int(v) for v in (row.td_api_ids or [])]
-        md_ids = [str(v) for v in (row.md_ids or [])]
-        restart = row.restart
-        st_paras = dict(row.st_paras or {})
-        row_type = row.type
-
-        # strategy.yml names accounts; the session stores api ids. Map back.
-        accounts = AccountRepository(db)
-        td_names: list[str] = []
-        unresolved: list[int] = []
-        for api_id in td_api_ids:
-            account = await accounts.get_by_api_id(api_id)
-            if account is None:
-                unresolved.append(api_id)
-                td_names.append(_deleted_td_placeholder(api_id))
-                continue
-            td_names.append(account.name)
-
-    spec = StrategySpec(
-        td=td_names, md=md_ids, restart=restart, sts=st_paras
-    )
-    return StrategyYamlResponse(
-        type=row_type,
-        session_id=session_id,
-        yaml=dump_strategy_yml(spec),
-        unresolved_td=unresolved,
-        reconstructed=True,
+    raise HTTPException(
+        status_code=404,
+        detail=(
+            f"session {session_id} has no stored strategy.yml — "
+            "this deploy predates document storage"
+        ),
     )
 
 

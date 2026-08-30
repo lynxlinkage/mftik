@@ -1,7 +1,7 @@
 """Scaffold a strategy that runs as generated.
 
-The value here is entirely in the ``strategy.yml``. A template with
-``td: [<your-account>]`` and a made-up ticker in it is a template that has to
+The value here is entirely in the ``strategy.yml``. A template with a
+placeholder account and a made-up ticker in it is a template that has to
 be corrected before it does anything, and correcting it means finding out
 which accounts this node has and which instruments its symbol plane knows —
 which is what the node is for asking. So this asks, and writes the answers.
@@ -88,11 +88,13 @@ class {cls}(Strategy):
 _STRATEGY_YML = """\
 # Deploy document. `mftik run` sends this; `mftik check` validates it.
 #
-# td:  account names, as this node knows them (mftik whoami's node, /apis)
+# td:  accounts this deploy attaches, keyed by the name this node knows
 # md:  feeds, each `topic.UniversalTicker`
 # sts: your own parameters — on_initialized above decides what is valid
-td: [{td}]
-md: [{md}]
+td:
+  {td}:
+md:
+  - {md}
 restart: never
 sts:
   stop_after: 5

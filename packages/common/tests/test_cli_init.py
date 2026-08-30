@@ -1,7 +1,7 @@
 """``mftik init`` — a scaffold that runs as generated.
 
 The template is not the interesting part; the ``strategy.yml`` is. One
-carrying ``td: [<your-account>]`` has to be corrected before it does
+carrying a placeholder account has to be corrected before it does
 anything, and correcting it means finding out what this node calls its
 accounts and which instruments its symbol plane knows. So these check that
 what gets written is real, and that when it cannot be, the file says so
@@ -117,8 +117,8 @@ def test_the_document_names_a_real_account_and_instrument(
     assert main(["init", str(root)]) == 0
 
     body = _yml(root)
-    assert 'td: ["paper trader"]' in body
-    assert 'md: ["orderbook.Paper_Spot_BTCUSDT"]' in body
+    assert '"paper trader":' in body
+    assert '"orderbook.Paper_Spot_BTCUSDT"' in body
     # The instruments asked for are the ones that account can trade.
     assert node.venue_asked == "Paper"
 
@@ -217,7 +217,7 @@ def test_a_venue_with_no_instruments_keeps_the_real_account(
 
     out = capsys.readouterr().out
     assert "knows no instruments" in out
-    assert 'td: ["paper trader"]' in _yml(root)
+    assert '"paper trader":' in _yml(root)
 
 
 # --- not clobbering anything ----------------------------------------------

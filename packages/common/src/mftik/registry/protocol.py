@@ -10,8 +10,8 @@ from typing import Any
 from mftik.registry.errors import MissingRemoteExtras, RegistryError
 
 PROTOCOL = "mftik.registry"
-PROTOCOL_VERSION = 1
-PROTOCOL_MIN = 1
+PROTOCOL_VERSION = 2
+PROTOCOL_MIN = 2
 
 
 def _installed_version() -> str:

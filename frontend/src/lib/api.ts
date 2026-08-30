@@ -283,12 +283,6 @@ export type StrategyYaml = {
 	type: string | null;
 	session_id: string;
 	yaml: string;
-	/** api ids whose account name could not be recovered — their `td` entries
-	 * are placeholders that will not redeploy. Reconstructed documents only. */
-	unresolved_td: number[];
-	/** False when `yaml` is the submitted document; true when it was rebuilt
-	 * from the stored spec because that deploy predates the text being kept. */
-	reconstructed: boolean;
 };
 
 export type Audit = {
@@ -430,7 +424,7 @@ export type ApiCreateBody = {
 };
 
 const DEFAULT_STRATEGY_YML = `td:
-  - paper trader
+  paper trader:
 md:
   - orderbook.Paper_Spot_BTCUSDT
 sts:

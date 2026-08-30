@@ -213,8 +213,6 @@
 				<span class="muted small">
 					{#if yaml === null}
 						Loading…
-					{:else if yaml.reconstructed}
-						Rebuilt from the stored spec — comments and formatting are gone.
 					{:else}
 						The document as submitted.
 					{/if}
