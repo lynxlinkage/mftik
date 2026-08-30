@@ -151,9 +151,9 @@ BINANCE_FUTURE = Venue(
     label="Binance USD-M Futures",
     # A venue of its own rather than a category of ``Binance``, and this is the
     # case the docstring above is about: Binance's USDⓈ-M plane has its own
-    # hosts, its own wallet, its own order book and its own API key, and a
-    # credential for one cannot trade the other. One connection, one
-    # credential — so, one venue.
+    # hosts, wallet and order book, so a credential stored here cannot trade
+    # spot or COIN-M. Binance issues one key for all three planes; uniqueness
+    # is therefore (venue, api_key), not the key string alone.
     categories=frozenset({Category.PERP}),
     # Same authentication story as spot: the WebSocket API authenticates a
     # connection with ``session.logon``, which accepts only Ed25519 keys.
@@ -164,9 +164,10 @@ BINANCE_FUTURE = Venue(
 BINANCE_DELIVERY = Venue(
     name="BinanceDelivery",
     label="Binance COIN-M Futures",
-    # dapi: coin-margined book on its own hosts, wallet and API key. Inverse
-    # is the product, not a category of the USD-M perp venue — the ticker is
-    # ``BinanceDelivery_Inverse_BTCUSD``, never ``…_Perp_BTCUSD``.
+    # dapi: coin-margined book on its own hosts and wallet. Inverse is the
+    # product, not a category of the USD-M perp venue — the ticker is
+    # ``BinanceDelivery_Inverse_BTCUSD``, never ``…_Perp_BTCUSD``. The same
+    # key string as USD-M is the usual case, not a collision.
     categories=frozenset({Category.INVERSE}),
     # COIN-M is quoted in USD, not USDT: ``BTCUSD_PERP`` is the venue's own
     # spelling and ``BTCUSDT`` is not an instrument dapi lists at all.

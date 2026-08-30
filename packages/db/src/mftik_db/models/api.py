@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from mftik_db.models.base import Base
@@ -17,9 +17,23 @@ class ApiType(StrEnum):
 
 
 class Api(Base):
-    """Exchange / venue API credential owned by a user."""
+    """Exchange / venue API credential owned by a user.
+
+    Uniqueness is ``(venue, api_key)``, not the key string alone. Binance
+    issues one key for spot, USD-M and COIN-M; each plane is its own venue
+    and needs its own row, so the same key must be allowed on more than one.
+
+    ``venue`` holds the canonical registry spelling — writers resolve it
+    through ``venues`` first, and 0028 folded the older rows — because the
+    constraint compares it exactly while venue identity is otherwise
+    case-insensitive. :meth:`ApiRepository.get_by_venue_and_api_key` matches
+    case-blind so a stray spelling is still caught before a write.
+    """
 
     __tablename__ = "apis"
+    __table_args__ = (
+        UniqueConstraint("venue", "api_key", name="uq_apis_venue_api_key"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     owner_id: Mapped[int] = mapped_column(
@@ -27,7 +41,7 @@ class Api(Base):
         index=True,
     )
     venue: Mapped[str] = mapped_column(String(64), index=True)
-    api_key: Mapped[str] = mapped_column(String(256), unique=True, index=True)
+    api_key: Mapped[str] = mapped_column(String(256), index=True)
     api_secret: Mapped[str] = mapped_column(Text())
     type: Mapped[str] = mapped_column(String(32), default=ApiType.HMAC.value)
     passphrase: Mapped[str | None] = mapped_column(String(256), nullable=True)

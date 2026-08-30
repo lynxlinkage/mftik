@@ -90,7 +90,9 @@ async def seed() -> None:
         summary.append(f"  user_id={user.id} email={DEV_EMAIL}")
 
         for spec in (*PAPER_APIS, *live_venue_apis()):
-            existing = await apis.get_by_api_key(spec["api_key"])
+            existing = await apis.get_by_venue_and_api_key(
+                spec["venue"], spec["api_key"]
+            )
             if existing is not None:
                 logger.info(
                     "api exists id=%s key=%s venue=%s",

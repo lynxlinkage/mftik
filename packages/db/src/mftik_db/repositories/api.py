@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mftik_db.models.api import Api
@@ -13,11 +13,26 @@ class ApiRepository(BaseRepository[Api]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, Api)
 
-    async def get_by_api_key(self, api_key: str) -> Api | None:
+    async def get_by_venue_and_api_key(
+        self, venue: str, api_key: str
+    ) -> Api | None:
+        """The credential for a venue, matching the venue name case-blind.
+
+        Venue identity is case-insensitive everywhere else (``venues.get``),
+        so a row left non-canonical by older code must still be found here —
+        otherwise this lookup misses it and a second row for the same real
+        venue and key gets written.
+        """
         result = await self.session.execute(
-            select(Api).where(Api.api_key == api_key)
+            select(Api)
+            .where(
+                func.lower(Api.venue) == venue.strip().lower(),
+                Api.api_key == api_key,
+            )
+            .order_by(Api.id.asc())
+            .limit(1)
         )
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
     async def list_all(self) -> Sequence[Api]:
         result = await self.session.execute(select(Api).order_by(Api.id.asc()))

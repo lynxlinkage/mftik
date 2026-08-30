@@ -89,7 +89,7 @@ Instruments are **universal tickers**: `Venue_Category_SYMBOL`. `Gate_Spot_BTCUS
 
 ## Exchange integration
 
-A venue here is **one connection with one credential**. Binance spot and Binance USD-M are two venues — different hosts, different wallets, different keys. Bybit's unified account is one venue with two categories behind the same key.
+A venue here is **one connection with one credential**. Binance spot and Binance USD-M are two venues — different hosts, different wallets. Binance issues one key for all three planes, so the same key string may be stored once per venue. Bybit's unified account is one venue with two categories behind the same key.
 
 | Venue | Markets | Credential | Trade | ticker | trade | book | quote | kline | aggtrade | liq |
 |---|---|---|---|---|---|---|---|---|---|---|
