@@ -16,7 +16,7 @@ import fakeredis.aioredis
 import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.exchange import PaperExchange, Side
-from mftik.exchange.errors import OrderError
+from mftik.exchange.errors import ExchangeError, OrderError
 from mftik.exchange.models import (
     Balance,
     Order,
@@ -40,6 +40,7 @@ from mftik.protocol import (
     Topics,
     UntypedEnvelope,
 )
+from mftik_td.errors import VENUES, VenueErrors
 from mftik_td.session import PaperSessionFactory, SessionManager
 
 API_ID = 42
@@ -379,6 +380,86 @@ async def test_a_venue_reject_hands_the_prelock_back(
     row = await broker.state_get(Topics.td_ledger(API_ID), "USDT")
     assert row is not None
     assert Decimal(row["prelock"]) == Decimal("0")
+
+
+class _LabeledError(ExchangeError):
+    """Shaped like the errors Gate's adapter raises: a venue label to read."""
+
+    def __init__(self, label: str, message: str) -> None:
+        super().__init__(f"{label}: {message}")
+        self.label = label
+
+
+async def test_a_fok_that_filled_nothing_is_a_cancel_not_a_reject(
+    attached: SessionManager, broker: Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One event, one shape, whichever channel the venue answers on.
+
+    Gate and Binance's margined books answer an unfillable fill-or-kill at the
+    call; Bybit, OKX and Binance spot end the order as a plain cancel on the
+    stream. It is the same event — the instruction asked for everything or
+    nothing and got nothing — so a strategy must not have to handle it two
+    ways. TD ends it as a cancelled order on both paths.
+
+    The paper venue is lent an ``unfilled`` entry for the duration, because
+    the engine no longer raises this at all: paper cancels the order itself,
+    like the venues it simulates. Which spellings mean "unfilled" is
+    ``test_error_normalization``'s subject; this is about what TD does with
+    the answer.
+    """
+    session = attached.get(API_ID)
+    assert session is not None
+    session.ledger.apply_venue(Balance(asset="USDT", free=Decimal("1000")))
+    session.symbols = _StubSymbols()
+    monkeypatch.setitem(
+        VENUES, "Paper", VenueErrors(unfilled=frozenset({"FOK_NOT_FILL"}))
+    )
+
+    async def unfillable(request: PlaceOrderRequest) -> Order:
+        cause = _LabeledError("FOK_NOT_FILL", "Order cannot be filled completely")
+        # The adapters all re-raise this way, so the label is a `__cause__`
+        # away — which is the shape TD has to see through.
+        raise OrderError(str(cause)) from cause
+
+    session.private.place_order = unfillable  # type: ignore[method-assign]
+
+    rejects: list[dict[str, Any]] = []
+    stop = asyncio.Event()
+
+    async def _watch() -> dict[str, Any]:
+        async for env in broker.subscribe(
+            Topics.td_global(API_ID), stop=stop
+        ):
+            payload = env.payload
+            if payload.get("client_order_id") != "cid-fok":
+                continue
+            if env.type == TD_ORDER_REJECT:
+                rejects.append(payload)
+            if (
+                env.type == TD_ORDER_UPDATE
+                and payload["status"] == OrderStatus.CANCELED.value
+            ):
+                stop.set()
+                return payload
+        raise AssertionError("no terminal update for cid-fok")
+
+    watcher = asyncio.create_task(_watch())
+    await asyncio.sleep(0.05)
+
+    ack = await _ack(
+        broker,
+        _submit_envelope(client_order_id="cid-fok", price=Decimal("50000")),
+    )
+    assert ack.accepted is True
+    canceled = await asyncio.wait_for(watcher, timeout=2.0)
+
+    assert canceled["status"] == OrderStatus.CANCELED.value
+    assert Decimal(canceled["filled_qty"]) == Decimal("0")
+    # Nothing was refused, so nothing may reach `on_order_reject`.
+    assert rejects == []
+    # And it is settled: out of the book, funds back.
+    assert session.oms.get_order("cid-fok") is None
+    assert not session.ledger.has_reservation("cid-fok")
 
 
 async def test_pending_new_is_in_redis_before_the_ack(

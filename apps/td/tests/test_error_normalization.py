@@ -34,7 +34,12 @@ from mftik.protocol.reject_codes import (
     is_td_internal,
     is_venue,
 )
-from mftik_td.errors import VENUES, normalize, normalize_reason
+from mftik_td.errors import (
+    VENUES,
+    is_unfilled_immediate,
+    normalize,
+    normalize_reason,
+)
 
 GATE = "Gate"
 GATE_FUTURES = "GateFutures"
@@ -395,6 +400,79 @@ def test_a_cyclic_cause_chain_does_not_hang() -> None:
     second.__cause__ = first
 
     assert normalize(first, venue=BINANCE) is RejectCode.VENUE_REJECTED
+
+
+# --- not a refusal at all ---------------------------------------------------
+
+
+def test_gate_says_a_fok_filled_nothing_and_that_is_not_a_reject() -> None:
+    """``FOK_NOT_FILL`` is the instruction working, so it is routed away.
+
+    Gate is one of only two venues that answers this at the call. The rest
+    report it as a cancelled order on the stream, and TD ends it the same way
+    for all of them — see ``Session.record_unfilled``.
+    """
+    err = GateApiError("FOK_NOT_FILL", "Order cannot be filled completely")
+
+    assert is_unfilled_immediate(err, venue=GATE)
+
+
+def test_binance_futures_5021_is_the_same_event_by_another_name() -> None:
+    err = BinanceWsError(
+        -5021,
+        "Due to the order could not be filled immediately, the FOK order has "
+        "been rejected.",
+    )
+
+    assert is_unfilled_immediate(err, venue=BINANCE_FUTURE)
+    # Both margined books, one table.
+    assert is_unfilled_immediate(err, venue="BinanceDelivery")
+
+
+def test_the_unfilled_check_reads_the_cause_like_normalize_does() -> None:
+    """The order path only ever sees the adapter's bare ``OrderError``."""
+    venue_error = GateApiError("FOK_NOT_FILL", "Order cannot be filled completely")
+    wrapped = OrderError(str(venue_error))
+    wrapped.__cause__ = venue_error
+
+    assert is_unfilled_immediate(wrapped, venue=GATE)
+
+
+@pytest.mark.parametrize(
+    ("exc", "venue"),
+    [
+        # The one this must never swallow: post-only is a real refusal, and
+        # the strategy that earned it has a quote missing from the book.
+        (BinanceWsError(-5022, "post only order would immediately match"),
+         BINANCE_FUTURE),
+        (GateApiError("POC_FILL_IMMEDIATELY", "would fill immediately"), GATE),
+        # Nor anything else a venue turns down.
+        (GateApiError("BALANCE_NOT_ENOUGH", "not enough USDT"), GATE),
+        (BinanceWsError(-2019, "Margin is insufficient."), BINANCE_FUTURE),
+        # Spot has no entry at all — it never answers this at the call.
+        (BinanceWsError(-5021, "fok rejected"), BINANCE),
+        # And a bare local error has nothing to read.
+        (OrderError("limit order requires a price"), GATE),
+    ],
+)
+def test_a_refusal_is_never_read_as_an_unfilled_order(
+    exc: Exception, venue: str
+) -> None:
+    assert not is_unfilled_immediate(exc, venue=venue)
+
+
+def test_an_unfilled_entry_is_not_also_a_reject_code() -> None:
+    """The two tables must not both claim the same spelling.
+
+    A code in both would be routed to a cancelled order *and* carry a reject
+    code nothing publishes — the sort of contradiction that only shows up on
+    the day someone reads one of the two and not the other.
+    """
+    for name, table in VENUES.items():
+        overlap = table.unfilled & (
+            set(table.codes) | set(table.labels)
+        )
+        assert not overlap, f"{name} maps {overlap} as both"
 
 
 # --- the bands themselves ---------------------------------------------------
