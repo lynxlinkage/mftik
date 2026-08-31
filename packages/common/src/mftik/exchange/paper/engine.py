@@ -401,9 +401,16 @@ class PaperExchange:
             assert request.price is not None
             limit_price = _round_price(request.price, inst.tick_size)
 
+        # A fill-or-kill the book cannot serve. Decided on depth, before
+        # anything trades, because all-or-nothing cannot be judged from the
+        # result of a partial match — but *acted on* further down, once the
+        # order exists, because the answer is a cancelled order rather than a
+        # refusal. Nothing was filled and nothing was turned down: FOK asked
+        # for everything or nothing and got nothing, which is the instruction
+        # working. Bybit, OKX and Binance spot all report it as a plain
+        # cancel, and this engine says the same thing.
+        killed = False
         if request.tif is TimeInForce.FOK:
-            # All-or-nothing has to be decided before anything trades, so it
-            # is depth that is checked, not the result of a partial match.
             makers = self._sorted_makers(
                 request.symbol,
                 request.side,
@@ -415,18 +422,11 @@ class PaperExchange:
                     (rem * (order.price or Decimal("0")) for _a, order, rem in makers),
                     Decimal("0"),
                 )
-                if available_notional < request.quote_qty:
-                    raise OrderError(
-                        f"fill-or-kill needs {request.quote_qty} quote, "
-                        f"book has {available_notional}"
-                    )
+                killed = available_notional < request.quote_qty
             else:
                 available = sum((row[2] for row in makers), Decimal("0"))
                 assert request.qty is not None
-                if available < request.qty:
-                    raise OrderError(
-                        f"fill-or-kill needs {request.qty}, book has {available}"
-                    )
+                killed = available < request.qty
 
         if request.tif is TimeInForce.POST_ONLY:
             # Refuse before the order exists rather than matching and undoing
@@ -461,6 +461,16 @@ class PaperExchange:
         )
         self._register_order(account, order)
 
+        if killed:
+            # Straight to CANCELED, with no NEW in between: it never rested,
+            # and inventing the acknowledgement would put a resting quote in
+            # the record that no book ever held. Nothing traded, so no
+            # balance moved and there is nothing to emit but the order.
+            done = order.model_copy(update={"status": OrderStatus.CANCELED})
+            self._orders[done.order_id] = done
+            self._emit_order(account, done)
+            return done
+
         filled_qty, notional, unfilled_quote = self._match_taker_locked(
             account,
             order,
@@ -485,8 +495,13 @@ class PaperExchange:
             # IOC keeps what crossed and drops the rest. The remainder never
             # rests, so it is never reserved — locking funds for it would fail
             # orders the account can perfectly well afford to have filled.
-            # Acknowledged before being cancelled because PENDING_NEW →
-            # CANCELED is not a legal transition.
+            #
+            # Acknowledged before being cancelled so the fills have a state to
+            # belong to: a partial IOC really did reach PARTIALLY_FILLED, and
+            # a strategy reading only the terminal row would otherwise see the
+            # size appear with nothing to say when. An IOC that took nothing
+            # could go straight to CANCELED the way a killed FOK does, but
+            # the two rows cost nothing and keep this branch one shape.
             avg = (notional / filled_qty) if filled_qty > 0 else None
             acked = order.model_copy(
                 update={
