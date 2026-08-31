@@ -6,6 +6,12 @@ requires-python = ">=3.12"
 dependencies = [
     "mftik",
     "mftik-db",
+    # The loop this process runs on — docs/EventLoop.md says why. Declared even
+    # though the shared image already has it via `uvicorn[standard]`: that only
+    # holds because `uv sync --all-packages` installs the API's dependencies
+    # into the same venv, and a per-app sync would start this process on a
+    # missing import. The marker is uvloop's own — there is no Windows wheel.
+    "uvloop>=0.21; sys_platform != 'win32'",
 ]
 
 [tool.uv.sources]
