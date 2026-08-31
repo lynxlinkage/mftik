@@ -8,6 +8,7 @@ import os
 import signal
 from typing import Any
 
+import uvloop
 from mftik import configure_logging, run_until_stopped
 from mftik.broker import Broker
 from mftik.protocol import Topics
@@ -231,5 +232,11 @@ def main() -> None:
     # Non-zero when a long-lived task ended on its own: the restart
     # policy is what puts the process back, and an exit code is what
     # tells anyone reading ``docker ps`` that STS did not just stop.
-    if not asyncio.run(amain()):
+    #
+    # ``uvloop.run`` rather than ``asyncio.run`` — docs/EventLoop.md has the
+    # measurements, and this is the process they matter most in: every session
+    # is a task on this one loop. It builds that loop for this call alone and
+    # leaves the global policy untouched, so a strategy that asks for the
+    # running loop gets uvloop and nothing else in the image changes.
+    if not uvloop.run(amain()):
         raise SystemExit(1)

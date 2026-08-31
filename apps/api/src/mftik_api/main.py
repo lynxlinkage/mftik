@@ -158,7 +158,22 @@ def run() -> None:
 
     host = os.getenv("API_HOST", "0.0.0.0")
     port = int(os.getenv("API_PORT", "8000"))
-    uvicorn.run("mftik_api.main:app", host=host, port=port, log_level="info")
+    # ``loop="uvloop"`` states what this process has in fact been running since
+    # the day it was written. Uvicorn defaults to ``loop="auto"``, and auto
+    # means uvloop whenever uvloop imports — which it always has here, because
+    # it arrives as a ``uvicorn[standard]`` extra. So this changes no behaviour;
+    # it removes an accident. The domains now say the same thing at their own
+    # entrypoints (docs/EventLoop.md), and a node running one loop on purpose is
+    # worth more than a node running the right one by luck: with ``auto``, a
+    # dependency bump that dropped the extra would move the API off uvloop and
+    # nothing would say so but a latency graph.
+    uvicorn.run(
+        "mftik_api.main:app",
+        host=host,
+        port=port,
+        log_level="info",
+        loop="uvloop",
+    )
 
 
 if __name__ == "__main__":
