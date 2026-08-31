@@ -1,47 +1,64 @@
-# uvloop — can this node change event loops, and would it matter?
+# uvloop — why every process here runs it, and what that was worth
 
-Short answer: it can, cheaply and with no new dependency, and one of the six
-processes has been running on uvloop in production for as long as the API has
-existed. What it would buy is roughly a tenth of the CPU each plane burns —
-not the latency this question is usually asked in hope of.
+All six processes run uvloop. Five of them were changed to; the API had been
+doing it by accident since the day it was written, and now says so.
 
-Nothing here is built yet. The measurements are, and `just loop-bench`
-reproduces every number below.
+What it bought is roughly a tenth of the CPU each plane burns. It is not worth
+much latency, and the rest of this document is mostly the evidence for that
+second sentence — because the change is easy to make for the wrong reason, and
+the number that would justify the wrong reason is not there.
 
-## What is already true
+`just loop-bench` reproduces every measurement below.
 
-Facts this assessment rests on, all of them checkable in the tree today.
+## What this changed
 
-**The API already runs uvloop.** `run()` calls `uvicorn.run(...)` with no
-`loop` argument (`apps/api/src/mftik_api/main.py:156`), which leaves Uvicorn on
-its default `loop="auto"` — and `auto` means uvloop when uvloop imports. Asked
-from inside a request handler started that way, the answer is `uvloop.Loop`.
-So the node is *already* mixed: the control plane runs one loop and the five
-domains run another, and nobody chose either.
+| | Before | After |
+|---|---|---|
+| api | `uvicorn.run(...)`, no `loop` → `auto` → uvloop | `loop="uvloop"`, stated |
+| td, md, sts, sym, paper | `asyncio.run(amain())` | `uvloop.run(amain())` |
+| declared dependency | none of the six named uvloop | all six do |
+| test suite | stdlib loop | uvloop, and `packages` on both |
 
-**uvloop is already installed in every container.** It arrives as an extra of
-`uvicorn[standard]` (`apps/api/pyproject.toml:10`) and is pinned in the
-lockfile at 0.22.1 (`uv.lock:1263`), with prebuilt manylinux and musllinux
-wheels for x86-64 and aarch64 on 3.12, 3.13 and 3.14 — nothing compiles. The
-Dockerfile installs the whole workspace in one shot with
-`uv sync --all-packages` (`Dockerfile:32`) and every service shares that image,
-so `import uvloop` already succeeds inside TD, MD, STS, SYM and Paper. Adopting
-it there adds no dependency, no image weight and no build step.
+`uvloop.run` rather than a policy installed at import: it builds the loop for
+that one call and leaves `asyncio`'s global policy alone, so each entrypoint
+states the loop it runs on and nothing else in the process is reached into.
 
-**The five domains each own exactly one loop, created in one line.** `main()`
-calls `asyncio.run(amain())` and nothing else touches loop construction:
-`apps/td/src/mftik_td/app.py:184`, `apps/md/src/mftik_md/app.py:232`,
-`apps/sts/src/mftik_sts/app.py:229`, `apps/sym/src/mftik_sym/app.py:144`,
-`apps/paper/src/mftik_paper/app.py:317`. There is no `new_event_loop`, no
-`set_event_loop`, no `get_event_loop`, no `set_event_loop_policy` and no
-`run_forever` anywhere in the repository. The change is five lines, in five
-files, each replacing `asyncio.run` with `uvloop.run`.
+**The dependency was declared even though the image already had it.** uvloop
+arrives as a `uvicorn[standard]` extra (`apps/api/pyproject.toml`), and the
+Dockerfile installs the whole workspace at once with `uv sync --all-packages`
+(`Dockerfile:32`), so `import uvloop` already worked in every container. But it
+worked *by proximity*: `uv tree --package mftik-td` did not mention uvloop, so a
+per-app sync — a slim image, a local `uv sync --package mftik-sts` — would have
+built a container that started and died on the import. Naming it in the five
+apps is what makes the import a fact rather than a coincidence. The API names it
+too, now that its code asks for `loop="uvloop"` by name.
+
+It is *not* declared in `packages/common`. That is the distribution a strategy
+author installs with `pip install mftik`, uvloop publishes no Windows wheel, and
+the SDK's own entrypoint — the `mftik` CLI — is synchronous and needs no loop.
+
+## What made this cheap
+
+Facts checkable in the tree, and the reason this was a five-line change rather
+than a project.
+
+**uvloop was already in the lockfile**, pinned at 0.22.1 (`uv.lock`), with
+prebuilt manylinux and musllinux wheels for x86-64 and aarch64 on 3.12, 3.13
+and 3.14. Nothing compiles, and the image did not grow.
+
+**Each process owned exactly one loop, created in one line.** There is no
+`new_event_loop`, no `set_event_loop`, no `get_event_loop`, no
+`set_event_loop_policy` and no `run_forever` anywhere in the repository, so
+there was nothing to unpick — only `asyncio.run` to replace, in
+`apps/td/src/mftik_td/app.py`, `apps/md/src/mftik_md/app.py`,
+`apps/sts/src/mftik_sts/app.py`, `apps/sym/src/mftik_sym/app.py` and
+`apps/paper/src/mftik_paper/app.py`.
 
 **Sessions are tasks, not processes.** STS, TD and MD all multiplex sessions
-onto one loop with `asyncio.create_task`. That means the loop is genuinely
-shared infrastructure — one slow callback is felt by every session in the
-process — so loop efficiency is a real lever on how many sessions fit in a
-plane. It also means there is exactly one loop per container to convert.
+onto one loop with `asyncio.create_task`. That is why the CPU saving is the part
+worth having: one slow callback is felt by every session in the process, so a
+tenth of the CPU back is a tenth more headroom before a plane has to be split.
+It is also why there was exactly one loop per container to convert.
 
 **Nothing in the tree uses the parts of asyncio uvloop does not implement.**
 No `add_reader` or `add_writer`, no child watchers, no `subprocess_exec` or
@@ -53,6 +70,12 @@ used — `loop.add_signal_handler` for SIGINT/SIGTERM in all five domains,
 `loop.run_in_executor` against a dedicated pool for alert matching
 (`apps/api/src/mftik_api/alert_eval.py:20`), and `loop.time()` — are all
 supported. Two of them behave differently, which is the next section.
+
+**The scripts under `scripts/` were left on `asyncio.run`.** They are one-shot
+operator tools — seed, fetch, a cursor reset, a backfill probe — that make a
+handful of round trips and exit. There is no loop-sensitive behaviour to align
+in a process whose whole life is shorter than one plane's heartbeat interval,
+and `loop_bench.py` runs both loops on purpose.
 
 ## The two behaviours that actually differ
 
@@ -89,33 +112,46 @@ and the two loops agree on the sleeps they both honour to within 8 µs.
 
 **A sub-millisecond sleep stops being a sleep.** asyncio floors
 `sleep(0.0001)` at about a millisecond; uvloop returns from it in under two
-microseconds. A poll loop written as `await asyncio.sleep(0.0001)` would go from
-a thousand laps a second to a spin. No production or test code does this: the
-shortest sleep anywhere in the tree is `0.01`, which both loops honour to within
-8 µs. It is a rule for later, not a migration blocker.
+microseconds. A poll loop written as `await asyncio.sleep(0.0001)` goes from a
+thousand laps a second to a spin. Nothing did: the shortest sleep anywhere in
+the tree, production or test, is `0.01`, which both loops honour to within 8 µs.
+It is a rule for whoever writes the next poll loop, not something this change had
+to work around.
 
 ## The suite says the same thing on either loop
 
-pytest-asyncio builds every test's loop from its `event_loop_policy` fixture,
-so running the suite both ways is one fixture override, and `asyncio_mode` is
-already `auto` (`pyproject.toml:33`). All 2,926 tests — every venue adapter
-against its stub server, the OMS, the broker, the TD/MD/STS session machinery —
-were run on each loop: 2,921 passed on asyncio and 2,922 on uvloop, in 209
-seconds either way, the suite being bound by fakeredis and sqlite rather than
-by the loop.
+The suite now runs on uvloop by default, because a suite on a different loop
+from the node cannot see a loop-specific regression. `conftest.py` implements
+pytest-asyncio's `pytest_asyncio_loop_factories` hook and reads
+`MFTIK_TEST_LOOP`, so either loop is one environment variable away. The hook
+rather than the older `event_loop_policy` fixture: overriding that fixture is
+deprecated and warns, and loop policies are leaving asyncio itself.
 
-The five that failed deserve the honest version rather than a rounded one. They
-were the same five on both loops except that one passed under uvloop, and all of
-them are about the on-disk strategy registry and an environment overlay rather
-than about async anything. Run in isolation the set changes again — three fail
-on asyncio, one on uvloop — which is what order-dependence looks like, and they
-were reproduced on asyncio before uvloop was introduced. No test failed under
-uvloop that passed under asyncio.
+CI runs the whole suite on uvloop and then `packages` again on the stdlib loop.
+That second pass is not symmetry — `packages/common` ships as `mftik`, so
+nothing a strategy author imports may require uvloop to work.
 
-That is what makes this cheap to try rather than a leap: the switch is testable
-on both loops from one branch, and the suite is a real check on it.
+All 2,926 tests were run both ways while making this change: every venue adapter
+against its stub server, the OMS, the broker, the TD/MD/STS session machinery.
+209 seconds either way, the suite being bound by fakeredis and sqlite rather
+than by the loop. **No test failed on uvloop that passed on asyncio.**
 
-## What it would buy
+The handful that did fail deserve the honest version rather than a rounded one:
+the same set on both loops except one that passed on uvloop, all of them about
+the on-disk strategy registry and an environment overlay rather than about async
+anything, and all of them order-dependent — run in isolation the set changes
+again. They reproduce on asyncio with none of this applied.
+
+**One thing worth knowing that this change did not cause.** A domain that gets
+SIGTERM exits non-zero, because `run_until_stopped` sees the plane's own loops
+finish in the same `asyncio.wait` batch as its stopper and reports them as having
+"ended before shutdown". Booting Paper for real and signalling it gives that
+result six times out of six on *both* loops, so uvloop neither introduced it nor
+hides it. It is left alone here rather than folded into a loop swap, but a clean
+shutdown that looks like a crash to whatever reads exit codes is worth its own
+change.
+
+## What it bought
 
 Measured with `just loop-bench` against a real Redis, driving the actual
 `Broker` and the actual pydantic envelopes. Medians of five reps.
@@ -126,7 +162,7 @@ Measured with `just loop-bench` against a real Redis, driving the actual
 | `ws_ingest` | a venue read loop: recv + `json.loads` | 89,685/s | 97,274/s | 1.08x |
 | `subscribe` | STS feed pump: `get_message` + envelope parse | 9,943/s | 10,103/s | 1.02x |
 | `rpc` | `Broker.request` p50 latency (lower is better) | 332 µs | 309 µs | 1.07x |
-| `fanout` | `Dispatcher.publish` as written today | 1,747/s | 1,731/s | 0.99x |
+| `fanout` | `Dispatcher.publish` as it is written | 1,747/s | 1,731/s | 0.99x |
 
 Read the control first. On a raw transport with nothing above it, uvloop is
 half again as fast, so the harness can plainly see what uvloop is good at. The
@@ -141,10 +177,9 @@ loop makes a round trip that still has to happen any cheaper.
 
 **CPU is the exception, and it is consistent.** uvloop costs 10–12% less CPU
 for identical work on every Redis case — 63.4 → 56.5 µs per fan-out round trip,
-100.4 → 91.8 µs per message received, 0.50 → 0.45 s for 1,500 RPCs. That is
-real: sessions are tasks sharing one process, so a tenth of the CPU back is a
-tenth more headroom before a plane has to be split. It is just a different claim
-from the one a loop swap is usually proposed to make.
+100.4 → 91.8 µs per message received, 0.50 → 0.45 s for 1,500 RPCs. That is the
+reason this change was made, and it is a different claim from the one a loop
+swap is usually proposed to make.
 
 ## The lever that is bigger than the loop
 
@@ -153,14 +188,14 @@ tape append batched into one round trip instead of `N+1` awaited ones:
 
 | Fan-out variant | asyncio | uvloop |
 |---|---|---|
-| as written today | 1,747/s | 1,731/s |
+| as it is written | 1,747/s | 1,731/s |
 | pipelined | 5,663/s | 5,794/s |
 
-**3.24x, on the same loop.** If the reason to want uvloop is MD throughput,
-uvloop is the wrong change — it is worth 0.99x on that path and pipelining is
-worth 3.24x. The two do not compete for the same work and could both be done,
-but they should not be confused for each other, and only one of them is on the
-critical path of a busy feed.
+**3.24x, on the same loop.** Nothing here batches those round trips yet, and
+that is the point of leaving this section in: if MD's throughput is ever the
+problem, this change is not the fix for it and switching loops again will not
+help either. The two levers do not compete for the same work, but only one of
+them is on the critical path of a busy feed.
 
 The same shape shows up elsewhere and is worth naming while it is in view:
 `Broker.subscribe` sleeps 10 ms between empty polls and `Broker.request` polls
@@ -168,46 +203,37 @@ BLPOP in one-second laps; `envapply` runs a blocking `subprocess.run` on the
 loop that serves it. None of those are loop problems, and a faster loop hides
 none of them.
 
-## Recommendation
+## Why one loop rather than the faster one
 
-Adopt it, for CPU headroom and for consistency, and do not sell it as latency.
+The CPU is the payoff, but consistency is the reason the change was worth making
+rather than deferring. Before it, the API ran uvloop because a transitive extra
+happened to be installed and the five domains ran the stdlib loop because nobody
+had said otherwise. That is one node running two loops by accident: a
+loop-sensitive bug would reproduce differently in the API than in STS, and
+nothing in the repository would have explained why. Either loop was defensible;
+running both without having chosen was not.
 
-The consistency argument is the stronger one. Right now the API runs uvloop
-because a transitive extra happened to be installed, and the five domains run
-the stdlib loop because nobody said otherwise. That is one node running two
-loops by accident, which means a loop-sensitive bug reproduces differently in
-the API than in STS and nothing in the repository would explain why. Whichever
-loop is chosen, it should be chosen out loud.
+That is also why the API's `loop="uvloop"` is in the diff despite changing no
+behaviour. With `auto`, a dependency bump that dropped the `standard` extra would
+have moved the API back to the stdlib loop silently, and the only trace would
+have been a latency graph.
 
-What that takes:
+## What to watch
 
-1. **Declare it.** Add `uvloop` to the `[project.dependencies]` of the five
-   apps, not to `packages/common`. `mftik` is the distribution a strategy
-   author installs with `pip install mftik`, and uvloop publishes no Windows
-   wheel — the lockfile already carries `sys_platform != 'win32'` on it for
-   that reason. The SDK's own entrypoints (the `mftik` CLI) are synchronous, so
-   it needs no loop on a laptop.
-2. **Swap five lines.** `asyncio.run(amain())` → `uvloop.run(amain())` in the
-   five `main()` functions listed above. `uvloop.run` is the drop-in: it
-   installs the loop for that call and nothing else, which keeps loop choice
-   visible at the entrypoint instead of hidden in a policy set at import time.
-3. **Pin the API's loop explicitly.** Pass `loop="uvloop"` to `uvicorn.run`, so
-   the API is on uvloop because someone decided it rather than because an extra
-   is installed. This changes no behaviour today and stops a dependency bump
-   from silently changing it tomorrow.
-4. **Run the suite both ways in CI.** One `event_loop_policy` fixture override
-   behind a flag. It is what makes the third-party surface — a strategy author
-   can install packages into a session's environment overlay — checkable rather
-   than assumed.
+In this order:
 
-What to watch afterwards, in this order: per-plane CPU at a fixed message rate,
-which is where the 10% should show up and the only place the case rests;
-reconnect behaviour on the venue sockets, which is the largest body of
-OS-error handling in the tree and the least exercised by tests; and eventlog
-write latency, since `to_thread` is the one place the loop hands work to a
-thread on a path a strategy can feel.
+**Per-plane CPU at a fixed message rate.** Where the 10–12% should appear, and
+the only place the case for this change rests. If it does not show up in
+production, the change bought nothing and should be said so.
 
-If none of that is worth the churn, the defensible alternative is not "leave
-it" — it is to pin the API to the stdlib loop with `loop="asyncio"` for the
-same one-node-one-loop reason, and revisit uvloop when a profile actually shows
-a plane CPU-bound in its loop.
+**Reconnect behaviour on the venue sockets.** The largest body of OS-error
+handling in the tree and the least exercised by tests. The probe confirms a
+refused connection still raises `ConnectionRefusedError` and still is an
+`OSError`, so every `except OSError` still catches it — but that is a check on
+one error, not on nine venues' worth of disconnect paths.
+
+**Eventlog write latency.** `asyncio.to_thread` is the one place the loop hands
+work to a thread on a path a strategy can feel.
+
+**Anything that starts measuring durations off `loop.time()`.** It is a
+millisecond clock now. Use `time.perf_counter()`.
