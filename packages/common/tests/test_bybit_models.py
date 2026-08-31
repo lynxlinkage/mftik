@@ -116,6 +116,49 @@ def test_a_quote_sized_market_order_does_not_copy_qty_as_base() -> None:
     assert order.quote_qty == Decimal("100")
 
 
+def test_a_refused_order_carries_the_venues_own_reason() -> None:
+    """Bybit refuses a crossed post-only *here*, not at the call.
+
+    The row is the only place it ever says so, so dropping ``rejectReason``
+    in the conversion leaves nothing downstream able to tell this apart from
+    a refusal for short balance or a notional under the floor.
+    """
+    order = BybitOrderUpdate.model_validate(
+        {
+            "symbol": "BTCUSDT",
+            "orderId": "ord-1",
+            "orderLinkId": "cid-1",
+            "side": "Buy",
+            "orderType": "Limit",
+            "orderStatus": "Rejected",
+            "timeInForce": "PostOnly",
+            "price": "60000",
+            "qty": "0.001",
+            "rejectReason": "EC_PostOnlyWillTakeLiquidity",
+        }
+    ).to_order(TICKER)
+    assert order.status is OrderStatus.REJECTED
+    assert order.reject_reason == "EC_PostOnlyWillTakeLiquidity"
+
+
+def test_no_error_is_not_a_reason() -> None:
+    """``EC_NoError`` rides along on rows that are not refusals at all."""
+    order = BybitOrderUpdate.model_validate(
+        {
+            "symbol": "BTCUSDT",
+            "orderId": "ord-1",
+            "side": "Buy",
+            "orderType": "Limit",
+            "orderStatus": "Filled",
+            "price": "60000",
+            "qty": "0.001",
+            "cumExecQty": "0.001",
+            "rejectReason": "EC_NoError",
+        }
+    ).to_order(TICKER)
+    assert order.reject_reason == ""
+
+
 @pytest.mark.parametrize(
     ("venue_status", "expected"),
     [

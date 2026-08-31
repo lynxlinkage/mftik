@@ -480,6 +480,9 @@ class BinanceExecutionReport(BinanceMessage):
             price=self.p or None,
             filled_qty=self.filled_qty_total,
             avg_price=self.avg_price,
+            # ``NONE`` is what every report that is not a refusal carries, so
+            # it means "no reason", not a reason named NONE.
+            reject_reason="" if self.reject_reason == "NONE" else self.reject_reason,
             ts=secs(self.transact_time or self.event_time),
         )
 

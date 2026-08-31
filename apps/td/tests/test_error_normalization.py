@@ -33,7 +33,7 @@ from mftik.protocol.reject_codes import (
     is_td_internal,
     is_venue,
 )
-from mftik_td.errors import VENUES, normalize
+from mftik_td.errors import VENUES, normalize, normalize_reason
 
 GATE = "Gate"
 GATE_FUTURES = "GateFutures"
@@ -183,6 +183,10 @@ def test_typed_errors_normalize_without_a_label(
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
+        (
+            "post-only order would cross at 50001.01 (best opposite 50001)",
+            RejectCode.VENUE_POST_ONLY_WOULD_CROSS,
+        ),
         ("duplicate client_order_id=cid-1", RejectCode.VENUE_DUPLICATE_CLIENT_ORDER_ID),
         ("unknown order_id=7", RejectCode.VENUE_ORDER_NOT_FOUND),
         ("order 7 is not open for account=a", RejectCode.VENUE_ORDER_ALREADY_CLOSED),
@@ -489,6 +493,72 @@ def test_a_rest_refusal_normalizes_like_a_socket_one() -> None:
     """Same numbers over both transports, which is why one table covers them."""
     rest = BybitRestError(170213, "Order does not exist", status=200)
     assert normalize(rest, venue="Bybit") == RejectCode.VENUE_ORDER_NOT_FOUND
+
+
+# --- refusals the venue puts on the order, not on the call ------------------
+#
+# ``normalize`` reads an exception. Bybit never raises for a crossed post-only:
+# it accepts the request, kills the order, and names the reason on the ``order``
+# topic. That is a second entry point into the same tables.
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (
+            "EC_PostOnlyWillTakeLiquidity",
+            RejectCode.VENUE_POST_ONLY_WOULD_CROSS,
+        ),
+        ("EC_DuplicatedClOrdID", RejectCode.VENUE_DUPLICATE_CLIENT_ORDER_ID),
+        ("EC_OrigClOrdIDDoesNotExist", RejectCode.VENUE_ORDER_NOT_FOUND),
+        ("EC_TooLateToCancel", RejectCode.VENUE_ORDER_ALREADY_CLOSED),
+        ("EC_LimitOrderInvalidPrice", RejectCode.VENUE_INVALID_PARAM),
+        ("EC_InvalidSymbolStatus", RejectCode.VENUE_SYMBOL_NOT_TRADABLE),
+    ],
+)
+def test_a_bybit_reject_reason_becomes_a_venue_code(
+    reason: str, expected: RejectCode
+) -> None:
+    """The one that matters is the first: 202 is what ``ChaseOrder`` branches
+    on to know a refusal was the ordinary cost of quoting passively."""
+    assert normalize_reason(reason, venue="Bybit") == expected
+
+
+def test_a_reject_reason_is_matched_whatever_its_case() -> None:
+    """The table is written in Bybit's spelling so it can be read against the
+    docs; the lookup must not depend on that spelling being reproduced."""
+    assert (
+        normalize_reason("ec_postonlywilltakeliquidity", venue="Bybit")
+        == RejectCode.VENUE_POST_ONLY_WOULD_CROSS
+    )
+
+
+def test_an_unmapped_reject_reason_survives_as_itself() -> None:
+    """Same bargain as an unmapped code: the detail outlives the table."""
+    assert normalize_reason("EC_SomethingNew", venue="Bybit") == "EC_SomethingNew"
+
+
+@pytest.mark.parametrize("reason", ["", "   "])
+def test_a_refusal_with_no_reason_is_a_plain_venue_reject(reason: str) -> None:
+    """Which is exactly what ``VENUE_REJECTED`` says: the venue refused it and
+    gave nothing to go on."""
+    assert normalize_reason(reason, venue="Bybit") is RejectCode.VENUE_REJECTED
+
+
+def test_a_reason_from_a_venue_with_no_table_still_survives() -> None:
+    assert normalize_reason("WHO_KNOWS", venue="Nowhere") == "WHO_KNOWS"
+
+
+def test_a_reject_reason_can_match_a_message_fragment_too() -> None:
+    """Message fragments are tried after labels, the same order ``normalize``
+    ends with — so a venue whose stream carries prose is covered as well."""
+    assert (
+        normalize_reason(
+            "post-only order would cross at 50001.01 (best opposite 50001)",
+            venue=PAPER,
+        )
+        is RejectCode.VENUE_POST_ONLY_WOULD_CROSS
+    )
 
 
 # --- OKX --------------------------------------------------------------------

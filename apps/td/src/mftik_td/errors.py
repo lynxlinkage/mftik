@@ -5,6 +5,11 @@ gets translated. :func:`normalize` takes the exception an adapter raised and
 returns the ``error_code`` that goes on the wire beside it. The venue's own
 words ride along unchanged as the reject's ``reason``.
 
+A venue can also say no *without* raising: it accepts the request, then kills
+the order and gives its reason on the private order stream. That refusal
+reaches TD as an order update rather than an exception, so it has a second
+entry point, :func:`normalize_reason`, reading the same tables.
+
 The mapping lives here, centrally, rather than inside each adapter: the codes
 are a cross-venue contract, and keeping every venue's spellings side by side
 is what makes it obvious when two venues mean the same thing under different
@@ -35,7 +40,13 @@ class VenueErrors:
     """How one venue spells the errors we have codes for."""
 
     #: Machine-readable label → code. Gate's ``data.errs.label`` and REST
-    #: ``label`` both land here.
+    #: ``label`` both land here, as does the ``rejectReason`` a venue puts on
+    #: an order it refused on the stream.
+    #:
+    #: Matched case-insensitively — ``__post_init__`` upper-cases the keys — so
+    #: a table can be written in the venue's own spelling and still be found.
+    #: Worth those four lines: Bybit's ``EC_PostOnlyWillTakeLiquidity`` can be
+    #: read against its docs, ``EC_POSTONLYWILLTAKELIQUIDITY`` cannot.
     labels: dict[str, RejectCode] = field(default_factory=dict)
     #: Numeric venue code → code, for venues that answer with integers.
     codes: dict[int, RejectCode] = field(default_factory=dict)
@@ -56,6 +67,11 @@ class VenueErrors:
     #: venues that raise no code at all; only worth having where the messages
     #: are ours to keep stable.
     messages: tuple[tuple[str, RejectCode], ...] = ()
+
+    def __post_init__(self) -> None:
+        upper = {key.upper(): value for key, value in self.labels.items()}
+        if upper != self.labels:
+            object.__setattr__(self, "labels", upper)
 
 
 #: Gate spot. Labels are Gate's own, from ``data.errs.label`` on a trading
@@ -294,12 +310,13 @@ OKX = VenueErrors(
     },
 )
 
-#: Bybit v5. Numeric codes only — Bybit publishes no label, and the numbers
-#: are its documented contract, the same ones over REST and over the sockets.
+#: Bybit v5. Numeric codes for what it refuses at the call, ``EC_`` labels for
+#: what it refuses on the ``order`` topic — the numbers are its documented
+#: contract, the same ones over REST and over the sockets.
 #:
-#: They are all five and six digit, so an unmapped one passes through as itself
-#: without any risk of colliding with the ``100``–``299`` band this platform
-#: assigns — see :mod:`mftik.protocol.reject_codes`.
+#: The numbers are all five and six digit, so an unmapped one passes through as
+#: itself without any risk of colliding with the ``100``–``299`` band this
+#: platform assigns — see :mod:`mftik.protocol.reject_codes`.
 #:
 #: **The two books number the same fact differently**, which is why several
 #: meanings appear twice: ``110001`` is "no such order" on the contract books
@@ -309,12 +326,44 @@ OKX = VenueErrors(
 #: belong to endpoints this adapter never calls — leverage, margin mode,
 #: transfers, sub-accounts. What is here is what an order can be refused with.
 #:
-#: One refusal is missing on purpose: a post-only order that would cross does
-#: not come back as an error at all. Bybit accepts it, cancels it, and says so
-#: on the ``order`` topic with ``rejectReason``
-#: ``EC_PostOnlyWillTakeLiquidity`` — so it reaches TD as an order update, not
-#: as an exception, and :func:`normalize` never sees it.
+#: **The labels are on a different path from the codes.** Bybit answers some
+#: refusals by killing the order after it has accepted the request: the row
+#: arrives on the ``order`` topic with ``orderStatus=Rejected`` and its
+#: ``rejectReason``, never as an exception, so :func:`normalize` never sees it
+#: and only :func:`normalize_reason` reads these. A crossed post-only is the
+#: one that matters in practice — it is the ordinary cost of quoting passively,
+#: and without ``EC_PostOnlyWillTakeLiquidity`` here it is indistinguishable
+#: from a refusal for any other reason.
+#:
+#: Two ``EC_`` values are deliberately absent. ``EC_BySelfMatch`` and
+#: ``EC_PerCancelRequest`` end an order as ``Cancelled``, not ``Rejected``, so
+#: they arrive as an order update and never reach a reject at all — mapping
+#: them would add codes that can never fire. (Self-trade prevention is a cancel
+#: on every venue here: Binance's ``EXPIRED_IN_MATCH`` and Gate's ``stp``
+#: finish-reason are both normalized to ``CANCELED`` in their adapters.)
 BYBIT = VenueErrors(
+    labels={
+        # post-only that would have taken liquidity — "your post only order
+        # would have executed as a taker, and so was rejected"
+        "EC_PostOnlyWillTakeLiquidity": RejectCode.VENUE_POST_ONLY_WOULD_CROSS,
+        # the order itself
+        "EC_DuplicatedClOrdID": RejectCode.VENUE_DUPLICATE_CLIENT_ORDER_ID,
+        "EC_OrigClOrdIDDoesNotExist": RejectCode.VENUE_ORDER_NOT_FOUND,
+        "EC_TooLateToCancel": RejectCode.VENUE_ORDER_ALREADY_CLOSED,
+        # request fields
+        "EC_MissingClOrdID": RejectCode.VENUE_INVALID_PARAM,
+        "EC_MissingOrigClOrdID": RejectCode.VENUE_INVALID_PARAM,
+        "EC_UnknownMessageType": RejectCode.VENUE_INVALID_PARAM,
+        "EC_UnknownOrderType": RejectCode.VENUE_INVALID_PARAM,
+        "EC_UnknownSide": RejectCode.VENUE_INVALID_PARAM,
+        "EC_UnknownTimeInForce": RejectCode.VENUE_INVALID_PARAM,
+        "EC_LimitOrderInvalidPrice": RejectCode.VENUE_INVALID_PARAM,
+        "EC_MarketOrderPriceIsNotZero": RejectCode.VENUE_INVALID_PARAM,
+        "EC_MarketOrderCannotBePostOnly": RejectCode.VENUE_INVALID_PARAM,
+        # instrument
+        "EC_InvalidSymbolStatus": RejectCode.VENUE_SYMBOL_NOT_TRADABLE,
+        "EC_InCallAuctionStatus": RejectCode.VENUE_SYMBOL_NOT_TRADABLE,
+    },
     codes={
         # credentials and permissions
         10003: RejectCode.VENUE_AUTH_FAILED,  # invalid api key
@@ -361,6 +410,9 @@ BYBIT = VenueErrors(
 #: them is a maintenance question rather than a guess about a third party.
 PAPER = VenueErrors(
     messages=(
+        # ``post-only order would cross at X (best opposite Y)`` — the engine
+        # refuses before the order exists, the same promise a real venue makes.
+        ("post-only order would cross", RejectCode.VENUE_POST_ONLY_WOULD_CROSS),
         ("duplicate client_order_id", RejectCode.VENUE_DUPLICATE_CLIENT_ORDER_ID),
         ("unknown client_order_id", RejectCode.VENUE_ORDER_NOT_FOUND),
         ("unknown order_id", RejectCode.VENUE_ORDER_NOT_FOUND),
@@ -441,6 +493,47 @@ def normalize(exc: BaseException, *, venue: str) -> int | str:
     return RejectCode.VENUE_REJECTED
 
 
+def normalize_reason(reason: str, *, venue: str) -> int | str:
+    """The reject code for a refusal the venue put on an *order*, not a call.
+
+    :func:`normalize` is the entry point for a venue that answers ``no`` by
+    raising. Some do not: Bybit accepts the request, kills the order, and says
+    why on the ``order`` topic as ``rejectReason``. That row reaches TD as an
+    order update with ``OrderStatus.REJECTED`` and never passes through an
+    exception, so ``normalize`` cannot be asked — which is why this exists
+    rather than the caller hard-coding ``VENUE_REJECTED``.
+
+    ``reason`` is the venue's own string, carried this far by
+    :attr:`~mftik.exchange.models.Order.reject_reason`. It is matched against
+    the venue's labels first and its message fragments second, the same two
+    steps and the same order ``normalize`` ends with.
+
+    The fallthrough is the same bargain too: an unmapped reason comes back as
+    itself, so the detail survives until the table catches up, and only a
+    refusal that came with *no* reason at all becomes ``VENUE_REJECTED`` —
+    which is exactly what that code says.
+    """
+    reason = reason.strip()
+    if not reason:
+        # The venue refused it and told us nothing. Honest, and all anyone
+        # knows.
+        return RejectCode.VENUE_REJECTED
+
+    table = VENUES.get(venue, VenueErrors())
+
+    mapped = table.labels.get(reason.upper())
+    if mapped is not None:
+        return mapped
+
+    lowered = reason.lower()
+    for fragment, matched in table.messages:
+        if fragment in lowered:
+            return matched
+
+    # Unmapped: hand back the venue's own word, not a catch-all.
+    return reason
+
+
 def _chain(exc: BaseException) -> list[BaseException]:
     """``exc`` and everything it was raised from, outermost first.
 
@@ -487,4 +580,5 @@ __all__ = [
     "VENUES",
     "VenueErrors",
     "normalize",
+    "normalize_reason",
 ]

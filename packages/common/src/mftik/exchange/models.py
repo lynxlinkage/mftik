@@ -459,6 +459,19 @@ class Order(InstrumentScoped):
     price: Decimal | None = None
     filled_qty: Decimal = Decimal("0")
     avg_price: Decimal | None = None
+    #: The venue's own word for why it refused this order, verbatim — Bybit's
+    #: ``EC_PostOnlyWillTakeLiquidity``, Binance's ``r``. Only a venue that
+    #: refuses on the *order stream* rather than at the call has anywhere to
+    #: put this: a refusal that comes back from the call itself is an
+    #: exception, and its reason is in the exception. Empty on every order
+    #: that was not refused, and on the venues that carry no such field.
+    #:
+    #: Kept as the venue's spelling rather than mapped here, because the
+    #: mapping is a cross-venue contract that lives in TD (``mftik_td.errors``)
+    #: beside every other venue's vocabulary. Without this field that path has
+    #: nothing to read: a stream refusal would otherwise reach a strategy as a
+    #: bare "rejected" no matter what the venue actually said.
+    reject_reason: str = ""
     ts: float = Field(default_factory=_ts)
 
 
