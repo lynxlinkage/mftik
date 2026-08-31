@@ -62,7 +62,7 @@ from mftik.protocol.reject_codes import describe
 from mftik_db.models.session import SessionDomain, SessionStatus
 
 from mftik_td.backfill.trigger import request_backfill
-from mftik_td.errors import normalize
+from mftik_td.errors import is_unfilled_immediate, normalize
 from mftik_td.history import HistoryWriter
 from mftik_td.session.factory import SessionFactory
 from mftik_td.session.session import Session
@@ -1473,7 +1473,18 @@ class SessionManager:
             )
         except ExchangeError as exc:
             acct.cid_owner.pop(req.client_order_id, None)
-            code = normalize(exc, venue=acct.trading.venue)
+            venue = acct.trading.venue
+            if is_unfilled_immediate(exc, venue=venue):
+                # Not a refusal, whatever this venue called it: an immediate
+                # order that filled nothing did exactly what it was told, and
+                # the venues that report it on the order stream end it as a
+                # plain cancel. Ending it the same way here is what stops one
+                # event reaching a strategy two different ways.
+                await acct.trading.record_unfilled(
+                    req.client_order_id, reason=str(exc)
+                )
+                return
+            code = normalize(exc, venue=venue)
             # Settle the PENDING_NEW we booked before announcing the refusal.
             await acct.trading.record_rejected(req.client_order_id)
             await acct.trading.publish_order_reject(

@@ -117,8 +117,20 @@ _S = OrderStatus
 #: fills completely on arrival never passes through PARTIALLY_FILLED, and a
 #: recovery query can find an UNKNOWN order still working rather than finished.
 _TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
+    # CANCELED without ever resting is what an immediate-or-nothing order
+    # does when the book cannot serve it: a FOK the venue killed on arrival
+    # never reached NEW, and the venues that refuse one at the call never
+    # acknowledged it at all. Booking it a NEW it never had, only to cancel
+    # that, would put a resting quote in the record that never existed.
     _S.PENDING_NEW: frozenset(
-        {_S.NEW, _S.PARTIALLY_FILLED, _S.FILLED, _S.REJECTED, _S.UNKNOWN}
+        {
+            _S.NEW,
+            _S.PARTIALLY_FILLED,
+            _S.FILLED,
+            _S.CANCELED,
+            _S.REJECTED,
+            _S.UNKNOWN,
+        }
     ),
     _S.NEW: frozenset(
         {

@@ -598,6 +598,42 @@ class Session:
         self._record_order(rejected)
         return rejected
 
+    async def record_unfilled(
+        self, client_order_id: str, *, reason: str
+    ) -> Order | None:
+        """Settle an immediate-or-nothing order that filled nothing.
+
+        A fill-or-kill the book could not serve did what it was told, so it
+        ends as a cancelled order with nothing filled — never as a reject.
+        Most venues report exactly that on their private order stream and this
+        is never reached for them; Gate and Binance's margined books answer
+        the *call* instead, and this is what makes the two look the same to a
+        strategy. See :func:`mftik_td.errors.is_unfilled_immediate`.
+
+        Unlike :meth:`record_rejected` this *does* announce the order, because
+        no reject envelope follows it. The order update is the only thing that
+        will ever say what happened, so a strategy waiting on the terminal
+        state hears it here.
+
+        ``reason`` is the venue's own words. They go to the log and no further:
+        nothing was refused, and ``reject_reason`` is for orders that were.
+        """
+        self._pending_since.pop(client_order_id, None)
+        await self.release(client_order_id)
+        order = self.oms.get_order(client_order_id)
+        if order is None or is_terminal(order.status):
+            return None
+        canceled = order.model_copy(update={"status": OrderStatus.CANCELED})
+        self.oms.handle_order(canceled)
+        await self.write_order(canceled)
+        self._record_order(canceled)
+        await self._td_log(
+            f"order unfilled cid={client_order_id} "
+            f"(immediate-or-nothing, nothing filled): {reason}"
+        )
+        await self._publish_order_update(canceled)
+        return canceled
+
     async def record_pending_cancel(self, client_order_id: str) -> str | None:
         """Mark an order PENDING_CANCEL before the cancel goes to the venue.
 

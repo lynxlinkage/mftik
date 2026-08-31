@@ -582,26 +582,38 @@ async def test_an_ioc_that_crosses_fully_just_fills(
 
 
 @pytest.mark.asyncio
-async def test_fill_or_kill_is_refused_when_the_book_is_too_thin(
+async def test_fill_or_kill_is_cancelled_when_the_book_is_too_thin(
     exchange: PaperExchange,
 ) -> None:
-    """All-or-nothing is decided on depth, before anything trades."""
+    """All-or-nothing is decided on depth, before anything trades.
+
+    And the answer is a cancelled order, not a refusal: FOK asked for
+    everything or nothing and got nothing, which is the instruction working
+    rather than the venue turning it down. Bybit, OKX and Binance spot all
+    report it that way, and this engine is a simulation of them — it used to
+    raise, which reached a strategy as a reject those venues never sent.
+    """
     await _seed_thin_ask(exchange, qty="0.5")
     private = _private(exchange)
     await private.connect()
 
-    with pytest.raises(OrderError, match="fill-or-kill"):
-        await private.place_order(
-            PlaceOrderRequest(
-                universal_ticker="Paper_Spot_BTCUSDT",
-                side=Side.BUY,
-                type=OrderType.LIMIT,
-                qty=Decimal("0.8"),
-                price=Decimal("50001"),
-                tif=TimeInForce.FOK,
-            )
+    order = await private.place_order(
+        PlaceOrderRequest(
+            universal_ticker="Paper_Spot_BTCUSDT",
+            side=Side.BUY,
+            type=OrderType.LIMIT,
+            qty=Decimal("0.8"),
+            price=Decimal("50001"),
+            tif=TimeInForce.FOK,
         )
-    # Nothing traded: the whole order was refused, not partly done.
+    )
+
+    assert order.status is OrderStatus.CANCELED
+    assert order.filled_qty == Decimal("0")
+    # It never rested, so it was never refused either — that field is for
+    # orders a venue turned down.
+    assert order.reject_reason == ""
+    # Nothing traded: all-or-nothing, and it was nothing.
     bal = {x.asset: x.free for x in await private.fetch_balances()}
     assert bal["BTC"] == Decimal("1")
     await private.close()
