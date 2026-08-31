@@ -16,6 +16,7 @@ import fakeredis.aioredis
 import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.exchange import PaperExchange, Side
+from mftik.exchange.errors import OrderError
 from mftik.exchange.models import (
     Balance,
     Order,
@@ -27,6 +28,7 @@ from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
+    TD_ORDER_REJECT,
     TD_ORDER_UPDATE,
     Envelope,
     LeaseHeartbeat,
@@ -141,6 +143,36 @@ async def _ack(broker: Broker, envelope: Envelope[Any]) -> OrderAck:
         Topics.td_order(API_ID), envelope, timeout=2.0
     )
     return OrderAck.model_validate(reply.payload)
+
+
+async def _await_global(
+    broker: Broker, type_: str, client_order_id: str
+) -> asyncio.Task[dict[str, Any]]:
+    """Listen on the account's global topic *before* the trigger fires.
+
+    Returns a task holding the first matching payload. Subscribing after the
+    call that publishes is a race the test loses on a fast broker, so this is
+    armed first and awaited afterwards.
+    """
+    stop = asyncio.Event()
+
+    async def _listen() -> dict[str, Any]:
+        async for env in broker.subscribe(
+            Topics.td_global(API_ID), stop=stop
+        ):
+            payload = env.payload
+            if (
+                env.type == type_
+                and payload.get("client_order_id") == client_order_id
+            ):
+                stop.set()
+                return payload
+        raise AssertionError(f"no {type_} for {client_order_id}")
+
+    task = asyncio.create_task(_listen())
+    # The subscription is not live the moment the task exists.
+    await asyncio.sleep(0.05)
+    return task
 
 
 async def test_the_order_loop_rebuilds_itself_rather_than_going_quiet(
@@ -308,6 +340,45 @@ async def test_an_unaffordable_order_is_refused_and_reserves_nothing(
     assert "insufficient balance" in ack.reason
     assert ack.error_code == RejectCode.TD_INSUFFICIENT_BALANCE
     assert not session.ledger.has_reservation("cid-broke")
+
+
+async def test_a_venue_reject_hands_the_prelock_back(
+    attached: SessionManager, broker: Broker
+) -> None:
+    """A refused submit must not keep holding the funds it reserved.
+
+    The release every other terminal state gets is wired to the venue stream,
+    and a submit the venue refused by raising never appears there. Nothing
+    else frees the reservation before the session dies, so each refusal used
+    to shave a little off ``available`` for good — and a passive quote earns a
+    crossed post-only every time the book moves under it.
+    """
+    session = attached.get(API_ID)
+    assert session is not None
+    session.ledger.apply_venue(Balance(asset="USDT", free=Decimal("1000")))
+    session.symbols = _StubSymbols()
+
+    async def refuse(request: PlaceOrderRequest) -> Order:
+        raise OrderError("FOK_NOT_FILL: Order cannot be filled completely")
+
+    session.private.place_order = refuse  # type: ignore[method-assign]
+
+    rejected = await _await_global(broker, TD_ORDER_REJECT, "cid-refused")
+    ack = await _ack(
+        broker,
+        _submit_envelope(
+            client_order_id="cid-refused", price=Decimal("50000")
+        ),
+    )
+    assert ack.accepted is True
+    await asyncio.wait_for(rejected, timeout=2.0)
+
+    assert not session.ledger.has_reservation("cid-refused")
+    assert session.ledger.available("USDT") == Decimal("1000")
+    # And STS sees the same thing, since that is where it reads balances.
+    row = await broker.state_get(Topics.td_ledger(API_ID), "USDT")
+    assert row is not None
+    assert Decimal(row["prelock"]) == Decimal("0")
 
 
 async def test_pending_new_is_in_redis_before_the_ack(

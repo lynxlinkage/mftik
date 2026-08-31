@@ -557,14 +557,32 @@ class Session:
         return order
 
     async def record_rejected(self, client_order_id: str) -> Order | None:
-        """Settle a booked order the venue refused.
+        """Settle a booked order the venue refused, and give the funds back.
 
         The submit path publishes its own reject envelope, but the order it
         booked ``PENDING_NEW`` is still sitting in the book — without this it
         would linger until the sweeper called it ``UNKNOWN`` and chased a
         venue that already said no.
+
+        The pre-lock comes back here too, and only here. Every other terminal
+        state releases through the manager's ``_on_order_settled``, which is
+        registered on the *venue stream* — and a submit the venue refused by
+        raising never reaches that stream. Left undone it is a standing leak:
+        the order is gone from the book while its reservation still counts
+        against ``available``, and nothing frees it until the session dies and
+        ``clear_state`` drops the ledger wholesale. A crossed post-only alone
+        earns one every time the book moves under a passive quote.
+
+        Released before the caller announces the refusal, for the reason
+        :meth:`reserve` writes the ledger before the ack goes out: a strategy
+        that resubmits off the reject must not read a balance still holding
+        funds for the order it was just told about.
         """
         self._pending_since.pop(client_order_id, None)
+        # Ahead of the early return, and idempotent by design: an order the
+        # stream already settled has had this cid released, and one whose
+        # commitment could not be priced never reserved it at all.
+        await self.release(client_order_id)
         order = self.oms.get_order(client_order_id)
         if order is None or is_terminal(order.status):
             return None
