@@ -118,15 +118,30 @@ class TimerToken:
         interval = self._interval_ms
         try:
             while not self._cancelled.is_set():
-                delay_s = (next_ms - self._timer.now_ms()) / 1000.0
-                if delay_s > 0:
+                # Loop until the clock has really reached ``next_ms``, rather
+                # than trusting one sleep to land there. A loop may wake a timer
+                # slightly early — uvloop's are millisecond-grained and were
+                # measured firing up to 1ms before the deadline, roughly once in
+                # four hundred — and ``register`` promises a wall-clock instant,
+                # not an approximation of one. A strategy told to act at
+                # 09:30:00.000 must not be called at 09:29:59.999; arriving late
+                # is latency, arriving early is the wrong answer.
+                while True:
+                    delay_s = (next_ms - self._timer.now_ms()) / 1000.0
+                    if delay_s <= 0:
+                        break
                     try:
+                        # Never ask for less than the clock's own resolution.
+                        # uvloop treats a sub-millisecond timeout as no wait at
+                        # all, so asking for the true remainder would spin here
+                        # instead of sleeping through it.
                         await asyncio.wait_for(
-                            self._cancelled.wait(), timeout=delay_s
+                            self._cancelled.wait(),
+                            timeout=max(delay_s, 0.001),
                         )
                         return
                     except TimeoutError:
-                        pass
+                        continue
                 if self._cancelled.is_set():
                     return
                 # ``due_ms`` alongside the wall clock: a tick that fires late

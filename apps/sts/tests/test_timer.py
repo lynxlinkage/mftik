@@ -21,6 +21,38 @@ async def test_one_shot_register_and_fire() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_token_never_fires_before_the_millisecond_it_is_due() -> None:
+    """``register`` names a wall-clock instant, so firing early is wrong.
+
+    One sleep is not enough to guarantee it. A loop may wake a timer slightly
+    early — uvloop's timers are millisecond-grained and were measured firing up
+    to 1ms ahead about once in four hundred — and a strategy told to act at
+    09:30:00.000 must not be called at 09:29:59.999. Late is latency; early is
+    a different answer.
+
+    Enough repeats to catch a rate that low, kept cheap by a short lead: the
+    original one-shot test above holds this too, but only by luck of timing,
+    and it was passing for a fortnight while the timer could fire early.
+    """
+    timer = Timer()
+    early: list[int] = []
+    for _ in range(200):
+        token = timer.token()
+        fired = asyncio.Event()
+        due = now_ms() + 2
+
+        def on_fire(_due: int = due, _fired: asyncio.Event = fired) -> None:
+            if timer.now_ms() < _due:
+                early.append(_due - timer.now_ms())
+            _fired.set()
+
+        token.register(due, 0, on_fire)
+        await asyncio.wait_for(fired.wait(), timeout=2.0)
+
+    assert early == []
+
+
+@pytest.mark.asyncio
 async def test_interval_and_cancel() -> None:
     timer = Timer()
     hits: list[int] = []
