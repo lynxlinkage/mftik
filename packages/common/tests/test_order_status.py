@@ -83,9 +83,9 @@ def test_documented_transitions_are_allowed(
 @pytest.mark.parametrize(
     ("current", "nxt"),
     [
-        # An order with no venue id cannot be cancelled.
+        # An order with no venue id cannot be *asked* to cancel — though the
+        # venue can still end it as one; see the killed-FOK test below.
         (S.PENDING_NEW, S.PENDING_CANCEL),
-        (S.PENDING_NEW, S.CANCELED),
         # A venue does not reject an order it already accepted and filled.
         (S.PARTIALLY_FILLED, S.REJECTED),
         (S.PARTIALLY_FILLED, S.NEW),
@@ -108,6 +108,16 @@ def test_an_order_can_fill_without_resting_first() -> None:
     """
     assert can_transition(S.PENDING_NEW, S.FILLED)
     assert can_transition(S.PENDING_NEW, S.PARTIALLY_FILLED)
+
+
+def test_an_order_can_be_cancelled_without_resting_first() -> None:
+    """A killed fill-or-kill never reaches NEW, and must not have to.
+
+    The venues that refuse one at the call never acknowledged it at all, so
+    TD has no NEW to move from — and inventing one would put a resting quote
+    in the record that no book ever held.
+    """
+    assert can_transition(S.PENDING_NEW, S.CANCELED)
     assert can_transition(S.NEW, S.FILLED)
 
 

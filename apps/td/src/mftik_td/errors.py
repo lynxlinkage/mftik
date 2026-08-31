@@ -67,11 +67,30 @@ class VenueErrors:
     #: venues that raise no code at all; only worth having where the messages
     #: are ours to keep stable.
     messages: tuple[tuple[str, RejectCode], ...] = ()
+    #: Labels and numeric codes a venue uses to say an immediate-or-nothing
+    #: order could not be filled — **not** refusals, and so not codes at all.
+    #:
+    #: A FOK that filled nothing did what it was told: fill everything now or
+    #: nothing. Most venues report that as a plain cancel on the order stream,
+    #: but Gate and Binance's margined books answer the *call* with an error
+    #: instead, which is the only reason TD ever sees one. Everything named
+    #: here is routed to a cancelled order rather than a reject, so a strategy
+    #: hears the same thing on every venue — see
+    #: :func:`is_unfilled_immediate`.
+    #:
+    #: Labels are matched case-insensitively, like :attr:`labels`.
+    unfilled: frozenset[int | str] = frozenset()
 
     def __post_init__(self) -> None:
         upper = {key.upper(): value for key, value in self.labels.items()}
         if upper != self.labels:
             object.__setattr__(self, "labels", upper)
+        shouted = frozenset(
+            entry.upper() if isinstance(entry, str) else entry
+            for entry in self.unfilled
+        )
+        if shouted != self.unfilled:
+            object.__setattr__(self, "unfilled", shouted)
 
 
 #: Gate spot. Labels are Gate's own, from ``data.errs.label`` on a trading
@@ -135,6 +154,9 @@ GATE = VenueErrors(
         "SERVER_ERROR": RejectCode.VENUE_INTERNAL_ERROR,
         "TOO_BUSY": RejectCode.VENUE_INTERNAL_ERROR,
     },
+    # "Order cannot be filled completely" — the instruction working, not a
+    # refusal. Gate is one of the two venues that answers this at the call.
+    unfilled=frozenset({"FOK_NOT_FILL"}),
     # Gate's WebSocket ``error.code``. Only the three documented values are
     # mapped — guessing at the rest would be worse than passing them through.
     codes={
@@ -264,7 +286,14 @@ BINANCE_FUTURE = VenueErrors(
         # counterparty's best price fails the PERCENT_PRICE filter
         -4131: RejectCode.VENUE_INVALID_PARAM,
         # the order itself
-        -2020: RejectCode.VENUE_REJECTED,  # unable to fill (FOK)
+        #
+        # "Unable to fill." Not the FOK path, whatever this comment used to
+        # say — that is ``-5021``, in :attr:`~VenueErrors.unfilled` below.
+        # Kept as a refusal because it has never been seen on the wire here
+        # and its wording covers more than one thing; routing an unobserved
+        # code to a cancelled order would turn a real refusal into a
+        # non-event on nothing but a guess.
+        -2020: RejectCode.VENUE_REJECTED,
         -2021: RejectCode.VENUE_INVALID_PARAM,  # would trigger immediately
         -2022: RejectCode.VENUE_INVALID_PARAM,  # reduce-only rejected
         -4061: RejectCode.VENUE_INVALID_PARAM,  # positionSide does not match mode
@@ -277,6 +306,11 @@ BINANCE_FUTURE = VenueErrors(
         -4400: RejectCode.VENUE_PERMISSION_DENIED,  # compliance restricted
         -4401: RejectCode.VENUE_PERMISSION_DENIED,  # compliance restricted
     },
+    # "Due to the order could not be filled immediately, the FOK order has
+    # been rejected. The order will not be recorded in the order history."
+    # Binance calls it a rejection; it is the instruction working, and the
+    # spot book reports the same event as an ``EXPIRED`` order instead.
+    unfilled=frozenset({-5021}),
     refine={
         **BINANCE.refine,
         -2010: (
@@ -512,6 +546,41 @@ def normalize(exc: BaseException, *, venue: str) -> int | str:
     return RejectCode.VENUE_REJECTED
 
 
+def is_unfilled_immediate(exc: BaseException, *, venue: str) -> bool:
+    """Whether ``exc`` is a venue saying an immediate order filled nothing.
+
+    Not a refusal, and so deliberately not a code: a fill-or-kill that took
+    nothing carried out its instruction exactly, the way an IOC that took
+    nothing does. The difference is only which channel the venue answers on —
+    Bybit, OKX and Binance spot report it as a cancelled order on the private
+    stream, while Gate and Binance's margined books raise at the call. TD asks
+    this question so the two arrive at a strategy the same way, as one
+    cancelled order with nothing filled.
+
+    Read against :attr:`VenueErrors.unfilled` and nothing else. A venue whose
+    spelling is not in that table falls through to :func:`normalize` and
+    reaches the strategy as a reject, which is what this platform did for
+    every venue before — an incomplete table costs consistency, never
+    information.
+
+    Searches ``__cause__`` for the same reason :func:`normalize` does: every
+    adapter re-raises a venue rejection as a bare ``OrderError``, and the
+    label or code is one link down the chain.
+    """
+    table = VENUES.get(venue, VenueErrors())
+    if not table.unfilled:
+        return False
+
+    for candidate in _chain(exc):
+        label = getattr(candidate, "label", "")
+        if isinstance(label, str) and label:
+            return label.upper() in table.unfilled
+        code = getattr(candidate, "code", None)
+        if isinstance(code, int) and not isinstance(code, bool):
+            return code in table.unfilled
+    return False
+
+
 def normalize_reason(reason: str, *, venue: str) -> int | str:
     """The reject code for a refusal the venue put on an *order*, not a call.
 
@@ -598,6 +667,7 @@ __all__ = [
     "BYBIT",
     "VENUES",
     "VenueErrors",
+    "is_unfilled_immediate",
     "normalize",
     "normalize_reason",
 ]
