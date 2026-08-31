@@ -287,7 +287,26 @@ BINANCE_FUTURE = VenueErrors(
     },
 )
 
+#: OKX. Numeric codes for what it refuses at the call — the ``sCode`` on an
+#: order reply and the ``code`` on a REST or socket error, which are the same
+#: numbering.
+#:
+#: **A crossed post-only is not among them.** OKX accepts the order, kills it,
+#: and reports ``state=canceled`` with ``cancelSource=31``; no exception is
+#: ever raised, so :func:`normalize` cannot be asked. The adapter reads that
+#: integer (``mftik.exchange.okx.models.CANCEL_REFUSALS``) and puts OKX's own
+#: words for it on the order, which is what :func:`normalize_reason` matches.
+#: The words come through :attr:`~VenueErrors.messages` rather than
+#: :attr:`~VenueErrors.labels` because OKX publishes no label on this path —
+#: the fragment is the adapter's, kept stable on purpose, the same arrangement
+#: :data:`PAPER` uses.
 OKX = VenueErrors(
+    messages=(
+        (
+            "post-only order will take liquidity",
+            RejectCode.VENUE_POST_ONLY_WOULD_CROSS,
+        ),
+    ),
     codes={
         50101: RejectCode.VENUE_AUTH_FAILED,
         50102: RejectCode.VENUE_AUTH_FAILED,

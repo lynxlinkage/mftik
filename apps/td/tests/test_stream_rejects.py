@@ -11,6 +11,12 @@ The regression it guards is narrow and was live in 0.4.1: the branch published
 ``VENUE_REJECTED`` and the literal string ``"rejected"`` no matter what the
 venue said, which made a crossed post-only indistinguishable from a refusal for
 short balance or a notional under the floor.
+
+OKX reaches the same path from further back. It does not even call the refusal
+a rejection — the row says ``canceled``, and only ``cancelSource`` separates it
+from the strategy's own cancel — so the adapter is what puts it on this path at
+all. The last test here is the end of that: an OKX row, the real converter, and
+the reject a strategy was owed.
 """
 
 from __future__ import annotations
@@ -24,6 +30,8 @@ import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.exchange import PaperExchange, Side
 from mftik.exchange.models import Order, OrderStatus, OrderType
+from mftik.exchange.okx.models import OkxOrderUpdate
+from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     TD_ORDER_REJECT,
@@ -213,3 +221,31 @@ async def test_only_a_crossed_post_only_drops_out_of_the_warnings(
     await session._store_then_announce_order(_refused("cid-level", reason))
 
     assert [lvl for lvl, msg in seen if "order rejected" in msg] == [level]
+
+
+async def test_an_okx_row_that_says_canceled_still_reaches_on_order_reject(
+    broker: Broker, session
+) -> None:
+    """#37, end to end. OKX pushed ``state=canceled`` for a post-only it had
+    refused, so nothing on this path fired: no reject, no log line, and a
+    strategy with no way to tell a refusal from its own cancel."""
+    session.private.name = "Okx"
+    order = OkxOrderUpdate.model_validate(
+        {
+            "instId": "BTC-USDT",
+            "ordId": "ord-okx",
+            "clOrdId": "cid-okx",
+            "side": "buy",
+            "ordType": "post_only",
+            "state": "canceled",
+            "cancelSource": "31",
+            "px": "77518.1",
+            "sz": "0.00001",
+            "accFillSz": "0",
+        }
+    ).to_order(UniversalTicker.parse("Okx_Spot_BTCUSDT"))
+
+    payload = await _reject_for(broker, session, order)
+
+    assert payload["error_code"] == RejectCode.VENUE_POST_ONLY_WOULD_CROSS
+    assert "post-only order will take liquidity" in payload["reason"]

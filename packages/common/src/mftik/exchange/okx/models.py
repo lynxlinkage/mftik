@@ -19,6 +19,9 @@ Readings worth knowing before trusting the converters:
   the direction in ``posSide``. :meth:`OkxPosition.signed_size` hides that.
 * **Spot market buys size in quote unless ``tgtCcy`` says otherwise.** The
   same trap as Bybit's ``marketUnit``.
+* **A refusal can arrive as a cancellation.** OKX does not reject a
+  post-only order that would take liquidity; it accepts it, kills it, and
+  says so only in ``cancelSource``. See :data:`CANCEL_REFUSALS`.
 """
 
 from __future__ import annotations
@@ -66,6 +69,34 @@ _TYPE: dict[str, OrderType] = {
     "OPTIMAL_LIMIT_IOC": OrderType.MARKET,
     "MMP": OrderType.LIMIT,
     "MMP_AND_POST_ONLY": OrderType.LIMIT,
+}
+
+#: ``cancelSource`` values where OKX *refused* the order, and the words its
+#: docs give them. Public, unlike its neighbours, because ``mftik_td.errors``
+#: has to hold a matching entry for every line of it.
+#:
+#: OKX has no reject for a post-only that would take liquidity. It accepts the
+#: request, kills the order, and pushes ``state=canceled`` — the same row, the
+#: same terminal state, as a cancel the strategy asked for itself. This integer
+#: is the only thing that separates them, so without reading it a refusal is
+#: invisible: no reject reaches a strategy and nothing says the order was
+#: turned down.
+#:
+#: **Only refusals belong here**, because everything in this table becomes a
+#: reject. Every other source ends an order the venue had already accepted —
+#: ``1`` is the user's own cancel, ``20`` is cancel-all-after, ``13`` and ``14``
+#: are FOK and IOC doing exactly what those instructions ask, ``32`` is
+#: self-trade prevention, which is a cancel on every venue here — and reading
+#: any of them as a refusal would invent a rejection that never happened.
+#:
+#: The values are OKX's own wording, carried because the wire is not: the push
+#: has the number and no text at all (``cancelSourceReason`` exists on the REST
+#: order, never on the ``orders`` channel), and ``31`` alone is nothing a human
+#: reads in a log. ``mftik_td.errors`` keys its OKX table on these words, so a
+#: source added here needs an entry there or its reject lands as an unmapped
+#: code.
+CANCEL_REFUSALS: dict[str, str] = {
+    "31": "The post-only order will take liquidity in taker orders",
 }
 
 _CATEGORY_OF: dict[str, Category] = {
@@ -175,6 +206,7 @@ class OkxOrderUpdate(OkxMessage):
     side: VenueSide = Side.BUY
     ord_type: str = Field(default="limit", alias="ordType")
     state: str = ""
+    cancel_source: str = Field(default="", alias="cancelSource")
     px: Dec = Decimal("0")
     sz: Dec = Decimal("0")
     tgt_ccy: str = Field(default="", alias="tgtCcy")
@@ -198,7 +230,40 @@ class OkxOrderUpdate(OkxMessage):
 
     @property
     def status(self) -> OrderStatus:
-        return status_of(self.state)
+        """The shared lifecycle state, reading a refusal as one.
+
+        A cancellation OKX made because it refused the order is a reject
+        everywhere else on this platform — Bybit says ``Rejected``, Binance and
+        Gate raise — so it is one here too. Left as ``CANCELED`` it would be
+        indistinguishable from the strategy's own cancel, which is the whole
+        complaint: the same hook, the same terminal state, nothing to branch
+        on.
+        """
+        status = status_of(self.state)
+        if status is OrderStatus.CANCELED and self.refusal:
+            return OrderStatus.REJECTED
+        return status
+
+    @property
+    def refusal(self) -> str:
+        """Why OKX refused this order, or ``""`` where it did not.
+
+        The words are OKX's, looked up from the ``cancelSource`` it sent; the
+        number rides along in front of them because it is what the wire
+        actually carried and what OKX's own docs are indexed by. See
+        :data:`CANCEL_REFUSALS` for which sources count as a refusal.
+
+        **An order that traded is never a refusal**, whatever the source says.
+        A reject supersedes the order update rather than accompanying it, so
+        reading a partial fill as one would lose the fill: the strategy would
+        hear that the order was turned down and never that some of it went
+        through.
+        """
+        if self.acc_fill_sz > 0:
+            return ""
+        source = self.cancel_source.strip()
+        words = CANCEL_REFUSALS.get(source)
+        return f"cancelSource={source} {words}" if words else ""
 
     @property
     def type(self) -> OrderType:
@@ -235,6 +300,9 @@ class OkxOrderUpdate(OkxMessage):
             price=self.px or None,
             filled_qty=filled,
             avg_price=self.avg_price,
+            # OKX refuses on this channel rather than at the call, and says
+            # which refusal it was in ``cancelSource`` and nowhere else.
+            reject_reason=self.refusal,
             ts=self.ts,
         )
 
@@ -655,6 +723,7 @@ def order_book_from_result(
 
 
 __all__ = [
+    "CANCEL_REFUSALS",
     "Dec",
     "Ms",
     "OkxAccount",
