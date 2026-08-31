@@ -13,7 +13,10 @@ Shapes that drive most of what follows:
   shared model sizes in base (``qty``) or quote (``quote_qty``), so this
   connector sends the flag to match.
 * **Post-only is an order type**, spelled ``post_only``. IOC and FOK are
-  too — OKX has no separate time-in-force field on a limit.
+  too — OKX has no separate time-in-force field on a limit. One that would
+  take liquidity is not refused at the call either: OKX accepts it, kills
+  it, and reports a plain cancellation whose ``cancelSource`` is the only
+  thing that says it was a refusal. ``OkxOrderUpdate.status`` reads that.
 * **The order ack carries no status.** OKX acknowledges receipt with an id
   and an ``sCode``; the ``orders`` channel says what became of it. So
   :meth:`place_order` reports ``PENDING_NEW``.

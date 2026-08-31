@@ -106,6 +106,73 @@ def test_a_status_we_have_no_name_for_is_unknown_not_a_guess() -> None:
     assert status_of("") is OrderStatus.UNKNOWN
 
 
+def _canceled(**extra: str) -> OkxOrderUpdate:
+    """A post-only BUY that OKX killed rather than rested."""
+    return OkxOrderUpdate.model_validate(
+        {
+            "instId": "BTC-USDT",
+            "ordId": "ord-1",
+            "clOrdId": "c-1",
+            "side": "buy",
+            "ordType": "post_only",
+            "state": "canceled",
+            "px": "77518.1",
+            "sz": "0.00001",
+            "accFillSz": "0",
+            **extra,
+        }
+    )
+
+
+def test_a_post_only_okx_killed_for_crossing_is_a_reject_not_a_cancel() -> None:
+    """The whole complaint in #37: OKX refuses a crossed post-only by
+    cancelling it, so a strategy saw the same hook and the same terminal state
+    it sees when it cancels an order itself, with nothing to tell them apart."""
+    order = _canceled(cancelSource="31").to_order(TICKER)
+
+    assert order.status is OrderStatus.REJECTED
+    assert order.reject_reason.startswith("cancelSource=31 ")
+    assert "post-only order will take liquidity" in order.reject_reason
+
+
+def test_a_cancel_the_strategy_asked_for_stays_a_cancel() -> None:
+    """``1`` is the user's own cancel — the case a refusal must not be
+    confused with, and the reason this reads the source rather than treating
+    every cancellation as a rejection."""
+    order = _canceled(cancelSource="1").to_order(TICKER)
+
+    assert order.status is OrderStatus.CANCELED
+    assert order.reject_reason == ""
+
+
+@pytest.mark.parametrize("source", ["", "13", "14", "20", "32", "99"])
+def test_every_other_cancellation_source_is_left_alone(source: str) -> None:
+    """FOK and IOC expiring, cancel-all-after, self-trade prevention, one OKX
+    has not documented yet. All end an order the venue accepted, and calling
+    any of them a refusal would invent a rejection that never happened."""
+    order = _canceled(cancelSource=source).to_order(TICKER)
+
+    assert order.status is OrderStatus.CANCELED
+    assert order.reject_reason == ""
+
+
+def test_a_cancellation_that_traded_is_never_read_as_a_refusal() -> None:
+    """A reject supersedes the order update rather than riding with it, so
+    reading a partly filled order as refused would lose the fill."""
+    order = _canceled(cancelSource="31", accFillSz="0.000004").to_order(TICKER)
+
+    assert order.status is OrderStatus.CANCELED
+    assert order.reject_reason == ""
+    assert order.filled_qty == Decimal("0.000004")
+
+
+def test_an_order_that_was_not_refused_carries_no_reason() -> None:
+    order = _canceled(state="filled", accFillSz="0.00001").to_order(TICKER)
+
+    assert order.status is OrderStatus.FILLED
+    assert order.reject_reason == ""
+
+
 def test_a_fill_carries_this_execution_alone_and_a_positive_fee() -> None:
     """OKX reports a paid fee as a negative number; the shared model does not."""
     fill = OkxFill.model_validate(

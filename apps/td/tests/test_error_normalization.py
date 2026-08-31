@@ -23,6 +23,7 @@ from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
 from mftik.exchange.gate.spot.protocol import GateApiError, GateWsError
 from mftik.exchange.gate.spot.rest import GateRestError
+from mftik.exchange.okx.models import CANCEL_REFUSALS, OkxOrderUpdate
 from mftik.exchange.okx.protocol import OkxRestError, OkxWsError
 from mftik.exchange.paper.private import PaperAuthError, PaperPrivateClient
 from mftik.exchange.paper.remote import PaperRemotePrivateClient
@@ -598,3 +599,48 @@ def test_an_unmapped_okx_code_passes_through_as_itself() -> None:
 def test_an_okx_rest_refusal_normalizes_like_a_socket_one() -> None:
     rest = OkxRestError(51603, "Order does not exist", status=200)
     assert normalize(rest, venue="Okx") == RejectCode.VENUE_ORDER_NOT_FOUND
+
+
+def test_a_crossed_post_only_on_okx_is_202_off_the_order_stream() -> None:
+    """OKX raises nothing for it: it accepts the order, kills it, and puts
+    ``cancelSource=31`` on the row. The adapter turns that into words; this is
+    the table that has to recognise them."""
+    reason = _okx_refusal("31")
+
+    assert (
+        normalize_reason(reason, venue="Okx")
+        is RejectCode.VENUE_POST_ONLY_WOULD_CROSS
+    )
+
+
+@pytest.mark.parametrize("source", sorted(CANCEL_REFUSALS))
+def test_every_okx_refusal_the_adapter_raises_has_a_code_here(
+    source: str,
+) -> None:
+    """The two halves are separate on purpose — the adapter decides what is a
+    refusal, this module decides what it means — which leaves room for one to
+    move without the other. A source added there and forgotten here would
+    reach a strategy as its own prose in the ``error_code`` field, which
+    nothing branches on."""
+    assert isinstance(normalize_reason(_okx_refusal(source), venue="Okx"), int)
+
+
+def _okx_refusal(source: str) -> str:
+    """The ``reject_reason`` the OKX adapter puts on an order it was refused.
+
+    Built by going through the model rather than by repeating its format here,
+    so this stays a test of the two ends agreeing.
+    """
+    row = OkxOrderUpdate.model_validate(
+        {
+            "instId": "BTC-USDT",
+            "ordId": "ord-1",
+            "side": "buy",
+            "ordType": "post_only",
+            "state": "canceled",
+            "cancelSource": source,
+            "px": "77518.1",
+            "sz": "0.00001",
+        }
+    )
+    return row.refusal
