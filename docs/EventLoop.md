@@ -34,8 +34,8 @@ apps is what makes the import a fact rather than a coincidence. The API names it
 too, now that its code asks for `loop="uvloop"` by name.
 
 It is *not* declared in `packages/common`. That is the distribution a strategy
-author installs with `pip install mftik`, uvloop publishes no Windows wheel, and
-the SDK's own entrypoint — the `mftik` CLI — is synchronous and needs no loop.
+author installs with `pip install mftik`, and the SDK's own entrypoint — the
+`mftik` CLI — is synchronous and needs no loop.
 
 ## What made this cheap
 

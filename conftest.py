@@ -25,9 +25,9 @@ from db_harness import POSTGRES_URL_ENV, dialect_urls
 #:
 #: ``asyncio`` stays reachable, and CI runs ``packages`` that way too. Not for
 #: symmetry: ``packages/common`` is published as ``mftik``, and nothing a
-#: strategy author imports may require uvloop to work — uvloop does not even
-#: build on Windows. That second pass is what keeps the SDK honest, and it is
-#: also the setting a contributor on Windows needs.
+#: strategy author imports may require uvloop to work. That second pass is what
+#: keeps the SDK honest, and it is also the setting for a contributor whose
+#: environment has no uvloop.
 TEST_LOOP_ENV = "MFTIK_TEST_LOOP"
 
 

@@ -618,7 +618,7 @@ dependencies = [
     { name = "mftik-db" },
     { name = "regex" },
     { name = "uvicorn", extra = ["standard"] },
-    { name = "uvloop", marker = "sys_platform != 'win32'" },
+    { name = "uvloop" },
     { name = "websockets" },
 ]
 
@@ -631,7 +631,7 @@ requires-dist = [
     { name = "mftik-db", editable = "packages/db" },
     { name = "regex", specifier = ">=2024.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
-    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.21" },
+    { name = "uvloop", specifier = ">=0.21" },
     { name = "websockets", specifier = ">=13.0" },
 ]
 
@@ -661,14 +661,14 @@ source = { editable = "apps/md" }
 dependencies = [
     { name = "mftik" },
     { name = "mftik-db" },
-    { name = "uvloop", marker = "sys_platform != 'win32'" },
+    { name = "uvloop" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mftik", editable = "packages/common" },
     { name = "mftik-db", editable = "packages/db" },
-    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.21" },
+    { name = "uvloop", specifier = ">=0.21" },
 ]
 
 [[package]]
@@ -677,13 +677,13 @@ version = "0.1.0"
 source = { editable = "apps/paper" }
 dependencies = [
     { name = "mftik" },
-    { name = "uvloop", marker = "sys_platform != 'win32'" },
+    { name = "uvloop" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mftik", editable = "packages/common" },
-    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.21" },
+    { name = "uvloop", specifier = ">=0.21" },
 ]
 
 [[package]]
@@ -693,14 +693,14 @@ source = { editable = "apps/sts" }
 dependencies = [
     { name = "mftik" },
     { name = "mftik-db" },
-    { name = "uvloop", marker = "sys_platform != 'win32'" },
+    { name = "uvloop" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mftik", editable = "packages/common" },
     { name = "mftik-db", editable = "packages/db" },
-    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.21" },
+    { name = "uvloop", specifier = ">=0.21" },
 ]
 
 [[package]]
@@ -710,14 +710,14 @@ source = { editable = "apps/sym" }
 dependencies = [
     { name = "mftik" },
     { name = "mftik-db" },
-    { name = "uvloop", marker = "sys_platform != 'win32'" },
+    { name = "uvloop" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mftik", editable = "packages/common" },
     { name = "mftik-db", editable = "packages/db" },
-    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.21" },
+    { name = "uvloop", specifier = ">=0.21" },
 ]
 
 [[package]]
@@ -727,14 +727,14 @@ source = { editable = "apps/td" }
 dependencies = [
     { name = "mftik" },
     { name = "mftik-db" },
-    { name = "uvloop", marker = "sys_platform != 'win32'" },
+    { name = "uvloop" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mftik", editable = "packages/common" },
     { name = "mftik-db", editable = "packages/db" },
-    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.21" },
+    { name = "uvloop", specifier = ">=0.21" },
 ]
 
 [[package]]
