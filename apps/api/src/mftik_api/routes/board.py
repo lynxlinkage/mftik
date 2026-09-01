@@ -36,7 +36,7 @@ import csv
 import io
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
@@ -222,23 +222,27 @@ def _parse_statuses(status: str | None) -> str | list[str] | None:
 @router.get("/sessions", response_model=BoardResponse)
 async def list_board_sessions(
     status: str | None = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=500),
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> BoardResponse:
     """Recent runs, newest first. ``status`` omitted means every status.
 
     Comma-separated values select a union (``done,ack`` is Finished).
+    ``offset`` / ``limit`` page a numbered browse. ``total`` is the match
+    count before paging.
     """
     now = time.time()
+    parsed = _parse_statuses(status)
     async with session_scope() as db:
-        rows = list(
-            await StsSessionRepository(db).list_sessions(
-                status=_parse_statuses(status), limit=limit
-            )
+        repo = StsSessionRepository(db)
+        total = await repo.count_sessions(status=parsed)
+        page = list(
+            await repo.list_sessions(status=parsed, offset=offset, limit=limit)
         )
         fills = await FillRepository(db).count_by_session(
-            [row.session_id for row in rows]
+            [row.session_id for row in page]
         )
-        lines, tickers = await _settlement_lines(db, rows)
+        lines, tickers = await _settlement_lines(db, page)
 
     return BoardResponse(
         sessions=[
@@ -249,8 +253,10 @@ async def list_board_sessions(
                 now=now,
                 tickers=tickers.get(row.session_id, []),
             )
-            for row in rows
-        ]
+            for row in page
+        ],
+        total=total,
+        has_more=offset + len(page) < total,
     )
 
 

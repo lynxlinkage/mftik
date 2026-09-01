@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from typing import Annotated
+
+from fastapi import APIRouter, Query
 from mftik_db.repositories import AuditRepository
 from mftik_db.session import session_scope
 
@@ -12,11 +14,15 @@ router = APIRouter(tags=["audits"])
 
 
 @router.get("/audits", response_model=AuditListResponse)
-async def list_audits(limit: int = 100) -> AuditListResponse:
-    limit = max(1, min(limit, 500))
+async def list_audits(
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> AuditListResponse:
+    """Newest first. ``offset`` / ``limit`` page a numbered browse."""
     async with session_scope() as db:
         repo = AuditRepository(db)
-        rows = await repo.list_recent(limit=limit)
+        total = await repo.count()
+        rows = list(await repo.list_recent(limit=limit, offset=offset))
     return AuditListResponse(
         audits=[
             AuditOut(
@@ -30,5 +36,7 @@ async def list_audits(limit: int = 100) -> AuditListResponse:
                 key_id=row.key_id,
             )
             for row in rows
-        ]
+        ],
+        total=total,
+        has_more=offset + len(rows) < total,
     )

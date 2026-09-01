@@ -67,28 +67,14 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
     async def get_by_session_id(self, session_id: str) -> StsSessionRow | None:
         return await self.session.get(StsSessionRow, session_id)
 
-    async def list_sessions(
+    def _list_filters(
         self,
+        stmt: Any,
         *,
-        status: str | Sequence[str] | None = SessionStatus.LIVE.value,
-        created_by: int | None = None,
-        limit: int = 100,
-        before_session: str | None = None,
-    ) -> Sequence[StsSessionRow]:
-        """STS list, newest first, optionally older than ``before_session``.
-
-        Overrides the mixin: ``session_id`` is unique here, so it is a total
-        order with ``created_at``. ``td_sessions`` is one row per
-        ``(session_id, api_id)`` — the same cursor would not be.
-
-        An unknown ``before_session`` matches nothing (the subquery is
-        NULL). That is not the first page. The handler turns it into 422
-        so a deleted user is not read as the end of history.
-        """
-        stmt = select(StsSessionRow).order_by(
-            StsSessionRow.created_at.desc(),
-            StsSessionRow.session_id.desc(),
-        )
+        status: str | Sequence[str] | None,
+        created_by: int | None,
+    ) -> Any | None:
+        """Apply the list's status/owner filters. ``None`` means match nothing."""
         if status is not None:
             if isinstance(status, str):
                 stmt = stmt.where(StsSessionRow.status == status)
@@ -96,13 +82,62 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
                 values = list(status)
                 if not values:
                     # An empty union is "none of these", not "skip the filter".
-                    return []
+                    return None
                 if len(values) == 1:
                     stmt = stmt.where(StsSessionRow.status == values[0])
                 else:
                     stmt = stmt.where(StsSessionRow.status.in_(values))
         if created_by is not None:
             stmt = stmt.where(StsSessionRow.created_by == created_by)
+        return stmt
+
+    async def count_sessions(
+        self,
+        *,
+        status: str | Sequence[str] | None = SessionStatus.LIVE.value,
+        created_by: int | None = None,
+    ) -> int:
+        """How many STS rows match the list filter, ignoring limit/offset."""
+        stmt = self._list_filters(
+            select(func.count()).select_from(StsSessionRow),
+            status=status,
+            created_by=created_by,
+        )
+        if stmt is None:
+            return 0
+        result = await self.session.execute(stmt)
+        return int(result.scalar_one())
+
+    async def list_sessions(
+        self,
+        *,
+        status: str | Sequence[str] | None = SessionStatus.LIVE.value,
+        created_by: int | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        before_session: str | None = None,
+    ) -> Sequence[StsSessionRow]:
+        """STS list, newest first.
+
+        ``offset`` pages a numbered browse. ``before_session`` is the older
+        cursor used by time-series callers: unknown matches nothing (the
+        subquery is NULL), and the handler turns that into 422 so a
+        deleted user is not read as the end of history.
+
+        Overrides the mixin: ``session_id`` is unique here, so it is a total
+        order with ``created_at``. ``td_sessions`` is one row per
+        ``(session_id, api_id)`` — the same cursor would not be.
+        """
+        stmt = self._list_filters(
+            select(StsSessionRow).order_by(
+                StsSessionRow.created_at.desc(),
+                StsSessionRow.session_id.desc(),
+            ),
+            status=status,
+            created_by=created_by,
+        )
+        if stmt is None:
+            return []
         if before_session is not None:
             anchor = (
                 select(StsSessionRow.created_at)
@@ -116,6 +151,8 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
                     & (StsSessionRow.session_id < before_session)
                 )
             )
+        if offset:
+            stmt = stmt.offset(offset)
         stmt = stmt.limit(limit)
         result = await self.session.execute(stmt)
         return result.scalars().all()

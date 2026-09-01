@@ -296,6 +296,21 @@ async def _stamp(
     await repo.session.flush()
 
 
+async def test_list_sessions_pages_on_offset(db) -> None:
+    repo = StsSessionRepository(db)
+    origin = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    for minutes, session_id in enumerate(("s-old", "s-mid", "s-new")):
+        await _live(repo, session_id)
+        await _stamp(repo, session_id, origin + timedelta(minutes=minutes))
+
+    first = await repo.list_sessions(status=None, limit=2)
+    assert [r.session_id for r in first] == ["s-new", "s-mid"]
+    assert await repo.count_sessions(status=None) == 3
+
+    rest = await repo.list_sessions(status=None, offset=2, limit=2)
+    assert [r.session_id for r in rest] == ["s-old"]
+
+
 async def test_list_sessions_pages_on_a_session_cursor(db) -> None:
     """Newest first; the cursor of the last row is the rest, with no overlap."""
     repo = StsSessionRepository(db)

@@ -67,6 +67,7 @@ class StrategyOut(BaseModel):
 
 class StrategyListResponse(BaseModel):
     strategies: list[StrategyOut] = Field(default_factory=list)
+    total: int = 0
     has_more: bool = False
 
 
@@ -230,6 +231,8 @@ class AuditOut(BaseModel):
 
 class AuditListResponse(BaseModel):
     audits: list[AuditOut] = Field(default_factory=list)
+    total: int = 0
+    has_more: bool = False
 
 
 class SessionLogOut(BaseModel):
@@ -285,6 +288,8 @@ class BoardSession(BaseModel):
 
 class BoardResponse(BaseModel):
     sessions: list[BoardSession] = Field(default_factory=list)
+    total: int = 0
+    has_more: bool = False
 
 
 class BoardFill(BaseModel):

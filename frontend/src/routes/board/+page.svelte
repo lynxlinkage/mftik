@@ -3,6 +3,7 @@
 	import { api, formatTs, shortId, type BoardFill, type BoardSession } from '$lib/api';
 	import { handleUnauthorized } from '$lib/auth';
 	import BindingChips from '$lib/components/BindingChips.svelte';
+	import Pager from '$lib/components/Pager.svelte';
 	import { connectFills, type FillConnection } from '$lib/logging/fills';
 	import { symbolsFromTickers, venuesFromTickers } from '$lib/ticker';
 	/**
@@ -27,8 +28,11 @@
 	type Layout = 'cards' | 'table';
 
 	const LAYOUT_KEY = 'mftik.board.layout';
+	const PAGE_SIZE = 50;
 
 	let sessions = $state<BoardSession[]>([]);
+	let page = $state(1);
+	let total = $state(0);
 	let external = $state<BoardFill[]>([]);
 	let externalMore = $state(false);
 	let live = $state<Record<string, number>>({});
@@ -40,45 +44,79 @@
 	let loadingMore = $state(false);
 	let disconnect: (() => void) | null = null;
 
+	let listEpoch = 0;
+
+	const pageCount = $derived(Math.max(1, Math.ceil(total / PAGE_SIZE)));
+
+	function sessionStatus(which: Tab): string | undefined {
+		if (which === 'all' || which === 'external') return undefined;
+		return which === 'live' ? 'live' : 'done,ack';
+	}
+
 	async function refresh() {
+		const epoch = ++listEpoch;
+		const myFilter = filter;
 		loading = true;
 		error = null;
 		try {
-			if (filter === 'external') {
+			if (myFilter === 'external') {
 				const res = await api.boardExternalFills({ limit: 100 });
+				if (epoch !== listEpoch || filter !== myFilter) return;
 				external = res.fills;
 				externalMore = res.has_more;
 			} else {
-				const res = await api.boardSessions(
-					filter === 'all'
-						? {}
-						: { status: filter === 'live' ? 'live' : 'done,ack' }
-				);
+				let myPage = page;
+				let offset = Math.max(0, (myPage - 1) * PAGE_SIZE);
+				let res = await api.boardSessions({
+					status: sessionStatus(myFilter),
+					limit: PAGE_SIZE,
+					offset
+				});
+				if (epoch !== listEpoch || filter !== myFilter) return;
+				if (offset > 0 && offset >= res.total) {
+					myPage = Math.max(1, Math.ceil(Math.max(res.total, 0) / PAGE_SIZE));
+					offset = (myPage - 1) * PAGE_SIZE;
+					page = myPage;
+					res = await api.boardSessions({
+						status: sessionStatus(myFilter),
+						limit: PAGE_SIZE,
+						offset
+					});
+					if (epoch !== listEpoch || filter !== myFilter) return;
+				}
 				sessions = res.sessions;
+				total = res.total ?? 0;
 				// The server just told us the truth; anything counted locally is
 				// already inside it.
 				live = {};
 			}
 		} catch (e) {
+			if (epoch !== listEpoch) return;
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
-			loading = false;
+			if (epoch === listEpoch) loading = false;
 		}
 	}
 
 	async function loadMore() {
-		const oldest = external.at(-1);
-		if (!oldest || loadingMore) return;
+		if (loadingMore) return;
+		const epoch = listEpoch;
+		const myFilter = filter;
 		loadingMore = true;
+		error = null;
 		try {
+			const oldest = external.at(-1);
+			if (myFilter !== 'external' || !oldest) return;
 			const next = await api.boardExternalFills({
 				beforeTs: oldest.ts,
 				beforeId: oldest.id,
 				limit: 100
 			});
+			if (epoch !== listEpoch || filter !== myFilter) return;
 			external = [...external, ...next.fills];
 			externalMore = next.has_more;
 		} catch (e) {
+			if (epoch !== listEpoch) return;
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			loadingMore = false;
@@ -86,7 +124,25 @@
 	}
 
 	function setFilter(next: Tab) {
+		if (next === filter) return;
 		filter = next;
+		page = 1;
+		total = 0;
+		listEpoch += 1;
+		sessions = [];
+		external = [];
+		externalMore = false;
+		error = null;
+		loading = true;
+		void refresh();
+	}
+
+	function setPage(next: number) {
+		if (next === page || next < 1) return;
+		page = next;
+		sessions = [];
+		error = null;
+		loading = true;
 		void refresh();
 	}
 
@@ -298,6 +354,7 @@
 {:else if sessions.length === 0}
 	<section class="panel">
 		<p class="empty-state">{loading ? 'Loading…' : 'No sessions yet.'}</p>
+		<Pager {page} {pageCount} disabled={loading} onchange={setPage} />
 	</section>
 {:else if layout === 'table'}
 	<section class="panel">
@@ -374,6 +431,7 @@
 				{/each}
 			</tbody>
 		</table>
+		<Pager {page} {pageCount} disabled={loading} onchange={setPage} />
 	</section>
 {:else}
 	<div class="cards">
@@ -443,6 +501,7 @@
 			</a>
 		{/each}
 	</div>
+	<Pager {page} {pageCount} disabled={loading} onchange={setPage} />
 {/if}
 
 <style>

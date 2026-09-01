@@ -3,25 +3,54 @@
 	import { api, formatTs, type Audit } from '$lib/api';
 	import { hasBrandMark } from '$lib/brands';
 	import BrandMark from '$lib/components/BrandMark.svelte';
+	import Pager from '$lib/components/Pager.svelte';
+
+	const PAGE_SIZE = 50;
 
 	let audits = $state<Audit[]>([]);
+	let page = $state(1);
+	let total = $state(0);
 	let error = $state<string | null>(null);
 	let loading = $state(true);
 
-	async function refresh() {
+	let listEpoch = 0;
+
+	const pageCount = $derived(Math.max(1, Math.ceil(total / PAGE_SIZE)));
+
+	async function load() {
+		const epoch = ++listEpoch;
+		let myPage = page;
 		loading = true;
 		error = null;
 		try {
-			const res = await api.audits(200);
+			let offset = Math.max(0, (myPage - 1) * PAGE_SIZE);
+			let res = await api.audits({ limit: PAGE_SIZE, offset });
+			if (epoch !== listEpoch) return;
+			if (offset > 0 && offset >= res.total) {
+				myPage = Math.max(1, Math.ceil(Math.max(res.total, 0) / PAGE_SIZE));
+				offset = (myPage - 1) * PAGE_SIZE;
+				page = myPage;
+				res = await api.audits({ limit: PAGE_SIZE, offset });
+				if (epoch !== listEpoch) return;
+			}
 			audits = res.audits;
+			total = res.total ?? 0;
 		} catch (e) {
+			if (epoch !== listEpoch) return;
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
-			loading = false;
+			if (epoch === listEpoch) loading = false;
 		}
 	}
 
-	onMount(refresh);
+	function setPage(next: number) {
+		if (next === page || next < 1) return;
+		page = next;
+		audits = [];
+		void load();
+	}
+
+	onMount(load);
 
 	function formatIdentity(
 		via: string | null | undefined,
@@ -47,7 +76,7 @@
 		<h1>Audit</h1>
 		<p>Append-only record of control-plane operations.</p>
 	</div>
-	<button type="button" class="secondary" onclick={refresh} disabled={loading}>Refresh</button>
+	<button type="button" class="secondary" onclick={load} disabled={loading}>Refresh</button>
 </div>
 
 {#if error}
@@ -86,6 +115,7 @@
 			</tbody>
 		</table>
 	{/if}
+	<Pager {page} {pageCount} disabled={loading} onchange={setPage} />
 </section>
 
 <style>

@@ -215,34 +215,27 @@ async def strategy_type_template(
 @router.get("/strategies", response_model=StrategyListResponse)
 async def list_strategies(
     status: str | None = None,
-    before: str | None = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> StrategyListResponse:
     """List STS sessions as deploys, including ones that failed at attach.
 
-    ``status`` is a comma union (``done,ack`` is History). ``before`` is the
-    last ``session_id`` of the previous page. An unknown cursor is 422 —
-    the row may have gone with its user, and an empty page would read as
-    the end of history.
+    ``status`` is a comma union (``done,ack`` is History). ``offset`` /
+    ``limit`` page a numbered browse. ``total`` is the match count before
+    paging.
     """
     parsed = _parse_statuses(status)
-    fetch = limit + 1
     async with session_scope() as db:
         repo = StsSessionRepository(db)
-        if before is not None:
-            if await repo.get_by_session_id(before) is None:
-                raise HTTPException(
-                    status_code=422, detail=f"unknown cursor: {before}"
-                )
+        total = await repo.count_sessions(status=parsed)
         rows = await repo.list_sessions(
-            status=parsed, before_session=before, limit=fetch
+            status=parsed, offset=offset, limit=limit
         )
 
-    has_more = len(rows) > limit
-    page = rows[:limit]
     return StrategyListResponse(
-        strategies=[_strategy_out(row) for row in page],
-        has_more=has_more,
+        strategies=[_strategy_out(row) for row in rows],
+        total=total,
+        has_more=offset + len(rows) < total,
     )
 
 

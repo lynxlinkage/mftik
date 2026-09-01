@@ -1258,7 +1258,7 @@
           "sts"
         ],
         "summary": "List Strategies",
-        "description": "List STS sessions as deploys, including ones that failed at attach.\n\n``status`` is a comma union (``done,ack`` is History). ``before`` is the\nlast ``session_id`` of the previous page. An unknown cursor is 422 \u2014\nthe row may have gone with its user, and an empty page would read as\nthe end of history.",
+        "description": "List STS sessions as deploys, including ones that failed at attach.\n\n``status`` is a comma union (``done,ack`` is History). ``offset`` /\n``limit`` page a numbered browse. ``total`` is the match count before\npaging.",
         "operationId": "list_strategies_sts_strategies_get",
         "parameters": [
           {
@@ -1278,19 +1278,14 @@
             }
           },
           {
-            "name": "before",
+            "name": "offset",
             "in": "query",
             "required": false,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Before"
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
             }
           },
           {
@@ -1979,14 +1974,28 @@
           "audits"
         ],
         "summary": "List Audits",
+        "description": "Newest first. ``offset`` / ``limit`` page a numbered browse.",
         "operationId": "list_audits_audits_get",
         "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
           {
             "name": "limit",
             "in": "query",
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
               "default": 100,
               "title": "Limit"
             }
@@ -2185,7 +2194,7 @@
           "board"
         ],
         "summary": "List Board Sessions",
-        "description": "Recent runs, newest first. ``status`` omitted means every status.\n\nComma-separated values select a union (``done,ack`` is Finished).",
+        "description": "Recent runs, newest first. ``status`` omitted means every status.\n\nComma-separated values select a union (``done,ack`` is Finished).\n``offset`` / ``limit`` page a numbered browse. ``total`` is the match\ncount before paging.",
         "operationId": "list_board_sessions_board_sessions_get",
         "parameters": [
           {
@@ -2202,6 +2211,17 @@
                 }
               ],
               "title": "Status"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
             }
           },
           {
@@ -4001,6 +4021,16 @@
             },
             "type": "array",
             "title": "Audits"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
           }
         },
         "type": "object",
@@ -4195,6 +4225,16 @@
             },
             "type": "array",
             "title": "Sessions"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
           }
         },
         "type": "object",
@@ -6138,6 +6178,11 @@
             },
             "type": "array",
             "title": "Strategies"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
           },
           "has_more": {
             "type": "boolean",

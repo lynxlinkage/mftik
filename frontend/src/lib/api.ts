@@ -672,12 +672,17 @@ export const api = {
 	authKeyRevoke: (id: number) =>
 		request<AuthKey>(`/auth/keys/${encodeURIComponent(String(id))}`, { method: 'DELETE' }),
 	stats: () => request<{ domains: DomainStats[] }>('/stats'),
-	boardSessions: (opts: { status?: string; limit?: number } = {}) => {
+	boardSessions: (
+		opts: { status?: string; offset?: number; limit?: number } = {}
+	) => {
 		const q = new URLSearchParams();
 		if (opts.status) q.set('status', opts.status);
+		if (opts.offset != null && opts.offset > 0) q.set('offset', String(opts.offset));
 		if (opts.limit != null) q.set('limit', String(opts.limit));
 		const qs = q.toString();
-		return request<{ sessions: BoardSession[] }>(`/board/sessions${qs ? `?${qs}` : ''}`);
+		return request<{ sessions: BoardSession[]; total: number; has_more: boolean }>(
+			`/board/sessions${qs ? `?${qs}` : ''}`
+		);
 	},
 	boardSession: (sessionId: string) =>
 		request<BoardSession>(`/board/sessions/${encodeURIComponent(sessionId)}`),
@@ -843,13 +848,13 @@ export const api = {
 	strategyTypes: () => request<StrategyTypes>('/sts/types'),
 	strategyTypeTemplate: (type: string) =>
 		request<StrategyTemplate>(`/sts/types/${encodeURIComponent(type)}/template`),
-	strategies: (opts: { status?: string; before?: string; limit?: number } = {}) => {
+	strategies: (opts: { status?: string; offset?: number; limit?: number } = {}) => {
 		const q = new URLSearchParams();
 		if (opts.status) q.set('status', opts.status);
-		if (opts.before) q.set('before', opts.before);
+		if (opts.offset != null && opts.offset > 0) q.set('offset', String(opts.offset));
 		if (opts.limit != null) q.set('limit', String(opts.limit));
 		const qs = q.toString();
-		return request<{ strategies: StrategyRow[]; has_more: boolean }>(
+		return request<{ strategies: StrategyRow[]; total: number; has_more: boolean }>(
 			`/sts/strategies${qs ? `?${qs}` : ''}`
 		);
 	},
@@ -878,8 +883,15 @@ export const api = {
 		request<StsControl>(`/sts/sessions/${encodeURIComponent(id)}/ack`, {
 			method: 'POST'
 		}),
-	audits: (limit = 100) =>
-		request<{ audits: Audit[] }>(`/audits?limit=${limit}`),
+	audits: (opts: { offset?: number; limit?: number } = {}) => {
+		const q = new URLSearchParams();
+		if (opts.offset != null && opts.offset > 0) q.set('offset', String(opts.offset));
+		if (opts.limit != null) q.set('limit', String(opts.limit));
+		const qs = q.toString();
+		return request<{ audits: Audit[]; total: number; has_more: boolean }>(
+			`/audits${qs ? `?${qs}` : ''}`
+		);
+	},
 	logs: (
 		domain: 'sts' | 'td' | 'md',
 		streamId: string,

@@ -61,7 +61,7 @@ async function mockStsPage(
 		liveAt?: () => StrategyRow[];
 		holdLiveAfter?: number;
 		failHistory?: boolean;
-		attentionPage?: { first: StrategyRow[]; rest: StrategyRow[]; cursor: string };
+		attentionPage?: { first: StrategyRow[]; rest: StrategyRow[]; total: number };
 	} = {}
 ): Promise<{
 	urls: URL[];
@@ -120,7 +120,7 @@ async function mockStsPage(
 		const url = new URL(route.request().url());
 		urls.push(url);
 		const status = url.searchParams.get('status') ?? '';
-		const before = url.searchParams.get('before');
+		const offset = Number(url.searchParams.get('offset') ?? '0');
 		if (status === 'live') {
 			// Copy at request time so a later push is not smuggled into this page.
 			const live = [...(opts.liveAt ? opts.liveAt() : liveRows)];
@@ -129,23 +129,27 @@ async function mockStsPage(
 			if (opts.holdLiveAfter !== undefined && liveIndex > opts.holdLiveAfter) {
 				await held;
 			}
-			await route.fulfill({ json: { strategies: live, has_more: false } });
+			await route.fulfill({
+				json: { strategies: live, total: live.length, has_more: false }
+			});
 			return;
 		}
 		if (status === 'failed,interrupted') {
 			if (opts.attentionPage) {
-				if (before === opts.attentionPage.cursor) {
-					await route.fulfill({
-						json: { strategies: opts.attentionPage.rest, has_more: false }
-					});
-					return;
-				}
+				const rows =
+					offset > 0 ? opts.attentionPage.rest : opts.attentionPage.first;
 				await route.fulfill({
-					json: { strategies: opts.attentionPage.first, has_more: true }
+					json: {
+						strategies: rows,
+						total: opts.attentionPage.total,
+						has_more: offset + rows.length < opts.attentionPage.total
+					}
 				});
 				return;
 			}
-			await route.fulfill({ json: { strategies: ATTENTION, has_more: false } });
+			await route.fulfill({
+				json: { strategies: ATTENTION, total: ATTENTION.length, has_more: false }
+			});
 			return;
 		}
 		if (status === 'done,ack' && opts.failHistory) {
@@ -153,18 +157,13 @@ async function mockStsPage(
 			return;
 		}
 		if (status === 'done,ack') {
-			if (before === 's-done-mid') {
-				await route.fulfill({
-					json: { strategies: [HISTORY[2]], has_more: false }
-				});
-				return;
-			}
+			const rows = offset > 0 ? [HISTORY[2]] : HISTORY.slice(0, 2);
 			await route.fulfill({
-				json: { strategies: HISTORY.slice(0, 2), has_more: true }
+				json: { strategies: rows, total: 51, has_more: offset === 0 }
 			});
 			return;
 		}
-		await route.fulfill({ json: { strategies: [], has_more: false } });
+		await route.fulfill({ json: { strategies: [], total: 0, has_more: false } });
 	});
 	await page.routeWebSocket('**/ws/status/sts', (ws) => {
 		statusWs = ws;
@@ -194,7 +193,7 @@ test('the default tab is Live', async ({ page }) => {
 	await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
 	await expect(page.getByRole('button', { name: 'Ack' })).toHaveCount(0);
 	expect(urls[0]?.searchParams.get('status')).toBe('live');
-	expect(urls[0]?.searchParams.has('before')).toBe(false);
+	expect(urls[0]?.searchParams.has('offset')).toBe(false);
 });
 
 test('Attention and History list the rows that belong there', async ({ page }) => {
@@ -212,20 +211,17 @@ test('Attention and History list the rows that belong there', async ({ page }) =
 	await expect(page.getByRole('button', { name: 'Ack' })).toHaveCount(0);
 });
 
-test('History Load more sends the last row as before and keeps page one', async ({
-	page
-}) => {
+test('History page 2 replaces page one and sends offset', async ({ page }) => {
 	const { urls } = await mockStsPage(page);
 
 	await page.getByRole('tablist').getByRole('button', { name: 'History' }).click();
 	await expect(page.getByRole('link', { name: 's-done-new' })).toBeVisible();
-	await page.getByRole('button', { name: 'Load more' }).click();
+	await page.getByRole('button', { name: 'Page 2' }).click();
 
 	await expect(page.getByRole('link', { name: 's-ack' })).toBeVisible();
-	await expect(page.getByRole('link', { name: 's-done-new' })).toBeVisible();
-	await expect(page.getByRole('button', { name: 'Load more' })).toHaveCount(0);
+	await expect(page.getByRole('link', { name: 's-done-new' })).toHaveCount(0);
 
-	const more = urls.find((u) => u.searchParams.get('before') === 's-done-mid');
+	const more = urls.find((u) => u.searchParams.get('offset') === '50');
 	expect(more).toBeTruthy();
 	expect(more?.searchParams.get('status')).toBe('done,ack');
 });
@@ -243,7 +239,7 @@ test('a live event does not reload History', async ({ page }) => {
 	const { urls, send } = await mockStsPage(page);
 
 	await page.getByRole('tablist').getByRole('button', { name: 'History' }).click();
-	await page.getByRole('button', { name: 'Load more' }).click();
+	await page.getByRole('button', { name: 'Page 2' }).click();
 	await expect(page.getByRole('link', { name: 's-ack' })).toBeVisible();
 	const afterLoad = urls.length;
 
@@ -252,7 +248,7 @@ test('a live event does not reload History', async ({ page }) => {
 
 	expect(urls.length).toBe(afterLoad);
 	await expect(page.getByRole('link', { name: 's-ack' })).toBeVisible();
-	await expect(page.getByRole('link', { name: 's-done-new' })).toBeVisible();
+	await expect(page.getByRole('link', { name: 's-done-new' })).toHaveCount(0);
 });
 
 test('Refresh and a tab switch replace the list without a cursor', async ({
@@ -266,7 +262,7 @@ test('Refresh and a tab switch replace the list without a cursor', async ({
 
 	const last = urls.at(-1);
 	expect(last?.searchParams.get('status')).toBe('done,ack');
-	expect(last?.searchParams.has('before')).toBe(false);
+	expect(last?.searchParams.has('offset')).toBe(false);
 });
 
 test('two unseen live sessions share an in-flight fetch plus at most one trailing reload', async ({
@@ -313,12 +309,12 @@ test('an unseen session that misses the in-flight fetch still appears', async ({
 		.toBe(3);
 });
 
-test('Load more survives acking a full Attention page', async ({ page }) => {
+test('acking a full Attention page still offers the next page', async ({ page }) => {
 	const { send } = await mockStsPage(page, {
 		attentionPage: {
 			first: [row('s-fail', 'failed', 20)],
 			rest: [row('s-int', 'interrupted', 10)],
-			cursor: 's-fail'
+			total: 51
 		}
 	});
 
@@ -327,15 +323,13 @@ test('Load more survives acking a full Attention page', async ({ page }) => {
 
 	send(statusEvent('s-fail', 'ack', 2));
 	await expect(page.getByRole('link', { name: 's-fail' })).toHaveCount(0);
-	await expect(page.getByRole('button', { name: 'Load more' })).toBeVisible();
-	// The tab is not empty, only this page of it. Claiming otherwise over a
-	// button that would fetch the rest is the failure, not the empty table.
+	await expect(page.getByRole('button', { name: 'Page 2' })).toBeVisible();
+	// The tab is not empty, only this page of it. Claiming otherwise over
+	// a pager that still has another page is the failure.
 	await expect(page.getByText('Nothing needs attention.')).toHaveCount(0);
-	await expect(
-		page.getByText('Nothing left on this page — Load more has the rest.')
-	).toBeVisible();
+	await expect(page.getByText('Nothing on this page.')).toBeVisible();
 
-	await page.getByRole('button', { name: 'Load more' }).click();
+	await page.getByRole('button', { name: 'Page 2' }).click();
 	await expect(page.getByRole('link', { name: 's-int' })).toBeVisible();
 });
 
