@@ -135,6 +135,28 @@ async def test_the_book_stays_in_contracts() -> None:
     assert quote.bid_qty == Decimal("3")
 
 
+async def test_funding_history_is_oldest_first() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/fundingRate"] = [
+        {
+            "symbol": NATIVE,
+            "fundingTime": 1_700_000_000_000,
+            "fundingRate": "0.0001",
+        },
+        {
+            "symbol": NATIVE,
+            "fundingTime": 1_700_028_800_000,
+            "fundingRate": "0.0002",
+        },
+    ]
+
+    rows = await _reader(api).fetch_funding_history(TICKER, limit=5)
+
+    assert api.query("/dapi/v1/fundingRate") == {"symbol": NATIVE, "limit": "5"}
+    assert [row.ts for row in rows] == [1_700_000_000.0, 1_700_028_800.0]
+    assert rows[0].rate == Decimal("0.0001")
+
+
 async def test_the_factory_builds_a_binance_delivery_reader() -> None:
     factory = VenueReaderFactory(StubSymbols())  # type: ignore[arg-type]
     reader = await factory.create("BinanceDelivery")

@@ -246,6 +246,42 @@ async def test_liquidations_are_reported_as_the_position_that_was_closed(
     assert liquidation.qty == Decimal("0.014")
 
 
+async def test_mark_price_yields_a_funding_rate_and_skips_a_print_without_one(
+    future_public_stream: FakeBinanceStream,
+    future_market_stream: FakeBinanceStream,
+) -> None:
+    client = _client(future_public_stream, future_market_stream)
+    async with client:
+        stream = client.stream_funding_rate(TICKER)
+        pump = asyncio.ensure_future(anext(stream))
+        await asyncio.sleep(0.05)
+        await future_market_stream.push(
+            f"{NATIVE.lower()}@markPrice@1s",
+            {
+                "e": "markPriceUpdate",
+                "E": 1562305380000,
+                "s": NATIVE,
+                "p": "11794.15",
+            },
+        )
+        await future_market_stream.push(
+            f"{NATIVE.lower()}@markPrice@1s",
+            {
+                "e": "markPriceUpdate",
+                "E": 1562305381000,
+                "s": NATIVE,
+                "p": "11794.15",
+                "r": "0.00038167",
+                "T": 1562306400000,
+            },
+        )
+        funding = await asyncio.wait_for(pump, timeout=2.0)
+
+    assert funding.rate == Decimal("0.00038167")
+    assert funding.ts == 1562305381.0
+    assert not hasattr(funding, "next_funding_time")
+
+
 async def test_candles_answer_in_the_interval_that_was_asked_for(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,

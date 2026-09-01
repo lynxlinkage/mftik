@@ -66,6 +66,7 @@ from mftik.exchange.bybit.protocol import (
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.models import (
     Balance,
+    FundingRate,
     Kline,
     OrderBook,
     Ticker,
@@ -84,6 +85,9 @@ MAX_INSTRUMENT_PAGE = 1000
 
 #: Most history rows ``execution/list`` / ``order/history`` return per page.
 MAX_HISTORY = 100
+
+#: Most rows ``/v5/market/funding/history`` returns in one call.
+MAX_FUNDING_HISTORY = 200
 
 #: What a unified trading account is called. A classic account's spot wallet is
 #: ``SPOT``; Bybit has been migrating everyone to ``UNIFIED`` for years, so it
@@ -285,6 +289,36 @@ class BybitPublicRest(_BybitRestTransport):
         )
         rows = result.get("list") or []
         return [kline_from_row(row, ticker, interval) for row in reversed(rows)]
+
+    async def fetch_funding_history(
+        self,
+        product: str,
+        symbol: str,
+        *,
+        ticker: UniversalTicker,
+        limit: int = 100,
+    ) -> list[FundingRate]:
+        """``funding/history`` — settled rates, **reversed to oldest first**.
+
+        Bybit answers newest first. Reversing at the boundary matches klines.
+        """
+        result = await self._get(
+            ch.MARKET_FUNDING_HISTORY,
+            {
+                "category": product,
+                "symbol": symbol,
+                "limit": min(limit, MAX_FUNDING_HISTORY),
+            },
+        )
+        rows = result.get("list") or []
+        return [
+            FundingRate(
+                universal_ticker=str(ticker),
+                rate=Decimal(str(row.get("fundingRate") or "0")),
+                ts=float(row.get("fundingRateTimestamp") or 0) / 1000.0,
+            )
+            for row in reversed(rows)
+        ]
 
     async def server_time(self) -> float:
         """``time`` — Bybit's clock, in seconds.

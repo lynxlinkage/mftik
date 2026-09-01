@@ -10,10 +10,12 @@ from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_FETCH_BESTQUOTE,
+    MD_FETCH_FUNDING_HISTORY,
     MD_FETCH_KLINES,
     MD_FETCH_ORDERBOOK,
     Envelope,
     MdFetchBestQuote,
+    MdFetchFundingHistory,
     MdFetchKlines,
     MdFetchOrderBook,
     MdFetchRequest,
@@ -38,12 +40,13 @@ QUERY_ACK_TIMEOUT_S = 2.0
 class StrategyMds:
     """On-demand reads from MD, for what the feeds cannot answer.
 
-    Three reads: :meth:`fetch_klines` for history the feeds never carry, and
-    :meth:`fetch_order_book` / :meth:`fetch_best_quote` for a snapshot *now*
-    rather than a subscription to every change. The second pair overlaps feeds
-    that exist, and is the right tool when a strategy needs the book once —
-    subscribing to a stream to read its first message and drop the rest costs a
-    feed for the life of the session and gets a staler answer.
+    Four reads: :meth:`fetch_klines` and :meth:`fetch_funding_history` for
+    history the feeds never carry, and :meth:`fetch_order_book` /
+    :meth:`fetch_best_quote` for a snapshot *now* rather than a subscription
+    to every change. The second pair overlaps feeds that exist, and is the
+    right tool when a strategy needs the book once — subscribing to a stream
+    to read its first message and drop the rest costs a feed for the life of
+    the session and gets a staler answer.
 
     Independent of the feeds in both directions, which is the point. The
     request goes to one subject MD serves for everyone rather than to anything
@@ -170,6 +173,28 @@ class StrategyMds:
         """
         return await self._send(
             MD_FETCH_BESTQUOTE, MdFetchBestQuote, ticker=str(ticker)
+        )
+
+    async def fetch_funding_history(
+        self, ticker: UniversalTicker, *, limit: int = 100
+    ) -> str | None:
+        """Ask MD for the most recent ``limit`` settled funding rates.
+
+        Returns the query id, or ``None`` if the query never reached the
+        venue. The rows arrive at ``on_fetch_funding_history`` as an
+        :class:`~mftik.protocol.MdFundingHistoryResult` carrying this same
+        id, oldest first. Distinct from the live ``funding_rate`` feed,
+        which pushes the still-moving prediction for the upcoming
+        settlement.
+
+        A venue that has no history for this instrument (spot, paper)
+        answers with ``MD_VENUE_UNSUPPORTED_READ``.
+        """
+        return await self._send(
+            MD_FETCH_FUNDING_HISTORY,
+            MdFetchFundingHistory,
+            ticker=str(ticker),
+            limit=limit,
         )
 
     async def _send(

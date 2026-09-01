@@ -13,6 +13,7 @@ from mftik.exchange.models import (
     Balance,
     BestQuote,
     Fill,
+    FundingRate,
     Kline,
     Liquidation,
     Order,
@@ -26,6 +27,8 @@ from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_BESTQUOTE_RESULT,
+    MD_FUNDING_HISTORY_RESULT,
+    MD_FUNDING_RATE,
     MD_KLINE,
     MD_KLINES_RESULT,
     MD_LEASE_ACK,
@@ -52,6 +55,7 @@ from mftik.protocol import (
     MdBestQuoteResult,
     MdDetachRequest,
     MdDetachRequestEnvelope,
+    MdFundingHistoryResult,
     MdKlinesResult,
     MdLeaseAck,
     MdOrderBookResult,
@@ -96,6 +100,7 @@ MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     MD_AGG_TRADE: ("on_agg_trade", AggTrade),
     MD_BEST_QUOTE: ("on_best_quote", BestQuote),
     MD_LIQUIDATION: ("on_liquidation", Liquidation),
+    MD_FUNDING_RATE: ("on_funding_rate", FundingRate),
 }
 
 #: Query result type → (strategy hook, payload model). Separate from
@@ -106,6 +111,10 @@ MD_FETCH_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     MD_KLINES_RESULT: ("on_fetch_klines", MdKlinesResult),
     MD_ORDERBOOK_RESULT: ("on_fetch_orderbook", MdOrderBookResult),
     MD_BESTQUOTE_RESULT: ("on_fetch_bestquote", MdBestQuoteResult),
+    MD_FUNDING_HISTORY_RESULT: (
+        "on_fetch_funding_history",
+        MdFundingHistoryResult,
+    ),
 }
 
 #: TD global message type → (strategy hook, payload model).

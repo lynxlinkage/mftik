@@ -5,14 +5,20 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mftik.exchange.models import Kline
+from mftik.exchange.models import FundingRate, Kline
 from mftik.protocol import (
+    MD_FETCH_FUNDING_HISTORY,
     MD_FETCH_KLINES,
+    MD_FUNDING_HISTORY_RESULT,
     MD_KLINES_RESULT,
     MD_QUERY_ACK,
     Envelope,
+    MdFetchFundingHistory,
+    MdFetchFundingHistoryEnvelope,
     MdFetchKlines,
     MdFetchKlinesEnvelope,
+    MdFundingHistoryResult,
+    MdFundingHistoryResultEnvelope,
     MdKlinesResult,
     MdKlinesResultEnvelope,
     MdQueryAck,
@@ -285,3 +291,58 @@ def test_the_request_carries_where_its_answer_goes() -> None:
     assert req.reply_channel == "md.fetch.reply.anyone"
     # Nothing identifies the caller beyond where it wants the answer sent.
     assert not hasattr(req, "session_id")
+
+
+def test_fetch_funding_history_request_roundtrip() -> None:
+    env = MdFetchFundingHistoryEnvelope.wrap(
+        MdFetchFundingHistory(
+            reply_channel="md.fetch.reply.sess-1",
+            query_id="sess-1:8",
+            ticker="Bybit_Perp_BTCUSDT",
+            limit=50,
+        ),
+        type=MD_FETCH_FUNDING_HISTORY,
+        source="strategy.noop",
+        session_id="sess-1",
+    )
+    restored = MdFetchFundingHistoryEnvelope.from_json(env.to_json())
+
+    assert restored.type == MD_FETCH_FUNDING_HISTORY
+    assert restored.payload.ticker == "Bybit_Perp_BTCUSDT"
+    assert restored.payload.limit == 50
+
+
+def test_funding_history_result_roundtrip() -> None:
+    env = MdFundingHistoryResultEnvelope.wrap(
+        MdFundingHistoryResult(
+            query_id="q1",
+            ticker="Bybit_Perp_BTCUSDT",
+            rates=[
+                FundingRate(
+                    universal_ticker="Bybit_Perp_BTCUSDT",
+                    rate=Decimal("0.0001"),
+                    ts=1_700_000_000.0,
+                )
+            ],
+        ),
+        type=MD_FUNDING_HISTORY_RESULT,
+        source="md",
+        session_id="sess-1",
+    )
+    restored = MdFundingHistoryResultEnvelope.from_json(env.to_json())
+
+    assert restored.payload.ok is True
+    row = restored.payload.rates[0]
+    assert row.rate == Decimal("0.0001")
+    assert isinstance(row.rate, Decimal)
+    assert row.ts == 1_700_000_000.0
+
+
+def test_empty_funding_history_success_is_not_a_failure() -> None:
+    result = MdFundingHistoryResult(
+        query_id="q1",
+        ticker="Bybit_Perp_BTCUSDT",
+    )
+    assert result.ok is True
+    assert result.rates == []
+    assert result.error_code == QueryCode.NONE

@@ -152,6 +152,62 @@ async def test_five_feeds_and_liquidation(gate_futures: FakeGateFutures) -> None
         assert liq.qty == Decimal("0.001")
 
 
+async def test_ticker_and_funding_share_one_single_contract_subscribe(
+    gate_futures: FakeGateFutures,
+) -> None:
+    client = await _public(gate_futures)
+    async with client:
+        quote_task = asyncio.create_task(anext(client.stream_ticker(TICKER)))
+        rate_task = asyncio.create_task(anext(client.stream_funding_rate(TICKER)))
+        await _wait_sub(gate_futures, ch.TICKERS)
+        assert len(gate_futures.frames_for(ch.TICKERS)) == 1
+        assert gate_futures.frames_for(ch.TICKERS)[0]["payload"] == ["BTC_USDT"]
+        await gate_futures.push(
+            ch.TICKERS,
+            [
+                {
+                    "contract": "BTC_USDT",
+                    "last": "60000",
+                    "funding_rate": "0.0001",
+                    "t": 1_700_000_000,
+                }
+            ],
+            time_ms=1_700_000_001_500,
+        )
+        quote, funding = await asyncio.wait_for(
+            asyncio.gather(quote_task, rate_task), timeout=2
+        )
+
+    assert quote.last == Decimal("60000")
+    assert funding.rate == Decimal("0.0001")
+    assert funding.ts == 1_700_000_001.5
+    assert not hasattr(funding, "next_funding_time")
+
+
+async def test_funding_ts_falls_back_to_the_row_when_the_frame_has_no_clock(
+    gate_futures: FakeGateFutures,
+) -> None:
+    client = await _public(gate_futures)
+    async with client:
+        rate_task = asyncio.create_task(anext(client.stream_funding_rate(TICKER)))
+        await _wait_sub(gate_futures, ch.TICKERS)
+        await gate_futures.push(
+            ch.TICKERS,
+            [
+                {
+                    "contract": "BTC_USDT",
+                    "last": "60000",
+                    "funding_rate": "0.0002",
+                    "t": 1_700_000_000,
+                }
+            ],
+        )
+        funding = await asyncio.wait_for(rate_task, timeout=2)
+
+    assert funding.rate == Decimal("0.0002")
+    assert funding.ts == 1_700_000_000.0
+
+
 async def test_no_aggtrade_method(gate_futures: FakeGateFutures) -> None:
     client = await _public(gate_futures)
     assert not hasattr(client, "stream_agg_trades")

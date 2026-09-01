@@ -18,7 +18,7 @@ from mftik.exchange.okx.rest import OkxPublicRest
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol.query_codes import QueryCode
 from mftik_md.errors import normalize
-from mftik_md.fetch.readers import OkxReader, VenueReaderFactory
+from mftik_md.fetch.readers import NoReaderError, OkxReader, VenueReaderFactory
 
 SPOT = UniversalTicker.parse("Okx_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Okx_Perp_BTCUSDT")
@@ -158,6 +158,37 @@ async def test_a_perp_kline_volume_is_converted_to_base() -> None:
     klines = await _reader(api).fetch_klines(PERP, "1m", limit=1)
     assert klines[0].volume == Decimal("0.1")
     assert klines[0].quote_volume == Decimal("600")
+
+
+async def test_funding_history_reverses_newest_first_and_refuses_spot() -> None:
+    api = FakeApi()
+    api.results["/api/v5/public/funding-rate-history"] = [
+        {
+            "instId": "BTC-USDT-SWAP",
+            "fundingRate": "0.0002",
+            "fundingTime": "1700028800000",
+            "realizedRate": "0.0003",
+        },
+        {
+            "instId": "BTC-USDT-SWAP",
+            "fundingRate": "0.0001",
+            "fundingTime": "1700000000000",
+            "realizedRate": "0.00015",
+        },
+    ]
+
+    rows = await _reader(api).fetch_funding_history(PERP, limit=5)
+
+    query = api.query_for("/api/v5/public/funding-rate-history")
+    assert "instId=BTC-USDT-SWAP" in query
+    assert "limit=5" in query
+    assert [row.ts for row in rows] == [1_700_000_000.0, 1_700_028_800.0]
+    assert rows[0].rate == Decimal("0.0001")
+
+    before = len(api.requests)
+    with pytest.raises(NoReaderError, match="Spot"):
+        await _reader(api).fetch_funding_history(SPOT, limit=5)
+    assert len(api.requests) == before
 
 
 async def test_a_ticker_from_another_venue_is_refused() -> None:

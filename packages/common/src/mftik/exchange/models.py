@@ -406,6 +406,28 @@ class Liquidation(InstrumentScoped):
     ts: float = Field(default_factory=_ts)
 
 
+class FundingRate(InstrumentScoped):
+    """One funding-rate print: the live prediction, or a settled history row.
+
+    Feed topic ``funding_rate``. ``rate`` is the still-moving prediction for
+    the upcoming settlement on the live hook, and the locked rate at a past
+    settlement on a history query. The hook tells you which. Positive means
+    longs pay shorts. A decimal, not a percent: ``0.0001`` is 0.01% per
+    period.
+
+    ``ts`` on the live feed is the best available stamp — the venue's event
+    time when the print carries one, local receive time when it does not.
+    History ``ts`` is always the settlement time from the REST row.
+
+    The schedule (``next_funding_time``) and OKX's next-period prediction
+    are not here. A venue that cannot push this feed has no
+    ``stream_funding_rate``, and subscribing there is refused at attach.
+    """
+
+    rate: Decimal
+    ts: float = Field(default_factory=_ts)
+
+
 class OrderBook(InstrumentScoped):
     bids: list[BookLevel]
     asks: list[BookLevel]

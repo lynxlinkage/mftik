@@ -82,6 +82,7 @@ from mftik.exchange.bybit.protocol import (
 )
 from mftik.exchange.bybit.public import (
     BYBIT_INTERVALS,
+    FUNDING_CATEGORIES,
     LIQUIDATION_PRODUCTS,
     BybitPublicClient,
     venue_interval,
@@ -133,6 +134,7 @@ __all__ = [
     "BybitWallet",
     "BybitWalletCoin",
     "BybitWsError",
+    "FUNDING_CATEGORIES",
     "LIQUIDATION_PRODUCTS",
     "auth_frame",
     "channels",

@@ -28,6 +28,7 @@ from mftik.exchange.tickers import Category, UniversalTicker
 
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Bybit_Spot_BTCUSDT")
+PERP = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
 #: Its perp twin — same symbol, different book.
 PERP = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
 
@@ -411,6 +412,18 @@ def test_a_ticker_delta_with_no_price_is_not_a_ticker() -> None:
         {"symbol": "BTCUSDT", "fundingRate": "0.0001"}
     )
     assert not delta.quoted
+    funding = delta.to_funding_rate(PERP, ts=1_700_000_000.0)
+    assert funding is not None
+    assert funding.rate == Decimal("0.0001")
+    assert funding.ts == 1_700_000_000.0
+    assert not hasattr(funding, "next_funding_time")
+
+
+def test_a_ticker_without_a_rate_is_not_a_funding_print() -> None:
+    row = BybitTicker.model_validate(
+        {"symbol": "BTCUSDT", "lastPrice": "60000"}
+    )
+    assert row.to_funding_rate(PERP, ts=1.0) is None
 
 
 def test_a_quoted_ticker_keeps_both_sides() -> None:

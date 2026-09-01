@@ -29,7 +29,7 @@ from mftik.exchange.binance.rest import (
     BinanceRestTransport,
     BinanceSignedRest,
 )
-from mftik.exchange.models import Kline, OrderBook, Ticker
+from mftik.exchange.models import FundingRate, Kline, OrderBook, Ticker
 from mftik.exchange.tickers import UniversalTicker
 from mftik.symbols.listed import ListedInstrument
 
@@ -125,6 +125,23 @@ class BinanceDeliveryPublicRest(BinanceRestTransport):
         return BinanceDeliveryDepth.model_validate(payload or {}).to_order_book(
             ticker
         )
+
+    async def fetch_funding_history(
+        self, symbol: str, *, ticker: UniversalTicker, limit: int = 100
+    ) -> list[FundingRate]:
+        """``GET /dapi/v1/fundingRate`` — settled rates, already oldest first."""
+        rows = await self._get(
+            f"{API_PREFIX}/fundingRate",
+            {"symbol": symbol, "limit": min(limit, MAX_HISTORY)},
+        )
+        return [
+            FundingRate(
+                universal_ticker=str(ticker),
+                rate=Decimal(str(row.get("fundingRate") or "0")),
+                ts=secs(row.get("fundingTime")),
+            )
+            for row in rows or []
+        ]
 
 
 class BinanceDeliveryRest(BinanceSignedRest):

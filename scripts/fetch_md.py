@@ -6,6 +6,7 @@ Intended for local / docker-compose testing::
     just fetch quote  Gate_Spot_BTCUSDT
     just fetch book   Gate_Spot_BTCUSDT 5
     just fetch klines Gate_Spot_BTCUSDT 1h 5
+    just fetch funding-history Bybit_Perp_BTCUSDT 5
 
 The ticker is resolved leniently, so ``gate_spot_btcusdt`` works too.
 
@@ -32,16 +33,20 @@ from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_BESTQUOTE_RESULT,
     MD_FETCH_BESTQUOTE,
+    MD_FETCH_FUNDING_HISTORY,
     MD_FETCH_KLINES,
     MD_FETCH_ORDERBOOK,
+    MD_FUNDING_HISTORY_RESULT,
     MD_KLINES_RESULT,
     MD_ORDERBOOK_RESULT,
     Envelope,
     MdBestQuoteResult,
     MdFetchBestQuote,
+    MdFetchFundingHistory,
     MdFetchKlines,
     MdFetchOrderBook,
     MdFetchRequest,
+    MdFundingHistoryResult,
     MdKlinesResult,
     MdOrderBookResult,
     MdQueryAck,
@@ -57,6 +62,7 @@ RESULTS = {
     MD_KLINES_RESULT: MdKlinesResult,
     MD_ORDERBOOK_RESULT: MdOrderBookResult,
     MD_BESTQUOTE_RESULT: MdBestQuoteResult,
+    MD_FUNDING_HISTORY_RESULT: MdFundingHistoryResult,
 }
 
 
@@ -78,7 +84,15 @@ def build(kind: str, args: list[str], reply_channel: str) -> tuple[str, MdFetchR
         return MD_FETCH_ORDERBOOK, MdFetchOrderBook(**common, depth=depth)
     if kind == "quote":
         return MD_FETCH_BESTQUOTE, MdFetchBestQuote(**common)
-    raise SystemExit(f"unknown query {kind!r}; use one of: klines, book, quote")
+    if kind in {"funding-history", "funding_history"}:
+        limit = int(rest[0]) if rest else 5
+        return (
+            MD_FETCH_FUNDING_HISTORY,
+            MdFetchFundingHistory(**common, limit=limit),
+        )
+    raise SystemExit(
+        f"unknown query {kind!r}; use one of: klines, book, quote, funding-history"
+    )
 
 
 def show(result: object) -> None:
@@ -110,6 +124,10 @@ def show(result: object) -> None:
         else:
             q = result.quote
             print(f"  bid {q.bid} x {q.bid_qty} | ask {q.ask} x {q.ask_qty}")
+    elif isinstance(result, MdFundingHistoryResult):
+        print(f"  {len(result.rates)} settled rates")
+        for row in result.rates:
+            print(f"    t={int(row.ts)} rate={row.rate}")
 
 
 async def run(kind: str, args: list[str]) -> int:

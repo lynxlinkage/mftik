@@ -44,7 +44,12 @@ from mftik.exchange.binance.future.rest import BinanceFuturePublicRest
 from mftik.exchange.binance.spot.client import BinanceSpotWsApi
 from mftik.exchange.binance.spot.protocol import BINANCE_SPOT_WS_API_URL
 from mftik.exchange.binance.spot.public import venue_interval as binance_interval
-from mftik.exchange.bybit.protocol import BYBIT_REST_URL, product_of
+from mftik.exchange.bybit.protocol import (
+    BYBIT_REST_URL,
+    INVERSE,
+    LINEAR,
+    product_of,
+)
 from mftik.exchange.bybit.public import venue_interval as bybit_interval
 from mftik.exchange.bybit.rest import BybitPublicRest
 from mftik.exchange.gate.future.public import GATE_FUTURES_INTERVALS
@@ -55,7 +60,7 @@ from mftik.exchange.gate.future.rest import (
 from mftik.exchange.gate.spot.public import GATE_INTERVALS
 from mftik.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
-from mftik.exchange.models import BestQuote, Kline, OrderBook
+from mftik.exchange.models import BestQuote, FundingRate, Kline, OrderBook
 from mftik.exchange.okx.protocol import OKX_REST_URL
 from mftik.exchange.okx.public import venue_interval as okx_interval
 from mftik.exchange.okx.rest import OkxPublicRest
@@ -271,6 +276,15 @@ class GateFuturesReader:
             ts=book.ts,
         )
 
+    async def fetch_funding_history(
+        self, ticker: UniversalTicker, *, limit: int
+    ) -> list[FundingRate]:
+        """Settled rates, oldest first. Gate answers newest first; REST reverses."""
+        pair = await self._pair(ticker)
+        return await self.rest.fetch_funding_history(
+            pair, ticker=ticker, limit=limit
+        )
+
 
 class BinanceSpotReader:
     """Binance spot reads over the WebSocket API, in canonical symbol and interval.
@@ -457,6 +471,15 @@ class BinanceFutureReader:
             ts=book.ts,
         )
 
+    async def fetch_funding_history(
+        self, ticker: UniversalTicker, *, limit: int
+    ) -> list[FundingRate]:
+        """Settled rates, oldest first. Binance already answers that way."""
+        native = await self._symbol(ticker)
+        return await self.rest.fetch_funding_history(
+            native, ticker=ticker, limit=limit
+        )
+
 
 class BinanceDeliveryReader:
     """Binance COIN-M reads over REST, in canonical symbol and interval.
@@ -542,6 +565,15 @@ class BinanceDeliveryReader:
             ask=ask.price,
             ask_qty=ask.qty,
             ts=book.ts,
+        )
+
+    async def fetch_funding_history(
+        self, ticker: UniversalTicker, *, limit: int
+    ) -> list[FundingRate]:
+        """Settled rates, oldest first. Binance already answers that way."""
+        native = await self._symbol(ticker)
+        return await self.rest.fetch_funding_history(
+            native, ticker=ticker, limit=limit
         )
 
 
@@ -636,6 +668,19 @@ class BybitReader:
             ask_qty=row.ask_qty,
         )
 
+    async def fetch_funding_history(
+        self, ticker: UniversalTicker, *, limit: int
+    ) -> list[FundingRate]:
+        """Settled rates, oldest first. Spot has none — refused before HTTP."""
+        native, product = await self._resolve(ticker)
+        if product not in {LINEAR, INVERSE}:
+            raise NoReaderError(
+                f"{self.venue} {product} serves no funding history"
+            )
+        return await self.rest.fetch_funding_history(
+            product, native, ticker=ticker, limit=limit
+        )
+
 
 class OkxReader:
     """OKX reads over REST, across every category the venue trades.
@@ -710,6 +755,19 @@ class OkxReader:
         row = await self.rest.fetch_ticker_row(native)
         return row.to_best_quote(
             ticker, contract_size=await self._multiplier(ticker)
+        )
+
+    async def fetch_funding_history(
+        self, ticker: UniversalTicker, *, limit: int
+    ) -> list[FundingRate]:
+        """Settled rates, oldest first. Non-SWAP is refused before HTTP."""
+        if ticker.category is not Category.PERP:
+            raise NoReaderError(
+                f"{self.venue} {ticker.category} serves no funding history"
+            )
+        native = await self._resolve(ticker)
+        return await self.rest.fetch_funding_history(
+            native, ticker=ticker, limit=limit
         )
 
 

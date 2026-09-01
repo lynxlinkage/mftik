@@ -23,6 +23,7 @@ from mftik.exchange.gate.future.rest import (
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.models import (
     BestQuote,
+    FundingRate,
     Kline,
     Liquidation,
     OrderBook,
@@ -170,10 +171,22 @@ class GateFuturesPublicClient(BaseClient):
         self._ensure_connected()
         return self._liquidations(ticker)
 
+    def stream_funding_rate(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[FundingRate]:
+        """``futures.tickers`` — one contract, shared with the quote.
+
+        A late joiner is silent until the next ``funding_rate``-bearing
+        push; nothing is REST-filled. The subscribe payload is exactly
+        that one contract so the wire key matches ``stream_ticker``.
+        """
+        self._ensure_connected()
+        return self._funding_rates(ticker)
+
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_tickers(pair)
-        async for row in self._rows(stream):
+        async for row, _ts in self._rows(stream):
             if row.contract != pair:
                 continue
             yield row.to_ticker(ticker)
@@ -236,6 +249,19 @@ class GateFuturesPublicClient(BaseClient):
             if row.contract != pair:
                 continue
             yield row.to_liquidation(ticker, size)
+
+    async def _funding_rates(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[FundingRate]:
+        pair = await self._resolve(ticker)
+        stream = await self.ws.subscribe_tickers(pair)
+        async for row, ts in self._rows(stream):
+            if row.contract != pair:
+                continue
+            funding = row.to_funding_rate(ticker, ts=ts)
+            if funding is None:
+                continue
+            yield funding
 
     @staticmethod
     async def _rows(stream: EventStream[T]) -> AsyncIterator[T]:

@@ -54,6 +54,7 @@ from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.models import (
     AggTrade,
     BestQuote,
+    FundingRate,
     Kline,
     Liquidation,
     OrderBook,
@@ -225,6 +226,12 @@ class BinanceDeliveryPublicClient(BaseClient):
         self._ensure_connected()
         return self._liquidations(ticker)
 
+    def stream_funding_rate(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[FundingRate]:
+        self._ensure_connected()
+        return self._funding_rates(ticker)
+
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         """``@ticker`` for the stats, ``@bookTicker`` for the quote it lacks.
 
@@ -310,6 +317,20 @@ class BinanceDeliveryPublicClient(BaseClient):
             if row.symbol != native:
                 continue
             yield row.to_liquidation(ticker)
+
+    async def _funding_rates(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[FundingRate]:
+        """``@markPrice@1s`` — the still-moving prediction for the next settlement."""
+        native = await self._resolve(ticker)
+        stream = await self.feed.subscribe_mark_prices(native)
+        async for row in self._rows(stream):
+            if row.symbol != native:
+                continue
+            funding = row.to_funding_rate(ticker)
+            if funding is None:
+                continue
+            yield funding
 
     # --- stream plumbing ---------------------------------------------------
 

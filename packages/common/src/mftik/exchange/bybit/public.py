@@ -45,6 +45,7 @@ from mftik.exchange.bybit.rest import BybitPublicRest
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.models import (
     BestQuote,
+    FundingRate,
     Kline,
     Liquidation,
     OrderBook,
@@ -53,7 +54,7 @@ from mftik.exchange.models import (
 )
 from mftik.exchange.stream import EventStream
 from mftik.exchange.symbols import SymbolResolver
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,14 @@ BYBIT_INTERVALS: dict[str, str] = {
 #: are not traded here yet, so a subscribe on those books is refused locally
 #: rather than left hanging on a socket that never pushes.
 LIQUIDATION_PRODUCTS = frozenset({LINEAR, INVERSE})
+
+#: Categories that pay a funding hook. Checked on the category rather than the
+#: product because a dated future settles at expiry instead of funding, and
+#: :func:`~mftik.exchange.bybit.protocol.product_of` maps it onto ``linear``
+#: alongside the perps — the product alone cannot tell the two apart. Bybit's
+#: inverse perps arrive as ``Perp`` too; ``inverse`` is a product, not one of
+#: our categories.
+FUNDING_CATEGORIES = frozenset({Category.PERP})
 
 
 def venue_interval(interval: str) -> str:
@@ -265,6 +274,29 @@ class BybitPublicClient(BaseClient):
             )
         return self._liquidations(ticker)
 
+    def stream_funding_rate(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[FundingRate]:
+        """``tickers`` — refused on books Bybit does not fund.
+
+        Shares the ticker wire. A late joiner is silent until the next
+        ``fundingRate``-bearing delta; nothing is REST-filled. Checked here,
+        before the iterator runs, so MD's subscribe fails the same way a
+        missing ``stream_*`` does rather than starting a pump that never
+        yields.
+        """
+        self._ensure_connected()
+        if ticker.venue != self.name:
+            raise ValueError(
+                f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
+            )
+        if ticker.category not in FUNDING_CATEGORIES:
+            raise ValueError(
+                f"Bybit {ticker.category} serves no funding rate stream; "
+                f"supported: {', '.join(sorted(FUNDING_CATEGORIES))}"
+            )
+        return self._funding_rates(ticker)
+
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         """``tickers`` — skipping the deltas that carry no price.
 
@@ -276,7 +308,7 @@ class BybitPublicClient(BaseClient):
         native, product = await self._resolve(ticker)
         feed = await self.feed_for(product)
         stream = await feed.subscribe_tickers(native)
-        async for row in self._rows(stream):
+        async for row, _ts in self._rows(stream):
             if row.symbol != native or not row.quoted:
                 continue
             yield row.to_ticker(ticker, ts=time.time())
@@ -345,6 +377,21 @@ class BybitPublicClient(BaseClient):
                 continue
             yield row.to_liquidation(ticker)
 
+    async def _funding_rates(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[FundingRate]:
+        """``tickers`` — yield when the delta names a rate."""
+        native, product = await self._resolve(ticker)
+        feed = await self.feed_for(product)
+        stream = await feed.subscribe_tickers(native)
+        async for row, ts in self._rows(stream):
+            if row.symbol != native:
+                continue
+            funding = row.to_funding_rate(ticker, ts=ts)
+            if funding is None:
+                continue
+            yield funding
+
     # --- stream plumbing ---------------------------------------------------
 
     @staticmethod
@@ -383,6 +430,7 @@ class BybitPublicClient(BaseClient):
 
 __all__ = [
     "BYBIT_INTERVALS",
+    "FUNDING_CATEGORIES",
     "LIQUIDATION_PRODUCTS",
     "BybitPublicClient",
     "venue_interval",

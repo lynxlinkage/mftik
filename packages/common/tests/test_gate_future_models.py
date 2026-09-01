@@ -9,6 +9,7 @@ from mftik.exchange.gate.future.models import (
     GateFuturesLiquidation,
     GateFuturesOrder,
     GateFuturesPosition,
+    GateFuturesTicker,
     GateFuturesTrade,
     GateFuturesUserTrade,
     base_to_contracts,
@@ -47,6 +48,29 @@ def test_text_wraps_and_unwraps() -> None:
     assert from_text("t-42") == "42"
     assert from_text("apiv4") is None
     assert from_text("-") is None
+
+
+def test_a_ticker_with_a_funding_rate_converts() -> None:
+    row = GateFuturesTicker.model_validate(
+        {
+            "contract": "BTC_USDT",
+            "last": "60000",
+            "funding_rate": "0.0001",
+            "t": 1_700_000_000,
+        }
+    )
+    funding = row.to_funding_rate(TICKER, ts=1_700_000_001.5)
+    assert funding is not None
+    assert funding.rate == Decimal("0.0001")
+    assert funding.ts == 1_700_000_001.5
+    assert not hasattr(funding, "next_funding_time")
+
+
+def test_a_ticker_without_a_rate_is_not_a_funding_print() -> None:
+    row = GateFuturesTicker.model_validate(
+        {"contract": "BTC_USDT", "last": "60000"}
+    )
+    assert row.to_funding_rate(TICKER, ts=1.0) is None
 
 
 def test_public_trade_size_is_base_and_signed() -> None:

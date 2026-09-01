@@ -860,18 +860,24 @@ changes neither `ensure_feed` nor `_stop_feed_if_unused`.
 Update a doc in the ticket that makes its sentence false, not in a mop-up
 ticket.
 
+## Funding rate (product topic)
+
+`TOPIC_FUNDING_RATE` is a product key. `_open` resolves it to
+`stream_funding_rate`; STS delivers `MD_FUNDING_RATE` to
+`on_funding_rate`. History is a fetch, not a feed:
+`mds.fetch_funding_history` → `on_fetch_funding_history`. The shared
+`FundingRate` is `rate` + `ts` only — no `next_funding_time`, no
+`next_funding_rate`.
+
+A late joiner on a ticker-shared wire (Bybit `tickers.{symbol}`, Gate
+`futures.tickers`) is silent until the next rate-bearing delta. The pump
+is not REST-filled. Two product keys remain two pumps; sharing is a
+socket detail. Split venues (Paper, Gate spot, Binance spot) refuse the
+feed by missing method. Unified venues (Bybit, OKX) refuse spot inside
+the method.
+
 ## Out of scope (later epics)
 
-- **`funding_rate` as a product topic.** The payoff, and a separate epic:
-  `TOPIC_FUNDING_RATE` and an `_open` branch in
-  `apps/md/src/mftik_md/session/venue.py`, `MD_FUNDING_RATE` in
-  `packages/common/src/mftik/protocol/messages.py`, a shared model, a row
-  in `MD_HANDLERS` (`apps/sts/src/mftik_sts/session/session.py`), and
-  `on_funding_rate` on `Strategy`. Per venue: `stream_funding_rate` off
-  `BybitTicker.funding_rate` (same wire topic as `ticker`, separate MD
-  topic and hook), off `BinanceFutureMarkPrice` (`subscribe_mark_prices`
-  exists already), off Gate's `futures.tickers`, and off OKX's dedicated
-  `funding-rate` channel.
 - **`open_interest` as a product topic.** Same shape. Note that
   BinanceFuture USD-M has no WS channel for it, so that venue would have to
   refuse the feed rather than poll REST inside a push.

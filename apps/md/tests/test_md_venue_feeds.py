@@ -11,6 +11,7 @@ from mftik.exchange.models import (
     AggTrade,
     BestQuote,
     BookLevel,
+    FundingRate,
     Kline,
     Liquidation,
     OrderBook,
@@ -21,6 +22,7 @@ from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
+    MD_FUNDING_RATE,
     MD_KLINE,
     MD_LIQUIDATION,
     MD_ORDERBOOK,
@@ -161,6 +163,18 @@ class FakePublic:
             ),
         )
 
+    def stream_funding_rate(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[FundingRate]:
+        return self._once(
+            "funding_rate",
+            FundingRate(
+                universal_ticker=str(ticker),
+                rate=Decimal("0.0001"),
+                ts=1_700_000_000.0,
+            ),
+        )
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -172,6 +186,7 @@ class FakePublic:
         ("aggtrade", MD_AGG_TRADE),
         ("bestquote", MD_BEST_QUOTE),
         ("liquidation", MD_LIQUIDATION),
+        ("funding_rate", MD_FUNDING_RATE),
         ("kline_1m", MD_KLINE),
     ],
 )
@@ -261,6 +276,21 @@ async def test_a_venue_without_liquidations_refuses_that_topic() -> None:
     await sess.start()
     with pytest.raises(ValueError, match="does not publish stream_liquidation"):
         await sess.ensure_feed("liquidation", FAKE)
+    assert sess.feed_count == 0
+    await sess.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_venue_without_funding_rate_refuses_that_topic() -> None:
+    """A venue without the method refuses; perpetual books grow one later."""
+
+    class NoFunding(FakePublic):
+        stream_funding_rate = None
+
+    sess = VenueSession(FAKE.venue, NoFunding(), on_update=_noop_update)
+    await sess.start()
+    with pytest.raises(ValueError, match="does not publish stream_funding_rate"):
+        await sess.ensure_feed("funding_rate", FAKE)
     assert sess.feed_count == 0
     await sess.stop()
 
