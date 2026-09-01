@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mftik.exchange.models import BookLevel, OrderBook
 from mftik.exchange.okx import channels as ch
 from mftik.exchange.okx.models import (
+    OkxFundingRate,
     OkxLiquidation,
     OkxOrderBook,
     OkxPublicTrade,
@@ -238,6 +239,15 @@ class OkxPublicStream(OkxSocket):
         return await self._subscribe(
             (ch.liquidation(inst_type),),
             lambda _resp, row: OkxLiquidation.model_validate(row),
+        )
+
+    async def subscribe_funding_rate(
+        self, inst_id: str
+    ) -> EventStream[OkxFundingRate]:
+        """``funding-rate`` — SWAP only at the connector; this is the wire."""
+        return await self._subscribe(
+            (ch.funding_rate(inst_id),),
+            lambda _resp, row: OkxFundingRate.model_validate(row),
         )
 
     async def subscribe_order_book(

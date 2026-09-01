@@ -61,9 +61,18 @@ T = TypeVar("T")
 #: rather than just the touch.
 DEFAULT_BOOK_DEPTH = 50
 
-#: ``(topic, type, payload) -> model``. The topic is passed because a kline
-#: payload carries no symbol and a book delta carries no depth.
-Parse = Callable[[str, str, dict[str, Any]], Any]
+#: ``(topic, type, payload, envelope_ts_ms) -> model``. The topic is passed
+#: because a kline payload carries no symbol and a book delta carries no
+#: depth. Envelope ``ts`` is milliseconds; a missing stamp is ``0``.
+Parse = Callable[[str, str, dict[str, Any], int], Any]
+
+
+def _parse_ticker(
+    _topic: str, _kind: str, row: dict[str, Any], ts: int
+) -> tuple[BybitTicker, float]:
+    """Row plus the envelope stamp, falling back to local receive time."""
+    stamp = ts / 1000.0 if ts else time.time()
+    return BybitTicker.model_validate(row), stamp
 
 
 class BybitBookSnapshot(BaseModel):
@@ -258,7 +267,7 @@ class BybitPublicStream(BybitSocket):
 
     async def subscribe_raw(self, *topics: str) -> EventStream[dict[str, Any]]:
         """Subscribe by topic name and yield the raw payloads."""
-        return await self._subscribe(topics, lambda _t, _k, row: row)
+        return await self._subscribe(topics, lambda _t, _k, row, _ts: row)
 
     async def unsubscribe(self, *topics: str) -> None:
         """Unsubscribe topics. Last-reader only.
@@ -328,10 +337,12 @@ class BybitPublicStream(BybitSocket):
         """``publicTrade.<symbol>`` — the tape, one row per aggressing order."""
         return await self._subscribe(
             tuple(ch.public_trade(s) for s in symbols),
-            lambda _t, _k, row: BybitPublicTrade.model_validate(row),
+            lambda _t, _k, row, _ts: BybitPublicTrade.model_validate(row),
         )
 
-    async def subscribe_tickers(self, *symbols: str) -> EventStream[BybitTicker]:
+    async def subscribe_tickers(
+        self, *symbols: str
+    ) -> EventStream[tuple[BybitTicker, float]]:
         """``tickers.<symbol>`` — 24h stats.
 
         Snapshots on spot, deltas on the contract books; a delta carries only
@@ -341,10 +352,13 @@ class BybitPublicStream(BybitSocket):
         A late joiner is silent until the next push that carries the field
         it reads. The quote and the funding rate share this topic; neither
         is REST-filled for a joiner.
+
+        Each yield is ``(row, ts)``. ``ts`` is the envelope stamp in seconds
+        when the frame carried one, otherwise local receive time.
         """
         return await self._subscribe(
             tuple(ch.tickers(s) for s in symbols),
-            lambda _t, _k, row: BybitTicker.model_validate(row),
+            _parse_ticker,
         )
 
     async def subscribe_klines(
@@ -357,7 +371,7 @@ class BybitPublicStream(BybitSocket):
         """
         return await self._subscribe(
             tuple(ch.kline(s, interval) for s in symbols),
-            lambda topic, _k, row: (
+            lambda topic, _k, row, _ts: (
                 ch.symbol_of(topic),
                 BybitKline.model_validate(row),
             ),
@@ -438,7 +452,10 @@ class BybitPublicStream(BybitSocket):
             _Sub(
                 topics=topics,
                 stream=stream,
-                parse=lambda _t, kind, row: (kind, BybitOrderBook.model_validate(row)),
+                parse=lambda _t, kind, row, _ts: (
+                    kind,
+                    BybitOrderBook.model_validate(row),
+                ),
                 index=frozenset(topics),
             )
         )
@@ -453,7 +470,7 @@ class BybitPublicStream(BybitSocket):
         """
         return await self._subscribe(
             tuple(ch.order_book(s, depth=1) for s in symbols),
-            lambda _t, _k, row: BybitOrderBook.model_validate(row),
+            lambda _t, _k, row, _ts: BybitOrderBook.model_validate(row),
         )
 
     async def subscribe_liquidations(
@@ -466,7 +483,7 @@ class BybitPublicStream(BybitSocket):
         """
         return await self._subscribe(
             tuple(ch.all_liquidation(s) for s in symbols),
-            lambda _t, _k, row: BybitLiquidation.model_validate(row),
+            lambda _t, _k, row, _ts: BybitLiquidation.model_validate(row),
         )
 
     def _check_depth(self, depth: int) -> None:
@@ -478,7 +495,7 @@ class BybitPublicStream(BybitSocket):
             )
 
     def _fold_book(
-        self, topic: str, kind: str, row: dict[str, Any]
+        self, topic: str, kind: str, row: dict[str, Any], _ts: int = 0
     ) -> BybitBookSnapshot | None:
         """Apply one push to the book behind ``topic``, or ask for a new one."""
         book = self._books.get(topic)
@@ -556,7 +573,7 @@ class BybitPublicStream(BybitSocket):
         for sub in [s for s in self._subs if resp.topic in s.index]:
             for row in rows:
                 try:
-                    parsed = sub.parse(resp.topic, resp.type, row)
+                    parsed = sub.parse(resp.topic, resp.type, row, resp.ts)
                 except Exception:
                     logger.exception(
                         "%s failed to parse %s payload: %r",

@@ -17,6 +17,8 @@ import pytest
 from mftik.exchange.bybit.rest import BybitPublicRest
 from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.tickers import UniversalTicker
+from mftik.protocol.query_codes import QueryCode
+from mftik_md.errors import normalize
 from mftik_md.fetch.readers import BybitReader, NoReaderError, VenueReaderFactory
 
 SPOT = UniversalTicker.parse("Bybit_Spot_BTCUSDT")
@@ -179,6 +181,41 @@ async def test_the_ticker_picks_the_book_not_the_reader(api: FakeApi) -> None:
     ]
     assert "category=spot" in queries[0]
     assert "category=linear" in queries[1]
+
+
+async def test_funding_history_reverses_newest_first_and_refuses_spot(
+    api: FakeApi,
+) -> None:
+    api.results["/v5/market/funding/history"] = {
+        "list": [
+            {
+                "symbol": NATIVE,
+                "fundingRate": "0.0002",
+                "fundingRateTimestamp": "1700028800000",
+            },
+            {
+                "symbol": NATIVE,
+                "fundingRate": "0.0001",
+                "fundingRateTimestamp": "1700000000000",
+            },
+        ]
+    }
+
+    rows = await _reader(api).fetch_funding_history(PERP, limit=5)
+
+    assert "category=linear" in api.query_for("/v5/market/funding/history")
+    assert "limit=5" in api.query_for("/v5/market/funding/history")
+    assert [row.ts for row in rows] == [1_700_000_000.0, 1_700_028_800.0]
+    assert rows[0].rate == Decimal("0.0001")
+
+    before = len(api.requests)
+    with pytest.raises(NoReaderError, match="spot"):
+        await _reader(api).fetch_funding_history(SPOT, limit=5)
+    assert len(api.requests) == before
+    assert (
+        normalize(NoReaderError("Bybit spot serves no funding history"), venue="Bybit")
+        is QueryCode.MD_VENUE_UNSUPPORTED_READ
+    )
 
 
 async def test_a_ticker_from_another_venue_is_refused(api: FakeApi) -> None:

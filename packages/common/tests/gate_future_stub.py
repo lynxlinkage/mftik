@@ -121,15 +121,18 @@ class FakeGateFutures:
                 return call
         raise AssertionError(f"no api call for {channel}")
 
-    async def push(self, channel: str, result: Any) -> None:
-        frame = json.dumps(
-            {
-                "time": int(time.time()),
-                "channel": channel,
-                "event": ch.UPDATE,
-                "result": result,
-            }
-        )
+    async def push(
+        self, channel: str, result: Any, *, time_ms: int | None = None
+    ) -> None:
+        payload: dict[str, Any] = {
+            "time": int(time.time()),
+            "channel": channel,
+            "event": ch.UPDATE,
+            "result": result,
+        }
+        if time_ms is not None:
+            payload["time_ms"] = time_ms
+        frame = json.dumps(payload)
         for client in list(self.clients):
             await client.send(frame)
 

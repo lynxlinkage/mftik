@@ -90,6 +90,22 @@ async def test_unsupported_interval_never_hits_the_wire() -> None:
     assert not api.requests
 
 
+async def test_funding_history_reverses_newest_first_and_keeps_seconds() -> None:
+    api = FakeApi()
+    api.results["/api/v4/futures/usdt/funding_rate"] = [
+        {"t": 1_700_028_800, "r": "0.0002"},
+        {"t": 1_700_000_000, "r": "0.0001"},
+    ]
+
+    rows = await _reader(api).fetch_funding_history(TICKER, limit=5)
+
+    request = api.requests[0]
+    assert request.url.path == "/api/v4/futures/usdt/funding_rate"
+    assert dict(request.url.params) == {"contract": "BTC_USDT", "limit": "5"}
+    assert [row.ts for row in rows] == [1_700_000_000.0, 1_700_028_800.0]
+    assert rows[0].rate == Decimal("0.0001")
+
+
 async def test_the_factory_builds_a_gate_futures_reader() -> None:
     factory = VenueReaderFactory(StubSymbols())
     reader = await factory.create("GateFutures")

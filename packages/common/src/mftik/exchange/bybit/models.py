@@ -38,6 +38,7 @@ from mftik.exchange.models import (
     BestQuote,
     BookLevel,
     Fill,
+    FundingRate,
     Kline,
     Liquidation,
     Order,
@@ -548,6 +549,20 @@ class BybitTicker(BybitMessage):
         fields: dict[str, Any] = {} if ts <= 0 else {"ts": ts}
         return Ticker(
             universal_ticker=str(ticker), bid=bid, ask=ask, last=last, **fields
+        )
+
+    def to_funding_rate(self, ticker: UniversalTicker, *, ts: float) -> FundingRate | None:
+        """The still-moving prediction, when this delta named one.
+
+        The row has no clock; ``ts`` is the envelope stamp (or local receive)
+        the caller already chose.
+        """
+        if self.funding_rate is None:
+            return None
+        return FundingRate(
+            universal_ticker=str(ticker),
+            rate=self.funding_rate,
+            ts=ts,
         )
 
 

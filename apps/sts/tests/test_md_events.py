@@ -12,6 +12,7 @@ from mftik.exchange.models import (
     AggTrade,
     BestQuote,
     BookLevel,
+    FundingRate,
     Kline,
     Liquidation,
     OrderBook,
@@ -21,6 +22,7 @@ from mftik.exchange.models import (
 from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
+    MD_FUNDING_RATE,
     MD_KLINE,
     MD_LIQUIDATION,
     MD_ORDERBOOK,
@@ -60,6 +62,7 @@ class RecordingStrategy(Strategy):
             "agg_trade": [],
             "best_quote": [],
             "liquidation": [],
+            "funding_rate": [],
         }
 
     async def on_ticker(self, ticker: Ticker) -> None:
@@ -82,6 +85,9 @@ class RecordingStrategy(Strategy):
 
     async def on_liquidation(self, liquidation: Liquidation) -> None:
         self.seen["liquidation"].append(liquidation)
+
+    async def on_funding_rate(self, funding: FundingRate) -> None:
+        self.seen["funding_rate"].append(funding)
 
 
 def _payloads() -> list[tuple[str, str, dict]]:
@@ -164,6 +170,15 @@ def _payloads() -> list[tuple[str, str, dict]]:
                 price=Decimal("59100"),
                 qty=Decimal("1.5"),
                 side="buy",
+            ).model_dump(mode="json"),
+        ),
+        (
+            MD_FUNDING_RATE,
+            "funding_rate",
+            FundingRate(
+                universal_ticker="Bybit_Perp_BTCUSDT",
+                rate=Decimal("0.0001"),
+                ts=1_700_000_000.0,
             ).model_dump(mode="json"),
         ),
     ]

@@ -36,6 +36,7 @@ from mftik.exchange.models import (
     BestQuote,
     BookLevel,
     Fill,
+    FundingRate,
     Kline,
     Liquidation,
     Order,
@@ -505,6 +506,35 @@ class OkxLiquidation(OkxMessage):
         return out
 
 
+class OkxFundingRate(OkxMessage):
+    """``funding-rate`` — the still-moving prediction for the next settlement.
+
+    ``fundingTime`` / ``nextFundingTime`` / ``nextFundingRate`` stay on the
+    wire. The shared model is ``rate`` + ``ts`` only.
+    """
+
+    inst_type: str = Field(default="", alias="instType")
+    inst_id: str = Field(default="", alias="instId")
+    funding_rate: OptDec = Field(default=None, alias="fundingRate")
+    next_funding_rate: OptDec = Field(default=None, alias="nextFundingRate")
+    funding_time: Ms = Field(default=0.0, alias="fundingTime")
+    next_funding_time: Ms = Field(default=0.0, alias="nextFundingTime")
+    ts: Ms = 0.0
+
+    @property
+    def symbol(self) -> str:
+        return self.inst_id
+
+    def to_funding_rate(self, ticker: UniversalTicker) -> FundingRate | None:
+        if self.funding_rate is None:
+            return None
+        return FundingRate(
+            universal_ticker=str(ticker),
+            rate=self.funding_rate,
+            ts=self.ts,
+        )
+
+
 class OkxTicker(OkxMessage):
     """``tickers``, and one row of ``GET /api/v5/market/ticker``."""
 
@@ -729,6 +759,7 @@ __all__ = [
     "OkxAccount",
     "OkxBalanceDetail",
     "OkxFill",
+    "OkxFundingRate",
     "OkxLeverage",
     "OkxLiquidation",
     "OkxLiquidationDetail",

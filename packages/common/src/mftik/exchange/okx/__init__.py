@@ -32,6 +32,7 @@ from mftik.exchange.okx.feed import (
 from mftik.exchange.okx.models import (
     OkxAccount,
     OkxFill,
+    OkxFundingRate,
     OkxOrderAck,
     OkxOrderBook,
     OkxOrderUpdate,
@@ -88,6 +89,7 @@ __all__ = [
     "OkxBookSnapshot",
     "OkxError",
     "OkxFill",
+    "OkxFundingRate",
     "OkxOrderAck",
     "OkxOrderBook",
     "OkxOrderUpdate",

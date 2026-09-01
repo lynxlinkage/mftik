@@ -45,6 +45,7 @@ from mftik.exchange.bybit.rest import BybitPublicRest
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.models import (
     BestQuote,
+    FundingRate,
     Kline,
     Liquidation,
     OrderBook,
@@ -265,6 +266,30 @@ class BybitPublicClient(BaseClient):
             )
         return self._liquidations(ticker)
 
+    def stream_funding_rate(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[FundingRate]:
+        """``tickers`` — refused on books Bybit does not fund.
+
+        Shares the ticker wire. A late joiner is silent until the next
+        ``fundingRate``-bearing delta; nothing is REST-filled. Checked here,
+        before the iterator runs, so MD's subscribe fails the same way a
+        missing ``stream_*`` does rather than starting a pump that never
+        yields.
+        """
+        self._ensure_connected()
+        if ticker.venue != self.name:
+            raise ValueError(
+                f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
+            )
+        product = product_of(ticker.category)
+        if product not in LIQUIDATION_PRODUCTS:
+            raise ValueError(
+                f"Bybit {product} serves no funding rate stream; "
+                f"supported: {', '.join(sorted(LIQUIDATION_PRODUCTS))}"
+            )
+        return self._funding_rates(ticker)
+
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         """``tickers`` — skipping the deltas that carry no price.
 
@@ -276,7 +301,7 @@ class BybitPublicClient(BaseClient):
         native, product = await self._resolve(ticker)
         feed = await self.feed_for(product)
         stream = await feed.subscribe_tickers(native)
-        async for row in self._rows(stream):
+        async for row, _ts in self._rows(stream):
             if row.symbol != native or not row.quoted:
                 continue
             yield row.to_ticker(ticker, ts=time.time())
@@ -344,6 +369,21 @@ class BybitPublicClient(BaseClient):
             if row.symbol != native:
                 continue
             yield row.to_liquidation(ticker)
+
+    async def _funding_rates(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[FundingRate]:
+        """``tickers`` — yield when the delta names a rate."""
+        native, product = await self._resolve(ticker)
+        feed = await self.feed_for(product)
+        stream = await feed.subscribe_tickers(native)
+        async for row, ts in self._rows(stream):
+            if row.symbol != native:
+                continue
+            funding = row.to_funding_rate(ticker, ts=ts)
+            if funding is None:
+                continue
+            yield funding
 
     # --- stream plumbing ---------------------------------------------------
 

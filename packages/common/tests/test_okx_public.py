@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from typing import Any
 
 import httpx
 import pytest
 from mftik.exchange.intervals import InvalidIntervalError
+from mftik.exchange.okx import channels as ch
+from mftik.exchange.okx.feed import OkxPublicStream
 from mftik.exchange.okx.public import OkxPublicClient, venue_interval
 from mftik.exchange.okx.rest import OkxPublicRest
 from mftik.exchange.tickers import Category, UniversalTicker
+from okx_stub import FakeOkx
 
 TICKER = UniversalTicker.parse("Okx_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Okx_Perp_BTCUSDT")
@@ -114,3 +118,44 @@ async def test_a_perp_liquidation_stream_is_offered_and_spot_is_not() -> None:
         client.stream_liquidation(PERP)
         with pytest.raises(ValueError, match="serves no liquidation"):
             client.stream_liquidation(TICKER)
+
+
+async def test_funding_rate_arrives_from_its_own_channel(
+    okx_public: FakeOkx,
+) -> None:
+    client = OkxPublicClient(
+        symbols=StubSymbols(),
+        rest=OkxPublicRest(base_url=BASE, client=FakeApi().client()),
+        public=OkxPublicStream(okx_public.url, ping_interval=0),
+    )
+    async with client:
+        stream = client.stream_funding_rate(PERP)
+        task = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)
+        await okx_public.push(
+            ch.funding_rate("BTC-USDT-SWAP"),
+            [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "fundingRate": "0.0001",
+                    "nextFundingRate": "0.0002",
+                    "fundingTime": "1700000000000",
+                    "nextFundingTime": "1700028800000",
+                    "ts": "1700000001000",
+                }
+            ],
+        )
+        funding = await asyncio.wait_for(task, 2)
+
+    assert funding.rate == Decimal("0.0001")
+    assert funding.ts == 1_700_000_001.0
+    assert not hasattr(funding, "next_funding_rate")
+    assert okx_public.subscribed == {("funding-rate", "BTC-USDT-SWAP", "")}
+
+
+async def test_spot_has_no_funding_rate_stream() -> None:
+    api = FakeApi()
+    async with _client(api) as client:
+        client.stream_funding_rate(PERP)
+        with pytest.raises(ValueError, match="serves no funding rate"):
+            client.stream_funding_rate(TICKER)

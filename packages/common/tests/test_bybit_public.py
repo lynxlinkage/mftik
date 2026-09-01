@@ -644,6 +644,99 @@ async def test_spot_has_no_liquidation_stream(bybit_public: FakeBybit) -> None:
             client.stream_liquidation(UniversalTicker.parse("Bybit_Spot_BTCUSDT"))
 
 
+async def test_a_funding_snapshot_uses_the_envelope_stamp(
+    bybit_public: FakeBybit,
+) -> None:
+    client = _client(bybit_public, product="linear")
+    async with client:
+        ticker = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
+        stream = client.stream_funding_rate(ticker)
+        task = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)
+        await bybit_public.push(
+            "tickers.BTCUSDT",
+            {
+                "symbol": NATIVE,
+                "lastPrice": "60000",
+                "fundingRate": "0.0001",
+            },
+            ts=1_700_000_000_000,
+        )
+        row = await asyncio.wait_for(task, 2)
+
+    assert row.rate == Decimal("0.0001")
+    assert row.ts == 1_700_000_000.0
+    assert not hasattr(row, "next_funding_time")
+
+
+async def test_a_funding_only_delta_feeds_funding_not_the_ticker(
+    bybit_public: FakeBybit,
+) -> None:
+    client = _client(bybit_public, product="linear")
+    perp = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
+    async with client:
+        quotes = client.stream_ticker(perp)
+        rates = client.stream_funding_rate(perp)
+        quote_task = asyncio.ensure_future(quotes.__anext__())
+        rate_task = asyncio.ensure_future(rates.__anext__())
+        await asyncio.sleep(0.05)
+        await bybit_public.push(
+            "tickers.BTCUSDT",
+            {"symbol": NATIVE, "fundingRate": "0.0001"},
+            kind="delta",
+            ts=1_700_000_000_000,
+        )
+        funding = await asyncio.wait_for(rate_task, 2)
+        assert not quote_task.done()
+        await bybit_public.push(
+            "tickers.BTCUSDT",
+            {"symbol": NATIVE, "lastPrice": "60000"},
+        )
+        quote = await asyncio.wait_for(quote_task, 2)
+
+    assert funding.rate == Decimal("0.0001")
+    assert quote.last == Decimal("60000")
+
+
+async def test_ticker_and_funding_share_one_venue_subscription(
+    bybit_public: FakeBybit,
+) -> None:
+    client = _client(bybit_public, product="linear")
+    perp = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
+    async with client:
+        quotes = client.stream_ticker(perp)
+        rates = client.stream_funding_rate(perp)
+        quote_task = asyncio.ensure_future(quotes.__anext__())
+        rate_task = asyncio.ensure_future(rates.__anext__())
+        await asyncio.sleep(0.05)
+        assert len(bybit_public.frames_for("subscribe")) == 1
+        assert bybit_public.subscribed == {"tickers.BTCUSDT"}
+        await bybit_public.push(
+            "tickers.BTCUSDT",
+            {
+                "symbol": NATIVE,
+                "lastPrice": "60000",
+                "fundingRate": "0.0001",
+            },
+            ts=1_700_000_000_000,
+        )
+        quote, funding = await asyncio.wait_for(
+            asyncio.gather(quote_task, rate_task), 2
+        )
+
+    assert quote.last == Decimal("60000")
+    assert funding.rate == Decimal("0.0001")
+    assert funding.ts == 1_700_000_000.0
+
+
+async def test_spot_has_no_funding_rate_stream(bybit_public: FakeBybit) -> None:
+    """Spot is not funded; the subscribe is refused before any socket."""
+    client = _client(bybit_public)
+    async with client:
+        with pytest.raises(ValueError, match="serves no funding rate stream"):
+            client.stream_funding_rate(UniversalTicker.parse("Bybit_Spot_BTCUSDT"))
+
+
 async def test_each_category_gets_its_own_socket(bybit_public: FakeBybit) -> None:
     """Bybit has no single market-data endpoint: spot and linear are different
     connections carrying the same topic names."""

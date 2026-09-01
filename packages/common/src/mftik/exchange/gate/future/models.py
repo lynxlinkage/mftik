@@ -18,6 +18,7 @@ from mftik.exchange.models import (
     BestQuote,
     BookLevel,
     Fill,
+    FundingRate,
     Kline,
     Liquidation,
     Order,
@@ -113,6 +114,22 @@ class GateFuturesTicker(GateMessage):
             bid=self.last,
             ask=self.last,
             last=self.last,
+        )
+
+    def to_funding_rate(
+        self, ticker: UniversalTicker, *, ts: float
+    ) -> FundingRate | None:
+        """The still-moving prediction, when this push named one.
+
+        ``ts`` is the frame stamp (or local receive) the caller already chose;
+        the row's ``t`` is optional and is not used here.
+        """
+        if self.funding_rate is None:
+            return None
+        return FundingRate(
+            universal_ticker=str(ticker),
+            rate=self.funding_rate,
+            ts=ts,
         )
 
 

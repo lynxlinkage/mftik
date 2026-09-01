@@ -24,6 +24,7 @@ from mftik.exchange.base import BaseClient
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.models import (
     BestQuote,
+    FundingRate,
     Kline,
     Liquidation,
     OrderBook,
@@ -215,6 +216,28 @@ class OkxPublicClient(BaseClient):
             )
         return self._liquidations(ticker)
 
+    def stream_funding_rate(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[FundingRate]:
+        """``funding-rate`` — refused on books OKX does not fund.
+
+        Checked here, before the iterator runs, so MD's subscribe fails the
+        same way a missing ``stream_*`` does rather than starting a pump
+        that never yields.
+        """
+        self._ensure_connected()
+        if ticker.venue != self.name:
+            raise ValueError(
+                f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
+            )
+        product = product_of(ticker.category)
+        if product not in LIQUIDATION_PRODUCTS:
+            raise ValueError(
+                f"OKX {product} serves no funding rate stream; "
+                f"supported: {', '.join(sorted(LIQUIDATION_PRODUCTS))}"
+            )
+        return self._funding_rates(ticker)
+
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         native, _ = await self._resolve(ticker)
         feed = await self.public_feed()
@@ -286,6 +309,21 @@ class OkxPublicClient(BaseClient):
                 continue
             for event in row.to_liquidations(ticker, contract_size=scale):
                 yield event
+
+    async def _funding_rates(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[FundingRate]:
+        """``funding-rate`` — one instrument, SWAP only."""
+        native, _ = await self._resolve(ticker)
+        feed = await self.public_feed()
+        stream = await feed.subscribe_funding_rate(native)
+        async for row in self._rows(stream):
+            if row.symbol and row.symbol != native:
+                continue
+            funding = row.to_funding_rate(ticker)
+            if funding is None:
+                continue
+            yield funding
 
     @staticmethod
     async def _rows(stream: EventStream[T]) -> AsyncIterator[T]:

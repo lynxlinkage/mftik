@@ -195,6 +195,7 @@ MARKET_INSTRUMENTS = "/v5/market/instruments-info"
 MARKET_TICKERS = "/v5/market/tickers"
 MARKET_ORDER_BOOK = "/v5/market/orderbook"
 MARKET_KLINE = "/v5/market/kline"
+MARKET_FUNDING_HISTORY = "/v5/market/funding/history"
 MARKET_TIME = "/v5/market/time"
 
 ORDER_CREATE_PATH = "/v5/order/create"
@@ -215,6 +216,7 @@ __all__ = [
     "GREEKS",
     "KLINE_INTERVALS",
     "MARKET_INSTRUMENTS",
+    "MARKET_FUNDING_HISTORY",
     "MARKET_KLINE",
     "MARKET_ORDER_BOOK",
     "MARKET_TICKERS",

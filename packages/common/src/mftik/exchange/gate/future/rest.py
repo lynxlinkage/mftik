@@ -32,6 +32,7 @@ from mftik.exchange.gate.future.protocol import (
 from mftik.exchange.models import (
     Balance,
     BookLevel,
+    FundingRate,
     Kline,
     OrderBook,
     Ticker,
@@ -228,6 +229,27 @@ class GateFuturesPublicRest(_Transport):
         if not rows:
             raise GateRestError(200, "not_found", f"no ticker for {contract}")
         return GateFuturesTicker.model_validate(rows[0]).to_ticker(ticker)
+
+    async def fetch_funding_history(
+        self, contract: str, *, ticker: UniversalTicker, limit: int = 100
+    ) -> list[FundingRate]:
+        """``GET /futures/{settle}/funding_rate`` — settled rates, oldest first.
+
+        Gate answers newest first and stamps ``t`` in unix seconds. Reverse
+        here; do not divide ``t`` by 1000.
+        """
+        rows = await self._get(
+            f"{FUTURES_PREFIX}/funding_rate",
+            {"contract": contract, "limit": min(limit, MAX_HISTORY)},
+        )
+        return [
+            FundingRate(
+                universal_ticker=str(ticker),
+                rate=Decimal(str(row.get("r") or "0")),
+                ts=float(row.get("t") or 0),
+            )
+            for row in reversed(rows or [])
+        ]
 
     async def fetch_order_book(
         self,

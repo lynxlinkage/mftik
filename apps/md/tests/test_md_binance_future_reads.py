@@ -152,6 +152,32 @@ async def test_another_venues_ticker_never_reaches_the_wire() -> None:
     assert not api.requests
 
 
+async def test_funding_history_is_oldest_first_and_drops_mark_price() -> None:
+    api = FakeApi()
+    api.results["/fapi/v1/fundingRate"] = [
+        {
+            "symbol": NATIVE,
+            "fundingTime": 1_700_000_000_000,
+            "fundingRate": "0.0001",
+            "markPrice": "60000",
+        },
+        {
+            "symbol": NATIVE,
+            "fundingTime": 1_700_028_800_000,
+            "fundingRate": "0.0002",
+            "markPrice": "60100",
+        },
+    ]
+
+    rows = await _reader(api).fetch_funding_history(TICKER, limit=5)
+
+    assert api.query("/fapi/v1/fundingRate") == {"symbol": NATIVE, "limit": "5"}
+    assert [row.ts for row in rows] == [1_700_000_000.0, 1_700_028_800.0]
+    assert [row.rate for row in rows] == [Decimal("0.0001"), Decimal("0.0002")]
+    assert all(row.universal_ticker == str(TICKER) for row in rows)
+    assert not any(hasattr(row, "mark_price") for row in rows)
+
+
 async def test_the_factory_builds_a_binance_future_reader() -> None:
     factory = VenueReaderFactory(StubSymbols())  # type: ignore[arg-type]
     reader = await factory.create("BinanceFuture")

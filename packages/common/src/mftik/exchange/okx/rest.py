@@ -26,7 +26,7 @@ from typing import Any
 import httpx
 
 from mftik.exchange.errors import ExchangeError
-from mftik.exchange.models import Balance, Kline, OrderBook, Ticker
+from mftik.exchange.models import Balance, FundingRate, Kline, OrderBook, Ticker
 from mftik.exchange.okx import channels as ch
 from mftik.exchange.okx.listing import LINEAR, LIVE, to_listed
 from mftik.exchange.okx.models import (
@@ -212,6 +212,27 @@ class OkxPublicRest(_OkxRestTransport):
         )
         return [
             kline_from_row(row, ticker, bar, contract_size=contract_size)
+            for row in reversed(rows or [])
+        ]
+
+    async def fetch_funding_history(
+        self, inst_id: str, *, ticker: UniversalTicker, limit: int = 100
+    ) -> list[FundingRate]:
+        """Settled rates, **reversed to oldest first**.
+
+        OKX answers newest first. ``fundingRate`` is the applied rate;
+        ``realizedRate`` is ignored.
+        """
+        rows = await self._get(
+            ch.MARKET_FUNDING_HISTORY,
+            {"instId": inst_id, "limit": min(limit, MAX_HISTORY)},
+        )
+        return [
+            FundingRate(
+                universal_ticker=str(ticker),
+                rate=Decimal(str(row.get("fundingRate") or "0")),
+                ts=float(row.get("fundingTime") or 0) / 1000.0,
+            )
             for row in reversed(rows or [])
         ]
 

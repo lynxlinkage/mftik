@@ -9,6 +9,7 @@ from mftik.exchange.models import (
     Balance,
     BestQuote,
     Fill,
+    FundingRate,
     Kline,
     Liquidation,
     Order,
@@ -22,6 +23,7 @@ from mftik.protocol import (
     CancelReject,
     Envelope,
     MdBestQuoteResult,
+    MdFundingHistoryResult,
     MdKlinesResult,
     MdOrderBookResult,
     OrderReject,
@@ -91,7 +93,7 @@ class Strategy:
 
     Public events from ``md.{session_id}`` (wired):
         on_ticker, on_order_book, on_kline, on_trade, on_agg_trade,
-        on_best_quote, on_liquidation
+        on_best_quote, on_liquidation, on_funding_rate
         One hook per feed topic subscribed in ``md_ids``
         (``topic.UniversalTicker``; kline carries its interval in the topic,
         e.g. ``paper.kline_1m.BTCUSDT``).
@@ -100,10 +102,11 @@ class Strategy:
         self.mds.fetch_klines(ticker, interval, limit=...)
         self.mds.fetch_order_book(ticker, depth=...)
         self.mds.fetch_best_quote(ticker)
+        self.mds.fetch_funding_history(ticker, limit=...)
         Each returns a query_id once MD acks, or None if it never left
         (refused, or no MD running — mds.last_reject_reason says which). The
         answer arrives later at on_fetch_klines / on_fetch_orderbook /
-        on_fetch_bestquote, carrying that query_id.
+        on_fetch_bestquote / on_fetch_funding_history, carrying that query_id.
         Independent of md_ids: a session that subscribes to nothing can still
         query, and any venue is reachable whether or not it is streaming.
         NOTE: these are not the feed hooks. A feed pushes every change for as
@@ -403,6 +406,21 @@ class Strategy:
         silently producing nothing.
         """
 
+    async def on_funding_rate(self, funding: FundingRate) -> None:
+        """Handle live funding-rate updates from MD.
+
+        Feed topic ``funding_rate``. ``rate`` is the still-moving prediction
+        for the upcoming settlement — not a locked period constant, and not
+        a settled history row. Positive means longs pay shorts.
+
+        ``ts`` is the best available stamp: the venue's event time when the
+        print carries one, local receive time when it does not.
+
+        Not every venue publishes this. Perpetual books do; spot and paper
+        do not, and subscribing there is refused at attach rather than
+        silently producing nothing.
+        """
+
     # --- query answers -----------------------------------------------------
     #
     # One hook per kind of query, each firing once per ``mds.fetch_*`` call and
@@ -449,7 +467,20 @@ class Strategy:
         ``quote`` is None when the query failed **or** when a side of the book
         was empty. The second is not an error and not a quote either: a
         strategy checking whether its own price can rest has nothing to check
-        against, and should ask again rather than read it as a quote of zero.
+        against, and         should ask again rather than read it as a quote of zero.
+        """
+
+    async def on_fetch_funding_history(
+        self, result: MdFundingHistoryResult
+    ) -> None:
+        """Handle the answer to ``self.mds.fetch_funding_history(...)``.
+
+        Distinct from :meth:`on_funding_rate`, which is the live prediction
+        for the upcoming settlement. This one carries locked history, oldest
+        first, on ``result.rates``. Each row's ``ts`` is a past settlement.
+
+        An ``ok`` result with no rows is not a failure: the venue has no
+        history that far back for this instrument.
         """
 
     # --- helpers -----------------------------------------------------------

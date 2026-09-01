@@ -199,6 +199,23 @@ def test_mark_price_carries_the_funding_schedule() -> None:
     assert row.funding_rate == Decimal("0.00038167")
     assert row.next_funding_time == 1562306400000
     assert not hasattr(row, "to_ticker"), "a mark price is not a quote"
+    funding = row.to_funding_rate(TICKER)
+    assert funding is not None
+    assert funding.rate == Decimal("0.00038167")
+    assert funding.ts == 1562305380.0
+    assert not hasattr(funding, "next_funding_time")
+
+
+def test_a_mark_price_without_a_rate_is_not_a_funding_print() -> None:
+    row = BinanceFutureMarkPrice.model_validate(
+        {
+            "e": "markPriceUpdate",
+            "E": 1562305380000,
+            "s": "BTCUSDT",
+            "p": "11794.15000000",
+        }
+    )
+    assert row.to_funding_rate(TICKER) is None
 
 
 def test_a_kline_says_whether_its_window_closed() -> None:

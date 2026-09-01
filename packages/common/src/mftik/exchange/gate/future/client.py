@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -91,12 +92,36 @@ def _payloads_of(channel: str, idents: list[tuple[str, ...]]) -> list[list[str]]
     return [list(ident) for ident in idents]
 
 
+Parse = Callable[[dict[str, Any], GateResponse], Any]
+
+
+def _parse_ticker(
+    row: dict[str, Any], resp: GateResponse
+) -> tuple[GateFuturesTicker, float]:
+    """Row plus the best available stamp: frame ``time_ms``, then row ``t``."""
+    ticker = GateFuturesTicker.model_validate(row)
+    if resp.time_ms:
+        stamp = resp.time_ms / 1000.0
+    elif ticker.t is not None:
+        stamp = float(ticker.t)
+    else:
+        stamp = time.time()
+    return ticker, stamp
+
+
+def _as(model: type[T]) -> Callable[[dict[str, Any], GateResponse], T]:
+    def parse(row: dict[str, Any], _resp: GateResponse) -> T:
+        return model.model_validate(row)
+
+    return parse
+
+
 @dataclass
 class _Sub:
     channel: str
     payload: list[str]
     stream: EventStream[Any]
-    parse: Callable[[dict[str, Any]], Any]
+    parse: Parse
     private: bool = False
 
 
@@ -401,7 +426,7 @@ class GateFuturesWebSocket:
         self,
         channel: str,
         payload: list[str] | None,
-        parse: Callable[[dict[str, Any]], T],
+        parse: Callable[[dict[str, Any], GateResponse], T],
         *,
         private: bool = False,
     ) -> EventStream[T]:
@@ -430,20 +455,23 @@ class GateFuturesWebSocket:
 
     async def subscribe_tickers(
         self, *contracts: str
-    ) -> EventStream[GateFuturesTicker]:
+    ) -> EventStream[tuple[GateFuturesTicker, float]]:
         """``futures.tickers`` — mark, last, and funding on one channel.
 
         A late joiner is silent until the next push that carries the field
         it reads. The quote and the funding rate share this topic; neither
         is REST-filled for a joiner.
+
+        Each yield is ``(row, ts)``. ``ts`` prefers the frame ``time_ms``,
+        then the row's ``t`` (unix seconds), then local receive time.
         """
         return await self._subscribe(
-            ch.TICKERS, ch.tickers(*contracts), GateFuturesTicker.model_validate
+            ch.TICKERS, ch.tickers(*contracts), _parse_ticker
         )
 
     async def subscribe_trades(self, *contracts: str) -> EventStream[GateFuturesTrade]:
         return await self._subscribe(
-            ch.TRADES, ch.trades(*contracts), GateFuturesTrade.model_validate
+            ch.TRADES, ch.trades(*contracts), _as(GateFuturesTrade)
         )
 
     async def subscribe_candlesticks(
@@ -452,7 +480,7 @@ class GateFuturesWebSocket:
         return await self._subscribe(
             ch.CANDLESTICKS,
             ch.candlesticks(interval, contract),
-            GateFuturesCandlestick.model_validate,
+            _as(GateFuturesCandlestick),
         )
 
     async def subscribe_order_book(
@@ -461,7 +489,7 @@ class GateFuturesWebSocket:
         return await self._subscribe(
             ch.ORDER_BOOK,
             ch.order_book(contract, level=level, interval=interval),
-            GateFuturesOrderBook.model_validate,
+            _as(GateFuturesOrderBook),
         )
 
     async def subscribe_book_ticker(
@@ -470,7 +498,7 @@ class GateFuturesWebSocket:
         return await self._subscribe(
             ch.BOOK_TICKER,
             ch.book_ticker(*contracts),
-            GateFuturesBookTicker.model_validate,
+            _as(GateFuturesBookTicker),
         )
 
     async def subscribe_liquidations(
@@ -479,14 +507,14 @@ class GateFuturesWebSocket:
         return await self._subscribe(
             ch.PUBLIC_LIQUIDATES,
             ch.public_liquidates(*contracts),
-            GateFuturesLiquidation.model_validate,
+            _as(GateFuturesLiquidation),
         )
 
     async def subscribe_orders(self, *contracts: str) -> EventStream[GateFuturesOrder]:
         return await self._subscribe(
             ch.ORDERS,
             ch.orders(self._require_uid(), *contracts),
-            GateFuturesOrder.model_validate,
+            _as(GateFuturesOrder),
             private=True,
         )
 
@@ -496,7 +524,7 @@ class GateFuturesWebSocket:
         return await self._subscribe(
             ch.USER_TRADES,
             ch.user_trades(self._require_uid(), *contracts),
-            GateFuturesUserTrade.model_validate,
+            _as(GateFuturesUserTrade),
             private=True,
         )
 
@@ -506,7 +534,7 @@ class GateFuturesWebSocket:
         return await self._subscribe(
             ch.POSITIONS,
             ch.positions(self._require_uid(), *contracts),
-            GateFuturesPosition.model_validate,
+            _as(GateFuturesPosition),
             private=True,
         )
 
@@ -514,7 +542,7 @@ class GateFuturesWebSocket:
         return await self._subscribe(
             ch.BALANCES,
             ch.balances(self._require_uid()),
-            GateFuturesBalance.model_validate,
+            _as(GateFuturesBalance),
             private=True,
         )
 
@@ -709,7 +737,7 @@ class GateFuturesWebSocket:
         for sub in [s for s in self._subs if s.channel == resp.channel]:
             for row in resp.rows():
                 try:
-                    sub.stream.push(sub.parse(row))
+                    sub.stream.push(sub.parse(row, resp))
                 except Exception:
                     logger.exception(
                         "gate.futures failed to parse %s row: %r",

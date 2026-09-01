@@ -9,17 +9,26 @@ from typing import Any
 import fakeredis.aioredis
 import pytest
 from mftik.broker import Broker, BrokerConfig
-from mftik.exchange.models import BestQuote, BookLevel, Kline, OrderBook
+from mftik.exchange.models import (
+    BestQuote,
+    BookLevel,
+    FundingRate,
+    Kline,
+    OrderBook,
+)
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_BESTQUOTE_RESULT,
+    MD_FUNDING_HISTORY_RESULT,
     MD_KLINE,
     MD_KLINES_RESULT,
     MD_ORDERBOOK_RESULT,
     MD_QUERY_ACK,
     Envelope,
     MdBestQuoteResult,
+    MdFetchFundingHistory,
     MdFetchKlines,
+    MdFundingHistoryResult,
     MdKlinesResult,
     MdOrderBookResult,
     MdQueryAck,
@@ -520,4 +529,81 @@ async def test_a_quote_with_nothing_resting_is_not_an_error(
     assert strategy.quotes[0].ok is True
     assert strategy.quotes[0].quote is None
     assert strategy.quotes[0].error_code == QueryCode.NONE
+    await sts.stop()
+
+
+@pytest.mark.asyncio
+async def test_fetch_funding_history_reaches_its_own_hook(broker: Broker) -> None:
+    """Ack, then the settled rows at ``on_fetch_funding_history``."""
+
+    class Collector(RecordingStrategy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.history: list[MdFundingHistoryResult] = []
+
+        async def on_fetch_funding_history(
+            self, result: MdFundingHistoryResult
+        ) -> None:
+            self.history.append(result)
+
+    class FundingMd:
+        def __init__(self) -> None:
+            self._stop = asyncio.Event()
+            self._task: asyncio.Task[Any] | None = None
+            self.requests: list[MdFetchFundingHistory] = []
+
+        async def start(self) -> None:
+            self._task = asyncio.create_task(self._serve())
+            await asyncio.sleep(0.05)
+
+        async def stop(self) -> None:
+            self._stop.set()
+            if self._task is not None:
+                await asyncio.gather(self._task, return_exceptions=True)
+
+        async def _serve(self) -> None:
+            async for req in broker.serve(Topics.md_fetch(), stop=self._stop):
+                payload = MdFetchFundingHistory.model_validate(
+                    req.envelope.payload
+                )
+                self.requests.append(payload)
+                await req.reply(
+                    Envelope[MdQueryAck].wrap(
+                        MdQueryAck(query_id=payload.query_id, accepted=True),
+                        type=MD_QUERY_ACK,
+                        source="md",
+                    )
+                )
+                await broker.publish(
+                    payload.reply_channel,
+                    Envelope[MdFundingHistoryResult].wrap(
+                        MdFundingHistoryResult(
+                            query_id=payload.query_id,
+                            ticker=payload.ticker,
+                            rates=[
+                                FundingRate(
+                                    universal_ticker=payload.ticker,
+                                    rate=Decimal("0.0001"),
+                                    ts=1_700_000_000.0,
+                                )
+                            ],
+                        ),
+                        type=MD_FUNDING_HISTORY_RESULT,
+                        source="md",
+                    ),
+                )
+
+    strategy = Collector()
+    sts = await _session(broker, strategy, md_ids=[])
+    md = FundingMd()
+    await md.start()
+
+    query_id = await strategy.mds.fetch_funding_history(TICKER, limit=5)
+    assert query_id is not None, strategy.mds.last_reject_reason
+    await _wait_until(lambda: strategy.history)
+    assert strategy.history[0].query_id == query_id
+    assert strategy.history[0].rates[0].rate == Decimal("0.0001")
+    assert md.requests[0].limit == 5
+
+    await md.stop()
     await sts.stop()

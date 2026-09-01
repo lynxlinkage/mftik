@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mftik.exchange.models import (
     BestQuote,
+    FundingRate,
     Kline,
     OrderBook,
     OrderType,
@@ -592,6 +593,17 @@ class MdFetchBestQuote(MdFetchRequest):
     """
 
 
+class MdFetchFundingHistory(MdFetchRequest):
+    """Ask for the most recent settled funding rates, oldest first.
+
+    Distinct from the live ``funding_rate`` feed, which pushes the still-
+    moving prediction for the upcoming settlement. This is the locked
+    history: each row's ``ts`` is a past settlement.
+    """
+
+    limit: int = 100
+
+
 class MdQueryAck(BaseModel):
     """MD → caller: the immediate reply to a query request.
 
@@ -670,6 +682,16 @@ class MdBestQuoteResult(MdFetchResult):
     """
 
     quote: BestQuote | None = None
+
+
+class MdFundingHistoryResult(MdFetchResult):
+    """The answer to :class:`MdFetchFundingHistory`.
+
+    An ``ok`` result with no rows means the venue has no history that far
+    back for this instrument. ``rates`` is oldest first.
+    """
+
+    rates: list[FundingRate] = Field(default_factory=list)
 
 
 class Recon(BaseModel):
@@ -897,10 +919,12 @@ MdDetachEnvelope = Envelope[MdDetach]
 MdFetchKlinesEnvelope = Envelope[MdFetchKlines]
 MdFetchOrderBookEnvelope = Envelope[MdFetchOrderBook]
 MdFetchBestQuoteEnvelope = Envelope[MdFetchBestQuote]
+MdFetchFundingHistoryEnvelope = Envelope[MdFetchFundingHistory]
 MdQueryAckEnvelope = Envelope[MdQueryAck]
 MdKlinesResultEnvelope = Envelope[MdKlinesResult]
 MdOrderBookResultEnvelope = Envelope[MdOrderBookResult]
 MdBestQuoteResultEnvelope = Envelope[MdBestQuoteResult]
+MdFundingHistoryResultEnvelope = Envelope[MdFundingHistoryResult]
 
 # Envelope.type constants for control-plane RPC
 TD_HEALTH = "td.health"
@@ -1046,16 +1070,19 @@ MD_AGG_TRADE = "md.aggtrade"
 MD_KLINE = "md.kline"
 MD_BEST_QUOTE = "md.bestquote"
 MD_LIQUIDATION = "md.liquidation"
+MD_FUNDING_RATE = "md.funding_rate"
 MD_SUBSCRIBE = "md.subscribe"
 MD_UNSUBSCRIBE = "md.unsubscribe"
 MD_DETACH = "md.detach"
 MD_FETCH_KLINES = "md.fetch.klines"
 MD_FETCH_ORDERBOOK = "md.fetch.orderbook"
 MD_FETCH_BESTQUOTE = "md.fetch.bestquote"
+MD_FETCH_FUNDING_HISTORY = "md.fetch.funding_history"
 MD_QUERY_ACK = "md.query.ack"
 MD_KLINES_RESULT = "md.klines.result"
 MD_ORDERBOOK_RESULT = "md.orderbook.result"
 MD_BESTQUOTE_RESULT = "md.bestquote.result"
+MD_FUNDING_HISTORY_RESULT = "md.funding_history.result"
 
 
 # --- symbol plane (sym) ----------------------------------------------------

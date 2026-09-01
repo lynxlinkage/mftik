@@ -11,20 +11,30 @@ import pytest
 from mftik.broker import Broker, BrokerConfig
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.intervals import InvalidIntervalError
-from mftik.exchange.models import BestQuote, BookLevel, Kline, OrderBook
+from mftik.exchange.models import (
+    BestQuote,
+    BookLevel,
+    FundingRate,
+    Kline,
+    OrderBook,
+)
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_BESTQUOTE_RESULT,
     MD_FETCH_BESTQUOTE,
+    MD_FETCH_FUNDING_HISTORY,
     MD_FETCH_KLINES,
     MD_FETCH_ORDERBOOK,
+    MD_FUNDING_HISTORY_RESULT,
     MD_KLINES_RESULT,
     MD_ORDERBOOK_RESULT,
     Envelope,
     MdBestQuoteResult,
     MdFetchBestQuote,
+    MdFetchFundingHistory,
     MdFetchKlines,
     MdFetchOrderBook,
+    MdFundingHistoryResult,
     MdKlinesResult,
     MdOrderBookResult,
     MdQueryAck,
@@ -66,6 +76,8 @@ class FakeReader:
         self.book_calls: list[tuple[str, int]] = []
         self.book: OrderBook | None = None
         self.quote: BestQuote | None = None
+        self.rates: list[FundingRate] = []
+        self.rate_calls: list[tuple[str, int]] = []
 
     async def connect(self) -> None:
         self.connects += 1
@@ -99,6 +111,16 @@ class FakeReader:
         if self.raises is not None:
             raise self.raises
         return self.quote
+
+    async def fetch_funding_history(
+        self, ticker: UniversalTicker, *, limit: int
+    ) -> list[FundingRate]:
+        self.rate_calls.append((ticker.symbol, limit))
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.raises is not None:
+            raise self.raises
+        return list(self.rates)
 
 
 class FakeFactory:
@@ -156,6 +178,7 @@ class Caller:
             MD_KLINES_RESULT: MdKlinesResult,
             MD_ORDERBOOK_RESULT: MdOrderBookResult,
             MD_BESTQUOTE_RESULT: MdBestQuoteResult,
+            MD_FUNDING_HISTORY_RESULT: MdFundingHistoryResult,
         }
 
         async def _pump() -> None:
@@ -665,6 +688,60 @@ async def test_a_read_the_venue_does_not_serve_is_refused_by_name(
     await session.stop()
 
 
+async def test_funding_history_arrives_oldest_first(
+    broker: Broker, caller: Caller
+) -> None:
+    older = FundingRate(
+        universal_ticker=str(TICKER),
+        rate=Decimal("0.0001"),
+        ts=1_700_000_000.0,
+    )
+    newer = FundingRate(
+        universal_ticker=str(TICKER),
+        rate=Decimal("0.0002"),
+        ts=1_700_028_800.0,
+    )
+    reader = FakeReader()
+    reader.rates = [older, newer]
+    session = FetchSession(broker, FakeFactory(reader))
+    await session.start()
+    await asyncio.sleep(0.05)
+
+    await caller.ask(
+        type=MD_FETCH_FUNDING_HISTORY,
+        payload=_funding_req(limit=5),
+    )
+    result = await caller.next_result(model=MdFundingHistoryResult)
+
+    assert result.ok is True
+    assert [row.ts for row in result.rates] == [older.ts, newer.ts]
+    assert reader.rate_calls == [(SYMBOL, 5)]
+
+    await session.stop()
+
+
+async def test_a_venue_without_funding_history_is_refused_by_name(
+    broker: Broker, caller: Caller
+) -> None:
+    class NoHistory(FakeReader):
+        fetch_funding_history = None
+
+    session = FetchSession(broker, FakeFactory(NoHistory()))
+    await session.start()
+    await asyncio.sleep(0.05)
+
+    await caller.ask(
+        type=MD_FETCH_FUNDING_HISTORY, payload=_funding_req()
+    )
+    result = await caller.next_result(model=MdFundingHistoryResult)
+
+    assert result.ok is False
+    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
+    assert "fetch_funding_history" in result.reason
+
+    await session.stop()
+
+
 def _book_req(depth: int = 10) -> MdFetchOrderBook:
     return MdFetchOrderBook(
         reply_channel=REPLY, query_id="q1", ticker=str(TICKER), depth=depth
@@ -674,4 +751,10 @@ def _book_req(depth: int = 10) -> MdFetchOrderBook:
 def _quote_req() -> MdFetchBestQuote:
     return MdFetchBestQuote(
         reply_channel=REPLY, query_id="q1", ticker=str(TICKER)
+    )
+
+
+def _funding_req(limit: int = 100) -> MdFetchFundingHistory:
+    return MdFetchFundingHistory(
+        reply_channel=REPLY, query_id="q1", ticker=str(TICKER), limit=limit
     )

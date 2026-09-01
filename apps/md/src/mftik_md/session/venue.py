@@ -13,6 +13,7 @@ from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
+    MD_FUNDING_RATE,
     MD_KLINE,
     MD_LIQUIDATION,
     MD_ORDERBOOK,
@@ -32,10 +33,11 @@ class MarketDataConnector(Protocol):
     lives here, with the consumer, and holds only what every venue really does
     provide: a lifecycle and the three feeds nobody lacks.
 
-    ``stream_kline``, ``stream_best_quote``, ``stream_agg_trades`` and
-    ``stream_liquidation`` are deliberately absent. Gate serves the first two
-    and paper does not; only Binance has the third; Bybit, OKX, GateFutures
-    and ``BinanceFuture`` have the fourth. A venue that cannot should have
+    ``stream_kline``, ``stream_best_quote``, ``stream_agg_trades``,
+    ``stream_liquidation`` and ``stream_funding_rate`` are deliberately
+    absent. Gate serves the first two and paper does not; only Binance has
+    the third; Bybit, OKX, GateFutures and ``BinanceFuture`` have the
+    fourth; perpetual venues have the fifth. A venue that cannot should have
     no such method rather than one that raises — :meth:`VenueSession._open`
     looks for them and refuses the subscribe when they are missing, which
     is the same answer one venue short of the full set was always going to
@@ -72,6 +74,11 @@ TOPIC_BEST_QUOTE = "bestquote"
 #: Public forced-liquidation prints. Bybit, OKX (SWAP only), GateFutures and
 #: BinanceFuture publish them; a venue without the method refuses by name.
 TOPIC_LIQUIDATION = "liquidation"
+#: Predicted funding rate for the upcoming settlement. Perpetual venues
+#: publish it; spot and paper have no method and the subscribe is refused
+#: by name. A late joiner on a ticker-shared wire (Bybit, Gate) is silent
+#: until the next rate-bearing delta — the pump is not REST-filled.
+TOPIC_FUNDING_RATE = "funding_rate"
 #: Klines need an interval, and a feed key is only ``topic.ticker`` — so the
 #: interval rides in the topic: ``kline_1m.Paper_Spot_BTCUSDT``. The split is
 #: on ``.``, so the underscore here is not ambiguous with the ticker's.
@@ -185,6 +192,8 @@ class VenueSession:
             return self._stream("stream_best_quote")(ticker), MD_BEST_QUOTE
         if topic == TOPIC_LIQUIDATION:
             return self._stream("stream_liquidation")(ticker), MD_LIQUIDATION
+        if topic == TOPIC_FUNDING_RATE:
+            return self._stream("stream_funding_rate")(ticker), MD_FUNDING_RATE
         if topic.startswith(KLINE_PREFIX):
             interval = topic[len(KLINE_PREFIX) :]
             if not interval:
