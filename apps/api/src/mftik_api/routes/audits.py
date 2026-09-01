@@ -8,6 +8,7 @@ from fastapi import APIRouter, Query
 from mftik_db.repositories import AuditRepository
 from mftik_db.session import session_scope
 
+from mftik_api.deps import ListOffset
 from mftik_api.schemas import AuditListResponse, AuditOut
 
 router = APIRouter(tags=["audits"])
@@ -15,7 +16,7 @@ router = APIRouter(tags=["audits"])
 
 @router.get("/audits", response_model=AuditListResponse)
 async def list_audits(
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: ListOffset = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> AuditListResponse:
     """Newest first. ``offset`` / ``limit`` page a numbered browse."""

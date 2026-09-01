@@ -56,7 +56,12 @@ from mftik_db.session import session_scope
 from mftik_api.audit_util import record_audit
 from mftik_api.auth import ANONYMOUS, OwnerId, Principal, PrincipalDep
 from mftik_api.broker_rpc import DomainRpcError, request_domain
-from mftik_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
+from mftik_api.deps import (
+    DEFAULT_USER_ID,
+    BrokerDep,
+    ListOffset,
+    RegistryStoreDep,
+)
 from mftik_api.orchestrate import deploy_strategy
 from mftik_api.schemas import (
     DeployResponse,
@@ -215,7 +220,7 @@ async def strategy_type_template(
 @router.get("/strategies", response_model=StrategyListResponse)
 async def list_strategies(
     status: str | None = None,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: ListOffset = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> StrategyListResponse:
     """List STS sessions as deploys, including ones that failed at attach.

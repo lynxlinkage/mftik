@@ -52,6 +52,7 @@ from mftik_db.repositories import (
 from mftik_db.session import session_scope
 
 from mftik_api.decimals import wire_decimal
+from mftik_api.deps import ListOffset
 from mftik_api.schemas import (
     BoardFill,
     BoardFillListResponse,
@@ -222,7 +223,7 @@ def _parse_statuses(status: str | None) -> str | list[str] | None:
 @router.get("/sessions", response_model=BoardResponse)
 async def list_board_sessions(
     status: str | None = Query(default=None),
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: ListOffset = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> BoardResponse:
     """Recent runs, newest first. ``status`` omitted means every status.
