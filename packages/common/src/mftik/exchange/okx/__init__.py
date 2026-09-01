@@ -65,6 +65,7 @@ from mftik.exchange.okx.protocol import (
     sign_ws,
 )
 from mftik.exchange.okx.public import (
+    FUNDING_PRODUCTS,
     LIQUIDATION_PRODUCTS,
     OKX_INTERVALS,
     OkxPublicClient,
@@ -75,6 +76,7 @@ from mftik.exchange.okx.socket import OkxSocket
 
 __all__ = [
     "DEFAULT_BOOK_CHANNEL",
+    "FUNDING_PRODUCTS",
     "LIQUIDATION_PRODUCTS",
     "OKX_INTERVALS",
     "OKX_REST_URL",

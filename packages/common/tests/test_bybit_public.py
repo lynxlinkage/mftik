@@ -737,6 +737,19 @@ async def test_spot_has_no_funding_rate_stream(bybit_public: FakeBybit) -> None:
             client.stream_funding_rate(UniversalTicker.parse("Bybit_Spot_BTCUSDT"))
 
 
+async def test_a_dated_future_has_no_funding_rate_stream(
+    bybit_public: FakeBybit,
+) -> None:
+    """A dated future settles at expiry rather than paying a funding hook, and
+    it shares the ``linear`` product with the perps — so the refusal has to
+    read the category. Checked on the product it would pass, and the pump
+    would then sit on a wire that never carries a ``fundingRate``."""
+    client = _client(bybit_public)
+    async with client:
+        with pytest.raises(ValueError, match="serves no funding rate stream"):
+            client.stream_funding_rate(UniversalTicker.parse("Bybit_Future_BTCUSDT"))
+
+
 async def test_each_category_gets_its_own_socket(bybit_public: FakeBybit) -> None:
     """Bybit has no single market-data endpoint: spot and linear are different
     connections carrying the same topic names."""

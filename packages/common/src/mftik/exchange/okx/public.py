@@ -69,6 +69,11 @@ OKX_INTERVALS: dict[str, str] = {
 
 LIQUIDATION_PRODUCTS = frozenset({SWAP})
 
+#: Products that pay a funding hook. The same set as the liquidation one
+#: today, spelled separately because the two answer different questions: a
+#: venue that starts liquidating dated futures still would not fund them.
+FUNDING_PRODUCTS = frozenset({SWAP})
+
 
 def venue_interval(interval: str) -> str:
     """Canonical interval → OKX's, or refuse before any round trip."""
@@ -231,10 +236,10 @@ class OkxPublicClient(BaseClient):
                 f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
             )
         product = product_of(ticker.category)
-        if product not in LIQUIDATION_PRODUCTS:
+        if product not in FUNDING_PRODUCTS:
             raise ValueError(
                 f"OKX {product} serves no funding rate stream; "
-                f"supported: {', '.join(sorted(LIQUIDATION_PRODUCTS))}"
+                f"supported: {', '.join(sorted(FUNDING_PRODUCTS))}"
             )
         return self._funding_rates(ticker)
 
@@ -350,6 +355,7 @@ class OkxPublicClient(BaseClient):
 
 
 __all__ = [
+    "FUNDING_PRODUCTS",
     "LIQUIDATION_PRODUCTS",
     "OKX_INTERVALS",
     "OkxPublicClient",

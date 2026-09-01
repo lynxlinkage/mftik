@@ -54,7 +54,7 @@ from mftik.exchange.models import (
 )
 from mftik.exchange.stream import EventStream
 from mftik.exchange.symbols import SymbolResolver
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,14 @@ BYBIT_INTERVALS: dict[str, str] = {
 #: are not traded here yet, so a subscribe on those books is refused locally
 #: rather than left hanging on a socket that never pushes.
 LIQUIDATION_PRODUCTS = frozenset({LINEAR, INVERSE})
+
+#: Categories that pay a funding hook. Checked on the category rather than the
+#: product because a dated future settles at expiry instead of funding, and
+#: :func:`~mftik.exchange.bybit.protocol.product_of` maps it onto ``linear``
+#: alongside the perps — the product alone cannot tell the two apart. Bybit's
+#: inverse perps arrive as ``Perp`` too; ``inverse`` is a product, not one of
+#: our categories.
+FUNDING_CATEGORIES = frozenset({Category.PERP})
 
 
 def venue_interval(interval: str) -> str:
@@ -282,11 +290,10 @@ class BybitPublicClient(BaseClient):
             raise ValueError(
                 f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
             )
-        product = product_of(ticker.category)
-        if product not in LIQUIDATION_PRODUCTS:
+        if ticker.category not in FUNDING_CATEGORIES:
             raise ValueError(
-                f"Bybit {product} serves no funding rate stream; "
-                f"supported: {', '.join(sorted(LIQUIDATION_PRODUCTS))}"
+                f"Bybit {ticker.category} serves no funding rate stream; "
+                f"supported: {', '.join(sorted(FUNDING_CATEGORIES))}"
             )
         return self._funding_rates(ticker)
 
@@ -423,6 +430,7 @@ class BybitPublicClient(BaseClient):
 
 __all__ = [
     "BYBIT_INTERVALS",
+    "FUNDING_CATEGORIES",
     "LIQUIDATION_PRODUCTS",
     "BybitPublicClient",
     "venue_interval",
