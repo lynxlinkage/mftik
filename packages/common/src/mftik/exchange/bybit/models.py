@@ -551,7 +551,9 @@ class BybitTicker(BybitMessage):
             universal_ticker=str(ticker), bid=bid, ask=ask, last=last, **fields
         )
 
-    def to_funding_rate(self, ticker: UniversalTicker, *, ts: float) -> FundingRate | None:
+    def to_funding_rate(
+        self, ticker: UniversalTicker, *, ts: float
+    ) -> FundingRate | None:
         """The still-moving prediction, when this delta named one.
 
         The row has no clock; ``ts`` is the envelope stamp (or local receive)

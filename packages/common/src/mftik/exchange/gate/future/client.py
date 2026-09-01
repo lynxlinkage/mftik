@@ -109,7 +109,7 @@ def _parse_ticker(
     return ticker, stamp
 
 
-def _as(model: type[T]) -> Callable[[dict[str, Any], GateResponse], T]:
+def _as[T](model: type[T]) -> Callable[[dict[str, Any], GateResponse], T]:
     def parse(row: dict[str, Any], _resp: GateResponse) -> T:
         return model.model_validate(row)
 

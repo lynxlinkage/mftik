@@ -467,7 +467,7 @@ class Strategy:
         ``quote`` is None when the query failed **or** when a side of the book
         was empty. The second is not an error and not a quote either: a
         strategy checking whether its own price can rest has nothing to check
-        against, and         should ask again rather than read it as a quote of zero.
+        against, and should ask again rather than read it as a quote of zero.
         """
 
     async def on_fetch_funding_history(
