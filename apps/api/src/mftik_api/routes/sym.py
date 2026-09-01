@@ -21,7 +21,8 @@ from mftik.protocol import (
 )
 
 from mftik_api.broker_rpc import DomainRpcError, request_domain
-from mftik_api.deps import BrokerDep, ListOffset
+from mftik_api.deps import BrokerDep
+from mftik_api.paging import ListOffset
 from mftik_api.schemas import SymSymbolListResponse, SymVenueListResponse
 
 router = APIRouter(prefix="/sym", tags=["sym"])

@@ -11,12 +11,14 @@
 	let audits = $state<Audit[]>([]);
 	let page = $state(1);
 	let total = $state(0);
+	/** How far the API will page this list; it says so in every response. */
+	let maxOffset = $state<number | undefined>(undefined);
 	let error = $state<string | null>(null);
 	let loading = $state(true);
 
 	let listEpoch = 0;
 
-	const pageCount = $derived(pageCountOf(total, PAGE_SIZE));
+	const pageCount = $derived(pageCountOf(total, PAGE_SIZE, maxOffset));
 
 	async function load() {
 		const epoch = ++listEpoch;
@@ -28,7 +30,7 @@
 			let res = await api.audits({ limit: PAGE_SIZE, offset });
 			if (epoch !== listEpoch) return;
 			if (offset > 0 && offset >= res.total) {
-				myPage = pageCountOf(res.total, PAGE_SIZE);
+				myPage = pageCountOf(res.total, PAGE_SIZE, res.max_offset);
 				offset = (myPage - 1) * PAGE_SIZE;
 				page = myPage;
 				res = await api.audits({ limit: PAGE_SIZE, offset });
@@ -36,6 +38,7 @@
 			}
 			audits = res.audits;
 			total = res.total ?? 0;
+			maxOffset = res.max_offset;
 		} catch (e) {
 			if (epoch !== listEpoch) return;
 			error = e instanceof Error ? e.message : String(e);

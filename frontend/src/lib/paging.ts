@@ -7,27 +7,23 @@
  */
 
 /**
- * How far the API will page. Mirrors `MAX_LIST_OFFSET` in
- * `apps/api/src/mftik_api/deps.py`, where an `offset` past it is a 422:
- * an offset page makes the database walk every index entry it skips, so
- * the far side of a browse is a refusal rather than a slow scan.
- *
- * It is a copy, not an import — there is no codegen between the contract
- * and this app. If the API's cap moves, this one has to move with it.
- */
-export const MAX_LIST_OFFSET = 100_000;
-
-/**
  * How many pages of `total` rows a caller can reach.
  *
- * Always at least one: page one exists even for an empty list. Never more
- * than {@link MAX_LIST_OFFSET} allows, so the pager cannot offer a number
- * the API would refuse — a list longer than that keeps its oldest rows,
- * they just stop being reachable by page number.
+ * Always at least one: page one exists even for an empty list.
+ *
+ * `maxOffset` is the `max_offset` the list served — how far the API will
+ * page before answering a 422, because an offset page makes the database
+ * walk every index entry it skips. Passing it keeps the pager from
+ * offering a number the API would refuse; a list longer than that keeps
+ * its oldest rows, they just stop being reachable by page number. Omit it
+ * before the first response has said, when there is nothing to page yet.
  */
-export function pageCountOf(total: number, pageSize: number): number {
+export function pageCountOf(total: number, pageSize: number, maxOffset?: number): number {
 	if (!Number.isFinite(total) || total <= 0) return 1;
 	const filled = Math.ceil(total / pageSize);
-	const reachable = Math.floor(MAX_LIST_OFFSET / pageSize) + 1;
+	const reachable =
+		maxOffset != null && Number.isFinite(maxOffset)
+			? Math.floor(maxOffset / pageSize) + 1
+			: filled;
 	return Math.max(1, Math.min(filled, reachable));
 }

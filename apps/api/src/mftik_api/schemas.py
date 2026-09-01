@@ -7,6 +7,8 @@ from typing import Any, Literal
 from mftik.protocol import SymbolInfo
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mftik_api.paging import MAX_LIST_OFFSET
+
 
 class DomainStats(BaseModel):
     domain: str
@@ -69,6 +71,10 @@ class StrategyListResponse(BaseModel):
     strategies: list[StrategyOut] = Field(default_factory=list)
     total: int = 0
     has_more: bool = False
+    #: The largest ``offset`` this list accepts; past it the request is a
+    #: 422. Served rather than assumed so a client pages to the last page
+    #: it can actually ask for instead of keeping its own copy of the cap.
+    max_offset: int = MAX_LIST_OFFSET
 
 
 class StrategyTemplateOut(BaseModel):
@@ -177,6 +183,10 @@ class SymSymbolListResponse(BaseModel):
     symbols: list[SymbolInfo] = Field(default_factory=list)
     #: Match count before limit/offset; equals ``len(symbols)`` when unpaged.
     total: int = 0
+    #: The largest ``offset`` this list accepts; past it the request is a
+    #: 422. Served rather than assumed so a client pages to the last page
+    #: it can actually ask for instead of keeping its own copy of the cap.
+    max_offset: int = MAX_LIST_OFFSET
 
 
 class ApiCreateBody(BaseModel):
@@ -233,6 +243,10 @@ class AuditListResponse(BaseModel):
     audits: list[AuditOut] = Field(default_factory=list)
     total: int = 0
     has_more: bool = False
+    #: The largest ``offset`` this list accepts; past it the request is a
+    #: 422. Served rather than assumed so a client pages to the last page
+    #: it can actually ask for instead of keeping its own copy of the cap.
+    max_offset: int = MAX_LIST_OFFSET
 
 
 class SessionLogOut(BaseModel):
@@ -290,6 +304,10 @@ class BoardResponse(BaseModel):
     sessions: list[BoardSession] = Field(default_factory=list)
     total: int = 0
     has_more: bool = False
+    #: The largest ``offset`` this list accepts; past it the request is a
+    #: 422. Served rather than assumed so a client pages to the last page
+    #: it can actually ask for instead of keeping its own copy of the cap.
+    max_offset: int = MAX_LIST_OFFSET
 
 
 class BoardFill(BaseModel):

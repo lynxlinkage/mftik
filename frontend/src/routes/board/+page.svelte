@@ -34,6 +34,8 @@
 	let sessions = $state<BoardSession[]>([]);
 	let page = $state(1);
 	let total = $state(0);
+	/** How far the API will page this list; it says so in every response. */
+	let maxOffset = $state<number | undefined>(undefined);
 	let external = $state<BoardFill[]>([]);
 	let externalMore = $state(false);
 	let live = $state<Record<string, number>>({});
@@ -47,7 +49,7 @@
 
 	let listEpoch = 0;
 
-	const pageCount = $derived(pageCountOf(total, PAGE_SIZE));
+	const pageCount = $derived(pageCountOf(total, PAGE_SIZE, maxOffset));
 
 	function sessionStatus(which: Tab): string | undefined {
 		if (which === 'all' || which === 'external') return undefined;
@@ -75,7 +77,7 @@
 				});
 				if (epoch !== listEpoch || filter !== myFilter) return;
 				if (offset > 0 && offset >= res.total) {
-					myPage = pageCountOf(res.total, PAGE_SIZE);
+					myPage = pageCountOf(res.total, PAGE_SIZE, res.max_offset);
 					offset = (myPage - 1) * PAGE_SIZE;
 					page = myPage;
 					res = await api.boardSessions({
@@ -87,6 +89,7 @@
 				}
 				sessions = res.sessions;
 				total = res.total ?? 0;
+				maxOffset = res.max_offset;
 				// The server just told us the truth; anything counted locally is
 				// already inside it.
 				live = {};

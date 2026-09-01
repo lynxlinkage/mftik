@@ -52,7 +52,7 @@ from mftik_db.repositories import (
 from mftik_db.session import session_scope
 
 from mftik_api.decimals import wire_decimal
-from mftik_api.deps import ListOffset
+from mftik_api.paging import ListOffset
 from mftik_api.schemas import (
     BoardFill,
     BoardFillListResponse,

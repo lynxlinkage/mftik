@@ -8,7 +8,7 @@ from fastapi import APIRouter, Query
 from mftik_db.repositories import AuditRepository
 from mftik_db.session import session_scope
 
-from mftik_api.deps import ListOffset
+from mftik_api.paging import ListOffset
 from mftik_api.schemas import AuditListResponse, AuditOut
 
 router = APIRouter(tags=["audits"])

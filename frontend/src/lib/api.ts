@@ -59,6 +59,20 @@ export type BoardFillList = {
 	has_more: boolean;
 };
 
+/**
+ * What every list that pages by number returns alongside its rows.
+ *
+ * `max_offset` is how far the API will page before answering a 422 — an
+ * offset page makes the database walk every index entry it skips. It is
+ * served rather than assumed so this app does not keep its own copy of a
+ * number the API owns.
+ */
+export type ListPage = {
+	total: number;
+	has_more: boolean;
+	max_offset: number;
+};
+
 export type DomainStats = {
 	domain: string;
 	live: number;
@@ -680,7 +694,7 @@ export const api = {
 		if (opts.offset != null && opts.offset > 0) q.set('offset', String(opts.offset));
 		if (opts.limit != null) q.set('limit', String(opts.limit));
 		const qs = q.toString();
-		return request<{ sessions: BoardSession[]; total: number; has_more: boolean }>(
+		return request<ListPage & { sessions: BoardSession[] }>(
 			`/board/sessions${qs ? `?${qs}` : ''}`
 		);
 	},
@@ -854,7 +868,7 @@ export const api = {
 		if (opts.offset != null && opts.offset > 0) q.set('offset', String(opts.offset));
 		if (opts.limit != null) q.set('limit', String(opts.limit));
 		const qs = q.toString();
-		return request<{ strategies: StrategyRow[]; total: number; has_more: boolean }>(
+		return request<ListPage & { strategies: StrategyRow[] }>(
 			`/sts/strategies${qs ? `?${qs}` : ''}`
 		);
 	},
@@ -888,7 +902,7 @@ export const api = {
 		if (opts.offset != null && opts.offset > 0) q.set('offset', String(opts.offset));
 		if (opts.limit != null) q.set('limit', String(opts.limit));
 		const qs = q.toString();
-		return request<{ audits: Audit[]; total: number; has_more: boolean }>(
+		return request<ListPage & { audits: Audit[] }>(
 			`/audits${qs ? `?${qs}` : ''}`
 		);
 	},

@@ -26,7 +26,7 @@ from mftik.protocol import (
     SymListResultEnvelope,
     UntypedEnvelope,
 )
-from mftik_api.deps import MAX_LIST_OFFSET
+from mftik_api.paging import MAX_LIST_OFFSET
 from mftik_api.routes import audits as audits_routes
 from mftik_api.routes import board as board_routes
 from mftik_api.routes import sts as sts_routes
@@ -70,16 +70,30 @@ async def client(monkeypatch, database_url):
 
 
 @pytest.mark.parametrize("path", PATHS)
-async def test_an_offset_past_the_cap_is_refused(client, path: str) -> None:
-    """A 422, not a scan: ``offset`` skips index entries one by one."""
-    res = await client.get(path, params={"offset": MAX_LIST_OFFSET + 1})
+async def test_the_list_says_how_far_it_pages(client, path: str) -> None:
+    """The bound is in the response, so a client need not carry a copy."""
+    res = await client.get(path)
+    assert res.status_code == 200
+    assert res.json()["max_offset"] == MAX_LIST_OFFSET
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_an_offset_past_what_it_serves_is_refused(client, path: str) -> None:
+    """A 422, not a scan: ``offset`` skips index entries one by one.
+
+    Driven off the number the list served rather than the constant, which
+    is the property that matters: what it promises is what it accepts.
+    """
+    served = (await client.get(path)).json()["max_offset"]
+    res = await client.get(path, params={"offset": served + 1})
     assert res.status_code == 422
     detail = res.json()["detail"]
     assert any(err["loc"] == ["query", "offset"] for err in detail), detail
 
 
 @pytest.mark.parametrize("path", PATHS)
-async def test_the_cap_itself_is_not_past_it(client, path: str) -> None:
+async def test_the_offset_it_serves_is_not_past_it(client, path: str) -> None:
     """Inclusive. The boundary is a page, not the first refusal."""
-    res = await client.get(path, params={"offset": MAX_LIST_OFFSET})
+    served = (await client.get(path)).json()["max_offset"]
+    res = await client.get(path, params={"offset": served})
     assert res.status_code == 200

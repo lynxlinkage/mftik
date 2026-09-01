@@ -56,13 +56,9 @@ from mftik_db.session import session_scope
 from mftik_api.audit_util import record_audit
 from mftik_api.auth import ANONYMOUS, OwnerId, Principal, PrincipalDep
 from mftik_api.broker_rpc import DomainRpcError, request_domain
-from mftik_api.deps import (
-    DEFAULT_USER_ID,
-    BrokerDep,
-    ListOffset,
-    RegistryStoreDep,
-)
+from mftik_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
 from mftik_api.orchestrate import deploy_strategy
+from mftik_api.paging import ListOffset
 from mftik_api.schemas import (
     DeployResponse,
     EventLogInfoResponse,

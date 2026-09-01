@@ -36,6 +36,8 @@
 	let strategies = $state<StrategyRow[]>([]);
 	let page = $state(1);
 	let total = $state(0);
+	/** How far the API will page this list; it says so in every response. */
+	let maxOffset = $state<number | undefined>(undefined);
 	let yamlText = $state(defaultStrategyYml());
 	let templates = $state<StrategyTemplate[]>([]);
 	let selectedType = $state('');
@@ -52,7 +54,7 @@
 	let pendingReload = false;
 	let pendingSessions = new Set<string>();
 
-	const pageCount = $derived(pageCountOf(total, PAGE_SIZE));
+	const pageCount = $derived(pageCountOf(total, PAGE_SIZE, maxOffset));
 
 	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
 	const selected = $derived(templates.find((t) => t.type === selectedType) ?? null);
@@ -121,7 +123,7 @@
 			});
 			if (epoch !== listEpoch || tab !== myTab) return;
 			if (offset > 0 && offset >= list.total) {
-				myPage = pageCountOf(list.total, PAGE_SIZE);
+				myPage = pageCountOf(list.total, PAGE_SIZE, list.max_offset);
 				offset = (myPage - 1) * PAGE_SIZE;
 				page = myPage;
 				list = await api.strategies({
@@ -133,6 +135,7 @@
 			}
 			strategies = list.strategies;
 			total = list.total ?? 0;
+			maxOffset = list.max_offset;
 			if (accountsP) {
 				const a = await accountsP;
 				if (epoch !== listEpoch) return;
