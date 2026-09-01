@@ -19,6 +19,7 @@
 		type StatusConnection,
 		type StsSessionStatusEvent
 	} from '$lib/logging/status';
+	import { pageCountOf } from '$lib/paging';
 
 	type Tab = 'live' | 'attention' | 'history';
 
@@ -51,7 +52,7 @@
 	let pendingReload = false;
 	let pendingSessions = new Set<string>();
 
-	const pageCount = $derived(Math.max(1, Math.ceil(total / PAGE_SIZE)));
+	const pageCount = $derived(pageCountOf(total, PAGE_SIZE));
 
 	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
 	const selected = $derived(templates.find((t) => t.type === selectedType) ?? null);
@@ -120,7 +121,7 @@
 			});
 			if (epoch !== listEpoch || tab !== myTab) return;
 			if (offset > 0 && offset >= list.total) {
-				myPage = Math.max(1, Math.ceil(Math.max(list.total, 0) / PAGE_SIZE));
+				myPage = pageCountOf(list.total, PAGE_SIZE);
 				offset = (myPage - 1) * PAGE_SIZE;
 				page = myPage;
 				list = await api.strategies({

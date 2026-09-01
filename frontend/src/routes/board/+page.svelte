@@ -5,6 +5,7 @@
 	import BindingChips from '$lib/components/BindingChips.svelte';
 	import Pager from '$lib/components/Pager.svelte';
 	import { connectFills, type FillConnection } from '$lib/logging/fills';
+	import { pageCountOf } from '$lib/paging';
 	import { symbolsFromTickers, venuesFromTickers } from '$lib/ticker';
 	/**
 	 * One card per strategy run: how much it traded and how long it ran.
@@ -46,7 +47,7 @@
 
 	let listEpoch = 0;
 
-	const pageCount = $derived(Math.max(1, Math.ceil(total / PAGE_SIZE)));
+	const pageCount = $derived(pageCountOf(total, PAGE_SIZE));
 
 	function sessionStatus(which: Tab): string | undefined {
 		if (which === 'all' || which === 'external') return undefined;
@@ -74,7 +75,7 @@
 				});
 				if (epoch !== listEpoch || filter !== myFilter) return;
 				if (offset > 0 && offset >= res.total) {
-					myPage = Math.max(1, Math.ceil(Math.max(res.total, 0) / PAGE_SIZE));
+					myPage = pageCountOf(res.total, PAGE_SIZE);
 					offset = (myPage - 1) * PAGE_SIZE;
 					page = myPage;
 					res = await api.boardSessions({

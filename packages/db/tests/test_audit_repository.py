@@ -1,4 +1,4 @@
-"""Audit log — newest first, then older than an id cursor."""
+"""Audit log — newest first, paged on offset."""
 
 from __future__ import annotations
 

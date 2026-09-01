@@ -40,7 +40,12 @@
 		const out: Array<number | 'ellipsis'> = [];
 		for (const n of ordered) {
 			const prev = out.at(-1);
-			if (typeof prev === 'number' && n > prev + 1) out.push('ellipsis');
+			if (typeof prev === 'number' && n > prev + 1) {
+				// A gap of one is the page itself: "1 … 3" is wider than
+				// "1 2 3" and costs a click to reach a number that fits.
+				if (n === prev + 2) out.push(prev + 1);
+				else out.push('ellipsis');
+			}
 			out.push(n);
 		}
 		return out;

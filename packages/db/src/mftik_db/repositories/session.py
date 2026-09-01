@@ -119,10 +119,11 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
     ) -> Sequence[StsSessionRow]:
         """STS list, newest first.
 
-        ``offset`` pages a numbered browse. ``before_session`` is the older
-        cursor used by time-series callers: unknown matches nothing (the
-        subquery is NULL), and the handler turns that into 422 so a
-        deleted user is not read as the end of history.
+        ``offset`` pages a numbered browse — the only paging any caller in
+        the tree uses today. ``before_session`` is the keyset cursor kept
+        for a caller that cannot tolerate rows shifting under it: unknown
+        matches nothing (the subquery is NULL) rather than falling back to
+        the first page, so whoever revives it must say what that means.
 
         Overrides the mixin: ``session_id`` is unique here, so it is a total
         order with ``created_at``. ``td_sessions`` is one row per

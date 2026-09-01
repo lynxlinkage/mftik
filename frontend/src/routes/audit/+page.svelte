@@ -4,6 +4,7 @@
 	import { hasBrandMark } from '$lib/brands';
 	import BrandMark from '$lib/components/BrandMark.svelte';
 	import Pager from '$lib/components/Pager.svelte';
+	import { pageCountOf } from '$lib/paging';
 
 	const PAGE_SIZE = 50;
 
@@ -15,7 +16,7 @@
 
 	let listEpoch = 0;
 
-	const pageCount = $derived(Math.max(1, Math.ceil(total / PAGE_SIZE)));
+	const pageCount = $derived(pageCountOf(total, PAGE_SIZE));
 
 	async function load() {
 		const epoch = ++listEpoch;
@@ -27,7 +28,7 @@
 			let res = await api.audits({ limit: PAGE_SIZE, offset });
 			if (epoch !== listEpoch) return;
 			if (offset > 0 && offset >= res.total) {
-				myPage = Math.max(1, Math.ceil(Math.max(res.total, 0) / PAGE_SIZE));
+				myPage = pageCountOf(res.total, PAGE_SIZE);
 				offset = (myPage - 1) * PAGE_SIZE;
 				page = myPage;
 				res = await api.audits({ limit: PAGE_SIZE, offset });

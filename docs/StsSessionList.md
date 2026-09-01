@@ -1,5 +1,16 @@
 # STS session list — tabs and a page, not a pile
 
+> **Superseded in part.** The tabs, the status union, and the socket rules
+> below are what the code does. The paging is not: `before`, `has_more` as
+> the only end-of-list signal, "Load more", and the 422 on an unknown
+> cursor were replaced by numbered pages. `GET /sts/strategies`,
+> `GET /board/sessions` and `GET /audits` now take `offset` / `limit` and
+> return `total`; there is no `before` parameter. The "Keyset, not offset"
+> argument below was the reason for the original design and is the cost of
+> the new one: an offset page shifts under rows that arrive while somebody
+> reads, so a row last seen on page one can appear again at the top of page
+> two. That was accepted in exchange for jumping to a page by number.
+
 The STS page is the place an operator deploys a strategy and then lives with
 the runs. Stop, ack, open YAML, pull logs: those actions sit on the
 same table that lists every session this node has ever recorded. That was

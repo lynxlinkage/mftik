@@ -56,24 +56,14 @@ class AuditRepository(BaseRepository[Audit]):
         *,
         limit: int = 100,
         offset: int = 0,
-        before_id: int | None = None,
     ) -> Sequence[Audit]:
         """Newest first. ``offset`` pages a numbered browse.
 
-        ``before_id`` is the last row of a cursor page. Ordered on
-        ``(created_at, id)`` so two writes in the same second still have a
-        total order. An unknown ``before_id`` matches nothing (the subquery
-        is NULL).
+        Ordered on ``(created_at, id)``: two writes in the same second
+        still have a total order, so an offset page does not swap or
+        repeat rows across the boundary.
         """
         stmt = select(Audit).order_by(Audit.created_at.desc(), Audit.id.desc())
-        if before_id is not None:
-            anchor = (
-                select(Audit.created_at).where(Audit.id == before_id).scalar_subquery()
-            )
-            stmt = stmt.where(
-                (Audit.created_at < anchor)
-                | ((Audit.created_at == anchor) & (Audit.id < before_id))
-            )
         if offset:
             stmt = stmt.offset(offset)
         stmt = stmt.limit(limit)
