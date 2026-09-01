@@ -31,7 +31,13 @@ function row(session_id: string, status: string): StrategyRow {
 	};
 }
 
-async function mockStrategyPage(page: Page, live: StrategyRow[]) {
+async function mockStrategyPage(
+	page: Page,
+	live: StrategyRow[],
+	opts: {
+		history?: { first: StrategyRow[]; rest: StrategyRow[]; cursor: string };
+	} = {}
+) {
 	await page.route('**/api/auth/status', (route) =>
 		route.fulfill({
 			json: {
@@ -90,9 +96,24 @@ async function mockStrategyPage(page: Page, live: StrategyRow[]) {
 			}
 		})
 	);
-	await page.route('**/api/sts/strategies**', (route) =>
-		route.fulfill({ json: { strategies: live, has_more: false } })
-	);
+	await page.route('**/api/sts/strategies**', (route) => {
+		const url = new URL(route.request().url());
+		const status = url.searchParams.get('status') ?? '';
+		const before = url.searchParams.get('before');
+		if (status === 'done,ack' && opts.history) {
+			if (before === opts.history.cursor || Number(url.searchParams.get('offset') ?? '0') > 0) {
+				return route.fulfill({
+					json: { strategies: opts.history.rest, total: 51, has_more: false }
+				});
+			}
+			return route.fulfill({
+				json: { strategies: opts.history.first, total: 51, has_more: true }
+			});
+		}
+		return route.fulfill({
+			json: { strategies: live, total: live.length, has_more: false }
+		});
+	});
 	await page.route('**/api/sts/sessions/*/eventlog/info', (route) =>
 		route.fulfill({
 			json: {
@@ -162,4 +183,24 @@ test('opening a run shows STS plus the attached accounts and venues', async ({
 		'/md/Paper'
 	);
 	await expect(page.getByRole('heading', { name: 'STS log' })).toBeVisible();
+});
+
+test('History page 2 replaces page one', async ({
+	page
+}) => {
+	const history = {
+		first: [row('s-done-new', 'done'), row('s-done-mid', 'done')],
+		rest: [row('s-ack', 'ack')],
+		cursor: 's-done-mid'
+	};
+	await mockStrategyPage(page, [row('s-live', 'live')], { history });
+
+	await page.getByRole('tablist').getByRole('button', { name: 'History' }).click();
+	await expect(page.getByRole('link', { name: 's-done-new' })).toBeVisible();
+	await expect(page.getByRole('link', { name: 's-done-mid' })).toBeVisible();
+	await expect(page.getByRole('link', { name: 's-ack' })).toHaveCount(0);
+
+	await page.getByRole('button', { name: 'Page 2' }).click();
+	await expect(page.getByRole('link', { name: 's-ack' })).toBeVisible();
+	await expect(page.getByRole('link', { name: 's-done-new' })).toHaveCount(0);
 });

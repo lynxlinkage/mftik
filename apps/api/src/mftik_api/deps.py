@@ -33,3 +33,4 @@ def get_registry_store() -> RegistryStore:
 
 
 RegistryStoreDep = Annotated[RegistryStore, Depends(get_registry_store)]
+

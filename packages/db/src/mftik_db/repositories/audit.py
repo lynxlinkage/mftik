@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mftik_db.models.audit import Audit
@@ -47,8 +47,25 @@ class AuditRepository(BaseRepository[Audit]):
         )
         return result.scalars().all()
 
-    async def list_recent(self, *, limit: int = 100) -> Sequence[Audit]:
-        result = await self.session.execute(
-            select(Audit).order_by(Audit.created_at.desc()).limit(limit)
-        )
+    async def count(self) -> int:
+        result = await self.session.execute(select(func.count()).select_from(Audit))
+        return int(result.scalar_one())
+
+    async def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Sequence[Audit]:
+        """Newest first. ``offset`` pages a numbered browse.
+
+        Ordered on ``(created_at, id)``: two writes in the same second
+        still have a total order, so an offset page does not swap or
+        repeat rows across the boundary.
+        """
+        stmt = select(Audit).order_by(Audit.created_at.desc(), Audit.id.desc())
+        if offset:
+            stmt = stmt.offset(offset)
+        stmt = stmt.limit(limit)
+        result = await self.session.execute(stmt)
         return result.scalars().all()

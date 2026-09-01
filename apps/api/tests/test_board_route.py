@@ -153,10 +153,10 @@ async def confirm(
             )
 
 
-async def rows(*, status: str | None = None, limit: int = 50):
+async def rows(*, status: str | None = None, offset: int = 0, limit: int = 50):
     """Call the route the way FastAPI would, with its Query defaults resolved."""
     result = await board_routes.list_board_sessions(
-        status=status, limit=limit
+        status=status, offset=offset, limit=limit
     )
     return result.sessions
 
@@ -273,6 +273,25 @@ async def test_finished_is_done_and_ack(db) -> None:
         "s-done",
         "s-ack",
     }
+
+
+async def test_the_list_pages_on_offset(db) -> None:
+    origin = START
+    await a_session(db, "s-old", started=origin)
+    await a_session(db, "s-mid", started=origin + timedelta(minutes=1))
+    await a_session(db, "s-new", started=origin + timedelta(minutes=2))
+
+    first = await board_routes.list_board_sessions(status="done,ack", limit=2)
+    assert [r.session_id for r in first.sessions] == ["s-new", "s-mid"]
+    assert first.total == 3
+    assert first.has_more is True
+
+    second = await board_routes.list_board_sessions(
+        status="done,ack", offset=2, limit=2
+    )
+    assert [r.session_id for r in second.sessions] == ["s-old"]
+    assert second.total == 3
+    assert second.has_more is False
 
 
 # --- settled vs provisional ------------------------------------------------

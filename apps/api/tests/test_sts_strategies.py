@@ -128,7 +128,7 @@ async def test_live_is_the_database_alone(db) -> None:
     assert result.has_more is False
 
 
-async def test_the_list_pages_on_a_session_cursor(db) -> None:
+async def test_the_list_pages_on_offset(db) -> None:
     origin = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     async with db() as session:
         repo = StsSessionRepository(session)
@@ -143,20 +143,15 @@ async def test_the_list_pages_on_a_session_cursor(db) -> None:
 
     first = await sts_routes.list_strategies(status="done,ack", limit=2)
     assert [row.session_id for row in first.strategies] == ["s-new", "s-mid"]
+    assert first.total == 3
     assert first.has_more is True
 
     second = await sts_routes.list_strategies(
-        status="done,ack", before="s-mid", limit=2
+        status="done,ack", offset=2, limit=2
     )
     assert [row.session_id for row in second.strategies] == ["s-old"]
+    assert second.total == 3
     assert second.has_more is False
-
-
-async def test_an_unknown_cursor_is_a_422(db) -> None:
-    with pytest.raises(HTTPException) as caught:
-        await sts_routes.list_strategies(before="nope")
-    assert caught.value.status_code == 422
-    assert "nope" in str(caught.value.detail)
 
 
 async def test_an_unknown_status_is_a_422(db) -> None:

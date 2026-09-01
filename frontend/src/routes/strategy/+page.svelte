@@ -12,12 +12,14 @@
 		type StrategyRow,
 		type StrategyTemplate
 	} from '$lib/api';
+	import Pager from '$lib/components/Pager.svelte';
 	import StrategyPicker from '$lib/components/StrategyPicker.svelte';
 	import {
 		connectStsStatus,
 		type StatusConnection,
 		type StsSessionStatusEvent
 	} from '$lib/logging/status';
+	import { pageCountOf } from '$lib/paging';
 
 	type Tab = 'live' | 'attention' | 'history';
 
@@ -28,10 +30,14 @@
 	};
 
 	const OPERATOR_STOP = 'operator_stop';
+	const PAGE_SIZE = 50;
 
 	let tab = $state<Tab>('live');
 	let strategies = $state<StrategyRow[]>([]);
-	let hasMore = $state(false);
+	let page = $state(1);
+	let total = $state(0);
+	/** How far the API will page this list; it says so in every response. */
+	let maxOffset = $state<number | undefined>(undefined);
 	let yamlText = $state(defaultStrategyYml());
 	let templates = $state<StrategyTemplate[]>([]);
 	let selectedType = $state('');
@@ -40,15 +46,15 @@
 	let error = $state<string | null>(null);
 	let busy = $state(false);
 	let loading = $state(true);
-	let loadingMore = $state(false);
 	let connection = $state<StatusConnection>('connecting');
 	let lastEventTs = new Map<string, number>();
 
 	let listEpoch = 0;
 	let listTail: Promise<void> = Promise.resolve();
-	let listCursor: string | null = null;
 	let pendingReload = false;
 	let pendingSessions = new Set<string>();
+
+	const pageCount = $derived(pageCountOf(total, PAGE_SIZE, maxOffset));
 
 	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
 	const selected = $derived(templates.find((t) => t.type === selectedType) ?? null);
@@ -95,12 +101,12 @@
 		return s.md_ids ?? [];
 	}
 
-	async function applyPageOne(epoch: number, withTypes: boolean) {
+	async function applyPage(epoch: number, withTypes: boolean) {
 		const myTab = tab;
+		let myPage = page;
 		loading = true;
 		error = null;
 		try {
-			const listP = api.strategies({ status: TAB_STATUS[myTab] });
 			const typesP = withTypes
 				? api.strategyTypes().catch(() => ({
 						types: [],
@@ -109,11 +115,27 @@
 					}))
 				: null;
 			const accountsP = withTypes ? api.apis().catch(() => ({ apis: [] })) : null;
-			const list = await listP;
+			let offset = Math.max(0, (myPage - 1) * PAGE_SIZE);
+			let list = await api.strategies({
+				status: TAB_STATUS[myTab],
+				limit: PAGE_SIZE,
+				offset
+			});
 			if (epoch !== listEpoch || tab !== myTab) return;
+			if (offset > 0 && offset >= list.total) {
+				myPage = pageCountOf(list.total, PAGE_SIZE, list.max_offset);
+				offset = (myPage - 1) * PAGE_SIZE;
+				page = myPage;
+				list = await api.strategies({
+					status: TAB_STATUS[myTab],
+					limit: PAGE_SIZE,
+					offset
+				});
+				if (epoch !== listEpoch || tab !== myTab) return;
+			}
 			strategies = list.strategies;
-			hasMore = list.has_more;
-			listCursor = strategies.at(-1)?.session_id ?? null;
+			total = list.total ?? 0;
+			maxOffset = list.max_offset;
 			if (accountsP) {
 				const a = await accountsP;
 				if (epoch !== listEpoch) return;
@@ -139,60 +161,35 @@
 	async function refresh() {
 		bumpListEpoch();
 		const epoch = listEpoch;
-		return enqueueList(() => applyPageOne(epoch, true));
+		return enqueueList(() => applyPage(epoch, true));
 	}
 
 	function setTab(next: Tab) {
 		if (next === tab) return;
 		tab = next;
+		page = 1;
+		total = 0;
 		bumpListEpoch();
 		strategies = [];
-		hasMore = false;
-		listCursor = null;
 		error = null;
 		loading = true;
 		const epoch = listEpoch;
-		void enqueueList(() => applyPageOne(epoch, true));
+		void enqueueList(() => applyPage(epoch, true));
 	}
 
-	async function loadMore() {
-		if (!hasMore || !listCursor || loadingMore) return;
-		const epoch = listEpoch;
-		const myTab = tab;
-		loadingMore = true;
+	function setPage(next: number) {
+		if (next === page || next < 1) return;
+		page = next;
+		bumpListEpoch();
+		strategies = [];
 		error = null;
-		return enqueueList(async () => {
-			if (epoch !== listEpoch || tab !== myTab) {
-				loadingMore = false;
-				return;
-			}
-			const cursor = listCursor;
-			if (!cursor) {
-				loadingMore = false;
-				return;
-			}
-			try {
-				const next = await api.strategies({
-					status: TAB_STATUS[myTab],
-					before: cursor
-				});
-				if (epoch !== listEpoch || tab !== myTab) return;
-				strategies = [...strategies, ...next.strategies];
-				hasMore = next.has_more;
-				listCursor = strategies.at(-1)?.session_id ?? cursor;
-			} catch (e) {
-				if (epoch !== listEpoch) return;
-				error = e instanceof Error ? e.message : String(e);
-			} finally {
-				loadingMore = false;
-			}
-		});
+		loading = true;
+		const epoch = listEpoch;
+		void enqueueList(() => applyPage(epoch, false));
 	}
 
 	function dropRow(sessionId: string) {
-		const last = strategies.at(-1);
 		strategies = strategies.filter((s) => s.session_id !== sessionId);
-		listCursor = strategies.at(-1)?.session_id ?? last?.session_id ?? listCursor;
 	}
 
 	function applyTemplate(type: string) {
@@ -216,9 +213,9 @@
 		try {
 			const created = await api.deploySts({ type: selectedType, yaml: yamlText });
 			tab = 'live';
+			page = 1;
+			total = 0;
 			strategies = [];
-			hasMore = false;
-			listCursor = null;
 			await refresh();
 			await goto(`/strategy/${created.session_id}`);
 		} catch (e) {
@@ -264,7 +261,7 @@
 			bumpListEpoch();
 			const epoch = listEpoch;
 			const wanted = [...pendingSessions];
-			await applyPageOne(epoch, false);
+			await applyPage(epoch, false);
 			for (const id of wanted) pendingSessions.delete(id);
 		}
 	}
@@ -283,7 +280,7 @@
 		const inTab = statusesOf(tab).has(ev.status);
 		const row = strategies.find((s) => s.session_id === ev.session_id);
 		if (row === undefined) {
-			if (inTab && tab !== 'history') fetchUnknownSession(ev.session_id);
+			if (inTab && tab !== 'history' && page === 1) fetchUnknownSession(ev.session_id);
 			return;
 		}
 		if (!inTab) {
@@ -384,8 +381,8 @@
 		<p class="empty-state">
 			{loading
 				? 'Loading…'
-				: hasMore
-					? 'Nothing left on this page — Load more has the rest.'
+				: pageCount > 1
+					? 'Nothing on this page.'
 					: tab === 'live'
 						? 'No live sessions.'
 						: tab === 'attention'
@@ -472,13 +469,7 @@
 			</tbody>
 		</table>
 	{/if}
-	{#if hasMore}
-		<div class="more">
-			<button type="button" class="secondary" onclick={loadMore} disabled={loadingMore}>
-				{loadingMore ? 'Loading…' : 'Load more'}
-			</button>
-		</div>
-	{/if}
+	<Pager {page} {pageCount} disabled={loading} onchange={setPage} />
 </section>
 
 <style>
@@ -555,12 +546,6 @@
 
 	.table-wrap {
 		overflow-x: auto;
-	}
-
-	.more {
-		display: flex;
-		justify-content: center;
-		padding-top: 1rem;
 	}
 
 	.head-actions {

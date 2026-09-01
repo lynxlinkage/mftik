@@ -59,6 +59,20 @@ export type BoardFillList = {
 	has_more: boolean;
 };
 
+/**
+ * What every list that pages by number returns alongside its rows.
+ *
+ * `max_offset` is how far the API will page before answering a 422 — an
+ * offset page makes the database walk every index entry it skips. It is
+ * served rather than assumed so this app does not keep its own copy of a
+ * number the API owns.
+ */
+export type ListPage = {
+	total: number;
+	has_more: boolean;
+	max_offset: number;
+};
+
 export type DomainStats = {
 	domain: string;
 	live: number;
@@ -672,12 +686,17 @@ export const api = {
 	authKeyRevoke: (id: number) =>
 		request<AuthKey>(`/auth/keys/${encodeURIComponent(String(id))}`, { method: 'DELETE' }),
 	stats: () => request<{ domains: DomainStats[] }>('/stats'),
-	boardSessions: (opts: { status?: string; limit?: number } = {}) => {
+	boardSessions: (
+		opts: { status?: string; offset?: number; limit?: number } = {}
+	) => {
 		const q = new URLSearchParams();
 		if (opts.status) q.set('status', opts.status);
+		if (opts.offset != null && opts.offset > 0) q.set('offset', String(opts.offset));
 		if (opts.limit != null) q.set('limit', String(opts.limit));
 		const qs = q.toString();
-		return request<{ sessions: BoardSession[] }>(`/board/sessions${qs ? `?${qs}` : ''}`);
+		return request<ListPage & { sessions: BoardSession[] }>(
+			`/board/sessions${qs ? `?${qs}` : ''}`
+		);
 	},
 	boardSession: (sessionId: string) =>
 		request<BoardSession>(`/board/sessions/${encodeURIComponent(sessionId)}`),
@@ -843,13 +862,13 @@ export const api = {
 	strategyTypes: () => request<StrategyTypes>('/sts/types'),
 	strategyTypeTemplate: (type: string) =>
 		request<StrategyTemplate>(`/sts/types/${encodeURIComponent(type)}/template`),
-	strategies: (opts: { status?: string; before?: string; limit?: number } = {}) => {
+	strategies: (opts: { status?: string; offset?: number; limit?: number } = {}) => {
 		const q = new URLSearchParams();
 		if (opts.status) q.set('status', opts.status);
-		if (opts.before) q.set('before', opts.before);
+		if (opts.offset != null && opts.offset > 0) q.set('offset', String(opts.offset));
 		if (opts.limit != null) q.set('limit', String(opts.limit));
 		const qs = q.toString();
-		return request<{ strategies: StrategyRow[]; has_more: boolean }>(
+		return request<ListPage & { strategies: StrategyRow[] }>(
 			`/sts/strategies${qs ? `?${qs}` : ''}`
 		);
 	},
@@ -878,8 +897,15 @@ export const api = {
 		request<StsControl>(`/sts/sessions/${encodeURIComponent(id)}/ack`, {
 			method: 'POST'
 		}),
-	audits: (limit = 100) =>
-		request<{ audits: Audit[] }>(`/audits?limit=${limit}`),
+	audits: (opts: { offset?: number; limit?: number } = {}) => {
+		const q = new URLSearchParams();
+		if (opts.offset != null && opts.offset > 0) q.set('offset', String(opts.offset));
+		if (opts.limit != null) q.set('limit', String(opts.limit));
+		const qs = q.toString();
+		return request<ListPage & { audits: Audit[] }>(
+			`/audits${qs ? `?${qs}` : ''}`
+		);
+	},
 	logs: (
 		domain: 'sts' | 'td' | 'md',
 		streamId: string,
