@@ -184,6 +184,28 @@ class Timer:
         *,
         time_fn: Callable[[], int] | None = None,
     ) -> None:
+        """Build a timer, optionally on a clock other than :func:`now_ms`.
+
+        ``time_fn`` returns unix milliseconds and must advance in step with
+        real time. It is the authority on when a token is due: a token waits
+        until *this* clock reaches the instant ``register`` named, and goes
+        back to waiting for as long as it has not, because the loop may wake a
+        sleep up to a millisecond early and firing early is the one failure a
+        schedule cannot absorb.
+
+        That has a consequence worth naming, because it is not what a clock
+        double usually expects. **A clock that never reaches the instant never
+        fires the token** — a stopped clock in the same way a running one never
+        reaches a deadline a century out. Nothing spins and nothing leaks: the
+        token sleeps whatever remainder its own clock reports (a stopped clock
+        100ms short of due costs ten wakeups a second, ~1.6ms of CPU per
+        second), and ``cancel`` and ``close`` still take it down. But it will
+        wait for as long as the session lives, so a test that wants a tick out
+        of a clock it holds still has to call the callback itself. The STS
+        tests do exactly that with their own ``FakeTimer``; where the timer
+        itself is under test, ``apps/sts/tests/test_timer.py`` drives a clock
+        that does move, at half speed.
+        """
         self._time_fn = time_fn or now_ms
         self._strategy: Strategy | None = None
         self._tokens: set[TimerToken] = set()
