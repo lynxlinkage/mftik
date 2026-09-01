@@ -71,6 +71,27 @@ def test_bundled_templates_are_marked_bundled() -> None:
         assert template.source == "bundled"
 
 
+def test_bundled_fields_name_every_sts_key() -> None:
+    """A key in the starting document must be a declared field.
+
+    The editor hints from ``fields``, not from scraping the YAML. A template
+    that grows a new ``sts:`` key without a field is a document the UI
+    cannot complete.
+    """
+    for template in all_templates():
+        spec = parse_strategy_yml(template.yaml)
+        names = {field.name for field in template.fields}
+        assert names, f"{template.type} has no sts fields"
+        missing = [key for key in spec.sts if key not in names]
+        assert not missing, f"{template.type} sts keys lack fields: {missing}"
+        for field in template.fields:
+            if field.required:
+                assert field.name in spec.sts, (
+                    f"{template.type} required field {field.name!r} "
+                    "is missing from the template yaml"
+                )
+
+
 def test_null_settings_are_empty() -> None:
     spec = parse_strategy_yml(
         """

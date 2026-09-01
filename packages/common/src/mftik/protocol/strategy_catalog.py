@@ -21,6 +21,55 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+#: What an ``sts:`` key is, for the editor — not a second validator.
+#: ``on_initialized`` still decides whether a document can run.
+StsFieldKind = Literal[
+    "int",
+    "decimal",
+    "string",
+    "bool",
+    "enum",
+    "td-account",
+    "ticker",
+    "md-topic",
+    "list",
+]
+
+
+class StsField(BaseModel):
+    """One ``sts:`` parameter the chosen strategy will read.
+
+    The class that validates the document is the one that knows the names.
+    Bundled templates carry this list; a registry tree that has not declared
+    any yet is an empty list, and the editor then has nothing to hint.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    kind: StsFieldKind
+    description: str = ""
+    #: Closed set for ``enum`` / ``md-topic`` / a ``list`` of enums.
+    values: list[str] = Field(default_factory=list)
+    required: bool = True
+
+
+def _f(
+    name: str,
+    kind: StsFieldKind,
+    description: str,
+    *,
+    values: tuple[str, ...] = (),
+    required: bool = True,
+) -> StsField:
+    return StsField(
+        name=name,
+        kind=kind,
+        description=description,
+        values=list(values),
+        required=required,
+    )
+
 
 class StrategyTemplate(BaseModel):
     """One deployable strategy: what it is, and a document that runs it."""
@@ -42,6 +91,8 @@ class StrategyTemplate(BaseModel):
     requires: list[str] = Field(default_factory=list)
     #: Whether this node's applied extras cover ``requires``.
     env_ok: bool = True
+    #: ``sts:`` keys this type reads. Empty means the editor cannot hint them.
+    fields: list[StsField] = Field(default_factory=list)
 
 
 NOOP = StrategyTemplate(
@@ -63,6 +114,15 @@ sts:
   gap_bps: 10
   qty_quote: 100
 """,
+    fields=[
+        _f("exec_interval_ms", "int", "ms between each place → cancel"),
+        _f("gap_bps", "decimal", "offset from mid, in basis points"),
+        _f(
+            "qty_quote",
+            "decimal",
+            "size in the pair's quote currency (not always a dollar)",
+        ),
+    ],
 )
 
 CHASE = StrategyTemplate(
@@ -91,6 +151,31 @@ sts:
   must_exec: false
   refresh_interval_ms: 1000
 """,
+    fields=[
+        _f(
+            "side",
+            "enum",
+            "BUY posts below the ask; SELL above the bid",
+            values=("buy", "sell"),
+        ),
+        _f(
+            "qty",
+            "decimal",
+            "size in base units — set this or qty_quote",
+            required=False,
+        ),
+        _f(
+            "qty_quote",
+            "decimal",
+            "size in the pair's quote currency — set this or qty",
+            required=False,
+        ),
+        _f("gap_bps", "decimal", "how far inside the spread the rest sits"),
+        _f("expiry_s", "decimal", "seconds from start before the chase gives up"),
+        _f("extreme_bps", "decimal", "how far the reference may run against us"),
+        _f("must_exec", "bool", "take the unfilled remainder when the chase ends"),
+        _f("refresh_interval_ms", "int", "how often the resting price is recomputed"),
+    ],
 )
 
 OCO = StrategyTemplate(
@@ -120,6 +205,20 @@ sts:
   # Give up if TD recon or the first quote never arrives.
   arm_timeout_s: 30
 """,
+    fields=[
+        _f("orders", "list", "exactly two legs, each side / price / qty"),
+        _f(
+            "ticker",
+            "ticker",
+            "instrument; omitted, the first md feed names it",
+            required=False,
+        ),
+        _f(
+            "arm_timeout_s",
+            "decimal",
+            "give up if recon or the first quote never arrives",
+        ),
+    ],
 )
 
 CROSS_ARB = StrategyTemplate(
@@ -149,6 +248,21 @@ sts:
   x_lo_bps: 5
   x_hi_bps: 15
 """,
+    fields=[
+        _f("quote_account", "td-account", "td key that rests the PostOnly quotes"),
+        _f("hedge_account", "td-account", "td key that IOC-hedges a fill"),
+        _f("quote_ticker", "ticker", "instrument the quoter posts on"),
+        _f("hedge_ticker", "ticker", "instrument the hedge takes on"),
+        _f(
+            "side",
+            "list",
+            "one or both sides to quote",
+            values=("buy", "sell"),
+        ),
+        _f("qty", "decimal", "size in base units"),
+        _f("x_lo_bps", "decimal", "fee-blind lower edge of the band, in bps"),
+        _f("x_hi_bps", "decimal", "fee-blind upper edge of the band, in bps"),
+    ],
 )
 
 TWAP = StrategyTemplate(
@@ -173,6 +287,23 @@ sts:
   # Exactly one sizing knob — base units or quote currency per round.
   qty_per_round: 0.001
 """,
+    fields=[
+        _f("side", "enum", "direction of every slice", values=("buy", "sell")),
+        _f("exec_interval_s", "decimal", "seconds between IOC slices"),
+        _f("num_round", "int", "how many successful slices end the window"),
+        _f(
+            "qty_per_round",
+            "decimal",
+            "base units per slice — set this or qty_quote_per_round",
+            required=False,
+        ),
+        _f(
+            "qty_quote_per_round",
+            "decimal",
+            "quote currency per slice — set this or qty_per_round",
+            required=False,
+        ),
+    ],
 )
 
 TAPE_KEEPER = StrategyTemplate(
@@ -194,6 +325,13 @@ sts:
   # so this line is the difference between "quiet" and "died an hour ago".
   report_interval_ms: 300000
 """,
+    fields=[
+        _f(
+            "report_interval_ms",
+            "int",
+            "how often to log that the feeds are still held",
+        ),
+    ],
 )
 
 MACD_DOLLAR = StrategyTemplate(
@@ -238,6 +376,30 @@ sts:
   # size that was asked for.
   cross_bps: 5
 """,
+    fields=[
+        _f(
+            "feed",
+            "md-topic",
+            "exactly one recorded topic — aggtrade or trade, not both",
+            values=("aggtrade", "trade"),
+        ),
+        _f(
+            "bar_quote_volume",
+            "decimal",
+            "quote currency that closes one dollar bar",
+        ),
+        _f("fast", "int", "fast EMA period; must be shorter than slow"),
+        _f("slow", "int", "slow EMA period"),
+        _f("signal", "int", "signal-line EMA period over the MACD"),
+        _f("qty_quote", "decimal", "quote currency per entry"),
+        _f("cross_bps", "decimal", "how far through the touch each IOC is priced"),
+        _f(
+            "warmup_limit",
+            "int",
+            "cap on tape prints read at start",
+            required=False,
+        ),
+    ],
 )
 
 #: Every deployable strategy, keyed by the type used on the wire.

@@ -360,7 +360,13 @@
 			</p>
 		{/if}
 	{/if}
-	<YamlEditor bind:value={yamlText} {accounts} rows={lineCount} disabled={busy} />
+	<YamlEditor
+		bind:value={yamlText}
+		{accounts}
+		fields={selected?.fields ?? []}
+		rows={lineCount}
+		disabled={busy}
+	/>
 </section>
 
 <div class="tabs" role="tablist">

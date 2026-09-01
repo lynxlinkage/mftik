@@ -235,6 +235,67 @@ test('the editor lists this node\'s account names under td:', async ({ page }) =
 	await expect(editor).toHaveValue(/td:\n  alpha:/);
 });
 
+test('the editor hints sts field names from the chosen type', async ({ page }) => {
+	await mockStrategyPage(page, [row('s-live', 'live')]);
+	await page.route('**/api/sts/types', (route) =>
+		route.fulfill({
+			json: {
+				types: ['NoopStrategy'],
+				templates: [
+					{
+						type: 'NoopStrategy',
+						label: 'Noop',
+						description: 'noop',
+						yaml: 'td:\n  paper trader:\nsts:\n  gap_bps: 10\n',
+						source: 'bundled',
+						fields: [
+							{
+								name: 'exec_interval_ms',
+								kind: 'int',
+								description: 'ms between each place',
+								values: [],
+								required: true
+							},
+							{
+								name: 'gap_bps',
+								kind: 'decimal',
+								description: 'offset from mid',
+								values: [],
+								required: true
+							},
+							{
+								name: 'must_exec',
+								kind: 'bool',
+								description: 'take the remainder',
+								values: [],
+								required: false
+							}
+						]
+					}
+				],
+				default: 'NoopStrategy'
+			}
+		})
+	);
+	await page.goto('/strategy');
+
+	const editor = page.getByRole('textbox', { name: 'strategy.yml editor' });
+	await editor.click();
+	await editor.evaluate((el: HTMLTextAreaElement) => {
+		const at = el.value.indexOf('gap_bps');
+		el.focus();
+		el.setSelectionRange(at, at);
+	});
+	await editor.press('Control+Space');
+
+	const list = page.getByRole('listbox');
+	await expect(list.getByRole('option', { name: /gap_bps/ })).toBeVisible();
+	await expect(list.getByRole('option', { name: /exec_interval_ms/ })).toBeVisible();
+
+	await list.getByRole('option', { name: /exec_interval_ms/ }).click();
+	await expect(editor).toHaveValue(/sts:\n  exec_interval_ms:/);
+});
+
 test('clicking an account chip inserts it under td:', async ({ page }) => {
 	await mockStrategyPage(page, [row('s-live', 'live')]);
 

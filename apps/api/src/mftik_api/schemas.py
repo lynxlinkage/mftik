@@ -70,6 +70,20 @@ class StrategyListResponse(BaseModel):
     has_more: bool = False
 
 
+class StsFieldOut(BaseModel):
+    """One ``sts:`` key the chosen strategy will read.
+
+    The editor uses this to hint names and values. It is not a second
+    validator — ``on_initialized`` still decides whether the document runs.
+    """
+
+    name: str
+    kind: str
+    description: str = ""
+    values: list[str] = Field(default_factory=list)
+    required: bool = True
+
+
 class StrategyTemplateOut(BaseModel):
     """One deployable strategy and the document it starts from."""
 
@@ -80,6 +94,7 @@ class StrategyTemplateOut(BaseModel):
     source: Literal["bundled", "registry"] = "bundled"
     requires: list[str] = Field(default_factory=list)
     env_ok: bool = True
+    fields: list[StsFieldOut] = Field(default_factory=list)
 
 
 class StrategyTypesResponse(BaseModel):

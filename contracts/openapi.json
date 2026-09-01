@@ -6262,6 +6262,13 @@
             "type": "boolean",
             "title": "Env Ok",
             "default": true
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/StsFieldOut"
+            },
+            "type": "array",
+            "title": "Fields"
           }
         },
         "type": "object",
@@ -6369,6 +6376,42 @@
           "status"
         ],
         "title": "StsControlResponse"
+      },
+      "StsFieldOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "default": ""
+          },
+          "values": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Values"
+          },
+          "required": {
+            "type": "boolean",
+            "title": "Required",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "title": "StsFieldOut",
+        "description": "One ``sts:`` key the chosen strategy will read.\n\nThe editor uses this to hint names and values. It is not a second\nvalidator \u2014 ``on_initialized`` still decides whether the document runs."
       },
       "SymSymbolListResponse": {
         "properties": {

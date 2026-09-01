@@ -7,9 +7,20 @@
  *
  * ``td`` keys are account names. Deploy resolves them via GET /apis
  * (``Account.name``), not api ids and not the venue key string.
+ *
+ * ``sts`` keys come from the chosen strategy's ``fields`` on GET /sts/types.
+ * The class that validates the document is the one that named them.
  */
 
-export type HintKind = 'root-key' | 'td-key' | 'md-item' | 'restart-value' | 'sts-account';
+import type { StsField } from '$lib/api';
+
+export type HintKind =
+	| 'root-key'
+	| 'td-key'
+	| 'md-item'
+	| 'restart-value'
+	| 'sts-key'
+	| 'sts-value';
 
 export type HintAccount = {
 	name: string;
@@ -24,6 +35,10 @@ export type HintContext = {
 	replaceEnd: number;
 	/** Mapping key still needs a trailing ``:``. */
 	needsColon: boolean;
+	/** ``sts:`` key when the cursor is on that field's value. */
+	field?: string;
+	/** Full unquoted token under the cursor, not only the prefix. */
+	token?: string;
 };
 
 export type HintItem = {
@@ -302,7 +317,8 @@ export function hintContext(text: string, cursor: number): HintContext | null {
 			prefix: line.isEmpty ? '' : tokenPrefix(line.raw, keyStart, Math.min(col, keyEnd)),
 			replaceStart: line.start + keyStart,
 			replaceEnd: line.start + keyEnd,
-			needsColon: line.colon < 0
+			needsColon: line.colon < 0,
+			token: line.isEmpty ? '' : unquoteYaml(line.raw.slice(keyStart, keyEnd))
 		};
 	}
 
@@ -318,19 +334,111 @@ export function hintContext(text: string, cursor: number): HintContext | null {
 		};
 	}
 
-	if (section === 'sts' && line.indent > 0 && !line.isList && !line.isComment && line.key) {
-		if (STS_ACCOUNT_FIELDS.has(line.key) && line.colon >= 0 && col > line.colon) {
+	if (section === 'sts' && (line.indent > 0 || emptyInSection) && !line.isComment) {
+		// Nested mappings (OCO legs) are that field's own shape, not top-level
+		// ``sts:`` keys. Leave them alone.
+		if (line.indent >= 4) return null;
+		if (line.isList) return null;
+		if (line.colon >= 0 && col > line.colon && line.key) {
 			return {
-				kind: 'sts-account',
+				kind: 'sts-value',
 				prefix: tokenPrefix(line.raw, line.valueStart, Math.min(col, line.valueEnd)),
 				replaceStart: line.start + line.valueStart,
 				replaceEnd: line.start + line.valueEnd,
-				needsColon: false
+				needsColon: false,
+				field: line.key
 			};
 		}
+		const keyStart = line.isEmpty ? col : line.keyStart;
+		const keyEnd = line.isEmpty ? col : line.keyEnd;
+		return {
+			kind: 'sts-key',
+			prefix: line.isEmpty ? '' : tokenPrefix(line.raw, keyStart, Math.min(col, keyEnd)),
+			replaceStart: line.start + keyStart,
+			replaceEnd: line.start + keyEnd,
+			needsColon: line.colon < 0,
+			token: line.isEmpty ? '' : unquoteYaml(line.raw.slice(keyStart, keyEnd))
+		};
 	}
 
 	return null;
+}
+
+function stsKeysOf(text: string): string[] {
+	const lines = parseYmlLines(text);
+	const keys: string[] = [];
+	let inSts = false;
+	for (const line of lines) {
+		if (line.indent === 0 && line.key && !line.isComment) {
+			inSts = line.key === 'sts';
+			continue;
+		}
+		if (!inSts || line.isComment || line.isEmpty || line.isList) continue;
+		if (line.indent === 2 && line.key) keys.push(line.key);
+	}
+	return keys;
+}
+
+function lookupField(fields: StsField[], name: string | undefined): StsField | undefined {
+	if (!name) return undefined;
+	const found = fields.find((f) => f.name === name);
+	if (found) return found;
+	if (STS_ACCOUNT_FIELDS.has(name)) {
+		return {
+			name,
+			kind: 'td-account',
+			description: 'td account',
+			values: [],
+			required: true
+		};
+	}
+	return undefined;
+}
+
+function stsValueItems(
+	ctx: HintContext,
+	fields: StsField[],
+	accounts: HintAccount[],
+	text: string
+): HintItem[] {
+	const field = lookupField(fields, ctx.field);
+	if (!field) return [];
+	const prefix = ctx.prefix;
+	if (field.kind === 'td-account') {
+		const fromTd = tdAccountKeys(text);
+		const names = fromTd.length ? fromTd : accounts.map((a) => a.name);
+		return sortByPrefix(
+			names.filter((n) => matches(n, prefix)).map((n) => ({
+				label: n,
+				insert: asYamlKey(n),
+				detail: 'td account',
+				kind: ctx.kind
+			})),
+			prefix
+		);
+	}
+	if (field.kind === 'bool') {
+		return ['true', 'false']
+			.filter((v) => matches(v, prefix))
+			.map((v) => ({
+				label: v,
+				insert: v,
+				detail: field.description || 'bool',
+				kind: ctx.kind
+			}));
+	}
+	if (field.kind === 'enum' || field.kind === 'md-topic' || field.values.length) {
+		return sortByPrefix(
+			field.values.filter((v) => matches(v, prefix)).map((v) => ({
+				label: v,
+				insert: v,
+				detail: field.description || field.kind,
+				kind: ctx.kind
+			})),
+			prefix
+		);
+	}
+	return [];
 }
 
 export function tdAccountKeys(text: string): string[] {
@@ -373,7 +481,7 @@ function sortByPrefix<T extends { label: string }>(items: T[], prefix: string): 
 
 export function hintItems(
 	ctx: HintContext,
-	opts: { accounts?: HintAccount[]; text?: string } = {}
+	opts: { accounts?: HintAccount[]; text?: string; fields?: StsField[] } = {}
 ): HintItem[] {
 	const accounts = opts.accounts ?? [];
 	const used = new Set(tdAccountKeys(opts.text ?? ''));
@@ -409,23 +517,29 @@ export function hintItems(
 		}));
 	}
 
-	if (ctx.kind === 'sts-account') {
-		const fromTd = tdAccountKeys(opts.text ?? '');
-		const names = fromTd.length ? fromTd : accounts.map((a) => a.name);
+	if (ctx.kind === 'sts-key') {
+		const used = new Set(stsKeysOf(opts.text ?? ''));
+		const current = ctx.token ?? unquoteYaml(prefix);
 		return sortByPrefix(
-			names.filter((n) => matches(n, prefix)).map((n) => ({
-				label: n,
-				insert: asYamlKey(n),
-				detail: 'td account',
-				kind: ctx.kind
-			})),
+			(opts.fields ?? [])
+				.filter((f) => matches(f.name, prefix) && (!used.has(f.name) || f.name === current))
+				.map((f) => ({
+					label: f.name,
+					insert: f.name,
+					detail: f.description || f.kind,
+					kind: ctx.kind
+				})),
 			prefix
 		);
 	}
 
+	if (ctx.kind === 'sts-value') {
+		return stsValueItems(ctx, opts.fields ?? [], accounts, opts.text ?? '');
+	}
+
 	// td-key: names this node can resolve, minus ones already attached
 	// (keep the token under the cursor so editing it still lists itself).
-	const current = unquoteYaml(prefix);
+	const current = ctx.token ?? unquoteYaml(prefix);
 	const items: HintItem[] = [];
 	for (const row of accounts) {
 		const name = row.name.trim();
@@ -447,11 +561,16 @@ export function applyHint(
 	item: HintItem
 ): { text: string; cursor: number } {
 	let insert = item.insert;
-	if (ctx.needsColon && ctx.kind !== 'md-item' && ctx.kind !== 'restart-value') {
+	if (
+		ctx.needsColon &&
+		ctx.kind !== 'md-item' &&
+		ctx.kind !== 'restart-value' &&
+		ctx.kind !== 'sts-value'
+	) {
 		const after = text.slice(ctx.replaceEnd);
 		if (!after.startsWith(':')) insert += ':';
 	}
-	if (ctx.kind === 'td-key' && ctx.needsColon && insert.endsWith(':')) {
+	if ((ctx.kind === 'td-key' || ctx.kind === 'sts-key') && ctx.needsColon && insert.endsWith(':')) {
 		const before = text.slice(0, ctx.replaceStart);
 		const atLineStart = before.endsWith('\n') || before.length === 0;
 		const line = text.slice(text.lastIndexOf('\n', ctx.replaceStart - 1) + 1, ctx.replaceStart);

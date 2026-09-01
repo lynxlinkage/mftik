@@ -102,6 +102,26 @@ export type StrategyDeployBody = {
 	timeout?: number;
 };
 
+/** What an `sts:` key is, as the chosen strategy declared it. */
+export type StsFieldKind =
+	| 'int'
+	| 'decimal'
+	| 'string'
+	| 'bool'
+	| 'enum'
+	| 'td-account'
+	| 'ticker'
+	| 'md-topic'
+	| 'list';
+
+export type StsField = {
+	name: string;
+	kind: StsFieldKind;
+	description: string;
+	values: string[];
+	required: boolean;
+};
+
 /** A deployable strategy and the document it starts from. */
 export type StrategyTemplate = {
 	type: string;
@@ -114,6 +134,8 @@ export type StrategyTemplate = {
 	requires?: string[];
 	/** Whether this node's applied extras cover `requires`. */
 	env_ok?: boolean;
+	/** `sts:` keys this type reads. Empty — the editor cannot hint them. */
+	fields?: StsField[];
 };
 
 export type EnvPackage = {

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { ApiCredential } from '$lib/api';
+	import type { ApiCredential, StsField } from '$lib/api';
 	import {
 		applyHint,
 		hintContext,
@@ -13,6 +13,7 @@
 	interface Props {
 		value: string;
 		accounts?: ApiCredential[];
+		fields?: StsField[];
 		disabled?: boolean;
 		rows?: number;
 	}
@@ -20,6 +21,7 @@
 	let {
 		value = $bindable(),
 		accounts = [],
+		fields = [],
 		disabled = false,
 		rows = 12
 	}: Props = $props();
@@ -49,10 +51,13 @@
 			open = false;
 			return;
 		}
-		const next = hintItems(ctx, { accounts, text: value });
+		const next = hintItems(ctx, { accounts, text: value, fields });
 		items = next;
 		active = 0;
-		if (next.length && (force || ctx.prefix.length > 0 || ctx.kind === 'td-key')) {
+		if (
+			next.length &&
+			(force || ctx.prefix.length > 0 || ctx.kind === 'td-key' || ctx.kind === 'sts-key')
+		) {
 			open = true;
 			placeMenu();
 		} else {
