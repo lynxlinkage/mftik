@@ -21,7 +21,7 @@ from mftik.protocol import (
 )
 
 from mftik_api.broker_rpc import DomainRpcError, request_domain
-from mftik_api.deps import BrokerDep
+from mftik_api.deps import BrokerDep, ListOffset
 from mftik_api.schemas import SymSymbolListResponse, SymVenueListResponse
 
 router = APIRouter(prefix="/sym", tags=["sym"])
@@ -60,7 +60,7 @@ async def list_symbols(
     active_only: bool = True,
     q: str | None = None,
     limit: Annotated[int | None, Query(ge=1, le=500)] = None,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: ListOffset = 0,
     slim: bool = False,
 ) -> SymSymbolListResponse:
     """Instruments from the golden tables. Omitted filters widen the result.

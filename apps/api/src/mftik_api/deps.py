@@ -45,5 +45,5 @@ RegistryStoreDep = Annotated[RegistryStore, Depends(get_registry_store)]
 #: is a 422, not a slow scan.
 MAX_LIST_OFFSET = 100_000
 
-#: The ``offset`` of every numbered list, so the three cannot drift apart.
+#: The ``offset`` of every list that pages, so they cannot drift apart.
 ListOffset = Annotated[int, Query(ge=0, le=MAX_LIST_OFFSET)]
