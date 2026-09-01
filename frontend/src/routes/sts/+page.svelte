@@ -6,12 +6,14 @@
 		defaultStrategyYml,
 		formatTs,
 		shortId,
+		type ApiCredential,
 		type StrategyRow,
 		type StrategyTemplate,
 		type StrategyYaml
 	} from '$lib/api';
 	import LogDownloadModal from '$lib/components/LogDownloadModal.svelte';
 	import StrategyPicker from '$lib/components/StrategyPicker.svelte';
+	import YamlEditor from '$lib/components/YamlEditor.svelte';
 	import {
 		connectStsStatus,
 		type StatusConnection,
@@ -35,6 +37,7 @@
 	// Tracks whether the editor still holds the selected type's template
 	// untouched, so switching type can only discard what nobody typed.
 	let pristineYaml = $state(defaultStrategyYml());
+	let accounts = $state<ApiCredential[]>([]);
 	let error = $state<string | null>(null);
 	let busy = $state(false);
 	let loading = $state(true);
@@ -116,11 +119,17 @@
 						default: 'NoopStrategy'
 					}))
 				: null;
+			const accountsP = withTypes ? api.apis().catch(() => ({ apis: [] })) : null;
 			const list = await listP;
 			if (epoch !== listEpoch || tab !== myTab) return;
 			strategies = list.strategies;
 			hasMore = list.has_more;
 			listCursor = strategies.at(-1)?.session_id ?? null;
+			if (accountsP) {
+				const a = await accountsP;
+				if (epoch !== listEpoch) return;
+				accounts = a.apis;
+			}
 			if (typesP) {
 				const t = await typesP;
 				if (epoch !== listEpoch) return;
@@ -474,14 +483,7 @@
 			</p>
 		{/if}
 	{/if}
-	<textarea
-		class="yml"
-		bind:value={yamlText}
-		rows={lineCount}
-		spellcheck="false"
-		disabled={busy}
-		aria-label="strategy.yml editor"
-	></textarea>
+	<YamlEditor bind:value={yamlText} {accounts} rows={lineCount} disabled={busy} />
 </section>
 
 <div class="tabs" role="tablist">
@@ -725,26 +727,6 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.5rem;
-	}
-
-	.yml {
-		width: 100%;
-		min-height: 16rem;
-		resize: vertical;
-		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-		font-size: 0.85rem;
-		line-height: 1.45;
-		tab-size: 2;
-		background: var(--bg);
-		border: 1px solid var(--border);
-		color: var(--text);
-		border-radius: var(--radius);
-		padding: 0.85rem 1rem;
-	}
-
-	.yml:focus {
-		outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
-		outline-offset: 1px;
 	}
 
 	.table-wrap {

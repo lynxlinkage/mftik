@@ -163,3 +163,84 @@ test('opening a run shows STS plus the attached accounts and venues', async ({
 	);
 	await expect(page.getByRole('heading', { name: 'STS log' })).toBeVisible();
 });
+
+test('the editor lists this node\'s account names under td:', async ({ page }) => {
+	await mockStrategyPage(page, [row('s-live', 'live')]);
+	await page.route('**/api/sts/types', (route) =>
+		route.fulfill({
+			json: {
+				types: ['NoopStrategy'],
+				templates: [
+					{
+						type: 'NoopStrategy',
+						label: 'Noop',
+						description: 'noop',
+						yaml: 'td:\n  paper trader:\nmd:\n  - orderbook.Paper_Spot_BTCUSDT\nsts: {}\n',
+						source: 'bundled'
+					}
+				],
+				default: 'NoopStrategy'
+			}
+		})
+	);
+	await page.route('**/api/apis', (route) =>
+		route.fulfill({
+			json: {
+				apis: [
+					{
+						id: 3,
+						account_id: 1,
+						name: 'alpha',
+						venue: 'Paper',
+						api_key: 'k',
+						type: 'HMAC',
+						created_at: 1,
+						created_by: 1
+					},
+					{
+						id: 4,
+						account_id: 2,
+						name: 'gate hedger',
+						venue: 'Gate',
+						api_key: 'g',
+						type: 'HMAC',
+						created_at: 1,
+						created_by: 1
+					}
+				]
+			}
+		})
+	);
+	await page.goto('/strategy');
+
+	const editor = page.getByRole('textbox', { name: 'strategy.yml editor' });
+	await expect(editor).toBeVisible();
+	await expect(page.getByRole('button', { name: 'Paper/alpha' })).toBeVisible();
+	await expect(page.getByRole('button', { name: 'Gate/gate hedger' })).toBeVisible();
+
+	await editor.click();
+	await editor.evaluate((el: HTMLTextAreaElement) => {
+		const at = el.value.indexOf('paper trader');
+		el.focus();
+		el.setSelectionRange(at, at);
+	});
+	await editor.press('Control+Space');
+
+	const list = page.getByRole('listbox');
+	await expect(list).toBeVisible();
+	await expect(list.getByRole('option', { name: /alpha/ })).toBeVisible();
+	await expect(list.getByRole('option', { name: /gate hedger/ })).toBeVisible();
+
+	await list.getByRole('option', { name: /alpha/ }).click();
+	await expect(editor).toHaveValue(/td:\n  alpha:/);
+});
+
+test('clicking an account chip inserts it under td:', async ({ page }) => {
+	await mockStrategyPage(page, [row('s-live', 'live')]);
+
+	const editor = page.getByRole('textbox', { name: 'strategy.yml editor' });
+	await expect(editor).toHaveValue('sts: {}\n');
+
+	await page.getByRole('button', { name: 'Paper/alpha' }).click();
+	await expect(editor).toHaveValue(/^td:\n  alpha:\n/);
+});
