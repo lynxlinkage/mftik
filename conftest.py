@@ -47,8 +47,10 @@ def pytest_asyncio_loop_factories(
     """
     choice = os.getenv(TEST_LOOP_ENV, "uvloop")
     if choice == "asyncio":
-        # What pytest-asyncio would have used anyway, named so the test id says
-        # which loop a failure came from.
+        # What pytest-asyncio would have used anyway. The key names the
+        # factory, it does not label the run: with a single factory
+        # pytest-asyncio ids it `pytest.HIDDEN_PARAM`, so test ids read the
+        # same on either loop and only this variable says which one ran.
         return {"asyncio": asyncio.new_event_loop}
     if choice != "uvloop":
         raise pytest.UsageError(
