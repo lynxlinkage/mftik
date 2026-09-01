@@ -153,8 +153,13 @@ async def test_an_order_is_refused_while_the_socket_is_unauthenticated(
 async def test_the_socket_reauthenticates_after_a_drop(bybit: FakeBybit) -> None:
     async with _trade(bybit, retry_backoff=0.01) as trade:
         await bybit.drop()
+        # Wait on the client's own flag, not just the server's count. The stub
+        # increments ``auths`` while building the reply, and the socket sets
+        # ``_authenticated`` only once ``handshake`` has read that reply back,
+        # so ``auths >= 2`` is true strictly before the socket agrees. Polling
+        # the counter alone races the round trip and fails under CI load.
         for _ in range(200):
-            if bybit.auths >= 2:
+            if bybit.auths >= 2 and trade.authenticated:
                 break
             await asyncio.sleep(0.01)
         assert bybit.auths >= 2
