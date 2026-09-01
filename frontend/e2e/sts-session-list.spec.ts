@@ -116,6 +116,7 @@ async function mockStsPage(
 			}
 		})
 	);
+	await page.route('**/api/apis', (route) => route.fulfill({ json: { apis: [] } }));
 	await page.route('**/api/sts/strategies**', async (route) => {
 		const url = new URL(route.request().url());
 		urls.push(url);
