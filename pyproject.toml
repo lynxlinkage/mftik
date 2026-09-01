@@ -13,8 +13,14 @@ members = ["apps/*", "packages/*"]
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
+    # `conftest.py` implements `pytest_asyncio_loop_factories`, and that hookspec
+    # is 1.4's. Below it pytest-asyncio does not know the name, pytest rejects
+    # the plugin outright — `PluginValidationError: unknown hook` — and no test
+    # in the workspace runs. 1.4 pins `pytest>=8.4` itself; the floor is named
+    # here too because the same 8.4 is what gives `pytest.HIDDEN_PARAM`, which
+    # is why one loop factory leaves test ids alone.
+    "pytest>=8.4",
+    "pytest-asyncio>=1.4",
     "ruff>=0.9",
     "fakeredis>=2.26",
     "aiosqlite>=0.20",

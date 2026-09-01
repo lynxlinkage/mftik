@@ -12,6 +12,7 @@ import logging
 import os
 import signal
 
+import uvloop
 from mftik import configure_logging, run_until_stopped
 from mftik.broker import Broker
 from mftik.protocol import Topics
@@ -146,5 +147,10 @@ def main() -> None:
     # Non-zero when a long-lived task ended on its own: the restart
     # policy is what puts the process back, and an exit code is what
     # tells anyone reading ``docker ps`` that SYM did not just stop.
-    if not asyncio.run(amain()):
+    #
+    # ``uvloop.run`` rather than ``asyncio.run`` — docs/EventLoop.md has the
+    # measurements. It builds the loop for this one call and leaves the global
+    # policy alone, so the loop this process runs is stated here rather than
+    # inherited from whatever an import happened to install.
+    if not uvloop.run(amain()):
         raise SystemExit(1)

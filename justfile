@@ -37,6 +37,13 @@ lint:
 backfill-check *args:
     uv run --all-packages python scripts/backfill_check.py {{args}}
 
+# Time this node's hot paths on asyncio vs uvloop — evidence for docs/EventLoop.md.
+# Wants a Redis nobody else is using: it publishes thousands of messages and
+# writes a tape stream. `--probe` reports behaviour differences instead.
+loop-bench *args:
+    REDIS_URL="${REDIS_URL:-redis://localhost:6379/9}" \
+      uv run --all-packages python scripts/loop_bench.py {{args}}
+
 # Apply DB migrations
 migrate revision="head":
     uv run --all-packages mftik-db-migrate {{revision}}

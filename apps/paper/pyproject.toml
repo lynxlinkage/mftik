@@ -5,6 +5,12 @@ description = "MFTIK paper exchange engine service"
 requires-python = ">=3.12"
 dependencies = [
     "mftik",
+    # The loop this process runs on — docs/EventLoop.md says why. Declared even
+    # though the shared image already has it via `uvicorn[standard]`: that only
+    # holds because `uv sync --all-packages` installs the API's dependencies
+    # into the same venv, and a per-app sync would start this process on a
+    # missing import.
+    "uvloop>=0.21",
 ]
 
 [tool.uv.sources]

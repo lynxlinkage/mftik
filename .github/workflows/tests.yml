@@ -65,5 +65,17 @@ jobs:
           uv run --all-packages alembic -c packages/db/alembic.ini upgrade head
           uv run --all-packages alembic -c packages/db/alembic.ini check
 
+      # On uvloop, because that is the loop all six processes run
+      # (docs/EventLoop.md) and `conftest.py` defaults the suite to it. A suite
+      # on a different loop from the node cannot see a loop-specific regression.
       - name: Test
         run: uv run --all-packages pytest packages apps -q
+
+      # `packages/common` ships to PyPI as `mftik`, and nothing a strategy
+      # author imports may need uvloop to work. Only `packages`, because that is
+      # the part with a life outside this repo; the five planes are only ever
+      # run from the image, on the loop above.
+      - name: Test the published packages on the stdlib loop too
+        env:
+          MFTIK_TEST_LOOP: asyncio
+        run: uv run --all-packages pytest packages -q

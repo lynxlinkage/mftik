@@ -8,6 +8,11 @@ dependencies = [
     "mftik-db",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
+    # `uvicorn[standard]` already pulls this in, and that is exactly the reason
+    # to name it: `run()` now asks Uvicorn for `loop="uvloop"` outright, so the
+    # API would fail to start if that extra ever stopped including it. A loop
+    # this process names in code is one it should depend on in its own right.
+    "uvloop>=0.21",
     "websockets>=13.0",
     # argon2id for the Owner's password. The one hashing decision here, and
     # not one to hand-roll.

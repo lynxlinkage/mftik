@@ -118,15 +118,30 @@ class TimerToken:
         interval = self._interval_ms
         try:
             while not self._cancelled.is_set():
-                delay_s = (next_ms - self._timer.now_ms()) / 1000.0
-                if delay_s > 0:
+                # Loop until the clock has really reached ``next_ms``, rather
+                # than trusting one sleep to land there. A loop may wake a timer
+                # slightly early — uvloop's are millisecond-grained and were
+                # measured firing up to 1ms before the deadline, roughly once in
+                # four hundred — and ``register`` promises a wall-clock instant,
+                # not an approximation of one. A strategy told to act at
+                # 09:30:00.000 must not be called at 09:29:59.999; arriving late
+                # is latency, arriving early is the wrong answer.
+                while True:
+                    delay_s = (next_ms - self._timer.now_ms()) / 1000.0
+                    if delay_s <= 0:
+                        break
                     try:
+                        # Never ask for less than the clock's own resolution.
+                        # uvloop treats a sub-millisecond timeout as no wait at
+                        # all, so asking for the true remainder would spin here
+                        # instead of sleeping through it.
                         await asyncio.wait_for(
-                            self._cancelled.wait(), timeout=delay_s
+                            self._cancelled.wait(),
+                            timeout=max(delay_s, 0.001),
                         )
                         return
                     except TimeoutError:
-                        pass
+                        continue
                 if self._cancelled.is_set():
                     return
                 # ``due_ms`` alongside the wall clock: a tick that fires late
@@ -169,6 +184,28 @@ class Timer:
         *,
         time_fn: Callable[[], int] | None = None,
     ) -> None:
+        """Build a timer, optionally on a clock other than :func:`now_ms`.
+
+        ``time_fn`` returns unix milliseconds and must advance in step with
+        real time. It is the authority on when a token is due: a token waits
+        until *this* clock reaches the instant ``register`` named, and goes
+        back to waiting for as long as it has not, because the loop may wake a
+        sleep up to a millisecond early and firing early is the one failure a
+        schedule cannot absorb.
+
+        That has a consequence worth naming, because it is not what a clock
+        double usually expects. **A clock that never reaches the instant never
+        fires the token** — a stopped clock in the same way a running one never
+        reaches a deadline a century out. Nothing spins and nothing leaks: the
+        token sleeps whatever remainder its own clock reports (a stopped clock
+        100ms short of due costs ten wakeups a second, ~1.6ms of CPU per
+        second), and ``cancel`` and ``close`` still take it down. But it will
+        wait for as long as the session lives, so a test that wants a tick out
+        of a clock it holds still has to call the callback itself. The STS
+        tests do exactly that with their own ``FakeTimer``; where the timer
+        itself is under test, ``apps/sts/tests/test_timer.py`` drives a clock
+        that does move, at half speed.
+        """
         self._time_fn = time_fn or now_ms
         self._strategy: Strategy | None = None
         self._tokens: set[TimerToken] = set()
