@@ -5,7 +5,7 @@
 # you `import mftik` and the `mftik` command, and nothing about "common"
 # survives being read from outside this repository.
 name = "mftik"
-version = "0.5.0"
+version = "0.5.1"
 description = "MFTIK — strategy SDK and client for a self-hosted trading node"
 readme = "README.md"
 license = "MIT"
