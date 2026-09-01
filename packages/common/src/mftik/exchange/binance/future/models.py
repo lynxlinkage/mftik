@@ -208,14 +208,17 @@ class BinanceFutureMarkPrice(BinanceMessage):
         """The live prediction, or None when this print has no ``r``.
 
         Dated leftovers can arrive without a rate. ``T`` stays on this
-        model — the shared print does not carry the schedule.
+        model — the shared print does not carry the schedule. A print without
+        ``E`` leaves the stamp off so the shared print takes its local receive
+        default, rather than reading as the epoch.
         """
         if self.funding_rate is None:
             return None
+        fields: dict[str, Any] = {} if self.ts <= 0 else {"ts": self.ts}
         return FundingRate(
             universal_ticker=str(ticker),
             rate=self.funding_rate,
-            ts=self.ts,
+            **fields,
         )
 
 

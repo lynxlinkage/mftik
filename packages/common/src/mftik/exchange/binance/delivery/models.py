@@ -199,13 +199,18 @@ class BinanceDeliveryMarkPrice(BinanceMessage):
         return secs(self.event_time)
 
     def to_funding_rate(self, ticker: UniversalTicker) -> FundingRate | None:
-        """The live prediction, or None when this print has no ``r``."""
+        """The live prediction, or None when this print has no ``r``.
+
+        A print without ``E`` leaves the stamp off so the shared print takes
+        its local receive default, rather than reading as the epoch.
+        """
         if self.funding_rate is None:
             return None
+        fields: dict[str, Any] = {} if self.ts <= 0 else {"ts": self.ts}
         return FundingRate(
             universal_ticker=str(ticker),
             rate=self.funding_rate,
-            ts=self.ts,
+            **fields,
         )
 
 

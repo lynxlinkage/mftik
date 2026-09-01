@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 
 import pytest
@@ -378,6 +379,18 @@ def test_a_funding_rate_frame_converts_and_keeps_schedule_off_the_shared_row() -
 def test_a_funding_row_without_a_rate_is_not_a_print() -> None:
     row = OkxFundingRate.model_validate({"instId": "BTC-USDT-SWAP", "ts": "1"})
     assert row.to_funding_rate(PERP) is None
+
+
+def test_a_funding_push_without_a_clock_is_stamped_on_receive() -> None:
+    """A push with no ``ts`` must not read as the epoch: a staleness check
+    would call a fresh print decades old."""
+    row = OkxFundingRate.model_validate(
+        {"instId": "BTC-USDT-SWAP", "fundingRate": "0.0001"}
+    )
+    before = time.time()
+    funding = row.to_funding_rate(PERP)
+    assert funding is not None
+    assert before <= funding.ts <= time.time()
 
 
 def test_liquidation_details_become_one_event_each() -> None:
