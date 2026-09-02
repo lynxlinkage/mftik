@@ -126,6 +126,18 @@ async function mockStrategyPage(
 			}
 		})
 	);
+	await page.route('**/api/sts/sessions/*/yaml', (route) => {
+		const parts = new URL(route.request().url()).pathname.split('/');
+		const id = parts[parts.length - 2] ?? '';
+		const found = live.find((s) => s.session_id === id) ?? live[0];
+		return route.fulfill({
+			json: {
+				type: found?.type ?? 'NoopStrategy',
+				session_id: id,
+				yaml: `sts:\n  from: ${id}\n`
+			}
+		});
+	});
 	await page.route(/\/api\/sts\/sessions\/[^/]+$/, (route) => {
 		const id = new URL(route.request().url()).pathname.split('/').pop() ?? '';
 		const found = live.find((s) => s.session_id === id) ?? live[0];
@@ -163,6 +175,36 @@ test('the list shows the deploy and the TD / MD it attached', async ({ page }) =
 		'href',
 		'/strategy/s-live'
 	);
+	await expect(page.getByRole('button', { name: 'Load yml' })).toBeVisible();
+});
+
+test('Load yml puts the session document in the editor', async ({ page }) => {
+	await mockStrategyPage(page, [row('s-live', 'live')]);
+
+	const editor = page.getByLabel('strategy.yml editor');
+	await expect(editor).toHaveValue('sts: {}\n');
+
+	await page.getByRole('button', { name: 'Load yml' }).click();
+	await expect(editor).toHaveValue('sts:\n  from: s-live\n');
+
+	await page.getByRole('button', { name: 'Refresh' }).click();
+	await expect(editor).toHaveValue('sts:\n  from: s-live\n');
+});
+
+test('Load yml asks before replacing an edited document', async ({ page }) => {
+	await mockStrategyPage(page, [row('s-live', 'live')]);
+
+	const editor = page.getByLabel('strategy.yml editor');
+	await expect(editor).toHaveValue('sts: {}\n');
+	await editor.fill('sts:\n  qty: 9\n');
+
+	page.once('dialog', (dialog) => dialog.dismiss());
+	await page.getByRole('button', { name: 'Load yml' }).click();
+	await expect(editor).toHaveValue('sts:\n  qty: 9\n');
+
+	page.once('dialog', (dialog) => dialog.accept());
+	await page.getByRole('button', { name: 'Load yml' }).click();
+	await expect(editor).toHaveValue('sts:\n  from: s-live\n');
 });
 
 test('opening a run shows STS plus the attached accounts and venues', async ({

@@ -48,6 +48,11 @@
 	let loading = $state(true);
 	let connection = $state<StatusConnection>('connecting');
 	let lastEventTs = new Map<string, number>();
+	/** Session whose strategy.yml is being fetched into the editor. */
+	let loadingYml = $state<string | null>(null);
+	// Load yml pins a past deploy in the editor. applyPage only seeds a
+	// type template while the editor still holds one.
+	let pinnedYaml = $state(false);
 
 	let listEpoch = 0;
 	let listTail: Promise<void> = Promise.resolve();
@@ -148,7 +153,7 @@
 				if (!templates.some((x) => x.type === selectedType)) {
 					selectedType = pickType(list.strategies, templates, t.default);
 				}
-				if (!dirty || !yamlText.trim()) applyTemplate(selectedType);
+				if (!pinnedYaml && (!dirty || !yamlText.trim())) applyTemplate(selectedType);
 			}
 		} catch (e) {
 			if (epoch !== listEpoch) return;
@@ -197,10 +202,31 @@
 		const next = tpl?.yaml || defaultStrategyYml();
 		yamlText = next;
 		pristineYaml = next;
+		pinnedYaml = false;
+	}
+
+	async function loadYml(s: StrategyRow) {
+		if (dirty && !confirm("Replace the editor with this session's strategy.yml?")) {
+			return;
+		}
+		loadingYml = s.session_id;
+		error = null;
+		try {
+			const doc = await api.strategyYaml(s.session_id);
+			if (doc.type) selectedType = doc.type;
+			yamlText = doc.yaml;
+			pristineYaml = doc.yaml;
+			pinnedYaml = true;
+			window.scrollTo({ top: 0, behavior: 'smooth' });
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			loadingYml = null;
+		}
 	}
 
 	function changeType(next: string) {
-		if (dirty && !confirm(`Replace the editor with the ${next} template?`)) {
+		if ((dirty || pinnedYaml) && !confirm(`Replace the editor with the ${next} template?`)) {
 			return;
 		}
 		selectedType = next;
@@ -461,6 +487,14 @@
 										Ack
 									</button>
 								{/if}
+								<button
+									type="button"
+									class="secondary"
+									disabled={busy || loadingYml !== null}
+									onclick={() => loadYml(s)}
+								>
+									{loadingYml === s.session_id ? 'Loading…' : 'Load yml'}
+								</button>
 								<a class="link-btn" href={`/strategy/${s.session_id}`}>Open</a>
 							</div>
 						</td>
