@@ -6,9 +6,9 @@ import asyncio
 from decimal import Decimal
 from typing import Any
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig
+from broker_harness import a_broker
+from mftik.broker import Broker
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.models import (
@@ -147,15 +147,8 @@ class GateStyleError(ExchangeError):
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test-fetch"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker("test-fetch") as client:
+        yield client
 
 
 @pytest.fixture

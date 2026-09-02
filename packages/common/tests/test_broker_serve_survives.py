@@ -16,9 +16,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig, IncomingRequest
+from broker_harness import a_broker
+from mftik.broker import Broker, IncomingRequest
 from mftik.broker import client as broker_client
 from mftik.protocol import Envelope
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -29,15 +29,8 @@ SUBJECT = "demo"
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test-serve"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker("test-serve") as client:
+        yield client
 
 
 @pytest.fixture(autouse=True)

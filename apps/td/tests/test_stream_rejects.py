@@ -25,9 +25,9 @@ import asyncio
 from decimal import Decimal
 from typing import Any
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig
+from broker_harness import a_broker
+from mftik.broker import Broker
 from mftik.exchange import PaperExchange, Side
 from mftik.exchange.models import Order, OrderStatus, OrderType
 from mftik.exchange.okx.models import OkxOrderUpdate
@@ -50,15 +50,8 @@ TICKER = "Paper_Spot_BTCUSDT"
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker() as client:
+        yield client
 
 
 @pytest.fixture

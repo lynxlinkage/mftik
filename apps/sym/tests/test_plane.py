@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import fakeredis.aioredis
 import pytest
+from broker_harness import a_broker
 from db_harness import a_database
-from mftik.broker import Broker, BrokerConfig
+from mftik.broker import Broker
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol import (
     SYM_LIST,
@@ -127,15 +127,8 @@ def plane_factory(sessionmaker_):
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker() as client:
+        yield client
 
 
 # --- refresh ---------------------------------------------------------------

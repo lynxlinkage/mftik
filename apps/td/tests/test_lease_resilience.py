@@ -15,9 +15,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig
+from broker_harness import a_broker
+from mftik.broker import Broker
 from mftik.exchange import PaperExchange
 from mftik.protocol import (
     STS_DETACH,
@@ -92,15 +92,8 @@ class FakeStore:
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test-lease"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker("test-lease") as client:
+        yield client
 
 
 @pytest.fixture

@@ -7,9 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig
+from broker_harness import a_broker
+from mftik.broker import Broker
 from mftik.envapply import ApplySpec, apply_packages
 from mftik.environment import EnvStamp, NodeEnv
 from mftik.protocol import StsCreateSessionRequest, TdAccountRef
@@ -51,15 +51,8 @@ def _isolate() -> None:
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test-env11"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker("test-env11") as client:
+        yield client
 
 
 class Rebuildable(Strategy):

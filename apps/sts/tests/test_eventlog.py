@@ -7,9 +7,9 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig
+from broker_harness import a_broker
+from mftik.broker import Broker
 from mftik.exchange.models import Order, OrderStatus, OrderType, Side, Ticker
 from mftik.exchange.oms import LedgerEntry
 from mftik.exchange.tickers import UniversalTicker
@@ -36,15 +36,8 @@ from mftik_sts.session.session import StsSession
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test-eventlog"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker("test-eventlog") as client:
+        yield client
 
 
 def _read(path: Path) -> list[dict]:
