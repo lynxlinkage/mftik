@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import asyncio
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig
+from broker_harness import a_broker
+from mftik.broker import Broker
 from mftik.protocol import Envelope, TdAttachRequest, TdBackfill, Topics
 from mftik_td.backfill.trigger import request_backfill
 from mftik_td.session import PaperSessionFactory, SessionManager
@@ -24,15 +24,8 @@ SESSION = "sts-trigger"
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker() as client:
+        yield client
 
 
 async def queued(broker: Broker) -> list[TdBackfill]:

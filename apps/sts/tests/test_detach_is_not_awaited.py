@@ -11,9 +11,9 @@ from __future__ import annotations
 import asyncio
 import time
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig
+from broker_harness import a_broker
+from mftik.broker import Broker
 from mftik.protocol import (
     MD_SESSION_DETACH,
     TD_SESSION_DETACH,
@@ -28,15 +28,8 @@ from mftik_sts.session.session import StsSession
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test-detach"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker("test-detach") as client:
+        yield client
 
 
 async def _queued(broker: Broker, subject: str) -> list[UntypedEnvelope]:

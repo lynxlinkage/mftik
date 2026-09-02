@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig
+from broker_harness import a_broker
+from mftik.broker import Broker
 from mftik.exchange import PaperExchange
 from mftik.exchange.paper.remote_public import PaperRemotePublicClient
 from mftik.exchange.tickers import UniversalTicker
@@ -21,15 +21,8 @@ def PAPER(symbol: str) -> UniversalTicker:
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test-ppub"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker("test-ppub") as client:
+        yield client
 
 
 @pytest.mark.asyncio

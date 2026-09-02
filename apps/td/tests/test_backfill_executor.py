@@ -15,10 +15,10 @@ import time
 from decimal import Decimal
 from types import SimpleNamespace
 
-import fakeredis.aioredis
 import pytest
+from broker_harness import a_broker
 from db_harness import a_database
-from mftik.broker import Broker, BrokerConfig
+from mftik.broker import Broker
 from mftik.exchange.models import Fill, Order, OrderStatus, OrderType, Side
 from mftik_db.models.history import Attribution, Source, Stream
 from mftik_db.repositories import (
@@ -48,15 +48,8 @@ def ago(seconds: float) -> float:
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker() as client:
+        yield client
 
 
 @pytest.fixture

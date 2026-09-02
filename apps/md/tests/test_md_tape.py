@@ -8,9 +8,9 @@ read straight across it.
 
 from __future__ import annotations
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig
+from broker_harness import a_broker
+from mftik.broker import Broker
 from mftik.broker.client import decode_tape_gaps
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import Envelope, Topics
@@ -22,15 +22,8 @@ AGG_FEED = Topics.md_feed("aggtrade", TICKER)
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker() as client:
+        yield client
 
 
 def _agg_payload(trade_id: str = "1", price: str = "68000") -> dict:

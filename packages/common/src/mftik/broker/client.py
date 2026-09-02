@@ -642,15 +642,17 @@ class Broker:
         queue = self._rpc_queue(subject)
         await self.redis.rpush(queue, outbound.to_json())
 
-        # BLPOP timeout is whole seconds; poll until the deadline for accuracy.
+        # A pop that returns nothing is not a verdict — only the deadline is.
+        # So this polls, and ``serve_poll_seconds`` is how often it looks up.
         deadline = time.monotonic() + wait
+        poll = self.config.serve_poll_seconds
         try:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RequestTimeoutError(subject, outbound.id, wait)
                 try:
-                    result = await self.redis.blpop(reply_key, timeout=1)
+                    result = await self.redis.blpop(reply_key, timeout=poll)
                 except (RedisTimeoutError, RedisConnectionError):
                     # Same read deadline as ``serve``'s poll, and the same
                     # answer: a poll that failed is not a reply and not a
@@ -707,7 +709,9 @@ class Broker:
         queue = self._rpc_queue(subject)
         while stop is None or not stop.is_set():
             try:
-                result = await self.redis.blpop(queue, timeout=1)
+                result = await self.redis.blpop(
+                    queue, timeout=self.config.serve_poll_seconds
+                )
             except (RedisTimeoutError, RedisConnectionError):
                 # A blocking pop carries its own read deadline, so a stalled
                 # socket raises here even with no ``socket_timeout`` set, and

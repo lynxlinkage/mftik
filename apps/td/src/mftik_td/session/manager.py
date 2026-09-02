@@ -614,8 +614,8 @@ class SessionManager:
         # The order / account loops park in a blocking BLPOP. Cancelling them
         # there leaves the unread reply on the pooled connection and corrupts
         # whatever runs next on it, so let them retire on their own: ``serve``
-        # rechecks the stop event between polls, which bounds this to about a
-        # second.
+        # rechecks the stop event between polls, which bounds this to one
+        # ``BrokerConfig.serve_poll_seconds`` — a second in production.
         if acct.order_task is not None and acct.order_task is not current:
             await asyncio.gather(acct.order_task, return_exceptions=True)
         if acct.account_task is not None and acct.account_task is not current:

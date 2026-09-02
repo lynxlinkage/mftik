@@ -199,7 +199,7 @@ them is on the critical path of a busy feed.
 
 The same shape shows up elsewhere and is worth naming while it is in view:
 `Broker.subscribe` sleeps 10 ms between empty polls and `Broker.request` polls
-BLPOP in one-second laps; `envapply` runs a blocking `subprocess.run` on the
+BLPOP in laps of `BrokerConfig.serve_poll_seconds` (one second in production); `envapply` runs a blocking `subprocess.run` on the
 loop that serves it. None of those are loop problems, and a faster loop hides
 none of them.
 

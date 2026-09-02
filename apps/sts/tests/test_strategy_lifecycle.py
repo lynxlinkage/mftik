@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig
+from broker_harness import a_broker
+from mftik.broker import Broker
 from mftik.protocol import StsCreateSessionRequest, TdAccountRef
 from mftik.strategy import Strategy
 from mftik_sts.impl import register, resolve
@@ -49,15 +49,8 @@ class ExitSoonStrategy(Strategy):
 
 @pytest.fixture
 async def broker() -> Broker:
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    client = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test"),
-        redis_client=redis,
-    )
-    await client.connect()
-    yield client
-    await client.close()
-    await redis.aclose()
+    async with a_broker() as client:
+        yield client
 
 
 @pytest.mark.asyncio
