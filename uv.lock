@@ -585,7 +585,7 @@ wheels = [
 
 [[package]]
 name = "mftik"
-version = "0.5.2"
+version = "0.5.3"
 source = { editable = "packages/common" }
 dependencies = [
     { name = "cryptography" },
