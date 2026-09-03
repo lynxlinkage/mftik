@@ -142,7 +142,7 @@ public sizes already use:
 | Bybit linear | `openInterest` | as sent (base) | yes vs Gate |
 | GateFutures | `total_size` | `total_size * contract_size` (base) | yes vs Bybit |
 | OKX SWAP | `oiCcy` (else `oi * ctVal`) | base, as sent | unit yes; ~½ of Bybit/Gate |
-| BinanceDelivery | REST `openInterest` | as sent (contracts) | no — below |
+| BinanceDelivery | REST `openInterest` | as sent (contracts) | n/a — different product |
 
 Those four are why a unit is stated at all. A strategy holding
 `open_interest` on BTC across Bybit, OKX, GateFutures and BinanceFuture
@@ -171,16 +171,20 @@ Bybit now also publishes `singleOpenInterest` (27844.324, half of
 `oiCcy`. This ticket does not change the chosen fields, and does
 not invent a halving on Bybit or Gate either.
 
-**BinanceDelivery is not comparable, and does not pretend to be.** Its
-contract is USD-denominated — `contractSize` is USD per contract, not
-base — so contracts → base needs a mark price the OI endpoint does not
-carry. Every other public size this tree reports there is already
-contracts: book, tape and liquidations all
-(`binance/delivery/public.py`), and klines take `quote_per_contract`
-rather than converting. A second GET to make this one field disagree
-with the rest of its venue would buy a comparison against instruments
-nothing else here lists as `Inverse`. A caller putting that `qty` beside
-a base figure is comparing USD contracts to coins.
+**BinanceDelivery is contracts, and that is the answer rather than a
+gap.** It is this tree's only `Inverse` book — a USD-margined contract
+on a different instrument from BinanceFuture's `Perp` — and nothing
+here asks the two to be compared. The mechanics agree with the
+decision: `contractSize` is USD per contract, not base, so
+contracts → base would need a mark price the OI endpoint does not
+carry, and every other public size this tree reports on that venue is
+already contracts — book, tape and liquidations all
+(`binance/delivery/public.py`), with klines taking
+`quote_per_contract` rather than converting. A second GET to convert
+this one field would make it disagree with the rest of its own venue
+to buy a comparison nobody asked for. So `qty` there is contracts by
+decision, not by shortfall, and a later ticket "fixing" it is
+reopening a settled question.
 
 `ts` is the venue's event time when the print carries one, local
 receive time when it does not — same sentence as `FundingRate`.
