@@ -14,11 +14,32 @@ NATIVE = "BTC-USDT"
 TICKER_ARG = ch.tickers(NATIVE)
 BOOK_ARG = ch.books(NATIVE)
 FUNDING_ARG = ch.funding_rate("BTC-USDT-SWAP")
+OPEN_INTEREST_ARG = ch.open_interest("BTC-USDT-SWAP")
 
 
 def test_funding_rate_arg_is_not_the_ticker() -> None:
     assert ch.arg_key(FUNDING_ARG) == ("funding-rate", "BTC-USDT-SWAP", "")
     assert ch.arg_key(FUNDING_ARG) != ch.arg_key(ch.tickers("BTC-USDT-SWAP"))
+
+
+def test_open_interest_arg_is_not_the_ticker() -> None:
+    assert ch.arg_key(OPEN_INTEREST_ARG) == (
+        "open-interest",
+        "BTC-USDT-SWAP",
+        "",
+    )
+    assert ch.arg_key(OPEN_INTEREST_ARG) != ch.arg_key(
+        ch.tickers("BTC-USDT-SWAP")
+    )
+
+
+async def test_open_interest_subscribes_its_own_channel(
+    okx_public: FakeOkx,
+) -> None:
+    async with _feed(okx_public) as feed:
+        await feed.subscribe_open_interest("BTC-USDT-SWAP")
+        frames = okx_public.frames_for("subscribe")
+        assert frames[0]["args"] == [OPEN_INTEREST_ARG]
 
 
 def _feed(stub: FakeOkx, **kwargs: Any) -> OkxPublicStream:

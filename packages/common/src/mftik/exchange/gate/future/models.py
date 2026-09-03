@@ -21,6 +21,7 @@ from mftik.exchange.models import (
     FundingRate,
     Kline,
     Liquidation,
+    OpenInterest,
     Order,
     OrderBook,
     OrderStatus,
@@ -93,13 +94,14 @@ class GateMessage(BaseModel):
 
 
 class GateFuturesTicker(GateMessage):
-    """``futures.tickers`` — last/mark/funding; no bid/ask on this channel."""
+    """``futures.tickers`` — last/mark/funding/size; no bid/ask on this channel."""
 
     contract: str
     last: Decimal
     mark_price: Decimal | None = None
     index_price: Decimal | None = None
     funding_rate: Decimal | None = None
+    total_size: Decimal | None = None
     high_24h: Decimal | None = None
     low_24h: Decimal | None = None
     volume_24h_base: Decimal | None = None
@@ -130,6 +132,28 @@ class GateFuturesTicker(GateMessage):
             universal_ticker=str(ticker),
             rate=self.funding_rate,
             ts=ts,
+        )
+
+    def to_open_interest(
+        self,
+        ticker: UniversalTicker,
+        *,
+        contract_size: Decimal,
+        ts: float = 0.0,
+    ) -> OpenInterest | None:
+        """One side, in base, when this row named ``total_size``.
+
+        ``ts`` is the frame stamp (or local receive) the caller already
+        chose. The row's ``t`` is used only when the caller omitted one.
+        """
+        if self.total_size is None:
+            return None
+        stamp = ts if ts > 0 else _ts(self.t)
+        fields: dict[str, Any] = {} if stamp <= 0 else {"ts": stamp}
+        return OpenInterest(
+            universal_ticker=str(ticker),
+            qty=contracts_to_base(self.total_size, contract_size),
+            **fields,
         )
 
 

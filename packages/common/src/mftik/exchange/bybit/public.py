@@ -48,6 +48,7 @@ from mftik.exchange.models import (
     FundingRate,
     Kline,
     Liquidation,
+    OpenInterest,
     OrderBook,
     Ticker,
     Trade,
@@ -95,6 +96,10 @@ LIQUIDATION_PRODUCTS = frozenset({LINEAR, INVERSE})
 #: inverse perps arrive as ``Perp`` too; ``inverse`` is a product, not one of
 #: our categories.
 FUNDING_CATEGORIES = frozenset({Category.PERP})
+
+#: Categories that publish open interest. Spot has none. A dated
+#: future does — unlike funding, which only a perpetual settles.
+OPEN_INTEREST_CATEGORIES = frozenset({Category.PERP, Category.FUTURE})
 
 
 def venue_interval(interval: str) -> str:
@@ -297,6 +302,30 @@ class BybitPublicClient(BaseClient):
             )
         return self._funding_rates(ticker)
 
+    def stream_open_interest(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[OpenInterest]:
+        """``tickers`` — refused on spot, before the iterator runs.
+
+        Shares the ticker wire with ``stream_ticker`` / ``stream_funding_rate``.
+        A late joiner is silent until the next ``openInterest``-bearing
+        delta; nothing is REST-filled. A dated future is answered.
+        """
+        self._ensure_connected()
+        if ticker.venue != self.name:
+            raise ValueError(
+                f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
+            )
+        if ticker.category not in OPEN_INTEREST_CATEGORIES:
+            names = ", ".join(
+                sorted(c.value for c in OPEN_INTEREST_CATEGORIES)
+            )
+            raise ValueError(
+                f"Bybit {ticker.category} serves no open interest stream; "
+                f"supported: {names}"
+            )
+        return self._open_interests(ticker)
+
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         """``tickers`` — skipping the deltas that carry no price.
 
@@ -392,6 +421,21 @@ class BybitPublicClient(BaseClient):
                 continue
             yield funding
 
+    async def _open_interests(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[OpenInterest]:
+        """``tickers`` — yield when the delta names a size."""
+        native, product = await self._resolve(ticker)
+        feed = await self.feed_for(product)
+        stream = await feed.subscribe_tickers(native)
+        async for row, ts in self._rows(stream):
+            if row.symbol != native:
+                continue
+            interest = row.to_open_interest(ticker, ts=ts)
+            if interest is None:
+                continue
+            yield interest
+
     # --- stream plumbing ---------------------------------------------------
 
     @staticmethod
@@ -432,6 +476,7 @@ __all__ = [
     "BYBIT_INTERVALS",
     "FUNDING_CATEGORIES",
     "LIQUIDATION_PRODUCTS",
+    "OPEN_INTEREST_CATEGORIES",
     "BybitPublicClient",
     "venue_interval",
 ]

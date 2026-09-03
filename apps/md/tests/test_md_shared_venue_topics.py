@@ -12,7 +12,13 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from mftik.exchange.models import AggTrade, BestQuote, FundingRate, Ticker
+from mftik.exchange.models import (
+    AggTrade,
+    BestQuote,
+    FundingRate,
+    OpenInterest,
+    Ticker,
+)
 from mftik.exchange.tickers import UniversalTicker
 from mftik_md.session.dispatcher import Dispatcher
 from mftik_md.session.venue import VenueSession
@@ -163,6 +169,73 @@ async def test_detach_ticker_leaves_the_funding_rate_pump_fed() -> None:
     assert "funding_rate" not in public.closed
     public.push("funding_rate", _funding(rate="0.0003"))
     await _wait_until(lambda: seen.count("funding_rate") >= 2)
+    await sess.stop()
+
+
+def _open_interest(*, qty: str = "1000") -> OpenInterest:
+    return OpenInterest(
+        universal_ticker=str(FAKE),
+        qty=Decimal(qty),
+        ts=1_700_000_000.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_detach_open_interest_leaves_the_ticker_pump_fed() -> None:
+    public = FakePublic()
+    seen: list[str] = []
+
+    async def _on_update(topic, ticker, env) -> None:  # noqa: ANN001
+        seen.append(f"{topic}:{env.payload.get('last', env.payload.get('qty'))}")
+
+    disp = Dispatcher(broker=None)  # type: ignore[arg-type]
+    sess = VenueSession(FAKE.venue, public, on_update=_on_update)
+    await sess.start()
+    disp.subscribe("s1", "ticker", FAKE)
+    disp.subscribe("s1", "open_interest", FAKE)
+    await sess.ensure_feed("ticker", FAKE)
+    await sess.ensure_feed("open_interest", FAKE)
+    await _wait_until(
+        lambda: "ticker" in public.opened and "open_interest" in public.opened
+    )
+
+    emptied, rc = disp.unsubscribe("s1", "open_interest", FAKE)
+    assert emptied and rc == 0
+    await sess.stop_feed("open_interest", FAKE)
+    await _wait_until(lambda: "open_interest" in public.closed)
+
+    assert "ticker" not in public.closed
+    assert disp.refcount("ticker", FAKE) == 1
+    public.push("ticker", _ticker(last="200"))
+    await _wait_until(lambda: any(row.startswith("ticker:200") for row in seen))
+    await sess.stop()
+
+
+@pytest.mark.asyncio
+async def test_detach_ticker_leaves_the_open_interest_pump_fed() -> None:
+    public = FakePublic()
+    seen: list[object] = []
+
+    async def _on_update(topic, ticker, env) -> None:  # noqa: ANN001
+        seen.append(topic)
+
+    disp = Dispatcher(broker=None)  # type: ignore[arg-type]
+    sess = VenueSession(FAKE.venue, public, on_update=_on_update)
+    await sess.start()
+    disp.subscribe("s1", "ticker", FAKE)
+    disp.subscribe("s1", "open_interest", FAKE)
+    await sess.ensure_feed("ticker", FAKE)
+    await sess.ensure_feed("open_interest", FAKE)
+    await _wait_until(lambda: len(seen) >= 2)
+
+    emptied, _ = disp.unsubscribe("s1", "ticker", FAKE)
+    assert emptied
+    await sess.stop_feed("ticker", FAKE)
+    await _wait_until(lambda: "ticker" in public.closed)
+
+    assert "open_interest" not in public.closed
+    public.push("open_interest", _open_interest(qty="2000"))
+    await _wait_until(lambda: seen.count("open_interest") >= 2)
     await sess.stop()
 
 

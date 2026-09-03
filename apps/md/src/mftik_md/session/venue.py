@@ -16,6 +16,7 @@ from mftik.protocol import (
     MD_FUNDING_RATE,
     MD_KLINE,
     MD_LIQUIDATION,
+    MD_OPEN_INTEREST,
     MD_ORDERBOOK,
     MD_TICKER,
     MD_TRADE,
@@ -34,14 +35,15 @@ class MarketDataConnector(Protocol):
     provide: a lifecycle and the three feeds nobody lacks.
 
     ``stream_kline``, ``stream_best_quote``, ``stream_agg_trades``,
-    ``stream_liquidation`` and ``stream_funding_rate`` are deliberately
-    absent. Gate serves the first two and paper does not; only Binance has
-    the third; Bybit, OKX, GateFutures and ``BinanceFuture`` have the
-    fourth; perpetual venues have the fifth. A venue that cannot should have
-    no such method rather than one that raises — :meth:`VenueSession._open`
-    looks for them and refuses the subscribe when they are missing, which
-    is the same answer one venue short of the full set was always going to
-    give.
+    ``stream_liquidation``, ``stream_funding_rate`` and
+    ``stream_open_interest`` are deliberately absent. Gate serves kline
+    and best-quote and paper does not; only Binance has the aggregated
+    tape; Bybit, OKX, GateFutures and ``BinanceFuture`` have
+    liquidations; perpetual venues have funding. Open interest is the
+    same optional: a venue that cannot should have no such method rather
+    than one that raises — :meth:`VenueSession._open` looks for them and
+    refuses the subscribe when they are missing, which is the same
+    answer one venue short of the full set was always going to give.
 
     Streams are opened on a :class:`~mftik.exchange.tickers.UniversalTicker`, not
     a symbol. A unified-account venue is one connector serving several markets,
@@ -79,6 +81,12 @@ TOPIC_LIQUIDATION = "liquidation"
 #: by name. A late joiner on a ticker-shared wire (Bybit, Gate) is silent
 #: until the next rate-bearing delta — the pump is not REST-filled.
 TOPIC_FUNDING_RATE = "funding_rate"
+#: Current open interest. Contract venues that push it publish a stream;
+#: Binance futures and every spot / paper book have no method and the
+#: subscribe is refused by name. A late joiner on a ticker-shared wire
+#: (Bybit, Gate) is silent until the next size-bearing delta — the pump
+#: is not REST-filled.
+TOPIC_OPEN_INTEREST = "open_interest"
 #: Klines need an interval, and a feed key is only ``topic.ticker`` — so the
 #: interval rides in the topic: ``kline_1m.Paper_Spot_BTCUSDT``. The split is
 #: on ``.``, so the underscore here is not ambiguous with the ticker's.
@@ -194,6 +202,8 @@ class VenueSession:
             return self._stream("stream_liquidation")(ticker), MD_LIQUIDATION
         if topic == TOPIC_FUNDING_RATE:
             return self._stream("stream_funding_rate")(ticker), MD_FUNDING_RATE
+        if topic == TOPIC_OPEN_INTEREST:
+            return self._stream("stream_open_interest")(ticker), MD_OPEN_INTEREST
         if topic.startswith(KLINE_PREFIX):
             interval = topic[len(KLINE_PREFIX) :]
             if not interval:

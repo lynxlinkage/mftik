@@ -5,22 +5,28 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from mftik.exchange.models import FundingRate, Kline
+from mftik.exchange.models import FundingRate, Kline, OpenInterest
 from mftik.protocol import (
     MD_FETCH_FUNDING_HISTORY,
     MD_FETCH_KLINES,
+    MD_FETCH_OPEN_INTEREST,
     MD_FUNDING_HISTORY_RESULT,
     MD_KLINES_RESULT,
+    MD_OPEN_INTEREST_RESULT,
     MD_QUERY_ACK,
     Envelope,
     MdFetchFundingHistory,
     MdFetchFundingHistoryEnvelope,
     MdFetchKlines,
     MdFetchKlinesEnvelope,
+    MdFetchOpenInterest,
+    MdFetchOpenInterestEnvelope,
     MdFundingHistoryResult,
     MdFundingHistoryResultEnvelope,
     MdKlinesResult,
     MdKlinesResultEnvelope,
+    MdOpenInterestResult,
+    MdOpenInterestResultEnvelope,
     MdQueryAck,
     MdQueryAckEnvelope,
     QueryCode,
@@ -346,3 +352,68 @@ def test_empty_funding_history_success_is_not_a_failure() -> None:
     assert result.ok is True
     assert result.rates == []
     assert result.error_code == QueryCode.NONE
+
+
+def test_open_interest_roundtrips_json() -> None:
+    row = OpenInterest(
+        universal_ticker="Bybit_Perp_BTCUSDT",
+        qty=Decimal("1234.5"),
+        ts=1_700_000_000.0,
+    )
+    restored = OpenInterest.model_validate(row.model_dump(mode="json"))
+    assert restored.qty == Decimal("1234.5")
+    assert isinstance(restored.qty, Decimal)
+    assert restored.ts == 1_700_000_000.0
+
+
+def test_open_interest_fetch_request_roundtrip() -> None:
+    env = Envelope[MdFetchOpenInterest].wrap(
+        MdFetchOpenInterest(
+            reply_channel=Topics.md_fetch_reply("sess-1"),
+            query_id="sess-1:9",
+            ticker="Bybit_Perp_BTCUSDT",
+        ),
+        type=MD_FETCH_OPEN_INTEREST,
+        source="strategy.noop",
+        session_id="sess-1",
+    )
+    restored = MdFetchOpenInterestEnvelope.from_json(env.to_json())
+
+    assert restored.type == MD_FETCH_OPEN_INTEREST
+    assert restored.payload.ticker == "Bybit_Perp_BTCUSDT"
+
+
+def test_open_interest_result_roundtrip() -> None:
+    env = MdOpenInterestResultEnvelope.wrap(
+        MdOpenInterestResult(
+            query_id="q1",
+            ticker="Bybit_Perp_BTCUSDT",
+            open_interest=OpenInterest(
+                universal_ticker="Bybit_Perp_BTCUSDT",
+                qty=Decimal("1000"),
+                ts=1_700_000_000.0,
+            ),
+        ),
+        type=MD_OPEN_INTEREST_RESULT,
+        source="md",
+        session_id="sess-1",
+    )
+    restored = MdOpenInterestResultEnvelope.from_json(env.to_json())
+
+    assert restored.payload.ok is True
+    row = restored.payload.open_interest
+    assert row is not None
+    assert row.qty == Decimal("1000")
+    assert isinstance(row.qty, Decimal)
+
+
+def test_failed_open_interest_result_has_no_print() -> None:
+    result = MdOpenInterestResult(
+        query_id="q1",
+        ticker="Bybit_Perp_BTCUSDT",
+        ok=False,
+        error_code=QueryCode.MD_VENUE_UNSUPPORTED_READ,
+        reason="venue 'Paper' does not serve fetch_open_interest",
+    )
+    assert result.open_interest is None
+    assert result.ok is False

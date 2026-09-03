@@ -73,6 +73,28 @@ def test_a_ticker_without_a_rate_is_not_a_funding_print() -> None:
     assert row.to_funding_rate(TICKER, ts=1.0) is None
 
 
+def test_a_ticker_with_total_size_converts_to_base() -> None:
+    row = GateFuturesTicker.model_validate(
+        {
+            "contract": "BTC_USDT",
+            "last": "60000",
+            "total_size": "1000",
+            "t": 1_700_000_000,
+        }
+    )
+    interest = row.to_open_interest(TICKER, contract_size=CS)
+    assert interest is not None
+    assert interest.qty == Decimal("0.1")
+    assert interest.ts == 1_700_000_000.0
+
+
+def test_a_ticker_without_total_size_is_not_an_open_interest_print() -> None:
+    row = GateFuturesTicker.model_validate(
+        {"contract": "BTC_USDT", "last": "60000"}
+    )
+    assert row.to_open_interest(TICKER, contract_size=CS, ts=1.0) is None
+
+
 def test_public_trade_size_is_base_and_signed() -> None:
     trade = GateFuturesTrade.model_validate(
         {

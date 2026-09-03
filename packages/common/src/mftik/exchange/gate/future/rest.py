@@ -34,6 +34,7 @@ from mftik.exchange.models import (
     BookLevel,
     FundingRate,
     Kline,
+    OpenInterest,
     OrderBook,
     Ticker,
 )
@@ -222,13 +223,41 @@ class GateFuturesPublicRest(_Transport):
         rows = await self._get(f"{FUTURES_PREFIX}/contracts")
         return list(rows or [])
 
-    async def fetch_ticker(
-        self, contract: str, *, ticker: UniversalTicker
-    ) -> Ticker:
+    async def fetch_ticker_row(self, contract: str) -> GateFuturesTicker:
+        """``tickers`` — the venue's row, sizes and all.
+
+        The shared :class:`~mftik.exchange.models.Ticker` drops
+        ``total_size``. A caller that needs the contract figure asks
+        here rather than reconstructing it.
+        """
         rows = await self._get(f"{FUTURES_PREFIX}/tickers", {"contract": contract})
         if not rows:
             raise GateRestError(200, "not_found", f"no ticker for {contract}")
-        return GateFuturesTicker.model_validate(rows[0]).to_ticker(ticker)
+        return GateFuturesTicker.model_validate(rows[0])
+
+    async def fetch_ticker(
+        self, contract: str, *, ticker: UniversalTicker
+    ) -> Ticker:
+        return (await self.fetch_ticker_row(contract)).to_ticker(ticker)
+
+    async def fetch_open_interest(
+        self,
+        contract: str,
+        *,
+        ticker: UniversalTicker,
+        contract_size: Decimal,
+    ) -> OpenInterest:
+        """``tickers`` — current size, converted to base.
+
+        ``contract_stats`` is a history series and is not this read.
+        """
+        row = await self.fetch_ticker_row(contract)
+        interest = row.to_open_interest(ticker, contract_size=contract_size)
+        if interest is None:
+            raise GateRestError(
+                200, "not_found", f"no total_size for {contract}"
+            )
+        return interest
 
     async def fetch_funding_history(
         self, contract: str, *, ticker: UniversalTicker, limit: int = 100

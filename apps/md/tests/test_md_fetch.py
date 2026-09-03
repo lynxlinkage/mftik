@@ -16,6 +16,7 @@ from mftik.exchange.models import (
     BookLevel,
     FundingRate,
     Kline,
+    OpenInterest,
     OrderBook,
 )
 from mftik.exchange.tickers import UniversalTicker
@@ -24,24 +25,29 @@ from mftik.protocol import (
     MD_FETCH_BESTQUOTE,
     MD_FETCH_FUNDING_HISTORY,
     MD_FETCH_KLINES,
+    MD_FETCH_OPEN_INTEREST,
     MD_FETCH_ORDERBOOK,
     MD_FUNDING_HISTORY_RESULT,
     MD_KLINES_RESULT,
+    MD_OPEN_INTEREST_RESULT,
     MD_ORDERBOOK_RESULT,
     Envelope,
     MdBestQuoteResult,
     MdFetchBestQuote,
     MdFetchFundingHistory,
     MdFetchKlines,
+    MdFetchOpenInterest,
     MdFetchOrderBook,
     MdFundingHistoryResult,
     MdKlinesResult,
+    MdOpenInterestResult,
     MdOrderBookResult,
     MdQueryAck,
     QueryCode,
     Topics,
 )
 from mftik_md.fetch import FetchSession, NoReaderError
+from mftik_md.fetch.readers import BinanceSpotReader, GateSpotReader
 
 VENUE = "Gate"
 SYMBOL = "BTCUSDT"
@@ -78,6 +84,8 @@ class FakeReader:
         self.quote: BestQuote | None = None
         self.rates: list[FundingRate] = []
         self.rate_calls: list[tuple[str, int]] = []
+        self.interest: OpenInterest | None = None
+        self.interest_calls: list[str] = []
 
     async def connect(self) -> None:
         self.connects += 1
@@ -121,6 +129,20 @@ class FakeReader:
         if self.raises is not None:
             raise self.raises
         return list(self.rates)
+
+    async def fetch_open_interest(
+        self, ticker: UniversalTicker
+    ) -> OpenInterest:
+        self.interest_calls.append(ticker.symbol)
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.raises is not None:
+            raise self.raises
+        return self.interest or OpenInterest(
+            universal_ticker=str(ticker),
+            qty=Decimal("1000"),
+            ts=1_700_000_000.0,
+        )
 
 
 class FakeFactory:
@@ -172,6 +194,7 @@ class Caller:
             MD_ORDERBOOK_RESULT: MdOrderBookResult,
             MD_BESTQUOTE_RESULT: MdBestQuoteResult,
             MD_FUNDING_HISTORY_RESULT: MdFundingHistoryResult,
+            MD_OPEN_INTEREST_RESULT: MdOpenInterestResult,
         }
 
         async def _pump() -> None:
@@ -735,6 +758,56 @@ async def test_a_venue_without_funding_history_is_refused_by_name(
     await session.stop()
 
 
+async def test_open_interest_arrives_as_one_print(
+    broker: Broker, caller: Caller
+) -> None:
+    reader = FakeReader()
+    reader.interest = OpenInterest(
+        universal_ticker=str(TICKER),
+        qty=Decimal("1234.5"),
+        ts=1_700_000_000.0,
+    )
+    session = FetchSession(broker, FakeFactory(reader))
+    await session.start()
+    await asyncio.sleep(0.05)
+
+    await caller.ask(type=MD_FETCH_OPEN_INTEREST, payload=_oi_req())
+    result = await caller.next_result(model=MdOpenInterestResult)
+
+    assert result.ok is True
+    assert result.open_interest is not None
+    assert result.open_interest.qty == Decimal("1234.5")
+    assert reader.interest_calls == [SYMBOL]
+
+    await session.stop()
+
+
+async def test_a_venue_without_open_interest_is_refused_by_name(
+    broker: Broker, caller: Caller
+) -> None:
+    class NoOpenInterest(FakeReader):
+        fetch_open_interest = None
+
+    session = FetchSession(broker, FakeFactory(NoOpenInterest()))
+    await session.start()
+    await asyncio.sleep(0.05)
+
+    await caller.ask(type=MD_FETCH_OPEN_INTEREST, payload=_oi_req())
+    result = await caller.next_result(model=MdOpenInterestResult)
+
+    assert result.ok is False
+    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
+    assert result.open_interest is None
+    assert "fetch_open_interest" in result.reason
+
+    await session.stop()
+
+
+def test_spot_readers_have_no_open_interest_method() -> None:
+    assert not hasattr(BinanceSpotReader, "fetch_open_interest")
+    assert not hasattr(GateSpotReader, "fetch_open_interest")
+
+
 def _book_req(depth: int = 10) -> MdFetchOrderBook:
     return MdFetchOrderBook(
         reply_channel=REPLY, query_id="q1", ticker=str(TICKER), depth=depth
@@ -750,4 +823,10 @@ def _quote_req() -> MdFetchBestQuote:
 def _funding_req(limit: int = 100) -> MdFetchFundingHistory:
     return MdFetchFundingHistory(
         reply_channel=REPLY, query_id="q1", ticker=str(TICKER), limit=limit
+    )
+
+
+def _oi_req() -> MdFetchOpenInterest:
+    return MdFetchOpenInterest(
+        reply_channel=REPLY, query_id="q1", ticker=str(TICKER)
     )

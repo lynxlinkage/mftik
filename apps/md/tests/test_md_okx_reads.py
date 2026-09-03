@@ -22,12 +22,19 @@ from mftik_md.fetch.readers import NoReaderError, OkxReader, VenueReaderFactory
 
 SPOT = UniversalTicker.parse("Okx_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Okx_Perp_BTCUSDT")
+FUTURE = UniversalTicker.parse("Okx_Future_BTCUSDT")
+INVERSE = UniversalTicker.parse("Okx_Inverse_BTCUSD")
+OPTION = UniversalTicker.parse("Okx_Option_BTCUSDT")
 BASE = "https://okx.test"
 
 
 class StubSymbols:
     async def exch_ticker(self, ticker: UniversalTicker) -> str:
-        return "BTC-USDT-SWAP" if ticker.category is Category.PERP else "BTC-USDT"
+        if ticker.category is Category.PERP:
+            return "BTC-USDT-SWAP"
+        if ticker.category is Category.FUTURE:
+            return "BTC-USDT-260327"
+        return "BTC-USDT"
 
     async def symbol_for(
         self, venue: str, exch_ticker: str, *, category: str
@@ -35,7 +42,7 @@ class StubSymbols:
         return UniversalTicker.of(venue, category, "BTCUSDT")
 
     async def contract_size(self, ticker: UniversalTicker) -> Decimal | None:
-        if ticker.category is Category.PERP:
+        if ticker.category in {Category.PERP, Category.FUTURE}:
             return Decimal("0.01")
         return None
 
@@ -189,6 +196,57 @@ async def test_funding_history_reverses_newest_first_and_refuses_spot() -> None:
     with pytest.raises(NoReaderError, match="Spot"):
         await _reader(api).fetch_funding_history(SPOT, limit=5)
     assert len(api.requests) == before
+
+
+async def test_open_interest_uses_oi_ccy_and_serves_swap_only() -> None:
+    api = FakeApi()
+    api.results["/api/v5/public/open-interest"] = [
+        {
+            "instId": "BTC-USDT-SWAP",
+            "instType": "SWAP",
+            "oi": "1000",
+            "oiCcy": "10",
+            "ts": "1700000000000",
+        }
+    ]
+
+    row = await _reader(api).fetch_open_interest(PERP)
+
+    query = api.query_for("/api/v5/public/open-interest")
+    assert "instType=SWAP" in query
+    assert "instId=BTC-USDT-SWAP" in query
+    assert row.qty == Decimal("10")
+    assert row.ts == 1_700_000_000.0
+    assert row.universal_ticker == str(PERP)
+
+    # Everything but Perp is refused before HTTP, and refused the way the
+    # stream refuses it: this venue lists Spot + Perp, and a dated future
+    # would answer in base while its book and tape stay in contracts.
+    # ``Inverse`` is the one that used to reach ``product_of`` and come
+    # back as a venue call that failed rather than a read we do not serve.
+    before = len(api.requests)
+    for ticker, name in (
+        (SPOT, "Spot"),
+        (FUTURE, "Future"),
+        (INVERSE, "Inverse"),
+        (OPTION, "Option"),
+    ):
+        with pytest.raises(NoReaderError, match=name):
+            await _reader(api).fetch_open_interest(ticker)
+    assert len(api.requests) == before
+    assert (
+        normalize(NoReaderError("Okx Spot serves no open interest"), venue="Okx")
+        is QueryCode.MD_VENUE_UNSUPPORTED_READ
+    )
+
+
+async def test_open_interest_falls_back_to_contracts_times_size() -> None:
+    api = FakeApi()
+    api.results["/api/v5/public/open-interest"] = [
+        {"instId": "BTC-USDT-SWAP", "instType": "SWAP", "oi": "1000"}
+    ]
+    row = await _reader(api).fetch_open_interest(PERP)
+    assert row.qty == Decimal("10")
 
 
 async def test_a_ticker_from_another_venue_is_refused() -> None:

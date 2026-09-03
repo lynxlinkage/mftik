@@ -39,7 +39,7 @@ from mftik.exchange.binance.rest import (
     BinanceRestTransport,
     BinanceSignedRest,
 )
-from mftik.exchange.models import FundingRate, Kline, OrderBook, Ticker
+from mftik.exchange.models import FundingRate, Kline, OpenInterest, OrderBook, Ticker
 from mftik.exchange.tickers import UniversalTicker
 from mftik.symbols.listed import ListedInstrument
 
@@ -60,7 +60,7 @@ class BinanceFutureRestError(BinanceRestError):
 
 
 class BinanceFuturePublicRest(BinanceRestTransport):
-    """The two public reads the futures WebSocket API does not serve."""
+    """Public reads the futures WebSocket API does not serve."""
 
     default_base_url = BINANCE_FUTURE_REST_URL
     error_type = BinanceFutureRestError
@@ -150,6 +150,33 @@ class BinanceFuturePublicRest(BinanceRestTransport):
             )
             for row in rows or []
         ]
+
+    async def fetch_open_interest(
+        self, symbol: str, *, ticker: UniversalTicker
+    ) -> OpenInterest:
+        """``GET /fapi/v1/openInterest`` — current size, already in base.
+
+        Absent means the read failed, not that nothing is open. Binance
+        answers a refusal with 4xx and a ``code``, which the transport
+        raises on; what reaches here without the field is a 2xx whose body
+        did not parse as JSON, and :meth:`BinanceRestTransport._parse`
+        hands that back as ``None``. Defaulting it to zero would publish a
+        print indistinguishable from the real zero a newly listed contract
+        has — and ``MdOpenInterestResult`` says an ``ok`` zero is a real
+        answer.
+        """
+        row = await self._get(f"{API_PREFIX}/openInterest", {"symbol": symbol})
+        if not isinstance(row, dict) or row.get("openInterest") in (None, ""):
+            raise BinanceFutureRestError(
+                200, None, f"no openInterest for {symbol}"
+            )
+        stamp = secs(row.get("time"))
+        fields: dict[str, Any] = {} if stamp <= 0 else {"ts": stamp}
+        return OpenInterest(
+            universal_ticker=str(ticker),
+            qty=Decimal(str(row["openInterest"])),
+            **fields,
+        )
 
 
 class BinanceFutureRest(BinanceSignedRest):

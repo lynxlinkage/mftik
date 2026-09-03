@@ -500,7 +500,7 @@ method starts sharing and not later:
 | Folded book joining a raw-held topic | One deliberate resync; blind for one RTT, including for the raw consumer |
 | Unfolded book (`subscribe_book_deltas`) joining a folder | Refuse — a joiner can never recover |
 | Unfolded book joining another unfolded consumer | Shared, no replay, deltas from here on |
-| Bybit / Gate `tickers` split across `ticker` + `funding_rate` | Silent until the field that pump reads next appears. Documented, not REST-filled |
+| Bybit / Gate `tickers` split across `ticker` + `funding_rate` + `open_interest` | Silent until the field that pump reads next appears. Documented, not REST-filled |
 | Binance `@bookTicker` shared by `ticker` + `bestquote` | Every push is a snapshot, so the next print is enough |
 | OKX `bbo-tbt`, `books5` | Always-snapshot channels; next push is enough |
 
@@ -857,6 +857,10 @@ it" is still true of the product ledger, and feed pinning is still the
 exception to refcount-zero. This epic adds a second ledger below it and
 changes neither `ensure_feed` nor `_stop_feed_if_unused`.
 
+`docs/MdOpenInterest.md` is the product-topic record for `open_interest`.
+It does not reopen these tickets. OI-4 edits one late-joiner row here
+when that feed lands.
+
 Update a doc in the ticket that makes its sentence false, not in a mop-up
 ticket.
 
@@ -878,9 +882,9 @@ the method.
 
 ## Out of scope (later epics)
 
-- **`open_interest` as a product topic.** Same shape. Note that
-  BinanceFuture USD-M has no WS channel for it, so that venue would have to
-  refuse the feed rather than poll REST inside a push.
+- **`open_interest` as a product topic.** Moved to
+  `docs/MdOpenInterest.md`. Binance still has no WS channel; that
+  venue refuses the feed rather than polling REST inside a push.
 - **`next_funding_time`.** Bybit sends it on the ticker and the model drops
   it (`extra="ignore"`); Gate does not send it on the wire at all
   (`funding_next_apply` is REST, in unix seconds). Deriving it needs either

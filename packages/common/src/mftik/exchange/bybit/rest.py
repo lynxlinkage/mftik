@@ -68,6 +68,7 @@ from mftik.exchange.models import (
     Balance,
     FundingRate,
     Kline,
+    OpenInterest,
     OrderBook,
     Ticker,
 )
@@ -127,6 +128,20 @@ class _BybitRestTransport:
         return {"Accept": "application/json"}
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        result, _ = await self._get_stamped(path, params)
+        return result
+
+    async def _get_stamped(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> tuple[Any, float]:
+        """The result, and Bybit's own ``time`` from around it.
+
+        ``_get`` drops the second half because ``result`` is all any other
+        read wants. A snapshot that has to say *when* wants the envelope:
+        v5 rows carry no clock of their own, so the only other answer is
+        local receive, which stamps our own latency rather than the
+        venue's.
+        """
         await self.connect()
         assert self._client is not None
         # Built once and used twice: the signature covers this exact string, so
@@ -134,7 +149,8 @@ class _BybitRestTransport:
         query = query_string(params)
         url = f"{path}?{query}" if query else path
         response = await self._client.get(url, headers=self._headers(query))
-        return self._parse(response, path)
+        payload = self._parse(response, path)
+        return _result_of(payload), _envelope_secs(payload)
 
     async def _post(self, path: str, args: dict[str, Any] | None = None) -> Any:
         await self.connect()
@@ -143,7 +159,7 @@ class _BybitRestTransport:
         headers = self._headers(body)
         headers["Content-Type"] = "application/json"
         response = await self._client.post(path, content=body, headers=headers)
-        return self._parse(response, path)
+        return _result_of(self._parse(response, path))
 
     def _parse(self, response: httpx.Response, path: str) -> Any:
         try:
@@ -170,7 +186,24 @@ class _BybitRestTransport:
                 status=response.status_code,
                 op=path,
             )
-        return payload.get("result") or {}
+        # The whole envelope, narrowed by the callers: ``_get`` and ``_post``
+        # want ``result``, and :meth:`_get_stamped` also wants ``time``.
+        return payload
+
+
+def _result_of(payload: Any) -> Any:
+    """The ``result`` object every v5 reply wraps its answer in."""
+    return payload.get("result") or {} if isinstance(payload, dict) else {}
+
+
+def _envelope_secs(payload: Any) -> float:
+    """Bybit's envelope ``time`` in seconds, or 0.0 when it sent none."""
+    if not isinstance(payload, dict):
+        return 0.0
+    try:
+        return float(payload.get("time") or 0) / 1000.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 class BybitPublicRest(_BybitRestTransport):
@@ -319,6 +352,39 @@ class BybitPublicRest(_BybitRestTransport):
             )
             for row in reversed(rows)
         ]
+
+    async def fetch_open_interest(
+        self,
+        product: str,
+        symbol: str,
+        *,
+        ticker: UniversalTicker,
+    ) -> OpenInterest:
+        """``tickers`` — current size, already in base, stamped by Bybit.
+
+        Read through :meth:`_get_stamped` rather than
+        :meth:`fetch_ticker_row` for the stamp alone: the row has no clock,
+        and a snapshot whose ``ts`` is local receive tells a caller how
+        long *we* took, which is not what it asked.
+
+        The dedicated ``/v5/market/open-interest`` endpoint is a
+        history series and is not this read.
+        """
+        result, stamp = await self._get_stamped(
+            ch.MARKET_TICKERS, {"category": product, "symbol": symbol}
+        )
+        rows = result.get("list") or []
+        if not rows:
+            raise BybitRestError(
+                None, f"no ticker for {symbol}", op=ch.MARKET_TICKERS
+            )
+        row = BybitTicker.model_validate(rows[0])
+        interest = row.to_open_interest(ticker, ts=stamp)
+        if interest is None:
+            raise BybitRestError(
+                None, f"no openInterest for {symbol}", op=ch.MARKET_TICKERS
+            )
+        return interest
 
     async def server_time(self) -> float:
         """``time`` — Bybit's clock, in seconds.

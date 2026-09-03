@@ -14,6 +14,7 @@ from mftik.exchange.models import (
     FundingRate,
     Kline,
     Liquidation,
+    OpenInterest,
     OrderBook,
     Ticker,
     Trade,
@@ -25,6 +26,7 @@ from mftik.protocol import (
     MD_FUNDING_RATE,
     MD_KLINE,
     MD_LIQUIDATION,
+    MD_OPEN_INTEREST,
     MD_ORDERBOOK,
     MD_TICKER,
     MD_TRADE,
@@ -175,6 +177,18 @@ class FakePublic:
             ),
         )
 
+    def stream_open_interest(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[OpenInterest]:
+        return self._once(
+            "open_interest",
+            OpenInterest(
+                universal_ticker=str(ticker),
+                qty=Decimal("1000"),
+                ts=1_700_000_000.0,
+            ),
+        )
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -187,6 +201,7 @@ class FakePublic:
         ("bestquote", MD_BEST_QUOTE),
         ("liquidation", MD_LIQUIDATION),
         ("funding_rate", MD_FUNDING_RATE),
+        ("open_interest", MD_OPEN_INTEREST),
         ("kline_1m", MD_KLINE),
     ],
 )
@@ -291,6 +306,21 @@ async def test_a_venue_without_funding_rate_refuses_that_topic() -> None:
     await sess.start()
     with pytest.raises(ValueError, match="does not publish stream_funding_rate"):
         await sess.ensure_feed("funding_rate", FAKE)
+    assert sess.feed_count == 0
+    await sess.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_venue_without_open_interest_refuses_that_topic() -> None:
+    """A venue without the method refuses; contract books grow one later."""
+
+    class NoOpenInterest(FakePublic):
+        stream_open_interest = None
+
+    sess = VenueSession(FAKE.venue, NoOpenInterest(), on_update=_noop_update)
+    await sess.start()
+    with pytest.raises(ValueError, match="does not publish stream_open_interest"):
+        await sess.ensure_feed("open_interest", FAKE)
     assert sess.feed_count == 0
     await sess.stop()
 

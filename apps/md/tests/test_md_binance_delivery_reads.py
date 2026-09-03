@@ -7,7 +7,10 @@ from typing import Any
 
 import httpx
 import pytest
-from mftik.exchange.binance.delivery.rest import BinanceDeliveryPublicRest
+from mftik.exchange.binance.delivery.rest import (
+    BinanceDeliveryPublicRest,
+    BinanceDeliveryRestError,
+)
 from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.tickers import UniversalTicker
 from mftik_md.fetch.readers import BinanceDeliveryReader, VenueReaderFactory
@@ -155,6 +158,47 @@ async def test_funding_history_is_oldest_first() -> None:
     assert api.query("/dapi/v1/fundingRate") == {"symbol": NATIVE, "limit": "5"}
     assert [row.ts for row in rows] == [1_700_000_000.0, 1_700_028_800.0]
     assert rows[0].rate == Decimal("0.0001")
+
+
+async def test_open_interest_stays_in_contracts() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/openInterest"] = {
+        "symbol": NATIVE,
+        "openInterest": "890",
+        "time": 1_700_000_000_000,
+    }
+
+    row = await _reader(api).fetch_open_interest(TICKER)
+
+    assert api.query("/dapi/v1/openInterest") == {"symbol": NATIVE}
+    assert row.qty == Decimal("890")
+    assert row.ts == 1_700_000_000.0
+    assert row.universal_ticker == str(TICKER)
+
+
+async def test_a_body_without_open_interest_is_a_failed_read() -> None:
+    """Absent is a failed read; the venue never omits the field on a 2xx.
+
+    A refusal comes back 4xx with a ``code`` and is raised in the
+    transport, so what lands here without it is a 2xx whose body did not
+    parse. Zero would be indistinguishable from the real zero a newly
+    listed contract has, and an ``ok`` zero is documented as a real print.
+    """
+    api = FakeApi()
+    api.results["/dapi/v1/openInterest"] = {"symbol": NATIVE}
+
+    with pytest.raises(BinanceDeliveryRestError, match="no openInterest"):
+        await _reader(api).fetch_open_interest(TICKER)
+
+    # A venue-sent zero still is one.
+    api.results["/dapi/v1/openInterest"] = {
+        "symbol": NATIVE,
+        "openInterest": "0",
+        "time": 1_700_000_000_000,
+    }
+    row = await _reader(api).fetch_open_interest(TICKER)
+    assert row.qty == Decimal("0")
+    assert row.ts == 1_700_000_000.0
 
 
 async def test_the_factory_builds_a_binance_delivery_reader() -> None:

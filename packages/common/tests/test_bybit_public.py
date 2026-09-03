@@ -737,6 +737,120 @@ async def test_spot_has_no_funding_rate_stream(bybit_public: FakeBybit) -> None:
             client.stream_funding_rate(UniversalTicker.parse("Bybit_Spot_BTCUSDT"))
 
 
+async def test_an_open_interest_only_delta_feeds_oi_not_the_ticker(
+    bybit_public: FakeBybit,
+) -> None:
+    client = _client(bybit_public, product="linear")
+    perp = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
+    async with client:
+        quotes = client.stream_ticker(perp)
+        sizes = client.stream_open_interest(perp)
+        quote_task = asyncio.ensure_future(quotes.__anext__())
+        size_task = asyncio.ensure_future(sizes.__anext__())
+        await asyncio.sleep(0.05)
+        await bybit_public.push(
+            "tickers.BTCUSDT",
+            {"symbol": NATIVE, "openInterest": "1234.5"},
+            kind="delta",
+            ts=1_700_000_000_000,
+        )
+        interest = await asyncio.wait_for(size_task, 2)
+        assert not quote_task.done()
+        await bybit_public.push(
+            "tickers.BTCUSDT",
+            {"symbol": NATIVE, "lastPrice": "60000"},
+        )
+        quote = await asyncio.wait_for(quote_task, 2)
+
+    assert interest.qty == Decimal("1234.5")
+    assert interest.ts == 1_700_000_000.0
+    assert quote.last == Decimal("60000")
+
+
+async def test_a_quoted_delta_without_open_interest_yields_neither_oi(
+    bybit_public: FakeBybit,
+) -> None:
+    client = _client(bybit_public, product="linear")
+    perp = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
+    async with client:
+        sizes = client.stream_open_interest(perp)
+        size_task = asyncio.ensure_future(sizes.__anext__())
+        await asyncio.sleep(0.05)
+        await bybit_public.push(
+            "tickers.BTCUSDT",
+            {"symbol": NATIVE, "lastPrice": "60000"},
+        )
+        await asyncio.sleep(0.05)
+        assert not size_task.done()
+        await bybit_public.push(
+            "tickers.BTCUSDT",
+            {"symbol": NATIVE, "openInterest": "9"},
+            ts=1_700_000_000_000,
+        )
+        interest = await asyncio.wait_for(size_task, 2)
+
+    assert interest.qty == Decimal("9")
+    size_task.cancel()
+
+
+async def test_ticker_and_open_interest_share_one_venue_subscription(
+    bybit_public: FakeBybit,
+) -> None:
+    client = _client(bybit_public, product="linear")
+    perp = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
+    async with client:
+        quotes = client.stream_ticker(perp)
+        sizes = client.stream_open_interest(perp)
+        quote_task = asyncio.ensure_future(quotes.__anext__())
+        size_task = asyncio.ensure_future(sizes.__anext__())
+        await asyncio.sleep(0.05)
+        assert len(bybit_public.frames_for("subscribe")) == 1
+        assert bybit_public.subscribed == {"tickers.BTCUSDT"}
+        await bybit_public.push(
+            "tickers.BTCUSDT",
+            {
+                "symbol": NATIVE,
+                "lastPrice": "60000",
+                "openInterest": "1234.5",
+            },
+            ts=1_700_000_000_000,
+        )
+        quote, interest = await asyncio.wait_for(
+            asyncio.gather(quote_task, size_task), 2
+        )
+
+    assert quote.last == Decimal("60000")
+    assert interest.qty == Decimal("1234.5")
+
+
+async def test_spot_has_no_open_interest_stream(bybit_public: FakeBybit) -> None:
+    client = _client(bybit_public)
+    async with client:
+        with pytest.raises(ValueError, match="serves no open interest stream"):
+            client.stream_open_interest(UniversalTicker.parse("Bybit_Spot_BTCUSDT"))
+
+
+async def test_a_dated_future_has_an_open_interest_stream(
+    bybit_public: FakeBybit,
+) -> None:
+    """A dated future has open interest; only spot is refused."""
+    client = _client(bybit_public, product="linear")
+    future = UniversalTicker.parse("Bybit_Future_BTCUSDT")
+    async with client:
+        stream = client.stream_open_interest(future)
+        task = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)
+        await bybit_public.push(
+            "tickers.BTCUSDT",
+            {"symbol": NATIVE, "openInterest": "4"},
+            ts=1_700_000_000_000,
+        )
+        interest = await asyncio.wait_for(task, 2)
+
+    assert interest.qty == Decimal("4")
+    assert interest.universal_ticker == str(future)
+
+
 async def test_a_dated_future_has_no_funding_rate_stream(
     bybit_public: FakeBybit,
 ) -> None:

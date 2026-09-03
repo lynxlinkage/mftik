@@ -426,6 +426,24 @@ def test_a_ticker_without_a_rate_is_not_a_funding_print() -> None:
     assert row.to_funding_rate(PERP, ts=1.0) is None
 
 
+def test_a_ticker_with_open_interest_converts() -> None:
+    row = BybitTicker.model_validate(
+        {"symbol": "BTCUSDT", "openInterest": "1234.5"}
+    )
+    interest = row.to_open_interest(PERP, ts=1_700_000_000.0)
+    assert interest is not None
+    assert interest.qty == Decimal("1234.5")
+    assert interest.ts == 1_700_000_000.0
+    assert not hasattr(interest, "open_interest_value")
+
+
+def test_a_ticker_without_open_interest_is_not_a_print() -> None:
+    row = BybitTicker.model_validate(
+        {"symbol": "BTCUSDT", "lastPrice": "60000"}
+    )
+    assert row.to_open_interest(PERP, ts=1.0) is None
+
+
 def test_a_quoted_ticker_keeps_both_sides() -> None:
     ticker = BybitTicker.model_validate(
         {

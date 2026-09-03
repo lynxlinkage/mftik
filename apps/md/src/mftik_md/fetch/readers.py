@@ -50,6 +50,9 @@ from mftik.exchange.bybit.protocol import (
     LINEAR,
     product_of,
 )
+from mftik.exchange.bybit.public import (
+    OPEN_INTEREST_CATEGORIES as BYBIT_OPEN_INTEREST_CATEGORIES,
+)
 from mftik.exchange.bybit.public import venue_interval as bybit_interval
 from mftik.exchange.bybit.rest import BybitPublicRest
 from mftik.exchange.gate.future.public import GATE_FUTURES_INTERVALS
@@ -60,8 +63,15 @@ from mftik.exchange.gate.future.rest import (
 from mftik.exchange.gate.spot.public import GATE_INTERVALS
 from mftik.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
-from mftik.exchange.models import BestQuote, FundingRate, Kline, OrderBook
+from mftik.exchange.models import (
+    BestQuote,
+    FundingRate,
+    Kline,
+    OpenInterest,
+    OrderBook,
+)
 from mftik.exchange.okx.protocol import OKX_REST_URL
+from mftik.exchange.okx.protocol import product_of as okx_product_of
 from mftik.exchange.okx.public import venue_interval as okx_interval
 from mftik.exchange.okx.rest import OkxPublicRest
 from mftik.exchange.symbols import SymbolResolver
@@ -285,6 +295,15 @@ class GateFuturesReader:
             pair, ticker=ticker, limit=limit
         )
 
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size, in base. Off the ticker row, not ``contract_stats``."""
+        pair = await self._pair(ticker)
+        return await self.rest.fetch_open_interest(
+            pair,
+            ticker=ticker,
+            contract_size=await self._multiplier(ticker),
+        )
+
 
 class BinanceSpotReader:
     """Binance spot reads over the WebSocket API, in canonical symbol and interval.
@@ -480,6 +499,11 @@ class BinanceFutureReader:
             native, ticker=ticker, limit=limit
         )
 
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size, already in base."""
+        native = await self._symbol(ticker)
+        return await self.rest.fetch_open_interest(native, ticker=ticker)
+
 
 class BinanceDeliveryReader:
     """Binance COIN-M reads over REST, in canonical symbol and interval.
@@ -575,6 +599,11 @@ class BinanceDeliveryReader:
         return await self.rest.fetch_funding_history(
             native, ticker=ticker, limit=limit
         )
+
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size, in contracts. Distinct from every linear book."""
+        native = await self._symbol(ticker)
+        return await self.rest.fetch_open_interest(native, ticker=ticker)
 
 
 class BybitReader:
@@ -681,6 +710,28 @@ class BybitReader:
             product, native, ticker=ticker, limit=limit
         )
 
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size, in base. Spot and options are refused before HTTP.
+
+        A dated future is answered: that book has open interest, unlike
+        funding, which only a perpetual settles.
+
+        Guarded on the set ``stream_open_interest`` guards on, and not on
+        a spot test of its own. I4 is that the query and the subscribe
+        refuse the same books; two guards spelled differently drift, and
+        the one that drifts wide sends an option ticker to the venue to
+        come back as ``MD_VENUE_CALL_FAILED`` — which reads as "the venue
+        broke" rather than "we do not serve this".
+        """
+        if ticker.category not in BYBIT_OPEN_INTEREST_CATEGORIES:
+            raise NoReaderError(
+                f"{self.venue} {ticker.category} serves no open interest"
+            )
+        native, product = await self._resolve(ticker)
+        return await self.rest.fetch_open_interest(
+            product, native, ticker=ticker
+        )
+
 
 class OkxReader:
     """OKX reads over REST, across every category the venue trades.
@@ -768,6 +819,34 @@ class OkxReader:
         native = await self._resolve(ticker)
         return await self.rest.fetch_funding_history(
             native, ticker=ticker, limit=limit
+        )
+
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size, in base. Non-SWAP is refused before HTTP.
+
+        The same books ``stream_open_interest`` serves
+        (:data:`~mftik.exchange.okx.public.OPEN_INTEREST_PRODUCTS`), which
+        on this venue is spot being refused. Tested on the category rather
+        than the product because ``product_of`` raises on one this venue
+        has no mapping for — ``Inverse`` — and I4 wants that refused by
+        name, not as a venue call that failed.
+
+        ``oiCcy`` is used as sent; the side-count calibration lives in
+        ``docs/MdOpenInterest.md``.
+        """
+        if ticker.category is not Category.PERP:
+            raise NoReaderError(
+                f"{self.venue} {ticker.category} serves no open interest"
+            )
+        native = await self._resolve(ticker)
+        size = await self.symbols.contract_size(ticker)
+        if size is not None and size <= 0:
+            size = None
+        return await self.rest.fetch_open_interest(
+            native,
+            ticker=ticker,
+            inst_type=okx_product_of(ticker.category),
+            contract_size=size,
         )
 
 
