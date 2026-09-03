@@ -437,9 +437,12 @@ class OpenInterest(InstrumentScoped):
     is USD, so ``qty`` there is contracts, like every other public size
     this tree reports on that venue.
 
-    ``ts`` on the live feed is the best available stamp — the venue's
-    event time when the print carries one, local receive time when it
-    does not. A snapshot ``ts`` is the venue's stamp from the REST row.
+    ``ts`` is the best available stamp, on a snapshot as on the feed: the
+    venue's own time where the payload carries one — Binance's ``time``,
+    OKX's ``ts``, Bybit's reply envelope — and local receive time where it
+    does not. Gate is the one that does not: its REST ticker row carries
+    no clock, so a Gate snapshot is stamped here, and a caller measuring
+    staleness on it is measuring partly our own latency.
 
     Notionals (``oiUsd``, ``openInterestValue``) and a second side are
     not here. A venue that cannot push this feed has no

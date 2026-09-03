@@ -9,6 +9,7 @@ the ticker names the book.
 
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -47,6 +48,9 @@ class FakeApi:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.results: dict[str, Any] = {}
+        #: Bybit's envelope clock, in ms. None leaves it off the reply, which
+        #: is the shape a caller falling back to local receive has to handle.
+        self.time: int | None = None
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -55,14 +59,14 @@ class FakeApi:
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        return httpx.Response(
-            200,
-            json={
-                "retCode": 0,
-                "retMsg": "OK",
-                "result": self.results.get(request.url.path, {}),
-            },
-        )
+        body: dict[str, Any] = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": self.results.get(request.url.path, {}),
+        }
+        if self.time is not None:
+            body["time"] = self.time
+        return httpx.Response(200, json=body)
 
     def query_for(self, path: str) -> str:
         for request in self.requests:
@@ -256,6 +260,28 @@ async def test_open_interest_reads_the_ticker_and_refuses_only_spot(
         normalize(NoReaderError("Bybit Spot serves no open interest"), venue="Bybit")
         is QueryCode.MD_VENUE_UNSUPPORTED_READ
     )
+
+
+async def test_open_interest_is_stamped_by_the_venue_envelope(
+    api: FakeApi,
+) -> None:
+    """The v5 row has no clock, so the stamp comes off the reply envelope.
+
+    Local receive would date the print by how long we took to ask, which
+    makes a staleness check read ~0 no matter how old the figure is.
+    """
+    api.time = 1_700_000_000_000
+    api.results["/v5/market/tickers"] = {
+        "list": [{"symbol": NATIVE, "lastPrice": "60000", "openInterest": "7"}]
+    }
+
+    row = await _reader(api).fetch_open_interest(PERP)
+    assert row.ts == 1_700_000_000.0
+
+    # And local receive when Bybit sends no envelope clock at all.
+    api.time = None
+    fresh = await _reader(api).fetch_open_interest(PERP)
+    assert fresh.ts == pytest.approx(time.time(), abs=5)
 
 
 async def test_a_ticker_from_another_venue_is_refused(api: FakeApi) -> None:

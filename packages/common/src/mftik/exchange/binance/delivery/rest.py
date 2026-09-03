@@ -146,13 +146,27 @@ class BinanceDeliveryPublicRest(BinanceRestTransport):
     async def fetch_open_interest(
         self, symbol: str, *, ticker: UniversalTicker
     ) -> OpenInterest:
-        """``GET /dapi/v1/openInterest`` — current size, in contracts."""
+        """``GET /dapi/v1/openInterest`` — current size, in contracts.
+
+        Absent means the read failed, not that nothing is open. Binance
+        answers a refusal with 4xx and a ``code``, which the transport
+        raises on; what reaches here without the field is a 2xx whose body
+        did not parse as JSON, and :meth:`BinanceRestTransport._parse`
+        hands that back as ``None``. Defaulting it to zero would publish a
+        print indistinguishable from the real zero a newly listed contract
+        has — and ``MdOpenInterestResult`` says an ``ok`` zero is a real
+        answer.
+        """
         row = await self._get(f"{API_PREFIX}/openInterest", {"symbol": symbol})
-        stamp = secs((row or {}).get("time"))
+        if not isinstance(row, dict) or row.get("openInterest") in (None, ""):
+            raise BinanceDeliveryRestError(
+                200, None, f"no openInterest for {symbol}"
+            )
+        stamp = secs(row.get("time"))
         fields: dict[str, Any] = {} if stamp <= 0 else {"ts": stamp}
         return OpenInterest(
             universal_ticker=str(ticker),
-            qty=Decimal(str((row or {}).get("openInterest") or "0")),
+            qty=Decimal(str(row["openInterest"])),
             **fields,
         )
 
