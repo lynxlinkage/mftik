@@ -23,6 +23,8 @@ from mftik_md.fetch.readers import NoReaderError, OkxReader, VenueReaderFactory
 SPOT = UniversalTicker.parse("Okx_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Okx_Perp_BTCUSDT")
 FUTURE = UniversalTicker.parse("Okx_Future_BTCUSDT")
+INVERSE = UniversalTicker.parse("Okx_Inverse_BTCUSD")
+OPTION = UniversalTicker.parse("Okx_Option_BTCUSDT")
 BASE = "https://okx.test"
 
 
@@ -196,7 +198,7 @@ async def test_funding_history_reverses_newest_first_and_refuses_spot() -> None:
     assert len(api.requests) == before
 
 
-async def test_open_interest_uses_oi_ccy_and_refuses_only_spot() -> None:
+async def test_open_interest_uses_oi_ccy_and_serves_swap_only() -> None:
     api = FakeApi()
     api.results["/api/v5/public/open-interest"] = [
         {
@@ -217,23 +219,20 @@ async def test_open_interest_uses_oi_ccy_and_refuses_only_spot() -> None:
     assert row.ts == 1_700_000_000.0
     assert row.universal_ticker == str(PERP)
 
-    api.results["/api/v5/public/open-interest"] = [
-        {
-            "instId": "BTC-USDT-260327",
-            "instType": "FUTURES",
-            "oiCcy": "4",
-            "ts": "1700000000000",
-        }
-    ]
-    dated = await _reader(api).fetch_open_interest(FUTURE)
-    last = api.requests[-1]
-    assert last.url.params["instType"] == "FUTURES"
-    assert last.url.params["instId"] == "BTC-USDT-260327"
-    assert dated.qty == Decimal("4")
-
+    # Everything but Perp is refused before HTTP, and refused the way the
+    # stream refuses it: this venue lists Spot + Perp, and a dated future
+    # would answer in base while its book and tape stay in contracts.
+    # ``Inverse`` is the one that used to reach ``product_of`` and come
+    # back as a venue call that failed rather than a read we do not serve.
     before = len(api.requests)
-    with pytest.raises(NoReaderError, match="Spot"):
-        await _reader(api).fetch_open_interest(SPOT)
+    for ticker, name in (
+        (SPOT, "Spot"),
+        (FUTURE, "Future"),
+        (INVERSE, "Inverse"),
+        (OPTION, "Option"),
+    ):
+        with pytest.raises(NoReaderError, match=name):
+            await _reader(api).fetch_open_interest(ticker)
     assert len(api.requests) == before
     assert (
         normalize(NoReaderError("Okx Spot serves no open interest"), venue="Okx")

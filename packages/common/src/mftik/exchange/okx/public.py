@@ -35,7 +35,6 @@ from mftik.exchange.models import (
 from mftik.exchange.okx.feed import DEFAULT_BOOK_CHANNEL, OkxPublicStream
 from mftik.exchange.okx.models import kline_from_row
 from mftik.exchange.okx.protocol import (
-    FUTURES,
     OKX_REST_URL,
     SPOT,
     SWAP,
@@ -76,9 +75,19 @@ LIQUIDATION_PRODUCTS = frozenset({SWAP})
 #: venue that starts liquidating dated futures still would not fund them.
 FUNDING_PRODUCTS = frozenset({SWAP})
 
-#: Contract books that publish open interest. Spot has none. Dated
-#: futures do — unlike funding, which only a perpetual settles.
-OPEN_INTEREST_PRODUCTS = frozenset({SWAP, FUTURES})
+#: Contract books this venue serves open interest for. SWAP only, which
+#: on OKX is *refuse spot* under another name: ``venues.py`` lists this
+#: venue as Spot + Perp, and ``Perp`` is the only category resolving to
+#: SWAP.
+#:
+#: FUTURES is left out over the **unit**, not the refusal. ``oiCcy`` /
+#: ``oi * ctVal`` is base, while a dated future's book, tape and quotes
+#: here stay in contracts — :meth:`OkxPublicClient._multiplier` returns
+#: None off ``Perp`` — and I5 says ``qty`` uses the unit the venue's
+#: other public sizes already use. Publishing one feed in base beside
+#: three in contracts is the silent disagreement that rule exists to
+#: prevent. Listing FUTURES is a ticket that settles the unit first.
+OPEN_INTEREST_PRODUCTS = frozenset({SWAP})
 
 
 def venue_interval(interval: str) -> str:
@@ -252,11 +261,13 @@ class OkxPublicClient(BaseClient):
     def stream_open_interest(
         self, ticker: UniversalTicker
     ) -> AsyncIterator[OpenInterest]:
-        """``open-interest`` — refused on spot, before the iterator runs.
+        """``open-interest`` — SWAP only, checked before the iterator runs.
 
-        A dated future is answered. Checked here so MD's subscribe fails
-        the same way a missing ``stream_*`` does rather than starting a
-        pump that never yields.
+        Which on this venue is spot being refused: it lists Spot and Perp.
+        A dated future is *not* served here, and that is a unit decision
+        rather than the funding one — see :data:`OPEN_INTEREST_PRODUCTS`.
+        Checked here so MD's subscribe fails the same way a missing
+        ``stream_*`` does rather than starting a pump that never yields.
         """
         self._ensure_connected()
         if ticker.venue != self.name:

@@ -24,6 +24,7 @@ from mftik_md.fetch.readers import BybitReader, NoReaderError, VenueReaderFactor
 SPOT = UniversalTicker.parse("Bybit_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
 FUTURE = UniversalTicker.parse("Bybit_Future_BTCUSDT")
+OPTION = UniversalTicker.parse("Bybit_Option_BTCUSDT")
 NATIVE = "BTC-USDT"
 BASE = "https://bybit.test"
 
@@ -244,12 +245,15 @@ async def test_open_interest_reads_the_ticker_and_refuses_only_spot(
     assert dated.qty == Decimal("1234.5")
     assert "category=linear" in api.requests[-1].url.query.decode()
 
+    # Refused on the set the stream refuses on, so an option ticker is a
+    # read we do not serve rather than a venue call that failed.
     before = len(api.requests)
-    with pytest.raises(NoReaderError, match="spot"):
-        await _reader(api).fetch_open_interest(SPOT)
+    for ticker, name in ((SPOT, "Spot"), (OPTION, "Option")):
+        with pytest.raises(NoReaderError, match=name):
+            await _reader(api).fetch_open_interest(ticker)
     assert len(api.requests) == before
     assert (
-        normalize(NoReaderError("Bybit spot serves no open interest"), venue="Bybit")
+        normalize(NoReaderError("Bybit Spot serves no open interest"), venue="Bybit")
         is QueryCode.MD_VENUE_UNSUPPORTED_READ
     )
 

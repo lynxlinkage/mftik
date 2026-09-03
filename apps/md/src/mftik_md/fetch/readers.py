@@ -48,8 +48,10 @@ from mftik.exchange.bybit.protocol import (
     BYBIT_REST_URL,
     INVERSE,
     LINEAR,
-    SPOT,
     product_of,
+)
+from mftik.exchange.bybit.public import (
+    OPEN_INTEREST_CATEGORIES as BYBIT_OPEN_INTEREST_CATEGORIES,
 )
 from mftik.exchange.bybit.public import venue_interval as bybit_interval
 from mftik.exchange.bybit.rest import BybitPublicRest
@@ -709,16 +711,23 @@ class BybitReader:
         )
 
     async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
-        """Current size, in base. Spot is refused before HTTP.
+        """Current size, in base. Spot and options are refused before HTTP.
 
         A dated future is answered: that book has open interest, unlike
         funding, which only a perpetual settles.
+
+        Guarded on the set ``stream_open_interest`` guards on, and not on
+        a spot test of its own. I4 is that the query and the subscribe
+        refuse the same books; two guards spelled differently drift, and
+        the one that drifts wide sends an option ticker to the venue to
+        come back as ``MD_VENUE_CALL_FAILED`` — which reads as "the venue
+        broke" rather than "we do not serve this".
         """
-        native, product = await self._resolve(ticker)
-        if product == SPOT:
+        if ticker.category not in BYBIT_OPEN_INTEREST_CATEGORIES:
             raise NoReaderError(
-                f"{self.venue} {product} serves no open interest"
+                f"{self.venue} {ticker.category} serves no open interest"
             )
+        native, product = await self._resolve(ticker)
         return await self.rest.fetch_open_interest(
             product, native, ticker=ticker
         )
@@ -813,12 +822,19 @@ class OkxReader:
         )
 
     async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
-        """Current size, in base. Spot is refused before HTTP.
+        """Current size, in base. Non-SWAP is refused before HTTP.
 
-        A dated future is answered. ``oiCcy`` is used as sent; the
-        side-count calibration lives in ``docs/MdOpenInterest.md``.
+        The same books ``stream_open_interest`` serves
+        (:data:`~mftik.exchange.okx.public.OPEN_INTEREST_PRODUCTS`), which
+        on this venue is spot being refused. Tested on the category rather
+        than the product because ``product_of`` raises on one this venue
+        has no mapping for — ``Inverse`` — and I4 wants that refused by
+        name, not as a venue call that failed.
+
+        ``oiCcy`` is used as sent; the side-count calibration lives in
+        ``docs/MdOpenInterest.md``.
         """
-        if ticker.category is Category.SPOT:
+        if ticker.category is not Category.PERP:
             raise NoReaderError(
                 f"{self.venue} {ticker.category} serves no open interest"
             )

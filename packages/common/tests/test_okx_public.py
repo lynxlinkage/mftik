@@ -228,9 +228,16 @@ async def test_an_empty_open_interest_row_is_skipped(
     task.cancel()
 
 
-async def test_spot_has_no_open_interest_stream() -> None:
+async def test_only_swap_has_an_open_interest_stream() -> None:
+    """SWAP is the whole set here, which is spot refused under another name.
+
+    A dated future is out over the unit, not the funding rule Bybit's
+    topic drops: ``oiCcy`` is base while this client leaves that book's
+    quotes and tape in contracts.
+    """
     api = FakeApi()
     async with _client(api) as client:
         client.stream_open_interest(PERP)
-        with pytest.raises(ValueError, match="serves no open interest"):
-            client.stream_open_interest(TICKER)
+        for ticker in (TICKER, UniversalTicker.parse("Okx_Future_BTCUSDT")):
+            with pytest.raises(ValueError, match="serves no open interest"):
+                client.stream_open_interest(ticker)
