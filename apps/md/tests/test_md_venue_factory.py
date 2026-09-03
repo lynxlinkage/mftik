@@ -42,6 +42,7 @@ async def test_paper_venue_keeps_the_paper_factory(
     client = await factory.create("paper")
     assert isinstance(client, PaperPublicClient)
     assert not hasattr(client, "stream_funding_rate")
+    assert not hasattr(client, "stream_open_interest")
 
 
 async def test_gate_spot_venue_builds_a_gate_public_client(
@@ -54,6 +55,7 @@ async def test_gate_spot_venue_builds_a_gate_public_client(
     # Public market data only — the socket carries no credentials.
     assert not client.ws.authenticated
     assert not hasattr(client, "stream_funding_rate")
+    assert not hasattr(client, "stream_open_interest")
 
 
 async def test_gate_futures_venue_builds_a_perp_public_client(
@@ -65,6 +67,7 @@ async def test_gate_futures_venue_builds_a_perp_public_client(
     assert client.name == "GateFutures"
     assert hasattr(client, "stream_liquidation")
     assert hasattr(client, "stream_funding_rate")
+    assert not hasattr(client, "stream_open_interest")
     assert not hasattr(client, "stream_agg_trades")
     assert not client.ws.authenticated
 
@@ -89,6 +92,7 @@ async def test_binance_venue_builds_a_binance_public_client(
     assert isinstance(client, BinanceSpotPublicClient)
     assert client.name == "Binance"
     assert not hasattr(client, "stream_funding_rate")
+    assert not hasattr(client, "stream_open_interest")
     # Public market data only — neither of Binance's two sockets carries
     # credentials, so MD can run a feed without a trading account.
     assert not client.api.authenticated
@@ -109,6 +113,7 @@ async def test_binance_future_venue_builds_its_own_public_client(
     # Liquidations are this venue's own feed; MD refuses the topic elsewhere.
     assert hasattr(client, "stream_liquidation")
     assert hasattr(client, "stream_funding_rate")
+    assert not hasattr(client, "stream_open_interest")
 
 
 async def test_binance_delivery_venue_builds_its_own_public_client(
@@ -122,6 +127,7 @@ async def test_binance_delivery_venue_builds_its_own_public_client(
     assert hasattr(client, "stream_liquidation")
     assert hasattr(client, "stream_agg_trades")
     assert hasattr(client, "stream_funding_rate")
+    assert not hasattr(client, "stream_open_interest")
 
 
 async def test_bybit_venue_builds_one_client_for_every_category(
@@ -141,6 +147,7 @@ async def test_bybit_venue_builds_one_client_for_every_category(
     # Nothing connected eagerly, and no credentials: market data is open.
     assert client._feeds == {}
     assert hasattr(client, "stream_funding_rate")
+    assert not hasattr(client, "stream_open_interest")
 
 
 async def test_okx_venue_builds_one_client_for_every_category(
@@ -163,6 +170,7 @@ async def test_okx_venue_builds_one_client_for_every_category(
     assert hasattr(client, "stream_best_quote")
     assert hasattr(client, "stream_liquidation")
     assert hasattr(client, "stream_funding_rate")
+    assert not hasattr(client, "stream_open_interest")
     assert not hasattr(client, "stream_agg_trades")
 
 

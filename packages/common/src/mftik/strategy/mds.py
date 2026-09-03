@@ -12,11 +12,13 @@ from mftik.protocol import (
     MD_FETCH_BESTQUOTE,
     MD_FETCH_FUNDING_HISTORY,
     MD_FETCH_KLINES,
+    MD_FETCH_OPEN_INTEREST,
     MD_FETCH_ORDERBOOK,
     Envelope,
     MdFetchBestQuote,
     MdFetchFundingHistory,
     MdFetchKlines,
+    MdFetchOpenInterest,
     MdFetchOrderBook,
     MdFetchRequest,
     MdQueryAck,
@@ -40,13 +42,14 @@ QUERY_ACK_TIMEOUT_S = 2.0
 class StrategyMds:
     """On-demand reads from MD, for what the feeds cannot answer.
 
-    Four reads: :meth:`fetch_klines` and :meth:`fetch_funding_history` for
+    Five reads: :meth:`fetch_klines` and :meth:`fetch_funding_history` for
     history the feeds never carry, and :meth:`fetch_order_book` /
-    :meth:`fetch_best_quote` for a snapshot *now* rather than a subscription
-    to every change. The second pair overlaps feeds that exist, and is the
-    right tool when a strategy needs the book once — subscribing to a stream
-    to read its first message and drop the rest costs a feed for the life of
-    the session and gets a staler answer.
+    :meth:`fetch_best_quote` / :meth:`fetch_open_interest` for a snapshot
+    *now* rather than a subscription to every change. The last three overlap
+    feeds that exist (open interest only on venues that publish it), and
+    are the right tool when a strategy needs the figure once — subscribing
+    to a stream to read its first message and drop the rest costs a feed
+    for the life of the session and gets a staler answer.
 
     Independent of the feeds in both directions, which is the point. The
     request goes to one subject MD serves for everyone rather than to anything
@@ -195,6 +198,20 @@ class StrategyMds:
             MdFetchFundingHistory,
             ticker=str(ticker),
             limit=limit,
+        )
+
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> str | None:
+        """Ask MD for the current open interest. Returns the query id.
+
+        The answer reaches ``on_fetch_open_interest``. Distinct from the
+        live ``open_interest`` feed, which pushes every change. This is
+        the figure at one moment.
+
+        A venue that has no open interest for this instrument (spot,
+        paper) answers with ``MD_VENUE_UNSUPPORTED_READ``.
+        """
+        return await self._send(
+            MD_FETCH_OPEN_INTEREST, MdFetchOpenInterest, ticker=str(ticker)
         )
 
     async def _send(

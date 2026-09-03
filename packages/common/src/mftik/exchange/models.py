@@ -428,6 +428,28 @@ class FundingRate(InstrumentScoped):
     ts: float = Field(default_factory=_ts)
 
 
+class OpenInterest(InstrumentScoped):
+    """One open-interest print: the live figure, or a snapshot query.
+
+    Feed topic ``open_interest``. ``qty`` is **one side**, in **base** on
+    every base-denominated book (Bybit linear, OKX SWAP, GateFutures,
+    BinanceFuture). BinanceDelivery is the stated exception: its contract
+    is USD, so ``qty`` there is contracts, like every other public size
+    this tree reports on that venue.
+
+    ``ts`` on the live feed is the best available stamp — the venue's
+    event time when the print carries one, local receive time when it
+    does not. A snapshot ``ts`` is the venue's stamp from the REST row.
+
+    Notionals (``oiUsd``, ``openInterestValue``) and a second side are
+    not here. A venue that cannot push this feed has no
+    ``stream_open_interest``, and subscribing there is refused at attach.
+    """
+
+    qty: Decimal
+    ts: float = Field(default_factory=_ts)
+
+
 class OrderBook(InstrumentScoped):
     bids: list[BookLevel]
     asks: list[BookLevel]

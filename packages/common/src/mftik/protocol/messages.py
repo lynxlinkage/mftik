@@ -11,6 +11,7 @@ from mftik.exchange.models import (
     BestQuote,
     FundingRate,
     Kline,
+    OpenInterest,
     OrderBook,
     OrderType,
     Side,
@@ -604,6 +605,15 @@ class MdFetchFundingHistory(MdFetchRequest):
     limit: int = 100
 
 
+class MdFetchOpenInterest(MdFetchRequest):
+    """Ask for the current open interest of one instrument.
+
+    Distinct from the live ``open_interest`` feed, which pushes every
+    change. This is the figure *now*, once, like
+    :class:`MdFetchBestQuote`. It is not history and takes no interval.
+    """
+
+
 class MdQueryAck(BaseModel):
     """MD → caller: the immediate reply to a query request.
 
@@ -692,6 +702,16 @@ class MdFundingHistoryResult(MdFetchResult):
     """
 
     rates: list[FundingRate] = Field(default_factory=list)
+
+
+class MdOpenInterestResult(MdFetchResult):
+    """The answer to :class:`MdFetchOpenInterest`.
+
+    ``open_interest`` is None only when the query failed. An ``ok`` result
+    with ``qty`` of zero is a real print: nothing is open there.
+    """
+
+    open_interest: OpenInterest | None = None
 
 
 class Recon(BaseModel):
@@ -920,11 +940,13 @@ MdFetchKlinesEnvelope = Envelope[MdFetchKlines]
 MdFetchOrderBookEnvelope = Envelope[MdFetchOrderBook]
 MdFetchBestQuoteEnvelope = Envelope[MdFetchBestQuote]
 MdFetchFundingHistoryEnvelope = Envelope[MdFetchFundingHistory]
+MdFetchOpenInterestEnvelope = Envelope[MdFetchOpenInterest]
 MdQueryAckEnvelope = Envelope[MdQueryAck]
 MdKlinesResultEnvelope = Envelope[MdKlinesResult]
 MdOrderBookResultEnvelope = Envelope[MdOrderBookResult]
 MdBestQuoteResultEnvelope = Envelope[MdBestQuoteResult]
 MdFundingHistoryResultEnvelope = Envelope[MdFundingHistoryResult]
+MdOpenInterestResultEnvelope = Envelope[MdOpenInterestResult]
 
 # Envelope.type constants for control-plane RPC
 TD_HEALTH = "td.health"
@@ -1071,6 +1093,7 @@ MD_KLINE = "md.kline"
 MD_BEST_QUOTE = "md.bestquote"
 MD_LIQUIDATION = "md.liquidation"
 MD_FUNDING_RATE = "md.funding_rate"
+MD_OPEN_INTEREST = "md.open_interest"
 MD_SUBSCRIBE = "md.subscribe"
 MD_UNSUBSCRIBE = "md.unsubscribe"
 MD_DETACH = "md.detach"
@@ -1078,11 +1101,13 @@ MD_FETCH_KLINES = "md.fetch.klines"
 MD_FETCH_ORDERBOOK = "md.fetch.orderbook"
 MD_FETCH_BESTQUOTE = "md.fetch.bestquote"
 MD_FETCH_FUNDING_HISTORY = "md.fetch.funding_history"
+MD_FETCH_OPEN_INTEREST = "md.fetch.open_interest"
 MD_QUERY_ACK = "md.query.ack"
 MD_KLINES_RESULT = "md.klines.result"
 MD_ORDERBOOK_RESULT = "md.orderbook.result"
 MD_BESTQUOTE_RESULT = "md.bestquote.result"
 MD_FUNDING_HISTORY_RESULT = "md.funding_history.result"
+MD_OPEN_INTEREST_RESULT = "md.open_interest.result"
 
 
 # --- symbol plane (sym) ----------------------------------------------------

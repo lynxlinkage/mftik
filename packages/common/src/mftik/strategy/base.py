@@ -12,6 +12,7 @@ from mftik.exchange.models import (
     FundingRate,
     Kline,
     Liquidation,
+    OpenInterest,
     Order,
     OrderBook,
     Ticker,
@@ -25,6 +26,7 @@ from mftik.protocol import (
     MdBestQuoteResult,
     MdFundingHistoryResult,
     MdKlinesResult,
+    MdOpenInterestResult,
     MdOrderBookResult,
     OrderReject,
     Recon,
@@ -93,7 +95,7 @@ class Strategy:
 
     Public events from ``md.{session_id}`` (wired):
         on_ticker, on_order_book, on_kline, on_trade, on_agg_trade,
-        on_best_quote, on_liquidation, on_funding_rate
+        on_best_quote, on_liquidation, on_funding_rate, on_open_interest
         One hook per feed topic subscribed in ``md_ids``
         (``topic.UniversalTicker``; kline carries its interval in the topic,
         e.g. ``paper.kline_1m.BTCUSDT``).
@@ -103,10 +105,12 @@ class Strategy:
         self.mds.fetch_order_book(ticker, depth=...)
         self.mds.fetch_best_quote(ticker)
         self.mds.fetch_funding_history(ticker, limit=...)
+        self.mds.fetch_open_interest(ticker)
         Each returns a query_id once MD acks, or None if it never left
         (refused, or no MD running — mds.last_reject_reason says which). The
         answer arrives later at on_fetch_klines / on_fetch_orderbook /
-        on_fetch_bestquote / on_fetch_funding_history, carrying that query_id.
+        on_fetch_bestquote / on_fetch_funding_history /
+        on_fetch_open_interest, carrying that query_id.
         Independent of md_ids: a session that subscribes to nothing can still
         query, and any venue is reachable whether or not it is streaming.
         NOTE: these are not the feed hooks. A feed pushes every change for as
@@ -421,6 +425,22 @@ class Strategy:
         silently producing nothing.
         """
 
+    async def on_open_interest(self, open_interest: OpenInterest) -> None:
+        """Handle live open-interest updates from MD.
+
+        Feed topic ``open_interest``. ``qty`` is one side, in base on every
+        base-denominated book — BinanceDelivery reports contracts instead,
+        like the rest of that venue's public sizes.
+
+        ``ts`` is the best available stamp: the venue's event time when the
+        print carries one, local receive time when it does not.
+
+        Not every venue publishes this. Bybit, OKX and GateFutures do on
+        their contract books; Binance futures has no stream, and spot and
+        paper have none. Subscribing there is refused at attach rather
+        than silently producing nothing.
+        """
+
     # --- query answers -----------------------------------------------------
     #
     # One hook per kind of query, each firing once per ``mds.fetch_*`` call and
@@ -481,6 +501,17 @@ class Strategy:
 
         An ``ok`` result with no rows is not a failure: the venue has no
         history that far back for this instrument.
+        """
+
+    async def on_fetch_open_interest(self, result: MdOpenInterestResult) -> None:
+        """Handle the answer to ``self.mds.fetch_open_interest(...)``.
+
+        Distinct from :meth:`on_open_interest`, which pushes every change
+        for as long as the feed is subscribed. This is the figure at one
+        moment, because that is what was asked for.
+
+        ``open_interest`` is None only on failure; an ``ok`` result with
+        ``qty`` of zero is a real print.
         """
 
     # --- helpers -----------------------------------------------------------

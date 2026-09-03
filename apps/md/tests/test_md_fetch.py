@@ -24,18 +24,22 @@ from mftik.protocol import (
     MD_FETCH_BESTQUOTE,
     MD_FETCH_FUNDING_HISTORY,
     MD_FETCH_KLINES,
+    MD_FETCH_OPEN_INTEREST,
     MD_FETCH_ORDERBOOK,
     MD_FUNDING_HISTORY_RESULT,
     MD_KLINES_RESULT,
+    MD_OPEN_INTEREST_RESULT,
     MD_ORDERBOOK_RESULT,
     Envelope,
     MdBestQuoteResult,
     MdFetchBestQuote,
     MdFetchFundingHistory,
     MdFetchKlines,
+    MdFetchOpenInterest,
     MdFetchOrderBook,
     MdFundingHistoryResult,
     MdKlinesResult,
+    MdOpenInterestResult,
     MdOrderBookResult,
     MdQueryAck,
     QueryCode,
@@ -172,6 +176,7 @@ class Caller:
             MD_ORDERBOOK_RESULT: MdOrderBookResult,
             MD_BESTQUOTE_RESULT: MdBestQuoteResult,
             MD_FUNDING_HISTORY_RESULT: MdFundingHistoryResult,
+            MD_OPEN_INTEREST_RESULT: MdOpenInterestResult,
         }
 
         async def _pump() -> None:
@@ -735,6 +740,25 @@ async def test_a_venue_without_funding_history_is_refused_by_name(
     await session.stop()
 
 
+async def test_a_venue_without_open_interest_is_refused_by_name(
+    broker: Broker, caller: Caller
+) -> None:
+    """OI-1: no reader method yet, so the query is refused by name."""
+    session = FetchSession(broker, FakeFactory(FakeReader()))
+    await session.start()
+    await asyncio.sleep(0.05)
+
+    await caller.ask(type=MD_FETCH_OPEN_INTEREST, payload=_oi_req())
+    result = await caller.next_result(model=MdOpenInterestResult)
+
+    assert result.ok is False
+    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
+    assert result.open_interest is None
+    assert "fetch_open_interest" in result.reason
+
+    await session.stop()
+
+
 def _book_req(depth: int = 10) -> MdFetchOrderBook:
     return MdFetchOrderBook(
         reply_channel=REPLY, query_id="q1", ticker=str(TICKER), depth=depth
@@ -750,4 +774,10 @@ def _quote_req() -> MdFetchBestQuote:
 def _funding_req(limit: int = 100) -> MdFetchFundingHistory:
     return MdFetchFundingHistory(
         reply_channel=REPLY, query_id="q1", ticker=str(TICKER), limit=limit
+    )
+
+
+def _oi_req() -> MdFetchOpenInterest:
+    return MdFetchOpenInterest(
+        reply_channel=REPLY, query_id="q1", ticker=str(TICKER)
     )
