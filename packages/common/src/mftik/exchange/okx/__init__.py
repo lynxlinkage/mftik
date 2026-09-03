@@ -69,6 +69,7 @@ from mftik.exchange.okx.public import (
     FUNDING_PRODUCTS,
     LIQUIDATION_PRODUCTS,
     OKX_INTERVALS,
+    OPEN_INTEREST_PRODUCTS,
     OkxPublicClient,
     venue_interval,
 )
@@ -79,6 +80,7 @@ __all__ = [
     "DEFAULT_BOOK_CHANNEL",
     "FUNDING_PRODUCTS",
     "LIQUIDATION_PRODUCTS",
+    "OPEN_INTEREST_PRODUCTS",
     "OKX_INTERVALS",
     "OKX_REST_URL",
     "OKX_WS_BUSINESS_URL",

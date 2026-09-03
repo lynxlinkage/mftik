@@ -27,6 +27,7 @@ from mftik.exchange.okx import channels as ch
 from mftik.exchange.okx.models import (
     OkxFundingRate,
     OkxLiquidation,
+    OkxOpenInterest,
     OkxOrderBook,
     OkxPublicTrade,
     OkxTicker,
@@ -248,6 +249,15 @@ class OkxPublicStream(OkxSocket):
         return await self._subscribe(
             (ch.funding_rate(inst_id),),
             lambda _resp, row: OkxFundingRate.model_validate(row),
+        )
+
+    async def subscribe_open_interest(
+        self, inst_id: str
+    ) -> EventStream[OkxOpenInterest]:
+        """``open-interest`` — SWAP (and dated futures) at the connector."""
+        return await self._subscribe(
+            (ch.open_interest(inst_id),),
+            lambda _resp, row: OkxOpenInterest.model_validate(row),
         )
 
     async def subscribe_order_book(

@@ -26,6 +26,7 @@ BOOKS5 = "books5"
 BBO = "bbo-tbt"
 LIQUIDATION = "liquidation-orders"
 FUNDING_RATE = "funding-rate"
+OPEN_INTEREST = "open-interest"
 
 #: Book depths the REST ``/market/books`` endpoint accepts. The WS ``books``
 #: channel is always 400 levels; a caller wanting fewer trims locally.
@@ -88,6 +89,11 @@ def liquidation(inst_type: str) -> dict[str, str]:
 def funding_rate(inst_id: str) -> dict[str, str]:
     """``funding-rate`` — the still-moving prediction for the next settlement."""
     return {"channel": FUNDING_RATE, "instId": inst_id}
+
+
+def open_interest(inst_id: str) -> dict[str, str]:
+    """``open-interest`` — current size, about every three seconds."""
+    return {"channel": OPEN_INTEREST, "instId": inst_id}
 
 
 # --- private channels ------------------------------------------------------
@@ -173,6 +179,7 @@ __all__ = [
     "MARKET_OPEN_INTEREST",
     "MARKET_TICKER",
     "MARKET_TIME",
+    "OPEN_INTEREST",
     "ORDERS",
     "ORDERS_HISTORY",
     "ORDERS_PENDING",
@@ -189,6 +196,7 @@ __all__ = [
     "fills",
     "funding_rate",
     "liquidation",
+    "open_interest",
     "orders",
     "positions",
     "tickers",

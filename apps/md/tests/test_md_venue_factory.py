@@ -170,7 +170,7 @@ async def test_okx_venue_builds_one_client_for_every_category(
     assert hasattr(client, "stream_best_quote")
     assert hasattr(client, "stream_liquidation")
     assert hasattr(client, "stream_funding_rate")
-    assert not hasattr(client, "stream_open_interest")
+    assert hasattr(client, "stream_open_interest")
     assert not hasattr(client, "stream_agg_trades")
 
 

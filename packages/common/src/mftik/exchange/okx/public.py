@@ -27,6 +27,7 @@ from mftik.exchange.models import (
     FundingRate,
     Kline,
     Liquidation,
+    OpenInterest,
     OrderBook,
     Ticker,
     Trade,
@@ -34,6 +35,7 @@ from mftik.exchange.models import (
 from mftik.exchange.okx.feed import DEFAULT_BOOK_CHANNEL, OkxPublicStream
 from mftik.exchange.okx.models import kline_from_row
 from mftik.exchange.okx.protocol import (
+    FUTURES,
     OKX_REST_URL,
     SPOT,
     SWAP,
@@ -73,6 +75,10 @@ LIQUIDATION_PRODUCTS = frozenset({SWAP})
 #: today, spelled separately because the two answer different questions: a
 #: venue that starts liquidating dated futures still would not fund them.
 FUNDING_PRODUCTS = frozenset({SWAP})
+
+#: Contract books that publish open interest. Spot has none. Dated
+#: futures do — unlike funding, which only a perpetual settles.
+OPEN_INTEREST_PRODUCTS = frozenset({SWAP, FUTURES})
 
 
 def venue_interval(interval: str) -> str:
@@ -243,6 +249,28 @@ class OkxPublicClient(BaseClient):
             )
         return self._funding_rates(ticker)
 
+    def stream_open_interest(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[OpenInterest]:
+        """``open-interest`` — refused on spot, before the iterator runs.
+
+        A dated future is answered. Checked here so MD's subscribe fails
+        the same way a missing ``stream_*`` does rather than starting a
+        pump that never yields.
+        """
+        self._ensure_connected()
+        if ticker.venue != self.name:
+            raise ValueError(
+                f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
+            )
+        product = product_of(ticker.category)
+        if product not in OPEN_INTEREST_PRODUCTS:
+            raise ValueError(
+                f"OKX {product} serves no open interest stream; "
+                f"supported: {', '.join(sorted(OPEN_INTEREST_PRODUCTS))}"
+            )
+        return self._open_interests(ticker)
+
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         native, _ = await self._resolve(ticker)
         feed = await self.public_feed()
@@ -330,6 +358,22 @@ class OkxPublicClient(BaseClient):
                 continue
             yield funding
 
+    async def _open_interests(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[OpenInterest]:
+        """``open-interest`` — one instrument, contracts converted to base."""
+        native, _ = await self._resolve(ticker)
+        scale = await self._multiplier(ticker)
+        feed = await self.public_feed()
+        stream = await feed.subscribe_open_interest(native)
+        async for row in self._rows(stream):
+            if row.symbol and row.symbol != native:
+                continue
+            interest = row.to_open_interest(ticker, contract_size=scale)
+            if interest is None:
+                continue
+            yield interest
+
     @staticmethod
     async def _rows(stream: EventStream[T]) -> AsyncIterator[T]:
         try:
@@ -357,6 +401,7 @@ class OkxPublicClient(BaseClient):
 __all__ = [
     "FUNDING_PRODUCTS",
     "LIQUIDATION_PRODUCTS",
+    "OPEN_INTEREST_PRODUCTS",
     "OKX_INTERVALS",
     "OkxPublicClient",
     "venue_interval",

@@ -159,3 +159,78 @@ async def test_spot_has_no_funding_rate_stream() -> None:
         client.stream_funding_rate(PERP)
         with pytest.raises(ValueError, match="serves no funding rate"):
             client.stream_funding_rate(TICKER)
+
+
+async def test_open_interest_arrives_from_its_own_channel(
+    okx_public: FakeOkx,
+) -> None:
+    client = OkxPublicClient(
+        symbols=StubSymbols(),
+        rest=OkxPublicRest(base_url=BASE, client=FakeApi().client()),
+        public=OkxPublicStream(okx_public.url, ping_interval=0),
+    )
+    async with client:
+        stream = client.stream_open_interest(PERP)
+        task = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)
+        await okx_public.push(
+            ch.open_interest("BTC-USDT-SWAP"),
+            [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "instType": "SWAP",
+                    "oi": "1000",
+                    "oiCcy": "10",
+                    "oiUsd": "600000",
+                    "ts": "1700000001000",
+                }
+            ],
+        )
+        interest = await asyncio.wait_for(task, 2)
+
+    assert interest.qty == Decimal("10")
+    assert interest.ts == 1_700_000_001.0
+    assert not hasattr(interest, "oi_usd")
+    assert okx_public.subscribed == {("open-interest", "BTC-USDT-SWAP", "")}
+
+
+async def test_an_empty_open_interest_row_is_skipped(
+    okx_public: FakeOkx,
+) -> None:
+    client = OkxPublicClient(
+        symbols=StubSymbols(),
+        rest=OkxPublicRest(base_url=BASE, client=FakeApi().client()),
+        public=OkxPublicStream(okx_public.url, ping_interval=0),
+    )
+    async with client:
+        stream = client.stream_open_interest(PERP)
+        task = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)
+        await okx_public.push(
+            ch.open_interest("BTC-USDT-SWAP"),
+            [{"instId": "BTC-USDT-SWAP", "oi": "", "oiCcy": ""}],
+        )
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        await okx_public.push(
+            ch.open_interest("BTC-USDT-SWAP"),
+            [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "oiCcy": "4",
+                    "ts": "1700000000000",
+                }
+            ],
+        )
+        interest = await asyncio.wait_for(task, 2)
+
+    assert interest.qty == Decimal("4")
+    task.cancel()
+
+
+async def test_spot_has_no_open_interest_stream() -> None:
+    api = FakeApi()
+    async with _client(api) as client:
+        client.stream_open_interest(PERP)
+        with pytest.raises(ValueError, match="serves no open interest"):
+            client.stream_open_interest(TICKER)
