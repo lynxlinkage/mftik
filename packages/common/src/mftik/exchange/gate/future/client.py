@@ -459,8 +459,8 @@ class GateFuturesWebSocket:
         """``futures.tickers`` — mark, last, and funding on one channel.
 
         A late joiner is silent until the next push that carries the field
-        it reads. The quote and the funding rate share this topic; neither
-        is REST-filled for a joiner.
+        it reads. The quote, the funding rate and open interest share this
+        topic; none is REST-filled for a joiner.
 
         Each yield is ``(row, ts)``. ``ts`` prefers the frame ``time_ms``,
         then the row's ``t`` (unix seconds), then local receive time.

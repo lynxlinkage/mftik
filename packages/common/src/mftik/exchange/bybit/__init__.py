@@ -84,6 +84,7 @@ from mftik.exchange.bybit.public import (
     BYBIT_INTERVALS,
     FUNDING_CATEGORIES,
     LIQUIDATION_PRODUCTS,
+    OPEN_INTEREST_CATEGORIES,
     BybitPublicClient,
     venue_interval,
 )
@@ -136,6 +137,7 @@ __all__ = [
     "BybitWsError",
     "FUNDING_CATEGORIES",
     "LIQUIDATION_PRODUCTS",
+    "OPEN_INTEREST_CATEGORIES",
     "auth_frame",
     "channels",
     "kline_from_row",

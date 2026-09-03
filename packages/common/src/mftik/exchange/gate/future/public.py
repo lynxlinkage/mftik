@@ -26,6 +26,7 @@ from mftik.exchange.models import (
     FundingRate,
     Kline,
     Liquidation,
+    OpenInterest,
     OrderBook,
     Ticker,
     Trade,
@@ -183,6 +184,18 @@ class GateFuturesPublicClient(BaseClient):
         self._ensure_connected()
         return self._funding_rates(ticker)
 
+    def stream_open_interest(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[OpenInterest]:
+        """``futures.tickers`` — one contract, shared with the quote.
+
+        A late joiner is silent until the next ``total_size``-bearing
+        push; nothing is REST-filled. The subscribe payload is exactly
+        that one contract so the wire key matches ``stream_ticker``.
+        """
+        self._ensure_connected()
+        return self._open_interests(ticker)
+
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         pair = await self._resolve(ticker)
         stream = await self.ws.subscribe_tickers(pair)
@@ -262,6 +275,22 @@ class GateFuturesPublicClient(BaseClient):
             if funding is None:
                 continue
             yield funding
+
+    async def _open_interests(
+        self, ticker: UniversalTicker
+    ) -> AsyncIterator[OpenInterest]:
+        pair = await self._resolve(ticker)
+        size = await self._multiplier(ticker)
+        stream = await self.ws.subscribe_tickers(pair)
+        async for row, ts in self._rows(stream):
+            if row.contract != pair:
+                continue
+            interest = row.to_open_interest(
+                ticker, contract_size=size, ts=ts
+            )
+            if interest is None:
+                continue
+            yield interest
 
     @staticmethod
     async def _rows(stream: EventStream[T]) -> AsyncIterator[T]:

@@ -350,8 +350,8 @@ class BybitPublicStream(BybitSocket):
         :class:`~mftik.exchange.bybit.models.BybitTicker`.
 
         A late joiner is silent until the next push that carries the field
-        it reads. The quote and the funding rate share this topic; neither
-        is REST-filled for a joiner.
+        it reads. The quote, the funding rate and open interest share this
+        topic; none is REST-filled for a joiner.
 
         Each yield is ``(row, ts)``. ``ts`` is the envelope stamp in seconds
         when the frame carried one, otherwise local receive time.

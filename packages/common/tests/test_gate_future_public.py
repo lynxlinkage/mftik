@@ -208,6 +208,66 @@ async def test_funding_ts_falls_back_to_the_row_when_the_frame_has_no_clock(
     assert funding.ts == 1_700_000_000.0
 
 
+async def test_open_interest_converts_total_size_and_skips_a_row_without_it(
+    gate_futures: FakeGateFutures,
+) -> None:
+    client = await _public(gate_futures)
+    async with client:
+        size_task = asyncio.create_task(anext(client.stream_open_interest(TICKER)))
+        await _wait_sub(gate_futures, ch.TICKERS)
+        await gate_futures.push(
+            ch.TICKERS,
+            [{"contract": "BTC_USDT", "last": "60000", "t": 1_700_000_000}],
+        )
+        await asyncio.sleep(0.05)
+        assert not size_task.done()
+        await gate_futures.push(
+            ch.TICKERS,
+            [
+                {
+                    "contract": "BTC_USDT",
+                    "last": "60000",
+                    "total_size": "1000",
+                    "t": 1_700_000_000,
+                }
+            ],
+            time_ms=1_700_000_001_500,
+        )
+        interest = await asyncio.wait_for(size_task, timeout=2)
+
+    assert interest.qty == Decimal("0.1")
+    assert interest.ts == 1_700_000_001.5
+
+
+async def test_ticker_and_open_interest_share_one_single_contract_subscribe(
+    gate_futures: FakeGateFutures,
+) -> None:
+    client = await _public(gate_futures)
+    async with client:
+        quote_task = asyncio.create_task(anext(client.stream_ticker(TICKER)))
+        size_task = asyncio.create_task(anext(client.stream_open_interest(TICKER)))
+        await _wait_sub(gate_futures, ch.TICKERS)
+        assert len(gate_futures.frames_for(ch.TICKERS)) == 1
+        assert gate_futures.frames_for(ch.TICKERS)[0]["payload"] == ["BTC_USDT"]
+        await gate_futures.push(
+            ch.TICKERS,
+            [
+                {
+                    "contract": "BTC_USDT",
+                    "last": "60000",
+                    "total_size": "2000",
+                }
+            ],
+            time_ms=1_700_000_000_000,
+        )
+        quote, interest = await asyncio.wait_for(
+            asyncio.gather(quote_task, size_task), timeout=2
+        )
+
+    assert quote.last == Decimal("60000")
+    assert interest.qty == Decimal("0.2")
+
+
 async def test_no_aggtrade_method(gate_futures: FakeGateFutures) -> None:
     client = await _public(gate_futures)
     assert not hasattr(client, "stream_agg_trades")

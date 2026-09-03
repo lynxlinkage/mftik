@@ -67,7 +67,7 @@ async def test_gate_futures_venue_builds_a_perp_public_client(
     assert client.name == "GateFutures"
     assert hasattr(client, "stream_liquidation")
     assert hasattr(client, "stream_funding_rate")
-    assert not hasattr(client, "stream_open_interest")
+    assert hasattr(client, "stream_open_interest")
     assert not hasattr(client, "stream_agg_trades")
     assert not client.ws.authenticated
 
@@ -147,7 +147,7 @@ async def test_bybit_venue_builds_one_client_for_every_category(
     # Nothing connected eagerly, and no credentials: market data is open.
     assert client._feeds == {}
     assert hasattr(client, "stream_funding_rate")
-    assert not hasattr(client, "stream_open_interest")
+    assert hasattr(client, "stream_open_interest")
 
 
 async def test_okx_venue_builds_one_client_for_every_category(

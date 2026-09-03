@@ -500,7 +500,7 @@ method starts sharing and not later:
 | Folded book joining a raw-held topic | One deliberate resync; blind for one RTT, including for the raw consumer |
 | Unfolded book (`subscribe_book_deltas`) joining a folder | Refuse — a joiner can never recover |
 | Unfolded book joining another unfolded consumer | Shared, no replay, deltas from here on |
-| Bybit / Gate `tickers` split across `ticker` + `funding_rate` | Silent until the field that pump reads next appears. Documented, not REST-filled |
+| Bybit / Gate `tickers` split across `ticker` + `funding_rate` + `open_interest` | Silent until the field that pump reads next appears. Documented, not REST-filled |
 | Binance `@bookTicker` shared by `ticker` + `bestquote` | Every push is a snapshot, so the next print is enough |
 | OKX `bbo-tbt`, `books5` | Always-snapshot channels; next push is enough |
 
