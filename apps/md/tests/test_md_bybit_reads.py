@@ -224,7 +224,7 @@ async def test_funding_history_reverses_newest_first_and_refuses_spot(
     )
 
 
-async def test_open_interest_reads_the_ticker_and_refuses_only_spot(
+async def test_open_interest_reads_the_ticker_and_refuses_what_the_stream_does(
     api: FakeApi,
 ) -> None:
     api.results["/v5/market/tickers"] = {
