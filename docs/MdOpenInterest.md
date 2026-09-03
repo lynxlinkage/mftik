@@ -58,7 +58,9 @@ stream the venue does not have.
   detail, not a merge of hooks.
 - A venue that cannot serve the feed has no `stream_open_interest`,
   and the subscribe is refused by name. Unified venues (Bybit, OKX)
-  refuse spot *inside* the method, same as `stream_funding_rate`.
+  refuse **spot** *inside* the method — and only spot. Every contract
+  book they list has open interest, a dated future included, which is
+  where this parts company with `stream_funding_rate`.
 - Feeds keep yielding what the venue pushed. REST stays `fetch_*` /
   `md.fetch`. Filling a live feed from REST is not a contract this
   tree states.
@@ -102,14 +104,21 @@ Each is meant to be a test.
 3. **I3 — Two keys, two pumps.** Subscribing `open_interest.` does
    not start delivering `on_ticker` or `on_funding_rate`, and the
    reverse. Detaching one leaves the others fed.
-4. **I4 — Refuse by name.** Split venues (Paper, Gate spot, Binance
-   spot) have no `stream_open_interest` / `fetch_open_interest`.
-   Unified venues refuse a spot ticker inside the method. The
-   subscribe fails at attach; the query comes back
-   `MD_VENUE_UNSUPPORTED_READ`.
-5. **I5 — Thin model.** `OpenInterest` is `qty` + `ts`. `qty` is
-   **base** on Bybit linear, OKX SWAP, GateFutures, BinanceFuture;
-   **contracts** on BinanceDelivery, matching that venue's tape.
+4. **I4 — Refuse by name, and only spot.** Split venues (Paper, Gate
+   spot, Binance spot) have no `stream_open_interest` /
+   `fetch_open_interest`. Unified venues refuse a **spot** ticker inside
+   the method; a dated future is answered, not refused. The subscribe
+   fails at attach; the query comes back `MD_VENUE_UNSUPPORTED_READ`,
+   which a reader earns by raising `NoReaderError` — that type is what
+   `mftik_md.errors.BY_TYPE` maps to the code, and a bare `ValueError`
+   lands on `MD_VENUE_CALL_FAILED` instead.
+5. **I5 — Thin model, comparable unit.** `OpenInterest` is `qty` + `ts`.
+   `qty` is **one side, in base** on every base-denominated book — Bybit
+   linear, OKX SWAP, GateFutures, BinanceFuture — so the same underlying
+   compares across the four without the caller knowing whose contract is
+   whose. BinanceDelivery is the stated exception and says so: its
+   contract is USD, so `qty` there is **contracts**, like every other
+   public size this tree reports on that venue.
 6. **I6 — Late joiner is silent on a shared ticker.** A second pump
    joining Bybit `tickers.{symbol}` or Gate `futures.tickers` publishes
    nothing until the next OI-bearing delta. It is not REST-filled.
@@ -123,16 +132,42 @@ class OpenInterest(InstrumentScoped):
     ts: float
 ```
 
-`qty` is both-sides open interest, in the unit the venue's other
+`qty` is **one side's** open interest — the market convention, and what
+Binance, Bybit and Gate already report — in the unit the venue's other
 public sizes already use:
 
-| Venue | Native field | Shared `qty` |
-|---|---|---|
-| BinanceFuture | REST `openInterest` | as sent (base) |
-| BinanceDelivery | REST `openInterest` | as sent (contracts) |
-| Bybit linear | `openInterest` | as sent (base) |
-| OKX SWAP | `oiCcy` (else `oi * ctVal`) | base |
-| GateFutures | `total_size` | `total_size * contract_size` (base) |
+| Venue | Native field | Shared `qty` | Comparable |
+|---|---|---|---|
+| BinanceFuture | REST `openInterest` | as sent (base) | yes |
+| Bybit linear | `openInterest` | as sent (base) | yes |
+| GateFutures | `total_size` | `total_size * contract_size` (base) | yes |
+| OKX SWAP | `oiCcy` (else `oi * ctVal`) | base | yes, once the side count is settled |
+| BinanceDelivery | REST `openInterest` | as sent (contracts) | no — below |
+
+Those four are why a unit is stated at all. A strategy holding
+`open_interest` on BTC across Bybit, OKX, GateFutures and BinanceFuture
+compares four numbers, and a venue whose native figure needs a factor
+applies it **in its own reader** rather than leaving every caller to
+know which venue counts which way.
+
+**OKX is the one to settle on landing.** `oi` / `oiCcy` are documented
+as "open interest", not as one side, and the two conventions differ by
+exactly 2x — the one factor a caller cannot spot from a single print.
+OI-2 measures it against the other three on the same underlying and
+records the answer in this table; if OKX is both sides, `OkxReader`
+halves and says so in its docstring. Do not ship a halving on a guess,
+in either direction.
+
+**BinanceDelivery is not comparable, and does not pretend to be.** Its
+contract is USD-denominated — `contractSize` is USD per contract, not
+base — so contracts → base needs a mark price the OI endpoint does not
+carry. Every other public size this tree reports there is already
+contracts: book, tape and liquidations all
+(`binance/delivery/public.py`), and klines take `quote_per_contract`
+rather than converting. A second GET to make this one field disagree
+with the rest of its venue would buy a comparison against instruments
+nothing else here lists as `Inverse`. A caller putting that `qty` beside
+a base figure is comparing USD contracts to coins.
 
 `ts` is the venue's event time when the print carries one, local
 receive time when it does not — same sentence as `FundingRate`.
@@ -199,11 +234,15 @@ refuses both, by missing method. Nothing publishes.
   `MdOpenInterestResult` (`open_interest: OpenInterest | None`).
   `None` only on failure — an `ok` result with `qty` of zero is a
   real print.
+  Re-exported from `mftik.protocol` — `funding_rate` carries six
+  entries there, and a name that is not exported is not a name.
 - `Strategy.on_open_interest` / `on_fetch_open_interest` and the
-  class docstring. `StrategyMds.fetch_open_interest`.
+  class docstring. `StrategyMds.fetch_open_interest`, whose docstring
+  counts its reads ("Four reads:") and now counts five.
 - `VenueSession`: `TOPIC_OPEN_INTEREST` → `stream_open_interest` →
   `MD_OPEN_INTEREST`. `MarketDataConnector` keeps the method off the
-  protocol, same as `stream_funding_rate`.
+  protocol, same as `stream_funding_rate` — its docstring enumerates
+  the optional streams and gains a sixth.
 - `FetchSession._KINDS` for the new request. No reader grows the
   method here.
 - STS `MD_HANDLERS` / `MD_FETCH_HANDLERS`.
@@ -259,7 +298,12 @@ the matching MD reader. No WebSocket. No interval argument.
 Bybit already has `fetch_ticker_row`. Parse `openInterest` on
 `BybitTicker` here (needed again by OI-4; landing it on the wire
 model once is the point). Gate parses `total_size` on
-`GateFuturesTicker` the same way.
+`GateFuturesTicker` the same way — but has nothing that hands the row
+back: `GateFuturesPublicRest.fetch_ticker` converts to a shared
+`Ticker` and drops it, so this ticket adds the row-returning read that
+Bybit already has. OKX's endpoint is scoped by `instType`, not by
+`instId` alone, and its path constant lands in `okx/channels.py`
+beside the other REST paths — the same file OI-3 adds a channel to.
 
 **Problem.** Binance will never grow the feed. A strategy that needs
 OI there has only this call. Bybit's dedicated OI REST is a history
@@ -267,9 +311,12 @@ series and would silently become the wrong product if someone
 reached for the name.
 
 **Solution.** One reader method, one REST GET, one `OpenInterest`.
-Bybit spot / OKX spot raise inside the method so the plane maps them
-to `MD_VENUE_UNSUPPORTED_READ`, same as `fetch_funding_history`.
-Gate uses the ticker row, not `/contract_stats`.
+Bybit spot / OKX spot raise `NoReaderError` inside the method — that
+type, not a bare `ValueError`, is what the plane maps to
+`MD_VENUE_UNSUPPORTED_READ`, and it is what
+`BybitReader.fetch_funding_history` already raises. Only spot is
+refused: a Bybit dated future has open interest and is answered. Gate
+uses the ticker row, not `/contract_stats`.
 
 **Verify.**
 
@@ -278,12 +325,23 @@ Gate uses the ticker row, not `/contract_stats`.
   `test_md_binance_delivery_reads.py`, `test_md_bybit_reads.py`,
   `test_md_okx_reads.py`, `test_md_gate_future_reads.py`): path,
   query, `qty`, `ts`, `universal_ticker`.
-- Bybit / OKX spot → `MD_VENUE_UNSUPPORTED_READ`.
+- Bybit / OKX spot → `MD_VENUE_UNSUPPORTED_READ`, asserted through
+  `normalize(NoReaderError(...))` the way `test_md_bybit_reads.py`
+  already asserts it for funding history.
+- Bybit dated future is answered, not refused — the opposite of
+  `test_a_dated_future_has_no_funding_rate_stream`.
 - Gate / paper / Binance spot readers still have no method.
 - `test_md_fetch.py` / `test_mds_query.py`: an `ok` result carries
   one `OpenInterest`; a missing method still fails as in OI-1.
 - A unit test that Bybit's reader does not call
   `/v5/market/open-interest`.
+- **One live calibration, recorded in this doc rather than in a test.**
+  `qty` for one underlying on OKX against Bybit, BinanceFuture and
+  GateFutures. Those three agree or the reading is wrong; a systematic
+  2x on OKX alone means its figure is both sides, and the halving plus
+  its reason land in `OkxReader` and in the shared-model table. This is
+  the ticket that owns I5's comparability, and it does not merge on an
+  unmeasured guess.
 
 **Depends.** OI-1. Independent of OI-3 and OI-4.
 
