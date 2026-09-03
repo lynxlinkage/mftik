@@ -14,6 +14,7 @@ from mftik.exchange.models import (
     BookLevel,
     FundingRate,
     Kline,
+    OpenInterest,
     OrderBook,
 )
 from mftik.exchange.tickers import UniversalTicker
@@ -606,8 +607,84 @@ async def test_fetch_funding_history_reaches_its_own_hook(broker: Broker) -> Non
 
 
 @pytest.mark.asyncio
+async def test_fetch_open_interest_carries_the_print(broker: Broker) -> None:
+    """Ack, then one OpenInterest at ``on_fetch_open_interest``."""
+
+    class Collector(RecordingStrategy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.interest: list[MdOpenInterestResult] = []
+
+        async def on_fetch_open_interest(
+            self, result: MdOpenInterestResult
+        ) -> None:
+            self.interest.append(result)
+
+    class OpenInterestMd:
+        def __init__(self) -> None:
+            self._stop = asyncio.Event()
+            self._task: asyncio.Task[Any] | None = None
+            self.requests: list[MdFetchOpenInterest] = []
+
+        async def start(self) -> None:
+            self._task = asyncio.create_task(self._serve())
+            await asyncio.sleep(0.05)
+
+        async def stop(self) -> None:
+            self._stop.set()
+            if self._task is not None:
+                await asyncio.gather(self._task, return_exceptions=True)
+
+        async def _serve(self) -> None:
+            async for req in broker.serve(Topics.md_fetch(), stop=self._stop):
+                payload = MdFetchOpenInterest.model_validate(
+                    req.envelope.payload
+                )
+                self.requests.append(payload)
+                await req.reply(
+                    Envelope[MdQueryAck].wrap(
+                        MdQueryAck(query_id=payload.query_id, accepted=True),
+                        type=MD_QUERY_ACK,
+                        source="md",
+                    )
+                )
+                await broker.publish(
+                    payload.reply_channel,
+                    Envelope[MdOpenInterestResult].wrap(
+                        MdOpenInterestResult(
+                            query_id=payload.query_id,
+                            ticker=payload.ticker,
+                            open_interest=OpenInterest(
+                                universal_ticker=payload.ticker,
+                                qty=Decimal("1234.5"),
+                                ts=1_700_000_000.0,
+                            ),
+                        ),
+                        type=MD_OPEN_INTEREST_RESULT,
+                        source="md",
+                    ),
+                )
+
+    strategy = Collector()
+    sts = await _session(broker, strategy, md_ids=[])
+    md = OpenInterestMd()
+    await md.start()
+
+    query_id = await strategy.mds.fetch_open_interest(TICKER)
+    assert query_id is not None, strategy.mds.last_reject_reason
+    await _wait_until(lambda: strategy.interest)
+    assert strategy.interest[0].query_id == query_id
+    assert strategy.interest[0].ok is True
+    assert strategy.interest[0].open_interest is not None
+    assert strategy.interest[0].open_interest.qty == Decimal("1234.5")
+
+    await md.stop()
+    await sts.stop()
+
+
+@pytest.mark.asyncio
 async def test_fetch_open_interest_reaches_its_own_hook(broker: Broker) -> None:
-    """Ack, then today's readers refuse — the hook still fires."""
+    """Ack, then a missing method still fires the hook as a refusal."""
 
     class Collector(RecordingStrategy):
         def __init__(self) -> None:

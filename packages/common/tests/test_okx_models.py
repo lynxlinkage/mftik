@@ -14,6 +14,7 @@ from mftik.exchange.okx.models import (
     OkxFill,
     OkxFundingRate,
     OkxLiquidation,
+    OkxOpenInterest,
     OkxOrderBook,
     OkxOrderUpdate,
     OkxPosition,
@@ -379,6 +380,44 @@ def test_a_funding_rate_frame_converts_and_keeps_schedule_off_the_shared_row() -
 def test_a_funding_row_without_a_rate_is_not_a_print() -> None:
     row = OkxFundingRate.model_validate({"instId": "BTC-USDT-SWAP", "ts": "1"})
     assert row.to_funding_rate(PERP) is None
+
+
+def test_open_interest_prefers_oi_ccy_and_keeps_notional_off_the_shared_row() -> (
+    None
+):
+    row = OkxOpenInterest.model_validate(
+        {
+            "instType": "SWAP",
+            "instId": "BTC-USDT-SWAP",
+            "oi": "1000",
+            "oiCcy": "10",
+            "oiUsd": "600000",
+            "ts": "1700000001000",
+        }
+    )
+    interest = row.to_open_interest(PERP, contract_size=Decimal("0.01"))
+    assert interest is not None
+    assert interest.qty == Decimal("10")
+    assert interest.ts == 1_700_000_001.0
+    assert not hasattr(interest, "oi_usd")
+
+
+def test_open_interest_falls_back_to_contracts_times_size() -> None:
+    row = OkxOpenInterest.model_validate(
+        {"instId": "BTC-USDT-SWAP", "oi": "1000", "ts": "1700000000000"}
+    )
+    interest = row.to_open_interest(PERP, contract_size=Decimal("0.01"))
+    assert interest is not None
+    assert interest.qty == Decimal("10")
+
+
+def test_open_interest_without_a_size_is_not_a_print() -> None:
+    row = OkxOpenInterest.model_validate({"instId": "BTC-USDT-SWAP", "ts": "1"})
+    assert row.to_open_interest(PERP, contract_size=Decimal("0.01")) is None
+    contracts_only = OkxOpenInterest.model_validate(
+        {"instId": "BTC-USDT-SWAP", "oi": "1000"}
+    )
+    assert contracts_only.to_open_interest(PERP) is None
 
 
 def test_a_funding_push_without_a_clock_is_stamped_on_receive() -> None:

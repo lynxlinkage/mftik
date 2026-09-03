@@ -157,6 +157,22 @@ async def test_funding_history_is_oldest_first() -> None:
     assert rows[0].rate == Decimal("0.0001")
 
 
+async def test_open_interest_stays_in_contracts() -> None:
+    api = FakeApi()
+    api.results["/dapi/v1/openInterest"] = {
+        "symbol": NATIVE,
+        "openInterest": "890",
+        "time": 1_700_000_000_000,
+    }
+
+    row = await _reader(api).fetch_open_interest(TICKER)
+
+    assert api.query("/dapi/v1/openInterest") == {"symbol": NATIVE}
+    assert row.qty == Decimal("890")
+    assert row.ts == 1_700_000_000.0
+    assert row.universal_ticker == str(TICKER)
+
+
 async def test_the_factory_builds_a_binance_delivery_reader() -> None:
     factory = VenueReaderFactory(StubSymbols())  # type: ignore[arg-type]
     reader = await factory.create("BinanceDelivery")

@@ -39,7 +39,7 @@ from mftik.exchange.binance.rest import (
     BinanceRestTransport,
     BinanceSignedRest,
 )
-from mftik.exchange.models import FundingRate, Kline, OrderBook, Ticker
+from mftik.exchange.models import FundingRate, Kline, OpenInterest, OrderBook, Ticker
 from mftik.exchange.tickers import UniversalTicker
 from mftik.symbols.listed import ListedInstrument
 
@@ -60,7 +60,7 @@ class BinanceFutureRestError(BinanceRestError):
 
 
 class BinanceFuturePublicRest(BinanceRestTransport):
-    """The two public reads the futures WebSocket API does not serve."""
+    """Public reads the futures WebSocket API does not serve."""
 
     default_base_url = BINANCE_FUTURE_REST_URL
     error_type = BinanceFutureRestError
@@ -150,6 +150,19 @@ class BinanceFuturePublicRest(BinanceRestTransport):
             )
             for row in rows or []
         ]
+
+    async def fetch_open_interest(
+        self, symbol: str, *, ticker: UniversalTicker
+    ) -> OpenInterest:
+        """``GET /fapi/v1/openInterest`` — current size, already in base."""
+        row = await self._get(f"{API_PREFIX}/openInterest", {"symbol": symbol})
+        stamp = secs((row or {}).get("time"))
+        fields: dict[str, Any] = {} if stamp <= 0 else {"ts": stamp}
+        return OpenInterest(
+            universal_ticker=str(ticker),
+            qty=Decimal(str((row or {}).get("openInterest") or "0")),
+            **fields,
+        )
 
 
 class BinanceFutureRest(BinanceSignedRest):

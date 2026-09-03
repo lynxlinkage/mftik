@@ -41,6 +41,7 @@ from mftik.exchange.models import (
     FundingRate,
     Kline,
     Liquidation,
+    OpenInterest,
     Order,
     OrderBook,
     OrderStatus,
@@ -526,6 +527,7 @@ class BybitTicker(BybitMessage):
     mark_price: OptDec = Field(default=None, alias="markPrice")
     index_price: OptDec = Field(default=None, alias="indexPrice")
     funding_rate: OptDec = Field(default=None, alias="fundingRate")
+    open_interest: OptDec = Field(default=None, alias="openInterest")
 
     @property
     def quoted(self) -> bool:
@@ -565,6 +567,24 @@ class BybitTicker(BybitMessage):
             universal_ticker=str(ticker),
             rate=self.funding_rate,
             ts=ts,
+        )
+
+    def to_open_interest(
+        self, ticker: UniversalTicker, *, ts: float = 0.0
+    ) -> OpenInterest | None:
+        """One side, in base, when this row named a size.
+
+        The row has no clock; ``ts`` is the envelope stamp (or local
+        receive) the caller already chose. Omitted when the delta did
+        not carry ``openInterest``.
+        """
+        if self.open_interest is None:
+            return None
+        fields: dict[str, Any] = {} if ts <= 0 else {"ts": ts}
+        return OpenInterest(
+            universal_ticker=str(ticker),
+            qty=self.open_interest,
+            **fields,
         )
 
 

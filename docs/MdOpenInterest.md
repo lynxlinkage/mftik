@@ -138,10 +138,10 @@ public sizes already use:
 
 | Venue | Native field | Shared `qty` | Comparable |
 |---|---|---|---|
-| BinanceFuture | REST `openInterest` | as sent (base) | yes |
-| Bybit linear | `openInterest` | as sent (base) | yes |
-| GateFutures | `total_size` | `total_size * contract_size` (base) | yes |
-| OKX SWAP | `oiCcy` (else `oi * ctVal`) | base | yes, once the side count is settled |
+| BinanceFuture | REST `openInterest` | as sent (base) | yes — its own book |
+| Bybit linear | `openInterest` | as sent (base) | yes vs Gate |
+| GateFutures | `total_size` | `total_size * contract_size` (base) | yes vs Bybit |
+| OKX SWAP | `oiCcy` (else `oi * ctVal`) | base, as sent | unit yes; ~½ of Bybit/Gate |
 | BinanceDelivery | REST `openInterest` | as sent (contracts) | no — below |
 
 Those four are why a unit is stated at all. A strategy holding
@@ -150,13 +150,26 @@ compares four numbers, and a venue whose native figure needs a factor
 applies it **in its own reader** rather than leaving every caller to
 know which venue counts which way.
 
-**OKX is the one to settle on landing.** `oi` / `oiCcy` are documented
-as "open interest", not as one side, and the two conventions differ by
-exactly 2x — the one factor a caller cannot spot from a single print.
-OI-2 measures it against the other three on the same underlying and
-records the answer in this table; if OKX is both sides, `OkxReader`
-halves and says so in its docstring. Do not ship a halving on a guess,
-in either direction.
+**OKX is one side, and is not halved.** Measured 2026-09-03 on
+BTC-USDT perp, using the fields this table names:
+
+| Venue | Native | Shared `qty` (BTC) |
+|---|---|---|
+| BinanceFuture | `openInterest` | 108144.552 |
+| Bybit linear | `openInterest` | 55688.648 |
+| GateFutures | `total_size * 0.0001` | 58278.184 |
+| OKX SWAP | `oiCcy` | 29187.818 |
+
+Bybit and Gate agree. OKX is half of those two, not double. Binance
+is its own book (~1.9× Bybit, ~3.7× OKX), not a 2× of anyone. A
+systematic 2× on OKX alone would have meant both sides and a
+halving in `OkxReader`; that is not what landed.
+
+Bybit now also publishes `singleOpenInterest` (27844.324, half of
+`openInterest`) and Gate's contract row has `position_size`
+(29139.092 base, half of `total_size`). Those pair with OKX's
+`oiCcy`. This ticket does not change the chosen fields, and does
+not invent a halving on Bybit or Gate either.
 
 **BinanceDelivery is not comparable, and does not pretend to be.** Its
 contract is USD-denominated — `contractSize` is USD per contract, not

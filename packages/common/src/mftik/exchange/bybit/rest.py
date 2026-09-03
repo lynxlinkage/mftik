@@ -68,6 +68,7 @@ from mftik.exchange.models import (
     Balance,
     FundingRate,
     Kline,
+    OpenInterest,
     OrderBook,
     Ticker,
 )
@@ -319,6 +320,26 @@ class BybitPublicRest(_BybitRestTransport):
             )
             for row in reversed(rows)
         ]
+
+    async def fetch_open_interest(
+        self,
+        product: str,
+        symbol: str,
+        *,
+        ticker: UniversalTicker,
+    ) -> OpenInterest:
+        """``tickers`` — current size, already in base.
+
+        The dedicated ``/v5/market/open-interest`` endpoint is a
+        history series and is not this read.
+        """
+        row = await self.fetch_ticker_row(product, symbol)
+        interest = row.to_open_interest(ticker)
+        if interest is None:
+            raise BybitRestError(
+                None, f"no openInterest for {symbol}", op=ch.MARKET_TICKERS
+            )
+        return interest
 
     async def server_time(self) -> float:
         """``time`` — Bybit's clock, in seconds.

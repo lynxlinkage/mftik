@@ -39,6 +39,7 @@ from mftik.exchange.models import (
     FundingRate,
     Kline,
     Liquidation,
+    OpenInterest,
     Order,
     OrderBook,
     OrderStatus,
@@ -541,6 +542,48 @@ class OkxFundingRate(OkxMessage):
         )
 
 
+class OkxOpenInterest(OkxMessage):
+    """``open-interest`` — current size, REST and the live channel.
+
+    ``oi`` is contracts; ``oiCcy`` is already base. Notionals stay on
+    the wire. The shared print is one ``qty`` in base.
+    """
+
+    inst_type: str = Field(default="", alias="instType")
+    inst_id: str = Field(default="", alias="instId")
+    oi: OptDec = None
+    oi_ccy: OptDec = Field(default=None, alias="oiCcy")
+    ts: Ms = 0.0
+
+    @property
+    def symbol(self) -> str:
+        return self.inst_id
+
+    def to_open_interest(
+        self,
+        ticker: UniversalTicker,
+        *,
+        contract_size: Decimal | None = None,
+    ) -> OpenInterest | None:
+        """Base size, preferring ``oiCcy``. Falls back to ``oi * ctVal``.
+
+        A row with neither field, or only contracts and no multiplier,
+        is not a print. A missing ``ts`` leaves the stamp off so the
+        shared model takes its local receive default.
+        """
+        qty = self.oi_ccy
+        if qty is None:
+            if self.oi is None or contract_size is None or contract_size <= 0:
+                return None
+            qty = self.oi * contract_size
+        fields: dict[str, Any] = {} if self.ts <= 0 else {"ts": self.ts}
+        return OpenInterest(
+            universal_ticker=str(ticker),
+            qty=qty,
+            **fields,
+        )
+
+
 class OkxTicker(OkxMessage):
     """``tickers``, and one row of ``GET /api/v5/market/ticker``."""
 
@@ -769,6 +812,7 @@ __all__ = [
     "OkxLeverage",
     "OkxLiquidation",
     "OkxLiquidationDetail",
+    "OkxOpenInterest",
     "OkxMessage",
     "OkxOrderAck",
     "OkxOrderBook",

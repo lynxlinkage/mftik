@@ -23,6 +23,7 @@ from mftik_md.fetch.readers import BybitReader, NoReaderError, VenueReaderFactor
 
 SPOT = UniversalTicker.parse("Bybit_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
+FUTURE = UniversalTicker.parse("Bybit_Future_BTCUSDT")
 NATIVE = "BTC-USDT"
 BASE = "https://bybit.test"
 
@@ -214,6 +215,41 @@ async def test_funding_history_reverses_newest_first_and_refuses_spot(
     assert len(api.requests) == before
     assert (
         normalize(NoReaderError("Bybit spot serves no funding history"), venue="Bybit")
+        is QueryCode.MD_VENUE_UNSUPPORTED_READ
+    )
+
+
+async def test_open_interest_reads_the_ticker_and_refuses_only_spot(
+    api: FakeApi,
+) -> None:
+    api.results["/v5/market/tickers"] = {
+        "list": [
+            {
+                "symbol": NATIVE,
+                "lastPrice": "60000",
+                "openInterest": "1234.5",
+            }
+        ]
+    }
+
+    row = await _reader(api).fetch_open_interest(PERP)
+
+    assert [r.url.path for r in api.requests] == ["/v5/market/tickers"]
+    assert "category=linear" in api.query_for("/v5/market/tickers")
+    assert "/v5/market/open-interest" not in {r.url.path for r in api.requests}
+    assert row.qty == Decimal("1234.5")
+    assert row.universal_ticker == str(PERP)
+
+    dated = await _reader(api).fetch_open_interest(FUTURE)
+    assert dated.qty == Decimal("1234.5")
+    assert "category=linear" in api.requests[-1].url.query.decode()
+
+    before = len(api.requests)
+    with pytest.raises(NoReaderError, match="spot"):
+        await _reader(api).fetch_open_interest(SPOT)
+    assert len(api.requests) == before
+    assert (
+        normalize(NoReaderError("Bybit spot serves no open interest"), venue="Bybit")
         is QueryCode.MD_VENUE_UNSUPPORTED_READ
     )
 

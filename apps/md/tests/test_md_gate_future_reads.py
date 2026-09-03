@@ -106,6 +106,27 @@ async def test_funding_history_reverses_newest_first_and_keeps_seconds() -> None
     assert rows[0].rate == Decimal("0.0001")
 
 
+async def test_open_interest_converts_total_size_to_base() -> None:
+    api = FakeApi()
+    api.results["/api/v4/futures/usdt/tickers"] = [
+        {
+            "contract": "BTC_USDT",
+            "last": "60000",
+            "total_size": "1000",
+            "t": 1_700_000_000,
+        }
+    ]
+
+    row = await _reader(api).fetch_open_interest(TICKER)
+
+    request = api.requests[0]
+    assert request.url.path == "/api/v4/futures/usdt/tickers"
+    assert dict(request.url.params) == {"contract": "BTC_USDT"}
+    assert row.qty == Decimal("0.1")
+    assert row.ts == 1_700_000_000.0
+    assert row.universal_ticker == str(TICKER)
+
+
 async def test_the_factory_builds_a_gate_futures_reader() -> None:
     factory = VenueReaderFactory(StubSymbols())
     reader = await factory.create("GateFutures")

@@ -48,6 +48,7 @@ from mftik.exchange.bybit.protocol import (
     BYBIT_REST_URL,
     INVERSE,
     LINEAR,
+    SPOT,
     product_of,
 )
 from mftik.exchange.bybit.public import venue_interval as bybit_interval
@@ -60,8 +61,15 @@ from mftik.exchange.gate.future.rest import (
 from mftik.exchange.gate.spot.public import GATE_INTERVALS
 from mftik.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotPublicRest
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
-from mftik.exchange.models import BestQuote, FundingRate, Kline, OrderBook
+from mftik.exchange.models import (
+    BestQuote,
+    FundingRate,
+    Kline,
+    OpenInterest,
+    OrderBook,
+)
 from mftik.exchange.okx.protocol import OKX_REST_URL
+from mftik.exchange.okx.protocol import product_of as okx_product_of
 from mftik.exchange.okx.public import venue_interval as okx_interval
 from mftik.exchange.okx.rest import OkxPublicRest
 from mftik.exchange.symbols import SymbolResolver
@@ -285,6 +293,15 @@ class GateFuturesReader:
             pair, ticker=ticker, limit=limit
         )
 
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size, in base. Off the ticker row, not ``contract_stats``."""
+        pair = await self._pair(ticker)
+        return await self.rest.fetch_open_interest(
+            pair,
+            ticker=ticker,
+            contract_size=await self._multiplier(ticker),
+        )
+
 
 class BinanceSpotReader:
     """Binance spot reads over the WebSocket API, in canonical symbol and interval.
@@ -480,6 +497,11 @@ class BinanceFutureReader:
             native, ticker=ticker, limit=limit
         )
 
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size, already in base."""
+        native = await self._symbol(ticker)
+        return await self.rest.fetch_open_interest(native, ticker=ticker)
+
 
 class BinanceDeliveryReader:
     """Binance COIN-M reads over REST, in canonical symbol and interval.
@@ -575,6 +597,11 @@ class BinanceDeliveryReader:
         return await self.rest.fetch_funding_history(
             native, ticker=ticker, limit=limit
         )
+
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size, in contracts. Distinct from every linear book."""
+        native = await self._symbol(ticker)
+        return await self.rest.fetch_open_interest(native, ticker=ticker)
 
 
 class BybitReader:
@@ -681,6 +708,21 @@ class BybitReader:
             product, native, ticker=ticker, limit=limit
         )
 
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size, in base. Spot is refused before HTTP.
+
+        A dated future is answered: that book has open interest, unlike
+        funding, which only a perpetual settles.
+        """
+        native, product = await self._resolve(ticker)
+        if product == SPOT:
+            raise NoReaderError(
+                f"{self.venue} {product} serves no open interest"
+            )
+        return await self.rest.fetch_open_interest(
+            product, native, ticker=ticker
+        )
+
 
 class OkxReader:
     """OKX reads over REST, across every category the venue trades.
@@ -768,6 +810,27 @@ class OkxReader:
         native = await self._resolve(ticker)
         return await self.rest.fetch_funding_history(
             native, ticker=ticker, limit=limit
+        )
+
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size, in base. Spot is refused before HTTP.
+
+        A dated future is answered. ``oiCcy`` is used as sent; the
+        side-count calibration lives in ``docs/MdOpenInterest.md``.
+        """
+        if ticker.category is Category.SPOT:
+            raise NoReaderError(
+                f"{self.venue} {ticker.category} serves no open interest"
+            )
+        native = await self._resolve(ticker)
+        size = await self.symbols.contract_size(ticker)
+        if size is not None and size <= 0:
+            size = None
+        return await self.rest.fetch_open_interest(
+            native,
+            ticker=ticker,
+            inst_type=okx_product_of(ticker.category),
+            contract_size=size,
         )
 
 

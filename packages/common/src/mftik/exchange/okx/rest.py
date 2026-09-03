@@ -26,13 +26,21 @@ from typing import Any
 import httpx
 
 from mftik.exchange.errors import ExchangeError
-from mftik.exchange.models import Balance, FundingRate, Kline, OrderBook, Ticker
+from mftik.exchange.models import (
+    Balance,
+    FundingRate,
+    Kline,
+    OpenInterest,
+    OrderBook,
+    Ticker,
+)
 from mftik.exchange.okx import channels as ch
 from mftik.exchange.okx.listing import LINEAR, LIVE, to_listed
 from mftik.exchange.okx.models import (
     OkxAccount,
     OkxFill,
     OkxLeverage,
+    OkxOpenInterest,
     OkxOrderAck,
     OkxOrderUpdate,
     OkxPosition,
@@ -235,6 +243,37 @@ class OkxPublicRest(_OkxRestTransport):
             )
             for row in reversed(rows or [])
         ]
+
+    async def fetch_open_interest(
+        self,
+        inst_id: str,
+        *,
+        ticker: UniversalTicker,
+        inst_type: str,
+        contract_size: Decimal | None = None,
+    ) -> OpenInterest:
+        """``open-interest`` — current size, scoped by ``instType``.
+
+        Prefers ``oiCcy`` (already base). Falls back to ``oi * ctVal``.
+        """
+        rows = await self._get(
+            ch.MARKET_OPEN_INTEREST,
+            {"instType": inst_type, "instId": inst_id},
+        )
+        if not rows:
+            raise OkxRestError(
+                None, f"no open interest for {inst_id}", op=ch.MARKET_OPEN_INTEREST
+            )
+        interest = OkxOpenInterest.model_validate(rows[0]).to_open_interest(
+            ticker, contract_size=contract_size
+        )
+        if interest is None:
+            raise OkxRestError(
+                None,
+                f"no open interest size for {inst_id}",
+                op=ch.MARKET_OPEN_INTEREST,
+            )
+        return interest
 
     async def server_time(self) -> float:
         rows = await self._get(ch.MARKET_TIME)

@@ -178,6 +178,22 @@ async def test_funding_history_is_oldest_first_and_drops_mark_price() -> None:
     assert not any(hasattr(row, "mark_price") for row in rows)
 
 
+async def test_open_interest_is_base_and_dated_by_the_venue() -> None:
+    api = FakeApi()
+    api.results["/fapi/v1/openInterest"] = {
+        "symbol": NATIVE,
+        "openInterest": "12345.67",
+        "time": 1_700_000_000_000,
+    }
+
+    row = await _reader(api).fetch_open_interest(TICKER)
+
+    assert api.query("/fapi/v1/openInterest") == {"symbol": NATIVE}
+    assert row.qty == Decimal("12345.67")
+    assert row.ts == 1_700_000_000.0
+    assert row.universal_ticker == str(TICKER)
+
+
 async def test_the_factory_builds_a_binance_future_reader() -> None:
     factory = VenueReaderFactory(StubSymbols())  # type: ignore[arg-type]
     reader = await factory.create("BinanceFuture")

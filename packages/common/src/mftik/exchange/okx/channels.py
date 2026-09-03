@@ -136,6 +136,7 @@ MARKET_BOOKS = "/api/v5/market/books"
 MARKET_CANDLES = "/api/v5/market/candles"
 MARKET_TIME = "/api/v5/public/time"
 MARKET_FUNDING_HISTORY = "/api/v5/public/funding-rate-history"
+MARKET_OPEN_INTEREST = "/api/v5/public/open-interest"
 
 ORDER_PLACE = "/api/v5/trade/order"
 ORDER_CANCEL = "/api/v5/trade/cancel-order"
@@ -169,6 +170,7 @@ __all__ = [
     "MARKET_CANDLES",
     "MARKET_FUNDING_HISTORY",
     "MARKET_INSTRUMENTS",
+    "MARKET_OPEN_INTEREST",
     "MARKET_TICKER",
     "MARKET_TIME",
     "ORDERS",
