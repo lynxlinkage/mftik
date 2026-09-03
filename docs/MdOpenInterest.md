@@ -364,7 +364,8 @@ uses the ticker row, not `/contract_stats`.
 dedicated `open-interest` channel. Spot is refused inside the
 method.
 
-**Scope.** `okx/channels.py` (`OPEN_INTEREST`, `open_interest()`),
+**Scope.** `okx/channels.py` (`OPEN_INTEREST`, `open_interest()` —
+the same file OI-2 puts `MARKET_OPEN_INTEREST` in),
 `OkxOpenInterest` + `to_open_interest`, `subscribe_open_interest`,
 `OkxPublicClient.stream_open_interest`. Factory `hasattr` flips for
 Okx only.
@@ -373,10 +374,21 @@ Okx only.
 something else. Implementing it after Bybit/Gate would bury a clean
 channel in a shared-wire ticket.
 
-**Solution.** Copy `stream_funding_rate`. SWAP only
-(`FUNDING_PRODUCTS` / the liquidation-style product set). `oiCcy`
-when present; otherwise `oi * contract_size`. Skip a row with no
-usable size rather than inventing zero.
+**Solution.** Copy `stream_funding_rate`. SWAP only — which here is
+*refuse spot* under another name, not the narrowing OI-4 rejects: this
+venue lists Spot and Perp (`venues.py`), and `Perp` is the only
+category that resolves to SWAP. `oiCcy` when present; otherwise
+`oi * contract_size`. Skip a row with no usable size rather than
+inventing zero. Whatever factor OI-2's calibration settles applies
+here too — the channel and the endpoint report the same figure, and
+one of them silently disagreeing with the other is the bug this
+sentence exists to catch.
+
+If OKX ever lists FUTURES here, the open question is the **unit**, not
+the refusal: `oi * ctVal` is base, while that instrument's book, tape
+and quotes would still be contracts, and I5 says `qty` uses the unit
+the venue's other public sizes already use. That is a ticket, not a
+line in this one.
 
 **Verify.**
 
@@ -398,7 +410,8 @@ usable size rather than inventing zero.
 **Goal.** `open_interest` on Bybit perp and GateFutures reads the
 ticker topic already subscribed for `ticker` / `funding_rate`,
 sends no second `SUBSCRIBE`, and yields only when the delta names
-OI. Spot (Bybit) is refused inside the method.
+OI. Spot (Bybit) is refused inside the method; a dated future is
+not.
 
 **Scope.** `BybitTicker.to_open_interest` /
 `GateFuturesTicker.to_open_interest` (fields may already be on the
@@ -412,8 +425,12 @@ print. A second `SUBSCRIBE` for `tickers.BTCUSDT` would violate
 MDS I2. Gate's `total_size` is currently discarded.
 
 **Solution.** A third pump on the same `subscribe_tickers` call,
-mirroring `_funding_rates`. Yield when `to_open_interest` returns a
-row; skip otherwise. Gate multiplies `total_size` by `contract_size`.
+mirroring `_funding_rates` — except in what it refuses. The guard is
+its own category set, **not** `FUNDING_CATEGORIES`: that set is `{Perp}`
+because a dated future settles at expiry instead of paying a hook, and
+a dated future still has open interest. Yield when `to_open_interest`
+returns a row; skip otherwise. Gate multiplies `total_size` by
+`contract_size`.
 Late joiner: silent until the next OI-bearing push — documented on
 the method, not REST-filled. MDS-2's ticker-family row gains
 `open_interest` next to `funding_rate`; that is a doc edit in this
@@ -426,7 +443,13 @@ ticket, not a MDS-2 dependency.
   neither OI. Two consumers (`subscribe_tickers` from ticker and
   from OI) send one subscribe frame
   (`test_two_consumers_share_one_venue_subscription` shape).
-- Bybit spot / dated future raise before the iterator runs.
+- Bybit spot raises before the iterator runs. A dated future does
+  **not** — the mirror image of
+  `test_a_dated_future_has_no_funding_rate_stream`, and the reason
+  this topic gets its own category set. (`Bybit_Future_*` is not a
+  category the registry builds; it is reachable through
+  `UniversalTicker.parse`, which is what that funding test already
+  uses.)
 - Gate: a `futures.tickers` push with `total_size` yields base
   `qty`; a push without it is skipped. Same one-frame sharing
   against `stream_ticker` / `stream_funding_rate`.
@@ -452,8 +475,10 @@ OI-1  model + protocol + empty hooks          [unblocks the rest]
   └── OI-4  Bybit + Gate on the shared ticker wire
 ```
 
-Nothing below OI-1 gates anything else in that row. The only coupling
-is textual: OI-2 and OI-4 both touch the Bybit / Gate ticker models.
+Nothing below OI-1 gates anything else in that row. The coupling that
+exists is textual, in two files: OI-2 and OI-4 both touch the Bybit /
+Gate ticker models, and OI-2 and OI-3 both touch `okx/channels.py` —
+the REST path and the WS channel sit in the same module.
 
 Recommended order if they land one at a time:
 
@@ -484,9 +509,12 @@ Binance pump pretending to stream.
 
 ## Docs that stay right
 
-`docs/MdVenueSubscriptions.md` drops `open_interest` from *Out of
-scope* and points here. Its "Why now" table stays: that is why the
-ledger epic existed, not a promise this epic re-opens MDS tickets.
+`docs/MdVenueSubscriptions.md` already points here — its *Out of
+scope* entry reads "Moved to `docs/MdOpenInterest.md`". Its "Why now"
+table stays: that is why the ledger epic existed, not a promise this
+epic re-opens MDS tickets. Its MDS-2 late-joiner row now names
+`open_interest` beside `funding_rate`, which is OI-4's edit and is
+done.
 
 `docs/MdHandover.md` needs no edit. Product-zero and pinning do not
 change.
