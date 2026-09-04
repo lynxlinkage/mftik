@@ -100,6 +100,33 @@ def test_a_spot_sell_sized_in_quote_commits_nothing_knowable() -> None:
     assert held is None
 
 
+def test_a_delivery_future_commits_nothing_knowable() -> None:
+    """Coin-m dated futures settle in the coin and size in contracts.
+
+    ``Category.FUTURE`` on BinanceFuture is linear; the same category on
+    BinanceDelivery is not. A USDT reading would lock the wrong asset.
+    """
+    request = _request(universal_ticker="BinanceDelivery_Future_BTCUSD260925")
+    assert (
+        commitment_for(
+            category=Category.FUTURE,
+            side=request.side,
+            order_type=request.type,
+            base="BTC",
+            quote="USD",
+            qty=request.qty,
+            price=request.price,
+            leverage=Decimal("10"),
+            venue="BinanceDelivery",
+        )
+        is None
+    )
+    assert (
+        reservation_for(request, base="BTC", quote="USD", leverage=Decimal("10"))
+        is None
+    )
+
+
 def test_an_inverse_order_commits_nothing_knowable() -> None:
     """Margin is in the coin and size is a contract count.
 

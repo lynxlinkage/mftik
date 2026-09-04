@@ -63,11 +63,16 @@ from mftik.exchange.models import (
 )
 from mftik.exchange.stream import EventStream
 from mftik.exchange.symbols import SymbolResolver
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+#: Categories that pay a funding hook. A dated future settles at expiry;
+#: ``@markPrice`` may still push, but without ``r``, so a subscribe would
+#: open a pump that never yields. Inverse (the coin-margined perp) funds.
+FUNDING_CATEGORIES = frozenset({Category.INVERSE})
 
 #: Canonical interval → Binance's COIN-M spelling.
 #:
@@ -229,7 +234,22 @@ class BinanceDeliveryPublicClient(BaseClient):
     def stream_funding_rate(
         self, ticker: UniversalTicker
     ) -> AsyncIterator[FundingRate]:
+        """``@markPrice@1s`` — refused on books that do not fund.
+
+        A dated future settles at expiry. Checked here, before the iterator
+        runs, so MD's subscribe fails the same way a missing ``stream_*``
+        does rather than starting a pump that never yields.
+        """
         self._ensure_connected()
+        if ticker.venue != self.name:
+            raise ValueError(
+                f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
+            )
+        if ticker.category not in FUNDING_CATEGORIES:
+            raise ValueError(
+                f"{self.name} {ticker.category} serves no funding rate stream; "
+                f"supported: {', '.join(sorted(FUNDING_CATEGORIES))}"
+            )
         return self._funding_rates(ticker)
 
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
@@ -391,6 +411,7 @@ __all__ = [
     "BINANCE_DELIVERY_INTERVALS",
     "DEFAULT_BOOK_LEVELS",
     "DEFAULT_BOOK_SPEED",
+    "FUNDING_CATEGORIES",
     "BinanceDeliveryPublicClient",
     "venue_interval",
 ]

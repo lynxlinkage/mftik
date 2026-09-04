@@ -21,8 +21,8 @@ from mftik.exchange.models import (
     is_terminal,
 )
 from mftik.exchange.oms import LedgerEntry, LedgerView, OmsView, Position
-from mftik.exchange.reservations import reservation_for
-from mftik.exchange.tickers import Category, UniversalTicker
+from mftik.exchange.reservations import is_linear_margin, reservation_for
+from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
@@ -52,10 +52,6 @@ from mftik_td.oms import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: Books whose reservation is ``notional / leverage``. Inverse is not:
-#: its margin is in the coin and the size is a contract count.
-_LEVERAGED = frozenset({Category.PERP, Category.FUTURE})
 
 #: A venue that has not acknowledged an order in this long is not going to.
 #: Generous enough to ride out a slow round-trip; short enough that a strategy
@@ -177,7 +173,8 @@ class Session:
         self.symbols = symbols
         #: universal_ticker → configured leverage, filled by
         #: :meth:`ensure_leverage` (and optionally recon). Used to size
-        #: margined (perp and dated future) pre-locks as ``notional / leverage``.
+        #: linear-margined pre-locks as ``notional / leverage``. Coin-m
+        #: dated futures are not: they settle in the coin.
         self._leverage: dict[str, Decimal] = {}
         self._order_cbs: list[OrderCallback] = []
         self._fill_cbs: list[FillCallback] = []
@@ -1031,9 +1028,9 @@ class Session:
         cached = self._leverage.get(key)
         if cached is not None:
             return cached
-        if ticker.category not in _LEVERAGED:
+        if not is_linear_margin(ticker.category, venue=ticker.venue):
             raise ExchangeError(
-                f"leverage is only defined on Perp and Future, got {ticker}"
+                f"leverage is only defined on linear margined books, got {ticker}"
             )
         fetch = getattr(self.private, "fetch_leverage", None)
         if fetch is None:
@@ -1075,7 +1072,7 @@ class Session:
             return None
         leverage = (
             self._leverage.get(request.universal_ticker)
-            if request.category in _LEVERAGED
+            if is_linear_margin(request.category, venue=request.ticker.venue)
             else None
         )
         held = reservation_for(

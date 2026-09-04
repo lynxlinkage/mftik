@@ -609,6 +609,7 @@ class ChaseOrder(Strategy):
             qty=qty,
             price=price,
             leverage=self.ledger.leverage(info.ticker, api_id),
+            venue=info.venue,
         )
         if held is None:
             return None

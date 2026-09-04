@@ -33,6 +33,9 @@ from typing import Protocol
 from mftik.exchange import venues
 from mftik.exchange.binance.delivery.protocol import BINANCE_DELIVERY_REST_URL
 from mftik.exchange.binance.delivery.public import (
+    FUNDING_CATEGORIES as BINANCE_DELIVERY_FUNDING_CATEGORIES,
+)
+from mftik.exchange.binance.delivery.public import (
     venue_interval as binance_delivery_interval,
 )
 from mftik.exchange.binance.delivery.rest import BinanceDeliveryPublicRest
@@ -605,7 +608,15 @@ class BinanceDeliveryReader:
     async def fetch_funding_history(
         self, ticker: UniversalTicker, *, limit: int
     ) -> list[FundingRate]:
-        """Settled rates, oldest first. Binance already answers that way."""
+        """Settled rates, oldest first. Dated futures have none.
+
+        Guarded on the same set ``stream_funding_rate`` guards on, so a
+        query and a subscribe refuse the same books.
+        """
+        if ticker.category not in BINANCE_DELIVERY_FUNDING_CATEGORIES:
+            raise NoReaderError(
+                f"{self.venue} {ticker.category} serves no funding history"
+            )
         native = await self._symbol(ticker)
         return await self.rest.fetch_funding_history(
             native, ticker=ticker, limit=limit

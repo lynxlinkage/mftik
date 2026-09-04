@@ -194,10 +194,17 @@ def test_binance_delivery_is_its_own_perp_venue() -> None:
     coin = venues.require("BinanceDelivery")
     assert coin is venues.BINANCE_DELIVERY
     assert coin.label == "Binance COIN-M Futures"
-    assert coin.categories == frozenset({Category.INVERSE})
+    assert coin.categories == frozenset({Category.INVERSE, Category.FUTURE})
     assert coin.api_types == frozenset({venues.ED25519})
     assert coin.ticker_example == "BinanceDelivery_Inverse_BTCUSD"
-    assert str(coin.ticker(None, "BTCUSD")) == "BinanceDelivery_Inverse_BTCUSD"
+    assert str(coin.ticker("inverse", "BTCUSD")) == (
+        "BinanceDelivery_Inverse_BTCUSD"
+    )
+    assert str(coin.ticker("future", "BTCUSD260925")) == (
+        "BinanceDelivery_Future_BTCUSD260925"
+    )
+    with pytest.raises(venues.UnsupportedCategoryError, match="explicitly"):
+        coin.ticker(None, "BTCUSD")
     with pytest.raises(venues.UnsupportedCategoryError, match="does not trade"):
         coin.ticker("spot", "BTCUSD")
     with pytest.raises(venues.UnsupportedCategoryError, match="does not trade"):

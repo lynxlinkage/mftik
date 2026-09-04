@@ -13,7 +13,13 @@ from mftik.exchange.binance.delivery.rest import (
 )
 from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.tickers import UniversalTicker
-from mftik_md.fetch.readers import BinanceDeliveryReader, VenueReaderFactory
+from mftik.protocol.query_codes import QueryCode
+from mftik_md.errors import normalize
+from mftik_md.fetch.readers import (
+    BinanceDeliveryReader,
+    NoReaderError,
+    VenueReaderFactory,
+)
 
 TICKER = UniversalTicker.parse("BinanceDelivery_Inverse_BTCUSD")
 NATIVE = "BTCUSD_PERP"
@@ -158,6 +164,19 @@ async def test_funding_history_is_oldest_first() -> None:
     assert api.query("/dapi/v1/fundingRate") == {"symbol": NATIVE, "limit": "5"}
     assert [row.ts for row in rows] == [1_700_000_000.0, 1_700_028_800.0]
     assert rows[0].rate == Decimal("0.0001")
+
+    before = len(api.requests)
+    dated = UniversalTicker.parse("BinanceDelivery_Future_BTCUSD260925")
+    with pytest.raises(NoReaderError, match="Future"):
+        await _reader(api).fetch_funding_history(dated, limit=5)
+    assert len(api.requests) == before
+    assert (
+        normalize(
+            NoReaderError("BinanceDelivery Future serves no funding history"),
+            venue="BinanceDelivery",
+        )
+        is QueryCode.MD_VENUE_UNSUPPORTED_READ
+    )
 
 
 async def test_open_interest_stays_in_contracts() -> None:

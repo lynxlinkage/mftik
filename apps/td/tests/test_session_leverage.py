@@ -22,6 +22,7 @@ from mftik_td.session.session import Session
 DATED = UniversalTicker.parse("BinanceFuture_Future_BTCUSDT250926")
 PERP = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
 SPOT = UniversalTicker.parse("Binance_Spot_BTCUSDT")
+COIN_FUTURE = UniversalTicker.parse("BinanceDelivery_Future_BTCUSD260925")
 
 
 class _Private:
@@ -90,8 +91,17 @@ async def test_ensure_leverage_still_answers_for_a_perp(broker: Broker) -> None:
 
 async def test_ensure_leverage_still_refuses_spot(broker: Broker) -> None:
     session = _session(broker)
-    with pytest.raises(ExchangeError, match="Perp and Future"):
+    with pytest.raises(ExchangeError, match="linear margined"):
         await session.ensure_leverage(SPOT)
+
+
+async def test_ensure_leverage_refuses_a_coin_margined_future(
+    broker: Broker,
+) -> None:
+    """Same category as USD-M dated, different settlement — no linear lock."""
+    session = _session(broker)
+    with pytest.raises(ExchangeError, match="linear margined"):
+        await session.ensure_leverage(COIN_FUTURE)
 
 
 async def test_reserve_uses_cached_leverage_on_a_dated_future(
@@ -105,3 +115,16 @@ async def test_reserve_uses_cached_leverage_on_a_dated_future(
     assert await session.reserve(_limit(DATED)) is None
     # 0.01 * 50000 / 10 = 50, not 500.
     assert session.ledger.available("USDT") == Decimal("950")
+
+
+async def test_reserve_does_not_lock_a_coin_margined_future(
+    broker: Broker,
+) -> None:
+    """Unknowable, so the order goes through unreserved rather than in USD."""
+    session = _session(broker)
+    session.ledger.apply_venue(Balance(asset="USDT", free=Decimal("1000")))
+    session.ledger.apply_venue(Balance(asset="BTC", free=Decimal("2")))
+
+    assert await session.reserve(_limit(COIN_FUTURE)) is None
+    assert session.ledger.available("USDT") == Decimal("1000")
+    assert session.ledger.available("BTC") == Decimal("2")

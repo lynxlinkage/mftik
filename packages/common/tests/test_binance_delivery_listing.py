@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from mftik.exchange.binance.delivery.listing import to_listed
@@ -54,8 +55,8 @@ def test_a_perp_row_keeps_quote_per_contract_and_lot_in_contracts() -> None:
     assert listed.filters["min_notional"] is None
 
 
-def test_a_dated_contract_is_dropped() -> None:
-    """``BTCUSD_260925`` canonicalizes to ``BTCUSD`` and would collide."""
+def test_a_dated_contract_is_dropped_from_the_inverse_book() -> None:
+    """``BTCUSD_260925`` canonicalizes to ``BTCUSD`` and would steal the perp."""
     listed = to_listed(
         {
             **PERP,
@@ -64,6 +65,46 @@ def test_a_dated_contract_is_dropped() -> None:
         }
     )
     assert listed is None
+
+
+def test_a_dated_future_glues_yymmdd_onto_the_symbol() -> None:
+    """So it cannot collide with ``BinanceDelivery_Inverse_BTCUSD``."""
+    listed = to_listed(
+        {
+            **PERP,
+            "symbol": "BTCUSD_260925",
+            "contractType": "CURRENT_QUARTER",
+        },
+        category=Category.FUTURE,
+    )
+    assert listed is not None
+    assert listed.exch_ticker == "BTCUSD_260925"
+    assert listed.symbol == "BTCUSD260925"
+    assert str(listed.ticker) == "BinanceDelivery_Future_BTCUSD260925"
+    assert listed.category is Category.FUTURE
+    assert listed.contract_size == Decimal("100")
+    assert listed.settlement_asset == "BTC"
+    assert listed.expiry == datetime(2026, 9, 25, 8, tzinfo=UTC)
+
+
+def test_a_dated_row_without_delivery_date_still_gets_an_expiry() -> None:
+    listed = to_listed(
+        {
+            **PERP,
+            "symbol": "ETHUSD_251226",
+            "contractType": "NEXT_QUARTER",
+            "baseAsset": "ETH",
+            "marginAsset": "ETH",
+        },
+        category=Category.FUTURE,
+    )
+    assert listed is not None
+    assert listed.symbol == "ETHUSD251226"
+    assert listed.expiry == datetime(2025, 12, 26, 8, tzinfo=UTC)
+
+
+def test_a_perp_is_not_stored_as_a_future() -> None:
+    assert to_listed(PERP, category=Category.FUTURE) is None
 
 
 def test_missing_contract_size_is_skipped() -> None:

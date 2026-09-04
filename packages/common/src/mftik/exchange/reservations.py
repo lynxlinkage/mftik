@@ -18,9 +18,27 @@ from decimal import Decimal
 
 from mftik.exchange.models import OrderType, PlaceOrderRequest, Side
 from mftik.exchange.tickers import Category
+from mftik.exchange.venues import get as venue_of
 
 ZERO = Decimal("0")
 ONE = Decimal("1")
+
+
+def is_linear_margin(category: Category, *, venue: str | None = None) -> bool:
+    """Quote-settled books whose reservation is ``notional / leverage``.
+
+    Inverse and dated futures on a coin-margined venue settle in the coin
+    and size in contracts. A ``Future`` with no venue named is the linear
+    book — a coin-m Future must pass its venue so it is not priced as USDT.
+    """
+    if category is Category.PERP:
+        return True
+    if category is Category.FUTURE:
+        if not venue:
+            return True
+        found = venue_of(venue)
+        return found is not None and Category.PERP in found.categories
+    return False
 
 
 def commitment_for(
@@ -34,6 +52,7 @@ def commitment_for(
     quote_qty: Decimal | None = None,
     price: Decimal | None = None,
     leverage: Decimal | None = None,
+    venue: str | None = None,
 ) -> tuple[str, Decimal] | None:
     """What an order of this shape commits: ``(asset, amount)``, or None.
 
@@ -49,10 +68,11 @@ def commitment_for(
     non-positive ``leverage`` is treated as ``1`` — conservative until the
     leverage cache has been filled.
 
-    Inverse: unknowable here. Margin is in the settle coin and the size is a
-    contract count worth a fixed amount of quote; both need
-    ``contract_size``, which this function does not take. Returning a spot
-    or linear figure would lock the wrong asset.
+    Inverse, and dated futures on a coin-margined venue: unknowable here.
+    Margin is in the settle coin and the size is a contract count worth a
+    fixed amount of quote; both need ``contract_size``, which this function
+    does not take. Returning a spot or linear figure would lock the wrong
+    asset.
 
     ``None`` means unknowable, never nothing: a caller that then reserves
     nothing has *decided* to, which is not the same as reserving zero.
@@ -61,7 +81,10 @@ def commitment_for(
     asks this to decide whether to build one at all. See
     :func:`reservation_for` for the reading of an order already built.
     """
-    if category is Category.INVERSE:
+    if category is Category.INVERSE or (
+        category is Category.FUTURE
+        and not is_linear_margin(category, venue=venue)
+    ):
         return None
     if quote_qty is not None:
         if category in {Category.PERP, Category.FUTURE}:
@@ -106,6 +129,7 @@ def reservation_for(
         quote_qty=request.quote_qty,
         price=request.price,
         leverage=leverage,
+        venue=request.ticker.venue,
     )
 
 
@@ -113,4 +137,4 @@ def _leverage_or_one(leverage: Decimal | None) -> Decimal:
     return leverage if leverage is not None and leverage > ZERO else ONE
 
 
-__all__ = ["commitment_for", "reservation_for"]
+__all__ = ["commitment_for", "is_linear_margin", "reservation_for"]

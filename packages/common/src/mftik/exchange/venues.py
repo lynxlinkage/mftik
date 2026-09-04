@@ -176,10 +176,13 @@ BINANCE_DELIVERY = Venue(
     # product, not a category of the USD-M perp venue — the ticker is
     # ``BinanceDelivery_Inverse_BTCUSD``, never ``…_Perp_BTCUSD``. The same
     # key string as USD-M is the usual case, not a collision.
-    categories=frozenset({Category.INVERSE}),
+    categories=frozenset({Category.INVERSE, Category.FUTURE}),
     # COIN-M is quoted in USD, not USDT: ``BTCUSD_PERP`` is the venue's own
     # spelling and ``BTCUSDT`` is not an instrument dapi lists at all.
     example_symbol="BTCUSD",
+    # ``Future`` sorts first and a bare ``BTCUSD`` is not a dated
+    # instrument, so the hint stays on the inverse perpetual.
+    example_category=Category.INVERSE,
     api_types=frozenset({ED25519}),
     requires_passphrase=False,
 )

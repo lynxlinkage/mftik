@@ -35,9 +35,10 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
 
     Binance appears as three venues — ``Binance``, ``BinanceFuture`` and
     ``BinanceDelivery`` — because those are three credentials and three
-    listing endpoints. ``BinanceFuture`` then appears twice more, the way
-    Bybit does: one ``exchangeInfo`` mixes perpetuals and dated futures,
-    and a refresh must delist each book independently.
+    listing endpoints. ``BinanceFuture`` and ``BinanceDelivery`` then
+    appear twice more, the way Bybit does: one ``exchangeInfo`` mixes
+    perpetuals and dated futures, and a refresh must delist each book
+    independently.
     ``Gate`` / ``GateFutures`` is the classic split with no dated book yet.
     """
     return [
@@ -47,7 +48,8 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
         BinanceSpotInstrumentSource(),
         BinanceFutureInstrumentSource(category=Category.PERP),
         BinanceFutureInstrumentSource(category=Category.FUTURE),
-        BinanceDeliveryInstrumentSource(),
+        BinanceDeliveryInstrumentSource(category=Category.INVERSE),
+        BinanceDeliveryInstrumentSource(category=Category.FUTURE),
         BybitInstrumentSource(category=Category.SPOT),
         BybitInstrumentSource(category=Category.PERP),
         OkxInstrumentSource(category=Category.SPOT),

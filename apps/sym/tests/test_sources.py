@@ -707,12 +707,15 @@ BINANCE_DELIVERY_ROWS = [
 ]
 
 
-def _binance_delivery(rows: list[dict]) -> BinanceDeliveryInstrumentSource:
+def _binance_delivery(
+    rows: list[dict], *, category: Category = Category.INVERSE
+) -> BinanceDeliveryInstrumentSource:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/dapi/v1/exchangeInfo"
         return httpx.Response(200, json={"symbols": rows})
 
     return BinanceDeliveryInstrumentSource(
+        category=category,
         client=httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
             base_url="https://dapi.binance.com",
@@ -739,6 +742,24 @@ async def test_dated_delivery_contracts_are_not_stored_as_perpetuals() -> None:
     instruments = await _binance_delivery(BINANCE_DELIVERY_ROWS).fetch()
 
     assert [i.exch_ticker for i in instruments] == ["BTCUSD_PERP", "SOONUSD_PERP"]
+
+
+async def test_dated_delivery_contracts_become_future_instruments() -> None:
+    instruments = await _binance_delivery(
+        BINANCE_DELIVERY_ROWS, category=Category.FUTURE
+    ).fetch()
+
+    assert [i.exch_ticker for i in instruments] == ["BTCUSD_260925"]
+    btc = instruments[0]
+    assert str(btc.ticker) == "BinanceDelivery_Future_BTCUSD260925"
+    assert btc.symbol == "BTCUSD260925"
+    assert btc.category is Category.FUTURE
+    assert btc.contract_size == Decimal("100")
+    assert btc.settlement_asset == "BTC"
+    assert btc.expiry is not None
+    assert btc.expiry.year == 2026
+    assert btc.expiry.month == 9
+    assert btc.expiry.day == 25
 
 
 async def test_a_delivery_contract_not_yet_trading_is_listed_but_inactive() -> None:

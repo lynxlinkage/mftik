@@ -31,6 +31,7 @@ def test_parse_round_trips() -> None:
         "Bybit_Perp_ETHUSDT",
         "Paper_Spot_BTCUSDT",
         "BinanceDelivery_Inverse_BTCUSD",
+        "BinanceDelivery_Future_BTCUSD260925",
         "BinanceFuture_Future_BTCUSDT250926",
     ):
         assert str(UniversalTicker.parse(text)) == text

@@ -89,16 +89,25 @@ _LIMIT = "LIMIT"
 #: ``-2013`` is the query answer, ``-2011`` the cancel answer for the same fact.
 _NOT_FOUND_CODES = frozenset({-2011, -2013})
 
+#: Books this connector trades. Same set as ``venues.BINANCE_DELIVERY``.
+#: Inverse first so the common inbound row hits on the first lookup.
+_BOOKS = (Category.INVERSE, Category.FUTURE)
+
 
 class BinanceDeliveryPrivateClient(BaseClient):
     """Binance COIN-M trading account for TD.
 
-    Symbols cross this boundary in canonical form (``BTCUSD``) and are
-    resolved to Binance's spelling (``BTCUSD_PERP``) on the wire; everything
-    coming back is resolved home again. ``quantity`` stays in contracts.
+    Symbols cross this boundary in canonical form (``BTCUSD``,
+    ``BTCUSD260925``) and are resolved to Binance's spelling
+    (``BTCUSD_PERP``, ``BTCUSD_260925``) on the wire; everything coming
+    back is resolved home again. ``quantity`` stays in contracts.
     """
 
     name = "BinanceDelivery"
+    #: The default book, used when a caller names a bare symbol. The venue
+    #: trades Inverse and dated Future on this one credential — incoming
+    #: rows are resolved by looking up the native spelling on each book,
+    #: not by assuming this one.
     category = Category.INVERSE
 
     def __init__(
@@ -192,7 +201,7 @@ class BinanceDeliveryPrivateClient(BaseClient):
 
         order_type, tif = self._order_shape(request)
         ticker = request.ticker
-        check_venue(ticker, self.name, {self.category})
+        check_venue(ticker, self.name, _BOOKS)
         symbol = await self.symbols.exch_ticker(ticker)
         try:
             ack = await self.api.place_order(
@@ -381,27 +390,60 @@ class BinanceDeliveryPrivateClient(BaseClient):
 
     # --- symbols -----------------------------------------------------------
 
-    def _ticker(self, symbol: str) -> UniversalTicker:
-        return UniversalTicker.of(self.name, self.category, symbol)
+    def _ticker(
+        self, symbol: str, category: Category | None = None
+    ) -> UniversalTicker:
+        return UniversalTicker.of(self.name, category or self.category, symbol)
 
     async def _venue_symbol(self, symbol: str) -> str:
-        return await self.symbols.exch_ticker(self._ticker(symbol))
+        """Canonical → Binance's spelling, via the plane.
+
+        Tries each book: ``BTCUSD`` is the inverse perpetual,
+        ``BTCUSD260925`` the dated future. They are not interchangeable.
+        """
+        from mftik.symbols import SymbolNotFoundError
+
+        last: SymbolNotFoundError | None = None
+        for category in _BOOKS:
+            try:
+                return await self.symbols.exch_ticker(
+                    self._ticker(symbol, category)
+                )
+            except SymbolNotFoundError as exc:
+                last = exc
+        assert last is not None
+        raise last
 
     async def _resolve(self, native_symbol: str) -> UniversalTicker:
-        return await self.symbols.symbol_for(
-            self.name, native_symbol, category=self.category
-        )
+        """Binance's spelling → the universal ticker.
+
+        Looked up on each book this venue trades, rather than derived:
+        stripping a dated suffix would land a quarterly fill on the
+        inverse perpetual of the same pair.
+        """
+        from mftik.symbols import SymbolNotFoundError
+
+        last: SymbolNotFoundError | None = None
+        for category in _BOOKS:
+            try:
+                return await self.symbols.symbol_for(
+                    self.name, native_symbol, category=category
+                )
+            except SymbolNotFoundError as exc:
+                last = exc
+        assert last is not None
+        raise last
 
     async def _resolve_or_skip(self, native_symbol: str) -> UniversalTicker | None:
         """The canonical ticker, or ``None`` for a contract we do not carry.
 
-        dapi answers for every contract listed on the venue, dated ones
-        included, where the symbol plane ingests only perpetuals — so a
-        quarterly the account happens to hold is a row nothing can name. It
-        must not abort an account-wide read or tear down a stream that is
-        also carrying the perpetuals we do trade. Reads that were asked about
-        one specific order still use :meth:`_resolve` and raise: there,
-        answering with nothing would be the worse lie.
+        dapi answers for every contract listed on the venue. Dated ones
+        resolve once the plane carries them; a row the plane has not
+        ingested yet must not abort an account-wide read or tear down a
+        stream that is also carrying the instruments we do trade. Reads
+        that were asked about one specific order still use
+        :meth:`_resolve` and raise: there, answering with nothing would
+        be the worse lie.
         """
         # Imported here, not at module scope: the exchange barrel is what
         # ``mftik.symbols`` itself loads, so naming it up top is a cycle.

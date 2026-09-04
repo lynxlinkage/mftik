@@ -31,7 +31,10 @@ from mftik.exchange.binance.delivery.protocol import (
     BINANCE_DELIVERY_WS_API_TESTNET_URL,
     BINANCE_DELIVERY_WS_API_URL,
 )
-from mftik.exchange.binance.delivery.public import BinanceDeliveryPublicClient
+from mftik.exchange.binance.delivery.public import (
+    FUNDING_CATEGORIES,
+    BinanceDeliveryPublicClient,
+)
 from mftik.exchange.binance.delivery.rest import (
     BinanceDeliveryPublicRest,
     BinanceDeliveryRest,
@@ -47,6 +50,7 @@ __all__ = [
     "BINANCE_DELIVERY_STREAM_URL",
     "BINANCE_DELIVERY_WS_API_TESTNET_URL",
     "BINANCE_DELIVERY_WS_API_URL",
+    "FUNDING_CATEGORIES",
     "BinanceDeliveryPrivateClient",
     "BinanceDeliveryPublicClient",
     "BinanceDeliveryPublicRest",

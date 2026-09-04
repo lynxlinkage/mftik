@@ -26,14 +26,15 @@ from mftik.exchange.models import (
     Side,
     TimeInForce,
 )
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.symbols import SymbolNotFoundError
 
 NATIVE = "BTCUSD_PERP"
-#: A quarterly. dapi lists and answers for these; the plane never
-#: ingests them, because ``to_listed`` keeps only ``PERPETUAL``.
+#: A quarterly. Unlisted on a perp-only plane; listed as Future when both
+#: books are in the resolver.
 DATED = "BTCUSD_260626"
 TICKER = UniversalTicker.parse("BinanceDelivery_Inverse_BTCUSD")
+DATED_TICKER = UniversalTicker.parse("BinanceDelivery_Future_BTCUSD260626")
 
 OPEN_ORDER = {
     "symbol": NATIVE,
@@ -54,20 +55,41 @@ OPEN_ORDER = {
 
 
 class StubSymbols:
-    """A symbol plane whose venue spelling differs from the canonical one."""
+    """A symbol plane whose venue spelling differs from the canonical one.
+
+    Two books on one venue: the inverse perpetual and one dated future. A
+    miss raises so the connector can try the other book rather than
+    inventing a ticker.
+    """
 
     async def exch_ticker(self, ticker: UniversalTicker) -> str:
-        return NATIVE
+        if ticker == DATED_TICKER:
+            return DATED
+        if ticker == TICKER:
+            return NATIVE
+        raise SymbolNotFoundError(f"no such instrument: {ticker}")
 
     async def symbol_for(
         self, venue: str, exch_ticker: str, *, category: str
     ) -> UniversalTicker:
-        assert exch_ticker == NATIVE, f"unexpected venue symbol {exch_ticker!r}"
-        return UniversalTicker.of(venue, category, "BTCUSD")
+        book = Category(category)
+        if exch_ticker == DATED and book is Category.FUTURE:
+            return DATED_TICKER
+        if exch_ticker == NATIVE and book is Category.INVERSE:
+            return TICKER
+        raise SymbolNotFoundError(
+            f"no {book.value} instrument spelled {exch_ticker!r} on "
+            f"venue {venue!r}"
+        )
 
 
 class PerpOnlySymbols(StubSymbols):
-    """The real plane's shape: perpetuals are in it and nothing else is."""
+    """A stale plane: perpetuals are in it and dated contracts are not."""
+
+    async def exch_ticker(self, ticker: UniversalTicker) -> str:
+        if ticker == TICKER:
+            return NATIVE
+        raise SymbolNotFoundError(f"no such instrument: {ticker}")
 
     async def symbol_for(
         self, venue: str, exch_ticker: str, *, category: str
@@ -526,3 +548,67 @@ async def test_a_dated_contract_does_not_tear_down_the_order_stream(
         order = await asyncio.wait_for(pump, timeout=2.0)
 
     assert order.universal_ticker == str(TICKER)
+
+
+async def test_a_dated_future_order_reaches_the_wire(
+    delivery_api: FakeBinanceDeliveryApi,
+    delivery_user: FakeBinanceDeliveryUser,
+    binance_key,
+) -> None:
+    """Same credential, different book — the ticker says which."""
+    _key, pem = binance_key
+    delivery_api.results[m.ORDER_PLACE] = {**OPEN_ORDER, "symbol": DATED}
+    async with _client(delivery_api, delivery_user, pem) as client:
+        order = await client.place_order(
+            _order(universal_ticker=str(DATED_TICKER))
+        )
+    assert delivery_api.call(m.ORDER_PLACE)["params"]["symbol"] == DATED
+    assert order.universal_ticker == str(DATED_TICKER)
+
+
+async def test_a_dated_future_position_does_not_land_on_the_inverse(
+    delivery_api: FakeBinanceDeliveryApi,
+    delivery_user: FakeBinanceDeliveryUser,
+    binance_key,
+) -> None:
+    """One account holds both books; the native spelling says which."""
+    _key, pem = binance_key
+    delivery_api.results[m.ACCOUNT_POSITION] = [
+        {"symbol": DATED, "positionAmt": "3", "entryPrice": "40000"},
+        {"symbol": NATIVE, "positionAmt": "-2", "entryPrice": "40000"},
+    ]
+    async with _client(delivery_api, delivery_user, pem) as client:
+        positions = await client.fetch_positions()
+    by_ticker = {row.universal_ticker: row.qty for row in positions}
+    assert by_ticker[str(DATED_TICKER)] == Decimal("3")
+    assert by_ticker[str(TICKER)] == Decimal("-2")
+
+
+async def test_a_dated_open_order_resolves_home(
+    delivery_api: FakeBinanceDeliveryApi,
+    delivery_user: FakeBinanceDeliveryUser,
+    binance_key,
+) -> None:
+    _key, pem = binance_key
+    rest = StubRest([{**OPEN_ORDER, "symbol": DATED}])
+    async with _client(delivery_api, delivery_user, pem, rest=rest) as client:
+        orders = await client.fetch_open_orders()
+    assert orders[0].universal_ticker == str(DATED_TICKER)
+    assert rest.asked == [None]
+
+
+async def test_a_dated_future_stream_resolves_home(
+    delivery_api: FakeBinanceDeliveryApi,
+    delivery_user: FakeBinanceDeliveryUser,
+    binance_key,
+) -> None:
+    _key, pem = binance_key
+    async with _client(delivery_api, delivery_user, pem) as client:
+        orders = client.stream_orders()
+        pump = asyncio.ensure_future(anext(orders))
+        await asyncio.sleep(0.05)
+        await delivery_user.push(
+            {**ORDER_UPDATE, "o": {**ORDER_UPDATE["o"], "s": DATED}}
+        )
+        order = await asyncio.wait_for(pump, timeout=2.0)
+    assert order.universal_ticker == str(DATED_TICKER)
