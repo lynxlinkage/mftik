@@ -37,7 +37,7 @@ serves them on a topic something else already reads:
 |---|---|---|
 | BinanceFuture | `@markPrice` (`r`, `T`); `subscribe_mark_prices` exists, unwired | No USD-M WS channel; REST `/fapi/v1/openInterest` |
 | Bybit perp | `tickers.{symbol}` — the topic `stream_ticker` reads | Same `tickers.{symbol}` |
-| GateFutures | `futures.tickers` (`funding_rate`, parsed then dropped) | `total_size` on the same ticker |
+| GateFutures | `futures.tickers` (`funding_rate`, parsed then dropped) | `total_size` on the same ticker, halved to one side |
 | OKX SWAP | Dedicated `funding-rate` channel | Dedicated `open-interest` channel |
 | Spot / Paper | N/A — refuse | N/A — refuse |
 

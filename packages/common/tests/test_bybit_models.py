@@ -426,15 +426,51 @@ def test_a_ticker_without_a_rate_is_not_a_funding_print() -> None:
     assert row.to_funding_rate(PERP, ts=1.0) is None
 
 
-def test_a_ticker_with_open_interest_converts() -> None:
+def test_a_ticker_with_open_interest_halves_both_sides() -> None:
     row = BybitTicker.model_validate(
         {"symbol": "BTCUSDT", "openInterest": "1234.5"}
     )
     interest = row.to_open_interest(PERP, ts=1_700_000_000.0)
     assert interest is not None
-    assert interest.qty == Decimal("1234.5")
+    assert interest.qty == Decimal("617.25")
     assert interest.ts == 1_700_000_000.0
     assert not hasattr(interest, "open_interest_value")
+
+
+def test_a_ticker_prefers_single_open_interest() -> None:
+    row = BybitTicker.model_validate(
+        {
+            "symbol": "BTCUSDT",
+            "openInterest": "1234.5",
+            "singleOpenInterest": "600",
+        }
+    )
+    interest = row.to_open_interest(PERP, ts=1.0)
+    assert interest is not None
+    assert interest.qty == Decimal("600")
+
+
+def test_a_ticker_with_only_single_open_interest_converts() -> None:
+    row = BybitTicker.model_validate(
+        {"symbol": "BTCUSDT", "singleOpenInterest": "12.5"}
+    )
+    interest = row.to_open_interest(PERP, ts=1.0)
+    assert interest is not None
+    assert interest.qty == Decimal("12.5")
+
+
+def test_an_empty_single_open_interest_falls_back() -> None:
+    """Bybit sends ``""`` for a numeric it has no value for, not the key."""
+    row = BybitTicker.model_validate(
+        {
+            "symbol": "BTCUSDT",
+            "openInterest": "1234.5",
+            "singleOpenInterest": "",
+        }
+    )
+    interest = row.to_open_interest(PERP, ts=1.0)
+    assert interest is not None
+    assert interest.qty == Decimal("617.25")
 
 
 def test_a_ticker_without_open_interest_is_not_a_print() -> None:

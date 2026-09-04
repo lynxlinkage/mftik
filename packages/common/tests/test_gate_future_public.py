@@ -235,7 +235,7 @@ async def test_open_interest_converts_total_size_and_skips_a_row_without_it(
         )
         interest = await asyncio.wait_for(size_task, timeout=2)
 
-    assert interest.qty == Decimal("0.1")
+    assert interest.qty == Decimal("0.05")
     assert interest.ts == 1_700_000_001.5
 
 
@@ -265,7 +265,7 @@ async def test_ticker_and_open_interest_share_one_single_contract_subscribe(
         )
 
     assert quote.last == Decimal("60000")
-    assert interest.qty == Decimal("0.2")
+    assert interest.qty == Decimal("0.1")
 
 
 async def test_no_aggtrade_method(gate_futures: FakeGateFutures) -> None:

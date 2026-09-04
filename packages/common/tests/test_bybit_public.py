@@ -762,9 +762,30 @@ async def test_an_open_interest_only_delta_feeds_oi_not_the_ticker(
         )
         quote = await asyncio.wait_for(quote_task, 2)
 
-    assert interest.qty == Decimal("1234.5")
+    assert interest.qty == Decimal("617.25")
     assert interest.ts == 1_700_000_000.0
     assert quote.last == Decimal("60000")
+
+
+async def test_a_single_open_interest_delta_feeds_oi(
+    bybit_public: FakeBybit,
+) -> None:
+    client = _client(bybit_public, product="linear")
+    perp = UniversalTicker.parse("Bybit_Perp_BTCUSDT")
+    async with client:
+        sizes = client.stream_open_interest(perp)
+        size_task = asyncio.ensure_future(sizes.__anext__())
+        await asyncio.sleep(0.05)
+        await bybit_public.push(
+            "tickers.BTCUSDT",
+            {"symbol": NATIVE, "singleOpenInterest": "12.5"},
+            kind="delta",
+            ts=1_700_000_000_000,
+        )
+        interest = await asyncio.wait_for(size_task, 2)
+
+    assert interest.qty == Decimal("12.5")
+    assert interest.ts == 1_700_000_000.0
 
 
 async def test_a_quoted_delta_without_open_interest_yields_neither_oi(
@@ -789,7 +810,7 @@ async def test_a_quoted_delta_without_open_interest_yields_neither_oi(
         )
         interest = await asyncio.wait_for(size_task, 2)
 
-    assert interest.qty == Decimal("9")
+    assert interest.qty == Decimal("4.5")
     size_task.cancel()
 
 
@@ -820,7 +841,7 @@ async def test_ticker_and_open_interest_share_one_venue_subscription(
         )
 
     assert quote.last == Decimal("60000")
-    assert interest.qty == Decimal("1234.5")
+    assert interest.qty == Decimal("617.25")
 
 
 async def test_spot_has_no_open_interest_stream(bybit_public: FakeBybit) -> None:
@@ -847,7 +868,7 @@ async def test_a_dated_future_has_an_open_interest_stream(
         )
         interest = await asyncio.wait_for(task, 2)
 
-    assert interest.qty == Decimal("4")
+    assert interest.qty == Decimal("2")
     assert interest.universal_ticker == str(future)
 
 

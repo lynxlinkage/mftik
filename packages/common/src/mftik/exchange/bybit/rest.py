@@ -360,9 +360,10 @@ class BybitPublicRest(_BybitRestTransport):
         *,
         ticker: UniversalTicker,
     ) -> OpenInterest:
-        """``tickers`` — current size, already in base, stamped by Bybit.
+        """``tickers`` — current size, one side, already in base.
 
-        Read through :meth:`_get_stamped` rather than
+        ``singleOpenInterest`` when the row named it, otherwise half of
+        ``openInterest``. Read through :meth:`_get_stamped` rather than
         :meth:`fetch_ticker_row` for the stamp alone: the row has no clock,
         and a snapshot whose ``ts`` is local receive tells a caller how
         long *we* took, which is not what it asked.
@@ -382,7 +383,7 @@ class BybitPublicRest(_BybitRestTransport):
         interest = row.to_open_interest(ticker, ts=stamp)
         if interest is None:
             raise BybitRestError(
-                None, f"no openInterest for {symbol}", op=ch.MARKET_TICKERS
+                None, f"no open interest for {symbol}", op=ch.MARKET_TICKERS
             )
         return interest
 

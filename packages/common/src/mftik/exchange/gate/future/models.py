@@ -143,8 +143,11 @@ class GateFuturesTicker(GateMessage):
     ) -> OpenInterest | None:
         """One side, in base, when this row named ``total_size``.
 
-        ``ts`` is the frame stamp (or local receive) the caller already
-        chose. The row's ``t`` is used only when the caller omitted one.
+        ``total_size`` is long plus short. A perpetual's two sides are
+        identical, so the shared print is half of that, times
+        ``contract_size``. ``ts`` is the frame stamp (or local receive)
+        the caller already chose. The row's ``t`` is used only when the
+        caller omitted one.
         """
         if self.total_size is None:
             return None
@@ -152,7 +155,8 @@ class GateFuturesTicker(GateMessage):
         fields: dict[str, Any] = {} if stamp <= 0 else {"ts": stamp}
         return OpenInterest(
             universal_ticker=str(ticker),
-            qty=contracts_to_base(self.total_size, contract_size),
+            qty=contracts_to_base(self.total_size, contract_size)
+            / Decimal("2"),
             **fields,
         )
 

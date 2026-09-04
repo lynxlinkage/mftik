@@ -528,6 +528,9 @@ class BybitTicker(BybitMessage):
     index_price: OptDec = Field(default=None, alias="indexPrice")
     funding_rate: OptDec = Field(default=None, alias="fundingRate")
     open_interest: OptDec = Field(default=None, alias="openInterest")
+    single_open_interest: OptDec = Field(
+        default=None, alias="singleOpenInterest"
+    )
 
     @property
     def quoted(self) -> bool:
@@ -574,16 +577,21 @@ class BybitTicker(BybitMessage):
     ) -> OpenInterest | None:
         """One side, in base, when this row named a size.
 
-        The row has no clock; ``ts`` is the envelope stamp (or local
-        receive) the caller already chose. Omitted when the delta did
-        not carry ``openInterest``.
+        Prefer ``singleOpenInterest`` — the venue's single-side figure.
+        A delta that only carried the older ``openInterest`` is halved:
+        that field is both sides. The row has no clock; ``ts`` is the
+        envelope stamp (or local receive) the caller already chose.
+        Omitted when the delta named neither size.
         """
-        if self.open_interest is None:
-            return None
+        qty = self.single_open_interest
+        if qty is None:
+            if self.open_interest is None:
+                return None
+            qty = self.open_interest / Decimal("2")
         fields: dict[str, Any] = {} if ts <= 0 else {"ts": ts}
         return OpenInterest(
             universal_ticker=str(ticker),
-            qty=self.open_interest,
+            qty=qty,
             **fields,
         )
 
