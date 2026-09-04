@@ -247,8 +247,9 @@ class GateFuturesPublicRest(_Transport):
         ticker: UniversalTicker,
         contract_size: Decimal,
     ) -> OpenInterest:
-        """``tickers`` — current size, converted to base.
+        """``tickers`` — current size, one side, converted to base.
 
+        ``total_size`` is both sides; the converter halves it.
         ``contract_stats`` is a history series and is not this read.
         """
         row = await self.fetch_ticker_row(contract)

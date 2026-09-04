@@ -35,9 +35,9 @@ publish it.
 
 | Venue | Live OI arrives on | Current snapshot |
 |---|---|---|
-| Bybit perp | `tickers.{symbol}` — same wire as `ticker` and `funding_rate` | `GET /v5/market/tickers` (`openInterest`) |
+| Bybit perp | `tickers.{symbol}` — same wire as `ticker` and `funding_rate` | `GET /v5/market/tickers` (`singleOpenInterest`, else half of `openInterest`) |
 | OKX SWAP | Dedicated `open-interest` channel, about every 3s | `GET /api/v5/public/open-interest` |
-| GateFutures | `futures.tickers.total_size` — same wire as `ticker` and `funding_rate` | REST ticker `total_size` |
+| GateFutures | `futures.tickers.total_size` — same wire as `ticker` and `funding_rate`; halved | REST ticker `total_size / 2` |
 | BinanceFuture | **No WS.** `@ticker` / `@markPrice` do not carry it | `GET /fapi/v1/openInterest` |
 | BinanceDelivery | **No WS.** | `GET /dapi/v1/openInterest` |
 | Spot / Paper | N/A — refuse | N/A — refuse |
@@ -132,16 +132,16 @@ class OpenInterest(InstrumentScoped):
     ts: float
 ```
 
-`qty` is **one side's** open interest — the market convention, and what
-Binance, Bybit and Gate already report — in the unit the venue's other
-public sizes already use:
+`qty` is **one side's** open interest — the market convention — in the
+unit the venue's other public sizes already use. A venue whose native
+figure is both sides applies the factor **in its own converter**:
 
 | Venue | Native field | Shared `qty` | Comparable |
 |---|---|---|---|
-| BinanceFuture | REST `openInterest` | as sent (base) | yes — its own book |
-| Bybit linear | `openInterest` | as sent (base) | yes vs Gate |
-| GateFutures | `total_size` | `total_size * contract_size` (base) | yes vs Bybit |
-| OKX SWAP | `oiCcy` (else `oi * ctVal`) | base, as sent | unit yes; ~½ of Bybit/Gate |
+| BinanceFuture | REST `openInterest` | as sent (base, one side) | yes — its own book |
+| Bybit linear | `singleOpenInterest`, else `openInterest / 2` | base, one side | yes vs OKX / Gate |
+| GateFutures | `total_size` | `total_size * contract_size / 2` (base) | yes vs Bybit / OKX |
+| OKX SWAP | `oiCcy` (else `oi * ctVal`) | base, as sent (one side) | yes vs Bybit / Gate |
 | BinanceDelivery | REST `openInterest` | as sent (contracts) | n/a — different product |
 
 Those four are why a unit is stated at all. A strategy holding
@@ -150,26 +150,27 @@ compares four numbers, and a venue whose native figure needs a factor
 applies it **in its own reader** rather than leaving every caller to
 know which venue counts which way.
 
-**OKX is one side, and is not halved.** Measured 2026-09-03 on
-BTC-USDT perp, using the fields this table names:
+**Bybit `openInterest` and Gate `total_size` are both sides.** The
+2026-09-03 calibration read those fields as sent and concluded OKX
+was the odd one out (half of Bybit / Gate). That inverted I5: OKX
+`oiCcy` was already one side, and the 2× sat on Bybit and Gate.
+[#58](https://github.com/lynxlinkage/mftik/issues/58) corrects the
+converters. Measured 2026-09-04 on BTC-USDT perp, after the factor:
 
 | Venue | Native | Shared `qty` (BTC) |
 |---|---|---|
-| BinanceFuture | `openInterest` | 108144.552 |
-| Bybit linear | `openInterest` | 55688.648 |
-| GateFutures | `total_size * 0.0001` | 58278.184 |
-| OKX SWAP | `oiCcy` | 29187.818 |
+| BinanceFuture | `openInterest` | 110156.526 |
+| Bybit linear | `singleOpenInterest` | 28172.812 |
+| GateFutures | `total_size * 0.0001 / 2` | 28805.218 |
+| OKX SWAP | `oiCcy` | 27819.866 |
 
-Bybit and Gate agree. OKX is half of those two, not double. Binance
-is its own book (~1.9× Bybit, ~3.7× OKX), not a 2× of anyone. A
-systematic 2× on OKX alone would have meant both sides and a
-halving in `OkxReader`; that is not what landed.
-
-Bybit now also publishes `singleOpenInterest` (27844.324, half of
-`openInterest`) and Gate's contract row has `position_size`
-(29139.092 base, half of `total_size`). Those pair with OKX's
-`oiCcy`. This ticket does not change the chosen fields, and does
-not invent a halving on Bybit or Gate either.
+Bybit, OKX and Gate are now peers. Binance is its own larger book
+(~3.9× OKX), not a 2× of anyone. Bybit's ticker documents
+`openInterest` as both sides and `singleOpenInterest` as one side
+(exact 2.0 on that print). Gate's `position_size` ("total long
+position size") is the same one-sided figure as `total_size / 2`;
+the live feed stays on the ticker and halves there, rather than
+switching the snapshot to the contract row.
 
 **BinanceDelivery is contracts, and that is the answer rather than a
 gap.** It is this tree's only `Inverse` book — a USD-margined contract
@@ -222,8 +223,9 @@ OKX half. `open-interest` is a new arg on the same public socket.
 
 **Gate `contract_stats` is the wrong tool for a live print.** The
 channel requires an interval. REST `/contract_stats` is the same
-bucketed series. Current OI is `total_size` on the ticker (and
-`position_size` on the contract row — same long-side figure).
+bucketed series, and its `open_interest` is both sides — the same
+figure as ticker `total_size`, not the one-sided `position_size`.
+Live OI stays `total_size / 2` on `futures.tickers`.
 
 **Fetch already refuses a missing reader method.**
 `FetchSession` looks up `read` on the venue reader the same way
@@ -308,19 +310,20 @@ the matching MD reader. No WebSocket. No interval argument.
 |---|---|---|
 | BinanceFuture | `GET /fapi/v1/openInterest` | `openInterest` (base) |
 | BinanceDelivery | `GET /dapi/v1/openInterest` | `openInterest` (contracts) |
-| Bybit | `GET /v5/market/tickers` | `openInterest` (base). **Not** `/v5/market/open-interest` |
+| Bybit | `GET /v5/market/tickers` | `singleOpenInterest`, else `openInterest / 2` (base). **Not** `/v5/market/open-interest` |
 | OKX | `GET /api/v5/public/open-interest` | `oiCcy`, else `oi * contract_size` |
-| GateFutures | `GET /futures/{settle}/tickers` | `total_size * contract_size` |
+| GateFutures | `GET /futures/{settle}/tickers` | `total_size * contract_size / 2` |
 
-Bybit already has `fetch_ticker_row`. Parse `openInterest` on
-`BybitTicker` here (needed again by OI-4; landing it on the wire
-model once is the point). Gate parses `total_size` on
-`GateFuturesTicker` the same way — but has nothing that hands the row
-back: `GateFuturesPublicRest.fetch_ticker` converts to a shared
-`Ticker` and drops it, so this ticket adds the row-returning read that
-Bybit already has. OKX's endpoint is scoped by `instType`, not by
-`instId` alone, and its path constant lands in `okx/channels.py`
-beside the other REST paths — the same file OI-3 adds a channel to.
+Bybit already has `fetch_ticker_row`. Parse `openInterest` and
+`singleOpenInterest` on `BybitTicker` here (needed again by OI-4;
+landing them on the wire model once is the point). Gate parses
+`total_size` on `GateFuturesTicker` the same way — but has nothing
+that hands the row back: `GateFuturesPublicRest.fetch_ticker`
+converts to a shared `Ticker` and drops it, so this ticket adds the
+row-returning read that Bybit already has. OKX's endpoint is scoped
+by `instType`, not by `instId` alone, and its path constant lands in
+`okx/channels.py` beside the other REST paths — the same file OI-3
+adds a channel to.
 
 **Problem.** Binance will never grow the feed. A strategy that needs
 OI there has only this call. Bybit's dedicated OI REST is a history
@@ -355,10 +358,10 @@ uses the ticker row, not `/contract_stats`.
 - **One live calibration, recorded in this doc rather than in a test.**
   `qty` for one underlying on OKX against Bybit, BinanceFuture and
   GateFutures. Those three agree or the reading is wrong; a systematic
-  2x on OKX alone means its figure is both sides, and the halving plus
-  its reason land in `OkxReader` and in the shared-model table. This is
-  the ticket that owns I5's comparability, and it does not merge on an
-  unmeasured guess.
+  2x on a venue means its figure is both sides, and the halving plus
+  its reason land in that venue's converter and in the shared-model
+  table. The 2026-09-03 reading applied that test to OKX; [#58](https://github.com/lynxlinkage/mftik/issues/58)
+  moved the factor onto Bybit and Gate, where the 2× actually sat.
 
 **Depends.** OI-1. Independent of OI-3 and OI-4.
 
@@ -434,7 +437,8 @@ its own category set, **not** `FUNDING_CATEGORIES`: that set is `{Perp}`
 because a dated future settles at expiry instead of paying a hook, and
 a dated future still has open interest. Yield when `to_open_interest`
 returns a row; skip otherwise. Gate multiplies `total_size` by
-`contract_size`.
+`contract_size` and halves it (long plus short). Bybit prefers
+`singleOpenInterest` and otherwise halves `openInterest`.
 Late joiner: silent until the next OI-bearing push — documented on
 the method, not REST-filled. MDS-2's ticker-family row gains
 `open_interest` next to `funding_rate`; that is a doc edit in this
@@ -442,10 +446,11 @@ ticket, not a MDS-2 dependency.
 
 **Verify.**
 
-- Bybit: a delta with only `openInterest` yields OI and does not
-  yield a `Ticker`; a quoted delta without `openInterest` yields
-  neither OI. Two consumers (`subscribe_tickers` from ticker and
-  from OI) send one subscribe frame
+- Bybit: a delta with only `openInterest` yields one-sided OI
+  (half) and does not yield a `Ticker`; a `singleOpenInterest`
+  delta yields that figure as sent; a quoted delta without either
+  size yields neither OI. Two consumers (`subscribe_tickers` from
+  ticker and from OI) send one subscribe frame
   (`test_two_consumers_share_one_venue_subscription` shape).
 - Bybit spot raises before the iterator runs. A dated future does
   **not** — the mirror image of
@@ -454,9 +459,10 @@ ticket, not a MDS-2 dependency.
   category the registry builds; it is reachable through
   `UniversalTicker.parse`, which is what that funding test already
   uses.)
-- Gate: a `futures.tickers` push with `total_size` yields base
-  `qty`; a push without it is skipped. Same one-frame sharing
-  against `stream_ticker` / `stream_funding_rate`.
+- Gate: a `futures.tickers` push with `total_size` yields one-sided
+  base `qty` (`total_size * contract_size / 2`); a push without it
+  is skipped. Same one-frame sharing against `stream_ticker` /
+  `stream_funding_rate`.
 - `test_md_shared_venue_topics.py`: detach `open_interest` leaves
   `ticker` (and `funding_rate` if up) fed; detach `ticker` leaves
   `open_interest` fed.

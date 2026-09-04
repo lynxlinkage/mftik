@@ -242,11 +242,11 @@ async def test_open_interest_reads_the_ticker_and_refuses_what_the_stream_does(
     assert [r.url.path for r in api.requests] == ["/v5/market/tickers"]
     assert "category=linear" in api.query_for("/v5/market/tickers")
     assert "/v5/market/open-interest" not in {r.url.path for r in api.requests}
-    assert row.qty == Decimal("1234.5")
+    assert row.qty == Decimal("617.25")
     assert row.universal_ticker == str(PERP)
 
     dated = await _reader(api).fetch_open_interest(FUTURE)
-    assert dated.qty == Decimal("1234.5")
+    assert dated.qty == Decimal("617.25")
     assert "category=linear" in api.requests[-1].url.query.decode()
 
     # Refused on the set the stream refuses on, so an option ticker is a

@@ -308,8 +308,9 @@ class BybitPublicClient(BaseClient):
         """``tickers`` — refused on spot, before the iterator runs.
 
         Shares the ticker wire with ``stream_ticker`` / ``stream_funding_rate``.
-        A late joiner is silent until the next ``openInterest``-bearing
-        delta; nothing is REST-filled. A dated future is answered.
+        A late joiner is silent until the next size-bearing delta
+        (``singleOpenInterest`` or ``openInterest``); nothing is
+        REST-filled. A dated future is answered.
         """
         self._ensure_connected()
         if ticker.venue != self.name:
