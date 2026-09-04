@@ -63,6 +63,11 @@ class Venue:
     #: every venue quotes in USDT; a coin-margined one does not, and a hint
     #: naming an instrument the venue cannot list is worse than none.
     example_symbol: str = "BTCUSDT"
+    #: Category used in ``ticker_example`` when the sorted default would
+    #: name an instrument the venue cannot list — a dated book whose
+    #: symbols carry an expiry, so a bare ``BTCUSDT`` under ``Future``
+    #: would be a lie.
+    example_category: Category | None = None
     #: Credential algorithms this venue's adapter can sign with.
     api_types: frozenset[str] = field(default_factory=lambda: frozenset({HMAC}))
     #: Whether a passphrase is part of the credential (OKX-style venues).
@@ -87,7 +92,7 @@ class Venue:
     @property
     def ticker_example(self) -> str:
         """A well-formed ticker on this venue, for UI hints."""
-        example = sorted(self.categories)[0]
+        example = self.example_category or sorted(self.categories)[0]
         return str(UniversalTicker(self.name, example, self.example_symbol))
 
     def ticker(self, category: str | None, symbol: str) -> UniversalTicker:
@@ -154,7 +159,10 @@ BINANCE_FUTURE = Venue(
     # hosts, wallet and order book, so a credential stored here cannot trade
     # spot or COIN-M. Binance issues one key for all three planes; uniqueness
     # is therefore (venue, api_key), not the key string alone.
-    categories=frozenset({Category.PERP}),
+    categories=frozenset({Category.PERP, Category.FUTURE}),
+    # ``Future`` sorts first and a bare ``BTCUSDT`` is not a dated
+    # instrument, so the hint stays on the perpetual.
+    example_category=Category.PERP,
     # Same authentication story as spot: the WebSocket API authenticates a
     # connection with ``session.logon``, which accepts only Ed25519 keys.
     api_types=frozenset({ED25519}),
@@ -236,6 +244,14 @@ def check_registry() -> None:
             )
         if not venue.categories:
             raise ValueError(f"venue {name!r} trades no categories")
+        if (
+            venue.example_category is not None
+            and venue.example_category not in venue.categories
+        ):
+            raise ValueError(
+                f"venue {name!r} hints at {venue.example_category.value}, "
+                f"which it does not trade"
+            )
         # Round-trips through the strict parser, so a name the parser would
         # reject cannot be registered in the first place.
         UniversalTicker.parse(str(UniversalTicker(name, Category.SPOT, "BTCUSDT")))

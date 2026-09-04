@@ -36,6 +36,7 @@ _MARKET_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     ("GateFutures", Category.PERP): _BOTH_QTY,
     ("Binance", Category.SPOT): _BOTH_EITHER,
     ("BinanceFuture", Category.PERP): _BOTH_QTY,
+    ("BinanceFuture", Category.FUTURE): _BOTH_QTY,
     # Contract count as ``qty``. Inverse margin-in-coin is a reservation
     # question, not a ``quote_qty`` one.
     ("BinanceDelivery", Category.INVERSE): _BOTH_QTY,
@@ -60,6 +61,7 @@ _LIMIT_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     ("GateFutures", Category.PERP): _BOTH_QTY,
     ("Binance", Category.SPOT): _BOTH_QTY,
     ("BinanceFuture", Category.PERP): _BOTH_QTY,
+    ("BinanceFuture", Category.FUTURE): _BOTH_QTY,
     ("BinanceDelivery", Category.INVERSE): _BOTH_QTY,
     ("Bybit", Category.SPOT): _BOTH_QTY,
     ("Bybit", Category.PERP): _BOTH_QTY,

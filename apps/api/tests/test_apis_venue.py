@@ -55,9 +55,10 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     assert by_name["Okx"].categories == ["Perp", "Spot"]
     assert by_name["Okx"].requires_passphrase is True
     assert by_name["Okx"].api_types == ["HMAC"]
-    # Binance's USD-M plane is a venue of its own, on one category: separate
-    # hosts and a separate wallet, so it cannot be a category of "Binance".
-    assert by_name["BinanceFuture"].categories == ["Perp"]
+    # Binance's USD-M plane is a venue of its own: separate hosts and a
+    # separate wallet, so it cannot be a category of "Binance". Perp and
+    # dated futures share that credential; the hint stays on the perpetual.
+    assert by_name["BinanceFuture"].categories == ["Future", "Perp"]
     assert by_name["BinanceFuture"].api_types == ["ED25519"]
     assert by_name["BinanceFuture"].ticker_example == "BinanceFuture_Perp_BTCUSDT"
     assert by_name["BinanceDelivery"].categories == ["Inverse"]

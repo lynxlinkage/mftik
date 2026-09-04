@@ -169,6 +169,26 @@ def test_gate_futures_is_its_own_perp_venue() -> None:
         fut.ticker("spot", "BTCUSDT")
 
 
+def test_binance_future_trades_perps_and_dated_on_one_credential() -> None:
+    """USD-M dated futures share the fapi credential and must not steal
+    the perpetual's ticker — category and the glued ``YYMMDD`` keep them
+    apart. The UI hint stays on the perpetual: a bare ``BTCUSDT`` is not
+    a dated instrument.
+    """
+    fut = venues.require("BinanceFuture")
+    assert fut is venues.BINANCE_FUTURE
+    assert fut.categories == frozenset({Category.PERP, Category.FUTURE})
+    assert fut.ticker_example == "BinanceFuture_Perp_BTCUSDT"
+    assert str(fut.ticker("perp", "BTCUSDT")) == "BinanceFuture_Perp_BTCUSDT"
+    assert str(fut.ticker("future", "BTCUSDT250926")) == (
+        "BinanceFuture_Future_BTCUSDT250926"
+    )
+    with pytest.raises(venues.UnsupportedCategoryError, match="explicitly"):
+        fut.ticker(None, "BTCUSDT")
+    with pytest.raises(venues.UnsupportedCategoryError, match="does not trade"):
+        fut.ticker("spot", "BTCUSDT")
+
+
 def test_binance_delivery_is_its_own_perp_venue() -> None:
     """dapi — separate credential and host from spot and from USD-M."""
     coin = venues.require("BinanceDelivery")
