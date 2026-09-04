@@ -19,7 +19,13 @@ from mftik.exchange.binance.future.rest import (
 )
 from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.tickers import UniversalTicker
-from mftik_md.fetch.readers import BinanceFutureReader, VenueReaderFactory
+from mftik.protocol.query_codes import QueryCode
+from mftik_md.errors import normalize
+from mftik_md.fetch.readers import (
+    BinanceFutureReader,
+    NoReaderError,
+    VenueReaderFactory,
+)
 
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
 NATIVE = "BTC-USDT"
@@ -179,6 +185,19 @@ async def test_funding_history_is_oldest_first_and_drops_mark_price() -> None:
     assert [row.rate for row in rows] == [Decimal("0.0001"), Decimal("0.0002")]
     assert all(row.universal_ticker == str(TICKER) for row in rows)
     assert not any(hasattr(row, "mark_price") for row in rows)
+
+    before = len(api.requests)
+    dated = UniversalTicker.parse("BinanceFuture_Future_BTCUSDT250926")
+    with pytest.raises(NoReaderError, match="Future"):
+        await _reader(api).fetch_funding_history(dated, limit=5)
+    assert len(api.requests) == before
+    assert (
+        normalize(
+            NoReaderError("BinanceFuture Future serves no funding history"),
+            venue="BinanceFuture",
+        )
+        is QueryCode.MD_VENUE_UNSUPPORTED_READ
+    )
 
 
 async def test_open_interest_is_base_and_dated_by_the_venue() -> None:

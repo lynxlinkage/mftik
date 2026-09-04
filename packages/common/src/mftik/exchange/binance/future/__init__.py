@@ -79,6 +79,7 @@ from mftik.exchange.binance.future.protocol import (
 )
 from mftik.exchange.binance.future.public import (
     BINANCE_FUTURE_INTERVALS,
+    FUNDING_CATEGORIES,
     BinanceFuturePublicClient,
     venue_interval,
 )
@@ -94,6 +95,7 @@ from mftik.exchange.binance.future.user import (
 
 __all__ = [
     "BINANCE_FUTURE_INTERVALS",
+    "FUNDING_CATEGORIES",
     "BINANCE_FUTURE_MARKET_STREAM_URL",
     "BINANCE_FUTURE_PRIVATE_STREAM_URL",
     "BINANCE_FUTURE_PUBLIC_STREAM_URL",

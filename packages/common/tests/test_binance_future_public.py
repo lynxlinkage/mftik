@@ -282,6 +282,20 @@ async def test_mark_price_yields_a_funding_rate_and_skips_a_print_without_one(
     assert not hasattr(funding, "next_funding_time")
 
 
+async def test_a_dated_future_has_no_funding_rate_stream(
+    future_public_stream: FakeBinanceStream,
+    future_market_stream: FakeBinanceStream,
+) -> None:
+    """A dated future settles at expiry; ``@markPrice`` would push without
+    ``r`` and the pump would never yield. Refused before any subscribe."""
+    client = _client(future_public_stream, future_market_stream)
+    async with client:
+        with pytest.raises(ValueError, match="serves no funding rate stream"):
+            client.stream_funding_rate(
+                UniversalTicker.parse("BinanceFuture_Future_BTCUSDT250926")
+            )
+
+
 async def test_candles_answer_in_the_interval_that_was_asked_for(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
