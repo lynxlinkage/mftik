@@ -20,9 +20,10 @@ Four futures shapes drive most of what follows:
 
 * **Post-only is a time-in-force**, spelled ``GTX``. Unlike spot, no order type
   has to be swapped for it — ``LIMIT_MAKER`` does not exist here.
-* **Positions exist**, which on spot they do not: a perp account holds signed
-  exposure that no balance describes. So this connector serves
-  ``fetch_positions`` and ``stream_positions``, which TD picks up by name.
+* **Positions exist**, which on spot they do not: a USDⓈ-M account holds
+  signed exposure that no balance describes — perpetual and dated on the
+  same credential. So this connector serves ``fetch_positions`` and
+  ``stream_positions``, which TD picks up by name.
 * **A balance has no free/locked split.** Margin is held against the position,
   not against an order, so ``free``/``locked`` are derived from what Binance
   says is still available — see
@@ -110,20 +111,26 @@ _LIMIT = "LIMIT"
 #: fact.
 _NOT_FOUND_CODES = frozenset({-2011, -2013})
 
+#: Books this connector trades. Same set as ``venues.BINANCE_FUTURE``.
+#: Perp first so the common inbound row hits on the first lookup.
+_BOOKS = (Category.PERP, Category.FUTURE)
+
 
 class BinanceFuturePrivateClient(BaseClient):
     """Binance USDⓈ-M futures trading account for TD.
 
-    Symbols cross this boundary in canonical form (``BTCUSDT``) and are
-    resolved to Binance's spelling on the wire; everything coming back is
-    resolved home again. Venue-only order options — ``reduceOnly``,
+    Symbols cross this boundary in canonical form (``BTCUSDT``,
+    ``BTCUSDT250926``) and are resolved to Binance's spelling on the wire
+    (``BTCUSDT``, ``BTCUSDT_250926``); everything coming back is resolved
+    home again. Venue-only order options — ``reduceOnly``,
     ``positionSide``, ``priceMatch`` — ride in ``PlaceOrderRequest.params``.
     """
 
     name = "BinanceFuture"
-    #: This connector's market. Binance's USDⓈ-M plane is a venue of its own
-    #: here — one credential, one book — so every instrument it touches is a
-    #: perpetual and it builds the ticker rather than being told it.
+    #: The default book, used when a caller names a bare symbol. The venue
+    #: trades Perp and dated Future on this one credential — incoming rows
+    #: are resolved by looking up the native spelling on each book, not by
+    #: assuming this one.
     category = Category.PERP
 
     def __init__(
@@ -225,7 +232,7 @@ class BinanceFuturePrivateClient(BaseClient):
 
         order_type, tif = self._order_shape(request)
         ticker = request.ticker
-        check_venue(ticker, self.name, {self.category})
+        check_venue(ticker, self.name, _BOOKS)
         symbol = await self.symbols.exch_ticker(ticker)
         try:
             ack = await self.api.place_order(
@@ -366,7 +373,7 @@ class BinanceFuturePrivateClient(BaseClient):
         order goes out.
         """
         self._ensure_connected()
-        check_venue(ticker, self.name, {self.category})
+        check_venue(ticker, self.name, _BOOKS)
         native = await self.symbols.exch_ticker(ticker)
         rows = await self.rest.fetch_symbol_config(native)
         for row in rows:
@@ -464,19 +471,50 @@ class BinanceFuturePrivateClient(BaseClient):
 
     # --- symbols -----------------------------------------------------------
 
-    def _ticker(self, symbol: str) -> UniversalTicker:
-        """The universal identity of a symbol on this connector's market."""
-        return UniversalTicker.of(self.name, self.category, symbol)
+    def _ticker(
+        self, symbol: str, category: Category | None = None
+    ) -> UniversalTicker:
+        """The universal identity of a symbol on one of this venue's books."""
+        return UniversalTicker.of(self.name, category or self.category, symbol)
 
     async def _venue_symbol(self, symbol: str) -> str:
-        """Canonical → Binance's spelling, via the plane."""
-        return await self.symbols.exch_ticker(self._ticker(symbol))
+        """Canonical → Binance's spelling, via the plane.
+
+        Tries each book: ``BTCUSDT`` is the perpetual, ``BTCUSDT250926``
+        the dated future. They are not interchangeable.
+        """
+        from mftik.symbols import SymbolNotFoundError
+
+        last: SymbolNotFoundError | None = None
+        for category in _BOOKS:
+            try:
+                return await self.symbols.exch_ticker(
+                    self._ticker(symbol, category)
+                )
+            except SymbolNotFoundError as exc:
+                last = exc
+        assert last is not None
+        raise last
 
     async def _resolve(self, native_symbol: str) -> UniversalTicker:
-        """Binance's spelling → the universal ticker, on this connector's book."""
-        return await self.symbols.symbol_for(
-            self.name, native_symbol, category=self.category
-        )
+        """Binance's spelling → the universal ticker.
+
+        Looked up on each book this venue trades, rather than derived:
+        stripping a dated suffix would land a quarterly fill on the
+        perpetual of the same pair.
+        """
+        from mftik.symbols import SymbolNotFoundError
+
+        last: SymbolNotFoundError | None = None
+        for category in _BOOKS:
+            try:
+                return await self.symbols.symbol_for(
+                    self.name, native_symbol, category=category
+                )
+            except SymbolNotFoundError as exc:
+                last = exc
+        assert last is not None
+        raise last
 
     async def _symbol_for(self, order_id: str) -> str:
         """Resolve an id to its venue symbol, refreshing only if unseen."""

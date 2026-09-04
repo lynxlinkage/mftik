@@ -53,6 +53,10 @@ from mftik_td.oms import (
 
 logger = logging.getLogger(__name__)
 
+#: Books whose reservation is ``notional / leverage``. Inverse is not:
+#: its margin is in the coin and the size is a contract count.
+_LEVERAGED = frozenset({Category.PERP, Category.FUTURE})
+
 #: A venue that has not acknowledged an order in this long is not going to.
 #: Generous enough to ride out a slow round-trip; short enough that a strategy
 #: is not left believing an order is in flight for minutes.
@@ -172,8 +176,8 @@ class Session:
         #: Optional: without it TD still trades, it just cannot pre-lock.
         self.symbols = symbols
         #: universal_ticker → configured leverage, filled by
-        #: :meth:`ensure_leverage` (and optionally recon). Used to size perp
-        #: pre-locks as ``notional / leverage``.
+        #: :meth:`ensure_leverage` (and optionally recon). Used to size
+        #: margined (perp and dated future) pre-locks as ``notional / leverage``.
         self._leverage: dict[str, Decimal] = {}
         self._order_cbs: list[OrderCallback] = []
         self._fill_cbs: list[FillCallback] = []
@@ -1027,9 +1031,9 @@ class Session:
         cached = self._leverage.get(key)
         if cached is not None:
             return cached
-        if ticker.category is not Category.PERP:
+        if ticker.category not in _LEVERAGED:
             raise ExchangeError(
-                f"leverage is only defined on perps, got {ticker}"
+                f"leverage is only defined on Perp and Future, got {ticker}"
             )
         fetch = getattr(self.private, "fetch_leverage", None)
         if fetch is None:
@@ -1071,7 +1075,7 @@ class Session:
             return None
         leverage = (
             self._leverage.get(request.universal_ticker)
-            if request.category is Category.PERP
+            if request.category in _LEVERAGED
             else None
         )
         held = reservation_for(
