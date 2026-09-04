@@ -429,7 +429,7 @@ class Strategy:
         """Handle live open-interest updates from MD.
 
         Feed topic ``open_interest``. ``qty`` is one side, in base on every
-        base-denominated book — BinanceDelivery reports contracts instead,
+        base-denominated book — BinanceCM reports contracts instead,
         like the rest of that venue's public sizes.
 
         ``ts`` is the best available stamp: the venue's event time when the

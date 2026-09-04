@@ -18,7 +18,7 @@ from mftik.broker.client import (
     encode_tape_gaps,
 )
 
-FEED = "aggtrade.BinanceFuture_Perp_BTCUSDT"
+FEED = "aggtrade.BinanceUM_Perp_BTCUSDT"
 
 
 @pytest.fixture

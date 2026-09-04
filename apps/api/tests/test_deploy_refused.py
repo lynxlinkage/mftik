@@ -25,8 +25,8 @@ from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.orchestrate import deploy_strategy
 
 REFUSAL = (
-    "no bestquote feed for BinanceFuture_Perp_BTCUSDT in md "
-    "['aggtrade.BinanceFuture_Perp_BTCUSDT']; macd_dollar prices its IOCs "
+    "no bestquote feed for BinanceUM_Perp_BTCUSDT in md "
+    "['aggtrade.BinanceUM_Perp_BTCUSDT']; macd_dollar prices its IOCs "
     "through the touch and has no book without one"
 )
 
@@ -69,7 +69,7 @@ async def test_a_refused_strategy_never_reaches_the_attach() -> None:
             broker,
             strategy_id="MacdDollarBars",
             td={"paper": TdAccountRef(api_id=1)},
-            md=["aggtrade.BinanceFuture_Perp_BTCUSDT"],
+            md=["aggtrade.BinanceUM_Perp_BTCUSDT"],
             created_by=1,
         )
 

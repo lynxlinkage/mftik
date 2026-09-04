@@ -19,14 +19,14 @@ from mftik.protocol.messages import SymbolInfo
 from mftik_td.oms import Ledger
 from mftik_td.session.session import Session
 
-DATED = UniversalTicker.parse("BinanceFuture_Future_BTCUSDT250926")
-PERP = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
+DATED = UniversalTicker.parse("BinanceUM_Future_BTCUSDT250926")
+PERP = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 SPOT = UniversalTicker.parse("Binance_Spot_BTCUSDT")
-COIN_FUTURE = UniversalTicker.parse("BinanceDelivery_Future_BTCUSD260925")
+COIN_FUTURE = UniversalTicker.parse("BinanceCM_Future_BTCUSD260925")
 
 
 class _Private:
-    name = "BinanceFuture"
+    name = "BinanceUM"
 
 
 class _Symbols:

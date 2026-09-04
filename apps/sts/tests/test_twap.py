@@ -39,7 +39,7 @@ BTCUSDT = SymbolInfo(
 )
 
 BTCUSDT_PERP = SymbolInfo(
-    universal_ticker="BinanceFuture_Perp_BTCUSDT",
+    universal_ticker="BinanceUM_Perp_BTCUSDT",
     base="BTC",
     quote="USDT",
     exch_ticker="BTCUSDT",
@@ -497,9 +497,9 @@ async def test_perp_arm_ensures_leverage() -> None:
     await _arm(strat)
     assert strat._armed
     assert strat.ledger.ensure_calls == [
-        ("BinanceFuture_Perp_BTCUSDT", 7),
+        ("BinanceUM_Perp_BTCUSDT", 7),
     ]
-    assert strat.ledger.leverage("BinanceFuture_Perp_BTCUSDT") == Decimal("10")
+    assert strat.ledger.leverage("BinanceUM_Perp_BTCUSDT") == Decimal("10")
 
 
 @pytest.mark.asyncio

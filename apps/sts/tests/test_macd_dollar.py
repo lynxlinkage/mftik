@@ -28,7 +28,7 @@ from mftik.protocol import ReconDone, RejectCode, SymbolInfo
 from mftik.strategy.tape import TapeSlice
 from mftik_sts.impl.macd_dollar import MacdDollarBars, _BarBuilder, _Ema
 
-TICKER = "BinanceFuture_Perp_BTCUSDT"
+TICKER = "BinanceUM_Perp_BTCUSDT"
 SPOT_TICKER = "Bybit_Spot_BTCUSDT"
 
 INFO = SymbolInfo(
@@ -574,7 +574,7 @@ async def test_a_quote_for_another_instrument_is_ignored() -> None:
     await _warm(strat, ["120", "110"])
     await strat.on_best_quote(
         BestQuote(
-            universal_ticker="BinanceFuture_Perp_ETHUSDT",
+            universal_ticker="BinanceUM_Perp_ETHUSDT",
             bid=Decimal("1"),
             bid_qty=Decimal("1"),
             ask=Decimal("2"),

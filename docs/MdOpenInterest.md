@@ -38,8 +38,8 @@ publish it.
 | Bybit perp | `tickers.{symbol}` — same wire as `ticker` and `funding_rate` | `GET /v5/market/tickers` (`singleOpenInterest`, else half of `openInterest`) |
 | OKX SWAP | Dedicated `open-interest` channel, about every 3s | `GET /api/v5/public/open-interest` |
 | GateFutures | `futures.tickers.total_size` — same wire as `ticker` and `funding_rate`; halved | REST ticker `total_size / 2` |
-| BinanceFuture | **No WS.** `@ticker` / `@markPrice` do not carry it | `GET /fapi/v1/openInterest` |
-| BinanceDelivery | **No WS.** | `GET /dapi/v1/openInterest` |
+| BinanceUM | **No WS.** `@ticker` / `@markPrice` do not carry it | `GET /fapi/v1/openInterest` |
+| BinanceCM | **No WS.** | `GET /dapi/v1/openInterest` |
 | Spot / Paper | N/A — refuse | N/A — refuse |
 
 Bybit and Gate are the shared-wire case MDS-1 was built for. OKX is a
@@ -96,7 +96,7 @@ stream the venue does not have.
 Each is meant to be a test.
 
 1. **I1 — Push is a push.** `stream_open_interest` yields a print the
-   venue sent. It does not GET. BinanceFuture and BinanceDelivery have
+   venue sent. It does not GET. BinanceUM and BinanceCM have
    no such method.
 2. **I2 — Snapshot is a snapshot.** `fetch_open_interest` answers
    once, current OI, on `md.fetch`. It does not subscribe, and it does
@@ -114,9 +114,9 @@ Each is meant to be a test.
    lands on `MD_VENUE_CALL_FAILED` instead.
 5. **I5 — Thin model, comparable unit.** `OpenInterest` is `qty` + `ts`.
    `qty` is **one side, in base** on every base-denominated book — Bybit
-   linear, OKX SWAP, GateFutures, BinanceFuture — so the same underlying
+   linear, OKX SWAP, GateFutures, BinanceUM — so the same underlying
    compares across the four without the caller knowing whose contract is
-   whose. BinanceDelivery is the stated exception and says so: its
+   whose. BinanceCM is the stated exception and says so: its
    contract is USD, so `qty` there is **contracts**, like every other
    public size this tree reports on that venue.
 6. **I6 — Late joiner is silent on a shared ticker.** A second pump
@@ -138,14 +138,14 @@ figure is both sides applies the factor **in its own converter**:
 
 | Venue | Native field | Shared `qty` | Comparable |
 |---|---|---|---|
-| BinanceFuture | REST `openInterest` | as sent (base, one side) | yes — its own book |
+| BinanceUM | REST `openInterest` | as sent (base, one side) | yes — its own book |
 | Bybit linear | `singleOpenInterest`, else `openInterest / 2` | base, one side | yes vs OKX / Gate |
 | GateFutures | `total_size` | `total_size * contract_size / 2` (base) | yes vs Bybit / OKX |
 | OKX SWAP | `oiCcy` (else `oi * ctVal`) | base, as sent (one side) | yes vs Bybit / Gate |
-| BinanceDelivery | REST `openInterest` | as sent (contracts) | n/a — different product |
+| BinanceCM | REST `openInterest` | as sent (contracts) | n/a — different product |
 
 Those four are why a unit is stated at all. A strategy holding
-`open_interest` on BTC across Bybit, OKX, GateFutures and BinanceFuture
+`open_interest` on BTC across Bybit, OKX, GateFutures and BinanceUM
 compares four numbers, and a venue whose native figure needs a factor
 applies it **in its own reader** rather than leaving every caller to
 know which venue counts which way.
@@ -159,7 +159,7 @@ converters. Measured 2026-09-04 on BTC-USDT perp, after the factor:
 
 | Venue | Native | Shared `qty` (BTC) |
 |---|---|---|
-| BinanceFuture | `openInterest` | 110156.526 |
+| BinanceUM | `openInterest` | 110156.526 |
 | Bybit linear | `singleOpenInterest` | 28172.812 |
 | GateFutures | `total_size * 0.0001 / 2` | 28805.218 |
 | OKX SWAP | `oiCcy` | 27819.866 |
@@ -172,9 +172,9 @@ position size") is the same one-sided figure as `total_size / 2`;
 the live feed stays on the ticker and halves there, rather than
 switching the snapshot to the contract row.
 
-**BinanceDelivery is contracts, and that is the answer rather than a
+**BinanceCM is contracts, and that is the answer rather than a
 gap.** It is this tree's only `Inverse` book — a USD-margined contract
-on a different instrument from BinanceFuture's `Perp` — and nothing
+on a different instrument from BinanceUM's `Perp` — and nothing
 here asks the two to be compared. The mechanics agree with the
 decision: `contractSize` is USD per contract, not base, so
 contracts → base would need a mark price the OI endpoint does not
@@ -274,7 +274,7 @@ rule also has nothing to refuse.
 query fail the way `funding_rate` already fails on Paper. Factory
 tests pin `not hasattr(..., "stream_open_interest")` on every
 client, including the perps — OI-3 / OI-4 flip the ones that grow
-it; BinanceFuture / BinanceDelivery stay false for the life of this
+it; BinanceUM / BinanceCM stay false for the life of this
 epic.
 
 **Verify.**
@@ -293,7 +293,7 @@ epic.
   `ok` False / `MD_VENUE_UNSUPPORTED_READ` against today's readers
   (`test_md_fetch.py` / `test_mds_query.py` style).
 - Factory: every venue client, including GateFutures / Bybit / Okx /
-  BinanceFuture / BinanceDelivery, `not hasattr` `stream_open_interest`.
+  BinanceUM / BinanceCM, `not hasattr` `stream_open_interest`.
 
 **Depends.** Nothing in this epic. Does not wait on MDS-2..6.
 
@@ -308,8 +308,8 @@ the matching MD reader. No WebSocket. No interval argument.
 
 | Reader | Endpoint | Field → `qty` |
 |---|---|---|
-| BinanceFuture | `GET /fapi/v1/openInterest` | `openInterest` (base) |
-| BinanceDelivery | `GET /dapi/v1/openInterest` | `openInterest` (contracts) |
+| BinanceUM | `GET /fapi/v1/openInterest` | `openInterest` (base) |
+| BinanceCM | `GET /dapi/v1/openInterest` | `openInterest` (contracts) |
 | Bybit | `GET /v5/market/tickers` | `singleOpenInterest`, else `openInterest / 2` (base). **Not** `/v5/market/open-interest` |
 | OKX | `GET /api/v5/public/open-interest` | `oiCcy`, else `oi * contract_size` |
 | GateFutures | `GET /futures/{settle}/tickers` | `total_size * contract_size / 2` |
@@ -356,7 +356,7 @@ uses the ticker row, not `/contract_stats`.
 - A unit test that Bybit's reader does not call
   `/v5/market/open-interest`.
 - **One live calibration, recorded in this doc rather than in a test.**
-  `qty` for one underlying on OKX against Bybit, BinanceFuture and
+  `qty` for one underlying on OKX against Bybit, BinanceUM and
   GateFutures. Those three agree or the reading is wrong; a systematic
   2x on a venue means its figure is both sides, and the halving plus
   its reason land in that venue's converter and in the shared-model
@@ -467,7 +467,7 @@ ticket, not a MDS-2 dependency.
   `ticker` (and `funding_rate` if up) fed; detach `ticker` leaves
   `open_interest` fed.
 - Factory: Bybit and GateFutures `hasattr` `stream_open_interest`;
-  BinanceFuture, BinanceDelivery, Paper, Gate spot, Binance spot
+  BinanceUM, BinanceCM, Paper, Gate spot, Binance spot
   still do not.
 - Late-joiner policy is in the method docstring: silent, not
   REST-filled.
@@ -509,8 +509,8 @@ All four `Verify` sections green, and the matrix holds:
 | Bybit perp | pushes | snapshot |
 | OKX SWAP | pushes | snapshot |
 | GateFutures | pushes | snapshot |
-| BinanceFuture | refused at attach | snapshot |
-| BinanceDelivery | refused at attach | snapshot |
+| BinanceUM | refused at attach | snapshot |
+| BinanceCM | refused at attach | snapshot |
 | Spot / Paper | refused at attach | `MD_VENUE_UNSUPPORTED_READ` |
 
 A strategy can subscribe OI on OKX / Bybit / GateFutures, query it

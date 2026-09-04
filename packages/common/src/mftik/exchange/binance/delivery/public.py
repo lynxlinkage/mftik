@@ -118,7 +118,7 @@ class BinanceDeliveryPublicClient(BaseClient):
 
         client = BinanceDeliveryPublicClient(symbols=symbol_client)
         async with client:
-            ticker = UniversalTicker.parse("BinanceDelivery_Inverse_BTCUSD")
+            ticker = UniversalTicker.parse("BinanceCM_Inverse_BTCUSD")
             async for book in client.stream_order_book(ticker):
                 ...
 
@@ -126,7 +126,7 @@ class BinanceDeliveryPublicClient(BaseClient):
     a symbol, as every connector here does.
     """
 
-    name = "BinanceDelivery"
+    name = "BinanceCM"
 
     def __init__(
         self,
@@ -152,7 +152,7 @@ class BinanceDeliveryPublicClient(BaseClient):
         await self.feed.connect()
         await self.rest.connect()
         self._connected = True
-        logger.info("BinanceDelivery public connected")
+        logger.info("BinanceCM public connected")
 
     async def close(self) -> None:
         self._connected = False

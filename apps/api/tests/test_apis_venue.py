@@ -31,8 +31,8 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
 
     assert set(by_name) == {
         "Binance",
-        "BinanceDelivery",
-        "BinanceFuture",
+        "BinanceCM",
+        "BinanceUM",
         "Bybit",
         "Gate",
         "GateFutures",
@@ -58,13 +58,13 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     # Binance's USD-M plane is a venue of its own: separate hosts and a
     # separate wallet, so it cannot be a category of "Binance". Perp and
     # dated futures share that credential; the hint stays on the perpetual.
-    assert by_name["BinanceFuture"].categories == ["Future", "Perp"]
-    assert by_name["BinanceFuture"].api_types == ["ED25519"]
-    assert by_name["BinanceFuture"].ticker_example == "BinanceFuture_Perp_BTCUSDT"
-    assert by_name["BinanceDelivery"].categories == ["Future", "Inverse"]
-    assert by_name["BinanceDelivery"].api_types == ["ED25519"]
-    assert by_name["BinanceDelivery"].ticker_example == (
-        "BinanceDelivery_Inverse_BTCUSD"
+    assert by_name["BinanceUM"].categories == ["Future", "Perp"]
+    assert by_name["BinanceUM"].api_types == ["ED25519"]
+    assert by_name["BinanceUM"].ticker_example == "BinanceUM_Perp_BTCUSDT"
+    assert by_name["BinanceCM"].categories == ["Future", "Inverse"]
+    assert by_name["BinanceCM"].api_types == ["ED25519"]
+    assert by_name["BinanceCM"].ticker_example == (
+        "BinanceCM_Inverse_BTCUSD"
     )
     assert by_name["GateFutures"].categories == ["Perp"]
     assert by_name["GateFutures"].api_types == ["HMAC"]

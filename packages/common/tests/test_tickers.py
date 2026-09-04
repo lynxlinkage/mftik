@@ -30,9 +30,9 @@ def test_parse_round_trips() -> None:
         "Bybit_Spot_ETHUSDT",
         "Bybit_Perp_ETHUSDT",
         "Paper_Spot_BTCUSDT",
-        "BinanceDelivery_Inverse_BTCUSD",
-        "BinanceDelivery_Future_BTCUSD260925",
-        "BinanceFuture_Future_BTCUSDT250926",
+        "BinanceCM_Inverse_BTCUSD",
+        "BinanceCM_Future_BTCUSD260925",
+        "BinanceUM_Future_BTCUSDT250926",
     ):
         assert str(UniversalTicker.parse(text)) == text
 
@@ -136,8 +136,8 @@ def test_resolve_checks_the_venue_actually_trades_the_category() -> None:
 
 def test_resolve_accepts_a_binance_future_dated_contract() -> None:
     assert str(
-        UniversalTicker.resolve("binancefuture_future_btcusdt250926")
-    ) == "BinanceFuture_Future_BTCUSDT250926"
+        UniversalTicker.resolve("binanceum_future_btcusdt250926")
+    ) == "BinanceUM_Future_BTCUSDT250926"
 
 
 def test_of_normalizes_its_parts() -> None:

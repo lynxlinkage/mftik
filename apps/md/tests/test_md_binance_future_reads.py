@@ -27,7 +27,7 @@ from mftik_md.fetch.readers import (
     VenueReaderFactory,
 )
 
-TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
+TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 NATIVE = "BTC-USDT"
 BASE = "https://fapi.test"
 
@@ -187,14 +187,14 @@ async def test_funding_history_is_oldest_first_and_drops_mark_price() -> None:
     assert not any(hasattr(row, "mark_price") for row in rows)
 
     before = len(api.requests)
-    dated = UniversalTicker.parse("BinanceFuture_Future_BTCUSDT250926")
+    dated = UniversalTicker.parse("BinanceUM_Future_BTCUSDT250926")
     with pytest.raises(NoReaderError, match="Future"):
         await _reader(api).fetch_funding_history(dated, limit=5)
     assert len(api.requests) == before
     assert (
         normalize(
-            NoReaderError("BinanceFuture Future serves no funding history"),
-            venue="BinanceFuture",
+            NoReaderError("BinanceUM Future serves no funding history"),
+            venue="BinanceUM",
         )
         is QueryCode.MD_VENUE_UNSUPPORTED_READ
     )
@@ -243,7 +243,7 @@ async def test_a_body_without_open_interest_is_a_failed_read() -> None:
 
 async def test_the_factory_builds_a_binance_future_reader() -> None:
     factory = VenueReaderFactory(StubSymbols())  # type: ignore[arg-type]
-    reader = await factory.create("BinanceFuture")
+    reader = await factory.create("BinanceUM")
 
     assert isinstance(reader, BinanceFutureReader)
-    assert reader.venue == "BinanceFuture"
+    assert reader.venue == "BinanceUM"

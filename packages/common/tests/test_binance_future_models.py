@@ -34,7 +34,7 @@ from mftik.exchange.binance.future.models import (
 from mftik.exchange.models import OrderStatus, OrderType, Side
 from mftik.exchange.tickers import Category, UniversalTicker
 
-TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
+TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 
 
 # --- market streams --------------------------------------------------------
@@ -147,7 +147,7 @@ def test_the_depth_reply_carries_no_symbol_so_it_is_told_one() -> None:
             "asks": [["4.00000200", "12.00000000"]],
         }
     ).to_order_book(TICKER)
-    assert book.universal_ticker == "BinanceFuture_Perp_BTCUSDT"
+    assert book.universal_ticker == "BinanceUM_Perp_BTCUSDT"
     assert book.bids[0].qty == Decimal("431")
 
 
@@ -454,7 +454,7 @@ def test_a_position_reply_carries_the_signed_size() -> None:
 
 
 def test_a_dated_future_glues_yymmdd_onto_the_symbol() -> None:
-    """So it cannot collide with ``BinanceFuture_Perp_BTCUSDT``."""
+    """So it cannot collide with ``BinanceUM_Perp_BTCUSDT``."""
     instrument = to_listed(
         {
             "symbol": "BTCUSDT_250926",
@@ -475,7 +475,7 @@ def test_a_dated_future_glues_yymmdd_onto_the_symbol() -> None:
     assert instrument is not None
     assert instrument.exch_ticker == "BTCUSDT_250926"
     assert instrument.symbol == "BTCUSDT250926"
-    assert str(instrument.ticker) == "BinanceFuture_Future_BTCUSDT250926"
+    assert str(instrument.ticker) == "BinanceUM_Future_BTCUSDT250926"
     assert instrument.expiry == datetime(2025, 9, 26, 8, tzinfo=UTC)
     assert instrument.filters["min_notional"] == Decimal("5")
 

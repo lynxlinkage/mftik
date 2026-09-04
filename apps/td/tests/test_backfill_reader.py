@@ -221,7 +221,7 @@ async def test_a_venue_with_no_reader_says_so_by_name() -> None:
 # --- Binance COIN-M --------------------------------------------------------
 
 
-DELIVERY = UniversalTicker.parse("BinanceDelivery_Inverse_BTCUSD")
+DELIVERY = UniversalTicker.parse("BinanceCM_Inverse_BTCUSD")
 
 
 def delivery_trade(trade_id: int, order_id: int = 28) -> dict:
@@ -397,9 +397,9 @@ async def test_delivery_orders_carry_the_client_order_id_trades_lack() -> None:
 
 async def test_delivery_refuses_another_venues_ticker() -> None:
     api = FakeApi()
-    with pytest.raises(ValueError, match="BinanceFuture"):
+    with pytest.raises(ValueError, match="BinanceUM"):
         await delivery_reader(api).fetch_my_trades(
-            UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
+            UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
         )
 
 
@@ -859,8 +859,8 @@ async def test_every_venue_but_paper_has_a_reader() -> None:
         "Bybit",
         "Gate",
         "GateFutures",
-        "BinanceFuture",
-        "BinanceDelivery",
+        "BinanceUM",
+        "BinanceCM",
         "Okx",
     ):
         reader = await factory.create(venue, row)

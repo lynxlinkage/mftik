@@ -45,7 +45,7 @@ GATE = "Gate"
 GATE_FUTURES = "GateFutures"
 PAPER = "Paper"
 BINANCE = "Binance"
-BINANCE_FUTURE = "BinanceFuture"
+BINANCE_UM = "BinanceUM"
 
 
 # --- band 2: venue errors we recognise -------------------------------------
@@ -298,13 +298,13 @@ def test_a_known_binance_future_code_becomes_a_venue_code(
     order type there, refused inside the ``-2010`` message, and a time-in-force
     here with a code of its own.
     """
-    assert normalize(BinanceWsError(code, "nope"), venue=BINANCE_FUTURE) is expected
+    assert normalize(BinanceWsError(code, "nope"), venue=BINANCE_UM) is expected
 
 
 def test_the_futures_venue_is_normalized_at_all() -> None:
     """A venue missing from the table would fall through as unrecognised."""
-    assert BINANCE_FUTURE in VENUES
-    assert VENUES["BinanceDelivery"] is VENUES[BINANCE_FUTURE]
+    assert BINANCE_UM in VENUES
+    assert VENUES["BinanceCM"] is VENUES[BINANCE_UM]
 
 
 def test_a_2010_with_a_message_we_do_not_know_stays_a_plain_reject() -> None:
@@ -424,9 +424,9 @@ def test_binance_futures_5021_is_the_same_event_by_another_name() -> None:
         "been rejected.",
     )
 
-    assert is_unfilled_immediate(err, venue=BINANCE_FUTURE)
+    assert is_unfilled_immediate(err, venue=BINANCE_UM)
     # Both margined books, one table.
-    assert is_unfilled_immediate(err, venue="BinanceDelivery")
+    assert is_unfilled_immediate(err, venue="BinanceCM")
 
 
 def test_the_unfilled_check_reads_the_cause_like_normalize_does() -> None:
@@ -444,11 +444,11 @@ def test_the_unfilled_check_reads_the_cause_like_normalize_does() -> None:
         # The one this must never swallow: post-only is a real refusal, and
         # the strategy that earned it has a quote missing from the book.
         (BinanceWsError(-5022, "post only order would immediately match"),
-         BINANCE_FUTURE),
+         BINANCE_UM),
         (GateApiError("POC_FILL_IMMEDIATELY", "would fill immediately"), GATE),
         # Nor anything else a venue turns down.
         (GateApiError("BALANCE_NOT_ENOUGH", "not enough USDT"), GATE),
-        (BinanceWsError(-2019, "Margin is insufficient."), BINANCE_FUTURE),
+        (BinanceWsError(-2019, "Margin is insufficient."), BINANCE_UM),
         # Spot has no entry at all — it never answers this at the call.
         (BinanceWsError(-5021, "fok rejected"), BINANCE),
         # And a bare local error has nothing to read.

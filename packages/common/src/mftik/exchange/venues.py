@@ -151,8 +151,8 @@ BINANCE = Venue(
     requires_passphrase=False,
 )
 
-BINANCE_FUTURE = Venue(
-    name="BinanceFuture",
+BINANCE_UM = Venue(
+    name="BinanceUM",
     label="Binance USD-M Futures",
     # A venue of its own rather than a category of ``Binance``, and this is the
     # case the docstring above is about: Binance's USDⓈ-M plane has its own
@@ -169,12 +169,12 @@ BINANCE_FUTURE = Venue(
     requires_passphrase=False,
 )
 
-BINANCE_DELIVERY = Venue(
-    name="BinanceDelivery",
+BINANCE_CM = Venue(
+    name="BinanceCM",
     label="Binance COIN-M Futures",
     # dapi: coin-margined book on its own hosts and wallet. Inverse is the
     # product, not a category of the USD-M perp venue — the ticker is
-    # ``BinanceDelivery_Inverse_BTCUSD``, never ``…_Perp_BTCUSD``. The same
+    # ``BinanceCM_Inverse_BTCUSD``, never ``…_Perp_BTCUSD``. The same
     # key string as USD-M is the usual case, not a collision.
     categories=frozenset({Category.INVERSE, Category.FUTURE}),
     # COIN-M is quoted in USD, not USDT: ``BTCUSD_PERP`` is the venue's own
@@ -224,8 +224,8 @@ VENUES: dict[str, Venue] = {
         GATE,
         GATE_FUTURES,
         BINANCE,
-        BINANCE_FUTURE,
-        BINANCE_DELIVERY,
+        BINANCE_UM,
+        BINANCE_CM,
         BYBIT,
         OKX,
     )
@@ -332,8 +332,8 @@ def _categories(venue: Venue) -> str:
 
 __all__ = [
     "BINANCE",
-    "BINANCE_DELIVERY",
-    "BINANCE_FUTURE",
+    "BINANCE_CM",
+    "BINANCE_UM",
     "BYBIT",
     "ED25519",
     "GATE",

@@ -1,7 +1,7 @@
 """Binance COIN-M (dapi) endpoints, on the venue-wide framing.
 
 This is Binance's historical "delivery" plane: coin-margined perpetuals and
-dated contracts, registered as the venue ``BinanceDelivery``. Framing, signing
+dated contracts, registered as the venue ``BinanceCM``. Framing, signing
 and the error block are the same as spot and USD-M — they live in
 :mod:`mftik.exchange.binance.protocol`. What is this market's own is *where
 the frames go*.

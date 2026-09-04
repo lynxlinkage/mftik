@@ -596,7 +596,7 @@ async def test_binance_future_rows_become_perp_instruments() -> None:
     instruments = await _binance_future(BINANCE_FUTURE_ROWS).fetch()
 
     btc = instruments[0]
-    assert str(btc.ticker) == "BinanceFuture_Perp_BTCUSDT"
+    assert str(btc.ticker) == "BinanceUM_Perp_BTCUSDT"
     assert btc.category is Category.PERP
     # The settlement currency, which spot has no field for because the quote
     # currency is the settlement there.
@@ -610,7 +610,7 @@ async def test_dated_futures_are_not_stored_as_perpetuals() -> None:
     """A perp refresh must not ingest the quarterly.
 
     ``BTCUSDT_250926`` shares the perpetual's base and quote. Written under
-    ``Perp`` it would steal ``BinanceFuture_Perp_BTCUSDT`` and every perp
+    ``Perp`` it would steal ``BinanceUM_Perp_BTCUSDT`` and every perp
     order would route to a contract that expires.
     """
     instruments = await _binance_future(BINANCE_FUTURE_ROWS).fetch()
@@ -625,7 +625,7 @@ async def test_dated_futures_become_future_instruments() -> None:
 
     assert [i.exch_ticker for i in instruments] == ["BTCUSDT_250926"]
     btc = instruments[0]
-    assert str(btc.ticker) == "BinanceFuture_Future_BTCUSDT250926"
+    assert str(btc.ticker) == "BinanceUM_Future_BTCUSDT250926"
     assert btc.symbol == "BTCUSDT250926"
     assert btc.category is Category.FUTURE
     assert btc.settlement_asset == "USDT"
@@ -727,7 +727,7 @@ async def test_binance_delivery_rows_become_perp_instruments() -> None:
     instruments = await _binance_delivery(BINANCE_DELIVERY_ROWS).fetch()
 
     btc = instruments[0]
-    assert str(btc.ticker) == "BinanceDelivery_Inverse_BTCUSD"
+    assert str(btc.ticker) == "BinanceCM_Inverse_BTCUSD"
     assert btc.exch_ticker == "BTCUSD_PERP"
     assert btc.category is Category.INVERSE
     assert btc.contract_size == Decimal("100")
@@ -751,7 +751,7 @@ async def test_dated_delivery_contracts_become_future_instruments() -> None:
 
     assert [i.exch_ticker for i in instruments] == ["BTCUSD_260925"]
     btc = instruments[0]
-    assert str(btc.ticker) == "BinanceDelivery_Future_BTCUSD260925"
+    assert str(btc.ticker) == "BinanceCM_Future_BTCUSD260925"
     assert btc.symbol == "BTCUSD260925"
     assert btc.category is Category.FUTURE
     assert btc.contract_size == Decimal("100")

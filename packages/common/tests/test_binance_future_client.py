@@ -25,7 +25,7 @@ from mftik.exchange.binance.future.user import BinanceFutureUserStream
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.tickers import UniversalTicker
 
-TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
+TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 
 
 def _api(stub: FakeBinanceFutureApi, pem: str | None = None) -> BinanceFutureWsApi:
@@ -218,7 +218,7 @@ async def test_a_ticker_costs_two_calls_because_futures_splits_it(
         Decimal("40000"),
         Decimal("40001"),
     )
-    assert ticker.universal_ticker == "BinanceFuture_Perp_BTCUSDT"
+    assert ticker.universal_ticker == "BinanceUM_Perp_BTCUSDT"
 
 
 async def test_a_ticker_answered_as_an_array_reads_the_same(

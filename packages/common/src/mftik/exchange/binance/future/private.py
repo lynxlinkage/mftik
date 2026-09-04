@@ -111,7 +111,7 @@ _LIMIT = "LIMIT"
 #: fact.
 _NOT_FOUND_CODES = frozenset({-2011, -2013})
 
-#: Books this connector trades. Same set as ``venues.BINANCE_FUTURE``.
+#: Books this connector trades. Same set as ``venues.BINANCE_UM``.
 #: Perp first so the common inbound row hits on the first lookup.
 _BOOKS = (Category.PERP, Category.FUTURE)
 
@@ -126,7 +126,7 @@ class BinanceFuturePrivateClient(BaseClient):
     ``positionSide``, ``priceMatch`` — ride in ``PlaceOrderRequest.params``.
     """
 
-    name = "BinanceFuture"
+    name = "BinanceUM"
     #: The default book, used when a caller names a bare symbol. The venue
     #: trades Perp and dated Future on this one credential — incoming rows
     #: are resolved by looking up the native spelling on each book, not by
@@ -194,7 +194,7 @@ class BinanceFuturePrivateClient(BaseClient):
             await self.api.close()
             raise
         self._connected = True
-        logger.info("BinanceFuture connected key=%s…", self.api_key[:6])
+        logger.info("BinanceUM connected key=%s…", self.api_key[:6])
 
     async def close(self) -> None:
         self._connected = False
@@ -226,7 +226,7 @@ class BinanceFuturePrivateClient(BaseClient):
         for reserved in _RESERVED_PARAMS:
             if extras.pop(reserved, None) is not None:
                 logger.warning(
-                    "BinanceFuture ignoring params[%r]; set it on the request",
+                    "BinanceUM ignoring params[%r]; set it on the request",
                     reserved,
                 )
 
@@ -321,7 +321,7 @@ class BinanceFuturePrivateClient(BaseClient):
             native = await self.symbols.exch_ticker(ticker)
         if native is None:
             raise OrderError(
-                f"cannot resolve BinanceFuture order {client_order_id!r} "
+                f"cannot resolve BinanceUM order {client_order_id!r} "
                 "without its symbol"
             )
         try:
@@ -381,11 +381,11 @@ class BinanceFuturePrivateClient(BaseClient):
                 continue
             if row.leverage is None or row.leverage <= 0:
                 raise ExchangeError(
-                    f"BinanceFuture symbolConfig for {native} has no leverage"
+                    f"BinanceUM symbolConfig for {native} has no leverage"
                 )
             return row.leverage
         raise ExchangeError(
-            f"BinanceFuture symbolConfig returned no row for {native}"
+            f"BinanceUM symbolConfig returned no row for {native}"
         )
 
     # --- account streams ---------------------------------------------------
@@ -525,7 +525,7 @@ class BinanceFuturePrivateClient(BaseClient):
             await self._inbound(ack)
         native = self._venue_symbols.get(order_id)
         if native is None:
-            raise OrderError(f"no open BinanceFuture order for id {order_id!r}")
+            raise OrderError(f"no open BinanceUM order for id {order_id!r}")
         return native
 
     async def _inbound(self, ack: BinanceFutureOrderAck) -> Order:

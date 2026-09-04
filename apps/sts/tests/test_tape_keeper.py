@@ -12,7 +12,7 @@ from mftik.protocol import parse_strategy_yml, strategy_catalog
 from mftik_sts.impl import resolve, resolve_class
 from mftik_sts.impl.tape_keeper import TapeKeeper
 
-TICKER = "BinanceFuture_Perp_BTCUSDT"
+TICKER = "BinanceUM_Perp_BTCUSDT"
 
 
 class FakeSession:

@@ -1,7 +1,7 @@
 """Binance USDⓈ-M futures adapter — one venue, four connections.
 
-The perpetual half of Binance, registered as the venue ``BinanceFuture`` and
-addressed as ``BinanceFuture_Perp_BTCUSDT``. A venue of its own rather than a
+The perpetual half of Binance, registered as the venue ``BinanceUM`` and
+addressed as ``BinanceUM_Perp_BTCUSDT``. A venue of its own rather than a
 category of the spot one, because that is what the API is: separate hosts,
 separate credentials, separate wallet, separate order book — see
 :mod:`mftik.exchange.venues` for the rule.

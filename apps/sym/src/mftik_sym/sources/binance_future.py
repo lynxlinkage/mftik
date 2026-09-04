@@ -10,7 +10,7 @@ WebSocket API at all.
 futures (``BTCUSDT_250926``) that share the perpetual's ``baseAsset`` and
 ``quoteAsset``. Each source stamps its own category so a refresh can delist
 one book without touching the other, and ``to_listed`` glues ``YYMMDD`` onto
-the dated symbol so the two cannot collide as ``BinanceFuture_Perp_BTCUSDT``.
+the dated symbol so the two cannot collide as ``BinanceUM_Perp_BTCUSDT``.
 """
 
 from __future__ import annotations

@@ -275,7 +275,7 @@ BINANCE = VenueErrors(
 #: post-only: spot expresses it as ``LIMIT_MAKER`` and refuses it inside the
 #: ``-2010`` message, while futures has a code of its own (``-5022``) for a
 #: ``GTX`` order that would have taken.
-BINANCE_FUTURE = VenueErrors(
+BINANCE_UM = VenueErrors(
     codes={
         **BINANCE.codes,
         # post-only (GTX) that would have crossed — futures says it outright
@@ -481,8 +481,8 @@ PAPER = VenueErrors(
 #: reports as its ``name``.
 VENUES: dict[str, VenueErrors] = {
     "Binance": BINANCE,
-    "BinanceFuture": BINANCE_FUTURE,
-    "BinanceDelivery": BINANCE_FUTURE,
+    "BinanceUM": BINANCE_UM,
+    "BinanceCM": BINANCE_UM,
     "Bybit": BYBIT,
     "Okx": OKX,
     "Gate": GATE,

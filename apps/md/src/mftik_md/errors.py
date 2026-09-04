@@ -124,10 +124,10 @@ BINANCE = VenueErrors(
 #: funds, no credentials and no order to be wrong about. ``-1120`` for an
 #: interval Binance does not serve is the one that actually fires here, since
 #: futures serves one window fewer than spot.
-BINANCE_FUTURE = BINANCE
+BINANCE_UM = BINANCE
 
 #: Binance COIN-M. Same numeric codes as the other Binance planes.
-BINANCE_DELIVERY = BINANCE
+BINANCE_CM = BINANCE
 
 OKX = VenueErrors(
     codes={
@@ -171,8 +171,8 @@ PAPER = VenueErrors()
 #: reports as its ``name``.
 VENUES: dict[str, VenueErrors] = {
     "Binance": BINANCE,
-    "BinanceDelivery": BINANCE_DELIVERY,
-    "BinanceFuture": BINANCE_FUTURE,
+    "BinanceCM": BINANCE_CM,
+    "BinanceUM": BINANCE_UM,
     "Bybit": BYBIT,
     "Okx": OKX,
     "Gate": GATE,

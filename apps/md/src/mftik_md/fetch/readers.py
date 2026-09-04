@@ -14,7 +14,7 @@ subscription to a feed. Nothing else has to know which of the two a venue is.
 
 Binance's futures plane then shows that the decision is not even per *brand*:
 the same company serves no candles at all over that market's WebSocket API, so
-``BinanceFuture``'s reader is an HTTP one beside spot's socket.
+``BinanceUM``'s reader is an HTTP one beside spot's socket.
 
 That is why the composition lives on this side. ``mftik.exchange.<venue>``
 publishes connectors, not a contract — see :mod:`mftik.exchange.base` — and the
@@ -418,7 +418,7 @@ class BinanceFutureReader:
     them, and no connection held open between queries.
     """
 
-    venue = "BinanceFuture"
+    venue = "BinanceUM"
 
     def __init__(
         self,
@@ -528,7 +528,7 @@ class BinanceDeliveryReader:
     a linear bar, and ``contractSize`` is USD per contract, not base.
     """
 
-    venue = "BinanceDelivery"
+    venue = "BinanceCM"
 
     def __init__(
         self,
@@ -904,9 +904,9 @@ class VenueReaderFactory:
             return GateFuturesReader(symbols=self._symbols)
         if venue == venues.BINANCE.name:
             return BinanceSpotReader(symbols=self._symbols)
-        if venue == venues.BINANCE_FUTURE.name:
+        if venue == venues.BINANCE_UM.name:
             return BinanceFutureReader(symbols=self._symbols)
-        if venue == venues.BINANCE_DELIVERY.name:
+        if venue == venues.BINANCE_CM.name:
             return BinanceDeliveryReader(symbols=self._symbols)
         if venue == venues.BYBIT.name:
             return BybitReader(symbols=self._symbols)

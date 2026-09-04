@@ -107,9 +107,9 @@ async def test_binance_future_venue_builds_its_own_public_client(
     futures serves its candles and its instrument listing over REST alone.
     """
     factory = VenuePublicFactory(broker)
-    client = await factory.create("BinanceFuture")
+    client = await factory.create("BinanceUM")
     assert isinstance(client, BinanceFuturePublicClient)
-    assert client.name == "BinanceFuture"
+    assert client.name == "BinanceUM"
     # Liquidations are this venue's own feed; MD refuses the topic elsewhere.
     assert hasattr(client, "stream_liquidation")
     assert hasattr(client, "stream_funding_rate")
@@ -119,11 +119,11 @@ async def test_binance_future_venue_builds_its_own_public_client(
 async def test_binance_delivery_venue_builds_its_own_public_client(
     broker: Broker,
 ) -> None:
-    """A separate venue, not a category of ``BinanceFuture``: Inverse, dapi."""
+    """A separate venue, not a category of ``BinanceUM``: Inverse, dapi."""
     factory = VenuePublicFactory(broker)
-    client = await factory.create("BinanceDelivery")
+    client = await factory.create("BinanceCM")
     assert isinstance(client, BinanceDeliveryPublicClient)
-    assert client.name == "BinanceDelivery"
+    assert client.name == "BinanceCM"
     assert hasattr(client, "stream_liquidation")
     assert hasattr(client, "stream_agg_trades")
     assert hasattr(client, "stream_funding_rate")
