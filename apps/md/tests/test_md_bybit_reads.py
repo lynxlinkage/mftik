@@ -227,12 +227,15 @@ async def test_funding_history_reverses_newest_first_and_refuses_spot(
 async def test_open_interest_reads_the_ticker_and_refuses_what_the_stream_does(
     api: FakeApi,
 ) -> None:
+    # The live shape: Bybit sends both, and ``singleOpenInterest`` is the
+    # one the reader must publish.
     api.results["/v5/market/tickers"] = {
         "list": [
             {
                 "symbol": NATIVE,
                 "lastPrice": "60000",
                 "openInterest": "1234.5",
+                "singleOpenInterest": "617.25",
             }
         ]
     }
@@ -260,6 +263,23 @@ async def test_open_interest_reads_the_ticker_and_refuses_what_the_stream_does(
         normalize(NoReaderError("Bybit Spot serves no open interest"), venue="Bybit")
         is QueryCode.MD_VENUE_UNSUPPORTED_READ
     )
+
+
+async def test_open_interest_falls_back_to_half_of_both_sides(
+    api: FakeApi,
+) -> None:
+    """A row without ``singleOpenInterest`` is halved, not published as sent.
+
+    Bybit documents ``openInterest`` as both sides; the shared print is one.
+    """
+    api.results["/v5/market/tickers"] = {
+        "list": [
+            {"symbol": NATIVE, "lastPrice": "60000", "openInterest": "1234.5"}
+        ]
+    }
+
+    row = await _reader(api).fetch_open_interest(PERP)
+    assert row.qty == Decimal("617.25")
 
 
 async def test_open_interest_is_stamped_by_the_venue_envelope(
