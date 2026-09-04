@@ -17,7 +17,7 @@ So identity is three parts, rendered as one string::
 
     <Venue>_<Category>_<SYMBOL>     Gate_Spot_BTCUSDT
                                     GateFutures_Perp_BTCUSDT
-                                    BinanceDelivery_Inverse_BTCUSD
+                                    BinanceCM_Inverse_BTCUSD
                                     Bybit_Spot_BTCUSDT
                                     Bybit_Perp_BTCUSDT
 
@@ -69,8 +69,8 @@ class Category(StrEnum):
     SPOT = "Spot"
     PERP = "Perp"
     #: Coin-margined (inverse) book — a product of its own, not a kind of
-    #: linear perp. ``BinanceDelivery_Inverse_BTCUSD``, never
-    #: ``BinanceDelivery_Perp_BTCUSD``.
+    #: linear perp. ``BinanceCM_Inverse_BTCUSD``, never
+    #: ``BinanceCM_Perp_BTCUSD``.
     INVERSE = "Inverse"
     FUTURE = "Future"
     OPTION = "Option"

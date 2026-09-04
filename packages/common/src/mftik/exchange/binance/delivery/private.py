@@ -89,7 +89,7 @@ _LIMIT = "LIMIT"
 #: ``-2013`` is the query answer, ``-2011`` the cancel answer for the same fact.
 _NOT_FOUND_CODES = frozenset({-2011, -2013})
 
-#: Books this connector trades. Same set as ``venues.BINANCE_DELIVERY``.
+#: Books this connector trades. Same set as ``venues.BINANCE_CM``.
 #: Inverse first so the common inbound row hits on the first lookup.
 _BOOKS = (Category.INVERSE, Category.FUTURE)
 
@@ -103,7 +103,7 @@ class BinanceDeliveryPrivateClient(BaseClient):
     back is resolved home again. ``quantity`` stays in contracts.
     """
 
-    name = "BinanceDelivery"
+    name = "BinanceCM"
     #: The default book, used when a caller names a bare symbol. The venue
     #: trades Inverse and dated Future on this one credential — incoming
     #: rows are resolved by looking up the native spelling on each book,
@@ -166,7 +166,7 @@ class BinanceDeliveryPrivateClient(BaseClient):
             await self.api.close()
             raise
         self._connected = True
-        logger.info("BinanceDelivery connected key=%s…", self.api_key[:6])
+        logger.info("BinanceCM connected key=%s…", self.api_key[:6])
 
     async def close(self) -> None:
         self._connected = False
@@ -195,7 +195,7 @@ class BinanceDeliveryPrivateClient(BaseClient):
         for reserved in _RESERVED_PARAMS:
             if extras.pop(reserved, None) is not None:
                 logger.warning(
-                    "BinanceDelivery ignoring params[%r]; set it on the request",
+                    "BinanceCM ignoring params[%r]; set it on the request",
                     reserved,
                 )
 
@@ -282,7 +282,7 @@ class BinanceDeliveryPrivateClient(BaseClient):
             native = await self.symbols.exch_ticker(ticker)
         if native is None:
             raise OrderError(
-                f"cannot resolve BinanceDelivery order {client_order_id!r} "
+                f"cannot resolve BinanceCM order {client_order_id!r} "
                 "without its symbol"
             )
         try:
@@ -455,7 +455,7 @@ class BinanceDeliveryPrivateClient(BaseClient):
             if native_symbol not in self._unlisted:
                 self._unlisted.add(native_symbol)
                 logger.warning(
-                    "BinanceDelivery symbol plane does not carry %s — "
+                    "BinanceCM symbol plane does not carry %s — "
                     "skipping its rows",
                     native_symbol,
                 )
@@ -469,7 +469,7 @@ class BinanceDeliveryPrivateClient(BaseClient):
             await self._inbound_or_skip(ack)
         native = self._venue_symbols.get(order_id)
         if native is None:
-            raise OrderError(f"no open BinanceDelivery order for id {order_id!r}")
+            raise OrderError(f"no open BinanceCM order for id {order_id!r}")
         return native
 
     async def _inbound(self, ack: BinanceDeliveryOrderAck) -> Order:

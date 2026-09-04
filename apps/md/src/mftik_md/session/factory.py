@@ -75,7 +75,7 @@ class VenuePublicFactory:
     attaching a session that would never produce a tick.
 
     Venues do not all publish the same feeds — Gate and Binance serve kline
-    and best-quote, ``BinanceFuture`` / ``BinanceDelivery`` / GateFutures /
+    and best-quote, ``BinanceUM`` / ``BinanceCM`` / GateFutures /
     Bybit / OKX add liquidations, only Binance coalesces the tape, paper
     serves a subset —
     so a subscribe to a topic the venue has no stream for fails at
@@ -119,11 +119,11 @@ class VenuePublicFactory:
         if resolved is venues.BINANCE:
             logger.info("MD building Binance public client")
             return BinanceSpotPublicClient(symbols=self._symbols)
-        if resolved is venues.BINANCE_FUTURE:
-            logger.info("MD building BinanceFuture public client")
+        if resolved is venues.BINANCE_UM:
+            logger.info("MD building BinanceUM public client")
             return BinanceFuturePublicClient(symbols=self._symbols)
-        if resolved is venues.BINANCE_DELIVERY:
-            logger.info("MD building BinanceDelivery public client")
+        if resolved is venues.BINANCE_CM:
+            logger.info("MD building BinanceCM public client")
             return BinanceDeliveryPublicClient(symbols=self._symbols)
         if resolved is venues.BYBIT:
             logger.info("MD building Bybit public client")

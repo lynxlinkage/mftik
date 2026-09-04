@@ -35,7 +35,7 @@ def _request(**overrides: object) -> PlaceOrderRequest:
 
 def _perp(**overrides: object) -> PlaceOrderRequest:
     payload: dict[str, object] = {
-        "universal_ticker": "BinanceFuture_Perp_BTCUSDT",
+        "universal_ticker": "BinanceUM_Perp_BTCUSDT",
         "side": Side.BUY,
         "type": OrderType.LIMIT,
         "qty": Decimal("0.01"),
@@ -103,10 +103,10 @@ def test_a_spot_sell_sized_in_quote_commits_nothing_knowable() -> None:
 def test_a_delivery_future_commits_nothing_knowable() -> None:
     """Coin-m dated futures settle in the coin and size in contracts.
 
-    ``Category.FUTURE`` on BinanceFuture is linear; the same category on
-    BinanceDelivery is not. A USDT reading would lock the wrong asset.
+    ``Category.FUTURE`` on BinanceUM is linear; the same category on
+    BinanceCM is not. A USDT reading would lock the wrong asset.
     """
-    request = _request(universal_ticker="BinanceDelivery_Future_BTCUSD260925")
+    request = _request(universal_ticker="BinanceCM_Future_BTCUSD260925")
     assert (
         commitment_for(
             category=Category.FUTURE,
@@ -117,7 +117,7 @@ def test_a_delivery_future_commits_nothing_knowable() -> None:
             qty=request.qty,
             price=request.price,
             leverage=Decimal("10"),
-            venue="BinanceDelivery",
+            venue="BinanceCM",
         )
         is None
     )
@@ -134,7 +134,7 @@ def test_an_inverse_order_commits_nothing_knowable() -> None:
     ``contract_size`` is not an argument here, so the answer is None until
     the inverse formula lands beside it.
     """
-    request = _request(universal_ticker="BinanceDelivery_Inverse_BTCUSD")
+    request = _request(universal_ticker="BinanceCM_Inverse_BTCUSD")
     assert (
         commitment_for(
             category=Category.INVERSE,

@@ -30,43 +30,43 @@ def _row(*, venue: str, api_key: str = "shared-key") -> Api:
 async def test_same_key_on_two_venues_is_allowed(db) -> None:
     """Binance issues one key for USD-M and COIN-M; both rows must store."""
     apis = ApiRepository(db)
-    um = await apis.add(_row(venue="BinanceFuture"))
-    cm = await apis.add(_row(venue="BinanceDelivery"))
+    um = await apis.add(_row(venue="BinanceUM"))
+    cm = await apis.add(_row(venue="BinanceCM"))
     await db.flush()
 
     assert um.id != cm.id
     assert await apis.get_by_venue_and_api_key(
-        "BinanceFuture", "shared-key"
+        "BinanceUM", "shared-key"
     ) is um
     assert await apis.get_by_venue_and_api_key(
-        "BinanceDelivery", "shared-key"
+        "BinanceCM", "shared-key"
     ) is cm
 
 
 async def test_same_key_on_the_same_venue_is_refused(db) -> None:
     apis = ApiRepository(db)
-    await apis.add(_row(venue="BinanceFuture"))
+    await apis.add(_row(venue="BinanceUM"))
     with pytest.raises(IntegrityError):
-        await apis.add(_row(venue="BinanceFuture"))
+        await apis.add(_row(venue="BinanceUM"))
 
 
 async def test_lookup_finds_a_non_canonical_venue_spelling(db) -> None:
-    """Rows written by older code may hold e.g. ``binancefuture``.
+    """Rows written by older code may hold e.g. ``binanceum``.
 
     Venue identity is case-insensitive everywhere else, so the pre-check
     has to see such a row — the exact-match constraint will not.
     """
     apis = ApiRepository(db)
-    legacy = await apis.add(_row(venue="binancefuture"))
+    legacy = await apis.add(_row(venue="binanceum"))
     await db.flush()
 
     assert await apis.get_by_venue_and_api_key(
-        "BinanceFuture", "shared-key"
+        "BinanceUM", "shared-key"
     ) is legacy
     assert await apis.get_by_venue_and_api_key(
-        " BinanceFuture ", "shared-key"
+        " BinanceUM ", "shared-key"
     ) is legacy
     assert (
-        await apis.get_by_venue_and_api_key("BinanceDelivery", "shared-key")
+        await apis.get_by_venue_and_api_key("BinanceCM", "shared-key")
         is None
     )

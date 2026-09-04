@@ -16,7 +16,7 @@ from mftik.exchange.binance.delivery.rest import (
 )
 from mftik.exchange.tickers import UniversalTicker
 
-TICKER = UniversalTicker.parse("BinanceDelivery_Inverse_BTCUSD")
+TICKER = UniversalTicker.parse("BinanceCM_Inverse_BTCUSD")
 BASE = "https://dapi.test"
 SIZE = Decimal("100")
 

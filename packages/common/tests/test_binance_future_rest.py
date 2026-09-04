@@ -22,7 +22,7 @@ from mftik.exchange.binance.future.rest import (
 )
 from mftik.exchange.tickers import UniversalTicker
 
-TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
+TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 BASE = "https://fapi.test"
 
 EXCHANGE_INFO = {

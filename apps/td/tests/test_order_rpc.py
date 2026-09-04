@@ -1237,7 +1237,7 @@ def test_reduce_only_passes_on_a_contract_ticker() -> None:
     """
     from mftik_td.session.manager import _reduce_only_unsupported
 
-    for ticker in ("BinanceFuture_Perp_BTCUSDT", "Bybit_Perp_BTCUSDT"):
+    for ticker in ("BinanceUM_Perp_BTCUSDT", "Bybit_Perp_BTCUSDT"):
         payload = OrderSubmit.model_validate(
             {
                 "session_id": SESSION,

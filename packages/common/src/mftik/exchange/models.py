@@ -433,7 +433,7 @@ class OpenInterest(InstrumentScoped):
 
     Feed topic ``open_interest``. ``qty`` is **one side**, in **base** on
     every base-denominated book (Bybit linear, OKX SWAP, GateFutures,
-    BinanceFuture). BinanceDelivery is the stated exception: its contract
+    BinanceUM). BinanceCM is the stated exception: its contract
     is USD, so ``qty`` there is contracts, like every other public size
     this tree reports on that venue.
 

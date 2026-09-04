@@ -1,8 +1,8 @@
 """Binance COIN-M adapter — listing, public REST, dstream, ws-dapi, listen-key.
 
-Registered as the venue ``BinanceDelivery`` and addressed as
-``BinanceDelivery_Inverse_BTCUSD``. Inverse is the product — not a kind of
-linear perp, and not a category of spot or of ``BinanceFuture``. Separate
+Registered as the venue ``BinanceCM`` and addressed as
+``BinanceCM_Inverse_BTCUSD``. Inverse is the product — not a kind of
+linear perp, and not a category of spot or of ``BinanceUM``. Separate
 hosts (``dapi`` / ``ws-dapi`` / ``dstream``), separate wallet, separate API
 key.
 

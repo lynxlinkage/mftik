@@ -122,7 +122,7 @@ class BinanceFuturePublicClient(BaseClient):
 
         client = BinanceFuturePublicClient(symbols=symbol_client)
         async with client:
-            ticker = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
+            ticker = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
             async for book in client.stream_order_book(ticker):
                 ...
 
@@ -132,7 +132,7 @@ class BinanceFuturePublicClient(BaseClient):
     works for single-market venues is one MD would have to branch around.
     """
 
-    name = "BinanceFuture"
+    name = "BinanceUM"
 
     def __init__(
         self,
@@ -164,7 +164,7 @@ class BinanceFuturePublicClient(BaseClient):
         await self.feed.connect()
         await self.rest.connect()
         self._connected = True
-        logger.info("BinanceFuture public connected")
+        logger.info("BinanceUM public connected")
 
     async def close(self) -> None:
         self._connected = False

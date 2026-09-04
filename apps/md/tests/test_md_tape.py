@@ -16,7 +16,7 @@ from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import Envelope, Topics
 from mftik_md.tape import TapeRecorder
 
-TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
+TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 AGG_FEED = Topics.md_feed("aggtrade", TICKER)
 
 

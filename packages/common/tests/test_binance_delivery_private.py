@@ -33,8 +33,8 @@ NATIVE = "BTCUSD_PERP"
 #: A quarterly. Unlisted on a perp-only plane; listed as Future when both
 #: books are in the resolver.
 DATED = "BTCUSD_260626"
-TICKER = UniversalTicker.parse("BinanceDelivery_Inverse_BTCUSD")
-DATED_TICKER = UniversalTicker.parse("BinanceDelivery_Future_BTCUSD260626")
+TICKER = UniversalTicker.parse("BinanceCM_Inverse_BTCUSD")
+DATED_TICKER = UniversalTicker.parse("BinanceCM_Future_BTCUSD260626")
 
 OPEN_ORDER = {
     "symbol": NATIVE,
@@ -347,9 +347,9 @@ async def test_an_order_for_another_venue_is_refused_before_it_is_sent(
 ) -> None:
     _key, pem = binance_key
     async with _client(delivery_api, delivery_user, pem) as client:
-        with pytest.raises(OrderError, match="BinanceFuture"):
+        with pytest.raises(OrderError, match="BinanceUM"):
             await client.place_order(
-                _order(universal_ticker="BinanceFuture_Perp_BTCUSDT")
+                _order(universal_ticker="BinanceUM_Perp_BTCUSDT")
             )
     assert not delivery_api.calls(m.ORDER_PLACE)
 

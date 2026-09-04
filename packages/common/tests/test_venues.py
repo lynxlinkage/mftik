@@ -25,8 +25,8 @@ def test_gate_is_registered_as_its_own_venue() -> None:
 def test_registry_lists_every_venue() -> None:
     assert venues.names() == [
         "Binance",
-        "BinanceDelivery",
-        "BinanceFuture",
+        "BinanceCM",
+        "BinanceUM",
         "Bybit",
         "Gate",
         "GateFutures",
@@ -37,8 +37,8 @@ def test_registry_lists_every_venue() -> None:
     assert venues.PAPER.simulated
     assert not venues.GATE.simulated
     assert not venues.BINANCE.simulated
-    assert not venues.BINANCE_FUTURE.simulated
-    assert not venues.BINANCE_DELIVERY.simulated
+    assert not venues.BINANCE_UM.simulated
+    assert not venues.BINANCE_CM.simulated
     assert not venues.BYBIT.simulated
     assert not venues.OKX.simulated
 
@@ -175,13 +175,13 @@ def test_binance_future_trades_perps_and_dated_on_one_credential() -> None:
     apart. The UI hint stays on the perpetual: a bare ``BTCUSDT`` is not
     a dated instrument.
     """
-    fut = venues.require("BinanceFuture")
-    assert fut is venues.BINANCE_FUTURE
+    fut = venues.require("BinanceUM")
+    assert fut is venues.BINANCE_UM
     assert fut.categories == frozenset({Category.PERP, Category.FUTURE})
-    assert fut.ticker_example == "BinanceFuture_Perp_BTCUSDT"
-    assert str(fut.ticker("perp", "BTCUSDT")) == "BinanceFuture_Perp_BTCUSDT"
+    assert fut.ticker_example == "BinanceUM_Perp_BTCUSDT"
+    assert str(fut.ticker("perp", "BTCUSDT")) == "BinanceUM_Perp_BTCUSDT"
     assert str(fut.ticker("future", "BTCUSDT250926")) == (
-        "BinanceFuture_Future_BTCUSDT250926"
+        "BinanceUM_Future_BTCUSDT250926"
     )
     with pytest.raises(venues.UnsupportedCategoryError, match="explicitly"):
         fut.ticker(None, "BTCUSDT")
@@ -191,17 +191,17 @@ def test_binance_future_trades_perps_and_dated_on_one_credential() -> None:
 
 def test_binance_delivery_is_its_own_perp_venue() -> None:
     """dapi — separate credential and host from spot and from USD-M."""
-    coin = venues.require("BinanceDelivery")
-    assert coin is venues.BINANCE_DELIVERY
+    coin = venues.require("BinanceCM")
+    assert coin is venues.BINANCE_CM
     assert coin.label == "Binance COIN-M Futures"
     assert coin.categories == frozenset({Category.INVERSE, Category.FUTURE})
     assert coin.api_types == frozenset({venues.ED25519})
-    assert coin.ticker_example == "BinanceDelivery_Inverse_BTCUSD"
+    assert coin.ticker_example == "BinanceCM_Inverse_BTCUSD"
     assert str(coin.ticker("inverse", "BTCUSD")) == (
-        "BinanceDelivery_Inverse_BTCUSD"
+        "BinanceCM_Inverse_BTCUSD"
     )
     assert str(coin.ticker("future", "BTCUSD260925")) == (
-        "BinanceDelivery_Future_BTCUSD260925"
+        "BinanceCM_Future_BTCUSD260925"
     )
     with pytest.raises(venues.UnsupportedCategoryError, match="explicitly"):
         coin.ticker(None, "BTCUSD")
@@ -210,7 +210,7 @@ def test_binance_delivery_is_its_own_perp_venue() -> None:
     with pytest.raises(venues.UnsupportedCategoryError, match="does not trade"):
         coin.ticker("perp", "BTCUSD")
     with pytest.raises(venues.UnsupportedApiTypeError, match="ED25519"):
-        venues.validate_credential("BinanceDelivery", venues.HMAC)
+        venues.validate_credential("BinanceCM", venues.HMAC)
 
 
 def test_every_venue_hint_names_an_instrument_that_venue_could_list() -> None:

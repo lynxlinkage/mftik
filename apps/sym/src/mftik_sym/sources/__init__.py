@@ -33,9 +33,9 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
     independently — see :mod:`mftik_sym.sources.bybit` and
     :mod:`mftik_sym.sources.okx`.
 
-    Binance appears as three venues — ``Binance``, ``BinanceFuture`` and
-    ``BinanceDelivery`` — because those are three credentials and three
-    listing endpoints. ``BinanceFuture`` and ``BinanceDelivery`` then
+    Binance appears as three venues — ``Binance``, ``BinanceUM`` and
+    ``BinanceCM`` — because those are three credentials and three
+    listing endpoints. ``BinanceUM`` and ``BinanceCM`` then
     appear twice more, the way Bybit does: one ``exchangeInfo`` mixes
     perpetuals and dated futures, and a refresh must delist each book
     independently.

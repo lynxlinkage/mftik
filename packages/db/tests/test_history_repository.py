@@ -432,7 +432,7 @@ async def test_a_cash_movement_is_recorded_once(db) -> None:
         "api_id": 1,
         "venue_id": "9689322392",
         "kind": "funding",
-        "universal_ticker": "BinanceFuture_Perp_BTCUSDT",
+        "universal_ticker": "BinanceUM_Perp_BTCUSDT",
         "asset": "USDT",
         "amount": Decimal("-0.375"),
         "ts": 1570636800.0,

@@ -163,7 +163,7 @@ TWAP = StrategyTemplate(
 td:
   paper trader:
 md:
-  # Spot or Perp (e.g. bestquote.BinanceFuture_Perp_BTCUSDT).
+  # Spot or Perp (e.g. bestquote.BinanceUM_Perp_BTCUSDT).
   - bestquote.Paper_Spot_BTCUSDT
 sts:
   side: buy
@@ -188,7 +188,7 @@ TAPE_KEEPER = StrategyTemplate(
 md:
   # One entry per feed to keep recorded. Only aggtrade and trade are recorded;
   # subscribing to anything else here holds the feed but records nothing.
-  - aggtrade.BinanceFuture_Perp_BTCUSDT
+  - aggtrade.BinanceUM_Perp_BTCUSDT
 sts:
   # How often to log that the feeds are still held (ms). It does nothing else,
   # so this line is the difference between "quiet" and "died an hour ago".
@@ -215,8 +215,8 @@ md:
   #
   # Exactly one of aggtrade / trade: they report the same matches, so
   # subscribing to both would count every bar's volume twice (also refused).
-  - aggtrade.BinanceFuture_Perp_BTCUSDT
-  - bestquote.BinanceFuture_Perp_BTCUSDT
+  - aggtrade.BinanceUM_Perp_BTCUSDT
+  - bestquote.BinanceUM_Perp_BTCUSDT
 sts:
   feed: aggtrade
   # A bar closes once its prints carry this much of the quote currency, so it

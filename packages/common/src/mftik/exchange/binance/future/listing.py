@@ -36,7 +36,7 @@ TRADING = "TRADING"
 #: The six digits are identity — ``deliveryDate`` is the clock, not the name.
 _DATE_SUFFIX = re.compile(r"_(\d{6})\Z")
 
-VENUE = venues.BINANCE_FUTURE.name
+VENUE = venues.BINANCE_UM.name
 
 
 class BinanceFutureExchangeSymbol(BaseModel):

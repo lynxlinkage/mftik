@@ -241,7 +241,7 @@ class BinanceFutureHistoryReader:
     ``session_id`` it would be summed per session and be wrong.
     """
 
-    venue = venues.BINANCE_FUTURE.name
+    venue = venues.BINANCE_UM.name
     pages_newest_first = False
     max_page = BINANCE_FUTURE_MAX
 
@@ -324,7 +324,7 @@ class BinanceDeliveryHistoryReader:
     computes it against the account's position basis.
     """
 
-    venue = venues.BINANCE_DELIVERY.name
+    venue = venues.BINANCE_CM.name
     pages_newest_first = False
     max_page = BINANCE_DELIVERY_MAX
     #: dapi is the one venue whose two history endpoints cap differently:
@@ -820,14 +820,14 @@ class HistoryReaderFactory:
                     api_key=row.api_key, api_secret=row.api_secret
                 ),
             )
-        if venue == venues.BINANCE_FUTURE.name:
+        if venue == venues.BINANCE_UM.name:
             return BinanceFutureHistoryReader(
                 symbols=self._symbols,
                 rest=BinanceFutureRest(
                     api_key=row.api_key, api_secret=row.api_secret
                 ),
             )
-        if venue == venues.BINANCE_DELIVERY.name:
+        if venue == venues.BINANCE_CM.name:
             return BinanceDeliveryHistoryReader(
                 symbols=self._symbols,
                 rest=BinanceDeliveryRest(

@@ -18,7 +18,7 @@ from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.models import AggTrade, Side
 from mftik.exchange.tickers import UniversalTicker
 
-TICKER = UniversalTicker.parse("BinanceDelivery_Inverse_BTCUSD")
+TICKER = UniversalTicker.parse("BinanceCM_Inverse_BTCUSD")
 NATIVE = "BTCUSD_PERP"
 SIZE = Decimal("100")
 
@@ -280,7 +280,7 @@ async def test_a_dated_future_has_no_funding_rate_stream(
     async with client:
         with pytest.raises(ValueError, match="serves no funding rate stream"):
             client.stream_funding_rate(
-                UniversalTicker.parse("BinanceDelivery_Future_BTCUSD260925")
+                UniversalTicker.parse("BinanceCM_Future_BTCUSD260925")
             )
 
 
@@ -358,7 +358,7 @@ async def test_another_venues_ticker_is_refused(
     client = _client(binance_stream)
     async with client:
         stream = client.stream_trades(
-            UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
+            UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
         )
-        with pytest.raises(ValueError, match="BinanceFuture ticker"):
+        with pytest.raises(ValueError, match="BinanceUM ticker"):
             await anext(stream)

@@ -39,7 +39,7 @@ def test_a_perp_row_keeps_quote_per_contract_and_lot_in_contracts() -> None:
     listed = to_listed(PERP)
 
     assert listed is not None
-    assert str(listed.ticker) == "BinanceDelivery_Inverse_BTCUSD"
+    assert str(listed.ticker) == "BinanceCM_Inverse_BTCUSD"
     assert listed.exch_ticker == "BTCUSD_PERP"
     assert listed.category is Category.INVERSE
     assert listed.contract_size == Decimal("100")
@@ -68,7 +68,7 @@ def test_a_dated_contract_is_dropped_from_the_inverse_book() -> None:
 
 
 def test_a_dated_future_glues_yymmdd_onto_the_symbol() -> None:
-    """So it cannot collide with ``BinanceDelivery_Inverse_BTCUSD``."""
+    """So it cannot collide with ``BinanceCM_Inverse_BTCUSD``."""
     listed = to_listed(
         {
             **PERP,
@@ -80,7 +80,7 @@ def test_a_dated_future_glues_yymmdd_onto_the_symbol() -> None:
     assert listed is not None
     assert listed.exch_ticker == "BTCUSD_260925"
     assert listed.symbol == "BTCUSD260925"
-    assert str(listed.ticker) == "BinanceDelivery_Future_BTCUSD260925"
+    assert str(listed.ticker) == "BinanceCM_Future_BTCUSD260925"
     assert listed.category is Category.FUTURE
     assert listed.contract_size == Decimal("100")
     assert listed.settlement_asset == "BTC"

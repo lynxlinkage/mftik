@@ -38,7 +38,7 @@ class MarketDataConnector(Protocol):
     ``stream_liquidation``, ``stream_funding_rate`` and
     ``stream_open_interest`` are deliberately absent. Gate serves kline
     and best-quote and paper does not; only Binance has the aggregated
-    tape; Bybit, OKX, GateFutures and ``BinanceFuture`` have
+    tape; Bybit, OKX, GateFutures and ``BinanceUM`` have
     liquidations; perpetual venues have funding. Open interest is the
     same optional: a venue that cannot should have no such method rather
     than one that raises — :meth:`VenueSession._open` looks for them and
@@ -74,7 +74,7 @@ TOPIC_TRADE = "trade"
 TOPIC_AGG_TRADE = "aggtrade"
 TOPIC_BEST_QUOTE = "bestquote"
 #: Public forced-liquidation prints. Bybit, OKX (SWAP only), GateFutures and
-#: BinanceFuture publish them; a venue without the method refuses by name.
+#: BinanceUM publish them; a venue without the method refuses by name.
 TOPIC_LIQUIDATION = "liquidation"
 #: Predicted funding rate for the upcoming settlement. Perpetual venues
 #: publish it; spot and paper have no method and the subscribe is refused

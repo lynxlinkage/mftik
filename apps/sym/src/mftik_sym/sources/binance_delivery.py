@@ -9,7 +9,7 @@ dated futures (``BTCUSD_260925``) that share the perpetual's ``baseAsset``
 and ``quoteAsset``. Each source stamps its own category so a refresh can
 delist one book without touching the other, and ``to_listed`` glues
 ``YYMMDD`` onto the dated symbol so the two cannot collide as
-``BinanceDelivery_Inverse_BTCUSD``. Inverse stays the coin-margined perp;
+``BinanceCM_Inverse_BTCUSD``. Inverse stays the coin-margined perp;
 dated contracts are ``Future``, not a second Inverse.
 """
 

@@ -85,7 +85,7 @@ A subscribe the venue does not serve is **refused at attach**, not silently empt
 
 **Private events** arrive from the account, not from a candle: order updates, fills, rejects, balances, positions (contracts only). `td.{api_id}.global` is account-wide — filter with `self.owns(cid)` before you treat a fill as yours.
 
-Instruments are **universal tickers**: `Venue_Category_SYMBOL`. `Gate_Spot_BTCUSDT`, `BinanceFuture_Perp_BTCUSDT`, `Bybit_Spot_ETHUSDT`. The middle part is the book, not a nickname.
+Instruments are **universal tickers**: `Venue_Category_SYMBOL`. `Gate_Spot_BTCUSDT`, `BinanceUM_Perp_BTCUSDT`, `Bybit_Spot_ETHUSDT`. The middle part is the book, not a nickname.
 
 ## Exchange integration
 
@@ -97,7 +97,7 @@ A venue here is **one connection with one credential**. Binance spot and Binance
 | **Gate** | Spot | HMAC | yes | yes | yes | yes | yes | yes | — | — |
 | **GateFutures** | USD-M perp | HMAC | yes | yes | yes | yes | yes | yes | — | yes |
 | **Binance** | Spot | Ed25519 | yes | yes | yes | yes | yes | yes | yes | — |
-| **BinanceFuture** | USD-M perp | Ed25519 | yes | yes | yes | yes | yes | yes | yes | yes |
+| **BinanceUM** | USD-M perp | Ed25519 | yes | yes | yes | yes | yes | yes | yes | yes |
 | **Bybit** | Spot + perp | HMAC | yes | yes | yes | yes | yes | yes | — | perp |
 
 `yes` means the adapter serves it. `—` means a subscribe (or a query of that kind) is refused, not faked.

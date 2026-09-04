@@ -35,7 +35,7 @@ serves them on a topic something else already reads:
 
 | Venue | Funding arrives on | Open interest arrives on |
 |---|---|---|
-| BinanceFuture | `@markPrice` (`r`, `T`); `subscribe_mark_prices` exists, unwired | No USD-M WS channel; REST `/fapi/v1/openInterest` |
+| BinanceUM | `@markPrice` (`r`, `T`); `subscribe_mark_prices` exists, unwired | No USD-M WS channel; REST `/fapi/v1/openInterest` |
 | Bybit perp | `tickers.{symbol}` — the topic `stream_ticker` reads | Same `tickers.{symbol}` |
 | GateFutures | `futures.tickers` (`funding_rate`, parsed then dropped) | `total_size` on the same ticker, halved to one side |
 | OKX SWAP | Dedicated `funding-rate` channel | Dedicated `open-interest` channel |
@@ -53,16 +53,16 @@ the identity.
 ```
 one STS session
   md:
-    - ticker.BinanceFuture_Perp_BTCUSDT      # pump A
-    - bestquote.BinanceFuture_Perp_BTCUSDT   # pump B
+    - ticker.BinanceUM_Perp_BTCUSDT      # pump A
+    - bestquote.BinanceUM_Perp_BTCUSDT   # pump B
 ```
 
 MD's ledger after attach:
 
 | Product key | refcount |
 |---|---|
-| `ticker.BinanceFuture_Perp_BTCUSDT` | 1 |
-| `bestquote.BinanceFuture_Perp_BTCUSDT` | 1 |
+| `ticker.BinanceUM_Perp_BTCUSDT` | 1 |
+| `bestquote.BinanceUM_Perp_BTCUSDT` | 1 |
 
 What the futures sockets hold:
 
@@ -599,7 +599,7 @@ built from two disjoint payloads would never notice.
 On the unsubscribe side, Binance and Bybit close every `_Sub` whose index
 intersects the named identities, and Gate ignores the payload entirely and
 closes the whole channel. `BinanceFutureStream.unsubscribe` inherits this
-by fanning out to each group's socket — and BinanceFuture is the venue in
+by fanning out to each group's socket — and BinanceUM is the venue in
 this epic's headline example. Before MDS-1 that was already wrong; after
 MDS-1 it is worse, because each one now calls `WireLedger.discard` and so
 also hands back an identity a surviving reader depends on.
@@ -728,7 +728,7 @@ frame count, it is in the wrong ticket.
 
 **Problem.** Every ticket above is socket-local. None of them says anything
 about MD. The claim that matters is the one in *The problem* section:
-`ticker.` and `bestquote.` on one BinanceFuture instrument open one
+`ticker.` and `bestquote.` on one BinanceUM instrument open one
 `@bookTicker`, and dropping `bestquote` leaves `ticker` fed. Nothing in the
 tree tests it. The claim splits cleanly in two: *one identity* is counted on
 the socket in MDS-1b, and *the survivor keeps eating* is asserted here,

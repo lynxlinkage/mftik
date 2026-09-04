@@ -247,7 +247,7 @@ class VenueSessionFactory:
             )
             return self._session(api_id, private)
 
-        if venue is venues.BINANCE_FUTURE:
+        if venue is venues.BINANCE_UM:
             # The same Ed25519 credential shape as spot, and a different key:
             # Binance's USDⓈ-M plane is a separate account with separate API
             # keys, so a spot credential stored against this venue would fail
@@ -261,13 +261,13 @@ class VenueSessionFactory:
                 symbols=self._symbols,
             )
             logger.info(
-                "TD building BinanceFuture session api_id=%s key=%s…",
+                "TD building BinanceUM session api_id=%s key=%s…",
                 api_id,
                 row.api_key[:6],
             )
             return self._session(api_id, private)
 
-        if venue is venues.BINANCE_DELIVERY:
+        if venue is venues.BINANCE_CM:
             # Same Ed25519 PEM shape as the other Binance venues, and a
             # different key / wallet: coin-margined is its own account.
             private = BinanceDeliveryPrivateClient(
@@ -276,7 +276,7 @@ class VenueSessionFactory:
                 symbols=self._symbols,
             )
             logger.info(
-                "TD building BinanceDelivery session api_id=%s key=%s…",
+                "TD building BinanceCM session api_id=%s key=%s…",
                 api_id,
                 row.api_key[:6],
             )

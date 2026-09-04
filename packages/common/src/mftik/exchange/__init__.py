@@ -174,8 +174,8 @@ from mftik.exchange.tickers import (
 )
 from mftik.exchange.venues import (
     BINANCE,
-    BINANCE_DELIVERY,
-    BINANCE_FUTURE,
+    BINANCE_CM,
+    BINANCE_UM,
     BYBIT,
     GATE,
     OKX,
@@ -189,12 +189,12 @@ from mftik.exchange.venues import (
 
 __all__ = [
     "BINANCE",
-    "BINANCE_DELIVERY",
+    "BINANCE_CM",
     "BINANCE_DELIVERY_PRIVATE_STREAM_URL",
     "BINANCE_DELIVERY_REST_URL",
     "BINANCE_DELIVERY_STREAM_URL",
     "BINANCE_DELIVERY_WS_API_URL",
-    "BINANCE_FUTURE",
+    "BINANCE_UM",
     "BINANCE_FUTURE_MARKET_STREAM_URL",
     "BINANCE_FUTURE_PRIVATE_STREAM_URL",
     "BINANCE_FUTURE_PUBLIC_STREAM_URL",
