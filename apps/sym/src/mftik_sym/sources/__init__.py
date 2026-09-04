@@ -33,17 +33,20 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
     independently — see :mod:`mftik_sym.sources.bybit` and
     :mod:`mftik_sym.sources.okx`.
 
-    Binance appears three times, and for the opposite reason: ``Binance``,
-    ``BinanceFuture`` and ``BinanceDelivery`` are three venues with three
-    credentials and three listing endpoints, so their sources share nothing
-    but a brand. ``Gate`` / ``GateFutures`` is the same split.
+    Binance appears as three venues — ``Binance``, ``BinanceFuture`` and
+    ``BinanceDelivery`` — because those are three credentials and three
+    listing endpoints. ``BinanceFuture`` then appears twice more, the way
+    Bybit does: one ``exchangeInfo`` mixes perpetuals and dated futures,
+    and a refresh must delist each book independently.
+    ``Gate`` / ``GateFutures`` is the classic split with no dated book yet.
     """
     return [
         PaperInstrumentSource(broker),
         GateSpotInstrumentSource(),
         GateFuturesInstrumentSource(),
         BinanceSpotInstrumentSource(),
-        BinanceFutureInstrumentSource(),
+        BinanceFutureInstrumentSource(category=Category.PERP),
+        BinanceFutureInstrumentSource(category=Category.FUTURE),
         BinanceDeliveryInstrumentSource(),
         BybitInstrumentSource(category=Category.SPOT),
         BybitInstrumentSource(category=Category.PERP),

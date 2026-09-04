@@ -9,6 +9,7 @@ depth push shaped exactly like a diff, a wallet with no free/locked split.
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -31,7 +32,7 @@ from mftik.exchange.binance.future.models import (
     type_of,
 )
 from mftik.exchange.models import OrderStatus, OrderType, Side
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
 
 TICKER = UniversalTicker.parse("BinanceFuture_Perp_BTCUSDT")
 
@@ -450,6 +451,65 @@ def test_a_position_reply_carries_the_signed_size() -> None:
     ).to_position(TICKER)
     assert position.flat, "a closed position is reported, not omitted"
     assert position.entry_price is None, "0 means unset, not free"
+
+
+def test_a_dated_future_glues_yymmdd_onto_the_symbol() -> None:
+    """So it cannot collide with ``BinanceFuture_Perp_BTCUSDT``."""
+    instrument = to_listed(
+        {
+            "symbol": "BTCUSDT_250926",
+            "contractType": "CURRENT_QUARTER",
+            "status": "TRADING",
+            "baseAsset": "BTC",
+            "quoteAsset": "USDT",
+            "marginAsset": "USDT",
+            "deliveryDate": 1758873600000,
+            "filters": [
+                {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+                {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
+                {"filterType": "MIN_NOTIONAL", "notional": "5"},
+            ],
+        },
+        category=Category.FUTURE,
+    )
+    assert instrument is not None
+    assert instrument.exch_ticker == "BTCUSDT_250926"
+    assert instrument.symbol == "BTCUSDT250926"
+    assert str(instrument.ticker) == "BinanceFuture_Future_BTCUSDT250926"
+    assert instrument.expiry == datetime(2025, 9, 26, 8, tzinfo=UTC)
+    assert instrument.filters["min_notional"] == Decimal("5")
+
+
+def test_a_dated_row_without_delivery_date_still_gets_an_expiry() -> None:
+    instrument = to_listed(
+        {
+            "symbol": "ETHUSDT_251226",
+            "contractType": "NEXT_QUARTER",
+            "status": "TRADING",
+            "baseAsset": "ETH",
+            "quoteAsset": "USDT",
+        },
+        category=Category.FUTURE,
+    )
+    assert instrument is not None
+    assert instrument.symbol == "ETHUSDT251226"
+    assert instrument.expiry == datetime(2025, 12, 26, 8, tzinfo=UTC)
+
+
+def test_a_dated_row_without_a_date_suffix_is_skipped() -> None:
+    assert (
+        to_listed(
+            {
+                "symbol": "BTCUSDT",
+                "contractType": "CURRENT_QUARTER",
+                "status": "TRADING",
+                "baseAsset": "BTC",
+                "quoteAsset": "USDT",
+            },
+            category=Category.FUTURE,
+        )
+        is None
+    )
 
 
 def test_instruments_read_the_futures_notional_key() -> None:

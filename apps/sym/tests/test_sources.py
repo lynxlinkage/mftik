@@ -519,8 +519,8 @@ async def test_bybit_http_failure_propagates() -> None:
 # --- Binance USDⓈ-M futures ------------------------------------------------
 
 #: Trimmed rows in ``fapi/v1/exchangeInfo``'s shape. The second is a dated
-#: future, which shares the perpetual's base and quote and therefore its
-#: canonical symbol.
+#: future, which shares the perpetual's base and quote; its canonical symbol
+#: is the pair plus ``YYMMDD`` so the two tickers cannot collide.
 BINANCE_FUTURE_ROWS = [
     {
         "symbol": "BTCUSDT",
@@ -554,6 +554,7 @@ BINANCE_FUTURE_ROWS = [
         "baseAsset": "BTC",
         "quoteAsset": "USDT",
         "marginAsset": "USDT",
+        "deliveryDate": 1758873600000,
         "filters": [],
     },
     {
@@ -575,16 +576,19 @@ BINANCE_FUTURE_ROWS = [
 ]
 
 
-def _binance_future(rows: list[dict]) -> BinanceFutureInstrumentSource:
+def _binance_future(
+    rows: list[dict], *, category: Category = Category.PERP
+) -> BinanceFutureInstrumentSource:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/fapi/v1/exchangeInfo"
         return httpx.Response(200, json={"symbols": rows})
 
     return BinanceFutureInstrumentSource(
+        category=category,
         client=httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
             base_url="https://fapi.binance.com",
-        )
+        ),
     )
 
 
@@ -603,15 +607,32 @@ async def test_binance_future_rows_become_perp_instruments() -> None:
 
 
 async def test_dated_futures_are_not_stored_as_perpetuals() -> None:
-    """``BTCUSDT_250926`` canonicalizes to ``BTCUSDT`` — the perpetual's symbol.
+    """A perp refresh must not ingest the quarterly.
 
-    Keeping both would leave whichever was written last holding
-    ``BinanceFuture_Perp_BTCUSDT``, and every perp order would route to a
-    contract that expires.
+    ``BTCUSDT_250926`` shares the perpetual's base and quote. Written under
+    ``Perp`` it would steal ``BinanceFuture_Perp_BTCUSDT`` and every perp
+    order would route to a contract that expires.
     """
     instruments = await _binance_future(BINANCE_FUTURE_ROWS).fetch()
 
     assert [i.exch_ticker for i in instruments] == ["BTCUSDT", "SOONUSDT"]
+
+
+async def test_dated_futures_become_future_instruments() -> None:
+    instruments = await _binance_future(
+        BINANCE_FUTURE_ROWS, category=Category.FUTURE
+    ).fetch()
+
+    assert [i.exch_ticker for i in instruments] == ["BTCUSDT_250926"]
+    btc = instruments[0]
+    assert str(btc.ticker) == "BinanceFuture_Future_BTCUSDT250926"
+    assert btc.symbol == "BTCUSDT250926"
+    assert btc.category is Category.FUTURE
+    assert btc.settlement_asset == "USDT"
+    assert btc.expiry is not None
+    assert btc.expiry.year == 2025
+    assert btc.expiry.month == 9
+    assert btc.expiry.day == 26
 
 
 async def test_a_contract_not_yet_trading_is_listed_but_inactive() -> None:

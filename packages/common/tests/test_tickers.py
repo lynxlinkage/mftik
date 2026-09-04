@@ -31,6 +31,7 @@ def test_parse_round_trips() -> None:
         "Bybit_Perp_ETHUSDT",
         "Paper_Spot_BTCUSDT",
         "BinanceDelivery_Inverse_BTCUSD",
+        "BinanceFuture_Future_BTCUSDT250926",
     ):
         assert str(UniversalTicker.parse(text)) == text
 
@@ -130,6 +131,12 @@ def test_resolve_checks_the_venue_registry() -> None:
 def test_resolve_checks_the_venue_actually_trades_the_category() -> None:
     with pytest.raises(Exception, match="does not trade"):
         UniversalTicker.resolve("Gate_Perp_BTCUSDT")
+
+
+def test_resolve_accepts_a_binance_future_dated_contract() -> None:
+    assert str(
+        UniversalTicker.resolve("binancefuture_future_btcusdt250926")
+    ) == "BinanceFuture_Future_BTCUSDT250926"
 
 
 def test_of_normalizes_its_parts() -> None:

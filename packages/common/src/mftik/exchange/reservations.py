@@ -44,9 +44,10 @@ def commitment_for(
     commits that amount of quote; a spot sell sized that way delivers base
     we cannot size without a price, so it is unknowable too.
 
-    Perp: both sides commit margin in the quote (settle) asset. The amount is
-    ``notional / leverage``. Missing or non-positive ``leverage`` is treated
-    as ``1`` — conservative until the leverage cache has been filled.
+    Perp and linear dated futures: both sides commit margin in the quote
+    (settle) asset. The amount is ``notional / leverage``. Missing or
+    non-positive ``leverage`` is treated as ``1`` — conservative until the
+    leverage cache has been filled.
 
     Inverse: unknowable here. Margin is in the settle coin and the size is a
     contract count worth a fixed amount of quote; both need
@@ -63,7 +64,7 @@ def commitment_for(
     if category is Category.INVERSE:
         return None
     if quote_qty is not None:
-        if category is Category.PERP:
+        if category in {Category.PERP, Category.FUTURE}:
             return quote, quote_qty / _leverage_or_one(leverage)
         if side is Side.SELL:
             # Quote-sized, but base is what leaves. No price, no amount.
@@ -71,7 +72,7 @@ def commitment_for(
         return quote, quote_qty
     if qty is None:
         return None
-    if category is Category.PERP:
+    if category in {Category.PERP, Category.FUTURE}:
         if order_type is OrderType.MARKET or price is None:
             return None
         return quote, (qty * price) / _leverage_or_one(leverage)
