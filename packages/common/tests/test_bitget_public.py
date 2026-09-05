@@ -171,6 +171,53 @@ async def test_i6_spot_has_no_liquidation_funding_or_oi() -> None:
         client.stream_open_interest(USDC)
 
 
+async def test_bestquote_and_trade_both_print_on_one_spot_socket(
+    bitget_public: FakeBitget,
+) -> None:
+    """V12: two id-less ACKs on one socket must not leave either feed silent."""
+    api = FakeApi()
+    client = BitgetPublicClient(
+        symbols=StubSymbols(),
+        rest=BitgetPublicRest(base_url=BASE, client=api.client()),
+        feeds={
+            "SPOT": BitgetPublicStream(
+                bitget_public.url, inst_type="spot", ping_interval=0
+            )
+        },
+    )
+    async with client:
+        quote_stream = client.stream_best_quote(SPOT)
+        trade_stream = client.stream_trades(SPOT)
+        quote_task = asyncio.ensure_future(quote_stream.__anext__())
+        trade_task = asyncio.ensure_future(trade_stream.__anext__())
+        await asyncio.sleep(0.05)
+        await bitget_public.push(
+            ch.books("spot", "BTCUSDT", topic=ch.BOOKS1),
+            [{"b": [["79634.99", "0.4"]], "a": [["79635", "0.5"]], "ts": "1"}],
+        )
+        await bitget_public.push(
+            ch.public_trade("spot", "BTCUSDT"),
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "p": "79635",
+                    "v": "0.01",
+                    "S": "buy",
+                    "i": "t-1",
+                    "T": "1700000000000",
+                }
+            ],
+        )
+        quote = await asyncio.wait_for(quote_task, 2)
+        trade = await asyncio.wait_for(trade_task, 2)
+    assert quote.bid == Decimal("79634.99")
+    assert trade.qty == Decimal("0.01")
+    assert bitget_public.subscribed == {
+        ("books1", "BTCUSDT", "spot", ""),
+        ("publicTrade", "BTCUSDT", "spot", ""),
+    }
+
+
 async def test_v5_funding_and_oi_ride_the_ticker(
     bitget_public: FakeBitget,
 ) -> None:

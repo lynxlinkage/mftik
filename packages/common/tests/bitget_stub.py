@@ -1,10 +1,11 @@
 """A local stand-in for Bitget's UTA v3 sockets.
 
-Speaks the real envelopes: ``{"id", "op", "args"}`` in, ``{"id", "event",
-"code", "msg"}`` back, ``{"arg", "data"}`` for pushes, and the literal
-strings ``ping`` / ``pong``. :class:`FakeBitget` **verifies the login
-signature** the way OKX's stub verifies HMAC — signing is the one part
-with no way to be partly right.
+Speaks the real envelopes: ``{"id", "op", "args"}`` in, an id-less
+``{"event", "arg", "connId"}`` subscribe ACK (the venue does not echo
+``id``), ``{"event", "code", "msg"}`` for login, ``{"arg", "data"}`` for
+pushes, and the literal strings ``ping`` / ``pong``. :class:`FakeBitget`
+**verifies the login signature** the way OKX's stub verifies HMAC —
+signing is the one part with no way to be partly right.
 """
 
 from __future__ import annotations
@@ -55,10 +56,9 @@ class FakeBitget:
 
     async def _answer(self, websocket: Any, msg: dict[str, Any]) -> None:
         op = msg.get("op", "")
-        req_id = msg.get("id")
 
         if op == "login":
-            await websocket.send(json.dumps(self._login(msg, req_id)))
+            await websocket.send(json.dumps(self._login(msg)))
             return
 
         if op in ("subscribe", "unsubscribe"):
@@ -68,21 +68,22 @@ class FakeBitget:
                 self.subscribed.update(keys)
             else:
                 self.subscribed.difference_update(keys)
-            await websocket.send(
-                json.dumps(
-                    {
-                        "id": req_id,
-                        "event": op,
-                        "code": "0",
-                        "msg": "",
-                        "arg": args[0] if args else {},
-                    }
+            # Venue v3 omits ``id`` on subscribe / unsubscribe ACKs even
+            # when the client sent one. Echoing it hid #64 from CI.
+            for arg in args or [{}]:
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "event": op,
+                            "arg": arg,
+                            "connId": "stub-conn",
+                        }
+                    )
                 )
-            )
             return
 
-    def _login(self, msg: dict[str, Any], req_id: Any) -> dict[str, Any]:
-        refused = {"id": req_id, "event": "login", "code": "40009", "msg": "error"}
+    def _login(self, msg: dict[str, Any]) -> dict[str, Any]:
+        refused = {"event": "login", "code": "40009", "msg": "error"}
         args = msg.get("args") or []
         if self.api_secret is None or not args:
             return {**refused, "msg": "malformed login"}
@@ -96,7 +97,7 @@ class FakeBitget:
         if len(timestamp) > 11:
             return {**refused, "msg": "timestamp unit"}
         self.logins += 1
-        return {"id": req_id, "event": "login", "code": "0", "msg": ""}
+        return {"event": "login", "code": "0", "msg": ""}
 
     async def push(
         self,

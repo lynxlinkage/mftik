@@ -435,7 +435,8 @@ class BitgetResponse:
 
     Three shapes are normalized onto the same attributes:
 
-    * an op reply — ``{"id", "event", "code", "msg", "arg"}``;
+    * an op reply — ``{"event", "arg", "connId"}``, optionally with
+      ``id`` / ``code`` / ``msg``. v3 subscribe ACKs omit ``id``;
     * a push — ``{"arg", "data", "action?"}``;
     * a pong, which is the literal string ``pong``.
 

@@ -20,6 +20,7 @@ and funding-account balances are out of scope.
 | V9 | UTA assets vs funding | Only `GET /api/v3/account/assets`. Never `funding-assets`. | BG-5 |
 | V10 | GET query signing order | Query keys **sorted alphabetically**. Signed query is put on the path so httpx cannot reserialise. | BG-2 |
 | V11 | Error code table is v3 | v3 codes only. Unmapped codes pass through. At least `40085`. | BG-6 |
+| V12 | Public/private WS subscribe ACK `id` | **Omitted.** Live ACK is `{"event", "arg", "connId"}` whether or not the client sent `id`. Login is `{"event":"login","code","msg"}` — also no `id`. Correlate on `id` when present, else `(event, arg)`. | #64 |
 
 V1 and V2 did not contradict the constants this doc assumed for identity.
 V2 changed the *venue* symbol for USDC-M (`BTCPERP`), not the platform ticker
@@ -47,3 +48,5 @@ connect gate / qty / hedge / UTA balances (`test_bitget_private.py`),
 refuse-by-name (`test_bitget_public.py`, `test_md_bitget_reads.py`),
 no Bitget channel names outside `mftik.exchange.bitget`
 (`test_md_imports_no_venue_channel_or_stream_module`).
+V12 is `test_bitget_socket.py` and the public-stream cases in
+`test_bitget_public.py` (stub ACKs omit `id`).
