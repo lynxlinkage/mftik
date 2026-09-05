@@ -15,7 +15,12 @@ from mftik.exchange.bitget.models import (
     CANCEL_REFUSALS as BITGET_CANCEL_REFUSALS,
 )
 from mftik.exchange.bitget.models import BitgetOrderUpdate
-from mftik.exchange.bitget.protocol import BitgetRestError, BitgetWsError
+from mftik.exchange.bitget.protocol import (
+    BitgetAccountModeError,
+    BitgetAuthError,
+    BitgetRestError,
+    BitgetWsError,
+)
 from mftik.exchange.bybit.protocol import BybitRestError, BybitWsError
 from mftik.exchange.errors import (
     ExchangeError,
@@ -765,13 +770,24 @@ def test_every_bitget_refusal_the_adapter_raises_has_a_code_here(
 
 
 def test_bitget_local_refusals_have_codes() -> None:
+    # The exception *types* the adapter really raises, not stand-ins: a typed
+    # match is resolved before any message fragment, so a test that fabricates
+    # an ``OrderError`` here would pass while the live path answered something
+    # else.
     assert (
-        normalize(OrderError("Bitget passphrase is required"), venue="Bitget")
+        normalize(BitgetAuthError("Bitget passphrase is required"), venue="Bitget")
         == RejectCode.VENUE_AUTH_FAILED
     )
     assert (
         normalize(
-            OrderError("Bitget accountMode='switching' cannot trade"),
+            BitgetAccountModeError("Bitget accountMode='switching' cannot trade"),
+            venue="Bitget",
+        )
+        == RejectCode.VENUE_PERMISSION_DENIED
+    )
+    assert (
+        normalize(
+            BitgetAccountModeError("Bitget settings has no holdMode"),
             venue="Bitget",
         )
         == RejectCode.VENUE_PERMISSION_DENIED

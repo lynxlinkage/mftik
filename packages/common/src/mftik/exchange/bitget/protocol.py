@@ -229,6 +229,19 @@ class BitgetAuthError(ExchangeError):
     """The credential is missing or unusable before anything was sent."""
 
 
+class BitgetAccountModeError(BitgetAuthError):
+    """The key is fine; the *account* it opens cannot trade this adapter.
+
+    ``accountMode`` is Classic / ``upgrading`` / ``switching``, or
+    ``holdMode`` is absent. A subclass rather than a message, because
+    ``mftik_td.errors`` resolves typed exceptions before it looks at
+    message fragments: without its own class this refusal normalizes as
+    ``VENUE_AUTH_FAILED`` (rotate the key) instead of
+    ``VENUE_PERMISSION_DENIED`` (fix the account), which is the wrong
+    instruction to hand an operator.
+    """
+
+
 # --- signing ---------------------------------------------------------------
 
 LOGIN_PATH = "/user/verify"
@@ -544,6 +557,7 @@ __all__ = [
     "USDC_FUTURES",
     "USDT_FUTURES",
     "WS_RET_OK",
+    "BitgetAccountModeError",
     "BitgetAuthError",
     "BitgetError",
     "BitgetResponse",

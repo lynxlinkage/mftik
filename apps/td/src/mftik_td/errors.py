@@ -26,7 +26,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from mftik.exchange.bitget.protocol import BitgetAuthError
+from mftik.exchange.bitget.protocol import (
+    BitgetAccountModeError,
+    BitgetAuthError,
+)
 from mftik.exchange.errors import (
     ExchangeNotConnectedError,
     InstrumentNotFoundError,
@@ -549,6 +552,12 @@ BY_TYPE: tuple[tuple[type[BaseException], RejectCode], ...] = (
     # Paper's only typed refusal; every other paper error is a bare
     # ``OrderError`` and falls to :attr:`VenueErrors.messages`.
     (PaperAuthError, RejectCode.VENUE_AUTH_FAILED),
+    # Before its base class: a UTA account that cannot trade is an account
+    # problem, not a key problem, and this tuple is read most-specific
+    # first. Without the subclass entry the ``accountmode=`` /
+    # ``has no holdmode`` fragments below are unreachable, because a typed
+    # match is resolved before any message fragment is.
+    (BitgetAccountModeError, RejectCode.VENUE_PERMISSION_DENIED),
     (BitgetAuthError, RejectCode.VENUE_AUTH_FAILED),
 )
 

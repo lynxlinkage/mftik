@@ -27,6 +27,7 @@ from mftik.exchange.bitget.protocol import (
     SPOT,
     USDC_FUTURES,
     USDT_FUTURES,
+    BitgetAccountModeError,
     BitgetAuthError,
     BitgetError,
     category_of,
@@ -60,6 +61,11 @@ REFUSED_ACCOUNT_MODES = frozenset({"upgrading", "switching"})
 HEDGE_MODE = "hedge_mode"
 ONE_WAY_MODE = "one_way_mode"
 
+#: Body fields the request itself owns. ``params`` may not restate them.
+#:
+#: ``posSide`` is deliberately *not* here: hedge mode needs it and
+#: :class:`~mftik.exchange.models.PlaceOrderRequest` has no field for it, so
+#: ``params`` is the only channel — see :meth:`BitgetPrivateClient._pos_side`.
 _RESERVED_PARAMS = (
     "category",
     "symbol",
@@ -68,7 +74,6 @@ _RESERVED_PARAMS = (
     "orderType",
     "price",
     "clientOid",
-    "posSide",
     "reduceOnly",
     "timeInForce",
 )
@@ -153,13 +158,13 @@ class BitgetPrivateClient(BaseClient):
         mode = (settings.account_mode or "").strip()
         refused = not mode or mode in REFUSED_ACCOUNT_MODES
         if refused or mode not in ACCEPTED_ACCOUNT_MODES:
-            raise BitgetAuthError(
+            raise BitgetAccountModeError(
                 f"Bitget accountMode={mode or 'unknown'!r} cannot trade; "
                 f"UTA required (accepted: {', '.join(sorted(ACCEPTED_ACCOUNT_MODES))})"
             )
         hold = (settings.hold_mode or "").strip()
         if not hold:
-            raise BitgetAuthError(
+            raise BitgetAccountModeError(
                 "Bitget settings has no holdMode; refuse to guess (V7)"
             )
         self._account_mode = mode
@@ -212,7 +217,7 @@ class BitgetPrivateClient(BaseClient):
             args["timeInForce"] = tif
         if request.reduce_only:
             args["reduceOnly"] = "YES"
-        pos_side = self._pos_side(request)
+        pos_side = self._pos_side(extras)
         if pos_side is not None:
             args["posSide"] = pos_side
         args.update(extras)
@@ -269,15 +274,27 @@ class BitgetPrivateClient(BaseClient):
             return request.quote_qty, True
         return sized_amount(request), request.quote_qty is not None
 
-    def _pos_side(self, request: PlaceOrderRequest) -> str | None:
-        extras = dict(request.params or {})
-        pos_side = extras.get("posSide")
+    def _pos_side(self, extras: dict[str, object]) -> str | None:
+        """``posSide`` for this order, consumed out of ``extras`` (I8).
+
+        Hedge mode requires it and refuses locally when it is missing.
+        One-way mode omits the field, and drops any value the caller sent so
+        it cannot reach the body through ``args.update(extras)``.
+        """
+        pos_side = extras.pop("posSide", None)
         if self._hold_mode == HEDGE_MODE:
             if not pos_side:
                 raise OrderError(
                     "Bitget hedge_mode requires posSide; the order was not sent"
                 )
             return str(pos_side)
+        if pos_side:
+            logger.warning(
+                "Bitget %s ignores params['posSide']=%r; it is a hedge-mode "
+                "field",
+                self._hold_mode or ONE_WAY_MODE,
+                pos_side,
+            )
         return None
 
     async def cancel_order(self, order_id: str) -> Order:
