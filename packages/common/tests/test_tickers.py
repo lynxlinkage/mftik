@@ -34,6 +34,7 @@ def test_parse_round_trips() -> None:
         "BinanceCM_Future_BTCUSD-260925",
         "BinanceUM_Future_BTCUSDT-250926",
         "BinanceUM_Option_BTCUSDT-260905-100000-C",
+        "Bybit_Option_AVAXUSDC-260905-6D4-C",
     ):
         assert str(UniversalTicker.parse(text)) == text
 
@@ -132,18 +133,25 @@ def test_of_refuses_a_field_it_would_render_unparseable(strike: str) -> None:
         UniversalTicker.of("Bybit", "option", f"BTCUSDT-260905-{strike}-C")
 
 
-def test_a_fractional_strike_is_refused_until_an_encoding_is_chosen() -> None:
-    """Not a parse failure — a decision nobody has made yet.
+def test_a_fractional_strike_spells_its_decimal_point_with_d() -> None:
+    """``.`` is folded at the lenient boundary and refused at the strict one.
 
-    ``.`` would survive a ticker today, but only because every reader of a
-    feed key (``bestquote.Gate_Spot_BTCUSDT``) happens to split leftmost.
-    That is an implementation, not a grammar, and no venue here lists an
-    option yet — so the cheap moment to refuse it is now, while refusing
-    costs nothing. The epic that lists the first option with a fractional
-    strike picks the encoding on purpose and lifts this.
+    Exactly the shape ``BTC/USDT`` already has: a person may type it, a
+    column may not hold it. ``.`` cannot sit inside a ticker because it is
+    what separates a feed key's topic from its ticker, and every reader of
+    one splitting leftmost is an implementation rather than a grammar.
     """
+    for typed in (
+        "AVAXUSDC-260905-6.4-C",
+        "avax-usdc-260905-6.4-c",
+        "AVAXUSDC-260905-6d4-C",
+    ):
+        built = UniversalTicker.of("Bybit", "option", typed)
+        assert str(built) == "Bybit_Option_AVAXUSDC-260905-6D4-C", typed
+        assert UniversalTicker.parse(str(built)) == built
+
     with pytest.raises(InvalidTickerError, match=r"'\.' cannot"):
-        UniversalTicker.of("Bybit", "option", "AVAXUSDC-260905-6.4-C")
+        UniversalTicker.parse("Bybit_Option_AVAXUSDC-260905-6.4-C")
 
 
 def test_every_symbol_of_builds_survives_a_round_trip() -> None:
@@ -153,6 +161,7 @@ def test_every_symbol_of_builds_survives_a_round_trip() -> None:
         "BTCUSDT-250926",
         "BTCUSDT-260905-100000-C",
         "BTCUSDT-260905-100000-P",
+        "AVAXUSDC-260905-6D4-C",
         "龙虾USDT",
     ):
         category = "option" if symbol.count("-") == 3 else (

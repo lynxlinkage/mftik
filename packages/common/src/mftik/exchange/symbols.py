@@ -37,6 +37,25 @@ _DATE_CODE = re.compile(r"\d{6}\Z")
 #: Categories whose symbol may carry ``-`` as a field separator.
 _STRUCTURED = frozenset({"future", "option"})
 
+#: How a fractional strike writes its decimal point: ``6.4`` is ``6D4``.
+#:
+#: A strike has to be spelled somehow and ``.`` is the obvious candidate,
+#: but ``.`` is also what a feed key uses to separate its topic from its
+#: ticker (``bestquote.Gate_Spot_BTCUSDT``). Every reader of one splits
+#: leftmost today, so a ``.`` inside a ticker would survive by
+#: implementation rather than by grammar — and the first time somebody
+#: split from the right it would break somewhere no test looks. A letter
+#: cannot collide with the fields either side, which are a six-digit date
+#: and a ``C``/``P``, and a strike is a number so no digit is displaced.
+#:
+#: Uppercase because every other character in a symbol is. That is not
+#: only tidiness: :func:`normalize_symbol` uppercases before it splits,
+#: so a strike typed ``6d4`` and one typed ``6.4`` land on the same
+#: spelling for free. A lowercase marker would need that case folded back
+#: by hand, and the spelling that got missed would be a second identity
+#: for one strike.
+STRIKE_DECIMAL = "D"
+
 #: The punctuation :func:`canonical` folds out of a pair, minus ``-`` —
 #: the one character the structured grammar promotes to a field separator.
 #: Refused inside a symbol rather than folded away, because
@@ -44,17 +63,12 @@ _STRUCTURED = frozenset({"future", "option"})
 #: strike is passed through verbatim, so a ``_`` there would otherwise ride
 #: into a ticker that :meth:`UniversalTicker.parse` cannot split back.
 #:
-#: ``.`` is here for a different reason, and only until something decides
-#: otherwise. A fractional strike has to be spelled *somehow*, and a
-#: decimal point is the obvious candidate — but ``.`` is also what a feed
-#: key uses to separate its topic from its ticker
-#: (``bestquote.Gate_Spot_BTCUSDT``). Every parse of one happens to split
-#: leftmost today, so a ``.`` inside the ticker survives by implementation
-#: rather than by grammar. No venue here lists an option yet, so refusing
-#: it costs nothing and makes the first listing that needs a fractional
-#: strike state the encoding on purpose, instead of inheriting one nobody
-#: chose. Whoever lifts this owes the grammar a sentence and the feed key
-#: a test.
+#: ``.`` is refused because a fractional strike spells its decimal point
+#: :data:`STRIKE_DECIMAL`, not because it is meaningless — which is why
+#: :func:`normalize_symbol` folds it rather than rejecting the input.
+#: Refusing it *here* is what keeps the folded form the only one that can
+#: reach a column, exactly as ``BTC/USDT`` folds while
+#: ``Gate_Spot_BTC/USDT`` does not parse.
 _FORBIDDEN_IN_SYMBOL = re.compile(r"[/_.\s]")
 
 
@@ -131,6 +145,12 @@ def normalize_symbol(symbol: str, *, category: str | None = None) -> str:
     lands on one identity (``BTC-USDT-250926`` → ``BTCUSDT-250926``).
     The glued form ``BTCUSDT250926`` is accepted on those books so
     older YAML and typed input do not fork a second instrument.
+
+    A fractional strike is spelled with :data:`STRIKE_DECIMAL`, and a
+    decimal point is folded onto it here — ``AVAXUSDC-260905-6.4-C``
+    becomes ``AVAXUSDC-260905-6D4-C``. Same shape as ``BTC/USDT`` folding
+    to ``BTCUSDT``: the spelling a venue or a person writes is taken, and
+    the one the platform stores comes back.
     """
     raw = (symbol or "").strip().upper()
     if not raw:
@@ -142,7 +162,7 @@ def normalize_symbol(symbol: str, *, category: str | None = None) -> str:
     if _is_option_parts(parts):
         pair = canonical("-".join(parts[:-3]))
         if pair:
-            return f"{pair}-{parts[-3]}-{parts[-2]}-{parts[-1]}"
+            return f"{pair}-{parts[-3]}-{_strike(parts[-2])}-{parts[-1]}"
     if len(parts) >= 2 and _DATE_CODE.match(parts[-1]):
         pair = canonical("-".join(parts[:-1]))
         if pair:
@@ -170,6 +190,18 @@ def forbidden_in_symbol(symbol: str) -> str | None:
     return found.group(0) if found else None
 
 
+def _strike(field: str) -> str:
+    """A strike in platform form: ``6.4``, ``6d4`` and ``6D4`` all land here.
+
+    Only the decimal point needs folding. The case is already folded by
+    the time this runs — :func:`normalize_symbol` uppercases before it
+    splits — which is the whole reason :data:`STRIKE_DECIMAL` is
+    uppercase. A lowercase marker would make this two folds, and two
+    spellings of one strike the first time one of them was forgotten.
+    """
+    return field.replace(".", STRIKE_DECIMAL)
+
+
 def _is_option_parts(parts: list[str]) -> bool:
     return (
         len(parts) >= 4
@@ -188,6 +220,7 @@ def join(base: str, quote: str, separator: str = "") -> str:
 canonical_symbol = canonical
 
 __all__ = [
+    "STRIKE_DECIMAL",
     "SymbolResolver",
     "check_venue",
     "canonical",

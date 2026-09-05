@@ -38,6 +38,14 @@ def test_canonical_tolerates_empty_input() -> None:
         ("BTCUSDT-250926", "future", "BTCUSDT-250926"),
         ("BTC-USDT-260905-100000-C", "option", "BTCUSDT-260905-100000-C"),
         ("avaxusdc-260905-64-c", "option", "AVAXUSDC-260905-64-C"),
+        # A fractional strike folds its decimal point onto ``d``, the
+        # way a pair folds its punctuation away.
+        ("AVAXUSDC-260905-6.4-c", "option", "AVAXUSDC-260905-6D4-C"),
+        ("avax-usdc-260905-6.4-C", "option", "AVAXUSDC-260905-6D4-C"),
+        ("AVAXUSDC-260905-6d4-c", "option", "AVAXUSDC-260905-6D4-C"),
+        # Uppercased before the split, which is what makes a typed
+        # ``6d4`` and a typed ``6.4`` one spelling for free.
+        ("AVAXUSDC-260905-6D4-C", "option", "AVAXUSDC-260905-6D4-C"),
         ("BTCUSDT", Category.PERP, "BTCUSDT"),
     ],
 )
@@ -53,6 +61,7 @@ def test_normalize_symbol_keeps_structured_hyphens(
         ("BTCUSDT", None),
         ("BTCUSDT-250926", None),
         ("BTCUSDT-260905-100000-C", None),
+        ("AVAXUSDC-260905-6D4-C", None),
         ("龙虾USDT", None),
         ("BTCUSDT-260905-6.4-C", "."),
         ("BTC_USDT", "_"),

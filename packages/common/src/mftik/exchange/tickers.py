@@ -24,7 +24,10 @@ So identity is three parts, rendered as one string::
 ``_`` separates, and therefore cannot appear inside a part. Venues are
 CamelCase (``GateFutures``, never ``gate_futures``). Pair symbols are
 separator-free (``BTCUSDT``, never ``BTC_USDT``); dated futures and
-options keep ``-`` between fields (``BTCUSDT-250926``).
+options keep ``-`` between fields (``BTCUSDT-250926``,
+``AVAXUSDC-260905-6D4-C``), and a fractional strike writes its decimal
+point ``D`` — ``.`` is what separates a feed key's topic from its
+ticker, so it cannot also sit inside one.
 :func:`mftik.exchange.venues.check_registry` enforces the venue half of that at
 import time, so a venue named with an underscore fails loudly at startup
 rather than silently breaking every parse.
@@ -46,7 +49,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from mftik.exchange.errors import ExchangeError
-from mftik.exchange.symbols import forbidden_in_symbol, normalize_symbol
+from mftik.exchange.symbols import (
+    STRIKE_DECIMAL,
+    forbidden_in_symbol,
+    normalize_symbol,
+)
 
 #: What splits the three parts, and so what none of them may contain.
 SEPARATOR = "_"
@@ -211,13 +218,13 @@ def _check_symbol(symbol: str, category: Category) -> str:
     """
     bad = forbidden_in_symbol(symbol)
     if bad is not None:
-        # '.' is refused for a different reason from the rest, and saying
-        # so is the point: it is the obvious way to spell a fractional
-        # strike, so whoever hits this is asking a question rather than
-        # making a typo. See _FORBIDDEN_IN_SYMBOL.
+        # '.' has a spelling rather than no meaning, and saying which is
+        # the point: whoever hits this typed a strike, not a typo, and the
+        # lenient boundary would have folded it for them.
         why = (
-            "how a fractional strike is spelled is not decided yet, and "
-            "'.' already separates a feed key's topic from its ticker"
+            f"a fractional strike spells its decimal point "
+            f"{STRIKE_DECIMAL!r} (6.4 is '6{STRIKE_DECIMAL}4'), because "
+            f"'.' separates a feed key's topic from its ticker"
             if bad == "."
             else (
                 f"{SEPARATOR!r} separates the ticker's three parts, and "
@@ -232,7 +239,9 @@ def _check_symbol(symbol: str, category: Category) -> str:
         raise InvalidTickerError(
             f"invalid symbol {symbol!r} in a universal ticker; symbols are "
             f"uppercase and separator-free, or a dated/option form with '-' "
-            f"(e.g. 'BTCUSDT', 'BTCUSDT-250926')"
+            f"between fields and {STRIKE_DECIMAL!r} for a strike's decimal "
+            f"point (e.g. 'BTCUSDT', 'BTCUSDT-250926', "
+            f"'AVAXUSDC-260905-6{STRIKE_DECIMAL}4-C')"
         )
     return symbol
 
