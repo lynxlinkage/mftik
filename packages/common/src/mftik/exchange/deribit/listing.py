@@ -6,8 +6,13 @@
   ``base+quote`` (``BTCUSDC``); the underscore stays on ``exch_ticker``.
 * Linear perpetual names are ``BTC_USDC-PERPETUAL``. Same platform
   symbol as the spot pair; category separates them.
-* Inverse ``BTC-PERPETUAL`` is ``instrument_type=reversed``. Dated
-  futures have ``settlement_period != perpetual``. Both are dropped.
+* Inverse perpetual names are ``BTC-PERPETUAL``. Platform symbol is
+  ``BTCUSD``; category is ``Inverse``, never a second Perp.
+* Dated names keep Deribit's day-month-year suffix on the wire
+  (``BTC-6SEP26``, ``BTC_USDC-6SEP26``). Platform ``expiry_code`` is
+  ``YYMMDD`` (``260906``), so identity is ``Deribit_Future_BTCUSD-260906``
+  / ``Deribit_Future_BTCUSDC-260906``. Linear dated quote USDC; inverse
+  dated quote USD and settle the coin.
 * CBE-routed spots set ``is_cbe_routed`` / ``is_csr``; native spots omit
   both. Presence, not ``== false`` (V12).
 """
@@ -22,7 +27,12 @@ from pydantic import BaseModel, ConfigDict
 from mftik.exchange.deribit.protocol import (
     KIND_FUTURE,
     KIND_SPOT,
+    expiry_code_from_name,
+    expiry_from_code,
+    expiry_from_timestamp,
     is_cbe_routed,
+    is_dated_future,
+    is_inverse_perp,
     is_linear_perp,
 )
 from mftik.exchange.tickers import Category
@@ -45,6 +55,8 @@ logger = logging.getLogger(__name__)
 
 VENUE = "Deribit"
 
+_DERIVS = frozenset({Category.PERP, Category.INVERSE, Category.FUTURE})
+
 
 class DeribitInstrumentRow(BaseModel):
     """One ``result[]`` row of ``public/get_instruments``."""
@@ -62,6 +74,7 @@ class DeribitInstrumentRow(BaseModel):
     tick_size: WireStr = ""
     min_trade_amount: WireStr = ""
     contract_size: WireStr = ""
+    expiration_timestamp: Any = None
     is_active: bool = False
     state: WireStr = ""
     is_cbe_routed: bool | None = None
@@ -83,6 +96,8 @@ def to_listed(
     if category is Category.SPOT:
         if kind != KIND_SPOT:
             return None
+        expiry_code = None
+        expiry = None
     elif category is Category.PERP:
         if kind != KIND_FUTURE or not is_linear_perp(
             instrument_type=parsed.instrument_type,
@@ -91,6 +106,30 @@ def to_listed(
             kind=parsed.kind,
         ):
             return None
+        expiry_code = None
+        expiry = None
+    elif category is Category.INVERSE:
+        if kind != KIND_FUTURE or not is_inverse_perp(
+            instrument_type=parsed.instrument_type,
+            future_type=parsed.future_type,
+            settlement_period=parsed.settlement_period,
+            kind=parsed.kind,
+        ):
+            return None
+        expiry_code = None
+        expiry = None
+    elif category is Category.FUTURE:
+        if kind != KIND_FUTURE or not is_dated_future(
+            settlement_period=parsed.settlement_period,
+            kind=parsed.kind,
+        ):
+            return None
+        expiry_code = expiry_code_from_name(parsed.instrument_name)
+        if expiry_code is None:
+            return None
+        expiry = expiry_from_timestamp(parsed.expiration_timestamp) or expiry_from_code(
+            expiry_code
+        )
     else:
         return None
 
@@ -111,8 +150,10 @@ def to_listed(
         quote=quote,
         exch_ticker=exch_ticker,
         category=category,
-        settlement_asset=settle if category is Category.PERP else None,
+        settlement_asset=settle if category in _DERIVS else None,
         contract_size=listing_decimal(parsed.contract_size),
+        expiry=expiry,
+        expiry_code=expiry_code,
         is_active=bool(parsed.is_active) or parsed.state.strip().casefold() == "open",
         filters={
             PRICE_TICK: listing_decimal(parsed.tick_size),

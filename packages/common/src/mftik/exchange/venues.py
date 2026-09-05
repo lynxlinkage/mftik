@@ -9,9 +9,10 @@ which names are real and what each one needs.
 A venue here is **one connection with one credential**, which is the axis the
 API is actually organised on. Gate's spot and futures planes sign separately
 and speak to separate endpoints, so they are two venues (``Gate``,
-``GateFutures``) that happen to share a brand. Bybit's, OKX's, Bitget's and Deribit's
-unified accounts sign once for both books, so each is one venue with two
-categories. What a venue trades is :attr:`Venue.categories`; which one an
+``GateFutures``) that happen to share a brand. Bybit's, OKX's and Bitget's
+unified accounts sign once for both books; Deribit's signs once for
+spot, linear perp, inverse and dated futures. What a venue trades is
+:attr:`Venue.categories`; which one an
 instrument is on is the middle part of its
 :class:`~mftik.exchange.tickers.UniversalTicker`.
 
@@ -237,10 +238,13 @@ DERIBIT = Venue(
     name="Deribit",
     label="Deribit",
     # One HMAC credential (Client ID / Client Secret, no passphrase) trades
-    # spot and the linear perpetual books. Inverse coin-margined perps,
-    # dated futures and options stay unregistered until an adapter serves
-    # them. The linear quote is USDC, not USDT, so the hint is BTCUSDC.
-    categories=frozenset({Category.SPOT, Category.PERP}),
+    # spot, linear USDC perps, inverse USD perps and dated futures (linear
+    # and inverse). Options stay unregistered. ``Future`` sorts first and a
+    # bare ``BTCUSDC`` is not a dated instrument, so the hint stays on
+    # Spot. The linear quote is USDC, not USDT.
+    categories=frozenset(
+        {Category.SPOT, Category.PERP, Category.INVERSE, Category.FUTURE}
+    ),
     example_symbol="BTCUSDC",
     example_category=Category.SPOT,
     api_types=frozenset({HMAC}),

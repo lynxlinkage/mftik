@@ -61,7 +61,12 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     assert by_name["Bitget"].requires_passphrase is True
     assert by_name["Bitget"].api_types == ["HMAC"]
     assert by_name["Bitget"].ticker_example == "Bitget_Spot_BTCUSDT"
-    assert by_name["Deribit"].categories == ["Perp", "Spot"]
+    assert by_name["Deribit"].categories == [
+        "Future",
+        "Inverse",
+        "Perp",
+        "Spot",
+    ]
     assert by_name["Deribit"].requires_passphrase is False
     assert by_name["Deribit"].api_types == ["HMAC"]
     assert by_name["Deribit"].ticker_example == "Deribit_Spot_BTCUSDC"

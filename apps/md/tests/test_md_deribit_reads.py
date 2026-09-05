@@ -7,32 +7,62 @@ from typing import Any
 
 import httpx
 import pytest
-from mftik.exchange.deribit.protocol import DeribitRestError
+from mftik.exchange.deribit.protocol import (
+    DeribitRestError,
+    expiry_code_from_name,
+    expiry_suffix_from_code,
+)
 from mftik.exchange.deribit.rest import DeribitPublicRest
 from mftik.exchange.intervals import InvalidIntervalError
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol.query_codes import QueryCode
 from mftik_md.errors import normalize
 from mftik_md.fetch.readers import DeribitReader, NoReaderError, VenueReaderFactory
 
 SPOT = UniversalTicker.parse("Deribit_Spot_BTCUSDC")
 PERP = UniversalTicker.parse("Deribit_Perp_BTCUSDC")
+INVERSE = UniversalTicker.parse("Deribit_Inverse_BTCUSD")
+DATED = UniversalTicker.parse("Deribit_Future_BTCUSD-260906")
 BASE = "https://deribit.test"
+
+
+def _wire(ticker: UniversalTicker) -> str:
+    symbol = ticker.symbol
+    code = None
+    if "-" in symbol:
+        pair, maybe = symbol.rsplit("-", 1)
+        if len(maybe) == 6 and maybe.isdigit():
+            symbol, code = pair, maybe
+    for quote in ("USDC", "USDT", "USD"):
+        if symbol.endswith(quote) and symbol != quote:
+            base = symbol[: -len(quote)]
+            if quote == "USD":
+                if ticker.category is Category.FUTURE and code:
+                    return f"{base}-{expiry_suffix_from_code(code)}"
+                return f"{base}-PERPETUAL"
+            pair = f"{base}_{quote}"
+            if ticker.category is Category.PERP:
+                return f"{pair}-PERPETUAL"
+            if ticker.category is Category.FUTURE and code:
+                return f"{pair}-{expiry_suffix_from_code(code)}"
+            return pair
+    return ticker.symbol
 
 
 class StubSymbols:
     async def exch_ticker(self, ticker: UniversalTicker) -> str:
-        if ticker.symbol.endswith("USDC"):
-            pair = f"{ticker.symbol[:-4]}_USDC"
-            if ticker.category.value == "Perp":
-                return f"{pair}-PERPETUAL"
-            return pair
-        return ticker.symbol
+        return _wire(ticker)
 
     async def symbol_for(
         self, venue: str, exch_ticker: str, *, category: str
     ) -> UniversalTicker:
-        symbol = exch_ticker.replace("-PERPETUAL", "").replace("_", "")
+        code = expiry_code_from_name(exch_ticker)
+        body = exch_ticker.replace("-PERPETUAL", "")
+        if code:
+            body = exch_ticker.rsplit("-", 1)[0]
+        symbol = body.replace("_", "") if "_" in body else f"{body}USD"
+        if code:
+            symbol = f"{symbol}-{code}"
         return UniversalTicker.of(venue, category, symbol)
 
     async def contract_size(self, ticker: UniversalTicker) -> Decimal | None:
@@ -122,6 +152,27 @@ async def test_spot_funding_and_oi_are_unsupported_reads() -> None:
         )
         is QueryCode.MD_VENUE_UNSUPPORTED_READ
     )
+
+
+async def test_inverse_funding_is_served_and_dated_funding_is_refused() -> None:
+    api = FakeApi()
+    api.results["/public/get_funding_rate_history"] = [
+        {"timestamp": 1700000000000, "interest_8h": "0.0001"},
+    ]
+    api.results["/public/ticker"] = {
+        "instrument_name": "BTC-6SEP26",
+        "open_interest": "2414140",
+        "timestamp": 1700000000000,
+    }
+    rows = await _reader(api).fetch_funding_history(INVERSE, limit=5)
+    assert rows[0].rate == Decimal("0.0001")
+    assert "instrument_name=BTC-PERPETUAL" in api.query_for(
+        "/public/get_funding_rate_history"
+    )
+    with pytest.raises(NoReaderError, match="Future"):
+        await _reader(api).fetch_funding_history(DATED, limit=5)
+    interest = await _reader(api).fetch_open_interest(DATED)
+    assert interest.qty == Decimal("2414140")
 
 
 async def test_perp_funding_and_oi_are_served() -> None:

@@ -86,23 +86,29 @@ def test_bitget_is_one_venue_trading_two_books_and_needs_a_passphrase() -> None:
         bitget.ticker("inverse", "BTCUSD")
 
 
-def test_deribit_is_one_venue_trading_two_books_without_a_passphrase() -> None:
+def test_deribit_is_one_venue_trading_four_books_without_a_passphrase() -> None:
     """HMAC Client ID / Secret, no passphrase. Linear quote is USDC."""
     deribit = venues.require("Deribit")
     assert deribit is venues.DERIBIT
-    assert deribit.categories == frozenset({Category.SPOT, Category.PERP})
+    assert deribit.categories == frozenset(
+        {Category.SPOT, Category.PERP, Category.INVERSE, Category.FUTURE}
+    )
     assert deribit.api_types == frozenset({venues.HMAC})
     assert not deribit.requires_passphrase
     assert deribit.ticker_example == "Deribit_Spot_BTCUSDC"
     assert str(deribit.ticker("spot", "btcusdc")) == "Deribit_Spot_BTCUSDC"
     assert str(deribit.ticker("perp", "BTCUSDC")) == "Deribit_Perp_BTCUSDC"
+    assert str(deribit.ticker("inverse", "BTCUSD")) == "Deribit_Inverse_BTCUSD"
+    assert str(deribit.ticker("future", "BTCUSD-260906")) == (
+        "Deribit_Future_BTCUSD-260906"
+    )
     assert venues.validate_credential("Deribit", venues.HMAC).name == "Deribit"
     with pytest.raises(venues.UnsupportedApiTypeError):
         venues.validate_credential("Deribit", venues.ED25519)
     with pytest.raises(venues.UnsupportedCategoryError, match="explicitly"):
         deribit.ticker(None, "BTCUSDC")
     with pytest.raises(venues.UnsupportedCategoryError):
-        deribit.ticker("inverse", "BTCUSD")
+        deribit.ticker("option", "BTCUSD")
 
 
 def test_okx_is_one_venue_trading_two_books_and_needs_a_passphrase() -> None:

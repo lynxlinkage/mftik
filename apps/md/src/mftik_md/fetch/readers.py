@@ -977,12 +977,13 @@ class BitgetReader:
 
 
 class DeribitReader:
-    """Deribit reads over REST, across spot and the linear perpetual books.
+    """Deribit reads over REST, across every book this venue lists.
 
     One reader. The ticker names the book; ``exch_ticker`` is the wire
-    ``instrument_name``. Funding history and open interest are perp-only
-    and refused on spot before HTTP. There is no trade-history fetch —
-    CBE spots answer ``11060`` on ``get_last_trades_*``.
+    ``instrument_name``. Funding history is perp and inverse only;
+    open interest is perp, inverse and dated. Spot is refused before
+    HTTP. There is no trade-history fetch — CBE spots answer ``11060``
+    on ``get_last_trades_*``.
     """
 
     venue = "Deribit"

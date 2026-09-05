@@ -1202,13 +1202,29 @@ DERIBIT_INVERSE = {
     "is_active": True,
 }
 
-DERIBIT_DATED = {
+DERIBIT_DATED_INVERSE = {
     "instrument_name": "BTC-6SEP26",
     "kind": "future",
-    "instrument_type": "linear",
-    "settlement_period": "week",
+    "instrument_type": "reversed",
+    "future_type": "reversed",
+    "settlement_period": "day",
     "base_currency": "BTC",
     "quote_currency": "USD",
+    "settlement_currency": "BTC",
+    "expiration_timestamp": 1_788_681_600_000,
+    "is_active": True,
+}
+
+DERIBIT_DATED_LINEAR = {
+    "instrument_name": "BTC_USDC-6SEP26",
+    "kind": "future",
+    "instrument_type": "linear",
+    "future_type": "linear",
+    "settlement_period": "day",
+    "base_currency": "BTC",
+    "quote_currency": "USDC",
+    "settlement_currency": "USDC",
+    "expiration_timestamp": 1_788_681_600_000,
     "is_active": True,
 }
 
@@ -1241,28 +1257,60 @@ async def test_deribit_spot_fetch_keeps_cbe_and_native() -> None:
     assert by_ticker["Deribit_Spot_SOLUSDC"].exch_ticker == "SOL_USDC"
 
 
+_DERIBIT_FUTURE_ROWS = [
+    DERIBIT_LINEAR,
+    DERIBIT_INVERSE,
+    DERIBIT_DATED_INVERSE,
+    DERIBIT_DATED_LINEAR,
+    {"symbol": "BAD"},
+]
+
+
 async def test_deribit_perp_fetch_drops_inverse_and_dated() -> None:
-    source = _deribit(
-        [DERIBIT_LINEAR, DERIBIT_INVERSE, DERIBIT_DATED, {"symbol": "BAD"}],
-        category=Category.PERP,
-    )
+    source = _deribit(_DERIBIT_FUTURE_ROWS, category=Category.PERP)
     instruments = await source.fetch()
     assert [str(i.ticker) for i in instruments] == ["Deribit_Perp_BTCUSDC"]
     assert instruments[0].exch_ticker == "BTC_USDC-PERPETUAL"
     assert instruments[0].settlement_asset == "USDC"
 
 
-def test_default_sources_has_exactly_one_deribit_perp_source() -> None:
+async def test_deribit_inverse_fetch_keeps_the_coin_margined_perp() -> None:
+    source = _deribit(_DERIBIT_FUTURE_ROWS, category=Category.INVERSE)
+    instruments = await source.fetch()
+    assert [str(i.ticker) for i in instruments] == ["Deribit_Inverse_BTCUSD"]
+    assert instruments[0].exch_ticker == "BTC-PERPETUAL"
+    assert instruments[0].settlement_asset == "BTC"
+
+
+async def test_deribit_future_fetch_keeps_linear_and_inverse_dated() -> None:
+    source = _deribit(_DERIBIT_FUTURE_ROWS, category=Category.FUTURE)
+    instruments = await source.fetch()
+    tickers = {str(i.ticker): i for i in instruments}
+    assert set(tickers) == {
+        "Deribit_Future_BTCUSD-260906",
+        "Deribit_Future_BTCUSDC-260906",
+    }
+    assert tickers["Deribit_Future_BTCUSD-260906"].exch_ticker == "BTC-6SEP26"
+    assert tickers["Deribit_Future_BTCUSDC-260906"].exch_ticker == (
+        "BTC_USDC-6SEP26"
+    )
+
+
+def test_default_sources_has_one_deribit_source_per_book() -> None:
     class _Broker:
         pass
 
     sources = default_sources(_Broker())  # type: ignore[arg-type]
     deribit = [s for s in sources if getattr(s, "venue", None) == "Deribit"]
-    assert len(deribit) == 2
-    perps = [s for s in deribit if s.category is Category.PERP]
-    spots = [s for s in deribit if s.category is Category.SPOT]
-    assert len(perps) == 1
-    assert len(spots) == 1
-    assert perps[0].kind == "future"
-    assert spots[0].kind == "spot"
+    by_book = {s.category: s for s in deribit}
+    assert set(by_book) == {
+        Category.SPOT,
+        Category.PERP,
+        Category.INVERSE,
+        Category.FUTURE,
+    }
+    assert by_book[Category.SPOT].kind == "spot"
+    assert by_book[Category.PERP].kind == "future"
+    assert by_book[Category.INVERSE].kind == "future"
+    assert by_book[Category.FUTURE].kind == "future"
 

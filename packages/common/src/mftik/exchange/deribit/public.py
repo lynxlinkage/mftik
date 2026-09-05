@@ -1,11 +1,12 @@
 """The Deribit market-data connector.
 
-One public client, one public socket (V4). Spot and linear perps share
-it; the channel names the instrument.
+One public client, one public socket (V4). Spot, linear perps, inverse
+perps and dated futures share it; the channel names the instrument.
 
 **V5:** funding and open interest ride the ticker row. They are a second
 pump on a shared wire identity (MDS-1), not a second ``SUBSCRIBE``. Spot
-has neither; those methods raise before the iterator runs.
+has neither. Dated futures have open interest and no funding hook.
+Those methods raise before the iterator runs when the book has none.
 
 There is no aggregated tape and no liquidation channel.
 """
@@ -23,8 +24,7 @@ from mftik.exchange.deribit.models import kline_from_tick
 from mftik.exchange.deribit.protocol import (
     DERIBIT_REST_URL,
     DERIBIT_WS_URL,
-    KIND_FUTURE,
-    KIND_SPOT,
+    kind_of,
 )
 from mftik.exchange.deribit.rest import DeribitPublicRest
 from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
@@ -61,8 +61,10 @@ DERIBIT_INTERVALS: dict[str, str] = {
     "1d": "1D",
 }
 
-FUNDING_CATEGORIES = frozenset({Category.PERP})
-OPEN_INTEREST_CATEGORIES = frozenset({Category.PERP})
+FUNDING_CATEGORIES = frozenset({Category.PERP, Category.INVERSE})
+OPEN_INTEREST_CATEGORIES = frozenset(
+    {Category.PERP, Category.INVERSE, Category.FUTURE}
+)
 
 
 def venue_interval(interval: str) -> str:
@@ -78,7 +80,7 @@ def venue_interval(interval: str) -> str:
 
 
 class DeribitPublicClient(BaseClient):
-    """Deribit market data for MD, on spot and the linear perpetual books."""
+    """Deribit market data for MD, on every book this venue lists."""
 
     name = "Deribit"
 
@@ -124,8 +126,9 @@ class DeribitPublicClient(BaseClient):
     async def fetch_instruments(self, category: Category | None = None):
         self._ensure_connected()
         wanted = category or Category.SPOT
-        kind = KIND_SPOT if wanted is Category.SPOT else KIND_FUTURE
-        return await self.rest.fetch_instruments(kind)
+        return await self.rest.fetch_instruments(
+            kind_of(wanted), category=wanted
+        )
 
     async def fetch_ticker(self, ticker: UniversalTicker) -> Ticker:
         self._ensure_connected()

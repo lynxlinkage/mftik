@@ -79,7 +79,7 @@ class VenuePublicFactory:
     Venues do not all publish the same feeds — Gate and Binance serve kline
     and best-quote, ``BinanceUM`` / ``BinanceCM`` / GateFutures /
     Bybit / OKX / Bitget add liquidations, Deribit funds and sizes the
-    linear perp off the ticker, only Binance coalesces the tape, paper
+    perpetual books off the ticker, only Binance coalesces the tape, paper
     serves a subset —
     so a subscribe to a topic the venue has no stream for fails at
     ``ensure_feed``, which is where that difference belongs.

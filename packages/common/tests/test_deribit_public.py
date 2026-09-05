@@ -11,6 +11,10 @@ import pytest
 from deribit_stub import FakeDeribit
 from mftik.exchange.deribit import channels as ch
 from mftik.exchange.deribit.feed import DeribitPublicStream
+from mftik.exchange.deribit.protocol import (
+    expiry_code_from_name,
+    expiry_suffix_from_code,
+)
 from mftik.exchange.deribit.public import DeribitPublicClient, venue_interval
 from mftik.exchange.deribit.rest import DeribitPublicRest
 from mftik.exchange.intervals import InvalidIntervalError
@@ -18,24 +22,48 @@ from mftik.exchange.tickers import Category, UniversalTicker
 
 SPOT = UniversalTicker.parse("Deribit_Spot_BTCUSDC")
 PERP = UniversalTicker.parse("Deribit_Perp_BTCUSDC")
+INVERSE = UniversalTicker.parse("Deribit_Inverse_BTCUSD")
+DATED = UniversalTicker.parse("Deribit_Future_BTCUSD-260906")
 BASE = "https://deribit.test"
+
+
+def _wire(ticker: UniversalTicker) -> str:
+    symbol = ticker.symbol
+    code = None
+    if "-" in symbol:
+        pair, maybe = symbol.rsplit("-", 1)
+        if len(maybe) == 6 and maybe.isdigit():
+            symbol, code = pair, maybe
+    for quote in ("USDC", "USDT", "USD"):
+        if symbol.endswith(quote) and symbol != quote:
+            base = symbol[: -len(quote)]
+            if quote == "USD":
+                if ticker.category is Category.FUTURE and code:
+                    return f"{base}-{expiry_suffix_from_code(code)}"
+                return f"{base}-PERPETUAL"
+            pair = f"{base}_{quote}"
+            if ticker.category is Category.PERP:
+                return f"{pair}-PERPETUAL"
+            if ticker.category is Category.FUTURE and code:
+                return f"{pair}-{expiry_suffix_from_code(code)}"
+            return pair
+    return ticker.symbol
 
 
 class StubSymbols:
     async def exch_ticker(self, ticker: UniversalTicker) -> str:
-        for quote in ("USDC", "USDT", "BTC", "ETH"):
-            if ticker.symbol.endswith(quote) and ticker.symbol != quote:
-                base = ticker.symbol[: -len(quote)]
-                pair = f"{base}_{quote}"
-                if ticker.category is Category.PERP:
-                    return f"{pair}-PERPETUAL"
-                return pair
-        return ticker.symbol
+        return _wire(ticker)
 
     async def symbol_for(
         self, venue: str, exch_ticker: str, *, category: str
     ) -> UniversalTicker:
-        symbol = exch_ticker.replace("-PERPETUAL", "").replace("_", "")
+        code = expiry_code_from_name(exch_ticker)
+        body = exch_ticker.replace("-PERPETUAL", "")
+        if code:
+            body = exch_ticker.rsplit("-", 1)[0]
+        symbol = body.replace("_", "") if "_" in body else f"{body}USD"
+        if code:
+            symbol = f"{symbol}-{code}"
         return UniversalTicker.of(venue, category, symbol)
 
     async def contract_size(self, ticker: UniversalTicker) -> Decimal | None:
@@ -96,8 +124,13 @@ async def test_i6_spot_has_no_funding_or_oi() -> None:
             client.stream_funding_rate(SPOT)
         with pytest.raises(ValueError, match="open interest"):
             client.stream_open_interest(SPOT)
+        with pytest.raises(ValueError, match="funding"):
+            client.stream_funding_rate(DATED)
         client.stream_funding_rate(PERP)
+        client.stream_funding_rate(INVERSE)
         client.stream_open_interest(PERP)
+        client.stream_open_interest(INVERSE)
+        client.stream_open_interest(DATED)
 
 
 async def test_a_spot_ticker_prints_on_the_one_public_socket(

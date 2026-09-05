@@ -1,10 +1,10 @@
 """Deribit JSON-RPC 2.0 framing, HMAC signing, and the one response envelope.
 
 Deribit is a **unified** venue: one HMAC credential (Client ID / Client
-Secret, no passphrase) covers spot and the linear perpetual books. The
-market an instrument trades on is its ``kind`` / ``instrument_type``,
-not a different host. Inverse, dated futures and options are not
-modelled.
+Secret, no passphrase) covers spot, linear perps, inverse perps and
+dated futures. The market an instrument trades on is its ``kind`` /
+``instrument_type`` / ``settlement_period``, not a different host.
+Options, combos, Starbase/FIX and demo hosts are not modelled.
 
 HTTP and WebSocket speak the same methods. A private socket authenticates
 once with ``public/auth`` ``grant_type=client_signature`` (V1) and then
@@ -20,8 +20,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import itertools
+import re
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 from mftik.exchange.errors import ExchangeError
@@ -102,13 +104,42 @@ class DeribitAuthError(ExchangeError):
 
 # --- identity --------------------------------------------------------------
 
+#: Deribit's dated suffix is ``6SEP26`` / ``25SEP26`` — day has no leading
+#: zero. Platform ``expiry_code`` is still ``YYMMDD`` (``260906``).
+_MONTHS = {
+    "JAN": 1,
+    "FEB": 2,
+    "MAR": 3,
+    "APR": 4,
+    "MAY": 5,
+    "JUN": 6,
+    "JUL": 7,
+    "AUG": 8,
+    "SEP": 9,
+    "OCT": 10,
+    "NOV": 11,
+    "DEC": 12,
+}
+_MONTH_NAMES = {number: name for name, number in _MONTHS.items()}
+_DATE_SUFFIX = re.compile(
+    r"(?P<day>\d{1,2})"
+    r"(?P<mon>JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)"
+    r"(?P<year>\d{2})\Z",
+    re.IGNORECASE,
+)
+#: Perpetual rows publish a far-future ``expiration_timestamp``. Anything
+#: past this is a sentinel, not a delivery clock.
+_EXPIRY_SENTINEL_MS = 4_000_000_000_000
+
+_FUTURE_KINDS = frozenset({Category.PERP, Category.INVERSE, Category.FUTURE})
+
 
 def kind_of(category: Category | UniversalTicker) -> str:
     """Our category → Deribit's ``kind`` on listing and private filters."""
     resolved = category.category if isinstance(category, UniversalTicker) else category
     if resolved is Category.SPOT:
         return KIND_SPOT
-    if resolved is Category.PERP:
+    if resolved in _FUTURE_KINDS:
         return KIND_FUTURE
     raise ExchangeError(f"Deribit has no kind for category {resolved!r}")
 
@@ -123,19 +154,29 @@ def category_of(
 ) -> Category:
     """Inbound wire kind → our category.
 
-    Linear perpetuals fold into ``Perp``. Inverse and dated futures are
-    not a category this adapter serves; callers that need to drop them
-    use :func:`is_linear_perp`.
+    Linear perpetuals are ``Perp``. Inverse perpetuals are ``Inverse`` —
+    never a second Perp. Dated rows (linear USDC and inverse USD) are
+    ``Future``. Options stay on ``default``.
     """
     folded = (kind or "").strip().casefold()
     if folded == KIND_SPOT:
         return Category.SPOT
-    if folded == KIND_FUTURE and is_linear_perp(
+    if folded != KIND_FUTURE:
+        return default
+    if is_linear_perp(
         instrument_type=instrument_type,
         future_type=future_type,
         settlement_period=settlement_period,
     ):
         return Category.PERP
+    if is_inverse_perp(
+        instrument_type=instrument_type,
+        future_type=future_type,
+        settlement_period=settlement_period,
+    ):
+        return Category.INVERSE
+    if is_dated_future(settlement_period=settlement_period):
+        return Category.FUTURE
     return default
 
 
@@ -155,6 +196,30 @@ def is_linear_perp(
     return itype == LINEAR
 
 
+def is_inverse_perp(
+    *,
+    instrument_type: str = "",
+    future_type: str = "",
+    settlement_period: str = "",
+    kind: str = "",
+) -> bool:
+    """Whether a ``kind=future`` row is an inverse perpetual (V3)."""
+    if kind and kind.strip().casefold() not in {"", KIND_FUTURE}:
+        return False
+    if (settlement_period or "").strip().casefold() != PERPETUAL:
+        return False
+    itype = (instrument_type or future_type or "").strip().casefold()
+    return itype == REVERSED
+
+
+def is_dated_future(*, settlement_period: str = "", kind: str = "") -> bool:
+    """Whether a ``kind=future`` row expires (day / week / month)."""
+    if kind and kind.strip().casefold() not in {"", KIND_FUTURE}:
+        return False
+    period = (settlement_period or "").strip().casefold()
+    return period not in {"", PERPETUAL}
+
+
 def is_cbe_routed(row: dict[str, Any]) -> bool:
     """Coinbase-routed spot. The fields are **omitted** when false (V12)."""
     return bool(row.get("is_cbe_routed") or row.get("is_csr"))
@@ -166,10 +231,74 @@ def is_linear_perp_name(instrument_name: str) -> bool:
     return "_" in name and name.endswith("-PERPETUAL")
 
 
+def is_inverse_perp_name(instrument_name: str) -> bool:
+    """Wire name of an inverse perpetual: ``BTC-PERPETUAL``, no underscore."""
+    name = instrument_name or ""
+    return "_" not in name and name.endswith("-PERPETUAL")
+
+
+def expiry_code_from_name(instrument_name: str) -> str | None:
+    """Deribit ``6SEP26`` / ``25SEP26`` → platform ``YYMMDD``.
+
+    Options end in ``C`` / ``P``, so they do not match. The last hyphen
+    field is the date on both inverse (``BTC-6SEP26``) and linear
+    (``BTC_USDC-6SEP26``) dated names.
+    """
+    tail = (instrument_name or "").rsplit("-", 1)[-1]
+    found = _DATE_SUFFIX.fullmatch(tail)
+    if found is None:
+        return None
+    day = int(found.group("day"))
+    month = _MONTHS[found.group("mon").upper()]
+    year = int(found.group("year"))
+    if not 1 <= day <= 31:
+        return None
+    return f"{year:02d}{month:02d}{day:02d}"
+
+
+def expiry_suffix_from_code(code: str) -> str | None:
+    """Platform ``YYMMDD`` → Deribit's dated suffix (no leading zero on day)."""
+    if len(code) != 6 or not code.isdigit():
+        return None
+    year, month, day = int(code[:2]), int(code[2:4]), int(code[4:6])
+    name = _MONTH_NAMES.get(month)
+    if name is None or not 1 <= day <= 31:
+        return None
+    return f"{day}{name}{year:02d}"
+
+
+def expiry_from_timestamp(value: Any) -> datetime | None:
+    """``expiration_timestamp`` in ms → UTC, or ``None`` on a sentinel."""
+    if value in (None, "", 0, "0"):
+        return None
+    try:
+        ms = int(value)
+    except (TypeError, ValueError):
+        return None
+    if ms <= 0 or ms >= _EXPIRY_SENTINEL_MS:
+        return None
+    return datetime.fromtimestamp(ms / 1000, tz=UTC)
+
+
+def expiry_from_code(code: str) -> datetime:
+    """Last-resort clock when the timestamp is missing: 08:00 UTC that day.
+
+    Live dated rows settle at 08:00 UTC. The code is the identity; this
+    is only so the ``expiry`` column is not blank on a well-formed ticker.
+    """
+    return datetime.strptime(code, "%y%m%d").replace(
+        tzinfo=UTC, hour=8, minute=0, second=0, microsecond=0
+    )
+
+
 def category_from_instrument(instrument_name: str) -> Category:
     """Inbound ``instrument_name`` → category for the books this adapter serves."""
     if is_linear_perp_name(instrument_name):
         return Category.PERP
+    if is_inverse_perp_name(instrument_name):
+        return Category.INVERSE
+    if expiry_code_from_name(instrument_name):
+        return Category.FUTURE
     return Category.SPOT
 
 
@@ -430,7 +559,14 @@ __all__ = [
     "auth_params",
     "category_from_instrument",
     "category_of",
+    "expiry_code_from_name",
+    "expiry_from_code",
+    "expiry_from_timestamp",
+    "expiry_suffix_from_code",
     "is_cbe_routed",
+    "is_dated_future",
+    "is_inverse_perp",
+    "is_inverse_perp_name",
     "is_linear_perp",
     "is_linear_perp_name",
     "kind_of",

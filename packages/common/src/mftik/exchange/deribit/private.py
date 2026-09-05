@@ -5,10 +5,10 @@ One private client holds the HMAC credential. Connect reads
 the model is logged, not used as a gate. Deribit is one-way net; there
 is no hedge ``posSide``.
 
-v1 places and cancels on the authenticated socket. Spot and linear perp
-``qty`` is base (V6); ``quote_qty`` is refused. ``post_only`` defaults
-true on the venue — every non-``POST_ONLY`` order sends
-``post_only=false`` (V7).
+v1 places and cancels on the authenticated socket. Spot, linear perp and
+linear dated ``qty`` is base; inverse and inverse-dated ``qty`` is USD
+(V6). ``quote_qty`` is refused. ``post_only`` defaults true on the
+venue — every non-``POST_ONLY`` order sends ``post_only=false`` (V7).
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from mftik.exchange.deribit.protocol import (
     DeribitAuthError,
     DeribitError,
     category_from_instrument,
-    is_linear_perp_name,
 )
 from mftik.exchange.errors import OrderError
 from mftik.exchange.models import (
@@ -80,7 +79,7 @@ _LABEL_MAX = 64
 
 
 class DeribitPrivateClient(BaseClient):
-    """Deribit trading account for TD, on spot and the linear perpetual books."""
+    """Deribit trading account for TD, on every book this venue lists."""
 
     name = "Deribit"
 
@@ -329,10 +328,14 @@ class DeribitPrivateClient(BaseClient):
             if not isinstance(item, dict):
                 continue
             row = DeribitPosition.model_validate(item)
-            if not row.is_linear_perp and not is_linear_perp_name(row.instrument_name):
+            if row.kind and row.kind.casefold() not in {"", "future"}:
                 continue
             ticker = await self._resolve(row.instrument_name)
-            if ticker is None or ticker.category is not Category.PERP:
+            if ticker is None or ticker.category not in {
+                Category.PERP,
+                Category.INVERSE,
+                Category.FUTURE,
+            }:
                 continue
             out.append(row.to_position(ticker))
         return out
@@ -397,10 +400,6 @@ class DeribitPrivateClient(BaseClient):
 
     async def _resolve(self, instrument_name: str) -> UniversalTicker | None:
         if not instrument_name:
-            return None
-        if instrument_name.endswith("-PERPETUAL") and not is_linear_perp_name(
-            instrument_name
-        ):
             return None
         category = category_from_instrument(instrument_name)
         try:

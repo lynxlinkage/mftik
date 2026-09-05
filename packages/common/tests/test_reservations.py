@@ -13,7 +13,11 @@ from mftik.exchange.models import (
     PlaceOrderRequest,
     Side,
 )
-from mftik.exchange.reservations import commitment_for, reservation_for
+from mftik.exchange.reservations import (
+    commitment_for,
+    is_linear_margin,
+    reservation_for,
+)
 from mftik.exchange.tickers import Category
 
 BASE = "BTC"
@@ -125,6 +129,29 @@ def test_a_delivery_future_commits_nothing_knowable() -> None:
         reservation_for(request, base="BTC", quote="USD", leverage=Decimal("10"))
         is None
     )
+
+
+def test_deribit_linear_dated_commits_quote_margin() -> None:
+    """Linear dated quote USDC; inverse dated quote USD is unknowable."""
+    linear = _request(universal_ticker="Deribit_Future_BTCUSDC-260906")
+    assert is_linear_margin(
+        Category.FUTURE, venue="Deribit", quote="USDC"
+    )
+    assert (
+        reservation_for(linear, base="BTC", quote="USDC", leverage=Decimal("10"))
+        == ("USDC", Decimal("50"))
+    )
+    inverse_dated = _request(universal_ticker="Deribit_Future_BTCUSD-260906")
+    assert not is_linear_margin(
+        Category.FUTURE, venue="Deribit", quote="USD"
+    )
+    assert (
+        reservation_for(
+            inverse_dated, base="BTC", quote="USD", leverage=Decimal("10")
+        )
+        is None
+    )
+    assert not is_linear_margin(Category.FUTURE, venue="Deribit")
 
 
 def test_an_inverse_order_commits_nothing_knowable() -> None:

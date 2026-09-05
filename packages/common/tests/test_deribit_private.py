@@ -14,7 +14,12 @@ from mftik.exchange.deribit.models import (
     DeribitSummary,
 )
 from mftik.exchange.deribit.private import DeribitPrivateClient
-from mftik.exchange.deribit.protocol import MARGIN_MODELS, DeribitAuthError
+from mftik.exchange.deribit.protocol import (
+    MARGIN_MODELS,
+    DeribitAuthError,
+    expiry_code_from_name,
+    expiry_suffix_from_code,
+)
 from mftik.exchange.errors import OrderError
 from mftik.exchange.models import (
     OrderStatus,
@@ -27,25 +32,49 @@ from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import Category, UniversalTicker
 
 PERP = UniversalTicker.parse("Deribit_Perp_BTCUSDC")
+INVERSE = UniversalTicker.parse("Deribit_Inverse_BTCUSD")
+DATED = UniversalTicker.parse("Deribit_Future_BTCUSD-260906")
 API_KEY = "cid"
 API_SECRET = "secret"
 
 
+def _wire(ticker: UniversalTicker) -> str:
+    symbol = ticker.symbol
+    code = None
+    if "-" in symbol:
+        pair, maybe = symbol.rsplit("-", 1)
+        if len(maybe) == 6 and maybe.isdigit():
+            symbol, code = pair, maybe
+    for quote in ("USDC", "USDT", "USD"):
+        if symbol.endswith(quote) and symbol != quote:
+            base = symbol[: -len(quote)]
+            if quote == "USD":
+                if ticker.category is Category.FUTURE and code:
+                    return f"{base}-{expiry_suffix_from_code(code)}"
+                return f"{base}-PERPETUAL"
+            pair = f"{base}_{quote}"
+            if ticker.category is Category.PERP:
+                return f"{pair}-PERPETUAL"
+            if ticker.category is Category.FUTURE and code:
+                return f"{pair}-{expiry_suffix_from_code(code)}"
+            return pair
+    return ticker.symbol
+
+
 class StubSymbols:
     async def exch_ticker(self, ticker: UniversalTicker) -> str:
-        for quote in ("USDC", "USDT", "BTC", "ETH"):
-            if ticker.symbol.endswith(quote) and ticker.symbol != quote:
-                base = ticker.symbol[: -len(quote)]
-                pair = f"{base}_{quote}"
-                if ticker.category is Category.PERP:
-                    return f"{pair}-PERPETUAL"
-                return pair
-        return ticker.symbol
+        return _wire(ticker)
 
     async def symbol_for(
         self, venue: str, exch_ticker: str, *, category: str
     ) -> UniversalTicker:
-        symbol = exch_ticker.replace("-PERPETUAL", "").replace("_", "")
+        code = expiry_code_from_name(exch_ticker)
+        body = exch_ticker.replace("-PERPETUAL", "")
+        if code:
+            body = exch_ticker.rsplit("-", 1)[0]
+        symbol = body.replace("_", "") if "_" in body else f"{body}USD"
+        if code:
+            symbol = f"{symbol}-{code}"
         return UniversalTicker.of(venue, category, symbol)
 
     async def contract_size(self, ticker: UniversalTicker) -> Decimal | None:
@@ -100,7 +129,29 @@ class FakeStream:
                     "price": "60000",
                 }
             },
-            ch.PRIVATE_GET_POSITIONS: [],
+            ch.PRIVATE_GET_POSITIONS: [
+                {
+                    "instrument_name": "BTC_USDC-PERPETUAL",
+                    "kind": "future",
+                    "size": "0.01",
+                    "average_price": "60000",
+                    "floating_profit_loss": "1",
+                },
+                {
+                    "instrument_name": "BTC-PERPETUAL",
+                    "kind": "future",
+                    "size": "100",
+                    "average_price": "60000",
+                    "floating_profit_loss": "2",
+                },
+                {
+                    "instrument_name": "BTC-6SEP26",
+                    "kind": "future",
+                    "size": "50",
+                    "average_price": "60100",
+                    "floating_profit_loss": "0",
+                },
+            ],
             ch.PRIVATE_GET_OPEN_ORDERS: [],
         }
         self._reconnect_cbs: list[Any] = []
@@ -228,6 +279,15 @@ async def test_v6_quote_qty_is_refused() -> None:
                     price=Decimal("60000"),
                 )
             )
+        with pytest.raises(OrderError, match="quote_qty"):
+            await client.place_order(
+                PlaceOrderRequest(
+                    universal_ticker="Deribit_Inverse_BTCUSD",
+                    side=Side.BUY,
+                    type=OrderType.MARKET,
+                    quote_qty=Decimal("10"),
+                )
+            )
     assert not any(
         method in {ch.PRIVATE_BUY, ch.PRIVATE_SELL} for method, _ in stream.calls
     )
@@ -277,6 +337,82 @@ async def test_fills_and_orders_resolve_the_linear_perp() -> None:
         order = await _first(client.stream_orders())
     assert fill.ticker == PERP
     assert order.ticker == PERP
+
+
+async def test_inverse_and_dated_positions_resolve_home() -> None:
+    stream = FakeStream()
+    async with _client(stream) as client:
+        rows = await client.fetch_positions()
+    by_ticker = {row.universal_ticker: row.qty for row in rows}
+    assert by_ticker[str(PERP)] == Decimal("0.01")
+    assert by_ticker[str(INVERSE)] == Decimal("100")
+    assert by_ticker[str(DATED)] == Decimal("50")
+
+
+async def test_inverse_limit_sends_usd_amount() -> None:
+    stream = FakeStream()
+    stream.results[ch.PRIVATE_BUY] = {
+        "order": {
+            "order_id": "ord-inv",
+            "instrument_name": "BTC-PERPETUAL",
+            "direction": "buy",
+            "order_type": "limit",
+            "order_state": "open",
+            "amount": "10",
+            "price": "60000",
+        }
+    }
+    async with _client(stream) as client:
+        order = await client.place_order(
+            PlaceOrderRequest(
+                universal_ticker="Deribit_Inverse_BTCUSD",
+                side=Side.BUY,
+                type=OrderType.LIMIT,
+                qty=Decimal("10"),
+                price=Decimal("60000"),
+            )
+        )
+    method, params = stream.calls[-1]
+    assert method == ch.PRIVATE_BUY
+    assert params is not None
+    assert params["instrument_name"] == "BTC-PERPETUAL"
+    assert params["amount"] == 10.0
+    assert order.universal_ticker == str(INVERSE)
+
+
+async def test_fills_and_orders_resolve_inverse_and_dated() -> None:
+    stream = FakeStream()
+    async with _client(stream) as client:
+        stream.fills.push(
+            DeribitFill.model_validate(
+                {
+                    "instrument_name": "BTC-PERPETUAL",
+                    "trade_id": "t-inv",
+                    "order_id": "ord-inv",
+                    "direction": "buy",
+                    "price": "60000",
+                    "amount": "10",
+                    "timestamp": 1700000000000,
+                }
+            )
+        )
+        fill = await _first(client.stream_fills())
+        stream.orders.push(
+            DeribitOrderUpdate.model_validate(
+                {
+                    "instrument_name": "BTC-6SEP26",
+                    "order_id": "ord-d",
+                    "direction": "sell",
+                    "order_type": "limit",
+                    "order_state": "open",
+                    "amount": "10",
+                    "price": "60100",
+                }
+            )
+        )
+        order = await _first(client.stream_orders())
+    assert fill.ticker == INVERSE
+    assert order.ticker == DATED
 
 
 async def test_no_position_stream() -> None:

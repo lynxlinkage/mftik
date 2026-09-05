@@ -251,7 +251,7 @@ class VenueSessionFactory:
 
         if venue is venues.DERIBIT:
             # Same unified-account story as Bybit: one HMAC credential,
-            # no passphrase, spot and the linear perpetual books.
+            # no passphrase, every book this venue lists.
             private = DeribitPrivateClient(
                 api_key=row.api_key,
                 api_secret=row.api_secret,

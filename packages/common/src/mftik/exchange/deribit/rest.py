@@ -21,10 +21,8 @@ from mftik.exchange.deribit.models import (
 )
 from mftik.exchange.deribit.protocol import (
     DERIBIT_REST_URL,
-    KIND_FUTURE,
     KIND_SPOT,
     DeribitRestError,
-    category_of,
 )
 from mftik.exchange.models import FundingRate, Kline, OpenInterest, OrderBook, Ticker
 from mftik.exchange.tickers import Category, UniversalTicker
@@ -104,20 +102,22 @@ class DeribitPublicRest:
         return payload.get("result")
 
     async def fetch_instruments(
-        self, kind: str = KIND_SPOT
+        self, kind: str = KIND_SPOT, *, category: Category | None = None
     ) -> list[ListedInstrument]:
         rows = await self._get(
             ch.PUBLIC_GET_INSTRUMENTS, {"currency": "any", "kind": kind}
         )
-        category = category_of(kind, default=Category.SPOT)
-        if kind == KIND_FUTURE:
-            category = Category.PERP
+        resolved = category
+        if resolved is None:
+            resolved = (
+                Category.SPOT if kind == KIND_SPOT else Category.PERP
+            )
         instruments: list[ListedInstrument] = []
         seen: set[str] = set()
         for row in rows or []:
             if not isinstance(row, dict):
                 continue
-            listed = to_listed(row, category=category)
+            listed = to_listed(row, category=resolved)
             if listed is None or not listed.is_active:
                 continue
             if listed.exch_ticker in seen:

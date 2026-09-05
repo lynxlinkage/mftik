@@ -58,13 +58,35 @@ PERP_INVERSE = {
     "is_active": True,
 }
 
-DATED = {
+DATED_INVERSE = {
     "instrument_name": "BTC-6SEP26",
     "kind": "future",
-    "instrument_type": "linear",
-    "settlement_period": "week",
+    "instrument_type": "reversed",
+    "future_type": "reversed",
+    "settlement_period": "day",
     "base_currency": "BTC",
     "quote_currency": "USD",
+    "settlement_currency": "BTC",
+    "tick_size": "2.5",
+    "min_trade_amount": "10",
+    "contract_size": "10",
+    "expiration_timestamp": 1_788_681_600_000,
+    "is_active": True,
+}
+
+DATED_LINEAR = {
+    "instrument_name": "BTC_USDC-6SEP26",
+    "kind": "future",
+    "instrument_type": "linear",
+    "future_type": "linear",
+    "settlement_period": "day",
+    "base_currency": "BTC",
+    "quote_currency": "USDC",
+    "settlement_currency": "USDC",
+    "tick_size": "0.1",
+    "min_trade_amount": "0.0001",
+    "contract_size": "0.0001",
+    "expiration_timestamp": 1_788_681_600_000,
     "is_active": True,
 }
 
@@ -123,11 +145,42 @@ def test_v2_linear_perp_shares_the_spot_symbol() -> None:
     assert listed.settlement_asset == "USDC"
 
 
-def test_v3_inverse_and_dated_are_dropped() -> None:
+def test_v3_each_future_book_keeps_only_its_own_rows() -> None:
     assert to_listed(PERP_INVERSE, category=Category.PERP) is None
-    assert to_listed(DATED, category=Category.PERP) is None
+    assert to_listed(DATED_INVERSE, category=Category.PERP) is None
+    assert to_listed(DATED_LINEAR, category=Category.PERP) is None
     assert to_listed(PERP_LINEAR, category=Category.SPOT) is None
     assert to_listed(SPOT_NATIVE, category=Category.PERP) is None
+    assert to_listed(PERP_LINEAR, category=Category.INVERSE) is None
+    assert to_listed(DATED_INVERSE, category=Category.INVERSE) is None
+    assert to_listed(PERP_INVERSE, category=Category.FUTURE) is None
+
+
+def test_v3_inverse_perp_identity_is_btc_usd() -> None:
+    listed = to_listed(PERP_INVERSE, category=Category.INVERSE)
+    assert listed is not None
+    assert str(listed.ticker) == "Deribit_Inverse_BTCUSD"
+    assert listed.exch_ticker == "BTC-PERPETUAL"
+    assert listed.settlement_asset == "BTC"
+    assert listed.expiry_code is None
+
+
+def test_v3_dated_identity_hyphenates_yymmdd() -> None:
+    inverse = to_listed(DATED_INVERSE, category=Category.FUTURE)
+    linear = to_listed(DATED_LINEAR, category=Category.FUTURE)
+    assert inverse is not None
+    assert linear is not None
+    assert str(inverse.ticker) == "Deribit_Future_BTCUSD-260906"
+    assert inverse.exch_ticker == "BTC-6SEP26"
+    assert inverse.settlement_asset == "BTC"
+    assert inverse.expiry_code == "260906"
+    assert inverse.expiry is not None
+    assert inverse.expiry.year == 2026
+    assert inverse.expiry.month == 9
+    assert inverse.expiry.day == 6
+    assert str(linear.ticker) == "Deribit_Future_BTCUSDC-260906"
+    assert linear.exch_ticker == "BTC_USDC-6SEP26"
+    assert linear.settlement_asset == "USDC"
 
 
 def test_v12_cbe_is_listed_and_detected_by_presence() -> None:
@@ -143,12 +196,23 @@ def test_v12_cbe_is_listed_and_detected_by_presence() -> None:
 def test_kind_and_instrument_name_round_trip() -> None:
     spot = UniversalTicker.parse("Deribit_Spot_BTCUSDC")
     perp = UniversalTicker.parse("Deribit_Perp_BTCUSDC")
+    inverse = UniversalTicker.parse("Deribit_Inverse_BTCUSD")
+    dated = UniversalTicker.parse("Deribit_Future_BTCUSD-260906")
     assert p.kind_of(spot) == p.KIND_SPOT
     assert p.kind_of(perp) == p.KIND_FUTURE
+    assert p.kind_of(inverse) == p.KIND_FUTURE
+    assert p.kind_of(dated) == p.KIND_FUTURE
     assert p.category_from_instrument("BTC_USDC") is Category.SPOT
     assert p.category_from_instrument("BTC_USDC-PERPETUAL") is Category.PERP
+    assert p.category_from_instrument("BTC-PERPETUAL") is Category.INVERSE
+    assert p.category_from_instrument("BTC-6SEP26") is Category.FUTURE
+    assert p.category_from_instrument("BTC_USDC-6SEP26") is Category.FUTURE
+    assert p.category_from_instrument("BTC-6SEP26-100000-C") is Category.SPOT
     assert p.is_linear_perp_name("BTC_USDC-PERPETUAL")
     assert not p.is_linear_perp_name("BTC-PERPETUAL")
+    assert p.is_inverse_perp_name("BTC-PERPETUAL")
+    assert p.expiry_code_from_name("BTC-6SEP26") == "260906"
+    assert p.expiry_suffix_from_code("260906") == "6SEP26"
 
 
 def test_v9_balance_maps_available_funds_and_equity() -> None:
