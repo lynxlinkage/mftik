@@ -31,8 +31,9 @@ def test_parse_round_trips() -> None:
         "Bybit_Perp_ETHUSDT",
         "Paper_Spot_BTCUSDT",
         "BinanceCM_Inverse_BTCUSD",
-        "BinanceCM_Future_BTCUSD260925",
-        "BinanceUM_Future_BTCUSDT250926",
+        "BinanceCM_Future_BTCUSD-260925",
+        "BinanceUM_Future_BTCUSDT-250926",
+        "BinanceUM_Option_BTCUSDT-260905-100000-C",
     ):
         assert str(UniversalTicker.parse(text)) == text
 
@@ -72,7 +73,8 @@ def test_tickers_sort_and_key_dictionaries() -> None:
         "gate_Spot_BTCUSDT",  # venue not CamelCase
         "Gate_spot_BTCUSDT",  # category not canonically spelled
         "Gate_Spot_btcusdt",  # symbol not canonical
-        "Gate_Spot_BTC-USDT",  # separator inside the symbol
+        "Gate_Spot_BTC-USDT",  # pair hyphen is not a dated suffix
+        "BinanceUM_Future_BTCUSDT250926",  # glued dated form is no longer stored
     ],
 )
 def test_parse_is_strict(bad: str) -> None:
@@ -96,8 +98,9 @@ def test_a_symbol_need_not_be_ascii(symbol: str) -> None:
     An ASCII-only rule does not cost four instruments, it costs the venue:
     ``SymbolClient._table`` keys a whole venue's table by
     ``SymbolInfo.symbol``, so one unparseable row raises on every Gate read
-    in TD and MD. What a symbol must be is canonical and separator-free,
-    which is a different claim from being ``[A-Z0-9]+``.
+    in TD and MD. What a symbol must be is in platform form — separator-free
+    on a pair, hyphenated fields on a dated or option contract — which is
+    a different claim from being ``[A-Z0-9]+``.
     """
     text = f"Gate_Spot_{symbol}"
     assert str(UniversalTicker.parse(text)) == text
@@ -137,11 +140,20 @@ def test_resolve_checks_the_venue_actually_trades_the_category() -> None:
 def test_resolve_accepts_a_binance_future_dated_contract() -> None:
     assert str(
         UniversalTicker.resolve("binanceum_future_btcusdt250926")
-    ) == "BinanceUM_Future_BTCUSDT250926"
+    ) == "BinanceUM_Future_BTCUSDT-250926"
+    assert str(
+        UniversalTicker.resolve("binanceum_future_btcusdt-250926")
+    ) == "BinanceUM_Future_BTCUSDT-250926"
 
 
 def test_of_normalizes_its_parts() -> None:
     assert str(UniversalTicker.of("Gate", "spot", "btc/usdt")) == "Gate_Spot_BTCUSDT"
+    assert str(
+        UniversalTicker.of("BinanceUM", "future", "btc-usdt-250926")
+    ) == "BinanceUM_Future_BTCUSDT-250926"
+    assert str(
+        UniversalTicker.of("BinanceUM", "option", "btc-usdt-260905-6.4-c")
+    ) == "BinanceUM_Option_BTCUSDT-260905-6.4-C"
 
 
 def test_category_lookup_ignores_case() -> None:

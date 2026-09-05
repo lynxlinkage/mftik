@@ -1,7 +1,11 @@
 """Canonical instrument symbols.
 
-The platform speaks one spelling — ``BTCUSDT``, uppercase, no separator — and
-each adapter translates to its venue's form at the boundary.
+Pair spellings collapse to one form — ``BTCUSDT``, uppercase, no separator —
+and each adapter translates to its venue's form at the boundary. Dated
+futures and options keep ``-`` between fields (``BTCUSDT-250926``,
+``BTCUSDT-260905-100000-C``); :func:`normalize_symbol` is the function
+that knows that grammar. :func:`canonical` only folds pair punctuation
+so ``BTC-USDT`` and ``btc/usdt`` still look up as one instrument.
 
 Translation is a **lookup, not a transform**. Deriving a venue ticker from a
 canonical symbol needs the base/quote split, which ``BTCUSDT`` does not carry,
@@ -11,8 +15,7 @@ and would route an order to ``USD_TUSD``. Venues also publish tickers that are
 not ``base + separator + quote`` at all.
 
 So the symbol plane (``apps/sym``) owns both directions, and adapters take a
-:class:`SymbolResolver` rather than doing string surgery. :func:`canonical` is
-kept only for normalizing user input before a lookup.
+:class:`SymbolResolver` rather than doing string surgery.
 """
 
 from __future__ import annotations
@@ -25,6 +28,14 @@ if TYPE_CHECKING:  # Only for the annotation; tickers is built on this module.
     from mftik.exchange.tickers import UniversalTicker
 
 _SEPARATORS = re.compile(r"[/\-_\s]")
+
+#: ``YYMMDD`` as the venues write it onto a dated ticker. Six digits, not a
+#: calendar check — the venue already named the contract; we only need to
+#: see the field so we do not glue it to the pair.
+_DATE_CODE = re.compile(r"\d{6}\Z")
+
+#: Categories whose symbol may carry ``-`` as a field separator.
+_STRUCTURED = frozenset({"future", "option"})
 
 
 class SymbolResolver(Protocol):
@@ -81,13 +92,56 @@ def check_venue(ticker: UniversalTicker, venue: str, categories=None) -> None:
 
 
 def canonical(symbol: str) -> str:
-    """Normalize a spelling for lookup.
+    """Normalize a pair spelling for lookup.
 
     ``BTC_USDT``, ``BTC-USDT``, ``btc/usdt`` and ``BTCUSDT`` all collapse to
     ``BTCUSDT``. This makes user input uniform; it does not tell you the
-    venue's ticker — ask the resolver for that.
+    venue's ticker — ask the resolver for that. Dated and option symbols
+    go through :func:`normalize_symbol` instead, which keeps their ``-``.
     """
     return _SEPARATORS.sub("", (symbol or "").strip()).upper()
+
+
+def normalize_symbol(symbol: str, *, category: str | None = None) -> str:
+    """The platform spelling of a symbol, given the book it trades on.
+
+    Spot, perp and inverse stay a pair: separators fall out, so
+    ``BTC-USDT`` and ``btc/usdt`` become ``BTCUSDT``. Future and option
+    keep ``-`` between fields, and a hyphenated pair plus a date still
+    lands on one identity (``BTC-USDT-250926`` → ``BTCUSDT-250926``).
+    The glued form ``BTCUSDT250926`` is accepted on those books so
+    older YAML and typed input do not fork a second instrument.
+    """
+    raw = (symbol or "").strip().upper()
+    if not raw:
+        return ""
+    kind = str(category).strip().casefold() if category is not None else ""
+    if kind not in _STRUCTURED:
+        return canonical(raw)
+    parts = raw.split("-")
+    if _is_option_parts(parts):
+        pair = canonical("-".join(parts[:-3]))
+        if pair:
+            return f"{pair}-{parts[-3]}-{parts[-2]}-{parts[-1]}"
+    if len(parts) >= 2 and _DATE_CODE.match(parts[-1]):
+        pair = canonical("-".join(parts[:-1]))
+        if pair:
+            return f"{pair}-{parts[-1]}"
+    compact = canonical(raw)
+    if len(compact) > 6 and compact[-6:].isdigit():
+        pair, date = compact[:-6], compact[-6:]
+        if pair:
+            return f"{pair}-{date}"
+    return compact
+
+
+def _is_option_parts(parts: list[str]) -> bool:
+    return (
+        len(parts) >= 4
+        and parts[-1] in {"C", "P"}
+        and _DATE_CODE.match(parts[-3]) is not None
+        and parts[-2] != ""
+    )
 
 
 def join(base: str, quote: str, separator: str = "") -> str:
@@ -104,4 +158,5 @@ __all__ = [
     "canonical",
     "canonical_symbol",
     "join",
+    "normalize_symbol",
 ]

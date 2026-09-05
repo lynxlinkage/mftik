@@ -34,7 +34,7 @@ NATIVE = "BTCUSD_PERP"
 #: books are in the resolver.
 DATED = "BTCUSD_260626"
 TICKER = UniversalTicker.parse("BinanceCM_Inverse_BTCUSD")
-DATED_TICKER = UniversalTicker.parse("BinanceCM_Future_BTCUSD260626")
+DATED_TICKER = UniversalTicker.parse("BinanceCM_Future_BTCUSD-260626")
 
 OPEN_ORDER = {
     "symbol": NATIVE,

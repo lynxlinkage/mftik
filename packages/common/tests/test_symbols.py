@@ -10,8 +10,8 @@ from decimal import Decimal
 
 import pytest
 from mftik.exchange import symbols
-from mftik.exchange.symbols import canonical, join
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.symbols import canonical, join, normalize_symbol
+from mftik.exchange.tickers import Category, UniversalTicker
 
 
 @pytest.mark.parametrize(
@@ -26,6 +26,25 @@ def test_every_spelling_collapses_to_one_canonical(spelling: str) -> None:
 def test_canonical_tolerates_empty_input() -> None:
     assert canonical("") == ""
     assert canonical("   ") == ""
+
+
+@pytest.mark.parametrize(
+    ("symbol", "category", "want"),
+    [
+        ("BTC-USDT", "spot", "BTCUSDT"),
+        ("BTCUSDT-250926", "spot", "BTCUSDT250926"),
+        ("BTCUSDT250926", "future", "BTCUSDT-250926"),
+        ("btc-usdt-250926", "future", "BTCUSDT-250926"),
+        ("BTCUSDT-250926", "future", "BTCUSDT-250926"),
+        ("BTC-USDT-260905-100000-C", "option", "BTCUSDT-260905-100000-C"),
+        ("AVAXUSDC-260905-6.4-c", "option", "AVAXUSDC-260905-6.4-C"),
+        ("BTCUSDT", Category.PERP, "BTCUSDT"),
+    ],
+)
+def test_normalize_symbol_keeps_structured_hyphens(
+    symbol: str, category: str | Category, want: str
+) -> None:
+    assert normalize_symbol(symbol, category=category) == want
 
 
 def test_join_renders_a_venue_spelling_from_known_parts() -> None:

@@ -120,7 +120,7 @@ class BinanceFuturePrivateClient(BaseClient):
     """Binance USDⓈ-M futures trading account for TD.
 
     Symbols cross this boundary in canonical form (``BTCUSDT``,
-    ``BTCUSDT250926``) and are resolved to Binance's spelling on the wire
+    ``BTCUSDT-250926``) and are resolved to Binance's spelling on the wire
     (``BTCUSDT``, ``BTCUSDT_250926``); everything coming back is resolved
     home again. Venue-only order options — ``reduceOnly``,
     ``positionSide``, ``priceMatch`` — ride in ``PlaceOrderRequest.params``.
@@ -480,7 +480,7 @@ class BinanceFuturePrivateClient(BaseClient):
     async def _venue_symbol(self, symbol: str) -> str:
         """Canonical → Binance's spelling, via the plane.
 
-        Tries each book: ``BTCUSDT`` is the perpetual, ``BTCUSDT250926``
+        Tries each book: ``BTCUSDT`` is the perpetual, ``BTCUSDT-250926``
         the dated future. They are not interchangeable.
         """
         from mftik.symbols import SymbolNotFoundError

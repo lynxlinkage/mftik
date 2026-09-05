@@ -520,7 +520,7 @@ async def test_bybit_http_failure_propagates() -> None:
 
 #: Trimmed rows in ``fapi/v1/exchangeInfo``'s shape. The second is a dated
 #: future, which shares the perpetual's base and quote; its canonical symbol
-#: is the pair plus ``YYMMDD`` so the two tickers cannot collide.
+#: is the pair, a hyphen, and ``YYMMDD`` so the two tickers cannot collide.
 BINANCE_FUTURE_ROWS = [
     {
         "symbol": "BTCUSDT",
@@ -625,8 +625,8 @@ async def test_dated_futures_become_future_instruments() -> None:
 
     assert [i.exch_ticker for i in instruments] == ["BTCUSDT_250926"]
     btc = instruments[0]
-    assert str(btc.ticker) == "BinanceUM_Future_BTCUSDT250926"
-    assert btc.symbol == "BTCUSDT250926"
+    assert str(btc.ticker) == "BinanceUM_Future_BTCUSDT-250926"
+    assert btc.symbol == "BTCUSDT-250926"
     assert btc.category is Category.FUTURE
     assert btc.settlement_asset == "USDT"
     assert btc.expiry is not None
@@ -751,8 +751,8 @@ async def test_dated_delivery_contracts_become_future_instruments() -> None:
 
     assert [i.exch_ticker for i in instruments] == ["BTCUSD_260925"]
     btc = instruments[0]
-    assert str(btc.ticker) == "BinanceCM_Future_BTCUSD260925"
-    assert btc.symbol == "BTCUSD260925"
+    assert str(btc.ticker) == "BinanceCM_Future_BTCUSD-260925"
+    assert btc.symbol == "BTCUSD-260925"
     assert btc.category is Category.FUTURE
     assert btc.contract_size == Decimal("100")
     assert btc.settlement_asset == "BTC"

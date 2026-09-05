@@ -453,7 +453,7 @@ def test_a_position_reply_carries_the_signed_size() -> None:
     assert position.entry_price is None, "0 means unset, not free"
 
 
-def test_a_dated_future_glues_yymmdd_onto_the_symbol() -> None:
+def test_a_dated_future_hyphenates_yymmdd_onto_the_symbol() -> None:
     """So it cannot collide with ``BinanceUM_Perp_BTCUSDT``."""
     instrument = to_listed(
         {
@@ -474,8 +474,8 @@ def test_a_dated_future_glues_yymmdd_onto_the_symbol() -> None:
     )
     assert instrument is not None
     assert instrument.exch_ticker == "BTCUSDT_250926"
-    assert instrument.symbol == "BTCUSDT250926"
-    assert str(instrument.ticker) == "BinanceUM_Future_BTCUSDT250926"
+    assert instrument.symbol == "BTCUSDT-250926"
+    assert str(instrument.ticker) == "BinanceUM_Future_BTCUSDT-250926"
     assert instrument.expiry == datetime(2025, 9, 26, 8, tzinfo=UTC)
     assert instrument.filters["min_notional"] == Decimal("5")
 
@@ -492,7 +492,7 @@ def test_a_dated_row_without_delivery_date_still_gets_an_expiry() -> None:
         category=Category.FUTURE,
     )
     assert instrument is not None
-    assert instrument.symbol == "ETHUSDT251226"
+    assert instrument.symbol == "ETHUSDT-251226"
     assert instrument.expiry == datetime(2025, 12, 26, 8, tzinfo=UTC)
 
 

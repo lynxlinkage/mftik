@@ -187,7 +187,7 @@ async def test_funding_history_is_oldest_first_and_drops_mark_price() -> None:
     assert not any(hasattr(row, "mark_price") for row in rows)
 
     before = len(api.requests)
-    dated = UniversalTicker.parse("BinanceUM_Future_BTCUSDT250926")
+    dated = UniversalTicker.parse("BinanceUM_Future_BTCUSDT-250926")
     with pytest.raises(NoReaderError, match="Future"):
         await _reader(api).fetch_funding_history(dated, limit=5)
     assert len(api.requests) == before

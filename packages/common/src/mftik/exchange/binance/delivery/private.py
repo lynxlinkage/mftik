@@ -98,7 +98,7 @@ class BinanceDeliveryPrivateClient(BaseClient):
     """Binance COIN-M trading account for TD.
 
     Symbols cross this boundary in canonical form (``BTCUSD``,
-    ``BTCUSD260925``) and are resolved to Binance's spelling
+    ``BTCUSD-260925``) and are resolved to Binance's spelling
     (``BTCUSD_PERP``, ``BTCUSD_260925``) on the wire; everything coming
     back is resolved home again. ``quantity`` stays in contracts.
     """
@@ -399,7 +399,7 @@ class BinanceDeliveryPrivateClient(BaseClient):
         """Canonical → Binance's spelling, via the plane.
 
         Tries each book: ``BTCUSD`` is the inverse perpetual,
-        ``BTCUSD260925`` the dated future. They are not interchangeable.
+        ``BTCUSD-260925`` the dated future. They are not interchangeable.
         """
         from mftik.symbols import SymbolNotFoundError
 

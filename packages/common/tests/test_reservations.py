@@ -106,7 +106,7 @@ def test_a_delivery_future_commits_nothing_knowable() -> None:
     ``Category.FUTURE`` on BinanceUM is linear; the same category on
     BinanceCM is not. A USDT reading would lock the wrong asset.
     """
-    request = _request(universal_ticker="BinanceCM_Future_BTCUSD260925")
+    request = _request(universal_ticker="BinanceCM_Future_BTCUSD-260925")
     assert (
         commitment_for(
             category=Category.FUTURE,

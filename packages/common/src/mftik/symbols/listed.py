@@ -7,7 +7,7 @@ plane persists these rows and is the only thing that serves
 ``symbol`` is derived from ``base`` + ``quote`` rather than by splitting the
 venue's ticker — the venue tells us both, so no guessing is involved. A dated
 contract that shares that pair with a perpetual also carries ``expiry_code``
-(``YYMMDD``), glued on so the two cannot render the same ticker.
+(``YYMMDD``), joined with ``-`` so the two cannot render the same ticker.
 
 This module must not import :mod:`mftik.exchange` at load time. Adapters load
 it while the exchange package is still initializing; a reverse import would
@@ -88,9 +88,9 @@ class ListedInstrument:
     settlement_asset: str | None = None
     expiry: datetime | None = None
     #: ``YYMMDD`` from the venue's own dated ticker, not from ``expiry``.
-    #: Glued onto :attr:`symbol` so a quarterly does not collide with the
-    #: perpetual that shares its base and quote. ``None`` on everything that
-    #: does not expire.
+    #: Joined onto :attr:`symbol` with ``-`` so a quarterly does not collide
+    #: with the perpetual that shares its base and quote. ``None`` on
+    #: everything that does not expire.
     expiry_code: str | None = None
     is_active: bool = True
     #: name → bound. A key with a ``None`` value means the venue publishes the
@@ -101,13 +101,14 @@ class ListedInstrument:
     def symbol(self) -> str:
         """Canonical symbol — exact, because base and quote came from the venue.
 
-        Dated contracts append ``expiry_code`` with no separator
-        (``BTCUSDT250926``). The underscore that Binance puts in
-        ``BTCUSDT_250926`` cannot survive a ticker parse.
+        Dated contracts append ``expiry_code`` after a hyphen
+        (``BTCUSDT-250926``). The underscore that Binance puts in
+        ``BTCUSDT_250926`` cannot survive a ticker parse, so the
+        separator inside a symbol is ``-``.
         """
         pair = f"{self.base.upper()}{self.quote.upper()}"
         if self.expiry_code:
-            return f"{pair}{self.expiry_code}"
+            return f"{pair}-{self.expiry_code}"
         return pair
 
     @property

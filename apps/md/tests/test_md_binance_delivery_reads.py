@@ -166,7 +166,7 @@ async def test_funding_history_is_oldest_first() -> None:
     assert rows[0].rate == Decimal("0.0001")
 
     before = len(api.requests)
-    dated = UniversalTicker.parse("BinanceCM_Future_BTCUSD260925")
+    dated = UniversalTicker.parse("BinanceCM_Future_BTCUSD-260925")
     with pytest.raises(NoReaderError, match="Future"):
         await _reader(api).fetch_funding_history(dated, limit=5)
     assert len(api.requests) == before

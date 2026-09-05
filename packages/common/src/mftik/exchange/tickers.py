@@ -22,8 +22,9 @@ So identity is three parts, rendered as one string::
                                     Bybit_Perp_BTCUSDT
 
 ``_`` separates, and therefore cannot appear inside a part. Venues are
-CamelCase (``GateFutures``, never ``gate_futures``) and symbols are canonical
-(:func:`mftik.exchange.symbols.canonical`, so ``BTCUSDT``, never ``BTC_USDT``).
+CamelCase (``GateFutures``, never ``gate_futures``). Pair symbols are
+separator-free (``BTCUSDT``, never ``BTC_USDT``); dated futures and
+options keep ``-`` between fields (``BTCUSDT-250926``).
 :func:`mftik.exchange.venues.check_registry` enforces the venue half of that at
 import time, so a venue named with an underscore fails loudly at startup
 rather than silently breaking every parse.
@@ -45,7 +46,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from mftik.exchange.errors import ExchangeError
-from mftik.exchange.symbols import canonical
+from mftik.exchange.symbols import normalize_symbol
 
 #: What splits the three parts, and so what none of them may contain.
 SEPARATOR = "_"
@@ -114,10 +115,14 @@ class UniversalTicker:
     @classmethod
     def of(cls, venue: str, category_: str, symbol: str) -> UniversalTicker:
         """Build from parts, normalizing each. Raises on a malformed part."""
+        resolved = category(category_)
         return cls(
             venue=_check_venue(venue),
-            category=category(category_),
-            symbol=_check_symbol(canonical(symbol)),
+            category=resolved,
+            symbol=_check_symbol(
+                normalize_symbol(symbol, category=resolved),
+                category=resolved,
+            ),
         )
 
     @classmethod
@@ -138,10 +143,11 @@ class UniversalTicker:
                 f"Gate{SEPARATOR}Spot{SEPARATOR}BTCUSDT"
             )
         venue, category_, symbol = parts
+        resolved = category(category_)
         ticker = cls(
             venue=_check_venue(venue),
-            category=category(category_),
-            symbol=_check_symbol(symbol),
+            category=resolved,
+            symbol=_check_symbol(symbol, category=resolved),
         )
         if ticker.value != text:
             raise InvalidTickerError(
@@ -186,25 +192,21 @@ def _check_venue(name: str) -> str:
     return name
 
 
-def _check_symbol(symbol: str) -> str:
-    """Accept a symbol that is already canonical, whatever alphabet it is in.
+def _check_symbol(symbol: str, category: Category) -> str:
+    """Accept a symbol that is already in platform form.
 
-    The test is ``canonical(s) == s`` rather than a character class, because
-    the only two things this has to guarantee are that the symbol carries no
-    separator (``canonical`` strips them, so one cannot survive the round
-    trip) and that it is spelled the one way the platform spells it.
-
-    Anything narrower is wrong about real listings. Gate lists pairs whose
-    base currency is a CJK meme token — ``龙虾_USDT``, ``我踏马来了_USDT`` —
-    and an ASCII-only rule rejects them at parse time. That does not cost
-    four instruments: :meth:`SymbolClient._table` keys a whole venue's table
-    by ``SymbolInfo.symbol``, so one unparseable row breaks every read on
-    that venue in TD and MD.
+    Pairs are separator-free (``BTCUSDT``). Dated futures and options
+    keep ``-`` between fields (``BTCUSDT-250926``). The test is
+    ``normalize_symbol(s) == s`` rather than a character class: a spelling
+    this would have had to change cannot sit in a column, and an
+    ASCII-only rule would reject the CJK meme tokens Gate actually lists.
+    ``_`` is still forbidden — it separates the ticker.
     """
-    if not symbol or canonical(symbol) != symbol:
+    if not symbol or normalize_symbol(symbol, category=category) != symbol:
         raise InvalidTickerError(
             f"invalid symbol {symbol!r} in a universal ticker; symbols are "
-            f"canonical — uppercase, no separator (e.g. 'BTCUSDT')"
+            f"uppercase and separator-free, or a dated/option form with '-' "
+            f"(e.g. 'BTCUSDT', 'BTCUSDT-250926')"
         )
     return symbol
 

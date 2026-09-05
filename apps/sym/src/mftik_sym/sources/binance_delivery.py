@@ -7,8 +7,8 @@ no ``exchangeInfo`` over its WebSocket API.
 **Two sources, one endpoint.** The listing mixes inverse perpetuals with
 dated futures (``BTCUSD_260925``) that share the perpetual's ``baseAsset``
 and ``quoteAsset``. Each source stamps its own category so a refresh can
-delist one book without touching the other, and ``to_listed`` glues
-``YYMMDD`` onto the dated symbol so the two cannot collide as
+delist one book without touching the other, and ``to_listed`` joins
+``YYMMDD`` onto the dated symbol with ``-`` so the two cannot collide as
 ``BinanceCM_Inverse_BTCUSD``. Inverse stays the coin-margined perp;
 dated contracts are ``Future``, not a second Inverse.
 """
