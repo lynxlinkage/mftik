@@ -71,7 +71,7 @@ class VenuePublicFactory:
     """Dispatches on the feed's venue to build the right public client.
 
     Mirrors TD's ``VenueSessionFactory``: ``Paper`` keeps the existing
-    behaviour,     and the real venues build real market-data clients. A venue that
+    behaviour, and the real venues build real market-data clients. A venue that
     is in the registry but has no public client fails here rather than
     attaching a session that would never produce a tick.
 
