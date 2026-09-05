@@ -521,7 +521,12 @@ PAPER = VenueErrors(
         ("unknown client_order_id", RejectCode.VENUE_ORDER_NOT_FOUND),
         ("unknown order_id", RejectCode.VENUE_ORDER_NOT_FOUND),
         ("is not open", RejectCode.VENUE_ORDER_ALREADY_CLOSED),
-        ("insufficient liquidity", RejectCode.VENUE_INSUFFICIENT_BALANCE),
+        # ``insufficient liquidity`` is deliberately absent. The engine used
+        # to raise it for a market order that outran the book, and mapping a
+        # thin book onto an empty account was wrong twice over — the balance
+        # was never the problem, and the order had already traded. That order
+        # now ends CANCELED like the IOC and FOK beside it, so nothing
+        # produces the message and nothing should claim to translate it.
         ("qty must be positive", RejectCode.VENUE_INVALID_PARAM),
         ("require price", RejectCode.VENUE_INVALID_PARAM),
         ("api_key and api_secret are required", RejectCode.VENUE_AUTH_FAILED),

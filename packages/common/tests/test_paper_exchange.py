@@ -230,10 +230,17 @@ async def test_quote_budget_that_does_not_divide_evenly_still_fills(
 
 
 @pytest.mark.asyncio
-async def test_quote_budget_beyond_the_book_is_still_refused(
+async def test_quote_budget_beyond_the_book_is_cancelled_not_filled(
     exchange: PaperExchange,
 ) -> None:
-    """Dust tolerance must not swallow a genuinely under-supplied book."""
+    """Dust tolerance must not swallow a genuinely under-supplied book.
+
+    Still the distinction the test above pairs with, and still worth
+    keeping — only the ending changed. A residue too small to buy another
+    lot is *spent*, so that order is FILLED. A budget the book cannot
+    serve is a real shortfall, and it now ends CANCELED on what it took
+    rather than raising after the fills had already settled.
+    """
     await _seed_book(exchange)
     # Funded past the book so it is liquidity that runs out, not the balance.
     exchange.register_api(
@@ -243,15 +250,85 @@ async def test_quote_budget_beyond_the_book_is_still_refused(
         api_key="whale", api_secret="secret-for-whale", auto_register=False
     )
     await private.connect()
+    before = {b.asset: b.free for b in await private.fetch_balances()}
 
-    with pytest.raises(OrderError, match="insufficient liquidity"):
-        await private.place_order(
-            market_order(
-                ticker="Paper_Spot_BTCUSDT",
-                side=Side.BUY,
-                quote_qty=Decimal("100000000"),
-            )
+    order = await private.place_order(
+        market_order(
+            ticker="Paper_Spot_BTCUSDT",
+            side=Side.BUY,
+            quote_qty=Decimal("100000000"),
         )
+    )
+
+    assert order.status is OrderStatus.CANCELED
+    assert order.filled_qty > 0, "it took the depth that was there"
+    after = {b.asset: b.free for b in await private.fetch_balances()}
+    # The whale is funded in quote only, so it has no BTC row until it buys.
+    zero = Decimal("0")
+    assert after["BTC"] - before.get("BTC", zero) == order.filled_qty
+    assert after["USDT"] < before["USDT"]
+    await private.close()
+
+
+@pytest.mark.asyncio
+async def test_a_market_order_that_outruns_the_book_keeps_what_it_took(
+    exchange: PaperExchange,
+) -> None:
+    """It used to settle both sides and *then* raise.
+
+    Matching runs before the old refusal did, so the caller was handed an
+    exception for an order that had traded: balances moved, both fills were
+    emitted, the public trade was published, and the order was recorded
+    terminal-REJECTED. A strategy saw ``on_fill`` and ``on_order_reject``
+    for one order, was told 201 VENUE_INSUFFICIENT_BALANCE on an account
+    that was never short of funds, and held a position the order record
+    said it had never opened.
+
+    Market is the same event as IOC and as the killed FOK: an immediate
+    instruction that got what the book had. It ends cancelled.
+    """
+    await _seed_thin_ask(exchange, qty="0.5")
+    private = _private(exchange)
+    await private.connect()
+    before = {b.asset: b.free for b in await private.fetch_balances()}
+
+    order = await private.place_order(
+        market_order(
+            ticker="Paper_Spot_BTCUSDT",
+            side=Side.BUY,
+            qty=Decimal("0.8"),
+        )
+    )
+
+    assert order.status is OrderStatus.CANCELED
+    assert order.filled_qty == Decimal("0.5")
+    assert order.avg_price == Decimal("50001")
+    after = {b.asset: b.free for b in await private.fetch_balances()}
+    assert after["BTC"] - before["BTC"] == Decimal("0.5")
+    # The ask is gone and the taker paid for it — the trade the old refusal
+    # denied while keeping.
+    assert after["USDT"] < before["USDT"]
+    await private.close()
+
+
+@pytest.mark.asyncio
+async def test_a_market_order_the_book_cannot_serve_at_all_is_cancelled_flat(
+    exchange: PaperExchange,
+) -> None:
+    """Nothing to take is not a refusal either — it is a cancel on zero."""
+    private = _private(exchange)
+    await private.connect()
+
+    order = await private.place_order(
+        market_order(
+            ticker="Paper_Spot_BTCUSDT",
+            side=Side.BUY,
+            qty=Decimal("0.8"),
+        )
+    )
+
+    assert order.status is OrderStatus.CANCELED
+    assert order.filled_qty == 0
     await private.close()
 
 
