@@ -166,7 +166,11 @@ from mftik.exchange.paper import (
     PaperPrivateClient,
     PaperPublicClient,
 )
-from mftik.exchange.symbols import SymbolResolver, canonical_symbol
+from mftik.exchange.symbols import (
+    SymbolResolver,
+    canonical_symbol,
+    normalize_symbol,
+)
 from mftik.exchange.tickers import (
     Category,
     InvalidTickerError,
@@ -351,4 +355,5 @@ __all__ = [
     "SymbolResolver",
     "Venue",
     "canonical_symbol",
+    "normalize_symbol",
 ]
