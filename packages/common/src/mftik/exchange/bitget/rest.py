@@ -191,16 +191,19 @@ class BitgetPublicRest(_BitgetRestTransport):
     async def fetch_ticker_row(
         self, product: str, symbol: str
     ) -> BitgetTicker:
-        rows = await self._get(
+        data = await self._get(
             ch.MARKET_TICKERS, {"category": product, "symbol": symbol}
         )
-        for row in _rows(rows):
+        rows = _rows(data)
+        for row in rows:
             if isinstance(row, dict) and row.get("symbol") == symbol:
                 return BitgetTicker.model_validate({**row, "category": product})
-        if _rows(rows) and isinstance(_rows(rows)[0], dict):
-            return BitgetTicker.model_validate(
-                {**_rows(rows)[0], "category": product}
-            )
+        # Only fall back when the venue named nothing: a row that names a
+        # *different* symbol is an answer about another instrument, and
+        # returning it would report its price under this ticker.
+        first = rows[0] if rows else None
+        if isinstance(first, dict) and not first.get("symbol"):
+            return BitgetTicker.model_validate({**first, "category": product})
         raise BitgetRestError(
             None, f"no ticker for {symbol}", op=ch.MARKET_TICKERS
         )
