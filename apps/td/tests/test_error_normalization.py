@@ -22,6 +22,11 @@ from mftik.exchange.bitget.protocol import (
     BitgetWsError,
 )
 from mftik.exchange.bybit.protocol import BybitRestError, BybitWsError
+from mftik.exchange.deribit.protocol import (
+    DeribitAuthError,
+    DeribitRestError,
+    DeribitWsError,
+)
 from mftik.exchange.errors import (
     ExchangeError,
     ExchangeNotConnectedError,
@@ -822,3 +827,49 @@ def _bitget_refusal(source: str) -> str:
         }
     )
     return row.refusal
+
+
+# --- Deribit ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (10000, RejectCode.VENUE_AUTH_FAILED),
+        (10004, RejectCode.VENUE_INSUFFICIENT_BALANCE),
+        (10009, RejectCode.VENUE_ORDER_NOT_FOUND),
+        (10028, RejectCode.VENUE_RATE_LIMITED),
+        (11050, RejectCode.VENUE_INVALID_PARAM),
+        (11060, RejectCode.VENUE_INVALID_PARAM),
+    ],
+)
+def test_deribit_codes_normalize(code: int, expected: RejectCode) -> None:
+    assert normalize(DeribitWsError(code, "refused"), venue="Deribit") == expected
+
+
+def test_an_unmapped_deribit_code_passes_through_as_itself() -> None:
+    assert normalize(DeribitWsError(49999, "new one"), venue="Deribit") == 49999
+
+
+def test_a_deribit_rest_refusal_normalizes_like_a_socket_one() -> None:
+    rest = DeribitRestError(10000, "authorization required", status=200)
+    assert normalize(rest, venue="Deribit") == RejectCode.VENUE_AUTH_FAILED
+
+
+def test_deribit_local_refusals_have_codes() -> None:
+    assert (
+        normalize(
+            DeribitAuthError("api_key and api_secret are required"),
+            venue="Deribit",
+        )
+        == RejectCode.VENUE_AUTH_FAILED
+    )
+    assert (
+        normalize(
+            OrderError(
+                "Deribit MARKET orders size in base; quote_qty is not expressible"
+            ),
+            venue="Deribit",
+        )
+        == RejectCode.VENUE_INVALID_PARAM
+    )

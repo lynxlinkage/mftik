@@ -51,6 +51,10 @@ _MARKET_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     # market sell are base. Both linear perps size in base.
     ("Bitget", Category.SPOT): {Side.BUY: _QUOTE, Side.SELL: _QTY},
     ("Bitget", Category.PERP): _BOTH_QTY,
+    # Linear and spot size in the base coin (V6). Inverse USD amounts are
+    # out of scope; ``quote_qty`` is not expressible on either book.
+    ("Deribit", Category.SPOT): _BOTH_QTY,
+    ("Deribit", Category.PERP): _BOTH_QTY,
 }
 
 #: The same question for a limit order. Uniformly base today, which is why it
@@ -75,6 +79,8 @@ _LIMIT_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     ("Okx", Category.PERP): _BOTH_QTY,
     ("Bitget", Category.SPOT): _BOTH_QTY,
     ("Bitget", Category.PERP): _BOTH_QTY,
+    ("Deribit", Category.SPOT): _BOTH_QTY,
+    ("Deribit", Category.PERP): _BOTH_QTY,
 }
 
 #: Every book in :mod:`~mftik.exchange.venues` needs a row in *both* tables. A

@@ -9,7 +9,7 @@ which names are real and what each one needs.
 A venue here is **one connection with one credential**, which is the axis the
 API is actually organised on. Gate's spot and futures planes sign separately
 and speak to separate endpoints, so they are two venues (``Gate``,
-``GateFutures``) that happen to share a brand. Bybit's, OKX's and Bitget's
+``GateFutures``) that happen to share a brand. Bybit's, OKX's, Bitget's and Deribit's
 unified accounts sign once for both books, so each is one venue with two
 categories. What a venue trades is :attr:`Venue.categories`; which one an
 instrument is on is the middle part of its
@@ -233,6 +233,20 @@ BITGET = Venue(
     requires_passphrase=True,
 )
 
+DERIBIT = Venue(
+    name="Deribit",
+    label="Deribit",
+    # One HMAC credential (Client ID / Client Secret, no passphrase) trades
+    # spot and the linear perpetual books. Inverse coin-margined perps,
+    # dated futures and options stay unregistered until an adapter serves
+    # them. The linear quote is USDC, not USDT, so the hint is BTCUSDC.
+    categories=frozenset({Category.SPOT, Category.PERP}),
+    example_symbol="BTCUSDC",
+    example_category=Category.SPOT,
+    api_types=frozenset({HMAC}),
+    requires_passphrase=False,
+)
+
 #: Every venue the platform knows, keyed by canonical name. The single source
 #: of truth — :func:`get` scans it rather than keeping a second index, so a
 #: test or a plugin that adds an entry here is immediately visible to lookups.
@@ -248,6 +262,7 @@ VENUES: dict[str, Venue] = {
         BYBIT,
         OKX,
         BITGET,
+        DERIBIT,
     )
 }
 
@@ -356,6 +371,7 @@ __all__ = [
     "BINANCE_UM",
     "BITGET",
     "BYBIT",
+    "DERIBIT",
     "ED25519",
     "GATE",
     "GATE_FUTURES",

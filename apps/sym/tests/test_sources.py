@@ -17,6 +17,7 @@ from mftik_sym.sources.binance_delivery import BinanceDeliveryInstrumentSource
 from mftik_sym.sources.binance_future import BinanceFutureInstrumentSource
 from mftik_sym.sources.bitget import BitgetInstrumentSource
 from mftik_sym.sources.bybit import BybitInstrumentSource
+from mftik_sym.sources.deribit import DeribitInstrumentSource
 from mftik_sym.sources.gate import GateSpotInstrumentSource
 from mftik_sym.sources.gate_future import GateFuturesInstrumentSource
 from mftik_sym.sources.okx import OkxInstrumentSource
@@ -1153,4 +1154,115 @@ def test_i4_default_sources_has_exactly_one_bitget_perp_source() -> None:
     assert len(perps) == 1
     assert len(spots) == 1
     assert perps[0].products == ("USDT-FUTURES", "USDC-FUTURES")
+
+
+DERIBIT_SPOT = {
+    "instrument_name": "BTC_USDC",
+    "kind": "spot",
+    "base_currency": "BTC",
+    "quote_currency": "USDC",
+    "tick_size": "0.01",
+    "min_trade_amount": "0.0001",
+    "is_active": True,
+}
+
+DERIBIT_CBE = {
+    "instrument_name": "SOL_USDC",
+    "kind": "spot",
+    "base_currency": "SOL",
+    "quote_currency": "USDC",
+    "tick_size": "0.01",
+    "min_trade_amount": "0.01",
+    "is_active": True,
+    "is_cbe_routed": True,
+}
+
+DERIBIT_LINEAR = {
+    "instrument_name": "BTC_USDC-PERPETUAL",
+    "kind": "future",
+    "instrument_type": "linear",
+    "future_type": "linear",
+    "settlement_period": "perpetual",
+    "base_currency": "BTC",
+    "quote_currency": "USDC",
+    "settlement_currency": "USDC",
+    "tick_size": "0.1",
+    "min_trade_amount": "0.0001",
+    "is_active": True,
+}
+
+DERIBIT_INVERSE = {
+    "instrument_name": "BTC-PERPETUAL",
+    "kind": "future",
+    "instrument_type": "reversed",
+    "settlement_period": "perpetual",
+    "base_currency": "BTC",
+    "quote_currency": "USD",
+    "settlement_currency": "BTC",
+    "is_active": True,
+}
+
+DERIBIT_DATED = {
+    "instrument_name": "BTC-6SEP26",
+    "kind": "future",
+    "instrument_type": "linear",
+    "settlement_period": "week",
+    "base_currency": "BTC",
+    "quote_currency": "USD",
+    "is_active": True,
+}
+
+
+def _deribit(
+    rows: list[dict],
+    *,
+    category: Category = Category.SPOT,
+) -> DeribitInstrumentSource:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/public/get_instruments")
+        assert request.url.params["currency"] == "any"
+        return httpx.Response(200, json={"jsonrpc": "2.0", "result": rows})
+
+    return DeribitInstrumentSource(
+        category=category,
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://www.deribit.com/api/v2",
+        ),
+    )
+
+
+async def test_deribit_spot_fetch_keeps_cbe_and_native() -> None:
+    instruments = await _deribit([DERIBIT_SPOT, DERIBIT_CBE, {"kind": "bad"}]).fetch()
+    tickers = {str(i.ticker) for i in instruments}
+    assert tickers == {"Deribit_Spot_BTCUSDC", "Deribit_Spot_SOLUSDC"}
+    by_ticker = {str(i.ticker): i for i in instruments}
+    assert by_ticker["Deribit_Spot_BTCUSDC"].exch_ticker == "BTC_USDC"
+    assert by_ticker["Deribit_Spot_SOLUSDC"].exch_ticker == "SOL_USDC"
+
+
+async def test_deribit_perp_fetch_drops_inverse_and_dated() -> None:
+    source = _deribit(
+        [DERIBIT_LINEAR, DERIBIT_INVERSE, DERIBIT_DATED, {"symbol": "BAD"}],
+        category=Category.PERP,
+    )
+    instruments = await source.fetch()
+    assert [str(i.ticker) for i in instruments] == ["Deribit_Perp_BTCUSDC"]
+    assert instruments[0].exch_ticker == "BTC_USDC-PERPETUAL"
+    assert instruments[0].settlement_asset == "USDC"
+
+
+def test_default_sources_has_exactly_one_deribit_perp_source() -> None:
+    class _Broker:
+        pass
+
+    sources = default_sources(_Broker())  # type: ignore[arg-type]
+    deribit = [s for s in sources if getattr(s, "venue", None) == "Deribit"]
+    assert len(deribit) == 2
+    perps = [s for s in deribit if s.category is Category.PERP]
+    spots = [s for s in deribit if s.category is Category.SPOT]
+    assert len(perps) == 1
+    assert len(spots) == 1
+    assert perps[0].kind == "future"
+    assert spots[0].kind == "spot"
 
