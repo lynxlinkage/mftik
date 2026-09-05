@@ -443,9 +443,11 @@ class BitgetLiquidation(BitgetMessage):
     ts: Ms = 0.0
 
     def to_liquidation(self, ticker: UniversalTicker) -> Liquidation:
-        qty = self.amount
-        if self.price > 0:
-            qty = self.amount / self.price
+        # ``amount`` is the quote-side notional, so base size is
+        # ``amount / price``. Without a price there is no conversion — report
+        # nothing rather than pass the notional off as a quantity, which is
+        # what returning ``amount`` unconverted would do.
+        qty = self.amount / self.price if self.price > 0 else Decimal("0")
         return Liquidation(
             universal_ticker=str(ticker),
             price=self.price,
