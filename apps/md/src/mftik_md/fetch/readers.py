@@ -71,6 +71,15 @@ from mftik.exchange.bybit.public import (
 )
 from mftik.exchange.bybit.public import venue_interval as bybit_interval
 from mftik.exchange.bybit.rest import BybitPublicRest
+from mftik.exchange.deribit.protocol import DERIBIT_REST_URL
+from mftik.exchange.deribit.public import (
+    FUNDING_CATEGORIES as DERIBIT_FUNDING_CATEGORIES,
+)
+from mftik.exchange.deribit.public import (
+    OPEN_INTEREST_CATEGORIES as DERIBIT_OPEN_INTEREST_CATEGORIES,
+)
+from mftik.exchange.deribit.public import venue_interval as deribit_interval
+from mftik.exchange.deribit.rest import DeribitPublicRest
 from mftik.exchange.gate.future.public import GATE_FUTURES_INTERVALS
 from mftik.exchange.gate.future.rest import (
     GATE_FUTURES_REST_URL,
@@ -967,6 +976,94 @@ class BitgetReader:
         )
 
 
+class DeribitReader:
+    """Deribit reads over REST, across every book this venue lists.
+
+    One reader. The ticker names the book; ``exch_ticker`` is the wire
+    ``instrument_name``. Funding history is perp and inverse only;
+    open interest is perp, inverse and dated. Spot is refused before
+    HTTP. There is no trade-history fetch — CBE spots answer ``11060``
+    on ``get_last_trades_*``.
+    """
+
+    venue = "Deribit"
+
+    def __init__(
+        self,
+        *,
+        symbols: SymbolResolver,
+        rest: DeribitPublicRest | None = None,
+        base_url: str = DERIBIT_REST_URL,
+    ) -> None:
+        self.symbols = symbols
+        self.rest = rest or DeribitPublicRest(base_url=base_url)
+
+    async def connect(self) -> None:
+        await self.rest.connect()
+
+    async def close(self) -> None:
+        await self.rest.close()
+
+    async def _resolve(self, ticker: UniversalTicker) -> str:
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return await self.symbols.exch_ticker(ticker)
+
+    async def fetch_klines(
+        self, ticker: UniversalTicker, interval: str, *, limit: int
+    ) -> list[Kline]:
+        canonical = normalize_interval(interval)
+        resolution = deribit_interval(canonical)
+        native = await self._resolve(ticker)
+        klines = await self.rest.fetch_klines(
+            native,
+            resolution,
+            ticker=ticker,
+            interval=canonical,
+            limit=limit,
+        )
+        return [
+            kline.model_copy(update={"interval": canonical}) for kline in klines
+        ]
+
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int
+    ) -> OrderBook:
+        native = await self._resolve(ticker)
+        return await self.rest.fetch_order_book(
+            native, ticker=ticker, depth=depth
+        )
+
+    async def fetch_best_quote(self, ticker: UniversalTicker) -> BestQuote | None:
+        native = await self._resolve(ticker)
+        row = await self.rest.fetch_ticker_row(native)
+        return row.to_best_quote(ticker)
+
+    async def fetch_funding_history(
+        self, ticker: UniversalTicker, *, limit: int
+    ) -> list[FundingRate]:
+        """Settled rates, oldest first. Spot has none — refused before HTTP."""
+        if ticker.category not in DERIBIT_FUNDING_CATEGORIES:
+            raise NoReaderError(
+                f"{self.venue} {ticker.category} serves no funding history"
+            )
+        native = await self._resolve(ticker)
+        return await self.rest.fetch_funding_history(
+            native, ticker=ticker, limit=limit
+        )
+
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size. Spot is refused before HTTP (V5)."""
+        if ticker.category not in DERIBIT_OPEN_INTEREST_CATEGORIES:
+            raise NoReaderError(
+                f"{self.venue} {ticker.category} serves no open interest"
+            )
+        native = await self._resolve(ticker)
+        return await self.rest.fetch_open_interest(native, ticker=ticker)
+
+
 class ReaderFactory(Protocol):
     """Builds the reader for a venue name."""
 
@@ -1009,6 +1106,8 @@ class VenueReaderFactory:
             return OkxReader(symbols=self._symbols)
         if venue == venues.BITGET.name:
             return BitgetReader(symbols=self._symbols)
+        if venue == venues.DERIBIT.name:
+            return DeribitReader(symbols=self._symbols)
         if venue == venues.PAPER.name:
             # The paper engine's book lives in another process and its prices
             # are invented tick by tick; nothing here can be read out of band.

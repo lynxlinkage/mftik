@@ -30,6 +30,7 @@ from mftik.exchange.bitget.protocol import (
     BitgetAccountModeError,
     BitgetAuthError,
 )
+from mftik.exchange.deribit.protocol import DeribitAuthError
 from mftik.exchange.errors import (
     ExchangeNotConnectedError,
     InstrumentNotFoundError,
@@ -509,6 +510,28 @@ BITGET = VenueErrors(
     },
 )
 
+#: Deribit JSON-RPC. Numeric ``error.code`` (V11). Unmapped codes pass
+#: through. Local refusals (missing key, quote_qty) live in messages.
+DERIBIT = VenueErrors(
+    messages=(
+        ("api_key and api_secret are required", RejectCode.VENUE_AUTH_FAILED),
+        ("quote_qty is not expressible", RejectCode.VENUE_INVALID_PARAM),
+        ("label is at most", RejectCode.VENUE_INVALID_PARAM),
+    ),
+    codes={
+        10000: RejectCode.VENUE_AUTH_FAILED,
+        10010: RejectCode.VENUE_AUTH_FAILED,
+        13668: RejectCode.VENUE_AUTH_FAILED,
+        10004: RejectCode.VENUE_INSUFFICIENT_BALANCE,
+        10009: RejectCode.VENUE_ORDER_NOT_FOUND,
+        10003: RejectCode.VENUE_ORDER_NOT_FOUND,
+        11044: RejectCode.VENUE_ORDER_NOT_FOUND,
+        10028: RejectCode.VENUE_RATE_LIMITED,
+        11050: RejectCode.VENUE_INVALID_PARAM,
+        11060: RejectCode.VENUE_INVALID_PARAM,
+    },
+)
+
 #: The paper engine. Its errors carry no label, only a message — but the
 #: messages are ours, raised in ``mftik.exchange.paper.engine``, so matching on
 #: them is a maintenance question rather than a guess about a third party.
@@ -542,6 +565,7 @@ VENUES: dict[str, VenueErrors] = {
     "Bybit": BYBIT,
     "Okx": OKX,
     "Bitget": BITGET,
+    "Deribit": DERIBIT,
     "Gate": GATE,
     "GateFutures": GATE,
     "Paper": PAPER,
@@ -564,6 +588,7 @@ BY_TYPE: tuple[tuple[type[BaseException], RejectCode], ...] = (
     # match is resolved before any message fragment is.
     (BitgetAccountModeError, RejectCode.VENUE_PERMISSION_DENIED),
     (BitgetAuthError, RejectCode.VENUE_AUTH_FAILED),
+    (DeribitAuthError, RejectCode.VENUE_AUTH_FAILED),
 )
 
 
@@ -725,6 +750,7 @@ def _venue_code(exc: BaseException, table: VenueErrors) -> int | str | None:
 __all__ = [
     "BINANCE",
     "BITGET",
+    "DERIBIT",
     "BY_TYPE",
     "GATE",
     "OKX",

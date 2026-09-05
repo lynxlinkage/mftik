@@ -13,6 +13,7 @@ from mftik.exchange.binance.future.private import BinanceFuturePrivateClient
 from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mftik.exchange.bitget.private import BitgetPrivateClient
 from mftik.exchange.bybit.private import BybitPrivateClient
+from mftik.exchange.deribit.private import DeribitPrivateClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
@@ -243,6 +244,21 @@ class VenueSessionFactory:
             )
             logger.info(
                 "TD building Okx session api_id=%s key=%s…",
+                api_id,
+                row.api_key[:6],
+            )
+            return self._session(api_id, private)
+
+        if venue is venues.DERIBIT:
+            # Same unified-account story as Bybit: one HMAC credential,
+            # no passphrase, every book this venue lists.
+            private = DeribitPrivateClient(
+                api_key=row.api_key,
+                api_secret=row.api_secret,
+                symbols=self._symbols,
+            )
+            logger.info(
+                "TD building Deribit session api_id=%s key=%s…",
                 api_id,
                 row.api_key[:6],
             )

@@ -1072,7 +1072,11 @@ class Session:
             return None
         leverage = (
             self._leverage.get(request.universal_ticker)
-            if is_linear_margin(request.category, venue=request.ticker.venue)
+            if is_linear_margin(
+                request.category,
+                venue=request.ticker.venue,
+                quote=info.quote,
+            )
             else None
         )
         held = reservation_for(

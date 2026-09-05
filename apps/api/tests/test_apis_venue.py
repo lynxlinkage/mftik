@@ -35,6 +35,7 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
         "BinanceUM",
         "Bitget",
         "Bybit",
+        "Deribit",
         "Gate",
         "GateFutures",
         "Okx",
@@ -60,6 +61,15 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     assert by_name["Bitget"].requires_passphrase is True
     assert by_name["Bitget"].api_types == ["HMAC"]
     assert by_name["Bitget"].ticker_example == "Bitget_Spot_BTCUSDT"
+    assert by_name["Deribit"].categories == [
+        "Future",
+        "Inverse",
+        "Perp",
+        "Spot",
+    ]
+    assert by_name["Deribit"].requires_passphrase is False
+    assert by_name["Deribit"].api_types == ["HMAC"]
+    assert by_name["Deribit"].ticker_example == "Deribit_Spot_BTCUSDC"
     # Binance's USD-M plane is a venue of its own: separate hosts and a
     # separate wallet, so it cannot be a category of "Binance". Perp and
     # dated futures share that credential; the hint stays on the perpetual.
