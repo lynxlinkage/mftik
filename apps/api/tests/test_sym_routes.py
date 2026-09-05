@@ -147,6 +147,37 @@ async def test_symbols_forwards_query_filters() -> None:
     assert result.total == 1
 
 
+async def test_a_dated_symbol_filter_is_normalized_for_its_book() -> None:
+    """``symbol`` is an exact suffix match, so it has to be the stored form.
+
+    Both spellings a person might type land on the one the plane stores.
+    Folding this as a pair — which is what ``canonical`` does — strips the
+    hyphen and matches no dated row at all, in either spelling.
+    """
+    for typed in ("BTCUSDT250926", "btcusdt-250926", "btc/usdt-250926"):
+        broker = StubBroker(_list_reply())
+        await list_symbols(  # type: ignore[arg-type]
+            broker,
+            venue="binanceum",
+            category="future",
+            symbol=typed,
+        )
+        assert broker.sent is not None
+        assert broker.sent.payload["symbol"] == "BTCUSDT-250926", typed
+
+
+async def test_a_pair_symbol_filter_still_folds_its_punctuation() -> None:
+    """The dated grammar is per-book: spot and perp keep the old folding."""
+    broker = StubBroker(_list_reply())
+
+    await list_symbols(  # type: ignore[arg-type]
+        broker, venue="binanceum", category="perp", symbol="btc-usdt"
+    )
+
+    assert broker.sent is not None
+    assert broker.sent.payload["symbol"] == "BTCUSDT"
+
+
 async def test_symbols_rejects_a_filter_it_cannot_normalize() -> None:
     """A bad venue or category is a 400 here, not a 502 from the plane."""
     broker = StubBroker(_list_reply())

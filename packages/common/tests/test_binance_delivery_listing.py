@@ -67,7 +67,7 @@ def test_a_dated_contract_is_dropped_from_the_inverse_book() -> None:
     assert listed is None
 
 
-def test_a_dated_future_glues_yymmdd_onto_the_symbol() -> None:
+def test_a_dated_future_hyphenates_yymmdd_onto_the_symbol() -> None:
     """So it cannot collide with ``BinanceCM_Inverse_BTCUSD``."""
     listed = to_listed(
         {
@@ -79,8 +79,8 @@ def test_a_dated_future_glues_yymmdd_onto_the_symbol() -> None:
     )
     assert listed is not None
     assert listed.exch_ticker == "BTCUSD_260925"
-    assert listed.symbol == "BTCUSD260925"
-    assert str(listed.ticker) == "BinanceCM_Future_BTCUSD260925"
+    assert listed.symbol == "BTCUSD-260925"
+    assert str(listed.ticker) == "BinanceCM_Future_BTCUSD-260925"
     assert listed.category is Category.FUTURE
     assert listed.contract_size == Decimal("100")
     assert listed.settlement_asset == "BTC"
@@ -99,7 +99,7 @@ def test_a_dated_row_without_delivery_date_still_gets_an_expiry() -> None:
         category=Category.FUTURE,
     )
     assert listed is not None
-    assert listed.symbol == "ETHUSD251226"
+    assert listed.symbol == "ETHUSD-251226"
     assert listed.expiry == datetime(2025, 12, 26, 8, tzinfo=UTC)
 
 

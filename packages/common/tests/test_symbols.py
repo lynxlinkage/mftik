@@ -10,8 +10,8 @@ from decimal import Decimal
 
 import pytest
 from mftik.exchange import symbols
-from mftik.exchange.symbols import canonical, join
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.symbols import canonical, join, normalize_symbol
+from mftik.exchange.tickers import Category, UniversalTicker
 
 
 @pytest.mark.parametrize(
@@ -26,6 +26,60 @@ def test_every_spelling_collapses_to_one_canonical(spelling: str) -> None:
 def test_canonical_tolerates_empty_input() -> None:
     assert canonical("") == ""
     assert canonical("   ") == ""
+
+
+@pytest.mark.parametrize(
+    ("symbol", "category", "want"),
+    [
+        ("BTC-USDT", "spot", "BTCUSDT"),
+        ("BTCUSDT-250926", "spot", "BTCUSDT250926"),
+        ("BTCUSDT250926", "future", "BTCUSDT-250926"),
+        ("btc-usdt-250926", "future", "BTCUSDT-250926"),
+        ("BTCUSDT-250926", "future", "BTCUSDT-250926"),
+        ("BTC-USDT-260905-100000-C", "option", "BTCUSDT-260905-100000-C"),
+        ("avaxusdc-260905-64-c", "option", "AVAXUSDC-260905-64-C"),
+        # A fractional strike folds its decimal point onto ``d``, the
+        # way a pair folds its punctuation away.
+        ("AVAXUSDC-260905-6.4-c", "option", "AVAXUSDC-260905-6D4-C"),
+        ("avax-usdc-260905-6.4-C", "option", "AVAXUSDC-260905-6D4-C"),
+        ("AVAXUSDC-260905-6d4-c", "option", "AVAXUSDC-260905-6D4-C"),
+        # Uppercased before the split, which is what makes a typed
+        # ``6d4`` and a typed ``6.4`` one spelling for free.
+        ("AVAXUSDC-260905-6D4-C", "option", "AVAXUSDC-260905-6D4-C"),
+        ("BTCUSDT", Category.PERP, "BTCUSDT"),
+    ],
+)
+def test_normalize_symbol_keeps_structured_hyphens(
+    symbol: str, category: str | Category, want: str
+) -> None:
+    assert normalize_symbol(symbol, category=category) == want
+
+
+@pytest.mark.parametrize(
+    ("symbol", "want"),
+    [
+        ("BTCUSDT", None),
+        ("BTCUSDT-250926", None),
+        ("BTCUSDT-260905-100000-C", None),
+        ("AVAXUSDC-260905-6D4-C", None),
+        ("龙虾USDT", None),
+        ("BTCUSDT-260905-6.4-C", "."),
+        ("BTC_USDT", "_"),
+        ("BTCUSDT-260905-10_000-C", "_"),
+        ("BTCUSDT-260905-10 000-C", " "),
+        ("BTC/USDT", "/"),
+    ],
+)
+def test_forbidden_in_symbol_names_the_character(
+    symbol: str, want: str | None
+) -> None:
+    """``-`` is a field separator; the rest of the pair punctuation is not.
+
+    ``normalize_symbol`` folds these out of a pair but keeps an option's
+    strike verbatim, so this is the check that a kept field cannot smuggle
+    one into a ticker.
+    """
+    assert symbols.forbidden_in_symbol(symbol) == want
 
 
 def test_join_renders_a_venue_spelling_from_known_parts() -> None:

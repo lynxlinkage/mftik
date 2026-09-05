@@ -292,7 +292,7 @@ async def test_a_dated_future_has_no_funding_rate_stream(
     async with client:
         with pytest.raises(ValueError, match="serves no funding rate stream"):
             client.stream_funding_rate(
-                UniversalTicker.parse("BinanceUM_Future_BTCUSDT250926")
+                UniversalTicker.parse("BinanceUM_Future_BTCUSDT-250926")
             )
 
 

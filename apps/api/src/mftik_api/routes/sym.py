@@ -6,7 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 from mftik.exchange import tickers, venues
-from mftik.exchange.symbols import canonical_symbol
+from mftik.exchange.symbols import normalize_symbol
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     SYM_ERROR,
@@ -71,6 +71,15 @@ async def list_symbols(
     normalized here rather than matched literally, so a query typed
     ``gate/spot`` finds the rows stored as ``Gate_Spot_…``.
 
+    ``symbol`` is matched as an exact suffix, so it has to be normalized
+    the way the row was stored — and on a dated or option book that
+    spelling depends on the category (``BTCUSDT250926`` and
+    ``BTCUSDT-250926`` are both the stored ``BTCUSDT-250926``, but only
+    once something says the book is ``Future``). Pass ``category``
+    alongside ``symbol`` for those; without one the symbol is folded as a
+    pair, which is right for spot and perp and cannot find a dated row.
+    ``universal_ticker`` carries its own category and needs no such help.
+
     ``q`` / ``limit`` / ``offset`` page a browse. ``slim`` returns only the
     filters the table shows; pass ``universal_ticker`` without ``slim`` for
     the full filter set on one row.
@@ -78,7 +87,9 @@ async def list_symbols(
     try:
         venue = venues.normalize(venue) if venue else None
         category = tickers.category(category).value if category else None
-        symbol = canonical_symbol(symbol) if symbol else None
+        symbol = (
+            normalize_symbol(symbol, category=category) if symbol else None
+        )
         universal_ticker = (
             str(UniversalTicker.resolve(universal_ticker))
             if universal_ticker

@@ -171,9 +171,9 @@ def test_gate_futures_is_its_own_perp_venue() -> None:
 
 def test_binance_future_trades_perps_and_dated_on_one_credential() -> None:
     """USD-M dated futures share the fapi credential and must not steal
-    the perpetual's ticker — category and the glued ``YYMMDD`` keep them
-    apart. The UI hint stays on the perpetual: a bare ``BTCUSDT`` is not
-    a dated instrument.
+    the perpetual's ticker — category and the hyphenated ``YYMMDD`` keep
+    them apart. The UI hint stays on the perpetual: a bare ``BTCUSDT`` is
+    not a dated instrument.
     """
     fut = venues.require("BinanceUM")
     assert fut is venues.BINANCE_UM
@@ -181,7 +181,10 @@ def test_binance_future_trades_perps_and_dated_on_one_credential() -> None:
     assert fut.ticker_example == "BinanceUM_Perp_BTCUSDT"
     assert str(fut.ticker("perp", "BTCUSDT")) == "BinanceUM_Perp_BTCUSDT"
     assert str(fut.ticker("future", "BTCUSDT250926")) == (
-        "BinanceUM_Future_BTCUSDT250926"
+        "BinanceUM_Future_BTCUSDT-250926"
+    )
+    assert str(fut.ticker("future", "BTCUSDT-250926")) == (
+        "BinanceUM_Future_BTCUSDT-250926"
     )
     with pytest.raises(venues.UnsupportedCategoryError, match="explicitly"):
         fut.ticker(None, "BTCUSDT")
@@ -201,7 +204,7 @@ def test_binance_delivery_is_its_own_perp_venue() -> None:
         "BinanceCM_Inverse_BTCUSD"
     )
     assert str(coin.ticker("future", "BTCUSD260925")) == (
-        "BinanceCM_Future_BTCUSD260925"
+        "BinanceCM_Future_BTCUSD-260925"
     )
     with pytest.raises(venues.UnsupportedCategoryError, match="explicitly"):
         coin.ticker(None, "BTCUSD")

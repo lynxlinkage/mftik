@@ -31,8 +31,10 @@ def test_parse_round_trips() -> None:
         "Bybit_Perp_ETHUSDT",
         "Paper_Spot_BTCUSDT",
         "BinanceCM_Inverse_BTCUSD",
-        "BinanceCM_Future_BTCUSD260925",
-        "BinanceUM_Future_BTCUSDT250926",
+        "BinanceCM_Future_BTCUSD-260925",
+        "BinanceUM_Future_BTCUSDT-250926",
+        "BinanceUM_Option_BTCUSDT-260905-100000-C",
+        "Bybit_Option_AVAXUSDC-260905-6D4-C",
     ):
         assert str(UniversalTicker.parse(text)) == text
 
@@ -72,7 +74,8 @@ def test_tickers_sort_and_key_dictionaries() -> None:
         "gate_Spot_BTCUSDT",  # venue not CamelCase
         "Gate_spot_BTCUSDT",  # category not canonically spelled
         "Gate_Spot_btcusdt",  # symbol not canonical
-        "Gate_Spot_BTC-USDT",  # separator inside the symbol
+        "Gate_Spot_BTC-USDT",  # pair hyphen is not a dated suffix
+        "BinanceUM_Future_BTCUSDT250926",  # glued dated form is no longer stored
     ],
 )
 def test_parse_is_strict(bad: str) -> None:
@@ -96,8 +99,9 @@ def test_a_symbol_need_not_be_ascii(symbol: str) -> None:
     An ASCII-only rule does not cost four instruments, it costs the venue:
     ``SymbolClient._table`` keys a whole venue's table by
     ``SymbolInfo.symbol``, so one unparseable row raises on every Gate read
-    in TD and MD. What a symbol must be is canonical and separator-free,
-    which is a different claim from being ``[A-Z0-9]+``.
+    in TD and MD. What a symbol must be is in platform form — separator-free
+    on a pair, hyphenated fields on a dated or option contract — which is
+    a different claim from being ``[A-Z0-9]+``.
     """
     text = f"Gate_Spot_{symbol}"
     assert str(UniversalTicker.parse(text)) == text
@@ -109,6 +113,62 @@ def test_a_non_ascii_symbol_still_has_to_be_canonical() -> None:
     with pytest.raises(InvalidTickerError):
         UniversalTicker.parse("Gate_Spot_龙虾_USDT")
     assert str(UniversalTicker.of("Gate", "Spot", "龙虾/usdt")) == "Gate_Spot_龙虾USDT"
+
+
+@pytest.mark.parametrize(
+    "strike", ["10_000", "10 000", "10/000"]
+)
+def test_of_refuses_a_field_it_would_render_unparseable(strike: str) -> None:
+    """``of`` must not build what ``parse`` will not read back.
+
+    The structured grammar keeps an option's strike verbatim rather than
+    folding it, so a strike carrying pair punctuation is its own normal
+    form. Left to the ``normalize_symbol(s) == s`` test alone it would pass
+    — and then render ``Bybit_Option_BTCUSDT-260905-10_000-C``, which
+    splits into four parts and is refused on the way home. A value the
+    lenient boundary can build but the strict one cannot read is the exact
+    failure this type exists to prevent, so it is refused where it is made.
+    """
+    with pytest.raises(InvalidTickerError, match="cannot"):
+        UniversalTicker.of("Bybit", "option", f"BTCUSDT-260905-{strike}-C")
+
+
+def test_a_fractional_strike_spells_its_decimal_point_with_d() -> None:
+    """``.`` is folded at the lenient boundary and refused at the strict one.
+
+    Exactly the shape ``BTC/USDT`` already has: a person may type it, a
+    column may not hold it. ``.`` cannot sit inside a ticker because it is
+    what separates a feed key's topic from its ticker, and every reader of
+    one splitting leftmost is an implementation rather than a grammar.
+    """
+    for typed in (
+        "AVAXUSDC-260905-6.4-C",
+        "avax-usdc-260905-6.4-c",
+        "AVAXUSDC-260905-6d4-C",
+    ):
+        built = UniversalTicker.of("Bybit", "option", typed)
+        assert str(built) == "Bybit_Option_AVAXUSDC-260905-6D4-C", typed
+        assert UniversalTicker.parse(str(built)) == built
+
+    with pytest.raises(InvalidTickerError, match=r"'\.' cannot"):
+        UniversalTicker.parse("Bybit_Option_AVAXUSDC-260905-6.4-C")
+
+
+def test_every_symbol_of_builds_survives_a_round_trip() -> None:
+    """The invariant the check above defends, stated as the round trip."""
+    for symbol in (
+        "BTCUSDT",
+        "BTCUSDT-250926",
+        "BTCUSDT-260905-100000-C",
+        "BTCUSDT-260905-100000-P",
+        "AVAXUSDC-260905-6D4-C",
+        "龙虾USDT",
+    ):
+        category = "option" if symbol.count("-") == 3 else (
+            "future" if "-" in symbol else "spot"
+        )
+        built = UniversalTicker.of("Bybit", category, symbol)
+        assert UniversalTicker.parse(str(built)) == built
 
 
 @pytest.mark.parametrize(
@@ -137,11 +197,20 @@ def test_resolve_checks_the_venue_actually_trades_the_category() -> None:
 def test_resolve_accepts_a_binance_future_dated_contract() -> None:
     assert str(
         UniversalTicker.resolve("binanceum_future_btcusdt250926")
-    ) == "BinanceUM_Future_BTCUSDT250926"
+    ) == "BinanceUM_Future_BTCUSDT-250926"
+    assert str(
+        UniversalTicker.resolve("binanceum_future_btcusdt-250926")
+    ) == "BinanceUM_Future_BTCUSDT-250926"
 
 
 def test_of_normalizes_its_parts() -> None:
     assert str(UniversalTicker.of("Gate", "spot", "btc/usdt")) == "Gate_Spot_BTCUSDT"
+    assert str(
+        UniversalTicker.of("BinanceUM", "future", "btc-usdt-250926")
+    ) == "BinanceUM_Future_BTCUSDT-250926"
+    assert str(
+        UniversalTicker.of("BinanceUM", "option", "btc-usdt-260905-100000-c")
+    ) == "BinanceUM_Option_BTCUSDT-260905-100000-C"
 
 
 def test_category_lookup_ignores_case() -> None:

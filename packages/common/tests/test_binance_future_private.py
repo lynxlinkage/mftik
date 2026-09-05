@@ -41,7 +41,7 @@ from mftik.symbols import SymbolNotFoundError
 NATIVE = "BTC-USDT"
 TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 DATED_NATIVE = "BTCUSDT_250926"
-DATED_TICKER = UniversalTicker.parse("BinanceUM_Future_BTCUSDT250926")
+DATED_TICKER = UniversalTicker.parse("BinanceUM_Future_BTCUSDT-250926")
 
 OPEN_ORDER = {
     "symbol": NATIVE,
