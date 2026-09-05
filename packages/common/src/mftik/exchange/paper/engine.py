@@ -488,18 +488,33 @@ class PaperExchange:
             assert request.qty is not None
             remaining = request.qty - filled_qty
 
-        if remaining > 0 and request.type is OrderType.MARKET:
-            raise OrderError("insufficient liquidity for market order")
-
-        if remaining > 0 and request.tif is TimeInForce.IOC:
-            # IOC keeps what crossed and drops the rest. The remainder never
-            # rests, so it is never reserved — locking funds for it would fail
-            # orders the account can perfectly well afford to have filled.
+        if remaining > 0 and (
+            request.type is OrderType.MARKET
+            or request.tif is TimeInForce.IOC
+        ):
+            # An immediate instruction that outran the book keeps what
+            # crossed and drops the rest. Market and IOC are one event here,
+            # and the killed FOK above is the same judgement read from the
+            # other end: the answer is a cancelled order, not a refusal.
+            #
+            # A market order used to raise instead, on the line this replaces
+            # — but ``_match_taker_locked`` runs first, so by then it had
+            # moved both sides' balances, emitted both fills and published
+            # the public trade. The caller was told its order failed while
+            # holding what it had just bought, and the order was recorded
+            # terminal-REJECTED, so position and ledger disagreed with the
+            # order record. Real venues do not do that: Binance reports it
+            # ``EXPIRED``, which this tree already normalizes to CANCELED,
+            # and Bybit and OKX cancel outright.
+            #
+            # The remainder never rests, so it is never reserved — locking
+            # funds for it would fail orders the account can perfectly well
+            # afford to have filled.
             #
             # Acknowledged before being cancelled so the fills have a state to
-            # belong to: a partial IOC really did reach PARTIALLY_FILLED, and
+            # belong to: a partial fill really did reach PARTIALLY_FILLED, and
             # a strategy reading only the terminal row would otherwise see the
-            # size appear with nothing to say when. An IOC that took nothing
+            # size appear with nothing to say when. One that took nothing
             # could go straight to CANCELED the way a killed FOK does, but
             # the two rows cost nothing and keep this branch one shape.
             avg = (notional / filled_qty) if filled_qty > 0 else None
