@@ -9,10 +9,11 @@ which names are real and what each one needs.
 A venue here is **one connection with one credential**, which is the axis the
 API is actually organised on. Gate's spot and futures planes sign separately
 and speak to separate endpoints, so they are two venues (``Gate``,
-``GateFutures``) that happen to share a brand. Bybit's unified account signs
-once for both books, so it is one venue with two categories. What a venue
-trades is :attr:`Venue.categories`; which one an instrument is on is the middle
-part of its :class:`~mftik.exchange.tickers.UniversalTicker`.
+``GateFutures``) that happen to share a brand. Bybit's, OKX's and Bitget's
+unified accounts sign once for both books, so each is one venue with two
+categories. What a venue trades is :attr:`Venue.categories`; which one an
+instrument is on is the middle part of its
+:class:`~mftik.exchange.tickers.UniversalTicker`.
 
 Adding a venue is a one-entry change here plus the client wiring in TD/MD.
 """
@@ -214,6 +215,24 @@ OKX = Venue(
     requires_passphrase=True,
 )
 
+BITGET = Venue(
+    name="Bitget",
+    label="Bitget",
+    # Same unified-account shape as Bybit and OKX: one v3 credential (plus a
+    # passphrase) trades spot and both linear perpetual books. Classic Bitget
+    # accounts — v2 spot and mix as separate wallets — are not modelled; the
+    # adapter talks to the unified trading account and nowhere else. USDC-M
+    # folds into Perp because the symbol already names the settle coin
+    # (``BTCUSDC`` ≠ ``BTCUSDT``); Bitget's wire still splits them
+    # (``USDT-FUTURES`` vs ``USDC-FUTURES``). Identity is one Perp. Routing
+    # is not.
+    categories=frozenset({Category.SPOT, Category.PERP}),
+    # Sorted default would pick Perp; the hint stays on Spot (BG-1).
+    example_category=Category.SPOT,
+    api_types=frozenset({HMAC}),
+    requires_passphrase=True,
+)
+
 #: Every venue the platform knows, keyed by canonical name. The single source
 #: of truth — :func:`get` scans it rather than keeping a second index, so a
 #: test or a plugin that adds an entry here is immediately visible to lookups.
@@ -228,6 +247,7 @@ VENUES: dict[str, Venue] = {
         BINANCE_CM,
         BYBIT,
         OKX,
+        BITGET,
     )
 }
 
@@ -334,6 +354,7 @@ __all__ = [
     "BINANCE",
     "BINANCE_CM",
     "BINANCE_UM",
+    "BITGET",
     "BYBIT",
     "ED25519",
     "GATE",

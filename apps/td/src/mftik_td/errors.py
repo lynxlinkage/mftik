@@ -26,6 +26,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from mftik.exchange.bitget.protocol import (
+    BitgetAccountModeError,
+    BitgetAuthError,
+)
 from mftik.exchange.errors import (
     ExchangeNotConnectedError,
     InstrumentNotFoundError,
@@ -458,6 +462,53 @@ BYBIT = VenueErrors(
     },
 )
 
+#: Bitget UTA v3. Numeric codes only — v2 codes are not a fallback (V11).
+#: Unmapped codes pass through as themselves.
+#:
+#: **40085** is a UTA key on Classic v2 (or the reverse). Auth codes from
+#: the adapter's ``AUTH_CODES`` set land here. A crossed post-only is
+#: accepted then killed; the adapter puts words on the order and
+#: :func:`normalize_reason` matches them, the OKX ``CANCEL_REFUSALS``
+#: rule. Local refusals (passphrase, accountMode, missing posSide, spot
+#: market-buy base qty) are ours and live in :attr:`messages`.
+BITGET = VenueErrors(
+    messages=(
+        (
+            "the post-only order will take liquidity",
+            RejectCode.VENUE_POST_ONLY_WOULD_CROSS,
+        ),
+        ("passphrase is required", RejectCode.VENUE_AUTH_FAILED),
+        ("accountmode=", RejectCode.VENUE_PERMISSION_DENIED),
+        ("has no holdmode", RejectCode.VENUE_PERMISSION_DENIED),
+        ("hedge_mode requires posside", RejectCode.VENUE_INVALID_PARAM),
+        (
+            "spot market buy sizes qty in quote",
+            RejectCode.VENUE_INVALID_PARAM,
+        ),
+    ),
+    codes={
+        # credentials — Classic key on v3 / UTA key on v2
+        40006: RejectCode.VENUE_AUTH_FAILED,
+        40009: RejectCode.VENUE_AUTH_FAILED,
+        40014: RejectCode.VENUE_AUTH_FAILED,
+        40018: RejectCode.VENUE_AUTH_FAILED,
+        40085: RejectCode.VENUE_AUTH_FAILED,
+        # pacing
+        40034: RejectCode.VENUE_RATE_LIMITED,
+        429: RejectCode.VENUE_RATE_LIMITED,
+        # request / order
+        40015: RejectCode.VENUE_INVALID_PARAM,
+        40016: RejectCode.VENUE_INVALID_PARAM,
+        40017: RejectCode.VENUE_INVALID_PARAM,
+        43001: RejectCode.VENUE_ORDER_NOT_FOUND,
+        43012: RejectCode.VENUE_ORDER_NOT_FOUND,
+        22001: RejectCode.VENUE_ORDER_NOT_FOUND,
+        43011: RejectCode.VENUE_INSUFFICIENT_BALANCE,
+        40762: RejectCode.VENUE_BELOW_MINIMUM,
+        45110: RejectCode.VENUE_SYMBOL_NOT_TRADABLE,
+    },
+)
+
 #: The paper engine. Its errors carry no label, only a message — but the
 #: messages are ours, raised in ``mftik.exchange.paper.engine``, so matching on
 #: them is a maintenance question rather than a guess about a third party.
@@ -485,6 +536,7 @@ VENUES: dict[str, VenueErrors] = {
     "BinanceCM": BINANCE_UM,
     "Bybit": BYBIT,
     "Okx": OKX,
+    "Bitget": BITGET,
     "Gate": GATE,
     "GateFutures": GATE,
     "Paper": PAPER,
@@ -500,6 +552,13 @@ BY_TYPE: tuple[tuple[type[BaseException], RejectCode], ...] = (
     # Paper's only typed refusal; every other paper error is a bare
     # ``OrderError`` and falls to :attr:`VenueErrors.messages`.
     (PaperAuthError, RejectCode.VENUE_AUTH_FAILED),
+    # Before its base class: a UTA account that cannot trade is an account
+    # problem, not a key problem, and this tuple is read most-specific
+    # first. Without the subclass entry the ``accountmode=`` /
+    # ``has no holdmode`` fragments below are unreachable, because a typed
+    # match is resolved before any message fragment is.
+    (BitgetAccountModeError, RejectCode.VENUE_PERMISSION_DENIED),
+    (BitgetAuthError, RejectCode.VENUE_AUTH_FAILED),
 )
 
 
@@ -660,6 +719,7 @@ def _venue_code(exc: BaseException, table: VenueErrors) -> int | str | None:
 
 __all__ = [
     "BINANCE",
+    "BITGET",
     "BY_TYPE",
     "GATE",
     "OKX",

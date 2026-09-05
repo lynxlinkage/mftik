@@ -356,6 +356,63 @@ async def test_a_unified_venue_refreshes_each_book_independently(
     assert tickers == {"Bybit_Spot_BTCUSDT", "Bybit_Perp_BTCUSDT"}
 
 
+async def test_a_bitget_unified_venue_refreshes_each_book_independently(
+    plane_factory,
+) -> None:
+    """Bitget is one venue with two listings; USDT-M and USDC-M share Perp.
+
+    A spot refresh must not deactivate a perp row. The Perp source is
+    already the union — two Perp sources would wipe each other.
+    """
+    spot = StubSource(
+        [_inst("BTC", venue="Bitget", exch_ticker="BTCUSDT")],
+        venue="Bitget",
+    )
+    perp = StubSource(
+        [
+            _inst(
+                "BTC",
+                venue="Bitget",
+                category=Category.PERP,
+                exch_ticker="BTCUSDT",
+            ),
+            _inst(
+                "BTC",
+                quote="USDC",
+                venue="Bitget",
+                category=Category.PERP,
+                exch_ticker="BTCPERP",
+            ),
+        ],
+        venue="Bitget",
+        category=Category.PERP,
+    )
+    plane = plane_factory([spot, perp])
+
+    result = await plane.refresh()
+
+    assert result["refreshed"] == {"Bitget": 3}
+    tickers = {
+        s.universal_ticker
+        for s in (await plane.list_symbols(venue="Bitget")).symbols
+    }
+    assert tickers == {
+        "Bitget_Spot_BTCUSDT",
+        "Bitget_Perp_BTCUSDT",
+        "Bitget_Perp_BTCUSDC",
+    }
+
+    perp.instruments = perp.instruments[:1]
+    result = await plane.refresh()
+
+    assert result["deactivated"] == {"Bitget": 1}
+    tickers = {
+        s.universal_ticker
+        for s in (await plane.list_symbols(venue="Bitget")).symbols
+    }
+    assert tickers == {"Bitget_Spot_BTCUSDT", "Bitget_Perp_BTCUSDT"}
+
+
 async def test_a_failure_names_the_book_it_happened_on(plane_factory) -> None:
     """One venue name, two sources — the message is the only place that can
     say which of them was down."""

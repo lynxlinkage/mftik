@@ -6,6 +6,7 @@ import pytest
 from binance_delivery_stub import FakeBinanceDeliveryApi, FakeBinanceDeliveryUser
 from binance_future_stub import FakeBinanceFutureApi, FakeBinanceFutureUser
 from binance_stub import FakeBinanceApi, FakeBinanceStream, keypair
+from bitget_stub import FakeBitget
 from bybit_stub import FakeBybit
 from gate_future_stub import FakeGateFutures
 from gate_stub import FakeGate
@@ -178,6 +179,28 @@ async def okx():
 async def okx_public():
     """A FakeOkx standing in for a public socket — no login expected."""
     fake = FakeOkx(api_secret=None)
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def bitget():
+    """A FakeBitget that verifies login signatures; ``.url`` points at it."""
+    fake = FakeBitget()
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def bitget_public():
+    """A FakeBitget standing in for a public socket — no login expected."""
+    fake = FakeBitget(api_secret=None)
     server = await serve(fake.handler, "127.0.0.1", 0)
     fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
     yield fake

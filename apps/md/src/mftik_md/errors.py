@@ -162,6 +162,18 @@ BYBIT = VenueErrors(
     },
 )
 
+#: Bitget UTA v3. Numeric codes only (V11). A public read has no funds
+#: and no order to be wrong about.
+BITGET = VenueErrors(
+    codes={
+        40015: QueryCode.VENUE_INVALID_PARAM,
+        40016: QueryCode.VENUE_INVALID_PARAM,
+        40034: QueryCode.VENUE_RATE_LIMITED,
+        45110: QueryCode.VENUE_SYMBOL_NOT_FOUND,
+        40085: QueryCode.VENUE_INTERNAL_ERROR,
+    },
+)
+
 #: The paper engine, with nothing to map: it has no reader at all, so the
 #: factory refuses before any of this is reached. Listed so the venue is known
 #: rather than falling through as unrecognised.
@@ -175,6 +187,7 @@ VENUES: dict[str, VenueErrors] = {
     "BinanceUM": BINANCE_UM,
     "Bybit": BYBIT,
     "Okx": OKX,
+    "Bitget": BITGET,
     "Gate": GATE,
     "GateFutures": GATE,
     "Paper": PAPER,
@@ -240,6 +253,7 @@ def normalize(exc: BaseException, *, venue: str) -> int | str:
 
 __all__ = [
     "BINANCE",
+    "BITGET",
     "BY_TYPE",
     "GATE",
     "PAPER",

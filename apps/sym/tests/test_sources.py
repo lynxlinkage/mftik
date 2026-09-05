@@ -7,10 +7,15 @@ from decimal import Decimal
 import httpx
 import pytest
 from mftik.exchange.tickers import Category
-from mftik_sym.sources import PaperInstrumentSource, tick_from_precision
+from mftik_sym.sources import (
+    PaperInstrumentSource,
+    default_sources,
+    tick_from_precision,
+)
 from mftik_sym.sources.binance import BinanceSpotInstrumentSource
 from mftik_sym.sources.binance_delivery import BinanceDeliveryInstrumentSource
 from mftik_sym.sources.binance_future import BinanceFutureInstrumentSource
+from mftik_sym.sources.bitget import BitgetInstrumentSource
 from mftik_sym.sources.bybit import BybitInstrumentSource
 from mftik_sym.sources.gate import GateSpotInstrumentSource
 from mftik_sym.sources.gate_future import GateFuturesInstrumentSource
@@ -1039,3 +1044,113 @@ async def test_okx_envelope_refusal_does_not_empty_delist() -> None:
     )
     with pytest.raises(RuntimeError, match="50011"):
         await source.fetch()
+
+
+BITGET_USDT = {
+    "symbol": "BTCUSDT",
+    "category": "USDT-FUTURES",
+    "baseCoin": "BTC",
+    "quoteCoin": "USDT",
+    "type": "perpetual",
+    "status": "online",
+    "minOrderQty": "0.001",
+    "maxOrderQty": "100",
+    "minOrderAmount": "5",
+    "priceMultiplier": "0.1",
+    "quantityMultiplier": "0.001",
+}
+BITGET_USDC = {
+    "symbol": "BTCPERP",
+    "category": "USDC-FUTURES",
+    "baseCoin": "BTC",
+    "quoteCoin": "USDC",
+    "type": "perpetual",
+    "status": "online",
+    "minOrderQty": "0.001",
+    "maxOrderQty": "100",
+    "minOrderAmount": "5",
+    "priceMultiplier": "0.1",
+    "quantityMultiplier": "0.001",
+}
+BITGET_DELIVERY = {**BITGET_USDT, "symbol": "BTCUSDT-260327", "type": "delivery"}
+BITGET_SPOT = {
+    "symbol": "BTCUSDT",
+    "category": "SPOT",
+    "baseCoin": "BTC",
+    "quoteCoin": "USDT",
+    "status": "online",
+    "minOrderQty": "0.0001",
+    "maxOrderQty": "100",
+    "minOrderAmount": "5",
+    "priceMultiplier": "0.1",
+    "quantityMultiplier": "0.0001",
+}
+
+
+def _bitget(
+    by_product: dict[str, list[dict]],
+    *,
+    category: Category = Category.SPOT,
+) -> BitgetInstrumentSource:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3/market/instruments"
+        product = request.url.params["category"]
+        return httpx.Response(
+            200,
+            json={
+                "code": "00000",
+                "msg": "success",
+                "data": by_product.get(product, []),
+            },
+        )
+
+    return BitgetInstrumentSource(
+        category=category,
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://api.bitget.com",
+        ),
+    )
+
+
+async def test_bitget_spot_fetch_does_not_emit_a_perp_ticker() -> None:
+    instruments = await _bitget({"SPOT": [BITGET_SPOT, {"symbol": "BAD"}]}).fetch()
+    assert [str(i.ticker) for i in instruments] == ["Bitget_Spot_BTCUSDT"]
+    assert instruments[0].exch_ticker == "BTCUSDT"
+    assert instruments[0].settlement_asset is None
+
+
+async def test_i4_bitget_perp_fetch_unions_two_products_and_drops_delivery() -> None:
+    """I4 — one Perp listing, two fetches. Delivery is absent; malformed skipped."""
+    source = _bitget(
+        {
+            "USDT-FUTURES": [BITGET_USDT, BITGET_DELIVERY, {"symbol": "BAD"}],
+            "USDC-FUTURES": [BITGET_USDC],
+        },
+        category=Category.PERP,
+    )
+    instruments = await source.fetch()
+    tickers = {str(i.ticker) for i in instruments}
+    assert tickers == {"Bitget_Perp_BTCUSDT", "Bitget_Perp_BTCUSDC"}
+    by_ticker = {str(i.ticker): i for i in instruments}
+    assert by_ticker["Bitget_Perp_BTCUSDT"].quote == "USDT"
+    assert by_ticker["Bitget_Perp_BTCUSDT"].settlement_asset == "USDT"
+    assert by_ticker["Bitget_Perp_BTCUSDT"].exch_ticker == "BTCUSDT"
+    assert by_ticker["Bitget_Perp_BTCUSDC"].quote == "USDC"
+    assert by_ticker["Bitget_Perp_BTCUSDC"].settlement_asset == "USDC"
+    assert by_ticker["Bitget_Perp_BTCUSDC"].exch_ticker == "BTCPERP"
+
+
+def test_i4_default_sources_has_exactly_one_bitget_perp_source() -> None:
+    class _Broker:
+        pass
+
+    sources = default_sources(_Broker())  # type: ignore[arg-type]
+    bitget = [s for s in sources if getattr(s, "venue", None) == "Bitget"]
+    assert len(bitget) == 2
+    perps = [s for s in bitget if s.category is Category.PERP]
+    spots = [s for s in bitget if s.category is Category.SPOT]
+    assert len(perps) == 1
+    assert len(spots) == 1
+    assert perps[0].products == ("USDT-FUTURES", "USDC-FUTURES")
+

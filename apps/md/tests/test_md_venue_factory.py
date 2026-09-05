@@ -11,6 +11,7 @@ from mftik.exchange import PaperExchange
 from mftik.exchange.binance.delivery.public import BinanceDeliveryPublicClient
 from mftik.exchange.binance.future.public import BinanceFuturePublicClient
 from mftik.exchange.binance.spot.public import BinanceSpotPublicClient
+from mftik.exchange.bitget.public import BitgetPublicClient
 from mftik.exchange.bybit.public import BybitPublicClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.public import GateFuturesPublicClient
@@ -166,6 +167,28 @@ async def test_okx_venue_builds_one_client_for_every_category(
     assert client.name == "Okx"
     assert client._public is None
     assert client._business is None
+    assert hasattr(client, "stream_kline")
+    assert hasattr(client, "stream_best_quote")
+    assert hasattr(client, "stream_liquidation")
+    assert hasattr(client, "stream_funding_rate")
+    assert hasattr(client, "stream_open_interest")
+    assert not hasattr(client, "stream_agg_trades")
+
+
+async def test_bitget_venue_builds_one_client_for_every_category(
+    broker: Broker,
+) -> None:
+    """A unified venue is still one connector here.
+
+    Sockets are keyed on Bitget's category string, opened on first use.
+    Funding and OI ride the ticker (V5). There is no aggregated tape.
+    """
+    factory = VenuePublicFactory(broker)
+    client = await factory.create("Bitget")
+
+    assert isinstance(client, BitgetPublicClient)
+    assert client.name == "Bitget"
+    assert client._feeds == {}
     assert hasattr(client, "stream_kline")
     assert hasattr(client, "stream_best_quote")
     assert hasattr(client, "stream_liquidation")

@@ -33,6 +33,7 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
         "Binance",
         "BinanceCM",
         "BinanceUM",
+        "Bitget",
         "Bybit",
         "Gate",
         "GateFutures",
@@ -55,6 +56,10 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     assert by_name["Okx"].categories == ["Perp", "Spot"]
     assert by_name["Okx"].requires_passphrase is True
     assert by_name["Okx"].api_types == ["HMAC"]
+    assert by_name["Bitget"].categories == ["Perp", "Spot"]
+    assert by_name["Bitget"].requires_passphrase is True
+    assert by_name["Bitget"].api_types == ["HMAC"]
+    assert by_name["Bitget"].ticker_example == "Bitget_Spot_BTCUSDT"
     # Binance's USD-M plane is a venue of its own: separate hosts and a
     # separate wallet, so it cannot be a category of "Binance". Perp and
     # dated futures share that credential; the hint stays on the perpetual.
@@ -111,3 +116,18 @@ async def test_okx_refuses_a_credential_without_a_passphrase() -> None:
 
     assert exc.value.status_code == 400
     assert "passphrase" in exc.value.detail
+
+
+async def test_bitget_refuses_a_credential_without_a_passphrase() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await create_api(_body(venue="Bitget"))
+
+    assert exc.value.status_code == 400
+    assert "passphrase" in exc.value.detail
+
+
+async def test_bitget_refuses_an_rsa_credential() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await create_api(_body(venue="Bitget", type="RSA", passphrase="p"))
+
+    assert exc.value.status_code == 400

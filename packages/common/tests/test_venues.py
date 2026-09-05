@@ -27,6 +27,7 @@ def test_registry_lists_every_venue() -> None:
         "Binance",
         "BinanceCM",
         "BinanceUM",
+        "Bitget",
         "Bybit",
         "Gate",
         "GateFutures",
@@ -39,6 +40,7 @@ def test_registry_lists_every_venue() -> None:
     assert not venues.BINANCE.simulated
     assert not venues.BINANCE_UM.simulated
     assert not venues.BINANCE_CM.simulated
+    assert not venues.BITGET.simulated
     assert not venues.BYBIT.simulated
     assert not venues.OKX.simulated
 
@@ -56,6 +58,30 @@ def test_bybit_is_one_venue_trading_two_books() -> None:
     assert not bybit.requires_passphrase
     assert str(bybit.ticker("spot", "btc/usdt")) == "Bybit_Spot_BTCUSDT"
     assert str(bybit.ticker("perp", "BTCUSDT")) == "Bybit_Perp_BTCUSDT"
+
+
+def test_bitget_is_one_venue_trading_two_books_and_needs_a_passphrase() -> None:
+    """Same unified-account shape as OKX: HMAC plus a passphrase, two books.
+
+    USDC-M is still ``Perp`` — the symbol already names the settle coin —
+    so ``ticker("perp", "btcusdc")`` is a well-formed identity even though
+    Bitget's wire spells that book ``USDC-FUTURES``.
+    """
+    bitget = venues.require("Bitget")
+    assert bitget is venues.BITGET
+    assert bitget.categories == frozenset({Category.SPOT, Category.PERP})
+    assert bitget.api_types == frozenset({venues.HMAC})
+    assert bitget.requires_passphrase
+    assert bitget.ticker_example == "Bitget_Spot_BTCUSDT"
+    assert str(bitget.ticker("spot", "BTCUSDT")) == "Bitget_Spot_BTCUSDT"
+    assert str(bitget.ticker("perp", "btcusdc")) == "Bitget_Perp_BTCUSDC"
+    assert venues.validate_credential("Bitget", venues.HMAC).name == "Bitget"
+    with pytest.raises(venues.UnsupportedApiTypeError):
+        venues.validate_credential("Bitget", venues.ED25519)
+    with pytest.raises(venues.UnsupportedCategoryError, match="explicitly"):
+        bitget.ticker(None, "BTCUSDT")
+    with pytest.raises(venues.UnsupportedCategoryError):
+        bitget.ticker("inverse", "BTCUSD")
 
 
 def test_okx_is_one_venue_trading_two_books_and_needs_a_passphrase() -> None:

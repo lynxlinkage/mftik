@@ -50,6 +50,16 @@ from mftik.exchange.binance.future.rest import BinanceFuturePublicRest
 from mftik.exchange.binance.spot.client import BinanceSpotWsApi
 from mftik.exchange.binance.spot.protocol import BINANCE_SPOT_WS_API_URL
 from mftik.exchange.binance.spot.public import venue_interval as binance_interval
+from mftik.exchange.bitget.protocol import BITGET_REST_URL
+from mftik.exchange.bitget.protocol import product_of as bitget_product_of
+from mftik.exchange.bitget.public import (
+    FUNDING_CATEGORIES as BITGET_FUNDING_CATEGORIES,
+)
+from mftik.exchange.bitget.public import (
+    OPEN_INTEREST_CATEGORIES as BITGET_OPEN_INTEREST_CATEGORIES,
+)
+from mftik.exchange.bitget.public import venue_interval as bitget_interval
+from mftik.exchange.bitget.rest import BitgetPublicRest
 from mftik.exchange.bybit.protocol import (
     BYBIT_REST_URL,
     INVERSE,
@@ -872,6 +882,91 @@ class OkxReader:
         )
 
 
+class BitgetReader:
+    """Bitget reads over REST, across every book this epic lists.
+
+    Same unified-account shape as :class:`BybitReader`: the ticker names
+    the book, and ``product_of(ticker)`` — not ``product_of(category)`` —
+    turns it into the wire ``category``. USDC perps must hit
+    ``USDC-FUTURES``.
+    """
+
+    venue = "Bitget"
+
+    def __init__(
+        self,
+        *,
+        symbols: SymbolResolver,
+        rest: BitgetPublicRest | None = None,
+        base_url: str = BITGET_REST_URL,
+    ) -> None:
+        self.symbols = symbols
+        self.rest = rest or BitgetPublicRest(base_url=base_url)
+
+    async def connect(self) -> None:
+        await self.rest.connect()
+
+    async def close(self) -> None:
+        await self.rest.close()
+
+    async def _resolve(self, ticker: UniversalTicker) -> tuple[str, str]:
+        if ticker.venue != self.venue:
+            raise ValueError(
+                f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        return await self.symbols.exch_ticker(ticker), bitget_product_of(ticker)
+
+    async def fetch_klines(
+        self, ticker: UniversalTicker, interval: str, *, limit: int
+    ) -> list[Kline]:
+        canonical = normalize_interval(interval)
+        bar = bitget_interval(canonical)
+        native, product = await self._resolve(ticker)
+        klines = await self.rest.fetch_klines(
+            product, native, bar, ticker=ticker, limit=limit
+        )
+        return [
+            kline.model_copy(update={"interval": canonical}) for kline in klines
+        ]
+
+    async def fetch_order_book(
+        self, ticker: UniversalTicker, *, depth: int
+    ) -> OrderBook:
+        native, product = await self._resolve(ticker)
+        return await self.rest.fetch_order_book(
+            product, native, ticker=ticker, depth=depth
+        )
+
+    async def fetch_best_quote(self, ticker: UniversalTicker) -> BestQuote | None:
+        native, product = await self._resolve(ticker)
+        row = await self.rest.fetch_ticker_row(product, native)
+        return row.to_best_quote(ticker)
+
+    async def fetch_funding_history(
+        self, ticker: UniversalTicker, *, limit: int
+    ) -> list[FundingRate]:
+        """Settled rates, oldest first. Spot has none — refused before HTTP."""
+        if ticker.category not in BITGET_FUNDING_CATEGORIES:
+            raise NoReaderError(
+                f"{self.venue} {ticker.category} serves no funding history"
+            )
+        native, product = await self._resolve(ticker)
+        return await self.rest.fetch_funding_history(
+            product, native, ticker=ticker, limit=limit
+        )
+
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
+        """Current size. Spot is refused before HTTP (V5 / I6)."""
+        if ticker.category not in BITGET_OPEN_INTEREST_CATEGORIES:
+            raise NoReaderError(
+                f"{self.venue} {ticker.category} serves no open interest"
+            )
+        native, product = await self._resolve(ticker)
+        return await self.rest.fetch_open_interest(
+            product, native, ticker=ticker
+        )
+
+
 class ReaderFactory(Protocol):
     """Builds the reader for a venue name."""
 
@@ -912,6 +1007,8 @@ class VenueReaderFactory:
             return BybitReader(symbols=self._symbols)
         if venue == venues.OKX.name:
             return OkxReader(symbols=self._symbols)
+        if venue == venues.BITGET.name:
+            return BitgetReader(symbols=self._symbols)
         if venue == venues.PAPER.name:
             # The paper engine's book lives in another process and its prices
             # are invented tick by tick; nothing here can be read out of band.

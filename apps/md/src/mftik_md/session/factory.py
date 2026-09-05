@@ -10,6 +10,7 @@ from mftik.exchange import PaperExchange, venues
 from mftik.exchange.binance.delivery.public import BinanceDeliveryPublicClient
 from mftik.exchange.binance.future.public import BinanceFuturePublicClient
 from mftik.exchange.binance.spot.public import BinanceSpotPublicClient
+from mftik.exchange.bitget.public import BitgetPublicClient
 from mftik.exchange.bybit.public import BybitPublicClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.public import GateFuturesPublicClient
@@ -76,7 +77,7 @@ class VenuePublicFactory:
 
     Venues do not all publish the same feeds — Gate and Binance serve kline
     and best-quote, ``BinanceUM`` / ``BinanceCM`` / GateFutures /
-    Bybit / OKX add liquidations, only Binance coalesces the tape, paper
+    Bybit / OKX / Bitget add liquidations, only Binance coalesces the tape, paper
     serves a subset —
     so a subscribe to a topic the venue has no stream for fails at
     ``ensure_feed``, which is where that difference belongs.
@@ -131,6 +132,9 @@ class VenuePublicFactory:
         if resolved is venues.OKX:
             logger.info("MD building Okx public client")
             return OkxPublicClient(symbols=self._symbols)
+        if resolved is venues.BITGET:
+            logger.info("MD building Bitget public client")
+            return BitgetPublicClient(symbols=self._symbols)
         raise ExchangeError(
             f"venue {resolved.name!r} is registered but MD has no public "
             f"client for it"
