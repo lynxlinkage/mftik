@@ -61,9 +61,9 @@ from mftik.exchange.bitget.protocol import (
     sign_ws,
 )
 from mftik.exchange.bitget.public import (
+    BITGET_INTERVALS,
     FUNDING_CATEGORIES,
     LIQUIDATION_PRODUCTS,
-    BITGET_INTERVALS,
     OPEN_INTEREST_CATEGORIES,
     BitgetPublicClient,
     venue_interval,

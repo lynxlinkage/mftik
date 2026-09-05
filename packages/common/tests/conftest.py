@@ -6,10 +6,10 @@ import pytest
 from binance_delivery_stub import FakeBinanceDeliveryApi, FakeBinanceDeliveryUser
 from binance_future_stub import FakeBinanceFutureApi, FakeBinanceFutureUser
 from binance_stub import FakeBinanceApi, FakeBinanceStream, keypair
+from bitget_stub import FakeBitget
 from bybit_stub import FakeBybit
 from gate_future_stub import FakeGateFutures
 from gate_stub import FakeGate
-from bitget_stub import FakeBitget
 from okx_stub import FakeOkx
 from websockets.asyncio.server import serve
 

@@ -476,7 +476,9 @@ def kline_from_row(
     )
 
 
-def order_book_from_result(result: dict[str, Any], ticker: UniversalTicker) -> OrderBook:
+def order_book_from_result(
+    result: dict[str, Any], ticker: UniversalTicker
+) -> OrderBook:
     return BitgetOrderBook.model_validate(result).to_order_book(ticker)
 
 

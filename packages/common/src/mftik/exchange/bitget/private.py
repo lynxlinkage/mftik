@@ -151,7 +151,8 @@ class BitgetPrivateClient(BaseClient):
 
     def _apply_settings(self, settings: BitgetSettings) -> None:
         mode = (settings.account_mode or "").strip()
-        if not mode or mode in REFUSED_ACCOUNT_MODES or mode not in ACCEPTED_ACCOUNT_MODES:
+        refused = not mode or mode in REFUSED_ACCOUNT_MODES
+        if refused or mode not in ACCEPTED_ACCOUNT_MODES:
             raise BitgetAuthError(
                 f"Bitget accountMode={mode or 'unknown'!r} cannot trade; "
                 f"UTA required (accepted: {', '.join(sorted(ACCEPTED_ACCOUNT_MODES))})"

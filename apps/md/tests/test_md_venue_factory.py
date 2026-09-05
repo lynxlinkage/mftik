@@ -11,11 +11,11 @@ from mftik.exchange import PaperExchange
 from mftik.exchange.binance.delivery.public import BinanceDeliveryPublicClient
 from mftik.exchange.binance.future.public import BinanceFuturePublicClient
 from mftik.exchange.binance.spot.public import BinanceSpotPublicClient
+from mftik.exchange.bitget.public import BitgetPublicClient
 from mftik.exchange.bybit.public import BybitPublicClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.public import GateFuturesPublicClient
 from mftik.exchange.gate.spot.public import GateSpotPublicClient
-from mftik.exchange.bitget.public import BitgetPublicClient
 from mftik.exchange.okx.public import OkxPublicClient
 from mftik.exchange.paper.public import PaperPublicClient
 from mftik.exchange.venues import UnknownVenueError

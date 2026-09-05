@@ -26,12 +26,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from mftik.exchange.bitget.protocol import BitgetAuthError
 from mftik.exchange.errors import (
     ExchangeNotConnectedError,
     InstrumentNotFoundError,
     InsufficientBalanceError,
 )
-from mftik.exchange.bitget.protocol import BitgetAuthError
 from mftik.exchange.paper.private import PaperAuthError
 from mftik.protocol.reject_codes import RejectCode
 

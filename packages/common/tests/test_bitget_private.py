@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
-from mftik.exchange.bitget.models import BitgetAccount, BitgetFill, BitgetPosition
+from mftik.exchange.bitget.models import BitgetAccount, BitgetFill
 from mftik.exchange.bitget.private import (
     ACCEPTED_ACCOUNT_MODES,
     HEDGE_MODE,
@@ -26,7 +26,7 @@ from mftik.exchange.models import (
     TimeInForce,
 )
 from mftik.exchange.stream import EventStream
-from mftik.exchange.tickers import Category, UniversalTicker
+from mftik.exchange.tickers import UniversalTicker
 
 SPOT = UniversalTicker.parse("Bitget_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Bitget_Perp_BTCUSDT")
@@ -124,6 +124,11 @@ class FakeStream:
 
     async def subscribe_positions(self) -> EventStream:
         return self.positions
+
+
+@pytest.fixture
+def api() -> FakeApi:
+    return FakeApi()
 
 
 def _client(

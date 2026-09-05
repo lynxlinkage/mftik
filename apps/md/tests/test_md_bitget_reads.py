@@ -10,7 +10,7 @@ import pytest
 from mftik.exchange.bitget.protocol import BitgetRestError
 from mftik.exchange.bitget.rest import BitgetPublicRest
 from mftik.exchange.intervals import InvalidIntervalError
-from mftik.exchange.tickers import Category, UniversalTicker
+from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol.query_codes import QueryCode
 from mftik_md.errors import normalize
 from mftik_md.fetch.readers import BitgetReader, NoReaderError, VenueReaderFactory

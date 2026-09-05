@@ -8,13 +8,13 @@ from typing import Any
 
 import httpx
 import pytest
+from bitget_stub import FakeBitget
 from mftik.exchange.bitget import channels as ch
 from mftik.exchange.bitget.feed import BitgetPublicStream
 from mftik.exchange.bitget.public import BitgetPublicClient, venue_interval
 from mftik.exchange.bitget.rest import BitgetPublicRest
 from mftik.exchange.intervals import InvalidIntervalError
-from mftik.exchange.tickers import Category, UniversalTicker
-from bitget_stub import FakeBitget
+from mftik.exchange.tickers import UniversalTicker
 
 SPOT = UniversalTicker.parse("Bitget_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Bitget_Perp_BTCUSDT")
@@ -94,7 +94,11 @@ async def test_a_spot_ticker_never_opens_a_futures_socket(
     client = BitgetPublicClient(
         symbols=StubSymbols(),
         rest=BitgetPublicRest(base_url=BASE, client=api.client()),
-        feeds={"SPOT": BitgetPublicStream(bitget_public.url, inst_type="spot", ping_interval=0)},
+        feeds={
+            "SPOT": BitgetPublicStream(
+                bitget_public.url, inst_type="spot", ping_interval=0
+            )
+        },
     )
     async with client:
         stream = client.stream_ticker(SPOT)

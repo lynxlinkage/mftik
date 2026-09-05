@@ -7,16 +7,19 @@ from decimal import Decimal
 import httpx
 import pytest
 from mftik.exchange.tickers import Category
-from mftik_sym.sources import PaperInstrumentSource, tick_from_precision
+from mftik_sym.sources import (
+    PaperInstrumentSource,
+    default_sources,
+    tick_from_precision,
+)
 from mftik_sym.sources.binance import BinanceSpotInstrumentSource
 from mftik_sym.sources.binance_delivery import BinanceDeliveryInstrumentSource
 from mftik_sym.sources.binance_future import BinanceFutureInstrumentSource
+from mftik_sym.sources.bitget import BitgetInstrumentSource
 from mftik_sym.sources.bybit import BybitInstrumentSource
 from mftik_sym.sources.gate import GateSpotInstrumentSource
 from mftik_sym.sources.gate_future import GateFuturesInstrumentSource
-from mftik_sym.sources.bitget import BitgetInstrumentSource
 from mftik_sym.sources.okx import OkxInstrumentSource
-from mftik_sym.sources import default_sources
 
 # Trimmed rows in Gate's /spot/currency_pairs shape.
 GATE_ROWS = [

@@ -19,12 +19,12 @@ from mftik.exchange.binance.delivery.private import BinanceDeliveryPrivateClient
 from mftik.exchange.binance.future.private import BinanceFuturePrivateClient
 from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mftik.exchange.binance.spot.protocol import BinanceAuthError
+from mftik.exchange.bitget.private import BitgetPrivateClient
+from mftik.exchange.bitget.protocol import BitgetAuthError
 from mftik.exchange.bybit.private import BybitPrivateClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
-from mftik.exchange.bitget.private import BitgetPrivateClient
-from mftik.exchange.bitget.protocol import BitgetAuthError
 from mftik.exchange.okx.private import OkxPrivateClient
 from mftik.exchange.tickers import Category
 from mftik_td.session import PaperSessionFactory, VenueSessionFactory

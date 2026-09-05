@@ -5,9 +5,19 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from bitget_stub import API_KEY, API_SECRET, PASSPHRASE, FakeBitget
 from mftik.exchange.bitget.account import BitgetPrivateStream
 from mftik.exchange.bitget.channels import orders
-from bitget_stub import API_KEY, API_SECRET, PASSPHRASE, FakeBitget
+
+
+async def _until(predicate, *, timeout: float = 2.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("condition not reached")
 
 
 def _feed(stub: FakeBitget, **kwargs: Any) -> BitgetPrivateStream:
@@ -17,6 +27,8 @@ def _feed(stub: FakeBitget, **kwargs: Any) -> BitgetPrivateStream:
         passphrase=PASSPHRASE,
         url=stub.url,
         ping_interval=0,
+        retry_backoff=0.05,
+        max_retry_backoff=0.1,
         **kwargs,
     )
 
@@ -46,8 +58,10 @@ async def test_reconnect_re_logs_in_before_any_subscribe(bitget: FakeBitget) -> 
         await feed.subscribe_orders()
         assert bitget.logins == 1
         await bitget.drop()
-        await asyncio.sleep(0.2)
-        assert bitget.logins >= 2
+        await asyncio.wait_for(
+            _until(lambda: bitget.logins >= 2),
+            2,
+        )
         frames = bitget.frames_for("login")
         assert frames
         ts = frames[-1]["args"][0]["timestamp"]

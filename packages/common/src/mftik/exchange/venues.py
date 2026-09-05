@@ -227,6 +227,8 @@ BITGET = Venue(
     # (``USDT-FUTURES`` vs ``USDC-FUTURES``). Identity is one Perp. Routing
     # is not.
     categories=frozenset({Category.SPOT, Category.PERP}),
+    # Sorted default would pick Perp; the hint stays on Spot (BG-1).
+    example_category=Category.SPOT,
     api_types=frozenset({HMAC}),
     requires_passphrase=True,
 )

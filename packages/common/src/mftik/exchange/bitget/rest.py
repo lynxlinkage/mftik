@@ -366,7 +366,11 @@ class BitgetRest(_BitgetRestTransport):
 
     async def fetch_settings(self) -> BitgetSettings:
         data = await self._get(ch.ACCOUNT_SETTINGS)
-        row = data if isinstance(data, dict) else (_rows(data)[0] if _rows(data) else {})
+        if isinstance(data, dict):
+            row = data
+        else:
+            rows = _rows(data)
+            row = rows[0] if rows else {}
         if not isinstance(row, dict):
             raise BitgetRestError(
                 None, "empty settings reply", op=ch.ACCOUNT_SETTINGS

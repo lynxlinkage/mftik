@@ -11,6 +11,11 @@ import pytest
 from mftik.exchange import venues
 from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mftik.exchange.binance.spot.protocol import BinanceWsError
+from mftik.exchange.bitget.models import (
+    CANCEL_REFUSALS as BITGET_CANCEL_REFUSALS,
+)
+from mftik.exchange.bitget.models import BitgetOrderUpdate
+from mftik.exchange.bitget.protocol import BitgetRestError, BitgetWsError
 from mftik.exchange.bybit.protocol import BybitRestError, BybitWsError
 from mftik.exchange.errors import (
     ExchangeError,
@@ -23,11 +28,6 @@ from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
 from mftik.exchange.gate.spot.protocol import GateApiError, GateWsError
 from mftik.exchange.gate.spot.rest import GateRestError
-from mftik.exchange.bitget.models import (
-    CANCEL_REFUSALS as BITGET_CANCEL_REFUSALS,
-)
-from mftik.exchange.bitget.models import BitgetOrderUpdate
-from mftik.exchange.bitget.protocol import BitgetRestError, BitgetWsError
 from mftik.exchange.okx.models import CANCEL_REFUSALS, OkxOrderUpdate
 from mftik.exchange.okx.protocol import OkxRestError, OkxWsError
 from mftik.exchange.paper.private import PaperAuthError, PaperPrivateClient

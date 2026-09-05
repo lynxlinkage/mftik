@@ -47,6 +47,10 @@ _MARKET_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     # that flag, so both units are expressible. SWAP sizes in contracts.
     ("Okx", Category.SPOT): _BOTH_EITHER,
     ("Okx", Category.PERP): _BOTH_QTY,
+    # Spot market buy ``qty`` is quote on the wire (V6 / I9). Limit and
+    # market sell are base. Both linear perps size in base.
+    ("Bitget", Category.SPOT): {Side.BUY: _QUOTE, Side.SELL: _QTY},
+    ("Bitget", Category.PERP): _BOTH_QTY,
 }
 
 #: The same question for a limit order. Uniformly base today, which is why it
@@ -69,6 +73,8 @@ _LIMIT_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     ("Bybit", Category.PERP): _BOTH_QTY,
     ("Okx", Category.SPOT): _BOTH_QTY,
     ("Okx", Category.PERP): _BOTH_QTY,
+    ("Bitget", Category.SPOT): _BOTH_QTY,
+    ("Bitget", Category.PERP): _BOTH_QTY,
 }
 
 #: Every book in :mod:`~mftik.exchange.venues` needs a row in *both* tables. A
