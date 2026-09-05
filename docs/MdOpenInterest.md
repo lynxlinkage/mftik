@@ -36,6 +36,7 @@ publish it.
 | Venue | Live OI arrives on | Current snapshot |
 |---|---|---|
 | Bybit perp | `tickers.{symbol}` — same wire as `ticker` and `funding_rate` | `GET /v5/market/tickers` (`singleOpenInterest`, else half of `openInterest`) |
+| Bitget perp | `ticker` — `openInterest` on the same push as `ticker` / `funding_rate` | `GET /api/v3/market/open-interest` |
 | OKX SWAP | Dedicated `open-interest` channel, about every 3s | `GET /api/v5/public/open-interest` |
 | GateFutures | `futures.tickers.total_size` — same wire as `ticker` and `funding_rate`; halved | REST ticker `total_size / 2` |
 | BinanceUM | **No WS.** `@ticker` / `@markPrice` do not carry it | `GET /fapi/v1/openInterest` |

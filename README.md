@@ -99,10 +99,11 @@ A venue here is **one connection with one credential**. Binance spot and Binance
 | **Binance** | Spot | Ed25519 | yes | yes | yes | yes | yes | yes | yes | — |
 | **BinanceUM** | USD-M perp | Ed25519 | yes | yes | yes | yes | yes | yes | yes | yes |
 | **Bybit** | Spot + perp | HMAC | yes | yes | yes | yes | yes | yes | — | perp |
+| **Bitget** | Spot + perp | HMAC (+ passphrase) | yes | yes | yes | yes | yes | yes | — | perp |
 
 `yes` means the adapter serves it. `—` means a subscribe (or a query of that kind) is refused, not faked.
 
-History reads — `fetch_klines`, `fetch_order_book`, `fetch_best_quote` — are on both Gate planes, both Binance planes, and Bybit. They do not require a live feed. Paper answers ticker and book only.
+History reads — `fetch_klines`, `fetch_order_book`, `fetch_best_quote` — are on both Gate planes, both Binance planes, and Bybit. They do not require a live feed. Paper answers ticker and book only. Bitget also serves those reads, plus funding and open-interest snapshots on perp (ticker fields on the live feed).
 
 Binance's WebSocket API accepts **Ed25519** keys for `session.logon`. An HMAC key can still hit Binance REST; this adapter does not use REST for trading, so an HMAC credential is refused when you store it rather than failing the first order.
 

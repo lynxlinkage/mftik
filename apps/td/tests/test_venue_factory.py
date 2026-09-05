@@ -23,6 +23,8 @@ from mftik.exchange.bybit.private import BybitPrivateClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
+from mftik.exchange.bitget.private import BitgetPrivateClient
+from mftik.exchange.bitget.protocol import BitgetAuthError
 from mftik.exchange.okx.private import OkxPrivateClient
 from mftik.exchange.tickers import Category
 from mftik_td.session import PaperSessionFactory, VenueSessionFactory
@@ -241,6 +243,47 @@ async def test_okx_venue_builds_one_client_for_the_whole_account(
     assert hasattr(session.private, "stream_positions")
     assert hasattr(session.private, "fetch_positions")
     assert not session.private.connected
+
+
+async def test_bitget_venue_builds_one_client_for_the_whole_account(
+    broker: Broker,
+) -> None:
+    """One credential, a passphrase, one connector — every book."""
+    rows = {
+        13: FakeApiRow(
+            id=13,
+            venue="Bitget",
+            api_key="bg",
+            api_secret="bs",
+            passphrase="bp",
+        ),
+    }
+    factory = _factory(broker, rows)
+
+    session = await factory.create(13)
+
+    assert isinstance(session.private, BitgetPrivateClient)
+    assert session.private.name == "Bitget"
+    assert session.private.api_key == "bg"
+    assert session.private.passphrase == "bp"
+    assert session.private.category is Category.SPOT
+    assert hasattr(session.private, "stream_positions")
+    assert hasattr(session.private, "fetch_positions")
+    assert not session.private.connected
+
+
+async def test_a_bitget_credential_without_a_passphrase_fails_the_attach(
+    broker: Broker,
+) -> None:
+    rows = {
+        14: FakeApiRow(
+            id=14, venue="Bitget", api_key="bg", api_secret="bs"
+        ),
+    }
+    factory = _factory(broker, rows)
+
+    with pytest.raises(BitgetAuthError, match="passphrase"):
+        await factory.create(14)
 
 
 async def test_a_binance_credential_that_is_not_a_key_fails_the_attach(

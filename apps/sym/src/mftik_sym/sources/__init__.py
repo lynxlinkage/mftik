@@ -16,6 +16,7 @@ from mftik_sym.sources.base import (
 from mftik_sym.sources.binance import BinanceSpotInstrumentSource
 from mftik_sym.sources.binance_delivery import BinanceDeliveryInstrumentSource
 from mftik_sym.sources.binance_future import BinanceFutureInstrumentSource
+from mftik_sym.sources.bitget import BitgetInstrumentSource
 from mftik_sym.sources.bybit import BybitInstrumentSource
 from mftik_sym.sources.gate import GateSpotInstrumentSource
 from mftik_sym.sources.gate_future import GateFuturesInstrumentSource
@@ -28,10 +29,12 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
 
     ``broker`` is only needed by venues reached over IPC rather than HTTP.
 
-    Bybit and OKX appear twice, which is what a unified-account venue looks
-    like here: one credential, but two listings that are fetched and delisted
-    independently — see :mod:`mftik_sym.sources.bybit` and
-    :mod:`mftik_sym.sources.okx`.
+    Bybit, OKX and Bitget appear twice, which is what a unified-account
+    venue looks like here: one credential, but two listings that are
+    fetched and delisted independently — see :mod:`mftik_sym.sources.bybit`,
+    :mod:`mftik_sym.sources.okx` and :mod:`mftik_sym.sources.bitget`.
+    Bitget's Perp source is itself a union of two wire categories; a
+    second Perp source would deactivate the first.
 
     Binance appears as three venues — ``Binance``, ``BinanceUM`` and
     ``BinanceCM`` — because those are three credentials and three
@@ -54,6 +57,8 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
         BybitInstrumentSource(category=Category.PERP),
         OkxInstrumentSource(category=Category.SPOT),
         OkxInstrumentSource(category=Category.PERP),
+        BitgetInstrumentSource(category=Category.SPOT),
+        BitgetInstrumentSource(category=Category.PERP),
     ]
 
 
@@ -61,6 +66,7 @@ __all__ = [
     "BinanceDeliveryInstrumentSource",
     "BinanceFutureInstrumentSource",
     "BinanceSpotInstrumentSource",
+    "BitgetInstrumentSource",
     "BybitInstrumentSource",
     "GateFuturesInstrumentSource",
     "GateSpotInstrumentSource",

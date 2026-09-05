@@ -23,6 +23,11 @@ from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
 from mftik.exchange.gate.spot.protocol import GateApiError, GateWsError
 from mftik.exchange.gate.spot.rest import GateRestError
+from mftik.exchange.bitget.models import (
+    CANCEL_REFUSALS as BITGET_CANCEL_REFUSALS,
+)
+from mftik.exchange.bitget.models import BitgetOrderUpdate
+from mftik.exchange.bitget.protocol import BitgetRestError, BitgetWsError
 from mftik.exchange.okx.models import CANCEL_REFUSALS, OkxOrderUpdate
 from mftik.exchange.okx.protocol import OkxRestError, OkxWsError
 from mftik.exchange.paper.private import PaperAuthError, PaperPrivateClient
@@ -719,6 +724,85 @@ def _okx_refusal(source: str) -> str:
             "cancelSource": source,
             "px": "77518.1",
             "sz": "0.00001",
+        }
+    )
+    return row.refusal
+
+
+# --- Bitget -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (40085, RejectCode.VENUE_AUTH_FAILED),
+        (40009, RejectCode.VENUE_AUTH_FAILED),
+        (43001, RejectCode.VENUE_ORDER_NOT_FOUND),
+        (43011, RejectCode.VENUE_INSUFFICIENT_BALANCE),
+        (40762, RejectCode.VENUE_BELOW_MINIMUM),
+    ],
+)
+def test_bitget_codes_normalize(code: int, expected: RejectCode) -> None:
+    assert normalize(BitgetWsError(code, "refused"), venue="Bitget") == expected
+
+
+def test_an_unmapped_bitget_code_passes_through_as_itself() -> None:
+    assert normalize(BitgetWsError(49999, "new one"), venue="Bitget") == 49999
+
+
+def test_a_bitget_rest_refusal_normalizes_like_a_socket_one() -> None:
+    rest = BitgetRestError(40085, "Classic API", status=200)
+    assert normalize(rest, venue="Bitget") == RejectCode.VENUE_AUTH_FAILED
+
+
+@pytest.mark.parametrize("source", sorted(BITGET_CANCEL_REFUSALS))
+def test_every_bitget_refusal_the_adapter_raises_has_a_code_here(
+    source: str,
+) -> None:
+    assert isinstance(
+        normalize_reason(_bitget_refusal(source), venue="Bitget"), int
+    )
+
+
+def test_bitget_local_refusals_have_codes() -> None:
+    assert (
+        normalize(OrderError("Bitget passphrase is required"), venue="Bitget")
+        == RejectCode.VENUE_AUTH_FAILED
+    )
+    assert (
+        normalize(
+            OrderError("Bitget accountMode='switching' cannot trade"),
+            venue="Bitget",
+        )
+        == RejectCode.VENUE_PERMISSION_DENIED
+    )
+    assert (
+        normalize(
+            OrderError("Bitget hedge_mode requires posSide; the order was not sent"),
+            venue="Bitget",
+        )
+        == RejectCode.VENUE_INVALID_PARAM
+    )
+    assert (
+        normalize(
+            OrderError("Bitget spot market buy sizes qty in quote; set quote_qty"),
+            venue="Bitget",
+        )
+        == RejectCode.VENUE_INVALID_PARAM
+    )
+
+
+def _bitget_refusal(source: str) -> str:
+    row = BitgetOrderUpdate.model_validate(
+        {
+            "symbol": "BTCUSDT",
+            "orderId": "ord-1",
+            "side": "buy",
+            "orderType": "limit",
+            "orderStatus": "CANCELLED",
+            "cancelReason": source,
+            "price": "77518.1",
+            "qty": "0.00001",
         }
     )
     return row.refusal

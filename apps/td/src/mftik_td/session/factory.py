@@ -11,6 +11,7 @@ from mftik.exchange import PaperExchange, venues
 from mftik.exchange.binance.delivery.private import BinanceDeliveryPrivateClient
 from mftik.exchange.binance.future.private import BinanceFuturePrivateClient
 from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
+from mftik.exchange.bitget.private import BitgetPrivateClient
 from mftik.exchange.bybit.private import BybitPrivateClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.private import GateFuturesPrivateClient
@@ -242,6 +243,23 @@ class VenueSessionFactory:
             )
             logger.info(
                 "TD building Okx session api_id=%s key=%s…",
+                api_id,
+                row.api_key[:6],
+            )
+            return self._session(api_id, private)
+
+        if venue is venues.BITGET:
+            # Same unified-account story as OKX: one connector, one
+            # credential (plus the passphrase Bitget requires), every book.
+            # USDC-M is still Perp; the adapter routes it on the ticker.
+            private = BitgetPrivateClient(
+                api_key=row.api_key,
+                api_secret=row.api_secret,
+                passphrase=row.passphrase or "",
+                symbols=self._symbols,
+            )
+            logger.info(
+                "TD building Bitget session api_id=%s key=%s…",
                 api_id,
                 row.api_key[:6],
             )
