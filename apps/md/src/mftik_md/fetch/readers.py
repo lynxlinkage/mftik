@@ -53,6 +53,9 @@ from mftik.exchange.binance.spot.public import venue_interval as binance_interva
 from mftik.exchange.bitget.protocol import BITGET_REST_URL
 from mftik.exchange.bitget.protocol import product_of as bitget_product_of
 from mftik.exchange.bitget.public import (
+    FUNDING_CATEGORIES as BITGET_FUNDING_CATEGORIES,
+)
+from mftik.exchange.bitget.public import (
     OPEN_INTEREST_CATEGORIES as BITGET_OPEN_INTEREST_CATEGORIES,
 )
 from mftik.exchange.bitget.public import venue_interval as bitget_interval
@@ -943,7 +946,7 @@ class BitgetReader:
         self, ticker: UniversalTicker, *, limit: int
     ) -> list[FundingRate]:
         """Settled rates, oldest first. Spot has none — refused before HTTP."""
-        if ticker.category not in BITGET_OPEN_INTEREST_CATEGORIES:
+        if ticker.category not in BITGET_FUNDING_CATEGORIES:
             raise NoReaderError(
                 f"{self.venue} {ticker.category} serves no funding history"
             )
