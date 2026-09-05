@@ -54,6 +54,28 @@ def test_rewrite_text_hyphenates_dated_futures_only() -> None:
     )
 
 
+def test_rewrite_text_matches_the_symbol_grammar_it_migrates_to() -> None:
+    """The migration's pair class must not be narrower than the parser's.
+
+    ``_check_symbol`` admits the CJK meme tokens Gate lists, so an
+    ASCII-only rewrite would leave such a row glued — and a glued row
+    fails ``UniversalTicker.parse``, which raises on every symbol read for
+    that venue rather than only on the row. No dated book lists one today;
+    the two grammars agreeing is what keeps that from mattering.
+    """
+    rewrite_text = _migration().rewrite_text
+    assert (
+        rewrite_text("BinanceUM_Future_龙虾USDT250926")
+        == "BinanceUM_Future_龙虾USDT-250926"
+    )
+    # A digit run longer than six still splits on the last six, which is
+    # what ``normalize_symbol`` does with the same string.
+    assert (
+        rewrite_text("BinanceUM_Future_BTCUSDT2509261")
+        == "BinanceUM_Future_BTCUSDT2-509261"
+    )
+
+
 def test_rewrite_text_round_trips() -> None:
     rewrite_text = _migration().rewrite_text
     old = "aggtrade.BinanceUM_Future_BTCUSDT250926"
@@ -110,6 +132,17 @@ async def upgraded(database_url):
                     exch_ticker="BTCUSD_260925",
                 )
             )
+            # Selected by the LIKE pre-filter but left alone by the regex,
+            # so a re-run — or a row written after the code shipped — is
+            # not hyphenated twice.
+            session.add(
+                SymbolTicker(
+                    universal_ticker="BinanceUM_Future_ETHUSDT-251226",
+                    base="ETH",
+                    quote="USDT",
+                    exch_ticker="ETHUSDT_251226",
+                )
+            )
             session.add(
                 StsSessionRow(
                     session_id="s-1",
@@ -143,6 +176,7 @@ async def test_dated_tickers_and_session_documents_move(upgraded) -> None:
         assert tickers == [
             "BinanceCM_Future_BTCUSD-260925",
             "BinanceUM_Future_BTCUSDT-250926",
+            "BinanceUM_Future_ETHUSDT-251226",
             "BinanceUM_Perp_BTCUSDT",
         ]
         row = (await session.execute(sa.select(StsSessionRow))).scalar_one()

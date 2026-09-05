@@ -30,16 +30,33 @@ depends_on: Union[str, Sequence[str], None] = None
 
 #: ``Venue_Future_PAIRYYMMDD`` / ``Venue_Option_PAIRYYMMDD``. The lookbehind
 #: keeps a feed key prefix (``aggtrade.``) out of the venue; the lookahead
-#: refuses a longer digit run and refuses to touch an already-hyphenated
-#: option (``PAIR-YYMMDD-STRIKE-C``).
-_GLUED = re.compile(
-    r"(?P<head>(?<![A-Za-z0-9])[A-Z][A-Za-z0-9]*_(?:Future|Option)_)"
-    r"(?P<pair>[A-Z0-9]+)(?P<date>\d{6})(?![0-9A-Za-z-])"
-)
+#: refuses to touch an already-hyphenated option
+#: (``PAIR-YYMMDD-STRIKE-C``).
+#:
+#: The venue half stays ASCII because ``_VENUE_RE`` says venue names are.
+#: The pair half does not: ``_check_symbol`` deliberately admits the CJK
+#: meme tokens Gate lists, and a row this skipped would survive the
+#: upgrade in a spelling ``UniversalTicker.parse`` then refuses — which
+#: takes out every symbol read for that venue, not just the one row. No
+#: such instrument is listed on a dated book today; matching the grammar
+#: the tree enforces is cheaper than depending on that.
+_PAIR = r"[^\W_]+"
+#: Not followed by another symbol character or a hyphen — same rule as the
+#: pair, so a longer digit run and a hyphenated option both stay untouched.
+_TAIL = r"(?![^\W_]|-)"
+_HEAD = r"(?P<head>(?<![A-Za-z0-9])[A-Z][A-Za-z0-9]*_(?:Future|Option)_)"
+
+_GLUED = re.compile(_HEAD + rf"(?P<pair>{_PAIR})(?P<date>\d{{6}})" + _TAIL)
 _HYPHENATED = re.compile(
-    r"(?P<head>(?<![A-Za-z0-9])[A-Z][A-Za-z0-9]*_(?:Future|Option)_)"
-    r"(?P<pair>[A-Z0-9]+)-(?P<date>\d{6})(?![0-9A-Za-z-])"
+    _HEAD + rf"(?P<pair>{_PAIR})-(?P<date>\d{{6}})" + _TAIL
 )
+
+#: Cheap, portable superset of "this value could hold a dated ticker",
+#: used to keep the row loop off every order and fill ever recorded. No
+#: ``_`` in the pattern and so no ``ESCAPE`` clause: ``_`` is a LIKE
+#: wildcard, the dialects spell the escape differently, and the regex is
+#: what actually decides. A superset is all this has to be.
+_DATED_LIKE = ("%Future%", "%Option%")
 
 #: Columns that hold a universal ticker, or a feed key that embeds one.
 _TICKER_COLUMNS = (
@@ -100,8 +117,21 @@ def _rewrite_column(
     *,
     reverse: bool,
 ) -> None:
+    # Only the dated rows are read. ``orders`` and ``fills`` grow one row
+    # per order state change and per execution, and the rows this rewrites
+    # are the handful of Binance dated futures — so selecting the table
+    # whole would pull a production history into memory to change almost
+    # none of it. 0029 was set-based for the same reason; the rewrite here
+    # is a regex rather than a ``replace()``, so the predicate moves to the
+    # SELECT instead.
     cols = ", ".join((*pk, column))
-    rows = bind.execute(sa.text(f"SELECT {cols} FROM {table}")).fetchall()
+    like = " OR ".join(
+        f"{column} LIKE :pat{i}" for i in range(len(_DATED_LIKE))
+    )
+    rows = bind.execute(
+        sa.text(f"SELECT {cols} FROM {table} WHERE {like}"),
+        {f"pat{i}": pattern for i, pattern in enumerate(_DATED_LIKE)},
+    ).fetchall()
     for row in rows:
         value = row[-1]
         if not isinstance(value, str) or not value:
