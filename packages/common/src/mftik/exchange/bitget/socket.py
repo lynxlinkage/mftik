@@ -1,13 +1,14 @@
 """The connection machinery Bitget's public and private sockets share.
 
-Both take ``{"id", "op", "args"}``, answer on the id they were given (or
-on ``event``), push ``{"arg", "data"}`` frames, and expect the literal
-string ``ping``. So the reconnect loop, the request/reply correlation,
-the heartbeat and the push fan-out live here once.
+Both take ``{"id", "op", "args"}``. The venue's v3 ACK often omits ``id``
+even when we sent one — subscribe comes back as
+``{"event", "arg", "connId"}``. Correlation is therefore: the id when
+present, otherwise ``(event, arg)``, the same rule handshake already
+used for login. Pushes are ``{"arg", "data"}``. The heartbeat is the
+literal string ``ping``; the pong is ``pong``. Neither is JSON.
 
 **The heartbeat is not optional.** Bitget closes a connection that has
-sent nothing for ~2 minutes. The ping is the text ``ping`` and the pong
-is the text ``pong`` — neither is JSON.
+sent nothing for ~2 minutes.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from typing import Any
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
+from mftik.exchange.bitget.channels import arg_key
 from mftik.exchange.bitget.protocol import (
     PONG,
     BitgetResponse,
@@ -39,6 +41,36 @@ DEFAULT_PING_INTERVAL = 20.0
 class _Pending:
     future: asyncio.Future[BitgetResponse]
     op: str
+    args: tuple[dict[str, Any], ...] = ()
+
+
+def _frame_args(frame: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    raw = frame.get("args")
+    if not isinstance(raw, list):
+        return ()
+    return tuple(arg for arg in raw if isinstance(arg, dict))
+
+
+def _ack_matches(
+    resp: BitgetResponse,
+    *,
+    req_id: str,
+    op: str,
+    args: tuple[dict[str, Any], ...] = (),
+) -> bool:
+    """Whether ``resp`` is the ACK for this request.
+
+    Bitget's v3 subscribe ACK omits ``id``. An id-less reply matches on
+    ``event == op``, and on ``arg`` when two subscribes share the socket.
+    """
+    if resp.req_id:
+        return resp.req_id == req_id
+    if not (op and resp.event == op):
+        return False
+    if not resp.arg or not args:
+        return True
+    want = arg_key(resp.arg)
+    return any(arg_key(arg) == want for arg in args)
 
 
 @dataclass
@@ -180,7 +212,9 @@ class BitgetSocket:
             return await self.handshake(frame, req_id, op=op)
         wait = timeout or self.ack_timeout
         loop = asyncio.get_running_loop()
-        pending = _Pending(future=loop.create_future(), op=op)
+        pending = _Pending(
+            future=loop.create_future(), op=op, args=_frame_args(frame)
+        )
         self._pending[req_id] = pending
         try:
             await self.send(frame)
@@ -217,7 +251,9 @@ class BitgetSocket:
             if message is None:
                 continue
             resp = BitgetResponse(message)
-            if resp.req_id != req_id and not (op and resp.event == op):
+            if not _ack_matches(
+                resp, req_id=req_id, op=op, args=_frame_args(frame)
+            ):
                 logger.debug("%s dropping pre-handshake frame %r", self.name, resp)
                 continue
             resp.raise_for_error()
@@ -322,7 +358,7 @@ class BitgetSocket:
         if resp.is_pong:
             return
         if resp.is_reply:
-            pending = self._pending.get(resp.req_id or "")
+            pending = self._lookup_pending(resp)
             if pending is not None:
                 if not pending.future.done():
                     pending.future.set_result(resp)
@@ -336,6 +372,20 @@ class BitgetSocket:
             self._push(resp)
             return
         logger.debug("%s ignoring frame %r", self.name, resp)
+
+    def _lookup_pending(self, resp: BitgetResponse) -> _Pending | None:
+        if resp.req_id:
+            return self._pending.get(resp.req_id)
+        found: _Pending | None = None
+        for pending in self._pending.values():
+            if not _ack_matches(
+                resp, req_id="", op=pending.op, args=pending.args
+            ):
+                continue
+            if found is not None:
+                return None
+            found = pending
+        return found
 
     def _fail(self) -> None:
         self._connected = False
