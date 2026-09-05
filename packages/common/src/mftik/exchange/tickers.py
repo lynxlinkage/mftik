@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from mftik.exchange.errors import ExchangeError
-from mftik.exchange.symbols import normalize_symbol
+from mftik.exchange.symbols import forbidden_in_symbol, normalize_symbol
 
 #: What splits the three parts, and so what none of them may contain.
 SEPARATOR = "_"
@@ -196,12 +196,38 @@ def _check_symbol(symbol: str, category: Category) -> str:
     """Accept a symbol that is already in platform form.
 
     Pairs are separator-free (``BTCUSDT``). Dated futures and options
-    keep ``-`` between fields (``BTCUSDT-250926``). The test is
+    keep ``-`` between fields (``BTCUSDT-250926``). The main test is
     ``normalize_symbol(s) == s`` rather than a character class: a spelling
     this would have had to change cannot sit in a column, and an
     ASCII-only rule would reject the CJK meme tokens Gate actually lists.
-    ``_`` is still forbidden — it separates the ticker.
+
+    That test alone is not enough, which is why the character check comes
+    first. Normalizing is not validating: the structured grammar keeps an
+    option's strike verbatim, so ``BTCUSDT-260905-10_000-C`` is its own
+    normal form and would pass — and then render a ticker that
+    :meth:`UniversalTicker.parse` splits into four parts and refuses. A
+    value this can build but cannot read back is the one failure this type
+    exists to prevent, so ``_``, whitespace and ``/`` are refused by name.
     """
+    bad = forbidden_in_symbol(symbol)
+    if bad is not None:
+        # '.' is refused for a different reason from the rest, and saying
+        # so is the point: it is the obvious way to spell a fractional
+        # strike, so whoever hits this is asking a question rather than
+        # making a typo. See _FORBIDDEN_IN_SYMBOL.
+        why = (
+            "how a fractional strike is spelled is not decided yet, and "
+            "'.' already separates a feed key's topic from its ticker"
+            if bad == "."
+            else (
+                f"{SEPARATOR!r} separates the ticker's three parts, and "
+                f"'-' separates a dated or option symbol's fields"
+            )
+        )
+        raise InvalidTickerError(
+            f"invalid symbol {symbol!r} in a universal ticker; {bad!r} "
+            f"cannot appear inside a symbol — {why}"
+        )
     if not symbol or normalize_symbol(symbol, category=category) != symbol:
         raise InvalidTickerError(
             f"invalid symbol {symbol!r} in a universal ticker; symbols are "

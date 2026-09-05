@@ -37,7 +37,7 @@ def test_canonical_tolerates_empty_input() -> None:
         ("btc-usdt-250926", "future", "BTCUSDT-250926"),
         ("BTCUSDT-250926", "future", "BTCUSDT-250926"),
         ("BTC-USDT-260905-100000-C", "option", "BTCUSDT-260905-100000-C"),
-        ("AVAXUSDC-260905-6.4-c", "option", "AVAXUSDC-260905-6.4-C"),
+        ("avaxusdc-260905-64-c", "option", "AVAXUSDC-260905-64-C"),
         ("BTCUSDT", Category.PERP, "BTCUSDT"),
     ],
 )
@@ -45,6 +45,32 @@ def test_normalize_symbol_keeps_structured_hyphens(
     symbol: str, category: str | Category, want: str
 ) -> None:
     assert normalize_symbol(symbol, category=category) == want
+
+
+@pytest.mark.parametrize(
+    ("symbol", "want"),
+    [
+        ("BTCUSDT", None),
+        ("BTCUSDT-250926", None),
+        ("BTCUSDT-260905-100000-C", None),
+        ("龙虾USDT", None),
+        ("BTCUSDT-260905-6.4-C", "."),
+        ("BTC_USDT", "_"),
+        ("BTCUSDT-260905-10_000-C", "_"),
+        ("BTCUSDT-260905-10 000-C", " "),
+        ("BTC/USDT", "/"),
+    ],
+)
+def test_forbidden_in_symbol_names_the_character(
+    symbol: str, want: str | None
+) -> None:
+    """``-`` is a field separator; the rest of the pair punctuation is not.
+
+    ``normalize_symbol`` folds these out of a pair but keeps an option's
+    strike verbatim, so this is the check that a kept field cannot smuggle
+    one into a ticker.
+    """
+    assert symbols.forbidden_in_symbol(symbol) == want
 
 
 def test_join_renders_a_venue_spelling_from_known_parts() -> None:

@@ -115,6 +115,54 @@ def test_a_non_ascii_symbol_still_has_to_be_canonical() -> None:
 
 
 @pytest.mark.parametrize(
+    "strike", ["10_000", "10 000", "10/000"]
+)
+def test_of_refuses_a_field_it_would_render_unparseable(strike: str) -> None:
+    """``of`` must not build what ``parse`` will not read back.
+
+    The structured grammar keeps an option's strike verbatim rather than
+    folding it, so a strike carrying pair punctuation is its own normal
+    form. Left to the ``normalize_symbol(s) == s`` test alone it would pass
+    — and then render ``Bybit_Option_BTCUSDT-260905-10_000-C``, which
+    splits into four parts and is refused on the way home. A value the
+    lenient boundary can build but the strict one cannot read is the exact
+    failure this type exists to prevent, so it is refused where it is made.
+    """
+    with pytest.raises(InvalidTickerError, match="cannot"):
+        UniversalTicker.of("Bybit", "option", f"BTCUSDT-260905-{strike}-C")
+
+
+def test_a_fractional_strike_is_refused_until_an_encoding_is_chosen() -> None:
+    """Not a parse failure — a decision nobody has made yet.
+
+    ``.`` would survive a ticker today, but only because every reader of a
+    feed key (``bestquote.Gate_Spot_BTCUSDT``) happens to split leftmost.
+    That is an implementation, not a grammar, and no venue here lists an
+    option yet — so the cheap moment to refuse it is now, while refusing
+    costs nothing. The epic that lists the first option with a fractional
+    strike picks the encoding on purpose and lifts this.
+    """
+    with pytest.raises(InvalidTickerError, match=r"'\.' cannot"):
+        UniversalTicker.of("Bybit", "option", "AVAXUSDC-260905-6.4-C")
+
+
+def test_every_symbol_of_builds_survives_a_round_trip() -> None:
+    """The invariant the check above defends, stated as the round trip."""
+    for symbol in (
+        "BTCUSDT",
+        "BTCUSDT-250926",
+        "BTCUSDT-260905-100000-C",
+        "BTCUSDT-260905-100000-P",
+        "龙虾USDT",
+    ):
+        category = "option" if symbol.count("-") == 3 else (
+            "future" if "-" in symbol else "spot"
+        )
+        built = UniversalTicker.of("Bybit", category, symbol)
+        assert UniversalTicker.parse(str(built)) == built
+
+
+@pytest.mark.parametrize(
     "loose",
     [
         "Gate_Spot_BTCUSDT",
@@ -152,8 +200,8 @@ def test_of_normalizes_its_parts() -> None:
         UniversalTicker.of("BinanceUM", "future", "btc-usdt-250926")
     ) == "BinanceUM_Future_BTCUSDT-250926"
     assert str(
-        UniversalTicker.of("BinanceUM", "option", "btc-usdt-260905-6.4-c")
-    ) == "BinanceUM_Option_BTCUSDT-260905-6.4-C"
+        UniversalTicker.of("BinanceUM", "option", "btc-usdt-260905-100000-c")
+    ) == "BinanceUM_Option_BTCUSDT-260905-100000-C"
 
 
 def test_category_lookup_ignores_case() -> None:

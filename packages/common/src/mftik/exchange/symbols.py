@@ -37,6 +37,26 @@ _DATE_CODE = re.compile(r"\d{6}\Z")
 #: Categories whose symbol may carry ``-`` as a field separator.
 _STRUCTURED = frozenset({"future", "option"})
 
+#: The punctuation :func:`canonical` folds out of a pair, minus ``-`` —
+#: the one character the structured grammar promotes to a field separator.
+#: Refused inside a symbol rather than folded away, because
+#: :func:`normalize_symbol` does not fold every field it keeps: an option's
+#: strike is passed through verbatim, so a ``_`` there would otherwise ride
+#: into a ticker that :meth:`UniversalTicker.parse` cannot split back.
+#:
+#: ``.`` is here for a different reason, and only until something decides
+#: otherwise. A fractional strike has to be spelled *somehow*, and a
+#: decimal point is the obvious candidate — but ``.`` is also what a feed
+#: key uses to separate its topic from its ticker
+#: (``bestquote.Gate_Spot_BTCUSDT``). Every parse of one happens to split
+#: leftmost today, so a ``.`` inside the ticker survives by implementation
+#: rather than by grammar. No venue here lists an option yet, so refusing
+#: it costs nothing and makes the first listing that needs a fractional
+#: strike state the encoding on purpose, instead of inheriting one nobody
+#: chose. Whoever lifts this owes the grammar a sentence and the feed key
+#: a test.
+_FORBIDDEN_IN_SYMBOL = re.compile(r"[/_.\s]")
+
 
 class SymbolResolver(Protocol):
     """Two-way symbol translation, backed by the symbol plane.
@@ -135,6 +155,21 @@ def normalize_symbol(symbol: str, *, category: str | None = None) -> str:
     return compact
 
 
+def forbidden_in_symbol(symbol: str) -> str | None:
+    """The first character a platform symbol may not contain, or ``None``.
+
+    A symbol is checked for this rather than trusted to
+    :func:`normalize_symbol`, because normalizing is not the same as
+    validating: the structured grammar keeps some fields verbatim, so a
+    spelling can be its own normal form and still be unspellable as a
+    ticker. ``_`` separates the ticker's three parts and whitespace and
+    ``/`` are pair punctuation that only ever reach here through a field
+    ``normalize_symbol`` passes through.
+    """
+    found = _FORBIDDEN_IN_SYMBOL.search(symbol or "")
+    return found.group(0) if found else None
+
+
 def _is_option_parts(parts: list[str]) -> bool:
     return (
         len(parts) >= 4
@@ -157,6 +192,7 @@ __all__ = [
     "check_venue",
     "canonical",
     "canonical_symbol",
+    "forbidden_in_symbol",
     "join",
     "normalize_symbol",
 ]
