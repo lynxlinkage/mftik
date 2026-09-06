@@ -214,6 +214,7 @@ async def amain() -> bool:
             mark_done=md_db.mark_session_done,
             list_db_sessions=md_db.list_sessions,
             recorder=_build_recorder(broker),
+            instance=INSTANCE,
         )
         # Up for as long as the process is, and attached to nothing. A read
         # is owned by nobody, so the fetch plane needs no lease and no

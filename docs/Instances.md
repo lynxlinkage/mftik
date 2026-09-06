@@ -863,10 +863,19 @@ depends on the ticket that *moves the callers*.
 
 **Scope.**
 
-- `_ALIVE_DOMAIN` becomes `md:{instance}`; `reap_orphans` follows.
-- `MdSessionRepository.mark_done_session` takes the instance in its predicate.
-- The `md_sessions` unique constraint (already migrated in INS-1) is honoured
-  by `persist_live_session`.
+- `_ALIVE_DOMAIN` becomes `md:{instance}`.
+- `MdSessionRepository.mark_done_session` takes the instance in its predicate,
+  and `get_live` / `create_live` / `attach_live` / `mark_done` key on the
+  triple the INS-1 constraint already declares.
+- `persist_live_session` records the instance.
+- **A fourth, found while building the third.** The reap scan was
+  instance-blind in its own right: it lists every live row and, for one it does
+  not hold a link for, marks it done. With two MDs that closes a healthy
+  peer's rows on every scan. Filtering the scan to this instance is the wrong
+  fix — it would leave the rows of an MD that died outright live forever, with
+  no process anywhere in a position to notice, which is the recovery the
+  reaper exists for. The scan stays global and decides each row against *its
+  own* instance's key.
 
 **Problem.** All three are silent today and become live the moment INS-7 can
 split a session. Landing them after INS-7 means a window where a detach on one
@@ -876,12 +885,17 @@ MD tears down another's healthy link.
 
 **Verify.**
 
-- Two MDs attached to one session; one detaches; the other's link survives and
-  its rows stay `live` — the PI-4 test.
-- One MD's `reap_orphans` does not close a peer's rows (PI-6), extending
-  `test_md_orphan_reaper.py`.
-- `test_md_lease_resilience.py` and `test_md_shared_venue_topics.py` grow a
-  two-instance case.
+- Two MDs attached to one session; one detaches; the other's link survives, its
+  rows stay `live`, and the liveness key it lives behind is untouched — PI-4.
+- A reap scan does not close a session **only the peer holds** — PI-6. The
+  shape matters: two instances on the *same* session proves nothing, because
+  this instance's own key exists for that session too and the wrong key still
+  answers "alive". The bug only shows when the peer holds a session this one
+  does not.
+- An instance that died outright is still reaped by a peer, so the global scan
+  keeps the recovery it exists for.
+- Each fix is checked by regressing it and watching the right test fail. A
+  test that passes before and after is not evidence.
 
 **Depends.** INS-1. Independent of INS-2 and INS-3.
 

@@ -11,11 +11,12 @@ from mftik_db.session import session_scope
 
 async def persist_live_session(
     *,
+    instance: str,
     session_id: str,
     created_by: int,
     venues: list[str] | None = None,
 ) -> list[MdSessionRow]:
-    """Upsert live attach rows for each venue bound to ``session_id``."""
+    """Upsert live attach rows for each venue this instance holds."""
     venue_list = list(venues or [])
     if not venue_list:
         return []
@@ -25,6 +26,7 @@ async def persist_live_session(
         for venue in venue_list:
             out.append(
                 await repo.attach_live(
+                    instance=instance,
                     venue=venue,
                     session_id=session_id,
                     created_by=created_by,
@@ -33,10 +35,13 @@ async def persist_live_session(
     return out
 
 
-async def mark_session_done(*, session_id: str) -> list[MdSessionRow]:
+async def mark_session_done(
+    *, session_id: str, instance: str
+) -> list[MdSessionRow]:
+    """Close only this instance's rows — see the repository method."""
     async with session_scope() as db:
         repo = MdSessionRepository(db)
-        return await repo.mark_done_session(session_id)
+        return await repo.mark_done_session(session_id, instance=instance)
 
 
 async def list_sessions(

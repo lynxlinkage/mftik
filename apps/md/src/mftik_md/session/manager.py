@@ -49,9 +49,17 @@ LEASE_GRACE_S = 3.0
 #: much of the grace window that a still-live STS reads as expired.
 RESUBSCRIBE_DELAY_S = 0.5
 
-#: Which liveness key an MD attach holds. MD's own, not the STS session's:
-#: the two processes die independently, and it is MD's row being guarded.
-_ALIVE_DOMAIN = SessionDomain.MD.value
+def _alive_domain(instance: str) -> str:
+    """Which liveness key one MD instance's attach holds.
+
+    MD's own, not the STS session's: the two processes die independently, and
+    it is MD's row being guarded. Keyed per *instance* rather than per plane,
+    because ``liveness.py`` writes one key per ``(domain, session)`` — so two
+    MDs holding one session would share a key, and the first to detach would
+    ``clear_alive`` the one the survivor is living behind. Its reaper would
+    then tear down a link with nothing wrong with it.
+    """
+    return f"{SessionDomain.MD.value}:{instance}"
 
 #: How many consecutive scans must agree before a link this process holds is
 #: torn down. The key is refreshed by the lease loop and by nothing else, so
@@ -92,9 +100,15 @@ class SessionManager:
         list_db_sessions: ListDbSessions | None = None,
         lease_grace: float = LEASE_GRACE_S,
         recorder: TapeRecorder | None = None,
+        instance: str = SessionDomain.MD.value,
     ) -> None:
         self._factory = factory
         self._broker = broker
+        #: Which MD this is. Defaults to the plane name, which is what
+        #: ``MFTIK_INSTANCE`` resolves to when nobody has set it and what
+        #: migration 0031 declares.
+        self._instance = instance
+        self._alive_domain = _alive_domain(instance)
         self._persist_live = persist_live
         self._mark_done = mark_done
         self._list_db_sessions = list_db_sessions
@@ -106,9 +120,11 @@ class SessionManager:
         self._dispatcher = Dispatcher(broker, recorder=recorder)
         self._venues: dict[str, VenueSession] = {}
         self._links: dict[str, StsLink] = {}
-        #: ``session_id`` → consecutive scans that found no liveness key for a
-        #: link this process holds. See :data:`_ORPHAN_STRIKES`.
-        self._orphan_strikes: dict[str, int] = {}
+        #: ``(instance, session_id)`` → consecutive scans that found no
+        #: liveness key. Keyed by the pair because one session can have rows
+        #: from several instances and each is decided separately. See
+        #: :data:`_ORPHAN_STRIKES`.
+        self._orphan_strikes: dict[tuple[str, str], int] = {}
         #: Venue disconnects still running. Held so :meth:`close_all` can wait
         #: for them and a stray task cannot be garbage-collected mid-close.
         self._disconnects: set[asyncio.Task[Any]] = set()
@@ -171,7 +187,7 @@ class SessionManager:
         # Before the row, not after: a reaper that saw a live row with no
         # key yet would close an attach that is a moment old.
         await mark_alive(
-            self._broker, request.session_id, domain=_ALIVE_DOMAIN
+            self._broker, request.session_id, domain=self._alive_domain
         )
 
         for feed in request.subscriptions:
@@ -181,6 +197,7 @@ class SessionManager:
         venues = sorted(_venues_from_feeds(feeds))
         if self._persist_live is not None:
             await self._persist_live(
+                instance=self._instance,
                 session_id=request.session_id,
                 created_by=request.created_by,
                 venues=venues,
@@ -232,10 +249,12 @@ class SessionManager:
                 await self._stop_feed_if_unused((topic, ticker))
         await self._stop_link(link)
         if self._mark_done is not None:
-            await self._mark_done(session_id=session_id)
+            await self._mark_done(
+                session_id=session_id, instance=self._instance
+            )
         try:
             await clear_alive(
-                self._broker, session_id, domain=_ALIVE_DOMAIN
+                self._broker, session_id, domain=self._alive_domain
             )
         except Exception:
             # The row is already closed, and the key expires on its own —
@@ -356,33 +375,45 @@ class SessionManager:
             )
 
         reaped: list[str] = []
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         for row in rows:
             session_id = getattr(row, "session_id", None)
-            # One row per (venue, session), and the mark below closes every
-            # row a session has — so each id is worth deciding about once.
-            if session_id is None or session_id in seen:
+            if session_id is None:
                 continue
-            seen.add(session_id)
+            # Whose row this is, not whose scan this is. The scan stays global
+            # on purpose — an instance that dies outright leaves rows only some
+            # *other* process can notice, and noticing them is what this loop
+            # is for. What must not happen is deciding a peer's row against our
+            # own liveness key: a perfectly healthy md-jp-2 would then be
+            # closed by every scan md-jp-1 runs.
+            instance = getattr(row, "instance", None) or self._instance
+            key = (instance, session_id)
+            # The mark below closes one instance's rows for a session, so each
+            # pair is worth deciding about once however many venues it spans.
+            if key in seen:
+                continue
+            seen.add(key)
             try:
                 if await is_alive(
-                    self._broker, session_id, domain=_ALIVE_DOMAIN
+                    self._broker, session_id, domain=_alive_domain(instance)
                 ):
-                    self._orphan_strikes.pop(session_id, None)
+                    self._orphan_strikes.pop(key, None)
                     continue
             except Exception:
                 # Unreadable liveness is not evidence of death. A stale row
                 # survives to the next scan; a row closed by mistake hides a
                 # feed that is still running.
                 logger.exception(
-                    "MD liveness check failed session=%s", session_id
+                    "MD liveness check failed instance=%s session=%s",
+                    instance,
+                    session_id,
                 )
-                self._orphan_strikes.pop(session_id, None)
+                self._orphan_strikes.pop(key, None)
                 continue
 
-            if session_id in self._links:
-                strikes = self._orphan_strikes.get(session_id, 0) + 1
-                self._orphan_strikes[session_id] = strikes
+            if instance == self._instance and session_id in self._links:
+                strikes = self._orphan_strikes.get(key, 0) + 1
+                self._orphan_strikes[key] = strikes
                 if strikes < _ORPHAN_STRIKES:
                     continue
                 logger.warning(
@@ -405,10 +436,14 @@ class SessionManager:
             # and nothing rebuilds from one — STS re-attaching on rebuild is
             # what writes the row live again.
             try:
-                await self._mark_done(session_id=session_id)
+                await self._mark_done(
+                    session_id=session_id, instance=instance
+                )
             except Exception:
                 logger.exception(
-                    "MD orphan reap failed session=%s", session_id
+                    "MD orphan reap failed instance=%s session=%s",
+                    instance,
+                    session_id,
                 )
                 continue
             reaped.append(session_id)
@@ -632,7 +667,7 @@ class SessionManager:
                         await mark_alive(
                             self._broker,
                             link.session_id,
-                            domain=_ALIVE_DOMAIN,
+                            domain=self._alive_domain,
                         )
                     except Exception:
                         # A missed renewal is survivable — the TTL is many

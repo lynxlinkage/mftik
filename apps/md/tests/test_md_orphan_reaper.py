@@ -29,6 +29,11 @@ from mftik.protocol import (
 )
 from mftik_md.session import PaperPublicFactory, SessionManager
 
+#: The liveness domain one MD instance writes under. Per instance, not
+#: per plane: two MDs holding one session would otherwise share a key and
+#: the first to detach would clear the one the survivor lives behind.
+MD_ALIVE = "md:md"
+
 FEED = Topics.md_feed("orderbook", UniversalTicker.parse("Paper_Spot_BTCUSDT"))
 
 
@@ -56,10 +61,13 @@ class FakeMdStore:
         session_id: str,
         created_by: int,
         venues: list[str] | None = None,
+        instance: str = "md",
     ) -> list[SimpleNamespace]:
         return [self.seed_live(session_id, venue) for venue in venues or []]
 
-    async def mark_done(self, *, session_id: str) -> list[SimpleNamespace]:
+    async def mark_done(
+        self, *, session_id: str, instance: str = "md"
+    ) -> list[SimpleNamespace]:
         done: list[SimpleNamespace] = []
         for row in self.rows.values():
             if row.session_id != session_id or row.status != "live":
@@ -221,7 +229,7 @@ async def test_a_link_whose_lease_loop_stopped_is_torn_down(
     link = sessions._links["dead-loop-1"]  # noqa: SLF001
     link.stop.set()
     await asyncio.gather(*link.tasks, return_exceptions=True)
-    await clear_alive(broker, "dead-loop-1", domain="md")
+    await clear_alive(broker, "dead-loop-1", domain=MD_ALIVE)
 
     assert await sessions.reap_orphans() == []
     assert await sessions.reap_orphans() == ["dead-loop-1"]
@@ -249,12 +257,12 @@ async def test_a_healthy_link_survives_a_missing_key(
     sessions = _manager(broker, paper, store)
     task, stop = await _attached(broker, sessions, "blip-1")
 
-    await clear_alive(broker, "blip-1", domain="md")
+    await clear_alive(broker, "blip-1", domain=MD_ALIVE)
     assert await sessions.reap_orphans() == []
 
     # The loop is alive, so the key is back before the next scan.
     for _ in range(50):
-        if await is_alive(broker, "blip-1", domain="md"):
+        if await is_alive(broker, "blip-1", domain=MD_ALIVE):
             break
         await asyncio.sleep(0.02)
     assert await sessions.reap_orphans() == []
@@ -278,7 +286,7 @@ async def test_an_attach_another_process_holds_is_left_alone(
     store = FakeMdStore()
     store.seed_live("theirs-1")
     # Stands in for the peer that holds the attach holding its key.
-    await mark_alive(broker, "theirs-1", domain="md")
+    await mark_alive(broker, "theirs-1", domain=MD_ALIVE)
     sessions = _manager(broker, paper, store)
 
     assert await sessions.reap_orphans() == []
@@ -315,7 +323,7 @@ async def test_the_key_is_claimed_before_the_row_exists(
     seen: list[bool] = []
 
     async def watching_persist(**kwargs):
-        seen.append(await is_alive(broker, kwargs["session_id"], domain="md"))
+        seen.append(await is_alive(broker, kwargs["session_id"], domain=MD_ALIVE))
         return await store.persist_live(**kwargs)
 
     sessions._persist_live = watching_persist  # noqa: SLF001
@@ -336,11 +344,11 @@ async def test_detaching_releases_the_key(
     store = FakeMdStore()
     sessions = _manager(broker, paper, store)
     task, stop = await _attached(broker, sessions, "rel-1")
-    assert await is_alive(broker, "rel-1", domain="md")
+    assert await is_alive(broker, "rel-1", domain=MD_ALIVE)
 
     stop.set()
     await sessions.detach(session_id="rel-1", reason="test")
-    assert not await is_alive(broker, "rel-1", domain="md")
+    assert not await is_alive(broker, "rel-1", domain=MD_ALIVE)
 
     await asyncio.gather(task, return_exceptions=True)
     await sessions.close_all()
@@ -358,14 +366,14 @@ async def test_the_key_is_renewed_while_the_attach_lives(
     # Expire it out from under the attach; the lease heartbeat must put it
     # back without STS having to re-attach.
     await broker.redis.delete(
-        alive_key(broker.config.key_prefix, "renew-1", domain="md")
+        alive_key(broker.config.key_prefix, "renew-1", domain=MD_ALIVE)
     )
     for _ in range(50):
-        if await is_alive(broker, "renew-1", domain="md"):
+        if await is_alive(broker, "renew-1", domain=MD_ALIVE):
             break
         await asyncio.sleep(0.02)
 
-    assert await is_alive(broker, "renew-1", domain="md")
+    assert await is_alive(broker, "renew-1", domain=MD_ALIVE)
 
     stop.set()
     await sessions.detach(session_id="renew-1", reason="test")
@@ -419,4 +427,4 @@ async def test_a_failing_list_reaps_nothing(
 async def test_clearing_a_key_that_was_never_claimed_is_fine(
     broker: Broker,
 ) -> None:
-    await clear_alive(broker, "never-existed", domain="md")
+    await clear_alive(broker, "never-existed", domain=MD_ALIVE)
