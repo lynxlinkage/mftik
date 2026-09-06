@@ -204,3 +204,32 @@ async def test_the_feed_list_survives_the_instance_mapping(db) -> None:
         "orderbook.Paper_Spot_BTCUSDT",
         "ticker.Paper_Spot_ETHUSDT",
     ], "a split session shows its feeds, not the instances holding them"
+
+
+async def test_stopping_a_finished_session_is_an_immediate_404(db) -> None:
+    """The table answers what the table already knows.
+
+    Stop goes to a subject only the process holding the session serves, so a
+    request for one that has ended waits in a list nobody reads — the caller
+    would get a ten-second timeout where it used to get an instant 404. The
+    row is what can say "already over" without asking a process, and it is
+    consulted before anything is sent.
+    """
+    async with db() as session:
+        repo = StsSessionRepository(session)
+        await repo.create_live(session_id="s-done", created_by=1)
+        await repo.mark_done("s-done")
+
+    with pytest.raises(HTTPException) as caught:
+        await sts_routes.stop_session("s-done", broker=None)  # type: ignore[arg-type]
+
+    assert caught.value.status_code == 404
+    assert "no active sts session" in str(caught.value.detail)
+
+
+async def test_stopping_a_session_that_never_existed_is_a_404(db) -> None:
+    with pytest.raises(HTTPException) as caught:
+        await sts_routes.stop_session("never", broker=None)  # type: ignore[arg-type]
+
+    assert caught.value.status_code == 404
+    assert "unknown sts session" in str(caught.value.detail)

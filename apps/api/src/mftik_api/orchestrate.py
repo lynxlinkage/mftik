@@ -260,7 +260,9 @@ async def deploy_strategy(
         try:
             await request_domain(
                 broker,
-                Topics.STS,
+                # The session exists by now — the create returned — so the
+                # process holding it is the only one that can fail it.
+                Topics.sts_control(session_id),
                 StsSessionControlRequestEnvelope.wrap(
                     StsSessionControlRequest(
                         session_id=session_id, reason=fail_reason
@@ -429,11 +431,17 @@ async def _detach_md(
 
 
 async def _fail_sts(broker: Broker, session_id: str, reason: str) -> None:
-    """End a session that was created and can no longer be attached."""
+    """End a session that was created and can no longer be attached.
+
+    Addressed to the session rather than the plane: it exists by the time this
+    runs, so only the process holding it can end it — and on a node with two
+    STS the shared subject would let the other one answer ``not_found`` for a
+    session that is very much running.
+    """
     try:
         await request_domain(
             broker,
-            Topics.STS,
+            Topics.sts_control(session_id),
             StsSessionControlRequestEnvelope.wrap(
                 StsSessionControlRequest(session_id=session_id, reason=reason),
                 type=STS_SESSION_FAIL,

@@ -143,6 +143,28 @@ class Topics:
         return f"td.{api_id}.{session_id}"
 
     @staticmethod
+    def sts_control(session_id: str) -> str:
+        """Request-reply subject for acting on **one** running session.
+
+        Per session for the same reason :meth:`td_order` is per account, and
+        the failure it fixes is the same shape. Stop and fail are answered from
+        the receiving process's own in-memory sessions, so on the shared
+        ``sts`` subject a second STS could take a stop for a session it does
+        not hold and answer ``not_found`` — a row that stays live and that
+        nobody can end. ``serve`` is a competing consumer; one subject per
+        session makes the holder the only consumer there is.
+
+        Better than recording where a session landed and addressing that,
+        because it cannot go stale: whichever process rebuilds a session starts
+        serving this, and one that dies stops. Nothing has to be kept in step.
+
+        Only while the session is live. A request for one that has ended waits
+        in the list — so callers check the row before sending, and answer from
+        the table when the table already knows.
+        """
+        return f"sts.control.{session_id}"
+
+    @staticmethod
     def sts_td_session(session_id: str) -> str:
         """STS → TD per-session channel (lease heartbeat + cmds)."""
         return f"sts.td.{session_id}"
