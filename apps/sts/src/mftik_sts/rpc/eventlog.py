@@ -72,12 +72,11 @@ async def handle_eventlog_info(
     the same question — a finished session has no holder and its log is still
     readable.
 
-    Which means it is **wrong on a node with several STS**: the file is on the
-    volume of whichever process ran the session, nothing records which that
-    was, and an anycast request may reach one that does not have it. It fails
-    the safe way — ``available`` is false rather than another session's log
-    being returned — but it is a real gap, and closing it needs the row to
-    record where a session actually ran. See ``docs/Instances.md``.
+    So one process answers for its own disk only, and stamps each part with
+    :attr:`StsEventLogPart.instance`. Assembling a whole log from several is
+    the caller's job: ``mftik_api.routes.sts`` asks every declared STS and
+    merges, because a session's log can span two volumes and neither of them
+    is *the* right one to ask. See ``docs/Instances.md``.
     """
     try:
         payload = StsEventLogInfoRequest.model_validate(req.envelope.payload)
@@ -87,7 +86,8 @@ async def handle_eventlog_info(
 
     enabled = eventlog_dir() is not None
     parts = await asyncio.to_thread(log_parts, payload.session_id)
-    stats = await asyncio.to_thread(_stat_all, parts)
+    here = sessions.instance if sessions is not None else None
+    stats = await asyncio.to_thread(_stat_all, parts, here)
     live = sessions is not None and sessions.get(payload.session_id) is not None
 
     await req.reply(
@@ -168,7 +168,9 @@ async def handle_eventlog_read(
     )
 
 
-def _stat_all(paths: list[Path]) -> list[StsEventLogPart]:
+def _stat_all(
+    paths: list[Path], instance: str | None = None
+) -> list[StsEventLogPart]:
     """Size every part, skipping any that vanished between listing and stat."""
     out: list[StsEventLogPart] = []
     for path in paths:
@@ -178,7 +180,10 @@ def _stat_all(paths: list[Path]) -> list[StsEventLogPart]:
             continue
         out.append(
             StsEventLogPart(
-                name=path.name, size=stat.st_size, modified=stat.st_mtime
+                name=path.name,
+                size=stat.st_size,
+                modified=stat.st_mtime,
+                instance=instance,
             )
         )
     return out

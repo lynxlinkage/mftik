@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
@@ -29,6 +30,7 @@ from mftik.protocol import (
     StsEventLogInfo,
     StsEventLogInfoRequest,
     StsEventLogInfoRequestEnvelope,
+    StsEventLogPart,
     StsEventLogReadRequest,
     StsEventLogReadRequestEnvelope,
     StsSessionControlRequest,
@@ -47,9 +49,10 @@ from mftik.protocol import (
     parse_strategy_yml,
 )
 from mftik.registry import AddedStrategy, RegistryStore, qualify
-from mftik_db.models.session import SessionStatus, StsSessionRow
+from mftik_db.models.session import SessionDomain, SessionStatus, StsSessionRow
 from mftik_db.repositories import (
     AccountRepository,
+    InstanceRepository,
     StsSessionRepository,
 )
 from mftik_db.session import session_scope
@@ -505,10 +508,96 @@ async def download_eventlog(
 
 
 async def _eventlog_info(broker: BrokerDep, session_id: str) -> StsEventLogInfo:
+    """Ask every declared STS, and merge what they have.
+
+    Not the plane's shared subject, and not one instance either. An event log
+    lives on the disk of whichever process wrote it, and one session's can
+    genuinely span two: a rebuild elsewhere leaves the earlier parts on the
+    volume of the process that died. So there is no single right instance to
+    ask — asking one would report a prefix as the whole story, and asking
+    whichever answered would report somebody else's silence as "no log".
+
+    Which is also why this cannot be addressed the way stop and fail are.
+    Those need the process *holding* the session, and a finished session has
+    no holder; this needs the disk, and a finished session's disk is still
+    there.
+    """
+    named: list[str | None] = []
+    try:
+        async with session_scope() as db:
+            rows = await InstanceRepository(db).list_all(
+                domain=SessionDomain.STS.value
+            )
+        named = [row.name for row in rows]
+    except Exception:
+        # A log is worth reading when the database is not: this route needed
+        # only the broker before, and the table is here to say *which* STS to
+        # ask rather than whether to ask at all.
+        logger.warning(
+            "sts eventlog info: could not list instances — asking the shared "
+            "subject",
+            exc_info=True,
+        )
+    if not named:
+        # Nothing declared, or nothing readable. The shared subject is what a
+        # node with one STS has always used, and it is the only one there is.
+        named = [None]
+
+    replies = await asyncio.gather(
+        *(_ask_eventlog(broker, session_id, name) for name in named)
+    )
+    found = [r for r in replies if r is not None]
+    if not found:
+        raise HTTPException(
+            status_code=502,
+            detail=f"no STS answered for the event log of {session_id}",
+        )
+
+    parts = [part for reply in found for part in reply.parts]
+    return StsEventLogInfo(
+        session_id=session_id,
+        available=any(r.available for r in found),
+        # True if *anybody* keeps logs. Paired with ``available`` it still
+        # separates "we do not keep these" from "we keep these, but not that
+        # session's".
+        enabled=any(r.enabled for r in found),
+        parts=_merged_parts(parts),
+        total_bytes=sum(part.size for part in parts),
+        live=any(r.live for r in found),
+    )
+
+
+def _merged_parts(parts: list[StsEventLogPart]) -> list[StsEventLogPart]:
+    """Oldest first across instances, by modification time.
+
+    Within one instance ``log_parts`` already orders them, and their mtimes
+    increase with it. Across instances the handover is what orders them: every
+    file the process that died wrote was written before the one that took over
+    started. A part with no mtime keeps its place at the end rather than
+    guessing.
+
+    Depends on the hosts' clocks agreeing to within the gap between a session
+    stopping on one and resuming on another. That is seconds at worst, and the
+    alternative — reporting one instance's parts as the whole log — is wrong
+    every time rather than under skew.
+    """
+    return sorted(
+        parts, key=lambda p: (p.modified is None, p.modified or 0.0)
+    )
+
+
+async def _ask_eventlog(
+    broker: BrokerDep, session_id: str, instance: str | None
+) -> StsEventLogInfo | None:
+    """One instance's answer. ``None`` when it did not give one.
+
+    An instance that is down contributes nothing rather than failing the
+    request: the log may well be entirely on one that did answer.
+    """
     try:
         return await request_domain(
             broker,
-            Topics.STS,
+            Topics.STS if instance is None else Topics.sts(instance),
             StsEventLogInfoRequestEnvelope.wrap(
                 StsEventLogInfoRequest(session_id=session_id),
                 type=STS_EVENTLOG_INFO,
@@ -518,8 +607,13 @@ async def _eventlog_info(broker: BrokerDep, session_id: str) -> StsEventLogInfo:
             result_type=StsEventLogInfo,
             timeout=10.0,
         )
-    except DomainRpcError as exc:
-        raise HTTPException(status_code=502, detail=exc.message) from exc
+    except DomainRpcError:
+        logger.warning(
+            "sts eventlog info: %s did not answer for session=%s",
+            instance or "the shared subject",
+            session_id,
+        )
+        return None
 
 
 async def _eventlog_chunks(
@@ -538,7 +632,16 @@ async def _eventlog_chunks(
             try:
                 chunk = await request_domain(
                     broker,
-                    Topics.STS,
+                    # The instance the listing said has this part. Names
+                    # collide across instances — every process writes the same
+                    # ``{session}.jsonl`` — so a read sent to whichever
+                    # answered could return a different session's bytes under
+                    # the right file name, or none at all.
+                    (
+                        Topics.STS
+                        if part.instance is None
+                        else Topics.sts(part.instance)
+                    ),
                     StsEventLogReadRequestEnvelope.wrap(
                         StsEventLogReadRequest(
                             session_id=session_id,
