@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from auth_harness import a_client
-from db_harness import a_database, an_owner
+from db_harness import a_database, an_instance, an_owner
 from fastapi import FastAPI
 from mftik_api.auth import AuthMiddleware
 from mftik_api.routes import apis as apis_routes
@@ -20,6 +20,7 @@ async def db(monkeypatch, database_url):
     async with a_database(database_url) as database:
         async with database.maker() as session:
             await an_owner(session)
+            await an_instance(session)
             await session.commit()
         monkeypatch.setattr(apis_routes, "session_scope", database.scope)
         monkeypatch.setattr(apis_routes, "record_audit", _no_audit)
@@ -85,6 +86,7 @@ async def test_key_on_a_legacy_venue_spelling_is_409(db) -> None:
                 api_key="shared-ed25519-key",
                 api_secret="shared-ed25519-secret",
                 type="ED25519",
+                instance_id=1,
             )
         )
 

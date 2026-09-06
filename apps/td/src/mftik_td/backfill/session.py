@@ -66,11 +66,16 @@ class BackfillSession:
         broker: Broker,
         executor: BackfillExecutor,
         *,
+        instance: str = "td",
         max_in_flight: int = MAX_RUNS_IN_FLIGHT,
         stop_grace: float = STOP_GRACE_S,
     ) -> None:
         self._broker = broker
         self._executor = executor
+        #: Whose queue this serves. Backfill loads the credential and opens a
+        #: venue connection with it, so which host runs it is the compliance
+        #: question — see :meth:`Topics.td_backfill`.
+        self._instance = instance
         self._max_in_flight = max_in_flight
         self._stop_grace = stop_grace
         self._runs: set[asyncio.Task[Any]] = set()
@@ -87,7 +92,8 @@ class BackfillSession:
         self._stop.clear()
         self._task = asyncio.create_task(self._serve(), name="td-backfill")
         logger.info(
-            "TD backfill session listening subject=%s", Topics.td_backfill()
+            "TD backfill session listening subject=%s",
+            Topics.td_backfill(self._instance),
         )
 
     async def stop(self) -> None:
@@ -117,7 +123,7 @@ class BackfillSession:
         while not self._stop.is_set():
             try:
                 async for req in self._broker.serve(
-                    Topics.td_backfill(), stop=self._stop
+                    Topics.td_backfill(self._instance), stop=self._stop
                 ):
                     await self._handle(req)
             except asyncio.CancelledError:

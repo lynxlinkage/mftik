@@ -14,12 +14,8 @@ from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     TD_ERROR,
     TD_SESSION_ATTACH,
-    TD_SESSION_LIST,
     Envelope,
     LeaseHeartbeat,
-    ListSessionsRequest,
-    ListSessionsRequestEnvelope,
-    ListSessionsResult,
     RpcError,
     TdAttachRequest,
     TdAttachRequestEnvelope,
@@ -28,6 +24,7 @@ from mftik.protocol import (
 )
 from mftik_td.rpc import dispatch
 from mftik_td.session import PaperSessionFactory, SessionManager
+from mftik_td.session.manager import AccountHeldElsewhere
 
 
 @dataclass
@@ -262,25 +259,32 @@ async def test_attach_refcount_same_api(
 
 
 @pytest.mark.asyncio
-async def test_rpc_attach_and_list(
+async def test_rpc_attach_on_the_instance_subject(
     broker: Broker, manager: SessionManager
 ) -> None:
+    """Attach reaches a TD addressed by name, not only by plane.
+
+    The listing half of this test went with the RPC it exercised: reading
+    ``td_sessions`` never needed a TD process, so the API runs that query
+    itself now (``mftik_api.routes.td``). What is left is the part that does
+    need one.
+    """
+    subject = Topics.td("td-jp-1")
     stop_lease = asyncio.Event()
     stop_serve = asyncio.Event()
     pub = asyncio.create_task(_lease_publisher(broker, "rpc-sts", stop_lease))
 
     async def server() -> None:
-        async for req in broker.serve(Topics.TD, stop=stop_serve):
+        async for req in broker.serve(subject, stop=stop_serve):
             await dispatch(req, sessions=manager)
-            if req.envelope.type == TD_SESSION_LIST:
-                break
+            break
         stop_serve.set()
 
     serve_task = asyncio.create_task(server())
     await asyncio.sleep(0.05)
 
     create_reply = await broker.request(
-        Topics.TD,
+        subject,
         TdAttachRequestEnvelope.wrap(
             TdAttachRequest(
                 session_id="rpc-sts",
@@ -293,26 +297,15 @@ async def test_rpc_attach_and_list(
         ),
         timeout=3,
     )
-    created = TdAttachResult.model_validate(create_reply.payload)
-    assert create_reply.type == TD_SESSION_ATTACH
-    assert created.session_id == "rpc-sts"
-    assert created.api_id == 3
-
-    list_reply = await broker.request(
-        Topics.TD,
-        ListSessionsRequestEnvelope.wrap(
-            ListSessionsRequest(domain="td", status="live"),
-            type=TD_SESSION_LIST,
-            source="api",
-        ),
-        timeout=2,
-    )
     await serve_task
     stop_lease.set()
     await pub
 
-    listed = ListSessionsResult.model_validate(list_reply.payload)
-    assert any(s.session_id == created.session_id for s in listed.sessions)
+    created = TdAttachResult.model_validate(create_reply.payload)
+    assert create_reply.type == TD_SESSION_ATTACH
+    assert created.session_id == "rpc-sts"
+    assert created.api_id == 3
+    assert manager.refcount(3) == 1
 
     await manager.close_all()
 
@@ -324,7 +317,7 @@ async def test_rpc_attach_timeout_error(
     stop = asyncio.Event()
 
     async def server() -> None:
-        async for req in broker.serve(Topics.TD, stop=stop):
+        async for req in broker.serve(Topics.td("td"), stop=stop):
             await dispatch(req, sessions=manager)
             break
         stop.set()
@@ -333,7 +326,7 @@ async def test_rpc_attach_timeout_error(
     await asyncio.sleep(0.05)
 
     reply = await broker.request(
-        Topics.TD,
+        Topics.td("td"),
         TdAttachRequestEnvelope.wrap(
             TdAttachRequest(
                 session_id="gone",
@@ -351,3 +344,108 @@ async def test_rpc_attach_timeout_error(
     assert reply.type == TD_ERROR
     err = RpcError.model_validate(reply.payload)
     assert err.code == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_a_second_process_is_refused_the_same_account(
+    broker: Broker, paper: PaperExchange, store: FakeStore
+) -> None:
+    """PI-7, against two real managers rather than the primitive alone.
+
+    Two processes each holding one credential is two OMS views, two ledgers
+    and two competing consumers on ``td.order.{api_id}`` — the invariant the
+    lease, the OMS and the ``client_order_id`` slot all rest on. Before this it
+    was only asserted: ``attach`` decided from process-local memory.
+    """
+    first = SessionManager(
+        PaperSessionFactory(broker, paper),
+        broker,
+        persist_live=store.persist_live,
+        mark_done=store.mark_done,
+        list_db_sessions=store.list_sessions,
+        lease_grace=2.0,
+    )
+    second = SessionManager(
+        PaperSessionFactory(broker, paper),
+        broker,
+        persist_live=store.persist_live,
+        mark_done=store.mark_done,
+        list_db_sessions=store.list_sessions,
+        lease_grace=2.0,
+    )
+    stop = asyncio.Event()
+    pub = asyncio.create_task(_lease_publisher(broker, "own-sts", stop))
+    try:
+        await first.attach(
+            TdAttachRequest(
+                session_id="own-sts", api_id=3, timeout=2.0, created_by=1
+            )
+        )
+
+        with pytest.raises(AccountHeldElsewhere) as refused:
+            await second.attach(
+                TdAttachRequest(
+                    session_id="own-sts-2",
+                    api_id=3,
+                    timeout=2.0,
+                    created_by=1,
+                )
+            )
+
+        assert refused.value.api_id == 3
+        assert refused.value.holder == first._owner  # noqa: SLF001
+        assert "MFTIK_INSTANCE" in str(refused.value), (
+            "the refusal has to point at the configuration that caused it"
+        )
+        assert second.active_api_ids == [], (
+            "no venue session was opened for an account it may not hold"
+        )
+        assert first.active_api_ids == [3]
+    finally:
+        stop.set()
+        await pub
+        await first.close_all()
+        await second.close_all()
+
+
+@pytest.mark.asyncio
+async def test_releasing_an_account_lets_another_process_take_it(
+    broker: Broker, paper: PaperExchange, store: FakeStore
+) -> None:
+    """A redeploy must not have to wait out a TTL to get its accounts back."""
+    first = SessionManager(
+        PaperSessionFactory(broker, paper),
+        broker,
+        persist_live=store.persist_live,
+        mark_done=store.mark_done,
+        list_db_sessions=store.list_sessions,
+        lease_grace=2.0,
+    )
+    second = SessionManager(
+        PaperSessionFactory(broker, paper),
+        broker,
+        persist_live=store.persist_live,
+        mark_done=store.mark_done,
+        list_db_sessions=store.list_sessions,
+        lease_grace=2.0,
+    )
+    stop = asyncio.Event()
+    pub = asyncio.create_task(_lease_publisher(broker, "hand-over", stop))
+    try:
+        await first.attach(
+            TdAttachRequest(
+                session_id="hand-over", api_id=3, timeout=2.0, created_by=1
+            )
+        )
+        await first.close_all()
+
+        await second.attach(
+            TdAttachRequest(
+                session_id="hand-over", api_id=3, timeout=2.0, created_by=1
+            )
+        )
+        assert second.active_api_ids == [3]
+    finally:
+        stop.set()
+        await pub
+        await second.close_all()

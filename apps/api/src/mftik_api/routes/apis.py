@@ -8,6 +8,7 @@ from mftik_db.models.api import Api, ApiType
 from mftik_db.repositories import (
     AccountRepository,
     ApiRepository,
+    InstanceRepository,
     TdSessionRepository,
 )
 from mftik_db.session import session_scope
@@ -48,7 +49,9 @@ async def list_venues() -> VenueListResponse:
     return VenueListResponse(venues=[_venue_out(v) for v in venues.all_venues()])
 
 
-def _to_out(*, account_id: int, name: str, api: Api) -> ApiOut:
+def _to_out(
+    *, account_id: int, name: str, api: Api, instance: str | None = None
+) -> ApiOut:
     return ApiOut(
         id=api.id,
         account_id=account_id,
@@ -58,6 +61,7 @@ def _to_out(*, account_id: int, name: str, api: Api) -> ApiOut:
         type=api.type,
         created_at=api.created_at.timestamp() if api.created_at else 0.0,
         created_by=api.owner_id,
+        instance=instance,
     )
 
 
@@ -71,7 +75,12 @@ async def list_apis() -> ApiListResponse:
         if api is None:
             continue
         out.append(
-            _to_out(account_id=account.id, name=account.name, api=api)
+            _to_out(
+                account_id=account.id,
+                name=account.name,
+                api=api,
+                instance=api.instance.name if api.instance else None,
+            )
         )
     return ApiListResponse(apis=out)
 
@@ -125,6 +134,26 @@ async def create_api(
                 status_code=409, detail=f"account name already exists: {name}"
             )
 
+        # A credential names the TD instance allowed to use it, and TD has no
+        # anycast subject to fall through to — there is no unassigned state.
+        # `td` is the default because that is what a single-process node's
+        # MFTIK_INSTANCE already resolves to.
+        instance_name = (body.instance or "td").strip()
+        instance = await InstanceRepository(db).get_by_name(instance_name)
+        if instance is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown instance: {instance_name!r}",
+            )
+        if instance.domain != "td":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"instance {instance_name!r} is a {instance.domain} "
+                    "instance; a credential must name a td one"
+                ),
+            )
+
         api = await apis.add(
             Api(
                 owner_id=created_by,
@@ -133,6 +162,7 @@ async def create_api(
                 api_secret=body.api_secret,
                 type=api_type,
                 passphrase=body.passphrase,
+                instance_id=instance.id,
             )
         )
         account = await accounts.create(
@@ -140,7 +170,12 @@ async def create_api(
             api_id=api.id,
             created_by=created_by,
         )
-        result = _to_out(account_id=account.id, name=account.name, api=api)
+        result = _to_out(
+            account_id=account.id,
+            name=account.name,
+            api=api,
+            instance=instance.name,
+        )
 
     await record_audit(
         user_id=created_by,
@@ -194,7 +229,12 @@ async def rename_api(
             old_name = name
 
         owner_id = api.owner_id
-        result = _to_out(account_id=account.id, name=account.name, api=api)
+        result = _to_out(
+            account_id=account.id,
+            name=account.name,
+            api=api,
+            instance=api.instance.name if api.instance else None,
+        )
 
     if old_name != result.name:
         await record_audit(

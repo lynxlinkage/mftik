@@ -150,7 +150,7 @@ async def _lease_publisher(
 async def _serve(
     broker: Broker, sessions: SessionManager, stop: asyncio.Event
 ) -> None:
-    async for req in broker.serve(Topics.TD, stop=stop):
+    async for req in broker.serve(Topics.td("td"), stop=stop):
         await dispatch(req, sessions=sessions)
 
 
@@ -178,7 +178,7 @@ async def test_a_detach_request_closes_the_attach_and_answers(
             )
         )
 
-        reply = await broker.request(Topics.TD, _detach(), timeout=5.0)
+        reply = await broker.request(Topics.td("td"), _detach(), timeout=5.0)
 
         assert reply.type == TD_SESSION_DETACH
         assert TdDetachResult.model_validate(reply.payload).refcount == 0
@@ -219,7 +219,7 @@ async def test_a_detach_does_not_need_its_own_lease_loop(
         await asyncio.gather(*link.tasks, return_exceptions=True)
 
         reply = await broker.request(
-            Topics.TD, _detach(SIBLING_API_ID), timeout=5.0
+            Topics.td("td"), _detach(SIBLING_API_ID), timeout=5.0
         )
 
         assert reply.type == TD_SESSION_DETACH
@@ -249,8 +249,8 @@ async def test_detaching_twice_is_not_an_error(
                 api_id=API_ID, session_id=SID, created_by=1, timeout=5.0
             )
         )
-        first = await broker.request(Topics.TD, _detach(), timeout=5.0)
-        second = await broker.request(Topics.TD, _detach(), timeout=5.0)
+        first = await broker.request(Topics.td("td"), _detach(), timeout=5.0)
+        second = await broker.request(Topics.td("td"), _detach(), timeout=5.0)
 
         assert first.type == TD_SESSION_DETACH
         assert second.type == TD_SESSION_DETACH
@@ -272,7 +272,7 @@ async def test_a_malformed_detach_is_refused_not_ignored(
     server = asyncio.create_task(_serve(broker, sessions, srv_stop))
     try:
         reply = await broker.request(
-            Topics.TD,
+            Topics.td("td"),
             Envelope[dict].wrap(
                 {"session_id": SID},  # no api_id
                 type=TD_SESSION_DETACH,

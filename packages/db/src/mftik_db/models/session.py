@@ -110,6 +110,16 @@ class StsSessionRow(Base):
     #: recognise the orders it placed before the restart. Null for rows
     #: written before this was recorded.
     cid_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Which STS was asked to run this. Nullable: a row written before
+    #: instances existed was not pinned, and an unpinned deploy still is not.
+    #: The rebuild scan filters on it, so a run pinned to ``sts-tw`` comes back
+    #: on ``sts-tw`` or does not come back — a session pinned to an instance
+    #: nobody runs stays ``interrupted`` and waits for a person rather than
+    #: silently moving. A plain string, not a foreign key: this is history, and
+    #: retiring an instance must not break the record of what it did.
+    instance: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     #: ``always`` | ``never`` — whether this run asked to be restored after an
     #: STS restart. A property of the deploy, not of the strategy class or of
     #: whoever configured the process.
@@ -181,12 +191,26 @@ class MdSessionRow(Base):
 
     __tablename__ = "md_sessions"
     __table_args__ = (
+        # Instance leads because a session's feeds may be split across MDs, and
+        # two instances serving one venue for one session is the arrangement
+        # this exists to allow rather than an accident to refuse. A genuine
+        # duplicate — the same instance twice — is still refused.
         UniqueConstraint(
-            "venue", "session_id", name="uq_md_sessions_venue_session"
+            "instance",
+            "venue",
+            "session_id",
+            name="uq_md_sessions_instance_venue_session",
         ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: Which MD holds this attach. A plain string rather than a foreign key:
+    #: it is history, it records the name as it was at the time, and retiring
+    #: an instance must not break the rows describing what it did — the same
+    #: reason :attr:`venue` is a string.
+    instance: Mapped[str] = mapped_column(
+        String(64), default="md", index=True
+    )
     venue: Mapped[str] = mapped_column(String(64), index=True)
     session_id: Mapped[str] = mapped_column(String(64), index=True)
     created_by: Mapped[int] = mapped_column(

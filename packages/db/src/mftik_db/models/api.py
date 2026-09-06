@@ -44,6 +44,25 @@ class Api(Base):
     api_key: Mapped[str] = mapped_column(String(256), index=True)
     api_secret: Mapped[str] = mapped_column(Text())
     type: Mapped[str] = mapped_column(String(32), default=ApiType.HMAC.value)
+    #: Which TD instance may use this credential. ``NOT NULL``: a credential is
+    #: bound to a region as a matter of fact, and TD has no anycast subject to
+    #: fall through to — there is no "unassigned credential" state. A foreign
+    #: key rather than a name string, because a typo in a free-text column is a
+    #: credential that silently never attaches.
+    #:
+    #: ``RESTRICT``: retiring an instance a credential still points at is
+    #: refused, not cascaded. See ``docs/Instances.md``.
+    instance_id: Mapped[int] = mapped_column(
+        # Named so ``create_all`` and migration 0031 build the same constraint.
+        # Left to autogenerate they differ, and a schema built one way cannot
+        # be migrated by code written for the other.
+        ForeignKey(
+            "instances.id",
+            ondelete="RESTRICT",
+            name="fk_apis_instance_id",
+        ),
+        index=True,
+    )
     passphrase: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -56,6 +75,7 @@ class Api(Base):
     )
 
     owner = relationship("User", back_populates="apis")
+    instance = relationship("Instance", uselist=False)
     account = relationship(
         "Account",
         back_populates="api",

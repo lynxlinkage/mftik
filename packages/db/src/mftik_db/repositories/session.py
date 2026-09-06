@@ -413,10 +413,11 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
         super().__init__(session, MdSessionRow)
 
     async def get_live(
-        self, *, venue: str, session_id: str
+        self, *, instance: str, venue: str, session_id: str
     ) -> MdSessionRow | None:
         result = await self.session.execute(
             select(MdSessionRow).where(
+                MdSessionRow.instance == instance,
                 MdSessionRow.venue == venue,
                 MdSessionRow.session_id == session_id,
                 MdSessionRow.status == SessionStatus.LIVE.value,
@@ -427,11 +428,13 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
     async def create_live(
         self,
         *,
+        instance: str,
         venue: str,
         session_id: str,
         created_by: int,
     ) -> MdSessionRow:
         row = MdSessionRow(
+            instance=instance,
             venue=venue,
             session_id=session_id,
             created_by=created_by,
@@ -440,15 +443,20 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
         return await self.add(row)
 
     async def attach_live(
-        self, *, venue: str, session_id: str, created_by: int
+        self, *, instance: str, venue: str, session_id: str, created_by: int
     ) -> MdSessionRow:
-        """Record this attach as live, reusing the row if the pair had one.
+        """Record this attach as live, reusing the row if the triple had one.
 
-        Same reason as :meth:`TdSessionRepository.attach_live` — ``(venue,
-        session_id)`` is unique and a detach only marks the row done.
+        Same reason as :meth:`TdSessionRepository.attach_live` — the triple is
+        unique and a detach only marks the row done.
+
+        ``instance`` leads the key because a session's feeds may be split
+        across MDs, and two of them holding one venue for one session is the
+        arrangement this exists to allow rather than a collision to fold.
         """
         result = await self.session.execute(
             select(MdSessionRow).where(
+                MdSessionRow.instance == instance,
                 MdSessionRow.venue == venue,
                 MdSessionRow.session_id == session_id,
             )
@@ -456,7 +464,10 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
         row = result.scalar_one_or_none()
         if row is None:
             return await self.create_live(
-                venue=venue, session_id=session_id, created_by=created_by
+                instance=instance,
+                venue=venue,
+                session_id=session_id,
+                created_by=created_by,
             )
         row.status = SessionStatus.LIVE.value
         row.finished_at = None
@@ -464,9 +475,11 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
         return row
 
     async def mark_done(
-        self, *, venue: str, session_id: str
+        self, *, instance: str, venue: str, session_id: str
     ) -> MdSessionRow | None:
-        row = await self.get_live(venue=venue, session_id=session_id)
+        row = await self.get_live(
+            instance=instance, venue=venue, session_id=session_id
+        )
         if row is None:
             return None
         row.status = SessionStatus.DONE.value
@@ -474,9 +487,20 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
         await self.session.flush()
         return row
 
-    async def mark_done_session(self, session_id: str) -> list[MdSessionRow]:
+    async def mark_done_session(
+        self, session_id: str, *, instance: str
+    ) -> list[MdSessionRow]:
+        """Close this instance's live rows for ``session_id``.
+
+        ``instance`` is not optional and the predicate is not a convenience.
+        Without it one MD detaching closes every row the session has, including
+        the ones a peer wrote for feeds it is still pumping — the row goes
+        ``done`` while the feed runs, and the next reap scan finds nothing to
+        correct because the row no longer says it is live.
+        """
         result = await self.session.execute(
             select(MdSessionRow).where(
+                MdSessionRow.instance == instance,
                 MdSessionRow.session_id == session_id,
                 MdSessionRow.status == SessionStatus.LIVE.value,
             )

@@ -21,17 +21,41 @@
 
 	onMount(refresh);
 
-	function healthLabel(h: boolean | null): string {
-		if (h === true) return 'up';
-		if (h === false) return 'down';
-		return 'n/a';
+	/**
+	 * One group per plane, in a fixed order so the page does not reshuffle as
+	 * instances are declared and retired.
+	 */
+	const PLANES = ['sts', 'td', 'md'];
+
+	let planes = $derived(
+		PLANES.map((domain) => ({
+			domain,
+			rows: domains.filter((d) => d.domain === domain)
+		})).filter((group) => group.rows.length > 0)
+	);
+
+	/**
+	 * `down` is not `!healthy`. It says a row declared this instance and
+	 * nothing answered — a machine to go and look at, which is exactly what
+	 * would be invisible if a dead plane simply vanished from this page.
+	 */
+	function stateLabel(d: DomainStats): string {
+		if (!d.enabled) return 'draining';
+		return d.state === 'connected' ? 'up' : 'down';
+	}
+
+	function sessionCounts(d: DomainStats): boolean {
+		return d.live > 0 || d.done > 0 || d.failed > 0 || d.interrupted > 0 || d.ack > 0;
 	}
 </script>
 
 <div class="page-head">
 	<div>
 		<h1>Home</h1>
-		<p>Process health. STS deploys live on Strategy; TD and MD are the infra those deploys attach.</p>
+		<p>
+			Every declared instance, and whether it answered. A row that says <em>down</em> is
+			declared and silent — nothing here starts a plane, so making it true is a deploy.
+		</p>
 	</div>
 	<button type="button" class="secondary" onclick={refresh} disabled={loading}>
 		{loading ? 'Loading…' : 'Refresh'}
@@ -42,67 +66,103 @@
 	<div class="error-banner">{error}</div>
 {/if}
 
-<div class="stats">
-	{#each domains as d (d.domain)}
-		{#if d.domain === 'sts'}
-			<a class="stat" href="/strategy" data-sveltekit-preload-data="hover">
-				{@render card(d)}
-			</a>
-		{:else}
-			<div class="stat">
-				{@render card(d)}
-			</div>
-		{/if}
-	{:else}
-		{#if !loading && !error}
-			<p class="empty-state">No domain stats yet.</p>
-		{/if}
-	{/each}
-</div>
+{#each planes as group (group.domain)}
+	<section class="plane">
+		<h2>{group.domain}</h2>
+		<div class="stats">
+			{#each group.rows as d (d.instance ?? d.domain)}
+				{#if d.domain === 'sts'}
+					<a class="stat" href="/strategy" data-sveltekit-preload-data="hover">
+						{@render card(d)}
+					</a>
+				{:else}
+					<div class="stat">
+						{@render card(d)}
+					</div>
+				{/if}
+			{/each}
+		</div>
+	</section>
+{:else}
+	{#if !loading && !error}
+		<p class="empty-state">No instances declared yet.</p>
+	{/if}
+{/each}
 
 {#snippet card(d: DomainStats)}
 	<header>
-		<span class="domain">{d.domain}</span>
-		<span class="badge" class:live={d.healthy === true} class:down={d.healthy === false}>
-			{healthLabel(d.healthy)}
+		<span class="domain">{d.instance ?? d.domain}</span>
+		<span
+			class="badge"
+			class:live={d.state === 'connected' && d.enabled}
+			class:down={d.state !== 'connected'}
+			class:draining={!d.enabled}
+		>
+			{stateLabel(d)}
 		</span>
 	</header>
-	<div class="nums">
-		<div>
-			<span class="n">{d.live}</span>
-			<span class="l">live</span>
+	{#if d.region || d.version}
+		<div class="meta">
+			{#if d.region}<span>{d.region}</span>{/if}
+			{#if d.version}<span class="muted-n">{d.version}</span>{/if}
 		</div>
-		<div>
-			<span class="n muted-n">{d.done}</span>
-			<span class="l">history</span>
+	{/if}
+	<!-- Session counts belong to the plane, not to one of its processes, so
+	     they ride the first instance of each plane and the rest show none.
+	     Repeating them per card would claim a split the tables do not record. -->
+	{#if sessionCounts(d)}
+		<div class="nums">
+			<div>
+				<span class="n">{d.live}</span>
+				<span class="l">live</span>
+			</div>
+			<div>
+				<span class="n muted-n">{d.done}</span>
+				<span class="l">history</span>
+			</div>
+			<!-- Only shown when there is something to see: a permanent zero
+			     trains people to stop reading it. -->
+			{#if d.failed > 0}
+				<div>
+					<span class="n failed-n">{d.failed}</span>
+					<span class="l">failed</span>
+				</div>
+			{/if}
+			{#if d.interrupted > 0}
+				<div>
+					<span class="n stopped-n">{d.interrupted}</span>
+					<span class="l">interrupted</span>
+				</div>
+			{/if}
+			{#if d.ack > 0}
+				<div>
+					<span class="n muted-n">{d.ack}</span>
+					<span class="l">ack</span>
+				</div>
+			{/if}
 		</div>
-		<!-- Only shown when there is something to see: a permanent zero
-		     trains people to stop reading it. -->
-		{#if d.failed > 0}
-			<div>
-				<span class="n failed-n">{d.failed}</span>
-				<span class="l">failed</span>
-			</div>
-		{/if}
-		{#if d.interrupted > 0}
-			<div>
-				<span class="n stopped-n">{d.interrupted}</span>
-				<span class="l">interrupted</span>
-			</div>
-		{/if}
-		{#if d.ack > 0}
-			<div>
-				<span class="n muted-n">{d.ack}</span>
-				<span class="l">ack</span>
-			</div>
-		{/if}
-	</div>
+	{/if}
 {/snippet}
 
 <style>
+	.plane + .plane {
+		margin-top: 1.5rem;
+	}
+
+	.plane h2 {
+		margin: 0 0 0.6rem;
+		font-family: var(--font);
+		font-size: 0.82rem;
+		letter-spacing: 0.16em;
+		text-transform: uppercase;
+		color: var(--muted);
+	}
+
+	/* Auto-fill rather than a fixed three: the number of instances in a plane
+	   is a deployment's business, not this page's. */
 	.stats {
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 		gap: 1rem;
 	}
 
@@ -117,6 +177,7 @@
 			linear-gradient(180deg, rgba(24, 32, 43, 0.95), rgba(14, 18, 26, 0.9));
 		color: inherit;
 		text-decoration: none;
+		align-content: start;
 		transition:
 			border-color 180ms ease,
 			transform 180ms ease,
@@ -134,13 +195,21 @@
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
+		gap: 0.75rem;
 	}
 
 	.domain {
 		font-family: var(--font);
 		font-size: 1.1rem;
-		letter-spacing: 0.16em;
-		text-transform: uppercase;
+		letter-spacing: 0.06em;
+	}
+
+	.meta {
+		display: flex;
+		gap: 0.6rem;
+		margin-top: -0.75rem;
+		font-size: 0.78rem;
+		color: var(--muted);
 	}
 
 	/* Auto-fit rather than a fixed 1fr 1fr: only sts ever shows a third
@@ -179,11 +248,5 @@
 		font-size: 0.78rem;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
-	}
-
-	@media (max-width: 900px) {
-		.stats {
-			grid-template-columns: 1fr;
-		}
 	}
 </style>

@@ -53,7 +53,7 @@ async def ask(broker: Broker, **over) -> TdBackfillResult:
     payload = {"api_id": API_ID}
     payload.update(over)
     reply = await broker.request(
-        Topics.td_backfill(),
+        Topics.td_backfill("td"),
         Envelope[TdBackfill].wrap(
             TdBackfill.model_validate(payload), type=TD_BACKFILL, source="test"
         ),
@@ -143,7 +143,7 @@ async def test_an_unreadable_request_is_refused_not_dropped(serving, broker) -> 
     session, executor = serving
 
     reply = await broker.request(
-        Topics.td_backfill(),
+        Topics.td_backfill("td"),
         Envelope[dict].wrap({"nonsense": True}, type=TD_BACKFILL, source="test"),
         timeout=2.0,
     )

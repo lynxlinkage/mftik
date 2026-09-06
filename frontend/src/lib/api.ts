@@ -75,6 +75,19 @@ export type ListPage = {
 
 export type DomainStats = {
 	domain: string;
+	/** Which instance of the plane. One row per declared instance. */
+	instance: string | null;
+	region: string | null;
+	enabled: boolean;
+	/**
+	 * `connected` | `down`. A declared instance that does not answer is *down* —
+	 * a fact about a machine somebody has to go and look at, and one only
+	 * knowable because a row says it should be here.
+	 */
+	state: string;
+	version: string | null;
+	venues: string[];
+	api_ids: number[];
 	live: number;
 	done: number;
 	/** Sessions that ended badly. Always 0 outside `sts`. */

@@ -31,6 +31,18 @@ from mftik.protocol import (
 
 logger = logging.getLogger(__name__)
 
+#: How many probes one health subject's queue keeps. Only the recent ones can
+#: still have a caller waiting, so this is a fuse rather than a buffer: it is
+#: what stops a dashboard polling a down instance from growing a list without
+#: end. Comfortably above any plausible number of concurrent dashboards.
+PROBE_QUEUE_MAXLEN = 16
+
+#: How long a probe queue outlives its last write. Refreshed on every probe, so
+#: it is not what bounds a queue being actively written to — :data:`PROBE_QUEUE_MAXLEN`
+#: is. What this buys is that the key of an instance nobody probes any more goes
+#: away on its own rather than sitting in Redis for the life of the deployment.
+PROBE_QUEUE_TTL_SECONDS = 300
+
 
 def redacted_url(url: str) -> str:
     """``url`` with its password replaced, for logging.
@@ -641,7 +653,64 @@ class Broker:
 
         queue = self._rpc_queue(subject)
         await self.redis.rpush(queue, outbound.to_json())
+        return await self._await_reply(subject, outbound, reply_key, wait)
 
+    async def probe(
+        self,
+        subject: str,
+        envelope: Envelope[Any],
+        *,
+        timeout: float | None = None,
+    ) -> UntypedEnvelope:
+        """Ask whether somebody is serving ``subject``, leaving nothing behind.
+
+        :meth:`request` on a subject nobody serves leaves the request in the
+        list for the next consumer, which every other caller wants: an attach
+        or a backfill parked until its owner comes up is recovery. A liveness
+        probe is the one request where that is not recovery but litter. A
+        dashboard polling an instance that is down would write a record per
+        probe into a list nobody will ever drain — thousands a day, into the
+        Redis that also carries order entry — and the instance, when it finally
+        booted, would open by answering a heap of questions nobody is still
+        waiting on.
+
+        So the queue here is capped and expiring. Both are wrong for any other
+        subject and right for this one, because a probe has no value the moment
+        the caller stops waiting for it. The cap is what bounds a down
+        instance; the expiry is what makes the key go away once probing stops.
+        Neither is a substitute for the other.
+
+        The reply path is :meth:`request`'s exactly — a timeout still raises
+        :class:`RequestTimeoutError`, which is the caller's answer of "down".
+        """
+        wait = self.config.request_timeout if timeout is None else timeout
+        reply_key = self._rpc_reply(envelope.id)
+        outbound = (
+            envelope
+            if envelope.reply_to == reply_key
+            else envelope.model_copy(update={"reply_to": reply_key})
+        )
+
+        queue = self._rpc_queue(subject)
+        pipe = self.redis.pipeline(transaction=True)
+        pipe.rpush(queue, outbound.to_json())
+        # Newest first: if an instance does come back, the probes worth
+        # answering are the recent ones, and the stale ones it still finds are
+        # dropped on arrival by their ``ts``.
+        pipe.ltrim(queue, -PROBE_QUEUE_MAXLEN, -1)
+        pipe.expire(queue, PROBE_QUEUE_TTL_SECONDS)
+        await pipe.execute()
+
+        return await self._await_reply(subject, outbound, reply_key, wait)
+
+    async def _await_reply(
+        self,
+        subject: str,
+        outbound: Envelope[Any],
+        reply_key: str,
+        wait: float,
+    ) -> UntypedEnvelope:
+        """Block on ``reply_key`` until it answers or ``wait`` runs out."""
         # A pop that returns nothing is not a verdict — only the deadline is.
         # So this polls, and ``serve_poll_seconds`` is how often it looks up.
         deadline = time.monotonic() + wait

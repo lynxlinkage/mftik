@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from mftik_db.models.account import Account
+from mftik_db.models.api import Api
 from mftik_db.repositories.base import BaseRepository
 
 
@@ -19,7 +20,7 @@ class AccountRepository(BaseRepository[Account]):
     async def get_by_api_id(self, api_id: int) -> Account | None:
         result = await self.session.execute(
             select(Account)
-            .options(joinedload(Account.api))
+            .options(joinedload(Account.api).joinedload(Api.instance))
             .where(Account.api_id == api_id)
         )
         return result.scalars().unique().one_or_none()
@@ -27,7 +28,7 @@ class AccountRepository(BaseRepository[Account]):
     async def get_by_name(self, name: str) -> Account | None:
         result = await self.session.execute(
             select(Account)
-            .options(joinedload(Account.api))
+            .options(joinedload(Account.api).joinedload(Api.instance))
             .where(Account.name == name)
         )
         return result.scalars().unique().one_or_none()
@@ -35,7 +36,7 @@ class AccountRepository(BaseRepository[Account]):
     async def list_with_api(self, *, limit: int = 200) -> Sequence[Account]:
         stmt = (
             select(Account)
-            .options(joinedload(Account.api))
+            .options(joinedload(Account.api).joinedload(Api.instance))
             .order_by(Account.id.asc())
             .limit(limit)
         )

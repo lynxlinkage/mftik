@@ -27,7 +27,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 
-from mftik_db.models import Base, User
+from mftik_db.models import Base, Instance, User
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -72,6 +72,30 @@ async def an_owner(session: AsyncSession, user_id: int = OWNER_ID) -> User:
     session.add(user)
     await session.flush()
     return user
+
+
+#: The default TD instance. Migration 0031 seeds ``td`` / ``md`` / ``sts`` on
+#: every real database, so production code may assume one exists; tests build
+#: their schema from the models instead and have to say so themselves.
+DEFAULT_INSTANCE = "td"
+
+
+async def an_instance(
+    session: AsyncSession,
+    name: str = DEFAULT_INSTANCE,
+    domain: str = "td",
+) -> Instance:
+    """The instance row an ``apis.instance_id`` points at.
+
+    ``apis.instance_id`` is ``NOT NULL``: a credential names the TD instance
+    allowed to use it and there is no anycast TD to fall through to. So every
+    test that writes an ``Api`` needs one of these, the way every test that
+    writes a ``created_by`` needs :func:`an_owner`.
+    """
+    instance = Instance(name=name, domain=domain)
+    session.add(instance)
+    await session.flush()
+    return instance
 
 
 @dataclass(frozen=True)

@@ -137,6 +137,10 @@ TD_GLOBAL_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
 }
 
 
+#: ``api_id`` → the TD instance allowed to use that credential.
+TdInstanceLookup = Callable[[int], Awaitable[str | None]]
+
+
 class StsSession:
     """Strategy session with TD/MD pub/sub links and fencing lease heartbeat."""
 
@@ -158,6 +162,7 @@ class StsSession:
         remember: RememberHandler | None = None,
         event_log: EventLog | None = None,
         strategy_type: str | None = None,
+        td_instance: TdInstanceLookup | None = None,
     ) -> None:
         self.session_id = session_id
         self.broker = broker
@@ -172,6 +177,12 @@ class StsSession:
             self.td = dict(td)
         else:
             self.td = load_td(list(td_api_ids or []))
+        #: ``api_id`` → the TD instance holding that account, for addressing
+        #: a detach. Getting it wrong costs the lease's grace and nothing else
+        #: — both sides tear down on a heartbeat that stops — but a detach sent
+        #: to a subject nobody serves sits in its list rather than vanishing,
+        #: so it is worth addressing properly.
+        self._td_instance_lookup = td_instance
         self.md_ids = list(md_ids or [])
         self.st_paras = dict(st_paras or {})
         self.heartbeat_interval = heartbeat_interval
@@ -498,7 +509,7 @@ class StsSession:
         posts = [
             self._post_detach(
                 what=f"td api_id={api_id}",
-                subject=Topics.TD,
+                subject=Topics.td(await self._detach_instance(api_id)),
                 envelope=TdDetachRequestEnvelope.wrap(
                     TdDetachRequest(
                         session_id=self.session_id, api_id=api_id
@@ -525,6 +536,28 @@ class StsSession:
             )
         if posts:
             await asyncio.gather(*posts, return_exceptions=True)
+
+    async def _detach_instance(self, api_id: int) -> str:
+        """Which TD to address this detach to.
+
+        Best-effort in the same way the detach itself is: if nothing can
+        answer, the plane name is what a node with one TD runs under, and a
+        detach that lands nowhere costs the lease's grace rather than
+        correctness.
+        """
+        if self._td_instance_lookup is None:
+            return "td"
+        try:
+            return await self._td_instance_lookup(api_id) or "td"
+        except Exception:
+            logger.warning(
+                "STS could not resolve the TD instance for api_id=%s on "
+                "detach session=%s — the lease will expire the attach",
+                api_id,
+                self.session_id,
+                exc_info=True,
+            )
+            return "td"
 
     async def _post_detach(
         self, *, what: str, subject: str, envelope: Any

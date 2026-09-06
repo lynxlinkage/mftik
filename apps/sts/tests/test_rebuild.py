@@ -224,7 +224,7 @@ async def _serve_attaches(
             await req.reply(env)
 
     await asyncio.gather(
-        serve(Topics.TD, TD_SESSION_ATTACH, "td.error"),
+        serve(Topics.td("td"), TD_SESSION_ATTACH, "td.error"),
         serve(Topics.MD, MD_SESSION_ATTACH, "md.error"),
         return_exceptions=True,
     )

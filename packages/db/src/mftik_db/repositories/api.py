@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mftik_db.models.api import Api
+from mftik_db.models.instance import Instance
 from mftik_db.repositories.base import BaseRepository
 
 
@@ -33,6 +34,22 @@ class ApiRepository(BaseRepository[Api]):
             .limit(1)
         )
         return result.scalars().first()
+
+    async def instance_name(self, api_id: int) -> str | None:
+        """Which TD instance may use this credential.
+
+        The single source of truth for it. Both the deploy path and STS's
+        rebuild resolve an ``api_id`` this way rather than carrying the name
+        along in a session document: a credential can be moved between
+        instances, and a copy of the answer taken at deploy time would send a
+        rebuild to the instance that used to be allowed to use it.
+        """
+        result = await self.session.execute(
+            select(Instance.name)
+            .join(Api, Api.instance_id == Instance.id)
+            .where(Api.id == api_id)
+        )
+        return result.scalar_one_or_none()
 
     async def list_all(self) -> Sequence[Api]:
         result = await self.session.execute(select(Api).order_by(Api.id.asc()))

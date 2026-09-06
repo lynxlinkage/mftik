@@ -13,11 +13,12 @@ from decimal import Decimal
 
 import pytest
 from broker_harness import a_broker
-from db_harness import a_database
+from db_harness import a_database, an_instance, an_owner
 from mftik.broker import Broker
 from mftik.protocol import Envelope, TdBackfill, Topics
 from mftik_api import backfill_cron
 from mftik_api.backfill_cron import run_backfill_cron, sweep
+from mftik_db.models.api import Api
 from mftik_db.models.history import Attribution, Source
 from mftik_db.repositories import OrderRepository
 
@@ -34,6 +35,27 @@ async def db(monkeypatch, database_url):
     async with a_database(database_url) as database:
         monkeypatch.setattr(backfill_cron, "session_scope", database.scope)
         yield database.scope
+
+
+async def a_credential(session, api_id: int, instance_id: int) -> Api:
+    """The `apis` row the sweep resolves an instance from.
+
+    Backfill loads the credential and opens a venue connection with it, so the
+    sweep asks which host may before it asks anything at all — an account whose
+    row is gone is skipped rather than handed to whichever TD is free.
+    """
+    row = Api(
+        id=api_id,
+        owner_id=1,
+        venue="Paper",
+        api_key=f"k{api_id}",
+        api_secret="s",
+        type="HMAC",
+        instance_id=instance_id,
+    )
+    session.add(row)
+    await session.flush()
+    return row
 
 
 def an_order(api_id: int, *, ticker: str = "Binance_Spot_BTCUSDT") -> dict:
@@ -61,7 +83,7 @@ def an_order(api_id: int, *, ticker: str = "Binance_Spot_BTCUSDT") -> dict:
 
 
 async def queued(broker: Broker) -> list[TdBackfill]:
-    raw = await broker.redis.lrange(f"test:rpc:{Topics.td_backfill()}", 0, -1)
+    raw = await broker.redis.lrange(f"test:rpc:{Topics.td_backfill("td")}", 0, -1)
     return [
         TdBackfill.model_validate(Envelope[dict].model_validate_json(i).payload)
         for i in raw
@@ -75,6 +97,10 @@ def no_pause(monkeypatch):
 
 async def test_every_account_with_history_is_asked_about(broker, db) -> None:
     async with db() as session:
+        await an_owner(session)
+        instance = await an_instance(session)
+        for api_id in (1, 2, 3):
+            await a_credential(session, api_id, instance.id)
         await OrderRepository(session).bulk_upsert(
             [an_order(1), an_order(2), an_order(3)]
         )
@@ -89,6 +115,9 @@ async def test_every_account_with_history_is_asked_about(broker, db) -> None:
 async def test_an_account_that_stopped_trading_is_still_swept(broker, db) -> None:
     """The case no per-event trigger reaches: nothing detaches from it again."""
     async with db() as session:
+        await an_owner(session)
+        instance = await an_instance(session)
+        await a_credential(session, 7, instance.id)
         await OrderRepository(session).bulk_upsert([an_order(7)])
 
     await sweep(broker)
@@ -107,6 +136,9 @@ async def test_a_credential_that_never_traded_is_not_asked_about(
 async def test_one_account_is_asked_about_once_per_sweep(broker, db) -> None:
     """Several instruments are one walk, not one request each."""
     async with db() as session:
+        await an_owner(session)
+        instance = await an_instance(session)
+        await a_credential(session, 5, instance.id)
         repo = OrderRepository(session)
         await repo.bulk_upsert([an_order(5)])
         await repo.bulk_upsert(
@@ -126,6 +158,9 @@ async def test_one_account_is_asked_about_once_per_sweep(broker, db) -> None:
 
 async def test_the_loop_sweeps_on_its_interval(broker, db, monkeypatch) -> None:
     async with db() as session:
+        await an_owner(session)
+        instance = await an_instance(session)
+        await a_credential(session, 1, instance.id)
         await OrderRepository(session).bulk_upsert([an_order(1)])
     monkeypatch.setattr(backfill_cron, "Broker", lambda *a, **kw: broker)
     monkeypatch.setattr(broker, "close", _noop)
@@ -170,3 +205,29 @@ async def test_a_failed_sweep_does_not_end_the_loop(broker, db, monkeypatch) -> 
 
 async def _noop(*a, **kw) -> None:
     return None
+
+
+async def test_an_account_whose_credential_is_gone_is_not_asked_about(
+    broker, db
+) -> None:
+    """New with instance routing, and the reason the subject is keyed.
+
+    Backfill opens a venue connection with the credential, so the sweep has to
+    know which host may before it posts anything. A row with no ``apis`` entry
+    cannot answer that, and handing it to whichever TD is free is the failure
+    the whole ticket exists to remove — on a timer, not at an edge.
+    """
+    async with db() as session:
+        await an_owner(session)
+        instance = await an_instance(session)
+        await a_credential(session, 1, instance.id)
+        await OrderRepository(session).bulk_upsert(
+            [an_order(1), an_order(99)]
+        )
+
+    asked = await sweep(broker)
+
+    assert asked == 2, "both accounts have history"
+    assert [a.api_id for a in await queued(broker)] == [1], (
+        "only the one whose credential says where it may run"
+    )

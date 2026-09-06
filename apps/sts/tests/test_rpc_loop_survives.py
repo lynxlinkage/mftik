@@ -76,7 +76,12 @@ async def run_rpc_under_test(broker: Broker, stop: asyncio.Event) -> None:
     # ``sessions`` is only ever passed through to the handlers, and health —
     # the one call an operator makes to ask whether the subject is being
     # served at all — is the handler that does not touch it.
-    await sts_app.run_rpc(broker, None, stop)  # type: ignore[arg-type]
+    await sts_app.run_rpc(
+        broker,
+        None,  # type: ignore[arg-type]
+        stop,
+        subject=Topics.STS,
+    )
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ import pytest
 import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from db_harness import OWNER_ID, a_database, an_owner
+from db_harness import OWNER_ID, a_database, an_instance, an_owner
 from mftik_db.models import (
     AlertSource,
     Api,
@@ -69,12 +69,14 @@ async def upgraded(database_url):
     async with a_database(database_url) as database:
         async with database.maker() as session:
             await an_owner(session)
+            await an_instance(session)
             session.add(
                 Api(
                     owner_id=OWNER_ID,
                     venue="BinanceFuture",
                     api_key="k-um",
                     api_secret="s",
+                    instance_id=1,
                 )
             )
             session.add(
@@ -83,6 +85,7 @@ async def upgraded(database_url):
                     venue="BinanceDelivery",
                     api_key="k-cm",
                     api_secret="s",
+                    instance_id=1,
                 )
             )
             session.add(

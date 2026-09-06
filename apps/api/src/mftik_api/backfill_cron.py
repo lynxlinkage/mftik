@@ -23,7 +23,7 @@ import os
 
 from mftik.broker import Broker
 from mftik.protocol import TD_BACKFILL, Envelope, TdBackfill, Topics
-from mftik_db.repositories import OrderRepository
+from mftik_db.repositories import ApiRepository, OrderRepository
 from mftik_db.session import session_scope
 
 logger = logging.getLogger("mftik_api.backfill_cron")
@@ -47,6 +47,18 @@ async def accounts_to_sweep() -> list[int]:
         return await OrderRepository(db).api_ids_with_history()
 
 
+async def _instance_for(api_id: int) -> str | None:
+    """Which TD may open a venue connection with this credential.
+
+    Resolved per account rather than swept onto one queue. This loop is the
+    reason the subject is keyed at all: it touches every account with history
+    on a timer, so an unkeyed subject would hand a jurisdiction-bound key to
+    whichever TD was free — on a schedule, not at an edge.
+    """
+    async with session_scope() as db:
+        return await ApiRepository(db).instance_name(api_id)
+
+
 async def sweep(broker: Broker, *, reason: str = "cron") -> int:
     """Ask for a backfill of every account with history. Returns how many.
 
@@ -56,8 +68,17 @@ async def sweep(broker: Broker, *, reason: str = "cron") -> int:
     """
     api_ids = await accounts_to_sweep()
     for api_id in api_ids:
+        instance = await _instance_for(api_id)
+        if instance is None:
+            # The credential is gone. Its history is not, but nothing is
+            # allowed to open a venue connection for a row that no longer
+            # says which host may.
+            logger.warning(
+                "backfill cron skipping api_id=%s — no credential row", api_id
+            )
+            continue
         await broker.post(
-            Topics.td_backfill(),
+            Topics.td_backfill(instance),
             Envelope[TdBackfill].wrap(
                 TdBackfill(api_id=api_id, reason=reason),
                 type=TD_BACKFILL,

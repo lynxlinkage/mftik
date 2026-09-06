@@ -30,7 +30,7 @@ async def broker() -> Broker:
 
 async def queued(broker: Broker) -> list[TdBackfill]:
     """Whatever is sitting on ``td.backfill`` right now."""
-    key = f"test:rpc:{Topics.td_backfill()}"
+    key = f"test:rpc:{Topics.td_backfill("td")}"
     raw = await broker.redis.lrange(key, 0, -1)
     out = []
     for item in raw:
@@ -46,7 +46,7 @@ async def test_a_request_is_left_on_the_queue_for_whoever_takes_it(
     broker,
 ) -> None:
     """Posted, not requested: nobody here waits minutes for a walk."""
-    assert await request_backfill(broker, API_ID, reason="cron")
+    assert await request_backfill(broker, API_ID, instance="td", reason="cron")
 
     asks = await queued(broker)
     assert [(a.api_id, a.reason) for a in asks] == [(API_ID, "cron")]
@@ -58,7 +58,7 @@ async def test_a_request_survives_having_nobody_to_serve_it(broker) -> None:
     Nothing is listening. The message waits in the list, and the next TD to
     come up takes it — which is exactly the account whose record has a hole.
     """
-    await request_backfill(broker, API_ID, reason="shutdown")
+    await request_backfill(broker, API_ID, instance="td", reason="shutdown")
     await asyncio.sleep(0.05)
 
     assert len(await queued(broker)) == 1
@@ -66,7 +66,11 @@ async def test_a_request_survives_having_nobody_to_serve_it(broker) -> None:
 
 async def test_a_request_may_name_instruments(broker) -> None:
     await request_backfill(
-        broker, API_ID, reason="detach", tickers=["Binance_Spot_BTCUSDT"]
+        broker,
+        API_ID,
+        instance="td",
+        reason="detach",
+        tickers=["Binance_Spot_BTCUSDT"],
     )
 
     assert (await queued(broker))[0].tickers == ["Binance_Spot_BTCUSDT"]
@@ -81,7 +85,10 @@ async def test_asking_never_raises_on_a_broken_broker(broker) -> None:
 
         config = broker.config
 
-    assert await request_backfill(Broken(), API_ID, reason="cron") is False
+    assert (
+        await request_backfill(Broken(), API_ID, instance="td", reason="cron")
+        is False
+    )
 
 
 async def test_asking_gives_up_rather_than_holding_a_teardown(broker) -> None:
@@ -94,7 +101,7 @@ async def test_asking_gives_up_rather_than_holding_a_teardown(broker) -> None:
         config = broker.config
 
     result = await request_backfill(
-        Hanging(), API_ID, reason="shutdown", timeout=0.05
+        Hanging(), API_ID, instance="td", reason="shutdown", timeout=0.05
     )
     assert result is False
 
@@ -109,7 +116,9 @@ async def test_a_cancelled_ask_is_not_swallowed(broker) -> None:
         config = broker.config
 
     task = asyncio.create_task(
-        request_backfill(Hanging(), API_ID, reason="shutdown", timeout=30)
+        request_backfill(
+            Hanging(), API_ID, instance="td", reason="shutdown", timeout=30
+        )
     )
     await asyncio.sleep(0.05)
     task.cancel()

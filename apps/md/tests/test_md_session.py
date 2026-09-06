@@ -41,6 +41,7 @@ class FakeMdStore:
         session_id: str,
         created_by: int,
         venues: list[str] | None = None,
+        instance: str = "md",
     ) -> list[SimpleNamespace]:
         out: list[SimpleNamespace] = []
         for venue in venues or []:
@@ -61,7 +62,9 @@ class FakeMdStore:
             out.append(row)
         return out
 
-    async def mark_done(self, *, session_id: str) -> list[SimpleNamespace]:
+    async def mark_done(
+        self, *, session_id: str, instance: str = "md"
+    ) -> list[SimpleNamespace]:
         done: list[SimpleNamespace] = []
         for key, row in self.rows.items():
             if row.session_id != session_id or row.status != "live":

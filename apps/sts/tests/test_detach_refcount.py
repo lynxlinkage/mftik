@@ -29,7 +29,7 @@ async def _serve_td(
     broker: Broker, td: TdSessionManager, stop: asyncio.Event
 ) -> None:
     """TD's control-plane RPC, which is where a detach arrives."""
-    async for req in broker.serve(Topics.TD, stop=stop):
+    async for req in broker.serve(Topics.td("td"), stop=stop):
         await td_dispatch(req, sessions=td)
 
 

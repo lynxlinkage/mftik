@@ -12,6 +12,21 @@ from mftik_api.paging import MAX_LIST_OFFSET
 
 class DomainStats(BaseModel):
     domain: str
+    #: Which instance of the plane this row is. One row per declared instance.
+    instance: str | None = None
+    region: str | None = None
+    enabled: bool = True
+    #: ``connected`` | ``down``. A declared instance that does not answer is
+    #: *down* — a fact about a machine somebody has to go and look at, and one
+    #: only knowable because a row says it should be here. :attr:`healthy` is
+    #: kept as the boolean older clients read.
+    state: str = "connected"
+    version: str | None = None
+    venues: list[str] = Field(default_factory=list)
+    api_ids: list[int] = Field(default_factory=list)
+    #: Session counts are per plane. They ride the first instance of each plane
+    #: and are zero on the rest, because repeating them per instance would
+    #: claim a split the tables do not yet record.
     live: int = 0
     done: int = 0
     #: Sessions that ended badly. Only ``sts`` records these — td/md rows
@@ -199,6 +214,9 @@ class ApiCreateBody(BaseModel):
     type: str = "HMAC"
     passphrase: str | None = None
     created_by: int | None = None
+    #: Which TD instance may use this credential. Defaults to ``td``, the
+    #: instance every single-process node already answers to.
+    instance: str = Field(default="td", min_length=1, max_length=64)
 
 
 class ApiRenameBody(BaseModel):
@@ -216,6 +234,7 @@ class ApiOut(BaseModel):
     type: str
     created_at: float
     created_by: int
+    instance: str | None = None
 
 
 class ApiListResponse(BaseModel):
@@ -225,6 +244,46 @@ class ApiListResponse(BaseModel):
 class ApiDeleteResponse(BaseModel):
     id: int
     account_id: int
+    deleted: bool = True
+
+
+class InstanceCreateBody(BaseModel):
+    """Declare an instance. ``name`` and ``domain`` are fixed once written."""
+
+    name: str = Field(..., min_length=1, max_length=64)
+    domain: str = Field(..., min_length=1, max_length=16)
+    region: str | None = Field(default=None, max_length=64)
+
+
+class InstanceUpdateBody(BaseModel):
+    """Edit what nothing routes on.
+
+    There is no ``name`` and no ``domain``. A process reads its name from
+    ``MFTIK_INSTANCE`` in an environment this service cannot write, so a
+    rename here would not reach the process that answers to it — the row and
+    the process would disagree with nothing able to reconcile them.
+    """
+
+    region: str | None = Field(default=None, max_length=64)
+    enabled: bool | None = None
+
+
+class InstanceOut(BaseModel):
+    id: int
+    name: str
+    domain: str
+    region: str | None = None
+    enabled: bool = True
+    created_at: float
+    created_by: int | None = None
+
+
+class InstanceListResponse(BaseModel):
+    instances: list[InstanceOut] = Field(default_factory=list)
+
+
+class InstanceDeleteResponse(BaseModel):
+    id: int
     deleted: bool = True
 
 

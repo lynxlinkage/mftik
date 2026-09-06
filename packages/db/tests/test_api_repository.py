@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from db_harness import a_database, an_owner
+from db_harness import a_database, an_instance, an_owner
 from mftik_db.models.api import Api, ApiType
 from mftik_db.repositories import ApiRepository
 from sqlalchemy.exc import IntegrityError
@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 async def db(database_url):
     async with a_database(database_url) as database, database.maker() as session:
         await an_owner(session)
+        await an_instance(session)
         await session.commit()
         yield session
 
@@ -24,6 +25,7 @@ def _row(*, venue: str, api_key: str = "shared-key") -> Api:
         api_key=api_key,
         api_secret="secret",
         type=ApiType.ED25519.value,
+        instance_id=1,
     )
 
 

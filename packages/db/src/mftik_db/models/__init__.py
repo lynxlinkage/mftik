@@ -29,6 +29,7 @@ from mftik_db.models.history import (
     Source,
     Stream,
 )
+from mftik_db.models.instance import Instance
 from mftik_db.models.session import (
     MdSessionRow,
     SessionDomain,
@@ -69,6 +70,7 @@ __all__ = [
     "Base",
     "CashFlowRow",
     "FillRow",
+    "Instance",
     "MdSessionRow",
     "OrderRow",
     "SessionDomain",

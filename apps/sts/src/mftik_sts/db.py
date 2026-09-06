@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from mftik_db.models.session import SessionStatus, StsSessionRow
-from mftik_db.repositories import StsSessionRepository
+from mftik_db.repositories import ApiRepository, StsSessionRepository
 from mftik_db.session import session_scope
 
 
@@ -99,3 +99,16 @@ async def reset_rebuild_count(session_id: str) -> StsSessionRow | None:
     async with session_scope() as db:
         repo = StsSessionRepository(db)
         return await repo.reset_rebuild_count(session_id)
+
+
+async def td_instance(api_id: int) -> str | None:
+    """Which TD instance may use this credential.
+
+    STS resolves it here rather than reading a name recorded in the session
+    document. A credential can be moved between instances, and a copy taken at
+    deploy time would send a rebuild — days later, after a restart — to the
+    instance that used to be allowed to use it. ``apis.instance_id`` is the
+    only thing that knows.
+    """
+    async with session_scope() as db:
+        return await ApiRepository(db).instance_name(api_id)
