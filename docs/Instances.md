@@ -967,12 +967,20 @@ a picture.
 
 **Verify.**
 
-- ACKs stop; the session fails within the grace with a reason naming the feed
-  (`test_sts_session.py` / `test_session_failed.py` style).
-- ACKs continuing on one instance do not keep a session alive when another
-  attached instance has gone quiet — the split-feed case.
-- A session with no MD attach is unaffected.
-- `test_md_events.py` unchanged: a live feed never trips the watchdog.
+- ACKs stop; the session fails within the grace, and the reason **names the
+  instance** that went quiet.
+- One instance goes quiet while another keeps acknowledging: the session still
+  fails, and the reason names only the one at fault. A watchdog on a single
+  timestamp passes every other test here and fails this one — which is the
+  point of keying per instance.
+- A session that has heard no MD at all is **not** failed. Every deploy passes
+  through that window: a session heartbeats before MD has attached to hear it,
+  so the watchdog arms on the first acknowledgement rather than at start.
+- A live feed never trips it.
+- An MD that does not name itself is still watched, under the plane name — a
+  rolling upgrade has one on each side of the new field.
+- Checked by regressing the watchdog *and* by regressing the per-instance
+  keying, separately.
 
 **Depends.** INS-1. Independent of INS-3, INS-4 and INS-5.
 

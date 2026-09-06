@@ -140,6 +140,20 @@ TD_GLOBAL_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
 #: ``api_id`` → the TD instance allowed to use that credential.
 TdInstanceLookup = Callable[[int], Awaitable[str | None]]
 
+#: How long an attached MD may go without acknowledging before this session
+#: gives up on it.
+#:
+#: Mirrors MD's own ``LEASE_GRACE_S``, and deliberately: the lease is one
+#: agreement and both ends should tolerate the same silence. A blip long
+#: enough to expire MD's view of this session is one that has already cost the
+#: feeds, so a session that survived it would be running on data that stopped.
+#:
+#: Armed by the first acknowledgement from each instance rather than at start,
+#: because there is a real window between a session starting its heartbeat and
+#: an MD attaching to hear it. An MD that never acknowledges at all is caught
+#: by the attach failing, not by this.
+MD_ACK_GRACE_S = 3.0
+
 
 class StsSession:
     """Strategy session with TD/MD pub/sub links and fencing lease heartbeat."""
@@ -163,6 +177,7 @@ class StsSession:
         event_log: EventLog | None = None,
         strategy_type: str | None = None,
         td_instance: TdInstanceLookup | None = None,
+        md_ack_grace: float = MD_ACK_GRACE_S,
     ) -> None:
         self.session_id = session_id
         self.broker = broker
@@ -214,6 +229,13 @@ class StsSession:
         self._token = 0
         self._ack_tokens: dict[int, int] = {}
         self._md_ack_token: int | None = None
+        #: Instance name → when it last acknowledged, on this loop's clock.
+        #: Keyed per instance because a session's feeds may be split across
+        #: MDs: one of them going quiet is the case worth catching, and a
+        #: single timestamp would be kept fresh by whichever one was still
+        #: talking.
+        self._md_acks: dict[str, float] = {}
+        self._md_ack_grace = md_ack_grace
         self._md_lease_logged = False
         self._on_stop_task: asyncio.Task[Any] | None = None
         self._recon_sent: set[int] = set()
@@ -626,6 +648,36 @@ class StsSession:
                 )
                 self._fail_from_infrastructure("lease heartbeat")
                 return
+
+            # Checked here rather than on a timer of its own: this loop runs
+            # for exactly as long as the session does, and it is already the
+            # place a lease is kept. The lease was one-directional until now —
+            # MD and TD watched this heartbeat and tore down when it stopped,
+            # while the acknowledgements coming back were recorded and never
+            # read. An MD that died therefore just stopped delivering, and
+            # ``on_best_quote`` quietly never fired again.
+            stale = self._stale_md_instances(self._md_ack_grace)
+            if stale:
+                logger.error(
+                    "STS lost market data from %s session=%s",
+                    ", ".join(stale),
+                    self.session_id,
+                )
+                await self._publish_log(
+                    f"no market-data acknowledgement from {', '.join(stale)} "
+                    f"for {self._md_ack_grace:.0f}s",
+                    level="error",
+                )
+                # Named so the reason says which instance went quiet. Half a
+                # picture is more dangerous than none: a session that loses
+                # every feed does nothing, while one that loses a subset keeps
+                # acting on the rest — a cross-venue quote against a hedge
+                # price that has stopped moving.
+                self._fail_from_infrastructure(
+                    f"md feed from {', '.join(stale)}"
+                )
+                return
+
             try:
                 await asyncio.wait_for(
                     self._stop.wait(), timeout=self.heartbeat_interval
@@ -716,10 +768,38 @@ class StsSession:
             self._md_ack_token = ack.token
         except Exception:
             return
+        # Under the plane name when the sender does not say: a single-process
+        # node calls itself ``md``, so an MD that predates the field is tracked
+        # as the one instance it is rather than not tracked at all.
+        instance = ack.instance or "md"
+        first = instance not in self._md_acks
+        self._md_acks[instance] = asyncio.get_running_loop().time()
+        if first and self._md_acks:
+            self.event_log.record(
+                "lease", "md_ack_armed", dir="self", what=instance
+            )
         if self._md_lease_logged:
             return
         self._md_lease_logged = True
         await self._publish_log("MD lease established")
+
+    def _stale_md_instances(self, grace: float) -> list[str]:
+        """Attached MDs that have stopped acknowledging.
+
+        Only instances that have acknowledged at least once are considered.
+        Arming on the first ACK is what makes this safe to run from the moment
+        the session starts: a session begins heartbeating before MD has
+        attached to hear it, and a watchdog armed at start would fire in that
+        window every time.
+        """
+        if not self._md_acks:
+            return []
+        now = asyncio.get_running_loop().time()
+        return sorted(
+            instance
+            for instance, seen in self._md_acks.items()
+            if now - seen > grace
+        )
 
     async def _on_market_data(self, env: UntypedEnvelope) -> None:
         name, model = MD_HANDLERS[env.type]
