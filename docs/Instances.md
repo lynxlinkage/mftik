@@ -142,6 +142,12 @@ Each is meant to be a test.
   today: any instance of the plane may answer.
 - **PI-6** An instance that dies is reaped by its own rows only. A peer's rows
   and liveness keys are untouched.
+- **PI-7** An `api_id` is held by exactly one TD *process*, enforced rather
+  than asserted. Two processes configured with the same `MFTIK_INSTANCE` do not
+  both take it — the second is refused and says who holds it.
+- **PI-8** A session whose feeds are split across MD instances notices when any
+  one of them stops answering. Losing part of the picture never leaves the
+  strategy running on the rest.
 
 PI-4 is the strict one and the one to design against. Three separate pieces of
 today's code violate it the moment two MDs serve one session — see *The hard
@@ -296,8 +302,8 @@ fourth state and put a two-way interaction at every serve site:
 | Role | Serves `md` | Serves `md.{instance}` | Runs `reap_loop` | Set by |
 |---|---|---|---|---|
 | `standby` | ✗ | ✗ | ✗ | The cutover protocol. Temporary |
-| `named` | ✗ | ✓ | ✓ | Configuration. Permanent |
-| `active` | ✓ | ✓ | ✓ | Configuration. Permanent, and the default |
+| `named` | ✗ | ✓ | ✓ | Configuration. Permanent. **TD is always this** |
+| `active` | ✓ | ✓ | ✓ | Configuration. Permanent. The MD and STS default |
 
 Configuration names the *target* role. A process boots into `standby` if it is
 joining as green, otherwise straight into its target; the cutover is the
@@ -329,28 +335,69 @@ configuration that does nothing, not because something unsafe would follow.
 ## Subject naming
 
 `Topics.TD` becomes `Topics.td(instance)` returning `td.{instance}`, and the
-same for `sts`, `md`, `sym`, `paper`. The bare `td` stays as the anycast
-subject, and an `active` instance serves **both** its own and the bare one —
-that is what makes PI-5 hold without a special case, and what lets this ship
-before anything names an instance. `active` is the default precisely so that
-shipping stage 3 changes nothing observable; an operator who wants an instance
-to take only work addressed to it sets `named`. See *Roles*.
+same for `sts` and `md`. **Those three planes and no others** — see *Which
+planes are instanced* below.
 
-Two more subjects need the treatment for different reasons:
+MD and STS keep the bare subject as an anycast pool, and an `active` instance
+serves both its own and the bare one; that is what makes PI-5 hold without a
+special case, and what lets this ship before anything names an instance.
 
-- **`md.fetch`** is deliberately unkeyed, and the docstring argues the case
-  well: a read is owned by nobody, so competing consumers are the point. That
-  argument is about *correctness* and survives. What it does not cover is
-  latency or jurisdiction, both of which are the reason this document exists.
-  Add `md.fetch.{instance}`; keep the unkeyed one as the default.
+**TD has no anycast subject.** Its routing key is the `apis` row, which always
+resolves (see *Schema*), so there is no such thing as unaddressed TD work. Only
+three things ever reached `Topics.TD`: health, which is now probed per
+instance; attach and detach, which carry an `api_id`; and `TD_SESSION_LIST`,
+which turns out to need no plane at all — `handle_session_list` calls
+`SessionManager.list_sessions`, and that method is one database query with no
+in-memory state, in a route file that already opens `session_scope` for
+`_api_labels`. `/td/sessions` reads the table directly and the RPC goes. So TD
+instances default to `named`; `active` is an MD and STS default.
+
+Two more subjects change:
+
+- **`td.backfill`** becomes `td.backfill.{instance}`, always. Its docstring's
+  correctness argument survives untouched — the work is idempotent, unowned,
+  and an account with no live attach still needs it — but that argument says
+  nothing about *where the socket opens from*, and this is the one unowned job
+  that carries a credential: `BackfillSession`'s own docstring says "any TD can
+  **load the credential** and ask", `reader.py` builds each reader from
+  `row.api_key` / `row.api_secret`, and `backfill_cron` sweeps every account
+  with history on a timer. Left unkeyed, a US TD periodically opens a venue
+  connection with a JP-only key. That is the compliance requirement failing on
+  a schedule, not at an edge.
+
+  The docstring's objection to keying does not apply. It argues that a keyed
+  subject parks a request until the account's *owner* takes it, which for a
+  retired account is forever. The key here is the **instance**, and an instance
+  is up whether or not anybody is trading that account. For a jurisdiction-bound
+  credential, "wait until `td-jp-1` is back" is the correct behaviour, not a
+  regression.
 - **`log.md.{venue}`** collides across instances — two MDs on Bybit write the
   same channel and `/ws/md/{venue}` cannot tell them apart
   (`apps/api/src/mftik_api/ws.py:146`). It becomes
   `log.md.{instance}.{venue}`.
 
-`Topics.td_backfill()` stays unkeyed. Its docstring's reasoning is the real
-one — the work is idempotent, unowned, and an account with no live attach still
-needs it — and none of that changes here.
+### Which planes are instanced
+
+`sts`, `td`, `md`. Not `sym`, not `paper`, and `md.fetch` stays unkeyed with no
+per-instance variant.
+
+**SYM** is off the hot path. `SymbolClient` caches in-process behind a TTL and
+its module docstring says why: "Listings are near-static by definition, so a
+process refetches on a miss or when its TTL lapses, **not per order**." Five
+processes each hold a cache; a miss is rare and absorbs whatever the round trip
+costs.
+
+**Paper** is a simulated venue, and the point of it is one shared book. Two
+paper engines are not a scaled paper plane, they are two unrelated markets.
+
+**`md.fetch`** is the mirror of `td.backfill` and lands the other way for the
+one reason that matters: it carries no credential. Klines, book snapshots and
+quotes are public, so jurisdiction does not apply, and only latency argues for
+pinning a read to an instance. *The two drivers are not the same requirement*
+has already shown that with a single `REDIS_URL` a pinned read wins nothing —
+the caller's request has already crossed to Redis before any MD picks it up.
+Pinning it now would be building for the per-region broker this document puts
+out of scope. Deferred, and this paragraph is the record of why.
 
 ## Choosing an instance
 
@@ -375,8 +422,13 @@ worse than one that fails to parse.
 
 **TD, on the `apis` row.** Not in `strategy.yml`. A credential is bound to a
 region as a matter of fact, not as a matter of what a strategy author typed,
-and compliance is a property of the key. `Api` gets a nullable `instance_id`
-foreign key and TD attach routes by it. A foreign key rather than a name
+and compliance is a property of the key. `Api` gets an `instance_id` foreign
+key — **`NOT NULL` from the first migration, not eventually** — and TD attach
+routes by it. `MFTIK_INSTANCE` already defaults to the plane name, so the
+migration declares an instance called `td` and points every existing row at it;
+an existing single-process deployment upgrades without touching anything and
+never sees a null. There is deliberately no "unassigned credential" state to
+fall through to an anycast TD, because there is no anycast TD. A foreign key rather than a name
 string, because a typo in a free-text column is a credential that silently
 never attaches; deleting an instance a credential still points at is refused
 rather than cascaded, the way `list_live_for_origin` already refuses to delete
@@ -506,6 +558,81 @@ This is the only genuinely new machinery a probe-based design needs, and it has
 to land with the first probe rather than after it — the leak is invisible until
 the Redis it shares with order entry is full.
 
+### 7. Nothing enforces one TD per `api_id`
+
+`SessionManager.attach` (`apps/td/src/mftik_td/session/manager.py:204`) starts
+with `acct = self._accounts.get(request.api_id)` and builds the account if it
+is missing. `self._accounts` is process-local memory. **There is no
+cross-process guard on `api_id` at all.**
+
+Two processes configured with the same `MFTIK_INSTANCE` — a copy-pasted compose
+block, a `--scale` — each build a `TradingAccount` and each run
+`_serve_orders` on `td.order.{api_id}`. That subject is `BLPOP`, so they become
+competing consumers and the account's order flow is split between two processes
+that each believe they own it. Each keeps its own OMS, its own ledger and its
+own reservations, and both publish to `td.oms.{api_id}` and
+`td.ledger.{api_id}` — so the strategy watches its balances alternate between
+two half-pictures.
+
+This is latent rather than live today: nothing in the tree configures replicas.
+There is no `replicas`, `scale` or `deploy:` key in `docker-compose.yml`,
+`docker-compose.peer.yml` or the CLI's template, and no test runs two
+`SessionManager`s of one plane at once. **So this is not a defect being
+inherited — it is one this design would create**, because this design is the
+first thing that makes running several TDs an ordinary operation rather than a
+typo. Declaring "an `api_id` keeps exactly one TD owner" in *Non-goals* while
+nothing enforces it is not good enough once that is true.
+
+The primitive exists and is used for exactly this shape of problem one level
+down. STS guards rebuild with `claim_alive`'s `SET NX` so two processes cannot
+restore one session, and `liveness.py`'s docstring gives the reason: "several
+processes of a plane serve the same RPC subject as competing consumers, so one
+finding a live row it does not own has no way of knowing, by itself, whether a
+peer is running it."
+
+TD is the only plane with no key of its own — it imports `is_alive` and nothing
+else, reading STS's key to reap orphans and never claiming anything. So where
+*The hard parts, 1* found MD's liveness key needed fixing, TD's finding is the
+opposite: there is none to fix and one to add. `attach` takes a `SET NX` claim
+on `api_id` before building the account, renews it while held, releases it at
+refcount zero, and refuses the attach naming the holder when it cannot.
+
+### 8. STS cannot tell that an MD stopped
+
+`_on_md_lease_ack` (`apps/sts/src/mftik_sts/session/session.py:679`) stores the
+token and logs `MD lease established` once. The token goes nowhere:
+
+```
+204:  self._ack_tokens: dict[int, int] = {}
+205:  self._md_ack_token: int | None = None
+683:  self._md_ack_token = ack.token
+813:  self._ack_tokens[api_id] = ack.token
+```
+
+Four occurrences, all writes. Neither field is read anywhere in STS or in its
+tests. **The lease is one-directional in effect**: MD and TD watch STS's
+heartbeat and tear down when it stops, and STS does nothing at all with the
+acknowledgements coming back. An MD that dies today simply stops delivering;
+`on_best_quote` quietly never fires again and nothing says so.
+
+That answers `docs/MdHandover.md`'s open question 2 — "What is STS's actual
+grace for a missing `MdLeaseAck`?" — with: there is none, because there is no
+watchdog.
+
+Splitting feeds turns this from a pre-existing gap into a blocker. Today one MD
+holds all of a session's feeds, so its death costs the strategy *everything*,
+and a strategy receiving nothing generally does nothing. Under PI-3 the session
+loses only the feeds one instance held and keeps receiving the rest —
+`CrossArb` quotes one venue and hedges on another, so losing the hedge venue
+leaves it quoting against a price that is frozen rather than stale-and-known.
+**Half a picture is more dangerous than none, because it keeps acting.**
+
+So STS grows the mirror of the watchdog MD already runs (`_watch_timeout`
+against `LEASE_GRACE_S`), per attached *instance* rather than per session, and
+a grace exceeded goes to `_fail_from_infrastructure("md feed")` — a path that
+already exists and today is only ever reached by a pump exception. This has to
+land before stage 6, since stage 6 is what first makes half a picture possible.
+
 ## Schema
 
 Four migrations, all additive.
@@ -513,14 +640,17 @@ Four migrations, all additive.
 | Migration | Change |
 |---|---|
 | `instances` | New table: `name` (unique), `domain`, `region`, `enabled`, `created_by`, `created_at` |
-| `apis.instance_id` | Nullable FK to `instances.id`. Null means any TD |
+| `apis.instance_id` | FK to `instances.id`, **`NOT NULL`**. Existing rows point at the instance named `td` |
 | `md_sessions.instance` | `String(64)`, plus `uq_md_sessions_venue_session` → `(instance, venue, session_id)` |
+| `sts_sessions.instance` | `String(64)`, nullable. Which STS was asked to run this. Null is legacy and unpinned |
 | `sts_sessions.md_ids` | JSON list → instance-keyed mapping, read through a compat shim |
 
-`md_sessions.instance` is a plain string and deliberately **not** a foreign
-key: it is history, it records the name as it was at the time, and retiring an
-instance must not break the rows that describe what it did. `md_sessions.venue`
-is a plain string for the same reason.
+`md_sessions.instance` and `sts_sessions.instance` are plain strings and
+deliberately **not** foreign keys: they are history, they record the name as it
+was at the time, and retiring an instance must not break the rows that describe
+what it did. `md_sessions.venue` is a plain string for the same reason.
+`apis.instance_id` is the exception because it is not history — it is live
+routing, and a typo there is a credential that silently never attaches.
 
 `SessionInfo` gains `instance` so the session lists can show it.
 
@@ -540,9 +670,11 @@ Home renders that on a fixed three-column grid (`repeat(3, minmax(0, 1fr))` at
 `frontend/src/routes/+page.svelte:105`) with a `d.domain === 'sts'` special
 case for the link. It becomes grouped by plane with N cards under each.
 
-`/md/sessions` and `/td/sessions` need no routing work. They are anycast RPCs
-answered from the database, and any instance gives the same answer — only the
-new `instance` field has to reach the response.
+`/md/sessions` needs no routing work: it is an anycast RPC answered from the
+database, and any MD gives the same answer — only the new `instance` field has
+to reach the response. `/td/sessions` is the same query and stops being an RPC
+at all, since TD has no anycast subject to send it on and the API can run the
+query itself.
 
 `mftik check` stays a local parse. The `instances` table does make a name
 checkable without asking any plane — one ordinary HTTP query, no broker — so
@@ -563,21 +695,32 @@ Each stage is useful alone and leaves the tree shippable.
    starting one shows a connected row and a **down** row, which is the whole
    point and is also what makes the rest debuggable.
 3. **Unicast subjects and the role enum.** `Topics.td(instance)` and friends,
-   plus `standby` / `named` / `active` gating which serve loops exist. Every
-   instance defaults to `active`, so no caller uses the unicast subject yet and
-   nothing changes observably — which is the point. This is also the stage that
-   owns the two `docs/MdHandover.md` edits below, because it is what makes
-   their sentences false.
+   plus `standby` / `named` / `active` gating which serve loops exist. MD and
+   STS default to `active`, so nothing changes observably for them. TD is
+   `named` from the start and its anycast subject is deleted in this stage,
+   along with the `/td/sessions` RPC it was the last real caller of. Owns the
+   two `docs/MdHandover.md` edits below, because it is what makes their
+   sentences false.
 4. **The three PI-4 fixes.** Per-instance liveness key, `mark_done_session`
    predicate, the `md_sessions` constraint. Do this *before* anything can
    split a session across instances, not after.
-5. **TD routing.** `apis.instance`, attach routes by it. Smallest of the
-   routing changes and the one compliance actually needs.
-6. **MD routing.** The `strategy.yml` mapping, the deploy fan-out, the
+5. **TD routing and PI-7.** `apis.instance_id`, attach routes by it,
+   `td.backfill.{instance}`, and the `SET NX` claim on `api_id` (*The hard
+   parts, 7*). The claim belongs here and not later: this is the stage that
+   first makes two TDs meaningful, so before it there is nothing to test and
+   after it there is a window with the invariant unguarded.
+6. **PI-8: the STS MD lease watchdog** (*The hard parts, 8*). Alone and ahead
+   of the fan-out, because it is worth having whether or not feeds ever split —
+   today it closes a session that has silently stopped receiving anything.
+7. **MD routing.** The `strategy.yml` mapping, the deploy fan-out, the
    rollback unwind, `md_ids`. The largest stage and the one to do last.
-7. **STS selection.** The deploy parameter. Independent of everything above.
+8. **STS selection.** The deploy parameter *and* `sts_sessions.instance` with
+   the rebuild-scan filter. Not independent of the rest, as an earlier draft
+   claimed: without the column a restart re-races every interrupted session
+   across every STS, so a run pinned to `sts-tw` can come back on `sts-jp`.
+   The migration rides with the others in stage 1.
 
-Stage 5 alone closes the compliance requirement. Stages 6 and 7 are what make
+Stage 5 alone closes the compliance requirement. Stages 7 and 8 are what make
 a single session span instances, and can wait.
 
 ## Docs that stay right
@@ -598,6 +741,13 @@ That ordering is backwards once a poll can still take a request after a stop:
 it becomes blue stops, the poll is waited out, green starts — per subject. The
 line and the cutover budget around it both need updating.
 
+Its open question 2 — "What is STS's actual grace for a missing `MdLeaseAck`,
+and does it bound the cutover comfortably? Measure before stage 5" — has an
+answer that needs no measuring: **there is no grace, because STS never reads
+the acknowledgements** (*The hard parts, 8*). The cutover is unbounded by STS
+today, and becomes bounded by whatever watchdog PI-8 installs — so that
+question should be rewritten to depend on PI-8 rather than on a measurement.
+
 Its *What is already true* entry — "MD instances are already competing
 consumers" — stays right either way.
 
@@ -614,12 +764,12 @@ the ticket that would make such a sentence false.
 
 ## Open questions
 
-1. Should `active` really be the default? It is what makes PI-5 free and stage
-   3 a no-op, but it also means a misconfigured instance silently answers work
-   meant for a peer — the failure this document exists to remove. The
-   alternative is `named` by default and an explicit opt-in to the anycast
-   pool, which is safer and breaks every existing deployment on upgrade.
-   *Roles* assumes `active`; this is the assumption to challenge first.
+1. Should `active` really be the MD and STS default? TD has been settled — it
+   is `named`, because its routing key always resolves — but MD and STS still
+   need the anycast pool for PI-5, and `active` means a misconfigured instance
+   silently answers work meant for a peer. The alternative is `named` by
+   default with an explicit opt-in, which is safer and breaks every existing
+   deployment on upgrade.
 2. How often does Home probe, and does it probe on view or on a timer? Every
    probe to a down instance is a write to a queue that expires rather than
    drains, so the refresh interval is a cost as well as a freshness knob.
@@ -635,6 +785,3 @@ the ticket that would make such a sentence false.
    instance being retired. That wants an application check of the kind
    `list_live_for_origin` already performs for registry entries — the question
    is whether it blocks the delete or only warns.
-6. Should `md.fetch.{instance}` be preferred automatically when a session's
-   feeds all name one instance? The unkeyed subject is the better default for
-   correctness and the wrong one for a colocated read.

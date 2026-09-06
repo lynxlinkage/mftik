@@ -267,8 +267,14 @@ Each stage is useful alone and leaves the tree in a shippable state.
 
 1. Does `persist_live` need to record feeds, or is "blue must answer" enough?
    (See *The hard parts, 1*.)
-2. What is STS's actual grace for a missing `MdLeaseAck`, and does it bound the
-   cutover comfortably? Measure before stage 5.
+2. ~~What is STS's actual grace for a missing `MdLeaseAck`?~~ **There is none.**
+   `_on_md_lease_ack` stores the token and logs once; `_md_ack_token` is written
+   and never read, in STS or in its tests, so STS does not notice an MD that
+   stopped acknowledging. Nothing to measure — the cutover is unbounded by STS
+   today. `docs/Instances.md` (PI-8, *The hard parts, 8*) installs the watchdog
+   that will bound it, for its own reasons; this question becomes "does PI-8's
+   grace bound the cutover comfortably?" and cannot be answered before that
+   lands.
 3. Is the pinned-feed buffer bounded by time or by record count? The tape uses
    both (`DEFAULT_RETENTION_S`, `DEFAULT_MAXLEN`) for good reasons that apply
    here too.
