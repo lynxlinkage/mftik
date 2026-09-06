@@ -150,6 +150,7 @@ class SessionManager:
         heartbeat_interval: float = 1.0,
         strategy_factory: StrategyFactory | None = None,
         td_instance: TdInstanceLookup | None = None,
+        instance: str = SessionDomain.STS.value,
     ) -> None:
         self._broker = broker
         self._persist_live = persist_live
@@ -168,6 +169,9 @@ class SessionManager:
         #: Injected like every other database reach here, so a test can drive
         #: a rebuild without one.
         self._td_instance_lookup = td_instance
+        #: Which STS this is. Only the rebuild scan reads it: a session is
+        #: addressed by the subject it was created on, not by this.
+        self._instance = instance
         self._sessions: dict[str, StsSession] = {}
         # Held so shutdown can cancel them: each outlives the rebuild scan
         # that started it, and a pending task at loop close is a warning
@@ -305,10 +309,11 @@ class SessionManager:
                 type=request.type,
                 yaml_text=request.yaml_text,
                 td=dump_td(dict(request.td)),
-                md=dict(request.md),
+                md_ids=dict(request.md),
                 st_paras=dict(request.st_paras),
                 cid_slot=cid_slot,
                 restart=request.restart,
+                instance=request.instance,
             )
         try:
             await session.start()
@@ -677,6 +682,27 @@ class SessionManager:
                     session_id,
                     "an unknown time" if age is None else f"{age:.0f}s",
                     self._rebuild_max_age_s,
+                )
+                continue
+            pinned = getattr(row, "instance", None)
+            if pinned is not None and pinned != self._instance:
+                # Somebody else's run. The scan sees every interrupted row
+                # because the table is shared, and without this every STS
+                # would race for all of them: a session deployed to `sts-tw`
+                # would come back on whichever instance booted first, and
+                # differently on the next restart.
+                #
+                # A row pinned to an instance nobody runs is therefore rebuilt
+                # by nobody, and stays `interrupted` on the Attention list
+                # waiting for a person. That is the same rule as everywhere
+                # else here — the node reports the mismatch and does not
+                # quietly resolve it by moving a session across a boundary
+                # somebody drew on purpose.
+                logger.debug(
+                    "STS not rebuilding session=%s: pinned to %s, this is %s",
+                    session_id,
+                    pinned,
+                    self._instance,
                 )
                 continue
             if str(getattr(row, "restart", "always")) != "always":

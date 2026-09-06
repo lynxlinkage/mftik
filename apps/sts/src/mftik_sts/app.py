@@ -202,6 +202,7 @@ async def amain() -> bool:
             reset_rebuild_count=sts_db.reset_rebuild_count,
             rebuild_max_age_s=_rebuild_max_age_s(),
             td_instance=sts_db.td_instance,
+            instance=INSTANCE,
         )
         logger.info("STS started instance=%s", INSTANCE)
         subjects = control_subjects(SOURCE, INSTANCE, ROLE)

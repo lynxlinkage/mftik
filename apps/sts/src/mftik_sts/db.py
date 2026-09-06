@@ -22,6 +22,7 @@ async def persist_live_session(
     st_paras: dict[str, Any] | None = None,
     cid_slot: int | None = None,
     restart: str = "always",
+    instance: str | None = None,
 ) -> StsSessionRow:
     async with session_scope() as db:
         repo = StsSessionRepository(db)
@@ -39,6 +40,7 @@ async def persist_live_session(
             st_paras=st_paras,
             cid_slot=cid_slot,
             restart=restart,
+            instance=instance,
         )
 
 

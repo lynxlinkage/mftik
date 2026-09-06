@@ -607,13 +607,14 @@ async def deploy(
             broker,
             strategy_id=strategy_type,
             td=td,
-            md=list(spec.md),
+            md=dict(spec.md),
             st_paras=dict(spec.sts),
             created_by=created_by,
             timeout=body.timeout,
             restart=spec.restart,
             strategy_type=strategy_type,
             yaml_text=body.yaml,
+            instance=body.instance,
         )
     except DomainRpcError as exc:
         code = 404 if exc.code in {"unknown_strategy", "not_found"} else 502

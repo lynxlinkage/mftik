@@ -1045,8 +1045,14 @@ back.
 
 **Scope.**
 
-- `POST /sts/deploy/{type}` takes an optional instance; it lands in
-  `sts_sessions.instance`.
+- `POST /sts/deploy/{type}` takes an optional instance, in the body rather
+  than the document: the same `strategy.yml` should be deployable to `sts-tw`
+  and to `sts-jp` without editing it. The create goes to that instance's
+  subject, and the same two PI-2 checks run first.
+- `sts_sessions.instance` records **what the deploy asked for**, not where the
+  session landed. Recording the latter would make an unpinned deploy pinned
+  the moment it ran, and retiring that instance would strand a session nobody
+  ever asked to put there.
 - The rebuild scan filters on the instance — own name, or null for legacy and
   unpinned rows — before `claim_alive`.
 
@@ -1060,13 +1066,17 @@ and does not guarantee.
 
 **Verify.**
 
-- Two STS with different names boot against one interrupted row pinned to the
-  first: only the first rebuilds, deterministically, and repeatedly
-  (`test_rebuild.py`).
+- Two STS with different names scan one interrupted row pinned to the first:
+  only the first rebuilds. `claim_alive` already made the race *safe*; this is
+  what makes it deterministic.
 - A row pinned to a name nobody runs is rebuilt by nobody and stays
-  `INTERRUPTED`.
-- A row with a null instance is still rebuilt by whoever claims it — today's
-  behaviour, unchanged.
+  `INTERRUPTED`, waiting for a person rather than moving itself.
+- A row with a null instance is still rebuilt by whoever claims it.
+- A deploy that names an STS creates on that instance's subject and records
+  the name; an unpinned one uses the pool and records null.
+- Naming an instance of the wrong *domain* is refused — `md-jp-1` is declared
+  and answering, and is still not an STS.
+- Checked by regressing the filter and watching the two placement tests fail.
 
 **Depends.** INS-1. Independent of everything else.
 

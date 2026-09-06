@@ -47,6 +47,8 @@ class Recording:
         self.attaches: list[tuple[str, list[str]]] = []
         self.detaches: list[str] = []
         self.failed: str | None = None
+        self.created_on: str | None = None
+        self.create = None
 
     async def probe(self, subject, envelope, *, timeout=None):
         instance = subject.rsplit(".", 1)[-1]
@@ -66,6 +68,8 @@ class Recording:
 
     async def request(self, subject, envelope, *, timeout=None):
         if envelope.type == STS_SESSION_CREATE:
+            self.created_on = subject
+            self.create = envelope.payload
             return StsCreateSessionResultEnvelope.wrap(
                 StsCreateSessionResult(
                     session_id=envelope.payload.session_id,
@@ -117,6 +121,7 @@ async def db(monkeypatch, database_url):
             await an_owner(session)
             await an_instance(session, JP1, "md")
             await an_instance(session, JP2, "md")
+            await an_instance(session, "sts-tw", "sts")
             await session.commit()
         monkeypatch.setattr(orchestrate, "session_scope", database.scope)
         yield database.scope
@@ -244,3 +249,60 @@ async def test_a_failure_partway_unwinds_the_attaches_that_landed(db) -> None:
         "the attach that landed was rolled back"
     )
     assert broker.failed is not None, "and the session was failed"
+
+
+async def test_a_deploy_may_name_the_sts_that_runs_it(db) -> None:
+    """And the row records what was *asked for*, not where it landed."""
+    broker = Recording(up={"sts-tw"})
+
+    await deploy_strategy(
+        broker, strategy_id="tiny", md={}, created_by=1, instance="sts-tw"
+    )
+
+    assert broker.created_on == Topics.sts("sts-tw")
+    assert broker.create.instance == "sts-tw"
+
+
+async def test_an_unpinned_deploy_goes_to_the_sts_pool(db) -> None:
+    broker = Recording(up=set())
+
+    await deploy_strategy(broker, strategy_id="tiny", md={}, created_by=1)
+
+    assert broker.created_on == Topics.STS
+    assert broker.create.instance is None, (
+        "null means the deploy did not care, and anyone may rebuild it"
+    )
+
+
+async def test_an_sts_that_does_not_answer_is_refused_before_creating(
+    db,
+) -> None:
+    broker = Recording(up=set())
+
+    with pytest.raises(DomainRpcError) as refused:
+        await deploy_strategy(
+            broker,
+            strategy_id="tiny",
+            md={},
+            created_by=1,
+            instance="sts-tw",
+        )
+
+    assert refused.value.code == "instance_down"
+    assert broker.created_on is None, "nothing was created"
+
+
+async def test_naming_an_md_instance_for_sts_is_refused(db) -> None:
+    """The domain is checked, not just the name.
+
+    ``md-jp-1`` is a declared instance and answering; it is simply not an STS.
+    Sending a session create to it would time out with nothing to say.
+    """
+    broker = Recording(up={JP1})
+
+    with pytest.raises(DomainRpcError) as refused:
+        await deploy_strategy(
+            broker, strategy_id="tiny", md={}, created_by=1, instance=JP1
+        )
+
+    assert refused.value.code == "unknown_instance"

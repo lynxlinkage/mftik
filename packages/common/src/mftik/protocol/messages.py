@@ -259,6 +259,14 @@ class StsCreateSessionRequest(BaseModel):
     type: str | None = None
     #: The submitted ``strategy.yml``. Same upgrade window as ``type``.
     yaml_text: str | None = None
+    #: Which STS the deploy *asked for*, not which one took it.
+    #:
+    #: The distinction is the whole point. If the row recorded where a session
+    #: happened to land, an unpinned deploy would become pinned the moment it
+    #: ran — and if that instance were later retired the session would never
+    #: rebuild, despite nobody ever having asked for it to run there. Null
+    #: means the deploy did not care, and anyone may rebuild it.
+    instance: str | None = None
 
 
 class StsCreateSessionResult(BaseModel):

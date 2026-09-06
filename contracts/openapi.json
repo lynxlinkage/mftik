@@ -6584,6 +6584,17 @@
             "type": "number",
             "title": "Timeout",
             "default": 30.0
+          },
+          "instance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance"
           }
         },
         "type": "object",

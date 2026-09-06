@@ -49,6 +49,12 @@ class StrategyDeployBody(BaseModel):
     yaml: str = Field(..., description="strategy.yml contents")
     created_by: int | None = None
     timeout: float = 30.0
+    #: Which STS should run this. Omitted means any, which is what every
+    #: deploy meant before instances existed.
+    #:
+    #: Not in the document on purpose: the same ``strategy.yml`` should be
+    #: deployable to ``sts-tw`` and to ``sts-jp`` without editing it.
+    instance: str | None = None
 
 
 class TdAttachOut(BaseModel):

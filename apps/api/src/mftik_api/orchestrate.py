@@ -10,7 +10,6 @@ from mftik.broker import Broker
 from mftik.broker.errors import RequestTimeoutError
 from mftik.protocol import (
     ANY_INSTANCE,
-    MD_HEALTH,
     MD_SESSION_ATTACH,
     MD_SESSION_DETACH,
     STS_SESSION_CREATE,
@@ -60,6 +59,7 @@ async def deploy_strategy(
     restart: str = "always",
     strategy_type: str | None = None,
     yaml_text: str | None = None,
+    instance: str | None = None,
 ) -> dict[str, Any]:
     """Mint session_id, create STS, attach MD then each TD api_id. Fail-closed."""
     session_id = uuid4().hex
@@ -82,9 +82,17 @@ async def deploy_strategy(
     await sts_log(f"deploy start strategy={strategy_id} td={td} md={md}")
 
     try:
+        await _check_sts_instance(broker, instance)
+    except DomainRpcError as exc:
+        await sts_log(
+            f"STS instance check failed: {exc.message}", level="error"
+        )
+        raise
+
+    try:
         sts = await request_domain(
             broker,
-            Topics.STS,
+            Topics.STS if instance is None else Topics.sts(instance),
             StsCreateSessionRequestEnvelope.wrap(
                 StsCreateSessionRequest(
                     session_id=session_id,
@@ -96,6 +104,7 @@ async def deploy_strategy(
                     restart=restart,
                     type=strategy_type,
                     yaml_text=yaml_text,
+                    instance=instance,
                 ),
                 type=STS_SESSION_CREATE,
                 source="api",
@@ -327,20 +336,57 @@ async def _check_md_instances(
             )
 
 
-async def _answers(broker: Broker, instance: str) -> bool:
+async def _check_sts_instance(
+    broker: Broker, instance: str | None
+) -> None:
+    """Same two checks as MD's, on the plane that runs the strategy.
+
+    Nothing to check when no name was given: an unpinned deploy goes to the
+    shared pool, and the pool answering is what the create's own timeout is
+    for.
+    """
+    if instance is None:
+        return
+    async with session_scope() as db:
+        row = await InstanceRepository(db).get_by_name(instance)
+    if row is None or row.domain != SessionDomain.STS.value:
+        raise DomainRpcError(
+            "unknown_instance",
+            f"no sts instance named {instance!r} — declare it first, or "
+            f"omit it to use any sts",
+        )
+    if not row.enabled:
+        raise DomainRpcError(
+            "instance_disabled",
+            f"sts instance {instance!r} is disabled; sessions already running "
+            f"there keep running but new ones may not name it",
+        )
+    if not await _answers(broker, instance, domain=SessionDomain.STS.value):
+        raise DomainRpcError(
+            "instance_down",
+            f"sts instance {instance!r} is declared but did not answer — "
+            f"it is deployed nowhere, or the process is down",
+        )
+
+
+async def _answers(
+    broker: Broker, instance: str, *, domain: str = SessionDomain.MD.value
+) -> bool:
     """Whether this MD is there. A timeout is the answer, not an error."""
     try:
         await broker.probe(
-            Topics.health(SessionDomain.MD.value, instance),
+            Topics.health(domain, instance),
             Envelope[HealthCheck].wrap(
-                HealthCheck(), type=MD_HEALTH, source="api"
+                HealthCheck(), type=f"{domain}.health", source="api"
             ),
             timeout=_PROBE_TIMEOUT_S,
         )
     except RequestTimeoutError:
         return False
     except Exception:
-        logger.exception("md instance probe failed instance=%s", instance)
+        logger.exception(
+            "%s instance probe failed instance=%s", domain, instance
+        )
         return False
     return True
 
