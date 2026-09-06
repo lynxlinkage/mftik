@@ -192,7 +192,40 @@ Operator-owned, and the authority on *names*.
 | `domain` | `td` / `md` / `sts` |
 | `region` | Operator label. Free text; nothing routes on it |
 | `enabled` | Retire an instance without deleting the rows that reference it |
-| `created_by`, `created_at` | As every other operator-created table has |
+| `created_at` | As every other table has |
+| `created_by` | FK to `users.id`, **nullable**. Null means the migration created it, not a person — see *Bootstrap* |
+
+#### Bootstrap
+
+A fresh node needs `td`, `md` and `sts` to exist before anything can be
+addressed or shown, and they arrive in the same data migration that creates the
+table. Nothing is needed in `docker-compose.yml`: both it
+(`docker-compose.yml:45`) and the template `mftik node-init` writes
+(`packages/common/src/mftik/cli/templates/docker-compose.yml:87`) already run a
+`migrate` service on `mftik-db-migrate`, and every plane waits on
+`service_completed_successfully`. Writing rows from a migration is also already
+how this repo makes data changes — `0029_binance_um_cm_rename.py` and `0030`
+both rewrite stored values.
+
+Three rows, not five. `sym` and `paper` are not instanced (*Which planes are
+instanced*), so they get none.
+
+**This is why `created_by` is nullable.** `migrate` waits only on Postgres,
+while `seed` — which creates the Owner row — waits on `migrate` completing. So
+on an empty database there is no `users` row at migration time, and a `NOT NULL`
+`created_by` would fail the upgrade on exactly the deployment that has never
+been upgraded before. Null is the honest value: nobody created these three.
+
+The order inside the one migration is forced by the foreign key: create the
+table, insert the three rows, add `apis.instance_id` nullable, point every
+existing row at `td`, then set `NOT NULL`. The `td` row has to exist before a
+`NOT NULL` FK has anything to reference.
+
+An existing single-process deployment therefore upgrades into a node whose Home
+shows three connected instances named `td`, `md` and `sts`, because
+`MFTIK_INSTANCE` already defaults to the plane name and those processes answer
+to it. That is what makes the claim "stage 1 routes nothing and changes nothing
+observable" actually true rather than merely intended.
 
 This is the shape `Account` already has: an operator-created named row that
 `strategy.yml` refers to by name and that `_resolve_td`
@@ -639,7 +672,7 @@ Four migrations, all additive.
 
 | Migration | Change |
 |---|---|
-| `instances` | New table: `name` (unique), `domain`, `region`, `enabled`, `created_by`, `created_at` |
+| `instances` | New table: `name` (unique), `domain`, `region`, `enabled`, `created_at`, nullable `created_by`. Seeds `td` / `md` / `sts` in the same revision — see *Bootstrap* |
 | `apis.instance_id` | FK to `instances.id`, **`NOT NULL`**. Existing rows point at the instance named `td` |
 | `md_sessions.instance` | `String(64)`, plus `uq_md_sessions_venue_session` → `(instance, venue, session_id)` |
 | `sts_sessions.instance` | `String(64)`, nullable. Which STS was asked to run this. Null is legacy and unpinned |
@@ -687,8 +720,10 @@ same flag as the rest of `mftik`'s node round-trips, not in the default path.
 
 Each stage is useful alone and leaves the tree shippable.
 
-1. **Instance identity.** The `instances` table with its CRUD, and
-   `MFTIK_INSTANCE` read at boot. Nothing routes on either yet.
+1. **Instance identity.** The `instances` table with its CRUD, the migration
+   that seeds `td` / `md` / `sts`, and `MFTIK_INSTANCE` read at boot. Nothing
+   routes on either yet. `docker-compose.yml` needs no change — `migrate`
+   already runs and every plane already waits for it.
 2. **Home lists instances**, and the expiring health subject that makes probing
    safe (*The hard parts, 6*) lands with it, not after. `/stats` probes one row
    per declared instance; the grid groups by plane. Declaring two MDs and
