@@ -30,6 +30,8 @@ from mftik.protocol import (
     publish_sts_log,
 )
 from mftik_db.models.session import SessionStatus
+from mftik_db.repositories import ApiRepository
+from mftik_db.session import session_scope
 
 from mftik_api.broker_rpc import DomainRpcError, request_domain
 
@@ -158,10 +160,14 @@ async def deploy_strategy(
                 )
 
         for name, ref in td.items():
-            await sts_log(f"TD attach starting {name} api_id={ref.api_id}")
+            instance = await _td_instance(ref.api_id)
+            await sts_log(
+                f"TD attach starting {name} api_id={ref.api_id} "
+                f"instance={instance}"
+            )
             result = await request_domain(
                 broker,
-                Topics.TD,
+                Topics.td(instance),
                 TdAttachRequestEnvelope.wrap(
                     TdAttachRequest(
                         api_id=ref.api_id,
@@ -235,6 +241,25 @@ async def deploy_strategy(
         "md": md_out,
         "status": "live",
     }
+
+
+async def _td_instance(api_id: int) -> str:
+    """Which TD may use this credential.
+
+    Resolved here, from the ``apis`` row, rather than left to whichever TD
+    happens to be free — that is the whole compliance requirement. A credential
+    with no instance is not a thing that exists: ``apis.instance_id`` is
+    ``NOT NULL``, so a missing answer means the row is gone, and a deploy
+    against a credential that no longer exists should say so rather than fall
+    back to a plane-wide subject that would let any TD open it.
+    """
+    async with session_scope() as db:
+        name = await ApiRepository(db).instance_name(api_id)
+    if name is None:
+        raise DomainRpcError(
+            "unknown_api", f"no credential with api_id={api_id}"
+        )
+    return name
 
 
 def _md_venues(feeds: list[str]) -> set[str]:

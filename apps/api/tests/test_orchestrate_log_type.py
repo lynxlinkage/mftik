@@ -11,6 +11,7 @@ from mftik.protocol import (
     TdAttachResult,
     TdAttachResultEnvelope,
 )
+from mftik_api import orchestrate
 from mftik_api.orchestrate import deploy_strategy
 
 
@@ -104,7 +105,15 @@ class CaptureCreateBroker:
         raise AssertionError(f"unexpected rpc: {envelope.type}")
 
 
-async def test_deploy_create_payload_keeps_account_names() -> None:
+async def test_deploy_create_payload_keeps_account_names(monkeypatch) -> None:
+    # The deploy resolves each credential's TD instance from the `apis` row.
+    # This test has no database and is not about that question, so the lookup
+    # is answered directly — a broker double with no `apis` behind it would
+    # otherwise fail the attach and roll the session back.
+    async def _instance(api_id: int) -> str:
+        return "td"
+
+    monkeypatch.setattr(orchestrate, "_td_instance", _instance)
     broker = CaptureCreateBroker()
     td = {
         "paper trader": TdAccountRef(api_id=3),

@@ -28,7 +28,7 @@ async def test_td_health_reply(broker: Broker) -> None:
     stop = asyncio.Event()
 
     async def server() -> None:
-        async for req in broker.serve(Topics.TD, stop=stop):
+        async for req in broker.serve(Topics.td("td"), stop=stop):
             await dispatch(req)
             break
         stop.set()
@@ -37,7 +37,7 @@ async def test_td_health_reply(broker: Broker) -> None:
     await asyncio.sleep(0.05)
 
     reply = await broker.request(
-        Topics.TD,
+        Topics.td("td"),
         HealthCheckEnvelope.wrap(
             HealthCheck(),
             type=TD_HEALTH,
@@ -59,7 +59,7 @@ async def test_td_unknown_type_error(broker: Broker) -> None:
     stop = asyncio.Event()
 
     async def server() -> None:
-        async for req in broker.serve(Topics.TD, stop=stop):
+        async for req in broker.serve(Topics.td("td"), stop=stop):
             await dispatch(req)
             break
         stop.set()
@@ -68,7 +68,7 @@ async def test_td_unknown_type_error(broker: Broker) -> None:
     await asyncio.sleep(0.05)
 
     reply = await broker.request(
-        Topics.TD,
+        Topics.td("td"),
         HealthCheckEnvelope.wrap(
             HealthCheck(note="nope"),
             type="td.not_a_method",

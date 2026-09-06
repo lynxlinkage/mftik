@@ -127,7 +127,14 @@ def control_subjects(plane: str, instance: str, role: Role) -> list[str]:
     from mftik.protocol import Topics
 
     named = {"td": Topics.td, "sts": Topics.sts, "md": Topics.md}
-    anycast = {"td": Topics.TD, "sts": Topics.STS, "md": Topics.MD}
+    #: No ``td``. Everything that reaches TD carries an ``api_id``, and an
+    #: ``api_id`` names the one instance allowed to use that credential — so
+    #: there is no such thing as unaddressed TD work for a pool to take. A TD
+    #: configured ``active`` therefore serves exactly what a ``named`` one
+    #: does; the value is accepted rather than refused because a fleet-wide
+    #: ``MFTIK_ROLE=active`` is a reasonable thing to write and means something
+    #: unambiguous here.
+    anycast = {"sts": Topics.STS, "md": Topics.MD}
     if plane not in named:
         raise ValueError(
             f"{plane} is not an instanced plane; expected one of "
@@ -137,6 +144,6 @@ def control_subjects(plane: str, instance: str, role: Role) -> list[str]:
     subjects: list[str] = []
     if role.serves_unicast:
         subjects.append(named[plane](instance))
-    if role.serves_anycast:
+    if role.serves_anycast and plane in anycast:
         subjects.append(anycast[plane])
     return subjects

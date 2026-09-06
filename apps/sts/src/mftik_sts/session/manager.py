@@ -119,6 +119,7 @@ MarkLive = Callable[..., Awaitable[Any]]
 BumpRebuildCount = Callable[..., Awaitable[Any]]
 #: ``(session_id)`` — clear the attempt count of a rebuild that has settled.
 ResetRebuildCount = Callable[..., Awaitable[Any]]
+TdInstanceLookup = Callable[[int], Awaitable[str | None]]
 #: ``(session_id, *, status, reason)`` — move the row to a terminal status.
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
@@ -144,6 +145,7 @@ class SessionManager:
         rebuild_settle_s: float = _REBUILD_SETTLE_S,
         heartbeat_interval: float = 1.0,
         strategy_factory: StrategyFactory | None = None,
+        td_instance: TdInstanceLookup | None = None,
     ) -> None:
         self._broker = broker
         self._persist_live = persist_live
@@ -158,6 +160,10 @@ class SessionManager:
         self._rebuild_settle_s = rebuild_settle_s
         self._heartbeat_interval = heartbeat_interval
         self._strategy_factory = strategy_factory or resolve_strategy
+        #: ``api_id`` → the TD instance allowed to use that credential.
+        #: Injected like every other database reach here, so a test can drive
+        #: a rebuild without one.
+        self._td_instance_lookup = td_instance
         self._sessions: dict[str, StsSession] = {}
         # Held so shutdown can cancel them: each outlives the rebuild scan
         # that started it, and a pending task at loop close is a warning
@@ -268,6 +274,7 @@ class SessionManager:
             broker=self._broker,
             created_by=request.created_by,
             strategy=strategy,
+            td_instance=self._td_instance_lookup,
             cid_slot=cid_slot,
             remember=self._remember_fact,
             td=dict(request.td),
@@ -843,6 +850,7 @@ class SessionManager:
             broker=self._broker,
             created_by=created_by,
             strategy=strategy,
+            td_instance=self._td_instance_lookup,
             cid_slot=int(row.cid_slot),
             td=td,
             md_ids=md_ids,
@@ -929,12 +937,40 @@ class SessionManager:
             error_type=MD_ERROR,
         )
 
+    async def _td_instance(self, api_id: int) -> str:
+        """Which TD may take this attach.
+
+        Falls back to the plane name only when nothing can answer — no lookup
+        wired, or a credential that has been deleted. That is the instance a
+        node which has never heard of instances runs under, so the fallback
+        degrades to today's behaviour rather than to silence; a rebuild is
+        already the wrong moment to discover a missing row.
+        """
+        if self._td_instance_lookup is None:
+            return SessionDomain.TD.value
+        try:
+            name = await self._td_instance_lookup(api_id)
+        except Exception:
+            logger.exception(
+                "STS could not resolve the TD instance for api_id=%s", api_id
+            )
+            return SessionDomain.TD.value
+        if name is None:
+            logger.warning(
+                "STS found no credential api_id=%s — attaching on %s",
+                api_id,
+                SessionDomain.TD.value,
+            )
+            return SessionDomain.TD.value
+        return name
+
     async def _attach_td(
         self, session_id: str, created_by: int, api_id: int
     ) -> None:
+        instance = await self._td_instance(api_id)
         await self._attach_with_retry(
-            what=f"td api_id={api_id}",
-            subject=Topics.TD,
+            what=f"td api_id={api_id} instance={instance}",
+            subject=Topics.td(instance),
             envelope=TdAttachRequestEnvelope.wrap(
                 TdAttachRequest(
                     api_id=api_id,

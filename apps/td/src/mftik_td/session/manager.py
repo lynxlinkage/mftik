@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -26,7 +27,12 @@ from mftik.exchange.order_check import (
     classify,
 )
 from mftik.exchange.tickers import InvalidTickerError, UniversalTicker
-from mftik.liveness import is_alive
+from mftik.liveness import (
+    claim_owner,
+    hold_owner,
+    is_alive,
+    release_owner,
+)
 from mftik.protocol import (
     STS_DETACH,
     STS_ENSURE_LEVERAGE,
@@ -111,6 +117,30 @@ _REAP_SCAN_LIMIT = 500
 #: them are closed on the first scan: nothing is running to be wrong about.
 _ORPHAN_STRIKES = 2
 
+#: Where an account's ownership claim lives. One TD *process* may hold an
+#: ``api_id``: the lease, the OMS and the ``client_order_id`` slot all rest on
+#: that, and two processes serving ``td.order.{api_id}`` as competing consumers
+#: would split an account's order flow between two half-pictures of it.
+_OWNER_DOMAIN = "td"
+
+
+class AccountHeldElsewhere(RuntimeError):
+    """Another TD process holds this account, and says which.
+
+    Raised rather than logged because an attach that quietly proceeds is the
+    failure: nothing downstream would notice, and the operator would see two
+    processes each convinced they own one credential.
+    """
+
+    def __init__(self, api_id: int, holder: str) -> None:
+        self.api_id = api_id
+        self.holder = holder
+        super().__init__(
+            f"api_id={api_id} is held by TD process {holder} — an account has "
+            f"one owner; check for a second process sharing this "
+            f"MFTIK_INSTANCE"
+        )
+
 
 
 @dataclass
@@ -171,9 +201,19 @@ class SessionManager:
         list_db_sessions: ListDbSessions | None = None,
         history: HistoryWriter | None = None,
         lease_grace: float = LEASE_GRACE_S,
+        instance: str = "td",
     ) -> None:
         self._factory = factory
         self._broker = broker
+        #: Identifies this *process*, not this instance. Two processes sharing
+        #: an ``MFTIK_INSTANCE`` is the mistake the account claim guards
+        #: against, so a claim keyed by instance name would hand the account
+        #: to the second one.
+        self._owner = uuid.uuid4().hex
+        #: Which TD this is. Backfill is posted to this instance's queue: it
+        #: loads the credential and opens a venue connection with it, so which
+        #: host runs it is the compliance question.
+        self._instance = instance
         self._persist_live = persist_live
         self._mark_done = mark_done
         self._list_db_sessions = list_db_sessions
@@ -205,6 +245,16 @@ class SessionManager:
         """Attach ``api_id`` to STS ``session_id`` (refcount + lease)."""
         acct = self._accounts.get(request.api_id)
         if acct is None:
+            # Before the connector, not after: a refused claim must cost a
+            # refusal, not a venue session opened and then thrown away.
+            holder = await claim_owner(
+                self._broker,
+                str(request.api_id),
+                domain=_OWNER_DOMAIN,
+                owner=self._owner,
+            )
+            if holder is not None:
+                raise AccountHeldElsewhere(request.api_id, holder)
             trading = await self._factory.create(request.api_id)
             # Set before start(): recon runs inside it and its order updates
             # are history too.
@@ -574,7 +624,12 @@ class SessionManager:
             # and the ask is itself bounded by ``POST_TIMEOUT_S``, so an
             # unreachable Redis delays a detach by seconds rather than failing
             # it.
-            await request_backfill(self._broker, api_id, reason="detach")
+            await request_backfill(
+                self._broker,
+                api_id,
+                instance=self._instance,
+                reason="detach",
+            )
 
     async def close(self, api_id: int) -> None:
         await self._destroy_account(api_id)
@@ -598,6 +653,20 @@ class SessionManager:
         if acct is None:
             return
         acct.global_stop.set()
+        try:
+            # Released here rather than left to lapse: a redeploy that has to
+            # wait out a TTL before it can attach is an outage nobody caused.
+            await release_owner(
+                self._broker,
+                str(api_id),
+                domain=_OWNER_DOMAIN,
+                owner=self._owner,
+            )
+        except Exception:
+            logger.warning(
+                "TD claim release failed api_id=%s — it will lapse", api_id,
+                exc_info=True,
+            )
         current = asyncio.current_task()
         if (
             acct.recon_deadline_task is not None
@@ -631,9 +700,43 @@ class SessionManager:
         logger.info("TD trading destroyed api_id=%s", api_id)
 
     async def _global_keepalive(self, acct: TradingAccount) -> None:
-        """Publish a lightweight keepalive on td.{api_id}.global while live."""
+        """Publish a keepalive on td.{api_id}.global, and hold the claim.
+
+        The two belong in one loop because they end together. This is the task
+        that runs for exactly as long as the account does, so it is where a
+        claim can be refreshed without a timer of its own — and, more to the
+        point, where losing one can be acted on. A claim that has gone is not a
+        missed refresh to shrug at: some other process now owns this account,
+        and continuing to serve ``td.order.{api_id}`` would make the pair of us
+        competing consumers on one credential.
+        """
         topic = Topics.td_global(acct.api_id)
         while not acct.global_stop.is_set():
+            try:
+                if not await hold_owner(
+                    self._broker,
+                    str(acct.api_id),
+                    domain=_OWNER_DOMAIN,
+                    owner=self._owner,
+                ):
+                    logger.error(
+                        "TD lost its claim on api_id=%s — another process "
+                        "holds it; tearing this one down",
+                        acct.api_id,
+                    )
+                    asyncio.create_task(
+                        self._destroy_account(acct.api_id),
+                        name=f"td-yield-{acct.api_id}",
+                    )
+                    return
+            except Exception:
+                # Unreadable Redis is not evidence of a rival. The TTL is many
+                # refreshes wide, so a blip costs nothing and giving the
+                # account up over one would be the expensive mistake.
+                logger.warning(
+                    "TD claim refresh failed api_id=%s", acct.api_id,
+                    exc_info=True,
+                )
             try:
                 await self._broker.publish(
                     topic,

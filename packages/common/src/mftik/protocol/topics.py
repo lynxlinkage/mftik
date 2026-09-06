@@ -15,7 +15,9 @@ class Topics:
     # ``SYM`` and ``PAPER`` have no named form. Neither plane is instanced:
     # SYM is off the hot path behind ``SymbolClient``'s cache, and one shared
     # book is the whole point of paper.
-    TD = "td"
+    #: ``TD`` is deliberately absent. Everything that reaches TD carries an
+    #: ``api_id`` and an ``api_id`` names its instance, so there is no
+    #: unaddressed TD work — see :meth:`td`.
     STS = "sts"
     MD = "md"
     SYM = "sym"
@@ -207,26 +209,37 @@ class Topics:
         return f"td.account.{api_id}"
 
     @staticmethod
-    def td_backfill() -> str:
+    def td_backfill(instance: str) -> str:
         """Work queue for re-reading an account's history from its venue.
 
-        Unkeyed, unlike :meth:`td_order`. That subject names an account because
-        an order is *owned* — only the process holding the lease may place one.
-        A history read is owned by nobody: any TD can load the credential and
-        ask, the answer is the same whoever asked, and the writes it produces
-        are idempotent. So competing consumers stop being the hazard the key
-        exists to avoid and become the point, spreading the work across
-        whatever TD processes are up and surviving the loss of any one.
+        Keyed by *instance*, and this is the one unowned job for which that
+        matters. The correctness argument for leaving it unkeyed still stands
+        in full: a history read is owned by nobody, any TD can ask, the answer
+        is the same whoever asked, and the writes are idempotent. None of that
+        is about **where the socket opens from**.
 
-        It also means an account with no live attach still gets backfilled. A
-        keyed subject would park the request in a list until somebody attached,
-        which for a retired account is forever.
+        This is the only unowned job that carries a credential.
+        ``BackfillSession`` says so outright — "any TD can load the credential
+        and ask" — ``mftik_td.backfill.reader`` builds each reader from
+        ``row.api_key`` / ``row.api_secret``, and ``backfill_cron`` sweeps every
+        account with history on a timer. Unkeyed, a US TD would periodically
+        open a venue connection with a JP-only key: the compliance requirement
+        failing on a schedule rather than at an edge.
 
-        What *is* owned is the API key's rate-limit budget, and that is fenced
-        with a lock per ``api_id`` rather than by the subject — see
+        The old objection to keying does not apply here. It argued that a keyed
+        subject parks a request until the account's *owner* takes it, which for
+        a retired account is forever — but an instance is up whether or not
+        anybody is trading that account, so a retired account is still
+        backfilled. And for a jurisdiction-bound credential, "wait until
+        ``td-jp-1`` is back" is the correct behaviour rather than a regression.
+
+        Several TD processes on one instance still share this queue, which is
+        the competing-consumer spread the original design wanted. What *is*
+        owned is the API key's rate-limit budget, fenced with a lock per
+        ``api_id`` rather than by the subject — see
         :mod:`mftik_td.backfill.executor`.
         """
-        return "td.backfill"
+        return f"td.backfill.{instance}"
 
     @staticmethod
     def td_ledger(api_id: int) -> str:

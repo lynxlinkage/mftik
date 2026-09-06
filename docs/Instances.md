@@ -924,13 +924,23 @@ nothing stops two same-named processes owning one `api_id`.
 
 **Verify.**
 
-- A backfill for an account whose instance is down stays queued and is taken
-  when that instance returns — never by a different one
-  (`test_backfill_triggers.py`).
-- `backfill_cron` posts to per-instance subjects, one per account's instance.
-- Two managers, same `api_id`: the second `attach` is refused and names the
-  holder; only one `_serve_orders` exists (`test_session_create.py` style).
-- The claim's TTL lapsing lets a restarted process take the account.
+- `backfill_cron` posts each account to its own instance's queue, and a
+  JP-only credential never reaches the US queue — the requirement stated as
+  the sentence it is in.
+- An account whose `apis` row is gone is **skipped** rather than swept onto a
+  shared subject. New behaviour, and the reason the subject is keyed at all.
+- A deploy resolves each credential to its own instance, and refuses
+  `unknown_api` rather than falling back to a subject any TD could take.
+- Two managers, same `api_id`: the second `attach` raises, names the holder,
+  and opens no venue session; the first keeps the account. The refusal's text
+  points at `MFTIK_INSTANCE`, because that is the configuration that causes
+  it.
+- Closing the first manager lets the second take the account without waiting
+  out a TTL — a redeploy that had to would be an outage nobody caused.
+- The claim primitives on their own: a refresh does not re-create a lapsed
+  claim, and does not write its token back over a rival that has taken over.
+- Each of those is checked by removing the claim and watching the right tests
+  fail.
 - `test_cid_ownership.py` and `test_session_oms.py` unchanged — the claim must
   not alter single-owner behaviour.
 

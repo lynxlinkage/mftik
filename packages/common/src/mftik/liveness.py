@@ -92,3 +92,92 @@ async def is_alive(broker: Any, session_id: str, *, domain: str) -> bool:
             alive_key(broker.config.key_prefix, session_id, domain=domain)
         )
     )
+
+
+# --- resource ownership ----------------------------------------------------
+#
+# The keys above answer "is anyone running this session". These answer a
+# different question: "may I be the one running this resource at all". A
+# session is claimed by whoever is asked to run it; an account is claimed
+# against *rivals*, because two processes holding one credential is two
+# order books, two ledgers and one venue that believes both.
+
+#: How long an ownership claim outlives its last refresh. Short enough that a
+#: process which died does not hold an account out of service for long, and
+#: many refreshes wide so a Redis blip never costs a live account its claim.
+OWNER_TTL_SECONDS = 30
+
+
+def owner_key(key_prefix: str, resource: str, *, domain: str) -> str:
+    return f"{key_prefix}:{domain}:owner:{resource}"
+
+
+async def claim_owner(
+    broker: Any,
+    resource: str,
+    *,
+    domain: str,
+    owner: str,
+    ttl: int = OWNER_TTL_SECONDS,
+) -> str | None:
+    """Take exclusive ownership of ``resource``.
+
+    ``None`` when the claim is now ours. Otherwise the id of whoever holds it,
+    so a refusal can name them rather than saying only that it failed.
+
+    ``owner`` must identify the *process*, not the instance. Two processes
+    configured with the same ``MFTIK_INSTANCE`` is precisely the mistake this
+    guards against, and a claim keyed by instance name would hand it straight
+    to the second one.
+    """
+    took = await broker.redis.set(
+        owner_key(broker.config.key_prefix, resource, domain=domain),
+        owner,
+        ex=ttl,
+        nx=True,
+    )
+    if took:
+        return None
+    held = await broker.redis.get(
+        owner_key(broker.config.key_prefix, resource, domain=domain)
+    )
+    # Lapsed between the SET and the GET: nobody holds it, but we do not
+    # either. The caller retries or refuses; inventing ownership here would
+    # be the one outcome this function exists to prevent.
+    return held if held is not None else "unknown"
+
+
+async def hold_owner(
+    broker: Any,
+    resource: str,
+    *,
+    domain: str,
+    owner: str,
+    ttl: int = OWNER_TTL_SECONDS,
+) -> bool:
+    """Refresh a claim we still hold. ``False`` means it is no longer ours.
+
+    Read then ``PEXPIRE``, deliberately, rather than writing the value again.
+    If the claim lapses between the two and a rival takes it, extending its
+    TTL by one period is the whole cost — the rival keeps the account and this
+    caller finds out on its next pass. Re-writing the value would have taken
+    the account *from* them, which is the failure being guarded, and there is
+    no compare-and-set to lean on: the test suite's Redis has no scripting.
+
+    A missing key is a lost claim, never a reason to re-create one. Whoever
+    lets a claim expire has to go through :func:`claim_owner` again, where a
+    rival can say no.
+    """
+    key = owner_key(broker.config.key_prefix, resource, domain=domain)
+    if await broker.redis.get(key) != owner:
+        return False
+    return bool(await broker.redis.pexpire(key, int(ttl * 1000)))
+
+
+async def release_owner(
+    broker: Any, resource: str, *, domain: str, owner: str
+) -> None:
+    """Give up a claim, if it is still ours to give up."""
+    key = owner_key(broker.config.key_prefix, resource, domain=domain)
+    if await broker.redis.get(key) == owner:
+        await broker.redis.delete(key)

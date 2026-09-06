@@ -44,7 +44,7 @@ class DetachWatcher:
 
     async def listen(self) -> None:
         async def _serve() -> None:
-            async for req in self.broker.serve(Topics.TD, stop=self._stop):
+            async for req in self.broker.serve(Topics.td("td"), stop=self._stop):
                 if req.envelope.type != TD_SESSION_DETACH:
                     continue
                 payload = TdDetachRequest.model_validate(req.envelope.payload)

@@ -43,6 +43,7 @@ async def request_backfill(
     broker: Broker,
     api_id: int,
     *,
+    instance: str,
     reason: str,
     tickers: Sequence[str] = (),
     timeout: float = POST_TIMEOUT_S,
@@ -61,7 +62,8 @@ async def request_backfill(
     )
     try:
         await asyncio.wait_for(
-            broker.post(Topics.td_backfill(), envelope), timeout=timeout
+            broker.post(Topics.td_backfill(instance), envelope),
+            timeout=timeout,
         )
     except TimeoutError:
         logger.warning(

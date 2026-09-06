@@ -23,6 +23,8 @@ from mftik.protocol import (
     TdDetachResultEnvelope,
 )
 
+from mftik_td.session.manager import AccountHeldElsewhere
+
 if TYPE_CHECKING:
     from mftik_td.session import SessionManager
 
@@ -46,6 +48,11 @@ async def handle_session_attach(
 
     try:
         result = await sessions.attach(payload)
+    except AccountHeldElsewhere as exc:
+        # Its own code: this is not a transient failure to retry past, it is a
+        # second process holding a credential that may only have one owner.
+        await _error(req, "account_held", str(exc))
+        return
     except TimeoutError as exc:
         await _error(req, "timeout", str(exc))
         return

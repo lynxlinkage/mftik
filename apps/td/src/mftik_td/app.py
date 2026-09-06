@@ -155,6 +155,7 @@ async def amain() -> bool:
                 factory=HistoryReaderFactory(symbols),
                 load_api=td_db.get_api,
             ),
+            instance=INSTANCE,
         )
         await backfill.start()
         sessions = SessionManager(
@@ -232,7 +233,9 @@ async def amain() -> bool:
             await backfill.stop()
             await sessions.close_all()
             for api_id in held:
-                await request_backfill(broker, api_id, reason="shutdown")
+                await request_backfill(
+                    broker, api_id, instance=INSTANCE, reason="shutdown"
+                )
             # After the sessions, so the last of their order updates is in the
             # queue before it is drained.
             await history.stop()

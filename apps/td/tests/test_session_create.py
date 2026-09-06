@@ -24,6 +24,7 @@ from mftik.protocol import (
 )
 from mftik_td.rpc import dispatch
 from mftik_td.session import PaperSessionFactory, SessionManager
+from mftik_td.session.manager import AccountHeldElsewhere
 
 
 @dataclass
@@ -316,7 +317,7 @@ async def test_rpc_attach_timeout_error(
     stop = asyncio.Event()
 
     async def server() -> None:
-        async for req in broker.serve(Topics.TD, stop=stop):
+        async for req in broker.serve(Topics.td("td"), stop=stop):
             await dispatch(req, sessions=manager)
             break
         stop.set()
@@ -325,7 +326,7 @@ async def test_rpc_attach_timeout_error(
     await asyncio.sleep(0.05)
 
     reply = await broker.request(
-        Topics.TD,
+        Topics.td("td"),
         TdAttachRequestEnvelope.wrap(
             TdAttachRequest(
                 session_id="gone",
@@ -343,3 +344,108 @@ async def test_rpc_attach_timeout_error(
     assert reply.type == TD_ERROR
     err = RpcError.model_validate(reply.payload)
     assert err.code == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_a_second_process_is_refused_the_same_account(
+    broker: Broker, paper: PaperExchange, store: FakeStore
+) -> None:
+    """PI-7, against two real managers rather than the primitive alone.
+
+    Two processes each holding one credential is two OMS views, two ledgers
+    and two competing consumers on ``td.order.{api_id}`` — the invariant the
+    lease, the OMS and the ``client_order_id`` slot all rest on. Before this it
+    was only asserted: ``attach`` decided from process-local memory.
+    """
+    first = SessionManager(
+        PaperSessionFactory(broker, paper),
+        broker,
+        persist_live=store.persist_live,
+        mark_done=store.mark_done,
+        list_db_sessions=store.list_sessions,
+        lease_grace=2.0,
+    )
+    second = SessionManager(
+        PaperSessionFactory(broker, paper),
+        broker,
+        persist_live=store.persist_live,
+        mark_done=store.mark_done,
+        list_db_sessions=store.list_sessions,
+        lease_grace=2.0,
+    )
+    stop = asyncio.Event()
+    pub = asyncio.create_task(_lease_publisher(broker, "own-sts", stop))
+    try:
+        await first.attach(
+            TdAttachRequest(
+                session_id="own-sts", api_id=3, timeout=2.0, created_by=1
+            )
+        )
+
+        with pytest.raises(AccountHeldElsewhere) as refused:
+            await second.attach(
+                TdAttachRequest(
+                    session_id="own-sts-2",
+                    api_id=3,
+                    timeout=2.0,
+                    created_by=1,
+                )
+            )
+
+        assert refused.value.api_id == 3
+        assert refused.value.holder == first._owner  # noqa: SLF001
+        assert "MFTIK_INSTANCE" in str(refused.value), (
+            "the refusal has to point at the configuration that caused it"
+        )
+        assert second.active_api_ids == [], (
+            "no venue session was opened for an account it may not hold"
+        )
+        assert first.active_api_ids == [3]
+    finally:
+        stop.set()
+        await pub
+        await first.close_all()
+        await second.close_all()
+
+
+@pytest.mark.asyncio
+async def test_releasing_an_account_lets_another_process_take_it(
+    broker: Broker, paper: PaperExchange, store: FakeStore
+) -> None:
+    """A redeploy must not have to wait out a TTL to get its accounts back."""
+    first = SessionManager(
+        PaperSessionFactory(broker, paper),
+        broker,
+        persist_live=store.persist_live,
+        mark_done=store.mark_done,
+        list_db_sessions=store.list_sessions,
+        lease_grace=2.0,
+    )
+    second = SessionManager(
+        PaperSessionFactory(broker, paper),
+        broker,
+        persist_live=store.persist_live,
+        mark_done=store.mark_done,
+        list_db_sessions=store.list_sessions,
+        lease_grace=2.0,
+    )
+    stop = asyncio.Event()
+    pub = asyncio.create_task(_lease_publisher(broker, "hand-over", stop))
+    try:
+        await first.attach(
+            TdAttachRequest(
+                session_id="hand-over", api_id=3, timeout=2.0, created_by=1
+            )
+        )
+        await first.close_all()
+
+        await second.attach(
+            TdAttachRequest(
+                session_id="hand-over", api_id=3, timeout=2.0, created_by=1
+            )
+        )
+        assert second.active_api_ids == [3]
+    finally:
+        stop.set()
+        await pub
+        await second.close_all()

@@ -84,7 +84,7 @@ async def test_the_detaches_are_left_on_the_queue_for_whoever_serves_it(
     await session.start()
     await session.stop()
 
-    td = await _queued(broker, Topics.TD)
+    td = await _queued(broker, Topics.td("td"))
     md = await _queued(broker, Topics.MD)
 
     assert [env.type for env in td] == [TD_SESSION_DETACH]
@@ -108,7 +108,7 @@ async def test_one_detach_per_attached_api_id(broker: Broker) -> None:
     await session.start()
     await session.stop()
 
-    td = await _queued(broker, Topics.TD)
+    td = await _queued(broker, Topics.td("td"))
     api_ids = sorted(
         TdDetachRequest.model_validate(env.payload).api_id for env in td
     )
