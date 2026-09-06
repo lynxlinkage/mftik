@@ -50,10 +50,11 @@ one mechanism rather than two.
 `apps/md/src/mftik_md/session/manager.py:671`, not off `Topics.MD`. So adding
 and dropping a feed mid-run needs no work here — only the attach does.
 
-**`liveness.py` is the shape the presence key wants.** One key per
-`(domain, session)`, TTL'd, refreshed by the loop that would stop if the owner
-died. Instance presence is the same idea keyed per process, and should be a
-sibling module rather than new machinery.
+**The health probe already exists.** `/stats` sends a `HealthCheck` on each
+plane's subject with a 1.5s timeout and reports the plane healthy if a reply
+comes back (`apps/api/src/mftik_api/routes/stats.py:33`). Asking one instance
+whether it is up is that call with a different subject, so instance health
+needs no new mechanism — only a list of names to ask.
 
 **`Account` is the shape the declared table wants.** An operator-created named
 row, referred to by name in `strategy.yml`, turned into an id at deploy by
@@ -97,12 +98,11 @@ Instance routing is therefore necessary for colocation and not sufficient for
 it. A per-region broker is a much deeper change — `Broker()` is constructed
 once per process and `StsSession` holds a single `self.broker` for TD RPC, MD
 pub/sub, lease, eventlog and logs; the tape lives in Redis streams, so a split
-broker splits warm-up history; and the two halves of instance identity below
-would come apart, the declared table staying global on the shared Postgres
-while presence fragmented per Redis, so Home could name every instance and
-vouch for none outside its own region. That change is the federated-nodes
-design, and `docker-compose.peer.yml` is already most of it. **Out of scope
-here, and it should stay a separate document.**
+broker splits warm-up history; and the `instances` table would stay global on
+the shared Postgres while a health probe could not leave its own Redis, so Home
+could name every instance and vouch for none outside its own region. That
+change is the federated-nodes design, and `docker-compose.peer.yml` is already
+most of it. **Out of scope here, and it should stay a separate document.**
 
 ## Non-goals
 
@@ -114,6 +114,11 @@ here, and it should stay a separate document.**
 - **Not high availability.** A named instance that is down fails the deploy
   with a sentence. Failing over to a peer is `docs/MdHandover.md`'s problem and
   wants the cooperative handshake described there, not a retry here.
+- **Not provisioning.** The node never starts, stops or restarts a plane, and
+  never will as part of this. A declared row is a statement of what operations
+  should have deployed; reconciling it with reality happens wherever the
+  compose file lives. All the node owes anyone is an unambiguous report of the
+  mismatch.
 - **Not strategy-code federation.** `qualify.py`'s `origin` (`private::Tiny`,
   `node1::Tiny`) names where a strategy's *source* came from. It has nothing to
   do with which process runs it, and the two namespaces must not be merged.
@@ -125,9 +130,10 @@ Each is meant to be a test.
 - **PI-1** An attach reaches the instance the deploy named, or the deploy
   fails. It is never served by a different instance of the same plane.
 - **PI-2** A deploy that names an instance fails before any plane is asked to
-  do anything unless that instance is both *declared* and *present*, and the
+  do anything unless that instance is both *declared* and *answering*, and the
   two failures say different things: an undeclared name is a typo, a declared
-  name that is absent is an outage.
+  name that does not answer is an outage. Neither waits or retries — the node
+  does not make an instance exist.
 - **PI-3** A session's MD feeds may be split across instances. Each feed is
   held by exactly one.
 - **PI-4** One instance detaching a session does not tear down another
@@ -147,21 +153,28 @@ Every process reads `MFTIK_INSTANCE` at boot and defaults it to the plane name
 (`md`, `td`, `sts`). An existing deployment therefore keeps working unchanged
 and its instance is called `md`, which is also what `PI-5` needs.
 
-Identity is recorded **twice**, on purpose. A declared row says what should
-exist; a Redis key says what is running. Neither answers the other's question,
-and the operator's most important question is answered by the difference:
+A declared row says what should exist. A probe says whether it answers. Those
+are the only two facts, and Home is the difference between them:
 
-| | Declared | Not declared |
+| | Answers a probe | Silent |
 |---|---|---|
-| **Present** | Healthy | Unregistered — running and visible, not addressable by name |
-| **Absent** | **Down** | Does not exist |
+| **Declared** | Connected | **Down** — the row is what remembers it should be here |
+| **Not declared** | Not shown | Does not exist |
 
-The bottom-left cell is the whole reason for the table. An MD that is OOM-killed
-and never restarts loses its Redis key after one TTL, and with presence alone it
-simply vanishes from Home — nothing anywhere remembers it was supposed to be
-there. That is the same failure `liveness.py` and the orphan reapers exist to
-prevent one level down ("a session the UI shows as running that nobody can
-stop"), and a whole plane disappearing quietly is the worse version of it.
+*Declared and silent* is the whole reason for the table. An MD that is
+OOM-killed and never restarts would otherwise simply vanish from Home, with
+nothing anywhere remembering it was supposed to be there. That is the failure
+`liveness.py` and the orphan reapers exist to prevent one level down ("a session
+the UI shows as running that nobody can stop"), and a whole plane disappearing
+quietly is the worse version of it.
+
+**The API checks; it does not guarantee.** Nothing here starts, stops or
+restarts a plane, and a declared row that nobody deployed stays *down* forever
+rather than provoking the node into fixing it. Making the row true is
+operations work, done wherever the compose file lives; the node's whole job is
+to state the mismatch clearly enough that a person knows to go and do it. That
+is why a deploy naming an absent instance refuses immediately instead of
+waiting or retrying — waiting implies something is on its way, and nothing is.
 
 ### Declared: the `instances` table
 
@@ -181,11 +194,21 @@ This is the shape `Account` already has: an operator-created named row that
 refusing with `unknown td account name` when the name is not there. Instance
 resolution is the same function against a different table.
 
-**A row is not a precondition for starting.** A process comes up and announces
-itself whether or not it is declared; an undeclared one shows on Home as
-unregistered and is simply not addressable by name. Requiring the row first
-would make every deployment a two-step with an ordering hazard, and buys
-nothing that the deploy-time check does not already buy.
+**A row is not a precondition for starting.** A process comes up and serves
+whether or not it is declared. Being declared is what makes it addressable by
+name and visible on Home, not what lets it run — the node has no way to stop an
+undeclared process and no business trying.
+
+The cost is that an undeclared instance is invisible rather than wrong-looking.
+A process deployed with `MFTIK_INSTANCE=td-jp-l` — lowercase L — does not appear
+anywhere; all the operator sees is the declared `td-jp-1` reading *down*, with
+no hint as to why. A registry of self-announcing processes would have shown the
+typo sitting next to its intended twin. That is a real diagnostic and it is
+given up deliberately, because a registry is a TTL, a heartbeat writer and a
+second identity to keep straight, and this is the one place it would have paid.
+The recovery, if it is ever wanted, needs nothing new: every plane already runs
+`heartbeat_loop` publishing to `sys.heartbeat` with a `source` field, and
+nothing in the tree subscribes to it today.
 
 **`name` and `domain` are immutable. There is no rename.** A process learns its
 name from `MFTIK_INSTANCE` in its own environment, set in a compose file on the
@@ -219,44 +242,44 @@ notes. `enabled=false` drains rather than evicts — new deploys refuse to name
 the instance, sessions already attached keep running — because nothing else in
 this tree tears down live work to satisfy a configuration change.
 
-### Reported: the presence key
+### Reported: the health probe
 
-Process-owned, and the authority on *state*. Redis, at
-`{key_prefix}:instance:{domain}:{process_id}`, TTL'd and refreshed by the
-heartbeat loop each `app.py` already runs — the loop that stops when the
-process does, so the key expiring means the process really is gone.
+There is no presence registry. State is asked for when it is wanted, on the
+instance's own unicast subject, and the answer is the current one rather than
+one up to a TTL old.
+
+`/stats` already does exactly this, three times: `_HEALTH_PROBES` in
+`apps/api/src/mftik_api/routes/stats.py:33` sends a `HealthCheck` on each
+plane's subject with a 1.5s timeout and calls the plane healthy if a reply
+comes back. The change is to send one per declared row, to `td.{name}` rather
+than `td`, concurrently.
+
+`HealthStatus` returns `{status, service}` today and grows the fields a
+registry payload would have carried:
 
 | Field | Why |
 |---|---|
-| `name`, `domain` | Deliberately duplicated from the table — see below |
+| `name`, `domain` | What the process believes it is. Compared against the row it answered for |
 | `role` | `standby` / `named` / `active` — see *Roles* |
 | `version` | So a half-finished rolling deploy is visible |
 | `venues` | Which venues this MD can reach. A deploy naming a feed the instance cannot serve should fail at deploy, not at subscribe |
 | `api_ids` | Which accounts this TD currently holds |
 
-`name` and `domain` appear in both, and comparing them is the point: a process
-started with `MFTIK_INSTANCE=td-jp-1` but running the `md` command is a
-misconfiguration that presence alone cannot see and the pair makes obvious.
+Reporting `name` and `domain` back is not redundant with having addressed the
+probe by name. A process started with `MFTIK_INSTANCE=td-jp-1` but running the
+`md` command answers on the subject and says so, and the mismatch is the
+diagnosis.
 
-`region` is *not* here. It is an operator's statement about a deployment, and a
-process put in the wrong datacentre would report whatever its environment says
-rather than where it is. Neither can be verified, but the declaration is at
-least a stable record of intent — and this is the dashboard compliance is read
-from.
+`region` is deliberately not among them. It is an operator's statement about a
+deployment, and a process put in the wrong datacentre would report whatever its
+environment says rather than where it is. Neither can be verified, but the
+declaration is at least a stable record of intent — and this is the dashboard
+compliance is read from.
 
-**The presence key is per process, not per name.** Keying it on
-`{domain}:{name}` looks right and is the same bug as the shared liveness key in
-*The hard parts, 1*, one level up. A handover legitimately runs two processes
-called `md-jp-1` at once, so one key would have two writers, and blue's exit
-would clear the key green is living behind. Keyed per process, Home can say
-`md-jp-1 — 2 processes, handover in progress`, which is the truth and is also
-the only view from which a stuck cutover is visible. `docs/MdHandover.md`
-already gives each process an `instance_id` in `HandoverOffer`; this is that
-identifier, not a new concept.
-
-Presence has to be a registry rather than a query because `BLPOP` does not fan
-out: "which instances are up" cannot be one request-reply, and a broadcast with
-a deadline makes a missing instance indistinguishable from a slow one.
+Two consequences of probing rather than registering. A probe cannot see a
+process it was not told to ask about, which is the cost priced above. And a
+probe to a dead subject is not free — see *The hard parts, 6*, which is the one
+piece of new machinery this approach does need.
 
 ## Roles
 
@@ -402,11 +425,11 @@ scans and up to a minute later, with the feeds live in between.
 
 Resolution happens first, before any plane is asked to do anything (PI-2). It
 is two checks, not one: `deploy_strategy` resolves every named instance against
-the `instances` table, then against the presence keys, then — for MD — checks
-the present instance lists the venue the feed needs. The two failures are
+the `instances` table, then probes each one, then — for MD — checks the
+answering instance lists the venue the feed needs. The two failures are
 different sentences, because they are different problems: an undeclared name is
-a typo the operator should fix in the document, and a declared name with no
-presence is a machine they should go and look at. Failing at attach time
+a typo the operator should fix in the document, and a declared name that does
+not answer is a machine they should go and look at. Failing at attach time
 instead of here means the operator gets a lease timeout in place of either.
 
 ### 3. Splitting a venue across instances duplicates the wire
@@ -419,7 +442,7 @@ worse idea than a duplicated subscription.
 
 This is a real cost, and it is the cost being bought deliberately: an operator
 who splits one venue's feeds across `md-jp-1` and `md-jp-2` is asking for two
-connections. What must not happen is paying it by accident. The presence key's
+connections. What must not happen is paying it by accident. The health reply's
 `venues` field and the deploy-time check are what make the split explicit, and
 Home showing both instances is what makes it visible afterwards.
 
@@ -448,6 +471,41 @@ and `test_lease_resilience.py` are where PI-4 and PI-6 get their tests. This is
 not incidental work; it is where the bugs in *The hard parts, 1* would have been
 caught.
 
+### 6. Probing a dead instance leaks, and the obvious fix is wrong
+
+`Broker.request` deletes the *reply* key in its `finally`
+(`packages/common/src/mftik/broker/client.py:757`, under `reply_ttl_seconds`).
+It does not remove the request. That request was `RPUSH`ed onto
+`{key_prefix}:rpc:{subject}`, which has no TTL, and if nothing is serving the
+subject nothing ever pops it.
+
+So a dashboard that probes a down instance every few seconds writes a record
+per probe into a list nobody will drain. At a 5s refresh that is roughly 17k
+entries a day per down instance, and production Redis is capped at 512mb with
+`maxmemory-policy noeviction` — the same Redis that carries order RPC, the
+ledger and liveness. Filling it does not degrade the dashboard, it stops the
+writes that trade. And when the instance finally boots, the first thing it
+does is drain a heap of expired health checks.
+
+**A blanket TTL on rpc queues is the wrong fix**, and the tree says so in two
+places. `Topics.td_order`'s docstring: a request sent while nobody owns the
+subject "waits in the list rather than vanishing the way a pub/sub message
+would". `Broker.post`'s: "A request left in the list because nothing is serving
+the subject yet is not lost: the next consumer to come up takes it, which is
+the recovery a pub/sub message could not offer." An attach should wait. A
+backfill should wait.
+
+A health check is the one RPC where waiting has no value — an answer that
+arrives after the question stopped being asked tells nobody anything. So it
+gets its own subject, and expiry is correct semantics *there* rather than a
+compromise. `Envelope` already carries `ts`, so the serving side can also drop
+a probe older than its own timeout, which costs one comparison and closes the
+case where a queue outlives its expiry.
+
+This is the only genuinely new machinery a probe-based design needs, and it has
+to land with the first probe rather than after it — the leak is invisible until
+the Redis it shares with order entry is full.
+
 ## Schema
 
 Four migrations, all additive.
@@ -471,11 +529,12 @@ is a plain string for the same reason.
 `/stats` is the visible half of the request. `_HEALTH_PROBES` in
 `apps/api/src/mftik_api/routes/stats.py:33` hardcodes three subjects and the
 route returns three `DomainStats`. It becomes: read the `instances` table, join
-the presence keys onto it, emit one row per instance and probe each on its own
-unicast subject. `DomainStats` gains `instance`, `region` and a state that can
-say *down* and *unregistered*, not only *healthy* — a boolean `healthy` cannot
-carry the four-cell grid above, and collapsing it is how a dead plane goes back
-to being invisible.
+emit one row per declared instance, and probe each on its own unicast subject
+concurrently — so the page costs one timeout however many instances are down,
+not one per instance. `DomainStats` gains `instance` and `region`, and its
+`healthy` boolean has to admit a third state: a declared instance that does not
+answer is *down*, which is a fact worth rendering differently from a plane that
+was never asked.
 
 Home renders that on a fixed three-column grid (`repeat(3, minmax(0, 1fr))` at
 `frontend/src/routes/+page.svelte:105`) with a `d.domain === 'sts'` special
@@ -496,14 +555,13 @@ same flag as the rest of `mftik`'s node round-trips, not in the default path.
 
 Each stage is useful alone and leaves the tree shippable.
 
-1. **Instance identity.** The `instances` table with its CRUD, `MFTIK_INSTANCE`,
-   the presence key, the heartbeat refresh. Nothing routes on either yet.
-   Verifiable by declaring two MDs, starting one, and seeing one healthy row
-   and one down row.
-2. **Home lists instances.** `/stats` joins table to presence, the grid groups
-   by plane. Two MDs are visible to the operator — and so is a declared MD that
-   is not running — before anything can address one. This is the stage that
-   makes the rest debuggable.
+1. **Instance identity.** The `instances` table with its CRUD, and
+   `MFTIK_INSTANCE` read at boot. Nothing routes on either yet.
+2. **Home lists instances**, and the expiring health subject that makes probing
+   safe (*The hard parts, 6*) lands with it, not after. `/stats` probes one row
+   per declared instance; the grid groups by plane. Declaring two MDs and
+   starting one shows a connected row and a **down** row, which is the whole
+   point and is also what makes the rest debuggable.
 3. **Unicast subjects and the role enum.** `Topics.td(instance)` and friends,
    plus `standby` / `named` / `active` gating which serve loops exist. Every
    instance defaults to `active`, so no caller uses the unicast subject yet and
@@ -562,16 +620,15 @@ the ticket that would make such a sentence false.
    alternative is `named` by default and an explicit opt-in to the anycast
    pool, which is safer and breaks every existing deployment on upgrade.
    *Roles* assumes `active`; this is the assumption to challenge first.
-2. What creates a process id, and does it survive a restart? A boot-time uuid
-   is enough for presence and for `HandoverOffer`, but it means every restart
-   is a new row on Home until the old TTL lapses. A stable id derived from the
-   container would read better and is not always available.
+2. How often does Home probe, and does it probe on view or on a timer? Every
+   probe to a down instance is a write to a queue that expires rather than
+   drains, so the refresh interval is a cost as well as a freshness knob.
 3. What does an MD instance do with a feed for a venue it cannot reach — refuse
-   at attach, or refuse at deploy from the presence key's `venues`? Refusing at
+   at attach, or refuse at deploy from the health reply's `venues`? Refusing at
    deploy is a better message and a staler fact.
-4. Does `api_ids` belong in the presence payload at all? It changes on every
-   attach, so it is the one field that makes presence writes hot. The
-   alternative is reading `td_sessions`, which is already the source of truth.
+4. Does `api_ids` belong in the health reply at all? `td_sessions` is already
+   the source of truth for it, and a reply that has to assemble it makes the
+   probe do real work rather than answer instantly.
 5. What must be true before an instance row can be deleted? `apis.instance_id`
    is a foreign key and refuses on its own, but `md_sessions.instance` is a
    plain string by design and enforces nothing, so a live session can name an
