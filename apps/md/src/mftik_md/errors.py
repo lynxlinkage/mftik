@@ -174,6 +174,19 @@ BITGET = VenueErrors(
     },
 )
 
+#: Deribit JSON-RPC. Numeric ``error.code`` (V11). A public read has no
+#: funds and no order to be wrong about.
+DERIBIT = VenueErrors(
+    codes={
+        10009: QueryCode.VENUE_SYMBOL_NOT_FOUND,
+        10003: QueryCode.VENUE_INVALID_PARAM,
+        11044: QueryCode.VENUE_SYMBOL_NOT_FOUND,
+        10028: QueryCode.VENUE_RATE_LIMITED,
+        11050: QueryCode.VENUE_INVALID_PARAM,
+        11060: QueryCode.VENUE_INVALID_PARAM,
+    },
+)
+
 #: The paper engine, with nothing to map: it has no reader at all, so the
 #: factory refuses before any of this is reached. Listed so the venue is known
 #: rather than falling through as unrecognised.
@@ -188,6 +201,7 @@ VENUES: dict[str, VenueErrors] = {
     "Bybit": BYBIT,
     "Okx": OKX,
     "Bitget": BITGET,
+    "Deribit": DERIBIT,
     "Gate": GATE,
     "GateFutures": GATE,
     "Paper": PAPER,
@@ -254,6 +268,7 @@ def normalize(exc: BaseException, *, venue: str) -> int | str:
 __all__ = [
     "BINANCE",
     "BITGET",
+    "DERIBIT",
     "BY_TYPE",
     "GATE",
     "PAPER",

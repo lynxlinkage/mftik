@@ -18,6 +18,7 @@ from mftik_sym.sources.binance_delivery import BinanceDeliveryInstrumentSource
 from mftik_sym.sources.binance_future import BinanceFutureInstrumentSource
 from mftik_sym.sources.bitget import BitgetInstrumentSource
 from mftik_sym.sources.bybit import BybitInstrumentSource
+from mftik_sym.sources.deribit import DeribitInstrumentSource
 from mftik_sym.sources.gate import GateSpotInstrumentSource
 from mftik_sym.sources.gate_future import GateFuturesInstrumentSource
 from mftik_sym.sources.okx import OkxInstrumentSource
@@ -29,12 +30,15 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
 
     ``broker`` is only needed by venues reached over IPC rather than HTTP.
 
-    Bybit, OKX and Bitget appear twice, which is what a unified-account
-    venue looks like here: one credential, but two listings that are
-    fetched and delisted independently — see :mod:`mftik_sym.sources.bybit`,
-    :mod:`mftik_sym.sources.okx` and :mod:`mftik_sym.sources.bitget`.
-    Bitget's Perp source is itself a union of two wire categories; a
-    second Perp source would deactivate the first.
+    Bybit, OKX and Bitget appear twice, which is what a two-book
+    unified-account venue looks like here: one credential, but two
+    listings that are fetched and delisted independently — see
+    :mod:`mftik_sym.sources.bybit`, :mod:`mftik_sym.sources.okx` and
+    :mod:`mftik_sym.sources.bitget`. Bitget's Perp source is itself a
+    union of two wire categories; a second Perp source would deactivate
+    the first. Deribit appears four times: Spot, linear Perp, Inverse
+    and dated Future, each a filter on the same ``get_instruments``
+    call.
 
     Binance appears as three venues — ``Binance``, ``BinanceUM`` and
     ``BinanceCM`` — because those are three credentials and three
@@ -59,6 +63,10 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
         OkxInstrumentSource(category=Category.PERP),
         BitgetInstrumentSource(category=Category.SPOT),
         BitgetInstrumentSource(category=Category.PERP),
+        DeribitInstrumentSource(category=Category.SPOT),
+        DeribitInstrumentSource(category=Category.PERP),
+        DeribitInstrumentSource(category=Category.INVERSE),
+        DeribitInstrumentSource(category=Category.FUTURE),
     ]
 
 
@@ -68,6 +76,7 @@ __all__ = [
     "BinanceSpotInstrumentSource",
     "BitgetInstrumentSource",
     "BybitInstrumentSource",
+    "DeribitInstrumentSource",
     "GateFuturesInstrumentSource",
     "GateSpotInstrumentSource",
     "Instrument",

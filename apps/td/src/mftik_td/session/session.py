@@ -1023,12 +1023,23 @@ class Session:
         Spot tickers and venues without ``fetch_leverage`` raise
         :class:`~mftik.exchange.errors.ExchangeError`. A successful read is
         cached for :meth:`reserve` and later ensure calls.
+
+        The quote comes from the plane for the same reason :meth:`reserve`
+        passes it: a venue that lists linear and inverse dated futures
+        under one category is coin-margined or not depending on it, and
+        refusing here would leave that book's leverage cache empty and
+        its reservations stuck at 1x.
         """
         key = str(ticker)
         cached = self._leverage.get(key)
         if cached is not None:
             return cached
-        if not is_linear_margin(ticker.category, venue=ticker.venue):
+        info = await self._symbol_info(ticker)
+        if not is_linear_margin(
+            ticker.category,
+            venue=ticker.venue,
+            quote=info.quote if info is not None else None,
+        ):
             raise ExchangeError(
                 f"leverage is only defined on linear margined books, got {ticker}"
             )
@@ -1072,7 +1083,11 @@ class Session:
             return None
         leverage = (
             self._leverage.get(request.universal_ticker)
-            if is_linear_margin(request.category, venue=request.ticker.venue)
+            if is_linear_margin(
+                request.category,
+                venue=request.ticker.venue,
+                quote=info.quote,
+            )
             else None
         )
         held = reservation_for(

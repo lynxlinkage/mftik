@@ -8,6 +8,7 @@ from binance_future_stub import FakeBinanceFutureApi, FakeBinanceFutureUser
 from binance_stub import FakeBinanceApi, FakeBinanceStream, keypair
 from bitget_stub import FakeBitget
 from bybit_stub import FakeBybit
+from deribit_stub import FakeDeribit
 from gate_future_stub import FakeGateFutures
 from gate_stub import FakeGate
 from okx_stub import FakeOkx
@@ -201,6 +202,28 @@ async def bitget():
 async def bitget_public():
     """A FakeBitget standing in for a public socket — no login expected."""
     fake = FakeBitget(api_secret=None)
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def deribit():
+    """A FakeDeribit that verifies client_signature; ``.url`` points at it."""
+    fake = FakeDeribit()
+    server = await serve(fake.handler, "127.0.0.1", 0)
+    fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    yield fake
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.fixture
+async def deribit_public():
+    """A FakeDeribit standing in for a public socket — no auth expected."""
+    fake = FakeDeribit(api_secret=None)
     server = await serve(fake.handler, "127.0.0.1", 0)
     fake.url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
     yield fake

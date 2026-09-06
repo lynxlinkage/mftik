@@ -10,8 +10,9 @@ A venue here is **one connection with one credential**, which is the axis the
 API is actually organised on. Gate's spot and futures planes sign separately
 and speak to separate endpoints, so they are two venues (``Gate``,
 ``GateFutures``) that happen to share a brand. Bybit's, OKX's and Bitget's
-unified accounts sign once for both books, so each is one venue with two
-categories. What a venue trades is :attr:`Venue.categories`; which one an
+unified accounts sign once for both books; Deribit's signs once for
+spot, linear perp, inverse and dated futures. What a venue trades is
+:attr:`Venue.categories`; which one an
 instrument is on is the middle part of its
 :class:`~mftik.exchange.tickers.UniversalTicker`.
 
@@ -233,6 +234,23 @@ BITGET = Venue(
     requires_passphrase=True,
 )
 
+DERIBIT = Venue(
+    name="Deribit",
+    label="Deribit",
+    # One HMAC credential (Client ID / Client Secret, no passphrase) trades
+    # spot, linear USDC perps, inverse USD perps and dated futures (linear
+    # and inverse). Options stay unregistered. ``Future`` sorts first and a
+    # bare ``BTCUSDC`` is not a dated instrument, so the hint stays on
+    # Spot. The linear quote is USDC, not USDT.
+    categories=frozenset(
+        {Category.SPOT, Category.PERP, Category.INVERSE, Category.FUTURE}
+    ),
+    example_symbol="BTCUSDC",
+    example_category=Category.SPOT,
+    api_types=frozenset({HMAC}),
+    requires_passphrase=False,
+)
+
 #: Every venue the platform knows, keyed by canonical name. The single source
 #: of truth — :func:`get` scans it rather than keeping a second index, so a
 #: test or a plugin that adds an entry here is immediately visible to lookups.
@@ -248,6 +266,7 @@ VENUES: dict[str, Venue] = {
         BYBIT,
         OKX,
         BITGET,
+        DERIBIT,
     )
 }
 
@@ -356,6 +375,7 @@ __all__ = [
     "BINANCE_UM",
     "BITGET",
     "BYBIT",
+    "DERIBIT",
     "ED25519",
     "GATE",
     "GATE_FUTURES",

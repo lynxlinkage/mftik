@@ -22,6 +22,7 @@ from mftik.exchange.binance.spot.protocol import BinanceAuthError
 from mftik.exchange.bitget.private import BitgetPrivateClient
 from mftik.exchange.bitget.protocol import BitgetAuthError
 from mftik.exchange.bybit.private import BybitPrivateClient
+from mftik.exchange.deribit.private import DeribitPrivateClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.private import GateFuturesPrivateClient
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
@@ -284,6 +285,30 @@ async def test_a_bitget_credential_without_a_passphrase_fails_the_attach(
 
     with pytest.raises(BitgetAuthError, match="passphrase"):
         await factory.create(14)
+
+
+async def test_deribit_venue_builds_one_client_for_the_whole_account(
+    broker: Broker,
+) -> None:
+    """One HMAC credential, no passphrase, one connector — every book."""
+    rows = {
+        15: FakeApiRow(
+            id=15,
+            venue="Deribit",
+            api_key="did",
+            api_secret="dsec",
+        ),
+    }
+    factory = _factory(broker, rows)
+
+    session = await factory.create(15)
+
+    assert isinstance(session.private, DeribitPrivateClient)
+    assert session.private.name == "Deribit"
+    assert session.private.api_key == "did"
+    assert hasattr(session.private, "fetch_positions")
+    assert not hasattr(session.private, "stream_positions")
+    assert not session.private.connected
 
 
 async def test_a_binance_credential_that_is_not_a_key_fails_the_attach(

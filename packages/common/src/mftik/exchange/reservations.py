@@ -24,16 +24,26 @@ ZERO = Decimal("0")
 ONE = Decimal("1")
 
 
-def is_linear_margin(category: Category, *, venue: str | None = None) -> bool:
+def is_linear_margin(
+    category: Category, *, venue: str | None = None, quote: str | None = None
+) -> bool:
     """Quote-settled books whose reservation is ``notional / leverage``.
 
     Inverse and dated futures on a coin-margined venue settle in the coin
     and size in contracts. A ``Future`` with no venue named is the linear
     book — a coin-m Future must pass its venue so it is not priced as USDT.
+
+    Deribit lists both linear dated (quote USDC) and inverse dated (quote
+    USD) under ``Future``. The quote decides; missing quote is not
+    guessed.
     """
     if category is Category.PERP:
         return True
     if category is Category.FUTURE:
+        if venue:
+            found = venue_of(venue)
+            if found is not None and found.name == "Deribit":
+                return bool(quote) and quote.upper() != "USD"
         if not venue:
             return True
         found = venue_of(venue)
@@ -83,7 +93,7 @@ def commitment_for(
     """
     if category is Category.INVERSE or (
         category is Category.FUTURE
-        and not is_linear_margin(category, venue=venue)
+        and not is_linear_margin(category, venue=venue, quote=quote)
     ):
         return None
     if quote_qty is not None:
