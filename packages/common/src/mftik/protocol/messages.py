@@ -514,12 +514,23 @@ class LeaseAck(BaseModel):
 
 
 class MdLeaseAck(BaseModel):
-    """MD → STS fencing lease ACK on ``md.{session_id}``."""
+    """MD → STS fencing lease ACK on ``md.{session_id}``.
+
+    Names its sender because a session's feeds may be split across MD
+    instances, and every one of them acknowledges on the same channel. Without
+    it STS could tell that *somebody* was still there but not that one of them
+    had stopped — which is the case that matters, since a session receiving
+    half its feeds keeps trading on the half it still gets.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     session_id: str
     token: int
+    #: Which MD sent this. Optional so an MD that has not been upgraded yet
+    #: still acknowledges; it is then tracked under the plane name, which is
+    #: what a single-process node calls itself anyway.
+    instance: str | None = None
 
 
 class MdAttachRequest(BaseModel):

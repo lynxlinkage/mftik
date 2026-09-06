@@ -684,6 +684,7 @@ class SessionManager:
                                 MdLeaseAck(
                                     session_id=link.session_id,
                                     token=hb.token,
+                                    instance=self._instance,
                                 ),
                                 type=MD_LEASE_ACK,
                                 source="md",
