@@ -14,12 +14,8 @@ from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     TD_ERROR,
     TD_SESSION_ATTACH,
-    TD_SESSION_LIST,
     Envelope,
     LeaseHeartbeat,
-    ListSessionsRequest,
-    ListSessionsRequestEnvelope,
-    ListSessionsResult,
     RpcError,
     TdAttachRequest,
     TdAttachRequestEnvelope,
@@ -262,25 +258,32 @@ async def test_attach_refcount_same_api(
 
 
 @pytest.mark.asyncio
-async def test_rpc_attach_and_list(
+async def test_rpc_attach_on_the_instance_subject(
     broker: Broker, manager: SessionManager
 ) -> None:
+    """Attach reaches a TD addressed by name, not only by plane.
+
+    The listing half of this test went with the RPC it exercised: reading
+    ``td_sessions`` never needed a TD process, so the API runs that query
+    itself now (``mftik_api.routes.td``). What is left is the part that does
+    need one.
+    """
+    subject = Topics.td("td-jp-1")
     stop_lease = asyncio.Event()
     stop_serve = asyncio.Event()
     pub = asyncio.create_task(_lease_publisher(broker, "rpc-sts", stop_lease))
 
     async def server() -> None:
-        async for req in broker.serve(Topics.TD, stop=stop_serve):
+        async for req in broker.serve(subject, stop=stop_serve):
             await dispatch(req, sessions=manager)
-            if req.envelope.type == TD_SESSION_LIST:
-                break
+            break
         stop_serve.set()
 
     serve_task = asyncio.create_task(server())
     await asyncio.sleep(0.05)
 
     create_reply = await broker.request(
-        Topics.TD,
+        subject,
         TdAttachRequestEnvelope.wrap(
             TdAttachRequest(
                 session_id="rpc-sts",
@@ -293,26 +296,15 @@ async def test_rpc_attach_and_list(
         ),
         timeout=3,
     )
-    created = TdAttachResult.model_validate(create_reply.payload)
-    assert create_reply.type == TD_SESSION_ATTACH
-    assert created.session_id == "rpc-sts"
-    assert created.api_id == 3
-
-    list_reply = await broker.request(
-        Topics.TD,
-        ListSessionsRequestEnvelope.wrap(
-            ListSessionsRequest(domain="td", status="live"),
-            type=TD_SESSION_LIST,
-            source="api",
-        ),
-        timeout=2,
-    )
     await serve_task
     stop_lease.set()
     await pub
 
-    listed = ListSessionsResult.model_validate(list_reply.payload)
-    assert any(s.session_id == created.session_id for s in listed.sessions)
+    created = TdAttachResult.model_validate(create_reply.payload)
+    assert create_reply.type == TD_SESSION_ATTACH
+    assert created.session_id == "rpc-sts"
+    assert created.api_id == 3
+    assert manager.refcount(3) == 1
 
     await manager.close_all()
 

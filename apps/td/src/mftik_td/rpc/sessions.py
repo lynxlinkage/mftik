@@ -1,4 +1,8 @@
-"""TD session attach / list RPC handlers."""
+"""TD session attach / detach RPC handlers.
+
+Listing used to live here too. It read ``td_sessions`` and nothing else, so
+the API now runs that query itself — see ``mftik_api.routes.td``.
+"""
 
 from __future__ import annotations
 
@@ -10,10 +14,6 @@ from mftik.protocol import (
     TD_ERROR,
     TD_SESSION_ATTACH,
     TD_SESSION_DETACH,
-    TD_SESSION_LIST,
-    ListSessionsRequest,
-    ListSessionsResult,
-    ListSessionsResultEnvelope,
     RpcError,
     RpcErrorEnvelope,
     TdAttachRequest,
@@ -116,32 +116,6 @@ async def handle_session_detach(
             type=TD_SESSION_DETACH,
             source="td",
             session_id=payload.session_id,
-        )
-    )
-
-
-async def handle_session_list(
-    req: IncomingRequest,
-    *,
-    sessions: SessionManager | None = None,
-) -> None:
-    if sessions is None:
-        await _error(req, "unavailable", "session manager not configured")
-        return
-
-    try:
-        payload = ListSessionsRequest.model_validate(req.envelope.payload or {})
-    except Exception as exc:
-        await _error(req, "invalid_payload", str(exc))
-        return
-
-    items = await sessions.list_sessions(payload)
-    await req.reply(
-        ListSessionsResultEnvelope.wrap(
-            ListSessionsResult(sessions=items),
-            type=TD_SESSION_LIST,
-            source="td",
-            session_id=req.envelope.session_id,
         )
     )
 

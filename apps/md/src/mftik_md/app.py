@@ -10,13 +10,14 @@ import signal
 import uvloop
 from mftik import (
     configure_logging,
+    control_subjects,
     instance_name,
+    instance_role,
     run_until_stopped,
     serve_health,
 )
 from mftik.broker import Broker
 from mftik.exchange import venues
-from mftik.protocol import Topics
 from mftik.symbols import SymbolClient
 
 from mftik_md import db as md_db
@@ -35,6 +36,13 @@ SOURCE = "md"
 #: plane name — so an unconfigured deployment is the instance called
 #: ``md``, which migration 0031 declares. Nothing routes on it yet.
 INSTANCE = instance_name(SOURCE)
+#: How much of the plane this process answers for. ``MFTIK_ROLE``,
+#: defaulting to ``active`` — it serves its own subject and the shared
+#: pool, which is what every deployment did before instances existed.
+#: Raises at import on a value this plane cannot hold, so a bad setting
+#: is a boot failure with a sentence rather than a process that comes up
+#: answering nothing.
+ROLE = instance_role(SOURCE)
 logger = logging.getLogger(SOURCE)
 
 #: How long a serve loop waits before rebuilding itself after an exception it
@@ -48,12 +56,19 @@ async def run_rpc(
     broker: Broker,
     sessions: SessionManager,
     stop: asyncio.Event,
+    *,
+    subject: str,
 ) -> None:
-    """Serve API→MD request-reply on ``Topics.MD`` until ``stop``."""
-    logger.info("MD RPC listening on subject=%s", Topics.MD)
+    """Serve MD request-reply on ``subject`` until ``stop``.
+
+    One task per subject the role grants, rather than one loop over several:
+    each is the same loop with a different name, and a failure in one is not a
+    reason to stop answering on the other.
+    """
+    logger.info("MD RPC listening on subject=%s", subject)
     while not stop.is_set():
         try:
-            async for req in broker.serve(Topics.MD, stop=stop):
+            async for req in broker.serve(subject, stop=stop):
                 try:
                     await dispatch(req, sessions=sessions)
                 except Exception:
@@ -70,7 +85,9 @@ async def run_rpc(
             # MD ends up running sessions that nobody can list, pause or stop
             # — the process alive, the subject silent, and no line anywhere
             # saying so.
-            logger.exception("MD RPC serve loop failed — restarting")
+            logger.exception(
+                "MD RPC serve loop failed subject=%s — restarting", subject
+            )
             try:
                 await asyncio.wait_for(
                     stop.wait(), timeout=RPC_RESTART_DELAY_SECONDS
@@ -209,9 +226,20 @@ async def amain() -> bool:
             INSTANCE,
             venues.names(),
         )
-        rpc_task = asyncio.create_task(
-            run_rpc(broker, sessions, stop), name="md-rpc"
-        )
+        subjects = control_subjects(SOURCE, INSTANCE, ROLE)
+        if not subjects:
+            logger.warning(
+                "MD is %s and serves no control subject — it holds what it "
+                "has and takes nothing new",
+                ROLE.value,
+            )
+        rpc_tasks = [
+            asyncio.create_task(
+                run_rpc(broker, sessions, stop, subject=subject),
+                name=f"md-rpc-{subject}",
+            )
+            for subject in subjects
+        ]
         hb_task = asyncio.create_task(
             broker.heartbeat_loop(
                 SOURCE,
@@ -221,8 +249,12 @@ async def amain() -> bool:
             ),
             name="md-heartbeat",
         )
-        reaper_task = asyncio.create_task(
-            reap_loop(sessions, stop), name="md-reaper"
+        # A standby MD has nothing to reap and a peer that does — see
+        # ``Role.runs_reaper``.
+        reaper_task = (
+            asyncio.create_task(reap_loop(sessions, stop), name="md-reaper")
+            if ROLE.runs_reaper
+            else None
         )
         trim_task = asyncio.create_task(
             trim_loop(sessions, stop), name="md-tape-trim"
@@ -243,16 +275,22 @@ async def amain() -> bool:
         try:
             clean = await run_until_stopped(
                 stop,
-                rpc_task,
+                *rpc_tasks,
                 hb_task,
-                reaper_task,
+                *( [reaper_task] if reaper_task is not None else [] ),
                 trim_task,
                 health_task,
                 logger=logger,
             )
         finally:
             stop.set()
-            tasks = (rpc_task, hb_task, reaper_task, trim_task, health_task)
+            tasks = [
+                *rpc_tasks,
+                hb_task,
+                trim_task,
+                health_task,
+                *( [reaper_task] if reaper_task is not None else [] ),
+            ]
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

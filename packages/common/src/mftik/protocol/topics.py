@@ -5,11 +5,54 @@ from mftik.exchange.tickers import UniversalTicker
 
 class Topics:
     # Request-reply subjects (control plane)
+    #
+    # These are the *anycast* subjects: a plane's shared pool, taken by
+    # whichever of its processes gets there first. That is the right shape for
+    # work nobody has addressed — a ``strategy.yml`` that names no instance —
+    # and the wrong shape for work that has been. The named form is
+    # :meth:`td`, :meth:`sts` and :meth:`md` below.
+    #
+    # ``SYM`` and ``PAPER`` have no named form. Neither plane is instanced:
+    # SYM is off the hot path behind ``SymbolClient``'s cache, and one shared
+    # book is the whole point of paper.
     TD = "td"
     STS = "sts"
     MD = "md"
     SYM = "sym"
     PAPER = "paper"
+
+    @staticmethod
+    def td(instance: str) -> str:
+        """Control-plane subject one named TD answers on.
+
+        The anycast :attr:`TD` is what a caller uses when it has not decided
+        which process should take the work. Attach has decided — the ``apis``
+        row names the instance allowed to use that credential — so it comes
+        here instead.
+
+        Reads like the pub/sub channels next door (:meth:`td_global` is
+        ``td.{api_id}.global``) and is not one: request-reply subjects live
+        under ``{key_prefix}:rpc:`` as Redis lists, while a channel is the bare
+        name. The two namespaces have never overlapped and this does not change
+        that.
+        """
+        return f"td.{instance}"
+
+    @staticmethod
+    def sts(instance: str) -> str:
+        """Control-plane subject one named STS answers on."""
+        return f"sts.{instance}"
+
+    @staticmethod
+    def md(instance: str) -> str:
+        """Control-plane subject one named MD answers on.
+
+        Not :meth:`md_session`, which is ``md.{session_id}`` and a pub/sub
+        channel. Same reasoning as :meth:`td`: an rpc subject is a list under
+        ``{key_prefix}:rpc:``, a channel is the bare name, and the two have
+        never shared a keyspace.
+        """
+        return f"md.{instance}"
 
     @staticmethod
     def health(domain: str, instance: str) -> str:

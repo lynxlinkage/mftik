@@ -9,12 +9,13 @@ import signal
 import uvloop
 from mftik import (
     configure_logging,
+    control_subjects,
     instance_name,
+    instance_role,
     run_until_stopped,
     serve_health,
 )
 from mftik.broker import Broker
-from mftik.protocol import Topics
 from mftik.symbols import SymbolClient
 
 from mftik_td import db as td_db
@@ -33,6 +34,13 @@ SOURCE = "td"
 #: plane name — so an unconfigured deployment is the instance called
 #: ``td``, which migration 0031 declares. Nothing routes on it yet.
 INSTANCE = instance_name(SOURCE)
+#: How much of the plane this process answers for. ``MFTIK_ROLE``,
+#: defaulting to ``active`` — it serves its own subject and the shared
+#: pool, which is what every deployment did before instances existed.
+#: Raises at import on a value this plane cannot hold, so a bad setting
+#: is a boot failure with a sentence rather than a process that comes up
+#: answering nothing.
+ROLE = instance_role(SOURCE)
 logger = logging.getLogger(SOURCE)
 
 #: How long a serve loop waits before rebuilding itself after an exception it
@@ -46,12 +54,19 @@ async def run_rpc(
     broker: Broker,
     sessions: SessionManager,
     stop: asyncio.Event,
+    *,
+    subject: str,
 ) -> None:
-    """Serve API→TD request-reply on ``Topics.TD`` until ``stop``."""
-    logger.info("TD RPC listening on subject=%s", Topics.TD)
+    """Serve TD request-reply on ``subject`` until ``stop``.
+
+    One task per subject the role grants, rather than one loop over several:
+    each is the same loop with a different name, and a failure in one is not a
+    reason to stop answering on the other.
+    """
+    logger.info("TD RPC listening on subject=%s", subject)
     while not stop.is_set():
         try:
-            async for req in broker.serve(Topics.TD, stop=stop):
+            async for req in broker.serve(subject, stop=stop):
                 try:
                     await dispatch(req, sessions=sessions)
                 except Exception:
@@ -68,7 +83,9 @@ async def run_rpc(
             # TD ends up running sessions that nobody can list, pause or stop
             # — the process alive, the subject silent, and no line anywhere
             # saying so.
-            logger.exception("TD RPC serve loop failed — restarting")
+            logger.exception(
+                "TD RPC serve loop failed subject=%s — restarting", subject
+            )
             try:
                 await asyncio.wait_for(
                     stop.wait(), timeout=RPC_RESTART_DELAY_SECONDS
@@ -149,9 +166,20 @@ async def amain() -> bool:
             history=history,
         )
         logger.info("TD started instance=%s (venue session factory)", INSTANCE)
-        rpc_task = asyncio.create_task(
-            run_rpc(broker, sessions, stop), name="td-rpc"
-        )
+        subjects = control_subjects(SOURCE, INSTANCE, ROLE)
+        if not subjects:
+            logger.warning(
+                "TD is %s and serves no control subject — it holds what it "
+                "has and takes nothing new",
+                ROLE.value,
+            )
+        rpc_tasks = [
+            asyncio.create_task(
+                run_rpc(broker, sessions, stop, subject=subject),
+                name=f"td-rpc-{subject}",
+            )
+            for subject in subjects
+        ]
         hb_task = asyncio.create_task(
             broker.heartbeat_loop(
                 SOURCE,
@@ -179,7 +207,7 @@ async def amain() -> bool:
         try:
             clean = await run_until_stopped(
                 stop,
-                rpc_task,
+                *rpc_tasks,
                 hb_task,
                 reaper_task,
                 health_task,
@@ -187,10 +215,10 @@ async def amain() -> bool:
             )
         finally:
             stop.set()
-            for task in (rpc_task, hb_task, reaper_task, health_task):
+            for task in (*rpc_tasks, hb_task, reaper_task, health_task):
                 task.cancel()
             await asyncio.gather(
-                rpc_task,
+                *rpc_tasks,
                 hb_task,
                 reaper_task,
                 health_task,

@@ -385,6 +385,11 @@ in-memory state, in a route file that already opens `session_scope` for
 `_api_labels`. `/td/sessions` reads the table directly and the RPC goes. So TD
 instances default to `named`; `active` is an MD and STS default.
 
+That end state arrives in **INS-5**, not in INS-3. Adding the named subject and
+removing the shared one are separate changes, because three callers still send
+attach and detach to the bare subject and none can name an instance until an
+`api_id` resolves to one. INS-3 adds; INS-5 moves the callers and takes away.
+
 Two more subjects change:
 
 - **`td.backfill`** becomes `td.backfill.{instance}`, always. Its docstring's
@@ -792,40 +797,65 @@ carries order entry.
 
 **Depends.** INS-1.
 
-### INS-3 — Unicast subjects, the role enum, and TD's anycast subject goes
+### INS-3 — Unicast subjects and the role enum
 
-**Goal.** Every plane serves `{plane}.{instance}`. MD and STS also serve the
-bare subject; TD does not, and `/td/sessions` stops being an RPC.
+**Goal.** Every instanced plane also serves `{plane}.{instance}`, and a role
+decides which subjects each process serves at all. Nothing addresses an
+instance yet, so nothing changes observably. `/td/sessions` stops being an RPC.
 
 **Scope.**
 
 - `Topics.td(instance)` / `sts(instance)` / `md(instance)`. Not `sym`, not
   `paper` (*Which planes are instanced*).
-- `Role` enum — `standby` / `named` / `active` — gating which serve loops each
-  `app.py` builds, and `reap_loop`. MD/STS default `active`; TD is `named` and
-  refuses `standby` at boot.
-- Delete `Topics.TD` and the TD anycast serve loop. `routes/td.py` runs the
-  query itself; `TD_SESSION_LIST` and `handle_session_list` go.
-- `log.md.{venue}` → `log.md.{instance}.{venue}`, and `ws.py` / the
-  `md/[venue]` route with it.
+- `Role` — `standby` / `named` / `active` — from `MFTIK_ROLE`, defaulting to
+  `active`, gating which serve loops each `app.py` builds and whether
+  `reap_loop` runs. `standby` is refused at boot on TD and STS.
+- `run_rpc` takes the subject it serves; one task per subject the role grants,
+  rather than one loop over several, so a failure in one does not stop the
+  other.
+- `routes/td.py` runs its own query; `TD_SESSION_LIST` and
+  `handle_session_list` go.
 
-**Problem.** This is the addressing change everything after it uses, and it is
-the one that must be observably inert.
+**Problem.** This is the addressing every later ticket uses, and it is the one
+that must be observably inert — every instance defaults to `active` and keeps
+serving the pool it always did.
 
-**Solution.** Both subjects for MD/STS, one for TD.
+**Solution.** Add the named subjects beside the shared ones. Take nothing away.
 
 **Verify.**
 
-- An MD serving `active` answers a request on `md` and on `md.md-jp-1`; the
-  same MD as `named` answers only the second and the first request stays in
-  its list.
-- `standby` answers neither and runs no reaper.
-- A TD process refuses to boot with `MFTIK_INSTANCE` set and role `standby`.
-- `/td/sessions` returns the same rows with no TD process running at all —
-  the assertion that the RPC is gone rather than merely unused.
-- Existing `test_td_rpc.py` attach/detach cases pass against `td.{instance}`.
+- An MD serving `active` answers on `md` and on `md.md-jp-1`; the same MD as
+  `named` answers only the second, and the anycast request is still **in its
+  list** — waiting for a peer rather than lost, which is what makes a named
+  instance safe to run beside an active one.
+- `standby` builds no serve loop at all, answers neither subject, and runs no
+  reaper.
+- `MFTIK_ROLE=standby` on TD or STS is a boot failure naming the plane.
+- `/td/sessions` returns its rows from an app with no `state.broker` — the
+  assertion that the RPC is gone rather than merely unused.
+- `test_session_create.py`'s attach case runs against `td.{instance}`.
 
 **Depends.** INS-1. Independent of INS-2.
+
+**Two things this ticket does not do**, both moved after they were found to
+depend on work that comes later. The error was the same each time: a deletion
+or a rename was put in the ticket that *adds* the capability, when it actually
+depends on the ticket that *moves the callers*.
+
+- **Deleting `Topics.TD` and TD's anycast loop moves to INS-5.** Three callers
+  still send attach and detach to the bare subject — `deploy_strategy`, STS's
+  rebuild attach, and `StsSession`'s detach — and none can address an instance
+  until `apis.instance_id` is resolved, which is INS-5's own scope. Deleting
+  the subject here would leave attach with nowhere to go. So TD keeps
+  `active` through this ticket and becomes `named` in INS-5, when its callers
+  move in the same change.
+- **`log.md.{venue}` → `log.md.{instance}.{venue}` moves to INS-7.** The links
+  into that page are built from a session's venue list (`strategy/+page.svelte`
+  and `strategy/[sessionId]`), which is derived from `md_ids` — and `md_ids`
+  does not record which instance holds a feed until INS-7. Renaming the channel
+  here would mean a UI that cannot be navigated correctly until then, and the
+  collision it fixes is not live until two MDs serve one venue, which is also
+  INS-7.
 
 ### INS-4 — The three MD defects (closes PI-4, PI-6)
 
@@ -868,6 +898,9 @@ one process holds it. **This ticket closes the compliance requirement.**
 - `SessionManager.attach` takes a `SET NX` claim on `api_id` before building
   the `TradingAccount`, renews it while held, releases at refcount zero, and
   refuses naming the holder.
+- With the callers moved, `Topics.TD` and TD's anycast serve loop go, and TD
+  drops to `named`. INS-3 could not do this: attach had nowhere else to go
+  until an `api_id` resolved to an instance, which is the line above.
 
 **Problem.** Backfill loads the credential and `backfill_cron` sweeps every
 account on a timer, so an unkeyed subject fails compliance on a schedule. And
@@ -934,6 +967,11 @@ that names a missing one fails before anything is attached.
   failing STS.
 - `md_ids` read through a compat shim, in `_rebuild` too.
 - `MdSubscribe` carries the instance so only the holder acts on it.
+- `log.md.{venue}` → `log.md.{instance}.{venue}`, with `ws.py` and the
+  `md/[venue]` route. It belongs here rather than in INS-3 because the links
+  into that page come from a session's venue list, and only this ticket makes
+  `md_ids` record which instance holds a feed — before it, the channel has one
+  possible writer and the UI has no instance to navigate to.
 
 **Problem.** The largest change and the one with a rollback that did not
 previously have to unwind anything.

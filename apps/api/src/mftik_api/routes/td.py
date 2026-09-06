@@ -1,65 +1,66 @@
-"""TD session listing HTTP facade."""
+"""TD session listing — a database read, not an RPC.
+
+It used to go through the broker: the API sent `td.session.list` on the plane's
+shared subject, some TD process picked it up, ran one query and sent the rows
+back. That process holds no state this answer needs — `SessionManager.list_sessions`
+consulted `td_sessions` and nothing else — so the round trip bought a
+dependency on a plane being up in order to read a table the API is already
+connected to.
+
+Removing it is what lets TD stop serving an anycast subject at all: every other
+thing that reaches TD carries an `api_id`, and an `api_id` resolves to the one
+instance allowed to use that credential. See ``docs/Instances.md``.
+"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
-from mftik.protocol import (
-    TD_SESSION_LIST,
-    ListSessionsRequest,
-    ListSessionsRequestEnvelope,
-    ListSessionsResult,
-    Topics,
-)
-from mftik_db.repositories import AccountRepository
+from fastapi import APIRouter
+from mftik_db.models.session import SessionDomain
+from mftik_db.repositories import AccountRepository, TdSessionRepository
 from mftik_db.session import session_scope
 
-from mftik_api.broker_rpc import DomainRpcError, request_domain
-from mftik_api.deps import BrokerDep
 from mftik_api.schemas import SessionListResponse, SessionOut
 
 router = APIRouter(prefix="/td", tags=["td"])
 
+#: Mirrors the repository default. A scan that has to see every row must say
+#: so, because the default silently truncates.
+_LIST_LIMIT = 100
+
 
 @router.get("/sessions", response_model=SessionListResponse)
-async def list_sessions(
-    broker: BrokerDep, status: str | None = "live"
-) -> SessionListResponse:
-    try:
-        result = await request_domain(
-            broker,
-            Topics.TD,
-            ListSessionsRequestEnvelope.wrap(
-                ListSessionsRequest(domain="td", status=status),
-                type=TD_SESSION_LIST,
-                source="api",
-            ),
-            result_type=ListSessionsResult,
-        )
-    except DomainRpcError as exc:
-        raise HTTPException(status_code=502, detail=exc.message) from exc
-
-    label_by_api = await _api_labels()
-    sessions: list[SessionOut] = []
-    for s in result.sessions:
-        out = SessionOut.model_validate(s.model_dump())
-        if out.api_id is not None:
-            label = label_by_api.get(out.api_id)
-            if label is not None:
-                out = out.model_copy(
-                    update={"venue": label[0], "api_name": label[1]}
-                )
-        sessions.append(out)
-    return SessionListResponse(sessions=sessions)
-
-
-async def _api_labels() -> dict[int, tuple[str, str]]:
-    """api_id → (venue, account name)."""
+async def list_sessions(status: str | None = "live") -> SessionListResponse:
     async with session_scope() as db:
+        rows = await TdSessionRepository(db).list_sessions(
+            status=status, limit=_LIST_LIMIT
+        )
         accounts = await AccountRepository(db).list_with_api()
-    out: dict[int, tuple[str, str]] = {}
+
+    label_by_api: dict[int, tuple[str, str]] = {}
     for account in accounts:
         api = account.api
-        if api is None:
-            continue
-        out[api.id] = (api.venue, account.name)
-    return out
+        if api is not None:
+            label_by_api[api.id] = (api.venue, account.name)
+
+    sessions: list[SessionOut] = []
+    for row in rows:
+        venue, api_name = label_by_api.get(row.api_id, (None, None))
+        sessions.append(
+            SessionOut(
+                session_id=row.session_id,
+                domain=SessionDomain.TD.value,
+                created_by=row.created_by,
+                created_at=(
+                    row.created_at.timestamp() if row.created_at else 0.0
+                ),
+                finished_at=(
+                    row.finished_at.timestamp() if row.finished_at else None
+                ),
+                status=row.status,
+                api_id=row.api_id,
+                sts_session_id=row.session_id,
+                venue=venue,
+                api_name=api_name,
+            )
+        )
+    return SessionListResponse(sessions=sessions)

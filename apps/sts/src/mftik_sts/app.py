@@ -11,7 +11,9 @@ from typing import Any
 import uvloop
 from mftik import (
     configure_logging,
+    control_subjects,
     instance_name,
+    instance_role,
     run_until_stopped,
     serve_health,
 )
@@ -28,6 +30,13 @@ SOURCE = "sts"
 #: plane name — so an unconfigured deployment is the instance called
 #: ``sts``, which migration 0031 declares. Nothing routes on it yet.
 INSTANCE = instance_name(SOURCE)
+#: How much of the plane this process answers for. ``MFTIK_ROLE``,
+#: defaulting to ``active`` — it serves its own subject and the shared
+#: pool, which is what every deployment did before instances existed.
+#: Raises at import on a value this plane cannot hold, so a bad setting
+#: is a boot failure with a sentence rather than a process that comes up
+#: answering nothing.
+ROLE = instance_role(SOURCE)
 logger = logging.getLogger(SOURCE)
 
 #: How long a serve loop waits before rebuilding itself after an exception it
@@ -45,6 +54,8 @@ async def run_rpc(
     broker: Broker,
     sessions: SessionManager,
     stop: asyncio.Event,
+    *,
+    subject: str,
 ) -> None:
     logger.info("STS RPC listening on subject=%s", Topics.STS)
     while not stop.is_set():
@@ -66,7 +77,9 @@ async def run_rpc(
             # STS ends up running sessions that nobody can list, pause or stop
             # — the process alive, the subject silent, and no line anywhere
             # saying so.
-            logger.exception("STS RPC serve loop failed — restarting")
+            logger.exception(
+                "STS RPC serve loop failed subject=%s — restarting", subject
+            )
             try:
                 await asyncio.wait_for(
                     stop.wait(), timeout=RPC_RESTART_DELAY_SECONDS
@@ -190,9 +203,20 @@ async def amain() -> bool:
             rebuild_max_age_s=_rebuild_max_age_s(),
         )
         logger.info("STS started instance=%s", INSTANCE)
-        rpc_task = asyncio.create_task(
-            run_rpc(broker, sessions, stop), name="sts-rpc"
-        )
+        subjects = control_subjects(SOURCE, INSTANCE, ROLE)
+        if not subjects:
+            logger.warning(
+                "STS is %s and serves no control subject — it holds what it "
+                "has and takes nothing new",
+                ROLE.value,
+            )
+        rpc_tasks = [
+            asyncio.create_task(
+                run_rpc(broker, sessions, stop, subject=subject),
+                name=f"sts-rpc-{subject}",
+            )
+            for subject in subjects
+        ]
         hb_task = asyncio.create_task(
             broker.heartbeat_loop(
                 SOURCE,
@@ -228,7 +252,7 @@ async def amain() -> bool:
         try:
             clean = await run_until_stopped(
                 stop,
-                rpc_task,
+                *rpc_tasks,
                 hb_task,
                 reaper_task,
                 health_task,
@@ -236,7 +260,7 @@ async def amain() -> bool:
             )
         finally:
             stop.set()
-            tasks = [rpc_task, hb_task, reaper_task, health_task]
+            tasks = [*rpc_tasks, hb_task, reaper_task, health_task]
             if rebuild_task is not None:
                 tasks.append(rebuild_task)
             for task in tasks:
