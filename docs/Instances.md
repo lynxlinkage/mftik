@@ -50,10 +50,16 @@ one mechanism rather than two.
 `apps/md/src/mftik_md/session/manager.py:671`, not off `Topics.MD`. So adding
 and dropping a feed mid-run needs no work here — only the attach does.
 
-**`liveness.py` is the shape the instance registry wants.** One key per
+**`liveness.py` is the shape the presence key wants.** One key per
 `(domain, session)`, TTL'd, refreshed by the loop that would stop if the owner
-died. An instance registry is the same idea keyed by `(domain, instance)`, and
-should be a sibling module rather than new machinery.
+died. Instance presence is the same idea keyed per process, and should be a
+sibling module rather than new machinery.
+
+**`Account` is the shape the declared table wants.** An operator-created named
+row, referred to by name in `strategy.yml`, turned into an id at deploy by
+`_resolve_td` (`apps/api/src/mftik_api/routes/sts.py:670`), which refuses an
+unknown name with a sentence naming it. Declaring an instance is the same
+motion against a different table.
 
 **`td:` has already survived this migration once.** It went from a list of
 api ids to a mapping of account name to settings. `_TD_LIST_HINT` in
@@ -91,10 +97,12 @@ Instance routing is therefore necessary for colocation and not sufficient for
 it. A per-region broker is a much deeper change — `Broker()` is constructed
 once per process and `StsSession` holds a single `self.broker` for TD RPC, MD
 pub/sub, lease, eventlog and logs; the tape lives in Redis streams, so a split
-broker splits warm-up history; and the instance registry below would only see
-its own Redis. That change is the federated-nodes design, and
-`docker-compose.peer.yml` is already most of it. **Out of scope here, and it
-should stay a separate document.**
+broker splits warm-up history; and the two halves of instance identity below
+would come apart, the declared table staying global on the shared Postgres
+while presence fragmented per Redis, so Home could name every instance and
+vouch for none outside its own region. That change is the federated-nodes
+design, and `docker-compose.peer.yml` is already most of it. **Out of scope
+here, and it should stay a separate document.**
 
 ## Non-goals
 
@@ -116,8 +124,10 @@ Each is meant to be a test.
 
 - **PI-1** An attach reaches the instance the deploy named, or the deploy
   fails. It is never served by a different instance of the same plane.
-- **PI-2** A deploy that names an instance which is not in the registry fails
-  before any plane is asked to do anything, and says which name was not found.
+- **PI-2** A deploy that names an instance fails before any plane is asked to
+  do anything unless that instance is both *declared* and *present*, and the
+  two failures say different things: an undeclared name is a typo, a declared
+  name that is absent is an outage.
 - **PI-3** A session's MD feeds may be split across instances. Each feed is
   held by exactly one.
 - **PI-4** One instance detaching a session does not tear down another
@@ -137,35 +147,84 @@ Every process reads `MFTIK_INSTANCE` at boot and defaults it to the plane name
 (`md`, `td`, `sts`). An existing deployment therefore keeps working unchanged
 and its instance is called `md`, which is also what `PI-5` needs.
 
-Presence goes in Redis as `{key_prefix}:instance:{domain}:{process_id}`, TTL'd
-and refreshed by the heartbeat loop each `app.py` already runs — the loop that
-stops when the process does, so the key expiring means the process really is
-gone. The payload is small and is what Home renders:
+Identity is recorded **twice**, on purpose. A declared row says what should
+exist; a Redis key says what is running. Neither answers the other's question,
+and the operator's most important question is answered by the difference:
+
+| | Declared | Not declared |
+|---|---|---|
+| **Present** | Healthy | Unregistered — running and visible, not addressable by name |
+| **Absent** | **Down** | Does not exist |
+
+The bottom-left cell is the whole reason for the table. An MD that is OOM-killed
+and never restarts loses its Redis key after one TTL, and with presence alone it
+simply vanishes from Home — nothing anywhere remembers it was supposed to be
+there. That is the same failure `liveness.py` and the orphan reapers exist to
+prevent one level down ("a session the UI shows as running that nobody can
+stop"), and a whole plane disappearing quietly is the worse version of it.
+
+### Declared: the `instances` table
+
+Operator-owned, and the authority on *names*.
+
+| Column | Why |
+|---|---|
+| `name` | `td-jp-1`. Unique. What `strategy.yml` and `apis` refer to |
+| `domain` | `td` / `md` / `sts` |
+| `region` | Operator label. Free text; nothing routes on it |
+| `enabled` | Retire an instance without deleting the rows that reference it |
+| `created_by`, `created_at` | As every other operator-created table has |
+
+This is the shape `Account` already has: an operator-created named row that
+`strategy.yml` refers to by name and that `_resolve_td`
+(`apps/api/src/mftik_api/routes/sts.py:670`) turns into an id at deploy,
+refusing with `unknown td account name` when the name is not there. Instance
+resolution is the same function against a different table.
+
+**A row is not a precondition for starting.** A process comes up and announces
+itself whether or not it is declared; an undeclared one shows on Home as
+unregistered and is simply not addressable by name. Requiring the row first
+would make every deployment a two-step with an ordering hazard, and buys
+nothing that the deploy-time check does not already buy.
+
+### Reported: the presence key
+
+Process-owned, and the authority on *state*. Redis, at
+`{key_prefix}:instance:{domain}:{process_id}`, TTL'd and refreshed by the
+heartbeat loop each `app.py` already runs — the loop that stops when the
+process does, so the key expiring means the process really is gone.
 
 | Field | Why |
 |---|---|
-| `domain`, `name` | Identity. `name` is `MFTIK_INSTANCE` and is **not** unique — see below |
+| `name`, `domain` | Deliberately duplicated from the table — see below |
 | `role` | `standby` / `named` / `active` — see *Roles* |
-| `region` | Operator label. Free text; nothing routes on it |
 | `version` | So a half-finished rolling deploy is visible |
 | `venues` | Which venues this MD can reach. A deploy naming a feed the instance cannot serve should fail at deploy, not at subscribe |
 | `api_ids` | Which accounts this TD currently holds |
 
-**The key is the process, not the name.** Keying on `{domain}:{name}` looks
-right and is the same bug as the shared liveness key in *The hard parts, 1*,
-one level up. A handover legitimately runs two processes called `md-jp-1` at
-once, so one key would have two writers, and blue's exit would clear the key
-green is living behind — dropping a healthy instance off Home. Keyed per
-process, Home can say `md-jp-1 — 2 processes, handover in progress`, which is
-the truth and is also the only view from which a stuck cutover is visible.
-`docs/MdHandover.md` already gives each process an `instance_id` in
-`HandoverOffer`; this is that identifier, not a new concept.
+`name` and `domain` appear in both, and comparing them is the point: a process
+started with `MFTIK_INSTANCE=td-jp-1` but running the `md` command is a
+misconfiguration that presence alone cannot see and the pair makes obvious.
 
-A registry is not optional convenience. `BLPOP` does not fan out, so "which
-instances exist" cannot be one request-reply — there is no way to ask the
-plane and collect N answers without either this or a broadcast with a
-deadline, and a deadline makes a missing instance indistinguishable from a
-slow one.
+`region` is *not* here. It is an operator's statement about a deployment, and a
+process put in the wrong datacentre would report whatever its environment says
+rather than where it is. Neither can be verified, but the declaration is at
+least a stable record of intent — and this is the dashboard compliance is read
+from.
+
+**The presence key is per process, not per name.** Keying it on
+`{domain}:{name}` looks right and is the same bug as the shared liveness key in
+*The hard parts, 1*, one level up. A handover legitimately runs two processes
+called `md-jp-1` at once, so one key would have two writers, and blue's exit
+would clear the key green is living behind. Keyed per process, Home can say
+`md-jp-1 — 2 processes, handover in progress`, which is the truth and is also
+the only view from which a stuck cutover is visible. `docs/MdHandover.md`
+already gives each process an `instance_id` in `HandoverOffer`; this is that
+identifier, not a new concept.
+
+Presence has to be a registry rather than a query because `BLPOP` does not fan
+out: "which instances are up" cannot be one request-reply, and a broadcast with
+a deadline makes a missing instance indistinguishable from a slow one.
 
 ## Roles
 
@@ -261,10 +320,14 @@ worse than one that fails to parse.
 
 **TD, on the `apis` row.** Not in `strategy.yml`. A credential is bound to a
 region as a matter of fact, not as a matter of what a strategy author typed,
-and compliance is a property of the key. `Api` gets a nullable `instance`
-column and TD attach routes by it. `TdSettings` is `extra="forbid"` and empty
-today; if a per-deploy override is ever genuinely wanted it is one optional
-field there, but the default must come from the row.
+and compliance is a property of the key. `Api` gets a nullable `instance_id`
+foreign key and TD attach routes by it. A foreign key rather than a name
+string, because a typo in a free-text column is a credential that silently
+never attaches; deleting an instance a credential still points at is refused
+rather than cascaded, the way `list_live_for_origin` already refuses to delete
+a registry entry a live session is using. `TdSettings` is `extra="forbid"` and
+empty today; if a per-deploy override is ever genuinely wanted it is one
+optional field there, but the default must come from the row.
 
 **STS, at deploy.** `POST /sts/deploy/{type}` grows an optional instance
 parameter. It does not belong in the document: the same `strategy.yml` should
@@ -305,11 +368,14 @@ N attaches, a failure on the third leaves two live, and those must be detached
 before the STS fail — otherwise the reaper is what eventually cleans them, two
 scans and up to a minute later, with the feeds live in between.
 
-Resolution happens first, before any plane is asked to do anything (PI-2).
-`deploy_strategy` reads the registry, checks every named instance is present
-and — for MD — that it lists the venue the feed needs, and refuses with the
-missing name. Failing at attach time instead means the operator gets a lease
-timeout where they should have got a sentence.
+Resolution happens first, before any plane is asked to do anything (PI-2). It
+is two checks, not one: `deploy_strategy` resolves every named instance against
+the `instances` table, then against the presence keys, then — for MD — checks
+the present instance lists the venue the feed needs. The two failures are
+different sentences, because they are different problems: an undeclared name is
+a typo the operator should fix in the document, and a declared name with no
+presence is a machine they should go and look at. Failing at attach time
+instead of here means the operator gets a lease timeout in place of either.
 
 ### 3. Splitting a venue across instances duplicates the wire
 
@@ -321,7 +387,7 @@ worse idea than a duplicated subscription.
 
 This is a real cost, and it is the cost being bought deliberately: an operator
 who splits one venue's feeds across `md-jp-1` and `md-jp-2` is asking for two
-connections. What must not happen is paying it by accident. The registry's
+connections. What must not happen is paying it by accident. The presence key's
 `venues` field and the deploy-time check are what make the split explicit, and
 Home showing both instances is what makes it visible afterwards.
 
@@ -352,13 +418,19 @@ caught.
 
 ## Schema
 
-Three migrations, all additive.
+Four migrations, all additive.
 
 | Migration | Change |
 |---|---|
-| `apis.instance` | Nullable `String(64)`. Null means any TD |
+| `instances` | New table: `name` (unique), `domain`, `region`, `enabled`, `created_by`, `created_at` |
+| `apis.instance_id` | Nullable FK to `instances.id`. Null means any TD |
 | `md_sessions.instance` | `String(64)`, plus `uq_md_sessions_venue_session` → `(instance, venue, session_id)` |
 | `sts_sessions.md_ids` | JSON list → instance-keyed mapping, read through a compat shim |
+
+`md_sessions.instance` is a plain string and deliberately **not** a foreign
+key: it is history, it records the name as it was at the time, and retiring an
+instance must not break the rows that describe what it did. `md_sessions.venue`
+is a plain string for the same reason.
 
 `SessionInfo` gains `instance` so the session lists can show it.
 
@@ -366,9 +438,12 @@ Three migrations, all additive.
 
 `/stats` is the visible half of the request. `_HEALTH_PROBES` in
 `apps/api/src/mftik_api/routes/stats.py:33` hardcodes three subjects and the
-route returns three `DomainStats`. It becomes: read the registry, emit one row
-per instance, probe each on its own unicast subject. `DomainStats` gains
-`instance` and `region`.
+route returns three `DomainStats`. It becomes: read the `instances` table, join
+the presence keys onto it, emit one row per instance and probe each on its own
+unicast subject. `DomainStats` gains `instance`, `region` and a state that can
+say *down* and *unregistered*, not only *healthy* — a boolean `healthy` cannot
+carry the four-cell grid above, and collapsing it is how a dead plane goes back
+to being invisible.
 
 Home renders that on a fixed three-column grid (`repeat(3, minmax(0, 1fr))` at
 `frontend/src/routes/+page.svelte:105`) with a `d.domain === 'sts'` special
@@ -378,20 +453,25 @@ case for the link. It becomes grouped by plane with N cards under each.
 answered from the database, and any instance gives the same answer — only the
 new `instance` field has to reach the response.
 
-`mftik check` stays a local parse. It cannot resolve an instance name without a
-node round-trip, and the deploy already refuses an unknown one (PI-2); adding a
-network call to the one command that works offline is a bad trade.
+`mftik check` stays a local parse. The `instances` table does make a name
+checkable without asking any plane — one ordinary HTTP query, no broker — so
+this is now a choice rather than a limitation. It stays local because the
+command's value is that it works offline, and the deploy refuses an unknown
+name anyway (PI-2). If a connected check is ever wanted it belongs behind the
+same flag as the rest of `mftik`'s node round-trips, not in the default path.
 
 ## Suggested staging
 
 Each stage is useful alone and leaves the tree shippable.
 
-1. **Instance identity and registry.** `MFTIK_INSTANCE`, the presence key,
-   the heartbeat refresh. Nothing routes on it yet. Verifiable by starting two
-   MDs and seeing two entries.
-2. **Home lists instances.** `/stats` reads the registry, the grid groups by
-   plane. Two MDs are visible to the operator before anything can address one.
-   This is the stage that makes the rest debuggable.
+1. **Instance identity.** The `instances` table with its CRUD, `MFTIK_INSTANCE`,
+   the presence key, the heartbeat refresh. Nothing routes on either yet.
+   Verifiable by declaring two MDs, starting one, and seeing one healthy row
+   and one down row.
+2. **Home lists instances.** `/stats` joins table to presence, the grid groups
+   by plane. Two MDs are visible to the operator — and so is a declared MD that
+   is not running — before anything can address one. This is the stage that
+   makes the rest debuggable.
 3. **Unicast subjects and the role enum.** `Topics.td(instance)` and friends,
    plus `standby` / `named` / `active` gating which serve loops exist. Every
    instance defaults to `active`, so no caller uses the unicast subject yet and
@@ -451,15 +531,19 @@ the ticket that would make such a sentence false.
    pool, which is safer and breaks every existing deployment on upgrade.
    *Roles* assumes `active`; this is the assumption to challenge first.
 2. What creates a process id, and does it survive a restart? A boot-time uuid
-   is enough for the registry and for `HandoverOffer`, but it means every
-   restart is a new row on Home until the old TTL lapses. A stable id derived
-   from the container would read better and is not always available.
+   is enough for presence and for `HandoverOffer`, but it means every restart
+   is a new row on Home until the old TTL lapses. A stable id derived from the
+   container would read better and is not always available.
 3. What does an MD instance do with a feed for a venue it cannot reach — refuse
-   at attach, or refuse at deploy from the registry's `venues`? Refusing at
+   at attach, or refuse at deploy from the presence key's `venues`? Refusing at
    deploy is a better message and a staler fact.
-4. Does `api_ids` belong in the registry payload at all? It changes on every
+4. Does `api_ids` belong in the presence payload at all? It changes on every
    attach, so it is the one field that makes presence writes hot. The
    alternative is reading `td_sessions`, which is already the source of truth.
-5. Should `md.fetch.{instance}` be preferred automatically when a session's
+5. Should declaring an instance be reachable from the UI, or is it a `mftik`
+   CLI and API-only operation? Home has to *show* the table either way; whether
+   it edits it is a different question, and the answer probably follows
+   whatever `apis` and `accounts` already do.
+6. Should `md.fetch.{instance}` be preferred automatically when a session's
    feeds all name one instance? The unkeyed subject is the better default for
    correctness and the wrong one for a colocated read.
