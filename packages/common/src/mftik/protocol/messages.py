@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
@@ -55,12 +56,67 @@ class HealthCheck(BaseModel):
 
 
 class HealthStatus(BaseModel):
-    """Domain → API health probe reply payload."""
+    """Domain → API health probe reply payload.
+
+    Carries what a presence registry would have held, and carries it *fresher*:
+    these are read off the answering process at the moment it answers, where a
+    TTL'd key would be up to its whole TTL out of date. See
+    ``docs/Instances.md``.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     status: str = "ok"
     service: str = "td"
+    #: What the process believes it is. Reported back rather than assumed from
+    #: the subject it was asked on, because the pair is the diagnosis: a
+    #: process started with ``MFTIK_INSTANCE=td-jp-1`` but running the ``md``
+    #: command answers and says so.
+    instance: str | None = None
+    domain: str | None = None
+    #: ``standby`` / ``named`` / ``active``. Filled in once roles exist; until
+    #: then a process has no role to report and this stays null rather than
+    #: claiming one.
+    role: str | None = None
+    #: So a half-finished rolling deploy is visible on the dashboard.
+    version: str | None = None
+    #: Which venues this MD can reach. A deploy naming a feed the instance
+    #: cannot serve should fail at deploy rather than at subscribe.
+    venues: list[str] = Field(default_factory=list)
+    #: Which accounts this TD currently holds. Read at reply time rather than
+    #: refreshed into a key, so it cannot describe an attach that has ended.
+    api_ids: list[int] = Field(default_factory=list)
+
+
+#: How old a liveness probe may be before the process it reaches drops it
+#: instead of answering.
+#:
+#: Comfortably above any probe timeout a caller would set, and far below the
+#: queue's own expiry — this is the *second* line of defence, not the first.
+#: :data:`mftik.broker.client.PROBE_QUEUE_MAXLEN` is what bounds the queue; this
+#: is what stops an instance that has just booted from opening its life by
+#: answering a heap of questions whose callers stopped waiting minutes ago.
+#: Every one of those answers is an RPUSH to a reply key that was deleted when
+#: the caller gave up, so replying manufactures exactly the litter the capped
+#: queue exists to avoid.
+PROBE_MAX_AGE_SECONDS = 10.0
+
+
+def probe_is_stale(
+    envelope: Any, *, max_age: float = PROBE_MAX_AGE_SECONDS
+) -> bool:
+    """Whether this probe is too old to be worth answering.
+
+    Wall-clock, because the two sides are different processes and may be
+    different hosts — there is no shared monotonic clock to compare against.
+    That makes the threshold generous on purpose: a skewed clock should cost a
+    wasted reply, never a healthy instance reported down. A future-dated
+    envelope (the caller's clock ahead of ours) is never stale.
+    """
+    ts = getattr(envelope, "ts", None)
+    if ts is None:
+        return False
+    return (time.time() - float(ts)) > max_age
 
 
 class RpcError(BaseModel):

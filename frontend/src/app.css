@@ -142,6 +142,15 @@ table.data tr:hover td {
 	color: var(--muted);
 }
 
+/* An instance the operator has disabled. Warn rather than error: it is
+   answering and its attached sessions keep running — new deploys just will not
+   name it. Draining, not evicted. */
+.badge.draining {
+	color: var(--warn);
+	border-color: rgba(240, 180, 41, 0.35);
+	background: rgba(240, 180, 41, 0.08);
+}
+
 .badge.down {
 	color: var(--err);
 	border-color: rgba(240, 113, 120, 0.35);

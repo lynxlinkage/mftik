@@ -12,6 +12,26 @@ class Topics:
     PAPER = "paper"
 
     @staticmethod
+    def health(domain: str, instance: str) -> str:
+        """Request-reply subject one instance answers liveness on.
+
+        Separate from the plane's work subject, and not because it is tidier.
+        Every other subject in this class is built on the promise that a
+        request nobody is serving *waits* — :meth:`td_order` and
+        :meth:`Broker.post` both argue that a queued attach or backfill is
+        recovery rather than garbage, taken by the next consumer to come up.
+
+        A health check is the one request where that promise is worthless. An
+        answer that arrives after the question stopped being asked tells nobody
+        anything, and a dashboard polling an instance that is down would
+        otherwise write a record per probe into a list that will never be
+        drained — into the same Redis that carries order entry. So this subject
+        is bounded and expiring (see :meth:`Broker.probe`), which is correct
+        semantics *here* and would be data loss anywhere else.
+        """
+        return f"health.{domain}.{instance}"
+
+    @staticmethod
     def paper_orders(api_key: str) -> str:
         return f"paper.{api_key}.orders"
 

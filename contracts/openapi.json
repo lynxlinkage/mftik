@@ -4636,6 +4636,63 @@
             "type": "string",
             "title": "Domain"
           },
+          "instance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance"
+          },
+          "region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Region"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "state": {
+            "type": "string",
+            "title": "State",
+            "default": "connected"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "venues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Venues"
+          },
+          "api_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Api Ids"
+          },
           "live": {
             "type": "integer",
             "title": "Live",

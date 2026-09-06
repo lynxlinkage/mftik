@@ -7,7 +7,12 @@ import logging
 import signal
 
 import uvloop
-from mftik import configure_logging, instance_name, run_until_stopped
+from mftik import (
+    configure_logging,
+    instance_name,
+    run_until_stopped,
+    serve_health,
+)
 from mftik.broker import Broker
 from mftik.protocol import Topics
 from mftik.symbols import SymbolClient
@@ -159,16 +164,37 @@ async def amain() -> bool:
         reaper_task = asyncio.create_task(
             reap_loop(sessions, stop), name="td-reaper"
         )
+        health_task = asyncio.create_task(
+            serve_health(
+                broker,
+                domain=SOURCE,
+                instance=INSTANCE,
+                stop=stop,
+                # Which accounts this process holds right now. Read at reply
+                # time so it cannot go stale the way a registry payload would.
+                describe=lambda: {"api_ids": sessions.active_api_ids},
+            ),
+            name="td-health",
+        )
         try:
             clean = await run_until_stopped(
-                stop, rpc_task, hb_task, reaper_task, logger=logger
+                stop,
+                rpc_task,
+                hb_task,
+                reaper_task,
+                health_task,
+                logger=logger,
             )
         finally:
             stop.set()
-            for task in (rpc_task, hb_task, reaper_task):
+            for task in (rpc_task, hb_task, reaper_task, health_task):
                 task.cancel()
             await asyncio.gather(
-                rpc_task, hb_task, reaper_task, return_exceptions=True
+                rpc_task,
+                hb_task,
+                reaper_task,
+                health_task,
+                return_exceptions=True,
             )
             # Asked for before this process stops serving the subject, and
             # deliberately not run here: whoever comes up next takes it off the

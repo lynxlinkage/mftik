@@ -47,6 +47,7 @@ from mftik.protocol.messages import (
     PAPER_ORDER,
     PAPER_ORDER_BOOK,
     PAPER_PLACE_ORDER,
+    PROBE_MAX_AGE_SECONDS,
     STS_DETACH,
     STS_ENSURE_LEVERAGE,
     STS_ERROR,
@@ -230,6 +231,7 @@ from mftik.protocol.messages import (
     TdDetachRequestEnvelope,
     TdDetachResult,
     TdDetachResultEnvelope,
+    probe_is_stale,
 )
 
 # Only the enums are re-exported: ``is_td_internal``, ``is_retryable`` and
@@ -311,6 +313,8 @@ __all__ = [
     "MD_SESSION_DETACH",
     "MD_SESSION_LIST",
     "MD_SUBSCRIBE",
+    "PROBE_MAX_AGE_SECONDS",
+    "probe_is_stale",
     "MD_TICKER",
     "MD_TRADE",
     "MD_UNSUBSCRIBE",

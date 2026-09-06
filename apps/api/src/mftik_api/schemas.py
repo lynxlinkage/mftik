@@ -12,6 +12,21 @@ from mftik_api.paging import MAX_LIST_OFFSET
 
 class DomainStats(BaseModel):
     domain: str
+    #: Which instance of the plane this row is. One row per declared instance.
+    instance: str | None = None
+    region: str | None = None
+    enabled: bool = True
+    #: ``connected`` | ``down``. A declared instance that does not answer is
+    #: *down* — a fact about a machine somebody has to go and look at, and one
+    #: only knowable because a row says it should be here. :attr:`healthy` is
+    #: kept as the boolean older clients read.
+    state: str = "connected"
+    version: str | None = None
+    venues: list[str] = Field(default_factory=list)
+    api_ids: list[int] = Field(default_factory=list)
+    #: Session counts are per plane. They ride the first instance of each plane
+    #: and are zero on the rest, because repeating them per instance would
+    #: claim a split the tables do not yet record.
     live: int = 0
     done: int = 0
     #: Sessions that ended badly. Only ``sts`` records these — td/md rows

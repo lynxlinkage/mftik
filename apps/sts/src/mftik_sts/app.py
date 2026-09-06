@@ -9,7 +9,12 @@ import signal
 from typing import Any
 
 import uvloop
-from mftik import configure_logging, instance_name, run_until_stopped
+from mftik import (
+    configure_logging,
+    instance_name,
+    run_until_stopped,
+    serve_health,
+)
 from mftik.broker import Broker
 from mftik.protocol import Topics
 
@@ -200,6 +205,12 @@ async def amain() -> bool:
         reaper_task = asyncio.create_task(
             reap_loop(sessions, stop), name="sts-reaper"
         )
+        health_task = asyncio.create_task(
+            serve_health(
+                broker, domain=SOURCE, instance=INSTANCE, stop=stop
+            ),
+            name="sts-health",
+        )
         if _rebuild_enabled():
             # A task, not awaited: rebuilding waits on TD and MD, which may
             # not be up yet, and RPC service must not be held up behind it.
@@ -216,11 +227,16 @@ async def amain() -> bool:
         )
         try:
             clean = await run_until_stopped(
-                stop, rpc_task, hb_task, reaper_task, logger=logger
+                stop,
+                rpc_task,
+                hb_task,
+                reaper_task,
+                health_task,
+                logger=logger,
             )
         finally:
             stop.set()
-            tasks = [rpc_task, hb_task, reaper_task]
+            tasks = [rpc_task, hb_task, reaper_task, health_task]
             if rebuild_task is not None:
                 tasks.append(rebuild_task)
             for task in tasks:

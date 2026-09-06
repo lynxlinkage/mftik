@@ -8,7 +8,12 @@ import os
 import signal
 
 import uvloop
-from mftik import configure_logging, instance_name, run_until_stopped
+from mftik import (
+    configure_logging,
+    instance_name,
+    run_until_stopped,
+    serve_health,
+)
 from mftik.broker import Broker
 from mftik.exchange import venues
 from mftik.protocol import Topics
@@ -222,13 +227,32 @@ async def amain() -> bool:
         trim_task = asyncio.create_task(
             trim_loop(sessions, stop), name="md-tape-trim"
         )
+        health_task = asyncio.create_task(
+            serve_health(
+                broker,
+                domain=SOURCE,
+                instance=INSTANCE,
+                stop=stop,
+                # Which venues this MD can reach. A deploy naming a feed on a
+                # venue it cannot serve should fail at deploy rather than at
+                # subscribe, and this is where that answer comes from.
+                describe=lambda: {"venues": sorted(venues.names())},
+            ),
+            name="md-health",
+        )
         try:
             clean = await run_until_stopped(
-                stop, rpc_task, hb_task, reaper_task, trim_task, logger=logger
+                stop,
+                rpc_task,
+                hb_task,
+                reaper_task,
+                trim_task,
+                health_task,
+                logger=logger,
             )
         finally:
             stop.set()
-            tasks = (rpc_task, hb_task, reaper_task, trim_task)
+            tasks = (rpc_task, hb_task, reaper_task, trim_task, health_task)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
