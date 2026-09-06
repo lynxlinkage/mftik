@@ -65,9 +65,14 @@ def upgrade() -> None:
             ["created_by"], ["users.id"], ondelete="SET NULL"
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("name", name="uq_instances_name"),
     )
-    op.create_index("ix_instances_name", "instances", ["name"], unique=False)
+    # A unique *index*, not a UniqueConstraint beside a plain one. The model
+    # says ``unique=True, index=True``, which SQLAlchemy renders exactly this
+    # way — and 0019 already went through the tables that disagreed, for the
+    # reason its docstring gives: until the two agree on paper, ``alembic
+    # check`` cannot be in CI, and every later disagreement has nothing
+    # watching for it.
+    op.create_index("ix_instances_name", "instances", ["name"], unique=True)
     op.create_index(
         "ix_instances_domain", "instances", ["domain"], unique=False
     )
