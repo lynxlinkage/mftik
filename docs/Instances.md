@@ -187,6 +187,38 @@ unregistered and is simply not addressable by name. Requiring the row first
 would make every deployment a two-step with an ordering hazard, and buys
 nothing that the deploy-time check does not already buy.
 
+**`name` and `domain` are immutable. There is no rename.** A process learns its
+name from `MFTIK_INSTANCE` in its own environment, set in a compose file on the
+host — which for this deployment lives outside the repository and which the API
+has never read and cannot write. The authority for the name is on the far side
+of a boundary the node cannot cross, so a row edited here would not reach the
+process that answers to it.
+
+That is the opposite of `PATCH /apis/{api_id}`, which does rename, and the
+docstring at `apps/api/src/mftik_api/routes/apis.py:161` says exactly why it is
+safe to: `strategy.yml` resolves an account name to an `api_id` at deploy, so
+the name is a lookup label and the integer is the address. An instance name is
+not a label. It *is* the address — it is the subject string `td.td-jp-1` — and
+half of it is held in a process's environment.
+
+An id indirection does not rescue this. Serving `td.{instance_id}` means the
+process must learn its id, which it can only do by looking itself up by the
+name in its environment; the bootstrap join key is still the name. Putting the
+id in the environment instead moves the immutable thing rather than removing
+it, and makes the compose file a list of opaque integers.
+
+So a rename in the world is four steps — declare the new row, redeploy with the
+new `MFTIK_INSTANCE`, move `apis.instance_id` across, retire the old row — and
+that is a feature. Every intermediate state is honest: the new row reads *down*
+until its process is up, the old one reads *down* once its process is gone, and
+at no point does anything read healthy while being wrong. A UI rename is wrong
+in both directions the instant it is saved and says nothing.
+
+What the UI may edit is what nothing routes on: `region`, `enabled`, and any
+notes. `enabled=false` drains rather than evicts — new deploys refuse to name
+the instance, sessions already attached keep running — because nothing else in
+this tree tears down live work to satisfy a configuration change.
+
 ### Reported: the presence key
 
 Process-owned, and the authority on *state*. Redis, at
@@ -540,10 +572,12 @@ the ticket that would make such a sentence false.
 4. Does `api_ids` belong in the presence payload at all? It changes on every
    attach, so it is the one field that makes presence writes hot. The
    alternative is reading `td_sessions`, which is already the source of truth.
-5. Should declaring an instance be reachable from the UI, or is it a `mftik`
-   CLI and API-only operation? Home has to *show* the table either way; whether
-   it edits it is a different question, and the answer probably follows
-   whatever `apis` and `accounts` already do.
+5. What must be true before an instance row can be deleted? `apis.instance_id`
+   is a foreign key and refuses on its own, but `md_sessions.instance` is a
+   plain string by design and enforces nothing, so a live session can name an
+   instance being retired. That wants an application check of the kind
+   `list_live_for_origin` already performs for registry entries — the question
+   is whether it blocks the delete or only warns.
 6. Should `md.fetch.{instance}` be preferred automatically when a session's
    feeds all name one instance? The unkeyed subject is the better default for
    correctness and the wrong one for a colocated read.
