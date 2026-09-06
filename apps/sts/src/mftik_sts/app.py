@@ -18,7 +18,6 @@ from mftik import (
     serve_health,
 )
 from mftik.broker import Broker
-from mftik.protocol import Topics
 
 from mftik_sts import db as sts_db
 from mftik_sts.rpc import dispatch
@@ -57,10 +56,16 @@ async def run_rpc(
     *,
     subject: str,
 ) -> None:
-    logger.info("STS RPC listening on subject=%s", Topics.STS)
+    """Serve STS request-reply on ``subject`` until ``stop``.
+
+    One task per subject the role grants, rather than one loop over several:
+    each is the same loop with a different name, and a failure in one is not a
+    reason to stop answering on the other.
+    """
+    logger.info("STS RPC listening on subject=%s", subject)
     while not stop.is_set():
         try:
-            async for req in broker.serve(Topics.STS, stop=stop):
+            async for req in broker.serve(subject, stop=stop):
                 try:
                     await dispatch(req, sessions=sessions)
                 except Exception:
