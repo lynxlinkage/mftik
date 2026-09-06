@@ -224,8 +224,8 @@ existing row at `td`, then set `NOT NULL`. The `td` row has to exist before a
 An existing single-process deployment therefore upgrades into a node whose Home
 shows three connected instances named `td`, `md` and `sts`, because
 `MFTIK_INSTANCE` already defaults to the plane name and those processes answer
-to it. That is what makes the claim "stage 1 routes nothing and changes nothing
-observable" actually true rather than merely intended.
+to it. That is what makes INS-1's claim — that it routes nothing and changes
+nothing observable — true rather than merely intended.
 
 This is the shape `Account` already has: an operator-created named row that
 `strategy.yml` refers to by name and that `_resolve_td`
@@ -664,7 +664,8 @@ So STS grows the mirror of the watchdog MD already runs (`_watch_timeout`
 against `LEASE_GRACE_S`), per attached *instance* rather than per session, and
 a grace exceeded goes to `_fail_from_infrastructure("md feed")` — a path that
 already exists and today is only ever reached by a pump exception. This has to
-land before stage 6, since stage 6 is what first makes half a picture possible.
+land before INS-7 (it is INS-6), since INS-7 is what first makes half a picture
+possible.
 
 ## Schema
 
@@ -716,51 +717,294 @@ command's value is that it works offline, and the deploy refuses an unknown
 name anyway (PI-2). If a connected check is ever wanted it belongs behind the
 same flag as the rest of `mftik`'s node round-trips, not in the default path.
 
-## Suggested staging
+## Tickets
 
-Each stage is useful alone and leaves the tree shippable.
+Eight, prefixed `INS-` so they do not collide with the `PI-` invariants they
+close. Each leaves the tree shippable; `Verify` names the tests that say so.
 
-1. **Instance identity.** The `instances` table with its CRUD, the migration
-   that seeds `td` / `md` / `sts`, and `MFTIK_INSTANCE` read at boot. Nothing
-   routes on either yet. `docker-compose.yml` needs no change — `migrate`
-   already runs and every plane already waits for it.
-2. **Home lists instances**, and the expiring health subject that makes probing
-   safe (*The hard parts, 6*) lands with it, not after. `/stats` probes one row
-   per declared instance; the grid groups by plane. Declaring two MDs and
-   starting one shows a connected row and a **down** row, which is the whole
-   point and is also what makes the rest debuggable.
-3. **Unicast subjects and the role enum.** `Topics.td(instance)` and friends,
-   plus `standby` / `named` / `active` gating which serve loops exist. MD and
-   STS default to `active`, so nothing changes observably for them. TD is
-   `named` from the start and its anycast subject is deleted in this stage,
-   along with the `/td/sessions` RPC it was the last real caller of. Owns the
-   two `docs/MdHandover.md` edits below, because it is what makes their
-   sentences false.
-4. **The three PI-4 fixes.** Per-instance liveness key, `mark_done_session`
-   predicate, the `md_sessions` constraint. Do this *before* anything can
-   split a session across instances, not after.
-5. **TD routing and PI-7.** `apis.instance_id`, attach routes by it,
-   `td.backfill.{instance}`, and the `SET NX` claim on `api_id` (*The hard
-   parts, 7*). The claim belongs here and not later: this is the stage that
-   first makes two TDs meaningful, so before it there is nothing to test and
-   after it there is a window with the invariant unguarded.
-6. **PI-8: the STS MD lease watchdog** (*The hard parts, 8*). Alone and ahead
-   of the fan-out, because it is worth having whether or not feeds ever split —
-   today it closes a session that has silently stopped receiving anything.
-7. **MD routing.** The `strategy.yml` mapping, the deploy fan-out, the
-   rollback unwind, `md_ids`. The largest stage and the one to do last.
-8. **STS selection.** The deploy parameter *and* `sts_sessions.instance` with
-   the rebuild-scan filter. Not independent of the rest, as an earlier draft
-   claimed: without the column a restart re-races every interrupted session
-   across every STS, so a run pinned to `sts-tw` can come back on `sts-jp`.
-   The migration rides with the others in stage 1.
+### INS-1 — The `instances` table, its migration, and `MFTIK_INSTANCE`
 
-Stage 5 alone closes the compliance requirement. Stages 7 and 8 are what make
-a single session span instances, and can wait.
+**Goal.** A fresh node comes up with `td`, `md` and `sts` declared. Every
+process knows its own name. Nothing routes on either.
+
+**Scope.**
+
+- `mftik_db.models.instance.Instance` — `name` (unique), `domain`, `region`,
+  `enabled`, `created_at`, nullable `created_by`.
+- One revision `0031`, in the order the foreign key forces: create the table,
+  insert `td` / `md` / `sts`, add `apis.instance_id` nullable, point every row
+  at `td`, set `NOT NULL`. Same revision adds `md_sessions.instance` with the
+  `(instance, venue, session_id)` constraint, `sts_sessions.instance`, and the
+  `sts_sessions.md_ids` shape change.
+- `InstanceRepository`; `GET/POST/PATCH/DELETE /instances`. `PATCH` accepts
+  `region`, `enabled`, notes and **refuses `name` and `domain`**.
+- `MFTIK_INSTANCE` read in each `app.py`, defaulting to the plane name.
+
+**Problem.** Everything else needs names to exist and a process to know its
+own. Nothing can be tested before that.
+
+**Solution.** Table and env only. No subject changes, no probes, no routing.
+
+**Verify.**
+
+- Migration on an empty database creates three rows and no `users` row is
+  required — the case a `NOT NULL` `created_by` would have failed.
+- Migration on a database with `apis` rows leaves every one pointing at `td`,
+  and `apis.instance_id` is `NOT NULL` afterwards.
+- `PATCH /instances/{id}` with a `name` is a 4xx; with `region` it is a 200.
+- Deleting an instance an `apis` row references is refused (`test_apis_venue.py`
+  style).
+- Each `app.py` logs the instance it read; absent env yields the plane name.
+
+**Depends.** Nothing.
+
+### INS-2 — Home probes declared instances, and probing is safe
+
+**Goal.** Home lists one row per declared instance and says *connected* or
+*down*. Probing a down instance leaks nothing.
+
+**Scope.**
+
+- The expiring health subject and its `Envelope.ts` staleness drop
+  (*The hard parts, 6*). **This half is not optional and not deferrable.**
+- `HealthStatus` grows `name`, `domain`, `role`, `version`, `venues`.
+- `/stats` reads `instances`, probes each concurrently, returns one
+  `DomainStats` per instance with `instance`, `region` and a state that admits
+  *down*.
+- `frontend/src/routes/+page.svelte` — grouped by plane, N cards.
+
+**Problem.** Without this nobody can see what the later tickets are doing, and
+probing without the expiring subject fills a `noeviction` Redis that also
+carries order entry.
+
+**Solution.** Probe on demand; no registry, no TTL'd presence key.
+
+**Verify.**
+
+- Two declared MDs, one running: `/stats` returns one connected and one down.
+- A probe to a subject nobody serves leaves the queue at length zero after the
+  key's expiry — the leak test, and the reason this ticket is not just UI.
+- A probe whose `ts` is older than its timeout is dropped by the server, not
+  answered (`test_broker_poll.py` style).
+- `/stats` with three down instances returns within one timeout, not three
+  (concurrency, not serial).
+- `test_stats_status_coverage.py` grows the instance dimension.
+
+**Depends.** INS-1.
+
+### INS-3 — Unicast subjects, the role enum, and TD's anycast subject goes
+
+**Goal.** Every plane serves `{plane}.{instance}`. MD and STS also serve the
+bare subject; TD does not, and `/td/sessions` stops being an RPC.
+
+**Scope.**
+
+- `Topics.td(instance)` / `sts(instance)` / `md(instance)`. Not `sym`, not
+  `paper` (*Which planes are instanced*).
+- `Role` enum — `standby` / `named` / `active` — gating which serve loops each
+  `app.py` builds, and `reap_loop`. MD/STS default `active`; TD is `named` and
+  refuses `standby` at boot.
+- Delete `Topics.TD` and the TD anycast serve loop. `routes/td.py` runs the
+  query itself; `TD_SESSION_LIST` and `handle_session_list` go.
+- `log.md.{venue}` → `log.md.{instance}.{venue}`, and `ws.py` / the
+  `md/[venue]` route with it.
+
+**Problem.** This is the addressing change everything after it uses, and it is
+the one that must be observably inert.
+
+**Solution.** Both subjects for MD/STS, one for TD.
+
+**Verify.**
+
+- An MD serving `active` answers a request on `md` and on `md.md-jp-1`; the
+  same MD as `named` answers only the second and the first request stays in
+  its list.
+- `standby` answers neither and runs no reaper.
+- A TD process refuses to boot with `MFTIK_INSTANCE` set and role `standby`.
+- `/td/sessions` returns the same rows with no TD process running at all —
+  the assertion that the RPC is gone rather than merely unused.
+- Existing `test_td_rpc.py` attach/detach cases pass against `td.{instance}`.
+
+**Depends.** INS-1. Independent of INS-2.
+
+### INS-4 — The three MD defects (closes PI-4, PI-6)
+
+**Goal.** Two MDs can hold one session without corrupting each other's rows.
+
+**Scope.**
+
+- `_ALIVE_DOMAIN` becomes `md:{instance}`; `reap_orphans` follows.
+- `MdSessionRepository.mark_done_session` takes the instance in its predicate.
+- The `md_sessions` unique constraint (already migrated in INS-1) is honoured
+  by `persist_live_session`.
+
+**Problem.** All three are silent today and become live the moment INS-7 can
+split a session. Landing them after INS-7 means a window where a detach on one
+MD tears down another's healthy link.
+
+**Solution.** Fix before the thing that exposes them, not after.
+
+**Verify.**
+
+- Two MDs attached to one session; one detaches; the other's link survives and
+  its rows stay `live` — the PI-4 test.
+- One MD's `reap_orphans` does not close a peer's rows (PI-6), extending
+  `test_md_orphan_reaper.py`.
+- `test_md_lease_resilience.py` and `test_md_shared_venue_topics.py` grow a
+  two-instance case.
+
+**Depends.** INS-1. Independent of INS-2 and INS-3.
+
+### INS-5 — TD routing and the `api_id` claim (closes PI-7)
+
+**Goal.** A credential is only ever used from the instance it names, and only
+one process holds it. **This ticket closes the compliance requirement.**
+
+**Scope.**
+
+- Attach resolves `apis.instance_id` → `td.{instance}`.
+- `Topics.td_backfill(instance)`; `request_backfill` and `backfill_cron` resolve
+  the account's instance before posting.
+- `SessionManager.attach` takes a `SET NX` claim on `api_id` before building
+  the `TradingAccount`, renews it while held, releases at refcount zero, and
+  refuses naming the holder.
+
+**Problem.** Backfill loads the credential and `backfill_cron` sweeps every
+account on a timer, so an unkeyed subject fails compliance on a schedule. And
+nothing stops two same-named processes owning one `api_id`.
+
+**Solution.** Route by the row; enforce the claim rather than assert it.
+
+**Verify.**
+
+- A backfill for an account whose instance is down stays queued and is taken
+  when that instance returns — never by a different one
+  (`test_backfill_triggers.py`).
+- `backfill_cron` posts to per-instance subjects, one per account's instance.
+- Two managers, same `api_id`: the second `attach` is refused and names the
+  holder; only one `_serve_orders` exists (`test_session_create.py` style).
+- The claim's TTL lapsing lets a restarted process take the account.
+- `test_cid_ownership.py` and `test_session_oms.py` unchanged — the claim must
+  not alter single-owner behaviour.
+
+**Depends.** INS-1, INS-3.
+
+### INS-6 — The STS market-data watchdog (closes PI-8)
+
+**Goal.** A session notices an MD that stopped acknowledging, instead of
+running on whatever still arrives.
+
+**Scope.**
+
+- STS tracks last-ACK per attached MD instance, mirroring MD's `_watch_timeout`
+  against `LEASE_GRACE_S`.
+- Grace exceeded → `_fail_from_infrastructure("md feed")`, the path that exists
+  and is today only reached by a pump exception.
+- `_md_ack_token` becomes read rather than written-only.
+
+**Problem.** `_md_ack_token` is written in four places and read in none, so a
+dead MD is invisible to STS. After INS-7 that becomes a session trading on half
+a picture.
+
+**Solution.** Land it before the fan-out; it is worth having with one MD.
+
+**Verify.**
+
+- ACKs stop; the session fails within the grace with a reason naming the feed
+  (`test_sts_session.py` / `test_session_failed.py` style).
+- ACKs continuing on one instance do not keep a session alive when another
+  attached instance has gone quiet — the split-feed case.
+- A session with no MD attach is unaffected.
+- `test_md_events.py` unchanged: a live feed never trips the watchdog.
+
+**Depends.** INS-1. Independent of INS-3, INS-4 and INS-5.
+
+### INS-7 — MD routing (closes PI-1, PI-3)
+
+**Goal.** `strategy.yml` can name which MD serves which feeds, and a deploy
+that names a missing one fails before anything is attached.
+
+**Scope.**
+
+- `StrategySpec.md` accepts a mapping; a list still means "any MD" (PI-5). The
+  duplicate-key and merge-key guards `_refuse_collapsing_td_keys` applies to
+  `td:` extended to `md:`.
+- `deploy_strategy` resolves names against the table, then probes, then checks
+  the venue; fans out one attach per instance; unwinds partial attaches before
+  failing STS.
+- `md_ids` read through a compat shim, in `_rebuild` too.
+- `MdSubscribe` carries the instance so only the holder acts on it.
+
+**Problem.** The largest change and the one with a rollback that did not
+previously have to unwind anything.
+
+**Solution.** Last, on top of INS-4's fixes.
+
+**Verify.**
+
+- A `md:` mapping across two instances attaches each to its own feeds; a plain
+  list behaves exactly as today (PI-5).
+- An undeclared name and a declared-but-silent name fail with **different**
+  messages, before any attach (PI-2) — `test_deploy_refused.py`.
+- A failure on the third of three MD attaches leaves no live attach behind.
+- A duplicate key under `md:` is a parse error, not a silently folded map
+  (`test_sts_strategy_yaml.py`).
+- A rebuild of a row written before this ticket still attaches (compat shim).
+
+**Depends.** INS-1, INS-3, INS-4, INS-6.
+
+### INS-8 — STS selection and rebuild placement
+
+**Goal.** A run pinned to `sts-tw` comes back on `sts-tw`, or does not come
+back.
+
+**Scope.**
+
+- `POST /sts/deploy/{type}` takes an optional instance; it lands in
+  `sts_sessions.instance`.
+- The rebuild scan filters on the instance — own name, or null for legacy and
+  unpinned rows — before `claim_alive`.
+
+**Problem.** The scan filters on `restart`, on the strategy building, on
+`rebuildable` and on `claim_alive`, never on placement, and placement was not
+recorded at all. Two STS booting race for every interrupted row.
+
+**Solution.** Record it and filter on it. A session pinned to an instance that
+no longer exists stays `INTERRUPTED` and waits for a person — the node checks
+and does not guarantee.
+
+**Verify.**
+
+- Two STS with different names boot against one interrupted row pinned to the
+  first: only the first rebuilds, deterministically, and repeatedly
+  (`test_rebuild.py`).
+- A row pinned to a name nobody runs is rebuilt by nobody and stays
+  `INTERRUPTED`.
+- A row with a null instance is still rebuilt by whoever claims it — today's
+  behaviour, unchanged.
+
+**Depends.** INS-1. Independent of everything else.
+
+### Order
+
+```
+INS-1  table + migration + MFTIK_INSTANCE      [unblocks everything]
+  ├── INS-2  probes + Home + the expiring health subject
+  ├── INS-3  unicast subjects, roles, TD anycast deleted
+  │     └── INS-5  TD routing + api_id claim      [closes compliance]
+  ├── INS-4  the three MD defects
+  ├── INS-6  STS market-data watchdog
+  ├── INS-8  STS selection + rebuild placement
+  └── INS-7  MD routing                          [needs 3, 4, 6]
+```
+
+INS-5 alone closes the compliance requirement, and only INS-1 and INS-3 stand
+in front of it. INS-7 is the only ticket with more than one parent, and it is
+last for that reason rather than by size.
 
 ## Docs that stay right
 
-`docs/MdHandover.md` needs two edits, and both belong to stage 3 rather than to
+`docs/MdHandover.md` needs two edits, and both belong to INS-3 rather than to
 a mop-up ticket.
 
 *The hard parts, 2* says `broker.serve(Topics.MD, ...)` is a shared subject
@@ -794,7 +1038,7 @@ happens between processes, not a correction to anything it claims.
 not one process per plane, and that stays true.
 
 `docs/StrategyEnvironment.md` and `docs/CLI.md` mention `strategy.yml` but
-neither documents the `md:` shape. Stage 6 owns re-checking that, since it is
+neither documents the `md:` shape. INS-7 owns re-checking that, since it is
 the ticket that would make such a sentence false.
 
 ## Open questions
