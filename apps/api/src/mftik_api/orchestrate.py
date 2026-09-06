@@ -34,6 +34,7 @@ from mftik.protocol import (
     TdAttachResult,
     Topics,
     load_md,
+    md_feeds_of,
     md_instances_of,
     publish_md_log,
     publish_sts_log,
@@ -276,10 +277,13 @@ async def deploy_strategy(
             logger.exception("rollback STS fail failed session=%s", session_id)
         raise
 
+    # ``md_feeds_of``, not ``list(md)``: the argument is a mapping now, and
+    # iterating one yields the instance names. Reached whenever nothing was
+    # attached — a document naming an instance with an empty feed list, say.
     md_out = (
         list(attached_md["subscriptions"])
         if attached_md is not None
-        else list(md)
+        else md_feeds_of(md)
     )
     await sts_log(
         f"deploy complete strategy={sts.strategy} td={attached_td} md={md_out}"
