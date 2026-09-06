@@ -35,7 +35,7 @@ from mftik.exchange.models import (
     Trade,
 )
 from mftik.exchange.oms import Position
-from mftik.exchange.tickers import Category, UniversalTicker
+from mftik.exchange.tickers import UniversalTicker
 
 _STATUS: dict[str, OrderStatus] = {
     "LIVE": OrderStatus.NEW,
@@ -484,10 +484,6 @@ def order_book_from_result(
     return BitgetOrderBook.model_validate(result).to_order_book(ticker)
 
 
-def inbound_category(row_category: str, default: Category) -> Category:
-    return category_of(row_category, default)
-
-
 __all__ = [
     "CANCEL_REFUSALS",
     "BitgetAccount",
@@ -502,7 +498,6 @@ __all__ = [
     "BitgetSettings",
     "BitgetTicker",
     "category_of",
-    "inbound_category",
     "kline_from_row",
     "order_book_from_result",
     "status_of",
