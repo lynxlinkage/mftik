@@ -13,6 +13,7 @@ from mftik.broker import Broker
 from mftik.broker.errors import RequestTimeoutError
 from mftik.liveness import claim_alive, clear_alive, is_alive, mark_alive
 from mftik.protocol import (
+    ANY_INSTANCE,
     MD_ERROR,
     MD_SESSION_ATTACH,
     STS_REASON_OPERATOR_STOP,
@@ -33,7 +34,10 @@ from mftik.protocol import (
     TdAttachRequestEnvelope,
     Topics,
     dump_td,
+    load_md,
     load_td,
+    md_feeds_of,
+    md_instances_of,
     publish_sts_log,
     td_api_ids_of,
 )
@@ -278,7 +282,7 @@ class SessionManager:
             cid_slot=cid_slot,
             remember=self._remember_fact,
             td=dict(request.td),
-            md_ids=list(request.md),
+            md=dict(request.md),
             st_paras=dict(request.st_paras),
             heartbeat_interval=self._heartbeat_interval,
             on_exit=self._on_session_exit,
@@ -301,7 +305,7 @@ class SessionManager:
                 type=request.type,
                 yaml_text=request.yaml_text,
                 td=dump_td(dict(request.td)),
-                md_ids=list(request.md),
+                md=dict(request.md),
                 st_paras=dict(request.st_paras),
                 cid_slot=cid_slot,
                 restart=request.restart,
@@ -842,7 +846,11 @@ class SessionManager:
         session_id = row.session_id
         td = load_td(getattr(row, "td", None))
         td_api_ids = td_api_ids_of(td)
-        md_ids = [str(v) for v in (getattr(row, "md_ids", None) or [])]
+        # The compat shim. A row written before instances stored a flat list
+        # meaning "any MD"; ``load_md`` reads either shape, so a session
+        # interrupted by the deploy that introduced this still rebuilds.
+        md = load_md(getattr(row, "md_ids", None))
+        md_ids = md_feeds_of(md)
         created_by = int(getattr(row, "created_by", 0) or 0)
 
         session = StsSession(
@@ -853,7 +861,7 @@ class SessionManager:
             td_instance=self._td_instance_lookup,
             cid_slot=int(row.cid_slot),
             td=td,
-            md_ids=md_ids,
+            md=md,
             st_paras=dict(getattr(row, "st_paras", None) or {}),
             heartbeat_interval=self._heartbeat_interval,
             on_exit=self._on_session_exit,
@@ -884,8 +892,8 @@ class SessionManager:
         await session.start()
 
         try:
-            if md_ids:
-                await self._attach_md(session_id, created_by, md_ids)
+            if md:
+                await self._attach_md(session_id, created_by, md)
             for api_id in td_api_ids:
                 await self._attach_td(session_id, created_by, api_id)
         except Exception:
@@ -918,24 +926,38 @@ class SessionManager:
             )
 
     async def _attach_md(
-        self, session_id: str, created_by: int, md_ids: list[str]
+        self, session_id: str, created_by: int, md: dict[str, list[str]]
     ) -> None:
-        await self._attach_with_retry(
-            what=f"md feeds={md_ids}",
-            subject=Topics.MD,
-            envelope=MdAttachRequestEnvelope.wrap(
-                MdAttachRequest(
-                    session_id=session_id,
-                    created_by=created_by,
-                    subscriptions=md_ids,
-                    timeout=_ATTACH_TIMEOUT_S,
+        """One attach per instance the document names.
+
+        Sequential rather than gathered: ``_attach_with_retry`` gives up by
+        failing the session, and a second failure racing the first would
+        report a rebuild as failing for whichever reason arrived last.
+        """
+        for instance in md_instances_of(md):
+            feeds = md.get(instance) or []
+            if not feeds:
+                continue
+            await self._attach_with_retry(
+                what=f"md instance={instance} feeds={feeds}",
+                subject=(
+                    Topics.MD
+                    if instance == ANY_INSTANCE
+                    else Topics.md(instance)
                 ),
-                type=MD_SESSION_ATTACH,
-                source="sts",
-                session_id=session_id,
-            ),
-            error_type=MD_ERROR,
-        )
+                envelope=MdAttachRequestEnvelope.wrap(
+                    MdAttachRequest(
+                        session_id=session_id,
+                        created_by=created_by,
+                        subscriptions=feeds,
+                        timeout=_ATTACH_TIMEOUT_S,
+                    ),
+                    type=MD_SESSION_ATTACH,
+                    source="sts",
+                    session_id=session_id,
+                ),
+                error_type=MD_ERROR,
+            )
 
     async def _td_instance(self, api_id: int) -> str:
         """Which TD may take this attach.

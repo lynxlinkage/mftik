@@ -79,15 +79,21 @@ async def publish_md_log(
     *,
     source: str,
     level: str = "info",
+    instance: str | None = None,
     **extra: Any,
 ) -> None:
-    """Fan out a log line for ``/ws/md/{venue}`` (buffered + live)."""
+    """Fan out a log line for ``/ws/md/{venue}`` (buffered + live).
+
+    ``instance`` names the MD that wrote it, and is null when nothing can:
+    an unpinned attach is one where the deploy did not choose, so the API has
+    no name to put here. See :class:`Log`.
+    """
     from mftik.protocol.messages import Log, LogEnvelope
     from mftik.protocol.topics import Topics
 
     topic = Topics.log_md(venue)
     envelope = LogEnvelope.wrap(
-        Log(level=level, message=message, **extra),
+        Log(level=level, message=message, instance=instance, **extra),
         type="log",
         source=source,
         session_id=venue,

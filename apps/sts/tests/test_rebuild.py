@@ -27,6 +27,7 @@ from mftik.protocol import (
     TD_SESSION_ATTACH,
     Envelope,
     MdAttachResult,
+    MdAttachResultEnvelope,
     RpcError,
     TdAttachResult,
     Topics,
@@ -49,7 +50,7 @@ class FakeStsStore:
         cid_slot: int | None = 7,
         td: dict[str, Any] | None = None,
         td_api_ids: list[int] | None = None,
-        md_ids: list[str] | None = None,
+        md_ids: list[str] | dict[str, list[str]] | None = None,
         st_facts: dict[str, str] | None = None,
         finished_ago_s: float = 0.0,
         restart: str = "always",
@@ -74,7 +75,10 @@ class FakeStsStore:
                 f"account-{int(i)}": {"api_id": int(i)}
                 for i in (td_api_ids or [])
             },
-            md_ids=list(md_ids or []),
+            # Either shape: a row written before instances holds a flat list,
+            # and the compat shim has to read it. Passed through unchanged so
+            # a test can seed exactly what was on disk.
+            md_ids=md_ids if md_ids is not None else [],
             st_paras={},
             st_facts=dict(st_facts or {}),
         )
@@ -710,3 +714,57 @@ async def test_incompatible_environment_is_not_rebuilt_and_counts(
     assert store.rows["r-env"].rebuild_count == 1
     assert store.rows["r-env"].status == "interrupted"
     reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_row_rebuilds_on_the_instance_it_names(
+    broker: Broker,
+) -> None:
+    """A run pinned to an MD comes back on that MD, or not at all.
+
+    The flat-list shape a row written before instances holds is covered by
+    ``test_an_interrupted_session_comes_back`` above, which seeds exactly that
+    and still passes — the compat shim is what keeps it passing. This is the
+    other half: a row that *does* name an instance must not quietly fall back
+    to the shared pool, or the pin would survive a deploy and not a restart.
+    """
+    store = FakeStsStore()
+    store.seed("r-pinned", md_ids={"md-jp-1": ["bestquote.Paper_Spot_BTCUSDT"]})
+    instances: list[Rebuildable] = []
+    manager = _manager(broker, store, instances)
+
+    subjects: list[str] = []
+    stop = asyncio.Event()
+
+    async def serve(subject: str) -> None:
+        async for req in broker.serve(subject, stop=stop):
+            subjects.append(subject)
+            await req.reply(
+                MdAttachResultEnvelope.wrap(
+                    MdAttachResult(
+                        session_id="r-pinned",
+                        subscriptions=["bestquote.Paper_Spot_BTCUSDT"],
+                        refcounts={},
+                    ),
+                    type=MD_SESSION_ATTACH,
+                    source="md",
+                )
+            )
+            return
+
+    serving = asyncio.gather(
+        serve(Topics.md("md-jp-1")),
+        serve(Topics.MD),
+        return_exceptions=True,
+    )
+    await asyncio.sleep(0.1)
+    try:
+        assert await manager.rebuild_interrupted() == ["r-pinned"]
+        assert subjects == [Topics.md("md-jp-1")], (
+            "the shared pool was never asked"
+        )
+    finally:
+        stop.set()
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+        await manager.close_all()

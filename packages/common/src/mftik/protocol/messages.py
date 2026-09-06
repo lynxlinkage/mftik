@@ -6,7 +6,7 @@ import time
 from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mftik.exchange.models import (
     BestQuote,
@@ -23,7 +23,7 @@ from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol.envelope import Envelope
 from mftik.protocol.query_codes import QueryCode
 from mftik.protocol.reject_codes import RejectCode
-from mftik.protocol.strategy_yml import TdAccountRef
+from mftik.protocol.strategy_yml import TdAccountRef, load_md
 
 
 class Heartbeat(BaseModel):
@@ -45,6 +45,16 @@ class Log(BaseModel):
     #: TD and MD leave this unset. Distinct from :class:`Envelope`.type
     #: (``"log"``). Set only through ``publish_sts_log(..., type=)``.
     type: str | None = None
+    #: Which MD instance wrote this. MD only.
+    #:
+    #: A field rather than a channel split. Two MDs on one venue do write the
+    #: same ``log.md.{venue}``, and telling them apart is the point — but the
+    #: API cannot name the writer for an unpinned attach, because not naming
+    #: one is what unpinned *means*. A channel per instance would leave those
+    #: lines with nowhere honest to go, and would make the UI need an instance
+    #: to build a URL from. Null is therefore a real answer: "some MD, and the
+    #: deploy did not care which".
+    instance: str | None = None
 
 
 class HealthCheck(BaseModel):
@@ -229,7 +239,18 @@ class StsCreateSessionRequest(BaseModel):
     created_by: int
     strategy: str
     td: dict[str, TdAccountRef] = Field(default_factory=dict)
-    md: list[str] = Field(default_factory=list)
+    #: Instance name → feed keys. ``{"*": [...]}`` is every feed, unpinned —
+    #: see :data:`mftik.protocol.strategy_yml.ANY_INSTANCE`.
+    #:
+    #: A plain list is accepted and read as unpinned. This crosses the wire
+    #: between the API and STS, so a rolling upgrade has one of each running
+    #: for a while and the older half sends a list.
+    md: dict[str, list[str]] = Field(default_factory=dict)
+
+    @field_validator("md", mode="before")
+    @classmethod
+    def _md_shape(cls, value: Any) -> dict[str, list[str]]:
+        return load_md(value)
     st_paras: dict[str, Any] = Field(default_factory=dict)
     #: ``always`` | ``never`` — see ``StrategySpec.restart``.
     restart: str = "always"
@@ -577,12 +598,24 @@ class MdDetachResult(BaseModel):
 
 
 class MdSubscribe(BaseModel):
-    """STS → MD: add a feed subscription on the session stream."""
+    """STS → MD: add a feed subscription on the session stream.
+
+    Nothing sends one today — MD has handled this since before there was a
+    caller. ``instance`` is here so that when one arrives it cannot go wrong
+    in the way the channel invites: ``sts.md.{session_id}`` is pub/sub and
+    *every* MD holding the session reads it, so an unaddressed subscribe would
+    have each of them open the feed and fan it out, and the strategy would see
+    every print once per instance. Refcounting cannot notice — each instance
+    counts its own.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     session_id: str
     feed: str
+    #: Which MD should take it. ``None`` means any, which is only correct
+    #: while one instance holds the session.
+    instance: str | None = None
 
 
 class MdUnsubscribe(BaseModel):

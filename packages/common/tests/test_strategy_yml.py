@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 from mftik.protocol import (
+    ANY_INSTANCE,
     StrategyYamlError,
     TdAccountRef,
     TdSettings,
@@ -28,7 +29,10 @@ from mftik.protocol import (
 def test_parse_default_template() -> None:
     spec = parse_strategy_yml(default_template().yaml)
     assert spec.td == {"paper trader": TdSettings()}
-    assert spec.md == ["orderbook.Paper_Spot_BTCUSDT"]
+    # A plain list under `md:` is every feed, unpinned — which is what the
+    # bundled templates say and will keep saying: naming an instance is a
+    # deployment's business, and a template is where somebody starts.
+    assert spec.md == {ANY_INSTANCE: ["orderbook.Paper_Spot_BTCUSDT"]}
     # No mid: the strategy reads one from the order book feed above.
     assert "mid" not in spec.sts
     assert spec.sts["exec_interval_ms"] == 1000

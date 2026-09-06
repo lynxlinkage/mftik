@@ -7,14 +7,22 @@ from typing import Any
 from uuid import uuid4
 
 from mftik.broker import Broker
+from mftik.broker.errors import RequestTimeoutError
 from mftik.protocol import (
+    ANY_INSTANCE,
+    MD_HEALTH,
     MD_SESSION_ATTACH,
+    MD_SESSION_DETACH,
     STS_SESSION_CREATE,
     STS_SESSION_FAIL,
     TD_SESSION_ATTACH,
+    Envelope,
+    HealthCheck,
     MdAttachRequest,
     MdAttachRequestEnvelope,
     MdAttachResult,
+    MdDetachRequest,
+    MdDetachRequestEnvelope,
     StsCreateSessionRequest,
     StsCreateSessionRequestEnvelope,
     StsCreateSessionResult,
@@ -26,11 +34,13 @@ from mftik.protocol import (
     TdAttachRequestEnvelope,
     TdAttachResult,
     Topics,
+    load_md,
+    md_instances_of,
     publish_md_log,
     publish_sts_log,
 )
-from mftik_db.models.session import SessionStatus
-from mftik_db.repositories import ApiRepository
+from mftik_db.models.session import SessionDomain, SessionStatus
+from mftik_db.repositories import ApiRepository, InstanceRepository
 from mftik_db.session import session_scope
 
 from mftik_api.broker_rpc import DomainRpcError, request_domain
@@ -43,7 +53,7 @@ async def deploy_strategy(
     *,
     strategy_id: str,
     td: dict[str, TdAccountRef] | None = None,
-    md: list[str] | None = None,
+    md: dict[str, list[str]] | list[str] | None = None,
     st_paras: dict[str, Any] | None = None,
     created_by: int,
     timeout: float = 30.0,
@@ -54,7 +64,7 @@ async def deploy_strategy(
     """Mint session_id, create STS, attach MD then each TD api_id. Fail-closed."""
     session_id = uuid4().hex
     td = dict(td or {})
-    md = list(md or [])
+    md = load_md(md)
     st_paras = dict(st_paras or {})
     attached_td: list[dict[str, Any]] = []
     attached_md: dict[str, Any] | None = None
@@ -116,24 +126,44 @@ async def deploy_strategy(
         )
         raise DomainRpcError("strategy_refused", reason)
 
+    # Resolved before anything is asked to do anything (PI-2). Two checks,
+    # and the two failures are different sentences because they are different
+    # problems: a name nothing declared is a typo to fix in the document, and
+    # a declared name that does not answer is a machine to go and look at.
+    # Neither waits or retries — the node does not make an instance exist.
     try:
-        if md:
-            await sts_log(f"MD attach starting feeds={md}")
-            for venue in _md_venues(md):
+        await _check_md_instances(broker, md)
+    except DomainRpcError as exc:
+        await sts_log(f"MD instance check failed: {exc.message}", level="error")
+        await _fail_sts(broker, session_id, f"deploy refused: {exc.message}")
+        raise
+
+    attached_instances: list[str] = []
+    try:
+        for instance in md_instances_of(md):
+            feeds = md.get(instance) or []
+            if not feeds:
+                continue
+            where = "any md" if instance == ANY_INSTANCE else instance
+            await sts_log(f"MD attach starting {where} feeds={feeds}")
+            for venue in _md_venues(feeds):
                 await publish_md_log(
                     broker,
                     venue,
-                    f"attach starting sts={session_id} feeds={md}",
+                    f"attach starting sts={session_id} feeds={feeds}",
                     source="api",
+                    instance=(
+                        None if instance == ANY_INSTANCE else instance
+                    ),
                 )
             md_result = await request_domain(
                 broker,
-                Topics.MD,
+                Topics.MD if instance == ANY_INSTANCE else Topics.md(instance),
                 MdAttachRequestEnvelope.wrap(
                     MdAttachRequest(
                         session_id=session_id,
                         created_by=created_by,
-                        subscriptions=md,
+                        subscriptions=feeds,
                         timeout=timeout,
                     ),
                     type=MD_SESSION_ATTACH,
@@ -143,11 +173,14 @@ async def deploy_strategy(
                 result_type=MdAttachResult,
                 timeout=timeout + 5.0,
             )
-            attached_md = {
-                "subscriptions": list(md_result.subscriptions),
-                "refcounts": dict(md_result.refcounts),
-            }
-            await sts_log(f"MD attached feeds={md_result.subscriptions}")
+            attached_instances.append(instance)
+            if attached_md is None:
+                attached_md = {"subscriptions": [], "refcounts": {}}
+            attached_md["subscriptions"].extend(md_result.subscriptions)
+            attached_md["refcounts"].update(md_result.refcounts)
+            await sts_log(
+                f"MD attached {where} feeds={md_result.subscriptions}"
+            )
             for venue in _md_venues(md_result.subscriptions):
                 await publish_md_log(
                     broker,
@@ -157,6 +190,9 @@ async def deploy_strategy(
                         f"feeds={md_result.subscriptions}"
                     ),
                     source="api",
+                    instance=(
+                        None if instance == ANY_INSTANCE else instance
+                    ),
                 )
 
         for name, ref in td.items():
@@ -205,6 +241,11 @@ async def deploy_strategy(
         await sts_log(
             f"attach failed — rolling back STS: {exc}", level="error"
         )
+        # New with the fan-out: an attach that fails on the third instance
+        # leaves two live, and failing STS alone would leave them pumping
+        # feeds for a session that no longer exists until a reaper noticed —
+        # two scans and up to a minute later.
+        await _detach_md(broker, session_id, attached_instances, sts_log)
         fail_reason = f"attach failed — rolled back during deploy: {exc}"
         try:
             await request_domain(
@@ -243,6 +284,119 @@ async def deploy_strategy(
     }
 
 
+async def _check_md_instances(
+    broker: Broker, md: dict[str, list[str]]
+) -> None:
+    """Every named MD instance must be declared *and* answering.
+
+    Before any attach, and this is PI-2. Failing at attach time instead hands
+    the operator a lease timeout where they should have had a sentence — and
+    for an unpinned deploy there is nothing to check, because the whole point
+    of the anycast pool is that no name was given.
+    """
+    named = [i for i in md if i != ANY_INSTANCE and md.get(i)]
+    if not named:
+        return
+
+    async with session_scope() as db:
+        repo = InstanceRepository(db)
+        declared = {
+            row.name: row
+            for row in await repo.list_all(domain=SessionDomain.MD.value)
+        }
+
+    for name in named:
+        row = declared.get(name)
+        if row is None:
+            raise DomainRpcError(
+                "unknown_instance",
+                f"no md instance named {name!r} — declare it first, or "
+                f"remove the name to use any md",
+            )
+        if not row.enabled:
+            raise DomainRpcError(
+                "instance_disabled",
+                f"md instance {name!r} is disabled; sessions already attached "
+                f"keep running but new ones may not name it",
+            )
+        if not await _answers(broker, name):
+            raise DomainRpcError(
+                "instance_down",
+                f"md instance {name!r} is declared but did not answer — "
+                f"it is deployed nowhere, or the process is down",
+            )
+
+
+async def _answers(broker: Broker, instance: str) -> bool:
+    """Whether this MD is there. A timeout is the answer, not an error."""
+    try:
+        await broker.probe(
+            Topics.health(SessionDomain.MD.value, instance),
+            Envelope[HealthCheck].wrap(
+                HealthCheck(), type=MD_HEALTH, source="api"
+            ),
+            timeout=_PROBE_TIMEOUT_S,
+        )
+    except RequestTimeoutError:
+        return False
+    except Exception:
+        logger.exception("md instance probe failed instance=%s", instance)
+        return False
+    return True
+
+
+async def _detach_md(
+    broker: Broker,
+    session_id: str,
+    instances: list[str],
+    log: Any,
+) -> None:
+    """Unwind the attaches that did land, before failing the session."""
+    for instance in instances:
+        try:
+            await broker.post(
+                Topics.MD if instance == ANY_INSTANCE else Topics.md(instance),
+                MdDetachRequestEnvelope.wrap(
+                    MdDetachRequest(
+                        session_id=session_id, reason="deploy_rollback"
+                    ),
+                    type=MD_SESSION_DETACH,
+                    source="api",
+                    session_id=session_id,
+                ),
+            )
+        except Exception:
+            # The lease covers this: MD tears the attach down when this
+            # session's heartbeat stops, which failing it is about to do.
+            logger.warning(
+                "MD rollback detach failed instance=%s session=%s",
+                instance,
+                session_id,
+                exc_info=True,
+            )
+            continue
+        await log(f"rolled back MD attach on {instance}", level="warning")
+
+
+async def _fail_sts(broker: Broker, session_id: str, reason: str) -> None:
+    """End a session that was created and can no longer be attached."""
+    try:
+        await request_domain(
+            broker,
+            Topics.STS,
+            StsSessionControlRequestEnvelope.wrap(
+                StsSessionControlRequest(session_id=session_id, reason=reason),
+                type=STS_SESSION_FAIL,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=StsSessionControlResult,
+            timeout=10.0,
+        )
+    except Exception:
+        logger.exception("rollback STS fail failed session=%s", session_id)
+
+
 async def _td_instance(api_id: int) -> str:
     """Which TD may use this credential.
 
@@ -260,6 +414,12 @@ async def _td_instance(api_id: int) -> str:
             "unknown_api", f"no credential with api_id={api_id}"
         )
     return name
+
+
+#: How long one MD gets to answer the deploy's liveness check. Matches the
+#: dashboard's, and for the same reason: this is not a health measurement, it
+#: is the difference between "down" and "there".
+_PROBE_TIMEOUT_S = 1.5
 
 
 def _md_venues(feeds: list[str]) -> set[str]:

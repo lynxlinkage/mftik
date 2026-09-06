@@ -255,6 +255,7 @@ from mftik.protocol.strategy_catalog import (
     strategy_types,
 )
 from mftik.protocol.strategy_yml import (
+    ANY_INSTANCE,
     RESTART_ALWAYS,
     RESTART_NEVER,
     StrategySpec,
@@ -263,7 +264,10 @@ from mftik.protocol.strategy_yml import (
     TdSettings,
     attached_api_ids,
     dump_td,
+    load_md,
     load_td,
+    md_feeds_of,
+    md_instances_of,
     parse_strategy_yml,
     td_api_ids_of,
 )
@@ -395,7 +399,11 @@ __all__ = [
     "TdSettings",
     "attached_api_ids",
     "dump_td",
+    "ANY_INSTANCE",
+    "load_md",
     "load_td",
+    "md_feeds_of",
+    "md_instances_of",
     "td_api_ids_of",
     "Envelope",
     "HealthCheck",
