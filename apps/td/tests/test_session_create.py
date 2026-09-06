@@ -10,6 +10,7 @@ import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange
+from mftik.liveness import owner_key
 from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     TD_ERROR,
@@ -449,3 +450,55 @@ async def test_releasing_an_account_lets_another_process_take_it(
         stop.set()
         await pub
         await second.close_all()
+
+
+@pytest.mark.asyncio
+async def test_losing_the_claim_tears_the_account_down(
+    broker: Broker, paper: PaperExchange, store: FakeStore
+) -> None:
+    """The half of PI-7 that runs after attach, and had no coverage.
+
+    A claim that lapses and is taken by a rival is not a missed refresh to
+    shrug at: this process would go on serving ``td.order.{api_id}`` as a
+    competing consumer against the account's new owner. The keepalive loop is
+    where that is noticed, and noticing has to mean giving the account up.
+    """
+    manager = SessionManager(
+        PaperSessionFactory(broker, paper),
+        broker,
+        persist_live=store.persist_live,
+        mark_done=store.mark_done,
+        list_db_sessions=store.list_sessions,
+        lease_grace=2.0,
+    )
+    stop = asyncio.Event()
+    pub = asyncio.create_task(_lease_publisher(broker, "yield-sts", stop))
+    try:
+        await manager.attach(
+            TdAttachRequest(
+                session_id="yield-sts", api_id=3, timeout=2.0, created_by=1
+            )
+        )
+        assert manager.active_api_ids == [3]
+
+        # A rival takes the account: the key is gone, then theirs.
+        key = owner_key(broker.config.key_prefix, "3", domain="td")
+        await broker.redis.set(key, "some-other-process")
+
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while (
+            manager.active_api_ids
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.05)
+
+        assert manager.active_api_ids == [], (
+            "an account whose claim moved on must not still be served here"
+        )
+        assert await broker.redis.get(key) == "some-other-process", (
+            "and the rival's claim must not be stolen back on the way out"
+        )
+    finally:
+        stop.set()
+        await pub
+        await manager.close_all()

@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from db_harness import a_database, an_owner
 from fastapi import HTTPException
+from mftik.protocol import ANY_INSTANCE
 from mftik_api.routes import sts as sts_routes
 from mftik_db.models.session import SessionStatus
 from mftik_db.repositories import StsSessionRepository
@@ -165,3 +166,41 @@ async def test_a_status_of_only_commas_is_a_422(db) -> None:
     with pytest.raises(HTTPException) as caught:
         await sts_routes.list_strategies(status=" , ")
     assert caught.value.status_code == 422
+
+
+async def test_the_feed_list_survives_the_instance_mapping(db) -> None:
+    """What STS actually writes now, not the shape the tests above seed.
+
+    ``md_ids`` holds instance name → feeds since INS-7, and an unpinned deploy
+    stores ``{"*": [...]}``. Iterating that dict yields its *keys*, so a mapper
+    written for a list renders every session's feeds as the single string
+    ``"*"`` — the whole Strategy page, not an edge case. The tests above pass
+    because they hand ``create_live`` a raw list, which is no longer what
+    anything writes.
+    """
+    async with db() as session:
+        repo = StsSessionRepository(session)
+        await repo.create_live(
+            session_id="s-unpinned",
+            created_by=1,
+            type="NoopStrategy",
+            md_ids={ANY_INSTANCE: ["orderbook.Paper_Spot_BTCUSDT"]},
+        )
+        await repo.create_live(
+            session_id="s-split",
+            created_by=1,
+            type="NoopStrategy",
+            md_ids={
+                "md-jp-1": ["orderbook.Paper_Spot_BTCUSDT"],
+                "md-jp-2": ["ticker.Paper_Spot_ETHUSDT"],
+            },
+        )
+
+    unpinned = await sts_routes.get_strategy("s-unpinned")
+    assert unpinned.md_ids == ["orderbook.Paper_Spot_BTCUSDT"]
+
+    split = await sts_routes.get_strategy("s-split")
+    assert sorted(split.md_ids) == [
+        "orderbook.Paper_Spot_BTCUSDT",
+        "ticker.Paper_Spot_ETHUSDT",
+    ], "a split session shows its feeds, not the instances holding them"

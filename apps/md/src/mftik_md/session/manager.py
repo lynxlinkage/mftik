@@ -218,6 +218,7 @@ class SessionManager:
                     f"feeds={feeds} refcounts={self._dispatcher.refcounts()}"
                 ),
                 source="md",
+                instance=self._instance,
             )
         return MdAttachResult(
             session_id=request.session_id,
@@ -244,6 +245,7 @@ class SessionManager:
                     f"(sts={session_id} detach reason={reason})"
                 ),
                 source="md",
+                instance=self._instance,
             )
             if new_rc == 0:
                 await self._stop_feed_if_unused((topic, ticker))
@@ -271,6 +273,7 @@ class SessionManager:
                 venue,
                 f"sts detached session={session_id} reason={reason}",
                 source="md",
+                instance=self._instance,
             )
 
     async def list_sessions(
@@ -499,6 +502,7 @@ class SessionManager:
                 ticker.venue,
                 f"feed pump started {feed}",
                 source="md",
+                instance=self._instance,
             )
 
     async def _unsubscribe_feed(self, link: StsLink, feed: str) -> None:
@@ -601,6 +605,7 @@ class SessionManager:
                 venue,
                 "venue public client disconnected",
                 source="md",
+                instance=self._instance,
             )
         except Exception:
             logger.exception("MD venue disconnect log failed venue=%s", venue)
@@ -708,6 +713,12 @@ class SessionManager:
                     try:
                         msg = MdSubscribe.model_validate(env.payload)
                     except Exception:
+                        continue
+                    # Addressed to a peer. This channel is pub/sub and every
+                    # MD holding the session reads it, so acting on another
+                    # instance's subscribe would open a second pump for one
+                    # feed and deliver every print twice.
+                    if msg.instance is not None and msg.instance != self._instance:
                         continue
                     if msg.session_id != link.session_id:
                         continue

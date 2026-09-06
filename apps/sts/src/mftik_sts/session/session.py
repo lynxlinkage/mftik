@@ -25,6 +25,7 @@ from mftik.exchange.models import (
 from mftik.exchange.oms import Position
 from mftik.liveness import mark_alive
 from mftik.protocol import (
+    ANY_INSTANCE,
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_BESTQUOTE_RESULT,
@@ -70,7 +71,10 @@ from mftik.protocol import (
     TdDetachRequestEnvelope,
     Topics,
     UntypedEnvelope,
+    load_md,
     load_td,
+    md_feeds_of,
+    md_instances_of,
     publish_sts_log,
     td_api_ids_of,
 )
@@ -168,6 +172,7 @@ class StsSession:
         td: dict[str, TdAccountRef] | None = None,
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
+        md: dict[str, list[str]] | None = None,
         st_paras: dict[str, Any] | None = None,
         heartbeat_interval: float = 1.0,
         cid_slot: int = 0,
@@ -198,7 +203,15 @@ class StsSession:
         #: to a subject nobody serves sits in its list rather than vanishing,
         #: so it is worth addressing properly.
         self._td_instance_lookup = td_instance
-        self.md_ids = list(md_ids or [])
+        #: Instance name → feeds, for addressing attach and detach.
+        self.md = load_md(md) if md is not None else load_md(md_ids)
+        #: Every feed, flat, whatever instance holds it. This is what a
+        #: strategy reads — ``TwapStrategy``, ``OneCancelOther`` and
+        #: ``NoopStrategy`` all take ``md_ids[0]`` to find the instrument they
+        #: were configured for. Which MD serves a feed is a deployment's
+        #: business and never a strategy's, so the shape a strategy sees does
+        #: not change.
+        self.md_ids = md_feeds_of(self.md)
         self.st_paras = dict(st_paras or {})
         self.heartbeat_interval = heartbeat_interval
         #: 16-bit id packed into every client_order_id this session mints.
@@ -543,11 +556,15 @@ class StsSession:
             )
             for api_id in self.td_api_ids
         ]
-        if self.md_ids:
+        for instance in md_instances_of(self.md):
             posts.append(
                 self._post_detach(
-                    what="md",
-                    subject=Topics.MD,
+                    what=f"md instance={instance}",
+                    subject=(
+                        Topics.MD
+                        if instance == ANY_INSTANCE
+                        else Topics.md(instance)
+                    ),
                     envelope=MdDetachRequestEnvelope.wrap(
                         MdDetachRequest(session_id=self.session_id),
                         type=MD_SESSION_DETACH,

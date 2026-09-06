@@ -131,7 +131,18 @@ class StsSessionRow(Base):
     #: Account name → ``{api_id, settings}``. The attach list the UI still
     #: calls ``td_api_ids`` is derived from this.
     td: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    md_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    #: Instance name → feed keys, with ``"*"`` for feeds the deploy did not
+    #: pin. Read it with ``md_feeds_of`` / ``load_md`` and never by iterating:
+    #: a mapping iterated yields its keys, which is how the strategy list came
+    #: to render every session's feeds as the single string ``"*"``.
+    #:
+    #: ``dict | list`` because a row written before instances holds the list,
+    #: and the readers take either. The column keeps its name: it is what the
+    #: board and the API still call this field, and renaming a JSON column
+    #: costs a migration to say nothing new.
+    md_ids: Mapped[dict[str, Any] | list[Any]] = mapped_column(
+        JSON, default=dict
+    )
     st_paras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     #: What ``Strategy.remember()`` wrote — facts established while running
     #: that cannot be re-derived from ``st_paras`` or from TD reconciliation,

@@ -167,10 +167,11 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         type: str | None = None,
         yaml_text: str | None = None,
         td: dict[str, Any] | None = None,
-        md_ids: list[str] | None = None,
+        md_ids: list[str] | dict[str, list[str]] | None = None,
         st_paras: dict[str, Any] | None = None,
         cid_slot: int | None = None,
         restart: str = "always",
+        instance: str | None = None,
     ) -> StsSessionRow:
         row = StsSessionRow(
             session_id=session_id,
@@ -178,8 +179,9 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
             strategy=strategy,
             type=type,
             yaml_text=yaml_text,
+            instance=instance,
             td=dict(td or {}),
-            md_ids=list(md_ids or []),
+            md_ids=md_ids if md_ids is not None else [],
             st_paras=dict(st_paras or {}),
             cid_slot=cid_slot,
             restart=restart,

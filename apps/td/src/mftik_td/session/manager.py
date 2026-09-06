@@ -214,6 +214,10 @@ class SessionManager:
         #: loads the credential and opens a venue connection with it, so which
         #: host runs it is the compliance question.
         self._instance = instance
+        #: Account teardowns started from the keepalive loop. Held so a task
+        #: nothing else points at is not garbage-collected before it runs, and
+        #: so ``close_all`` can wait for them.
+        self._yields: set[asyncio.Task[Any]] = set()
         self._persist_live = persist_live
         self._mark_done = mark_done
         self._list_db_sessions = list_db_sessions
@@ -637,6 +641,10 @@ class SessionManager:
     async def close_all(self) -> None:
         for api_id in list(self._accounts):
             await self._destroy_account(api_id)
+        # A teardown the keepalive started may still be running, and it holds
+        # the same account state this is closing.
+        if self._yields:
+            await asyncio.gather(*self._yields, return_exceptions=True)
 
     async def _stop_link(self, link: StsLink) -> None:
         """Stop a link's tasks without cancelling the caller (if it is one)."""
@@ -724,10 +732,20 @@ class SessionManager:
                         "holds it; tearing this one down",
                         acct.api_id,
                     )
-                    asyncio.create_task(
+                    # On a sibling task, because ``_destroy_account``
+                    # cancels the very loop this runs in — and *held*, because
+                    # asyncio keeps only a weak reference and a task nothing
+                    # points at can be collected before it runs. Losing this
+                    # one would leave the process serving
+                    # ``td.order.{api_id}`` for an account a rival now owns,
+                    # which is the exact state the claim exists to prevent.
+                    # Same reasoning as MD's ``_disconnects``.
+                    task = asyncio.create_task(
                         self._destroy_account(acct.api_id),
                         name=f"td-yield-{acct.api_id}",
                     )
+                    self._yields.add(task)
+                    task.add_done_callback(self._yields.discard)
                     return
             except Exception:
                 # Unreadable Redis is not evidence of a rival. The TTL is many

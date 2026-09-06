@@ -56,10 +56,11 @@ def deploy_http_timeout(
 ) -> float:
     """Long enough to hear the API's own answer, not just 30s.
 
-    Create, then one MD attach if any feeds, then one TD attach per
-    account.
+    Create, then one MD attach **per named instance**, then one TD attach per
+    account. A document that splits its feeds across two MDs waits for two
+    attaches, and a timeout sized for one would give up on the second.
     """
-    n = (1 if spec.md else 0) + len(spec.td)
+    n = len(spec.md) + len(spec.td)
     return _STS_CREATE_S + n * (attach_s + _ATTACH_RPC_SLACK_S) + _HTTP_SLACK_S
 
 

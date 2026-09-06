@@ -999,11 +999,14 @@ that names a missing one fails before anything is attached.
   failing STS.
 - `md_ids` read through a compat shim, in `_rebuild` too.
 - `MdSubscribe` carries the instance so only the holder acts on it.
-- `log.md.{venue}` → `log.md.{instance}.{venue}`, with `ws.py` and the
-  `md/[venue]` route. It belongs here rather than in INS-3 because the links
-  into that page come from a session's venue list, and only this ticket makes
-  `md_ids` record which instance holds a feed — before it, the channel has one
-  possible writer and the UI has no instance to navigate to.
+- The MD log line names its writer. **Not** the channel split this ticket
+  originally called for: `log.md.{venue}` stays, and `Log` grows an
+  `instance`. The stated problem — two MDs on one venue writing one channel
+  that cannot tell them apart — is solved either way, but a channel per
+  instance has nowhere honest to put an *unpinned* attach's lines, because not
+  naming an instance is exactly what unpinned means. Null is a real answer
+  there; `log.md.*.Bybit` is not. It also keeps the UI's links working, which
+  is what made this wait for INS-7 in the first place.
 
 **Problem.** The largest change and the one with a rollback that did not
 previously have to unwind anything.
@@ -1012,14 +1015,26 @@ previously have to unwind anything.
 
 **Verify.**
 
-- A `md:` mapping across two instances attaches each to its own feeds; a plain
-  list behaves exactly as today (PI-5).
-- An undeclared name and a declared-but-silent name fail with **different**
-  messages, before any attach (PI-2) — `test_deploy_refused.py`.
-- A failure on the third of three MD attaches leaves no live attach behind.
-- A duplicate key under `md:` is a parse error, not a silently folded map
-  (`test_sts_strategy_yaml.py`).
-- A rebuild of a row written before this ticket still attaches (compat shim).
+- A `md:` mapping across two instances attaches each to its own feeds (PI-3);
+  a plain list, and a mapping under `*`, both use the shared pool (PI-5).
+- An undeclared name, a disabled one and a declared-but-silent one fail with
+  **three different codes**, before any attach (PI-2). Collapsing the first
+  and third into one message tells the operator neither: one is fixed in the
+  document, the other by deploying something.
+- A failure on the second of two attaches unwinds the first before failing the
+  session.
+- A duplicate key or a merge key under `md:` is a parse error, not a silently
+  folded map. Worse here than under `td:`: a folded key loses a whole
+  instance's feed list, and the deploy that follows attaches fewer feeds than
+  the document asks for and says nothing.
+- The same feed named by two instances is a parse error — each would open a
+  pump and fan it out, and refcounting cannot notice because each instance
+  counts its own.
+- A row written before this ticket still rebuilds. Already covered by
+  `test_an_interrupted_session_comes_back`, which seeds exactly that flat list
+  — the shim is what keeps it passing. The new test is the other half: a
+  *pinned* row rebuilds on the instance it names and never asks the pool.
+- Checked by regressing the refusal split and the unwind separately.
 
 **Depends.** INS-1, INS-3, INS-4, INS-6.
 
@@ -1030,8 +1045,14 @@ back.
 
 **Scope.**
 
-- `POST /sts/deploy/{type}` takes an optional instance; it lands in
-  `sts_sessions.instance`.
+- `POST /sts/deploy/{type}` takes an optional instance, in the body rather
+  than the document: the same `strategy.yml` should be deployable to `sts-tw`
+  and to `sts-jp` without editing it. The create goes to that instance's
+  subject, and the same two PI-2 checks run first.
+- `sts_sessions.instance` records **what the deploy asked for**, not where the
+  session landed. Recording the latter would make an unpinned deploy pinned
+  the moment it ran, and retiring that instance would strand a session nobody
+  ever asked to put there.
 - The rebuild scan filters on the instance — own name, or null for legacy and
   unpinned rows — before `claim_alive`.
 
@@ -1045,13 +1066,17 @@ and does not guarantee.
 
 **Verify.**
 
-- Two STS with different names boot against one interrupted row pinned to the
-  first: only the first rebuilds, deterministically, and repeatedly
-  (`test_rebuild.py`).
+- Two STS with different names scan one interrupted row pinned to the first:
+  only the first rebuilds. `claim_alive` already made the race *safe*; this is
+  what makes it deterministic.
 - A row pinned to a name nobody runs is rebuilt by nobody and stays
-  `INTERRUPTED`.
-- A row with a null instance is still rebuilt by whoever claims it — today's
-  behaviour, unchanged.
+  `INTERRUPTED`, waiting for a person rather than moving itself.
+- A row with a null instance is still rebuilt by whoever claims it.
+- A deploy that names an STS creates on that instance's subject and records
+  the name; an unpinned one uses the pool and records null.
+- Naming an instance of the wrong *domain* is refused — `md-jp-1` is declared
+  and answering, and is still not an STS.
+- Checked by regressing the filter and watching the two placement tests fail.
 
 **Depends.** INS-1. Independent of everything else.
 

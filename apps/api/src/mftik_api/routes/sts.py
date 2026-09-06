@@ -43,6 +43,7 @@ from mftik.protocol import (
     attached_api_ids,
     default_template,
     get_template,
+    md_feeds_of,
     parse_strategy_yml,
 )
 from mftik.registry import AddedStrategy, RegistryStore, qualify
@@ -246,6 +247,11 @@ def _strategy_out(row: StsSessionRow) -> StrategyOut:
     ``td_api_ids`` and ``md_ids`` come from this row, not from TD/MD RPC —
     the page that shows a deploy's attaches must still load when those
     processes are silent.
+
+    Both go through a reader rather than being iterated: the columns hold
+    mappings now, and iterating one yields its keys. ``attached_api_ids`` has
+    done that for ``td`` since it stopped being a list; ``md_feeds_of`` is the
+    same job for ``md_ids``.
     """
     return StrategyOut(
         type=row.type,
@@ -256,7 +262,7 @@ def _strategy_out(row: StsSessionRow) -> StrategyOut:
         status=row.status,
         reason=row.reason,
         td_api_ids=attached_api_ids(row),
-        md_ids=[str(v) for v in (row.md_ids or [])],
+        md_ids=md_feeds_of(row.md_ids),
     )
 
 
@@ -607,13 +613,14 @@ async def deploy(
             broker,
             strategy_id=strategy_type,
             td=td,
-            md=list(spec.md),
+            md=dict(spec.md),
             st_paras=dict(spec.sts),
             created_by=created_by,
             timeout=body.timeout,
             restart=spec.restart,
             strategy_type=strategy_type,
             yaml_text=body.yaml,
+            instance=body.instance,
         )
     except DomainRpcError as exc:
         code = 404 if exc.code in {"unknown_strategy", "not_found"} else 502
