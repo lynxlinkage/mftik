@@ -1,10 +1,14 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
-	import { api, formatTs, type ApiCredential, type Venue } from '$lib/api';
+	import { api, formatTs, type ApiCredential, type Instance, type Venue } from '$lib/api';
 	import { maskApiKey } from '$lib/mask';
 
 	let rows = $state<ApiCredential[]>([]);
 	let venues = $state<Venue[]>([]);
+	// TD instances a credential may be bound to. Declared rows only: a name
+	// nothing declared is one the deploy would refuse, so offering it here
+	// would be offering a 400.
+	let instances = $state<Instance[]>([]);
 	// Instruments the symbol plane holds per venue. Advisory only — sym being
 	// down must not block registering a credential.
 	let symCounts = $state<Record<string, number>>({});
@@ -18,6 +22,10 @@
 	let apiSecret = $state('');
 	let type = $state('HMAC');
 	let passphrase = $state('');
+	// Which TD may use the key being created. `td` is what a single-process
+	// node calls itself and what the API defaults to, so it is the right
+	// starting point rather than an empty select.
+	let instance = $state('td');
 
 	/** Inline rename of the account column (double-click). */
 	let editingId = $state<number | null>(null);
@@ -47,6 +55,23 @@
 		});
 	});
 
+	async function loadInstances() {
+		try {
+			const res = await api.instances('td');
+			instances = res.instances;
+			// Keep the selection valid across reloads. An instance can be
+			// retired between two loads of this page.
+			if (!instances.some((i) => i.name === instance)) {
+				instance = instances[0]?.name ?? 'td';
+			}
+		} catch {
+			// The list is a convenience; the field has a working default and
+			// the API validates it. Not being able to enumerate instances must
+			// not stop somebody registering a credential.
+			instances = [];
+		}
+	}
+
 	async function loadVenues() {
 		const res = await api.venues();
 		venues = res.venues;
@@ -69,7 +94,11 @@
 		loading = true;
 		error = null;
 		try {
-			const [res] = await Promise.all([api.apis(), loadVenues()]);
+			const [res] = await Promise.all([
+				api.apis(),
+				loadVenues(),
+				loadInstances()
+			]);
 			rows = res.apis;
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -89,7 +118,8 @@
 				api_key: apiKey.trim(),
 				api_secret: apiSecret,
 				type,
-				passphrase: needsPassphrase ? passphrase.trim() : undefined
+				passphrase: needsPassphrase ? passphrase.trim() : undefined,
+				instance
 			});
 			name = '';
 			apiKey = '';
@@ -181,6 +211,21 @@
 			{/each}
 		</select>
 	</label>
+	<!-- Beside Venue on purpose: the two together are what this credential is
+	     allowed to do and where it is allowed to do it from. Only shown when
+	     there is a choice — a node with one TD has nothing to decide. -->
+	{#if instances.length > 1}
+		<label>
+			TD instance
+			<select bind:value={instance} disabled={busy}>
+				{#each instances as i (i.name)}
+					<option value={i.name} disabled={!i.enabled}>
+						{i.name}{i.region ? ` — ${i.region}` : ''}{i.enabled ? '' : ' (draining)'}
+					</option>
+				{/each}
+			</select>
+		</label>
+	{/if}
 	<label>
 		Type
 		<select bind:value={type} disabled={busy || types.length < 2}>
@@ -240,6 +285,7 @@
 					<th>API ID</th>
 					<th>Account</th>
 					<th>Venue</th>
+					<th>TD</th>
 					<th>Key</th>
 					<th>Type</th>
 					<th>Created</th>
@@ -281,7 +327,16 @@
 								</span>
 							{/if}
 						</td>
+						<!-- Which host may open a venue connection with this
+						     key. The whole point of binding one. -->
 						<td><code>{row.venue}</code></td>
+						<td>
+							{#if row.instance}
+								<code>{row.instance}</code>
+							{:else}
+								<span class="unbound">—</span>
+							{/if}
+						</td>
 						<td><code>{maskApiKey(row.api_key)}</code></td>
 						<td>{row.type}</td>
 						<td class="muted">{formatTs(row.created_at)}</td>
@@ -327,6 +382,13 @@
 		padding: 0.55rem 0.65rem;
 		border-radius: var(--radius);
 		min-width: 10rem;
+	}
+
+	/* A credential written before instances existed. It still works — TD
+	   falls back to the shared subject for one — but it is worth reading as
+	   unset rather than as a name. */
+	.unbound {
+		color: var(--muted);
 	}
 
 	.venue-hint {

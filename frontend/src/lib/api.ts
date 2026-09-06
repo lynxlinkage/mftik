@@ -359,6 +359,23 @@ export type ApiCredential = {
 	type: string;
 	created_at: number;
 	created_by: number;
+	/**
+	 * The TD instance allowed to use this credential — the one property that
+	 * says *where* it may open a venue connection from. Null only for a row
+	 * written by a node older than the field.
+	 */
+	instance: string | null;
+};
+
+/** A declared plane instance (`GET /instances`). */
+export type Instance = {
+	id: number;
+	name: string;
+	domain: string;
+	region: string | null;
+	enabled: boolean;
+	created_at: number;
+	created_by: number | null;
 };
 
 /** A venue a credential can be registered against (`GET /venues`). */
@@ -448,6 +465,8 @@ export type ApiCreateBody = {
 	api_secret: string;
 	type?: string;
 	passphrase?: string;
+	/** Which TD may use it. Omitted means `td`, the default single-process one. */
+	instance?: string;
 };
 
 const DEFAULT_STRATEGY_YML = `td:
@@ -768,6 +787,10 @@ export const api = {
 		);
 	},
 	apis: () => request<{ apis: ApiCredential[] }>('/apis'),
+	instances: (domain?: string) =>
+		request<{ instances: Instance[] }>(
+			domain ? `/instances?domain=${encodeURIComponent(domain)}` : '/instances'
+		),
 	createApi: (body: ApiCreateBody) =>
 		request<ApiCredential>('/apis', {
 			method: 'POST',
@@ -777,7 +800,8 @@ export const api = {
 				api_key: body.api_key,
 				api_secret: body.api_secret,
 				type: body.type ?? 'HMAC',
-				passphrase: body.passphrase
+				passphrase: body.passphrase,
+				...(body.instance ? { instance: body.instance } : {})
 			})
 		}),
 	renameApi: (id: number, name: string) =>
