@@ -1136,6 +1136,22 @@ not one process per plane, and that stays true.
 neither documents the `md:` shape. INS-7 owns re-checking that, since it is
 the ticket that would make such a sentence false.
 
+## Known gaps
+
+**The event log is addressed to the plane, not to where a session ran.**
+`STS_EVENTLOG_INFO` / `STS_EVENTLOG_READ` go to the shared `sts` subject, and
+the file they read lives on the volume of whichever process ran the session.
+Stop and fail were moved to `Topics.sts_control(session_id)` — served only by
+the process holding the session — but that does not work here: a finished
+session has no holder, and its log is still worth reading.
+
+It fails the safe way (`available` comes back false rather than another
+session's log) and it is still a gap. Closing it needs the row to record where
+a session *actually ran*, which is a different fact from
+`sts_sessions.instance` — that one records what the deploy **asked for**, and
+deliberately so (see INS-8). Two columns, or one column plus the rule that an
+unpinned session may still be rebuilt anywhere.
+
 ## Open questions
 
 1. Should `active` really be the MD and STS default? TD has been settled — it

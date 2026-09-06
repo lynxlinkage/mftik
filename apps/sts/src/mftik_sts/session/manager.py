@@ -56,6 +56,11 @@ CID_SLOT_KEY = "cid:slot"
 
 #: Why a session in ``interrupted`` stopped. A constant because it is the
 #: same event for every session in the process, not a per-session diagnosis.
+#: How long a shutdown waits for control loops to notice they were asked to
+#: stop. A little over the test broker's poll and well under production's, so
+#: this never becomes the thing that runs a container into SIGKILL.
+_CONTROL_RETIRE_S = 2.0
+
 _SHUTDOWN_REASON = "STS shut down while this was running"
 
 #: How many status events the replay buffer keeps, and for how long. Sized for
@@ -172,6 +177,15 @@ class SessionManager:
         #: Which STS this is. Only the rebuild scan reads it: a session is
         #: addressed by the subject it was created on, not by this.
         self._instance = instance
+        #: ``session_id`` → the loop serving that session's control subject,
+        #: and the event that ends it. One per live session: stop and fail are
+        #: answered from ``self._sessions``, so only the process holding a
+        #: session may answer for it.
+        self._control: dict[str, tuple[asyncio.Event, asyncio.Task[Any]]] = {}
+        #: Control loops asked to stop and not yet retired. Held so shutdown
+        #: can wait for them rather than leaving tasks pending at loop close,
+        #: and so one is not garbage-collected before it notices.
+        self._retiring: set[asyncio.Task[Any]] = set()
         self._sessions: dict[str, StsSession] = {}
         # Held so shutdown can cancel them: each outlives the rebuild scan
         # that started it, and a pending task at loop close is a warning
@@ -294,6 +308,7 @@ class SessionManager:
         )
         # Register before start so Strategy.exit() during on_start/on_ready works.
         self._sessions[request.session_id] = session
+        self._serve_control(request.session_id)
         # Claim liveness before the row exists, not after: a reaper that saw a
         # live row with no key would read it as an orphan and fail a session
         # that is only a moment old.
@@ -319,6 +334,7 @@ class SessionManager:
             await session.start()
         except Exception as exc:
             self._sessions.pop(request.session_id, None)
+            self._stop_serving_control(request.session_id)
             reason = f"start failed: {exc}"
             if self._mark_done is not None:
                 await self._mark_done(
@@ -496,6 +512,7 @@ class SessionManager:
         reason: str | None = None,
     ) -> None:
         session = self._sessions.pop(session_id, None)
+        self._stop_serving_control(session_id)
         if session is None:
             return
         broker = session.broker
@@ -895,6 +912,7 @@ class SessionManager:
             strategy_type=getattr(row, "type", None),
         )
         self._sessions[session_id] = session
+        self._serve_control(session_id)
 
         # Before on_start, so every hook that follows already sees whatever
         # the strategy restored — including on_recon_done, which is where a
@@ -944,6 +962,7 @@ class SessionManager:
     async def _abandon_rebuild(self, session_id: str) -> None:
         """Drop a claim so the next boot — or another process — may retry."""
         self._sessions.pop(session_id, None)
+        self._stop_serving_control(session_id)
         try:
             await clear_alive(self._broker, session_id, domain="sts")
         except Exception:
@@ -1116,3 +1135,81 @@ class SessionManager:
                 status=SessionStatus.INTERRUPTED.value,
                 reason=_SHUTDOWN_REASON,
             )
+        # Each was asked to stop as its session closed; they retire on their
+        # own between polls. Waited for here so none is left pending when the
+        # loop closes — bounded, because a shutdown is already racing SIGKILL
+        # and a control loop nobody is talking to is not worth the deadline.
+        if self._retiring:
+            await asyncio.wait(self._retiring, timeout=_CONTROL_RETIRE_S)
+
+    # --- per-session control ------------------------------------------------
+
+    def _serve_control(self, session_id: str) -> None:
+        """Start answering stop / fail for one session.
+
+        Started where the session is registered rather than where it starts,
+        so a session that ends inside ``on_start`` is still stoppable while it
+        does — and so the deploy's own rollback, which fails the session it
+        just created, has somebody to talk to.
+        """
+        if session_id in self._control:
+            return
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            self._control_loop(session_id, stop),
+            name=f"sts-control-{session_id}",
+        )
+        self._control[session_id] = (stop, task)
+
+    def _stop_serving_control(self, session_id: str) -> None:
+        """Ask the loop to retire. Not awaited.
+
+        ``serve`` parks in a blocking ``BLPOP`` and cancelling it there leaves
+        the unread reply on a pooled connection, so the loop is asked to stop
+        and left to notice between polls — the same rule TD's account loops
+        follow. The session is already out of ``self._sessions`` by then, so
+        anything that arrives in that window is answered ``not_found``, which
+        is the truth.
+        """
+        entry = self._control.pop(session_id, None)
+        if entry is None:
+            return
+        stop, task = entry
+        stop.set()
+        self._retiring.add(task)
+        task.add_done_callback(self._retiring.discard)
+
+    async def _control_loop(
+        self, session_id: str, stop: asyncio.Event
+    ) -> None:
+        # Imported here, not at module scope: the rpc package imports this
+        # module for typing only, and a runtime import the other way keeps the
+        # dependency one-directional.
+        from mftik_sts.rpc import dispatch
+
+        subject = Topics.sts_control(session_id)
+        while not stop.is_set():
+            try:
+                async for req in self._broker.serve(subject, stop=stop):
+                    try:
+                        await dispatch(req, sessions=self)
+                    except Exception:
+                        logger.exception(
+                            "STS control handler failed session=%s type=%s",
+                            session_id,
+                            req.envelope.type,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Same reasoning as the plane's own RPC loop: this returning
+                # is how a session becomes one nobody can stop, which is the
+                # failure this subject exists to prevent.
+                logger.exception(
+                    "STS control loop failed session=%s — restarting",
+                    session_id,
+                )
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=1.0)
+                except TimeoutError:
+                    continue

@@ -64,7 +64,21 @@ async def handle_eventlog_info(
     *,
     sessions: SessionManager | None = None,
 ) -> None:
-    """Answer what this process holds for one session."""
+    """Answer what this process holds for one session.
+
+    Deliberately answered on the plane's shared subject rather than the
+    session's own, unlike stop and fail. Those need the process that *holds*
+    the session; this needs the one whose disk has the file, and those are not
+    the same question — a finished session has no holder and its log is still
+    readable.
+
+    Which means it is **wrong on a node with several STS**: the file is on the
+    volume of whichever process ran the session, nothing records which that
+    was, and an anycast request may reach one that does not have it. It fails
+    the safe way — ``available`` is false rather than another session's log
+    being returned — but it is a real gap, and closing it needs the row to
+    record where a session actually ran. See ``docs/Instances.md``.
+    """
     try:
         payload = StsEventLogInfoRequest.model_validate(req.envelope.payload)
     except Exception as exc:

@@ -702,10 +702,27 @@ async def _control(
     owner: int,
     principal: Principal | None = None,
 ) -> StsControlResponse:
+    # Answered from the table when the table already knows. Stop and fail go
+    # to a subject only the process holding the session serves, so a request
+    # for a session that has ended waits in a list nobody is reading — the
+    # caller would get a timeout where it used to get an immediate 404. The
+    # row is the thing that can say "already over" without asking anyone.
+    async with session_scope() as db:
+        row = await StsSessionRepository(db).get_by_session_id(session_id)
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail=f"unknown sts session: {session_id}"
+        )
+    if row.status in SessionStatus.terminal():
+        raise HTTPException(
+            status_code=404,
+            detail=f"no active sts session: {session_id} is {row.status}",
+        )
+
     try:
         result = await request_domain(
             broker,
-            Topics.STS,
+            Topics.sts_control(session_id),
             StsSessionControlRequestEnvelope.wrap(
                 StsSessionControlRequest(session_id=session_id),
                 type=type_name,
@@ -716,6 +733,19 @@ async def _control(
             timeout=10.0,
         )
     except DomainRpcError as exc:
+        if exc.code == "timeout":
+            # The row says live and nobody answered for it. That is the
+            # orphan case — the STS holding it died without closing the row —
+            # and it is a different problem from "no such session", so it gets
+            # a different code and a sentence that says where to look.
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"the STS running {session_id} did not answer; the row "
+                    f"says live, so it may have died — the orphan reaper "
+                    f"closes rows like this"
+                ),
+            ) from exc
         code = 404 if exc.code == "not_found" else 502
         raise HTTPException(status_code=code, detail=exc.message) from exc
 
