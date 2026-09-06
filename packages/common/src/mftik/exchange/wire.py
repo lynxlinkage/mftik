@@ -91,11 +91,14 @@ class WireLedger(Generic[K]):
                 fut.exception()
 
     def discard(self, keys: Iterable[K]) -> None:
-        """Drop keys after an explicit venue unsubscribe.
+        """Drop keys once the venue has actually unsubscribed them.
 
-        Not used by book-gap resync: that round trip is not a ledger
-        open or close, and must not mark the identity free for a
-        co-reader.
+        What matters is that the UNSUBSCRIBE landed, not why it was
+        sent. A book-gap resync unsubscribes and subscribes again, and
+        must discard between the two: the venue has stopped sending the
+        channel, so a ledger that still calls it held would keep the
+        re-subscribe — and every later co-reader — from sending
+        anything.
         """
         for key in keys:
             self._held.discard(key)

@@ -10,7 +10,8 @@ import httpx
 import pytest
 from deribit_stub import FakeDeribit
 from mftik.exchange.deribit import channels as ch
-from mftik.exchange.deribit.feed import DeribitPublicStream
+from mftik.exchange.deribit.feed import DeribitBook, DeribitPublicStream
+from mftik.exchange.deribit.models import DeribitOrderBook
 from mftik.exchange.deribit.protocol import (
     expiry_code_from_name,
     expiry_suffix_from_code,
@@ -251,3 +252,92 @@ async def test_fetch_klines_use_the_resolved_instrument() -> None:
     query = api.requests[0].url.query.decode()
     assert "instrument_name=BTC_USDC-PERPETUAL" in query
     assert "resolution=60" in query
+
+
+def _book_frame(**kwargs: Any) -> DeribitOrderBook:
+    row: dict[str, Any] = {
+        "instrument_name": "BTC_USDC",
+        "timestamp": 1700000000000,
+        "bids": [],
+        "asks": [],
+    }
+    row.update(kwargs)
+    return DeribitOrderBook.model_validate(row)
+
+
+def test_a_stale_book_will_not_fold_a_delta_as_a_snapshot() -> None:
+    book = DeribitBook("BTC_USDC")
+    assert book.apply(
+        _book_frame(
+            change_id=1,
+            bids=[["new", "100", "5"], ["new", "99", "5"]],
+            asks=[["new", "101", "5"]],
+        )
+    )
+    # A gap: the frame does not chain onto change_id 1.
+    assert not book.apply(
+        _book_frame(change_id=9, prev_change_id=8, bids=[["change", "99", "7"]])
+    )
+    assert book.stale
+    # The next delta is still a delta. Folding it as a snapshot would
+    # publish two levels — one of them a delete — as the whole book.
+    assert not book.apply(
+        _book_frame(change_id=10, prev_change_id=9, bids=[["delete", "100", "0"]])
+    )
+    assert book.stale
+    snapshot = book.snapshot()
+    assert [level.price for level in snapshot.bids] == [
+        Decimal("100"),
+        Decimal("99"),
+    ]
+    # Only a frame with no prev_change_id clears it.
+    assert book.apply(_book_frame(change_id=20, bids=[["new", "98", "1"]]))
+    assert not book.stale
+    assert [level.price for level in book.snapshot().bids] == [Decimal("98")]
+
+
+async def test_a_book_gap_resubscribes_and_frees_the_ledger(
+    deribit_public: FakeDeribit,
+) -> None:
+    feed = DeribitPublicStream(deribit_public.url, ping_interval=0, heartbeat=0)
+    async with feed:
+        stream = await feed.subscribe_order_book("BTC_USDC")
+        await deribit_public.push(
+            ch.book("BTC_USDC"),
+            {
+                "instrument_name": "BTC_USDC",
+                "change_id": 1,
+                "timestamp": 1700000000000,
+                "bids": [["new", "100", "5"]],
+                "asks": [["new", "101", "5"]],
+            },
+        )
+        first = await asyncio.wait_for(stream.__anext__(), 2)
+        await deribit_public.push(
+            ch.book("BTC_USDC"),
+            {
+                "instrument_name": "BTC_USDC",
+                "change_id": 9,
+                "prev_change_id": 8,
+                "timestamp": 1700000001000,
+                "bids": [["delete", "100", "0"]],
+            },
+        )
+        await asyncio.sleep(0.1)
+        assert deribit_public.frames_for(ch.PUBLIC_UNSUBSCRIBE)
+        # The unsubscribe landed, so the ledger must not still call the
+        # channel held: the re-subscribe is what puts it back.
+        assert deribit_public.subscribed == {ch.book("BTC_USDC")}
+        assert len(deribit_public.frames_for(ch.PUBLIC_SUBSCRIBE)) == 2
+    assert [level.price for level in first.bids] == [Decimal("100")]
+
+
+async def test_fetch_klines_window_is_sized_by_the_interval() -> None:
+    api = FakeApi()
+    api.results["/public/get_tradingview_chart_data"] = {"status": "no_data"}
+    async with _client(api) as client:
+        await client.fetch_klines(PERP, "1m", limit=100)
+    query = dict(httpx.QueryParams(api.requests[0].url.query.decode()))
+    span = int(query["end_timestamp"]) - int(query["start_timestamp"])
+    # 101 minutes, not 100 days.
+    assert span == 101 * 60 * 1000

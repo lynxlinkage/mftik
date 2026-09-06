@@ -46,6 +46,7 @@ class _Stats:
     reconnects: int = 0
     frames: int = 0
     heartbeats: int = 0
+    pings: int = 0
     last_frame_at: float = field(default_factory=float)
 
 
@@ -295,21 +296,38 @@ class DeribitSocket:
             self._dispatch(DeribitResponse(message))
 
     async def _watchdog(self) -> None:
-        grace = min(max(self.ping_interval, 1.0) * 3, 45.0)
+        """Probe with ``public/test`` and drop a socket that stops answering.
+
+        Relative, like Bitget's: the question is whether a frame arrived
+        *after* our own probe, not how long the socket has been quiet.
+        An absolute comparison against ``last_frame_at`` would fail a
+        healthy socket twice over — the field is ``0.0`` until the first
+        frame lands, and a subscription that is simply idle is not a
+        dead one.
+        """
+        grace = min(self.ping_interval / 2, 5.0)
         while not self._closing:
-            await asyncio.sleep(max(self.ping_interval, 0.1))
-            if self._closing or not self._connected:
+            await asyncio.sleep(max(self.ping_interval - grace, 0.1))
+            if self._closing or not self._connected or self._conn is None:
                 continue
-            silent = asyncio.get_running_loop().time() - self.stats.last_frame_at
-            if silent <= grace:
+            silent_since = self.stats.last_frame_at
+            try:
+                await self._send_test()
+                self.stats.pings += 1
+            except Exception:
+                logger.debug("%s probe send failed", self.name, exc_info=True)
                 continue
+            await asyncio.sleep(grace)
             conn = self._conn
-            logger.warning(
-                "%s answered no frame within %.0fs; dropping the socket",
-                self.name,
-                grace,
-            )
-            if conn is not None:
+            if self._closing or conn is None:
+                continue
+            if self.stats.last_frame_at <= silent_since:
+                logger.warning(
+                    "%s answered no frame within %.0fs of a public/test; "
+                    "dropping the socket",
+                    self.name,
+                    grace,
+                )
                 with contextlib.suppress(Exception):
                     await conn.close()
 
@@ -349,12 +367,17 @@ class DeribitSocket:
             return
         logger.debug("%s ignoring frame %r", self.name, resp)
 
-    async def _answer_heartbeat(self) -> None:
-        if self._conn is None or self._closing:
+    async def _send_test(self) -> None:
+        """Send ``public/test``. Its reply is a frame, which is the point."""
+        conn = self._conn
+        if conn is None or self._closing:
             return
         frame, _ = rpc_frame(ch.PUBLIC_TEST)
+        await conn.send(json.dumps(frame))
+
+    async def _answer_heartbeat(self) -> None:
         with contextlib.suppress(Exception):
-            await self._conn.send(json.dumps(frame))
+            await self._send_test()
 
     def _fail(self) -> None:
         self._connected = False

@@ -213,6 +213,12 @@ def test_kind_and_instrument_name_round_trip() -> None:
     assert p.is_inverse_perp_name("BTC-PERPETUAL")
     assert p.expiry_code_from_name("BTC-6SEP26") == "260906"
     assert p.expiry_suffix_from_code("260906") == "6SEP26"
+    # A day the calendar does not have is skipped, not turned into a
+    # code that raises out of expiry_from_code and fails the refresh.
+    assert p.expiry_code_from_name("BTC-31FEB26") is None
+    assert p.expiry_code_from_name("BTC-31APR26") is None
+    assert p.expiry_code_from_name("BTC-29FEB27") is None
+    assert p.expiry_code_from_name("BTC-29FEB28") == "280229"
 
 
 def test_v9_balance_maps_available_funds_and_equity() -> None:

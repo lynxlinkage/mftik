@@ -9,6 +9,7 @@ from mftik.exchange.deribit import channels as ch
 from mftik.exchange.deribit.account import DeribitPrivateStream
 from mftik.exchange.deribit.feed import DeribitPublicStream
 from mftik.exchange.deribit.protocol import DeribitResponse
+from mftik.exchange.deribit.socket import DEFAULT_HEARTBEAT
 
 
 def test_a_reply_correlates_on_id() -> None:
@@ -115,3 +116,29 @@ async def test_subscribe_replies_correlate_on_id(
         ch.quote("BTC_USDC"),
     }
     assert all(frame.get("id") is not None for frame in deribit_public.received)
+
+
+async def test_the_heartbeat_is_on_by_default(deribit_public: FakeDeribit) -> None:
+    feed = DeribitPublicStream(deribit_public.url, ping_interval=0)
+    async with feed:
+        assert feed.heartbeat == DEFAULT_HEARTBEAT
+    assert deribit_public.heartbeats == 1
+
+
+async def test_the_watchdog_probes_an_idle_socket_instead_of_dropping_it(
+    deribit_public: FakeDeribit,
+) -> None:
+    """A socket nobody has subscribed to is idle, not dead.
+
+    ``stats.last_frame_at`` is zero until the first frame lands, so an
+    absolute silence check fails a healthy connection on its first tick.
+    """
+    feed = DeribitPublicStream(
+        deribit_public.url, ping_interval=0.3, heartbeat=0
+    )
+    async with feed:
+        await asyncio.sleep(0.9)
+        assert feed.connected
+        assert deribit_public.connections == 1
+    assert deribit_public.frames_for(ch.PUBLIC_TEST)
+    assert feed.stats.pings >= 1

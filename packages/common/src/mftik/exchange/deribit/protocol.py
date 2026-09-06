@@ -243,6 +243,10 @@ def expiry_code_from_name(instrument_name: str) -> str | None:
     Options end in ``C`` / ``P``, so they do not match. The last hyphen
     field is the date on both inverse (``BTC-6SEP26``) and linear
     (``BTC_USDC-6SEP26``) dated names.
+
+    The day is checked against the calendar, not just ``1..31``: a
+    ``31FEB26`` that got through here would raise out of
+    :func:`expiry_from_code` and take the whole listing refresh with it.
     """
     tail = (instrument_name or "").rsplit("-", 1)[-1]
     found = _DATE_SUFFIX.fullmatch(tail)
@@ -251,9 +255,12 @@ def expiry_code_from_name(instrument_name: str) -> str | None:
     day = int(found.group("day"))
     month = _MONTHS[found.group("mon").upper()]
     year = int(found.group("year"))
-    if not 1 <= day <= 31:
+    code = f"{year:02d}{month:02d}{day:02d}"
+    try:
+        expiry_from_code(code)
+    except ValueError:
         return None
-    return f"{year:02d}{month:02d}{day:02d}"
+    return code
 
 
 def expiry_suffix_from_code(code: str) -> str | None:

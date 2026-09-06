@@ -23,6 +23,10 @@ DATED = UniversalTicker.parse("BinanceUM_Future_BTCUSDT-250926")
 PERP = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 SPOT = UniversalTicker.parse("Binance_Spot_BTCUSDT")
 COIN_FUTURE = UniversalTicker.parse("BinanceCM_Future_BTCUSD-260925")
+#: Deribit lists linear and inverse dated under one category; the
+#: quote is the only thing that separates them.
+LINEAR_DATED = UniversalTicker.parse("Deribit_Future_BTCUSDC-260906")
+INVERSE_DATED = UniversalTicker.parse("Deribit_Future_BTCUSD-260906")
 
 
 class _Private:
@@ -30,11 +34,14 @@ class _Private:
 
 
 class _Symbols:
+    def __init__(self, quote: str = "USDT") -> None:
+        self.quote = quote
+
     async def get(self, ticker: UniversalTicker) -> SymbolInfo:
         return SymbolInfo(
             universal_ticker=str(ticker),
             base="BTC",
-            quote="USDT",
+            quote=self.quote,
             exch_ticker="BTCUSDT",
         )
 
@@ -45,12 +52,12 @@ async def broker() -> Broker:
         yield client
 
 
-def _session(broker: Broker) -> Session:
+def _session(broker: Broker, *, quote: str = "USDT") -> Session:
     return Session(
         api_id=1,
         broker=broker,
         private=_Private(),  # type: ignore[arg-type]
-        symbols=_Symbols(),  # type: ignore[arg-type]
+        symbols=_Symbols(quote),  # type: ignore[arg-type]
         ledger=Ledger(),
     )
 
@@ -128,3 +135,31 @@ async def test_reserve_does_not_lock_a_coin_margined_future(
     assert await session.reserve(_limit(COIN_FUTURE)) is None
     assert session.ledger.available("USDT") == Decimal("1000")
     assert session.ledger.available("BTC") == Decimal("2")
+
+
+async def test_ensure_leverage_answers_for_a_linear_dated_future_by_quote(
+    broker: Broker,
+) -> None:
+    """The quote decides, so ensure_leverage has to ask the plane for it.
+
+    Refusing a Deribit USDC dated future here would leave its leverage
+    cache empty for good, and every reserve on that book stuck at 1x.
+    """
+    session = _session(broker, quote="USDC")
+
+    async def fetch(ticker: UniversalTicker) -> Decimal:
+        assert ticker == LINEAR_DATED
+        return Decimal("5")
+
+    session.private.fetch_leverage = fetch  # type: ignore[attr-defined]
+    assert await session.ensure_leverage(LINEAR_DATED) == Decimal("5")
+    assert session.cached_leverage(LINEAR_DATED) == Decimal("5")
+
+
+async def test_ensure_leverage_refuses_an_inverse_dated_future_by_quote(
+    broker: Broker,
+) -> None:
+    """Same venue and category as the linear dated, settled in the coin."""
+    session = _session(broker, quote="USD")
+    with pytest.raises(ExchangeError, match="linear margined"):
+        await session.ensure_leverage(INVERSE_DATED)

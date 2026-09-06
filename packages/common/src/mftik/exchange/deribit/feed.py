@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, TypeVar
@@ -30,7 +30,11 @@ from mftik.exchange.deribit.models import (
     DeribitTicker,
 )
 from mftik.exchange.deribit.protocol import DeribitResponse, rpc_frame
-from mftik.exchange.deribit.socket import DEFAULT_PING_INTERVAL, DeribitSocket
+from mftik.exchange.deribit.socket import (
+    DEFAULT_HEARTBEAT,
+    DEFAULT_PING_INTERVAL,
+    DeribitSocket,
+)
 from mftik.exchange.models import BookLevel, OrderBook
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import UniversalTicker
@@ -81,10 +85,19 @@ class DeribitBook:
         self.resyncing = False
 
     def apply(self, payload: DeribitOrderBook) -> bool:
-        snapshot = payload.prev_change_id is None or self.stale
-        if snapshot:
+        """Fold one frame in. False means the caller must resync.
+
+        Only a frame with no ``prev_change_id`` is a snapshot. A stale
+        book folds nothing until one arrives: a delta carries the two or
+        three levels that changed — including the ``qty=0`` rows that
+        mean *delete* — and rebuilding from that would publish those few
+        levels as the whole book.
+        """
+        if payload.prev_change_id is None:
             self._reset(payload)
             return True
+        if self.stale:
+            return False
         if (
             self.change_id is not None
             and payload.prev_change_id != self.change_id
@@ -141,7 +154,7 @@ class DeribitPublicStream(DeribitSocket):
         retry_backoff: float = 1.0,
         max_retry_backoff: float = 30.0,
         ping_interval: float = DEFAULT_PING_INTERVAL,
-        heartbeat: int = 0,
+        heartbeat: int = DEFAULT_HEARTBEAT,
     ) -> None:
         super().__init__(
             url,
@@ -193,12 +206,7 @@ class DeribitPublicStream(DeribitSocket):
     async def subscribe_order_book(self, instrument: str):
         self._ensure_connected()
         channel = ch.book(instrument)
-
-        async def send(keys: list[str]) -> None:
-            frame, req_id = rpc_frame(ch.PUBLIC_SUBSCRIBE, {"channels": list(keys)})
-            await self.request(frame, req_id, op=ch.PUBLIC_SUBSCRIBE)
-
-        await self._ledger.acquire([channel], send)
+        await self._ledger.acquire([channel], self._send_subscribe)
         stream: EventStream[DeribitBookSnapshot] = EventStream(on_close=self._drop)
         book = self._books.setdefault(channel, DeribitBook(instrument))
         if not book.stale:
@@ -237,31 +245,41 @@ class DeribitPublicStream(DeribitSocket):
         return book.snapshot(ts=payload.timestamp or time.time())
 
     async def _resync_book(self, channel: str, book: DeribitBook) -> None:
-        """Unsubscribe and subscribe again so the venue sends a fresh snapshot."""
+        """Unsubscribe and subscribe again so the venue sends a fresh snapshot.
+
+        The re-subscribe goes back through the ledger. Once the
+        unsubscribe lands the venue is no longer sending this channel,
+        so a ledger that still calls it held would keep every later
+        subscriber from re-sending SUBSCRIBE — and a failed re-subscribe
+        would leave the stream silent until the socket reconnects.
+        """
         try:
             unsub, req_id = rpc_frame(
                 ch.PUBLIC_UNSUBSCRIBE, {"channels": [channel]}
             )
             await self.request(unsub, req_id, op=ch.PUBLIC_UNSUBSCRIBE)
-            self._books[channel] = DeribitBook(book.instrument)
-            sub, req_id = rpc_frame(ch.PUBLIC_SUBSCRIBE, {"channels": [channel]})
-            await self.request(sub, req_id, op=ch.PUBLIC_SUBSCRIBE)
+        except Exception:
+            logger.exception(
+                "%s book resync unsubscribe failed for %s", self.name, channel
+            )
+            book.resyncing = False
+            return
+        self._ledger.discard([channel])
+        self._books[channel] = DeribitBook(book.instrument)
+        try:
+            await self._ledger.acquire([channel], self._send_subscribe)
         except Exception:
             logger.exception("%s book resync failed for %s", self.name, channel)
-            book.resyncing = False
+
+    async def _send_subscribe(self, keys: Sequence[str]) -> None:
+        frame, req_id = rpc_frame(ch.PUBLIC_SUBSCRIBE, {"channels": list(keys)})
+        await self.request(frame, req_id, op=ch.PUBLIC_SUBSCRIBE)
 
     async def _subscribe(
         self, channels: tuple[str, ...], parse: Parse
     ) -> EventStream[T]:
         self._ensure_connected()
-
-        async def send(keys: list[str]) -> None:
-            frame, req_id = rpc_frame(
-                ch.PUBLIC_SUBSCRIBE, {"channels": list(keys)}
-            )
-            await self.request(frame, req_id, op=ch.PUBLIC_SUBSCRIBE)
-
-        await self._ledger.acquire(list(channels), send)
+        await self._ledger.acquire(list(channels), self._send_subscribe)
         stream: EventStream[T] = EventStream(on_close=self._drop)
         self._subs.append(
             _Sub(
@@ -290,14 +308,7 @@ class DeribitPublicStream(DeribitSocket):
             return
         for key, book in list(self._books.items()):
             self._books[key] = DeribitBook(book.instrument)
-
-        async def send(keys: list[str]) -> None:
-            frame, req_id = rpc_frame(
-                ch.PUBLIC_SUBSCRIBE, {"channels": list(keys)}
-            )
-            await self.request(frame, req_id, op=ch.PUBLIC_SUBSCRIBE)
-
-        await self._ledger.acquire(channels, send)
+        await self._ledger.acquire(channels, self._send_subscribe)
         logger.info("%s resubscribed %s channels", self.name, len(channels))
 
     def _push(self, resp: DeribitResponse) -> None:

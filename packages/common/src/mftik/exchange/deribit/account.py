@@ -32,7 +32,11 @@ from mftik.exchange.deribit.protocol import (
     auth_params,
     rpc_frame,
 )
-from mftik.exchange.deribit.socket import DEFAULT_PING_INTERVAL, DeribitSocket
+from mftik.exchange.deribit.socket import (
+    DEFAULT_HEARTBEAT,
+    DEFAULT_PING_INTERVAL,
+    DeribitSocket,
+)
 from mftik.exchange.stream import EventStream
 from mftik.exchange.wire import WireLedger, first_seen
 
@@ -46,6 +50,15 @@ class _Sub:
     channels: tuple[str, ...]
     stream: EventStream[Any]
     parse: Callable[[dict[str, Any]], Any]
+    #: Route every channel under this prefix, not just ``channels``. The
+    #: portfolio set grows after the subscribe; see
+    #: :meth:`DeribitPrivateStream.subscribe_account`.
+    prefix: str = ""
+
+    def wants(self, channel: str) -> bool:
+        if channel in self.channels:
+            return True
+        return bool(self.prefix) and channel.startswith(self.prefix)
 
 
 class DeribitPrivateStream(DeribitSocket):
@@ -65,7 +78,7 @@ class DeribitPrivateStream(DeribitSocket):
         retry_backoff: float = 1.0,
         max_retry_backoff: float = 30.0,
         ping_interval: float = DEFAULT_PING_INTERVAL,
-        heartbeat: int = 0,
+        heartbeat: int = DEFAULT_HEARTBEAT,
     ) -> None:
         super().__init__(
             url or DERIBIT_WS_URL,
@@ -133,17 +146,27 @@ class DeribitPrivateStream(DeribitSocket):
     async def subscribe_account(
         self, currencies: Iterable[str] = ()
     ) -> EventStream[DeribitSummary]:
+        """Every ``user.portfolio.{ccy}`` push, currencies added later included.
+
+        The channel set is not frozen here. :meth:`watch_portfolios` puts
+        new currencies on the wire as balances appear, and an account
+        with none at connect subscribes to nothing at all — so routing
+        is by prefix. Freezing the tuple would leave those pushes
+        arriving on a socket that drops them, and that first stream
+        permanently dead.
+        """
         await self.watch_portfolios(currencies)
-        channels = tuple(
-            ch.user_portfolio(ccy) for ccy in first_seen(self._portfolios)
-        )
-        if not channels:
-            stream: EventStream[DeribitSummary] = EventStream(on_close=self._drop)
-            self._subs.append(
-                _Sub(channels=(), stream=stream, parse=DeribitSummary.model_validate)
+        self._ensure_connected()
+        stream: EventStream[DeribitSummary] = EventStream(on_close=self._drop)
+        self._subs.append(
+            _Sub(
+                channels=(),
+                stream=stream,
+                parse=DeribitSummary.model_validate,
+                prefix=f"{ch.USER_PORTFOLIO}.",
             )
-            return stream
-        return await self._subscribe(channels, DeribitSummary.model_validate)
+        )
+        return stream
 
     async def watch_portfolios(self, currencies: Iterable[str]) -> None:
         """Subscribe ``user.portfolio.{ccy}`` for currencies not yet on the wire."""
@@ -190,7 +213,7 @@ class DeribitPrivateStream(DeribitSocket):
         if not rows:
             logger.debug("%s ignoring push %r", self.name, resp)
             return
-        for sub in [s for s in self._subs if key in s.channels]:
+        for sub in [s for s in self._subs if s.wants(key)]:
             for row in rows:
                 try:
                     sub.stream.push(sub.parse(row))

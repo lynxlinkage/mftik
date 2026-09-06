@@ -37,7 +37,7 @@ from mftik.exchange.models import (
     Trade,
 )
 from mftik.exchange.oms import Position
-from mftik.exchange.tickers import Category, UniversalTicker
+from mftik.exchange.tickers import UniversalTicker
 
 _STATUS: dict[str, OrderStatus] = {
     "OPEN": OrderStatus.NEW,
@@ -538,10 +538,6 @@ def order_book_from_result(
     return DeribitOrderBook.model_validate(result).to_order_book(ticker)
 
 
-def inbound_category(kind: str, default: Category) -> Category:
-    return category_of(kind, default=default)
-
-
 __all__ = [
     "DeribitAccountSummaries",
     "DeribitFill",
@@ -554,7 +550,6 @@ __all__ = [
     "DeribitSummary",
     "DeribitTicker",
     "category_of",
-    "inbound_category",
     "kline_from_chart",
     "kline_from_tick",
     "order_book_from_result",

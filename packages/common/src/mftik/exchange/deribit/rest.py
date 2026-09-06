@@ -24,6 +24,7 @@ from mftik.exchange.deribit.protocol import (
     KIND_SPOT,
     DeribitRestError,
 )
+from mftik.exchange.intervals import interval_seconds
 from mftik.exchange.models import FundingRate, Kline, OpenInterest, OrderBook, Ticker
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.symbols.listed import ListedInstrument
@@ -169,14 +170,17 @@ class DeribitPublicRest:
         """Recent candles, oldest first.
 
         ``resolution`` is Deribit's own spelling. The caller maps the
-        platform interval and stamps it back on the rows.
+        platform interval and stamps it back on the rows; ``interval``
+        is what sizes the window, since Deribit wants both timestamps
+        and answers with every candle between them.
         """
         import time
 
         end = end_ms if end_ms is not None else int(time.time() * 1000)
-        # A coarse window: Deribit requires both timestamps. Oversized is
-        # fine; we trim to ``limit`` after the zip.
-        start = end - max(limit, 1) * 86_400_000
+        # One extra window of slack for a partial candle at either end;
+        # we trim to ``limit`` after the zip.
+        count = min(max(limit, 1), MAX_KLINES) + 1
+        start = end - count * interval_seconds(interval) * 1000
         data = await self._get(
             ch.PUBLIC_GET_TRADINGVIEW,
             {

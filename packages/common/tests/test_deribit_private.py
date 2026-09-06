@@ -7,7 +7,11 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from deribit_stub import API_KEY as WIRE_API_KEY
+from deribit_stub import API_SECRET as WIRE_API_SECRET
+from deribit_stub import FakeDeribit
 from mftik.exchange.deribit import channels as ch
+from mftik.exchange.deribit.account import DeribitPrivateStream
 from mftik.exchange.deribit.models import (
     DeribitFill,
     DeribitOrderUpdate,
@@ -442,3 +446,35 @@ async def test_portfolio_push_maps_the_same_fields() -> None:
     assert balance.asset == "USDC"
     assert balance.free == Decimal("40")
     assert balance.locked == Decimal("60")
+
+
+async def test_a_portfolio_watched_later_still_reaches_the_account_stream(
+    deribit: FakeDeribit,
+) -> None:
+    """The channel set is not frozen at subscribe time.
+
+    An account with no balances yet subscribes to nothing, and
+    ``watch_portfolios`` puts each currency on the wire as it appears.
+    Routing on the frozen tuple would leave those pushes with nowhere
+    to go and that first stream permanently dead.
+    """
+    stream = DeribitPrivateStream(
+        api_key=WIRE_API_KEY,
+        api_secret=WIRE_API_SECRET,
+        url=deribit.url,
+        ping_interval=0,
+        heartbeat=0,
+    )
+    async with stream:
+        summaries = await stream.subscribe_account()
+        await stream.watch_portfolios(["usdc"])
+        assert deribit.subscribed == {ch.user_portfolio("USDC")}
+        task = asyncio.ensure_future(summaries.__anext__())
+        await asyncio.sleep(0.05)
+        await deribit.push(
+            ch.user_portfolio("USDC"),
+            {"currency": "USDC", "equity": "100", "available_funds": "40"},
+        )
+        summary = await asyncio.wait_for(task, 2)
+    assert summary.currency == "USDC"
+    assert summary.available_funds == Decimal("40")
