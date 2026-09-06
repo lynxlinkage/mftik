@@ -8,7 +8,7 @@ import os
 import signal
 
 import uvloop
-from mftik import configure_logging, run_until_stopped
+from mftik import configure_logging, instance_name, run_until_stopped
 from mftik.broker import Broker
 from mftik.exchange import venues
 from mftik.protocol import Topics
@@ -26,6 +26,10 @@ from mftik_md.tape import (
 )
 
 SOURCE = "md"
+#: Which MD this process is. ``MFTIK_INSTANCE``, defaulting to the
+#: plane name — so an unconfigured deployment is the instance called
+#: ``md``, which migration 0031 declares. Nothing routes on it yet.
+INSTANCE = instance_name(SOURCE)
 logger = logging.getLogger(SOURCE)
 
 #: How long a serve loop waits before rebuilding itself after an exception it
@@ -195,7 +199,11 @@ async def amain() -> bool:
         # separate from the feed sessions above.
         fetch = FetchSession(broker, VenueReaderFactory(SymbolClient(broker)))
         await fetch.start()
-        logger.info("MD started (venue public factory: %s)", venues.names())
+        logger.info(
+            "MD started instance=%s (venue public factory: %s)",
+            INSTANCE,
+            venues.names(),
+        )
         rpc_task = asyncio.create_task(
             run_rpc(broker, sessions, stop), name="md-rpc"
         )

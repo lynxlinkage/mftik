@@ -7,7 +7,7 @@ import logging
 import signal
 
 import uvloop
-from mftik import configure_logging, run_until_stopped
+from mftik import configure_logging, instance_name, run_until_stopped
 from mftik.broker import Broker
 from mftik.protocol import Topics
 from mftik.symbols import SymbolClient
@@ -24,6 +24,10 @@ from mftik_td.rpc import dispatch
 from mftik_td.session import SessionManager, VenueSessionFactory
 
 SOURCE = "td"
+#: Which TD this process is. ``MFTIK_INSTANCE``, defaulting to the
+#: plane name — so an unconfigured deployment is the instance called
+#: ``td``, which migration 0031 declares. Nothing routes on it yet.
+INSTANCE = instance_name(SOURCE)
 logger = logging.getLogger(SOURCE)
 
 #: How long a serve loop waits before rebuilding itself after an exception it
@@ -139,7 +143,7 @@ async def amain() -> bool:
             list_db_sessions=td_db.list_sessions,
             history=history,
         )
-        logger.info("TD started (venue session factory)")
+        logger.info("TD started instance=%s (venue session factory)", INSTANCE)
         rpc_task = asyncio.create_task(
             run_rpc(broker, sessions, stop), name="td-rpc"
         )

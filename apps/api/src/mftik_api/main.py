@@ -20,6 +20,7 @@ from mftik_api.routes import (
     board_router,
     environment_router,
     health_router,
+    instances_router,
     logs_router,
     md_router,
     registry_router,
@@ -114,6 +115,7 @@ app.include_router(auth_router)
 app.include_router(health_router)
 app.include_router(stats_router)
 app.include_router(apis_router)
+app.include_router(instances_router)
 app.include_router(registry_router)
 app.include_router(environment_router)
 app.include_router(sts_router)

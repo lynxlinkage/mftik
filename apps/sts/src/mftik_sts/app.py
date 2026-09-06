@@ -9,7 +9,7 @@ import signal
 from typing import Any
 
 import uvloop
-from mftik import configure_logging, run_until_stopped
+from mftik import configure_logging, instance_name, run_until_stopped
 from mftik.broker import Broker
 from mftik.protocol import Topics
 
@@ -19,6 +19,10 @@ from mftik_sts.runtime_env import extras_names, refresh
 from mftik_sts.session import SessionManager
 
 SOURCE = "sts"
+#: Which STS this process is. ``MFTIK_INSTANCE``, defaulting to the
+#: plane name — so an unconfigured deployment is the instance called
+#: ``sts``, which migration 0031 declares. Nothing routes on it yet.
+INSTANCE = instance_name(SOURCE)
 logger = logging.getLogger(SOURCE)
 
 #: How long a serve loop waits before rebuilding itself after an exception it
@@ -180,7 +184,7 @@ async def amain() -> bool:
             reset_rebuild_count=sts_db.reset_rebuild_count,
             rebuild_max_age_s=_rebuild_max_age_s(),
         )
-        logger.info("STS started")
+        logger.info("STS started instance=%s", INSTANCE)
         rpc_task = asyncio.create_task(
             run_rpc(broker, sessions, stop), name="sts-rpc"
         )

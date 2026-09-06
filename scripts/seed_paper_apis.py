@@ -26,7 +26,12 @@ import sys
 from mftik.exchange import venues
 from mftik_db.models.api import Api, ApiType
 from mftik_db.models.user import User
-from mftik_db.repositories import AccountRepository, ApiRepository, UserRepository
+from mftik_db.repositories import (
+    AccountRepository,
+    ApiRepository,
+    InstanceRepository,
+    UserRepository,
+)
 from mftik_db.session import session_scope
 
 logging.basicConfig(
@@ -89,6 +94,16 @@ async def seed() -> None:
 
         summary.append(f"  user_id={user.id} email={DEV_EMAIL}")
 
+        # Seeded credentials belong to the default TD instance. Migration 0031
+        # declares it, so this is a lookup and never a create — if it is
+        # missing the database is older than the code and should say so here
+        # rather than at the first attach.
+        td_instance = await InstanceRepository(db).get_by_name("td")
+        if td_instance is None:
+            raise SystemExit(
+                "no instance named 'td' — run migrations before seeding"
+            )
+
         for spec in (*PAPER_APIS, *live_venue_apis()):
             existing = await apis.get_by_venue_and_api_key(
                 spec["venue"], spec["api_key"]
@@ -109,6 +124,7 @@ async def seed() -> None:
                         api_key=spec["api_key"],
                         api_secret=spec["api_secret"],
                         type=ApiType.HMAC.value,
+                        instance_id=td_instance.id,
                     )
                 )
                 logger.info(

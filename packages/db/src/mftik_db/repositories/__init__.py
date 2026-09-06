@@ -20,6 +20,7 @@ from mftik_db.repositories.history import (
     FillRepository,
     OrderRepository,
 )
+from mftik_db.repositories.instance import InstanceRepository
 from mftik_db.repositories.session import (
     MdSessionRepository,
     StsSessionRepository,
@@ -45,6 +46,7 @@ __all__ = [
     "BackfillCursorRepository",
     "CashFlowRepository",
     "FillRepository",
+    "InstanceRepository",
     "MdSessionRepository",
     "OrderRepository",
     "SessionLogRepository",

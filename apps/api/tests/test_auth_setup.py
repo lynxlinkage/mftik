@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 from auth_harness import a_client, an_api, use_database
-from db_harness import a_database, an_owner
+from db_harness import a_database, an_instance, an_owner
 from mftik_api.auth import passwords, sessions
 from mftik_api.auth import routes as auth_routes
 from mftik_db.models import Api, StsSessionRow
@@ -41,6 +41,10 @@ async def a_seeded_owner(scope) -> int:
     """What ``seed`` leaves behind: a user row and things pointing at it."""
     async with scope() as session:
         owner = await an_owner(session)
+        # Migration 0031 declares this before `seed` runs, and `seed` points
+        # its credentials at it — so a database that looks like a seeded one
+        # has it too.
+        instance = await an_instance(session)
         session.add(
             Api(
                 owner_id=owner.id,
@@ -48,6 +52,7 @@ async def a_seeded_owner(scope) -> int:
                 api_key="paper-key-1",
                 api_secret="paper-secret-1",
                 type=ApiType.HMAC.value,
+                instance_id=instance.id,
             )
         )
         return owner.id

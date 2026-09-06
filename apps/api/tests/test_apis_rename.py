@@ -37,6 +37,7 @@ def _api(*, api_id: int = 3, owner_id: int = 1) -> SimpleNamespace:
         api_key="paper-key",
         type="HMAC",
         created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        instance=SimpleNamespace(name="td"),
     )
 
 

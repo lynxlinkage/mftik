@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 from auth_harness import a_client, an_api, use_database
-from db_harness import a_database
+from db_harness import a_database, an_instance
 from mftik_api.audit_util import record_audit
 from mftik_api.auth import routes as auth_routes
 from mftik_api.routes import apis as apis_routes
@@ -28,6 +28,11 @@ def _no_throttle() -> None:
 @pytest.fixture
 async def db(monkeypatch, database_url):
     async with a_database(database_url) as database:
+        # `/apis` resolves the TD instance a credential names, and migration
+        # 0031 declares it on every real database.
+        async with database.maker() as session:
+            await an_instance(session)
+            await session.commit()
         use_database(monkeypatch, database.scope)
         monkeypatch.setattr(auth_routes, "record_audit", record_audit)
         monkeypatch.setattr("mftik_api.audit_util.session_scope", database.scope)
