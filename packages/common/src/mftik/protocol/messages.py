@@ -366,6 +366,15 @@ class StsEventLogPart(BaseModel):
     name: str
     size: int
     modified: float | None = None
+    #: Which STS has this file on its disk, and therefore which one a read of
+    #: it must be addressed to.
+    #:
+    #: Names collide across instances — every process writes the same
+    #: ``{session}.jsonl`` — so the name alone cannot say where a part lives.
+    #: One session's log can genuinely span two of them: a rebuild elsewhere
+    #: leaves the earlier parts on the volume of the process that died. Null
+    #: from an STS that predates the field, which reads as "ask anyone".
+    instance: str | None = None
 
 
 class StsRegistryReloadRequest(BaseModel):

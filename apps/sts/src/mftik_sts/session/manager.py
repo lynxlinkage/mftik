@@ -192,6 +192,12 @@ class SessionManager:
         # nobody can act on.
         self._settle_tasks: set[asyncio.Task[None]] = set()
 
+    @property
+    def instance(self) -> str:
+        """Which STS this is. Read by the event log, which has to say whose
+        disk a part is on so a read can be addressed there."""
+        return self._instance
+
     def get(self, session_id: str) -> StsSession | None:
         return self._sessions.get(session_id)
 

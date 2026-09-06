@@ -45,7 +45,9 @@ async def sts_rpc(broker: Broker):
     """A running STS RPC server, with a stub session manager."""
     stop = asyncio.Event()
     live: dict[str, object] = {}
-    sessions = SimpleNamespace(get=live.get)
+    # ``instance`` is part of the interface now: a part says whose disk
+    # it is on, so a read of it can be addressed there.
+    sessions = SimpleNamespace(get=live.get, instance="sts")
 
     async def serve() -> None:
         async for req in broker.serve(Topics.STS, stop=stop):

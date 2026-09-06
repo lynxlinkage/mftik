@@ -1136,21 +1136,32 @@ not one process per plane, and that stays true.
 neither documents the `md:` shape. INS-7 owns re-checking that, since it is
 the ticket that would make such a sentence false.
 
-## Known gaps
+## Reading a log that spans two instances
 
-**The event log is addressed to the plane, not to where a session ran.**
-`STS_EVENTLOG_INFO` / `STS_EVENTLOG_READ` go to the shared `sts` subject, and
-the file they read lives on the volume of whichever process ran the session.
-Stop and fail were moved to `Topics.sts_control(session_id)` — served only by
-the process holding the session — but that does not work here: a finished
-session has no holder, and its log is still worth reading.
+An event log is written by whichever STS ran the session, so on a node with
+several it does not live in one place — and one session's can genuinely span
+two of them, because a rebuild elsewhere leaves the earlier parts on the volume
+of the process that died.
 
-It fails the safe way (`available` comes back false rather than another
-session's log) and it is still a gap. Closing it needs the row to record where
-a session *actually ran*, which is a different fact from
-`sts_sessions.instance` — that one records what the deploy **asked for**, and
-deliberately so (see INS-8). Two columns, or one column plus the rule that an
-unpinned session may still be rebuilt anywhere.
+That is why it is **not** addressed the way stop and fail are.
+`Topics.sts_control(session_id)` works for those because they need the process
+*holding* the session; a finished session has no holder, and its log is still
+worth reading. The disk outlives the holder.
+
+So the API asks **every declared STS** and merges. `StsEventLogPart` names the
+instance it lives on, the listing is sorted oldest-first by modification time
+across instances, and each read is addressed to the instance the listing said
+has that part — file names collide, since every process writes the same
+`{session}.jsonl`, so the name alone cannot say where a part is.
+
+An instance that does not answer contributes nothing rather than failing the
+request: the log may be entirely on one that did. Nobody answering is a 502,
+because "we could not ask" and "there is no log" are different answers.
+
+The ordering rests on the hosts' clocks agreeing to within the gap between a
+session stopping on one and resuming on another — seconds at worst. The
+alternative, reporting one instance's parts as the whole log, is wrong every
+time rather than under skew.
 
 ## Open questions
 
