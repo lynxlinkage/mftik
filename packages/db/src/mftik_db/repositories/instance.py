@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mftik_db.models.instance import Instance
+from mftik_db.models.session import (
+    MdSessionRow,
+    SessionDomain,
+    SessionStatus,
+    StsSessionRow,
+)
 from mftik_db.repositories.base import BaseRepository
 
 
@@ -67,6 +73,46 @@ class InstanceRepository(BaseRepository[Instance]):
             instance.enabled = enabled
         await self.session.flush()
         return instance
+
+    async def live_sessions_naming(self, instance: Instance) -> int:
+        """How many live sessions still name this instance.
+
+        The half the database cannot enforce. ``apis.instance_id`` is a
+        foreign key and refuses a delete on its own, but
+        ``md_sessions.instance`` and ``sts_sessions.instance`` are plain
+        strings by design — they are history, and retiring an instance must
+        not break the rows describing what it did. History is exactly what
+        must not block a delete; a session that is *still running* is not.
+
+        Which table depends on the domain, because a name belongs to one
+        plane. Counting the other one would refuse a delete for a reason that
+        is not true — an ``md_sessions`` row naming ``sts-tw`` describes some
+        MD instance that happened to be called that, not this STS.
+
+        TD has no row of its own to check: a TD attach is named by
+        ``apis.instance_id``, and that foreign key already refuses.
+        """
+        if instance.domain == SessionDomain.MD.value:
+            stmt = (
+                select(func.count())
+                .select_from(MdSessionRow)
+                .where(
+                    MdSessionRow.instance == instance.name,
+                    MdSessionRow.status == SessionStatus.LIVE.value,
+                )
+            )
+        elif instance.domain == SessionDomain.STS.value:
+            stmt = (
+                select(func.count())
+                .select_from(StsSessionRow)
+                .where(
+                    StsSessionRow.instance == instance.name,
+                    StsSessionRow.status == SessionStatus.LIVE.value,
+                )
+            )
+        else:
+            return 0
+        return int((await self.session.execute(stmt)).scalar_one())
 
     async def delete(self, instance: Instance) -> None:
         """Retire an instance.

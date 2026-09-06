@@ -686,7 +686,7 @@
           "instances"
         ],
         "summary": "Delete Instance",
-        "description": "Retire an instance.\n\nRefused while a credential still names it \u2014 ``apis.instance_id`` is\n``ON DELETE RESTRICT`` and the database says so before this does. Session\nrows that merely record an instance are plain strings and do not block:\nthey are history, and retiring an instance must not break the record of\nwhat it did.",
+        "description": "Retire an instance.\n\nRefused on two counts, and they are enforced in different places because\nthey are different facts.\n\nA **credential** still naming it is refused by the database:\n``apis.instance_id`` is ``ON DELETE RESTRICT``.\n\nA **live session** still naming it is refused here, because nothing else\ncan. ``md_sessions.instance`` and ``sts_sessions.instance`` are plain\nstrings on purpose \u2014 they are history, and retiring an instance must not\nbreak the record of what it did. History is exactly what must not block a\ndelete; a session that is still running is not history. Retiring the\ninstance a live run is pinned to would leave that run unable to rebuild,\nand it would only be discovered at the next restart.\n\nBlocked rather than warned. The foreign key above already blocks, so\nwarning here would make one kind of reference refuse and another shrug,\nand the operator has an obvious way forward either way: stop the session,\nor wait for it to end.",
         "operationId": "delete_instance_instances__instance_id__delete",
         "parameters": [
           {

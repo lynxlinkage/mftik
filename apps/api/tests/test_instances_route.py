@@ -18,6 +18,7 @@ from mftik_api.routes import apis as apis_routes
 from mftik_api.routes import instances as instances_routes
 from mftik_api.routes.apis import router as apis_router
 from mftik_api.routes.instances import router as instances_router
+from mftik_db.models.session import MdSessionRow, SessionStatus, StsSessionRow
 
 
 @pytest.fixture
@@ -200,3 +201,141 @@ async def test_a_credential_cannot_name_an_instance_that_is_not_declared(
 
     assert made.status_code == 400
     assert "td-jp-9" in made.json()["detail"]
+
+
+async def test_an_instance_a_live_md_session_names_cannot_be_retired(
+    db,
+) -> None:
+    """The half the database cannot enforce.
+
+    ``md_sessions.instance`` is a plain string on purpose — it is history, and
+    retiring an instance must not break the record of what it did. But a
+    session that is *still running* is not history, and retiring the instance
+    it is attached to would leave a live feed with no declared owner.
+    """
+    async with a_client(_app()) as client:
+        made = await client.post(
+            "/instances", json={"name": "md-jp-1", "domain": "md"}
+        )
+
+    async with db() as session:
+        session.add(
+            MdSessionRow(
+                instance="md-jp-1",
+                venue="Bybit",
+                session_id="running",
+                created_by=1,
+                status=SessionStatus.LIVE.value,
+            )
+        )
+
+    async with a_client(_app()) as client:
+        refused = await client.delete(f"/instances/{made.json()['id']}")
+
+    assert refused.status_code == 409
+    assert "live" in refused.json()["detail"]
+    assert "md-jp-1" in refused.json()["detail"]
+
+
+async def test_a_finished_session_does_not_block_retirement(db) -> None:
+    """History is exactly what must not block it.
+
+    A row naming a retired instance is the record of what that instance did,
+    and keeping it is why the column is a string rather than a foreign key.
+    """
+    async with a_client(_app()) as client:
+        made = await client.post(
+            "/instances", json={"name": "md-jp-2", "domain": "md"}
+        )
+
+    async with db() as session:
+        session.add(
+            MdSessionRow(
+                instance="md-jp-2",
+                venue="Bybit",
+                session_id="finished",
+                created_by=1,
+                status=SessionStatus.DONE.value,
+            )
+        )
+
+    async with a_client(_app()) as client:
+        gone = await client.delete(f"/instances/{made.json()['id']}")
+
+    assert gone.status_code == 200
+
+
+async def test_an_sts_instance_is_checked_against_sts_sessions(db) -> None:
+    """A name belongs to one plane, so the wrong table is not consulted.
+
+    Counting ``md_sessions`` against an STS instance would refuse a delete for
+    a reason that is not true.
+    """
+    async with a_client(_app()) as client:
+        made = await client.post(
+            "/instances", json={"name": "sts-tw", "domain": "sts"}
+        )
+
+    async with db() as session:
+        session.add(
+            StsSessionRow(
+                session_id="pinned-run",
+                created_by=1,
+                instance="sts-tw",
+                status=SessionStatus.LIVE.value,
+            )
+        )
+
+    async with a_client(_app()) as client:
+        refused = await client.delete(f"/instances/{made.json()['id']}")
+
+    assert refused.status_code == 409
+    assert "sts session" in refused.json()["detail"]
+
+
+async def test_the_wrong_table_does_not_refuse_a_delete(db) -> None:
+    """A name belongs to one plane, and only that plane's rows count.
+
+    ``md-lonely`` is an MD instance with no live MD attach. The live
+    ``sts_sessions`` row below names the same string, but it describes some
+    STS that happened to be called that — refusing on it would block a
+    retirement for a reason that is not true.
+
+    Written this way on purpose: a version that queries both tables passes
+    every other test in this file and fails only here.
+    """
+    async with a_client(_app()) as client:
+        made = await client.post(
+            "/instances", json={"name": "md-lonely", "domain": "md"}
+        )
+
+    async with db() as session:
+        session.add(
+            StsSessionRow(
+                session_id="a-different-plane",
+                created_by=1,
+                instance="md-lonely",
+                status=SessionStatus.LIVE.value,
+            )
+        )
+
+    async with a_client(_app()) as client:
+        gone = await client.delete(f"/instances/{made.json()['id']}")
+
+    assert gone.status_code == 200
+
+
+async def test_a_td_instance_is_left_to_the_foreign_key(db) -> None:
+    """TD has no session row of its own naming it.
+
+    An attach is named by ``apis.instance_id``, which is ``RESTRICT`` — so an
+    unused TD instance retires cleanly and a used one is refused by the
+    database, not by the count above.
+    """
+    async with a_client(_app()) as client:
+        made = await client.post(
+            "/instances", json={"name": "td-jp-9", "domain": "td"}
+        )
+        gone = await client.delete(f"/instances/{made.json()['id']}")
+
+    assert gone.status_code == 200

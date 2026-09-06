@@ -140,11 +140,24 @@ async def delete_instance(
 ) -> InstanceDeleteResponse:
     """Retire an instance.
 
-    Refused while a credential still names it — ``apis.instance_id`` is
-    ``ON DELETE RESTRICT`` and the database says so before this does. Session
-    rows that merely record an instance are plain strings and do not block:
-    they are history, and retiring an instance must not break the record of
-    what it did.
+    Refused on two counts, and they are enforced in different places because
+    they are different facts.
+
+    A **credential** still naming it is refused by the database:
+    ``apis.instance_id`` is ``ON DELETE RESTRICT``.
+
+    A **live session** still naming it is refused here, because nothing else
+    can. ``md_sessions.instance`` and ``sts_sessions.instance`` are plain
+    strings on purpose — they are history, and retiring an instance must not
+    break the record of what it did. History is exactly what must not block a
+    delete; a session that is still running is not history. Retiring the
+    instance a live run is pinned to would leave that run unable to rebuild,
+    and it would only be discovered at the next restart.
+
+    Blocked rather than warned. The foreign key above already blocks, so
+    warning here would make one kind of reference refuse and another shrug,
+    and the operator has an obvious way forward either way: stop the session,
+    or wait for it to end.
     """
     created_by = owner
     async with session_scope() as db:
@@ -155,6 +168,16 @@ async def delete_instance(
                 status_code=404, detail=f"unknown instance: {instance_id}"
             )
         name = row.name
+        live = await repo.live_sessions_naming(row)
+        if live:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"instance {name!r} still has {live} live "
+                    f"{row.domain} session(s) — stop them, or wait for them "
+                    f"to end, before retiring it"
+                ),
+            )
         try:
             await repo.delete(row)
         except IntegrityError as exc:

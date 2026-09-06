@@ -1180,9 +1180,11 @@ time rather than under skew.
 4. Does `api_ids` belong in the health reply at all? `td_sessions` is already
    the source of truth for it, and a reply that has to assemble it makes the
    probe do real work rather than answer instantly.
-5. What must be true before an instance row can be deleted? `apis.instance_id`
-   is a foreign key and refuses on its own, but `md_sessions.instance` is a
-   plain string by design and enforces nothing, so a live session can name an
-   instance being retired. That wants an application check of the kind
-   `list_live_for_origin` already performs for registry entries — the question
-   is whether it blocks the delete or only warns.
+5. ~~What must be true before an instance row can be deleted?~~ **Settled: a
+   live session naming it blocks, and the delete is refused with a 409.** The
+   foreign key on `apis.instance_id` already blocks, so warning here would make
+   one kind of reference refuse and another shrug — and the operator has an
+   obvious way forward either way. Only the instance's *own* plane is counted:
+   an `md_sessions` row naming `sts-tw` describes some MD that happened to be
+   called that. History does not block, which is the point of those columns
+   being plain strings.
