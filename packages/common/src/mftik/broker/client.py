@@ -81,6 +81,24 @@ def redacted_url(url: str) -> str:
 
 Handler = Callable[[IncomingRequest], Awaitable[None]]
 
+#: What a lease stores when its holder has no name worth writing down. A
+#: session liveness key answers "is anybody still here", never "who", so the
+#: value is a placeholder and :meth:`Broker.lease_owner` on one of those tells
+#: a reader nothing it did not already know from :meth:`Broker.lease_held`.
+LEASE_ANONYMOUS = "1"
+
+
+def _ms(seconds: float) -> int:
+    """Whole milliseconds, and never zero.
+
+    Milliseconds rather than the seconds Redis' ``EX`` takes, so a caller may
+    ask for a fraction: the test suite drives whole lease lifecycles per test
+    and a one-second floor would be paid on every one of them. Zero is
+    rejected by Redis outright, and a rounding error is a poor way to find
+    that out, so it becomes the shortest lease expressible instead.
+    """
+    return max(1, int(seconds * 1000))
+
 
 def _to_json(value: BaseModel | dict[str, Any]) -> str:
     if isinstance(value, BaseModel):
@@ -129,6 +147,20 @@ def decode_tape_gaps(raw: str | None) -> list[tuple[int, int]]:
         except ValueError:
             logger.warning("tape coverage has an unreadable gap: %r", chunk)
     return gaps
+
+
+def _record_ms(record_id: str) -> int:
+    """Milliseconds out of a ``<ms>-<seq>`` stream id.
+
+    Zero for an id that will not parse, which reads as "older than any
+    continuity mark" and costs the caller that one record. Redis' own ids
+    always parse; what this covers is a tape written by something else.
+    """
+    head, _, _tail = record_id.partition("-")
+    try:
+        return int(head)
+    except ValueError:
+        return 0
 
 
 def _int_or_none(raw: str | None) -> int | None:
@@ -263,6 +295,27 @@ class Broker:
         """Redis key backing a shared state hash (e.g. ``td.ledger.7``)."""
         return f"{self.config.key_prefix}:state:{name}"
 
+    def _key(self, name: str) -> str:
+        """One name's key under this broker's prefix. See :meth:`lease_key`."""
+        return f"{self.config.key_prefix}:{name}"
+
+    def lease_key(self, name: str) -> str:
+        """Redis key backing the lease ``name`` (e.g. ``sts:alive:s-1``).
+
+        A lease name is the whole key tail, not a segment under a ``lease:``
+        namespace of its own. The names in use predate this method — MD and
+        STS have been renewing ``{prefix}:{domain}:alive:{session}`` in
+        production since before there was an abstraction to put them behind —
+        and a rolling upgrade that moved them would have both halves of the
+        fleet reading a different key for "is anybody running this session",
+        which is the one question that must not have two answers.
+
+        So the namespacing is the caller's, and the families are
+        ``{domain}:alive:{session}``, ``{domain}:owner:{resource}``,
+        ``backfill:lock:{api_id}`` and ``cid:slot``.
+        """
+        return self._key(name)
+
     # --- shared state (hashes) ---------------------------------------------
     #
     # Pub/Sub tells a reader that something changed; these hold what it
@@ -329,6 +382,135 @@ class Broker:
         if names:
             await self.redis.delete(*(self.state_key(n) for n in names))
 
+    # --- leases (claims that expire) ---------------------------------------
+    #
+    # A lease is a fact about *now* that its holder may never get to retract:
+    # a process running a session, holding an account, walking an account's
+    # history. The state hashes above are deleted by their owner, which covers
+    # every ending the owner is around to observe and not the one that matters
+    # here — SIGKILL, OOM, the machine going away — after which a fact with no
+    # expiry is a session the UI shows as running that nobody can stop.
+    #
+    # So a lease always expires, and its holder renews it while it lives.
+    #
+    # Two of them decide *who* holds a resource, and that is the reason they
+    # are methods here rather than a read and a write composed by each caller:
+    # a decision that takes two round trips has a race in the middle, and
+    # where that race can be closed is in the transport. Redis has no
+    # compare-and-set to lean on (the suite's Redis has no scripting), so
+    # :meth:`lease_hold` and :meth:`lease_release` document the race they
+    # leave open and the direction they lose in. A transport that can do
+    # better does it once, and every caller inherits it.
+
+    async def lease_put(
+        self, name: str, *, ttl: float, owner: str = LEASE_ANONYMOUS
+    ) -> None:
+        """Write a lease, expiring ``ttl`` seconds from now.
+
+        Unconditional: this states a fact rather than asking a question, which
+        is right for a holder renewing its own lease and wrong for anything
+        deciding who the holder is. A heartbeat that checked first would stop
+        renewing the moment its own key lapsed, when re-taking it is exactly
+        what it wants; :meth:`lease_take` is for the other question.
+        """
+        await self.redis.set(self.lease_key(name), owner, px=_ms(ttl))
+
+    async def lease_take(
+        self, name: str, *, ttl: float, owner: str = LEASE_ANONYMOUS
+    ) -> bool:
+        """Take a lease only if nobody holds one. Whether it was taken.
+
+        The atomic half of a claim, and the only part of one that cannot be
+        assembled from a read and a write. Several processes of a plane come up
+        together and each asks for the same session; without the test being
+        part of the write they are all told yes and all run it.
+
+        A refusal says nothing about who refused it — ask :meth:`lease_owner`,
+        and see :meth:`lease_hold` for what a lapse between the two means.
+        """
+        return bool(
+            await self.redis.set(
+                self.lease_key(name), owner, px=_ms(ttl), nx=True
+            )
+        )
+
+    async def lease_owner(self, name: str) -> str | None:
+        """Who holds ``name``, or ``None`` when nobody does.
+
+        The value :meth:`lease_put` wrote, so a lease taken without naming a
+        holder answers :data:`LEASE_ANONYMOUS` rather than anything useful.
+        """
+        return await self.redis.get(self.lease_key(name))
+
+    async def lease_held(self, name: str) -> bool:
+        """Whether anybody holds ``name``.
+
+        For the leases that answer "is a process still here" rather than
+        "which process" — the reader has no holder to compare against, and
+        would only be checking that the string it got back was not empty.
+        """
+        return await self.lease_owner(name) is not None
+
+    async def lease_hold(self, name: str, *, owner: str, ttl: float) -> bool:
+        """Extend a lease still held by ``owner``. ``False`` when it is not.
+
+        Read then ``PEXPIRE``, deliberately, rather than writing the value
+        again. If the lease lapsed between the two and a rival took it, this
+        extends the *rival's* lease by one period — the rival keeps the
+        resource and this caller finds out on its next pass. Re-writing the
+        value would have taken it from them, which is the failure a lease
+        exists to prevent, so the race is lost in the safe direction.
+
+        A missing lease is never re-created here. Whoever let one expire goes
+        back through :meth:`lease_take`, where a rival can say no.
+        """
+        key = self.lease_key(name)
+        if await self.redis.get(key) != owner:
+            return False
+        return bool(await self.redis.pexpire(key, _ms(ttl)))
+
+    async def lease_release(self, name: str, *, owner: str) -> bool:
+        """Give up a lease, if it is still ``owner``'s to give up.
+
+        Conditional for the same reason as :meth:`lease_hold`: a process
+        shutting down may already have lost its lease to the one that replaced
+        it, and deleting a stranger's claim on the way out hands the resource
+        to a third process while the second still believes it holds it.
+
+        Releasing rather than waiting out the TTL is what keeps a redeploy
+        from looking like an outage nobody caused.
+        """
+        key = self.lease_key(name)
+        if await self.redis.get(key) != owner:
+            return False
+        await self.redis.delete(key)
+        return True
+
+    async def lease_drop(self, name: str) -> None:
+        """Delete a lease, whoever holds it. Safe when there is none.
+
+        The counterpart to :meth:`lease_put`'s unnamed holder: a lease nobody
+        signed cannot be released conditionally, because "is it still mine"
+        has no answer to check. Callers that named themselves want
+        :meth:`lease_release` instead.
+        """
+        await self.redis.delete(self.lease_key(name))
+
+    # --- shared counters ---------------------------------------------------
+
+    async def counter_next(self, name: str) -> int:
+        """Increment a shared counter and return the value that came back.
+
+        Shared rather than process-local because the callers are competing
+        consumers: several processes of a plane serve one subject, so a
+        counter each would hand two of them the same number.
+
+        Monotonic and unbounded. Folding it into a range is the caller's job,
+        and how wide that range is decides how long it takes a value to
+        repeat — see STS's cid slot, where a repeat is harmless anyway.
+        """
+        return int(await self.redis.incr(self._key(name)))
+
     # --- recorded tape (streams) -------------------------------------------
     #
     # A feed's own history, kept so a strategy that starts later can warm up on
@@ -386,19 +568,33 @@ class Broker:
 
     async def tape_tail(
         self, feed: str, *, count: int
-    ) -> list[tuple[str, dict[str, str]]]:
-        """Read the newest ``count`` records, oldest → newest.
+    ) -> list[tuple[int, dict[str, str]]]:
+        """Read the newest ``count`` records as ``(recorded_ms, fields)``.
 
-        The newest rather than the oldest: warming up means catching up to now,
+        Oldest → newest, because a warm-up replays forward. The *newest*
+        ``count`` rather than the oldest: warming up means catching up to now,
         and a stream capped by two independent bounds holds an unknown number
         of records, so "the first N" is not a window anyone asked for.
+
+        ``recorded_ms`` is the broker's clock at append time, which is the
+        stamp :meth:`tape_coverage`'s continuity mark is measured against. Not
+        the venue's timestamp — that rides on the record as a field and answers
+        a different question; the two are not interchangeable.
+
+        Milliseconds rather than the id the transport wrote. Readers were
+        pulling the ``<ms>-<seq>`` apart themselves, which put the shape of a
+        Redis stream id in the strategy SDK and in half a dozen tests, and a
+        transport that numbers its records any other way would have taken
+        every warm-up with it. Parsing it is this method's job.
         """
         if count <= 0:
             return []
         rows = await self.redis.xrevrange(
             self.tape_key(feed), max="+", min="-", count=count
         )
-        return [(str(rid), dict(fields)) for rid, fields in reversed(rows)]
+        return [
+            (_record_ms(str(rid)), dict(fields)) for rid, fields in reversed(rows)
+        ]
 
     async def tape_trim_before(self, feed: str, *, min_id_ms: int) -> int:
         """Drop records older than ``min_id_ms``. Returns how many went."""
@@ -501,9 +697,22 @@ class Broker:
 
     # --- Pub/Sub -----------------------------------------------------------
 
-    async def publish(self, topic: str, envelope: Envelope[Any]) -> int:
-        """Publish an envelope to a pub/sub topic (fan-out)."""
-        return int(await self.redis.publish(topic, envelope.to_json()))
+    async def publish(self, topic: str, envelope: Envelope[Any]) -> None:
+        """Publish an envelope to a pub/sub topic (fan-out).
+
+        Nothing comes back. Redis answers with the number of subscribers it
+        delivered to and this used to hand that on, which no caller ever read
+        and no other transport can promise — a broker built on subjects hands
+        a message to the server and the server decides who has it. Returning
+        it made a Redis implementation detail part of the interface, for the
+        benefit of nobody.
+
+        A count is also not the fact it looks like. Fan-out here is best
+        effort by design: a message published while nobody is subscribed is
+        gone, and where that is not acceptable the topic is written through
+        :meth:`publish_log` or the caller is using request-reply instead.
+        """
+        await self.redis.publish(topic, envelope.to_json())
 
     async def publish_log(
         self,
@@ -512,12 +721,15 @@ class Broker:
         *,
         maxlen: int | None = None,
         ttl_seconds: int = 86_400,
-    ) -> int:
-        """Publish a log line and append it to a Redis list for late subscribers.
+    ) -> None:
+        """Publish a log line and keep the last few for late subscribers.
 
-        Redis Pub/Sub alone drops messages when nobody is listening (e.g. UI
-        opens ``/ws/sts/...`` after deploy). The buffer is replayed on connect.
-        ``maxlen`` defaults to :attr:`BrokerConfig.log_buffer_maxlen` (100).
+        Pub/Sub alone drops messages when nobody is listening (e.g. the UI
+        opens ``/ws/sts/...`` after a deploy). The buffer is replayed on
+        connect by :meth:`fetch_log_buffer`. ``maxlen`` defaults to
+        :attr:`BrokerConfig.log_buffer_maxlen` (100).
+
+        Returns nothing, for :meth:`publish`'s reasons.
         """
         keep = (
             self.config.log_buffer_maxlen if maxlen is None else max(1, maxlen)
@@ -529,8 +741,7 @@ class Broker:
         pipe.ltrim(key, -keep, -1)
         pipe.expire(key, ttl_seconds)
         pipe.publish(topic, raw)
-        results = await pipe.execute()
-        return int(results[-1])
+        await pipe.execute()
 
     async def fetch_log_buffer(self, topic: str) -> list[str]:
         """Return buffered log JSON lines for ``topic`` (oldest → newest)."""
@@ -578,8 +789,14 @@ class Broker:
     ) -> AsyncIterator[tuple[str, UntypedEnvelope]]:
         """Yield ``(channel, envelope)`` from pattern subscriptions until ``stop``.
 
-        Uses Redis ``PSUBSCRIBE``. Messages published while not subscribed are
-        lost unless they were also written via :meth:`publish_log`.
+        Messages published while not subscribed are lost unless they were also
+        written via :meth:`publish_log`, exactly as in :meth:`subscribe`.
+
+        Patterns belong on :class:`~mftik.protocol.Topics` and must use one
+        wildcard per segment — ``log.*.*``, not ``log.*``. Redis globs the
+        whole channel name and would match both; a transport that matches per
+        segment matches only the first, and a pattern that matches nothing
+        fails silently. See the note above ``Topics.log_pattern``.
         """
         pattern_list = (patterns,) if isinstance(patterns, str) else tuple(patterns)
         if not pattern_list:

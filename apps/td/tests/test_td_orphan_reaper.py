@@ -232,24 +232,24 @@ async def test_a_key_that_comes_back_clears_the_strikes(
 async def test_an_unreadable_liveness_check_detaches_nothing(
     broker: Broker, sessions: SessionManager, store: FakeStore
 ) -> None:
-    """Redis being unreachable is not evidence that a strategy stopped.
+    """A broker that will not answer is not evidence that a strategy stopped.
 
     A stale link survives to the next scan; one detached by mistake takes the
     attach out from under a strategy that is still trading.
     """
     task, stop = await _attached(broker, sessions, "unreadable-1")
     await clear_alive(broker, "unreadable-1", domain="sts")
-    original = broker.redis.exists
+    original = broker.lease_held
 
-    async def exploding_exists(*args, **kwargs):
-        raise RuntimeError("redis gone")
+    async def exploding_read(*args, **kwargs):
+        raise RuntimeError("broker gone")
 
-    broker.redis.exists = exploding_exists  # type: ignore[method-assign]
+    broker.lease_held = exploding_read  # type: ignore[method-assign]
     try:
         assert await sessions.reap_orphans() == []
         assert await sessions.reap_orphans() == []
     finally:
-        broker.redis.exists = original  # type: ignore[method-assign]
+        broker.lease_held = original  # type: ignore[method-assign]
 
     assert store.status("unreadable-1") == "live"
     assert sessions.get(API_ID) is not None

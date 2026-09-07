@@ -20,7 +20,7 @@ import asyncio
 import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
-from mftik.liveness import claim_owner, hold_owner, owner_key, release_owner
+from mftik.liveness import claim_owner, hold_owner, owner_name, release_owner
 
 DOMAIN = "td"
 API = "42"
@@ -71,12 +71,10 @@ async def test_a_lapsed_claim_is_not_re_created_by_a_refresh(
     still held the account, with no moment at which a rival could say no.
     """
     await claim_owner(broker, API, domain=DOMAIN, owner="a")
-    await broker.redis.delete(owner_key(broker.config.key_prefix, API, domain=DOMAIN))
+    await broker.lease_drop(owner_name(API, domain=DOMAIN))
 
     assert await hold_owner(broker, API, domain=DOMAIN, owner="a") is False
-    assert await broker.redis.exists(
-        owner_key(broker.config.key_prefix, API, domain=DOMAIN)
-    ) == 0
+    assert not await broker.lease_held(owner_name(API, domain=DOMAIN))
 
 
 async def test_a_claim_taken_over_is_not_stolen_back_by_a_refresh(
@@ -89,13 +87,11 @@ async def test_a_claim_taken_over_is_not_stolen_back_by_a_refresh(
     the account, and A finds out on its next pass.
     """
     await claim_owner(broker, API, domain=DOMAIN, owner="a", ttl=30)
-    await broker.redis.delete(owner_key(broker.config.key_prefix, API, domain=DOMAIN))
+    await broker.lease_drop(owner_name(API, domain=DOMAIN))
     await claim_owner(broker, API, domain=DOMAIN, owner="b", ttl=30)
 
     assert await hold_owner(broker, API, domain=DOMAIN, owner="a") is False
-    assert await broker.redis.get(
-        owner_key(broker.config.key_prefix, API, domain=DOMAIN)
-    ) == "b"
+    assert await broker.lease_owner(owner_name(API, domain=DOMAIN)) == "b"
 
 
 async def test_releasing_lets_the_next_process_take_it(broker: Broker) -> None:
@@ -123,9 +119,10 @@ async def test_a_claim_lapses_so_a_restarted_process_can_take_the_account(
     Accepted deliberately. Keying on anything a restarted process could
     reproduce would also be reproducible by a rival, which is the whole point.
     """
+    # Cut its remaining life to 20ms rather than waiting out a real TTL.
     await claim_owner(broker, API, domain=DOMAIN, owner="old-pid", ttl=1)
-    await broker.redis.pexpire(
-        owner_key(broker.config.key_prefix, API, domain=DOMAIN), 20
+    await broker.lease_hold(
+        owner_name(API, domain=DOMAIN), owner="old-pid", ttl=0.02
     )
     await asyncio.sleep(0.1)
 

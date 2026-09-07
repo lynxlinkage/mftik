@@ -40,7 +40,7 @@ One machine (or one compose project) that owns:
 | **Paper** | A simulated venue in the same stack. Same ticker shape, same OMS path, no real money. |
 | **API + UI** | The control plane. Browser for the operator, `mftik` CLI for the laptop that writes code. |
 
-Domains do not import each other. They talk through Redis. A market-data restart is not supposed to take order entry with it; a strategy crash is not supposed to drop the venue connection. That split is the product, not an implementation detail.
+Domains do not import each other. They talk through one broker, over Redis today — see [docs/Broker.md](docs/Broker.md) for what a plane may say and what a transport has to answer. A market-data restart is not supposed to take order entry with it; a strategy crash is not supposed to drop the venue connection. That split is the product, not an implementation detail.
 
 The node is **single-tenant**. One Owner. That person may prove who they are with a password, Discord, or Google, and mint machine keys for scripts and for other nodes. Nobody else gets a user row.
 

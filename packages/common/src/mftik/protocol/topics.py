@@ -121,6 +121,31 @@ class Topics:
         """Deprecated alias for :meth:`log_sts`."""
         return Topics.log_sts(session_id)
 
+    # Subscription patterns
+    #
+    # One ``*`` per segment, and never a ``*`` left to span the separators
+    # itself. The two readings of a pattern do not agree on that: Redis globs
+    # the whole channel name, so ``log.*`` matches ``log.sts.s-1``, while a
+    # subscriber that matches per segment — NATS, and anything else built on
+    # subjects — reads ``log.*`` as a two-segment subject and delivers
+    # nothing. ``log.*.*`` means the same thing to both.
+    #
+    # Kept here rather than at the two call sites because a pattern that
+    # matches nothing fails silently: the log persister and the alert matcher
+    # would simply stop seeing lines, with every publisher still publishing
+    # and nothing in any log to say so. ``test_topic_patterns.py`` checks the
+    # rule against every ``*_pattern`` on this class.
+
+    @staticmethod
+    def log_pattern() -> str:
+        """Every log channel: :meth:`log_sts`, :meth:`log_td`, :meth:`log_md`."""
+        return "log.*.*"
+
+    @staticmethod
+    def td_global_pattern() -> str:
+        """Every trading account's private fan-out — see :meth:`td_global`."""
+        return "td.*.global"
+
     @staticmethod
     def status_sts() -> str:
         """STS session state changes, every session (``/ws/status/sts``).

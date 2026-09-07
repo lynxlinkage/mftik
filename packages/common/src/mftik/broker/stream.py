@@ -48,11 +48,11 @@ class BidirectionalStream:
     def closed(self) -> bool:
         return self._closed
 
-    async def send(self, envelope: Envelope[Any]) -> int:
+    async def send(self, envelope: Envelope[Any]) -> None:
         """Publish an envelope on the outbound (tx) topic."""
         if self._closed:
             raise RuntimeError("BidirectionalStream is closed")
-        return await self._broker.publish(self.tx, envelope)
+        await self._broker.publish(self.tx, envelope)
 
     def __aiter__(self) -> AsyncIterator[UntypedEnvelope]:
         """Iterate inbound envelopes from the rx topic until closed."""
