@@ -16,7 +16,34 @@ case to keep working.
 from __future__ import annotations
 
 import os
+import re
 from enum import StrEnum
+
+#: An instance name is one Redis subject segment — ``health.{domain}.{name}``
+#: — and the value of ``MFTIK_INSTANCE``. Dots split the subject, spaces and
+#: uppercase make a row no compose file will ever match, and there is no
+#: rename. ``*`` is already the unpinned-md sentinel.
+_INSTANCE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+
+
+def validate_instance_name(name: str) -> str:
+    """Return a legal instance name, or raise ``ValueError``.
+
+    Strips surrounding whitespace so a form field and an env value are
+    judged the same way. Does not lowercase: silently folding ``TD-JP-1``
+    into ``td-jp-1`` would be a rename, and there is no rename.
+    """
+    name = name.strip()
+    if not name:
+        raise ValueError("name is required")
+    if _INSTANCE_NAME.fullmatch(name) is None:
+        raise ValueError(
+            f"instance name {name!r} must be lowercase letters, digits "
+            f"and hyphens, starting with a letter — it is a Redis subject "
+            f"segment and there is no rename"
+        )
+    return name
+
 
 #: The environment variable a deployment sets to name one process.
 INSTANCE_ENV = "MFTIK_INSTANCE"
@@ -34,10 +61,23 @@ def instance_name(plane: str) -> str:
     ``MFTIK_INSTANCE=`` left in a compose file reads as "the default" rather
     than as an instance whose name is the empty string — which would serve a
     subject ending in a dot and match no declared row.
+
+    A value that is set but illegal refuses to start, which is the same rule
+    ``/instances`` applies to a declaration and has to be, because these two
+    names are compared for equality and neither side can rewrite the other.
+    Coming up anyway is the worse failure: ``MFTIK_INSTANCE=MD-JP-1`` would
+    serve ``health.md.MD-JP-1``, a name no declaration can hold, and read as
+    *down* on Home forever with the process healthy. Raising here says which
+    variable while somebody is still looking at the deploy.
     """
     raw = os.getenv(INSTANCE_ENV, "")
     name = raw.strip()
-    return name or plane
+    if not name:
+        return plane
+    try:
+        return validate_instance_name(name)
+    except ValueError as exc:
+        raise ValueError(f"{INSTANCE_ENV}={raw!r}: {exc}") from exc
 
 
 #: The environment variable that sets an instance's role.

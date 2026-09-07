@@ -9,6 +9,7 @@ wherever the compose file lives. See ``docs/Instances.md``.
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+from mftik.instance import validate_instance_name
 from mftik_db.models.instance import Instance
 from mftik_db.models.session import SessionDomain
 from mftik_db.repositories import InstanceRepository
@@ -63,10 +64,11 @@ async def create_instance(
     principal: PrincipalDep = ANONYMOUS,
 ) -> InstanceOut:
     created_by = owner
-    name = body.name.strip()
+    try:
+        name = validate_instance_name(body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     domain = body.domain.strip().lower()
-    if not name:
-        raise HTTPException(status_code=400, detail="name is required")
     if domain not in _INSTANCED:
         raise HTTPException(
             status_code=400,
@@ -115,9 +117,12 @@ async def update_instance(
             raise HTTPException(
                 status_code=404, detail=f"unknown instance: {instance_id}"
             )
-        row = await repo.update(
-            row, region=body.region, enabled=body.enabled
-        )
+        # Empty string is how the UI clears the label. ``update`` treats
+        # ``None`` as "leave it", so folding here — the same ``or None``
+        # POST uses — is what actually writes SQL NULL.
+        if body.region is not None:
+            row.region = body.region.strip() or None
+        row = await repo.update(row, enabled=body.enabled)
         result = _to_out(row)
 
     await record_audit(
