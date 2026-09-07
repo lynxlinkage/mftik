@@ -378,6 +378,19 @@ export type Instance = {
 	created_by: number | null;
 };
 
+/** Declare an instance. `name` and `domain` are fixed once written. */
+export type InstanceCreateBody = {
+	name: string;
+	domain: string;
+	region?: string;
+};
+
+/** Edit what nothing routes on. There is no rename. */
+export type InstanceUpdateBody = {
+	region?: string;
+	enabled?: boolean;
+};
+
 /** A venue a credential can be registered against (`GET /venues`). */
 export type AlertSource = {
 	id: number;
@@ -790,6 +803,25 @@ export const api = {
 	instances: (domain?: string) =>
 		request<{ instances: Instance[] }>(
 			domain ? `/instances?domain=${encodeURIComponent(domain)}` : '/instances'
+		),
+	createInstance: (body: InstanceCreateBody) =>
+		request<Instance>('/instances', {
+			method: 'POST',
+			body: JSON.stringify({
+				name: body.name,
+				domain: body.domain,
+				...(body.region ? { region: body.region } : {})
+			})
+		}),
+	patchInstance: (id: number, body: InstanceUpdateBody) =>
+		request<Instance>(`/instances/${encodeURIComponent(String(id))}`, {
+			method: 'PATCH',
+			body: JSON.stringify(body)
+		}),
+	deleteInstance: (id: number) =>
+		request<{ id: number; deleted: boolean }>(
+			`/instances/${encodeURIComponent(String(id))}`,
+			{ method: 'DELETE' }
 		),
 	createApi: (body: ApiCreateBody) =>
 		request<ApiCredential>('/apis', {
