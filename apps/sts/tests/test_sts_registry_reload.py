@@ -8,6 +8,9 @@ a tree that changed, and a tree that went away.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 from mftik.registry import RegistryStore
 from mftik_sts.impl import (
@@ -23,6 +26,26 @@ from mftik.strategy import Strategy
 class Tiny(Strategy):
     name = "tiny"
 """
+
+
+def _touch_newer(path: Path) -> None:
+    """Force ``st_mtime_ns`` strictly past its current value.
+
+    ``RegistryStore._tree_cache`` is keyed on ``(py count, max mtime_ns)``.
+    Two commits in the same resolution bucket leave that stamp unchanged,
+    so a same-process reload can keep the class from the first add.
+    """
+    stat = path.stat()
+    old = stat.st_mtime_ns
+    os.utime(path, ns=(stat.st_atime_ns, old + 1))
+    if path.stat().st_mtime_ns > old:
+        return
+    os.utime(path, ns=(stat.st_atime_ns, old + 1_000_000_000))
+    assert path.stat().st_mtime_ns > old
+
+
+def _private_py(tmp_path: Path) -> Path:
+    return tmp_path / "registry" / "private" / "tiny" / "strategy.py"
 
 
 def _tiny(marker: str) -> str:
@@ -51,6 +74,7 @@ def test_a_replaced_tree_resolves_to_its_new_code(tmp_path) -> None:
     assert resolve_class("private::Tiny").marker == "before"
 
     store.add({"strategy.py": _tiny("after")}, replace=True)
+    _touch_newer(_private_py(tmp_path))
     load_local_registry(store)
 
     assert resolve_class("private::Tiny").marker == "after"
@@ -113,6 +137,7 @@ def test_a_tree_that_stops_importing_stops_resolving(tmp_path) -> None:
         },
         replace=True,
     )
+    _touch_newer(_private_py(tmp_path))
     load_local_registry(store)
 
     with pytest.raises(KeyError):
