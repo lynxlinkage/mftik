@@ -10,7 +10,7 @@ import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange
-from mftik.liveness import owner_key
+from mftik.liveness import owner_name
 from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     TD_ERROR,
@@ -481,9 +481,9 @@ async def test_losing_the_claim_tears_the_account_down(
         )
         assert manager.active_api_ids == [3]
 
-        # A rival takes the account: the key is gone, then theirs.
-        key = owner_key(broker.config.key_prefix, "3", domain="td")
-        await broker.redis.set(key, "some-other-process")
+        # A rival takes the account: the claim is gone, then theirs.
+        name = owner_name("3", domain="td")
+        await broker.lease_put(name, owner="some-other-process", ttl=30)
 
         deadline = asyncio.get_running_loop().time() + 5.0
         while (
@@ -495,7 +495,7 @@ async def test_losing_the_claim_tears_the_account_down(
         assert manager.active_api_ids == [], (
             "an account whose claim moved on must not still be served here"
         )
-        assert await broker.redis.get(key) == "some-other-process", (
+        assert await broker.lease_owner(name) == "some-other-process", (
             "and the rival's claim must not be stolen back on the way out"
         )
     finally:

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
-from mftik.liveness import alive_key, clear_alive, is_alive, mark_alive
+from mftik.liveness import alive_name, clear_alive, is_alive, mark_alive
 from mftik.protocol import StsCreateSessionRequest
 from mftik.strategy import Strategy
 from mftik_sts.impl import register
@@ -213,9 +213,8 @@ async def test_the_key_is_renewed_while_the_session_runs(
             session_id="renew-1", created_by=1, strategy="idle_reap"
         )
     )
-    key = alive_key(broker.config.key_prefix, "renew-1", domain="sts")
     # Expire it out from under the session; the heartbeat must put it back.
-    await broker.redis.delete(key)
+    await broker.lease_drop(alive_name("renew-1", domain="sts"))
     for _ in range(50):
         if await is_alive(broker, "renew-1", domain="sts"):
             break
@@ -229,7 +228,7 @@ async def test_the_key_is_renewed_while_the_session_runs(
 async def test_an_unreadable_liveness_check_reaps_nothing(
     broker: Broker,
 ) -> None:
-    """Redis being unreachable is not evidence that a session died.
+    """A broker that will not answer is not evidence that a session died.
 
     Leaving a stale row is recoverable on the next scan; failing a strategy
     that is still trading is not.
@@ -238,16 +237,16 @@ async def test_an_unreadable_liveness_check_reaps_nothing(
     store.seed_live("unknown-1")
     manager = _manager(broker, store)
 
-    original = broker.redis.exists
+    original = broker.lease_held
 
-    async def exploding_exists(*args, **kwargs):
-        raise RuntimeError("redis gone")
+    async def exploding_read(*args, **kwargs):
+        raise RuntimeError("broker gone")
 
-    broker.redis.exists = exploding_exists  # type: ignore[method-assign]
+    broker.lease_held = exploding_read  # type: ignore[method-assign]
     try:
         assert await manager.reap_orphans() == []
     finally:
-        broker.redis.exists = original  # type: ignore[method-assign]
+        broker.lease_held = original  # type: ignore[method-assign]
     assert store.rows["unknown-1"].status == "live"
 
 

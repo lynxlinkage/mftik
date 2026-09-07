@@ -19,7 +19,7 @@ from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange
 from mftik.exchange.tickers import UniversalTicker
-from mftik.liveness import alive_key, clear_alive, is_alive, mark_alive
+from mftik.liveness import alive_name, clear_alive, is_alive, mark_alive
 from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     Envelope,
@@ -365,9 +365,7 @@ async def test_the_key_is_renewed_while_the_attach_lives(
 
     # Expire it out from under the attach; the lease heartbeat must put it
     # back without STS having to re-attach.
-    await broker.redis.delete(
-        alive_key(broker.config.key_prefix, "renew-1", domain=MD_ALIVE)
-    )
+    await broker.lease_drop(alive_name("renew-1", domain=MD_ALIVE))
     for _ in range(50):
         if await is_alive(broker, "renew-1", domain=MD_ALIVE):
             break
@@ -385,7 +383,7 @@ async def test_the_key_is_renewed_while_the_attach_lives(
 async def test_an_unreadable_liveness_check_reaps_nothing(
     broker: Broker, paper: PaperExchange
 ) -> None:
-    """Redis being unreachable is not evidence that MD died.
+    """A broker that will not answer is not evidence that MD died.
 
     A stale row survives to the next scan; a row wrongly closed hides a feed
     that is still running.
@@ -394,16 +392,16 @@ async def test_an_unreadable_liveness_check_reaps_nothing(
     store.seed_live("unreadable-1")
     sessions = _manager(broker, paper, store)
 
-    original = broker.redis.exists
+    original = broker.lease_held
 
-    async def exploding_exists(*args, **kwargs):
-        raise RuntimeError("redis gone")
+    async def exploding_read(*args, **kwargs):
+        raise RuntimeError("broker gone")
 
-    broker.redis.exists = exploding_exists  # type: ignore[method-assign]
+    broker.lease_held = exploding_read  # type: ignore[method-assign]
     try:
         assert await sessions.reap_orphans() == []
     finally:
-        broker.redis.exists = original  # type: ignore[method-assign]
+        broker.lease_held = original  # type: ignore[method-assign]
     assert store.rows[("Bybit", "unreadable-1")].status == "live"
 
 

@@ -80,6 +80,11 @@ def _safety_lag() -> float:
     return max(0.0, float(os.getenv("BACKFILL_SAFETY_LAG", str(SAFETY_LAG_S))))
 
 
+def lock_name(api_id: int) -> str:
+    """The broker lease one account's backfill run holds."""
+    return f"backfill:lock:{api_id}"
+
+
 @dataclass
 class BackfillOutcome:
     """What one run managed. Partial progress is a success, not a failure."""
@@ -423,9 +428,6 @@ class BackfillExecutor:
 
     # --- the lock ----------------------------------------------------------
 
-    def _lock_key(self, api_id: int) -> str:
-        return f"{self._broker.config.key_prefix}:backfill:lock:{api_id}"
-
     async def _lock(self, api_id: int, token: str) -> bool:
         """Claim this account, or decline the run.
 
@@ -434,21 +436,18 @@ class BackfillExecutor:
         which is the whole reason this exists.
         """
         try:
-            got = await self._broker.redis.set(
-                self._lock_key(api_id), token, nx=True, ex=self._lock_ttl
+            return await self._broker.lease_take(
+                lock_name(api_id), ttl=self._lock_ttl, owner=token
             )
         except Exception:
             # A lock we cannot take is not a reason to skip work that is safe
             # to repeat.
             logger.warning("TD backfill lock unavailable api_id=%s", api_id)
             return True
-        return bool(got)
 
     async def _unlock(self, api_id: int, token: str) -> None:
-        key = self._lock_key(api_id)
         try:
-            if await self._broker.redis.get(key) == token:
-                await self._broker.redis.delete(key)
+            await self._broker.lease_release(lock_name(api_id), owner=token)
         except Exception:
             logger.debug("TD backfill unlock failed api_id=%s", api_id, exc_info=True)
 

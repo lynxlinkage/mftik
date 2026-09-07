@@ -51,7 +51,7 @@ from mftik_sts.session.session import StsSession
 
 logger = logging.getLogger(__name__)
 
-#: Redis counter backing cid slot allocation (suffixed onto the key prefix).
+#: The broker counter backing cid slot allocation.
 CID_SLOT_KEY = "cid:slot"
 
 #: Why a session in ``interrupted`` stopped. A constant because it is the
@@ -276,8 +276,8 @@ class SessionManager:
     async def _allocate_cid_slot(self) -> int:
         """Reserve the 16-bit ``client_order_id`` slot for a new session.
 
-        Allocation goes through Redis, not a process-local counter: STS serves
-        RPC via ``BLPOP`` competing consumers, so several STS processes may be
+        Allocation goes through the broker, not a process-local counter: STS
+        serves RPC as competing consumers, so several STS processes may be
         creating sessions at once.
 
         The counter is monotonic and wraps at :data:`SLOT_SPACE`, so two live
@@ -285,8 +285,7 @@ class SessionManager:
         them was still running. Reuse after that is harmless — TD keys order
         ownership on the whole cid, whose ``ts_ms`` differs.
         """
-        key = f"{self._broker.config.key_prefix}:{CID_SLOT_KEY}"
-        return int(await self._broker.redis.incr(key)) % SLOT_SPACE
+        return await self._broker.counter_next(CID_SLOT_KEY) % SLOT_SPACE
 
     async def create_session(
         self, request: StsCreateSessionRequest
