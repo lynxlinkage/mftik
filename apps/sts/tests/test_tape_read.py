@@ -103,10 +103,10 @@ async def test_records_from_before_a_gap_are_dropped(broker: Broker) -> None:
     """Reading across a hole is the failure this whole mechanism prevents."""
     await _record(broker, AGG_FEED, "old", "1")
     rows = await broker.tape_tail(AGG_FEED, count=1)
-    after_old = int(rows[0][0].partition("-")[0]) + 1
+    after_old = rows[0][0] + 1
     # A real millisecond has to pass, or the record standing in for "after the
     # gap" lands in the same millisecond as the one standing in for "before"
-    # and the test cannot tell them apart. Stream ids are a clock.
+    # and the test cannot tell them apart. A record's stamp is a clock.
     await asyncio.sleep(0.01)
     # Recording restarted after that record — it is on the far side of a gap.
     await broker.tape_mark_recording(

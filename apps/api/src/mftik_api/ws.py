@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 #: Every trading account's private fan-out. Fills name an ``api_id`` and no
 #: session, which is what :func:`board_bridge` exists to bridge.
-TD_GLOBAL_PATTERN = "td.*.global"
+TD_GLOBAL_PATTERN = Topics.td_global_pattern()
 
 
 async def _log_bridge(

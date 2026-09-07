@@ -8,13 +8,13 @@ import os
 from typing import Any
 
 from mftik.broker import Broker
-from mftik.protocol import UntypedEnvelope
+from mftik.protocol import Topics, UntypedEnvelope
 from mftik_db.repositories import SessionLogRepository
 from mftik_db.session import session_scope
 
 logger = logging.getLogger("mftik_api.log_persist")
 
-LOG_PATTERN = "log.*"
+LOG_PATTERN = Topics.log_pattern()
 
 
 def _batch_size() -> int:

@@ -200,12 +200,11 @@ class StrategyTape:
         records: list[Trade] = []
         dropped = 0
         oldest_kept_ms: int | None = None
-        for record_id, fields in rows:
-            # The stream id is Redis' clock at append time, which is what the
-            # continuity mark is stamped against. The venue's own ts rides on
-            # the record and is what the strategy reads — the two answer
-            # different questions and are not interchangeable here.
-            record_ms = _id_ms(record_id)
+        for record_ms, fields in rows:
+            # The record's stamp is the broker's clock at append time, which is
+            # what the continuity mark is measured against. The venue's own ts
+            # rides on the record and is what the strategy reads — the two
+            # answer different questions and are not interchangeable here.
             if start_ms is not None and record_ms < start_ms:
                 dropped += 1
                 continue
@@ -292,15 +291,6 @@ def _log_records(log, feed: str, records: list[Trade]) -> None:  # noqa: ANN001
             count=len(chunk),
             payload=chunk,
         )
-
-
-def _id_ms(record_id: str) -> int:
-    """Milliseconds out of a ``<ms>-<seq>`` stream id."""
-    head, _, _tail = record_id.partition("-")
-    try:
-        return int(head)
-    except ValueError:
-        return 0
 
 
 def _int_or_none(raw: str | None) -> int | None:

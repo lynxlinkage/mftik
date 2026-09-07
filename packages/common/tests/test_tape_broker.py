@@ -89,15 +89,14 @@ async def test_trim_before_drops_by_time_not_count(broker: Broker) -> None:
     await _append(broker, 3)
 
     rows = await broker.tape_tail(FEED, count=5)
-    old_ms = int(rows[0][0].partition("-")[0])
-    cutoff = int(rows[2][0].partition("-")[0])
+    old_ms, cutoff = rows[0][0], rows[2][0]
     assert cutoff > old_ms, "the two batches must not share a millisecond"
 
     dropped = await broker.tape_trim_before(FEED, min_id_ms=cutoff)
 
     assert dropped == 2
     remaining = await broker.tape_tail(FEED, count=10)
-    assert all(int(rid.partition("-")[0]) >= cutoff for rid, _ in remaining)
+    assert all(recorded_ms >= cutoff for recorded_ms, _ in remaining)
 
 
 @pytest.mark.asyncio

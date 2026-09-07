@@ -149,6 +149,20 @@ def decode_tape_gaps(raw: str | None) -> list[tuple[int, int]]:
     return gaps
 
 
+def _record_ms(record_id: str) -> int:
+    """Milliseconds out of a ``<ms>-<seq>`` stream id.
+
+    Zero for an id that will not parse, which reads as "older than any
+    continuity mark" and costs the caller that one record. Redis' own ids
+    always parse; what this covers is a tape written by something else.
+    """
+    head, _, _tail = record_id.partition("-")
+    try:
+        return int(head)
+    except ValueError:
+        return 0
+
+
 def _int_or_none(raw: str | None) -> int | None:
     if not raw:
         return None
@@ -554,19 +568,33 @@ class Broker:
 
     async def tape_tail(
         self, feed: str, *, count: int
-    ) -> list[tuple[str, dict[str, str]]]:
-        """Read the newest ``count`` records, oldest → newest.
+    ) -> list[tuple[int, dict[str, str]]]:
+        """Read the newest ``count`` records as ``(recorded_ms, fields)``.
 
-        The newest rather than the oldest: warming up means catching up to now,
+        Oldest → newest, because a warm-up replays forward. The *newest*
+        ``count`` rather than the oldest: warming up means catching up to now,
         and a stream capped by two independent bounds holds an unknown number
         of records, so "the first N" is not a window anyone asked for.
+
+        ``recorded_ms`` is the broker's clock at append time, which is the
+        stamp :meth:`tape_coverage`'s continuity mark is measured against. Not
+        the venue's timestamp — that rides on the record as a field and answers
+        a different question; the two are not interchangeable.
+
+        Milliseconds rather than the id the transport wrote. Readers were
+        pulling the ``<ms>-<seq>`` apart themselves, which put the shape of a
+        Redis stream id in the strategy SDK and in half a dozen tests, and a
+        transport that numbers its records any other way would have taken
+        every warm-up with it. Parsing it is this method's job.
         """
         if count <= 0:
             return []
         rows = await self.redis.xrevrange(
             self.tape_key(feed), max="+", min="-", count=count
         )
-        return [(str(rid), dict(fields)) for rid, fields in reversed(rows)]
+        return [
+            (_record_ms(str(rid)), dict(fields)) for rid, fields in reversed(rows)
+        ]
 
     async def tape_trim_before(self, feed: str, *, min_id_ms: int) -> int:
         """Drop records older than ``min_id_ms``. Returns how many went."""
@@ -669,9 +697,22 @@ class Broker:
 
     # --- Pub/Sub -----------------------------------------------------------
 
-    async def publish(self, topic: str, envelope: Envelope[Any]) -> int:
-        """Publish an envelope to a pub/sub topic (fan-out)."""
-        return int(await self.redis.publish(topic, envelope.to_json()))
+    async def publish(self, topic: str, envelope: Envelope[Any]) -> None:
+        """Publish an envelope to a pub/sub topic (fan-out).
+
+        Nothing comes back. Redis answers with the number of subscribers it
+        delivered to and this used to hand that on, which no caller ever read
+        and no other transport can promise — a broker built on subjects hands
+        a message to the server and the server decides who has it. Returning
+        it made a Redis implementation detail part of the interface, for the
+        benefit of nobody.
+
+        A count is also not the fact it looks like. Fan-out here is best
+        effort by design: a message published while nobody is subscribed is
+        gone, and where that is not acceptable the topic is written through
+        :meth:`publish_log` or the caller is using request-reply instead.
+        """
+        await self.redis.publish(topic, envelope.to_json())
 
     async def publish_log(
         self,
@@ -680,12 +721,15 @@ class Broker:
         *,
         maxlen: int | None = None,
         ttl_seconds: int = 86_400,
-    ) -> int:
-        """Publish a log line and append it to a Redis list for late subscribers.
+    ) -> None:
+        """Publish a log line and keep the last few for late subscribers.
 
-        Redis Pub/Sub alone drops messages when nobody is listening (e.g. UI
-        opens ``/ws/sts/...`` after deploy). The buffer is replayed on connect.
-        ``maxlen`` defaults to :attr:`BrokerConfig.log_buffer_maxlen` (100).
+        Pub/Sub alone drops messages when nobody is listening (e.g. the UI
+        opens ``/ws/sts/...`` after a deploy). The buffer is replayed on
+        connect by :meth:`fetch_log_buffer`. ``maxlen`` defaults to
+        :attr:`BrokerConfig.log_buffer_maxlen` (100).
+
+        Returns nothing, for :meth:`publish`'s reasons.
         """
         keep = (
             self.config.log_buffer_maxlen if maxlen is None else max(1, maxlen)
@@ -697,8 +741,7 @@ class Broker:
         pipe.ltrim(key, -keep, -1)
         pipe.expire(key, ttl_seconds)
         pipe.publish(topic, raw)
-        results = await pipe.execute()
-        return int(results[-1])
+        await pipe.execute()
 
     async def fetch_log_buffer(self, topic: str) -> list[str]:
         """Return buffered log JSON lines for ``topic`` (oldest → newest)."""
@@ -746,8 +789,14 @@ class Broker:
     ) -> AsyncIterator[tuple[str, UntypedEnvelope]]:
         """Yield ``(channel, envelope)`` from pattern subscriptions until ``stop``.
 
-        Uses Redis ``PSUBSCRIBE``. Messages published while not subscribed are
-        lost unless they were also written via :meth:`publish_log`.
+        Messages published while not subscribed are lost unless they were also
+        written via :meth:`publish_log`, exactly as in :meth:`subscribe`.
+
+        Patterns belong on :class:`~mftik.protocol.Topics` and must use one
+        wildcard per segment — ``log.*.*``, not ``log.*``. Redis globs the
+        whole channel name and would match both; a transport that matches per
+        segment matches only the first, and a pattern that matches nothing
+        fails silently. See the note above ``Topics.log_pattern``.
         """
         pattern_list = (patterns,) if isinstance(patterns, str) else tuple(patterns)
         if not pattern_list:
