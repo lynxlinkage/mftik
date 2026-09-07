@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 from mftik.registry.digest import digest_files
 from mftik.registry.errors import RegistryConflict, RegistryError
@@ -16,6 +19,22 @@ class Tiny(Strategy):
 """
 
 _YML = "td: {}\nmd: []\nsts:\n  qty: 1\n"
+
+
+def _touch_newer(path: Path) -> None:
+    """Force ``st_mtime_ns`` strictly past its current value.
+
+    An in-place rewrite can land in the same mtime bucket the store's
+    ``_tree_cache`` is keyed on. Tests that assert invalidation must not
+    race that resolution.
+    """
+    stat = path.stat()
+    old = stat.st_mtime_ns
+    os.utime(path, ns=(stat.st_atime_ns, old + 1))
+    if path.stat().st_mtime_ns > old:
+        return
+    os.utime(path, ns=(stat.st_atime_ns, old + 1_000_000_000))
+    assert path.stat().st_mtime_ns > old
 
 
 def test_add_writes_source(tmp_path) -> None:
@@ -191,7 +210,9 @@ def test_class_name_mismatch_is_junk(tmp_path) -> None:
     store = RegistryStore(tmp_path)
     store.add({"strategy.py": _TINY})
     dest = tmp_path / "registry" / "private" / "tiny"
-    (dest / "strategy.py").write_text(_TINY.replace('name = "tiny"', 'name = "bar"'))
+    py = dest / "strategy.py"
+    py.write_text(_TINY.replace('name = "tiny"', 'name = "bar"'))
+    _touch_newer(py)
     assert store.list_private() == []
     assert store.get_private("tiny") is None
     assert store.get_private("bar") is None
@@ -205,6 +226,7 @@ def test_read_tree_cache_hits_until_mtime_changes(tmp_path) -> None:
     assert first is second
     dest = tmp_path / "registry" / "private" / "tiny" / "strategy.py"
     dest.write_text(_TINY + "\n# edited\n")
+    _touch_newer(dest)
     third = store.list_private()[0]
     assert third is not first
     assert third.digest != first.digest
@@ -356,6 +378,7 @@ def test_yml_mtime_invalidates_the_tree_cache(tmp_path) -> None:
     assert store.read_template(first) is None
     dest = tmp_path / "registry" / "private" / "tiny" / TEMPLATE_NAME
     dest.write_text(_YML)
+    _touch_newer(dest)
     second = store.list_private()[0]
     assert second is not first
     assert TEMPLATE_NAME in second.files
