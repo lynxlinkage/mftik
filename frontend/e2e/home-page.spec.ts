@@ -74,15 +74,7 @@ function statsOf(instances: Instance[], down: Set<string>) {
 	};
 }
 
-async function mockHome(
-	page: Page,
-	opts: { blocked?: Set<string> } = {}
-): Promise<{ instances: Instance[]; down: Set<string> }> {
-	const instances = seed();
-	const down = new Set<string>();
-	const blocked = opts.blocked ?? new Set(['td']);
-	let nextId = 4;
-
+async function mockAuth(page: Page) {
 	await page.route('**/api/auth/status', (route) =>
 		route.fulfill({
 			json: {
@@ -106,6 +98,20 @@ async function mockHome(
 			}
 		})
 	);
+}
+
+async function mockHome(
+	page: Page,
+	opts: { blocked?: Set<string> } = {}
+): Promise<{ instances: Instance[]; down: Set<string>; patched: number[]; deleted: number[] }> {
+	const instances = seed();
+	const down = new Set<string>();
+	const blocked = opts.blocked ?? new Set(['td']);
+	const patched: number[] = [];
+	const deleted: number[] = [];
+	let nextId = 4;
+
+	await mockAuth(page);
 	await page.route('**/api/stats', (route) =>
 		route.fulfill({ json: statsOf(instances, down) })
 	);
@@ -121,8 +127,9 @@ async function mockHome(
 				return;
 			}
 			const body = req.postDataJSON() as { region?: string; enabled?: boolean };
-			if (body.region !== undefined) row.region = body.region;
+			if (body.region !== undefined) row.region = body.region || null;
 			if (body.enabled !== undefined) row.enabled = body.enabled;
+			patched.push(id);
 			await route.fulfill({ json: row });
 			return;
 		}
@@ -147,6 +154,7 @@ async function mockHome(
 			const idx = instances.indexOf(row);
 			instances.splice(idx, 1);
 			down.delete(row.name);
+			deleted.push(id);
 			await route.fulfill({ json: { id, deleted: true } });
 			return;
 		}
@@ -182,7 +190,7 @@ async function mockHome(
 
 	await page.goto('/');
 	await expect(page.getByRole('heading', { name: 'Home' })).toBeVisible();
-	return { instances, down };
+	return { instances, down, patched, deleted };
 }
 
 function plane(page: Page, domain: string) {
@@ -208,7 +216,7 @@ test('declare, annotate, drain and retire', async ({ page }) => {
 
 	const md = plane(page, 'md');
 	await md.getByLabel('Instance name').fill('md-jp-1');
-	await md.getByLabel('Region').fill('tokyo');
+	await md.getByLabel('Declare region').fill('tokyo');
 	await md.getByRole('button', { name: 'Declare' }).click();
 
 	const declared = card(page, 'md-jp-1');
@@ -217,8 +225,8 @@ test('declare, annotate, drain and retire', async ({ page }) => {
 	await expect(declared.getByRole('button', { name: 'tokyo' })).toBeVisible();
 
 	await declared.getByRole('button', { name: 'tokyo' }).click();
-	await declared.getByLabel('Region').fill('ap-northeast-1');
-	await declared.getByLabel('Region').press('Enter');
+	await declared.getByLabel('Annotate region for md-jp-1').fill('ap-northeast-1');
+	await declared.getByLabel('Annotate region for md-jp-1').press('Enter');
 	await expect(declared.getByRole('button', { name: 'ap-northeast-1' })).toBeVisible();
 
 	await declared.getByRole('button', { name: 'Drain' }).click();
@@ -239,4 +247,83 @@ test('retire blocked by a credential shows the 409', async ({ page }) => {
 		"instance 'td' is still named by a credential"
 	);
 	await expect(card(page, 'td')).toBeVisible();
+});
+
+test('editing region then clicking Retire still retires', async ({ page }) => {
+	const dialogs: string[] = [];
+	page.on('dialog', (dialog) => {
+		dialogs.push(dialog.message());
+		dialog.accept();
+	});
+	const { patched, deleted } = await mockHome(page);
+
+	const mdCard = card(page, 'md');
+	await mdCard.getByRole('button', { name: 'region' }).click();
+	await mdCard.getByLabel('Annotate region for md').fill('tokyo');
+	await mdCard.getByRole('button', { name: 'Retire' }).click();
+
+	await expect(mdCard).toHaveCount(0);
+	expect(deleted).toEqual([3]);
+	expect(dialogs).toHaveLength(1);
+	expect(patched, 'the abandoned label is not saved onto a row being deleted').toEqual(
+		[]
+	);
+});
+
+test('editing region then clicking Drain saves the region too', async ({ page }) => {
+	// The other half of the same blur: here the edit is not abandoned, so the
+	// button that stole the focus has to commit it before it changes enabled.
+	const { instances, patched } = await mockHome(page);
+
+	const mdCard = card(page, 'md');
+	await mdCard.getByRole('button', { name: 'region' }).click();
+	await mdCard.getByLabel('Annotate region for md').fill('tokyo');
+	await mdCard.getByRole('button', { name: 'Drain' }).click();
+
+	await expect(mdCard.getByRole('button', { name: 'Enable' })).toBeVisible();
+	const md = instances.find((i) => i.name === 'md');
+	expect(md?.region).toBe('tokyo');
+	expect(md?.enabled).toBe(false);
+	expect(patched).toEqual([3, 3]);
+});
+
+test('a failed instances list still shows health cards', async ({ page }) => {
+	const instances = seed();
+	await mockAuth(page);
+	await page.route('**/api/stats', (route) =>
+		route.fulfill({ json: statsOf(instances, new Set()) })
+	);
+	await page.route('**/api/instances**', (route) =>
+		route.fulfill({ status: 500, json: { detail: 'instances unavailable' } })
+	);
+
+	await page.goto('/');
+	await expect(page.getByRole('heading', { name: 'Home' })).toBeVisible();
+	await expect(card(page, 'sts')).toBeVisible();
+	await expect(card(page, 'td')).toBeVisible();
+	await expect(card(page, 'md')).toBeVisible();
+	await expect(page.getByRole('button', { name: 'Drain' })).toHaveCount(0);
+	await expect(page.getByText('No instances declared.')).toHaveCount(0);
+	await expect(page.locator('.error-banner')).toContainText('instances unavailable');
+});
+
+test('a failed stats load does not claim nothing is declared', async ({ page }) => {
+	await mockAuth(page);
+	await page.route('**/api/stats', (route) =>
+		route.fulfill({ status: 500, json: { detail: 'stats down' } })
+	);
+	await page.route('**/api/instances**', (route) =>
+		route.fulfill({ json: { instances: seed() } })
+	);
+
+	await page.goto('/');
+	await expect(page.locator('.error-banner')).toContainText('stats down');
+	await expect(page.getByText('No instances declared.')).toHaveCount(0);
+});
+
+test('an illegal name cannot be declared', async ({ page }) => {
+	await mockHome(page);
+	const md = plane(page, 'md');
+	await md.getByLabel('Instance name').fill('md.jp');
+	await expect(md.getByRole('button', { name: 'Declare' })).toBeDisabled();
 });

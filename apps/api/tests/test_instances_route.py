@@ -95,6 +95,34 @@ async def test_only_td_md_sts_may_be_instanced(db, domain: str) -> None:
     assert domain in res.json()["detail"]
 
 
+@pytest.mark.parametrize("name", ["md.jp", "md jp", "MD-JP-1", "*"])
+async def test_an_illegal_instance_name_is_refused(db, name: str) -> None:
+    """The name is a Redis subject segment and there is no rename."""
+    async with a_client(_app()) as client:
+        res = await client.post(
+            "/instances", json={"name": name, "domain": "md"}
+        )
+
+    assert res.status_code == 400
+    assert name in res.json()["detail"]
+
+
+async def test_patch_clears_a_region_to_null(db) -> None:
+    """The UI sends ``""``. POST already stores NULL; PATCH must too."""
+    async with a_client(_app()) as client:
+        listed = await client.get("/instances")
+        instance_id = listed.json()["instances"][0]["id"]
+        await client.patch(
+            f"/instances/{instance_id}", json={"region": "ap-northeast-1"}
+        )
+        cleared = await client.patch(
+            f"/instances/{instance_id}", json={"region": ""}
+        )
+
+    assert cleared.status_code == 200
+    assert cleared.json()["region"] is None
+
+
 async def test_patch_edits_the_label_and_cannot_rename(db) -> None:
     """``region`` and ``enabled`` move. ``name`` is not a field at all.
 

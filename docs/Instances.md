@@ -159,6 +159,19 @@ Every process reads `MFTIK_INSTANCE` at boot and defaults it to the plane name
 (`md`, `td`, `sts`). An existing deployment therefore keeps working unchanged
 and its instance is called `md`, which is also what `PI-5` needs.
 
+The name is one subject segment — `[a-z][a-z0-9-]{0,63}` — and both sides
+enforce it: `POST /instances` refuses a declaration that does not match, and a
+process refuses to start on an `MFTIK_INSTANCE` that does not. It has to be
+both, because the two names are only ever compared for equality and neither
+side can rewrite the other: there is no rename. A process that came up on
+`MD-JP-1` would serve `health.md.MD-JP-1`, a name no declaration can hold, and
+read as *down* on Home forever while being perfectly healthy. Failing at boot
+turns that into a traceback naming the variable, while somebody is still
+looking at the deploy.
+
+This catches the names that could never have worked, not the ones that are
+merely wrong — see the `td-jp-l` typo below, which is legal and undetectable.
+
 A declared row says what should exist. A probe says whether it answers. Those
 are the only two facts, and Home is the difference between them:
 

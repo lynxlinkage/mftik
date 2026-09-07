@@ -15,6 +15,7 @@ from mftik.instance import (
     control_subjects,
     instance_name,
     instance_role,
+    validate_instance_name,
 )
 from mftik.runtime import (
     configure_logging,
@@ -32,6 +33,7 @@ __all__ = [
     "control_subjects",
     "instance_name",
     "instance_role",
+    "validate_instance_name",
     "serve_health",
     "run_heartbeat_service",
     "run_until_stopped",

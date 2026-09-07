@@ -8,6 +8,17 @@
 
 	const emptyDraft = (): Draft => ({ name: '', region: '' });
 
+	/** Same rule as ``validate_instance_name``: one Redis subject segment. */
+	const INSTANCE_NAME = /^[a-z][a-z0-9-]{0,63}$/;
+
+	function legalName(name: string): boolean {
+		return INSTANCE_NAME.test(name);
+	}
+
+	function errMsg(e: unknown): string {
+		return e instanceof Error ? e.message : String(e);
+	}
+
 	let domains = $state<DomainStats[]>([]);
 	/** `/stats` has no id; PATCH/DELETE do. Joined on the unique instance name. */
 	let idByName = $state<Record<string, number>>({});
@@ -27,15 +38,25 @@
 	async function refresh() {
 		loading = true;
 		error = null;
-		try {
-			const [statsRes, instRes] = await Promise.all([api.stats(), api.instances()]);
-			domains = statsRes.domains;
-			idByName = Object.fromEntries(instRes.instances.map((i) => [i.name, i.id]));
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			loading = false;
+		const [statsSettled, instSettled] = await Promise.allSettled([
+			api.stats(),
+			api.instances()
+		]);
+		if (statsSettled.status === 'fulfilled') {
+			domains = statsSettled.value.domains;
+		} else {
+			error = errMsg(statsSettled.reason);
 		}
+		if (instSettled.status === 'fulfilled') {
+			idByName = Object.fromEntries(
+				instSettled.value.instances.map((i) => [i.name, i.id])
+			);
+		} else {
+			// Health still renders. Cards without an id lose their buttons.
+			idByName = {};
+			error ??= errMsg(instSettled.reason);
+		}
+		loading = false;
 	}
 
 	onMount(refresh);
@@ -81,7 +102,7 @@
 	async function declareInstance(domain: Plane) {
 		const name = drafts[domain].name.trim();
 		const region = drafts[domain].region.trim();
-		if (!name || locked()) return;
+		if (!legalName(name) || locked()) return;
 		busy = true;
 		error = null;
 		try {
@@ -93,7 +114,7 @@
 			drafts[domain] = emptyDraft();
 			await refresh();
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = errMsg(e);
 		} finally {
 			busy = false;
 		}
@@ -113,8 +134,17 @@
 		editingId = null;
 	}
 
+	async function persistRegion(id: number, current: string | null): Promise<void> {
+		if (editingId !== id) return;
+		const next = editingRegion.trim();
+		editingId = null;
+		if (next === (current ?? '').trim()) return;
+		await api.patchInstance(id, { region: next });
+	}
+
 	async function commitAnnotate(id: number, current: string | null) {
 		if (editingId !== id) return;
+		if (locked()) return;
 		const next = editingRegion.trim();
 		editingId = null;
 		if (next === (current ?? '').trim()) return;
@@ -124,21 +154,31 @@
 			await api.patchInstance(id, { region: next });
 			await refresh();
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = errMsg(e);
 		} finally {
 			busy = false;
 		}
 	}
 
-	async function setEnabled(id: number, enabled: boolean) {
+	function regionFocusOut(event: FocusEvent, id: number, current: string | null) {
+		// A click on Drain/Retire fires blur first. If we take the lock here
+		// that click lands on locked() and does nothing — no confirm, no
+		// request. Let the button own the save.
+		const dest = event.relatedTarget;
+		if (dest instanceof HTMLElement && dest.closest('.card-actions')) return;
+		void commitAnnotate(id, current);
+	}
+
+	async function setEnabled(id: number, enabled: boolean, current: string | null) {
 		if (locked()) return;
 		busy = true;
 		error = null;
 		try {
+			await persistRegion(id, current);
 			await api.patchInstance(id, { enabled });
 			await refresh();
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = errMsg(e);
 		} finally {
 			busy = false;
 		}
@@ -146,6 +186,10 @@
 
 	async function retire(id: number, name: string) {
 		if (locked()) return;
+		// An uncommitted region is dropped rather than saved first, unlike
+		// Drain. The row is about to stop existing, so the PATCH buys an audit
+		// entry for nothing — and a region the API refused would block the
+		// retire behind an edit the user has already abandoned.
 		if (!confirm(`Retire ${name}? This only removes the declaration — a running process is a deploy.`)) {
 			return;
 		}
@@ -155,7 +199,7 @@
 			await api.deleteInstance(id);
 			await refresh();
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = errMsg(e);
 		} finally {
 			busy = false;
 		}
@@ -196,15 +240,20 @@
 					aria-label="Instance name"
 					placeholder="name"
 					maxlength="64"
+					spellcheck="false"
+					autocapitalize="off"
+					autocomplete="off"
+					pattern={"[a-z][a-z0-9-]{0,63}"}
+					title="lowercase letters, digits and hyphens — this is MFTIK_INSTANCE and there is no rename"
 				/>
 				<input
 					bind:value={drafts[group.domain].region}
 					disabled={locked()}
-					aria-label="Region"
+					aria-label="Declare region"
 					placeholder="region"
 					maxlength="64"
 				/>
-				<button type="submit" disabled={locked() || !drafts[group.domain].name.trim()}>
+				<button type="submit" disabled={locked() || !legalName(drafts[group.domain].name.trim())}>
 					Declare
 				</button>
 			</form>
@@ -217,7 +266,7 @@
 					</div>
 				{/each}
 			</div>
-		{:else if !loading}
+		{:else if !loading && !error}
 			<p class="plane-empty">No instances declared.</p>
 		{/if}
 	</section>
@@ -249,7 +298,7 @@
 				bind:this={regionInput}
 				bind:value={editingRegion}
 				disabled={busy}
-				aria-label="Region"
+				aria-label="Annotate region for {name}"
 				maxlength="64"
 				onkeydown={(e) => {
 					if (e.key === 'Enter') {
@@ -260,7 +309,7 @@
 						cancelAnnotate();
 					}
 				}}
-				onblur={() => void commitAnnotate(id, d.region)}
+				onfocusout={(e) => regionFocusOut(e, id, d.region)}
 			/>
 		{:else if id != null}
 			<button
@@ -320,7 +369,8 @@
 				type="button"
 				class="ghost"
 				disabled={locked()}
-				onclick={() => void setEnabled(id, !d.enabled)}
+				onmousedown={(e) => e.preventDefault()}
+				onclick={() => void setEnabled(id, !d.enabled, d.region)}
 			>
 				{d.enabled ? 'Drain' : 'Enable'}
 			</button>
@@ -328,6 +378,7 @@
 				type="button"
 				class="danger"
 				disabled={locked()}
+				onmousedown={(e) => e.preventDefault()}
 				onclick={() => void retire(id, name)}
 			>
 				Retire
