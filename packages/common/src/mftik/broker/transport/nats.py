@@ -528,7 +528,8 @@ class NatsTransport(BrokerTransport):
         inbound: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
 
         async def handler(msg: Msg) -> None:
-            await inbound.put((self._topic_from_subject(msg.subject), msg.data.decode()))
+            topic = self._topic_from_subject(msg.subject)
+            await inbound.put((topic, msg.data.decode()))
 
         subs = [
             await self.js.subscribe(

@@ -161,7 +161,7 @@ cannot cancel the loop from inside itself.
 | inbound | `Topics.sts_md_session(sid)` | `Topics.sts_td_session(sid)` |
 | outbound | `Topics.md_session(sid)` | `Topics.td_session(api_id, sid)` |
 | grace | 3s | 5s — not unified; the two planes do not fail the same way |
-| unexpected exit | `detach(reason="lease_loop_died")` | the loop ends; the manager's own teardown covers it |
+| unexpected exit | `detach(reason="lease_loop_died")` | the same |
 
 `bistream` / `BidirectionalStream` / `stream.py` are deleted. STS still
 heartbeats with `publish`; it was never a consumer of the link.
