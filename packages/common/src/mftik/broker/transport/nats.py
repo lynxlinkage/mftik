@@ -1338,15 +1338,23 @@ async def _iter_until_stopped(
             if nxt in done:
                 yield nxt.result()
                 continue
-            # Stopping, but the queue may still hold what arrived before the
-            # event was set. A message dropped here is one a plane was told
-            # about and never acted on.
             nxt.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await nxt
-            while not inbound.empty():
-                yield inbound.get_nowait()
-            return
+            break
+        # Whatever arrived before the event was set is still work this process
+        # accepted: ``_pump_posted`` acknowledges a posted message as it hands
+        # it over, so one dropped here is a backfill or an account sweep that
+        # the queue will not offer to anybody again.
+        #
+        # Drained after the loop rather than inside the stopping branch, because
+        # both ways out need it. A message that *wins* the race against the stop
+        # event is yielded and the loop goes round to a condition that is now
+        # false — which used to leave everything queued behind that one message
+        # unread, and that is the likelier ordering of the two: a plane is
+        # usually told to stop while its subject is busy.
+        while not inbound.empty():
+            yield inbound.get_nowait()
     finally:
         stopping.cancel()
         with contextlib.suppress(asyncio.CancelledError):

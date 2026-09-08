@@ -28,6 +28,7 @@ from mftik.broker.transport.nats import (
     MIN_TTL_SECONDS,
     NatsTransport,
     _check_subject,
+    _iter_until_stopped,
     _kv_key,
     _ttl_seconds,
 )
@@ -386,3 +387,29 @@ async def test_a_coverage_record_carries_its_own_expiry(broker: Broker) -> None:
         status.stream_info.config.name, subject=f"$KV.{status.bucket}.{_kv_key(feed)}"
     )
     assert (msg.headers or {}).get("Nats-TTL") == "1800"
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_serve_loop_still_hands_over_what_it_had_taken() -> None:
+    """Everything queued when the stop event fires, whichever won the race.
+
+    ``_pump_posted`` acknowledges a posted message as it hands it to the queue,
+    so a message dropped here is a backfill or an account sweep the work queue
+    will not offer to anybody again. The ordering that mattered is the one where
+    a message *wins* the race: the loop yields it and then finds its own
+    condition false, and the rest of the batch used to go out with it.
+    """
+    inbound: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
+    for n in range(5):
+        inbound.put_nowait((f"work-{n}", None))
+    stop = asyncio.Event()
+
+    seen: list[str] = []
+    async for raw, _reply in _iter_until_stopped(inbound, stop=stop):
+        seen.append(raw)
+        # Told to stop having taken the first of a batch — a plane is usually
+        # asked to shut down while its subject is busy, not while it is idle.
+        stop.set()
+
+    assert seen == [f"work-{n}" for n in range(5)]
+
