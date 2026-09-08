@@ -8,14 +8,13 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from mftik.broker import Broker
+from mftik.broker import Broker, LeasedSessionLink
 from mftik.liveness import clear_alive, is_alive, mark_alive
 from mftik.protocol import (
     MD_DETACH,
     MD_LEASE_ACK,
     MD_SUBSCRIBE,
     MD_UNSUBSCRIBE,
-    STS_LEASE_HEARTBEAT,
     Envelope,
     LeaseHeartbeat,
     ListSessionsRequest,
@@ -624,198 +623,110 @@ class SessionManager:
 
     async def _lease_loop(self, link: StsLink, ready: asyncio.Event) -> None:
         """Sub sts.md.{session_id}; ACK on md.{session_id}; enforce grace."""
-        sts_topic = Topics.sts_md_session(link.session_id)
-        md_topic = Topics.md_session(link.session_id)
-        last_seen = asyncio.get_running_loop().time()
 
-        async def _watch_timeout() -> None:
-            nonlocal last_seen
-            while not link.stop.is_set():
-                await asyncio.sleep(0.5)
-                if (
-                    asyncio.get_running_loop().time() - last_seen
-                    > self._lease_grace
-                ):
-                    logger.warning(
-                        "MD lease expired session=%s", link.session_id
-                    )
-                    if self._links.get(link.session_id) is link:
-                        # Detach on a sibling task — awaiting it here cancels
-                        # this lease loop from inside its own watchdog and can
-                        # recurse into RecursionError.
-                        asyncio.create_task(
-                            self.detach(
-                                session_id=link.session_id,
-                                reason="lease_expired",
-                            ),
-                            name=f"md-detach-{link.session_id}",
-                        )
-                    return
-
-        async def _pump() -> bool:
-            """Read one subscription to its end. True once STS has detached."""
-            nonlocal last_seen
-            async for env in self._broker.subscribe(sts_topic, stop=link.stop):
-                if env.type == STS_LEASE_HEARTBEAT:
-                    try:
-                        hb = LeaseHeartbeat.model_validate(env.payload)
-                    except Exception:
-                        continue
-                    last_seen = asyncio.get_running_loop().time()
-                    link.last_token = hb.token
-                    if not ready.is_set():
-                        ready.set()
-                    # Renewed here rather than on a timer of its own: the
-                    # lease heartbeat already is the signal that this attach
-                    # is in use, and the key should outlive exactly that.
-                    try:
-                        await mark_alive(
-                            self._broker,
-                            link.session_id,
-                            domain=self._alive_domain,
-                        )
-                    except Exception:
-                        # A missed renewal is survivable — the TTL is many
-                        # heartbeats wide. Dropping the lease loop over one
-                        # would not be: that stops the ACKs STS waits on.
-                        logger.exception(
-                            "MD liveness refresh failed session=%s",
-                            link.session_id,
-                        )
-                    try:
-                        await self._broker.publish(
-                            md_topic,
-                            Envelope[MdLeaseAck].wrap(
-                                MdLeaseAck(
-                                    session_id=link.session_id,
-                                    token=hb.token,
-                                    instance=self._instance,
-                                ),
-                                type=MD_LEASE_ACK,
-                                source="md",
-                                session_id=link.session_id,
-                            ),
-                        )
-                    except Exception:
-                        # Same reasoning as the renewal above, and the same
-                        # cost if it ends the loop: the watchdog goes with it,
-                        # and nothing is left that can expire this lease.
-                        logger.exception(
-                            "MD lease ack failed session=%s", link.session_id
-                        )
-                    continue
-
-                # Feed changes do venue I/O — a websocket that will not open
-                # must not take the lease down with it. Logged and dropped:
-                # STS asked for a feed and does not get one, which is visible,
-                # where a dead lease loop is not.
-                if env.type == MD_SUBSCRIBE:
-                    try:
-                        msg = MdSubscribe.model_validate(env.payload)
-                    except Exception:
-                        continue
-                    # Addressed to a peer. This channel is pub/sub and every
-                    # MD holding the session reads it, so acting on another
-                    # instance's subscribe would open a second pump for one
-                    # feed and deliver every print twice.
-                    if msg.instance is not None and msg.instance != self._instance:
-                        continue
-                    if msg.session_id != link.session_id:
-                        continue
-                    try:
-                        await self._subscribe_feed(link, msg.feed)
-                    except Exception:
-                        logger.exception(
-                            "MD subscribe failed session=%s feed=%s",
-                            link.session_id,
-                            msg.feed,
-                        )
-                    continue
-
-                if env.type == MD_UNSUBSCRIBE:
-                    try:
-                        msg = MdUnsubscribe.model_validate(env.payload)
-                    except Exception:
-                        continue
-                    if msg.session_id != link.session_id:
-                        continue
-                    try:
-                        await self._unsubscribe_feed(link, msg.feed)
-                    except Exception:
-                        logger.exception(
-                            "MD unsubscribe failed session=%s feed=%s",
-                            link.session_id,
-                            msg.feed,
-                        )
-                    continue
-
-                # STS detaches over ``md.session.detach`` now. This stays
-                # because a rolling deploy has both versions running at once
-                # — an STS that has not restarted yet still says goodbye here.
-                if env.type == MD_DETACH:
-                    try:
-                        det = MdDetach.model_validate(env.payload)
-                    except Exception:
-                        continue
-                    if det.session_id == link.session_id:
-                        await self.detach(
-                            session_id=link.session_id,
-                            reason="sts_stop",
-                        )
-                        return True
-            return False
-
-        watchdog = asyncio.create_task(
-            _watch_timeout(), name=f"md-lease-wd-{link.session_id}"
-        )
-        try:
-            # Resubscribed rather than returned: a dropped broker connection is
-            # not an ending, and this loop is the only thing that answers STS
-            # for this link. The watchdog stays outside the retry so it keeps
-            # judging liveness across the gap — a resubscribe that never comes
-            # back still expires the lease, instead of leaving an attach with
-            # nobody reading for it.
-            while not link.stop.is_set():
-                try:
-                    if await _pump():
-                        return
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception(
-                        "MD lease subscription failed session=%s "
-                        "— resubscribing",
-                        link.session_id,
-                    )
-                try:
-                    await asyncio.wait_for(
-                        link.stop.wait(), timeout=RESUBSCRIBE_DELAY_S
-                    )
-                except TimeoutError:
-                    continue
-        finally:
-            watchdog.cancel()
-            await asyncio.gather(watchdog, return_exceptions=True)
-            # Last resort, for an ending neither branch above accounts for:
-            # this loop stopped without detaching and without being torn down,
-            # leaving an md row live and a venue feed pumping for a session
-            # nobody is leasing — with no log to say so, because nothing
-            # awaits this task and its exception is never retrieved.
-            if (
-                not link.stop.is_set()
-                and self._links.get(link.session_id) is link
-            ):
-                logger.error(
-                    "MD lease loop exited unexpectedly session=%s — detaching",
+        async def _on_heartbeat(hb: LeaseHeartbeat) -> None:
+            link.last_token = hb.token
+            try:
+                await mark_alive(
+                    self._broker,
+                    link.session_id,
+                    domain=self._alive_domain,
+                )
+            except Exception:
+                logger.exception(
+                    "MD liveness refresh failed session=%s",
                     link.session_id,
                 )
-                asyncio.create_task(
-                    self.detach(
+
+        async def _on_message(env: Any) -> bool:
+            if env.type == MD_SUBSCRIBE:
+                try:
+                    msg = MdSubscribe.model_validate(env.payload)
+                except Exception:
+                    return False
+                if msg.instance is not None and msg.instance != self._instance:
+                    return False
+                if msg.session_id != link.session_id:
+                    return False
+                try:
+                    await self._subscribe_feed(link, msg.feed)
+                except Exception:
+                    logger.exception(
+                        "MD subscribe failed session=%s feed=%s",
+                        link.session_id,
+                        msg.feed,
+                    )
+                return False
+            if env.type == MD_UNSUBSCRIBE:
+                try:
+                    msg = MdUnsubscribe.model_validate(env.payload)
+                except Exception:
+                    return False
+                if msg.session_id != link.session_id:
+                    return False
+                try:
+                    await self._unsubscribe_feed(link, msg.feed)
+                except Exception:
+                    logger.exception(
+                        "MD unsubscribe failed session=%s feed=%s",
+                        link.session_id,
+                        msg.feed,
+                    )
+                return False
+            if env.type == MD_DETACH:
+                try:
+                    det = MdDetach.model_validate(env.payload)
+                except Exception:
+                    return False
+                if det.session_id == link.session_id:
+                    await self.detach(
                         session_id=link.session_id,
-                        reason="lease_loop_died",
-                    ),
-                    name=f"md-detach-{link.session_id}",
+                        reason="sts_stop",
+                    )
+                    return True
+            return False
+
+        async def _expire() -> None:
+            if self._links.get(link.session_id) is link:
+                await self.detach(
+                    session_id=link.session_id,
+                    reason="lease_expired",
                 )
+
+        async def _died() -> None:
+            if self._links.get(link.session_id) is link:
+                await self.detach(
+                    session_id=link.session_id,
+                    reason="lease_loop_died",
+                )
+
+        def _ack(hb: LeaseHeartbeat) -> Envelope[MdLeaseAck]:
+            return Envelope[MdLeaseAck].wrap(
+                MdLeaseAck(
+                    session_id=link.session_id,
+                    token=hb.token,
+                    instance=self._instance,
+                ),
+                type=MD_LEASE_ACK,
+                source="md",
+                session_id=link.session_id,
+            )
+
+        await LeasedSessionLink(
+            self._broker,
+            rx=Topics.sts_md_session(link.session_id),
+            tx=Topics.md_session(link.session_id),
+            stop=link.stop,
+            grace=self._lease_grace,
+            ready=ready,
+            ack=_ack,
+            on_heartbeat=_on_heartbeat,
+            on_message=_on_message,
+            on_expired=_expire,
+            on_died=_died,
+            resubscribe_delay=RESUBSCRIBE_DELAY_S,
+            name=f"md-lease-{link.session_id}",
+        ).run()
 
 
 def _venues_from_feeds(feeds: set[str] | list[str]) -> set[str]:

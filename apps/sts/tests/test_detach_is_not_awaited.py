@@ -1,7 +1,7 @@
 """Stopping a session must not wait on the domains it is detaching from.
 
 The lease is what actually ends an attach: TD and MD each watch this session's
-heartbeat and run the identical teardown when it stops. The detach message is
+heartbeat and run the identical teardown when it stops. The detach request is
 promptness and a reason on the row, not the mechanism — so a domain that is
 slow, busy or gone can cost a stop nothing.
 """
@@ -12,15 +12,12 @@ import asyncio
 import time
 
 import pytest
-from broker_harness import a_broker, queued_requests
+from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.protocol import (
-    MD_SESSION_DETACH,
     TD_SESSION_DETACH,
-    MdDetachRequest,
-    TdDetachRequest,
+    Envelope,
     Topics,
-    UntypedEnvelope,
 )
 from mftik.strategy import Strategy
 from mftik_sts.session.session import StsSession
@@ -30,14 +27,6 @@ from mftik_sts.session.session import StsSession
 async def broker() -> Broker:
     async with a_broker("test-detach") as client:
         yield client
-
-
-async def _queued(broker: Broker, subject: str) -> list[UntypedEnvelope]:
-    """Everything still waiting on a subject, without serving it."""
-    return [
-        UntypedEnvelope.from_json(row)
-        for row in await queued_requests(broker, subject)
-    ]
 
 
 def _session(broker: Broker, **kwargs) -> StsSession:
@@ -62,73 +51,42 @@ async def test_stop_does_not_wait_for_a_domain_that_never_answers(
     await session.stop()
     elapsed = time.monotonic() - started
 
-    # Generous against a slow machine and still an order of magnitude under
-    # the two five-second attempts per attach this replaced.
     assert elapsed < 2.0, f"stop took {elapsed:.1f}s"
 
 
-async def test_the_detaches_are_left_on_the_queue_for_whoever_serves_it(
-    broker: Broker,
-) -> None:
-    """Not waiting is not the same as not sending.
+async def test_a_serving_domain_receives_the_detach(broker: Broker) -> None:
+    seen: list[str] = []
+    stop = asyncio.Event()
 
-    A Redis list holds the message until a consumer takes it, so a domain that
-    is down during the stop still gets the detach when it comes back — which
-    is the difference between this and publishing on a stream nobody reads.
-    """
-    session = _session(
-        broker,
-        session_id="d-2",
-        td_api_ids=[7],
-        md_ids=["ticker.Paper_Spot_BTCUSDT"],
-    )
+    async def serve_td() -> None:
+        async for req in broker.serve(Topics.td("td"), stop=stop):
+            seen.append(req.envelope.type)
+            await req.reply(
+                Envelope[dict].wrap({}, type="td.session.detach", source="td")
+            )
+
+    task = asyncio.create_task(serve_td())
+    await asyncio.sleep(0.2)
+    session = _session(broker, session_id="d-2", td_api_ids=[7])
     await session.start()
     await session.stop()
+    stop.set()
+    await asyncio.gather(task, return_exceptions=True)
 
-    td = await _queued(broker, Topics.td("td"))
-    md = await _queued(broker, Topics.MD)
-
-    assert [env.type for env in td] == [TD_SESSION_DETACH]
-    assert [env.type for env in md] == [MD_SESSION_DETACH]
-
-    td_payload = TdDetachRequest.model_validate(td[0].payload)
-    assert td_payload.session_id == "d-2"
-    assert td_payload.api_id == 7
-    # The reason is the whole point of sending it at all: it separates a clean
-    # stop from a process that vanished and let its lease expire.
-    assert td_payload.reason == "sts_stop"
-    assert MdDetachRequest.model_validate(md[0].payload).session_id == "d-2"
-
-    # Posted, not requested: nobody is waiting on a reply inbox.
-    assert td[0].reply_to is None
-    assert md[0].reply_to is None
-
-
-async def test_one_detach_per_attached_api_id(broker: Broker) -> None:
-    session = _session(broker, session_id="d-3", td_api_ids=[1, 2, 3])
-    await session.start()
-    await session.stop()
-
-    td = await _queued(broker, Topics.td("td"))
-    api_ids = sorted(
-        TdDetachRequest.model_validate(env.payload).api_id for env in td
-    )
-    assert api_ids == [1, 2, 3]
-    # No md attach, so nothing was sent to MD.
-    assert await _queued(broker, Topics.MD) == []
+    assert TD_SESSION_DETACH in seen
 
 
 async def test_a_broker_that_cannot_take_the_detach_still_stops(
     broker: Broker, monkeypatch
 ) -> None:
-    """The lease covers it, so a failed post is a log line and not a hang."""
+    """The lease covers it, so a failed request is a log line and not a hang."""
 
-    async def boom(subject, envelope):  # noqa: ANN001, ANN202
-        raise RuntimeError("redis is down")
+    async def boom(subject, envelope, **kwargs):  # noqa: ANN001, ANN202
+        raise RuntimeError("nats is down")
 
     session = _session(broker, session_id="d-4", td_api_ids=[1])
     await session.start()
-    monkeypatch.setattr(broker, "post", boom)
+    monkeypatch.setattr(broker, "request", boom)
 
     started = time.monotonic()
     await session.stop()

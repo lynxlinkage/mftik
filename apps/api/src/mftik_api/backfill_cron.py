@@ -21,8 +21,14 @@ import asyncio
 import logging
 import os
 
-from mftik.broker import Broker
-from mftik.protocol import TD_BACKFILL, Envelope, TdBackfill, Topics
+from mftik.broker import Broker, RequestTimeoutError
+from mftik.protocol import (
+    TD_BACKFILL,
+    Envelope,
+    TdBackfill,
+    TdBackfillResult,
+    Topics,
+)
 from mftik_db.repositories import ApiRepository, OrderRepository
 from mftik_db.session import session_scope
 
@@ -62,9 +68,9 @@ async def _instance_for(api_id: int) -> str | None:
 async def sweep(broker: Broker, *, reason: str = "cron") -> int:
     """Ask for a backfill of every account with history. Returns how many.
 
-    Posts rather than requests: a walk is minutes of venue round trips and
-    there is nothing here that would do anything with the answer. TD replies to
-    nobody, and the result of the run is the cursor it moved.
+    Requests rather than posts: TD acks as soon as it accepts the walk, so
+    this learns whether that instance is there and whether the account is
+    already running. The cursor is still the guarantee.
     """
     api_ids = await accounts_to_sweep()
     for api_id in api_ids:
@@ -77,14 +83,39 @@ async def sweep(broker: Broker, *, reason: str = "cron") -> int:
                 "backfill cron skipping api_id=%s — no credential row", api_id
             )
             continue
-        await broker.post(
-            Topics.td_backfill(instance),
-            Envelope[TdBackfill].wrap(
-                TdBackfill(api_id=api_id, reason=reason),
-                type=TD_BACKFILL,
-                source="api",
-            ),
+        envelope = Envelope[TdBackfill].wrap(
+            TdBackfill(api_id=api_id, reason=reason),
+            type=TD_BACKFILL,
+            source="api",
         )
+        try:
+            reply = await broker.request(
+                Topics.td_backfill(instance), envelope, timeout=5.0
+            )
+        except RequestTimeoutError:
+            logger.warning(
+                "backfill cron no responder api_id=%s instance=%s",
+                api_id,
+                instance,
+            )
+        else:
+            try:
+                result = TdBackfillResult.model_validate(reply.payload)
+            except Exception:
+                logger.warning(
+                    "backfill cron unreadable reply api_id=%s instance=%s",
+                    api_id,
+                    instance,
+                    exc_info=True,
+                )
+            else:
+                if not result.ok:
+                    logger.warning(
+                        "backfill cron refused api_id=%s instance=%s reason=%s",
+                        api_id,
+                        instance,
+                        result.reason,
+                    )
         if ACCOUNT_PAUSE_S:
             await asyncio.sleep(ACCOUNT_PAUSE_S)
     return len(api_ids)

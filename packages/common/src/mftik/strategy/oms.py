@@ -38,12 +38,15 @@ ORDER_ACK_TIMEOUT_S = 2.0
 class StrategyOms:
     """Order entry, and reads of TD's book out of the broker.
 
-    There is no local copy of the book here. TD writes ``td.oms.{api_id}``
-    (client_order_id → Order) and every read below goes to it, so what a
-    strategy sees is always what TD sees. ``on_order_update`` and friends are
-    the cue to go and look, not a stream to fold into a private mirror —
-    rebuilding state from a fan-out that other sessions also feed is how the
-    two sides drift apart.
+    TD writes ``td.oms.{api_id}`` (client_order_id → Order). ``view`` and
+    ``orders`` read STS's local projection of that state when the session is
+    watching it, and fall back to ``state_all`` when it is not. A single
+    order after submit is always ``state_get``: the watch can still be a
+    tick behind the ack, and a miss here looks like the order was refused.
+
+    ``on_order_update`` and friends are the cue to go and look, not a
+    stream to fold into a private mirror — rebuilding state from a fan-out
+    that other sessions also feed is how the two sides drift apart.
 
     Order entry is request-reply on ``td.order.{api_id}``: submit and cancel
     both wait for TD's ack and return whether it took the request. Venue
@@ -73,9 +76,9 @@ class StrategyOms:
     async def view(self, api_id: int | None = None) -> OmsView:
         """Read TD's live book for ``api_id`` out of ``td.oms.{api_id}``.
 
-        Always a read: STS keeps no copy. TD is the only writer, so whatever
-        comes back here is what TD believes right now, and two strategies on
-        the same account cannot drift apart by each maintaining their own.
+        The projection when the session is watching it, otherwise a pull.
+        TD is the only writer, so two strategies on the same account cannot
+        drift apart by each maintaining their own book.
         """
         resolved = self._resolve(api_id)
         log = session_log(self._strategy)
@@ -84,7 +87,9 @@ class StrategyOms:
             # caller, so the log has to be the thing that tells them apart.
             log.record("read", "oms.view", dir="out", resolved=False, count=0)
             return OmsView()
-        rows = await self._session_broker().state_all(Topics.td_oms(resolved))
+        rows = self._state_rows(Topics.td_oms(resolved))
+        if rows is None:
+            rows = await self._session_broker().state_all(Topics.td_oms(resolved))
         # The rows, not the view built from them. This read is an input to
         # whatever the strategy did next, and only the answer it was actually
         # given can stand in for TD's book after the fact.
@@ -108,18 +113,18 @@ class StrategyOms:
     async def order(
         self, client_order_id: str | int, api_id: int | None = None
     ) -> Order | None:
-        """One order by ``client_order_id``, or None if it is not live."""
+        """One order by ``client_order_id``, or None if it is not live.
+
+        Always a direct read. The projection can lag the ack that told the
+        strategy the order was taken, and a miss here is a money bug.
+        """
         resolved = self._resolve(api_id)
         log = session_log(self._strategy)
         cid = str(client_order_id)
         if resolved is None:
-            log.record(
-                "read", "oms.order", dir="out", cid=cid, resolved=False
-            )
+            log.record("read", "oms.order", dir="out", cid=cid, resolved=False)
             return None
-        row = await self._session_broker().state_get(
-            Topics.td_oms(resolved), cid
-        )
+        row = await self._session_broker().state_get(Topics.td_oms(resolved), cid)
         # ``found`` rather than inferring it from a missing payload: an order
         # that is no longer live is a different answer from one nobody asked
         # about, and both arrive here as None.
@@ -147,6 +152,13 @@ class StrategyOms:
             return api_id
         attached = self.api_ids
         return attached[0] if len(attached) == 1 else None
+
+    def _state_rows(self, name: str) -> dict[str, Any] | None:
+        session = self._strategy.session if self._strategy is not None else None
+        getter = getattr(session, "projected_state", None)
+        if getter is None:
+            return None
+        return getter(name)
 
     def _session_broker(self):
         return self._require_session().broker

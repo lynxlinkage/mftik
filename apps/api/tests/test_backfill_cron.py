@@ -9,10 +9,12 @@ is exactly the one nothing else would ever repair.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from decimal import Decimal
 
 import pytest
-from broker_harness import a_broker, queued_requests
+from broker_harness import a_broker
 from db_harness import a_database, an_instance, an_owner
 from mftik.broker import Broker
 from mftik.protocol import Envelope, TdBackfill, Topics
@@ -82,12 +84,30 @@ def an_order(api_id: int, *, ticker: str = "Binance_Spot_BTCUSDT") -> dict:
     }
 
 
-async def queued(broker: Broker) -> list[TdBackfill]:
-    raw = await queued_requests(broker, Topics.td_backfill("td"))
-    return [
-        TdBackfill.model_validate(Envelope[dict].model_validate_json(i).payload)
-        for i in raw
-    ]
+async def _serve(broker: Broker, stop: asyncio.Event, seen: list[TdBackfill]) -> None:
+    async for req in broker.serve(Topics.td_backfill("td"), stop=stop):
+        seen.append(TdBackfill.model_validate(req.envelope.payload))
+        await req.reply(
+            Envelope[dict].wrap(
+                {"ok": True, "api_id": seen[-1].api_id},
+                type="td.backfill.result",
+                source="td",
+            )
+        )
+
+
+@asynccontextmanager
+async def capturing(broker: Broker) -> AsyncIterator[list[TdBackfill]]:
+    """A TD already serving, so the cron's request has somewhere to land."""
+    seen: list[TdBackfill] = []
+    stop = asyncio.Event()
+    task = asyncio.create_task(_serve(broker, stop, seen))
+    await asyncio.sleep(0.2)
+    try:
+        yield seen
+    finally:
+        stop.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.fixture(autouse=True)
@@ -105,11 +125,12 @@ async def test_every_account_with_history_is_asked_about(broker, db) -> None:
             [an_order(1), an_order(2), an_order(3)]
         )
 
-    asked = await sweep(broker)
+    async with capturing(broker) as seen:
+        asked = await sweep(broker)
 
-    assert asked == 3
-    assert sorted(a.api_id for a in await queued(broker)) == [1, 2, 3]
-    assert {a.reason for a in await queued(broker)} == {"cron"}
+        assert asked == 3
+        assert sorted(a.api_id for a in seen) == [1, 2, 3]
+        assert {a.reason for a in seen} == {"cron"}
 
 
 async def test_an_account_that_stopped_trading_is_still_swept(broker, db) -> None:
@@ -120,9 +141,10 @@ async def test_an_account_that_stopped_trading_is_still_swept(broker, db) -> Non
         await a_credential(session, 7, instance.id)
         await OrderRepository(session).bulk_upsert([an_order(7)])
 
-    await sweep(broker)
+    async with capturing(broker) as seen:
+        await sweep(broker)
 
-    assert [a.api_id for a in await queued(broker)] == [7]
+        assert [a.api_id for a in seen] == [7]
 
 
 async def test_a_credential_that_never_traded_is_not_asked_about(
@@ -130,7 +152,6 @@ async def test_a_credential_that_never_traded_is_not_asked_about(
 ) -> None:
     """Derived from the record, not from the ``apis`` table."""
     assert await sweep(broker) == 0
-    assert await queued(broker) == []
 
 
 async def test_one_account_is_asked_about_once_per_sweep(broker, db) -> None:
@@ -151,9 +172,10 @@ async def test_one_account_is_asked_about_once_per_sweep(broker, db) -> None:
             ]
         )
 
-    await sweep(broker)
+    async with capturing(broker) as seen:
+        await sweep(broker)
 
-    assert [a.api_id for a in await queued(broker)] == [5]
+        assert [a.api_id for a in seen] == [5]
 
 
 async def test_the_loop_sweeps_on_its_interval(broker, db, monkeypatch) -> None:
@@ -165,16 +187,17 @@ async def test_the_loop_sweeps_on_its_interval(broker, db, monkeypatch) -> None:
     monkeypatch.setattr(backfill_cron, "Broker", lambda *a, **kw: broker)
     monkeypatch.setattr(broker, "close", _noop)
 
-    stop = asyncio.Event()
-    task = asyncio.create_task(run_backfill_cron(stop, interval=0.05))
-    for _ in range(60):
-        await asyncio.sleep(0.02)
-        if await queued(broker):
-            break
-    stop.set()
-    await asyncio.wait_for(task, timeout=2)
+    async with capturing(broker) as seen:
+        stop = asyncio.Event()
+        task = asyncio.create_task(run_backfill_cron(stop, interval=0.05))
+        for _ in range(60):
+            await asyncio.sleep(0.02)
+            if seen:
+                break
+        stop.set()
+        await asyncio.wait_for(task, timeout=2)
 
-    assert [a.api_id for a in await queued(broker)] == [1]
+        assert [a.api_id for a in seen] == [1]
 
 
 async def test_a_failed_sweep_does_not_end_the_loop(broker, db, monkeypatch) -> None:
@@ -225,9 +248,10 @@ async def test_an_account_whose_credential_is_gone_is_not_asked_about(
             [an_order(1), an_order(99)]
         )
 
-    asked = await sweep(broker)
+    async with capturing(broker) as seen:
+        asked = await sweep(broker)
 
-    assert asked == 2, "both accounts have history"
-    assert [a.api_id for a in await queued(broker)] == [1], (
-        "only the one whose credential says where it may run"
-    )
+        assert asked == 2, "both accounts have history"
+        assert [a.api_id for a in seen] == [1], (
+            "only the one whose credential says where it may run"
+        )

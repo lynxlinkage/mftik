@@ -11,8 +11,9 @@ from typing import Any
 from pydantic import BaseModel
 
 from mftik.broker.config import BrokerConfig
+from mftik.broker.link import LeasedSessionLink
 from mftik.broker.request import IncomingRequest
-from mftik.broker.stream import BidirectionalStream
+from mftik.broker.state import StateProjection
 from mftik.broker.transport import build as build_transport
 from mftik.broker.transport.base import LEASE_ANONYMOUS, BrokerTransport
 from mftik.protocol import (
@@ -86,7 +87,7 @@ class Broker:
     Six processes, none of which import each other, and this is what they
     share. Every family below is documented in ``docs/Broker.md`` along with
     what NATS does to answer it; the short version is that fan-out is
-    best effort, a posted request waits for a consumer, and a lease expires.
+    best effort, a request nobody serves fails at once, and a lease expires.
 
     The store underneath is a :class:`~mftik.broker.transport.base.BrokerTransport`
     from :func:`mftik.broker.transport.build`. Nothing above this class may
@@ -96,8 +97,10 @@ class Broker:
 
     What lives here rather than in a transport is everything that would
     otherwise have been written twice: envelope encoding, the continuity
-    arithmetic in :meth:`tape_mark_recording`, and the two small objects that
-    wrap a subject pair and an incoming request.
+    arithmetic in :meth:`tape_mark_recording`, :class:`IncomingRequest`,
+    :class:`LeasedSessionLink` and :class:`StateProjection`.
+
+    The families below are the seven patterns in ``docs/BrokerPatterns.md``.
     """
 
     def __init__(
@@ -135,13 +138,12 @@ class Broker:
     async def __aexit__(self, *args: object) -> None:
         await self.close()
 
-    # --- shared state ------------------------------------------------------
+    # --- G. shared mutable state -------------------------------------------
     #
     # Fan-out tells a reader that something changed; these hold what it changed
     # *to*. A late subscriber, a restarted process and a strategy that missed a
-    # message all read the same current answer here, which is what makes "the
-    # writer's state and the reader's state agree" true by construction rather
-    # than by both sides keeping their own copy in sync.
+    # message all read the same current answer here. Writers still ``put`` /
+    # ``replace``; readers that care about the cost open a :class:`StateProjection`.
 
     async def state_put(
         self, name: str, field: str, value: BaseModel | dict[str, Any]
@@ -191,7 +193,17 @@ class Broker:
         """
         await self._transport.state_clear(names)
 
-    # --- leases (claims that expire) ---------------------------------------
+    def state_watch(
+        self, name: str, *, stop: asyncio.Event | None = None
+    ) -> AsyncIterator[tuple[str, str | None]]:
+        """Yield ``(field, raw_json)`` as ``name`` changes. ``None`` is a delete."""
+        return self._transport.state_watch(name, stop=stop)
+
+    def state_projection(self, name: str) -> StateProjection:
+        """A local map of ``name``, kept current by :meth:`state_watch`."""
+        return StateProjection(self, name)
+
+    # --- F. atomic register (leases and counters) --------------------------
     #
     # A lease is a fact about *now* that its holder may never get to retract:
     # a process running a session, holding an account, walking an account's
@@ -295,7 +307,7 @@ class Broker:
         """
         await self._transport.lease_drop(name)
 
-    # --- shared counters ---------------------------------------------------
+    # --- F. counters (same primitive, integer value) -----------------------
 
     async def counter_next(self, name: str) -> int:
         """Increment a shared counter and return the value that came back.
@@ -310,7 +322,7 @@ class Broker:
         """
         return await self._transport.counter_next(name)
 
-    # --- recorded tape -----------------------------------------------------
+    # --- B. keyed log (tape) -----------------------------------------------
     #
     # A feed's own history, kept so a strategy that starts later can warm up on
     # what it missed.
@@ -459,7 +471,7 @@ class Broker:
         """What this feed's tape covers, or ``{}`` if it was never recorded."""
         return await self._transport.tape_coverage(feed)
 
-    # --- fan-out -----------------------------------------------------------
+    # --- A. subject log (fan-out, with a replay tail on publish_log) -------
 
     async def publish(self, topic: str, envelope: Envelope[Any]) -> None:
         """Publish an envelope to a fan-out topic.
@@ -479,21 +491,33 @@ class Broker:
         maxlen: int | None = None,
         ttl_seconds: int = 86_400,
     ) -> None:
-        """Publish a log line and keep the last few for late subscribers.
+        """Publish a log line onto the log stream.
 
         Fan-out alone drops messages when nobody is listening (e.g. the UI
-        opens ``/ws/sts/...`` after a deploy). The buffer is replayed on
-        connect by :meth:`fetch_log_buffer`. ``maxlen`` defaults to
-        :attr:`BrokerConfig.log_buffer_maxlen` (100).
+        opens ``/ws/sts/...`` after a deploy). The stream holds its own
+        per-subject ring; :meth:`fetch_log_buffer` trims the replay to
+        ``maxlen`` (default :attr:`BrokerConfig.log_buffer_maxlen`). A
+        ``maxlen`` above the stream's cap raises rather than keeping fewer.
         """
         keep = self.config.log_buffer_maxlen if maxlen is None else max(1, maxlen)
         await self._transport.publish_log(
             topic, envelope.to_json(), maxlen=keep, ttl_seconds=ttl_seconds
         )
 
-    async def fetch_log_buffer(self, topic: str) -> list[str]:
-        """Return buffered log JSON lines for ``topic`` (oldest → newest)."""
-        return await self._transport.fetch_log_buffer(topic)
+    async def fetch_log_buffer(
+        self, topic: str, *, maxlen: int | None = None
+    ) -> list[str]:
+        """Return buffered log JSON lines for ``topic`` (oldest → newest).
+
+        The stream may hold more than a late subscriber asked to replay.
+        Trim here to ``maxlen`` (default
+        :attr:`BrokerConfig.log_buffer_maxlen`) so
+        ``BROKER_LOG_BUFFER_MAXLEN`` is the window even though the stream's
+        own ring is larger.
+        """
+        keep = self.config.log_buffer_maxlen if maxlen is None else max(1, maxlen)
+        rows = await self._transport.fetch_log_buffer(topic)
+        return rows[-keep:] if len(rows) > keep else rows
 
     async def subscribe(
         self,
@@ -535,30 +559,11 @@ class Broker:
         async for topic, raw in self._transport.psubscribe(pattern_list, stop=stop):
             yield topic, UntypedEnvelope.from_json(raw)
 
-    def bistream(
-        self,
-        *,
-        tx: str,
-        rx: str,
-    ) -> BidirectionalStream:
-        """Open a bidirectional stream (publish on ``tx``, subscribe on ``rx``)."""
-        return BidirectionalStream(self, tx=tx, rx=rx)
+    def leased_link(self, **kwargs: Any) -> LeasedSessionLink:
+        """Pattern E: a fenced session link. See :class:`LeasedSessionLink`."""
+        return LeasedSessionLink(self, **kwargs)
 
-    def bistream_pair(
-        self,
-        name: str,
-    ) -> tuple[BidirectionalStream, BidirectionalStream]:
-        """Open both ends of a named bistream: ``(up, down)``.
-
-        ``up`` publishes ``bistream.{name}.up`` and receives ``.down``;
-        ``down`` is the complement.
-        """
-        up_topic, down_topic = BidirectionalStream.topics(name)
-        up = self.bistream(tx=up_topic, rx=down_topic)
-        down = self.bistream(tx=down_topic, rx=up_topic)
-        return up, down
-
-    # --- Request-reply -----------------------------------------------------
+    # --- C. request / response ---------------------------------------------
 
     async def request(
         self,
@@ -597,18 +602,10 @@ class Broker:
     ) -> UntypedEnvelope:
         """Ask whether somebody is serving ``subject``, leaving nothing behind.
 
-        :meth:`request` on a subject nobody serves may leave the request for the
-        next consumer, which every other caller wants: an attach or a backfill
-        parked until its owner comes up is recovery. A liveness probe is the one
-        request where that is not recovery but litter — a dashboard polling a
-        down instance would write a record per probe that nobody will ever
-        drain, and the instance, when it finally booted, would open by answering
-        a heap of questions nobody is still waiting on.
-
-        So whatever a transport does to make an unserved request wait, it does
-        not do it here. The reply path is :meth:`request`'s exactly, and a
-        timeout still raises :class:`RequestTimeoutError`, which is the caller's
-        answer of "down".
+        :meth:`request` re-asks through a boot race. A probe does not: "down"
+        is the answer it exists to collect. The reply path is
+        :meth:`request`'s, and a timeout still raises
+        :class:`~mftik.broker.errors.RequestTimeoutError`.
         """
         wait = self.config.request_timeout if timeout is None else timeout
         outbound = self._addressed(envelope)
@@ -627,22 +624,6 @@ class Broker:
         if inbox is None or envelope.reply_to == inbox:
             return envelope
         return envelope.model_copy(update={"reply_to": inbox})
-
-    async def post(self, subject: str, envelope: Envelope[Any]) -> None:
-        """Enqueue on a request-reply subject without waiting for a reply.
-
-        The same subject :meth:`request` uses and the same competing consumers
-        take from it; what is missing is the ``reply_to``, so the handler
-        answers nobody and this returns as soon as the work has been accepted.
-
-        For work whose *result* the sender has no use for and whose duration it
-        must not inherit — a backfill run is minutes of venue round trips, and
-        the shutdown path that asks for one is measured in seconds. A request
-        left because nothing is serving the subject yet is not lost: the next
-        consumer to come up takes it, which is the recovery a fan-out message
-        could not offer, and the one place a durable queue keeps that promise.
-        """
-        await self._transport.post(subject, envelope.to_json())
 
     async def serve(
         self,

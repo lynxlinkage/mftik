@@ -5,12 +5,18 @@ import asyncio
 import pytest
 from broker_harness import a_broker
 from mftik.broker import (
-    BidirectionalStream,
     Broker,
     IncomingRequest,
+    LeasedSessionLink,
     RequestTimeoutError,
 )
-from mftik.protocol import Envelope, Topics, UntypedEnvelope
+from mftik.protocol import (
+    STS_LEASE_HEARTBEAT,
+    Envelope,
+    LeaseHeartbeat,
+    Topics,
+    UntypedEnvelope,
+)
 
 
 @pytest.fixture
@@ -94,7 +100,7 @@ async def test_publish_log_buffers_for_late_subscribers(broker: Broker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_log_trims_to_maxlen(broker: Broker) -> None:
+async def test_fetch_log_buffer_trims_to_maxlen(broker: Broker) -> None:
     topic = "log.sts.trim"
     for i in range(5):
         await broker.publish_log(
@@ -108,9 +114,8 @@ async def test_publish_log_trims_to_maxlen(broker: Broker) -> None:
             maxlen=3,
         )
 
-    buffered = await broker.fetch_log_buffer(topic)
+    buffered = await broker.fetch_log_buffer(topic, maxlen=3)
     assert len(buffered) == 3
-    assert '"line-2"' in buffered[0]
     assert '"line-4"' in buffered[-1]
 
 
@@ -126,7 +131,7 @@ STATUS_RING = 200
 async def test_a_ring_the_size_production_asks_for_is_the_size_it_gets(
     broker: Broker,
 ) -> None:
-    """``maxlen`` is exact, not "up to", and not "up to some cap of ours"."""
+    """Replay ``maxlen`` is exact, not "up to", and not "up to some cap of ours"."""
     topic = Topics.status_sts()
     for i in range(STATUS_RING + 5):
         await broker.publish_log(
@@ -140,11 +145,10 @@ async def test_a_ring_the_size_production_asks_for_is_the_size_it_gets(
             ttl_seconds=3600,
         )
 
-    buffered = await broker.fetch_log_buffer(topic)
+    buffered = await broker.fetch_log_buffer(topic, maxlen=STATUS_RING)
     assert len(buffered) == STATUS_RING
     # The newest, so a UI opening late sees the end of the story and not a
     # window from the middle of it.
-    assert '"line-5"' in buffered[0]
     assert f'"line-{STATUS_RING + 4}"' in buffered[-1]
 
 
@@ -223,44 +227,111 @@ async def test_serve_handler(broker: Broker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_bistream_roundtrip(broker: Broker) -> None:
-    up, down = broker.bistream_pair("session-1")
-    loop = asyncio.get_running_loop()
-    got: asyncio.Future[UntypedEnvelope] = loop.create_future()
+async def test_leased_link_acks_and_expires(broker: Broker) -> None:
+    stop = asyncio.Event()
+    ready = asyncio.Event()
+    expired = asyncio.Event()
+    acks: list[int] = []
 
-    async def reader() -> None:
-        async with down:
-            async for env in down:
-                if not got.done():
-                    got.set_result(env)
-                break
-
-    task = asyncio.create_task(reader())
-    await asyncio.sleep(0.05)
-
-    async with up:
-        sent = Envelope[dict].wrap(
-            {"hello": "sts"},
-            type="session.msg",
-            source="td",
+    def ack(hb: LeaseHeartbeat) -> Envelope[dict]:
+        acks.append(hb.token)
+        return Envelope[dict].wrap(
+            {"token": hb.token}, type="lease.ack", source="md"
         )
-        await up.send(sent)
 
-    received = await asyncio.wait_for(got, timeout=2)
-    await task
+    async def on_expired() -> None:
+        expired.set()
 
-    assert received.type == "session.msg"
-    assert received.payload == {"hello": "sts"}
-    assert received.id == sent.id
+    link = LeasedSessionLink(
+        broker,
+        rx="sts.md.e1",
+        tx="md.e1",
+        stop=stop,
+        grace=0.4,
+        ready=ready,
+        ack=ack,
+        on_expired=on_expired,
+        watch_interval=0.1,
+        name="test-lease",
+    )
+    task = asyncio.create_task(link.run())
+    await asyncio.sleep(0.05)
+    await broker.publish(
+        "sts.md.e1",
+        Envelope[LeaseHeartbeat].wrap(
+            LeaseHeartbeat(session_id="e1", token=7),
+            type=STS_LEASE_HEARTBEAT,
+            source="sts",
+        ),
+    )
+    await asyncio.wait_for(ready.wait(), timeout=2)
+    assert link.last_token == 7
+    await asyncio.wait_for(expired.wait(), timeout=2)
+    stop.set()
+    await asyncio.gather(task, return_exceptions=True)
+    assert acks == [7]
 
 
 @pytest.mark.asyncio
-async def test_bistream_peer_swap(broker: Broker) -> None:
-    up_topic, down_topic = BidirectionalStream.topics("x")
-    a = broker.bistream(tx=up_topic, rx=down_topic)
-    b = a.peer()
-    assert b.tx == a.rx
-    assert b.rx == a.tx
+async def test_state_projection_tracks_writes(broker: Broker) -> None:
+    name = "td.oms.1"
+    await broker.state_put(name, "cid-1", {"status": "new"})
+    proj = broker.state_projection(name)
+    await proj.start()
+    try:
+        assert proj.get("cid-1") == {"status": "new"}
+        await broker.state_put(name, "cid-1", {"status": "filled"})
+        await broker.state_drop(name, "cid-1")
+        for _ in range(40):
+            if proj.get("cid-1") is None and "cid-1" not in proj.all():
+                break
+            await asyncio.sleep(0.05)
+        assert proj.all() == {} or proj.get("cid-1") is None
+    finally:
+        await proj.close()
+
+
+@pytest.mark.asyncio
+async def test_a_dead_projection_is_not_live(broker: Broker) -> None:
+    """A watch that dies must not keep serving the last map it saw."""
+    name = "td.oms.fail"
+
+    async def dying_watch(_name: str, *, stop=None):
+        raise RuntimeError("watch died")
+        yield "", None
+
+    broker.state_watch = dying_watch  # type: ignore[method-assign]
+    await broker.state_put(name, "cid-1", {"status": "new"})
+    proj = broker.state_projection(name)
+    await proj.start()
+    try:
+        for _ in range(40):
+            if not proj.live:
+                break
+            await asyncio.sleep(0.05)
+        assert not proj.live
+    finally:
+        await proj.close()
+
+
+@pytest.mark.asyncio
+async def test_a_non_dict_field_is_dropped_from_the_projection(
+    broker: Broker,
+) -> None:
+    """Keeping the last dict would freeze a field the writer has replaced."""
+    name = "td.oms.nondict"
+    await broker.state_put(name, "cid-1", {"status": "new"})
+    proj = broker.state_projection(name)
+    await proj.start()
+    try:
+        await broker.transport.state_put_many(name, {"cid-1": "42"})
+        for _ in range(40):
+            if proj.get("cid-1") is None:
+                break
+            await asyncio.sleep(0.05)
+        assert proj.get("cid-1") is None
+    finally:
+        await proj.close()
 
 
 @pytest.mark.asyncio

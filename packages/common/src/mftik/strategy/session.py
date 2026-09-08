@@ -53,6 +53,10 @@ class SessionView(Protocol):
         """The only attached api_id. Raises if the session has not exactly one."""
         ...
 
+    def projected_state(self, name: str) -> dict[str, dict] | None:
+        """Local watch of ``name``, or ``None`` if it is missing or not live."""
+        ...
+
     def request_exit(
         self, reason: str = "strategy_exit", *, failed: bool = False
     ) -> None:

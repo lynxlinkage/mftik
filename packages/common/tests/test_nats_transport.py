@@ -22,12 +22,13 @@ from collections.abc import Awaitable, Callable
 
 import nats.js.errors
 import pytest
-from broker_harness import a_broker
+from broker_harness import a_broker, inject_raw_request
 from mftik.broker import Broker
 from mftik.broker.errors import RequestTimeoutError, StateReadIncompleteError
 from mftik.broker.transport.nats import (
     _NO_RESPONDERS_CEILING_S,
     FANOUT_MAX_MSGS_PER_SUBJECT,
+    LOG_MAX_MSGS_PER_SUBJECT,
     MIN_TTL_SECONDS,
     NatsTransport,
     _check_subject,
@@ -65,15 +66,11 @@ async def test_a_request_is_answered_by_its_handler_and_not_by_jetstream(
 ) -> None:
     """A stream is a subscriber too, and it answers.
 
-    ``post`` needs a work-queue stream, and the obvious way to build one is to
-    give it the same subject space ``request`` uses. Do that and JetStream
-    receives every core request — and replies to it, on the requester's own
-    reply subject, with ``{"stream": ..., "seq": n}``. The caller parses that as
-    its answer and the handler's real reply arrives second, to an inbox nobody
-    is reading. Nothing errors; the control plane simply starts returning
-    nonsense.
-
-    So the two spaces are separate, and this is what says so.
+    A JetStream stream whose filter covered the RPC subject space would
+    receive every core request — and reply to it, on the requester's own
+    reply subject, with ``{"stream": ..., "seq": n}``. The caller parses that
+    as its answer. Fan-out and logs stay on their own spaces so that cannot
+    happen.
     """
     stop = asyncio.Event()
 
@@ -101,9 +98,8 @@ async def test_a_request_is_answered_by_its_handler_and_not_by_jetstream(
 async def test_a_live_request_is_not_stored_anywhere(broker: Broker) -> None:
     """Which is how ``probe`` leaves nothing behind, and it must stay true.
 
-    Redis caps and expires a probe queue because it cannot refuse an unserved
-    request. Core NATS never wrote one down, and the work-queue stream must not
-    have picked it up on the way past.
+    Core NATS never wrote one down. There is no work-queue stream to pick it
+    up on the way past.
     """
     subject = Topics.health("md", "md-jp-1")
     with pytest.raises(RequestTimeoutError):
@@ -112,8 +108,8 @@ async def test_a_live_request_is_not_stored_anywhere(broker: Broker) -> None:
         await broker.request(subject, _envelope(), timeout=0.2)
 
     transport = _transport(broker)
-    info = await transport.js.stream_info(transport._post_stream)  # noqa: SLF001
-    assert info.state.messages == 0
+    names = [info.config.name for info in await transport.js.streams_info()]
+    assert not any(name and name.endswith("_post") for name in names)
 
 
 @pytest.mark.asyncio
@@ -364,22 +360,17 @@ async def test_a_subscriber_does_not_receive_what_it_missed(broker: Broker) -> N
 
 @pytest.mark.asyncio
 async def test_a_fan_out_subject_keeps_a_bounded_tail(broker: Broker) -> None:
-    """Which is what makes ``publish_log`` and ``publish`` the same write.
-
-    Every subject holds its last few messages rather than only the log topics,
-    so the stream's size follows how many subjects are live instead of how fast
-    the busiest one prints — a feed cannot grow it.
-
-    Written with plain ``publish``, because that is where the stream's own cap is
-    the *only* bound. ``publish_log`` adds a purge to whatever its caller asked
-    to keep, so it can only ever show a number the caller chose.
-    """
+    """Fan-out is capped per subject so a busy feed cannot grow the stream."""
     topic = Topics.log_sts("abc")
+    transport = _transport(broker)
     for n in range(FANOUT_MAX_MSGS_PER_SUBJECT + 20):
         await broker.publish(topic, _envelope(n))
 
-    buffered = await broker.fetch_log_buffer(topic)
-    assert len(buffered) == FANOUT_MAX_MSGS_PER_SUBJECT
+    subject = transport._fanout_subject(topic)  # noqa: SLF001
+    held = (await transport._subject_counts(transport._fanout_stream, subject)).get(  # noqa: SLF001
+        subject, 0
+    )
+    assert held == FANOUT_MAX_MSGS_PER_SUBJECT
 
 
 # --- the tape: a stream per feed ----------------------------------------------
@@ -428,13 +419,8 @@ async def test_the_newest_records_are_found_by_arithmetic(broker: Broker) -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_coverage_record_carries_its_own_expiry(broker: Broker) -> None:
-    """A feed can be subscribed and print nothing at all.
-
-    A dead instrument, a venue outage — the appends that would otherwise renew
-    the record never come, so the write states its own TTL rather than leaning
-    on the tape's.
-    """
+async def test_a_coverage_record_is_durable(broker: Broker) -> None:
+    """Coverage is a fact about the tape, not a TTL that needs renewing."""
     transport = _transport(broker)
     feed = "aggtrade.Gate_Spot_QUIET"
     await broker.tape_mark_recording(feed, since_ms=1, ttl_seconds=1800)
@@ -444,18 +430,20 @@ async def test_a_coverage_record_carries_its_own_expiry(broker: Broker) -> None:
     msg = await transport.js.get_msg(
         status.stream_info.config.name, subject=f"$KV.{status.bucket}.{_kv_key(feed)}"
     )
-    assert (msg.headers or {}).get("Nats-TTL") == "1800"
+    assert (msg.headers or {}).get("Nats-TTL") is None
+    coverage = await broker.tape_coverage(feed)
+    assert coverage["continuous_since_ms"] == "1"
 
 
 @pytest.mark.asyncio
 async def test_a_stopped_serve_loop_still_hands_over_what_it_had_taken() -> None:
     """Everything queued when the stop event fires, whichever won the race.
 
-    ``_pump_posted`` acknowledges a posted message as it hands it to the queue,
-    so a message dropped here is a backfill or an account sweep the work queue
-    will not offer to anybody again. The ordering that mattered is the one where
-    a message *wins* the race: the loop yields it and then finds its own
-    condition false, and the rest of the batch used to go out with it.
+    The stop event is delivered through the inbound queue rather than raced
+    against it, so a loop that is told to stop after taking the first of a
+    batch still hands the rest over. The ordering that mattered is the one
+    where a message *wins* the race: the loop yields it and then finds its
+    own condition false.
     """
     inbound: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
     for n in range(5):
@@ -562,11 +550,9 @@ async def test_a_cancelled_read_does_not_swallow_the_message_it_had_won() -> Non
     The race this loop used to run left a window one instant wide: the read
     completes, and the cancellation arrives before the loop is scheduled to take
     what it returned. Cancelling something that already holds a result does
-    nothing, so the message was neither in the queue nor with the consumer — and
-    on `serve` that is a posted request `_pump_posted` had already acknowledged,
-    which makes it a backfill hand-off or an account-history sweep that simply
-    stopped existing. Exactly the loss the handover after the loop prevents, in
-    the one path that did not go through it.
+    nothing, so the message was neither in the queue nor with the consumer.
+    Exactly the loss the handover after the loop prevents, in the one path
+    that did not go through it.
 
     Asserted as conservation rather than as a location, because either place is
     fine and which one it lands in is the scheduler's business: handed to the
@@ -631,7 +617,9 @@ async def test_a_cancelled_plane_loop_leaves_nothing_pending(
         if loop_name == "subscribe":
             await broker.publish(topic, _envelope())
         else:
-            await broker.post(topic, _envelope())
+            # Core NATS stores nothing; a request without a reply would
+            # wait out its timeout. The serve loop only needs a wake.
+            await inject_raw_request(broker, topic, _envelope().to_json())
 
     task = asyncio.create_task(plane_loop())
     await _arm(task, read, nudge)
@@ -649,17 +637,15 @@ async def test_a_ring_longer_than_the_stream_can_hold_is_refused(
 ) -> None:
     """Loudly, because the stream has already discarded by the time we know.
 
-    ``maxlen`` is enforced by a purge that keeps the newest N, and a purge
-    cannot bring back what the stream's own per-subject cap dropped on the way
-    in. So the only honest answers are "hold that many" and "no" — and this used
-    to be neither: a request above the cap skipped the purge and was served
-    however many the stream happened to be keeping.
+    ``maxlen`` above the log stream's per-subject cap is refused, because the
+    stream has already discarded by then. The only honest answers are "hold
+    that many" and "no".
     """
     with pytest.raises(ValueError, match="per-subject ceiling"):
         await broker.publish_log(
             Topics.status_sts(),
             _envelope(),
-            maxlen=FANOUT_MAX_MSGS_PER_SUBJECT + 1,
+            maxlen=LOG_MAX_MSGS_PER_SUBJECT + 1,
         )
 
 
@@ -679,8 +665,8 @@ async def test_a_log_line_carries_the_expiry_its_caller_asked_for(
     await broker.publish_log(topic, _envelope(), maxlen=10, ttl_seconds=1800)
 
     msg = await transport.js.get_msg(
-        transport._fanout_stream,  # noqa: SLF001
-        subject=transport._fanout_subject(topic),  # noqa: SLF001
+        transport._log_stream,  # noqa: SLF001
+        subject=transport._log_subject(topic),  # noqa: SLF001
     )
     assert (msg.headers or {}).get("Nats-TTL") == "1800"
 
@@ -782,25 +768,12 @@ async def test_a_feed_recording_past_its_ttl_keeps_its_coverage(
     await broker.tape_mark_recording(feed, since_ms=1_000, ttl_seconds=ttl)
     marked = await _coverage_seq(broker, feed)
 
-    # Inside the half-life there is nothing to renew, and there had better not
-    # be: prints arrive many times a second and a renewal is a read-modify-write.
     await broker.tape_append(feed, {"trade_id": "0"}, maxlen=100, ttl_seconds=ttl)
     assert await _coverage_seq(broker, feed) == marked
 
-    await asyncio.sleep(ttl / 2 + 0.1)
-    for n in range(1, 6):
-        await broker.tape_append(
-            feed, {"trade_id": str(n)}, maxlen=100, ttl_seconds=ttl
-        )
-
-    # Once for the five prints, because the first one claims the interval before
-    # it starts writing rather than after it finishes.
-    renewed = await _coverage_seq(broker, feed)
-    assert renewed is not None and renewed == marked + 1
-
-    # And past where the original write would have expired, still describing the
-    # feed it started describing.
-    await asyncio.sleep(ttl / 2 + 0.3)
+    await asyncio.sleep(ttl + 0.2)
+    await broker.tape_append(feed, {"trade_id": "1"}, maxlen=100, ttl_seconds=ttl)
+    assert await _coverage_seq(broker, feed) == marked
     coverage = await broker.tape_coverage(feed)
     assert coverage["continuous_since_ms"] == "1000"
     assert coverage["recording"] == "1"
@@ -830,70 +803,75 @@ async def test_a_feed_nobody_marked_recording_gets_no_coverage_invented(
 # --- what a removed field leaves behind ---------------------------------------
 
 
-async def _state_subjects(broker: Broker, name: str) -> dict[str, int]:
-    """Every message the state bucket's stream still holds under ``name``.
+@pytest.mark.asyncio
+async def _state_subjects(broker: Broker, name: str) -> set[str]:
+    """Subjects the state stream still holds for ``name``.
 
-    Past the KV interface on purpose: what is under test is whether removing a
-    field leaves a tombstone, and a tombstone is precisely what KV reports as
-    absent.
+    After a drop the live fields remain and the delete markers must not:
+    a leftover DEL is one extra subject ``_kv_scan`` transfers per order
+    this account has ever worked.
     """
     transport = _transport(broker)
     stream, head = await transport._state_stream()  # noqa: SLF001
-    return await transport._subject_counts(  # noqa: SLF001
-        stream, f"{head}{_kv_key(name)}.>"
-    )
+    prefix = f"{head}{transport._state_key(name, '')}"  # noqa: SLF001
+    return set(await transport._subject_counts(stream, f"{prefix}>"))  # noqa: SLF001
 
 
 @pytest.mark.asyncio
 async def test_a_dropped_field_leaves_nothing_where_it_was(broker: Broker) -> None:
-    """Both of KV's removals write a marker. Nothing here reads one.
+    """A pull read skips the delete marker a watcher needs.
 
-    A marker is how a watcher learns a key went, and this node has no watchers —
-    but it stays on the bucket's stream for good, and every scan of the name
-    counts it, transfers it and throws it away.
+    KV delete writes a marker so :meth:`Broker.state_watch` can see the field
+    go. The marker is then purged so the stream holds only the live set.
     """
     name = "oms.dropped"
     await broker.state_put_many(name, {f"o{n}": str(n) for n in range(6)})
     await broker.state_drop(name, "o0", "o1", "o2")
 
-    assert len(await _state_subjects(broker, name)) == 3
     assert await broker.state_all(name) == {"o3": "3", "o4": "4", "o5": "5"}
+    assert len(await _state_subjects(broker, name)) == 3
+
+
+@pytest.mark.asyncio
+async def test_dropping_a_missing_field_does_not_mint_a_marker(
+    broker: Broker,
+) -> None:
+    """nats-py ``delete`` never raises; an unchecked call would grow the bucket."""
+    name = "oms.ghost"
+    await broker.state_put_many(name, {"o1": "1"})
+    before = await _state_subjects(broker, name)
+
+    assert await broker.state_drop(name, "ghost") == 0
+    assert await _state_subjects(broker, name) == before
 
 
 @pytest.mark.asyncio
 async def test_replacing_the_book_per_fill_does_not_grow_the_bucket(
     broker: Broker,
 ) -> None:
-    """The writer is the reader, which is what made the markers compound.
+    """The writer caches the last field set, so a replace does not scan first.
 
-    TD replaces the whole order book per fill, and a replace reads the book first
-    to see what to drop. Every dropped field used to leave a marker, so an
-    account that had worked a few thousand orders was transferring a few thousand
-    of them on every print — and ``_kv_scan`` breaks on a fetch timeout, so past
-    enough of them a strategy would have read a book with rows missing and no way
-    to tell.
+    TD replaces the whole order book per fill. The last-written set is what
+    tells it which fields to drop, and ``state_all`` still answers with the
+    live book after twenty of those.
     """
     name = "oms.churn"
     for n in range(20):
         await broker.state_replace(name, {f"o{n}": str(n)})
 
-    assert len(await _state_subjects(broker, name)) == 1
     assert await broker.state_all(name) == {"o19": "19"}
+    assert len(await _state_subjects(broker, name)) == 1
 
 
 @pytest.mark.asyncio
 async def test_clearing_a_name_leaves_nothing_on_the_stream(broker: Broker) -> None:
-    """One purge over the whole tree, not a scan and a purge for each.
-
-    They are all going, so which ones there were is not worth the round trip to
-    find out.
-    """
+    """Every field is deleted so a watcher sees each one go."""
     name = "oms.cleared"
     await broker.state_put_many(name, {f"o{n}": str(n) for n in range(8)})
     await broker.state_clear(name)
 
-    assert await _state_subjects(broker, name) == {}
     assert await broker.state_all(name) == {}
+    assert await _state_subjects(broker, name) == set()
 
 
 # --- a read that could not finish ---------------------------------------------

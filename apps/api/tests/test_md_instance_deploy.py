@@ -56,10 +56,6 @@ class Recording:
             raise RequestTimeoutError(subject, envelope.id, timeout or 0)
         return envelope
 
-    async def post(self, subject, envelope):
-        if envelope.type == MD_SESSION_DETACH:
-            self.detaches.append(subject)
-
     async def publish_log(self, topic, envelope):
         return 1
 
@@ -67,6 +63,9 @@ class Recording:
         return 1
 
     async def request(self, subject, envelope, *, timeout=None):
+        if envelope.type == MD_SESSION_DETACH:
+            self.detaches.append(subject)
+            return envelope
         if envelope.type == STS_SESSION_CREATE:
             self.created_on = subject
             self.create = envelope.payload
