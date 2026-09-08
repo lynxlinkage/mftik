@@ -24,7 +24,7 @@ Two interfaces, and telling them apart is what makes the rest of this document
 short:
 
 - **`BrokerTransport`** (`transport/base.py`, 32 abstract methods) — one
-  implementation and one caller, `client.py`. Since #84 removes the second
+  implementation and one caller, `client.py`. Since #84 removed the second
   implementation, this is an internal seam rather than an interface. Changing
   it is invisible to every domain.
 - **`Broker`** (`client.py`) — what `sts`, `md`, `td`, `sym`, `api` and the
