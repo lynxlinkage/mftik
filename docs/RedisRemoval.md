@@ -75,10 +75,25 @@ still there if a second transport is ever justified again.
 exactly one value is worse than no variable: it reads like a choice. It goes
 from `BrokerConfig`, `from_env`, `.env.example` and the compose comment.
 
-**Four config fields go with it**, all marked "Redis only" in their own
-docstrings: `redis_url`, `health_check_interval`, `command_retries` and
-`serve_poll_seconds`. `consumer_idle_seconds` and everything transport-neutral
-stays. Note that `serve_poll_seconds` is referenced in a comment in
+**Five config fields go with it.** Four say "Redis only" in their own
+docstrings — `redis_url`, `health_check_interval`, `command_retries` and
+`serve_poll_seconds` — and searching for that phrase is how they were found,
+which is why the fifth was nearly missed.
+
+`reply_ttl_seconds` (`BROKER_REPLY_TTL`) is not marked as anything. Its only
+reader is `RedisTransport.send_reply`, which does
+`redis.expire(inbox, config.reply_ttl_seconds)`: a Redis reply inbox is a key
+with a lifetime, and the NATS reply path publishes to the protocol's own reply
+subject, where there is no inbox to expire. Left in place it is parsed from the
+environment, stored, and read by nothing — the same "a knob that reads like a
+choice" this document objects to two paragraphs above, which makes keeping it
+inconsistent as well as dead.
+
+The lesson generalises: a field is Redis-only if its *reader* is, and the
+docstrings are a convenience rather than the index. `consumer_idle_seconds` and
+everything transport-neutral stays.
+
+Note that `serve_poll_seconds` is referenced in a comment in
 `apps/td/src/mftik_td/session/manager.py` — that comment needs rewriting, not
 just the field deleting.
 
