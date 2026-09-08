@@ -93,13 +93,28 @@ FANOUT_MAX_MSGS_PER_SUBJECT = 256
 #: instead of the disk.
 FANOUT_MAX_MSGS = 1_000_000
 
-#: How long to wait before re-asking a subject that reported no responders, and
-#: how many times. Three attempts and 50ms is ~100ms spent before calling a
-#: subject unserved — long enough to cover a serve loop registering as its
-#: process boots, and still fifty times inside the five second timeout that is
-#: the alternative answer.
+#: How long to wait before re-asking a subject that reported no responders.
 _NO_RESPONDERS_GRACE_S = 0.05
-_NO_RESPONDERS_ATTEMPTS = 3
+
+#: How much of a caller's own timeout may go on re-asking, and the bounds on
+#: that. A share rather than a count of attempts, because what "no responders"
+#: is worth waiting through depends entirely on who is asking.
+#:
+#: A fixed ~100ms was wrong in one direction: order entry gets
+#: ``ORDER_ACK_TIMEOUT_S`` — two seconds — and an account loop being handed from
+#: one TD process to another takes longer than a tenth of a second, so a fill
+#: that Redis would have parked through the handover failed here instead. It
+#: would be wrong in the other direction too if it were simply "the whole
+#: timeout": the reason request-reply is core NATS and not a JetStream queue is
+#: that a plane which is genuinely down is known to be down at once.
+#:
+#: So: half of what the caller brought, never below the boot race this exists to
+#: cover, and never above a second — a twenty second control-plane request still
+#: comes back saying nobody is there while its caller has nineteen seconds left
+#: to decide what to do about it.
+_NO_RESPONDERS_SHARE = 0.5
+_NO_RESPONDERS_FLOOR_S = 0.1
+_NO_RESPONDERS_CEILING_S = 1.0
 
 #: How long a read's fetch waits before giving up. Sized against a server one
 #: round trip away and never reached in the normal case, because every read
@@ -659,18 +674,45 @@ class NatsTransport(BrokerTransport):
         down, and on the anycast subjects the whole pool can look empty during a
         rolling restart.
 
-        So it is re-asked a couple of times, briefly, and only within the
-        caller's own deadline. A subject that is really unserved still fails in
-        a fraction of a second rather than the whole timeout, which is what makes
-        core request-reply worth having here — it is the difference between the
-        control plane learning a plane is down now and learning it five seconds
-        from now, and the grace below is two orders of magnitude inside that.
+        So it is re-asked, and for how long is a share of what this caller
+        brought — see :data:`_NO_RESPONDERS_SHARE`. A subject that is really
+        unserved still fails well inside the timeout, which is what makes core
+        request-reply worth having here; a subject whose owner is mid-handover
+        gets asked again while the caller still has time to be told yes.
         """
-        deadline = asyncio.get_running_loop().time() + timeout
+        return await self._ask(
+            subject,
+            raw,
+            request_id=request_id,
+            timeout=timeout,
+            reask=min(
+                max(timeout * _NO_RESPONDERS_SHARE, _NO_RESPONDERS_FLOOR_S),
+                _NO_RESPONDERS_CEILING_S,
+            ),
+        )
+
+    async def _ask(
+        self,
+        subject: str,
+        raw: str,
+        *,
+        request_id: str,
+        timeout: float,
+        reask: float,
+    ) -> str:
+        """One core request, re-asked while nobody is on the subject.
+
+        ``reask`` bounds the re-asking only. Once it is spent, a subject that is
+        still empty fails immediately rather than sitting out the rest of
+        ``timeout``, because nothing about waiting longer would change the answer.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        give_up_asking = loop.time() + reask
         subject_name = self._rpc_subject(subject)
         payload = raw.encode()
-        for attempt in range(_NO_RESPONDERS_ATTEMPTS):
-            remaining = deadline - asyncio.get_running_loop().time()
+        while True:
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 break
             try:
@@ -678,11 +720,9 @@ class NatsTransport(BrokerTransport):
                     subject_name, payload, timeout=remaining
                 )
             except nats.errors.NoRespondersError:
-                last = attempt == _NO_RESPONDERS_ATTEMPTS - 1
-                grace = _NO_RESPONDERS_GRACE_S
-                if last or deadline - asyncio.get_running_loop().time() <= grace:
+                if loop.time() + _NO_RESPONDERS_GRACE_S >= give_up_asking:
                     break
-                await asyncio.sleep(grace)
+                await asyncio.sleep(_NO_RESPONDERS_GRACE_S)
                 continue
             except (nats.errors.TimeoutError, TimeoutError):
                 break
@@ -698,15 +738,27 @@ class NatsTransport(BrokerTransport):
         inbox: str | None,
         timeout: float,
     ) -> str:
-        """Exactly :meth:`request`, and that is the point.
+        """:meth:`request` without the patience, and that is the point.
 
         The Redis transport needs a capped, expiring queue here to stop a
         dashboard's probes accumulating against a down instance. Core NATS
         stores nothing anywhere, so there is no queue to cap: a probe nobody
         answers has already left no trace by the time the caller gives up.
+
+        What it does not share is the re-ask budget. An order gains from waiting
+        out a handover because the caller wants the order placed; a probe gains
+        nothing, because a liveness answer that arrives after the dashboard
+        stopped asking tells nobody anything — and "this instance is down" is the
+        answer a probe is *for*. So it re-asks only far enough to cover a serve
+        loop registering as its own process boots, which is the one case where a
+        first no-responders reading is simply wrong.
         """
-        return await self.request(
-            subject, raw, request_id=request_id, inbox=inbox, timeout=timeout
+        return await self._ask(
+            subject,
+            raw,
+            request_id=request_id,
+            timeout=timeout,
+            reask=_NO_RESPONDERS_FLOOR_S,
         )
 
     async def post(self, subject: str, raw: str) -> None:

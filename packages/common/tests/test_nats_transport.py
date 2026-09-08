@@ -24,6 +24,7 @@ from broker_harness import a_broker, only_on
 from mftik.broker import Broker
 from mftik.broker.errors import RequestTimeoutError
 from mftik.broker.transport.nats import (
+    _NO_RESPONDERS_CEILING_S,
     FANOUT_MAX_MSGS_PER_SUBJECT,
     MIN_TTL_SECONDS,
     NatsTransport,
@@ -125,11 +126,64 @@ async def test_a_request_to_nobody_fails_at_once_rather_than_waiting(
     request to a down plane costs its caller the whole timeout. Core NATS knows,
     and the control plane learns that a plane is down long before its own
     deadline — which is why this raises the same error rather than a new one.
+
+    "Milliseconds" is bounded by :data:`_NO_RESPONDERS_CEILING_S` rather than by
+    a number written here, so the two cannot drift apart: whatever that is, it is
+    what a caller with a five second budget spends before being told no.
     """
     started = asyncio.get_running_loop().time()
     with pytest.raises(RequestTimeoutError):
         await broker.request("nobody.here", _envelope(), timeout=5.0)
-    assert asyncio.get_running_loop().time() - started < 2.0
+    spent = asyncio.get_running_loop().time() - started
+    assert spent < _NO_RESPONDERS_CEILING_S * 2
+
+
+@pytest.mark.asyncio
+async def test_a_probe_does_not_wait_for_a_plane_to_turn_up(broker: Broker) -> None:
+    """Where ``probe`` parts company with ``request``.
+
+    An order gains from waiting out an owner handover because the caller wants
+    the order placed. A probe gains nothing: "down" is the answer it exists to
+    collect, and one that arrives after the dashboard stopped asking tells nobody
+    anything. So it spends the boot-race grace and no more, whatever budget its
+    caller happened to bring.
+    """
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(RequestTimeoutError):
+        await broker.probe("health.md.gone", _envelope(), timeout=5.0)
+    spent = asyncio.get_running_loop().time() - started
+    assert spent < _NO_RESPONDERS_CEILING_S
+
+
+@pytest.mark.asyncio
+async def test_a_request_waits_out_an_owner_that_is_still_arriving(
+    broker: Broker,
+) -> None:
+    """The handover, which a fixed grace of ~100ms used to fail through.
+
+    An account's order subject is served by whichever TD process holds the
+    account, and during a handover there is a window with nobody on it. Under
+    Redis the request parks and the new owner takes it; here it comes straight
+    back saying no responders — so what covers the window is asking again, and
+    for long enough. ``ORDER_ACK_TIMEOUT_S`` is two seconds and a handover is not
+    reliably inside a tenth of one.
+    """
+    subject = "td.order.handover"
+    stop = asyncio.Event()
+
+    async def owner() -> None:
+        # Late enough that the old fixed grace would have given up, and well
+        # inside what an order ack allows.
+        await asyncio.sleep(0.4)
+        async for req in broker.serve(subject, stop=stop):
+            await req.reply(_envelope(7))
+            break
+        stop.set()
+
+    task = asyncio.create_task(owner())
+    reply = await broker.request(subject, _envelope(), timeout=2.0)
+    await asyncio.wait_for(task, timeout=2)
+    assert reply.payload == {"n": 7}
 
 
 # --- leases: whole seconds, and a race Redis loses ----------------------------
