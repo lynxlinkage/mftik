@@ -357,29 +357,22 @@ transition to it. Blue runs the same transition backwards — to `standby`,
 which stops it taking new attaches while its existing links keep running,
 because `standby` gates `run_rpc` and never the dispatcher.
 
-**Cutover ordering costs a poll on Redis and nothing on NATS.** Under Redis a
-serve loop checks its stop event only at the top of the loop, so one that has
-been told to stop sits in `BLPOP` for up to `serve_poll_seconds` — one second
-in production — and *will still take a request off the list* in that window.
-Under NATS a subscription is cancellable and the loop stops when it is told.
-Either way blue and green must never serve one subject at the same time: blue
-leaves, the poll is waited out if there is one, green enters.
+**Cutover ordering costs nothing on the serve loop.** A subscription is
+cancellable and the loop stops when it is told. Blue and green must never
+serve one subject at the same time: blue leaves, green enters.
 
-The gap that leaves has to be covered, and how it is covered differs. Under
-Redis it covers itself: a request sent while nobody owns the subject waits on
-it rather than vanishing, which is what `Topics.td_order`'s docstring hands to
-the transport.
-Under NATS an unserved subject answers with no responders rather than parking,
-which is better for a plane that is genuinely down and worse for one that is
-three seconds from being up. Two things cover it there. The transport re-asks a
-subject that reported nobody, for half the caller's own timeout and up to a
-second — enough for a handover, deliberately not enough to hide an outage. Past
-that the caller's own retry takes over: `_attach_with_retry` re-sends within
-`_ATTACH_BUDGET_S`, and the budget is written as a budget for exactly this
-reason. MD attach is given `timeout + 5.0` in `deploy_strategy`, so a
-two-second gap is invisible on either. It is still two seconds of
-`docs/MdHandover.md`'s cutover budget, which is already bounded by STS's
-tolerance for a missing `MdLeaseAck` — one number, two claims on it.
+The gap that leaves has to be covered. An unserved subject answers with no
+responders rather than parking, which is better for a plane that is genuinely
+down and worse for one that is three seconds from being up. Two things cover
+it. The transport re-asks a subject that reported nobody, for half the
+caller's own timeout and up to a second — enough for a handover, deliberately
+not enough to hide an outage. Past that the caller's own retry takes over:
+`_attach_with_retry` re-sends within `_ATTACH_BUDGET_S`, and the budget is
+written as a budget for exactly this reason. MD attach is given
+`timeout + 5.0` in `deploy_strategy`, so a two-second gap is invisible. It is
+still two seconds of `docs/MdHandover.md`'s cutover budget, which is already
+bounded by STS's tolerance for a missing `MdLeaseAck` — one number, two
+claims on it.
 
 `standby` is MD-only in practice. `docs/MdHandover.md` is explicit that STS and
 TD must not be blue/greened, since two copies of a strategy session is two
@@ -583,43 +576,22 @@ and `test_lease_resilience.py` are where PI-4 and PI-6 get their tests. This is
 not incidental work; it is where the bugs in *The hard parts, 1* would have been
 caught.
 
-### 6. Probing a dead instance leaks, and the obvious fix is wrong
+### 6. Probing a dead instance leaves nothing behind
 
-`Broker.request` cleans up its own reply inbox and nothing else. Under Redis
-the request itself was pushed onto `{key_prefix}:rpc:{subject}`, which has no
-expiry, and if nothing is serving the subject nothing ever pops it.
-
-So a dashboard that probes a down instance every few seconds writes a record
-per probe into a list nobody will drain. At a 5s refresh that is roughly 17k
-entries a day per down instance, in the same store that carries order RPC, the
-ledger and liveness — and that store is capped, with eviction off, because
-dropping a key under pressure would silently drop a trade rather than degrade a
-cache. Filling it does not degrade the dashboard, it stops the writes that
-trade. And when the instance finally boots, the first thing it does is drain a
-heap of expired health checks.
-
-**A blanket TTL on rpc queues is the wrong fix**, and the tree says so where
-it says what waiting is worth. `Broker.post`'s docstring: "A request left
-because nothing is serving the subject yet is not lost: the next consumer to
-come up takes it, which is the recovery a fan-out message could not offer, and
-the one place both transports pay for a durable queue to keep that promise." An
-attach should wait. A backfill should wait.
+`Broker.request` cleans up its own reply inbox and nothing else. `probe` is
+core request-reply, which stores nothing anywhere, so an unanswered probe has
+left no trace by the time the caller gives up.
 
 A health check is the one RPC where waiting has no value — an answer that
 arrives after the question stopped being asked tells nobody anything. So it
-gets its own subject, and expiry is correct semantics *there* rather than a
-compromise. `Envelope` already carries `ts`, so the serving side can also drop
-a probe older than its own timeout, which costs one comparison and closes the
-case where a queue outlives its expiry.
-
-This is the only genuinely new machinery a probe-based design needs, and it had
-to land with the first probe rather than after it — the leak is invisible until
-the store it shares with order entry is full.
-
-Under NATS there is nothing to cap: `probe` is core request-reply, which stores
-nothing anywhere, so an unanswered probe has left no trace by the time the
-caller gives up. The staleness check stays as the second line of defence on both
-— see *How each transport answers* in `docs/Broker.md`.
+gets its own subject. `Envelope` already carries `ts`, so the serving side
+can also drop a probe older than its own timeout, which costs one comparison
+and is the second line of defence — see *How NATS answers* in
+`docs/Broker.md`. An attach should wait. A backfill should wait.
+`Broker.post`'s docstring: "A request left because nothing is serving the
+subject yet is not lost: the next consumer to come up takes it, which is the
+recovery a fan-out message could not offer, and the one place a durable
+queue keeps that promise."
 
 ### 7. Nothing enforces one TD per `api_id`
 

@@ -78,7 +78,7 @@ would make an optional disk trail the control plane for alerts.
 
 ### The shape that stays
 
-- Redis `log.{domain}.{stream_id}` is still the fan-out. Topics do
+- `log.{domain}.{stream_id}` is still the fan-out. Topics do
   not grow a fourth segment. `parse_log_topic` stays a split on
   `.` with maxsplit 2.
 - `session_id` stays `uuid4().hex`. It is an opaque identity.

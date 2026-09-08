@@ -16,9 +16,10 @@ Nothing here is built yet.
 
 Facts this design rests on, all of them checkable in the tree today.
 
-**The tape is not lost on restart.** `TapeRecorder` writes Redis streams, and
-Redis is long-lived substrate on another host — the production compose file does
-not manage it. A restart of the MD container leaves the stream intact.
+**The tape is not lost on restart.** `TapeRecorder` writes a JetStream stream
+per feed, and NATS is long-lived substrate on another host — the production
+compose file does not manage it. A restart of the MD container leaves the
+stream intact.
 
 **The fan-out is addressed per session.** `Dispatcher.publish` sends each update
 to `Topics.md_session(session_id)` for every subscribed link, and only then calls
