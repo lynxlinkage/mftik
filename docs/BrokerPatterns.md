@@ -12,10 +12,16 @@ different names, so the real answer is seven — and which three collapsed says
 more than the number does.
 
 Five of the seven are already NATS' own primitives, or close enough that a
-rewrite would move them sideways. Two are worth the work, for opposite reasons:
-one is still shaped like a Redis hash and sits on every strategy's read path;
-the other is native at the transport and has no shared abstraction at all, so
-two domains wrote the same one twice.
+rewrite would move them sideways. Three are worth acting on, for three
+different reasons:
+
+- **G** is still shaped like a Redis hash and sits on every strategy's read
+  path.
+- **E** is native at the transport and has no shared abstraction at all, so two
+  domains wrote the same one twice.
+- **D** should not exist. All four of its callers document a backstop outside
+  the broker, so at-least-once delivery is buying something none of them asked
+  for — and it is the most expensive pattern here to keep.
 
 ## How this was counted
 
@@ -55,7 +61,7 @@ pattern wearing different names, and saying so is worth more than the count:
 | **A** | Subject log — fan-out with a bounded replay tail | `publish` / `subscribe` / `psubscribe` / `publish_log` / `fetch_log_buffer` | Native. One stream, per-subject bounds. |
 | **B** | Keyed log — one stream per feed | `tape_append` / `tape_tail` / `tape_trim_before` | Native. "Newest N" is sequence arithmetic because a feed owns its stream. |
 | **C** | Request / response | `request` / `probe` | Native. Core request-reply; no-responders answers a request to nobody at once rather than at the timeout. |
-| **D** | Durable work queue | `post` / `serve` | Native. A work-queue stream plus a core queue group. |
+| **D** | Durable work queue | `post` / `serve` | Native — and **removable**. No caller needs it. See below. |
 | **E** | Fenced session link | hand-rolled from `subscribe` + `publish` | Native transport, **no shared abstraction**. Built twice. |
 | **F** | Atomic register | `lease_*`, `counter_next`, all of `liveness.py` | KV with per-message TTL and compare-and-set on revision. Better than the Redis original, which documented losing a race this one wins. |
 | **G** | **Shared mutable state** | `state_*` | **The one still shaped like a Redis hash.** |
@@ -112,6 +118,63 @@ E's fencing token does not come from F. `apps/sts/session/session.py:646` is
 detects a stale message from the *same* session and nothing more; what stops a
 second process claiming the same session is the lease, which is F. The two are
 related, but not in the way a shared token would make them.
+
+### D has four callers and none of them wants it
+
+`post` is at-least-once delivery: the ask outlives a plane that is not up yet.
+Every caller of it says, in its own comment, that it does not need that.
+
+| Caller | What it says the backstop is |
+|---|---|
+| `apps/api/backfill_cron.py:80` | the cron itself — "a failed sweep is logged and the loop goes on: the next tick asks again" |
+| `apps/td/backfill/trigger.py:65` (session detach, and TD shutdown) | "Best-effort by design… **none of them is the reason the record eventually settles**" |
+| `apps/sts/session/session.py:610` | "**The lease covers this.** Worth a line because a broker that cannot take a write is a problem in its own right, not because the attach is now stuck" |
+| `apps/api/orchestrate.py:409` | "**The lease covers this:** MD tears the attach down when this session's heartbeat stops, which failing it is about to do" |
+
+Two backstops between them, and neither is the broker: the backfill cursor —
+a Postgres row (`BackfillCursorRow`), advanced *during* a walk rather than at
+the end of one — and the liveness lease, which is F.
+
+The transport agrees about how little is on offer. `_pump_posted` acknowledges
+each message as it hands it over, not after the handler is done, and says why:
+"the durability this buys is 'nobody was serving the subject yet' … and not
+'the process died half way through the work', which neither transport has ever
+offered." A guarantee that narrow is worth one cron interval of latency, and
+the cron interval is fifteen minutes.
+
+**The backfill cron is the clean first move, and TD needs no change at all.**
+`BackfillSession` already builds a full `TdBackfillResult` and calls
+`req.reply` with it (`backfill/session.py:192`); on the posted path that is a
+silent no-op, because `_pump_posted` hands work over with no reply address on
+purpose. Point a `request` at the same subject and the reply that is being
+built and discarded today arrives. The cron gains what it does not have now —
+whether TD is there at all, and whether that account's walk is still running —
+and loses nothing, because losing a reply is not losing work: the cursor
+already moved as far as the walk got.
+
+**The shutdown caller is the one that cannot be an RPC**, and it does not need
+to be one. TD asks *after* it has stopped serving the subject, so by
+construction nothing is listening; an RPC there always fails. The queue exists
+to carry that ask to whichever TD comes up next. But the successor could look
+instead of being told — which accounts have cursors behind the settlement line
+is a database question — and looking is strictly better, because it does not
+depend on the predecessor having managed to post before it died. The cron's own
+docstring already lists that failure: "a process may die before it asks".
+
+**What removing D takes with it.** The work-queue stream, which has no
+`max_msgs`, `max_age` or `max_bytes` set. The durable consumer per served
+subject, which nothing deletes and which `inactive_threshold` does not reap.
+`_pump_posted` entirely. And the two-source merge inside `serve`, which is the
+whole stage on which #82 played out: the handover ordering that
+`_iter_until_stopped` has to get right exists because posted work is
+acknowledged on delivery and can land behind the stop sentinel. With one source
+that complexity has nothing to describe.
+
+**What it costs, stated honestly.** Failure behaviour changes from "delivered
+eventually" to "known failed immediately, backstop handles it". Four comments
+assert the backstops hold. That is intent, not observation, and which of them
+actually fires is the kind of thing only production answers — see the
+sequencing note at the end.
 
 ### E is the pattern the broker named and then under-specified
 
@@ -266,10 +329,20 @@ So:
 4. **Then** redesign G against measurements, with those seven files as
    the integration surface.
 
+**D splits across that line rather than sitting on one side of it.** Pointing
+the backfill cron at `request` instead of `post` belongs in step 2: TD needs no
+change, the reply is already built, and the cron gains an answer it does not
+have today. Deleting the pattern outright belongs after step 3, because what
+changes is failure behaviour and the four backstops are asserted rather than
+observed. Running the cron on RPC through a production window is what turns
+them into observations — no-responders and lease expiry either fire as the
+comments claim or they do not, and either way the answer arrives before
+anything irreversible is deleted.
+
 Step 4 is what produces the clean version. Doing it before step 3 produces a
 clean version of a guess.
 
-**E does not have to wait for step 3**, and that is the one place this
+**E does not have to wait for step 3** either, and that is the other place this
 sequencing bends. It needs no measurement — the argument for it is that the
 same fencing logic exists twice and a fix has to be made in both — and the
 duplication is a live correctness risk rather than a cost. It is also the one
