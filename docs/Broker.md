@@ -176,6 +176,18 @@ a node on it has no use for a Redis. Two things there are not optional:
 Port 8222 is the monitoring endpoint. It is what the healthcheck asks, and it
 is worth pointing `nats stream ls` at when a subject is not behaving.
 
+**Two version floors, and they are not the same number.** The *server* floor is
+2.11, where per-message TTL lands (ADR-43) and a lease becomes expressible at
+all. The *client* floor is nats-py 2.14, and it is higher than the server's
+because the client grew the pieces one release at a time: `Header.MSG_TTL` in
+2.12, `KeyValue.create(msg_ttl=...)` in 2.13, and a `ConsumerConfig` that will
+take `opt_start_time` as a datetime rather than an int in 2.14 — which the
+tape's retention sweep needs. Below any of those the transport imports and
+connects and then raises on the first account claim or the first trim, so the
+floor is declared in `packages/common/pyproject.toml` rather than left to the
+lock file: CI resolves to the newest available and only the published wheel ever
+sees the bottom of the range.
+
 **Switching a live node is not a migration.** Nothing copies state between the
 two, so a node that has been running on one does not find its sessions,
 its ledger or its tape on the other. Switch with nothing attached.
