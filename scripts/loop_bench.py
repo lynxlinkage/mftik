@@ -14,12 +14,10 @@ neighbour on the box biases both loops instead of whichever went second.
     just loop-bench --case rpc --reps 20
     just loop-bench --probe               # behaviour, not throughput
 
-`BROKER_TRANSPORT` chooses the store, exactly as it does for a plane, so the
-numbers are the ones the node will actually see. Needs a server nobody else is
-using — it publishes thousands of messages and writes a tape under its own key
-prefix. Point it somewhere scratch:
+Needs a NATS server nobody else is using — it publishes thousands of messages
+and writes a tape under its own key prefix. Point it somewhere scratch:
 
-    BROKER_TRANSPORT=redis REDIS_URL=redis://localhost:6379/9 just loop-bench
+    NATS_URL=nats://localhost:4222 just loop-bench
 
 **tcp_echo is the control, and reading it first is the point.** It is the
 workload uvloop exists to win: a raw transport with no library above it. If it
@@ -139,23 +137,20 @@ async def case_pipelined_fanout(messages: int = 4000, sessions: int = 8) -> dict
     broker = Broker(broker_config())
     await broker.connect()
     topics = [Topics.md_session(f"loopbench-{i}") for i in range(sessions)]
-    tape_key = broker.tape_key("binance.spot.BTC/USDT.best_quote")
+    feed = "binance.spot.BTC/USDT.best_quote"
 
     cpu0, t0 = cpu_seconds(), time.perf_counter()
     for seq in range(messages):
         envelope = quote_envelope(seq)
-        raw = envelope.to_json()
-        pipe = broker.redis.pipeline(transaction=False)
-        for topic in topics:
-            pipe.publish(topic, raw)
-        pipe.xadd(
-            tape_key,
-            {"payload": json.dumps(envelope.payload)},
-            maxlen=10_000,
-            approximate=True,
+        await asyncio.gather(
+            *(broker.publish(topic, envelope) for topic in topics),
+            broker.tape_append(
+                feed,
+                {"payload": json.dumps(envelope.payload)},
+                maxlen=10_000,
+                ttl_seconds=60,
+            ),
         )
-        pipe.expire(tape_key, 60)
-        await pipe.execute()
     wall, cpu = time.perf_counter() - t0, cpu_seconds() - cpu0
     await broker.close()
 
@@ -170,7 +165,7 @@ async def case_pipelined_fanout(messages: int = 4000, sessions: int = 8) -> dict
 
 
 async def case_rpc(requests: int = 1500) -> dict:
-    """`Broker.request` against `Broker.serve` — RPUSH out, BLPOP back.
+    """`Broker.request` against `Broker.serve`.
 
     Every control-plane action in the node is one of these, and so is every
     order a strategy places. Latency is the number that matters here, not
@@ -191,8 +186,7 @@ async def case_rpc(requests: int = 1500) -> dict:
             )
 
     task = asyncio.create_task(serve(), name="loopbench-serve")
-    # One warm request so the pool, the serve loop and the BLPOP path are all
-    # live before anything is timed.
+    # One warm request so the serve loop is live before anything is timed.
     await client.request(
         subject, UntypedEnvelope.wrap({}, type="echo", source="loopbench")
     )
@@ -229,8 +223,7 @@ async def case_rpc(requests: int = 1500) -> dict:
 async def case_subscribe(messages: int = 6000) -> dict:
     """`Broker.subscribe` — the receive side every STS feed pump sits on.
 
-    `pubsub.get_message` plus one `UntypedEnvelope.from_json` per message. The
-    fan-out case pays only for publishing; this pays for parsing, which is
+    The fan-out case pays only for publishing; this pays for parsing, which is
     where a strategy's own latency starts.
     """
     publisher, subscriber = Broker(broker_config()), Broker(broker_config())
@@ -249,10 +242,10 @@ async def case_subscribe(messages: int = 6000) -> dict:
                 return
 
     task = asyncio.create_task(consume(), name="loopbench-consume")
-    # Pub/Sub drops what nobody is listening to, so the SUBSCRIBE has to have
-    # landed on the server before the first publish — not merely been sent.
-    while (await publisher.redis.pubsub_numsub(topic))[0][1] == 0:
-        await asyncio.sleep(0.01)
+    # Fan-out drops what nobody is listening to, so the ephemeral consumer
+    # has to exist before the first timed publish. `subscribe` creates it
+    # before it waits for a message; a short pause is enough for that to land.
+    await asyncio.sleep(0.2)
 
     cpu0, t0 = cpu_seconds(), time.perf_counter()
     for seq in range(messages):
@@ -417,7 +410,7 @@ LOWER_IS_BETTER = {
     "wall_s",
 }
 
-CASES_NEEDING_REDIS = {"fanout", "pipelined_fanout", "rpc", "subscribe"}
+CASES_NEEDING_BROKER = {"fanout", "pipelined_fanout", "rpc", "subscribe"}
 
 
 # --- behaviour probe -------------------------------------------------------
@@ -612,9 +605,9 @@ def main() -> None:
         return
 
     cases = args.case or list(CASES)
-    if any(case in CASES_NEEDING_REDIS for case in cases):
+    if any(case in CASES_NEEDING_BROKER for case in cases):
         print(
-            f"redis: {broker_config().redis_url} (key prefix {KEY_PREFIX!r})",
+            f"nats: {broker_config().nats_url} (key prefix {KEY_PREFIX!r})",
             file=sys.stderr,
         )
 

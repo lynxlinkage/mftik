@@ -10,15 +10,9 @@ sync:
     cd frontend && npm install
 
 # Run all Python tests (sqlite only — fast, and what most changes need).
-# Needs the broker up: `just up nats`, or `just up redis` with
-# MFTIK_TEST_BROKER=redis. There is no fake to fall back on.
+# Needs the broker up: `just up nats`. There is no fake to fall back on.
 test:
     uv run --all-packages pytest packages apps -q
-
-# The suite again on the other transport. Both are supported, so both are run
-# before a broker change ships; CI does the same in two jobs.
-test-redis *args="packages apps":
-    MFTIK_TEST_BROKER=redis uv run --all-packages pytest {{args}} -q
 
 # Run them again on Postgres too, which is what CI does and what production is.
 # sqlite ignores VARCHAR length and has no decimal type, so it cannot show you
@@ -46,8 +40,7 @@ backfill-check *args:
 
 # Time this node's hot paths on asyncio vs uvloop — evidence for docs/EventLoop.md.
 # Wants a broker nobody else is using: it publishes thousands of messages and
-# writes a tape. BROKER_TRANSPORT picks which one, same as for a plane.
-# `--probe` reports behaviour differences instead.
+# writes a tape. `--probe` reports behaviour differences instead.
 loop-bench *args:
     uv run --all-packages python scripts/loop_bench.py {{args}}
 
