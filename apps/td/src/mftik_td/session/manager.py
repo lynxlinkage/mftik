@@ -817,6 +817,14 @@ class SessionManager:
                     reason="lease_expired",
                 )
 
+        async def _died() -> None:
+            if acct.links.get(link.session_id) is link:
+                await self.detach(
+                    session_id=link.session_id,
+                    api_id=link.api_id,
+                    reason="lease_loop_died",
+                )
+
         def _ack(hb: LeaseHeartbeat) -> Envelope[LeaseAck]:
             return Envelope[LeaseAck].wrap(
                 LeaseAck(
@@ -840,32 +848,10 @@ class SessionManager:
             on_heartbeat=_on_heartbeat,
             on_message=_on_message,
             on_expired=_expire,
+            on_died=_died,
             resubscribe_delay=RESUBSCRIBE_DELAY_S,
             name=f"td-lease-{link.api_id}-{link.session_id}",
         ).run()
-            # Last resort, for an ending neither branch above accounts for:
-            # this loop stopped without detaching and without being torn
-            # down. That is the leak — a td_sessions row left live with no
-            # lease behind it and no log to say so, because nothing awaits
-            # this task and its exception is never retrieved.
-            if (
-                not link.stop.is_set()
-                and acct.links.get(link.session_id) is link
-            ):
-                logger.error(
-                    "TD lease loop exited unexpectedly session=%s api_id=%s "
-                    "— detaching",
-                    link.session_id,
-                    link.api_id,
-                )
-                asyncio.create_task(
-                    self.detach(
-                        session_id=link.session_id,
-                        api_id=link.api_id,
-                        reason="lease_loop_died",
-                    ),
-                    name=f"td-detach-{link.api_id}-{link.session_id}",
-                )
 
     def _on_order_settled(self, acct: TradingAccount, order: Order) -> None:
         """Release what an order was holding once the venue owns the outcome.

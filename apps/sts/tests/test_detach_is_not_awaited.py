@@ -15,7 +15,6 @@ import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.protocol import (
-    MD_SESSION_DETACH,
     TD_SESSION_DETACH,
     Envelope,
     Topics,
