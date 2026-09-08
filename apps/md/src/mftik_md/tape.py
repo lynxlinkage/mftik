@@ -132,7 +132,9 @@ class TapeRecorder:
     async def stopped(self, feed: str) -> None:
         """Stamp the moment ``feed`` stopped recording."""
         try:
-            await self._broker.tape_mark_stopped(feed, at_ms=_now_ms())
+            await self._broker.tape_mark_stopped(
+                feed, at_ms=_now_ms(), ttl_seconds=self._ttl_seconds
+            )
         except Exception:
             logger.exception("MD tape stop stamp failed feed=%s", feed)
 
@@ -144,16 +146,12 @@ class TapeRecorder:
             if topic not in self._topics:
                 continue
             try:
-                dropped = await self._broker.tape_trim_before(
-                    feed, min_id_ms=horizon
-                )
+                dropped = await self._broker.tape_trim_before(feed, min_id_ms=horizon)
             except Exception:
                 logger.exception("MD tape trim failed feed=%s", feed)
                 continue
             if dropped:
-                logger.debug(
-                    "MD tape trimmed %d record(s) feed=%s", dropped, feed
-                )
+                logger.debug("MD tape trimmed %d record(s) feed=%s", dropped, feed)
 
 
 def _fields_from(topic: str, payload: dict[str, object]) -> dict[str, str]:
