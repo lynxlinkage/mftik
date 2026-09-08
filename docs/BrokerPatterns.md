@@ -4,9 +4,14 @@ Before redefining the broker's interface around NATS, this is the enumeration
 of what the interface is currently asked to do — counted from call sites rather
 than recalled from the design.
 
-The conclusion is narrower than expected. Of ten patterns, nine are already
-NATS' own primitives or close enough that a rewrite would move them sideways.
-One is not, and it is the one on every strategy's read path.
+The conclusion is narrower than expected, and in one place the count is not the
+interesting part.
+
+Of ten patterns, eight are already NATS' own primitives, or close enough that a
+rewrite would move them sideways. Two are worth the work, for opposite reasons:
+one is still shaped like a Redis hash and sits on every strategy's read path;
+the other is native at the transport and has no shared abstraction at all, so
+two domains wrote the same one twice.
 
 ## How this was counted
 
@@ -45,7 +50,7 @@ The seven: `apps/md/tape.py`, `apps/sts/session/manager.py`,
 | 3 | Request/response | `request` / `probe` | Native. Core request-reply, and no-responders answers a request to nobody at once instead of at the timeout. |
 | 4 | Queued work, competing consumers | `post` / `serve` | Native. A work-queue stream, plus a core queue group. |
 | 5 | Durable append log per feed | `tape_append` / `tape_tail` / `tape_trim_before` | Native. One stream per feed, so "newest N" is sequence arithmetic. |
-| 6 | Bidirectional stream | `bistream` / `bistream_pair` | **Unused.** See below. |
+| 6 | Bidirectional stream, fenced | hand-rolled from `subscribe` + `publish` | Native transport, **no shared abstraction**. Built twice. See below. |
 | 7 | Liveness | `heartbeat_loop` | Built on 1 and 8. Nothing of its own. |
 | 8 | Lease / distributed lock | `lease_*` | KV with per-message TTL and compare-and-set on revision. Already better than the Redis original, which documented losing a race this one wins. |
 | 9 | Monotonic counter | `counter_next` | KV compare-and-set loop. Not a Redis artifact — a server-side counter exists in NATS 2.12 and this node's floor is 2.11. |
@@ -55,15 +60,49 @@ Patterns 1 and 3 and 4 are the traffic — roughly half of all broker calls in
 the tree are `publish`, `subscribe`, `request`, `probe`, `post` and `serve`.
 There is nothing in them to make native. They already are.
 
-### 6 is not a pattern
+### 6 is the pattern the broker named and then under-specified
 
-`bistream` and `bistream_pair` have **no callers outside `client.py`,
-`stream.py` and the tests**. Two module docstrings under `apps/sts` mention
-"TD/MD bistreams" and nothing constructs one. It is either aspirational or
-left over.
+The session fencing lease between STS and both MD and TD *is* a bidirectional
+stream, and it is as load-bearing as anything here: it is what decides that a
+strategy session has gone and its feeds and its account link should be torn
+down.
 
-A redesign should not carry it across on the assumption that something uses it.
-Either a caller appears in the design that needs it, or it goes.
+It does not go through `broker.bistream()`. Both domains build it by hand, and
+they build the same thing:
+
+| | MD (`apps/md/session/manager.py:625`) | TD (`apps/td/session/manager.py:784`) |
+|---|---|---|
+| inbound | `subscribe(Topics.sts_md_session(sid))` | `subscribe(Topics.sts_td_session(sid))` |
+| outbound | `publish(Topics.md_session(sid))` | `publish(Topics.td_session(api_id, sid))` |
+| fencing token | `link.last_token = hb.token`, echoed in `MdLeaseAck` | the same, in `TD_LEASE_ACK` |
+| grace | `_watch_timeout` at 0.5s against `LEASE_GRACE_S` (5.0) | the same |
+| expiry action | `detach(reason="lease_expired")` | `detach(reason="lease_expired")` |
+
+That is exactly the shape `bistream_pair` offers — a named pair of up and down
+topics, one side subscribing and the other publishing — written twice by hand,
+with a `StsLink` dataclass, a watchdog and a token each time.
+
+So the reading is not "delete the unused API". It is that **the broker
+identified this pattern and then offered too little of it to be worth using.**
+`BidirectionalStream` carries envelopes in two directions and stops there. What
+the two call sites needed on top of it, and therefore wrote themselves, is:
+
+- a **fencing token** echoed back on the ack, so a stale writer is detectable;
+- a **liveness grace**, separate from the transport's own connection state,
+  because a peer that stopped heartbeating has gone even though the subject is
+  still there;
+- an **expiry action**, since noticing is not the point — detaching is.
+
+That is a leased session link, not a byte pipe. A native redesign should either
+build that primitive once — pattern 8 (`lease_*`) already has the token and TTL
+half of it, on a KV key rather than over a link — or delete `bistream` and say
+in the interface that this pattern belongs to the domains. What it should not
+do is carry `BidirectionalStream` across unchanged: the two call sites that
+needed this pattern both looked at it and wrote their own instead.
+
+The duplication is worth pricing on its own: `StsLink`, `_lease_loop`,
+`_watch_timeout` and `LEASE_GRACE_S` exist twice, in two apps, and a fix to the
+fencing logic has to be made in both.
 
 ### 2 costs one round trip more than it needs to
 
@@ -128,14 +167,22 @@ Three questions the design has to answer, none of which this document settles:
 
 ## What a redesign does not touch
 
-Thirty of the thirty-seven files use only patterns 1–5 and 7. Those are already
-NATS primitives, and a rewrite of the state model does not reach them. The
-integration surface for pattern 10 is the seven files listed above, and the two
-strategy-facing views inside them are where the behaviour actually changes.
+Most of the thirty-seven files use only patterns 1–5 and 7. Those are already
+NATS primitives, and neither redesign reaches them.
+
+The integration surface for **pattern 10** is the seven files listed above, and
+the two strategy-facing views inside them — `strategy/ledger.py` and
+`strategy/oms.py` — are where the behaviour actually changes.
+
+The integration surface for **pattern 6** is two files, both called
+`session/manager.py`, one in `apps/md` and one in `apps/td`. It is small, but
+unlike pattern 10 it is a change to how a session is torn down, which is the
+path a bad change breaks quietly: a fencing bug does not fail a request, it
+lets two writers believe they own the same feed.
 
 This is the part worth stating plainly, because "redefine the interface and
 integrate it into sts/md/td/sym/api" sounds like thirty-seven files and is
-seven.
+nine.
 
 ## Sequencing, and why not now
 
@@ -168,3 +215,11 @@ So:
 
 Step 4 is what produces the clean version. Doing it before step 3 produces a
 clean version of a guess.
+
+**Pattern 6 does not have to wait for step 3**, and that is the one place this
+sequencing bends. It needs no measurement — the argument for it is that the
+same fencing logic exists twice and a fix has to be made in both — and the
+duplication is a live correctness risk rather than a cost. It is also the one
+piece that production would make *harder* to change rather than easier, since
+teardown is what a deploy exercises. If anything here should happen before the
+first deploy, it is this and not pattern 10.
