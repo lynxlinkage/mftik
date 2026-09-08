@@ -14,7 +14,7 @@ import os
 from collections.abc import Callable, Mapping
 
 import pytest
-from broker_harness import TRANSPORT_ENV, server_address, server_is_up, transport_name
+from broker_harness import server_address, server_is_up
 from db_harness import POSTGRES_URL_ENV, dialect_urls
 
 #: Which event loop the suite runs on: ``uvloop`` or ``asyncio``.
@@ -88,10 +88,9 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     if not server_is_up():
         host, port = server_address()
         raise pytest.UsageError(
-            f"no {transport_name()} server at {host}:{port}, and the broker "
+            f"no NATS server at {host}:{port}, and the broker "
             f"suite has no fake to fall back on. Start one with "
-            f"`docker compose up -d {transport_name()}`, or set "
-            f"{TRANSPORT_ENV} to the transport you do have running."
+            f"`docker compose up -d nats`."
         )
 
 

@@ -1,8 +1,7 @@
 """The NATS transport's own machinery.
 
-Like ``test_redis_transport.py`` next door: everything here is about how NATS
-keeps a promise rather than the promise itself, so it runs only on the NATS
-pass. The promises are in ``test_broker*.py`` and hold either way.
+Everything here is about how NATS keeps a promise rather than the promise
+itself. The promises are in ``test_broker*.py``.
 
 Three of these are worth reading before changing anything in the transport,
 because each one bit during the port and none of them fails loudly:
@@ -23,7 +22,7 @@ from collections.abc import Awaitable, Callable
 
 import nats.js.errors
 import pytest
-from broker_harness import a_broker, only_on
+from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.broker.errors import RequestTimeoutError, StateReadIncompleteError
 from mftik.broker.transport.nats import (
@@ -37,8 +36,6 @@ from mftik.broker.transport.nats import (
     _ttl_seconds,
 )
 from mftik.protocol import Envelope, Topics
-
-pytestmark = only_on("nats")
 
 SUBJECT = "demo"
 

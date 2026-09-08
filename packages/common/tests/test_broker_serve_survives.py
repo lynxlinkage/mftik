@@ -7,10 +7,8 @@ raised ``TimeoutError`` on a socket that stalled — a failure that costs one po
 ended a control plane, and left no line in any log.
 
 The transport-shaped half of that — what a failed read looks like and that the
-next one is tried — is in ``test_redis_transport.py`` and
-``test_nats_transport.py``, because a stalled blocking pop and a reaped consumer
-have nothing in common but the answer. What is here is the half that is the
-broker's own: a message the broker itself cannot read.
+next one is tried — is in ``test_nats_transport.py``. What is here is the half
+that is the broker's own: a message the broker itself cannot read.
 """
 
 from __future__ import annotations
