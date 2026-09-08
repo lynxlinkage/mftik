@@ -1,27 +1,22 @@
 # What the system actually asks a broker for
 
-Before redefining the broker's interface around NATS, this is the enumeration
-of what the interface is currently asked to do — counted from call sites rather
-than recalled from the design.
-
-The conclusion is narrower than expected, and in one place the count is not the
-interesting part.
+This is the enumeration of what the interface is asked to do — counted from
+call sites rather than recalled from the design — and what landed when those
+seven patterns were made native.
 
 The first pass counted ten patterns. Three of those were one pattern under
 different names, so the real answer is seven — and which three collapsed says
 more than the number does.
 
-Five of the seven are already NATS' own primitives, or close enough that a
-rewrite would move them sideways. Three are worth acting on, for three
-different reasons:
+A, B, C and F were already NATS primitives. The rest is done:
 
-- **G** is still shaped like a Redis hash and sits on every strategy's read
-  path.
-- **E** is native at the transport and has no shared abstraction at all, so two
-  domains wrote the same one twice.
-- **D** should not exist. All four of its callers document a backstop outside
-  the broker, so at-least-once delivery is buying something none of them asked
-  for — and it is the most expensive pattern here to keep.
+- **A** has its own log stream. `publish_log` no longer purges.
+- **B / F** cache the KV bucket status. Tape coverage is a durable put.
+- **D** is gone. `post` and the work-queue stream are deleted; `serve` is
+  core NATS. The four callers use `request`, or they do not ask.
+- **E** is `LeasedSessionLink`. MD and TD no longer write the loop twice.
+- **G** is KV watch plus a local `StateProjection`. The three design
+  questions are answered below.
 
 ## How this was counted
 
@@ -58,26 +53,27 @@ pattern wearing different names, and saying so is worth more than the count:
 
 | | Pattern | Broker surface | Where NATS stands |
 |---|---|---|---|
-| **A** | Subject log — fan-out with a bounded replay tail | `publish` / `subscribe` / `psubscribe` / `publish_log` / `fetch_log_buffer` | Native. One stream, per-subject bounds. |
-| **B** | Keyed log — one stream per feed | `tape_append` / `tape_tail` / `tape_trim_before` | Native. "Newest N" is sequence arithmetic because a feed owns its stream. |
-| **C** | Request / response | `request` / `probe` | Native. Core request-reply; no-responders answers a request to nobody at once rather than at the timeout. |
-| **D** | Durable work queue | `post` / `serve` | Native — and **removable**. No caller needs it. See below. |
-| **E** | Fenced session link | hand-rolled from `subscribe` + `publish` | Native transport, **no shared abstraction**. Built twice. |
-| **F** | Atomic register | `lease_*`, `counter_next`, all of `liveness.py` | KV with per-message TTL and compare-and-set on revision. Better than the Redis original, which documented losing a race this one wins. |
-| **G** | **Shared mutable state** | `state_*` | **The one still shaped like a Redis hash.** |
+| **A** | Subject log — fan-out with a bounded replay tail | `publish` / `subscribe` / `psubscribe` / `publish_log` / `fetch_log_buffer` | Native. Two streams: `{prefix}.ps.>` and `{prefix}.log.>`. |
+| **B** | Keyed log — one stream per feed | `tape_append` / `tape_tail` / `tape_trim_before` | Native. "Newest N" is sequence arithmetic because a feed owns its stream. Coverage is a durable KV put. |
+| **C** | Request / response | `request` / `probe` / `serve` | Native. Core request-reply; no-responders answers a request to nobody at once rather than at the timeout. |
+| **D** | *(removed)* | — | The work-queue stream is gone. Nobody asked for at-least-once delivery. |
+| **E** | Fenced session link | `LeasedSessionLink` / `broker.leased_link` | Native transport, one abstraction. MD grace 3s, TD grace 5s. |
+| **F** | Atomic register | `lease_*`, `counter_next`, all of `liveness.py` | KV with per-message TTL and compare-and-set on revision. Signatures stay apart from G. Bucket status is cached. |
+| **G** | Shared mutable state | `state_*`, `state_watch`, `StateProjection` | Key-per-field, push via KV watch, last-written cache on the writer. |
 
-A, C and D are the traffic — roughly half of all broker calls in the tree are
-`publish`, `subscribe`, `request`, `probe`, `post` and `serve`. There is nothing
-in them to make native. They already are.
+A and C are the traffic — roughly half of all broker calls in the tree are
+`publish`, `subscribe`, `request`, `probe` and `serve`. There was nothing in
+them to make native. They already were.
 
 ### What the merges were
 
-**Fan-out and "fan-out with a replay tail" are one pattern (A).** `publish`
-(`nats.py:481`) and `publish_log` (`nats.py:569`) resolve the same
-`_fanout_subject` onto the same `_fanout_stream`. Every plain publish already
-has a replay tail — `max_msgs_per_subject` is 256 — and nobody reads it. The
-difference is a TTL header and a tighter ring, which is a retention argument,
-not a second pattern.
+**Fan-out and "fan-out with a replay tail" are one pattern (A).** They used
+to share `{prefix}.ps.>` and a purge after every log line. They now share
+the *pattern* and not the stream: `publish` stays on `.ps.>`; `publish_log`
+writes `{prefix}.log.>` with `max_msgs_per_subject = LOG_MAX_MSGS_PER_SUBJECT`.
+`subscribe` / `psubscribe` listen on both, so a live log subscriber does not
+need a second call. The difference is still a retention argument, not a
+second pattern.
 
 **Liveness was never a pattern (folded into F).** `packages/common/liveness.py`
 makes eight broker calls and **all eight are `lease_*`**: `mark_alive` is
@@ -119,250 +115,114 @@ detects a stale message from the *same* session and nothing more; what stops a
 second process claiming the same session is the lease, which is F. The two are
 related, but not in the way a shared token would make them.
 
-### D has four callers and none of them wants it
+### D is gone
 
-`post` is at-least-once delivery: the ask outlives a plane that is not up yet.
-Every caller of it says, in its own comment, that it does not need that.
+`post` was at-least-once delivery: the ask outlived a plane that was not up
+yet. Every caller of it said, in its own comment, that it did not need that.
 
-| Caller | What it says the backstop is |
-|---|---|
-| `apps/api/backfill_cron.py:80` | the cron itself — "a failed sweep is logged and the loop goes on: the next tick asks again" |
-| `apps/td/backfill/trigger.py:65` (session detach, and TD shutdown) | "Best-effort by design… **none of them is the reason the record eventually settles**" |
-| `apps/sts/session/session.py:610` | "**The lease covers this.** Worth a line because a broker that cannot take a write is a problem in its own right, not because the attach is now stuck" |
-| `apps/api/orchestrate.py:409` | "**The lease covers this:** MD tears the attach down when this session's heartbeat stops, which failing it is about to do" |
+| Caller | What it said the backstop is | What it does now |
+|---|---|---|
+| `apps/api/backfill_cron.py` | the cron itself — the next tick asks again | `request` with a 5s timeout; no-responders is a log line |
+| `apps/td/backfill/trigger.py` (session detach) | "none of them is the reason the record eventually settles" | short-timeout `request` while still serving; otherwise the cron |
+| `apps/td/app.py` (TD shutdown) | the same | deleted — TD has already stopped serving; the successor looks at the cursor |
+| `apps/sts/session/session.py` | "**The lease covers this.**" | short-timeout `request`; the lease still tears the attach down |
+| `apps/api/orchestrate.py` | "**The lease covers this.**" | short-timeout `request` on rollback |
 
 Two backstops between them, and neither is the broker: the backfill cursor —
 a Postgres row (`BackfillCursorRow`), advanced *during* a walk rather than at
 the end of one — and the liveness lease, which is F.
 
-The transport agrees about how little is on offer. `_pump_posted` acknowledges
-each message as it hands it over, not after the handler is done, and says why:
-"the durability this buys is 'nobody was serving the subject yet' … and not
-'the process died half way through the work', which neither transport has ever
-offered." A guarantee that narrow is worth one cron interval of latency, and
-the cron interval is fifteen minutes.
+`BackfillSession` acks as soon as it accepts the walk (`reason="accepted"`)
+and runs it in the background, so the cron learns whether that instance is
+there and whether the account is already running. Losing a reply is not
+losing work: the cursor already moved as far as the walk got.
 
-**The backfill cron is the clean first move, and TD needs no change at all.**
-`BackfillSession` already builds a full `TdBackfillResult` and calls
-`req.reply` with it (`backfill/session.py:192`); on the posted path that is a
-silent no-op, because `_pump_posted` hands work over with no reply address on
-purpose. Point a `request` at the same subject and the reply that is being
-built and discarded today arrives. The cron gains what it does not have now —
-whether TD is there at all, and whether that account's walk is still running —
-and loses nothing, because losing a reply is not losing work: the cursor
-already moved as far as the walk got.
+What left with D: the work-queue stream, `_pump_posted`, and the two-source
+merge inside `serve`. `serve` is a core NATS queue-group subscription. The
+stop-event handover in `_iter_until_stopped` stays — it is still how a
+cancelled loop does not swallow a message it has already taken.
 
-**The shutdown caller is the one that cannot be an RPC**, and it does not need
-to be one. TD asks *after* it has stopped serving the subject, so by
-construction nothing is listening; an RPC there always fails. The queue exists
-to carry that ask to whichever TD comes up next. But the successor could look
-instead of being told — which accounts have cursors behind the settlement line
-is a database question — and looking is strictly better, because it does not
-depend on the predecessor having managed to post before it died. The cron's own
-docstring already lists that failure: "a process may die before it asks".
+Failure behaviour is "known failed immediately, backstop handles it".
 
-**What removing D takes with it.** The work-queue stream, `_pump_posted`
-entirely, and the two-source merge inside `serve` — which is the whole stage on
-which #82 played out: the handover ordering that `_iter_until_stopped` has to
-get right exists because posted work is acknowledged on delivery and can land
-behind the stop sentinel. With one source that complexity has nothing to
-describe.
+### E is `LeasedSessionLink`
 
-The durable consumer per served subject is **not** on that list, and an earlier
-draft of this document was wrong to put it there. `_pump_posted` gives it
-`inactive_threshold=consumer_idle_seconds`, and since NATS 2.9 that reaps
-durables as well as ephemerals — this node's floor is 2.11 and CI runs
-`nats:2.11-alpine`. A durable for a subject nobody serves any more is gone five
-minutes later. `docs/Broker.md` says exactly this in its `consumer_idle_seconds`
-row, and says why: it "stops a node that has churned a thousand sessions from
-carrying a thousand consumers."
+The session fencing lease between STS and both MD and TD is what decides that
+a strategy session has gone and its feeds and its account link should be torn
+down. Both domains used to build it by hand.
 
-What does survive the correction is about messages rather than consumers. The
-work-queue stream is created with no `max_msgs`, `max_age` or `max_bytes`, and
-work-queue retention removes a message only when it is acknowledged. So a
-subject that is posted to and never served accumulates with nothing to stop it,
-and reaping the idle durable does not help — it removes the reader, not the
-backlog. That is a defect in the stream's configuration and is worth fixing on
-its own, whether or not D survives: a `max_age` gives unserved work an end
-without contradicting the intent `_ensure_post_stream` documents, which is that
-work waits rather than expires. It just makes "waits" finite.
+`packages/common/src/mftik/broker/link.py` is that loop once: subscribe `rx`,
+ack on `tx`, echo the fencing token, expire when the grace window lapses,
+resubscribe after a transport failure, and hand every other envelope to
+`on_message`. Expiry and an unexpected exit run on a sibling task so they
+cannot cancel the loop from inside itself.
 
-**What it costs, stated honestly.** Failure behaviour changes from "delivered
-eventually" to "known failed immediately, backstop handles it". Four comments
-assert the backstops hold. That is intent, not observation, and which of them
-actually fires is the kind of thing only production answers — see the
-sequencing note at the end.
-
-### E is the pattern the broker named and then under-specified
-
-The session fencing lease between STS and both MD and TD *is* a bidirectional
-stream, and it is as load-bearing as anything here: it is what decides that a
-strategy session has gone and its feeds and its account link should be torn
-down.
-
-It does not go through `broker.bistream()`. Both domains build it by hand, and
-they build the same thing:
-
-| | MD (`apps/md/session/manager.py:625`) | TD (`apps/td/session/manager.py:784`) |
+| | MD | TD |
 |---|---|---|
-| inbound | `subscribe(Topics.sts_md_session(sid))` | `subscribe(Topics.sts_td_session(sid))` |
-| outbound | `publish(Topics.md_session(sid))` | `publish(Topics.td_session(api_id, sid))` |
-| fencing token | `link.last_token = hb.token`, echoed in `MdLeaseAck` | the same, in `TD_LEASE_ACK` |
-| grace | `_watch_timeout` at 0.5s against `LEASE_GRACE_S` (5.0) | the same |
-| expiry action | `detach(reason="lease_expired")` | `detach(reason="lease_expired")` |
+| inbound | `Topics.sts_md_session(sid)` | `Topics.sts_td_session(sid)` |
+| outbound | `Topics.md_session(sid)` | `Topics.td_session(api_id, sid)` |
+| grace | 3s | 5s — not unified; the two planes do not fail the same way |
+| unexpected exit | `detach(reason="lease_loop_died")` | the loop ends; the manager's own teardown covers it |
 
-That is exactly the shape `bistream_pair` offers — a named pair of up and down
-topics, one side subscribing and the other publishing — written twice by hand,
-with a `StsLink` dataclass, a watchdog and a token each time.
+`bistream` / `BidirectionalStream` / `stream.py` are deleted. STS still
+heartbeats with `publish`; it was never a consumer of the link.
 
-So the reading is not "delete the unused API". It is that **the broker
-identified this pattern and then offered too little of it to be worth using.**
-`BidirectionalStream` carries envelopes in two directions and stops there. What
-the two call sites needed on top of it, and therefore wrote themselves, is:
+### A has its own log stream
 
-- a **fencing token** echoed back on the ack, so a stale writer is detectable;
-- a **liveness grace**, separate from the transport's own connection state,
-  because a peer that stopped heartbeating has gone even though the subject is
-  still there;
-- an **expiry action**, since noticing is not the point — detaching is.
+`publish_log` used to publish onto the fan-out stream and then purge the
+subject to `keep=maxlen`. Two bounds, one stream, so the smaller one was
+enforced by hand on every line.
 
-That is a leased session link, not a byte pipe. A native redesign should either
-build that primitive once — F (`lease_*`) already has the token and TTL
-half of it, on a KV key rather than over a link — or delete `bistream` and say
-in the interface that this pattern belongs to the domains. What it should not
-do is carry `BidirectionalStream` across unchanged: the two call sites that
-needed this pattern both looked at it and wrote their own instead.
+Logs now own `{prefix}.log.>` with `max_msgs_per_subject =
+LOG_MAX_MSGS_PER_SUBJECT` (256). That covers both the default log buffer and
+the status ring STS and the API ask for (`_STATUS_BUFFER` = 200). The server
+holds the ring; the purge is gone.
 
-The duplication is worth pricing on its own: `StsLink`, `_lease_loop`,
-`_watch_timeout` and `LEASE_GRACE_S` exist twice, in two apps, and a fix to the
-fencing logic has to be made in both.
+## G is push, still key-per-field
 
-### A costs one round trip more than it needs to
-
-`publish_log` publishes and then purges the subject to `keep=maxlen`, because
-the fan-out stream's `max_msgs_per_subject` is `FANOUT_MAX_MSGS_PER_SUBJECT`
-(256) while a log ring is `log_buffer_maxlen` (100). Two bounds, one stream, so
-the smaller one is enforced by hand on every line.
-
-Giving logs their own stream with `max_msgs_per_subject = log_buffer_maxlen`
-lets the server hold the ring and the purge goes. In practice there is one
-value: `client.py:489` passes `config.log_buffer_maxlen` unless a caller
-overrides, and none does.
-
-## G, which is the actual subject
-
-`state_*` is a Redis hash with the serial numbers filed off. One KV key per
+`state_*` was a Redis hash with the serial numbers filed off. One KV key per
 field, `state_all` reassembling a hash, `state_replace` emulating a `MULTI`.
-Everything that made it awkward follows from that choice: no cross-key
-transaction so `state_put_many` is not a snapshot; a lock in-process to restore
-"last issued wins"; a scan to find out which fields to drop.
+The write side is unchanged: TD still `state_replace`s the book. The read
+side is not.
 
-**What it costs today.** `state_all` is five round trips and a JetStream
-consumer created and destroyed: `bucket.status()`, `stream_info` for the
-subject counts, `pull_subscribe`, `fetch`, `delete_consumer`. In a clustered
-NATS, creating a consumer is a raft operation.
+Three questions, now answered:
 
-And it is on the read path of every strategy:
+1. **The unit stays key-per-field.** TD already has single-field
+   `write_order` / `write_ledger`. A key per *name* would turn those into a
+   read-modify-write on the order path, which is the cost the projection was
+   meant to remove from the *reader*, not add to the writer.
+2. **A broken watch is reopened.** KV watch re-delivers the current values
+   first, which is how a projection resynchronises after a reconnect. Gaps
+   are not reconstructed from history; they are overwritten by that snapshot.
+3. **A name has one writer.** `_state_lock`'s docstring already asserted
+   this. The transport caches the last-written field set, so `state_replace`
+   no longer reads before it writes.
 
-- `strategy/ledger.py:93` — `LedgerView.view()` calls `state_all` per access.
-  A strategy asking for a balance pays the whole thing.
-- `strategy/oms.py:87` — `OmsView.view()`, the same, for the order book.
+`state_drop` / `state_clear` are KV deletes, not stream purges. A watcher has
+to see the field go; a purge hid that. `state_all` still skips the delete
+markers those writes leave.
 
-**What the write side looks like.** `Session.publish_oms`
-(`apps/td/session/session.py:508`) is named "publish" and publishes nothing: it
-is a `state_replace`. TD writes the book; STS re-reads it when it next wants to
-know. Write-then-poll, because a Redis hash has no other mode.
+STS starts a `StateProjection` per attached `td.oms.{id}` and
+`td.ledger.{id}` on session start, and closes them on stop.
+`strategy/oms.py` and `strategy/ledger.py` read the local map when the
+session has one, and fall back to `state_all` when it does not — which is
+why the unit tests that never attach a session still pass.
 
-**What native looks like.** NATS KV has `watch`, `watchall` and `history` —
-verified present in the pinned nats-py. A state model designed for it is push,
-not pull: TD writes, and STS is told. The strategy's `view()` reads a locally
-maintained projection instead of paying five round trips to rebuild a hash the
-writer already had in memory.
+Bucket status is cached (`_kv_status`). That is the raft read `state_all`
+used to pay on every call.
 
-That is not a tidier spelling of the same thing. It is a different cost
-structure for the domain that reads most, and it is unreachable from a hash.
+## What this change touches
 
-Three questions the design has to answer, none of which this document settles:
+Most of the thirty-seven files still use only A, B, C and F, and those
+signatures did not move. First-classing the patterns is *not* renaming
+`publish` to `broker.a.publish`.
 
-- **Ordering and gaps.** A watch that misses an update because a client
-  reconnected has to resynchronise. KV history gives a revision per key; what
-  the projection does with a gap is the real design.
-- **The unit.** Key-per-field is what makes a single-field write cheap and a
-  multi-field write non-atomic. A key per *name* holding the whole record
-  inverts both. With a watch feeding a projection, the read cost that motivated
-  key-per-field partly goes away, so this is worth re-deciding rather than
-  inheriting.
-- **Who may write.** `_state_lock`'s docstring asserts a state name has exactly
-  one writer, the session that owns that account. If that holds, the transport
-  can cache the field set it last wrote and `state_replace` stops reading
-  before it writes. If it does not hold, the lock is already insufficient and
-  that is a bug independent of any redesign.
+The integration surface:
 
-## What a redesign does not touch
+- **D** — four callers, plus TD's `BackfillSession` ack, plus the tests that
+  used to assert work-queue backlog.
+- **E** — `apps/md/session/manager.py` and `apps/td/session/manager.py`.
+  Small, and the path a fencing bug breaks quietly.
+- **G** — `strategy/oms.py`, `strategy/ledger.py`, STS session start/stop.
 
-Most of the thirty-seven files use only A, B, C and D. Those are already
-NATS primitives, and neither redesign reaches them.
-
-The integration surface for **G** is the seven files listed above, and
-the two strategy-facing views inside them — `strategy/ledger.py` and
-`strategy/oms.py` — are where the behaviour actually changes.
-
-The integration surface for **E** is two files, both called
-`session/manager.py`, one in `apps/md` and one in `apps/td`. It is small, but
-unlike G it is a change to how a session is torn down, which is the
-path a bad change breaks quietly: a fencing bug does not fail a request, it
-lets two writers believe they own the same feed.
-
-This is the part worth stating plainly, because "redefine the interface and
-integrate it into sts/md/td/sym/api" sounds like thirty-seven files and is
-nine.
-
-## Sequencing, and why not now
-
-The expensive half of this work is already done. #77 and #80 pushed the store's
-vocabulary out of the domains and put a test in front of it. What is left is
-not a big-bang; the seam has been bought and paid for.
-
-What is missing is the thing that should shape the design: **no part of this
-system has run in production.** Four defects surfaced in review on 2026-09-08
-(#82, #83), every one of them invisible until a node had been up a while. An
-interface designed today is designed from round-trip counts — including every
-number in this document. An interface designed after two weeks of real traffic
-is designed from where the time actually goes.
-
-Deferring costs almost nothing here, which is unusual enough to be worth using:
-`test_broker_is_the_only_transport.py` keeps the seam from rotting while it
-waits.
-
-So:
-
-1. **#84** — remove the Redis transport. Frees `base.py` from lowest-common-
-   denominator semantics; prerequisite either way.
-2. **Round-trip work behind `client.py`** — cache the bucket status that is
-   re-fetched per call, keep the last-written field set so `state_replace`
-   stops reading first, move tape coverage off its TTL renewal, give logs their
-   own stream. No domain file changes.
-3. **Production, and two weeks of it.**
-4. **Then** redesign G against measurements, with those seven files as
-   the integration surface.
-
-**D splits across that line rather than sitting on one side of it.** Pointing
-the backfill cron at `request` instead of `post` belongs in step 2: TD needs no
-change, the reply is already built, and the cron gains an answer it does not
-have today. Deleting the pattern outright belongs after step 3, because what
-changes is failure behaviour and the four backstops are asserted rather than
-observed. Running the cron on RPC through a production window is what turns
-them into observations — no-responders and lease expiry either fire as the
-comments claim or they do not, and either way the answer arrives before
-anything irreversible is deleted.
-
-Step 4 is what produces the clean version. Doing it before step 3 produces a
-clean version of a guess.
-
-**E does not have to wait for step 3** either, and that is the other place this
-sequencing bends. It needs no measurement — the argument for it is that the
-same fencing logic exists twice and a fix has to be made in both — and the
-duplication is a live correctness risk rather than a cost. It is also the one
-piece that production would make *harder* to change rather than easier, since
-teardown is what a deploy exercises. If anything here should happen before the
-first deploy, it is this and not G.
+`test_broker_is_the_only_transport.py` still keeps the seam: nothing under
+an `src` tree may import `nats` or reach through `.js` / `.nc`.

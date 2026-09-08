@@ -406,7 +406,7 @@ async def _detach_md(
     """Unwind the attaches that did land, before failing the session."""
     for instance in instances:
         try:
-            await broker.post(
+            await broker.request(
                 Topics.MD if instance == ANY_INSTANCE else Topics.md(instance),
                 MdDetachRequestEnvelope.wrap(
                     MdDetachRequest(
@@ -416,6 +416,7 @@ async def _detach_md(
                     source="api",
                     session_id=session_id,
                 ),
+                timeout=1.5,
             )
         except Exception:
             # The lease covers this: MD tears the attach down when this

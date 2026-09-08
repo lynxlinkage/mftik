@@ -84,7 +84,9 @@ class StrategyOms:
             # caller, so the log has to be the thing that tells them apart.
             log.record("read", "oms.view", dir="out", resolved=False, count=0)
             return OmsView()
-        rows = await self._session_broker().state_all(Topics.td_oms(resolved))
+        rows = self._state_rows(Topics.td_oms(resolved))
+        if rows is None:
+            rows = await self._session_broker().state_all(Topics.td_oms(resolved))
         # The rows, not the view built from them. This read is an input to
         # whatever the strategy did next, and only the answer it was actually
         # given can stand in for TD's book after the fact.
@@ -117,8 +119,13 @@ class StrategyOms:
                 "read", "oms.order", dir="out", cid=cid, resolved=False
             )
             return None
-        row = await self._session_broker().state_get(
-            Topics.td_oms(resolved), cid
+        projected = self._state_rows(Topics.td_oms(resolved))
+        row = (
+            projected.get(cid)
+            if projected is not None
+            else await self._session_broker().state_get(
+                Topics.td_oms(resolved), cid
+            )
         )
         # ``found`` rather than inferring it from a missing payload: an order
         # that is no longer live is a different answer from one nobody asked
@@ -147,6 +154,13 @@ class StrategyOms:
             return api_id
         attached = self.api_ids
         return attached[0] if len(attached) == 1 else None
+
+    def _state_rows(self, name: str) -> dict[str, Any] | None:
+        session = self._strategy.session if self._strategy is not None else None
+        getter = getattr(session, "projected_state", None)
+        if getter is None:
+            return None
+        return getter(name)
 
     def _session_broker(self):
         return self._require_session().broker

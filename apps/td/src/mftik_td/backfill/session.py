@@ -163,28 +163,26 @@ class BackfillSession:
             )
             return
 
+        await self._reply(
+            req,
+            BackfillOutcome(api_id=payload.api_id, ok=True, reason="accepted"),
+        )
         task = asyncio.create_task(
-            self._run(req, payload), name=f"td-backfill-{payload.api_id}"
+            self._run(payload), name=f"td-backfill-{payload.api_id}"
         )
         self._runs.add(task)
         task.add_done_callback(self._runs.discard)
 
-    async def _run(self, req: IncomingRequest, payload: TdBackfill) -> None:
-        outcome = await self._executor.run(
+    async def _run(self, payload: TdBackfill) -> None:
+        await self._executor.run(
             payload.api_id, tickers=payload.tickers, reason=payload.reason
         )
-        await self._reply(req, outcome)
 
     async def _reply(self, req: IncomingRequest, outcome: BackfillOutcome) -> None:
-        """Answer the caller, whatever happened.
+        """Ack that the walk was accepted (or refused), not that it finished.
 
-        Answered even when nothing was done. A caller waiting on this has no
-        other way to learn the answer is never coming, and a run that was
-        skipped is a different fact from one that failed.
-
-        Unless nobody asked: the triggers post rather than request, because a
-        schedule and a shutdown have no use for a result they would have to
-        wait minutes for. A missing ``reply_to`` is that, not an error.
+        A walk is minutes of venue round trips. The caller is a schedule or a
+        detach measured in seconds, and the cursor is the record of progress.
         """
         if not req.envelope.reply_to:
             return

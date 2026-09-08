@@ -14,13 +14,11 @@ which is what reproduces the promise the broker makes — a message published
 while nobody was subscribed is gone — while leaving the stored message there for
 anything that wants to read the subject rather than follow it.
 
-**Request-reply is core NATS, except :meth:`NatsTransport.post`.** A caller
-waiting on an answer gains nothing from durability: it has a timeout, and a
-request executed after that timeout passed is a side effect nobody is expecting
-any more. Core request-reply also answers *better* — no responders is an
-immediate error rather than five seconds of silence, so the control plane learns
-that a plane is down in milliseconds. ``post`` is the one caller with no
-timeout to fall back on, so it alone rides a work-queue stream; see the method.
+**Request-reply is core NATS.** A caller waiting on an answer gains nothing
+from durability: it has a timeout, and a request executed after that timeout
+passed is a side effect nobody is expecting any more. Core request-reply also
+answers *better* — no responders is an immediate error rather than five seconds
+of silence, so the control plane learns that a plane is down in milliseconds.
 
 **Not everything Redis kept in one keyspace belongs in KV.** State, leases and
 counters do — they are current values addressed by name, which is what a bucket
@@ -45,7 +43,6 @@ import datetime as dt
 import json
 import logging
 import re
-import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
@@ -75,24 +72,21 @@ logger = logging.getLogger(__name__)
 #: shorter request is rounded up rather than sent and lost.
 MIN_TTL_SECONDS = 1
 
-#: How long the fan-out stream keeps a subject's messages. Matches
-#: ``publish_log``'s default TTL, because that is the longest any caller asks a
-#: fan-out topic to remember anything for.
+#: How long the fan-out stream keeps a subject's messages. A fuse, not a
+#: log: subscribers start at *new*, and a quiet topic's leftover prints
+#: should not sit forever.
 FANOUT_MAX_AGE_SECONDS = 86_400
 
-#: How many messages one fan-out subject keeps. Every pub/sub subject gets a
-#: tail, not only the log topics, and that is deliberate: ``publish_log`` and
-#: ``publish`` then differ only in whether the caller intends to read it back,
-#: rather than in where the message went. It also bounds the stream by the
-#: number of live subjects instead of by traffic — a busy feed cannot grow it.
-#:
-#: It is therefore a *ceiling* on what :meth:`NatsTransport.publish_log` can be
-#: asked to keep, and has to stay above every caller's ask. It was 100, which is
-#: ``BrokerConfig.log_buffer_maxlen``'s default and looked like the same number —
-#: but STS and the API both ask for 200 for the session status ring, and a
-#: request above the ceiling is served silently halved. Above it now raises, and
-#: this is sized well clear of both.
+#: How many messages one fan-out subject keeps. Live pub/sub is not a log:
+#: subscribers start at *new*, and this cap is only a fuse so a busy feed
+#: cannot grow the stream. Logs live on their own stream; see
+#: :meth:`NatsTransport.publish_log`.
 FANOUT_MAX_MSGS_PER_SUBJECT = 256
+
+#: Ceiling on a log ring. STS and the API ask for 200 for the session status
+#: ring; ``BrokerConfig.log_buffer_maxlen`` defaults to 100. The log stream's
+#: ``max_msgs_per_subject`` is this number so both fit without a purge.
+LOG_MAX_MSGS_PER_SUBJECT = 256
 
 #: Global fuse on the fan-out stream, in messages. Reached only if subjects
 #: themselves multiply without end, so it is what a session-churn bug hits
@@ -135,11 +129,6 @@ _READ_BATCH = 256
 #: consumer when the read is done, and this only covers the process that never
 #: gets there.
 _READ_CONSUMER_IDLE_S = 30.0
-
-#: How long one pull for posted work parks before looking at its stop event.
-#: Cancellable, unlike Redis' blocking pop, so this bounds nothing a caller
-#: waits on — it only decides how often an idle serve loop wakes.
-_POST_FETCH_TIMEOUT_S = 1.0
 
 #: Where a tape record carries the stamp its writer chose, when it chose one.
 #: A header rather than a field on the record, so it cannot collide with
@@ -254,10 +243,11 @@ class NatsTransport(BrokerTransport):
         # names this process writes — an account's book and its ledger — not by
         # traffic.
         self._state_locks: dict[str, asyncio.Lock] = {}
-        # When this process last gave a feed's coverage record a full TTL. See
-        # :meth:`_renew_tape_coverage`. One entry per feed this process records,
-        # and losing it on restart costs one extra renewal.
-        self._tape_cov_renewed: dict[str, float] = {}
+        # Last field set this process wrote for a state name. A name has one
+        # writer, so ``state_replace`` can drop the extras without reading first.
+        self._state_fields: dict[str, set[str]] = {}
+        # ``bucket.status()`` is a raft read. Cached per kind after first use.
+        self._kv_status: dict[str, Any] = {}
 
     # --- names -------------------------------------------------------------
 
@@ -268,37 +258,39 @@ class NatsTransport(BrokerTransport):
     def _fanout_subject(self, topic: str) -> str:
         return f"{self._prefix}.ps.{_check_subject(topic)}"
 
-    def _fanout_topic(self, subject: str) -> str:
-        """The topic a caller asked for, back out of the subject it arrived on."""
-        return subject[len(self._prefix) + 4 :]
-
     def _rpc_subject(self, subject: str) -> str:
         """Where a live request is asked. Core NATS, and no stream over it.
 
-        Separate from :meth:`_post_subject`, and it has to be. A JetStream
-        stream is a subscriber like any other, so a stream whose filter covered
-        this subject would receive every core request — and answer it, on the
-        requester's own reply subject, with a publish acknowledgement. The
-        caller then parses ``{"stream": ..., "seq": 1}`` as the reply it was
-        waiting for, and the handler's real answer arrives second to an inbox
-        nobody is reading any more.
+        A JetStream stream is a subscriber like any other, so a stream whose
+        filter covered this subject would receive every core request — and
+        answer it, on the requester's own reply subject, with a publish
+        acknowledgement. The caller then parses ``{"stream": ..., "seq": 1}``
+        as the reply it was waiting for. Fan-out and logs stay on their own
+        subject spaces for that reason.
         """
         return f"{self._prefix}.rpc.{_check_subject(subject)}"
 
-    def _post_subject(self, subject: str) -> str:
-        """Where durable work is left. Captured by the work-queue stream."""
-        return f"{self._prefix}.post.{_check_subject(subject)}"
+    def _log_subject(self, topic: str) -> str:
+        return f"{self._prefix}.log.{_check_subject(topic)}"
 
     def _tape_subject(self, feed: str) -> str:
         return f"{self._prefix}.tape.{_check_subject(feed)}"
+
+    def _topic_from_subject(self, subject: str) -> str:
+        """The topic a caller asked for, back out of the subject it arrived on."""
+        for mid in (".ps.", ".log."):
+            needle = f"{self._prefix}{mid}"
+            if subject.startswith(needle):
+                return subject[len(needle) :]
+        return subject
 
     @property
     def _fanout_stream(self) -> str:
         return _sanitize(f"{self._prefix}_ps")
 
     @property
-    def _post_stream(self) -> str:
-        return _sanitize(f"{self._prefix}_post")
+    def _log_stream(self) -> str:
+        return _sanitize(f"{self._prefix}_log")
 
     def _named(self, kind: str, original: str) -> str:
         """A stream or consumer name for ``original``, unique within this node.
@@ -346,15 +338,15 @@ class NatsTransport(BrokerTransport):
                 # policy exists to avoid as well.
                 max_reconnect_attempts=-1,
                 # Everything published while the connection is down is held and
-                # flushed on reconnect. That is right for fan-out and for
-                # posted work, and harmless for a request, which has its own
-                # deadline and will fail on that instead.
+                # flushed on reconnect. That is right for fan-out, and harmless
+                # for a request, which has its own deadline and will fail on
+                # that instead.
                 pending_size=8 * 1024 * 1024,
             )
             self._owns_connection = True
         self._js = self._nc.jetstream()
         await self._ensure_fanout_stream()
-        await self._ensure_post_stream()
+        await self._ensure_log_stream()
 
     async def close(self) -> None:
         if self._nc is not None and self._owns_connection:
@@ -363,8 +355,8 @@ class NatsTransport(BrokerTransport):
             # exactly the subscriptions whose loops are already being cancelled
             # — so it reliably waits out its own timeout and turns a teardown
             # into thirty seconds. The flush is the part worth keeping, because
-            # posted work still sitting in the outbound buffer is work that was
-            # accepted and then lost.
+            # a publish still sitting in the outbound buffer is a message that
+            # was accepted and then lost.
             with contextlib.suppress(Exception):
                 await self._nc.flush(timeout=_CLOSE_FLUSH_TIMEOUT_S)
             with contextlib.suppress(Exception):
@@ -372,6 +364,8 @@ class NatsTransport(BrokerTransport):
             self._nc = None
         self._js = None
         self._kv.clear()
+        self._kv_status.clear()
+        self._state_fields.clear()
         self._ensured.clear()
 
     def describe(self) -> str:
@@ -410,30 +404,29 @@ class NatsTransport(BrokerTransport):
                 max_msgs_per_subject=FANOUT_MAX_MSGS_PER_SUBJECT,
                 max_msgs=FANOUT_MAX_MSGS,
                 max_age=FANOUT_MAX_AGE_SECONDS,
-                # What lets ``publish_log`` honour the TTL it is handed. Without
-                # it the header is refused and the line is dropped, so this and
-                # that header have to be changed together.
-                allow_msg_ttl=True,
                 allow_direct=True,
             )
         )
 
-    async def _ensure_post_stream(self) -> None:
-        """The work queue behind :meth:`post`, and nothing else.
+    async def _ensure_log_stream(self) -> None:
+        """One stream for every ``publish_log`` subject this node writes.
 
-        Its own subject space, not shared with ``request`` and ``probe`` — see
-        :meth:`_rpc_subject` for what happens when a stream can see a core
-        request. What lands here is work whose sender has already moved on,
-        which is why the retention is ``workqueue``: a message lives until some
-        consumer acknowledges it, and one nobody is serving waits instead of
-        expiring.
+        Separate from fan-out so the ring is the stream's own
+        ``max_msgs_per_subject`` rather than a purge after every line. The
+        bound is :data:`LOG_MAX_MSGS_PER_SUBJECT`, which covers both the
+        default log buffer and the status ring STS and the API ask for.
         """
         await self._ensure_stream(
             js_api.StreamConfig(
-                name=self._post_stream,
-                subjects=[f"{self._prefix}.post.>"],
-                retention=js_api.RetentionPolicy.WORK_QUEUE,
+                name=self._log_stream,
+                subjects=[f"{self._prefix}.log.>"],
+                retention=js_api.RetentionPolicy.LIMITS,
                 discard=js_api.DiscardPolicy.OLD,
+                max_msgs_per_subject=LOG_MAX_MSGS_PER_SUBJECT,
+                max_msgs=FANOUT_MAX_MSGS,
+                max_age=FANOUT_MAX_AGE_SECONDS,
+                allow_msg_ttl=True,
+                allow_direct=True,
             )
         )
 
@@ -473,7 +466,19 @@ class NatsTransport(BrokerTransport):
                 js_api.KeyValueConfig(bucket=name, history=1)
             )
             self._kv[kind] = bucket
+            with contextlib.suppress(Exception):
+                self._kv_status[kind] = await bucket.status()
             return bucket
+
+    async def _bucket_status(self, kind: str) -> Any:
+        """Cached ``bucket.status()`` — a raft read on a clustered server."""
+        cached = self._kv_status.get(kind)
+        if cached is not None:
+            return cached
+        bucket = await self._bucket(kind)
+        status = await bucket.status()
+        self._kv_status[kind] = status
+        return status
 
     # --- fan-out -----------------------------------------------------------
 
@@ -483,9 +488,12 @@ class NatsTransport(BrokerTransport):
     async def subscribe(
         self, topics: Sequence[str], *, stop: asyncio.Event | None
     ) -> AsyncIterator[tuple[str, str]]:
-        async for item in self._consume(
-            [self._fanout_subject(t) for t in topics], stop=stop
-        ):
+        subjects = [
+            subject
+            for t in topics
+            for subject in (self._fanout_subject(t), self._log_subject(t))
+        ]
+        async for item in self._consume(subjects, stop=stop):
             yield item
 
     async def psubscribe(
@@ -493,9 +501,14 @@ class NatsTransport(BrokerTransport):
     ) -> AsyncIterator[tuple[str, str]]:
         # Patterns are subjects with wildcards in them, so they pass through
         # ``_check_subject``'s refusal of ``*`` — prefixed by hand instead.
-        async for item in self._consume(
-            [f"{self._prefix}.ps.{p}" for p in patterns], stop=stop
-        ):
+        # Both subject spaces: a live log subscriber reads the log stream,
+        # everything else the fan-out stream.
+        subjects = [
+            subject
+            for p in patterns
+            for subject in (f"{self._prefix}.ps.{p}", f"{self._prefix}.log.{p}")
+        ]
+        async for item in self._consume(subjects, stop=stop):
             yield item
 
     async def _consume(
@@ -515,7 +528,7 @@ class NatsTransport(BrokerTransport):
         inbound: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
 
         async def handler(msg: Msg) -> None:
-            await inbound.put((self._fanout_topic(msg.subject), msg.data.decode()))
+            await inbound.put((self._topic_from_subject(msg.subject), msg.data.decode()))
 
         subs = [
             await self.js.subscribe(
@@ -542,56 +555,39 @@ class NatsTransport(BrokerTransport):
     async def publish_log(
         self, topic: str, raw: str, *, maxlen: int, ttl_seconds: int
     ) -> None:
-        """Publish, hold this subject to ``maxlen``, and expire the line.
+        """Publish onto the log stream. The server holds the ring.
 
-        Two round trips rather than one, and that is the honest cost of an exact
-        ring here: a purge keeping the newest ``maxlen`` is the only per-subject
-        bound JetStream will take, and it cannot be pipelined behind the publish
-        the way Redis pipelines its ``LTRIM``. Only ``publish_log`` pays it;
-        plain :meth:`publish` does not, which is now the real difference between
-        the two.
+        ``maxlen`` above :data:`LOG_MAX_MSGS_PER_SUBJECT` raises: the stream
+        has already discarded by then, and a caller quietly given half the
+        ring it asked for is worse than one told it asked for too much. A
+        smaller ``maxlen`` is accepted — the stream still keeps its own
+        bound, which is the native ring.
 
-        ``maxlen`` above :data:`FANOUT_MAX_MSGS_PER_SUBJECT` raises. The stream
-        has already discarded by then, so there is nothing a purge could recover
-        and a caller quietly given half the ring it asked for is worse than one
-        told it asked for too much.
-
-        ``ttl_seconds`` is a per-message TTL, which is not quite what Redis does
-        with it — see the contract note on
+        ``ttl_seconds`` is a per-message TTL; see the contract note on
         :meth:`~mftik.broker.transport.base.BrokerTransport.publish_log`.
         """
-        if maxlen > FANOUT_MAX_MSGS_PER_SUBJECT:
+        if maxlen > LOG_MAX_MSGS_PER_SUBJECT:
             raise ValueError(
                 f"publish_log(maxlen={maxlen}) is above this transport's "
-                f"per-subject ceiling of {FANOUT_MAX_MSGS_PER_SUBJECT}; raise "
-                f"FANOUT_MAX_MSGS_PER_SUBJECT if a ring that long is wanted"
+                f"per-subject ceiling of {LOG_MAX_MSGS_PER_SUBJECT}; raise "
+                f"LOG_MAX_MSGS_PER_SUBJECT if a ring that long is wanted"
             )
-        subject = self._fanout_subject(topic)
         await self.js.publish(
-            subject,
+            self._log_subject(topic),
             raw.encode(),
             headers={js_api.Header.MSG_TTL: str(_ttl_seconds(ttl_seconds))},
         )
-        if maxlen < FANOUT_MAX_MSGS_PER_SUBJECT:
-            await self.js.purge_stream(
-                self._fanout_stream, subject=subject, keep=maxlen
-            )
 
     async def fetch_log_buffer(self, topic: str) -> list[str]:
-        """Everything the fan-out stream is still holding for ``topic``.
-
-        All of it rather than the newest N, and the cap is what makes that safe:
-        a subject holds at most :data:`FANOUT_MAX_MSGS_PER_SUBJECT` messages, so
-        "all of them" is bounded by config rather than by traffic.
-        """
-        subject = self._fanout_subject(topic)
-        held = (await self._subject_counts(self._fanout_stream, subject)).get(
+        """Everything the log stream is still holding for ``topic``."""
+        subject = self._log_subject(topic)
+        held = (await self._subject_counts(self._log_stream, subject)).get(
             subject, 0
         )
         if not held:
             return []
         rows = await self._read(
-            self._fanout_stream,
+            self._log_stream,
             subject,
             expected=held,
             config=js_api.ConsumerConfig(
@@ -797,25 +793,14 @@ class NatsTransport(BrokerTransport):
             reask=_NO_RESPONDERS_FLOOR_S,
         )
 
-    async def post(self, subject: str, raw: str) -> None:
-        await self.js.publish(self._post_subject(subject), raw.encode())
-
     async def serve(
         self, subject: str, *, stop: asyncio.Event | None
     ) -> AsyncIterator[tuple[str, str | None]]:
-        """Both halves of one subject: live requests and posted work.
+        """Core queue subscription. The queue group is what makes a pool.
 
-        Two sources, because :meth:`request` and :meth:`post` reach a subject by
-        different routes and a handler must not have to know which. Live
-        requests arrive on a core queue subscription, where the queue group is
-        what makes several processes of a plane a pool rather than all of them
-        answering. Posted work arrives from the work-queue stream through a
-        durable shared by name, which is the same sharing for the same reason.
-
-        Neither source may end this loop. A fetch that timed out is an idle
-        subject, and a connection that dropped is being reconnected underneath —
-        both mean go round again, because a plane whose control loop returned
-        stays up with nobody reading its requests.
+        A connection that dropped is being reconnected underneath, and a
+        plane whose control loop returned stays up with nobody reading its
+        requests — so only ``stop`` ends this.
         """
         live_subject = self._rpc_subject(subject)
         group = self._named("group", subject)
@@ -825,72 +810,12 @@ class NatsTransport(BrokerTransport):
             await inbound.put((msg.data.decode(), msg.reply or None))
 
         live = await self.nc.subscribe(live_subject, queue=group, cb=handler)
-        posted = asyncio.create_task(self._pump_posted(subject, inbound, stop=stop))
         try:
             async for item in _iter_until_stopped(inbound, stop=stop):
                 yield item
         finally:
-            posted.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await posted
             with contextlib.suppress(Exception):
                 await live.unsubscribe()
-
-    async def _pump_posted(
-        self,
-        subject: str,
-        inbound: asyncio.Queue[tuple[str, str | None]],
-        *,
-        stop: asyncio.Event | None,
-    ) -> None:
-        """Hand posted work to the serve loop, acknowledging on delivery.
-
-        Acknowledged as it is handed over rather than after the handler is done,
-        which is what the Redis transport does too — a blocking pop takes the
-        element off the list before any handler sees it. So the durability this
-        buys is "nobody was serving the subject yet", which is what ``post``'s
-        callers need, and not "the process died half way through the work",
-        which neither transport has ever offered.
-        """
-        post_subject = self._post_subject(subject)
-        durable = self._named("post", subject)
-        sub = None
-        while stop is None or not stop.is_set():
-            try:
-                if sub is None:
-                    sub = await self.js.pull_subscribe(
-                        post_subject,
-                        durable=durable,
-                        stream=self._post_stream,
-                        config=js_api.ConsumerConfig(
-                            durable_name=durable,
-                            ack_policy=js_api.AckPolicy.EXPLICIT,
-                            filter_subject=post_subject,
-                            inactive_threshold=self.config.consumer_idle_seconds,
-                        ),
-                    )
-                msgs = await sub.fetch(batch=16, timeout=_POST_FETCH_TIMEOUT_S)
-            except (nats.errors.TimeoutError, TimeoutError):
-                continue
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # A consumer the server reaped, a reconnect, a stream that is
-                # briefly not there. Rebuild it next time round rather than
-                # ending the loop and taking the subject's control plane down.
-                logger.warning(
-                    "broker posted-work pull failed subject=%s — retrying",
-                    subject,
-                    exc_info=True,
-                )
-                sub = None
-                await asyncio.sleep(_POST_FETCH_TIMEOUT_S)
-                continue
-            for msg in msgs:
-                with contextlib.suppress(Exception):
-                    await msg.ack()
-                # No reply address: this is work whose sender is already gone.
-                await inbound.put((msg.data.decode(), None))
 
     async def send_reply(self, inbox: str, raw: str) -> None:
         await self.nc.publish(inbox, raw.encode())
@@ -907,8 +832,7 @@ class NatsTransport(BrokerTransport):
         the stream underneath, which is what a purge that leaves no marker has to
         do.
         """
-        bucket = await self._bucket("state")
-        status = await bucket.status()
+        status = await self._bucket_status("state")
         stream = status.stream_info.config.name
         assert stream is not None
         return stream, f"$KV.{status.bucket}."
@@ -943,6 +867,9 @@ class NatsTransport(BrokerTransport):
             return
         async with self._state_lock(name):
             await self._put_fields(name, values)
+            known = self._state_fields.get(name)
+            if known is not None:
+                known.update(values)
 
     async def _put_fields(self, name: str, values: Mapping[str, str]) -> None:
         """Every field of one write, in flight together.
@@ -983,11 +910,14 @@ class NatsTransport(BrokerTransport):
         answer of "no balance", which it would act on.
         """
         async with self._state_lock(name):
-            before = set(await self._all_fields(name))
+            before = self._state_fields.get(name)
+            if before is None:
+                before = set(await self._all_fields(name))
             await self._put_fields(name, values)
             stale = before - set(values)
             if stale:
                 await self._drop_fields(name, sorted(stale))
+            self._state_fields[name] = set(values)
 
     async def state_get(self, name: str, field: str) -> str | None:
         bucket = await self._bucket("state")
@@ -1026,7 +956,10 @@ class NatsTransport(BrokerTransport):
         strategy reads its open orders, and a book missing rows looks exactly
         like a book that small.
         """
-        status = await bucket.status()
+        status = self._kv_status.get("state")
+        if status is None:
+            status = await bucket.status()
+            self._kv_status["state"] = status
         stream = status.stream_info.config.name
         assert stream is not None
         head = f"$KV.{status.bucket}."
@@ -1090,51 +1023,86 @@ class NatsTransport(BrokerTransport):
             return await self._drop_fields(name, fields)
 
     async def _drop_fields(self, name: str, fields: Sequence[str]) -> int:
-        """Remove these fields, leaving nothing where they were.
+        """Remove these fields so a watcher sees each one go.
 
-        Both of KV's ways to remove a key write a *marker* under it — a message
-        carrying a ``KV-Operation`` header, which is how a watcher learns the key
-        went. Nothing on this node watches, and the markers are not free: they
-        stay on the bucket's stream for good, each one is a subject
-        :meth:`_kv_scan` counts and then transfers and discards, and the only
-        sweep nats-py offers walks the entire bucket to find them, which is more
-        expensive than what it cleans up.
-
-        Left alone that compounds, because the writer is also the reader. TD
-        replaces its whole order book per fill and a replace reads the book to
-        see what to drop, so an account that had worked a few thousand orders was
-        transferring a few thousand markers on every print.
-
-        So the field's subject is purged out of the bucket's stream instead,
-        which is what Redis' ``HDEL`` does: the field is gone, and there is no
-        record that it was ever there.
+        KV delete writes a marker — that is how :meth:`state_watch` learns a
+        field left. :meth:`_kv_scan` already skips those markers, so a pull
+        read still answers with the live set.
         """
-        stream, head = await self._state_stream()
-        # One round trip to learn which of them are there, rather than a ``get``
-        # each — the same trade every other read here makes.
-        held = await self._subject_counts(stream, f"{head}{_kv_key(name)}.>")
+        bucket = await self._bucket("state")
         dropped = 0
         for field in fields:
-            subject = f"{head}{self._state_key(name, field)}"
-            if not held.get(subject):
+            try:
+                await bucket.delete(self._state_key(name, field))
+            except nats.js.errors.KeyNotFoundError:
                 continue
-            if await self.js.purge_stream(stream, subject=subject):
-                dropped += 1
+            dropped += 1
+        known = self._state_fields.get(name)
+        if known is not None:
+            known.difference_update(fields)
         return dropped
 
     async def state_clear(self, names: Sequence[str]) -> None:
-        """Drop every field of these names, markers and all.
-
-        One purge over each name's whole subject tree rather than a scan and a
-        purge per field: they are all going, so which ones there were is not
-        worth the round trip to find out.
-        """
-        stream, head = await self._state_stream()
+        """Drop every field of these names so watchers see each deletion."""
         for name in names:
             async with self._state_lock(name):
-                await self.js.purge_stream(
-                    stream, subject=f"{head}{_kv_key(name)}.>"
+                fields = list(await self._all_fields(name))
+                if fields:
+                    await self._drop_fields(name, fields)
+                self._state_fields.pop(name, None)
+
+    async def state_watch(
+        self, name: str, *, stop: asyncio.Event | None
+    ) -> AsyncIterator[tuple[str, str | None]]:
+        """Yield ``(field, value)`` for ``name``. ``None`` value means deleted.
+
+        Restarts the KV watch when it dies: a new watch re-delivers the
+        current values, which is how a projection resynchronises.
+        """
+        prefix = _kv_key(f"{name}.")
+        while stop is None or not stop.is_set():
+            watcher = None
+            try:
+                bucket = await self._bucket("state")
+                watcher = await bucket.watch(f"{prefix}>")
+                async for update in watcher:
+                    if stop is not None and stop.is_set():
+                        return
+                    if update is None or not update.key:
+                        continue
+                    key = update.key
+                    field = key[len(prefix) :] if key.startswith(prefix) else key
+                    operation = getattr(update, "operation", None)
+                    op = getattr(operation, "value", operation)
+                    if op in ("DEL", "PURGE"):
+                        yield field, None
+                        continue
+                    if update.value is None:
+                        continue
+                    yield field, update.value.decode()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "broker state watch failed name=%s — restarting",
+                    name,
+                    exc_info=True,
                 )
+                if stop is not None:
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=0.5)
+                        return
+                    except TimeoutError:
+                        continue
+                await asyncio.sleep(0.5)
+                continue
+            finally:
+                if watcher is not None:
+                    with contextlib.suppress(Exception):
+                        await watcher.stop()
+            if stop is not None and stop.is_set():
+                return
+            await asyncio.sleep(0.5)
 
     # --- leases ------------------------------------------------------------
     #
@@ -1151,8 +1119,7 @@ class NatsTransport(BrokerTransport):
     async def lease_put(
         self, name: str, *, ttl: float, owner: str = LEASE_ANONYMOUS
     ) -> None:
-        bucket = await self._bucket("lease")
-        status = await bucket.status()
+        status = await self._bucket_status("lease")
         # Published rather than ``put``, because ``put`` takes no TTL: a lease
         # that outlived its holder is the one thing a lease may never do.
         await self.js.publish(
@@ -1194,8 +1161,7 @@ class NatsTransport(BrokerTransport):
         held = await self._lease_entry(name)
         if held is None or held[0] != owner:
             return False
-        bucket = await self._bucket("lease")
-        status = await bucket.status()
+        status = await self._bucket_status("lease")
         try:
             await self.js.publish(
                 self._lease_subject(status.bucket, name),
@@ -1332,49 +1298,6 @@ class NatsTransport(BrokerTransport):
             json.dumps(dict(fields)).encode(),
             headers=headers,
         )
-        await self._renew_tape_coverage(feed, ttl_seconds=ttl_seconds)
-
-    async def _renew_tape_coverage(self, feed: str, *, ttl_seconds: int) -> None:
-        """Keep a recording feed's coverage record from outliving its own feed.
-
-        The records themselves need nothing: each carries its age against the
-        stream's ``max_age``, so a print expires on its own schedule. The
-        coverage record is not like that. It is one KV entry with a per-message
-        TTL, written when recording starts and not again until it stops, so a
-        feed that records for longer than ``ttl_seconds`` loses its description
-        while it is still being written.
-
-        Which loses the warm-up window. The next recorder reads coverage to
-        decide whether the interruption it is opening is *measured* — a
-        ``stopped_ms`` stamp beside a prior ``continuous_since_ms`` — and an
-        absent record answers no to both, so continuity restarts and hours of
-        intact tape fall behind the mark. That is the outcome
-        :meth:`~mftik.broker.client.Broker.tape_mark_recording` exists to avoid,
-        arrived at by an expiry rather than by a gap. Redis renews on every
-        append, pipelined behind the ``XADD``; here an append is a publish to a
-        stream and the coverage record lives in a bucket, so the renewal is a
-        write of its own.
-
-        Which is why it is not on every append. Prints arrive many times a second
-        on a busy feed and this is a read-modify-write. Once per half-life is one
-        of these per two hours per feed, and leaves the record holding at least
-        half its TTL at every moment.
-        """
-        if ttl_seconds <= 0:
-            return
-        last = self._tape_cov_renewed.get(feed)
-        if last is not None and time.monotonic() - last < ttl_seconds / 2:
-            return
-        # Claimed before the read rather than after the write, so a burst of
-        # appends behind one slow renewal does not queue a renewal each.
-        self._tape_cov_renewed[feed] = time.monotonic()
-        current = await self.tape_coverage(feed)
-        if not current:
-            # Nothing to keep alive. A feed appending without having marked itself
-            # recording has no coverage to lose, and an empty record invented here
-            # would claim the feed was described and that nothing is known of it.
-            return
-        await self._tape_coverage_write(feed, current, ttl_seconds=ttl_seconds)
 
     async def _tape_newest(self, feed: str, *, count: int) -> list[tuple[int, str]]:
         """The newest ``count`` records of ``feed``, by sequence arithmetic.
@@ -1543,31 +1466,25 @@ class NatsTransport(BrokerTransport):
         Read-modify-write, which is safe for the same reason the broker's
         continuity arithmetic above it is: a feed has exactly one recorder.
         """
+        del ttl_seconds
         merged = {
             **await self.tape_coverage(feed),
             **{k: str(v) for k, v in values.items()},
         }
-        await self._tape_coverage_write(feed, merged, ttl_seconds=ttl_seconds)
+        await self._tape_coverage_write(feed, merged)
 
     async def _tape_coverage_write(
-        self, feed: str, record: Mapping[str, str], *, ttl_seconds: int
+        self, feed: str, record: Mapping[str, str]
     ) -> None:
-        """Write this feed's whole coverage record with a fresh TTL.
+        """Write this feed's whole coverage record. Durable — no per-message TTL.
 
-        Published to the bucket's subject rather than put through the KV
-        interface, because a per-message TTL is a header and ``put`` has nowhere
-        to carry one.
+        A recording longer than a TTL used to lose its own description while
+        live. The tape stream already expires prints via ``max_age``; coverage
+        is a fact about those prints and stays until the next mark overwrites
+        it or the bucket is dropped.
         """
         bucket = await self._bucket("tapecov")
-        status = await bucket.status()
-        await self.js.publish(
-            f"$KV.{status.bucket}.{_kv_key(feed)}",
-            json.dumps(dict(record)).encode(),
-            headers={js_api.Header.MSG_TTL: str(_ttl_seconds(ttl_seconds))},
-        )
-        # Whoever wrote it, the record now has a full TTL in hand, so the renewal
-        # on the append path can leave it alone until half of that has gone.
-        self._tape_cov_renewed[feed] = time.monotonic()
+        await bucket.put(_kv_key(feed), json.dumps(dict(record)).encode())
 
 
 def _stamp_ms(msg: Msg) -> int:
@@ -1645,11 +1562,7 @@ async def _iter_until_stopped(
     held here.
 
     Handover order mostly falls out of it too — the sentinel goes to the tail,
-    so everything queued ahead of it is yielded first, including the likelier
-    ordering of a plane told to stop while its subject is busy. That matters
-    because ``_pump_posted`` acknowledges posted work as it hands it over, so a
-    message dropped here is a backfill or an account sweep that the queue will
-    not offer to anybody again.
+    so everything queued ahead of it is yielded first.
 
     The price is one task, and :func:`_tap_stop` holds no message — which is the
     whole reason to prefer it to one that does.
@@ -1665,10 +1578,6 @@ async def _iter_until_stopped(
             if item is _STOPPED:
                 break
             yield item
-        # The tail is where the sentinel goes, but not everything arrives before
-        # it: ``_pump_posted`` finishes the batch it is holding before it looks
-        # at the event again, so a message it has already acknowledged can land
-        # behind the sentinel rather than ahead of it. Hand over what is there.
         while not inbound.empty():
             yield inbound.get_nowait()
     finally:

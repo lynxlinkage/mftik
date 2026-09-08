@@ -22,7 +22,7 @@ answer in their own idiom — a lease is "may I be the one who runs this", not
 What stays above this line is everything that is not about the store: envelope
 encoding, the continuity arithmetic in :meth:`Broker.tape_mark_recording`, the
 gap codec, :class:`~mftik.broker.request.IncomingRequest` and
-:class:`~mftik.broker.stream.BidirectionalStream`. None of that gets a second
+:class:`~mftik.broker.link.LeasedSessionLink`. None of that gets a second
 implementation, so none of it is a transport's business.
 
 Strings, not models, cross the seam. The broker already serialized at exactly
@@ -172,16 +172,14 @@ class BrokerTransport(ABC):
         and still expects the lines it missed. Live subscribers see this exactly
         as they would a :meth:`publish`; the buffer is extra, not instead.
 
-        ``maxlen`` is exact on both transports. A transport that cannot hold a
-        ring that long must raise rather than keep fewer: a caller reading back
-        half of what it asked for has no way to tell that from a quiet hour.
+        ``maxlen`` above the log stream's per-subject cap raises rather than
+        keeping fewer: a caller reading back half of what it asked for has no
+        way to tell that from a quiet hour. A smaller ``maxlen`` is accepted;
+        the stream holds its own ring.
 
-        ``ttl_seconds`` is how long a line stays replayable, and the two
-        transports measure it from different points. Redis expires the buffer as
-        a whole and the write refreshes it, so a busy topic keeps lines older
-        than the TTL. NATS expires each line on its own clock, so it does not.
-        Both drop the buffer of a topic that has gone quiet, which is the
-        property callers pass it for.
+        ``ttl_seconds`` is a per-message TTL, so a line expires on its own
+        clock rather than the buffer expiring as a whole. A topic that has
+        gone quiet still drops, which is the property callers pass it for.
         """
 
     @abstractmethod
@@ -242,32 +240,12 @@ class BrokerTransport(ABC):
     ) -> str:
         """Ask whether anybody serves ``subject``, leaving nothing behind.
 
-        :meth:`request` on an unserved subject leaves work for whoever comes
-        up, which is recovery everywhere except here. A dashboard polling a
-        down instance would otherwise pile up a request per poll that nobody
-        will ever answer, and the instance would open its next boot by
-        answering questions from hours ago.
+        :meth:`request` re-asks through a boot race. A probe does not: "down"
+        is the answer it exists to collect, and a dashboard polling a down
+        instance must not wait out a handover that will not come.
 
-        So the reply path is :meth:`request`'s and the durability is not:
-        whatever a transport does to make an unserved request wait, it must not
-        do it here.
-        """
-
-    @abstractmethod
-    async def post(self, subject: str, raw: str) -> None:
-        """Enqueue on ``subject`` durably, with nobody waiting for the answer.
-
-        The one place the "an unserved request waits" promise is load-bearing
-        rather than incidental, and the only reason a transport may need a
-        durable queue at all. There is no caller and therefore no timeout, so a
-        transport that dropped this on an unserved subject would lose the work
-        silently — and the callers are TD's shutdown handing off a backfill and
-        the cron that sweeps account history, where a silent loss is a
-        jurisdiction-bound credential quietly not being read.
-
-        Served by the same :meth:`serve` loop as :meth:`request`, minus a reply
-        address, which is what makes a handler that always replies safe to post
-        to.
+        The reply path is :meth:`request`'s. Core NATS stores nothing, so there
+        is no queue to leave behind.
         """
 
     @abstractmethod
@@ -282,9 +260,6 @@ class BrokerTransport(ABC):
         than a race, and it is why the per-session and per-account subjects
         exist at all, since there the only correct consumer is the one holding
         the session.
-
-        ``reply_inbox`` is ``None`` for work that arrived without one, which is
-        every :meth:`post`.
 
         Only ``stop`` may end this. Not an unreachable store and not a message
         that will not parse, because this generator *is* a plane's control
@@ -348,6 +323,16 @@ class BrokerTransport(ABC):
 
         State that outlives its writer is worse than none: a reader cannot tell
         a stale answer from a current one.
+        """
+
+    @abstractmethod
+    def state_watch(
+        self, name: str, *, stop: asyncio.Event | None
+    ) -> AsyncIterator[tuple[str, str | None]]:
+        """Yield ``(field, raw)`` as ``name`` changes. ``None`` raw is a delete.
+
+        A watch that dies is restarted and re-delivers the current values,
+        which is how a projection resynchronises after a reconnect.
         """
 
     # --- leases ------------------------------------------------------------
@@ -477,9 +462,8 @@ class BrokerTransport(ABC):
         by the NATS server at write time, and a test about a *gap* in a tape
         needs records further apart than it is willing to sleep for.
 
-        ``ttl_seconds`` is renewed on every append, so a feed that stops being
-        recorded expires on its own. Without it a tape would outlive the last
-        strategy that ever wanted it.
+        The tape stream expires prints via ``max_age``. Coverage is a durable
+        KV record and is not renewed on append.
         """
 
     @abstractmethod
@@ -527,7 +511,7 @@ class BrokerTransport(ABC):
     ) -> None:
         """Write coverage fields for ``feed``, leaving the others alone.
 
-        Carries its own TTL because a feed can be subscribed and print nothing
-        at all — a dead instrument, a venue outage — and the appends that would
-        otherwise renew it never come.
+        ``ttl_seconds`` is accepted for the caller's clock and ignored: coverage
+        is durable. A feed that goes quiet keeps its description until the next
+        mark overwrites it.
         """

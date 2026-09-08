@@ -8,7 +8,8 @@ envelopes, continuity arithmetic and nothing else; `BrokerTransport` is what
 the store owes it; and there is one of those.
 
 ```
-Broker            envelopes, tape continuity, IncomingRequest, BidirectionalStream
+Broker            envelopes, tape continuity, IncomingRequest,
+                  LeasedSessionLink, StateProjection
   └── BrokerTransport          serialized strings in, serialized strings out
         └── NatsTransport      core NATS, JetStream, KV
 ```
@@ -22,13 +23,13 @@ second transport would owe if one were ever justified again.
 The obvious seam would have been push, pop, hash-set, expire — store
 primitives named for one idiom, with NATS emulating each behind them, badly.
 So the families below are named for what a *caller* wants, and the transport
-answers in its own idiom: `post` is a work-queue stream, a lease is "may I be
-the one who runs this", not a compare-and-set primitive leaked upward.
+answers in its own idiom: a lease is "may I be the one who runs this", not a
+compare-and-set primitive leaked upward.
 
 Everything that is not about the store stays above the line and has exactly one
 implementation: envelope encoding, the tape's continuity marks and gap
-arithmetic, `IncomingRequest`, `BidirectionalStream`. A transport handles
-`str` in and `str` out. It has never seen a pydantic model.
+arithmetic, `IncomingRequest`, `LeasedSessionLink`, `StateProjection`. A
+transport handles `str` in and `str` out. It has never seen a pydantic model.
 
 ## The rule, and where it is checked
 
@@ -61,11 +62,11 @@ back in through a side door.
 
 | Family | Methods | What it is for |
 |---|---|---|
-| Fan-out | `publish`, `subscribe`, `psubscribe` | Market data, heartbeats, per-session events. Best effort: a message published while nobody is subscribed is gone. |
-| Fan-out with a tail | `publish_log`, `fetch_log_buffer` | Logs, where a UI socket that opens after the deploy still wants the last hundred lines. |
-| Request-reply | `request`, `post`, `probe`, `serve`, `serve_handler` | The control plane. Attach, deploy, stop, health, backfill, market-data queries. |
-| Duplex | `bistream`, `bistream_pair` | A topic pair as one object. |
-| Shared state | `state_put`, `state_put_many`, `state_replace`, `state_get`, `state_all`, `state_drop`, `state_clear` | TD's order book and ledger, read by whoever needs the current answer rather than folded from a fan-out. |
+| Fan-out | `publish`, `subscribe`, `psubscribe` | Market data, heartbeats, per-session events. Best effort: a message published while nobody is subscribed is gone. `subscribe` / `psubscribe` also see the log stream, so a live log subscriber does not need a second call. |
+| Fan-out with a tail | `publish_log`, `fetch_log_buffer` | Logs, where a UI socket that opens after the deploy still wants the last hundred lines. Own stream (`{prefix}.log.>`), own per-subject ring. |
+| Request-reply | `request`, `probe`, `serve`, `serve_handler` | The control plane. Attach, deploy, stop, health, backfill, market-data queries. Nobody serving is an immediate error. |
+| Session link | `leased_link` / `LeasedSessionLink` | The fenced STS↔MD / STS↔TD heartbeat: token echo, grace watchdog, expiry on a sibling task. |
+| Shared state | `state_put`, `state_put_many`, `state_replace`, `state_get`, `state_all`, `state_drop`, `state_clear`, `state_watch`, `state_projection` | TD's order book and ledger. Writers `put` / `replace`; readers that care about the cost open a `StateProjection`. |
 | Leases | `lease_put`, `lease_take`, `lease_owner`, `lease_held`, `lease_hold`, `lease_release`, `lease_drop` | "Is anybody still running this", "may I be the one who runs it". Session liveness, account ownership, the backfill lock. |
 | Counters | `counter_next` | STS's cid slot, allocated across processes that all serve one subject. |
 | Recorded tape | `tape_append`, `tape_tail`, `tape_trim_before`, `tape_mark_recording`, `tape_mark_stopped`, `tape_coverage` | MD's recording, and the warm-up a strategy reads out of it. |
@@ -79,12 +80,11 @@ because `update` and `delete` take the revision they were read at. Two callers
 used to document a read-then-write workaround separately; now neither knows
 there was one.
 
-**A request nobody is serving waits — if it was `post`ed.** A parked backfill is
-recovery, not litter, and `Broker.post`'s docstring turns on it. `request` and
-`probe` are different: both have a caller with a deadline, and work executed
-after that deadline passed is a side effect nobody is expecting. That is why
-`Topics.td_order`'s docstring now hands the question of what a request in a
-cutover gap does to the transport rather than answering it itself.
+**A request nobody is serving fails at once.** There is no work-queue stream.
+The four callers that used to `post` each named a backstop outside the broker
+— the settlement cursor, or the liveness lease — and `serve` is a core NATS
+queue-group subscription. Work that has to happen eventually is asked again
+by the cron, or noticed when the lease expires.
 
 **A tape record's stamp is the broker's clock, not the venue's.** `tape_tail`
 returns `(recorded_ms, fields)`. It used to return a store id and let the
@@ -95,8 +95,10 @@ wearing different clothes.
 is exact. Approximate forms stop at macro-node boundaries, so the fuse did not
 hold until a feed was a hundred records past it and a sweep reported nothing
 dropped. `publish_log` has the other half of the rule: a ring longer than the
-fan-out stream's per-subject cap raises, because a caller quietly handed half
-of what it asked for reads the same as a topic that has been quiet.
+log stream's per-subject cap (`LOG_MAX_MSGS_PER_SUBJECT`, 256) raises, because
+a caller quietly handed half of what it asked for reads the same as a topic
+that has been quiet. A smaller `maxlen` is accepted; the stream holds its own
+ring.
 
 ## How NATS answers
 
@@ -104,18 +106,18 @@ of what it asked for reads the same as a topic that has been quiet.
 |---|---|
 | `publish` / `subscribe` | JetStream, one ephemeral consumer per subscriber, `DeliverPolicy.NEW` and no acknowledgement. The stream is `{prefix}.ps.>` with a per-subject cap. |
 | `psubscribe` | The same, with a wildcard subject. Patterns were already one `*` per segment; see `Topics.log_pattern`. |
-| `publish_log` / `fetch_log_buffer` | The same fan-out stream, plus a `purge … keep=maxlen` behind the publish — two round trips, because a purge cannot ride along a publish. `maxlen` above the stream's per-subject cap raises: the stream has already discarded by then and a caller handed half the ring it asked for cannot tell that from a quiet hour. `ttl_seconds` is a per-message TTL, so a line expires on its own clock rather than the buffer expiring as a whole and being refreshed by each write. |
+| `publish_log` / `fetch_log_buffer` | A dedicated stream (`{prefix}.log.>`), `max_msgs_per_subject = LOG_MAX_MSGS_PER_SUBJECT` (256). The server holds the ring; there is no purge after each line. `maxlen` above that cap raises. `ttl_seconds` is a per-message TTL, so a line expires on its own clock rather than the buffer expiring as a whole. |
 | `request` / `probe` | Core request-reply. No responders is an immediate error, so the control plane learns a plane is down without spending its whole timeout on it. Re-asked first, for half of what the caller brought and never more than a second: a serve loop registering as its process boots is not a plane being down, and neither is an account subject three hundred milliseconds into a handover — order entry brings two seconds. `probe` opts out and spends only the boot-race grace, because "down" is the answer a probe is *for*. |
-| `post` | A work-queue stream, on a *different subject space* (`{prefix}.post.>`). It has to be different: a stream is a subscriber like any other, so one whose filter covered the RPC subjects would answer every core request with a publish acknowledgement, on the requester's own reply subject, and the caller would parse `{"stream": …, "seq": 1}` as its answer. |
-| `serve` | Two sources merged: a core queue subscription (the queue group is what makes several processes a pool) and a pull consumer on the work queue, sharing a durable by name. The stop event is delivered *through* the inbound queue rather than raced against it, so a serve loop stops on the message after the one it is reading, and everything queued ahead of the stop is still handed over. |
+| `serve` | A core NATS queue-group subscription. The stop event is delivered *through* the inbound queue rather than raced against it, so a serve loop stops on the message after the one it is reading, and everything queued ahead of the stop is still handed over. |
 | Reply inbox | The protocol's own reply subject. `reply_inbox` returns `None` and `serve` produces the address on the way in, so nothing is stamped on the envelope. |
 | `state_*` | A KV bucket, one key per field, `:` mapped to `.`. `state_all` is one consumer over the bucket's subject tree delivering last-per-subject, not a `keys()` and a get each. One field lands whole; a multi-field write is several keys, issued together but not a snapshot — see below. `state_all` is complete or it raises `StateReadIncompleteError`: a consumer can come up short, and a book missing rows reads exactly like a book that small. |
-| `state_replace` | Write the new fields, then drop what the old set had extra — KV has no cross-key transaction. That order is the one where a reader in the middle sees a stale field rather than an empty state. The writes are serialised per name in-process, so "last issued wins" still holds inside one process. |
-| `state_drop` / `state_clear` | A purge of the field's subject out of the bucket's stream, not a KV delete or purge. Both of those write a *marker* — how a watcher learns a key went — and nothing here watches, while every marker is a subject `state_all` counts, transfers and discards. It compounds because the writer is the reader: TD replaces its whole order book per fill and a replace reads the book first. `state_clear` purges the name's whole subject tree in one call. |
+| `state_replace` | Write the new fields, then drop what the last-written set had extra — KV has no cross-key transaction. A name has one writer, so the transport caches that set and does not scan first. That order is the one where a reader in the middle sees a stale field rather than an empty state. The writes are serialised per name in-process, so "last issued wins" still holds inside one process. |
+| `state_drop` / `state_clear` | A KV delete per field, so a watcher sees each one go. `state_all` skips the delete markers those writes leave. `state_clear` deletes every live field of the name. |
+| `state_watch` / `StateProjection` | KV `watch` on the name's prefix. A watch that dies is restarted and re-delivers the current values. STS starts a projection per attached `td.oms.{id}` / `td.ledger.{id}` and the strategy views read that map, falling back to `state_all` when there is no projection. |
 | `lease_*` | KV with per-message TTL. `lease_take` is `create`; `lease_hold` and `lease_release` compare-and-set against the revision they read. |
 | `counter_next` | Read, add one, `update` at the revision that was read, retried on a loss. KV has no atomic increment, and the server-side counter that would give one is 2.12 while the floor here is 2.11. Cheap because the only caller allocates a slot once per session, not once per order. |
 | `tape_append` / `tape_tail` / `tape_trim_before` | A JetStream stream per feed. Per-feed, because retention is per feed in the interface and a stream's limits are the stream's — and because "the newest N records" is then subtraction on a sequence rather than a scan past every other feed's prints. |
-| `tape_coverage` / `tape_coverage_put` | One KV entry holding the whole record, written with a per-message TTL. Renewed by `tape_append`, throttled to once per half-life rather than done per print: a print arrives many times a second and this is a read-modify-write. Without the renewal a feed recording for longer than its TTL loses its own description while live, and the next recorder restarts continuity over an expiry rather than a gap. |
+| `tape_coverage` / `tape_coverage_put` | One KV entry holding the whole record, written durably — no per-message TTL, no half-life renewal. The tape stream already expires prints via `max_age`; coverage is a fact about those prints and stays until the next mark overwrites it. |
 | `key_prefix` | A subject root, and the name of every stream and KV bucket this node owns. |
 | `consumer_idle_seconds` | `inactive_threshold` on every consumer. Subjects are per-session and per-account, so the consumer count follows the fleet; this is what stops a node that has churned a thousand sessions from carrying a thousand consumers. For a *read*'s consumer it is only the backstop: `unsubscribe` on a pull subscription tears down the client's inboxes and leaves the server's consumer alone, so every read deletes its own and the threshold covers the process that died before it could. |
 | Connection policy | `max_reconnect_attempts=-1` and an 8 MB pending buffer. Reconnect forever: the alternative is a plane that gave up on the bus and stays up not doing anything. |
@@ -173,8 +175,8 @@ as a follow-up rather than carried here.
 The dev stack in `docker-compose.yml` runs NATS. The published node template
 (`mftik node init`) does too. Two things there are not optional:
 
-- `-js`. Only bare request-reply is core NATS; state, leases, fan-out, posted
-  work and the tape are all JetStream or KV, so a server without it accepts the
+- `-js`. Only bare request-reply is core NATS; state, leases, fan-out, logs
+  and the tape are all JetStream or KV, so a server without it accepts the
   connection and then refuses everything a plane does.
 - `-sd` on a volume. That state is the node's open orders, its ledger and its
   recorded tape. A node restarted with an empty store comes back reading as an

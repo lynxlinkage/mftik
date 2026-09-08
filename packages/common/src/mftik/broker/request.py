@@ -27,13 +27,8 @@ class IncomingRequest:
     async def reply(self, envelope: Envelope[Any]) -> None:
         """Send a reply envelope to the requester's reply inbox, if there is one.
 
-        A missing ``reply_to`` is not an error. It is what
-        :meth:`~mftik.broker.client.Broker.post` produces — the same queue and
-        the same handlers as :meth:`~mftik.broker.client.Broker.request`, minus
-        anybody waiting — so a handler that always replies is exactly what
-        makes a subject postable. Raising here would have meant every such
-        handler needed a guard, and forgetting one would surface only on the
-        posted path, after the work was already done.
+        A missing ``reply_to`` is not an error. A handler that always replies
+        is safe when the requester is already gone.
 
         :attr:`replied` distinguishes the two afterwards: a handler that wants
         to skip building an answer nobody will read can check ``reply_to``

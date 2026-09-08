@@ -9,8 +9,10 @@ with a JP-only key — on a schedule, quietly, forever.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
-from broker_harness import a_broker, queued_requests
+from broker_harness import a_broker
 from db_harness import a_database, an_instance, an_owner
 from mftik.broker import Broker
 from mftik.protocol import Envelope, TdBackfill, Topics
@@ -113,17 +115,25 @@ async def test_the_sweep_posts_each_account_to_its_own_queue(
 ) -> None:
     """The compliance hole this ticket closes, in the place it would fire.
 
-    Unkeyed, both of these would land on one queue and whichever TD was free
+    Unkeyed, both of these would land on one subject and whichever TD was free
     would take them — including the JP-only credential, from the US.
     """
     async with db() as session:
         await OrderRepository(session).bulk_upsert([an_order(1), an_order(2)])
 
-    asked = await sweep(broker)
-
-    assert asked == 2
-    assert await _queued(broker, JP) == [1]
-    assert await _queued(broker, US) == [2]
+    jp: list[TdBackfill] = []
+    us: list[TdBackfill] = []
+    jp_stop, jp_task = await _serve_instance(broker, JP, jp)
+    us_stop, us_task = await _serve_instance(broker, US, us)
+    try:
+        asked = await sweep(broker)
+        assert asked == 2
+        assert [a.api_id for a in jp] == [1]
+        assert [a.api_id for a in us] == [2]
+    finally:
+        jp_stop.set()
+        us_stop.set()
+        await asyncio.gather(jp_task, us_task, return_exceptions=True)
 
 
 async def test_a_jp_credential_never_reaches_the_us_queue(broker, db) -> None:
@@ -131,16 +141,34 @@ async def test_a_jp_credential_never_reaches_the_us_queue(broker, db) -> None:
     async with db() as session:
         await OrderRepository(session).bulk_upsert([an_order(1)])
 
-    await sweep(broker)
+    jp: list[TdBackfill] = []
+    us: list[TdBackfill] = []
+    jp_stop, jp_task = await _serve_instance(broker, JP, jp)
+    us_stop, us_task = await _serve_instance(broker, US, us)
+    try:
+        await sweep(broker)
+        assert [a.api_id for a in us] == []
+        assert [a.api_id for a in jp] == [1]
+    finally:
+        jp_stop.set()
+        us_stop.set()
+        await asyncio.gather(jp_task, us_task, return_exceptions=True)
 
-    assert await _queued(broker, US) == []
 
+async def _serve_instance(
+    broker: Broker, instance: str, seen: list[TdBackfill]
+) -> tuple[asyncio.Event, asyncio.Task[None]]:
+    stop = asyncio.Event()
 
-async def _queued(broker: Broker, instance: str) -> list[int]:
-    raw = await queued_requests(broker, Topics.td_backfill(instance))
-    return [
-        TdBackfill.model_validate(
-            Envelope.model_validate_json(item).payload
-        ).api_id
-        for item in raw
-    ]
+    async def serve() -> None:
+        async for req in broker.serve(Topics.td_backfill(instance), stop=stop):
+            seen.append(TdBackfill.model_validate(req.envelope.payload))
+            await req.reply(
+                Envelope[dict].wrap(
+                    {"ok": True}, type="td.backfill.result", source="td"
+                )
+            )
+
+    task = asyncio.create_task(serve())
+    await asyncio.sleep(0.2)
+    return stop, task

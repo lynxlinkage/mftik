@@ -61,19 +61,13 @@ class Topics:
         """Request-reply subject one instance answers liveness on.
 
         Separate from the plane's work subject, and not because it is tidier.
-        Every other subject in this class is built on the promise that a
-        request nobody is serving *waits* — :meth:`td_order` and
-        :meth:`Broker.post` both argue that a queued attach or backfill is
-        recovery rather than garbage, taken by the next consumer to come up.
-
-        A health check is the one request where that promise is worthless. An
-        answer that arrives after the question stopped being asked tells nobody
-        anything, and a dashboard polling an instance that is down would
-        otherwise leave a record per probe for that instance to find when it
-        finally boots — in the same store that carries order entry. So this
-        subject keeps nothing it does not have to (see :meth:`Broker.probe`),
-        which is correct semantics *here* and would be data loss anywhere
-        else.
+        Every other subject in this class is a live request: nobody serving
+        it is an immediate error, and the backstop lives outside the broker
+        — a lease, a cursor, the next cron tick. A health check is the one
+        request where even a late answer is worthless. An answer that arrives
+        after the question stopped being asked tells nobody anything, and a
+        dashboard polling an instance that is down should learn that at once
+        (see :meth:`Broker.probe`).
         """
         return f"health.{domain}.{instance}"
 

@@ -11,7 +11,7 @@ from decimal import Decimal
 from functools import partial
 from typing import Any
 
-from mftik.broker import Broker, IncomingRequest
+from mftik.broker import Broker, IncomingRequest, LeasedSessionLink
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.models import (
     Order,
@@ -36,7 +36,6 @@ from mftik.liveness import (
 from mftik.protocol import (
     STS_DETACH,
     STS_ENSURE_LEVERAGE,
-    STS_LEASE_HEARTBEAT,
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
     STS_RECON,
@@ -781,142 +780,69 @@ class SessionManager:
         ready: asyncio.Event,
     ) -> None:
         """Sub sts.td.{session_id}; ACK on td.{api_id}.{session_id}; enforce grace."""
-        sts_topic = Topics.sts_td_session(link.session_id)
         td_topic = Topics.td_session(link.api_id, link.session_id)
-        last_seen = asyncio.get_running_loop().time()
 
-        async def _watch_timeout() -> None:
-            nonlocal last_seen
-            while not link.stop.is_set():
-                await asyncio.sleep(0.5)
-                if asyncio.get_running_loop().time() - last_seen > self._lease_grace:
-                    logger.warning(
-                        "TD lease expired session=%s api_id=%s",
-                        link.session_id,
-                        link.api_id,
+        async def _on_heartbeat(hb: LeaseHeartbeat) -> None:
+            link.last_token = hb.token
+
+        async def _on_message(env: Any) -> bool:
+            if env.type == STS_RECON:
+                asyncio.create_task(
+                    self._handle_recon(acct, link, td_topic, env.payload),
+                    name=f"td-recon-{link.api_id}-{link.session_id}",
+                )
+                return False
+            if env.type == STS_DETACH:
+                try:
+                    det = StsDetach.model_validate(env.payload)
+                except Exception:
+                    return False
+                if (
+                    det.api_id == link.api_id
+                    and det.session_id == link.session_id
+                ):
+                    await self.detach(
+                        session_id=link.session_id,
+                        api_id=link.api_id,
+                        reason="sts_stop",
                     )
-                    if acct.links.get(link.session_id) is link:
-                        # Detach on a sibling task — awaiting it here cancels
-                        # this lease loop from inside its own watchdog and
-                        # previously blew up with RecursionError, leaving the
-                        # DB row live forever.
-                        asyncio.create_task(
-                            self.detach(
-                                session_id=link.session_id,
-                                api_id=link.api_id,
-                                reason="lease_expired",
-                            ),
-                            name=(
-                                f"td-detach-{link.api_id}-{link.session_id}"
-                            ),
-                        )
-                    return
-
-        async def _pump() -> bool:
-            """Read one subscription to its end. True once STS has detached."""
-            nonlocal last_seen
-            async for env in self._broker.subscribe(sts_topic, stop=link.stop):
-                if env.type == STS_LEASE_HEARTBEAT:
-                    try:
-                        hb = LeaseHeartbeat.model_validate(env.payload)
-                    except Exception:
-                        continue
-                    last_seen = asyncio.get_running_loop().time()
-                    link.last_token = hb.token
-                    if not ready.is_set():
-                        ready.set()
-                    try:
-                        await self._broker.publish(
-                            td_topic,
-                            Envelope[LeaseAck].wrap(
-                                LeaseAck(
-                                    api_id=link.api_id,
-                                    session_id=link.session_id,
-                                    token=hb.token,
-                                ),
-                                type=TD_LEASE_ACK,
-                                source="td",
-                                session_id=link.session_id,
-                            ),
-                        )
-                    except Exception:
-                        # A dropped ACK is survivable — STS heartbeats again
-                        # in a second. Letting it end this loop is not: the
-                        # watchdog below goes with it, and then nothing is
-                        # left that can expire this lease.
-                        logger.exception(
-                            "TD lease ack failed session=%s api_id=%s",
-                            link.session_id,
-                            link.api_id,
-                        )
-                    continue
-
-                # Venue I/O must not stall heartbeat reads — otherwise the
-                # watchdog false-expires a still-live STS.
-                if env.type == STS_RECON:
-                    asyncio.create_task(
-                        self._handle_recon(acct, link, td_topic, env.payload),
-                        name=f"td-recon-{link.api_id}-{link.session_id}",
-                    )
-                    continue
-
-                # Order entry does not come through here: it is request-reply
-                # on td.order.{api_id} so the strategy learns whether TD took
-                # the order. This loop carries lease/recon/detach only.
-
-                # STS detaches over ``td.session.detach`` now, for the reason
-                # in that handler. This stays because it costs nothing and a
-                # rolling deploy has both versions running at once — an STS
-                # that has not restarted yet still says goodbye this way.
-                if env.type == STS_DETACH:
-                    try:
-                        det = StsDetach.model_validate(env.payload)
-                    except Exception:
-                        continue
-                    if (
-                        det.api_id == link.api_id
-                        and det.session_id == link.session_id
-                    ):
-                        await self.detach(
-                            session_id=link.session_id,
-                            api_id=link.api_id,
-                            reason="sts_stop",
-                        )
-                        return True
+                    return True
             return False
 
-        watchdog = asyncio.create_task(
-            _watch_timeout(), name=f"td-lease-wd-{link.api_id}-{link.session_id}"
-        )
-        try:
-            # Resubscribed rather than returned: a dropped broker connection is
-            # not an ending, and this loop is the only thing that answers STS
-            # for this link. The watchdog stays outside the retry so it keeps
-            # judging liveness across the gap — a resubscribe that never comes
-            # back still expires the lease, instead of leaving an attach with
-            # nobody reading for it.
-            while not link.stop.is_set():
-                try:
-                    if await _pump():
-                        return
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception(
-                        "TD lease subscription failed session=%s api_id=%s "
-                        "— resubscribing",
-                        link.session_id,
-                        link.api_id,
-                    )
-                try:
-                    await asyncio.wait_for(
-                        link.stop.wait(), timeout=RESUBSCRIBE_DELAY_S
-                    )
-                except TimeoutError:
-                    continue
-        finally:
-            watchdog.cancel()
-            await asyncio.gather(watchdog, return_exceptions=True)
+        async def _expire() -> None:
+            if acct.links.get(link.session_id) is link:
+                await self.detach(
+                    session_id=link.session_id,
+                    api_id=link.api_id,
+                    reason="lease_expired",
+                )
+
+        def _ack(hb: LeaseHeartbeat) -> Envelope[LeaseAck]:
+            return Envelope[LeaseAck].wrap(
+                LeaseAck(
+                    api_id=link.api_id,
+                    session_id=link.session_id,
+                    token=hb.token,
+                ),
+                type=TD_LEASE_ACK,
+                source="td",
+                session_id=link.session_id,
+            )
+
+        await LeasedSessionLink(
+            self._broker,
+            rx=Topics.sts_td_session(link.session_id),
+            tx=td_topic,
+            stop=link.stop,
+            grace=self._lease_grace,
+            ready=ready,
+            ack=_ack,
+            on_heartbeat=_on_heartbeat,
+            on_message=_on_message,
+            on_expired=_expire,
+            resubscribe_delay=RESUBSCRIBE_DELAY_S,
+            name=f"td-lease-{link.api_id}-{link.session_id}",
+        ).run()
             # Last resort, for an ending neither branch above accounts for:
             # this loop stopped without detaching and without being torn
             # down. That is the leak — a td_sessions row left live with no
