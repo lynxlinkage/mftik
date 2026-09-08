@@ -22,7 +22,7 @@ from collections.abc import Awaitable, Callable
 
 import nats.js.errors
 import pytest
-from broker_harness import a_broker
+from broker_harness import a_broker, inject_raw_request
 from mftik.broker import Broker
 from mftik.broker.errors import RequestTimeoutError, StateReadIncompleteError
 from mftik.broker.transport.nats import (
@@ -431,7 +431,8 @@ async def test_a_coverage_record_is_durable(broker: Broker) -> None:
         status.stream_info.config.name, subject=f"$KV.{status.bucket}.{_kv_key(feed)}"
     )
     assert (msg.headers or {}).get("Nats-TTL") is None
-    assert await broker.tape_coverage(feed)["continuous_since_ms"] == "1"
+    coverage = await broker.tape_coverage(feed)
+    assert coverage["continuous_since_ms"] == "1"
 
 
 @pytest.mark.asyncio
@@ -616,7 +617,9 @@ async def test_a_cancelled_plane_loop_leaves_nothing_pending(
         if loop_name == "subscribe":
             await broker.publish(topic, _envelope())
         else:
-            await broker.request(topic, _envelope(), timeout=0.2)
+            # Core NATS stores nothing; a request without a reply would
+            # wait out its timeout. The serve loop only needs a wake.
+            await inject_raw_request(broker, topic, _envelope().to_json())
 
     task = asyncio.create_task(plane_loop())
     await _arm(task, read, nudge)
@@ -634,11 +637,9 @@ async def test_a_ring_longer_than_the_stream_can_hold_is_refused(
 ) -> None:
     """Loudly, because the stream has already discarded by the time we know.
 
-    ``maxlen`` is enforced by a purge that keeps the newest N, and a purge
-    cannot bring back what the stream's own per-subject cap dropped on the way
-    in. So the only honest answers are "hold that many" and "no" — and this used
-    to be neither: a request above the cap skipped the purge and was served
-    however many the stream happened to be keeping.
+    ``maxlen`` above the log stream's per-subject cap is refused, because the
+    stream has already discarded by then. The only honest answers are "hold
+    that many" and "no".
     """
     with pytest.raises(ValueError, match="per-subject ceiling"):
         await broker.publish_log(
