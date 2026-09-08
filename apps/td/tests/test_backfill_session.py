@@ -1,4 +1,4 @@
-"""``td.backfill`` — the work queue, and why it is not keyed by account.
+"""``td.backfill`` — accepted at once, walked out of band.
 
 The shape is the argument. Order entry is keyed by ``api_id`` because only the
 process holding the lease may place an order; a history read is owned by
@@ -6,6 +6,9 @@ nobody, so this subject takes work from anyone and answers for accounts this
 process has never traded. What that buys is the case a keyed subject cannot
 serve at all: an account nobody is attached to any more, whose record is
 exactly the one nothing else will repair.
+
+The reply is acceptance, not the walk. A walk is minutes of venue round
+trips; the cursor is the record of progress.
 """
 
 from __future__ import annotations
@@ -77,7 +80,9 @@ async def test_a_request_is_taken_and_answered(serving, broker) -> None:
     result = await ask(broker, reason="cron")
 
     assert result.ok
+    assert result.reason == "accepted"
     assert result.api_id == API_ID
+    await _until(lambda: bool(executor.runs))
     assert executor.runs == [(API_ID, (), "cron")]
 
 
@@ -86,6 +91,7 @@ async def test_a_request_may_name_the_instruments_to_walk(serving, broker) -> No
 
     await ask(broker, tickers=["Binance_Spot_ETHUSDT"], reason="detach")
 
+    await _until(lambda: bool(executor.runs))
     assert executor.runs == [(API_ID, ("Binance_Spot_ETHUSDT",), "detach")]
 
 
@@ -102,29 +108,13 @@ async def test_an_account_this_process_never_traded_is_still_served(
     result = await ask(broker, api_id=999)
 
     assert result.ok
+    assert result.reason == "accepted"
+    await _until(lambda: bool(executor.runs))
     assert executor.runs == [(999, (), "")]
 
 
-async def test_a_skipped_run_is_reported_rather_than_left_silent(
-    broker
-) -> None:
-    """A caller waiting on this cannot otherwise tell skipped from lost."""
-    executor = FakeExecutor(
-        outcome=BackfillOutcome(api_id=API_ID, reason="another run holds it")
-    )
-    session = BackfillSession(broker, executor)
-    await session.start()
-    try:
-        result = await ask(broker)
-    finally:
-        await session.stop()
-
-    assert result.ok
-    assert result.tickers == []
-    assert "another run" in result.reason
-
-
-async def test_a_failed_run_comes_back_as_not_ok(broker) -> None:
+async def test_a_walk_outcome_is_not_on_the_reply(broker) -> None:
+    """Accepted means TD took it. The cursor is how the walk went."""
     executor = FakeExecutor(
         outcome=BackfillOutcome(api_id=API_ID, ok=False, reason="venue said no")
     )
@@ -132,11 +122,12 @@ async def test_a_failed_run_comes_back_as_not_ok(broker) -> None:
     await session.start()
     try:
         result = await ask(broker)
+        assert result.ok
+        assert result.reason == "accepted"
+        await _until(lambda: bool(executor.runs))
+        assert executor.runs == [(API_ID, (), "")]
     finally:
         await session.stop()
-
-    assert not result.ok
-    assert result.reason == "venue said no"
 
 
 async def test_an_unreadable_request_is_refused_not_dropped(serving, broker) -> None:
@@ -201,3 +192,11 @@ async def test_too_many_runs_at_once_are_refused_not_queued(broker) -> None:
     finally:
         executor.gate.set()
         await session.stop()
+
+
+async def _until(pred, *, timeout: float = 2.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not pred():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("condition was not met in time")
+        await asyncio.sleep(0.02)
