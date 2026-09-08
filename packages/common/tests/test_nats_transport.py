@@ -21,10 +21,11 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
 
+import nats.js.errors
 import pytest
 from broker_harness import a_broker, only_on
 from mftik.broker import Broker
-from mftik.broker.errors import RequestTimeoutError
+from mftik.broker.errors import RequestTimeoutError, StateReadIncompleteError
 from mftik.broker.transport.nats import (
     _NO_RESPONDERS_CEILING_S,
     FANOUT_MAX_MSGS_PER_SUBJECT,
@@ -733,3 +734,254 @@ async def test_a_feed_that_stopped_printing_is_still_trimmed_to_nothing(
 
     assert dropped == 5
     assert await broker.tape_tail(feed, count=20) == []
+
+
+# --- the coverage record a live feed keeps ------------------------------------
+
+
+#: A coverage TTL short enough to cross its own half-life inside a test. Four
+#: hours is what MD asks for.
+_SHORT_COVERAGE_TTL_S = 2
+
+
+async def _coverage_seq(broker: Broker, feed: str) -> int | None:
+    """Which stream message currently holds this feed's coverage record.
+
+    A renewal republishes the whole record, so the sequence advancing is the
+    renewal having happened — and it is the only sign of one from outside, since
+    a renewed record holds the same fields it did before.
+    """
+    transport = _transport(broker)
+    bucket = await transport._bucket("tapecov")  # noqa: SLF001
+    status = await bucket.status()
+    assert status.stream_info.config.name is not None
+    try:
+        msg = await transport.js.get_msg(
+            status.stream_info.config.name,
+            subject=f"$KV.{status.bucket}.{_kv_key(feed)}",
+        )
+    except nats.js.errors.Error:
+        return None
+    return msg.seq
+
+
+@pytest.mark.asyncio
+async def test_a_feed_recording_past_its_ttl_keeps_its_coverage(
+    broker: Broker,
+) -> None:
+    """Renewed by the appends, or a live feed outlives its own description.
+
+    Coverage is one KV entry with a per-message TTL, written when recording
+    starts and not again until it stops. A feed recording for longer than that
+    TTL — four hours, against a session that runs for days — used to lose it
+    while still printing. The next recorder then reads no ``stopped_ms`` and no
+    prior ``continuous_since_ms``, judges the interruption unmeasurable, and
+    restarts continuity, so hours of intact tape fall behind the mark. That is
+    the exact outcome ``tape_mark_recording`` exists to avoid, reached by an
+    expiry instead of by a gap.
+    """
+    feed = "aggtrade.Gate_Spot_LONGRUN"
+    ttl = _SHORT_COVERAGE_TTL_S
+    await broker.tape_mark_recording(feed, since_ms=1_000, ttl_seconds=ttl)
+    marked = await _coverage_seq(broker, feed)
+
+    # Inside the half-life there is nothing to renew, and there had better not
+    # be: prints arrive many times a second and a renewal is a read-modify-write.
+    await broker.tape_append(feed, {"trade_id": "0"}, maxlen=100, ttl_seconds=ttl)
+    assert await _coverage_seq(broker, feed) == marked
+
+    await asyncio.sleep(ttl / 2 + 0.1)
+    for n in range(1, 6):
+        await broker.tape_append(
+            feed, {"trade_id": str(n)}, maxlen=100, ttl_seconds=ttl
+        )
+
+    # Once for the five prints, because the first one claims the interval before
+    # it starts writing rather than after it finishes.
+    renewed = await _coverage_seq(broker, feed)
+    assert renewed is not None and renewed == marked + 1
+
+    # And past where the original write would have expired, still describing the
+    # feed it started describing.
+    await asyncio.sleep(ttl / 2 + 0.3)
+    coverage = await broker.tape_coverage(feed)
+    assert coverage["continuous_since_ms"] == "1000"
+    assert coverage["recording"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_a_feed_nobody_marked_recording_gets_no_coverage_invented(
+    broker: Broker,
+) -> None:
+    """An empty record would claim the feed is described and say nothing about it.
+
+    Which reads the same as coverage that expired, so a renewal writing one would
+    turn "never recorded" into "recorded, and nothing is known" — and
+    ``tape_mark_recording`` treats those two the same way for good reason. A feed
+    appending without a mark has nothing to keep alive.
+    """
+    feed = "aggtrade.Gate_Spot_UNMARKED"
+    ttl = _SHORT_COVERAGE_TTL_S
+    await broker.tape_append(feed, {"trade_id": "0"}, maxlen=100, ttl_seconds=ttl)
+    await asyncio.sleep(ttl / 2 + 0.1)
+    await broker.tape_append(feed, {"trade_id": "1"}, maxlen=100, ttl_seconds=ttl)
+
+    assert await broker.tape_coverage(feed) == {}
+    assert await _coverage_seq(broker, feed) is None
+
+
+# --- what a removed field leaves behind ---------------------------------------
+
+
+async def _state_subjects(broker: Broker, name: str) -> dict[str, int]:
+    """Every message the state bucket's stream still holds under ``name``.
+
+    Past the KV interface on purpose: what is under test is whether removing a
+    field leaves a tombstone, and a tombstone is precisely what KV reports as
+    absent.
+    """
+    transport = _transport(broker)
+    stream, head = await transport._state_stream()  # noqa: SLF001
+    return await transport._subject_counts(  # noqa: SLF001
+        stream, f"{head}{_kv_key(name)}.>"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_field_leaves_nothing_where_it_was(broker: Broker) -> None:
+    """Both of KV's removals write a marker. Nothing here reads one.
+
+    A marker is how a watcher learns a key went, and this node has no watchers —
+    but it stays on the bucket's stream for good, and every scan of the name
+    counts it, transfers it and throws it away.
+    """
+    name = "oms.dropped"
+    await broker.state_put_many(name, {f"o{n}": str(n) for n in range(6)})
+    await broker.state_drop(name, "o0", "o1", "o2")
+
+    assert len(await _state_subjects(broker, name)) == 3
+    assert await broker.state_all(name) == {"o3": "3", "o4": "4", "o5": "5"}
+
+
+@pytest.mark.asyncio
+async def test_replacing_the_book_per_fill_does_not_grow_the_bucket(
+    broker: Broker,
+) -> None:
+    """The writer is the reader, which is what made the markers compound.
+
+    TD replaces the whole order book per fill, and a replace reads the book first
+    to see what to drop. Every dropped field used to leave a marker, so an
+    account that had worked a few thousand orders was transferring a few thousand
+    of them on every print — and ``_kv_scan`` breaks on a fetch timeout, so past
+    enough of them a strategy would have read a book with rows missing and no way
+    to tell.
+    """
+    name = "oms.churn"
+    for n in range(20):
+        await broker.state_replace(name, {f"o{n}": str(n)})
+
+    assert len(await _state_subjects(broker, name)) == 1
+    assert await broker.state_all(name) == {"o19": "19"}
+
+
+@pytest.mark.asyncio
+async def test_clearing_a_name_leaves_nothing_on_the_stream(broker: Broker) -> None:
+    """One purge over the whole tree, not a scan and a purge for each.
+
+    They are all going, so which ones there were is not worth the round trip to
+    find out.
+    """
+    name = "oms.cleared"
+    await broker.state_put_many(name, {f"o{n}": str(n) for n in range(8)})
+    await broker.state_clear(name)
+
+    assert await _state_subjects(broker, name) == {}
+    assert await broker.state_all(name) == {}
+
+
+# --- a read that could not finish ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_state_read_that_comes_up_short_raises(broker: Broker) -> None:
+    """A book missing rows reads exactly like a book that small.
+
+    Which is the whole problem: a strategy asking for its open orders cannot tell
+    the difference, and the difference is placing an order twice or hedging a
+    position that is already flat. So a scan that cannot deliver what the stream
+    says it holds says so.
+    """
+    transport = _transport(broker)
+    name = "oms.short"
+    await broker.state_put_many(name, {"o1": "1", "o2": "2"})
+
+    real = transport._subject_counts  # noqa: SLF001
+
+    async def overcount(stream: str, pattern: str) -> dict[str, int]:
+        # A key the stream does not hold, which is what losing a message looks
+        # like from the reader's side.
+        return {**await real(stream, pattern), f"{pattern[:-1]}ghost": 1}
+
+    transport._subject_counts = overcount  # type: ignore[method-assign]  # noqa: SLF001
+
+    with pytest.raises(StateReadIncompleteError, match="2 of 3"):
+        await broker.state_all(name)
+
+
+@pytest.mark.asyncio
+async def test_a_key_that_went_mid_read_is_not_an_error(broker: Broker) -> None:
+    """The other side of it, or a concurrent drop would raise at every reader.
+
+    A field removed between the count and the fetch makes the smaller answer the
+    current one. Told apart from a read that failed by asking the stream again:
+    only a count that still disagrees means messages went missing rather than
+    keys.
+    """
+    transport = _transport(broker)
+    name = "oms.raced"
+    await broker.state_put_many(name, {"o1": "1", "o2": "2"})
+
+    real = transport._subject_counts  # noqa: SLF001
+    calls = 0
+
+    async def overcount_once(stream: str, pattern: str) -> dict[str, int]:
+        nonlocal calls
+        calls += 1
+        counts = await real(stream, pattern)
+        if calls == 1:
+            return {**counts, f"{pattern[:-1]}ghost": 1}
+        return counts
+
+    transport._subject_counts = overcount_once  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert await broker.state_all(name) == {"o1": "1", "o2": "2"}
+
+
+# --- the consumer a read builds -----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_finished_read_leaves_no_consumer_on_the_server(
+    broker: Broker,
+) -> None:
+    """``unsubscribe`` tears down the client's inboxes and nothing else.
+
+    nats-py says so in as many words, so the consumer went on existing on the
+    server until ``inactive_threshold`` reaped it thirty seconds later. Every
+    read here builds one and TD reads its book per fill, so the hot path was
+    leaving a consumer per print and carrying thirty seconds' worth at a time.
+    """
+    transport = _transport(broker)
+    name = "oms.consumers"
+    await broker.state_put_many(name, {"o1": "1"})
+    stream, _head = await transport._state_stream()  # noqa: SLF001
+
+    async def consumers() -> int:
+        info = await transport.js.stream_info(stream)
+        return info.state.consumer_count
+
+    before = await consumers()
+    for _ in range(5):
+        await broker.state_all(name)
+
+    assert await consumers() == before
