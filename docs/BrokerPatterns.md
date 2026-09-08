@@ -7,7 +7,11 @@ than recalled from the design.
 The conclusion is narrower than expected, and in one place the count is not the
 interesting part.
 
-Of ten patterns, eight are already NATS' own primitives, or close enough that a
+The first pass counted ten patterns. Three of those were one pattern under
+different names, so the real answer is seven — and which three collapsed says
+more than the number does.
+
+Five of the seven are already NATS' own primitives, or close enough that a
 rewrite would move them sideways. Two are worth the work, for opposite reasons:
 one is still shaped like a Redis hash and sits on every strategy's read path;
 the other is native at the transport and has no shared abstraction at all, so
@@ -41,26 +45,75 @@ The seven: `apps/md/tape.py`, `apps/sts/session/manager.py`,
 `packages/common/liveness.py`, `packages/common/strategy/tape.py`,
 `packages/common/strategy/ledger.py`.
 
-## The ten patterns
+## Seven patterns
 
-| # | Pattern | Broker surface | Where NATS stands |
+The first pass of this document counted ten. Three of them were the same
+pattern wearing different names, and saying so is worth more than the count:
+
+| | Pattern | Broker surface | Where NATS stands |
 |---|---|---|---|
-| 1 | Fan-out | `publish` / `subscribe` | Native. Core pub/sub over a stream with per-subject bounds. |
-| 2 | Fan-out with a replay tail | `publish_log` / `fetch_log_buffer` | Native shape, one avoidable round trip — see below. |
-| 3 | Request/response | `request` / `probe` | Native. Core request-reply, and no-responders answers a request to nobody at once instead of at the timeout. |
-| 4 | Queued work, competing consumers | `post` / `serve` | Native. A work-queue stream, plus a core queue group. |
-| 5 | Durable append log per feed | `tape_append` / `tape_tail` / `tape_trim_before` | Native. One stream per feed, so "newest N" is sequence arithmetic. |
-| 6 | Bidirectional stream, fenced | hand-rolled from `subscribe` + `publish` | Native transport, **no shared abstraction**. Built twice. See below. |
-| 7 | Liveness | `heartbeat_loop` | Built on 1 and 8. Nothing of its own. |
-| 8 | Lease / distributed lock | `lease_*` | KV with per-message TTL and compare-and-set on revision. Already better than the Redis original, which documented losing a race this one wins. |
-| 9 | Monotonic counter | `counter_next` | KV compare-and-set loop. Not a Redis artifact — a server-side counter exists in NATS 2.12 and this node's floor is 2.11. |
-| 10 | **Shared mutable state** | `state_*` | **The one that is still Redis-shaped.** |
+| **A** | Subject log — fan-out with a bounded replay tail | `publish` / `subscribe` / `psubscribe` / `publish_log` / `fetch_log_buffer` | Native. One stream, per-subject bounds. |
+| **B** | Keyed log — one stream per feed | `tape_append` / `tape_tail` / `tape_trim_before` | Native. "Newest N" is sequence arithmetic because a feed owns its stream. |
+| **C** | Request / response | `request` / `probe` | Native. Core request-reply; no-responders answers a request to nobody at once rather than at the timeout. |
+| **D** | Durable work queue | `post` / `serve` | Native. A work-queue stream plus a core queue group. |
+| **E** | Fenced session link | hand-rolled from `subscribe` + `publish` | Native transport, **no shared abstraction**. Built twice. |
+| **F** | Atomic register | `lease_*`, `counter_next`, all of `liveness.py` | KV with per-message TTL and compare-and-set on revision. Better than the Redis original, which documented losing a race this one wins. |
+| **G** | **Shared mutable state** | `state_*` | **The one still shaped like a Redis hash.** |
 
-Patterns 1 and 3 and 4 are the traffic — roughly half of all broker calls in
-the tree are `publish`, `subscribe`, `request`, `probe`, `post` and `serve`.
-There is nothing in them to make native. They already are.
+A, C and D are the traffic — roughly half of all broker calls in the tree are
+`publish`, `subscribe`, `request`, `probe`, `post` and `serve`. There is nothing
+in them to make native. They already are.
 
-### 6 is the pattern the broker named and then under-specified
+### What the merges were
+
+**Fan-out and "fan-out with a replay tail" are one pattern (A).** `publish`
+(`nats.py:481`) and `publish_log` (`nats.py:569`) resolve the same
+`_fanout_subject` onto the same `_fanout_stream`. Every plain publish already
+has a replay tail — `max_msgs_per_subject` is 256 — and nobody reads it. The
+difference is a TTL header and a tighter ring, which is a retention argument,
+not a second pattern.
+
+**Liveness was never a pattern (folded into F).** `packages/common/liveness.py`
+makes eight broker calls and **all eight are `lease_*`**: `mark_alive` is
+`lease_put`, `claim_alive` is `lease_take`, `is_alive` is `lease_held`,
+`claim_owner` / `hold_owner` / `release_owner` are `lease_take` / `lease_hold` /
+`lease_release`. It is not built on leases; it is leases under another set of
+names. Listing it separately was an error in the first pass.
+
+**The counter is a register too (folded into F).** A lease is a compare-and-set
+owner with a TTL; a counter is a compare-and-set integer. One primitive, two
+value types. `counter_next` also has exactly one caller —
+`apps/sts/session/manager.py:296`, allocating a cid slot.
+
+### What was left unmerged, and why
+
+**A and B are the same NATS mechanism.** A stream with limits, read through a
+consumer with a start policy. Merging them honestly gives six patterns rather
+than seven.
+
+They are kept apart on lifecycle, not on mechanism. A tape stream is created
+per feed at runtime, carries retention the caller hands it, and is read by
+sequence arithmetic for the newest N; the fan-out stream is one stream, ensured
+once, read as "everything this subject still holds". One interface over both
+grows a parameter for each of those differences, which is what merging too far
+looks like. Worth deciding deliberately rather than by default.
+
+**F and G share a substrate and must not share a signature.** Both are KV, and
+that is the whole temptation. But F wants compare-and-set on one key with a
+TTL, and G wants a map of keys with a watch. An interface serving both is a
+lowest common denominator, which is the exact mistake this document exists to
+undo — it is how `state_*` became a Redis hash in the first place. Share the
+implementation; keep the surfaces apart.
+
+### One thing that is not a merge
+
+E's fencing token does not come from F. `apps/sts/session/session.py:646` is
+`self._token += 1` — an in-process counter, not `counter_next`. So the token
+detects a stale message from the *same* session and nothing more; what stops a
+second process claiming the same session is the lease, which is F. The two are
+related, but not in the way a shared token would make them.
+
+### E is the pattern the broker named and then under-specified
 
 The session fencing lease between STS and both MD and TD *is* a bidirectional
 stream, and it is as load-bearing as anything here: it is what decides that a
@@ -94,7 +147,7 @@ the two call sites needed on top of it, and therefore wrote themselves, is:
 - an **expiry action**, since noticing is not the point — detaching is.
 
 That is a leased session link, not a byte pipe. A native redesign should either
-build that primitive once — pattern 8 (`lease_*`) already has the token and TTL
+build that primitive once — F (`lease_*`) already has the token and TTL
 half of it, on a KV key rather than over a link — or delete `bistream` and say
 in the interface that this pattern belongs to the domains. What it should not
 do is carry `BidirectionalStream` across unchanged: the two call sites that
@@ -104,7 +157,7 @@ The duplication is worth pricing on its own: `StsLink`, `_lease_loop`,
 `_watch_timeout` and `LEASE_GRACE_S` exist twice, in two apps, and a fix to the
 fencing logic has to be made in both.
 
-### 2 costs one round trip more than it needs to
+### A costs one round trip more than it needs to
 
 `publish_log` publishes and then purges the subject to `keep=maxlen`, because
 the fan-out stream's `max_msgs_per_subject` is `FANOUT_MAX_MSGS_PER_SUBJECT`
@@ -116,7 +169,7 @@ lets the server hold the ring and the purge goes. In practice there is one
 value: `client.py:489` passes `config.log_buffer_maxlen` unless a caller
 overrides, and none does.
 
-## Pattern 10, which is the actual subject
+## G, which is the actual subject
 
 `state_*` is a Redis hash with the serial numbers filed off. One KV key per
 field, `state_all` reassembling a hash, `state_replace` emulating a `MULTI`.
@@ -167,16 +220,16 @@ Three questions the design has to answer, none of which this document settles:
 
 ## What a redesign does not touch
 
-Most of the thirty-seven files use only patterns 1–5 and 7. Those are already
+Most of the thirty-seven files use only A, B, C and D. Those are already
 NATS primitives, and neither redesign reaches them.
 
-The integration surface for **pattern 10** is the seven files listed above, and
+The integration surface for **G** is the seven files listed above, and
 the two strategy-facing views inside them — `strategy/ledger.py` and
 `strategy/oms.py` — are where the behaviour actually changes.
 
-The integration surface for **pattern 6** is two files, both called
+The integration surface for **E** is two files, both called
 `session/manager.py`, one in `apps/md` and one in `apps/td`. It is small, but
-unlike pattern 10 it is a change to how a session is torn down, which is the
+unlike G it is a change to how a session is torn down, which is the
 path a bad change breaks quietly: a fencing bug does not fail a request, it
 lets two writers believe they own the same feed.
 
@@ -210,16 +263,16 @@ So:
    stops reading first, move tape coverage off its TTL renewal, give logs their
    own stream. No domain file changes.
 3. **Production, and two weeks of it.**
-4. **Then** redesign pattern 10 against measurements, with those seven files as
+4. **Then** redesign G against measurements, with those seven files as
    the integration surface.
 
 Step 4 is what produces the clean version. Doing it before step 3 produces a
 clean version of a guess.
 
-**Pattern 6 does not have to wait for step 3**, and that is the one place this
+**E does not have to wait for step 3**, and that is the one place this
 sequencing bends. It needs no measurement — the argument for it is that the
 same fencing logic exists twice and a fix has to be made in both — and the
 duplication is a live correctness risk rather than a cost. It is also the one
 piece that production would make *harder* to change rather than easier, since
 teardown is what a deploy exercises. If anything here should happen before the
-first deploy, it is this and not pattern 10.
+first deploy, it is this and not G.
