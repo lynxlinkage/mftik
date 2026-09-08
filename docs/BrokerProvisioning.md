@@ -13,15 +13,14 @@ object that want three different ones.
 
 | | Objects | Created by | Set is known at |
 |---|---|---|---|
-| **Declared** | the fan-out stream, the post stream, four KV buckets (`state`, `lease`, `counter`, `tapecov`) | `connect()` and `_bucket()`, on first use | deploy time |
+| **Declared** | the fan-out stream, the log stream, four KV buckets (`state`, `lease`, `counter`, `tapecov`) | `connect()` and `_bucket()`, on first use | deploy time |
 | **Instantiated** | one tape stream per recorded feed | `_ensure_tape_stream`, when MD first records that feed | runtime |
 | **Ephemeral** | a consumer per read, per subscribe, per served subject | the operation | per call |
 
 The third tier is settled and correct. Read consumers are deleted when the read
-finishes (`_close_reader`, from #83), and the durable that `_pump_posted` shares
-by name carries `inactive_threshold=consumer_idle_seconds`, which since NATS 2.9
-reaps durables as well as ephemerals — so a subject nobody serves any more loses
-its consumer five minutes later. Nothing to move.
+finishes (`_close_reader`, from #83), and `consumer_idle_seconds` is the backstop
+for a process that died mid-read rather than the policy. Since #85 removed the
+work queue there is no durable consumer left at all. Nothing to move.
 
 The first tier is the one that wants to be a migration. The second is the
 interesting case, and it is not the one it looks like.
@@ -53,7 +52,7 @@ fits, immediately.
 
 The frequency is worse than "once per deploy". `self._ensured` is per transport
 instance, not per process, and `connect()` runs `_ensure_fanout_stream()` and
-`_ensure_post_stream()` every time. `apps/api` alone constructs seven `Broker`
+`_ensure_log_stream()` every time. `apps/api` alone constructs seven `Broker`
 objects — one per WebSocket bridge, one per background worker — so a single API
 process makes that assertion seven times.
 
@@ -105,24 +104,43 @@ wrong shape is a deploy that has not been run, and should fail loudly at
 startup naming the difference. Silently reshaping it is the behaviour that makes
 the rolling-deploy fight possible in the first place.
 
-## One defect that is independent of all of this
+## The hazard is not hypothetical — it shipped, and was caught
 
-`_ensure_post_stream` declares the work queue with a retention policy and a
-discard policy and **no limits at all** — no `max_msgs`, no `max_age`, no
-`max_bytes`. Work-queue retention removes a message only when it is
-acknowledged. So a subject that is posted to and never served accumulates with
-nothing to bound it.
+While this document was open, #88 tried to move `allow_msg_ttl=True` off the
+fan-out stream and onto a new log stream. On a fresh server that is correct. On
+any server that had ever run the previous code it is not, and the failure is not
+the silent narrowing described above — it is worse, and simpler.
 
-Reaping the idle durable does not help; that removes the reader, not the
-backlog. And this is not a provisioning question — it is wrong under any tier
-scheme, and worth fixing on its own.
+Reproduced against a live `nats:2.11-alpine`, creating the stream the way the
+previous code declared it and then applying the new config:
 
-A `max_age` is enough and does not contradict what the docstring intends. It
-says a posted message "lives until some consumer acknowledges it, and one nobody
-is serving waits instead of expiring". Waiting is the right behaviour; waiting
-*forever* is the part no caller asked for. `docs/BrokerPatterns.md` argues D may
-not survive at all, in which case this disappears with it — but that decision is
-weeks away and this is live now.
+```
+add_stream    -> BadRequestError code=400 err_code=10058
+                 'stream name already in use with a different configuration'
+update_stream -> ServerError    code=500 err_code=10052
+                 'message TTL status can not be disabled'
+```
+
+`_ensure_stream` catches `BadRequestError` and nothing else, so the `ServerError`
+propagates straight out of `connect()`. Not a reshaped stream, not lost
+messages: **every plane fails to boot**, and only on servers that already have
+the stream — which is every server except a developer's fresh one.
+
+That sharpens the argument rather than merely illustrating it. The paragraph
+above says `update_stream` applies a change you did not intend to apply. This
+says something stronger: **some config changes cannot be applied to a live
+stream at all**, and for those the "already there with a different shape, so
+update it" fallback has no answer to fall back to. It cannot succeed, so it
+raises, from inside `connect()`, on every process at once.
+
+#88 fixed its own instance by putting `allow_msg_ttl=True` back. The mechanism
+that let a one-line stream-config edit become a fleet-wide boot failure is
+untouched, and `_ensure_stream` still reads exactly as quoted above.
+
+It is also the strongest available argument for the create-not-update rule. A
+migration that fails is a deploy step that fails, in one place, before anything
+is running. The same failure inside `connect()` is every plane, at once, after
+the old ones have already stopped.
 
 ## What it costs, stated honestly
 
