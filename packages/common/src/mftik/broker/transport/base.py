@@ -171,6 +171,17 @@ class BrokerTransport(ABC):
         For logs, where the UI socket opens after the deploy it wants to watch
         and still expects the lines it missed. Live subscribers see this exactly
         as they would a :meth:`publish`; the buffer is extra, not instead.
+
+        ``maxlen`` is exact on both transports. A transport that cannot hold a
+        ring that long must raise rather than keep fewer: a caller reading back
+        half of what it asked for has no way to tell that from a quiet hour.
+
+        ``ttl_seconds`` is how long a line stays replayable, and the two
+        transports measure it from different points. Redis expires the buffer as
+        a whole and the write refreshes it, so a busy topic keeps lines older
+        than the TTL. NATS expires each line on its own clock, so it does not.
+        Both drop the buffer of a topic that has gone quiet, which is the
+        property callers pass it for.
         """
 
     @abstractmethod

@@ -80,7 +80,13 @@ FANOUT_MAX_AGE_SECONDS = 86_400
 #: rather than in where the message went. It also bounds the stream by the
 #: number of live subjects instead of by traffic — a busy feed cannot grow it.
 #:
-FANOUT_MAX_MSGS_PER_SUBJECT = 100
+#: It is therefore a *ceiling* on what :meth:`NatsTransport.publish_log` can be
+#: asked to keep, and has to stay above every caller's ask. It was 100, which is
+#: ``BrokerConfig.log_buffer_maxlen``'s default and looked like the same number —
+#: but STS and the API both ask for 200 for the session status ring, and a
+#: request above the ceiling is served silently halved. Above it now raises, and
+#: this is sized well clear of both.
+FANOUT_MAX_MSGS_PER_SUBJECT = 256
 
 #: Global fuse on the fan-out stream, in messages. Reached only if subjects
 #: themselves multiply without end, so it is what a session-churn bug hits
@@ -377,6 +383,10 @@ class NatsTransport(BrokerTransport):
                 max_msgs_per_subject=FANOUT_MAX_MSGS_PER_SUBJECT,
                 max_msgs=FANOUT_MAX_MSGS,
                 max_age=FANOUT_MAX_AGE_SECONDS,
+                # What lets ``publish_log`` honour the TTL it is handed. Without
+                # it the header is refused and the line is dropped, so this and
+                # that header have to be changed together.
+                allow_msg_ttl=True,
                 allow_direct=True,
             )
         )
@@ -505,17 +515,36 @@ class NatsTransport(BrokerTransport):
     async def publish_log(
         self, topic: str, raw: str, *, maxlen: int, ttl_seconds: int
     ) -> None:
-        """Publish, and hold this subject to ``maxlen``.
+        """Publish, hold this subject to ``maxlen``, and expire the line.
 
-        The stream already caps every subject at
-        :data:`FANOUT_MAX_MSGS_PER_SUBJECT`, so a caller asking for that many or
-        more has nothing extra to do and pays one round trip, same as
-        :meth:`publish`. A caller asking for fewer gets a purge that keeps the
-        newest ``maxlen``, which is the only per-subject bound JetStream will
-        take at write time.
+        Two round trips rather than one, and that is the honest cost of an exact
+        ring here: a purge keeping the newest ``maxlen`` is the only per-subject
+        bound JetStream will take, and it cannot be pipelined behind the publish
+        the way Redis pipelines its ``LTRIM``. Only ``publish_log`` pays it;
+        plain :meth:`publish` does not, which is now the real difference between
+        the two.
+
+        ``maxlen`` above :data:`FANOUT_MAX_MSGS_PER_SUBJECT` raises. The stream
+        has already discarded by then, so there is nothing a purge could recover
+        and a caller quietly given half the ring it asked for is worse than one
+        told it asked for too much.
+
+        ``ttl_seconds`` is a per-message TTL, which is not quite what Redis does
+        with it — see the contract note on
+        :meth:`~mftik.broker.transport.base.BrokerTransport.publish_log`.
         """
+        if maxlen > FANOUT_MAX_MSGS_PER_SUBJECT:
+            raise ValueError(
+                f"publish_log(maxlen={maxlen}) is above this transport's "
+                f"per-subject ceiling of {FANOUT_MAX_MSGS_PER_SUBJECT}; raise "
+                f"FANOUT_MAX_MSGS_PER_SUBJECT if a ring that long is wanted"
+            )
         subject = self._fanout_subject(topic)
-        await self.js.publish(subject, raw.encode())
+        await self.js.publish(
+            subject,
+            raw.encode(),
+            headers={js_api.Header.MSG_TTL: str(_ttl_seconds(ttl_seconds))},
+        )
         if maxlen < FANOUT_MAX_MSGS_PER_SUBJECT:
             await self.js.purge_stream(
                 self._fanout_stream, subject=subject, keep=maxlen

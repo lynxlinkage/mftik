@@ -114,6 +114,40 @@ async def test_publish_log_trims_to_maxlen(broker: Broker) -> None:
     assert '"line-4"' in buffered[-1]
 
 
+#: The ring STS and the API both ask for, as ``_STATUS_BUFFER`` in each. Named
+#: here because the test below is only interesting at a length a caller really
+#: uses: everything else in this file asks for a handful of lines, and a
+#: transport whose own per-subject cap sat at 100 answered all of those
+#: correctly while halving this one.
+STATUS_RING = 200
+
+
+@pytest.mark.asyncio
+async def test_a_ring_the_size_production_asks_for_is_the_size_it_gets(
+    broker: Broker,
+) -> None:
+    """``maxlen`` is exact, not "up to", and not "up to some cap of ours"."""
+    topic = Topics.status_sts()
+    for i in range(STATUS_RING + 5):
+        await broker.publish_log(
+            topic,
+            Envelope[dict].wrap(
+                {"level": "info", "message": f"line-{i}"},
+                type="log",
+                source="sts",
+            ),
+            maxlen=STATUS_RING,
+            ttl_seconds=3600,
+        )
+
+    buffered = await broker.fetch_log_buffer(topic)
+    assert len(buffered) == STATUS_RING
+    # The newest, so a UI opening late sees the end of the story and not a
+    # window from the middle of it.
+    assert '"line-5"' in buffered[0]
+    assert f'"line-{STATUS_RING + 4}"' in buffered[-1]
+
+
 @pytest.mark.asyncio
 async def test_request_reply(broker: Broker) -> None:
     stop = asyncio.Event()

@@ -315,10 +315,14 @@ async def test_a_fan_out_subject_keeps_a_bounded_tail(broker: Broker) -> None:
     Every subject holds its last few messages rather than only the log topics,
     so the stream's size follows how many subjects are live instead of how fast
     the busiest one prints — a feed cannot grow it.
+
+    Written with plain ``publish``, because that is where the stream's own cap is
+    the *only* bound. ``publish_log`` adds a purge to whatever its caller asked
+    to keep, so it can only ever show a number the caller chose.
     """
     topic = Topics.log_sts("abc")
     for n in range(FANOUT_MAX_MSGS_PER_SUBJECT + 20):
-        await broker.publish_log(topic, _envelope(n))
+        await broker.publish(topic, _envelope(n))
 
     buffered = await broker.fetch_log_buffer(topic)
     assert len(buffered) == FANOUT_MAX_MSGS_PER_SUBJECT
@@ -412,4 +416,47 @@ async def test_a_stopped_serve_loop_still_hands_over_what_it_had_taken() -> None
         stop.set()
 
     assert seen == [f"work-{n}" for n in range(5)]
+
+
+
+@pytest.mark.asyncio
+async def test_a_ring_longer_than_the_stream_can_hold_is_refused(
+    broker: Broker,
+) -> None:
+    """Loudly, because the stream has already discarded by the time we know.
+
+    ``maxlen`` is enforced by a purge that keeps the newest N, and a purge
+    cannot bring back what the stream's own per-subject cap dropped on the way
+    in. So the only honest answers are "hold that many" and "no" — and this used
+    to be neither: a request above the cap skipped the purge and was served
+    however many the stream happened to be keeping.
+    """
+    with pytest.raises(ValueError, match="per-subject ceiling"):
+        await broker.publish_log(
+            Topics.status_sts(),
+            _envelope(),
+            maxlen=FANOUT_MAX_MSGS_PER_SUBJECT + 1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_log_line_carries_the_expiry_its_caller_asked_for(
+    broker: Broker,
+) -> None:
+    """``ttl_seconds`` was accepted and dropped on the floor.
+
+    The fan-out stream has one ``max_age`` for every subject on it, so the
+    caller's number had nowhere to go and every line lived the stream's full
+    day. A per-message TTL is where it goes — the same mechanism a lease uses,
+    which is why the stream is created with ``allow_msg_ttl``.
+    """
+    transport = _transport(broker)
+    topic = "log.sts.expiry"
+    await broker.publish_log(topic, _envelope(), maxlen=10, ttl_seconds=1800)
+
+    msg = await transport.js.get_msg(
+        transport._fanout_stream,  # noqa: SLF001
+        subject=transport._fanout_subject(topic),  # noqa: SLF001
+    )
+    assert (msg.headers or {}).get("Nats-TTL") == "1800"
 
