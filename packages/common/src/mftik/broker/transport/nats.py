@@ -844,9 +844,33 @@ class NatsTransport(BrokerTransport):
             await self._put_fields(name, values)
 
     async def _put_fields(self, name: str, values: Mapping[str, str]) -> None:
+        """Every field of one write, in flight together.
+
+        A field is a key of its own here, so a mapping is several writes where
+        Redis has one ``HSET`` — and a reader that lands between two of them sees
+        the write half applied. KV has no way to make that impossible: the state
+        model would have to become one key per *name* holding the whole mapping,
+        which buys the guarantee at the price of turning every single-field write
+        on the order path into a read-modify-write.
+
+        What it does instead is stop making the window wider than it has to be.
+        Awaiting each put in turn spent one round trip per field with the state
+        visibly half-written throughout; issuing them together spends one for the
+        set. The ordering guarantee callers actually depend on — two writes to
+        one name landing in the order they were issued — is the caller's lock
+        above, not this loop, and different fields have no order between them.
+
+        See the contract note on
+        :meth:`~mftik.broker.transport.base.BrokerTransport.state_put_many` for
+        what is and is not promised.
+        """
         bucket = await self._bucket("state")
-        for field, raw in values.items():
-            await bucket.put(self._state_key(name, field), raw.encode())
+        await asyncio.gather(
+            *(
+                bucket.put(self._state_key(name, field), raw.encode())
+                for field, raw in values.items()
+            )
+        )
 
     async def state_replace(self, name: str, values: Mapping[str, str]) -> None:
         """Write the new fields, then drop whatever the old set had extra.

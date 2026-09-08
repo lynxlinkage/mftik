@@ -307,7 +307,20 @@ class BrokerTransport(ABC):
 
     @abstractmethod
     async def state_put_many(self, name: str, values: Mapping[str, str]) -> None:
-        """Write fields of ``name``, leaving the others alone."""
+        """Write fields of ``name``, leaving the others alone.
+
+        One field lands whole or not at all on both transports, so a reader never
+        sees half of one value. The *set* is not promised to land together:
+        Redis writes them in a single ``HSET`` and NATS writes a key per field,
+        so a reader there can catch a two-asset ledger write with one asset
+        updated and one not. Each value it sees is a real value the writer wrote;
+        what it may not get is a snapshot of the same instant.
+
+        No method here promises a snapshot, then — :meth:`state_replace` is
+        explicit that seeing old and new at once is allowed. A caller that needs
+        two numbers to move together has to put them in one field, where the
+        value is the unit both transports write whole.
+        """
 
     @abstractmethod
     async def state_replace(self, name: str, values: Mapping[str, str]) -> None:
