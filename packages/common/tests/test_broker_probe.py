@@ -6,11 +6,11 @@ health check has no value once its caller has stopped waiting — and a dashboar
 polling an instance that is down would otherwise leave a record per probe for
 that instance to find when it finally boots.
 
-What each transport does to keep the promise is its own business and is tested
-in ``test_redis_transport.py`` and ``test_nats_transport.py`` — Redis caps and
-expires a list, NATS stores nothing at all. What is here is the promise itself,
-which is not about a queue: an instance coming up must not be handed a pile of
-questions that grows with how long the dashboard has been asking.
+What the transport does to keep the promise is its own business and is tested
+in ``test_nats_transport.py`` — NATS stores nothing at all. What is here is the
+promise itself, which is not about a queue: an instance coming up must not be
+handed a pile of questions that grows with how long the dashboard has been
+asking.
 """
 
 from __future__ import annotations
