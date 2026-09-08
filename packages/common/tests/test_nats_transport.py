@@ -18,6 +18,7 @@ because each one bit during the port and none of them fails loudly:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 from broker_harness import a_broker, only_on
@@ -470,6 +471,93 @@ async def test_a_stopped_serve_loop_still_hands_over_what_it_had_taken() -> None
         stop.set()
 
     assert seen == [f"work-{n}" for n in range(5)]
+
+
+def _queue_readers() -> list[asyncio.Task]:
+    """Every unfinished ``Queue.get`` the loop is still holding.
+
+    Named by what leaked rather than counted, so a failure says which waiter is
+    still there. ``all_tasks`` only returns unfinished ones, which is exactly the
+    set asyncio complains about at collection time.
+    """
+    return [
+        task
+        for task in asyncio.all_tasks()
+        if getattr(task.get_coro(), "__qualname__", "") == "Queue.get"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_subscribe_loop_leaves_no_reader_behind() -> None:
+    """Teardown has to retire the waiter that lost the race, not abandon it.
+
+    A stopped session cancels the task running the `async for`, which raises out
+    of the `asyncio.wait` inside — and `asyncio.wait` does not cancel what it was
+    waiting on, it only drops its own callbacks. So the `Queue.get` future was
+    left pending, and asyncio said so when the collector eventually reached it:
+    `Task was destroyed but it is pending`, one per subscribe loop per teardown,
+    in every plane on this transport (issue #81). Redis is quiet because its
+    serve loop is a poll with a timeout and has no second waiter to lose.
+
+    Asserted on the loop's own task set rather than on log output, because the
+    warning is emitted from `__del__` and when that runs is the collector's
+    business, not this test's.
+    """
+    inbound: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
+    stop = asyncio.Event()
+    before = _queue_readers()
+
+    async def subscribe_loop() -> None:
+        async for _item in _iter_until_stopped(inbound, stop=stop):
+            pass
+
+    task = asyncio.create_task(subscribe_loop())
+    # Parked on the read, which is where a subscribe loop spends its life and
+    # therefore where a cancellation lands.
+    while _queue_readers() == before:
+        await asyncio.sleep(0)
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert _queue_readers() == before
+
+
+@pytest.mark.parametrize("loop_name", ["subscribe", "serve"])
+@pytest.mark.asyncio
+async def test_a_cancelled_plane_loop_leaves_no_reader_behind(
+    broker: Broker, loop_name: str
+) -> None:
+    """The same property through the two doors a plane actually goes in by.
+
+    `subscribe` and `serve` each wrap the helper above, and this is what the
+    counts in issue #81 were: one orphan per loop in flight, so an STS session
+    holding two contributed two and MD's one contributed one. Worth asserting
+    here as well as on the helper, because the leak is only visible to whoever
+    owns the outermost `async for` and a future rearrangement of these two could
+    put a waiter somewhere the helper's `finally` cannot reach.
+    """
+    stop = asyncio.Event()
+    before = _queue_readers()
+
+    async def plane_loop() -> None:
+        if loop_name == "subscribe":
+            async for _env in broker.subscribe("md.teardown", stop=stop):
+                pass
+        else:
+            async for _req in broker.serve("td.teardown", stop=stop):
+                pass
+
+    task = asyncio.create_task(plane_loop())
+    while _queue_readers() == before:
+        await asyncio.sleep(0)
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert _queue_readers() == before
 
 
 @pytest.mark.asyncio

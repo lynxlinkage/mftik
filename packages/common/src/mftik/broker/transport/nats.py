@@ -46,6 +46,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Mapping, Sequence
+from typing import Any
 
 import nats
 import nats.errors
@@ -1459,24 +1460,38 @@ async def _iter_until_stopped(
     The Redis transport cannot do this — a blocking pop is not cancellable
     without losing whatever it was about to return — and waiting out one poll on
     every teardown is the cost the whole test suite used to pay for it.
+
+    Racing means two waiters, and both are this function's to clean up. See
+    :func:`_retire` for what happens to the one that loses.
     """
     if stop is None:
         while True:
             yield await inbound.get()
 
     stopping = asyncio.ensure_future(stop.wait())
+    # Hoisted out of the loop so ``finally`` can reach it, which is the whole
+    # point: the read below is where this generator spends its life, so it is
+    # also where a cancellation lands.
+    reading: asyncio.Future[Any] | None = None
     try:
         while not stop.is_set():
-            nxt = asyncio.ensure_future(inbound.get())
+            reading = asyncio.ensure_future(inbound.get())
             done, _pending = await asyncio.wait(
-                {nxt, stopping}, return_when=asyncio.FIRST_COMPLETED
+                {reading, stopping}, return_when=asyncio.FIRST_COMPLETED
             )
-            if nxt in done:
-                yield nxt.result()
+            if reading in done:
+                item = reading.result()
+                # Taken, so no longer something ``finally`` should throw away.
+                reading = None
+                yield item
                 continue
-            nxt.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await nxt
+            # Retired here rather than left to ``finally`` because the drain
+            # below has to come after it: a cancelled ``Queue.get`` leaves what
+            # it was about to take in the queue, where ``get_nowait`` finds it,
+            # and one still waiting could take a late arrival with nobody left
+            # to read it.
+            await _retire(reading)
+            reading = None
             break
         # Whatever arrived before the event was set is still work this process
         # accepted: ``_pump_posted`` acknowledges a posted message as it hands
@@ -1492,6 +1507,27 @@ async def _iter_until_stopped(
         while not inbound.empty():
             yield inbound.get_nowait()
     finally:
-        stopping.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await stopping
+        for waiter in (reading, stopping):
+            if waiter is not None:
+                await _retire(waiter)
+
+
+async def _retire(waiter: asyncio.Future[Any]) -> None:
+    """Cancel one waiter and wait for it to admit it.
+
+    ``asyncio.wait`` does not cancel what it was waiting on when it is itself
+    cancelled — it only drops its own callbacks — so a loser left over from the
+    race above is nobody's but ours. A session being stopped raises out of that
+    ``wait``, and the abandoned ``Queue.get`` then sat pending until the garbage
+    collector reached it and asyncio logged ``Task was destroyed but it is
+    pending``: one line per subscribe loop, per teardown, in every plane on this
+    transport. Redis never showed it because its serve loop is a poll with a
+    timeout and has no second waiter to leak.
+
+    The await, not just the cancel, is what makes a teardown finish quiet rather
+    than eventually: without it the task is cancelled but not yet done, and a
+    caller that checks has to guess how long to wait first.
+    """
+    waiter.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await waiter
