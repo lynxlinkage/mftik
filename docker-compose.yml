@@ -4,13 +4,9 @@
 # `command`. Compose builds it once — the services share one `image:` tag — so
 # adding a domain costs a five-line block, not another Dockerfile.
 #
-# NATS_URL / REDIS_URL / DATABASE_URL / DATABASE_URL_SYNC come from .env (see
-# .env.example), where they already point at the `nats`, `redis` and `postgres`
+# NATS_URL / DATABASE_URL / DATABASE_URL_SYNC come from .env (see
+# .env.example), where they already point at the `nats` and `postgres`
 # service names.
-#
-# Both stores are here, unlike the published node stack, which runs only the
-# default. `BROKER_TRANSPORT` picks one (docs/Broker.md) and the suite is run
-# against each in turn, so a machine developing this needs both up.
 
 x-mftik: &mftik
   build:
@@ -20,13 +16,10 @@ x-mftik: &mftik
   env_file:
     - .env
 
-# Whichever store `BROKER_TRANSPORT` names, both are waited for: a plane that
-# started before its broker spends its first seconds reconnecting, and flipping
-# the variable should not also mean editing eight `depends_on` blocks.
+# A plane that started before its broker spends its first seconds reconnecting,
+# so every Python service waits on NATS here rather than repeating the block.
 x-broker: &broker
   nats:
-    condition: service_healthy
-  redis:
     condition: service_healthy
 
 services:
@@ -46,7 +39,7 @@ services:
       timeout: 3s
       retries: 10
 
-  # The default broker. `-js` is not optional: fan-out, posted work, state,
+  # The broker. `-js` is not optional: fan-out, posted work, state,
   # leases and the tape are all JetStream or KV, and a server without it answers
   # core requests and nothing else.
   #
@@ -67,18 +60,6 @@ services:
       - nats_data:/data
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:8222/healthz || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  # The other transport. Kept up so `MFTIK_TEST_BROKER=redis` has something to
-  # run against and a rollback needs no compose change.
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -145,13 +126,9 @@ services:
       MD_TAPE_RETENTION_S: "7200"
       # Fuse per feed, in records — roughly 200 bytes each, so ~30 MB.
       #
-      # Sized against the store, not against the retention window, and which
-      # store that is now matters. Under NATS a feed's tape is a JetStream
-      # stream of its own on disk, so this bounds a file and the budget is the
-      # volume: 150k x 8 feeds is ~240 MB. Under Redis it bounds memory shared
-      # with everything else the broker carries — order RPC, ledger and OMS
-      # state, liveness — where a tape that fills the cap does not degrade the
-      # warm-up, it stops the writes that trade.
+      # Sized against the store, not against the retention window. A feed's
+      # tape is a JetStream stream of its own on disk, so this bounds a file
+      # and the budget is the volume: 150k x 8 feeds is ~240 MB.
       #
       # 2h of a busy perp (~50 msg/s) is ~360k records, so this fuse will bite
       # first on the busiest instruments — they will warm up on less than two
