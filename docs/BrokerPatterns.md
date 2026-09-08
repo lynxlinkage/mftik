@@ -193,10 +193,11 @@ Three questions, now answered:
    read-modify-write on the order path, which is the cost the projection was
    meant to remove from the *reader*, not add to the writer.
 2. **A broken watch is reopened.** The watch itself is one-shot. The
-   projection reseeds from `state_all` and opens another; a hard failure
-   clears `live` so readers fall back to a pull rather than a frozen map.
-   Gaps are not reconstructed from history; they are overwritten by that
-   snapshot.
+   projection reseeds from `state_all` on an interval and when the watch
+   ends, so a purged delete marker is not mistaken for a live field. A
+   hard failure clears `live` so readers fall back to a pull rather than
+   a frozen map. Gaps are not reconstructed from history; they are
+   overwritten by that snapshot.
 3. **A name has one writer.** `_state_lock`'s docstring already asserted
    this. The transport caches the last-written field set, so `state_replace`
    no longer reads before it writes.
