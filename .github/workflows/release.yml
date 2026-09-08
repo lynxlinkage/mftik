@@ -32,6 +32,18 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      # The other broker transport. NATS is the default and is started as a step
+      # below instead, because JetStream is a command-line flag and a service
+      # container takes an image and options but no command.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     env:
       TEST_POSTGRES_URL: postgresql+asyncpg://mftik:mftik@localhost:5432/mftik_test
       DATABASE_URL_SYNC: postgresql+psycopg://mftik:mftik@localhost:5432/mftik_test
@@ -41,6 +53,27 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
+
+      # The default transport, and a step rather than a service container for
+      # the reason noted above. Everything the broker does beyond bare
+      # request-reply is a JetStream stream or a KV bucket, so a server started
+      # without `-js` accepts the connection and refuses the rest — and
+      # `conftest.py` fails the run outright if nothing is listening at all,
+      # because the broker suite has no fake left to fall back on.
+      - name: Start NATS with JetStream
+        run: |
+          docker run -d --name nats -p 4222:4222 -p 8222:8222 \
+            nats:2.11-alpine -js -sd /data -m 8222
+          for _ in $(seq 30); do
+            if curl -sf http://localhost:8222/healthz > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::nats-server did not come up" >&2
+          docker logs nats >&2 || true
+          exit 1
+
       - name: Sync
         run: uv sync --all-packages
 
@@ -56,6 +89,15 @@ jobs:
           uv run --all-packages alembic -c packages/db/alembic.ini check
 
       - name: Test
+        run: uv run --all-packages pytest packages apps -q
+
+      # Again on the other transport. The broker is under everything a plane
+      # does — order entry, shared state, liveness, the tape — so a
+      # transport-specific regression is not a broker-package concern but a
+      # suite-wide one, and both passes are full runs for that reason.
+      - name: Test on the Redis transport
+        env:
+          MFTIK_TEST_BROKER: redis
         run: uv run --all-packages pytest packages apps -q
       - name: Contracts up to date
         run: |

@@ -3,7 +3,7 @@
 Evidence for `docs/EventLoop.md`. A loop swap is the kind of change that is
 argued about with numbers from someone else's benchmark, so this one runs
 *this* codebase: the real `Broker`, the real pydantic envelopes, against a real
-Redis. Nothing here re-implements a hot path in order to time it.
+server. Nothing here re-implements a hot path in order to time it.
 
 Loop choice is a process-wide decision, so the parent process only orchestrates
 — every case runs in a child that installs one loop and prints one JSON line.
@@ -14,10 +14,12 @@ neighbour on the box biases both loops instead of whichever went second.
     just loop-bench --case rpc --reps 20
     just loop-bench --probe               # behaviour, not throughput
 
-Needs a Redis nobody else is using — it publishes thousands of messages and
-writes a tape stream under its own key prefix. Point it somewhere scratch:
+`BROKER_TRANSPORT` chooses the store, exactly as it does for a plane, so the
+numbers are the ones the node will actually see. Needs a server nobody else is
+using — it publishes thousands of messages and writes a tape under its own key
+prefix. Point it somewhere scratch:
 
-    REDIS_URL=redis://localhost:6379/9 just loop-bench
+    BROKER_TRANSPORT=redis REDIS_URL=redis://localhost:6379/9 just loop-bench
 
 **tcp_echo is the control, and reading it first is the point.** It is the
 workload uvloop exists to win: a raw transport with no library above it. If it
@@ -33,12 +35,12 @@ import argparse
 import asyncio
 import contextlib
 import json
-import os
 import resource
 import statistics
 import subprocess
 import sys
 import time
+from dataclasses import replace
 
 from mftik.broker.client import Broker
 from mftik.broker.config import BrokerConfig
@@ -50,10 +52,10 @@ KEY_PREFIX = "loopbench"
 
 
 def broker_config() -> BrokerConfig:
-    return BrokerConfig(
-        redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
-        key_prefix=KEY_PREFIX,
-    )
+    # From the environment, like a plane's, so this times the transport the node
+    # runs rather than the one the script was first written against. Only the
+    # prefix is overridden, and that is what makes the writes droppable.
+    return replace(BrokerConfig.from_env(), key_prefix=KEY_PREFIX)
 
 
 def cpu_seconds() -> float:

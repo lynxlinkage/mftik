@@ -9,9 +9,16 @@ sync:
     uv sync --all-packages
     cd frontend && npm install
 
-# Run all Python tests (sqlite only — fast, and what most changes need)
+# Run all Python tests (sqlite only — fast, and what most changes need).
+# Needs the broker up: `just up nats`, or `just up redis` with
+# MFTIK_TEST_BROKER=redis. There is no fake to fall back on.
 test:
     uv run --all-packages pytest packages apps -q
+
+# The suite again on the other transport. Both are supported, so both are run
+# before a broker change ships; CI does the same in two jobs.
+test-redis *args="packages apps":
+    MFTIK_TEST_BROKER=redis uv run --all-packages pytest {{args}} -q
 
 # Run them again on Postgres too, which is what CI does and what production is.
 # sqlite ignores VARCHAR length and has no decimal type, so it cannot show you
@@ -38,11 +45,11 @@ backfill-check *args:
     uv run --all-packages python scripts/backfill_check.py {{args}}
 
 # Time this node's hot paths on asyncio vs uvloop — evidence for docs/EventLoop.md.
-# Wants a Redis nobody else is using: it publishes thousands of messages and
-# writes a tape stream. `--probe` reports behaviour differences instead.
+# Wants a broker nobody else is using: it publishes thousands of messages and
+# writes a tape. BROKER_TRANSPORT picks which one, same as for a plane.
+# `--probe` reports behaviour differences instead.
 loop-bench *args:
-    REDIS_URL="${REDIS_URL:-redis://localhost:6379/9}" \
-      uv run --all-packages python scripts/loop_bench.py {{args}}
+    uv run --all-packages python scripts/loop_bench.py {{args}}
 
 # Apply DB migrations
 migrate revision="head":
@@ -53,9 +60,12 @@ seed:
     uv run --all-packages python scripts/seed_paper_apis.py
 
 # Ask a running MD for market data: just fetch quote Gate_Spot_BTCUSDT
+#
+# Reads the broker out of the environment, and the defaults already point at
+# the compose stack's published ports — so this needs no variables set unless
+# the node is somewhere else.
 fetch *args:
-    REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}" \
-      uv run --all-packages python scripts/fetch_md.py {{args}}
+    uv run --all-packages python scripts/fetch_md.py {{args}}
 
 # Fail if the migrations would not build the models. Runs against a scratch
 # database so it never touches the dev one, and drops it again afterwards.

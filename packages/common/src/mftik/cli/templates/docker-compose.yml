@@ -2,7 +2,7 @@
 #
 # Written by `mftik node init`. Nothing here is built: every Python service is
 # the same image differing only by `command:`, and both it and the frontend
-# come from GHCR. Postgres and Redis are part of the stack rather than
+# come from GHCR. Postgres and NATS are part of the stack rather than
 # substrate you have to bring, which is the difference between this and the
 # maintainers' own production compose.
 #
@@ -24,7 +24,7 @@ name: ${MFTIK_PROJECT:-mftik}
 x-env: &env
   DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
   DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:?set DATABASE_URL_SYNC in .env}
-  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  NATS_URL: ${NATS_URL:-nats://nats:4222}
   BROKER_KEY_PREFIX: ${BROKER_KEY_PREFIX:-mftik}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   MFTIK_DEFAULT_USER_ID: ${MFTIK_DEFAULT_USER_ID:-1}
@@ -40,7 +40,7 @@ x-app: &app
   depends_on:
     postgres:
       condition: service_healthy
-    redis:
+    nats:
       condition: service_healthy
     migrate:
       condition: service_completed_successfully
@@ -66,17 +66,24 @@ services:
       timeout: 3s
       retries: 10
 
-  redis:
-    image: redis:7-alpine
+  # The whole broker: order RPC, ledger and OMS state, liveness, and the
+  # recorded tape.
+  #
+  # `-js` is not optional. Only bare request-reply is core NATS; everything else
+  # a plane does is a JetStream stream or a KV bucket, and a server started
+  # without it accepts the connection and then refuses each of them.
+  #
+  # `-sd /data` on a volume, because that is what the state above is. A node
+  # restarted with an empty store comes back with no open orders, no ledger and
+  # no tape — which reads as an account that closed everything.
+  nats:
+    image: nats:2.11-alpine
     restart: unless-stopped
-    # Redis is the whole broker here — order RPC, ledger and OMS state,
-    # liveness, and the recorded tape. noeviction because dropping a key under
-    # memory pressure would silently drop a trade, not degrade a cache.
-    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    command: ["-js", "-sd", "/data", "-m", "8222"]
     volumes:
-      - redis_data:/data
+      - nats_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8222/healthz || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -120,7 +127,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
+      nats:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -159,7 +166,7 @@ services:
     <<: *app
     command: ["td"]
     depends_on:
-      redis:
+      nats:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -178,11 +185,12 @@ services:
       # the same matches.
       MD_TAPE_TOPICS: "aggtrade"
       MD_TAPE_RETENTION_S: "7200"
-      # Memory fuse per feed, in records. This times the number of recorded
-      # feeds has to stay well under the Redis cap above.
+      # Fuse per feed, in records — roughly 200 bytes each. This times the
+      # number of recorded feeds is what the nats volume has to hold: 150k x 8
+      # feeds is ~240 MB.
       MD_TAPE_MAXLEN: "150000"
     depends_on:
-      redis:
+      nats:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -214,7 +222,7 @@ services:
     <<: *app
     command: ["paper"]
     depends_on:
-      redis:
+      nats:
         condition: service_healthy
 
   sym:
@@ -226,7 +234,7 @@ services:
 
 volumes:
   postgres_data:
-  redis_data:
+  nats_data:
   mftik_data:
   sts_eventlog:
   caddy_data:
