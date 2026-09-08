@@ -45,6 +45,7 @@ import datetime as dt
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
@@ -56,7 +57,11 @@ from nats.aio.client import Client as NatsClient
 from nats.aio.msg import Msg
 
 from mftik.broker.config import BrokerConfig
-from mftik.broker.errors import BrokerNotConnectedError, RequestTimeoutError
+from mftik.broker.errors import (
+    BrokerNotConnectedError,
+    RequestTimeoutError,
+    StateReadIncompleteError,
+)
 from mftik.broker.transport.base import (
     LEASE_ANONYMOUS,
     BrokerTransport,
@@ -125,8 +130,10 @@ _READ_TIMEOUT_S = 2.0
 #: How many messages one fetch asks for at most.
 _READ_BATCH = 256
 
-#: How long a read's consumer survives if this process dies mid-read. Short: it
-#: exists for the length of one call.
+#: How long a read's consumer survives if this process dies mid-read. A
+#: backstop, not the policy: :meth:`NatsTransport._close_reader` deletes the
+#: consumer when the read is done, and this only covers the process that never
+#: gets there.
 _READ_CONSUMER_IDLE_S = 30.0
 
 #: How long one pull for posted work parks before looking at its stop event.
@@ -247,6 +254,10 @@ class NatsTransport(BrokerTransport):
         # names this process writes — an account's book and its ledger — not by
         # traffic.
         self._state_locks: dict[str, asyncio.Lock] = {}
+        # When this process last gave a feed's coverage record a full TTL. See
+        # :meth:`_renew_tape_coverage`. One entry per feed this process records,
+        # and losing it on restart costs one extra renewal.
+        self._tape_cov_renewed: dict[str, float] = {}
 
     # --- names -------------------------------------------------------------
 
@@ -607,6 +618,31 @@ class NatsTransport(BrokerTransport):
             return {}
         return dict(info.state.subjects or {})
 
+    async def _close_reader(
+        self, sub: nats.js.JetStreamContext.PullSubscription
+    ) -> None:
+        """Retire a read's consumer on the server as well as on the client.
+
+        ``unsubscribe`` on a pull subscription destroys the client's own inboxes
+        and stops there — nats-py says so in as many words — so the consumer it
+        built goes on existing on the server until ``inactive_threshold`` reaps
+        it, which is :data:`_READ_CONSUMER_IDLE_S`. That is a reasonable backstop
+        for a process that died mid-read and a poor way to end a read that
+        finished.
+
+        Every read here builds a consumer, and one of them is on a hot path: TD
+        replaces its whole order book per fill, which reads the book first, so a
+        busy account left a new consumer on the state bucket's stream per print
+        and carried thirty seconds' worth of them at any moment.
+        """
+        with contextlib.suppress(Exception):
+            await sub.unsubscribe()
+        with contextlib.suppress(Exception):
+            # Reached for rather than asked for: nats-py has the stream and
+            # consumer names right here, and its only public way to the latter is
+            # a round trip to the server to be told what we just named.
+            await self.js.delete_consumer(sub._stream, sub._consumer)  # noqa: SLF001
+
     async def _read(
         self,
         stream: str,
@@ -640,8 +676,7 @@ class NatsTransport(BrokerTransport):
                 for msg in msgs:
                     rows.append((_stamp_ms(msg), msg.data.decode()))
         finally:
-            with contextlib.suppress(Exception):
-                await sub.unsubscribe()
+            await self._close_reader(sub)
         return rows
 
     # --- request-reply -----------------------------------------------------
@@ -865,6 +900,19 @@ class NatsTransport(BrokerTransport):
     def _state_key(self, name: str, field: str) -> str:
         return _kv_key(f"{name}.{field}")
 
+    async def _state_stream(self) -> tuple[str, str]:
+        """The state bucket's stream, and the prefix its keys hang under.
+
+        Both are needed together by anything reaching past the KV interface to
+        the stream underneath, which is what a purge that leaves no marker has to
+        do.
+        """
+        bucket = await self._bucket("state")
+        status = await bucket.status()
+        stream = status.stream_info.config.name
+        assert stream is not None
+        return stream, f"$KV.{status.bucket}."
+
     def _state_lock(self, name: str) -> asyncio.Lock:
         """Serialise this process' writes to one state name.
 
@@ -969,7 +1017,15 @@ class NatsTransport(BrokerTransport):
     async def _kv_scan(
         self, bucket: nats.js.kv.KeyValue, pattern: str
     ) -> dict[str, str]:
-        """Every live key under ``pattern`` with its value, in one pass."""
+        """Every live key under ``pattern`` with its value, in one pass.
+
+        Complete or an exception, never quietly short. The count the batch is
+        sized from is the stream's own, so a read that comes up against it has
+        either lost a race with a writer or not finished, and the two are told
+        apart rather than both answered with a smaller dict — this is how a
+        strategy reads its open orders, and a book missing rows looks exactly
+        like a book that small.
+        """
         status = await bucket.status()
         stream = status.stream_info.config.name
         assert stream is not None
@@ -992,28 +1048,39 @@ class NatsTransport(BrokerTransport):
             ),
         )
         try:
-            remaining = len(subjects)
-            while remaining > 0:
+            # Counted apart from ``rows`` because a marker is delivered and then
+            # dropped: it is one of the subjects above, so the accounting has to
+            # see it even though the answer does not. ``_drop_fields`` no longer
+            # leaves any, but a bucket written by an older build still holds them.
+            delivered = 0
+            expected = len(subjects)
+            while delivered < expected:
                 try:
                     msgs = await sub.fetch(
-                        batch=min(remaining, _READ_BATCH), timeout=_READ_TIMEOUT_S
+                        batch=min(expected - delivered, _READ_BATCH),
+                        timeout=_READ_TIMEOUT_S,
                     )
                 except (nats.errors.TimeoutError, TimeoutError):
-                    break
+                    msgs = []
                 if not msgs:
-                    break
-                remaining -= len(msgs)
+                    # Either a key went while this was reading, which makes the
+                    # smaller answer the current one, or the read did not finish.
+                    # The stream knows which.
+                    if len(await self._subject_counts(stream, subject)) <= delivered:
+                        break
+                    raise StateReadIncompleteError(
+                        f"read {delivered} of {expected} keys under {pattern}"
+                    )
+                delivered += len(msgs)
                 for msg in msgs:
                     # A delete or a purge leaves a marker under the key, which is
                     # how a watcher learns the key went. To a reader it is simply
-                    # absent — but it is still a message, so it is still one of
-                    # the subjects counted above.
+                    # absent.
                     if (msg.headers or {}).get("KV-Operation") in ("DEL", "PURGE"):
                         continue
                     rows[msg.subject[len(head) :]] = msg.data.decode()
         finally:
-            with contextlib.suppress(Exception):
-                await sub.unsubscribe()
+            await self._close_reader(sub)
         return rows
 
     async def state_drop(self, name: str, fields: Sequence[str]) -> int:
@@ -1023,27 +1090,51 @@ class NatsTransport(BrokerTransport):
             return await self._drop_fields(name, fields)
 
     async def _drop_fields(self, name: str, fields: Sequence[str]) -> int:
-        bucket = await self._bucket("state")
+        """Remove these fields, leaving nothing where they were.
+
+        Both of KV's ways to remove a key write a *marker* under it — a message
+        carrying a ``KV-Operation`` header, which is how a watcher learns the key
+        went. Nothing on this node watches, and the markers are not free: they
+        stay on the bucket's stream for good, each one is a subject
+        :meth:`_kv_scan` counts and then transfers and discards, and the only
+        sweep nats-py offers walks the entire bucket to find them, which is more
+        expensive than what it cleans up.
+
+        Left alone that compounds, because the writer is also the reader. TD
+        replaces its whole order book per fill and a replace reads the book to
+        see what to drop, so an account that had worked a few thousand orders was
+        transferring a few thousand markers on every print.
+
+        So the field's subject is purged out of the bucket's stream instead,
+        which is what Redis' ``HDEL`` does: the field is gone, and there is no
+        record that it was ever there.
+        """
+        stream, head = await self._state_stream()
+        # One round trip to learn which of them are there, rather than a ``get``
+        # each — the same trade every other read here makes.
+        held = await self._subject_counts(stream, f"{head}{_kv_key(name)}.>")
         dropped = 0
         for field in fields:
-            key = self._state_key(name, field)
-            try:
-                await bucket.get(key)
-            except nats.js.errors.KeyNotFoundError:
+            subject = f"{head}{self._state_key(name, field)}"
+            if not held.get(subject):
                 continue
-            # Purge rather than delete: a delete marker is a revision of its
-            # own, and these keys are an order book being written per fill.
-            await bucket.purge(key)
-            dropped += 1
+            if await self.js.purge_stream(stream, subject=subject):
+                dropped += 1
         return dropped
 
     async def state_clear(self, names: Sequence[str]) -> None:
-        bucket = await self._bucket("state")
+        """Drop every field of these names, markers and all.
+
+        One purge over each name's whole subject tree rather than a scan and a
+        purge per field: they are all going, so which ones there were is not
+        worth the round trip to find out.
+        """
+        stream, head = await self._state_stream()
         for name in names:
             async with self._state_lock(name):
-                for key in await self._kv_scan(bucket, f"{_kv_key(name)}.>"):
-                    with contextlib.suppress(nats.js.errors.KeyNotFoundError):
-                        await bucket.purge(key)
+                await self.js.purge_stream(
+                    stream, subject=f"{head}{_kv_key(name)}.>"
+                )
 
     # --- leases ------------------------------------------------------------
     #
@@ -1241,6 +1332,49 @@ class NatsTransport(BrokerTransport):
             json.dumps(dict(fields)).encode(),
             headers=headers,
         )
+        await self._renew_tape_coverage(feed, ttl_seconds=ttl_seconds)
+
+    async def _renew_tape_coverage(self, feed: str, *, ttl_seconds: int) -> None:
+        """Keep a recording feed's coverage record from outliving its own feed.
+
+        The records themselves need nothing: each carries its age against the
+        stream's ``max_age``, so a print expires on its own schedule. The
+        coverage record is not like that. It is one KV entry with a per-message
+        TTL, written when recording starts and not again until it stops, so a
+        feed that records for longer than ``ttl_seconds`` loses its description
+        while it is still being written.
+
+        Which loses the warm-up window. The next recorder reads coverage to
+        decide whether the interruption it is opening is *measured* — a
+        ``stopped_ms`` stamp beside a prior ``continuous_since_ms`` — and an
+        absent record answers no to both, so continuity restarts and hours of
+        intact tape fall behind the mark. That is the outcome
+        :meth:`~mftik.broker.client.Broker.tape_mark_recording` exists to avoid,
+        arrived at by an expiry rather than by a gap. Redis renews on every
+        append, pipelined behind the ``XADD``; here an append is a publish to a
+        stream and the coverage record lives in a bucket, so the renewal is a
+        write of its own.
+
+        Which is why it is not on every append. Prints arrive many times a second
+        on a busy feed and this is a read-modify-write. Once per half-life is one
+        of these per two hours per feed, and leaves the record holding at least
+        half its TTL at every moment.
+        """
+        if ttl_seconds <= 0:
+            return
+        last = self._tape_cov_renewed.get(feed)
+        if last is not None and time.monotonic() - last < ttl_seconds / 2:
+            return
+        # Claimed before the read rather than after the write, so a burst of
+        # appends behind one slow renewal does not queue a renewal each.
+        self._tape_cov_renewed[feed] = time.monotonic()
+        current = await self.tape_coverage(feed)
+        if not current:
+            # Nothing to keep alive. A feed appending without having marked itself
+            # recording has no coverage to lose, and an empty record invented here
+            # would claim the feed was described and that nothing is known of it.
+            return
+        await self._tape_coverage_write(feed, current, ttl_seconds=ttl_seconds)
 
     async def _tape_newest(self, feed: str, *, count: int) -> list[tuple[int, str]]:
         """The newest ``count`` records of ``feed``, by sequence arithmetic.
@@ -1382,8 +1516,7 @@ class NatsTransport(BrokerTransport):
         except (nats.errors.TimeoutError, TimeoutError):
             return None
         finally:
-            with contextlib.suppress(Exception):
-                await sub.unsubscribe()
+            await self._close_reader(sub)
         if not msgs:
             return None
         return msgs[0].metadata.sequence.stream
@@ -1410,17 +1543,31 @@ class NatsTransport(BrokerTransport):
         Read-modify-write, which is safe for the same reason the broker's
         continuity arithmetic above it is: a feed has exactly one recorder.
         """
-        bucket = await self._bucket("tapecov")
-        status = await bucket.status()
         merged = {
             **await self.tape_coverage(feed),
             **{k: str(v) for k, v in values.items()},
         }
+        await self._tape_coverage_write(feed, merged, ttl_seconds=ttl_seconds)
+
+    async def _tape_coverage_write(
+        self, feed: str, record: Mapping[str, str], *, ttl_seconds: int
+    ) -> None:
+        """Write this feed's whole coverage record with a fresh TTL.
+
+        Published to the bucket's subject rather than put through the KV
+        interface, because a per-message TTL is a header and ``put`` has nowhere
+        to carry one.
+        """
+        bucket = await self._bucket("tapecov")
+        status = await bucket.status()
         await self.js.publish(
             f"$KV.{status.bucket}.{_kv_key(feed)}",
-            json.dumps(merged).encode(),
+            json.dumps(dict(record)).encode(),
             headers={js_api.Header.MSG_TTL: str(_ttl_seconds(ttl_seconds))},
         )
+        # Whoever wrote it, the record now has a full TTL in hand, so the renewal
+        # on the append path can leave it alone until half of that has gone.
+        self._tape_cov_renewed[feed] = time.monotonic()
 
 
 def _stamp_ms(msg: Msg) -> int:
