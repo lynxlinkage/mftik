@@ -149,6 +149,11 @@ _KV_KEY_OK = re.compile(r"^[-/_=.a-zA-Z0-9]+$")
 _SUBJECT_BAD = re.compile(r"[\s*>]")
 
 
+def _carries_log(topic: str) -> bool:
+    """Whether ``topic`` is ever written through :meth:`NatsTransport.publish_log`."""
+    return topic.startswith(("log.", "status."))
+
+
 def _ttl_seconds(ttl: float) -> int:
     """A lease TTL as whole seconds, never below the floor.
 
@@ -404,6 +409,11 @@ class NatsTransport(BrokerTransport):
                 max_msgs_per_subject=FANOUT_MAX_MSGS_PER_SUBJECT,
                 max_msgs=FANOUT_MAX_MSGS,
                 max_age=FANOUT_MAX_AGE_SECONDS,
+                # Kept even though ``publish_log`` has moved to its own stream:
+                # NATS refuses to disable message TTLs on a stream that has
+                # them, so removing this turns every upgrade against a live
+                # server into a failed boot.
+                allow_msg_ttl=True,
                 allow_direct=True,
             )
         )
@@ -491,7 +501,7 @@ class NatsTransport(BrokerTransport):
         subjects = [
             subject
             for t in topics
-            for subject in (self._fanout_subject(t), self._log_subject(t))
+            for subject in self._subscribe_subjects(t)
         ]
         async for item in self._consume(subjects, stop=stop):
             yield item
@@ -501,15 +511,28 @@ class NatsTransport(BrokerTransport):
     ) -> AsyncIterator[tuple[str, str]]:
         # Patterns are subjects with wildcards in them, so they pass through
         # ``_check_subject``'s refusal of ``*`` — prefixed by hand instead.
-        # Both subject spaces: a live log subscriber reads the log stream,
-        # everything else the fan-out stream.
+        # Log/status patterns also listen on the log stream; everything else
+        # is fan-out only, so a lease or a feed does not pay a second consumer.
         subjects = [
             subject
             for p in patterns
-            for subject in (f"{self._prefix}.ps.{p}", f"{self._prefix}.log.{p}")
+            for subject in self._subscribe_subjects(p, pattern=True)
         ]
         async for item in self._consume(subjects, stop=stop):
             yield item
+
+    def _subscribe_subjects(
+        self, topic: str, *, pattern: bool = False
+    ) -> tuple[str, ...]:
+        fanout = (
+            f"{self._prefix}.ps.{topic}" if pattern else self._fanout_subject(topic)
+        )
+        if not _carries_log(topic):
+            return (fanout,)
+        log = (
+            f"{self._prefix}.log.{topic}" if pattern else self._log_subject(topic)
+        )
+        return (fanout, log)
 
     async def _consume(
         self, subjects: Sequence[str], *, stop: asyncio.Event | None
@@ -561,8 +584,8 @@ class NatsTransport(BrokerTransport):
         ``maxlen`` above :data:`LOG_MAX_MSGS_PER_SUBJECT` raises: the stream
         has already discarded by then, and a caller quietly given half the
         ring it asked for is worse than one told it asked for too much. A
-        smaller ``maxlen`` is accepted — the stream still keeps its own
-        bound, which is the native ring.
+        smaller ``maxlen`` is the replay cap :meth:`fetch_log_buffer` honours;
+        the stream still holds its own bound.
 
         ``ttl_seconds`` is a per-message TTL; see the contract note on
         :meth:`~mftik.broker.transport.base.BrokerTransport.publish_log`.
@@ -984,8 +1007,8 @@ class NatsTransport(BrokerTransport):
         try:
             # Counted apart from ``rows`` because a marker is delivered and then
             # dropped: it is one of the subjects above, so the accounting has to
-            # see it even though the answer does not. ``_drop_fields`` no longer
-            # leaves any, but a bucket written by an older build still holds them.
+            # see it even though the answer does not. ``_drop_fields`` purges
+            # the marker after the delete; an older build's leftovers remain.
             delivered = 0
             expected = len(subjects)
             while delivered < expected:
@@ -1027,21 +1050,49 @@ class NatsTransport(BrokerTransport):
         """Remove these fields so a watcher sees each one go.
 
         KV delete writes a marker — that is how :meth:`state_watch` learns a
-        field left. :meth:`_kv_scan` already skips those markers, so a pull
-        read still answers with the live set.
+        field left. The marker is then purged from the bucket's stream so
+        :meth:`_kv_scan` does not transfer one extra subject per order this
+        account has ever worked. A key that is already gone is not deleted
+        again, or a repeated drop would mint a fresh marker.
         """
         bucket = await self._bucket("state")
-        dropped = 0
+        dropped_keys: list[str] = []
         for field in fields:
-            try:
-                await bucket.delete(self._state_key(name, field))
-            except nats.js.errors.KeyNotFoundError:
+            key = self._state_key(name, field)
+            if not await self._state_field_exists(bucket, key):
+                # A leftover DEL marker still occupies a subject. Sweep it
+                # without minting another — nats-py ``delete`` never raises
+                # on a missing key, so an unchecked call would grow the
+                # bucket by one marker per historical order.
+                await self._purge_state_key(key)
                 continue
-            dropped += 1
+            await bucket.delete(key)
+            dropped_keys.append(key)
         known = self._state_fields.get(name)
         if known is not None:
             known.difference_update(fields)
-        return dropped
+        for key in dropped_keys:
+            await self._purge_state_key(key)
+        return len(dropped_keys)
+
+    async def _state_field_exists(
+        self, bucket: nats.js.kv.KeyValue, key: str
+    ) -> bool:
+        try:
+            entry = await bucket.get(key)
+        except (nats.js.errors.KeyNotFoundError, nats.js.errors.KeyDeletedError):
+            return False
+        if entry is None or entry.value is None:
+            return False
+        operation = getattr(entry, "operation", None)
+        op = getattr(operation, "value", operation)
+        return op not in ("DEL", "PURGE")
+
+    async def _purge_state_key(self, key: str) -> None:
+        """Remove the delete marker so the bucket does not grow without bound."""
+        stream, head = await self._state_stream()
+        with contextlib.suppress(Exception):
+            await self.js.purge_stream(stream, subject=f"{head}{key}")
 
     async def state_clear(self, names: Sequence[str]) -> None:
         """Drop every field of these names so watchers see each deletion."""
@@ -1057,53 +1108,35 @@ class NatsTransport(BrokerTransport):
     ) -> AsyncIterator[tuple[str, str | None]]:
         """Yield ``(field, value)`` for ``name``. ``None`` value means deleted.
 
-        Restarts the KV watch when it dies: a new watch re-delivers the
-        current values, which is how a projection resynchronises.
+        One watch. The caller reseeds from :meth:`state_all` and opens another
+        if this ends — that is how a projection resynchronises after a
+        reconnect, and how a purged delete marker is not mistaken for a live
+        field.
         """
         prefix = _kv_key(f"{name}.")
-        while stop is None or not stop.is_set():
-            watcher = None
-            try:
-                bucket = await self._bucket("state")
-                watcher = await bucket.watch(f"{prefix}>")
-                async for update in watcher:
-                    if stop is not None and stop.is_set():
-                        return
-                    if update is None or not update.key:
-                        continue
-                    key = update.key
-                    field = key[len(prefix) :] if key.startswith(prefix) else key
-                    operation = getattr(update, "operation", None)
-                    op = getattr(operation, "value", operation)
-                    if op in ("DEL", "PURGE"):
-                        yield field, None
-                        continue
-                    if update.value is None:
-                        continue
-                    yield field, update.value.decode()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning(
-                    "broker state watch failed name=%s — restarting",
-                    name,
-                    exc_info=True,
-                )
-                if stop is not None:
-                    try:
-                        await asyncio.wait_for(stop.wait(), timeout=0.5)
-                        return
-                    except TimeoutError:
-                        continue
-                await asyncio.sleep(0.5)
-                continue
-            finally:
-                if watcher is not None:
-                    with contextlib.suppress(Exception):
-                        await watcher.stop()
-            if stop is not None and stop.is_set():
-                return
-            await asyncio.sleep(0.5)
+        watcher = None
+        try:
+            bucket = await self._bucket("state")
+            watcher = await bucket.watch(f"{prefix}>")
+            async for update in watcher:
+                if stop is not None and stop.is_set():
+                    return
+                if update is None or not update.key:
+                    continue
+                key = update.key
+                field = key[len(prefix) :] if key.startswith(prefix) else key
+                operation = getattr(update, "operation", None)
+                op = getattr(operation, "value", operation)
+                if op in ("DEL", "PURGE"):
+                    yield field, None
+                    continue
+                if update.value is None:
+                    continue
+                yield field, update.value.decode()
+        finally:
+            if watcher is not None:
+                with contextlib.suppress(Exception):
+                    await watcher.stop()
 
     # --- leases ------------------------------------------------------------
     #

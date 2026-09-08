@@ -21,8 +21,9 @@ class BrokerConfig:
     #: nodes share one server without reading each other's traffic.
     key_prefix: str = "mft"
     request_timeout: float = 5.0
-    #: How many log lines ``publish_log`` keeps per topic for late WS
-    #: subscribers. Older lines are trimmed; live fan-out is unaffected.
+    #: How many log lines :meth:`Broker.fetch_log_buffer` returns per topic
+    #: for late WS subscribers. The stream holds a larger ring; this is the
+    #: replay window. Live fan-out is unaffected.
     log_buffer_maxlen: int = 100
     #: How long an idle consumer survives before the server reaps it. Every
     #: ``subscribe`` is a consumer of its own and every served subject has one,

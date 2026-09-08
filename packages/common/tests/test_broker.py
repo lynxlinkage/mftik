@@ -100,7 +100,7 @@ async def test_publish_log_buffers_for_late_subscribers(broker: Broker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_log_trims_to_maxlen(broker: Broker) -> None:
+async def test_fetch_log_buffer_trims_to_maxlen(broker: Broker) -> None:
     topic = "log.sts.trim"
     for i in range(5):
         await broker.publish_log(
@@ -114,9 +114,8 @@ async def test_publish_log_trims_to_maxlen(broker: Broker) -> None:
             maxlen=3,
         )
 
-    buffered = await broker.fetch_log_buffer(topic)
-    # The log stream holds the ring; a smaller maxlen is a hint, not a purge.
-    assert 3 <= len(buffered) <= 5
+    buffered = await broker.fetch_log_buffer(topic, maxlen=3)
+    assert len(buffered) == 3
     assert '"line-4"' in buffered[-1]
 
 
@@ -132,7 +131,7 @@ STATUS_RING = 200
 async def test_a_ring_the_size_production_asks_for_is_the_size_it_gets(
     broker: Broker,
 ) -> None:
-    """``maxlen`` is exact, not "up to", and not "up to some cap of ours"."""
+    """Replay ``maxlen`` is exact, not "up to", and not "up to some cap of ours"."""
     topic = Topics.status_sts()
     for i in range(STATUS_RING + 5):
         await broker.publish_log(
@@ -146,8 +145,8 @@ async def test_a_ring_the_size_production_asks_for_is_the_size_it_gets(
             ttl_seconds=3600,
         )
 
-    buffered = await broker.fetch_log_buffer(topic)
-    assert len(buffered) >= STATUS_RING
+    buffered = await broker.fetch_log_buffer(topic, maxlen=STATUS_RING)
+    assert len(buffered) == STATUS_RING
     # The newest, so a UI opening late sees the end of the story and not a
     # window from the middle of it.
     assert f'"line-{STATUS_RING + 4}"' in buffered[-1]
@@ -288,6 +287,49 @@ async def test_state_projection_tracks_writes(broker: Broker) -> None:
                 break
             await asyncio.sleep(0.05)
         assert proj.all() == {} or proj.get("cid-1") is None
+    finally:
+        await proj.close()
+
+
+@pytest.mark.asyncio
+async def test_a_dead_projection_is_not_live(broker: Broker) -> None:
+    """A watch that dies must not keep serving the last map it saw."""
+    name = "td.oms.fail"
+
+    async def dying_watch(_name: str, *, stop=None):
+        raise RuntimeError("watch died")
+        yield "", None
+
+    broker.state_watch = dying_watch  # type: ignore[method-assign]
+    await broker.state_put(name, "cid-1", {"status": "new"})
+    proj = broker.state_projection(name)
+    await proj.start()
+    try:
+        for _ in range(40):
+            if not proj.live:
+                break
+            await asyncio.sleep(0.05)
+        assert not proj.live
+    finally:
+        await proj.close()
+
+
+@pytest.mark.asyncio
+async def test_a_non_dict_field_is_dropped_from_the_projection(
+    broker: Broker,
+) -> None:
+    """Keeping the last dict would freeze a field the writer has replaced."""
+    name = "td.oms.nondict"
+    await broker.state_put(name, "cid-1", {"status": "new"})
+    proj = broker.state_projection(name)
+    await proj.start()
+    try:
+        await broker.transport.state_put_many(name, {"cid-1": "42"})
+        for _ in range(40):
+            if proj.get("cid-1") is None:
+                break
+            await asyncio.sleep(0.05)
+        assert proj.get("cid-1") is None
     finally:
         await proj.close()
 

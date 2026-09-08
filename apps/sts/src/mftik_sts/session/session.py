@@ -311,9 +311,15 @@ class StsSession:
         return self.strategy.name
 
     def projected_state(self, name: str) -> dict[str, dict[str, Any]] | None:
-        """Local OMS/ledger projection, or ``None`` if this name is not watched."""
+        """Local OMS/ledger projection, or ``None`` if this name is not live.
+
+        ``None`` is the cue for strategy views to ``state_all`` / ``state_get``
+        rather than serve a map whose watch has died.
+        """
         proj = self._state.get(name)
-        return None if proj is None else proj.all()
+        if proj is None or not proj.live:
+            return None
+        return proj.all()
 
     async def _start_state_projections(self) -> None:
         for api_id in self.td_api_ids:

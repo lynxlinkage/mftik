@@ -158,6 +158,7 @@ class BackfillSession:
                 req,
                 BackfillOutcome(
                     api_id=payload.api_id,
+                    ok=False,
                     reason=f"{len(self._runs)} runs already in flight",
                 ),
             )

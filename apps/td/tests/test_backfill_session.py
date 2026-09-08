@@ -184,7 +184,7 @@ async def test_too_many_runs_at_once_are_refused_not_queued(broker) -> None:
                 break
 
         refused = await ask(broker, api_id=2)
-        assert refused.ok
+        assert refused.ok is False
         assert "already in flight" in refused.reason
 
         executor.gate.set()
