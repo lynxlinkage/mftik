@@ -16,10 +16,6 @@ services:
       - "4223:4222"
       - "8223:8222"
 
-  redis:
-    ports: !override
-      - "6380:6379"
-
   api:
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -85,12 +85,12 @@ class Broker:
 
     Six processes, none of which import each other, and this is what they
     share. Every family below is documented in ``docs/Broker.md`` along with
-    what each transport does to answer it; the short version is that fan-out is
-    best effort, request-reply waits for a consumer, and a lease expires.
+    what NATS does to answer it; the short version is that fan-out is
+    best effort, a posted request waits for a consumer, and a lease expires.
 
     The store underneath is a :class:`~mftik.broker.transport.base.BrokerTransport`
-    chosen by ``BROKER_TRANSPORT``. Nothing above this class may know which one
-    it got — that is the rule
+    from :func:`mftik.broker.transport.build`. Nothing above this class may
+    know the store — that is the rule
     ``packages/common/tests/test_broker_is_the_only_transport.py`` enforces, and
     the reason this class exists rather than callers holding a transport.
 
@@ -640,8 +640,7 @@ class Broker:
         the shutdown path that asks for one is measured in seconds. A request
         left because nothing is serving the subject yet is not lost: the next
         consumer to come up takes it, which is the recovery a fan-out message
-        could not offer, and the one place both transports pay for a durable
-        queue to keep that promise.
+        could not offer, and the one place a durable queue keeps that promise.
         """
         await self._transport.post(subject, envelope.to_json())
 

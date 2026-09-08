@@ -1,7 +1,7 @@
 """The broker — fan-out, request-reply, shared state and bidirectional streams.
 
-One vocabulary, two transports. ``BROKER_TRANSPORT`` picks which, and
-``docs/Broker.md`` is what each owes the other.
+One vocabulary, one store. ``docs/Broker.md`` is what a plane may say and
+what NATS does to answer it.
 """
 
 from mftik.broker.client import LEASE_ANONYMOUS, Broker, BrokerClient

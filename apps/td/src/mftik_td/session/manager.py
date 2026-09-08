@@ -688,12 +688,12 @@ class SessionManager:
         if acct.global_task is not None and acct.global_task is not current:
             acct.global_task.cancel()
             await asyncio.gather(acct.global_task, return_exceptions=True)
-        # The order / account loops park in a blocking broker read. Cancelling
-        # them there can leave an unread reply on a pooled connection and
-        # corrupt whatever runs next on it, so let them retire on their own:
-        # ``serve``
-        # rechecks the stop event between polls, which bounds this to one
-        # ``BrokerConfig.serve_poll_seconds`` — a second in production.
+        # The order / account loops park in a broker serve. Cancelling them
+        # there would drop the message already taken off the inbound queue,
+        # so let them retire on their own: ``serve`` delivers the stop event
+        # *through* that queue, and the loop stops on the message after the
+        # one it is reading. Everything queued ahead of the stop is still
+        # handed over.
         if acct.order_task is not None and acct.order_task is not current:
             await asyncio.gather(acct.order_task, return_exceptions=True)
         if acct.account_task is not None and acct.account_task is not current:

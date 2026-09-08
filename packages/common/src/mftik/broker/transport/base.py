@@ -88,8 +88,8 @@ def redacted_url(url: str) -> str:
 class BrokerTransport(ABC):
     """One store, answering the broker's vocabulary.
 
-    Implementations live beside this file and are chosen by name through
-    :mod:`mftik.broker.transport`. Two exist: ``nats`` and ``redis``.
+    Implementations live beside this file and are built through
+    :func:`mftik.broker.transport.build`. One exists.
 
     Every method here is called by :class:`~mftik.broker.client.Broker` and by
     nothing else. A domain that reached one directly would be going around the

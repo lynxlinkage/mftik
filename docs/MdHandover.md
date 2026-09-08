@@ -16,9 +16,10 @@ Nothing here is built yet.
 
 Facts this design rests on, all of them checkable in the tree today.
 
-**The tape is not lost on restart.** `TapeRecorder` writes Redis streams, and
-Redis is long-lived substrate on another host — the production compose file does
-not manage it. A restart of the MD container leaves the stream intact.
+**The tape is not lost on restart.** `TapeRecorder` writes a JetStream stream
+per feed, and NATS is long-lived substrate on another host — the production
+compose file does not manage it. A restart of the MD container leaves the
+stream intact.
 
 **The fan-out is addressed per session.** `Dispatcher.publish` sends each update
 to `Topics.md_session(session_id)` for every subscribed link, and only then calls
@@ -274,12 +275,12 @@ Each stage is useful alone and leaves the tree in a shippable state.
    stopped acknowledging at all, and the cutover was unbounded because nothing
    was watching it.
 
-   Three seconds is the budget the whole cutover now has to fit inside, and it
-   is tighter than this design assumed. Green must be acknowledging before blue
-   stops — the overlap is not an optimisation any more, it is the requirement —
-   and the two `serve_poll_seconds` waits under *The hard parts* spend two of
-   the three on their own. Measure before stage 5, but measure against this
-   number rather than looking for one.
+   Three seconds is the budget the whole cutover now has to fit inside.
+   Green acknowledging before blue stops is still the safe shape — a hole
+   in the tape is a hole — but it is no longer forced by two one-second
+   serve-loop polls: a subscription is cancellable and the loop stops when
+   it is told (see `docs/Instances.md`, *Cutover ordering*). Measure before
+   stage 5, and measure against this number rather than looking for one.
 3. Is the pinned-feed buffer bounded by time or by record count? The tape uses
    both (`DEFAULT_RETENTION_S`, `DEFAULT_MAXLEN`) for good reasons that apply
    here too.

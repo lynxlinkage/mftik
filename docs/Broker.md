@@ -1,33 +1,29 @@
-# The broker — what a plane may say, and what a transport has to answer
+# The broker — what a plane may say, and what NATS does to answer it
 
 Six processes and none of them import each other. What they share is
-`mftik.broker.Broker`, and it used to be doing two jobs at once: it was the
-vocabulary a plane speaks, and it was the Redis implementation of that
+`mftik.broker.Broker`. It used to be doing two jobs at once: it was the
+vocabulary a plane speaks, and it was the store implementation of that
 vocabulary. Those are now separate. `Broker` is a façade that knows about
-envelopes, continuity arithmetic and nothing else; `BrokerTransport` is what a
-store owes it; and there are two of those.
+envelopes, continuity arithmetic and nothing else; `BrokerTransport` is what
+the store owes it; and there is one of those.
 
 ```
 Broker            envelopes, tape continuity, IncomingRequest, BidirectionalStream
   └── BrokerTransport          serialized strings in, serialized strings out
-        ├── RedisTransport     lists, hashes, pub/sub, streams
         └── NatsTransport      core NATS, JetStream, KV
 ```
 
-NATS is the default. Redis is complete, tested on every CI run, and is what a
-rollback selects — `BROKER_TRANSPORT=redis`, no code change.
-
 This document is three lists. What a plane may say, which is the whole of the
-interface. How each transport answers it, which is where the two stores stop
-being interchangeable. And what a third one would owe.
+interface. How NATS answers it, and why each mechanism was chosen. And what a
+second transport would owe if one were ever justified again.
 
 ## The seam is serialized envelopes, not store primitives
 
-The obvious seam would have been push, pop, hash-set, expire — and it would
-have been Redis' vocabulary with a NATS emulation of each behind it, badly. So
-the families below are named for what a *caller* wants, and each transport
-answers in its own idiom: `post` is a list on one and a work-queue stream on
-the other, and neither has to pretend to be the other.
+The obvious seam would have been push, pop, hash-set, expire — store
+primitives named for one idiom, with NATS emulating each behind them, badly.
+So the families below are named for what a *caller* wants, and the transport
+answers in its own idiom: `post` is a work-queue stream, a lease is "may I be
+the one who runs this", not a compare-and-set primitive leaked upward.
 
 Everything that is not about the store stays above the line and has exactly one
 implementation: envelope encoding, the tape's continuity marks and gap
@@ -41,15 +37,14 @@ it:
 
 - no `redis` or `nats` import, so no second client and no store's exception
   types spelled out in a domain's error handling;
-- no `.redis`, `.js` or `.nc` — the escape hatches, one per transport;
+- no `.redis`, `.js` or `.nc` — the escape hatches;
 - no `.key_prefix`, because a name a caller builds is a name the broker cannot
-  change. Under Redis it was a key it could not reshape. Under NATS the prefix
-  is a subject root, a stream name and a KV bucket at once, and a caller's flat
-  string is not any of them.
+  change. The prefix is a subject root, a stream name and a KV bucket at once,
+  and a caller's flat string is not any of them.
 
-`packages/common/src/mftik/broker/` is exempt: the transports *are* the
+`packages/common/src/mftik/broker/` is exempt: the transport *is* the
 store-specific code. `scripts/` and the test suites are outside the rule —
-`redacted_url` is a Redis credential's problem and names it on purpose, and
+`redacted_url` is a credential's problem and names it on purpose, and
 `broker_harness` reaches through deliberately so the tests above it do not have
 to.
 
@@ -57,8 +52,10 @@ to.
 walks the trees and fails with file and line. It also asserts the walk found
 the tree, so a guard that has stopped looking at anything fails rather than
 passing. Closing the three reach-throughs that existed — liveness keys, TD's
-backfill lock, STS's cid slot — is what made this port a change to one package
-instead of a hunt through every file.
+backfill lock, STS's cid slot — is what made the port a change to one package
+instead of a hunt through every file. `redis` stays in the forbidden-import
+list after the dependency is gone: one string, and it stops the client coming
+back in through a side door.
 
 ## What a plane may say
 
@@ -74,15 +71,13 @@ instead of a hunt through every file.
 | Recorded tape | `tape_append`, `tape_tail`, `tape_trim_before`, `tape_mark_recording`, `tape_mark_stopped`, `tape_coverage` | MD's recording, and the warm-up a strategy reads out of it. |
 
 Four of those carry a promise a caller used to make for itself, and each is a
-promise a transport has to keep rather than reimplement:
+promise the transport has to keep rather than reimplement:
 
 **A lease is not a key with a TTL.** `lease_hold` and `lease_release` are
-conditional — extend or drop *if it is still ours*. Redis cannot do either
-atomically without scripting, so the Redis transport documents the race it
-leaves open and which way it loses it: a refresh arriving after a rival took
-the lease extends the rival's rather than stealing it back. NATS KV closes it,
+conditional — extend or drop *if it is still ours*. NATS KV closes the race,
 because `update` and `delete` take the revision they were read at. Two callers
-used to document that workaround separately; now neither knows there was one.
+used to document a read-then-write workaround separately; now neither knows
+there was one.
 
 **A request nobody is serving waits — if it was `post`ed.** A parked backfill is
 recovery, not litter, and `Broker.post`'s docstring turns on it. `request` and
@@ -92,73 +87,69 @@ after that deadline passed is a side effect nobody is expecting. That is why
 cutover gap does to the transport rather than answering it itself.
 
 **A tape record's stamp is the broker's clock, not the venue's.** `tape_tail`
-returns `(recorded_ms, fields)`. It used to return the Redis stream id and let
-the strategy SDK pull `<ms>-<seq>` apart, which was the same leak as the others
+returns `(recorded_ms, fields)`. It used to return a store id and let the
+strategy SDK pull `<ms>-<seq>` apart, which was the same leak as the others
 wearing different clothes.
 
-**`maxlen` means `maxlen`, and a transport that cannot must say so.** Both trim
-exactly. Redis' approximate forms — `XADD MAXLEN ~`, `XTRIM MINID ~` — stop at
-macro node boundaries, so the fuse did not hold until a feed was a hundred
-records past it and a sweep reported nothing dropped. fakeredis trimmed exactly,
-which is why nothing said so until the suite met a real server. `publish_log` has
-the other half of the rule: a ring longer than the NATS fan-out stream's
-per-subject cap raises, because a caller quietly handed half of what it asked for
-reads the same as a topic that has been quiet.
+**`maxlen` means `maxlen`, and a transport that cannot must say so.** Trimming
+is exact. Approximate forms stop at macro-node boundaries, so the fuse did not
+hold until a feed was a hundred records past it and a sweep reported nothing
+dropped. `publish_log` has the other half of the rule: a ring longer than the
+fan-out stream's per-subject cap raises, because a caller quietly handed half
+of what it asked for reads the same as a topic that has been quiet.
 
-## How each transport answers
+## How NATS answers
 
-| The broker's | Redis | NATS |
-|---|---|---|
-| `publish` / `subscribe` | `PUBLISH` / `SUBSCRIBE` | JetStream, one ephemeral consumer per subscriber, `DeliverPolicy.NEW` and no acknowledgement. The stream is `{prefix}.ps.>` with a per-subject cap. |
-| `psubscribe` | `PSUBSCRIBE`, glob | The same, with a wildcard subject. Patterns were already one `*` per segment; see `Topics.log_pattern`. |
-| `publish_log` / `fetch_log_buffer` | `RPUSH` + `LTRIM` + `EXPIRE` + `PUBLISH`, one pipelined round trip | The same fan-out stream, plus a `purge … keep=maxlen` behind the publish — two round trips, because a purge cannot ride along the way an `LTRIM` can. `maxlen` above the stream's per-subject cap raises: the stream has already discarded by then and a caller handed half the ring it asked for cannot tell that from a quiet hour. `ttl_seconds` is a per-message TTL, so a line expires on its own clock rather than the buffer expiring as a whole and being refreshed by each write. |
-| `request` / `probe` | List + `BLPOP`, reply list with a TTL | Core request-reply. No responders is an immediate error, so the control plane learns a plane is down without spending its whole timeout on it. Re-asked first, for half of what the caller brought and never more than a second: a serve loop registering as its process boots is not a plane being down, and neither is an account subject three hundred milliseconds into a handover — order entry brings two seconds and Redis would have parked through it. `probe` opts out and spends only the boot-race grace, because "down" is the answer a probe is *for*. |
-| `post` | The same list | A work-queue stream, on a *different subject space* (`{prefix}.post.>`). It has to be different: a stream is a subscriber like any other, so one whose filter covered the RPC subjects would answer every core request with a publish acknowledgement, on the requester's own reply subject, and the caller would parse `{"stream": …, "seq": 1}` as its answer. |
-| `serve` | `BLPOP` on one list, competing consumers | Two sources merged: a core queue subscription (the queue group is what makes several processes a pool) and a pull consumer on the work queue, sharing a durable by name. |
-| Reply inbox | A reply list with a TTL, addressed in the envelope | The protocol's own reply subject. `reply_inbox` returns `None` and `serve` produces the address on the way in, so nothing is stamped on the envelope. |
-| `state_*` | One hash per name, JSON per field | A KV bucket, one key per field, `:` mapped to `.`. `state_all` is one consumer over the bucket's subject tree delivering last-per-subject, not a `keys()` and a get each. One field lands whole either way; a multi-field write is one `HSET` on Redis and several keys here, issued together but not a snapshot — see below. `state_all` is complete or it raises `StateReadIncompleteError`: `HGETALL` cannot come up short, a consumer can, and a book missing rows reads exactly like a book that small. |
-| `state_replace` | `MULTI`: delete then write | Write the new fields, then drop what the old set had extra — KV has no cross-key transaction. That order is the one where a reader in the middle sees a stale field rather than an empty state. And the writes are serialised per name in-process, because `MULTI` being one round trip is what used to make "last issued wins" true. |
-| `state_drop` / `state_clear` | `HDEL`, `DEL` | A purge of the field's subject out of the bucket's stream, not a KV delete or purge. Both of those write a *marker* — how a watcher learns a key went — and nothing here watches, while every marker is a subject `state_all` counts, transfers and discards. It compounds because the writer is the reader: TD replaces its whole order book per fill and a replace reads the book first. `state_clear` purges the name's whole subject tree in one call. |
-| `lease_*` | `SET px`, `SET NX px`, `GET`, `PEXPIRE` | KV with per-message TTL. `lease_take` is `create`; `lease_hold` and `lease_release` compare-and-set against the revision they read. |
-| `counter_next` | `INCR` | Read, add one, `update` at the revision that was read, retried on a loss. KV has no atomic increment, and the server-side counter that would give one is 2.12 while the floor here is 2.11. Cheap because the only caller allocates a slot once per session, not once per order. |
-| `tape_append` / `tape_tail` / `tape_trim_before` | One stream per feed: `XADD maxlen` + `XREVRANGE` + `XTRIM MINID` | A JetStream stream per feed. Per-feed, because retention is per feed in the interface and a stream's limits are the stream's — and because "the newest N records" is then subtraction on a sequence rather than a scan past every other feed's prints. |
-| `tape_coverage` / `tape_coverage_put` | A hash beside the stream, `EXPIRE`d by every append | One KV entry holding the whole record, written with a per-message TTL. Renewed by `tape_append` the way Redis renews it, but throttled to once per half-life rather than done per print: a print arrives many times a second and this is a read-modify-write where Redis pipelines an `EXPIRE`. Without the renewal a feed recording for longer than its TTL loses its own description while live, and the next recorder restarts continuity over an expiry rather than a gap. |
-| `key_prefix` | Every key's first segment | A subject root, and the name of every stream and KV bucket this node owns. |
-| `serve_poll_seconds` | `BLPOP` granularity, and why shutdown waits out a poll | Unused. The stop event is delivered *through* the inbound queue rather than raced against it, so a serve loop stops on the message after the one it is reading, and everything queued ahead of the stop is still handed over. |
-| `consumer_idle_seconds` | Unused | `inactive_threshold` on every consumer. Subjects are per-session and per-account, so the consumer count follows the fleet; this is what stops a node that has churned a thousand sessions from carrying a thousand consumers. For a *read*'s consumer it is only the backstop: `unsubscribe` on a pull subscription tears down the client's inboxes and leaves the server's consumer alone, so every read deletes its own and the threshold covers the process that died before it could. |
-| Connection policy | `build_redis`: pooled, health checks, retry on `ConnectionError` | `max_reconnect_attempts=-1` and an 8 MB pending buffer. Reconnect forever for the same reason Redis retries: the alternative is a plane that gave up on the bus and stays up not doing anything. |
+| The broker's | What NATS does |
+|---|---|
+| `publish` / `subscribe` | JetStream, one ephemeral consumer per subscriber, `DeliverPolicy.NEW` and no acknowledgement. The stream is `{prefix}.ps.>` with a per-subject cap. |
+| `psubscribe` | The same, with a wildcard subject. Patterns were already one `*` per segment; see `Topics.log_pattern`. |
+| `publish_log` / `fetch_log_buffer` | The same fan-out stream, plus a `purge … keep=maxlen` behind the publish — two round trips, because a purge cannot ride along a publish. `maxlen` above the stream's per-subject cap raises: the stream has already discarded by then and a caller handed half the ring it asked for cannot tell that from a quiet hour. `ttl_seconds` is a per-message TTL, so a line expires on its own clock rather than the buffer expiring as a whole and being refreshed by each write. |
+| `request` / `probe` | Core request-reply. No responders is an immediate error, so the control plane learns a plane is down without spending its whole timeout on it. Re-asked first, for half of what the caller brought and never more than a second: a serve loop registering as its process boots is not a plane being down, and neither is an account subject three hundred milliseconds into a handover — order entry brings two seconds. `probe` opts out and spends only the boot-race grace, because "down" is the answer a probe is *for*. |
+| `post` | A work-queue stream, on a *different subject space* (`{prefix}.post.>`). It has to be different: a stream is a subscriber like any other, so one whose filter covered the RPC subjects would answer every core request with a publish acknowledgement, on the requester's own reply subject, and the caller would parse `{"stream": …, "seq": 1}` as its answer. |
+| `serve` | Two sources merged: a core queue subscription (the queue group is what makes several processes a pool) and a pull consumer on the work queue, sharing a durable by name. The stop event is delivered *through* the inbound queue rather than raced against it, so a serve loop stops on the message after the one it is reading, and everything queued ahead of the stop is still handed over. |
+| Reply inbox | The protocol's own reply subject. `reply_inbox` returns `None` and `serve` produces the address on the way in, so nothing is stamped on the envelope. |
+| `state_*` | A KV bucket, one key per field, `:` mapped to `.`. `state_all` is one consumer over the bucket's subject tree delivering last-per-subject, not a `keys()` and a get each. One field lands whole; a multi-field write is several keys, issued together but not a snapshot — see below. `state_all` is complete or it raises `StateReadIncompleteError`: a consumer can come up short, and a book missing rows reads exactly like a book that small. |
+| `state_replace` | Write the new fields, then drop what the old set had extra — KV has no cross-key transaction. That order is the one where a reader in the middle sees a stale field rather than an empty state. The writes are serialised per name in-process, so "last issued wins" still holds inside one process. |
+| `state_drop` / `state_clear` | A purge of the field's subject out of the bucket's stream, not a KV delete or purge. Both of those write a *marker* — how a watcher learns a key went — and nothing here watches, while every marker is a subject `state_all` counts, transfers and discards. It compounds because the writer is the reader: TD replaces its whole order book per fill and a replace reads the book first. `state_clear` purges the name's whole subject tree in one call. |
+| `lease_*` | KV with per-message TTL. `lease_take` is `create`; `lease_hold` and `lease_release` compare-and-set against the revision they read. |
+| `counter_next` | Read, add one, `update` at the revision that was read, retried on a loss. KV has no atomic increment, and the server-side counter that would give one is 2.12 while the floor here is 2.11. Cheap because the only caller allocates a slot once per session, not once per order. |
+| `tape_append` / `tape_tail` / `tape_trim_before` | A JetStream stream per feed. Per-feed, because retention is per feed in the interface and a stream's limits are the stream's — and because "the newest N records" is then subtraction on a sequence rather than a scan past every other feed's prints. |
+| `tape_coverage` / `tape_coverage_put` | One KV entry holding the whole record, written with a per-message TTL. Renewed by `tape_append`, throttled to once per half-life rather than done per print: a print arrives many times a second and this is a read-modify-write. Without the renewal a feed recording for longer than its TTL loses its own description while live, and the next recorder restarts continuity over an expiry rather than a gap. |
+| `key_prefix` | A subject root, and the name of every stream and KV bucket this node owns. |
+| `consumer_idle_seconds` | `inactive_threshold` on every consumer. Subjects are per-session and per-account, so the consumer count follows the fleet; this is what stops a node that has churned a thousand sessions from carrying a thousand consumers. For a *read*'s consumer it is only the backstop: `unsubscribe` on a pull subscription tears down the client's inboxes and leaves the server's consumer alone, so every read deletes its own and the threshold covers the process that died before it could. |
+| Connection policy | `max_reconnect_attempts=-1` and an 8 MB pending buffer. Reconnect forever: the alternative is a plane that gave up on the bus and stays up not doing anything. |
 
-### Three things NATS cannot do that Redis could
+### Properties a caller has to know
 
-**Sub-second leases.** NATS' per-message TTL is whole seconds with a one second
-floor (ADR-43); a `Nats-TTL` below it — `0` included — is rejected and the
-message discarded. So `_ttl_seconds` rounds *up*: a lease that expired early is
-two processes holding one account, and a lease that expired a fraction late is
-a redeploy waiting slightly longer. Production leases are thirty seconds, so
-nothing real is affected. Tests that watched a claim lapse in 20ms ask
-`broker_harness.MIN_LEASE_TTL` for the shortest the selected transport can
+**Leases are whole seconds, with a one second floor.** NATS' per-message TTL
+is whole seconds (ADR-43); a `Nats-TTL` below it — `0` included — is rejected
+and the message discarded. So `_ttl_seconds` rounds *up*: a lease that expired
+early is two processes holding one account, and a lease that expired a
+fraction late is a redeploy waiting slightly longer. Production leases are
+thirty seconds, so nothing real is affected. Tests that watch a claim lapse
+ask `broker_harness.MIN_LEASE_TTL` (1.0) for the shortest the store can
 express and wait that out instead.
 
-**A multi-field write as a snapshot.** `HSET` takes a mapping in one command,
-so a reader either sees all of it or none of it. A field is a KV key of its own
-here, so `state_put_many` is several writes and a reader can catch a two-asset
-ledger update with one asset moved and the other not. Every value it sees is a
-value the writer wrote — the field is the unit both transports write whole — but
-it is not the same instant. The writes go out together rather than one round
-trip at a time, which is as close as key-per-field gets; closing it outright
-would mean one key per *name* holding the whole mapping, which buys the
-guarantee by turning every single-field write on the order path into a
-read-modify-write. `BrokerTransport.state_put_many` states the promise so a
-caller that needs two numbers to move together knows to put them in one field,
-and `state_replace` is explicit that seeing old and new at once is allowed.
+**A multi-field write is not a snapshot.** A field is a KV key of its own, so
+`state_put_many` is several writes and a reader can catch a two-asset ledger
+update with one asset moved and the other not. Every value it sees is a value
+the writer wrote — the field is the unit written whole — but it is not the
+same instant. The writes go out together rather than one round trip at a
+time, which is as close as key-per-field gets; closing it outright would mean
+one key per *name* holding the whole mapping, which buys the guarantee by
+turning every single-field write on the order path into a read-modify-write.
+`BrokerTransport.state_put_many` states the promise so a caller that needs two
+numbers to move together knows to put them in one field, and `state_replace`
+is explicit that seeing old and new at once is allowed.
 
-**Any name at all.** A KV key is `[-/_=.a-zA-Z0-9]`, and a subject token may
-not contain whitespace, `*` or `>`. The lease and counter names were Redis key
-tails spelled with colons — `sts:alive:{session}`, `backfill:lock:{api_id}` —
-so those become dots, which is what the segments always were. Anything still
-outside the set raises with the offending value named, because the values that
-could get that far come from outside the node: a venue's symbol, a credential's
-api_key.
+**Names are a restricted character set.** A KV key is `[-/_=.a-zA-Z0-9]`, and
+a subject token may not contain whitespace, `*` or `>`. Lease and counter
+names were spelled with colons — `sts:alive:{session}`,
+`backfill:lock:{api_id}` — so those become dots, which is what the segments
+always were. Anything still outside the set raises with the offending value
+named, because the values that could get that far come from outside the node:
+a venue's symbol, a credential's api_key.
 
 ## The tape is not the fan-out yet
 
@@ -177,12 +168,10 @@ as a follow-up rather than carried here.
 
 ## Deployment
 
-`BROKER_TRANSPORT` picks the store. `NATS_URL` and `REDIS_URL` are read by
-`BrokerConfig.from_env` and nowhere else.
+`NATS_URL` is read by `BrokerConfig.from_env` and nowhere else.
 
-The dev stack in `docker-compose.yml` runs both, because the suite is run
-against each. The published node template (`mftik node init`) runs only NATS —
-a node on it has no use for a Redis. Two things there are not optional:
+The dev stack in `docker-compose.yml` runs NATS. The published node template
+(`mftik node init`) does too. Two things there are not optional:
 
 - `-js`. Only bare request-reply is core NATS; state, leases, fan-out, posted
   work and the tape are all JetStream or KV, so a server without it accepts the
@@ -206,17 +195,9 @@ floor is declared in `packages/common/pyproject.toml` rather than left to the
 lock file: CI resolves to the newest available and only the published wheel ever
 sees the bottom of the range.
 
-**Switching a live node is not a migration.** Nothing copies state between the
-two, so a node that has been running on one does not find its sessions,
-its ledger or its tape on the other. Switch with nothing attached.
-
 ## Testing
 
-`MFTIK_TEST_BROKER` chooses the transport, exactly as `MFTIK_TEST_LOOP` chooses
-the loop and `TEST_POSTGRES_URL` chooses the database. It defaults to `nats`;
-CI runs a full pass on each.
-
-Neither is a fake. There was one — fakeredis — and it is gone, for the reason
+This is not a fake. There was one — fakeredis — and it is gone, for the reason
 the database suite gave up on sqlite-only: an in-process imitation agrees with
 the real server right up to the behaviour you are trying to test. It hid exact
 trimming, it hid a subscription that is not live the instant it is created, and
@@ -225,25 +206,24 @@ imitation at all, and writing one would have meant asserting against our own
 guess at what a consumer does.
 
 `broker_harness.a_broker` hands each test a `key_prefix` nobody else has and
-drops everything under it afterwards — under NATS that prefix names the streams
-and buckets, so a teardown is a handful of `delete_stream` calls.
+drops everything under it afterwards — that prefix names the streams and
+buckets, so a teardown is a handful of `delete_stream` calls.
 
-Three files, and the split is the point:
+Two files, and the split is the point:
 
-- `test_broker*.py` describe what a *caller* is promised and carry no marker.
-  They run on both transports and are where a new promise belongs.
-- `test_redis_transport.py` and `test_nats_transport.py` describe one store's
-  internals — a list being capped, a consumer being ephemeral, a stream name
-  collision being refused. `only_on(...)` skips them on the other pass.
+- `test_broker*.py` describe what a *caller* is promised. They are where a new
+  promise belongs.
+- `test_nats_transport.py` describes the store's internals — a consumer being
+  ephemeral, a stream name collision being refused.
 
-## What a third transport would owe
+## What a second transport would owe
 
 `BrokerTransport` in
 [`packages/common/src/mftik/broker/transport/base.py`](../packages/common/src/mftik/broker/transport/base.py),
-and the tests above it. Register it in `transport/__init__.py` the way venues
-are registered, and the suite it has to pass is the unmarked one — not a new
-file of its own. If a family genuinely does not fit, add it to the interface
-and implement it on both existing sides rather than reaching for the new
-store's own command at a call site: a caller that does is a caller that only
-works on the transport it was written against, and this is exactly the state
-the guard above exists to keep the tree out of.
+and the tests above it. `build()` in `transport/__init__.py` is the seam — a
+plain factory, not a registry — so a second implementation is still an entry
+there rather than a rewrite of the client. If a family genuinely does not fit,
+add it to the interface and implement it on the existing side rather than
+reaching for the new store's own command at a call site: a caller that does is
+a caller that only works on the transport it was written against, and this is
+exactly the state the guard above exists to keep the tree out of.
