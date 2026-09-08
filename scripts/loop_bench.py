@@ -154,13 +154,17 @@ async def case_pipelined_fanout(messages: int = 4000, sessions: int = 8) -> dict
     wall, cpu = time.perf_counter() - t0, cpu_seconds() - cpu0
     await broker.close()
 
+    # Same count as ``case_fanout``: ``gather`` overlaps PubAcks, it does not
+    # fold them into one JetStream round trip.
+    round_trips = messages * (sessions + 1)
     return {
         "messages": messages,
         "sessions": sessions,
-        "round_trips": messages,
+        "round_trips": round_trips,
         "wall_s": wall,
         "msgs_per_s": messages / wall,
         "cpu_s": cpu,
+        "cpu_us_per_round_trip": cpu / round_trips * 1e6,
     }
 
 
@@ -230,22 +234,34 @@ async def case_subscribe(messages: int = 6000) -> dict:
     await publisher.connect()
     await subscriber.connect()
     topic = Topics.md_session("loopbench-sub")
-    stop, done = asyncio.Event(), asyncio.Event()
+    stop, done, ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
     received = 0
 
     async def consume() -> None:
         nonlocal received
-        async for _envelope in subscriber.subscribe(topic, stop=stop):
+        async for envelope in subscriber.subscribe(topic, stop=stop):
+            if envelope.type == "loopbench_warmup":
+                ready.set()
+                continue
             received += 1
             if received >= messages:
                 done.set()
                 return
 
     task = asyncio.create_task(consume(), name="loopbench-consume")
-    # Fan-out drops what nobody is listening to, so the ephemeral consumer
-    # has to exist before the first timed publish. `subscribe` creates it
-    # before it waits for a message; a short pause is enough for that to land.
-    await asyncio.sleep(0.2)
+    # Fan-out drops what nobody is listening to (DeliverPolicy.NEW), so the
+    # consumer has to exist before the first timed publish. Keep sending a
+    # warmup until one arrives — that is the subscription landing, not a clock.
+    warmup = UntypedEnvelope.wrap({}, type="loopbench_warmup", source="md")
+    deadline = time.monotonic() + 10.0
+    while not ready.is_set():
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"subscribe consumer on {topic} did not become live")
+        await publisher.publish(topic, warmup)
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=0.05)
+        except TimeoutError:
+            continue
 
     cpu0, t0 = cpu_seconds(), time.perf_counter()
     for seq in range(messages):
