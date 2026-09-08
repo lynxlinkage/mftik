@@ -463,7 +463,7 @@ async def test_order_with_no_td_records_the_refusal(
 
 # --- the reads ------------------------------------------------------------
 #
-# Every one of these goes straight to Redis rather than arriving as an event,
+# Every one of these is a read of TD's state rather than an inbound event,
 # so without a record of the answer the log cannot say what the strategy knew.
 
 
@@ -474,7 +474,6 @@ async def test_oms_view_records_the_book_it_was_given(
     sts = _session(
         broker, tmp_path, strategy, td_api_ids=[11], session_id="ev-oms-read"
     )
-    await sts.start()
     await broker.state_put(
         Topics.td_oms(11),
         "555",
@@ -488,6 +487,7 @@ async def test_oms_view_records_the_book_it_was_given(
             status=OrderStatus.NEW,
         ),
     )
+    await sts.start()
 
     view = await strategy.oms.view()
     assert set(view.orders) == {"555"}
@@ -529,7 +529,6 @@ async def test_ledger_view_records_the_balances(
     sts = _session(
         broker, tmp_path, strategy, td_api_ids=[11], session_id="ev-ledger"
     )
-    await sts.start()
     await broker.state_put(
         Topics.td_ledger(11),
         "USDT",
@@ -537,6 +536,7 @@ async def test_ledger_view_records_the_balances(
             free=Decimal("1000"), prelock=Decimal("400"), lock=Decimal("0")
         ),
     )
+    await sts.start()
 
     assert await strategy.ledger.available("USDT") == Decimal("600")
     await sts.stop()
