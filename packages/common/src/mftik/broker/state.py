@@ -16,6 +16,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: How long a watch may run before this map is rebuilt from ``state_all``.
+#: ``state_drop`` deletes a field and then purges the marker so the bucket
+#: does not grow; a live watch can miss that pair. Reseeding is how the
+#: projection learns the field is gone without the writer waiting.
+_RESEED_S = 1.0
+
 
 class StateProjection:
     """Local copy of one state name, kept current by :meth:`Broker.state_watch`.
@@ -88,12 +94,16 @@ class StateProjection:
             while not self._stop.is_set():
                 self._rows = await self._broker.state_all(self.name)
                 self._ready.set()
-                async for field, raw in self._broker.state_watch(
-                    self.name, stop=self._stop
-                ):
-                    self._apply(field, raw)
-                    if not self._ready.is_set():
-                        self._ready.set()
+                try:
+                    async with asyncio.timeout(_RESEED_S):
+                        async for field, raw in self._broker.state_watch(
+                            self.name, stop=self._stop
+                        ):
+                            self._apply(field, raw)
+                            if not self._ready.is_set():
+                                self._ready.set()
+                except TimeoutError:
+                    continue
         except asyncio.CancelledError:
             raise
         except Exception:
