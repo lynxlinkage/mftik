@@ -32,11 +32,11 @@ class Topics:
         row names the instance allowed to use that credential — so it comes
         here instead.
 
-        Reads like the pub/sub channels next door (:meth:`td_global` is
-        ``td.{api_id}.global``) and is not one: request-reply subjects live
-        under ``{key_prefix}:rpc:`` as Redis lists, while a channel is the bare
-        name. The two namespaces have never overlapped and this does not change
-        that.
+        Reads like the fan-out topics next door (:meth:`td_global` is
+        ``td.{api_id}.global``) and is not one: a transport puts request-reply
+        in a namespace of its own — a ``:rpc:`` key prefix under Redis, a
+        ``.rpc.`` subject root under NATS — while a fan-out topic is the bare
+        name. The two have never overlapped and this does not change that.
         """
         return f"td.{instance}"
 
@@ -49,10 +49,10 @@ class Topics:
     def md(instance: str) -> str:
         """Control-plane subject one named MD answers on.
 
-        Not :meth:`md_session`, which is ``md.{session_id}`` and a pub/sub
-        channel. Same reasoning as :meth:`td`: an rpc subject is a list under
-        ``{key_prefix}:rpc:``, a channel is the bare name, and the two have
-        never shared a keyspace.
+        Not :meth:`md_session`, which is ``md.{session_id}`` and a fan-out
+        topic. Same reasoning as :meth:`td`: an rpc subject lives in the
+        transport's own request-reply namespace, a topic is the bare name, and
+        the two have never shared a keyspace.
         """
         return f"md.{instance}"
 
@@ -69,10 +69,11 @@ class Topics:
         A health check is the one request where that promise is worthless. An
         answer that arrives after the question stopped being asked tells nobody
         anything, and a dashboard polling an instance that is down would
-        otherwise write a record per probe into a list that will never be
-        drained — into the same Redis that carries order entry. So this subject
-        is bounded and expiring (see :meth:`Broker.probe`), which is correct
-        semantics *here* and would be data loss anywhere else.
+        otherwise leave a record per probe for that instance to find when it
+        finally boots — in the same store that carries order entry. So this
+        subject keeps nothing it does not have to (see :meth:`Broker.probe`),
+        which is correct semantics *here* and would be data loss anywhere
+        else.
         """
         return f"health.{domain}.{instance}"
 
@@ -124,11 +125,10 @@ class Topics:
     # Subscription patterns
     #
     # One ``*`` per segment, and never a ``*`` left to span the separators
-    # itself. The two readings of a pattern do not agree on that: Redis globs
-    # the whole channel name, so ``log.*`` matches ``log.sts.s-1``, while a
-    # subscriber that matches per segment — NATS, and anything else built on
-    # subjects — reads ``log.*`` as a two-segment subject and delivers
-    # nothing. ``log.*.*`` means the same thing to both.
+    # itself. The two transports do not read a pattern the same way: Redis
+    # globs the whole channel name, so ``log.*`` matches ``log.sts.s-1``, while
+    # NATS matches per segment and reads ``log.*`` as a two-segment subject that
+    # nothing publishes to. ``log.*.*`` means the same thing to both.
     #
     # Kept here rather than at the two call sites because a pattern that
     # matches nothing fails silently: the log persister and the alert matcher
@@ -209,8 +209,8 @@ class Topics:
         """Request-reply subject for market-data queries. One, for everyone.
 
         Not keyed by anything, unlike :meth:`td_order`. That subject names an
-        account because ``serve`` is a competing-consumer BLPOP and only the
-        process holding the account may answer for it — an order is owned. A
+        account because ``serve`` is a competing consumer and only the process
+        holding the account may answer for it — an order is owned. A
         read is not: any MD can serve any venue over REST, and the same answer
         comes back whoever produced it. So competing consumers stop being the
         hazard the key exists to avoid and become the point, spreading queries
@@ -236,11 +236,16 @@ class Topics:
     def td_order(api_id: int) -> str:
         """STS → TD request-reply subject for order entry.
 
-        Per-account on purpose: ``serve`` is a competing-consumer BLPOP, so a
-        shared subject would let a TD process that does not hold this account
-        take the request. One subject per api_id makes the account's owner the
-        only consumer — and a request sent while nobody owns it waits in the
-        list rather than vanishing the way a pub/sub message would.
+        Per-account on purpose: ``serve`` is a competing consumer, so a shared
+        subject would let a TD process that does not hold this account take the
+        request. One subject per api_id makes the account's owner the only
+        consumer.
+
+        What happens to a request sent while nobody owns the subject is the
+        transport's to say, not this name's: Redis parks it until an owner
+        arrives, NATS answers at once that there is no responder. A caller that
+        sends during a cutover has to be able to live with either, which is why
+        STS's rebuild attach retries on a budget.
         """
         return f"td.order.{api_id}"
 
@@ -300,7 +305,7 @@ class Topics:
 
     @staticmethod
     def md_feed(topic: str, ticker: UniversalTicker | str) -> str:
-        """Logical feed key for attach payloads / refcount (not a Redis subject).
+        """Logical feed key for attach payloads / refcount (not a subject).
 
         ``topic.UniversalTicker`` — ``bestquote.Gate_Spot_ETHUSDT``. The topic
         leads because it is the part with a fixed vocabulary, and the ticker is

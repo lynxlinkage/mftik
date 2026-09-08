@@ -12,6 +12,23 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.0",
+    # The transport a node deploys on. The *server* floor is 2.11, which is where
+    # per-message TTL lands (ADR-43) and therefore where a lease becomes
+    # expressible — but the client grew the three pieces needed to use any of it
+    # one release at a time, and this floor is the last of them:
+    #
+    #   2.12  `Header.MSG_TTL`                          — leases, tape coverage
+    #   2.13  `KeyValue.create(msg_ttl=...)`            — `lease_take`
+    #   2.14  `ConsumerConfig.opt_start_time` as a
+    #         datetime rather than an int                — the tape's retention sweep
+    #
+    # Below it the transport imports and connects, then raises on the first
+    # account claim or the first trim. A floor has to be stated rather than
+    # inferred from the lock file: CI resolves to the newest and only the
+    # published wheel ever sees the bottom of this range.
+    "nats-py>=2.14",
+    # Still a complete, tested transport and what a rollback selects, so it
+    # stays a hard dependency rather than an extra.
     "redis>=5.0",
     "pyyaml>=6.0",
     "httpx>=0.27",

@@ -114,7 +114,7 @@ def attached_api_ids(row: Any) -> list[int]:
 #: The key an unpinned feed list is stored under.
 #:
 #: ``*`` rather than an empty string so a document that reads back is legible,
-#: and safe as a sentinel because an instance name is a Redis subject segment
+#: and safe as a sentinel because an instance name is a subject segment
 #: and is refused that character where names are declared.
 ANY_INSTANCE = "*"
 

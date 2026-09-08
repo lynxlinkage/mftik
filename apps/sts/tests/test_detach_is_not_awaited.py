@@ -12,7 +12,7 @@ import asyncio
 import time
 
 import pytest
-from broker_harness import a_broker
+from broker_harness import a_broker, queued_requests
 from mftik.broker import Broker
 from mftik.protocol import (
     MD_SESSION_DETACH,
@@ -33,10 +33,11 @@ async def broker() -> Broker:
 
 
 async def _queued(broker: Broker, subject: str) -> list[UntypedEnvelope]:
-    """Everything sitting on a subject's RPC queue, without serving it."""
-    key = broker._rpc_queue(subject)  # noqa: SLF001
-    rows = await broker.redis.lrange(key, 0, -1)
-    return [UntypedEnvelope.from_json(row) for row in rows]
+    """Everything still waiting on a subject, without serving it."""
+    return [
+        UntypedEnvelope.from_json(row)
+        for row in await queued_requests(broker, subject)
+    ]
 
 
 def _session(broker: Broker, **kwargs) -> StsSession:

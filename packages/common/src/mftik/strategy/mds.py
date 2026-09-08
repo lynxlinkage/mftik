@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: MD answers before it touches the venue, so an ack is about one Redis
+#: MD answers before it touches the venue, so an ack is about one broker
 #: round-trip away. This is *not* how long the query itself may take — that
 #: bound is the venue's, and its answer arrives on the reply channel however
 #: long it needs.

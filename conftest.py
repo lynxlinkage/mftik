@@ -14,6 +14,7 @@ import os
 from collections.abc import Callable, Mapping
 
 import pytest
+from broker_harness import TRANSPORT_ENV, server_address, server_is_up, transport_name
 from db_harness import POSTGRES_URL_ENV, dialect_urls
 
 #: Which event loop the suite runs on: ``uvloop`` or ``asyncio``.
@@ -71,15 +72,26 @@ def pytest_asyncio_loop_factories(
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """In CI, sqlite-only is a failure rather than a quiet degradation.
+    """Fail on a missing service rather than testing something weaker.
 
-    Without this, a Postgres service that failed to come up would not turn the
-    build red — the suite would run against sqlite alone and pass, which is the
-    state this parametrisation exists to end.
+    Two of them, for the same reason. A Postgres service that failed to come up
+    would not turn the build red on its own — the suite would run against sqlite
+    alone and pass, which is the state that parametrisation exists to end. And
+    the broker has no fake at all any more, so a missing server is not a
+    degradation but sixty modules of confusing connection errors; saying so once,
+    here, is worth more than each of them saying it.
     """
     if os.getenv("CI") and "postgres" not in dialect_urls():
         raise pytest.UsageError(
             f"{POSTGRES_URL_ENV} is unset: CI would test sqlite only."
+        )
+    if not server_is_up():
+        host, port = server_address()
+        raise pytest.UsageError(
+            f"no {transport_name()} server at {host}:{port}, and the broker "
+            f"suite has no fake to fall back on. Start one with "
+            f"`docker compose up -d {transport_name()}`, or set "
+            f"{TRANSPORT_ENV} to the transport you do have running."
         )
 
 

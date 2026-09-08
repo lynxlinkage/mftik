@@ -22,8 +22,8 @@ blocking pops now handle the exception themselves — see
 from __future__ import annotations
 
 import pytest
-from mftik.broker.client import build_redis
 from mftik.broker.config import BrokerConfig
+from mftik.broker.transport.redis import build_redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 

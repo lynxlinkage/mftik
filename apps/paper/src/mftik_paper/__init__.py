@@ -1,4 +1,4 @@
-"""MFTIK paper exchange engine — Redis RPC + stream fan-out."""
+"""MFTIK paper exchange engine — broker RPC + fan-out."""
 
 from mftik_paper.app import main
 

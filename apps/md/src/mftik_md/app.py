@@ -132,7 +132,7 @@ async def reap_loop(
 
 
 #: How often the retention window is applied. Far below it, so a tape is never
-#: much longer than it claims, and far above the cost of one XTRIM per feed.
+#: much longer than it claims, and far above the cost of one trim per feed.
 TRIM_INTERVAL_SECONDS = 60.0
 
 

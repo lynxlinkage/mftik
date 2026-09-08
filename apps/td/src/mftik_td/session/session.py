@@ -495,7 +495,7 @@ class Session:
         )
 
     async def clear_state(self) -> None:
-        """Delete this account's Redis state. Call when the session dies.
+        """Delete this account's shared state. Call when the session dies.
 
         State that outlives the session it describes is a trap: a strategy
         attaching later reads balances and orders that nobody is updating and
@@ -1107,7 +1107,7 @@ class Session:
         except InsufficientAvailable as exc:
             return str(exc)
         # Both awaited, not scheduled. The caller acks the submit off the back
-        # of this, and STS reads the ledger out of Redis — so the write has to
+        # of this, and STS reads the ledger out of the broker — so the write has to
         # have landed before True goes out, or a strategy could act on a
         # balance that does not yet know about the order it just placed.
         await self.write_ledger(asset)
@@ -1302,7 +1302,7 @@ class Session:
         """Persist the order, *then* raise the event.
 
         The order matters. STS treats the event as "go and look", and what it
-        looks at is Redis — announcing first would hand it a window in which
+        looks at is the broker — announcing first would hand it a window in which
         the hash still describes the previous state.
         """
         try:

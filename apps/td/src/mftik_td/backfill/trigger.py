@@ -33,8 +33,8 @@ from mftik.protocol import TD_BACKFILL, Envelope, TdBackfill, Topics
 
 logger = logging.getLogger(__name__)
 
-#: How long a teardown may spend asking. Generous for an ``RPUSH`` and short
-#: enough that an unreachable Redis cannot hold a container past its stop
+#: How long a teardown may spend asking. Generous for one ``post`` and short
+#: enough that an unreachable broker cannot hold a container past its stop
 #: timeout and turn a clean exit into a kill.
 POST_TIMEOUT_S = 3.0
 
@@ -71,8 +71,8 @@ async def request_backfill(
         )
         return False
     except asyncio.CancelledError:
-        # Propagated, never swallowed: this being best-effort is about Redis
-        # being unwell, not about ignoring a caller that asked us to stop.
+        # Propagated, never swallowed: this being best-effort is about the
+        # broker being unwell, not about ignoring a caller that asked us to stop.
         raise
     except Exception:
         logger.warning(

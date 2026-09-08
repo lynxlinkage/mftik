@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from broker_harness import a_broker
+from broker_harness import a_broker, queued_requests
 from mftik.broker import Broker
 from mftik.protocol import Envelope, TdAttachRequest, TdBackfill, Topics
 from mftik_td.backfill.trigger import request_backfill
@@ -29,9 +29,8 @@ async def broker() -> Broker:
 
 
 async def queued(broker: Broker) -> list[TdBackfill]:
-    """Whatever is sitting on ``td.backfill`` right now."""
-    key = f"test:rpc:{Topics.td_backfill("td")}"
-    raw = await broker.redis.lrange(key, 0, -1)
+    """Whatever is sitting on ``td.backfill`` right now, unserved."""
+    raw = await queued_requests(broker, Topics.td_backfill("td"))
     out = []
     for item in raw:
         envelope = Envelope[dict].model_validate_json(item)

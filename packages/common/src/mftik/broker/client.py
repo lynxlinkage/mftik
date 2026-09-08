@@ -1,26 +1,20 @@
-"""Async Redis broker — pub/sub and request-reply IPC."""
+"""The broker — what a plane may say, over whichever transport it was given."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
-import redis.asyncio as redis
 from pydantic import BaseModel
-from redis.asyncio.retry import Retry
-from redis.backoff import ExponentialBackoff
-from redis.exceptions import ConnectionError as RedisConnectionError
-from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from mftik.broker.config import BrokerConfig
-from mftik.broker.errors import BrokerNotConnectedError, RequestTimeoutError
 from mftik.broker.request import IncomingRequest
 from mftik.broker.stream import BidirectionalStream
+from mftik.broker.transport import build as build_transport
+from mftik.broker.transport.base import LEASE_ANONYMOUS, BrokerTransport
 from mftik.protocol import (
     Envelope,
     Heartbeat,
@@ -31,73 +25,7 @@ from mftik.protocol import (
 
 logger = logging.getLogger(__name__)
 
-#: How many probes one health subject's queue keeps. Only the recent ones can
-#: still have a caller waiting, so this is a fuse rather than a buffer: it is
-#: what stops a dashboard polling a down instance from growing a list without
-#: end. Comfortably above any plausible number of concurrent dashboards.
-PROBE_QUEUE_MAXLEN = 16
-
-#: How long a probe queue outlives its last write. Refreshed on every probe, so
-#: it is not what bounds a queue being actively written to — :data:`PROBE_QUEUE_MAXLEN`
-#: is. What this buys is that the key of an instance nobody probes any more goes
-#: away on its own rather than sitting in Redis for the life of the deployment.
-PROBE_QUEUE_TTL_SECONDS = 300
-
-
-def redacted_url(url: str) -> str:
-    """``url`` with its password replaced, for logging.
-
-    A Redis URL carries the credential inline and every service logs this
-    line on every connect, so the password lands in ``docker logs`` for the
-    whole fleet and in anything those logs are shipped to.
-
-    Parsed rather than pattern-matched: a password may contain ``@`` and
-    ``:``, so splitting on either finds the wrong one and prints the rest.
-    Anything that will not parse returns a placeholder — falling back to the
-    original would leak exactly the string this exists to hide.
-    """
-    try:
-        parts = urlsplit(url)
-        if not parts.password:
-            return url
-        host = parts.hostname or ""
-        # ``.port`` raises on a non-numeric port, and it raises here rather
-        # than in ``urlsplit`` — which is why the whole reconstruction is
-        # inside the try and not just the parse.
-        if parts.port is not None:
-            host = f"{host}:{parts.port}"
-        user = parts.username or ""
-        return urlunsplit(
-            (
-                parts.scheme,
-                f"{user}:***@{host}",
-                parts.path,
-                parts.query,
-                parts.fragment,
-            )
-        )
-    except ValueError:
-        return "<unparseable url>"
-
 Handler = Callable[[IncomingRequest], Awaitable[None]]
-
-#: What a lease stores when its holder has no name worth writing down. A
-#: session liveness key answers "is anybody still here", never "who", so the
-#: value is a placeholder and :meth:`Broker.lease_owner` on one of those tells
-#: a reader nothing it did not already know from :meth:`Broker.lease_held`.
-LEASE_ANONYMOUS = "1"
-
-
-def _ms(seconds: float) -> int:
-    """Whole milliseconds, and never zero.
-
-    Milliseconds rather than the seconds Redis' ``EX`` takes, so a caller may
-    ask for a fraction: the test suite drives whole lease lifecycles per test
-    and a one-second floor would be paid on every one of them. Zero is
-    rejected by Redis outright, and a rounding error is a poor way to find
-    that out, so it becomes the shortest lease expressible instead.
-    """
-    return max(1, int(seconds * 1000))
 
 
 def _to_json(value: BaseModel | dict[str, Any]) -> str:
@@ -106,17 +34,11 @@ def _to_json(value: BaseModel | dict[str, Any]) -> str:
     return json.dumps(value, default=str)
 
 
-#: How long :meth:`Broker.serve` waits before polling again after a poll that
-#: failed. Matched to the poll's own BLPOP timeout: long enough that a Redis
-#: outage does not fill the log a hundred times a second, short enough that
-#: nobody notices the gap in a control plane once Redis is back.
-_SERVE_POLL_RETRY_S = 1.0
-
-
 #: How many measured gaps one feed's coverage will carry before the tape stops
 #: being described as one series at all. A feed that was interrupted this often
 #: inside its retention window is not a recording with holes in it, and the
-#: field is a hash value, not a stream — it does not get to grow forever.
+#: field is one value in a coverage record, not a history — it does not get to
+#: grow forever.
 TAPE_MAX_GAPS = 32
 
 
@@ -124,7 +46,7 @@ def encode_tape_gaps(gaps: Sequence[tuple[int, int]]) -> str:
     """Render measured gaps as ``start-end`` pairs, oldest first.
 
     A flat string rather than JSON: these are pairs of integers written on
-    every feed restart and read on every warm-up, and the coverage hash is
+    every feed restart and read on every warm-up, and the coverage record is
     read as ``dict[str, str]`` by everything that touches it.
     """
     return ",".join(f"{start}-{end}" for start, end in gaps)
@@ -149,20 +71,6 @@ def decode_tape_gaps(raw: str | None) -> list[tuple[int, int]]:
     return gaps
 
 
-def _record_ms(record_id: str) -> int:
-    """Milliseconds out of a ``<ms>-<seq>`` stream id.
-
-    Zero for an id that will not parse, which reads as "older than any
-    continuity mark" and costs the caller that one record. Redis' own ids
-    always parse; what this covers is a tape written by something else.
-    """
-    head, _, _tail = record_id.partition("-")
-    try:
-        return int(head)
-    except ValueError:
-        return 0
-
-
 def _int_or_none(raw: str | None) -> int | None:
     if not raw:
         return None
@@ -172,106 +80,53 @@ def _int_or_none(raw: str | None) -> int | None:
         return None
 
 
-def build_redis(config: BrokerConfig) -> redis.Redis:
-    """Build the Redis client every service talks through.
-
-    Module-level rather than inline in :meth:`Broker.connect` because what it
-    encodes is a policy about failure, and a policy that can only be observed
-    by connecting to a real server is one nothing checks.
-    """
-    return redis.from_url(
-        config.redis_url,
-        decode_responses=True,
-        # Pooled connections are handed out newest-first, so one that sinks to
-        # the bottom of the pool can idle past the server's ``timeout`` and be
-        # closed there. Nothing notices until it is borrowed again, and then
-        # the command fails on a socket that was already gone — which is how a
-        # domain gets a burst of ConnectionErrors on a Redis that is perfectly
-        # healthy. Checking a connection's health on checkout is what finds one
-        # of those.
-        health_check_interval=config.health_check_interval,
-        socket_keepalive=True,
-        # Finding it is not the same as surviving it. With no retry, redis-py
-        # raises the health check's own ConnectionError at whichever caller
-        # happened to borrow the connection — and in STS that caller is a feed
-        # pump whose only reading of an exception is that the session can no
-        # longer run. The retry is what turns "this connection is dead" into
-        # "drop it and use a live one", which is what the health check was for.
-        #
-        # ConnectionError alone, deliberately. A retry re-sends the command, so
-        # one that failed while reading its reply is delivered twice — and
-        # ``request`` carries new orders. That duplicate is refused at the venue
-        # on its client_order_id (mftik_td.errors.VENUE_DUPLICATE_CLIENT_ORDER_ID
-        # is already the code for it), so it costs a spurious reject rather than
-        # a doubled position, which is a trade worth making to get the reconnect.
-        # TimeoutError is still not listed, but not for the reason this comment
-        # used to give. It said a TimeoutError cannot arise without a
-        # ``socket_timeout``; it can. redis-py gives a *blocking* command a read
-        # deadline of its own — BLPOP's timeout plus a margin — and a socket
-        # that stalls for a second past it raises ``redis.exceptions.TimeoutError``
-        # from inside ``read_response``. On 2026-08-18 that is what ended STS's
-        # RPC serve loop, and with it every pause, stop and health check for
-        # seven hours, while its sessions went on trading.
-        #
-        # It stays out because retrying a blocking pop is worse than failing
-        # one: the re-sent BLPOP takes the *next* element, so an element the
-        # server had already handed to the reply that got lost is dropped, and
-        # dropped silently. A retry cannot tell those apart from here. The two
-        # loops that issue blocking pops handle it where the semantics are
-        # known instead — see :meth:`Broker.serve` and :meth:`Broker.request`.
-        retry=Retry(
-            ExponentialBackoff(cap=0.5, base=0.05),
-            config.command_retries,
-            supported_errors=(RedisConnectionError,),
-        ),
-        retry_on_error=[RedisConnectionError],
-    )
-
-
 class Broker:
-    """Async Redis IPC client.
+    """Async IPC client — the whole of what a plane may say.
 
-    Three primitives:
+    Six processes, none of which import each other, and this is what they
+    share. Every family below is documented in ``docs/Broker.md`` along with
+    what each transport does to answer it; the short version is that fan-out is
+    best effort, request-reply waits for a consumer, and a lease expires.
 
-    1. **Pub/Sub** — fan-out broadcast via Redis Pub/Sub
-       (``publish`` / ``subscribe``).
-    2. **Request-reply** — 1:1 RPC via Redis lists
-       (``request`` / ``serve``).
-    3. **Bidirectional stream** — duplex channel = pub + sub
-       (``bistream``).
+    The store underneath is a :class:`~mftik.broker.transport.base.BrokerTransport`
+    chosen by ``BROKER_TRANSPORT``. Nothing above this class may know which one
+    it got — that is the rule
+    ``packages/common/tests/test_broker_is_the_only_transport.py`` enforces, and
+    the reason this class exists rather than callers holding a transport.
+
+    What lives here rather than in a transport is everything that would
+    otherwise have been written twice: envelope encoding, the continuity
+    arithmetic in :meth:`tape_mark_recording`, and the two small objects that
+    wrap a subject pair and an incoming request.
     """
 
     def __init__(
         self,
         config: BrokerConfig | None = None,
         *,
-        redis_client: redis.Redis | None = None,
+        transport: BrokerTransport | None = None,
     ) -> None:
         self.config = config or BrokerConfig.from_env()
-        self._redis = redis_client
-        self._owns_redis = redis_client is None
+        self._transport = transport or build_transport(self.config)
 
     # --- lifecycle ---------------------------------------------------------
 
     @property
-    def redis(self) -> redis.Redis:
-        if self._redis is None:
-            raise BrokerNotConnectedError(
-                "Broker is not connected; call connect() first"
-            )
-        return self._redis
+    def transport(self) -> BrokerTransport:
+        """The store this broker is talking to.
+
+        Here for the tests that need to break a transport on purpose to prove a
+        serve loop survives it. A domain reaching this is going around the
+        broker, and the guard test says so by name.
+        """
+        return self._transport
 
     async def connect(self) -> None:
-        if self._redis is None:
-            self._redis = build_redis(self.config)
-            self._owns_redis = True
-        await self._redis.ping()
-        logger.info("Connected to Redis at %s", redacted_url(self.config.redis_url))
+        await self._transport.connect()
+        logger.info("Connected to %s", self._transport.describe())
 
     async def close(self) -> None:
-        if self._redis is not None and self._owns_redis:
-            await self._redis.aclose()
-            self._redis = None
+        await self._transport.close()
 
     async def __aenter__(self) -> Broker:
         await self.connect()
@@ -280,127 +135,78 @@ class Broker:
     async def __aexit__(self, *args: object) -> None:
         await self.close()
 
-    # --- key helpers -------------------------------------------------------
-
-    def _rpc_queue(self, subject: str) -> str:
-        return f"{self.config.key_prefix}:rpc:{subject}"
-
-    def _rpc_reply(self, request_id: str) -> str:
-        return f"{self.config.key_prefix}:rpc:reply:{request_id}"
-
-    def _log_buffer_key(self, topic: str) -> str:
-        return f"{self.config.key_prefix}:logbuf:{topic}"
-
-    def state_key(self, name: str) -> str:
-        """Redis key backing a shared state hash (e.g. ``td.ledger.7``)."""
-        return f"{self.config.key_prefix}:state:{name}"
-
-    def _key(self, name: str) -> str:
-        """One name's key under this broker's prefix. See :meth:`lease_key`."""
-        return f"{self.config.key_prefix}:{name}"
-
-    def lease_key(self, name: str) -> str:
-        """Redis key backing the lease ``name`` (e.g. ``sts:alive:s-1``).
-
-        A lease name is the whole key tail, not a segment under a ``lease:``
-        namespace of its own. The names in use predate this method — MD and
-        STS have been renewing ``{prefix}:{domain}:alive:{session}`` in
-        production since before there was an abstraction to put them behind —
-        and a rolling upgrade that moved them would have both halves of the
-        fleet reading a different key for "is anybody running this session",
-        which is the one question that must not have two answers.
-
-        So the namespacing is the caller's, and the families are
-        ``{domain}:alive:{session}``, ``{domain}:owner:{resource}``,
-        ``backfill:lock:{api_id}`` and ``cid:slot``.
-        """
-        return self._key(name)
-
-    # --- shared state (hashes) ---------------------------------------------
+    # --- shared state ------------------------------------------------------
     #
-    # Pub/Sub tells a reader that something changed; these hold what it
-    # changed *to*. A late subscriber, a restarted process and a strategy that
-    # missed a message all read the same current answer here, which is what
-    # makes "the writer's state and the reader's state agree" true by
-    # construction rather than by both sides keeping their own copy in sync.
+    # Fan-out tells a reader that something changed; these hold what it changed
+    # *to*. A late subscriber, a restarted process and a strategy that missed a
+    # message all read the same current answer here, which is what makes "the
+    # writer's state and the reader's state agree" true by construction rather
+    # than by both sides keeping their own copy in sync.
 
     async def state_put(
         self, name: str, field: str, value: BaseModel | dict[str, Any]
     ) -> None:
-        """Write one field of a state hash."""
-        await self.redis.hset(  # type: ignore[misc]
-            self.state_key(name), field, _to_json(value)
-        )
+        """Write one field of a shared state."""
+        await self._transport.state_put_many(name, {field: _to_json(value)})
 
     async def state_put_many(
         self, name: str, values: Mapping[str, BaseModel | dict[str, Any]]
     ) -> None:
-        """Write several fields in one round trip."""
+        """Write several fields, leaving the rest alone."""
         if not values:
             return
-        await self.redis.hset(  # type: ignore[misc]
-            self.state_key(name),
-            mapping={k: _to_json(v) for k, v in values.items()},
+        await self._transport.state_put_many(
+            name, {k: _to_json(v) for k, v in values.items()}
         )
 
     async def state_replace(
         self, name: str, values: Mapping[str, BaseModel | dict[str, Any]]
     ) -> None:
-        """Make the hash exactly ``values`` — the recon path.
+        """Make the state exactly ``values`` — the recon path.
 
-        Delete and rewrite run in one transaction so a reader never observes
-        the empty gap between them.
+        A reader never observes the empty gap between the old contents and the
+        new. Whether it can briefly see both is the transport's business; see
+        :meth:`BrokerTransport.state_replace`.
         """
-        key = self.state_key(name)
-        pipe = self.redis.pipeline(transaction=True)
-        pipe.delete(key)
-        if values:
-            pipe.hset(key, mapping={k: _to_json(v) for k, v in values.items()})
-        await pipe.execute()
+        await self._transport.state_replace(
+            name, {k: _to_json(v) for k, v in values.items()}
+        )
 
     async def state_get(self, name: str, field: str) -> dict[str, Any] | None:
-        raw = await self.redis.hget(self.state_key(name), field)  # type: ignore[misc]
+        raw = await self._transport.state_get(name, field)
         return None if raw is None else json.loads(raw)
 
     async def state_all(self, name: str) -> dict[str, dict[str, Any]]:
-        rows = await self.redis.hgetall(self.state_key(name))  # type: ignore[misc]
+        rows = await self._transport.state_all(name)
         return {field: json.loads(raw) for field, raw in rows.items()}
 
     async def state_drop(self, name: str, *fields: str) -> int:
-        if not fields:
-            return 0
-        return int(
-            await self.redis.hdel(self.state_key(name), *fields)  # type: ignore[misc]
-        )
+        return await self._transport.state_drop(name, fields)
 
     async def state_clear(self, *names: str) -> None:
-        """Delete whole state hashes — call when their owner goes away.
+        """Delete whole states — call when their owner goes away.
 
         State that outlives its writer is worse than no state: a reader cannot
         tell a stale answer from a current one.
         """
-        if names:
-            await self.redis.delete(*(self.state_key(n) for n in names))
+        await self._transport.state_clear(names)
 
     # --- leases (claims that expire) ---------------------------------------
     #
     # A lease is a fact about *now* that its holder may never get to retract:
     # a process running a session, holding an account, walking an account's
-    # history. The state hashes above are deleted by their owner, which covers
-    # every ending the owner is around to observe and not the one that matters
-    # here — SIGKILL, OOM, the machine going away — after which a fact with no
-    # expiry is a session the UI shows as running that nobody can stop.
+    # history. The states above are deleted by their owner, which covers every
+    # ending the owner is around to observe and not the one that matters here —
+    # SIGKILL, OOM, the machine going away — after which a fact with no expiry
+    # is a session the UI shows as running that nobody can stop.
     #
     # So a lease always expires, and its holder renews it while it lives.
     #
-    # Two of them decide *who* holds a resource, and that is the reason they
-    # are methods here rather than a read and a write composed by each caller:
-    # a decision that takes two round trips has a race in the middle, and
-    # where that race can be closed is in the transport. Redis has no
-    # compare-and-set to lean on (the suite's Redis has no scripting), so
-    # :meth:`lease_hold` and :meth:`lease_release` document the race they
-    # leave open and the direction they lose in. A transport that can do
-    # better does it once, and every caller inherits it.
+    # Three of them decide *who* holds a resource, which is why they are the
+    # transport's methods rather than a read and a write composed here: a
+    # decision that takes two round trips has a race in the middle, and where
+    # that race can be closed is underneath. Redis cannot close it and says so;
+    # NATS does, and no caller changed.
 
     async def lease_put(
         self, name: str, *, ttl: float, owner: str = LEASE_ANONYMOUS
@@ -412,8 +218,12 @@ class Broker:
         deciding who the holder is. A heartbeat that checked first would stop
         renewing the moment its own key lapsed, when re-taking it is exactly
         what it wants; :meth:`lease_take` is for the other question.
+
+        ``ttl`` is honoured to the millisecond on Redis and rounded up to whole
+        seconds on NATS, whose per-message TTL has a one second floor. The
+        leases in production are thirty seconds.
         """
-        await self.redis.set(self.lease_key(name), owner, px=_ms(ttl))
+        await self._transport.lease_put(name, ttl=ttl, owner=owner)
 
     async def lease_take(
         self, name: str, *, ttl: float, owner: str = LEASE_ANONYMOUS
@@ -425,14 +235,9 @@ class Broker:
         together and each asks for the same session; without the test being
         part of the write they are all told yes and all run it.
 
-        A refusal says nothing about who refused it — ask :meth:`lease_owner`,
-        and see :meth:`lease_hold` for what a lapse between the two means.
+        A refusal says nothing about who refused it — ask :meth:`lease_owner`.
         """
-        return bool(
-            await self.redis.set(
-                self.lease_key(name), owner, px=_ms(ttl), nx=True
-            )
-        )
+        return await self._transport.lease_take(name, ttl=ttl, owner=owner)
 
     async def lease_owner(self, name: str) -> str | None:
         """Who holds ``name``, or ``None`` when nobody does.
@@ -440,7 +245,7 @@ class Broker:
         The value :meth:`lease_put` wrote, so a lease taken without naming a
         holder answers :data:`LEASE_ANONYMOUS` rather than anything useful.
         """
-        return await self.redis.get(self.lease_key(name))
+        return await self._transport.lease_owner(name)
 
     async def lease_held(self, name: str) -> bool:
         """Whether anybody holds ``name``.
@@ -454,47 +259,41 @@ class Broker:
     async def lease_hold(self, name: str, *, owner: str, ttl: float) -> bool:
         """Extend a lease still held by ``owner``. ``False`` when it is not.
 
-        Read then ``PEXPIRE``, deliberately, rather than writing the value
-        again. If the lease lapsed between the two and a rival took it, this
-        extends the *rival's* lease by one period — the rival keeps the
-        resource and this caller finds out on its next pass. Re-writing the
-        value would have taken it from them, which is the failure a lease
-        exists to prevent, so the race is lost in the safe direction.
-
         A missing lease is never re-created here. Whoever let one expire goes
         back through :meth:`lease_take`, where a rival can say no.
+
+        The two transports disagree about how tightly this holds, and it is
+        worth knowing which one is underneath. NATS extends at the revision it
+        read, so a lease that lapsed and was re-taken by a rival is refused.
+        Redis has no compare-and-set to lean on and loses that race in the safe
+        direction: it extends the rival's lease by one period rather than taking
+        it back, so the rival keeps the resource and this caller finds out on
+        its next pass.
         """
-        key = self.lease_key(name)
-        if await self.redis.get(key) != owner:
-            return False
-        return bool(await self.redis.pexpire(key, _ms(ttl)))
+        return await self._transport.lease_hold(name, owner=owner, ttl=ttl)
 
     async def lease_release(self, name: str, *, owner: str) -> bool:
         """Give up a lease, if it is still ``owner``'s to give up.
 
-        Conditional for the same reason as :meth:`lease_hold`: a process
-        shutting down may already have lost its lease to the one that replaced
-        it, and deleting a stranger's claim on the way out hands the resource
-        to a third process while the second still believes it holds it.
+        Conditional because a process shutting down may already have lost its
+        lease to the one that replaced it, and deleting a stranger's claim on
+        the way out hands the resource to a third process while the second still
+        believes it holds it.
 
-        Releasing rather than waiting out the TTL is what keeps a redeploy
-        from looking like an outage nobody caused.
+        Releasing rather than waiting out the TTL is what keeps a redeploy from
+        looking like an outage nobody caused.
         """
-        key = self.lease_key(name)
-        if await self.redis.get(key) != owner:
-            return False
-        await self.redis.delete(key)
-        return True
+        return await self._transport.lease_release(name, owner=owner)
 
     async def lease_drop(self, name: str) -> None:
         """Delete a lease, whoever holds it. Safe when there is none.
 
         The counterpart to :meth:`lease_put`'s unnamed holder: a lease nobody
-        signed cannot be released conditionally, because "is it still mine"
-        has no answer to check. Callers that named themselves want
+        signed cannot be released conditionally, because "is it still mine" has
+        no answer to check. Callers that named themselves want
         :meth:`lease_release` instead.
         """
-        await self.redis.delete(self.lease_key(name))
+        await self._transport.lease_drop(name)
 
     # --- shared counters ---------------------------------------------------
 
@@ -509,29 +308,16 @@ class Broker:
         and how wide that range is decides how long it takes a value to
         repeat — see STS's cid slot, where a repeat is harmless anyway.
         """
-        return int(await self.redis.incr(self._key(name)))
+        return await self._transport.counter_next(name)
 
-    # --- recorded tape (streams) -------------------------------------------
+    # --- recorded tape -----------------------------------------------------
     #
     # A feed's own history, kept so a strategy that starts later can warm up on
-    # what it missed. Streams rather than lists because the retention policy is
-    # a *duration* — a stream id is a millisecond timestamp, so "keep two
-    # hours" is ``XTRIM MINID`` and "read from T" is ``XRANGE``, neither of
-    # which a list can express: ``LTRIM`` counts entries, and the same count is
-    # eight hours of a quiet instrument or twenty minutes of a busy one.
+    # what it missed.
     #
     # Two bounds, and they mean different things. ``maxlen`` on append is the
-    # memory fuse — approximate, so Redis trims whole nodes and the write stays
-    # cheap. The MINID trim is the intent. Whichever binds first is what the
+    # memory fuse. The trim is the intent. Whichever binds first is what the
     # reader gets, and :meth:`tape_coverage` is how it finds out which.
-
-    def tape_key(self, feed: str) -> str:
-        """Redis stream holding recorded tape for ``feed``."""
-        return f"{self.config.key_prefix}:tape:{feed}"
-
-    def tape_coverage_key(self, feed: str) -> str:
-        """Redis hash describing what :meth:`tape_key` currently covers."""
-        return f"{self.config.key_prefix}:tape:coverage:{feed}"
 
     async def tape_append(
         self,
@@ -541,30 +327,20 @@ class Broker:
         maxlen: int,
         ttl_seconds: int,
     ) -> None:
-        """Append one record, capping the stream at ``maxlen`` entries.
+        """Append one record, capping the feed at ``maxlen`` entries.
 
-        The id is Redis' own clock, not the venue's timestamp. Event time is a
-        field on the record instead, because ``XADD`` refuses an id that does
-        not exceed the last one and a venue tape is not strictly monotonic —
-        one late print out of a million would otherwise end the recording.
+        The record's stamp is the broker's clock, not the venue's timestamp.
+        Event time is a field on the record instead, because a venue tape is not
+        strictly monotonic and one late print out of a million should not be
+        able to end a recording.
 
         ``ttl_seconds`` is renewed on every append, so a feed that stops being
         recorded expires on its own. Without it a tape would outlive the last
-        strategy that ever wanted it: the MINID trim only runs against feeds
-        that are still pumping, and a stream nobody writes to is never capped
-        by ``maxlen`` either. Every instrument ever subscribed would keep its
-        last two hours for as long as Redis lived.
+        strategy that ever wanted it.
         """
-        pipe = self.redis.pipeline()
-        pipe.xadd(
-            self.tape_key(feed),
-            dict(fields),
-            maxlen=maxlen,
-            approximate=True,
+        await self._transport.tape_append(
+            feed, fields, maxlen=maxlen, ttl_seconds=ttl_seconds
         )
-        pipe.expire(self.tape_key(feed), ttl_seconds)
-        pipe.expire(self.tape_coverage_key(feed), ttl_seconds)
-        await pipe.execute()
 
     async def tape_tail(
         self, feed: str, *, count: int
@@ -573,34 +349,21 @@ class Broker:
 
         Oldest → newest, because a warm-up replays forward. The *newest*
         ``count`` rather than the oldest: warming up means catching up to now,
-        and a stream capped by two independent bounds holds an unknown number
-        of records, so "the first N" is not a window anyone asked for.
+        and a tape held by two independent bounds contains an unknown number of
+        records, so "the first N" is not a window anyone asked for.
 
-        ``recorded_ms`` is the broker's clock at append time, which is the
-        stamp :meth:`tape_coverage`'s continuity mark is measured against. Not
-        the venue's timestamp — that rides on the record as a field and answers
-        a different question; the two are not interchangeable.
-
-        Milliseconds rather than the id the transport wrote. Readers were
-        pulling the ``<ms>-<seq>`` apart themselves, which put the shape of a
-        Redis stream id in the strategy SDK and in half a dozen tests, and a
-        transport that numbers its records any other way would have taken
-        every warm-up with it. Parsing it is this method's job.
+        ``recorded_ms`` is the broker's clock at append time, which is the stamp
+        :meth:`tape_coverage`'s continuity mark is measured against. Not the
+        venue's timestamp — that rides on the record as a field and answers a
+        different question; the two are not interchangeable.
         """
         if count <= 0:
             return []
-        rows = await self.redis.xrevrange(
-            self.tape_key(feed), max="+", min="-", count=count
-        )
-        return [
-            (_record_ms(str(rid)), dict(fields)) for rid, fields in reversed(rows)
-        ]
+        return await self._transport.tape_tail(feed, count=count)
 
     async def tape_trim_before(self, feed: str, *, min_id_ms: int) -> int:
         """Drop records older than ``min_id_ms``. Returns how many went."""
-        return int(
-            await self.redis.xtrim(self.tape_key(feed), minid=min_id_ms)
-        )
+        return await self._transport.tape_trim_before(feed, min_id_ms=min_id_ms)
 
     async def tape_mark_recording(
         self, feed: str, *, since_ms: int, ttl_seconds: int
@@ -621,13 +384,9 @@ class Broker:
 
         The distinction is the whole point. A deploy interrupts a feed for a few
         seconds, and resetting continuity for it discards two hours of tape that
-        is sitting intact in the stream — the warm-up window, thrown away to
+        is sitting intact in the recording — the warm-up window, thrown away to
         describe a hole shorter than one bar. What cannot be measured is still
         treated as fatal to continuity; what can is handed over as a fact.
-
-        Carries its own TTL because a feed can be subscribed and then print
-        nothing at all — a dead instrument, a venue outage — and the appends
-        that would otherwise renew it never come.
 
         Read-modify-write, and safe today because a feed has exactly one
         recorder: MD refcounts subscribers within one process, so ``started``
@@ -661,58 +420,56 @@ class Broker:
             gaps = []
             continuous_since = since_ms
 
-        pipe = self.redis.pipeline()
-        pipe.hset(
-            self.tape_coverage_key(feed),
-            mapping={
+        await self._transport.tape_coverage_put(
+            feed,
+            {
                 "continuous_since_ms": str(continuous_since),
                 "recording": "1",
                 "stopped_ms": "",
                 "gaps": encode_tape_gaps(gaps),
             },
+            ttl_seconds=ttl_seconds,
         )
-        pipe.expire(self.tape_coverage_key(feed), ttl_seconds)
-        await pipe.execute()
 
-    async def tape_mark_stopped(self, feed: str, *, at_ms: int) -> None:
+    async def tape_mark_stopped(
+        self, feed: str, *, at_ms: int, ttl_seconds: int
+    ) -> None:
         """Record that this feed stopped recording at ``at_ms``.
 
-        The stream is left alone. A reader that wants the last two hours before
-        a feed went quiet can still have them — it just has to know they end,
-        and that is exactly what this says.
+        The records are left alone. A reader that wants the last two hours
+        before a feed went quiet can still have them — it just has to know they
+        end, and that is exactly what this says.
 
         It is also the near edge of any gap that follows. Only a recorder that
         got to run its shutdown leaves this behind, which is what makes a
         planned interruption measurable and an unplanned one not — see
         :meth:`tape_mark_recording`.
+
+        ``ttl_seconds`` for the same reason as the other coverage write: a
+        transport that stores this as a record with an expiry has to be told
+        what the expiry is, and the recorder is the only thing that knows.
         """
-        await self.redis.hset(  # type: ignore[misc]
-            self.tape_coverage_key(feed),
-            mapping={"recording": "0", "stopped_ms": str(at_ms)},
+        await self._transport.tape_coverage_put(
+            feed,
+            {"recording": "0", "stopped_ms": str(at_ms)},
+            ttl_seconds=ttl_seconds,
         )
 
     async def tape_coverage(self, feed: str) -> dict[str, str]:
-        """What :meth:`tape_key` covers, or ``{}`` if it was never recorded."""
-        return dict(await self.redis.hgetall(self.tape_coverage_key(feed)))  # type: ignore[misc]
+        """What this feed's tape covers, or ``{}`` if it was never recorded."""
+        return await self._transport.tape_coverage(feed)
 
-    # --- Pub/Sub -----------------------------------------------------------
+    # --- fan-out -----------------------------------------------------------
 
     async def publish(self, topic: str, envelope: Envelope[Any]) -> None:
-        """Publish an envelope to a pub/sub topic (fan-out).
+        """Publish an envelope to a fan-out topic.
 
-        Nothing comes back. Redis answers with the number of subscribers it
-        delivered to and this used to hand that on, which no caller ever read
-        and no other transport can promise — a broker built on subjects hands
-        a message to the server and the server decides who has it. Returning
-        it made a Redis implementation detail part of the interface, for the
-        benefit of nobody.
-
-        A count is also not the fact it looks like. Fan-out here is best
-        effort by design: a message published while nobody is subscribed is
-        gone, and where that is not acceptable the topic is written through
-        :meth:`publish_log` or the caller is using request-reply instead.
+        Nothing comes back. Fan-out here is best effort by design: a message
+        published while nobody is subscribed is gone, and where that is not
+        acceptable the topic is written through :meth:`publish_log` or the
+        caller is using request-reply instead.
         """
-        await self.redis.publish(topic, envelope.to_json())
+        await self._transport.publish(topic, envelope.to_json())
 
     async def publish_log(
         self,
@@ -724,29 +481,19 @@ class Broker:
     ) -> None:
         """Publish a log line and keep the last few for late subscribers.
 
-        Pub/Sub alone drops messages when nobody is listening (e.g. the UI
+        Fan-out alone drops messages when nobody is listening (e.g. the UI
         opens ``/ws/sts/...`` after a deploy). The buffer is replayed on
         connect by :meth:`fetch_log_buffer`. ``maxlen`` defaults to
         :attr:`BrokerConfig.log_buffer_maxlen` (100).
-
-        Returns nothing, for :meth:`publish`'s reasons.
         """
-        keep = (
-            self.config.log_buffer_maxlen if maxlen is None else max(1, maxlen)
+        keep = self.config.log_buffer_maxlen if maxlen is None else max(1, maxlen)
+        await self._transport.publish_log(
+            topic, envelope.to_json(), maxlen=keep, ttl_seconds=ttl_seconds
         )
-        raw = envelope.to_json()
-        key = self._log_buffer_key(topic)
-        pipe = self.redis.pipeline()
-        pipe.rpush(key, raw)
-        pipe.ltrim(key, -keep, -1)
-        pipe.expire(key, ttl_seconds)
-        pipe.publish(topic, raw)
-        await pipe.execute()
 
     async def fetch_log_buffer(self, topic: str) -> list[str]:
         """Return buffered log JSON lines for ``topic`` (oldest → newest)."""
-        rows = await self.redis.lrange(self._log_buffer_key(topic), 0, -1)
-        return list(rows)
+        return await self._transport.fetch_log_buffer(topic)
 
     async def subscribe(
         self,
@@ -754,32 +501,16 @@ class Broker:
         *,
         stop: asyncio.Event | None = None,
     ) -> AsyncIterator[UntypedEnvelope]:
-        """Yield envelopes from one or more pub/sub topics until ``stop``.
+        """Yield envelopes from one or more fan-out topics until ``stop``.
 
-        Uses Redis Pub/Sub. Messages published while not subscribed are lost
-        unless they were also written via :meth:`publish_log`.
+        Messages published while not subscribed are lost unless they were also
+        written via :meth:`publish_log`.
         """
-        channel_list = (topics,) if isinstance(topics, str) else tuple(topics)
-        if not channel_list:
+        topic_list = (topics,) if isinstance(topics, str) else tuple(topics)
+        if not topic_list:
             raise ValueError("subscribe requires at least one topic")
-
-        pubsub = self.redis.pubsub()
-        await pubsub.subscribe(*channel_list)
-        try:
-            while stop is None or not stop.is_set():
-                message = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=1.0
-                )
-                if message is None:
-                    await asyncio.sleep(0.01)
-                    continue
-                data = message.get("data")
-                if data is None:
-                    continue
-                yield UntypedEnvelope.from_json(data)
-        finally:
-            await pubsub.unsubscribe(*channel_list)
-            await pubsub.aclose()
+        async for _topic, raw in self._transport.subscribe(topic_list, stop=stop):
+            yield UntypedEnvelope.from_json(raw)
 
     async def psubscribe(
         self,
@@ -787,7 +518,7 @@ class Broker:
         *,
         stop: asyncio.Event | None = None,
     ) -> AsyncIterator[tuple[str, UntypedEnvelope]]:
-        """Yield ``(channel, envelope)`` from pattern subscriptions until ``stop``.
+        """Yield ``(topic, envelope)`` from pattern subscriptions until ``stop``.
 
         Messages published while not subscribed are lost unless they were also
         written via :meth:`publish_log`, exactly as in :meth:`subscribe`.
@@ -801,27 +532,8 @@ class Broker:
         pattern_list = (patterns,) if isinstance(patterns, str) else tuple(patterns)
         if not pattern_list:
             raise ValueError("psubscribe requires at least one pattern")
-
-        pubsub = self.redis.pubsub()
-        await pubsub.psubscribe(*pattern_list)
-        try:
-            while stop is None or not stop.is_set():
-                message = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=1.0
-                )
-                if message is None:
-                    await asyncio.sleep(0.01)
-                    continue
-                if message.get("type") != "pmessage":
-                    continue
-                data = message.get("data")
-                channel = message.get("channel")
-                if data is None or channel is None:
-                    continue
-                yield str(channel), UntypedEnvelope.from_json(data)
-        finally:
-            await pubsub.punsubscribe(*pattern_list)
-            await pubsub.aclose()
+        async for topic, raw in self._transport.psubscribe(pattern_list, stop=stop):
+            yield topic, UntypedEnvelope.from_json(raw)
 
     def bistream(
         self,
@@ -857,20 +569,24 @@ class Broker:
     ) -> UntypedEnvelope:
         """Send a request and wait for a single reply.
 
-        The envelope's ``id`` is used as the correlation id. A temporary
-        reply list key is written into ``reply_to`` before enqueueing.
+        The envelope's ``id`` is the correlation id. Where the reply is
+        addressed is the transport's business — some put it in the envelope on
+        the way out, some carry it beside the message — so all this does is ask
+        and stamp what it is told.
+
+        A :class:`~mftik.broker.errors.RequestTimeoutError` is the caller's
+        answer of "down" at least as often as it is a fault.
         """
         wait = self.config.request_timeout if timeout is None else timeout
-        reply_key = self._rpc_reply(envelope.id)
-        outbound = (
-            envelope
-            if envelope.reply_to == reply_key
-            else envelope.model_copy(update={"reply_to": reply_key})
+        outbound = self._addressed(envelope)
+        raw = await self._transport.request(
+            subject,
+            outbound.to_json(),
+            request_id=outbound.id,
+            inbox=outbound.reply_to,
+            timeout=wait,
         )
-
-        queue = self._rpc_queue(subject)
-        await self.redis.rpush(queue, outbound.to_json())
-        return await self._await_reply(subject, outbound, reply_key, wait)
+        return UntypedEnvelope.from_json(raw)
 
     async def probe(
         self,
@@ -881,98 +597,53 @@ class Broker:
     ) -> UntypedEnvelope:
         """Ask whether somebody is serving ``subject``, leaving nothing behind.
 
-        :meth:`request` on a subject nobody serves leaves the request in the
-        list for the next consumer, which every other caller wants: an attach
-        or a backfill parked until its owner comes up is recovery. A liveness
-        probe is the one request where that is not recovery but litter. A
-        dashboard polling an instance that is down would write a record per
-        probe into a list nobody will ever drain — thousands a day, into the
-        Redis that also carries order entry — and the instance, when it finally
-        booted, would open by answering a heap of questions nobody is still
-        waiting on.
+        :meth:`request` on a subject nobody serves may leave the request for the
+        next consumer, which every other caller wants: an attach or a backfill
+        parked until its owner comes up is recovery. A liveness probe is the one
+        request where that is not recovery but litter — a dashboard polling a
+        down instance would write a record per probe that nobody will ever
+        drain, and the instance, when it finally booted, would open by answering
+        a heap of questions nobody is still waiting on.
 
-        So the queue here is capped and expiring. Both are wrong for any other
-        subject and right for this one, because a probe has no value the moment
-        the caller stops waiting for it. The cap is what bounds a down
-        instance; the expiry is what makes the key go away once probing stops.
-        Neither is a substitute for the other.
-
-        The reply path is :meth:`request`'s exactly — a timeout still raises
-        :class:`RequestTimeoutError`, which is the caller's answer of "down".
+        So whatever a transport does to make an unserved request wait, it does
+        not do it here. The reply path is :meth:`request`'s exactly, and a
+        timeout still raises :class:`RequestTimeoutError`, which is the caller's
+        answer of "down".
         """
         wait = self.config.request_timeout if timeout is None else timeout
-        reply_key = self._rpc_reply(envelope.id)
-        outbound = (
-            envelope
-            if envelope.reply_to == reply_key
-            else envelope.model_copy(update={"reply_to": reply_key})
+        outbound = self._addressed(envelope)
+        raw = await self._transport.probe(
+            subject,
+            outbound.to_json(),
+            request_id=outbound.id,
+            inbox=outbound.reply_to,
+            timeout=wait,
         )
+        return UntypedEnvelope.from_json(raw)
 
-        queue = self._rpc_queue(subject)
-        pipe = self.redis.pipeline(transaction=True)
-        pipe.rpush(queue, outbound.to_json())
-        # Newest first: if an instance does come back, the probes worth
-        # answering are the recent ones, and the stale ones it still finds are
-        # dropped on arrival by their ``ts``.
-        pipe.ltrim(queue, -PROBE_QUEUE_MAXLEN, -1)
-        pipe.expire(queue, PROBE_QUEUE_TTL_SECONDS)
-        await pipe.execute()
-
-        return await self._await_reply(subject, outbound, reply_key, wait)
-
-    async def _await_reply(
-        self,
-        subject: str,
-        outbound: Envelope[Any],
-        reply_key: str,
-        wait: float,
-    ) -> UntypedEnvelope:
-        """Block on ``reply_key`` until it answers or ``wait`` runs out."""
-        # A pop that returns nothing is not a verdict — only the deadline is.
-        # So this polls, and ``serve_poll_seconds`` is how often it looks up.
-        deadline = time.monotonic() + wait
-        poll = self.config.serve_poll_seconds
-        try:
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RequestTimeoutError(subject, outbound.id, wait)
-                try:
-                    result = await self.redis.blpop(reply_key, timeout=poll)
-                except (RedisTimeoutError, RedisConnectionError):
-                    # Same read deadline as ``serve``'s poll, and the same
-                    # answer: a poll that failed is not a reply and not a
-                    # verdict either. The deadline above is what decides this
-                    # call, so go back and keep asking until it passes.
-                    logger.warning(
-                        "broker reply poll failed subject=%s id=%s — polling again",
-                        subject,
-                        outbound.id,
-                        exc_info=True,
-                    )
-                    continue
-                if result is None:
-                    continue
-                _key, data = result
-                return UntypedEnvelope.from_json(data)
-        finally:
-            await self.redis.delete(reply_key)
+    def _addressed(self, envelope: Envelope[Any]) -> Envelope[Any]:
+        """``envelope`` carrying the reply address, if this transport uses one."""
+        inbox = self._transport.reply_inbox(envelope.id)
+        if inbox is None or envelope.reply_to == inbox:
+            return envelope
+        return envelope.model_copy(update={"reply_to": inbox})
 
     async def post(self, subject: str, envelope: Envelope[Any]) -> None:
         """Enqueue on a request-reply subject without waiting for a reply.
 
-        The same queue :meth:`request` uses and the same competing consumers
+        The same subject :meth:`request` uses and the same competing consumers
         take from it; what is missing is the ``reply_to``, so the handler
-        answers nobody and this returns as soon as Redis has the message.
+        answers nobody and this returns as soon as the work has been accepted.
 
         For work whose *result* the sender has no use for and whose duration it
         must not inherit — a backfill run is minutes of venue round trips, and
         the shutdown path that asks for one is measured in seconds. A request
-        left in the list because nothing is serving the subject yet is not lost:
-        the next consumer to come up takes it, which is the recovery a pub/sub
-        message could not offer.
+        left because nothing is serving the subject yet is not lost: the next
+        consumer to come up takes it, which is the recovery a fan-out message
+        could not offer, and the one place both transports pay for a durable
+        queue to keep that promise.
         """
-        await self.redis.rpush(self._rpc_queue(subject), envelope.to_json())
+        await self._transport.post(subject, envelope.to_json())
 
     async def serve(
         self,
@@ -982,42 +653,20 @@ class Broker:
     ) -> AsyncIterator[IncomingRequest]:
         """Yield incoming requests on a request-reply subject.
 
-        Call ``await req.reply(envelope)`` to respond. Competing consumers
-        on the same subject share work via Redis list ``BLPOP``.
+        Call ``await req.reply(envelope)`` to respond. Competing consumers on
+        the same subject share the work.
 
-        Only ``stop`` ends this loop. Neither a Redis hiccup nor a message
-        that will not parse does, because this generator *is* a domain's
-        control plane: when it returns, the process stays up, the sessions
-        keep trading and every request piles up in a list nobody is reading —
-        the most expensive way a service can fail, and the quietest. Both
-        failures below cost one request; ending would cost all of them.
+        Only ``stop`` ends this loop. Neither a transport hiccup nor a message
+        that will not parse does, because this generator *is* a domain's control
+        plane: when it returns, the process stays up, the sessions keep trading
+        and every request piles up unread — the most expensive way a service can
+        fail, and the quietest.
         """
-        queue = self._rpc_queue(subject)
-        while stop is None or not stop.is_set():
+        async for raw, inbox in self._transport.serve(subject, stop=stop):
             try:
-                result = await self.redis.blpop(
-                    queue, timeout=self.config.serve_poll_seconds
-                )
-            except (RedisTimeoutError, RedisConnectionError):
-                # A blocking pop carries its own read deadline, so a stalled
-                # socket raises here even with no ``socket_timeout`` set, and
-                # a Redis that is really down raises here once the retry in
-                # :func:`build_redis` has given up. Both are reasons to poll
-                # again, not to stop serving.
-                logger.warning(
-                    "broker serve poll failed subject=%s — polling again",
-                    subject,
-                    exc_info=True,
-                )
-                await asyncio.sleep(_SERVE_POLL_RETRY_S)
-                continue
-            if result is None:
-                continue
-            _key, data = result
-            try:
-                envelope = UntypedEnvelope.from_json(data)
+                envelope = UntypedEnvelope.from_json(raw)
             except Exception:
-                # BLPOP already took it off the list, so there is nothing to
+                # The transport has already taken it, so there is nothing to
                 # skip past and no way to hand it back: the choice is to drop
                 # this one message or to take the whole subject down with it.
                 logger.exception(
@@ -1025,6 +674,11 @@ class Broker:
                     subject,
                 )
                 continue
+            if inbox is not None and envelope.reply_to != inbox:
+                # A transport that carries the reply address beside the message
+                # rather than inside it. Stamping it here is what lets a handler
+                # read ``req.envelope.reply_to`` without knowing which.
+                envelope = envelope.model_copy(update={"reply_to": inbox})
             yield IncomingRequest(self, envelope)
 
     async def serve_handler(
@@ -1039,8 +693,7 @@ class Broker:
             await handler(req)
 
     async def _send_reply(self, reply_to: str, envelope: Envelope[Any]) -> None:
-        await self.redis.rpush(reply_to, envelope.to_json())
-        await self.redis.expire(reply_to, self.config.reply_ttl_seconds)
+        await self._transport.send_reply(reply_to, envelope.to_json())
 
     # --- convenience -------------------------------------------------------
 
@@ -1052,7 +705,7 @@ class Broker:
         stop: asyncio.Event | None = None,
         on_tick: Callable[[], None] | None = None,
     ) -> None:
-        """Publish periodic heartbeats on the heartbeat pub/sub topic."""
+        """Publish periodic heartbeats on the heartbeat fan-out topic."""
         while stop is None or not stop.is_set():
             envelope = HeartbeatEnvelope.wrap(
                 Heartbeat(),

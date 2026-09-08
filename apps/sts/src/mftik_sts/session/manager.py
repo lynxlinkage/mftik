@@ -69,11 +69,19 @@ _SHUTDOWN_REASON = "STS shut down while this was running"
 _STATUS_BUFFER = 200
 _STATUS_TTL_SECONDS = 3600
 
-#: Attach retries while rebuilding. TD and MD may still be starting — nothing
-#: makes them come up before STS — and their RPC requests queue in Redis
-#: rather than vanishing, so waiting is the whole strategy. Attach is
-#: idempotent on both sides, which is what makes re-sending safe.
-_ATTACH_ATTEMPTS = 5
+#: How long a rebuild keeps trying to attach one domain. TD and MD may still be
+#: starting — nothing makes them come up before STS — so waiting is the whole
+#: strategy, and attach is idempotent on both sides, which is what makes
+#: re-sending safe.
+#:
+#: A budget rather than a number of attempts, because how long one attempt takes
+#: is the transport's business and not this loop's. Under Redis an unserved
+#: request waits on its subject and the first attempt alone spends the whole
+#: twenty second timeout on it; under NATS the same request comes back in
+#: milliseconds saying nobody is listening. Counting attempts would have made
+#: this window a minute and a half on one transport and twenty seconds on the
+#: other without anything saying so.
+_ATTACH_BUDGET_S = 100.0
 _ATTACH_BACKOFF_S = 2.0
 _ATTACH_TIMEOUT_S = 20.0
 
@@ -1068,12 +1076,18 @@ class SessionManager:
         """Send an attach until it lands, or give up and say so.
 
         Retried rather than gated on a readiness probe: the domain may simply
-        not be up yet, its request waits in the Redis list rather than being
-        lost, and both attaches are idempotent — a request that was served
-        after we stopped waiting for the reply makes the next attempt a no-op.
+        not be up yet, and both attaches are idempotent — a request that was
+        served after we stopped waiting for the reply makes the next attempt a
+        no-op. What the retry is covering differs by transport: under Redis the
+        request is already waiting on the subject and this loop is only waiting
+        for the reply, while under NATS an unserved subject answers at once and
+        the re-send *is* the mechanism. Both are bounded by the same budget.
         """
         last: Exception | None = None
-        for attempt in range(1, _ATTACH_ATTEMPTS + 1):
+        deadline = asyncio.get_running_loop().time() + _ATTACH_BUDGET_S
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 reply = await self._broker.request(
                     subject, envelope, timeout=_ATTACH_TIMEOUT_S
@@ -1085,16 +1099,17 @@ class SessionManager:
                     return
                 err = RpcError.model_validate(reply.payload)
                 last = RuntimeError(f"{err.code}: {err.message}")
+            left = deadline - asyncio.get_running_loop().time()
             logger.warning(
-                "STS rebuild attach %s failed (attempt %d/%d): %s",
+                "STS rebuild attach %s failed (attempt %d, %.0fs left): %s",
                 what,
                 attempt,
-                _ATTACH_ATTEMPTS,
+                max(0.0, left),
                 last,
             )
-            if attempt < _ATTACH_ATTEMPTS:
-                await asyncio.sleep(_ATTACH_BACKOFF_S * attempt)
-        raise RuntimeError(f"rebuild could not attach {what}: {last}")
+            if left <= 0:
+                raise RuntimeError(f"rebuild could not attach {what}: {last}")
+            await asyncio.sleep(min(_ATTACH_BACKOFF_S * attempt, left))
 
     async def close_all(self) -> None:
         """Shut every session down, recording the terminal status first.
@@ -1169,8 +1184,8 @@ class SessionManager:
     def _stop_serving_control(self, session_id: str) -> None:
         """Ask the loop to retire. Not awaited.
 
-        ``serve`` parks in a blocking ``BLPOP`` and cancelling it there leaves
-        the unread reply on a pooled connection, so the loop is asked to stop
+        ``serve`` parks in a blocking broker read and cancelling it there can
+        leave an unread reply on a pooled connection, so the loop is asked to stop
         and left to notice between polls — the same rule TD's account loops
         follow. The session is already out of ``self._sessions`` by then, so
         anything that arrives in that window is answered ``not_found``, which

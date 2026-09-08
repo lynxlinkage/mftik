@@ -9,7 +9,7 @@ from mftik.broker import Broker
 from mftik.exchange import OrderError, PaperExchange, Side
 from mftik.exchange.models import OrderStatus, OrderType, PlaceOrderRequest, limit_order
 from mftik.exchange.paper.remote import PaperRemotePrivateClient
-from mftik_paper.app import RedisEventBridge
+from mftik_paper.app import BrokerEventBridge
 from mftik_paper.rpc import dispatch
 
 
@@ -21,7 +21,7 @@ async def broker() -> Broker:
 
 @pytest.mark.asyncio
 async def test_remote_private_place_cancel(broker: Broker) -> None:
-    bridge = RedisEventBridge(broker)
+    bridge = BrokerEventBridge(broker)
     exchange = PaperExchange(
         tick_interval=10.0,
         on_order=bridge.on_order,

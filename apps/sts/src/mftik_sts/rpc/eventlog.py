@@ -8,7 +8,7 @@ broker, through STS's own RPC subject.
 Paged, because that subject is served in turn. A handler that streamed a whole
 file would hold every session create, pause and stop behind it for as long as
 the transfer took. One bounded read per request keeps the loop moving, costs
-Redis one chunk at a time rather than the file, and lets an interrupted
+the broker one chunk at a time rather than the file, and lets an interrupted
 download resume where it stopped instead of starting again.
 
 Compressed at this end. Event logs are jsonl, which gives up about a factor of
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Ceiling on one read, whatever was asked for. Bounds the reply Redis has to
+#: Ceiling on one read, whatever was asked for. Bounds the reply the broker has to
 #: hold and the time this handler keeps the RPC loop — both of which a caller
 #: choosing its own page size should not get to decide.
 MAX_READ_BYTES = 1_048_576

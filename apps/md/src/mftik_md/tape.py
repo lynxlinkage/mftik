@@ -47,8 +47,8 @@ DEFAULT_RETENTION_S = 7200.0
 DEFAULT_MAXLEN = 500_000
 
 #: Fields lifted off a trade payload, in the order they are written. Every
-#: record in one stream carries the same set, which is what lets Redis keep the
-#: names once per node instead of once per entry.
+#: record in one tape carries the same set, which is what lets the store keep
+#: the names once rather than once per record.
 _TRADE_FIELDS = ("trade_id", "price", "qty", "side", "ts")
 _AGG_EXTRA_FIELDS = ("first_trade_id", "last_trade_id")
 
@@ -132,7 +132,9 @@ class TapeRecorder:
     async def stopped(self, feed: str) -> None:
         """Stamp the moment ``feed`` stopped recording."""
         try:
-            await self._broker.tape_mark_stopped(feed, at_ms=_now_ms())
+            await self._broker.tape_mark_stopped(
+                feed, at_ms=_now_ms(), ttl_seconds=self._ttl_seconds
+            )
         except Exception:
             logger.exception("MD tape stop stamp failed feed=%s", feed)
 
@@ -144,16 +146,12 @@ class TapeRecorder:
             if topic not in self._topics:
                 continue
             try:
-                dropped = await self._broker.tape_trim_before(
-                    feed, min_id_ms=horizon
-                )
+                dropped = await self._broker.tape_trim_before(feed, min_id_ms=horizon)
             except Exception:
                 logger.exception("MD tape trim failed feed=%s", feed)
                 continue
             if dropped:
-                logger.debug(
-                    "MD tape trimmed %d record(s) feed=%s", dropped, feed
-                )
+                logger.debug("MD tape trimmed %d record(s) feed=%s", dropped, feed)
 
 
 def _fields_from(topic: str, payload: dict[str, object]) -> dict[str, str]:

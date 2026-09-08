@@ -350,7 +350,7 @@ async def test_a_failed_attach_puts_the_session_back(
     while blind to a feed or an account."""
     # The real backoff is sized for a TD that is still starting; here every
     # attempt is refused outright, so waiting it out only slows the suite.
-    monkeypatch.setattr(manager_mod, "_ATTACH_ATTEMPTS", 2)
+    monkeypatch.setattr(manager_mod, "_ATTACH_BUDGET_S", 0.02)
     monkeypatch.setattr(manager_mod, "_ATTACH_BACKOFF_S", 0.01)
     store = FakeStsStore()
     store.seed("r-5", td_api_ids=[3])

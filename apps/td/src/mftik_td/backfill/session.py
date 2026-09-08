@@ -99,9 +99,9 @@ class BackfillSession:
     async def stop(self) -> None:
         self._stop.set()
         # Neither the serve loop nor a running walk is cancelled: both end by
-        # touching a pooled Redis connection, and cancelling one mid-command
-        # hands the connection back with its reply unread, which breaks
-        # whatever borrows it next. ``serve`` rechecks the stop event between
+        # touching the broker, and on a pooled transport cancelling one
+        # mid-command hands the connection back with its reply unread, which
+        # breaks whatever borrows it next. ``serve`` rechecks the stop event between
         # polls, so this is bounded by a poll plus the venue's own timeout.
         pending = [t for t in (self._task, *self._runs) if t is not None]
         if pending:

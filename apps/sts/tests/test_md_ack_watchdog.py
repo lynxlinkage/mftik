@@ -69,6 +69,31 @@ async def _ack(broker: Broker, instance: str | None, token: int = 1) -> None:
     )
 
 
+async def _arm(
+    session: StsSession, broker: Broker, instance: str | None, timeout: float = 3.0
+) -> None:
+    """Acknowledge until the session has heard it, then stop.
+
+    ``start()`` returns before its feed subscription exists: the pump is a task,
+    and the subscription is made the first time that task runs. A single publish
+    into that window is delivered to nobody — on either transport, against a
+    real server — and every test below arms the watchdog with a single publish.
+
+    Repeating until ``_md_acks`` shows the instance is what makes the arming a
+    fact instead of a race, and stopping the moment it does is what leaves the
+    grace period starting where the test thinks it does.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    token = 0
+    while asyncio.get_running_loop().time() < deadline:
+        token += 1
+        await _ack(broker, instance, token)
+        if (instance or "md") in session._md_acks:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"session never heard an acknowledgement from {instance!r}")
+
+
 async def _acking(
     broker: Broker, instances: list[str], stop: asyncio.Event
 ) -> None:
@@ -114,8 +139,7 @@ async def test_a_session_whose_md_goes_quiet_is_failed(broker: Broker) -> None:
     session = _session(broker)
     await session.start()
     try:
-        await _ack(broker, "md-jp-1")
-        await asyncio.sleep(0.05)
+        await _arm(session, broker, "md-jp-1")
 
         reason = await _exit_reason(session)
 
@@ -156,9 +180,8 @@ async def test_one_instance_going_quiet_fails_the_session(
     stop = asyncio.Event()
     await session.start()
     try:
-        await _ack(broker, "md-jp-1")
-        await _ack(broker, "md-jp-2")
-        await asyncio.sleep(0.05)
+        await _arm(session, broker, "md-jp-1")
+        await _arm(session, broker, "md-jp-2")
         pub = asyncio.create_task(_acking(broker, ["md-jp-2"], stop))
 
         reason = await _exit_reason(session)
@@ -182,8 +205,7 @@ async def test_an_md_that_does_not_name_itself_is_still_watched(
     session = _session(broker)
     await session.start()
     try:
-        await _ack(broker, None)
-        await asyncio.sleep(0.05)
+        await _arm(session, broker, None)
 
         reason = await _exit_reason(session)
 

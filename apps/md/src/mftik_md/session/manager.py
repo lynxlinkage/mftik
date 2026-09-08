@@ -63,7 +63,7 @@ def _alive_domain(instance: str) -> str:
 
 #: How many consecutive scans must agree before a link this process holds is
 #: torn down. The key is refreshed by the lease loop and by nothing else, so
-#: its absence usually means that loop is gone — but a Redis outage past the
+#: its absence usually means that loop is gone — but a broker outage past the
 #: 30s TTL looks identical for one scan, and detaching costs a running
 #: strategy its feeds. Rows with no link behind them are closed on the first
 #: scan: nothing is running to be wrong about.
@@ -769,7 +769,7 @@ class SessionManager:
             _watch_timeout(), name=f"md-lease-wd-{link.session_id}"
         )
         try:
-            # Resubscribed rather than returned: a dropped Redis connection is
+            # Resubscribed rather than returned: a dropped broker connection is
             # not an ending, and this loop is the only thing that answers STS
             # for this link. The watchdog stays outside the retry so it keeps
             # judging liveness across the gap — a resubscribe that never comes

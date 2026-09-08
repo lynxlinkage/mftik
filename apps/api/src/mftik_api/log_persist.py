@@ -1,4 +1,4 @@
-"""Long-lived Redis → Postgres session-log persist worker."""
+"""Long-lived broker → Postgres session-log persist worker."""
 
 from __future__ import annotations
 
