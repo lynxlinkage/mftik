@@ -96,11 +96,14 @@ returns `(recorded_ms, fields)`. It used to return the Redis stream id and let
 the strategy SDK pull `<ms>-<seq>` apart, which was the same leak as the others
 wearing different clothes.
 
-**`maxlen` means `maxlen`.** Both transports trim exactly. Redis' approximate
-forms — `XADD MAXLEN ~`, `XTRIM MINID ~` — stop at macro node boundaries, so
-the fuse did not hold until a feed was a hundred records past it and a sweep
-reported nothing dropped. fakeredis trimmed exactly, which is why nothing said
-so until the suite met a real server.
+**`maxlen` means `maxlen`, and a transport that cannot must say so.** Both trim
+exactly. Redis' approximate forms — `XADD MAXLEN ~`, `XTRIM MINID ~` — stop at
+macro node boundaries, so the fuse did not hold until a feed was a hundred
+records past it and a sweep reported nothing dropped. fakeredis trimmed exactly,
+which is why nothing said so until the suite met a real server. `publish_log` has
+the other half of the rule: a ring longer than the NATS fan-out stream's
+per-subject cap raises, because a caller quietly handed half of what it asked for
+reads the same as a topic that has been quiet.
 
 ## How each transport answers
 
@@ -108,12 +111,12 @@ so until the suite met a real server.
 |---|---|---|
 | `publish` / `subscribe` | `PUBLISH` / `SUBSCRIBE` | JetStream, one ephemeral consumer per subscriber, `DeliverPolicy.NEW` and no acknowledgement. The stream is `{prefix}.ps.>` with a per-subject cap. |
 | `psubscribe` | `PSUBSCRIBE`, glob | The same, with a wildcard subject. Patterns were already one `*` per segment; see `Topics.log_pattern`. |
-| `publish_log` / `fetch_log_buffer` | `RPUSH` + `LTRIM` + `EXPIRE` + `PUBLISH` | The same fan-out stream. A caller asking for fewer than the stream's own per-subject cap gets a `purge … keep=maxlen` behind the publish. |
-| `request` / `probe` | List + `BLPOP`, reply list with a TTL | Core request-reply. No responders is an immediate error, so the control plane learns a plane is down in milliseconds instead of five seconds — retried briefly first, because a serve loop registering as its process boots is not the same thing as a plane being down. |
+| `publish_log` / `fetch_log_buffer` | `RPUSH` + `LTRIM` + `EXPIRE` + `PUBLISH`, one pipelined round trip | The same fan-out stream, plus a `purge … keep=maxlen` behind the publish — two round trips, because a purge cannot ride along the way an `LTRIM` can. `maxlen` above the stream's per-subject cap raises: the stream has already discarded by then and a caller handed half the ring it asked for cannot tell that from a quiet hour. `ttl_seconds` is a per-message TTL, so a line expires on its own clock rather than the buffer expiring as a whole and being refreshed by each write. |
+| `request` / `probe` | List + `BLPOP`, reply list with a TTL | Core request-reply. No responders is an immediate error, so the control plane learns a plane is down without spending its whole timeout on it. Re-asked first, for half of what the caller brought and never more than a second: a serve loop registering as its process boots is not a plane being down, and neither is an account subject three hundred milliseconds into a handover — order entry brings two seconds and Redis would have parked through it. `probe` opts out and spends only the boot-race grace, because "down" is the answer a probe is *for*. |
 | `post` | The same list | A work-queue stream, on a *different subject space* (`{prefix}.post.>`). It has to be different: a stream is a subscriber like any other, so one whose filter covered the RPC subjects would answer every core request with a publish acknowledgement, on the requester's own reply subject, and the caller would parse `{"stream": …, "seq": 1}` as its answer. |
 | `serve` | `BLPOP` on one list, competing consumers | Two sources merged: a core queue subscription (the queue group is what makes several processes a pool) and a pull consumer on the work queue, sharing a durable by name. |
 | Reply inbox | A reply list with a TTL, addressed in the envelope | The protocol's own reply subject. `reply_inbox` returns `None` and `serve` produces the address on the way in, so nothing is stamped on the envelope. |
-| `state_*` | One hash per name, JSON per field | A KV bucket, one key per field, `:` mapped to `.`. `state_all` is one consumer over the bucket's subject tree delivering last-per-subject, not a `keys()` and a get each. |
+| `state_*` | One hash per name, JSON per field | A KV bucket, one key per field, `:` mapped to `.`. `state_all` is one consumer over the bucket's subject tree delivering last-per-subject, not a `keys()` and a get each. One field lands whole either way; a multi-field write is one `HSET` on Redis and several keys here, issued together but not a snapshot — see below. |
 | `state_replace` | `MULTI`: delete then write | Write the new fields, then drop what the old set had extra — KV has no cross-key transaction. That order is the one where a reader in the middle sees a stale field rather than an empty state. And the writes are serialised per name in-process, because `MULTI` being one round trip is what used to make "last issued wins" true. |
 | `lease_*` | `SET px`, `SET NX px`, `GET`, `PEXPIRE` | KV with per-message TTL. `lease_take` is `create`; `lease_hold` and `lease_release` compare-and-set against the revision they read. |
 | `counter_next` | `INCR` | Read, add one, `update` at the revision that was read, retried on a loss. KV has no atomic increment, and the server-side counter that would give one is 2.12 while the floor here is 2.11. Cheap because the only caller allocates a slot once per session, not once per order. |
@@ -123,7 +126,7 @@ so until the suite met a real server.
 | `consumer_idle_seconds` | Unused | `inactive_threshold` on every consumer. Subjects are per-session and per-account, so the consumer count follows the fleet; this is what stops a node that has churned a thousand sessions from carrying a thousand consumers. |
 | Connection policy | `build_redis`: pooled, health checks, retry on `ConnectionError` | `max_reconnect_attempts=-1` and an 8 MB pending buffer. Reconnect forever for the same reason Redis retries: the alternative is a plane that gave up on the bus and stays up not doing anything. |
 
-### Two things NATS cannot do that Redis could
+### Three things NATS cannot do that Redis could
 
 **Sub-second leases.** NATS' per-message TTL is whole seconds with a one second
 floor (ADR-43); a `Nats-TTL` below it — `0` included — is rejected and the
@@ -133,6 +136,19 @@ a redeploy waiting slightly longer. Production leases are thirty seconds, so
 nothing real is affected. Tests that watched a claim lapse in 20ms ask
 `broker_harness.MIN_LEASE_TTL` for the shortest the selected transport can
 express and wait that out instead.
+
+**A multi-field write as a snapshot.** `HSET` takes a mapping in one command,
+so a reader either sees all of it or none of it. A field is a KV key of its own
+here, so `state_put_many` is several writes and a reader can catch a two-asset
+ledger update with one asset moved and the other not. Every value it sees is a
+value the writer wrote — the field is the unit both transports write whole — but
+it is not the same instant. The writes go out together rather than one round
+trip at a time, which is as close as key-per-field gets; closing it outright
+would mean one key per *name* holding the whole mapping, which buys the
+guarantee by turning every single-field write on the order path into a
+read-modify-write. `BrokerTransport.state_put_many` states the promise so a
+caller that needs two numbers to move together knows to put them in one field,
+and `state_replace` is explicit that seeing old and new at once is allowed.
 
 **Any name at all.** A KV key is `[-/_=.a-zA-Z0-9]`, and a subject token may
 not contain whitespace, `*` or `>`. The lease and counter names were Redis key

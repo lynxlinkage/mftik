@@ -369,10 +369,12 @@ The gap that leaves has to be covered, and how it is covered differs. Under
 Redis it covers itself: a request sent while nobody owns the subject waits on
 it rather than vanishing, which is what `Topics.td_order`'s docstring hands to
 the transport.
-Under NATS an unserved subject answers *at once* with no responders, so a
-request in the gap fails rather than parking — which is better for a plane that
-is genuinely down and worse for one that is three seconds from being up. What
-covers it there is the caller's own retry: `_attach_with_retry` re-sends within
+Under NATS an unserved subject answers with no responders rather than parking,
+which is better for a plane that is genuinely down and worse for one that is
+three seconds from being up. Two things cover it there. The transport re-asks a
+subject that reported nobody, for half the caller's own timeout and up to a
+second — enough for a handover, deliberately not enough to hide an outage. Past
+that the caller's own retry takes over: `_attach_with_retry` re-sends within
 `_ATTACH_BUDGET_S`, and the budget is written as a budget for exactly this
 reason. MD attach is given `timeout + 5.0` in `deploy_strategy`, so a
 two-second gap is invisible on either. It is still two seconds of
