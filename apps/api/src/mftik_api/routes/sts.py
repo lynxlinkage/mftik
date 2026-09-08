@@ -91,7 +91,7 @@ _ACKABLE = frozenset(
 )
 
 #: Bytes of log requested per RPC. Small enough that STS answers between two
-#: session controls and Redis holds one slice, large enough that a 100 MB log
+#: session controls and the broker holds one slice, large enough that a 100 MB log
 #: is a few hundred round trips rather than tens of thousands.
 _EVENTLOG_CHUNK_BYTES = 262_144
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")

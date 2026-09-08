@@ -483,11 +483,12 @@ class StsSession:
         """Let the strategy clean up, bounded, before its attaches go away.
 
         Waited on rather than cancelled when it overruns. ``on_stop`` typically
-        parks in an order ack, which is a blocking Redis read; cancelling one
-        mid-command hands the connection back with its reply unread and breaks
-        whatever borrows it next. So a slow strategy is left running and the
-        detach goes out anyway — its cancel will be refused, but a stuck
-        strategy must not hold an attach open indefinitely either.
+        parks in an order ack, which is a blocking broker read; on a pooled
+        transport cancelling one mid-command hands the connection back with its
+        reply unread and breaks whatever borrows it next. So a slow strategy is
+        left running and the detach goes out anyway — its cancel will be
+        refused, but a stuck strategy must not hold an attach open indefinitely
+        either.
         """
         self.event_log.record("lifecycle", "on_stop", dir="self")
         self._on_stop_task = asyncio.create_task(

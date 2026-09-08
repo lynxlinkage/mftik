@@ -111,7 +111,7 @@ _REAP_SCAN_LIMIT = 500
 
 #: How many consecutive scans must agree that an STS session is gone before
 #: TD detaches a link it still holds. One scan cannot tell a stopped strategy
-#: from a Redis outage that outlasted the 30s liveness TTL, and the lease
+#: from a broker outage that outlasted the 30s liveness TTL, and the lease
 #: already handles the fast case in seconds — so there is nothing to gain by
 #: being quick here, and a trading strategy to lose. Rows with no link behind
 #: them are closed on the first scan: nothing is running to be wrong about.
@@ -626,7 +626,7 @@ class SessionManager:
             # the schedule. Only the ask is awaited, never the walk — this is
             # latency, and the schedule is what guarantees it happens at all —
             # and the ask is itself bounded by ``POST_TIMEOUT_S``, so an
-            # unreachable Redis delays a detach by seconds rather than failing
+            # unreachable broker delays a detach by seconds rather than failing
             # it.
             await request_backfill(
                 self._broker,
@@ -688,9 +688,10 @@ class SessionManager:
         if acct.global_task is not None and acct.global_task is not current:
             acct.global_task.cancel()
             await asyncio.gather(acct.global_task, return_exceptions=True)
-        # The order / account loops park in a blocking BLPOP. Cancelling them
-        # there leaves the unread reply on the pooled connection and corrupts
-        # whatever runs next on it, so let them retire on their own: ``serve``
+        # The order / account loops park in a blocking broker read. Cancelling
+        # them there can leave an unread reply on a pooled connection and
+        # corrupt whatever runs next on it, so let them retire on their own:
+        # ``serve``
         # rechecks the stop event between polls, which bounds this to one
         # ``BrokerConfig.serve_poll_seconds`` — a second in production.
         if acct.order_task is not None and acct.order_task is not current:
@@ -748,7 +749,7 @@ class SessionManager:
                     task.add_done_callback(self._yields.discard)
                     return
             except Exception:
-                # Unreadable Redis is not evidence of a rival. The TTL is many
+                # An unreadable broker is not evidence of a rival. The TTL is many
                 # refreshes wide, so a blip costs nothing and giving the
                 # account up over one would be the expensive mistake.
                 logger.warning(
@@ -888,7 +889,7 @@ class SessionManager:
             _watch_timeout(), name=f"td-lease-wd-{link.api_id}-{link.session_id}"
         )
         try:
-            # Resubscribed rather than returned: a dropped Redis connection is
+            # Resubscribed rather than returned: a dropped broker connection is
             # not an ending, and this loop is the only thing that answers STS
             # for this link. The watchdog stays outside the retry so it keeps
             # judging liveness across the gap — a resubscribe that never comes
@@ -1458,7 +1459,7 @@ class SessionManager:
                     RejectCode.TD_INSUFFICIENT_BALANCE,
                 )
                 return
-            # Book it PENDING_NEW and get it into Redis before the ack. A
+            # Book it PENDING_NEW and get it into the broker before the ack. A
             # strategy told True can then read the order it just placed; if
             # this write fails the ack is False and no order event follows,
             # so False stays a complete answer.

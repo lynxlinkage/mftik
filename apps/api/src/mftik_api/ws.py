@@ -27,9 +27,9 @@ async def _log_bridge(
     stream_id: str,
     source: str,
 ) -> None:
-    """Bridge a Redis log channel to a WebSocket client.
+    """Bridge a broker log topic to a WebSocket client.
 
-    Replays the Redis log buffer first (so deploy-time lines are not lost),
+    Replays the broker's log buffer first (so deploy-time lines are not lost),
     then forwards live pub/sub. Envelope ids are deduped across the seam.
     """
     await websocket.accept()

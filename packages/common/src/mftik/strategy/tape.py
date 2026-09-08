@@ -4,7 +4,7 @@ MD records the trade feeds it pumps (see ``mftik_md.tape``). This reads one back
 so a strategy that has to see a few hundred prints before it can act does not
 have to spend the first hour of its life watching them arrive.
 
-A direct Redis read rather than a query to MD, for the reason
+A direct broker read rather than a query to MD, for the reason
 :class:`~mftik.strategy.ledger.StrategyLedger` reads ``td.ledger.{api_id}`` directly:
 the data is already sitting in a key that MD owns and keeps current, and asking
 its owner to hand over a copy would add a round trip and a second answer that
@@ -75,7 +75,7 @@ class TapeGap:
     recording instead, and the tape before it never reaches the reader.
     """
 
-    #: When recording stopped, in Redis' clock — the same clock stream ids and
+    #: When recording stopped, in the broker's clock — the same clock record ids
     #: :attr:`TapeSlice.continuous_since_ms` are stamped against, not the
     #: venue's event time that rides on each record.
     start_ms: int

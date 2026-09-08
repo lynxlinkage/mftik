@@ -125,7 +125,7 @@ def _instrument(symbol: str, base: str, quote: str) -> PaperListed:
     )
 
 
-# Optional hooks for the paper-engine Redis bridge (sync; may schedule work).
+# Optional hooks for the paper-engine broker bridge (sync; may schedule work).
 OrderSink = Callable[[str, Order], Any]
 FillSink = Callable[[str, Fill], Any]
 BalanceSink = Callable[[str, Balance], Any]

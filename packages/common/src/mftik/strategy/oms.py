@@ -30,13 +30,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: An ack is answered before TD touches the venue, so it should come back in
-#: about one Redis round-trip. Generous enough to ride out a GC pause without
+#: about one broker round-trip. Generous enough to ride out a GC pause without
 #: leaving a strategy blocked for long.
 ORDER_ACK_TIMEOUT_S = 2.0
 
 
 class StrategyOms:
-    """Order entry, and reads of TD's book out of Redis.
+    """Order entry, and reads of TD's book out of the broker.
 
     There is no local copy of the book here. TD writes ``td.oms.{api_id}``
     (client_order_id → Order) and every read below goes to it, so what a

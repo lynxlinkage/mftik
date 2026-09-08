@@ -8,9 +8,9 @@ that arrives as a callable.
 The subject is :meth:`Topics.health`, not the plane's work subject, and the
 loop below is why that matters: a probe old enough that its caller has stopped
 waiting is dropped rather than answered. Replying to one is not merely useless,
-it is an RPUSH to a reply key that was deleted when the caller gave up — so an
-instance coming back from an outage would manufacture exactly the litter the
-capped queue exists to prevent.
+it is a reply to an address nobody is reading any more — so an instance coming
+back from an outage would manufacture exactly the litter the broker's own
+bounds exist to prevent.
 """
 
 from __future__ import annotations

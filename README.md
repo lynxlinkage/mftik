@@ -40,7 +40,7 @@ One machine (or one compose project) that owns:
 | **Paper** | A simulated venue in the same stack. Same ticker shape, same OMS path, no real money. |
 | **API + UI** | The control plane. Browser for the operator, `mftik` CLI for the laptop that writes code. |
 
-Domains do not import each other. They talk through one broker, over Redis today — see [docs/Broker.md](docs/Broker.md) for what a plane may say and what a transport has to answer. A market-data restart is not supposed to take order entry with it; a strategy crash is not supposed to drop the venue connection. That split is the product, not an implementation detail.
+Domains do not import each other. They talk through one broker, over NATS by default and over Redis if you point it there — see [docs/Broker.md](docs/Broker.md) for what a plane may say and how each store answers it. A market-data restart is not supposed to take order entry with it; a strategy crash is not supposed to drop the venue connection. That split is the product, not an implementation detail.
 
 The node is **single-tenant**. One Owner. That person may prove who they are with a password, Discord, or Google, and mint machine keys for scripts and for other nodes. Nobody else gets a user row.
 
@@ -124,7 +124,7 @@ docker compose pull
 docker compose up -d
 ```
 
-`node-init` writes compose, a Caddyfile, and a `.env` (mode `0600`, with a generated database password). Postgres, Redis, and the edge are part of the stack — you do not have to bring them. The images come from GHCR. Pin `MFTIK_VERSION` in `.env` once the node matters; `:latest` moves under you.
+`node-init` writes compose, a Caddyfile, and a `.env` (mode `0600`, with a generated database password). Postgres, NATS, and the edge are part of the stack — you do not have to bring them. The images come from GHCR. Pin `MFTIK_VERSION` in `.env` once the node matters; `:latest` moves under you.
 
 `up` waits for `migrate` (`alembic upgrade head`, idempotent) and `seed` (Owner row + two paper accounts, also idempotent) before the planes start. A later `pull` + `up` applies new revisions the same way.
 
@@ -195,7 +195,7 @@ A framework gives you `on_bar` and a backtest report. A desk has to answer what 
 
 **Leases fence the dangerous verbs.** Only the process that holds the attach may place an order. Heartbeats expire; a ghost session does not keep trading.
 
-**The tape survives a restart.** Redis is long-lived. A recorder that shut down cleanly leaves a *measured* hole; a reader is told about it instead of treating two hours of intact prints as gone. Closing the remaining seconds-wide deploy gap is a handover, not an emergency.
+**The tape survives a restart.** The broker's store is long-lived. A recorder that shut down cleanly leaves a *measured* hole; a reader is told about it instead of treating two hours of intact prints as gone. Closing the remaining seconds-wide deploy gap is a handover, not an emergency.
 
 **Rebuild on boot.** `STS_REBUILD_ON_BOOT` brings interrupted sessions back after the stack returns. Facts the strategy `remember`ed come back through `on_rebuild` before `on_start`; resting orders come from recon, not from anything stored. A strategy that leaves orders at the venue must know it was away (`rebuildable`); the process default is off because a restored instance that treats recon as a clean account will place alongside what it left.
 

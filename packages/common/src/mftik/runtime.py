@@ -82,7 +82,7 @@ async def run_heartbeat_service(source: str) -> None:
             pass
 
     async with Broker() as broker:
-        logger.info("%s started; heartbeat → Redis", source)
+        logger.info("%s started; heartbeat → broker", source)
         await broker.heartbeat_loop(
             source,
             interval=5.0,

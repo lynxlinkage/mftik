@@ -41,7 +41,7 @@ class PaperSessionFactory:
 
     * ``exchange`` set — in-process :class:`PaperExchange` (unit tests).
     * ``exchange`` omitted — :class:`PaperRemotePrivateClient` against the
-      paper-engine Redis service (docker / production TD).
+      paper-engine service over the broker (docker / production TD).
     """
 
     venue = venues.PAPER.name

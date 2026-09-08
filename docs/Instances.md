@@ -35,8 +35,8 @@ one owner.
 `Topics.SYM` and `Topics.PAPER` are five flat constants, and every process of a
 plane serves its own on one subject — `apps/td/src/mftik_td/app.py:45`,
 `apps/md/src/mftik_md/app.py:47`, `apps/sts/src/mftik_sts/app.py:43`. That
-subject is a Redis list read with `BLPOP`. Start a second MD and which one
-takes an attach is a lottery.
+subject is anycast — whichever process of the pool is free takes each
+request. Start a second MD and which one takes an attach is a lottery.
 
 **This is already written down.** `docs/MdHandover.md` states it outright under
 *The hard parts, 2*: a green MD that starts `run_rpc` immediately begins
@@ -72,7 +72,7 @@ copy both.
 
 **Postgres is off the hot path.** `apps/td/src/mftik_td/oms/oms.py` and
 `oms/ledger.py` contain no `session_scope` call — OMS state and the balance
-ledger live in Redis and in memory. `history.py` is a batching background
+ledger live in the broker's shared state and in memory. `history.py` is a batching background
 writer. The database carries control-plane rows and trade history only.
 
 ## The two drivers are not the same requirement
@@ -85,29 +85,29 @@ regardless of where the broker is. Instance routing is necessary and
 sufficient. This document delivers it.
 
 **Colocation** is about the loop `MD → STS → TD → venue`, and every leg of
-that loop crosses Redis: order entry is a `BLPOP` request-reply on
-`td.order.{api_id}`, and every tick is a pub/sub message on
-`md.{session_id}`. `BrokerConfig.from_env` reads one `REDIS_URL`
-(`packages/common/src/mftik/broker/config.py:49`) and there is no per-instance
+that loop crosses the broker: order entry is a request-reply on
+`td.order.{api_id}`, and every tick is a fan-out message on `md.{session_id}`.
+`BrokerConfig.from_env` reads one broker URL and there is no per-instance
 override. So a single broker means **exactly one region can be colocated
 properly**; instances elsewhere pay a WAN round trip inside the loop, and
 moving MD next to the venue buys nothing — it relocates the long leg from
-"MD to venue" to "MD to Redis" rather than removing it.
+"MD to venue" to "MD to the broker" rather than removing it.
 
 Instance routing is therefore necessary for colocation and not sufficient for
 it. A per-region broker is a much deeper change — `Broker()` is constructed
 once per process and `StsSession` holds a single `self.broker` for TD RPC, MD
-pub/sub, lease, eventlog and logs; the tape lives in Redis streams, so a split
-broker splits warm-up history; and the `instances` table would stay global on
-the shared Postgres while a health probe could not leave its own Redis, so Home
+fan-out, lease, eventlog and logs; the tape lives in the broker's own streams,
+so a split broker splits warm-up history; and the `instances` table would stay
+global on the shared Postgres while a health probe could not leave its own
+broker, so Home
 could name every instance and vouch for none outside its own region. That
 change is the federated-nodes design, and `docker-compose.peer.yml` is already
 most of it. **Out of scope here, and it should stay a separate document.**
 
 ## Non-goals
 
-- **Not a per-region broker.** One `REDIS_URL`, one `DATABASE_URL`, unchanged.
-  Every subject named below is a new name inside the existing keyspace.
+- **Not a per-region broker.** One broker, one `DATABASE_URL`, unchanged.
+  Every subject named below is a new name in the broker this node already has.
 - **Not two owners for one credential.** An `api_id` keeps exactly one TD
   owner. The lease, the OMS and the `client_order_id` slot all rest on that,
   and serving one key from two TDs is two processes deciding to trade.
@@ -357,18 +357,25 @@ transition to it. Blue runs the same transition backwards — to `standby`,
 which stops it taking new attaches while its existing links keep running,
 because `standby` gates `run_rpc` and never the dispatcher.
 
-**Cutover ordering costs a poll.** `Broker.serve` checks its stop event only
-at the top of the loop, so a serve loop that has been told to stop sits in
-`BLPOP` for up to `serve_poll_seconds` — one second in production — and *will
-still take a request off the list* in that window. Blue and green must
-therefore never serve one subject at the same time: blue leaves, the poll is
-waited out, green enters. Two subjects, so two waits.
+**Cutover ordering costs a poll on Redis and nothing on NATS.** Under Redis a
+serve loop checks its stop event only at the top of the loop, so one that has
+been told to stop sits in `BLPOP` for up to `serve_poll_seconds` — one second
+in production — and *will still take a request off the list* in that window.
+Under NATS a subscription is cancellable and the loop stops when it is told.
+Either way blue and green must never serve one subject at the same time: blue
+leaves, the poll is waited out if there is one, green enters.
 
-The gap that leaves is safe, and this is why the ordering is affordable at all.
-These subjects are Redis lists, not pub/sub: `Topics.td_order`'s docstring
-makes the point that a request sent while nobody owns the subject waits in the
-list rather than vanishing the way a pub/sub message would. MD attach is given `timeout + 5.0` in
-`deploy_strategy`, so a two-second gap is invisible. It is still two seconds of
+The gap that leaves has to be covered, and how it is covered differs. Under
+Redis it covers itself: a request sent while nobody owns the subject waits on
+it rather than vanishing, which is what `Topics.td_order`'s docstring hands to
+the transport.
+Under NATS an unserved subject answers *at once* with no responders, so a
+request in the gap fails rather than parking — which is better for a plane that
+is genuinely down and worse for one that is three seconds from being up. What
+covers it there is the caller's own retry: `_attach_with_retry` re-sends within
+`_ATTACH_BUDGET_S`, and the budget is written as a budget for exactly this
+reason. MD attach is given `timeout + 5.0` in `deploy_strategy`, so a
+two-second gap is invisible on either. It is still two seconds of
 `docs/MdHandover.md`'s cutover budget, which is already bounded by STS's
 tolerance for a missing `MdLeaseAck` — one number, two claims on it.
 
@@ -445,8 +452,8 @@ paper engines are not a scaled paper plane, they are two unrelated markets.
 one reason that matters: it carries no credential. Klines, book snapshots and
 quotes are public, so jurisdiction does not apply, and only latency argues for
 pinning a read to an instance. *The two drivers are not the same requirement*
-has already shown that with a single `REDIS_URL` a pinned read wins nothing —
-the caller's request has already crossed to Redis before any MD picks it up.
+has already shown that with a single broker a pinned read wins nothing — the
+caller's request has already crossed to the broker before any MD picks it up.
 Pinning it now would be building for the per-region broker this document puts
 out of scope. Deferred, and this paragraph is the record of why.
 
@@ -576,27 +583,25 @@ caught.
 
 ### 6. Probing a dead instance leaks, and the obvious fix is wrong
 
-`Broker.request` deletes the *reply* key in its `finally`
-(`packages/common/src/mftik/broker/client.py:757`, under `reply_ttl_seconds`).
-It does not remove the request. That request was `RPUSH`ed onto
-`{key_prefix}:rpc:{subject}`, which has no TTL, and if nothing is serving the
-subject nothing ever pops it.
+`Broker.request` cleans up its own reply inbox and nothing else. Under Redis
+the request itself was pushed onto `{key_prefix}:rpc:{subject}`, which has no
+expiry, and if nothing is serving the subject nothing ever pops it.
 
 So a dashboard that probes a down instance every few seconds writes a record
 per probe into a list nobody will drain. At a 5s refresh that is roughly 17k
-entries a day per down instance, and production Redis is capped at 512mb with
-`maxmemory-policy noeviction` — the same Redis that carries order RPC, the
-ledger and liveness. Filling it does not degrade the dashboard, it stops the
-writes that trade. And when the instance finally boots, the first thing it
-does is drain a heap of expired health checks.
+entries a day per down instance, in the same store that carries order RPC, the
+ledger and liveness — and that store is capped, with eviction off, because
+dropping a key under pressure would silently drop a trade rather than degrade a
+cache. Filling it does not degrade the dashboard, it stops the writes that
+trade. And when the instance finally boots, the first thing it does is drain a
+heap of expired health checks.
 
-**A blanket TTL on rpc queues is the wrong fix**, and the tree says so in two
-places. `Topics.td_order`'s docstring: a request sent while nobody owns the
-subject "waits in the list rather than vanishing the way a pub/sub message
-would". `Broker.post`'s: "A request left in the list because nothing is serving
-the subject yet is not lost: the next consumer to come up takes it, which is
-the recovery a pub/sub message could not offer." An attach should wait. A
-backfill should wait.
+**A blanket TTL on rpc queues is the wrong fix**, and the tree says so where
+it says what waiting is worth. `Broker.post`'s docstring: "A request left
+because nothing is serving the subject yet is not lost: the next consumer to
+come up takes it, which is the recovery a fan-out message could not offer, and
+the one place both transports pay for a durable queue to keep that promise." An
+attach should wait. A backfill should wait.
 
 A health check is the one RPC where waiting has no value — an answer that
 arrives after the question stopped being asked tells nobody anything. So it
@@ -605,9 +610,14 @@ compromise. `Envelope` already carries `ts`, so the serving side can also drop
 a probe older than its own timeout, which costs one comparison and closes the
 case where a queue outlives its expiry.
 
-This is the only genuinely new machinery a probe-based design needs, and it has
+This is the only genuinely new machinery a probe-based design needs, and it had
 to land with the first probe rather than after it — the leak is invisible until
-the Redis it shares with order entry is full.
+the store it shares with order entry is full.
+
+Under NATS there is nothing to cap: `probe` is core request-reply, which stores
+nothing anywhere, so an unanswered probe has left no trace by the time the
+caller gives up. The staleness check stays as the second line of defence on both
+— see *How each transport answers* in `docs/Broker.md`.
 
 ### 7. Nothing enforces one TD per `api_id`
 
@@ -618,7 +628,7 @@ cross-process guard on `api_id` at all.**
 
 Two processes configured with the same `MFTIK_INSTANCE` — a copy-pasted compose
 block, a `--scale` — each build a `TradingAccount` and each run
-`_serve_orders` on `td.order.{api_id}`. That subject is `BLPOP`, so they become
+`_serve_orders` on `td.order.{api_id}`. That subject is anycast, so they become
 competing consumers and the account's order flow is split between two processes
 that each believe they own it. Each keeps its own OMS, its own ledger and its
 own reservations, and both publish to `td.oms.{api_id}` and
@@ -792,8 +802,8 @@ own. Nothing can be tested before that.
 - `frontend/src/routes/+page.svelte` — grouped by plane, N cards.
 
 **Problem.** Without this nobody can see what the later tickets are doing, and
-probing without the expiring subject fills a `noeviction` Redis that also
-carries order entry.
+probing without the expiring subject fills the store that also carries order
+entry.
 
 **Solution.** Probe on demand; no registry, no TTL'd presence key.
 

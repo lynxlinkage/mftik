@@ -37,7 +37,7 @@ RPC_RESTART_DELAY_SECONDS = 1.0
 #: How often the book is republished with nothing having moved it. Two seconds
 #: is short enough that a strategy attaching to a quiet venue sees a book
 #: before it wonders whether the feed works, and long enough that an idle
-#: stack is not writing to Redis for no reason.
+#: stack is not writing to the broker for no reason.
 BOOK_INTERVAL_ENV = "PAPER_BOOK_INTERVAL_S"
 DEFAULT_BOOK_INTERVAL_S = 2.0
 
@@ -57,7 +57,7 @@ def _book_interval() -> float:
     return value
 
 
-class RedisEventBridge:
+class BrokerEventBridge:
     """Fan engine private events out on ``paper.{api_key}.*`` topics."""
 
     def __init__(self, broker: Broker) -> None:
@@ -232,7 +232,7 @@ async def amain() -> bool:
             pass
 
     async with Broker() as broker:
-        bridge = RedisEventBridge(broker)
+        bridge = BrokerEventBridge(broker)
         exchange = PaperExchange(
             tick_interval=1.0,
             volatility_bps=0,

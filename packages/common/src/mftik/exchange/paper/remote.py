@@ -1,4 +1,4 @@
-"""Redis-backed paper private client — talks to the paper-engine service."""
+"""Broker-backed paper private client — talks to the paper-engine service."""
 
 from __future__ import annotations
 

@@ -19,7 +19,7 @@ import os
 import re
 from enum import StrEnum
 
-#: An instance name is one Redis subject segment — ``health.{domain}.{name}``
+#: An instance name is one subject segment — ``health.{domain}.{name}``
 #: — and the value of ``MFTIK_INSTANCE``. Dots split the subject, spaces and
 #: uppercase make a row no compose file will ever match, and there is no
 #: rename. ``*`` is already the unpinned-md sentinel.
@@ -39,7 +39,7 @@ def validate_instance_name(name: str) -> str:
     if _INSTANCE_NAME.fullmatch(name) is None:
         raise ValueError(
             f"instance name {name!r} must be lowercase letters, digits "
-            f"and hyphens, starting with a letter — it is a Redis subject "
+            f"and hyphens, starting with a letter — it is a subject "
             f"segment and there is no rename"
         )
     return name
