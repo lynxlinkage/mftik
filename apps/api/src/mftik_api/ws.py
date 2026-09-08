@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 #: session, which is what :func:`board_bridge` exists to bridge.
 TD_GLOBAL_PATTERN = Topics.td_global_pattern()
 
+#: Replay window for ``status.sts``. Matches STS / API publish ``maxlen``.
+_STATUS_BUFFER = 200
+
 
 async def _log_bridge(
     websocket: WebSocket,
@@ -199,7 +202,9 @@ async def sts_status_bridge(websocket: WebSocket) -> None:
         sub_task = asyncio.create_task(pump_pubsub())
         await asyncio.sleep(0.05)
 
-        for raw in await broker.fetch_log_buffer(channel):
+        for raw in await broker.fetch_log_buffer(
+            channel, maxlen=_STATUS_BUFFER
+        ):
             if not await send_raw(raw):
                 break
 

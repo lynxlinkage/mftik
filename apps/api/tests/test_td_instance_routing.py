@@ -165,7 +165,9 @@ async def _serve_instance(
             seen.append(TdBackfill.model_validate(req.envelope.payload))
             await req.reply(
                 Envelope[dict].wrap(
-                    {"ok": True}, type="td.backfill.result", source="td"
+                    {"ok": True, "api_id": seen[-1].api_id},
+                    type="td.backfill.result",
+                    source="td",
                 )
             )
 

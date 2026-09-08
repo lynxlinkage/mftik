@@ -15,7 +15,13 @@ import logging
 from collections.abc import Sequence
 
 from mftik.broker import Broker, RequestTimeoutError
-from mftik.protocol import TD_BACKFILL, Envelope, TdBackfill, Topics
+from mftik.protocol import (
+    TD_BACKFILL,
+    Envelope,
+    TdBackfill,
+    TdBackfillResult,
+    Topics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +51,8 @@ async def request_backfill(
         source="td",
     )
     try:
-        await asyncio.wait_for(
-            broker.request(
-                Topics.td_backfill(instance), envelope, timeout=timeout
-            ),
+        reply = await asyncio.wait_for(
+            broker.request(Topics.td_backfill(instance), envelope, timeout=timeout),
             timeout=timeout,
         )
     except RequestTimeoutError:
@@ -64,6 +68,24 @@ async def request_backfill(
             api_id,
             reason,
             exc_info=True,
+        )
+        return False
+    try:
+        result = TdBackfillResult.model_validate(reply.payload)
+    except Exception:
+        logger.warning(
+            "TD backfill reply unreadable api_id=%s reason=%s",
+            api_id,
+            reason,
+            exc_info=True,
+        )
+        return False
+    if not result.ok:
+        logger.warning(
+            "TD backfill refused api_id=%s reason=%s detail=%s",
+            api_id,
+            reason,
+            result.reason,
         )
         return False
     logger.debug("TD backfill requested api_id=%s reason=%s", api_id, reason)

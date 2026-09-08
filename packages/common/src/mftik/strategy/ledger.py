@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 from mftik.broker.errors import RequestTimeoutError
 from mftik.exchange.models import Balance
-from mftik.exchange.oms import LedgerView
+from mftik.exchange.oms import LedgerEntry, LedgerView
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     STS_ENSURE_LEVERAGE,
@@ -109,15 +109,36 @@ class StrategyLedger:
 
     async def available(self, asset: str, api_id: int | None = None) -> Decimal:
         """Spendable ``asset`` — venue-free minus TD's pre-locks."""
-        return (await self.view(api_id)).available(asset)
+        return (await self._fresh_view(asset, api_id)).available(asset)
 
     async def free(self, asset: str, api_id: int | None = None) -> Decimal:
         """What the venue calls free, ignoring pre-locks."""
-        return (await self.view(api_id)).free(asset)
+        return (await self._fresh_view(asset, api_id)).free(asset)
 
     async def prelock(self, asset: str, api_id: int | None = None) -> Decimal:
         """Committed by orders TD has sent but the venue has not confirmed."""
-        return (await self.view(api_id)).prelock(asset)
+        return (await self._fresh_view(asset, api_id)).prelock(asset)
+
+    async def _fresh_view(self, asset: str, api_id: int | None) -> LedgerView:
+        """``view()`` for the log, with ``asset`` overlaid from a direct read.
+
+        The projection can lag the reserve that just ran; a sizing decision
+        must see that write, not the last watch delivery.
+        """
+        view = await self.view(api_id)
+        resolved = self._resolve(api_id)
+        if resolved is None or self._strategy is None:
+            return view
+        session = self._strategy.session
+        if session is None:
+            return view
+        row = await session.broker.state_get(Topics.td_ledger(resolved), asset)
+        balances = dict(view.balances)
+        if row is None:
+            balances.pop(asset, None)
+        else:
+            balances[asset] = LedgerEntry.model_validate(row).to_balance(asset)
+        return LedgerView(api_id=view.api_id, balances=balances)
 
     async def balances(self, api_id: int | None = None) -> dict[str, Balance]:
         return dict((await self.view(api_id)).balances)

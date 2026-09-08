@@ -22,7 +22,13 @@ import logging
 import os
 
 from mftik.broker import Broker, RequestTimeoutError
-from mftik.protocol import TD_BACKFILL, Envelope, TdBackfill, Topics
+from mftik.protocol import (
+    TD_BACKFILL,
+    Envelope,
+    TdBackfill,
+    TdBackfillResult,
+    Topics,
+)
 from mftik_db.repositories import ApiRepository, OrderRepository
 from mftik_db.session import session_scope
 
@@ -83,7 +89,7 @@ async def sweep(broker: Broker, *, reason: str = "cron") -> int:
             source="api",
         )
         try:
-            await broker.request(
+            reply = await broker.request(
                 Topics.td_backfill(instance), envelope, timeout=5.0
             )
         except RequestTimeoutError:
@@ -92,6 +98,24 @@ async def sweep(broker: Broker, *, reason: str = "cron") -> int:
                 api_id,
                 instance,
             )
+        else:
+            try:
+                result = TdBackfillResult.model_validate(reply.payload)
+            except Exception:
+                logger.warning(
+                    "backfill cron unreadable reply api_id=%s instance=%s",
+                    api_id,
+                    instance,
+                    exc_info=True,
+                )
+            else:
+                if not result.ok:
+                    logger.warning(
+                        "backfill cron refused api_id=%s instance=%s reason=%s",
+                        api_id,
+                        instance,
+                        result.reason,
+                    )
         if ACCOUNT_PAUSE_S:
             await asyncio.sleep(ACCOUNT_PAUSE_S)
     return len(api_ids)

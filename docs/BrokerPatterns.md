@@ -71,9 +71,11 @@ them to make native. They already were.
 to share `{prefix}.ps.>` and a purge after every log line. They now share
 the *pattern* and not the stream: `publish` stays on `.ps.>`; `publish_log`
 writes `{prefix}.log.>` with `max_msgs_per_subject = LOG_MAX_MSGS_PER_SUBJECT`.
-`subscribe` / `psubscribe` listen on both, so a live log subscriber does not
-need a second call. The difference is still a retention argument, not a
-second pattern.
+`subscribe` / `psubscribe` listen on the log stream only for `log.` /
+`status.` topics, so a live log subscriber does not need a second call
+and a lease or a feed does not pay a second consumer. The difference is
+still a retention argument, not a second pattern. `fetch_log_buffer`
+trims the replay to `BROKER_LOG_BUFFER_MAXLEN` (or the passed `maxlen`).
 
 **Liveness was never a pattern (folded into F).** `packages/common/liveness.py`
 makes eight broker calls and **all eight are `lease_*`**: `mark_alive` is
@@ -190,22 +192,26 @@ Three questions, now answered:
    `write_order` / `write_ledger`. A key per *name* would turn those into a
    read-modify-write on the order path, which is the cost the projection was
    meant to remove from the *reader*, not add to the writer.
-2. **A broken watch is reopened.** KV watch re-delivers the current values
-   first, which is how a projection resynchronises after a reconnect. Gaps
-   are not reconstructed from history; they are overwritten by that snapshot.
+2. **A broken watch is reopened.** The watch itself is one-shot. The
+   projection reseeds from `state_all` and opens another; a hard failure
+   clears `live` so readers fall back to a pull rather than a frozen map.
+   Gaps are not reconstructed from history; they are overwritten by that
+   snapshot.
 3. **A name has one writer.** `_state_lock`'s docstring already asserted
    this. The transport caches the last-written field set, so `state_replace`
    no longer reads before it writes.
 
-`state_drop` / `state_clear` are KV deletes, not stream purges. A watcher has
-to see the field go; a purge hid that. `state_all` still skips the delete
-markers those writes leave.
+`state_drop` / `state_clear` delete each live field so a watcher sees it
+go, then purge the delete marker so `_kv_scan` does not transfer one extra
+subject per historical order. A key that is already gone is not deleted
+again.
 
 STS starts a `StateProjection` per attached `td.oms.{id}` and
 `td.ledger.{id}` on session start, and closes them on stop.
-`strategy/oms.py` and `strategy/ledger.py` read the local map when the
-session has one, and fall back to `state_all` when it does not — which is
-why the unit tests that never attach a session still pass.
+`view` / `orders` / `balances` read the local map when it is live, and
+fall back to `state_all` when it is not. A single-field read after a
+write (`oms.order`, ledger `available` / `free` / `prelock`) always
+`state_get`s that field so it does not race the watch.
 
 Bucket status is cached (`_kv_status`). That is the raft read `state_all`
 used to pay on every call.

@@ -54,7 +54,7 @@ class SessionView(Protocol):
         ...
 
     def projected_state(self, name: str) -> dict[str, dict] | None:
-        """Local watch of ``name``, or ``None`` if this session is not watching."""
+        """Local watch of ``name``, or ``None`` if it is missing or not live."""
         ...
 
     def request_exit(

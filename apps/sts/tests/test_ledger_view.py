@@ -125,3 +125,22 @@ async def test_the_stored_shape_is_free_prelock_lock(broker: Broker) -> None:
     row = await broker.state_get(Topics.td_ledger(7), "USDT")
 
     assert sorted(row) == ["free", "lock", "prelock"]
+
+
+async def test_available_sees_a_write_the_projection_has_not_caught(
+    broker: Broker,
+) -> None:
+    """The watch can lag the reserve; ``available`` must not."""
+    ledger = StrategyLedger()
+    session = SimpleNamespace(
+        broker=broker,
+        td_api_ids=[7],
+        td_sole=lambda: 7,
+        projected_state=lambda _name: {
+            "USDT": {"free": "1", "prelock": "0", "lock": "0"}
+        },
+    )
+    ledger.bind(SimpleNamespace(session=session))
+    await _write(broker, 7, "USDT", "1000")
+
+    assert await ledger.available("USDT") == Decimal("1000")

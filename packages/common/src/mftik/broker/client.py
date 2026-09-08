@@ -491,21 +491,33 @@ class Broker:
         maxlen: int | None = None,
         ttl_seconds: int = 86_400,
     ) -> None:
-        """Publish a log line and keep the last few for late subscribers.
+        """Publish a log line onto the log stream.
 
         Fan-out alone drops messages when nobody is listening (e.g. the UI
-        opens ``/ws/sts/...`` after a deploy). The buffer is replayed on
-        connect by :meth:`fetch_log_buffer`. ``maxlen`` defaults to
-        :attr:`BrokerConfig.log_buffer_maxlen` (100).
+        opens ``/ws/sts/...`` after a deploy). The stream holds its own
+        per-subject ring; :meth:`fetch_log_buffer` trims the replay to
+        ``maxlen`` (default :attr:`BrokerConfig.log_buffer_maxlen`). A
+        ``maxlen`` above the stream's cap raises rather than keeping fewer.
         """
         keep = self.config.log_buffer_maxlen if maxlen is None else max(1, maxlen)
         await self._transport.publish_log(
             topic, envelope.to_json(), maxlen=keep, ttl_seconds=ttl_seconds
         )
 
-    async def fetch_log_buffer(self, topic: str) -> list[str]:
-        """Return buffered log JSON lines for ``topic`` (oldest → newest)."""
-        return await self._transport.fetch_log_buffer(topic)
+    async def fetch_log_buffer(
+        self, topic: str, *, maxlen: int | None = None
+    ) -> list[str]:
+        """Return buffered log JSON lines for ``topic`` (oldest → newest).
+
+        The stream may hold more than a late subscriber asked to replay.
+        Trim here to ``maxlen`` (default
+        :attr:`BrokerConfig.log_buffer_maxlen`) so
+        ``BROKER_LOG_BUFFER_MAXLEN`` is the window even though the stream's
+        own ring is larger.
+        """
+        keep = self.config.log_buffer_maxlen if maxlen is None else max(1, maxlen)
+        rows = await self._transport.fetch_log_buffer(topic)
+        return rows[-keep:] if len(rows) > keep else rows
 
     async def subscribe(
         self,

@@ -62,7 +62,7 @@ back in through a side door.
 
 | Family | Methods | What it is for |
 |---|---|---|
-| Fan-out | `publish`, `subscribe`, `psubscribe` | Market data, heartbeats, per-session events. Best effort: a message published while nobody is subscribed is gone. `subscribe` / `psubscribe` also see the log stream, so a live log subscriber does not need a second call. |
+| Fan-out | `publish`, `subscribe`, `psubscribe` | Market data, heartbeats, per-session events. Best effort: a message published while nobody is subscribed is gone. `subscribe` / `psubscribe` on a `log.` / `status.` topic also see the log stream, so a live log subscriber does not need a second call. |
 | Fan-out with a tail | `publish_log`, `fetch_log_buffer` | Logs, where a UI socket that opens after the deploy still wants the last hundred lines. Own stream (`{prefix}.log.>`), own per-subject ring. |
 | Request-reply | `request`, `probe`, `serve`, `serve_handler` | The control plane. Attach, deploy, stop, health, backfill, market-data queries. Nobody serving is an immediate error. |
 | Session link | `leased_link` / `LeasedSessionLink` | The fenced STS↔MD / STS↔TD heartbeat: token echo, grace watchdog, expiry on a sibling task. |
@@ -97,23 +97,23 @@ hold until a feed was a hundred records past it and a sweep reported nothing
 dropped. `publish_log` has the other half of the rule: a ring longer than the
 log stream's per-subject cap (`LOG_MAX_MSGS_PER_SUBJECT`, 256) raises, because
 a caller quietly handed half of what it asked for reads the same as a topic
-that has been quiet. A smaller `maxlen` is accepted; the stream holds its own
-ring.
+that has been quiet. A smaller `maxlen` is the replay cap `fetch_log_buffer`
+honours; the stream holds its own ring.
 
 ## How NATS answers
 
 | The broker's | What NATS does |
 |---|---|
-| `publish` / `subscribe` | JetStream, one ephemeral consumer per subscriber, `DeliverPolicy.NEW` and no acknowledgement. The stream is `{prefix}.ps.>` with a per-subject cap. |
-| `psubscribe` | The same, with a wildcard subject. Patterns were already one `*` per segment; see `Topics.log_pattern`. |
-| `publish_log` / `fetch_log_buffer` | A dedicated stream (`{prefix}.log.>`), `max_msgs_per_subject = LOG_MAX_MSGS_PER_SUBJECT` (256). The server holds the ring; there is no purge after each line. `maxlen` above that cap raises. `ttl_seconds` is a per-message TTL, so a line expires on its own clock rather than the buffer expiring as a whole. |
+| `publish` / `subscribe` | JetStream, one ephemeral consumer per subscriber, `DeliverPolicy.NEW` and no acknowledgement. The stream is `{prefix}.ps.>` with a per-subject cap. A `log.` / `status.` topic also opens a consumer on `{prefix}.log.>`. |
+| `psubscribe` | The same, with a wildcard subject. Patterns were already one `*` per segment; see `Topics.log_pattern`. A `log.` / `status.` pattern listens on both streams. |
+| `publish_log` / `fetch_log_buffer` | A dedicated stream (`{prefix}.log.>`), `max_msgs_per_subject = LOG_MAX_MSGS_PER_SUBJECT` (256). The server holds the ring; there is no purge after each line. `maxlen` above that cap raises. `fetch_log_buffer` trims the replay to `BROKER_LOG_BUFFER_MAXLEN` (or the passed `maxlen`). `ttl_seconds` is a per-message TTL, so a line expires on its own clock rather than the buffer expiring as a whole. |
 | `request` / `probe` | Core request-reply. No responders is an immediate error, so the control plane learns a plane is down without spending its whole timeout on it. Re-asked first, for half of what the caller brought and never more than a second: a serve loop registering as its process boots is not a plane being down, and neither is an account subject three hundred milliseconds into a handover — order entry brings two seconds. `probe` opts out and spends only the boot-race grace, because "down" is the answer a probe is *for*. |
 | `serve` | A core NATS queue-group subscription. The stop event is delivered *through* the inbound queue rather than raced against it, so a serve loop stops on the message after the one it is reading, and everything queued ahead of the stop is still handed over. |
 | Reply inbox | The protocol's own reply subject. `reply_inbox` returns `None` and `serve` produces the address on the way in, so nothing is stamped on the envelope. |
 | `state_*` | A KV bucket, one key per field, `:` mapped to `.`. `state_all` is one consumer over the bucket's subject tree delivering last-per-subject, not a `keys()` and a get each. One field lands whole; a multi-field write is several keys, issued together but not a snapshot — see below. `state_all` is complete or it raises `StateReadIncompleteError`: a consumer can come up short, and a book missing rows reads exactly like a book that small. |
 | `state_replace` | Write the new fields, then drop what the last-written set had extra — KV has no cross-key transaction. A name has one writer, so the transport caches that set and does not scan first. That order is the one where a reader in the middle sees a stale field rather than an empty state. The writes are serialised per name in-process, so "last issued wins" still holds inside one process. |
-| `state_drop` / `state_clear` | A KV delete per field, so a watcher sees each one go. `state_all` skips the delete markers those writes leave. `state_clear` deletes every live field of the name. |
-| `state_watch` / `StateProjection` | KV `watch` on the name's prefix. A watch that dies is restarted and re-delivers the current values. STS starts a projection per attached `td.oms.{id}` / `td.ledger.{id}` and the strategy views read that map, falling back to `state_all` when there is no projection. |
+| `state_drop` / `state_clear` | A KV delete per live field, so a watcher sees each one go, then a stream purge so the delete marker does not stay. A key that is already gone is not deleted again. `state_clear` deletes every live field of the name. |
+| `state_watch` / `StateProjection` | KV `watch` on the name's prefix, one-shot. The projection reseeds from `state_all` and opens another watch when that one ends. A hard failure clears `live` so STS views fall back to `state_all` / `state_get` rather than serving a frozen map. STS starts a projection per attached `td.oms.{id}` / `td.ledger.{id}`. `oms.order` and ledger `available` / `free` / `prelock` always `state_get` the field they asked for. |
 | `lease_*` | KV with per-message TTL. `lease_take` is `create`; `lease_hold` and `lease_release` compare-and-set against the revision they read. |
 | `counter_next` | Read, add one, `update` at the revision that was read, retried on a loss. KV has no atomic increment, and the server-side counter that would give one is 2.12 while the floor here is 2.11. Cheap because the only caller allocates a slot once per session, not once per order. |
 | `tape_append` / `tape_tail` / `tape_trim_before` | A JetStream stream per feed. Per-feed, because retention is per feed in the interface and a stream's limits are the stream's — and because "the newest N records" is then subtraction on a sequence rather than a scan past every other feed's prints. |

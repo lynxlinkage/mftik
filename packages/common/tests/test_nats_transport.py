@@ -804,17 +804,45 @@ async def test_a_feed_nobody_marked_recording_gets_no_coverage_invented(
 
 
 @pytest.mark.asyncio
+async def _state_subjects(broker: Broker, name: str) -> set[str]:
+    """Subjects the state stream still holds for ``name``.
+
+    After a drop the live fields remain and the delete markers must not:
+    a leftover DEL is one extra subject ``_kv_scan`` transfers per order
+    this account has ever worked.
+    """
+    transport = _transport(broker)
+    stream, head = await transport._state_stream()  # noqa: SLF001
+    prefix = f"{head}{transport._state_key(name, '')}"  # noqa: SLF001
+    return set(await transport._subject_counts(stream, f"{prefix}>"))  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_a_dropped_field_leaves_nothing_where_it_was(broker: Broker) -> None:
     """A pull read skips the delete marker a watcher needs.
 
     KV delete writes a marker so :meth:`Broker.state_watch` can see the field
-    go. ``state_all`` must still answer with the live set.
+    go. The marker is then purged so the stream holds only the live set.
     """
     name = "oms.dropped"
     await broker.state_put_many(name, {f"o{n}": str(n) for n in range(6)})
     await broker.state_drop(name, "o0", "o1", "o2")
 
     assert await broker.state_all(name) == {"o3": "3", "o4": "4", "o5": "5"}
+    assert len(await _state_subjects(broker, name)) == 3
+
+
+@pytest.mark.asyncio
+async def test_dropping_a_missing_field_does_not_mint_a_marker(
+    broker: Broker,
+) -> None:
+    """nats-py ``delete`` never raises; an unchecked call would grow the bucket."""
+    name = "oms.ghost"
+    await broker.state_put_many(name, {"o1": "1"})
+    before = await _state_subjects(broker, name)
+
+    assert await broker.state_drop(name, "ghost") == 0
+    assert await _state_subjects(broker, name) == before
 
 
 @pytest.mark.asyncio
@@ -832,6 +860,7 @@ async def test_replacing_the_book_per_fill_does_not_grow_the_bucket(
         await broker.state_replace(name, {f"o{n}": str(n)})
 
     assert await broker.state_all(name) == {"o19": "19"}
+    assert len(await _state_subjects(broker, name)) == 1
 
 
 @pytest.mark.asyncio
@@ -842,6 +871,7 @@ async def test_clearing_a_name_leaves_nothing_on_the_stream(broker: Broker) -> N
     await broker.state_clear(name)
 
     assert await broker.state_all(name) == {}
+    assert await _state_subjects(broker, name) == set()
 
 
 # --- a read that could not finish ---------------------------------------------

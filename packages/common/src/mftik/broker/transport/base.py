@@ -166,7 +166,7 @@ class BrokerTransport(ABC):
     async def publish_log(
         self, topic: str, raw: str, *, maxlen: int, ttl_seconds: int
     ) -> None:
-        """Publish, and keep the last ``maxlen`` for a late subscriber.
+        """Publish onto the log stream for live subscribers and late replay.
 
         For logs, where the UI socket opens after the deploy it wants to watch
         and still expects the lines it missed. Live subscribers see this exactly
@@ -174,8 +174,8 @@ class BrokerTransport(ABC):
 
         ``maxlen`` above the log stream's per-subject cap raises rather than
         keeping fewer: a caller reading back half of what it asked for has no
-        way to tell that from a quiet hour. A smaller ``maxlen`` is accepted;
-        the stream holds its own ring.
+        way to tell that from a quiet hour. A smaller ``maxlen`` is the replay
+        cap :meth:`fetch_log_buffer` honours; the stream holds its own ring.
 
         ``ttl_seconds`` is a per-message TTL, so a line expires on its own
         clock rather than the buffer expiring as a whole. A topic that has
@@ -184,7 +184,10 @@ class BrokerTransport(ABC):
 
     @abstractmethod
     async def fetch_log_buffer(self, topic: str) -> list[str]:
-        """What :meth:`publish_log` kept for ``topic``, oldest first."""
+        """What the log stream is still holding for ``topic``, oldest first.
+
+        The caller trims: :meth:`Broker.fetch_log_buffer` applies ``maxlen``.
+        """
 
     # --- request-reply -----------------------------------------------------
 

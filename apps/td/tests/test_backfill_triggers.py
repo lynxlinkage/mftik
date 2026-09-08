@@ -109,6 +109,38 @@ async def test_asking_gives_up_rather_than_holding_a_teardown(broker) -> None:
     assert result is False
 
 
+async def test_an_in_flight_refusal_is_not_accepted(broker) -> None:
+    """Saturated TD replies ``ok=False``; that is not a successful ask."""
+    stop = asyncio.Event()
+
+    async def refuse() -> None:
+        async for req in broker.serve(Topics.td_backfill("td"), stop=stop):
+            payload = TdBackfill.model_validate(req.envelope.payload)
+            await req.reply(
+                Envelope[dict].wrap(
+                    {
+                        "ok": False,
+                        "api_id": payload.api_id,
+                        "reason": "4 runs already in flight",
+                    },
+                    type="td.backfill.result",
+                    source="td",
+                )
+            )
+            break
+
+    task = asyncio.create_task(refuse())
+    await asyncio.sleep(0.2)
+    try:
+        assert (
+            await request_backfill(broker, API_ID, instance="td", reason="cron")
+            is False
+        )
+    finally:
+        stop.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_a_cancelled_ask_is_not_swallowed(broker) -> None:
     class Hanging:
         async def request(self, *a, **kw):

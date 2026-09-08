@@ -74,3 +74,19 @@ async def test_multiple_accounts_must_be_named(broker: Broker) -> None:
     assert set((await oms.view(8)).orders) == {"b"}
     assert await oms.order("a") is None
     assert (await oms.order("a", 7)) is not None
+
+
+async def test_order_sees_a_write_the_projection_has_not_caught(
+    broker: Broker,
+) -> None:
+    """The watch can lag the ack; ``order`` must not."""
+    oms = StrategyOms()
+    session = SimpleNamespace(
+        broker=broker,
+        td_api_ids=[7],
+        projected_state=lambda _name: {},
+    )
+    oms.bind(SimpleNamespace(session=session), cid_slot=1)
+    await _write(broker, 7, "cid-new")
+
+    assert await oms.order("cid-new") is not None
