@@ -7,7 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from mftik.broker import Broker
+from mftik.broker import Broker, RequestTimeoutError, StateProjection
 from mftik.exchange.models import (
     AggTrade,
     Balance,
@@ -158,6 +158,11 @@ TdInstanceLookup = Callable[[int], Awaitable[str | None]]
 #: by the attach failing, not by this.
 MD_ACK_GRACE_S = 3.0
 
+#: How long a detach may wait for a reply. The lease is the real teardown;
+#: this is promptness. Must stay well under the old two-attempt five-second
+#: wait that used to hold a stop open.
+DETACH_TIMEOUT_S = 1.5
+
 
 class StsSession:
     """Strategy session with TD/MD pub/sub links and fencing lease heartbeat."""
@@ -252,6 +257,7 @@ class StsSession:
         self._md_lease_logged = False
         self._on_stop_task: asyncio.Task[Any] | None = None
         self._recon_sent: set[int] = set()
+        self._state: dict[str, StateProjection] = {}
 
     @property
     def td_api_ids(self) -> list[int]:
@@ -304,6 +310,34 @@ class StsSession:
     def strategy_name(self) -> str:
         return self.strategy.name
 
+    def projected_state(self, name: str) -> dict[str, dict[str, Any]] | None:
+        """Local OMS/ledger projection, or ``None`` if this name is not watched."""
+        proj = self._state.get(name)
+        return None if proj is None else proj.all()
+
+    async def _start_state_projections(self) -> None:
+        for api_id in self.td_api_ids:
+            for name in (Topics.td_oms(api_id), Topics.td_ledger(api_id)):
+                if name in self._state:
+                    continue
+                proj = self.broker.state_projection(name)
+                try:
+                    await proj.start()
+                except Exception:
+                    logger.exception(
+                        "STS state projection failed to start name=%s "
+                        "session=%s — views will pull",
+                        name,
+                        self.session_id,
+                    )
+                    continue
+                self._state[name] = proj
+
+    async def _close_state_projections(self) -> None:
+        for proj in self._state.values():
+            await proj.close()
+        self._state.clear()
+
     async def _publish_log(
         self, message: str, *, source: str = "sts", level: str = "info"
     ) -> None:
@@ -325,6 +359,7 @@ class StsSession:
         # Before the pumps: the first thing on a feed must not arrive with
         # nowhere to be written.
         await self.event_log.start()
+        await self._start_state_projections()
         self.event_log.record(
             "lifecycle",
             "session_start",
@@ -474,6 +509,7 @@ class StsSession:
         except Exception:
             pass
         self.event_log.record("lifecycle", "session_stop", dir="self")
+        await self._close_state_projections()
         # Last, and awaited: the records above are the ones a post-mortem opens
         # the file for, and they are still in the queue at this point.
         await self.event_log.close()
@@ -602,23 +638,37 @@ class StsSession:
     async def _post_detach(
         self, *, what: str, subject: str, envelope: Any
     ) -> None:
-        """Enqueue one detach. A failure here is logged, not waited on."""
+        """Ask for one detach. A failure here is logged, not waited on."""
         self.event_log.record(
             "detach", envelope.type, dir="out", what=what
         )
         try:
-            await self.broker.post(subject, envelope)
+            await self.broker.request(
+                subject, envelope, timeout=DETACH_TIMEOUT_S
+            )
+        except RequestTimeoutError as exc:
+            self.event_log.record(
+                "detach", "detach_unanswered", dir="self", what=what,
+                error=repr(exc),
+            )
+            logger.warning(
+                "STS detach %s session=%s had no responder — the lease will "
+                "expire it",
+                what,
+                self.session_id,
+            )
+            return
         except Exception as exc:
             # The lease covers this. Worth a line because a broker that cannot
             # take a write is a problem in its own right, not because the
             # attach is now stuck.
             self.event_log.record(
-                "detach", "detach_post_failed", dir="self", what=what,
+                "detach", "detach_request_failed", dir="self", what=what,
                 error=repr(exc),
             )
             logger.warning(
-                "STS could not post detach %s session=%s: %s — the lease will "
-                "expire it",
+                "STS could not request detach %s session=%s: %s — the lease "
+                "will expire it",
                 what,
                 self.session_id,
                 exc,

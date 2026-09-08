@@ -90,7 +90,10 @@ class StrategyLedger:
         if session is None:
             log.record("read", "ledger.view", dir="out", resolved=False)
             return LedgerView()
-        rows = await session.broker.state_all(Topics.td_ledger(resolved))
+        getter = getattr(session, "projected_state", None)
+        rows = getter(Topics.td_ledger(resolved)) if getter is not None else None
+        if rows is None:
+            rows = await session.broker.state_all(Topics.td_ledger(resolved))
         # Every sizing decision downstream rests on these numbers, and they are
         # TD's, read at one moment. Nothing else in the log can reconstruct
         # what the balance was when the strategy asked.

@@ -1,4 +1,4 @@
-"""STS sessions — independent strategy runtime with TD/MD bistreams."""
+"""STS sessions — independent strategy runtime with TD/MD leased links."""
 
 from mftik.strategy import Strategy
 

@@ -587,11 +587,9 @@ arrives after the question stopped being asked tells nobody anything. So it
 gets its own subject. `Envelope` already carries `ts`, so the serving side
 can also drop a probe older than its own timeout, which costs one comparison
 and is the second line of defence — see *How NATS answers* in
-`docs/Broker.md`. An attach should wait. A backfill should wait.
-`Broker.post`'s docstring: "A request left because nothing is serving the
-subject yet is not lost: the next consumer to come up takes it, which is the
-recovery a fan-out message could not offer, and the one place a durable
-queue keeps that promise."
+`docs/Broker.md`. An attach or a backfill that finds nobody serving fails at
+once; the lease and the settlement cursor are the backstops, not a durable
+queue.
 
 ### 7. Nothing enforces one TD per `api_id`
 
@@ -905,7 +903,7 @@ one process holds it. **This ticket closes the compliance requirement.**
 
 - Attach resolves `apis.instance_id` → `td.{instance}`.
 - `Topics.td_backfill(instance)`; `request_backfill` and `backfill_cron` resolve
-  the account's instance before posting.
+  the account's instance before requesting.
 - `SessionManager.attach` takes a `SET NX` claim on `api_id` before building
   the `TradingAccount`, renews it while held, releases at refcount zero, and
   refuses naming the holder.
@@ -921,8 +919,8 @@ nothing stops two same-named processes owning one `api_id`.
 
 **Verify.**
 
-- `backfill_cron` posts each account to its own instance's queue, and a
-  JP-only credential never reaches the US queue — the requirement stated as
+- `backfill_cron` requests each account on its own instance's subject, and a
+  JP-only credential never reaches the US instance — the requirement stated as
   the sentence it is in.
 - An account whose `apis` row is gone is **skipped** rather than swept onto a
   shared subject. New behaviour, and the reason the subject is keyed at all.

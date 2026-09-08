@@ -23,7 +23,6 @@ from mftik_td.backfill import (
     BackfillExecutor,
     BackfillSession,
     HistoryReaderFactory,
-    request_backfill,
 )
 from mftik_td.history import HistoryWriter
 from mftik_td.rpc import dispatch
@@ -225,17 +224,11 @@ async def amain() -> bool:
                 health_task,
                 return_exceptions=True,
             )
-            # Asked for before this process stops serving the subject, and
-            # deliberately not run here: whoever comes up next takes it off the
-            # list. This process is going away and the accounts it was holding
-            # are the ones whose record is most likely to have a hole in it.
-            held = sessions.active_api_ids
+            # The cron is the guarantee. Asking after we have stopped serving
+            # the subject would always fail, and a successor looking at the
+            # cursors is strictly better than being told.
             await backfill.stop()
             await sessions.close_all()
-            for api_id in held:
-                await request_backfill(
-                    broker, api_id, instance=INSTANCE, reason="shutdown"
-                )
             # After the sessions, so the last of their order updates is in the
             # queue before it is drained.
             await history.stop()

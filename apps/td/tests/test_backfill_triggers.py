@@ -1,10 +1,8 @@
 """Who asks for a backfill, and what happens when asking fails.
 
-The ranking is the design. A detach and a shutdown are latency — they settle
-the record soon after somebody wants to read it. Neither is why it settles at
-all; the schedule is. So both of these must be unable to hurt the thing they
-are attached to: a detach that cannot reach Redis still detaches, and a
-shutdown still shuts down.
+The ranking is the design. A detach is latency — it settles the record soon
+after somebody wants to read it. The schedule is why it settles at all. So
+these must be unable to hurt the thing they are attached to.
 """
 
 from __future__ import annotations
@@ -12,7 +10,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from broker_harness import a_broker, queued_requests
+from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.protocol import Envelope, TdAttachRequest, TdBackfill, Topics
 from mftik_td.backfill.trigger import request_backfill
@@ -28,59 +26,67 @@ async def broker() -> Broker:
         yield client
 
 
-async def queued(broker: Broker) -> list[TdBackfill]:
-    """Whatever is sitting on ``td.backfill`` right now, unserved."""
-    raw = await queued_requests(broker, Topics.td_backfill("td"))
-    out = []
-    for item in raw:
-        envelope = Envelope[dict].model_validate_json(item)
-        out.append(TdBackfill.model_validate(envelope.payload))
-    return out
+async def _serve_backfill(broker: Broker, stop: asyncio.Event, seen: list) -> None:
+    async for req in broker.serve(Topics.td_backfill("td"), stop=stop):
+        payload = TdBackfill.model_validate(req.envelope.payload)
+        seen.append(payload)
+        await req.reply(
+            Envelope[dict].wrap(
+                {"ok": True, "api_id": payload.api_id},
+                type="td.backfill.result",
+                source="td",
+            )
+        )
 
 
-# --- posting ---------------------------------------------------------------
+# --- asking ---------------------------------------------------------------
 
 
-async def test_a_request_is_left_on_the_queue_for_whoever_takes_it(
-    broker,
-) -> None:
-    """Posted, not requested: nobody here waits minutes for a walk."""
-    assert await request_backfill(broker, API_ID, instance="td", reason="cron")
+async def test_a_request_is_answered_when_td_is_there(broker) -> None:
+    seen: list[TdBackfill] = []
+    stop = asyncio.Event()
+    task = asyncio.create_task(_serve_backfill(broker, stop, seen))
+    await asyncio.sleep(0.2)
+    try:
+        assert await request_backfill(broker, API_ID, instance="td", reason="cron")
+        assert [(a.api_id, a.reason) for a in seen] == [(API_ID, "cron")]
+    finally:
+        stop.set()
+        await asyncio.gather(task, return_exceptions=True)
 
-    asks = await queued(broker)
-    assert [(a.api_id, a.reason) for a in asks] == [(API_ID, "cron")]
 
-
-async def test_a_request_survives_having_nobody_to_serve_it(broker) -> None:
-    """The case a keyed subject cannot serve, and pub/sub would drop.
-
-    Nothing is listening. The message waits in the list, and the next TD to
-    come up takes it — which is exactly the account whose record has a hole.
-    """
-    await request_backfill(broker, API_ID, instance="td", reason="shutdown")
-    await asyncio.sleep(0.05)
-
-    assert len(await queued(broker)) == 1
+async def test_a_request_fails_at_once_when_nobody_is_serving(broker) -> None:
+    assert (
+        await request_backfill(
+            broker, API_ID, instance="td", reason="shutdown", timeout=0.3
+        )
+        is False
+    )
 
 
 async def test_a_request_may_name_instruments(broker) -> None:
-    await request_backfill(
-        broker,
-        API_ID,
-        instance="td",
-        reason="detach",
-        tickers=["Binance_Spot_BTCUSDT"],
-    )
-
-    assert (await queued(broker))[0].tickers == ["Binance_Spot_BTCUSDT"]
+    seen: list[TdBackfill] = []
+    stop = asyncio.Event()
+    task = asyncio.create_task(_serve_backfill(broker, stop, seen))
+    await asyncio.sleep(0.2)
+    try:
+        await request_backfill(
+            broker,
+            API_ID,
+            instance="td",
+            reason="detach",
+            tickers=["Binance_Spot_BTCUSDT"],
+        )
+        assert seen[0].tickers == ["Binance_Spot_BTCUSDT"]
+    finally:
+        stop.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_asking_never_raises_on_a_broken_broker(broker) -> None:
-    """Every caller has something more important to be doing."""
-
     class Broken:
-        async def post(self, *a, **kw):
-            raise RuntimeError("redis is gone")
+        async def request(self, *a, **kw):
+            raise RuntimeError("nats is gone")
 
         config = broker.config
 
@@ -91,32 +97,28 @@ async def test_asking_never_raises_on_a_broken_broker(broker) -> None:
 
 
 async def test_asking_gives_up_rather_than_holding_a_teardown(broker) -> None:
-    """An unreachable Redis must not hold a container past its stop timeout."""
-
     class Hanging:
-        async def post(self, *a, **kw):
+        async def request(self, *a, **kw):
             await asyncio.sleep(30)
 
         config = broker.config
 
     result = await request_backfill(
-        Hanging(), API_ID, instance="td", reason="shutdown", timeout=0.05
+        Hanging(), API_ID, instance="td", reason="detach", timeout=0.05
     )
     assert result is False
 
 
 async def test_a_cancelled_ask_is_not_swallowed(broker) -> None:
-    """Best-effort is about Redis being unwell, not about ignoring a stop."""
-
     class Hanging:
-        async def post(self, *a, **kw):
+        async def request(self, *a, **kw):
             await asyncio.sleep(30)
 
         config = broker.config
 
     task = asyncio.create_task(
         request_backfill(
-            Hanging(), API_ID, instance="td", reason="shutdown", timeout=30
+            Hanging(), API_ID, instance="td", reason="detach", timeout=30
         )
     )
     await asyncio.sleep(0.05)
@@ -164,7 +166,11 @@ async def _lease(broker: Broker, stop: asyncio.Event) -> None:
 async def test_a_detach_asks_for_the_account_it_just_released(
     broker, paper
 ) -> None:
-    """The moment somebody goes to look at what the run did."""
+    seen: list[TdBackfill] = []
+    stop_bf = asyncio.Event()
+    bf = asyncio.create_task(_serve_backfill(broker, stop_bf, seen))
+    await asyncio.sleep(0.2)
+
     manager = SessionManager(PaperSessionFactory(broker, paper), broker)
     stop = asyncio.Event()
     pub = asyncio.create_task(_lease(broker, stop))
@@ -177,19 +183,24 @@ async def test_a_detach_asks_for_the_account_it_just_released(
         await manager.detach(session_id=SESSION, api_id=API_ID)
     finally:
         stop.set()
-        await asyncio.gather(pub, return_exceptions=True)
+        stop_bf.set()
+        await asyncio.gather(pub, bf, return_exceptions=True)
         await manager.close_all()
 
-    asks = await queued(broker)
-    assert [(a.api_id, a.reason) for a in asks] == [(API_ID, "detach")]
+    assert [(a.api_id, a.reason) for a in seen] == [(API_ID, "detach")]
 
 
 async def test_a_detach_for_an_account_that_was_never_attached_asks_nothing(
     broker, paper
 ) -> None:
-    """There is no run to settle, and the row was closed by another path."""
+    seen: list[TdBackfill] = []
+    stop_bf = asyncio.Event()
+    bf = asyncio.create_task(_serve_backfill(broker, stop_bf, seen))
+    await asyncio.sleep(0.1)
     manager = SessionManager(PaperSessionFactory(broker, paper), broker)
 
     await manager.detach(session_id="never", api_id=API_ID)
+    stop_bf.set()
+    await asyncio.gather(bf, return_exceptions=True)
 
-    assert await queued(broker) == []
+    assert seen == []

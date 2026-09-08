@@ -98,58 +98,18 @@ async def _drop_everything(broker: Broker, prefix: str) -> None:
 # a real caller behind it.
 #
 # They live here rather than in the tests so the assertions stay above the
-# store: a test says "posted work waits for its consumer" once, and this is the
-# part that knows how the store spells it.
+# store: a test says "bytes that will not parse still reach serve" once, and
+# this is the part that knows how the store spells it.
 
 
 async def inject_raw_request(broker: Broker, subject: str, raw: str) -> None:
-    """Leave ``raw`` as durable work on ``subject``, bypassing the broker.
+    """Publish ``raw`` onto the core RPC subject, bypassing the broker.
 
-    For the one thing ``post`` cannot express: a request that will not parse.
-    ``Broker.post`` takes an envelope and serializes it, so a test about what a
-    serve loop does with unreadable bytes has to put the bytes there itself.
+    For the one thing ``request`` cannot express: bytes that will not parse.
+    A serve loop must already be listening — core NATS stores nothing.
     """
     transport = broker.transport
-    await transport.js.publish(transport._post_subject(subject), raw.encode())  # noqa: SLF001
-
-
-async def queued_requests(broker: Broker, subject: str) -> list[str]:
-    """Durable work waiting on ``subject``, without serving it.
-
-    Serving would consume it, and what these tests assert is precisely that
-    something is *still there* — that a detach was posted rather than awaited,
-    and that its handler has not run yet.
-
-    Read the work-queue stream directly, message by message, with no consumer
-    anywhere in it.
-
-    Not a consumer, on purpose and not for tidiness. A work-queue stream
-    refuses a consumer that does not acknowledge — "consumer in pull mode
-    requires explicit ack policy on workqueue stream" — and one that *does*
-    acknowledge deletes the message, which is precisely what serving it would
-    have done. Walking the subject by sequence is the only way to look without
-    taking.
-    """
-    import nats.js.errors
-    from mftik.broker.transport.nats import NatsTransport
-
-    transport = broker.transport
-    assert isinstance(transport, NatsTransport)
-    post_subject = transport._post_subject(subject)  # noqa: SLF001
-    stream = transport._post_stream  # noqa: SLF001
-
-    rows: list[str] = []
-    seq = 0
-    while True:
-        try:
-            msg = await transport.js.get_msg(
-                stream, seq=seq + 1, subject=post_subject, next=True
-            )
-        except nats.js.errors.NotFoundError:
-            return rows
-        assert msg.seq is not None
-        seq = msg.seq
-        rows.append((msg.data or b"").decode())
+    await transport.nc.publish(transport._rpc_subject(subject), raw.encode())  # noqa: SLF001
 
 
 async def append_tape_at(
