@@ -1226,6 +1226,7 @@ class NatsTransport(BrokerTransport):
         it.
         """
         name = self._tape_stream(feed)
+        subject = self._tape_subject(feed)
         try:
             info = await self.js.stream_info(name)
         except nats.js.errors.NotFoundError:
@@ -1235,28 +1236,58 @@ class NatsTransport(BrokerTransport):
             return 0
 
         horizon = dt.datetime.fromtimestamp(min_id_ms / 1000, tz=dt.UTC)
-        first_kept = await self._first_seq_at_or_after(
-            name, self._tape_subject(feed), horizon
-        )
-        if first_kept is None:
-            # Nothing is new enough to keep, so the whole feed is past its
-            # window. ``seq`` purges up to but not including, and the sequence
-            # after the last one is what "all of it" is spelled as.
+
+        # "Is anything new enough to keep" is asked of the newest record itself
+        # rather than inferred from a read that came back with nothing. The two
+        # used to be the same answer, and that made a slow server indistinguish-
+        # able from a feed that stopped printing an hour ago — one sweep that
+        # timed out purged the whole warm-up window and reported it as a trim.
+        if await self._is_older_than(name, subject, horizon):
+            # ``seq`` purges up to but not including, so the sequence after the
+            # last one is how "all of it" is spelled.
             await self.js.purge_stream(name, seq=info.state.last_seq + 1)
-        elif first_kept > info.state.first_seq:
-            await self.js.purge_stream(name, seq=first_kept)
         else:
-            return 0
+            first_kept = await self._first_seq_at_or_after(name, subject, horizon)
+            if first_kept is None:
+                # Something is inside the window and we could not find where it
+                # starts. Doing nothing costs one sweep; the next one is a minute
+                # away and the stream's ``max_age`` is the backstop underneath.
+                logger.warning(
+                    "broker tape trim found no horizon on %s — leaving it", feed
+                )
+                return 0
+            if first_kept <= info.state.first_seq:
+                return 0
+            await self.js.purge_stream(name, seq=first_kept)
         after = (await self.js.stream_info(name)).state.messages
         return max(0, before - after)
+
+    async def _is_older_than(
+        self, stream: str, subject: str, when: dt.datetime
+    ) -> bool:
+        """Whether every message on ``subject`` predates ``when``.
+
+        One direct read of the newest record, which either answers or raises.
+        That is the whole point of doing it this way: a consumer that finds
+        nothing is ambiguous, and this is the question whose wrong answer purges
+        a feed's entire history.
+        """
+        try:
+            newest = await self.js.get_last_msg(stream, subject)
+        except nats.js.errors.NotFoundError:
+            return False
+        return newest.time is not None and newest.time < when
 
     async def _first_seq_at_or_after(
         self, stream: str, subject: str, when: dt.datetime
     ) -> int | None:
         """The sequence of the first message on ``subject`` stamped at ``when``.
 
-        ``None`` when every message is older, which is a feed that stopped
-        printing before the horizon.
+        ``None`` means *could not tell*, and nothing else — not "there is none".
+        Callers establish that separately with :meth:`_is_older_than` before
+        asking, because a consumer delivering nothing and a fetch that timed out
+        look identical from here and only one of them means the feed is empty of
+        anything worth keeping.
         """
         sub = await self.js.pull_subscribe(
             subject,
@@ -1266,11 +1297,11 @@ class NatsTransport(BrokerTransport):
                 opt_start_time=when,
                 ack_policy=js_api.AckPolicy.NONE,
                 filter_subject=subject,
-                inactive_threshold=30.0,
+                inactive_threshold=_READ_CONSUMER_IDLE_S,
             ),
         )
         try:
-            msgs = await sub.fetch(batch=1, timeout=1.0)
+            msgs = await sub.fetch(batch=1, timeout=_READ_TIMEOUT_S)
         except (nats.errors.TimeoutError, TimeoutError):
             return None
         finally:

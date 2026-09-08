@@ -460,3 +460,51 @@ async def test_a_log_line_carries_the_expiry_its_caller_asked_for(
     )
     assert (msg.headers or {}).get("Nats-TTL") == "1800"
 
+
+
+@pytest.mark.asyncio
+async def test_a_trim_that_cannot_find_the_horizon_keeps_the_tape(
+    broker: Broker,
+) -> None:
+    """A slow sweep must not be read as "this feed is all past its window".
+
+    The horizon is found with a consumer and a fetch, and a fetch that times out
+    returns nothing — which is exactly what a feed whose last print predates the
+    window returns. Conflating them purged every record and reported it as an
+    ordinary trim, so a single slow second cost a strategy its whole warm-up.
+    """
+    transport = _transport(broker)
+    feed = "aggtrade.Gate_Spot_SLOWSWEEP"
+    for n in range(10):
+        await broker.tape_append(feed, {"trade_id": str(n)}, maxlen=100, ttl_seconds=60)
+
+    async def _cannot_tell(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    transport._first_seq_at_or_after = _cannot_tell  # type: ignore[method-assign] # noqa: SLF001
+    # A horizon inside the feed's history, so there is genuinely something to
+    # keep and something to drop.
+    dropped = await broker.tape_trim_before(feed, min_id_ms=1)
+
+    assert dropped == 0
+    assert len(await broker.tape_tail(feed, count=20)) == 10
+
+
+@pytest.mark.asyncio
+async def test_a_feed_that_stopped_printing_is_still_trimmed_to_nothing(
+    broker: Broker,
+) -> None:
+    """The other half of the pair, so the careful branch above is not a no-op.
+
+    A dead instrument's tape does go, and it goes because the newest record is
+    asked for its age directly rather than because a read found nothing.
+    """
+    feed = "aggtrade.Gate_Spot_DEADINSTRUMENT"
+    for n in range(5):
+        await broker.tape_append(feed, {"trade_id": str(n)}, maxlen=100, ttl_seconds=60)
+
+    # A horizon in the far future, so every record is behind it.
+    dropped = await broker.tape_trim_before(feed, min_id_ms=4_000_000_000_000)
+
+    assert dropped == 5
+    assert await broker.tape_tail(feed, count=20) == []
