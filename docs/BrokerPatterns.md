@@ -161,14 +161,31 @@ is a database question — and looking is strictly better, because it does not
 depend on the predecessor having managed to post before it died. The cron's own
 docstring already lists that failure: "a process may die before it asks".
 
-**What removing D takes with it.** The work-queue stream, which has no
-`max_msgs`, `max_age` or `max_bytes` set. The durable consumer per served
-subject, which nothing deletes and which `inactive_threshold` does not reap.
-`_pump_posted` entirely. And the two-source merge inside `serve`, which is the
-whole stage on which #82 played out: the handover ordering that
-`_iter_until_stopped` has to get right exists because posted work is
-acknowledged on delivery and can land behind the stop sentinel. With one source
-that complexity has nothing to describe.
+**What removing D takes with it.** The work-queue stream, `_pump_posted`
+entirely, and the two-source merge inside `serve` — which is the whole stage on
+which #82 played out: the handover ordering that `_iter_until_stopped` has to
+get right exists because posted work is acknowledged on delivery and can land
+behind the stop sentinel. With one source that complexity has nothing to
+describe.
+
+The durable consumer per served subject is **not** on that list, and an earlier
+draft of this document was wrong to put it there. `_pump_posted` gives it
+`inactive_threshold=consumer_idle_seconds`, and since NATS 2.9 that reaps
+durables as well as ephemerals — this node's floor is 2.11 and CI runs
+`nats:2.11-alpine`. A durable for a subject nobody serves any more is gone five
+minutes later. `docs/Broker.md` says exactly this in its `consumer_idle_seconds`
+row, and says why: it "stops a node that has churned a thousand sessions from
+carrying a thousand consumers."
+
+What does survive the correction is about messages rather than consumers. The
+work-queue stream is created with no `max_msgs`, `max_age` or `max_bytes`, and
+work-queue retention removes a message only when it is acknowledged. So a
+subject that is posted to and never served accumulates with nothing to stop it,
+and reaping the idle durable does not help — it removes the reader, not the
+backlog. That is a defect in the stream's configuration and is worth fixing on
+its own, whether or not D survives: a `max_age` gives unserved work an end
+without contradicting the intent `_ensure_post_stream` documents, which is that
+work waits rather than expires. It just makes "waits" finite.
 
 **What it costs, stated honestly.** Failure behaviour changes from "delivered
 eventually" to "known failed immediately, backstop handles it". Four comments
