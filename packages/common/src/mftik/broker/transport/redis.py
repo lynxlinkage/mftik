@@ -20,7 +20,6 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
-from urllib.parse import urlsplit, urlunsplit
 
 import redis.asyncio as redis
 from redis.asyncio.retry import Retry
@@ -30,7 +29,11 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from mftik.broker.config import BrokerConfig
 from mftik.broker.errors import BrokerNotConnectedError, RequestTimeoutError
-from mftik.broker.transport.base import LEASE_ANONYMOUS, BrokerTransport
+from mftik.broker.transport.base import (
+    LEASE_ANONYMOUS,
+    BrokerTransport,
+    redacted_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,42 +54,6 @@ PROBE_QUEUE_TTL_SECONDS = 300
 #: a Redis outage does not fill the log a hundred times a second, short enough
 #: that nobody notices the gap in a control plane once Redis is back.
 _SERVE_POLL_RETRY_S = 1.0
-
-
-def redacted_url(url: str) -> str:
-    """``url`` with its password replaced, for logging.
-
-    A Redis URL carries the credential inline and every service logs this
-    line on every connect, so the password lands in ``docker logs`` for the
-    whole fleet and in anything those logs are shipped to.
-
-    Parsed rather than pattern-matched: a password may contain ``@`` and
-    ``:``, so splitting on either finds the wrong one and prints the rest.
-    Anything that will not parse returns a placeholder — falling back to the
-    original would leak exactly the string this exists to hide.
-    """
-    try:
-        parts = urlsplit(url)
-        if not parts.password:
-            return url
-        host = parts.hostname or ""
-        # ``.port`` raises on a non-numeric port, and it raises here rather
-        # than in ``urlsplit`` — which is why the whole reconstruction is
-        # inside the try and not just the parse.
-        if parts.port is not None:
-            host = f"{host}:{parts.port}"
-        user = parts.username or ""
-        return urlunsplit(
-            (
-                parts.scheme,
-                f"{user}:***@{host}",
-                parts.path,
-                parts.query,
-                parts.fragment,
-            )
-        )
-    except ValueError:
-        return "<unparseable url>"
 
 
 def _ms(seconds: float) -> int:

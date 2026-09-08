@@ -56,7 +56,11 @@ from nats.aio.msg import Msg
 
 from mftik.broker.config import BrokerConfig
 from mftik.broker.errors import BrokerNotConnectedError, RequestTimeoutError
-from mftik.broker.transport.base import LEASE_ANONYMOUS, BrokerTransport
+from mftik.broker.transport.base import (
+    LEASE_ANONYMOUS,
+    BrokerTransport,
+    redacted_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +79,7 @@ FANOUT_MAX_AGE_SECONDS = 86_400
 #: ``publish`` then differ only in whether the caller intends to read it back,
 #: rather than in where the message went. It also bounds the stream by the
 #: number of live subjects instead of by traffic — a busy feed cannot grow it.
+#:
 FANOUT_MAX_MSGS_PER_SUBJECT = 100
 
 #: Global fuse on the fan-out stream, in messages. Reached only if subjects
@@ -337,9 +342,18 @@ class NatsTransport(BrokerTransport):
         self._ensured.clear()
 
     def describe(self) -> str:
-        servers = getattr(self._nc, "connected_url", None)
-        where = servers.netloc if servers is not None else self.config.nats_url
-        return f"NATS at {where}"
+        """Which server this ended up on, with the credential taken out.
+
+        The connected URL rather than the configured one, because ``NATS_URL``
+        may name several and which one a plane is actually on is the thing worth
+        having in a log. Both go through :func:`redacted_url`: ``connected_url``
+        is the URL as given, userinfo included, so reading ``.netloc`` off it
+        prints the password — and this line is logged by every plane on every
+        boot.
+        """
+        connected = getattr(self._nc, "connected_url", None)
+        url = self.config.nats_url if connected is None else connected.geturl()
+        return f"NATS at {redacted_url(url)}"
 
     # --- streams and buckets -----------------------------------------------
 

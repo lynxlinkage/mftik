@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 #: What a lease stores when its holder has no name worth writing down. A
 #: session liveness key answers "is anybody still here", never "who", so the
@@ -43,6 +44,45 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 #: those tells a reader nothing it did not already know from the lease
 #: existing at all.
 LEASE_ANONYMOUS = "1"
+
+
+def redacted_url(url: str) -> str:
+    """``url`` with its password replaced, for logging.
+
+    Every store this speaks to takes its credential inline in the URL, and
+    every service logs :meth:`BrokerTransport.describe` on every boot — so a
+    password left in one lands in ``docker logs`` for the whole fleet and in
+    anything those logs are shipped to. It lives here rather than in a
+    transport because it is how the ``describe`` contract below is kept, and
+    the next transport should find it already written.
+
+    Parsed rather than pattern-matched: a password may contain ``@`` and ``:``,
+    so splitting on either finds the wrong one and prints the rest. Anything
+    that will not parse returns a placeholder — falling back to the original
+    would leak exactly the string this exists to hide.
+    """
+    try:
+        parts = urlsplit(url)
+        if not parts.password:
+            return url
+        host = parts.hostname or ""
+        # ``.port`` raises on a non-numeric port, and it raises here rather
+        # than in ``urlsplit`` — which is why the whole reconstruction is
+        # inside the try and not just the parse.
+        if parts.port is not None:
+            host = f"{host}:{parts.port}"
+        user = parts.username or ""
+        return urlunsplit(
+            (
+                parts.scheme,
+                f"{user}:***@{host}",
+                parts.path,
+                parts.query,
+                parts.fragment,
+            )
+        )
+    except ValueError:
+        return "<unparseable url>"
 
 
 class BrokerTransport(ABC):
