@@ -10,7 +10,7 @@ with a JP-only key — on a schedule, quietly, forever.
 from __future__ import annotations
 
 import pytest
-from broker_harness import a_broker
+from broker_harness import a_broker, queued_requests
 from db_harness import a_database, an_instance, an_owner
 from mftik.broker import Broker
 from mftik.protocol import Envelope, TdBackfill, Topics
@@ -137,8 +137,7 @@ async def test_a_jp_credential_never_reaches_the_us_queue(broker, db) -> None:
 
 
 async def _queued(broker: Broker, instance: str) -> list[int]:
-    key = f"{broker.config.key_prefix}:rpc:{Topics.td_backfill(instance)}"
-    raw = await broker.redis.lrange(key, 0, -1)
+    raw = await queued_requests(broker, Topics.td_backfill(instance))
     return [
         TdBackfill.model_validate(
             Envelope.model_validate_json(item).payload

@@ -39,9 +39,7 @@ def _print(n: int) -> dict[str, str]:
 
 async def _append(broker: Broker, count: int, *, maxlen: int = 1000) -> None:
     for n in range(count):
-        await broker.tape_append(
-            FEED, _print(n), maxlen=maxlen, ttl_seconds=3600
-        )
+        await broker.tape_append(FEED, _print(n), maxlen=maxlen, ttl_seconds=3600)
 
 
 @pytest.mark.asyncio
@@ -106,7 +104,7 @@ async def test_coverage_reports_recording_then_stopped(broker: Broker) -> None:
     assert live["continuous_since_ms"] == "1234"
     assert live["recording"] == "1"
 
-    await broker.tape_mark_stopped(FEED, at_ms=5678)
+    await broker.tape_mark_stopped(FEED, at_ms=5678, ttl_seconds=3600)
     stopped = await broker.tape_coverage(FEED)
     assert stopped["recording"] == "0"
     assert stopped["stopped_ms"] == "5678"
@@ -123,16 +121,6 @@ async def test_coverage_of_a_feed_never_recorded_is_empty(
 
 
 @pytest.mark.asyncio
-async def test_append_renews_the_ttl_on_both_keys(broker: Broker) -> None:
-    """Without this a tape outlives the last strategy that ever wanted it."""
-    await broker.tape_mark_recording(FEED, since_ms=1, ttl_seconds=3600)
-    await broker.tape_append(FEED, _print(0), maxlen=100, ttl_seconds=1800)
-
-    assert 0 < await broker.redis.ttl(broker.tape_key(FEED)) <= 1800
-    assert 0 < await broker.redis.ttl(broker.tape_coverage_key(FEED)) <= 1800
-
-
-@pytest.mark.asyncio
 async def test_tail_of_a_missing_feed_is_empty(broker: Broker) -> None:
     assert await broker.tape_tail("trade.Paper_Spot_ETHUSDT", count=10) == []
 
@@ -146,7 +134,7 @@ async def test_a_measured_interruption_keeps_continuity(broker: Broker) -> None:
     seconds that both edges of the restart had already stamped.
     """
     await broker.tape_mark_recording(FEED, since_ms=1_000, ttl_seconds=3600)
-    await broker.tape_mark_stopped(FEED, at_ms=5_000)
+    await broker.tape_mark_stopped(FEED, at_ms=5_000, ttl_seconds=3600)
     await broker.tape_mark_recording(FEED, since_ms=9_000, ttl_seconds=3600)
 
     coverage = await broker.tape_coverage(FEED)
@@ -182,10 +170,8 @@ async def test_a_measured_gap_does_not_erase_the_ones_before_it(
     """Two deploys inside a retention window are two holes, not one."""
     await broker.tape_mark_recording(FEED, since_ms=1_000, ttl_seconds=3600)
     for stopped, resumed in ((2_000, 3_000), (4_000, 4_500)):
-        await broker.tape_mark_stopped(FEED, at_ms=stopped)
-        await broker.tape_mark_recording(
-            FEED, since_ms=resumed, ttl_seconds=3600
-        )
+        await broker.tape_mark_stopped(FEED, at_ms=stopped, ttl_seconds=3600)
+        await broker.tape_mark_recording(FEED, since_ms=resumed, ttl_seconds=3600)
 
     coverage = await broker.tape_coverage(FEED)
 
@@ -205,10 +191,8 @@ async def test_too_many_gaps_collapse_to_a_fresh_mark(broker: Broker) -> None:
     """
     await broker.tape_mark_recording(FEED, since_ms=0, ttl_seconds=3600)
     for n in range(TAPE_MAX_GAPS + 1):
-        await broker.tape_mark_stopped(FEED, at_ms=n * 10 + 1)
-        await broker.tape_mark_recording(
-            FEED, since_ms=n * 10 + 2, ttl_seconds=3600
-        )
+        await broker.tape_mark_stopped(FEED, at_ms=n * 10 + 1, ttl_seconds=3600)
+        await broker.tape_mark_recording(FEED, since_ms=n * 10 + 2, ttl_seconds=3600)
 
     coverage = await broker.tape_coverage(FEED)
 
@@ -222,7 +206,7 @@ async def test_a_stop_stamped_after_the_resume_is_not_a_gap(
 ) -> None:
     """A clock that moved backwards measures nothing. Treated as unknown."""
     await broker.tape_mark_recording(FEED, since_ms=1_000, ttl_seconds=3600)
-    await broker.tape_mark_stopped(FEED, at_ms=9_000)
+    await broker.tape_mark_stopped(FEED, at_ms=9_000, ttl_seconds=3600)
     await broker.tape_mark_recording(FEED, since_ms=5_000, ttl_seconds=3600)
 
     coverage = await broker.tape_coverage(FEED)

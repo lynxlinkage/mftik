@@ -101,14 +101,12 @@ class HealthStatus(BaseModel):
 #: How old a liveness probe may be before the process it reaches drops it
 #: instead of answering.
 #:
-#: Comfortably above any probe timeout a caller would set, and far below the
-#: queue's own expiry — this is the *second* line of defence, not the first.
-#: :data:`mftik.broker.client.PROBE_QUEUE_MAXLEN` is what bounds the queue; this
-#: is what stops an instance that has just booted from opening its life by
-#: answering a heap of questions whose callers stopped waiting minutes ago.
-#: Every one of those answers is an RPUSH to a reply key that was deleted when
-#: the caller gave up, so replying manufactures exactly the litter the capped
-#: queue exists to avoid.
+#: Comfortably above any probe timeout a caller would set — this is the *second*
+#: line of defence, not the first. :meth:`mftik.broker.Broker.probe` is what
+#: keeps an unanswered probe from being stored at all; this is what stops an
+#: instance that has just booted from opening its life by answering whatever few
+#: its transport did keep, whose callers stopped waiting minutes ago. Every one
+#: of those answers is addressed to a reply inbox nobody is reading.
 PROBE_MAX_AGE_SECONDS = 10.0
 
 

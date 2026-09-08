@@ -12,7 +12,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from broker_harness import a_broker
+from broker_harness import a_broker, queued_requests
 from db_harness import a_database, an_instance, an_owner
 from mftik.broker import Broker
 from mftik.protocol import Envelope, TdBackfill, Topics
@@ -83,7 +83,7 @@ def an_order(api_id: int, *, ticker: str = "Binance_Spot_BTCUSDT") -> dict:
 
 
 async def queued(broker: Broker) -> list[TdBackfill]:
-    raw = await broker.redis.lrange(f"test:rpc:{Topics.td_backfill("td")}", 0, -1)
+    raw = await queued_requests(broker, Topics.td_backfill("td"))
     return [
         TdBackfill.model_validate(Envelope[dict].model_validate_json(i).payload)
         for i in raw

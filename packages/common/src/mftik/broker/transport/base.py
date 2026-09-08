@@ -398,13 +398,20 @@ class BrokerTransport(ABC):
         *,
         maxlen: int,
         ttl_seconds: int,
+        recorded_ms: int | None = None,
     ) -> None:
         """Append one record, holding ``feed`` to ``maxlen`` records.
 
-        The record's stamp is this transport's clock, not the venue's. Event
-        time rides on the record as a field, because a venue tape is not
-        strictly monotonic and one late print out of a million must not be able
-        to end a recording.
+        The record's stamp is a clock, not the venue's timestamp. Event time
+        rides on the record as a field, because a venue tape is not strictly
+        monotonic and one late print out of a million must not be able to end a
+        recording.
+
+        ``recorded_ms`` names that stamp, and ``None`` — which is what
+        production passes — means "use your own clock". It is here because the
+        stamp is otherwise unreachable from outside: it is assigned by Redis or
+        by the NATS server at write time, and a test about a *gap* in a tape
+        needs records further apart than it is willing to sleep for.
 
         ``ttl_seconds`` is renewed on every append, so a feed that stops being
         recorded expires on its own. Without it a tape would outlive the last

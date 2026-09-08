@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from broker_harness import a_broker
+from broker_harness import MIN_LEASE_TTL, a_broker
 from mftik.broker import Broker
 from mftik.liveness import claim_owner, hold_owner, owner_name, release_owner
 
@@ -119,11 +119,21 @@ async def test_a_claim_lapses_so_a_restarted_process_can_take_the_account(
     Accepted deliberately. Keying on anything a restarted process could
     reproduce would also be reproducible by a rival, which is the whole point.
     """
-    # Cut its remaining life to 20ms rather than waiting out a real TTL.
+    # Cut its remaining life to the shortest the transport can express rather
+    # than waiting out a real thirty second claim.
     await claim_owner(broker, API, domain=DOMAIN, owner="old-pid", ttl=1)
     await broker.lease_hold(
-        owner_name(API, domain=DOMAIN), owner="old-pid", ttl=0.02
+        owner_name(API, domain=DOMAIN), owner="old-pid", ttl=MIN_LEASE_TTL
     )
-    await asyncio.sleep(0.1)
 
-    assert await claim_owner(broker, API, domain=DOMAIN, owner="new-pid") is None
+    # Retried rather than slept past, which is also what a booting process
+    # does. When the claim goes is the store's business — Redis drops a key on
+    # the millisecond it expires, and NATS sweeps its expiries a little after
+    # the second it floors them to — and a test that guessed a margin instead
+    # would be asserting on that.
+    deadline = asyncio.get_running_loop().time() + MIN_LEASE_TTL + 3.0
+    while asyncio.get_running_loop().time() < deadline:
+        if await claim_owner(broker, API, domain=DOMAIN, owner="new-pid") is None:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the old claim never lapsed, so the account is stuck")

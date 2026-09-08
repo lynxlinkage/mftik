@@ -9,7 +9,7 @@ absent from it.
 from __future__ import annotations
 
 import pytest
-from mftik.broker.client import redacted_url
+from mftik.broker.transport.redis import redacted_url
 
 #: The shape production actually uses: username, password, host, port, db.
 PROD = "redis://default:yPbyy0QcqZRppAb2fcFBIM3TH1Y08@172.238.24.139:6379/0"

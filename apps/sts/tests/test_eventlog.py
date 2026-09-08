@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from broker_harness import a_broker
+from broker_harness import a_broker, append_tape_at
 from mftik.broker import Broker
 from mftik.exchange.models import Order, OrderStatus, OrderType, Side, Ticker
 from mftik.exchange.oms import LedgerEntry
@@ -692,8 +692,9 @@ async def test_a_spanned_gap_is_written_to_the_log(
     """
     feed = Topics.md_feed("aggtrade", UniversalTicker.parse("Paper_Spot_BTCUSDT"))
     await broker.tape_mark_recording(feed, since_ms=1_000, ttl_seconds=3600)
-    await broker.redis.xadd(
-        broker.tape_key(feed),
+    await append_tape_at(
+        broker,
+        feed,
         {
             "trade_id": "0",
             "price": "68000",
@@ -703,9 +704,9 @@ async def test_a_spanned_gap_is_written_to_the_log(
             "first_trade_id": "0",
             "last_trade_id": "0",
         },
-        id="2000-0",
+        recorded_ms=2_000,
     )
-    await broker.tape_mark_stopped(feed, at_ms=3_000)
+    await broker.tape_mark_stopped(feed, at_ms=3_000, ttl_seconds=3600)
     await broker.tape_mark_recording(feed, since_ms=5_000, ttl_seconds=3600)
 
     strategy = ProbeStrategy()

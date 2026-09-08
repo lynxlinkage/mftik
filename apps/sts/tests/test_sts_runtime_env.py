@@ -9,9 +9,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import fakeredis.aioredis
 import pytest
-from mftik.broker import Broker, BrokerConfig
+from broker_harness import a_broker
+from mftik.broker import Broker
 from mftik.envapply import ApplySpec, apply_packages
 from mftik.environment import EnvStamp, NodeEnv
 from mftik.protocol import (
@@ -187,9 +187,15 @@ def test_refresh_does_not_invoke_uv(
     assert calls == []
 
 
+@pytest.fixture
+async def broker() -> Broker:
+    async with a_broker("test-envrpc") as client:
+        yield client
+
+
 @pytest.mark.asyncio
 async def test_reload_rpc_returns_the_generation_it_now_believes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
     apply_packages(
@@ -197,12 +203,6 @@ async def test_reload_rpc_returns_the_generation_it_now_believes(
         {"numpy": ApplySpec(version="1.0", dist="numpy")},
         installer=_plant_numpy,
     )
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    broker = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test-envrpc"),
-        redis_client=redis,
-    )
-    await broker.connect()
     stop = asyncio.Event()
 
     async def serve() -> None:
@@ -227,13 +227,11 @@ async def test_reload_rpc_returns_the_generation_it_now_believes(
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        await broker.close()
-        await redis.aclose()
 
 
 @pytest.mark.asyncio
 async def test_generation_rpc_is_read_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
     apply_packages(
@@ -249,12 +247,6 @@ async def test_generation_rpc_is_read_only(
         return real_refresh(*args, **kwargs)
 
     monkeypatch.setattr("mftik_sts.rpc.registry.refresh", wrapped_refresh)
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    broker = Broker(
-        BrokerConfig(redis_url="redis://fake", key_prefix="test-envgen"),
-        redis_client=redis,
-    )
-    await broker.connect()
     stop = asyncio.Event()
 
     async def serve() -> None:
@@ -319,8 +311,6 @@ async def test_generation_rpc_is_read_only(
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        await broker.close()
-        await redis.aclose()
 
 
 def test_the_stamp_not_the_symlink_decides_sys_path(tmp_path: Path) -> None:

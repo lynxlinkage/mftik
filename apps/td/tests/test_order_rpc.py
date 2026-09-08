@@ -305,16 +305,33 @@ async def test_state_is_written_before_the_ack_returns(
     session.ledger.apply_venue(Balance(asset="USDT", free=Decimal("1000")))
     session.symbols = _StubSymbols()
 
-    ack = await _ack(
-        broker,
-        _submit_envelope(client_order_id="cid-lock", price=Decimal("50000")),
-    )
+    # Hold the venue at the door. The submit runs as a task *after* the ack has
+    # gone out, and the venue's first acknowledgement of the order releases the
+    # pre-lock — so the read below would be racing that task rather than
+    # observing the ordering this test is about. How fast the race is decided is
+    # a property of the broker's latency, which is not what is being asserted.
+    gate = asyncio.Event()
+    place = session.private.place_order
 
-    assert ack.accepted is True
-    # Read Redis the way STS does — no sleep, no polling.
-    row = await broker.state_get(Topics.td_ledger(API_ID), "USDT")
-    assert row is not None
-    assert Decimal(row["prelock"]) == Decimal("500")  # 0.01 @ 50000
+    async def held(request: PlaceOrderRequest) -> Order:
+        await gate.wait()
+        return await place(request)
+
+    session.private.place_order = held  # type: ignore[method-assign]
+
+    try:
+        ack = await _ack(
+            broker,
+            _submit_envelope(client_order_id="cid-lock", price=Decimal("50000")),
+        )
+
+        assert ack.accepted is True
+        # Read the state the way STS does — no sleep, no polling.
+        row = await broker.state_get(Topics.td_ledger(API_ID), "USDT")
+        assert row is not None
+        assert Decimal(row["prelock"]) == Decimal("500")  # 0.01 @ 50000
+    finally:
+        gate.set()
 
 
 async def test_an_unaffordable_order_is_refused_and_reserves_nothing(

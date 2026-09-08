@@ -529,15 +529,27 @@ class RedisTransport(BrokerTransport):
         *,
         maxlen: int,
         ttl_seconds: int,
+        recorded_ms: int | None = None,
     ) -> None:
-        # ``maxlen`` is approximate on purpose: Redis then trims whole nodes and
-        # the write stays cheap. The MINID trim is the intent.
+        # ``maxlen`` is exact, not ``~``. Approximate trimming is the cheaper
+        # spelling and it is what this used to say, but Redis then trims whole
+        # macro nodes — so a stream shorter than one node is never trimmed at
+        # all, and the fuse the interface promises does not hold until the feed
+        # is a hundred records past it. At steady state exact trimming removes
+        # one entry per append, which is what this path can afford.
+        #
+        # ``*`` leaves the stamp to Redis, which is what production wants: an
+        # explicit id must exceed every id already in the stream, so a client
+        # clock that stepped backwards over NTP would start failing appends.
+        # ``<ms>-*`` keeps the sequence Redis' too, so a caller naming the same
+        # millisecond twice is fine.
         pipe = self.redis.pipeline()
         pipe.xadd(
             self.tape_key(feed),
             dict(fields),
+            id="*" if recorded_ms is None else f"{recorded_ms}-*",
             maxlen=maxlen,
-            approximate=True,
+            approximate=False,
         )
         pipe.expire(self.tape_key(feed), ttl_seconds)
         pipe.expire(self.tape_coverage_key(feed), ttl_seconds)
@@ -554,7 +566,16 @@ class RedisTransport(BrokerTransport):
         return [(_record_ms(str(rid)), dict(fields)) for rid, fields in reversed(rows)]
 
     async def tape_trim_before(self, feed: str, *, min_id_ms: int) -> int:
-        return int(await self.redis.xtrim(self.tape_key(feed), minid=min_id_ms))
+        # ``approximate=False``, against redis-py's default. ``XTRIM MINID ~``
+        # stops at the first macro node it cannot drop whole, so a two hour
+        # window on a quiet feed drops nothing and reports nothing — and the
+        # count is what the caller logs the sweep by. This runs on a timer per
+        # feed, not per print, so the exact form costs nothing that matters.
+        return int(
+            await self.redis.xtrim(
+                self.tape_key(feed), minid=min_id_ms, approximate=False
+            )
+        )
 
     async def tape_coverage(self, feed: str) -> dict[str, str]:
         return dict(await self.redis.hgetall(self.tape_coverage_key(feed)))  # type: ignore[misc]

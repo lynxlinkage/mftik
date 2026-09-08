@@ -82,10 +82,35 @@ FANOUT_MAX_MSGS_PER_SUBJECT = 100
 #: instead of the disk.
 FANOUT_MAX_MSGS = 1_000_000
 
+#: How long to wait before re-asking a subject that reported no responders, and
+#: how many times. Three attempts and 50ms is ~100ms spent before calling a
+#: subject unserved — long enough to cover a serve loop registering as its
+#: process boots, and still fifty times inside the five second timeout that is
+#: the alternative answer.
+_NO_RESPONDERS_GRACE_S = 0.05
+_NO_RESPONDERS_ATTEMPTS = 3
+
+#: How long a read's fetch waits before giving up. Sized against a server one
+#: round trip away and never reached in the normal case, because every read
+#: below knows how many messages it is asking for.
+_READ_TIMEOUT_S = 2.0
+
+#: How many messages one fetch asks for at most.
+_READ_BATCH = 256
+
+#: How long a read's consumer survives if this process dies mid-read. Short: it
+#: exists for the length of one call.
+_READ_CONSUMER_IDLE_S = 30.0
+
 #: How long one pull for posted work parks before looking at its stop event.
 #: Cancellable, unlike Redis' blocking pop, so this bounds nothing a caller
 #: waits on — it only decides how often an idle serve loop wakes.
 _POST_FETCH_TIMEOUT_S = 1.0
+
+#: Where a tape record carries the stamp its writer chose, when it chose one.
+#: A header rather than a field on the record, so it cannot collide with
+#: anything a feed prints.
+RECORDED_MS_HEADER = "Mftik-Recorded-Ms"
 
 #: How long :meth:`NatsTransport.close` waits for the outbound buffer. Short:
 #: everything still in it has already been published to a server that is one
@@ -191,6 +216,10 @@ class NatsTransport(BrokerTransport):
         self._ensured: set[str] = set()
         self._names: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        # One per state name. See :meth:`_state_lock`. Bounded by how many
+        # names this process writes — an account's book and its ledger — not by
+        # traffic.
+        self._state_locks: dict[str, asyncio.Lock] = {}
 
     # --- names -------------------------------------------------------------
 
@@ -479,70 +508,71 @@ class NatsTransport(BrokerTransport):
             )
 
     async def fetch_log_buffer(self, topic: str) -> list[str]:
+        """Everything the fan-out stream is still holding for ``topic``.
+
+        All of it rather than the newest N, and the cap is what makes that safe:
+        a subject holds at most :data:`FANOUT_MAX_MSGS_PER_SUBJECT` messages, so
+        "all of them" is bounded by config rather than by traffic.
+        """
         subject = self._fanout_subject(topic)
-        return [raw for _ms, raw in await self._tail(self._fanout_stream, subject)]
+        held = (await self._subject_counts(self._fanout_stream, subject)).get(
+            subject, 0
+        )
+        if not held:
+            return []
+        rows = await self._read(
+            self._fanout_stream,
+            subject,
+            expected=held,
+            config=js_api.ConsumerConfig(
+                deliver_policy=js_api.DeliverPolicy.ALL,
+                ack_policy=js_api.AckPolicy.NONE,
+                filter_subject=subject,
+                inactive_threshold=_READ_CONSUMER_IDLE_S,
+            ),
+        )
+        return [raw for _ms, raw in rows]
 
-    async def _tail(
-        self, stream: str, subject: str, *, count: int | None = None
-    ) -> list[tuple[int, str]]:
-        """The newest ``count`` messages on ``subject`` as ``(stamped_ms, raw)``.
+    async def _subject_counts(self, stream: str, pattern: str) -> dict[str, int]:
+        """How many messages each live subject under ``pattern`` is holding.
 
-        Reads by offset, which is the whole reason fan-out is JetStream. The
-        arithmetic is on the stream's own first and last sequence rather than on
-        a count of messages, because a consumer cannot be asked to skip: it
-        starts where it is told and reads forward.
-
-        ``subject`` must name one subject, not a wildcard — the sequence bounds
-        below are the stream's, so they only describe a single-subject stream or
-        a stream filtered to its last subject.
+        The cheap half of every read here, and the reason none of them guess. A
+        consumer cannot say how much it is about to deliver, so a fetch without
+        an expected count has to wait out its own timeout to learn it has them
+        all — which, on the paths a strategy reads its ledger through, was a
+        whole second per call.
         """
         try:
-            info = await self.js.stream_info(stream, subjects_filter=subject)
+            info = await self.js.stream_info(stream, subjects_filter=pattern)
         except nats.js.errors.NotFoundError:
-            return []
-        state = info.state
-        total = (state.subjects or {}).get(subject, 0) if state.subjects else 0
-        if not total:
-            return []
-        want = total if count is None else min(count, total)
-        if want <= 0:
-            return []
+            return {}
+        return dict(info.state.subjects or {})
 
-        # ``last_seq`` is the stream's, and on a per-feed stream that is this
-        # subject's. On the shared fan-out stream it may belong to another
-        # subject, which only ever makes the window wider — the consumer is
-        # filtered, so it still yields nothing but this subject's messages.
-        start = max(state.first_seq, state.last_seq - want + 1)
-        return await self._read_from(stream, subject, start=start, limit=want)
-
-    async def _read_from(
+    async def _read(
         self,
         stream: str,
         subject: str,
         *,
-        start: int,
-        limit: int,
+        expected: int,
+        config: js_api.ConsumerConfig,
     ) -> list[tuple[int, str]]:
-        """``limit`` messages on ``subject`` from sequence ``start``, oldest first."""
-        sub = await self.js.pull_subscribe(
-            subject,
-            stream=stream,
-            config=js_api.ConsumerConfig(
-                deliver_policy=js_api.DeliverPolicy.BY_START_SEQUENCE,
-                opt_start_seq=start,
-                ack_policy=js_api.AckPolicy.NONE,
-                filter_subject=subject,
-                # Short, because this consumer exists for the length of one
-                # read. The server reaps it if this process dies mid-warm-up.
-                inactive_threshold=30.0,
-            ),
-        )
+        """``expected`` messages through a consumer of ``config``, oldest first.
+
+        ``expected`` is what makes this prompt: the batch is sized to it, so the
+        server answers as soon as it has that many rather than when a timeout
+        expires. It is an upper bound, not a promise — a fetch that comes up
+        short returns what it got.
+        """
+        if expected <= 0:
+            return []
+        sub = await self.js.pull_subscribe(subject, stream=stream, config=config)
         rows: list[tuple[int, str]] = []
         try:
-            while len(rows) < limit:
+            while len(rows) < expected:
                 try:
                     msgs = await sub.fetch(
-                        batch=min(limit - len(rows), 256), timeout=1.0
+                        batch=min(expected - len(rows), _READ_BATCH),
+                        timeout=_READ_TIMEOUT_S,
                     )
                 except (nats.errors.TimeoutError, TimeoutError):
                     break
@@ -576,19 +606,45 @@ class NatsTransport(BrokerTransport):
         inbox: str | None,
         timeout: float,
     ) -> str:
-        try:
-            msg = await self.nc.request(
-                self._rpc_subject(subject), raw.encode(), timeout=timeout
-            )
-        except nats.errors.NoRespondersError:
-            # Nobody is serving this subject. The caller's question was "is this
-            # plane there", whatever it was asking for, and a timeout is the
-            # answer it already knows how to read — so it gets that, several
-            # seconds sooner than it would have got it from waiting.
-            raise RequestTimeoutError(subject, request_id, timeout) from None
-        except (nats.errors.TimeoutError, TimeoutError):
-            raise RequestTimeoutError(subject, request_id, timeout) from None
-        return msg.data.decode()
+        """Ask, and give a subject a moment to have somebody on it.
+
+        No responders is the server saying its subscription table had nobody on
+        this subject *at the instant the message arrived*, which is nearly always
+        "that plane is down" and occasionally "that plane is coming up". Treating
+        one sample as final is a race with every boot: a plane whose serve loop
+        registers a millisecond after the API's first request would be reported
+        down, and on the anycast subjects the whole pool can look empty during a
+        rolling restart.
+
+        So it is re-asked a couple of times, briefly, and only within the
+        caller's own deadline. A subject that is really unserved still fails in
+        a fraction of a second rather than the whole timeout, which is what makes
+        core request-reply worth having here — it is the difference between the
+        control plane learning a plane is down now and learning it five seconds
+        from now, and the grace below is two orders of magnitude inside that.
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
+        subject_name = self._rpc_subject(subject)
+        payload = raw.encode()
+        for attempt in range(_NO_RESPONDERS_ATTEMPTS):
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                msg = await self.nc.request(
+                    subject_name, payload, timeout=remaining
+                )
+            except nats.errors.NoRespondersError:
+                last = attempt == _NO_RESPONDERS_ATTEMPTS - 1
+                grace = _NO_RESPONDERS_GRACE_S
+                if last or deadline - asyncio.get_running_loop().time() <= grace:
+                    break
+                await asyncio.sleep(grace)
+                continue
+            except (nats.errors.TimeoutError, TimeoutError):
+                break
+            return msg.data.decode()
+        raise RequestTimeoutError(subject, request_id, timeout) from None
 
     async def probe(
         self,
@@ -713,9 +769,38 @@ class NatsTransport(BrokerTransport):
     def _state_key(self, name: str, field: str) -> str:
         return _kv_key(f"{name}.{field}")
 
+    def _state_lock(self, name: str) -> asyncio.Lock:
+        """Serialise this process' writes to one state name.
+
+        Redis gets this from the server: a ``MULTI`` is one round trip, so two
+        writers' commands cannot interleave and the last one issued is the one
+        that stands. KV has no transaction across keys, so
+        :meth:`state_replace` is three round trips and two of them *can*
+        interleave — and the callers doing so are not hypothetical. TD writes
+        an order and, from the OMS callback that same write triggered, schedules
+        a whole-book replace as its own task; a handful of those are in flight
+        at once during a burst of fills. Without a lock the one that finishes
+        last wins rather than the one that started last, which puts a cancelled
+        order back in the book.
+
+        A lock inside the process is enough because a state name has exactly one
+        writer — the session that owns that account — so there is no second
+        process to race. Ordering, not mutual exclusion, is what this buys:
+        asyncio runs ready tasks in the order they were created, so acquiring
+        here in that order is what makes "last issued wins" true again.
+        """
+        lock = self._state_locks.get(name)
+        if lock is None:
+            lock = self._state_locks[name] = asyncio.Lock()
+        return lock
+
     async def state_put_many(self, name: str, values: Mapping[str, str]) -> None:
         if not values:
             return
+        async with self._state_lock(name):
+            await self._put_fields(name, values)
+
+    async def _put_fields(self, name: str, values: Mapping[str, str]) -> None:
         bucket = await self._bucket("state")
         for field, raw in values.items():
             await bucket.put(self._state_key(name, field), raw.encode())
@@ -723,18 +808,18 @@ class NatsTransport(BrokerTransport):
     async def state_replace(self, name: str, values: Mapping[str, str]) -> None:
         """Write the new fields, then drop whatever the old set had extra.
 
-        KV has no transaction across keys, so the delete-then-write Redis does
-        in one ``MULTI`` is not available. This order is the one that keeps the
-        promise that matters: a reader between the two calls sees the new values
-        plus some stale ones, never an empty state. Reversing it would give a
-        strategy reading its ledger mid-reconciliation an answer of "no
-        balance", which it would act on.
+        This order — rather than Redis' delete-then-write — is the one that
+        keeps the promise that matters: a reader arriving between the two calls
+        sees the new values plus possibly a stale one, never an empty state.
+        Reversing it would give a strategy reading its ledger mid-replace an
+        answer of "no balance", which it would act on.
         """
-        before = set(await self.state_all(name))
-        await self.state_put_many(name, values)
-        stale = before - set(values)
-        if stale:
-            await self.state_drop(name, sorted(stale))
+        async with self._state_lock(name):
+            before = set(await self._all_fields(name))
+            await self._put_fields(name, values)
+            stale = before - set(values)
+            if stale:
+                await self._drop_fields(name, sorted(stale))
 
     async def state_get(self, name: str, field: str) -> str | None:
         bucket = await self._bucket("state")
@@ -753,6 +838,9 @@ class NatsTransport(BrokerTransport):
         subject tree delivering the last message per subject is the same answer
         in one pass.
         """
+        return await self._all_fields(name)
+
+    async def _all_fields(self, name: str) -> dict[str, str]:
         bucket = await self._bucket("state")
         prefix = _kv_key(f"{name}.")
         rows = await self._kv_scan(bucket, f"{prefix}>")
@@ -761,11 +849,18 @@ class NatsTransport(BrokerTransport):
     async def _kv_scan(
         self, bucket: nats.js.kv.KeyValue, pattern: str
     ) -> dict[str, str]:
-        """Every live key under ``pattern`` with its value."""
+        """Every live key under ``pattern`` with its value, in one pass."""
         status = await bucket.status()
         stream = status.stream_info.config.name
         assert stream is not None
-        subject = f"$KV.{status.bucket}.{pattern}"
+        head = f"$KV.{status.bucket}."
+        subject = f"{head}{pattern}"
+        # One message per key survives — the bucket keeps a history of one — so
+        # the number of subjects is the number of keys, and that is the batch.
+        subjects = await self._subject_counts(stream, subject)
+        if not subjects:
+            return {}
+        rows: dict[str, str] = {}
         sub = await self.js.pull_subscribe(
             subject,
             stream=stream,
@@ -773,28 +868,29 @@ class NatsTransport(BrokerTransport):
                 deliver_policy=js_api.DeliverPolicy.LAST_PER_SUBJECT,
                 ack_policy=js_api.AckPolicy.NONE,
                 filter_subject=subject,
-                inactive_threshold=30.0,
+                inactive_threshold=_READ_CONSUMER_IDLE_S,
             ),
         )
-        head = f"$KV.{status.bucket}."
-        rows: dict[str, str] = {}
         try:
-            while True:
+            remaining = len(subjects)
+            while remaining > 0:
                 try:
-                    msgs = await sub.fetch(batch=256, timeout=1.0)
+                    msgs = await sub.fetch(
+                        batch=min(remaining, _READ_BATCH), timeout=_READ_TIMEOUT_S
+                    )
                 except (nats.errors.TimeoutError, TimeoutError):
                     break
                 if not msgs:
                     break
+                remaining -= len(msgs)
                 for msg in msgs:
-                    # A delete or a purge leaves a marker under the key, which
-                    # is how a watcher learns the key went. To a reader it is
-                    # simply absent.
+                    # A delete or a purge leaves a marker under the key, which is
+                    # how a watcher learns the key went. To a reader it is simply
+                    # absent — but it is still a message, so it is still one of
+                    # the subjects counted above.
                     if (msg.headers or {}).get("KV-Operation") in ("DEL", "PURGE"):
                         continue
                     rows[msg.subject[len(head) :]] = msg.data.decode()
-                if len(msgs) < 256:
-                    break
         finally:
             with contextlib.suppress(Exception):
                 await sub.unsubscribe()
@@ -803,6 +899,10 @@ class NatsTransport(BrokerTransport):
     async def state_drop(self, name: str, fields: Sequence[str]) -> int:
         if not fields:
             return 0
+        async with self._state_lock(name):
+            return await self._drop_fields(name, fields)
+
+    async def _drop_fields(self, name: str, fields: Sequence[str]) -> int:
         bucket = await self._bucket("state")
         dropped = 0
         for field in fields:
@@ -820,9 +920,10 @@ class NatsTransport(BrokerTransport):
     async def state_clear(self, names: Sequence[str]) -> None:
         bucket = await self._bucket("state")
         for name in names:
-            for key in await self._kv_scan(bucket, f"{_kv_key(name)}.>"):
-                with contextlib.suppress(nats.js.errors.KeyNotFoundError):
-                    await bucket.purge(key)
+            async with self._state_lock(name):
+                for key in await self._kv_scan(bucket, f"{_kv_key(name)}.>"):
+                    with contextlib.suppress(nats.js.errors.KeyNotFoundError):
+                        await bucket.purge(key)
 
     # --- leases ------------------------------------------------------------
     #
@@ -1009,13 +1110,49 @@ class NatsTransport(BrokerTransport):
         *,
         maxlen: int,
         ttl_seconds: int,
+        recorded_ms: int | None = None,
     ) -> None:
-        stream = await self._ensure_tape_stream(
-            feed, maxlen=maxlen, ttl_seconds=ttl_seconds
+        await self._ensure_tape_stream(feed, maxlen=maxlen, ttl_seconds=ttl_seconds)
+        headers = (
+            None if recorded_ms is None else {RECORDED_MS_HEADER: str(recorded_ms)}
         )
-        del stream
         await self.js.publish(
-            self._tape_subject(feed), json.dumps(dict(fields)).encode()
+            self._tape_subject(feed),
+            json.dumps(dict(fields)).encode(),
+            headers=headers,
+        )
+
+    async def _tape_newest(self, feed: str, *, count: int) -> list[tuple[int, str]]:
+        """The newest ``count`` records of ``feed``, by sequence arithmetic.
+
+        Only sound because a feed owns its stream outright: sequences are the
+        stream's, so ``last_seq - count + 1`` is this feed's ``count``-from-the-end
+        and nothing else's. The same arithmetic on a shared stream reads a window
+        of whatever was written last, which is generally somebody else's — see
+        :meth:`fetch_log_buffer` for how a shared subject is read instead.
+        """
+        stream = self._tape_stream(feed)
+        subject = self._tape_subject(feed)
+        try:
+            info = await self.js.stream_info(stream, subjects_filter=subject)
+        except nats.js.errors.NotFoundError:
+            return []
+        held = (info.state.subjects or {}).get(subject, 0)
+        if not held:
+            return []
+        want = min(count, held)
+        start = max(info.state.first_seq, info.state.last_seq - want + 1)
+        return await self._read(
+            stream,
+            subject,
+            expected=want,
+            config=js_api.ConsumerConfig(
+                deliver_policy=js_api.DeliverPolicy.BY_START_SEQUENCE,
+                opt_start_seq=start,
+                ack_policy=js_api.AckPolicy.NONE,
+                filter_subject=subject,
+                inactive_threshold=_READ_CONSUMER_IDLE_S,
+            ),
         )
 
     async def tape_tail(
@@ -1023,8 +1160,7 @@ class NatsTransport(BrokerTransport):
     ) -> list[tuple[int, dict[str, str]]]:
         if count <= 0:
             return []
-        name = self._tape_stream(feed)
-        rows = await self._tail(name, self._tape_subject(feed), count=count)
+        rows = await self._tape_newest(feed, count=count)
         out: list[tuple[int, dict[str, str]]] = []
         for stamped_ms, raw in rows:
             try:
@@ -1137,12 +1273,24 @@ class NatsTransport(BrokerTransport):
 
 
 def _stamp_ms(msg: Msg) -> int:
-    """A stored message's stream timestamp, in milliseconds.
+    """When a stored message was recorded, in milliseconds.
 
-    The transport's clock, which is what the tape's continuity marks are
-    measured against. Not the venue's — that rides on the record as a field and
-    answers a different question.
+    The server's own stamp unless the writer named one, which is the clock the
+    tape's continuity marks are measured against. Not the venue's — that rides
+    on the record as a field and answers a different question.
+
+    :meth:`NatsTransport.tape_trim_before` asks the server to find a horizon by
+    time, so it reads the server's stamp even for a record carrying a header.
+    The two agree to within a round trip for anything actually being recorded;
+    a record placed at an arbitrary stamp is a test's, and trimming is not what
+    it is testing.
     """
+    named = (msg.headers or {}).get(RECORDED_MS_HEADER)
+    if named is not None:
+        try:
+            return int(named)
+        except ValueError:
+            pass
     try:
         return int(msg.metadata.timestamp.timestamp() * 1000)
     except Exception:

@@ -11,7 +11,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from broker_harness import a_broker
+from broker_harness import a_broker, append_tape_at
 from mftik.broker import Broker
 from mftik.exchange.models import AggTrade, Side, Trade
 from mftik.exchange.tickers import UniversalTicker
@@ -136,7 +136,7 @@ async def test_a_stopped_feed_says_so(broker: Broker) -> None:
     """History that ends in the past is still history — but it ends."""
     await broker.tape_mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
     await _record(broker, AGG_FEED, "1", "1")
-    await broker.tape_mark_stopped(AGG_FEED, at_ms=2)
+    await broker.tape_mark_stopped(AGG_FEED, at_ms=2, ttl_seconds=3600)
 
     result = await _tape(broker).read(TICKER)
 
@@ -188,12 +188,12 @@ async def test_limit_takes_the_most_recent(broker: Broker) -> None:
 async def _record_at(
     broker: Broker, feed: str, trade_id: str, ms: int, *, agg: bool = True
 ) -> None:
-    """Append with an explicit stream id.
+    """Append a record stamped ``ms``.
 
-    The id is the clock the continuity mark and the gaps are stamped against,
-    so a test about holes has to be able to place a record on one side of one.
-    Letting Redis stamp them means the only reachable gaps are however long the
-    test slept for.
+    That stamp is the clock the continuity mark and the gaps are measured
+    against, so a test about holes has to be able to place a record on one side
+    of one. Letting the store stamp them means the only reachable gaps are
+    however long the test slept for.
     """
     fields = {
         "trade_id": trade_id,
@@ -205,14 +205,14 @@ async def _record_at(
     if agg:
         fields["first_trade_id"] = trade_id
         fields["last_trade_id"] = trade_id
-    await broker.redis.xadd(broker.tape_key(feed), fields, id=f"{ms}-0")
+    await append_tape_at(broker, feed, fields, recorded_ms=ms)
 
 
 async def _interrupted(
     broker: Broker, *, stopped_ms: int, resumed_ms: int
 ) -> None:
     """One clean stop/start cycle — the shape a deploy leaves behind."""
-    await broker.tape_mark_stopped(AGG_FEED, at_ms=stopped_ms)
+    await broker.tape_mark_stopped(AGG_FEED, at_ms=stopped_ms, ttl_seconds=3600)
     await broker.tape_mark_recording(
         AGG_FEED, since_ms=resumed_ms, ttl_seconds=3600
     )

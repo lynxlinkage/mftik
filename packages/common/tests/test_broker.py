@@ -10,7 +10,7 @@ from mftik.broker import (
     IncomingRequest,
     RequestTimeoutError,
 )
-from mftik.protocol import Envelope, UntypedEnvelope
+from mftik.protocol import Envelope, Topics, UntypedEnvelope
 
 
 @pytest.fixture
@@ -175,9 +175,7 @@ async def test_serve_handler(broker: Broker) -> None:
         )
         stop.set()
 
-    task = asyncio.create_task(
-        broker.serve_handler("ping", handler, stop=stop)
-    )
+    task = asyncio.create_task(broker.serve_handler("ping", handler, stop=stop))
     await asyncio.sleep(0.05)
 
     response = await broker.request(
@@ -238,7 +236,10 @@ async def test_psubscribe_receives_channel_and_envelope(broker: Broker) -> None:
     received: asyncio.Future[tuple[str, UntypedEnvelope]] = loop.create_future()
 
     async def reader() -> None:
-        async for channel, env in broker.psubscribe("log.*", stop=stop):
+        # ``log.*.*``, not ``log.*``: one wildcard per segment. Redis globs the
+        # whole channel name and matches either, so this test used to pass with
+        # the short form on a pattern no other transport can read.
+        async for channel, env in broker.psubscribe(Topics.log_pattern(), stop=stop):
             if not received.done():
                 received.set_result((channel, env))
             break
