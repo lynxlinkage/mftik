@@ -1448,6 +1448,25 @@ def _stamp_ms(msg: Msg) -> int:
         return 0
 
 
+class _Stopped:
+    """The stop event, in a shape a queue can carry.
+
+    One instance, :data:`_STOPPED`, and it is recognised by identity: no message
+    can be this object, whatever its topic and payload turn out to be.
+    """
+
+    __slots__ = ()
+
+
+_STOPPED = _Stopped()
+
+
+async def _tap_stop(stop: asyncio.Event, inbound: asyncio.Queue[Any]) -> None:
+    """Turn the stop event into the last item on ``inbound``."""
+    await stop.wait()
+    inbound.put_nowait(_STOPPED)
+
+
 async def _iter_until_stopped(
     inbound: asyncio.Queue[tuple[str, str | None]] | asyncio.Queue[tuple[str, str]],
     *,
@@ -1455,79 +1474,60 @@ async def _iter_until_stopped(
 ) -> AsyncIterator:
     """Yield from ``inbound`` until ``stop`` is set.
 
-    Racing the queue against the stop event, rather than polling the queue with
-    a timeout, is what makes a NATS serve loop stop the moment it is told to.
-    The Redis transport cannot do this — a blocking pop is not cancellable
-    without losing whatever it was about to return — and waiting out one poll on
-    every teardown is the cost the whole test suite used to pay for it.
+    Stopping the moment it is told to, rather than waiting out a poll, is what
+    makes a NATS teardown quick. The Redis transport cannot do it — a blocking
+    pop is not cancellable without losing what it was about to return — and
+    waiting out one poll per teardown is what the whole suite used to pay.
 
-    Racing means two waiters, and both are this function's to clean up. See
-    :func:`_retire` for what happens to the one that loses.
+    The obvious way to get that is to race ``inbound.get()`` against
+    ``stop.wait()`` under :func:`asyncio.wait`, and it is wrong twice over.
+    Racing needs the read wrapped in a task, and a task is not something the
+    caller's cancellation reaches: ``asyncio.wait`` drops its own callbacks when
+    it is cancelled and leaves what it was waiting on alone, so a stopped
+    session left that read pending until the collector found it and asyncio
+    logged ``Task was destroyed but it is pending`` (#81). And cancellation can
+    land in the instant *after* the read has taken a message, where cancelling
+    is a no-op and the message is already out of the queue and in a local with
+    nowhere left to go.
+
+    So the stop event arrives through the queue rather than beside it. There is
+    one waiter, this generator awaits it directly instead of a task doing it,
+    and both problems become asyncio's own contract: a cancellation reaches the
+    read, and a cancelled ``Queue.get`` leaves what it was about to take in the
+    queue instead of holding it. Nothing is dropped here because nothing is ever
+    held here.
+
+    Handover order mostly falls out of it too — the sentinel goes to the tail,
+    so everything queued ahead of it is yielded first, including the likelier
+    ordering of a plane told to stop while its subject is busy. That matters
+    because ``_pump_posted`` acknowledges posted work as it hands it over, so a
+    message dropped here is a backfill or an account sweep that the queue will
+    not offer to anybody again.
+
+    The price is one task, and :func:`_tap_stop` holds no message — which is the
+    whole reason to prefer it to one that does.
     """
     if stop is None:
         while True:
             yield await inbound.get()
 
-    stopping = asyncio.ensure_future(stop.wait())
-    # Hoisted out of the loop so ``finally`` can reach it, which is the whole
-    # point: the read below is where this generator spends its life, so it is
-    # also where a cancellation lands.
-    reading: asyncio.Future[Any] | None = None
+    tap = asyncio.create_task(_tap_stop(stop, inbound))
     try:
-        while not stop.is_set():
-            reading = asyncio.ensure_future(inbound.get())
-            done, _pending = await asyncio.wait(
-                {reading, stopping}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if reading in done:
-                item = reading.result()
-                # Taken, so no longer something ``finally`` should throw away.
-                reading = None
-                yield item
-                continue
-            # Retired here rather than left to ``finally`` because the drain
-            # below has to come after it: a cancelled ``Queue.get`` leaves what
-            # it was about to take in the queue, where ``get_nowait`` finds it,
-            # and one still waiting could take a late arrival with nobody left
-            # to read it.
-            await _retire(reading)
-            reading = None
-            break
-        # Whatever arrived before the event was set is still work this process
-        # accepted: ``_pump_posted`` acknowledges a posted message as it hands
-        # it over, so one dropped here is a backfill or an account sweep that
-        # the queue will not offer to anybody again.
-        #
-        # Drained after the loop rather than inside the stopping branch, because
-        # both ways out need it. A message that *wins* the race against the stop
-        # event is yielded and the loop goes round to a condition that is now
-        # false — which used to leave everything queued behind that one message
-        # unread, and that is the likelier ordering of the two: a plane is
-        # usually told to stop while its subject is busy.
+        while True:
+            item = await inbound.get()
+            if item is _STOPPED:
+                break
+            yield item
+        # The tail is where the sentinel goes, but not everything arrives before
+        # it: ``_pump_posted`` finishes the batch it is holding before it looks
+        # at the event again, so a message it has already acknowledged can land
+        # behind the sentinel rather than ahead of it. Hand over what is there.
         while not inbound.empty():
             yield inbound.get_nowait()
     finally:
-        for waiter in (reading, stopping):
-            if waiter is not None:
-                await _retire(waiter)
-
-
-async def _retire(waiter: asyncio.Future[Any]) -> None:
-    """Cancel one waiter and wait for it to admit it.
-
-    ``asyncio.wait`` does not cancel what it was waiting on when it is itself
-    cancelled — it only drops its own callbacks — so a loser left over from the
-    race above is nobody's but ours. A session being stopped raises out of that
-    ``wait``, and the abandoned ``Queue.get`` then sat pending until the garbage
-    collector reached it and asyncio logged ``Task was destroyed but it is
-    pending``: one line per subscribe loop, per teardown, in every plane on this
-    transport. Redis never showed it because its serve loop is a poll with a
-    timeout and has no second waiter to leak.
-
-    The await, not just the cancel, is what makes a teardown finish quiet rather
-    than eventually: without it the task is cancelled but not yet done, and a
-    caller that checks has to guess how long to wait first.
-    """
-    waiter.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await waiter
+        tap.cancel()
+        # Awaited, not merely cancelled, so a teardown finishes quiet rather
+        # than eventually: a cancelled task is not yet a done task, and a caller
+        # that checks would otherwise have to guess how long to wait first.
+        with contextlib.suppress(asyncio.CancelledError):
+            await tap

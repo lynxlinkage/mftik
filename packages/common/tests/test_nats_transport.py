@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable, Callable
 
 import pytest
 from broker_harness import a_broker, only_on
@@ -473,60 +474,137 @@ async def test_a_stopped_serve_loop_still_hands_over_what_it_had_taken() -> None
     assert seen == [f"work-{n}" for n in range(5)]
 
 
-def _queue_readers() -> list[asyncio.Task]:
-    """Every unfinished ``Queue.get`` the loop is still holding.
+_ARM_TIMEOUT_S = 10.0
+_NUDGE_INTERVAL_S = 0.05
 
-    Named by what leaked rather than counted, so a failure says which waiter is
-    still there. ``all_tasks`` only returns unfinished ones, which is exactly the
-    set asyncio complains about at collection time.
+
+def _leftovers(before: frozenset[asyncio.Task]) -> frozenset[asyncio.Task]:
+    """Unfinished tasks that were not already running when the loop started.
+
+    A set difference rather than a count, so a failure can name what is still
+    pending, and so the answer does not depend on the order ``all_tasks`` happens
+    to hand its contents back. ``all_tasks`` returns only unfinished tasks, which
+    is exactly the set asyncio complains about at collection time.
     """
-    return [
-        task
-        for task in asyncio.all_tasks()
-        if getattr(task.get_coro(), "__qualname__", "") == "Queue.get"
-    ]
+    return frozenset(asyncio.all_tasks()) - before - {asyncio.current_task()}
+
+
+async def _arm(
+    task: asyncio.Task, read: asyncio.Event, nudge: Callable[[], Awaitable[None]]
+) -> None:
+    """Wait until the loop under test has read one message, nudging until it has.
+
+    Nudged repeatedly rather than once because a fan-out subscription only sees
+    what is published after its consumer exists, and that consumer is built
+    inside ``task``.
+
+    Bounded, and watching the task as well as the event, because the alternative
+    is a test that hangs: a loop that raises on its way up would otherwise leave
+    this spinning, and with no ``pytest-timeout`` here a regression would stall
+    CI instead of failing it.
+    """
+    clock = asyncio.get_running_loop()
+    deadline = clock.time() + _ARM_TIMEOUT_S
+    while not read.is_set():
+        if task.done():
+            # Awaited rather than asserted on, so the failure is the loop's own
+            # traceback instead of a report that something went wrong nearby.
+            await task
+            raise AssertionError("the loop ended before it read anything")
+        if clock.time() > deadline:
+            raise AssertionError(f"the loop read nothing within {_ARM_TIMEOUT_S}s")
+        await nudge()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(read.wait(), _NUDGE_INTERVAL_S)
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_subscribe_loop_leaves_no_reader_behind() -> None:
-    """Teardown has to retire the waiter that lost the race, not abandon it.
+async def test_a_cancelled_subscribe_loop_leaves_nothing_pending() -> None:
+    """A stopped session cancels the task running the `async for`, mid-read.
 
-    A stopped session cancels the task running the `async for`, which raises out
-    of the `asyncio.wait` inside — and `asyncio.wait` does not cancel what it was
-    waiting on, it only drops its own callbacks. So the `Queue.get` future was
-    left pending, and asyncio said so when the collector eventually reached it:
+    That read used to be a task of its own, raced against the stop event under
+    `asyncio.wait`, and `asyncio.wait` does not cancel what it was waiting on
+    when it is cancelled — it drops its own callbacks and leaves the rest. So the
+    read was left pending, and asyncio said so once the collector reached it:
     `Task was destroyed but it is pending`, one per subscribe loop per teardown,
     in every plane on this transport (issue #81). Redis is quiet because its
-    serve loop is a poll with a timeout and has no second waiter to lose.
+    serve loop is a poll with a timeout and has no second waiter to abandon.
 
-    Asserted on the loop's own task set rather than on log output, because the
-    warning is emitted from `__del__` and when that runs is the collector's
-    business, not this test's.
+    Asserted on the task set rather than on log output, because that warning is
+    emitted from `__del__` and when it runs is the collector's business. Asserted
+    on the whole set rather than on reads specifically, so it still holds for the
+    stop tap that replaced the race, and for whatever replaces that.
     """
     inbound: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
     stop = asyncio.Event()
-    before = _queue_readers()
+    read = asyncio.Event()
+    before = frozenset(asyncio.all_tasks())
 
     async def subscribe_loop() -> None:
         async for _item in _iter_until_stopped(inbound, stop=stop):
-            pass
+            read.set()
+
+    async def nudge() -> None:
+        inbound.put_nowait(("wake", None))
 
     task = asyncio.create_task(subscribe_loop())
-    # Parked on the read, which is where a subscribe loop spends its life and
-    # therefore where a cancellation lands.
-    while _queue_readers() == before:
-        await asyncio.sleep(0)
+    await _arm(task, read, nudge)
 
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
 
-    assert _queue_readers() == before
+    assert _leftovers(before) == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_read_does_not_swallow_the_message_it_had_won() -> None:
+    """Cancellation must not consume a message it has no way to deliver.
+
+    The race this loop used to run left a window one instant wide: the read
+    completes, and the cancellation arrives before the loop is scheduled to take
+    what it returned. Cancelling something that already holds a result does
+    nothing, so the message was neither in the queue nor with the consumer — and
+    on `serve` that is a posted request `_pump_posted` had already acknowledged,
+    which makes it a backfill hand-off or an account-history sweep that simply
+    stopped existing. Exactly the loss the handover after the loop prevents, in
+    the one path that did not go through it.
+
+    Asserted as conservation rather than as a location, because either place is
+    fine and which one it lands in is the scheduler's business: handed to the
+    consumer, or left in the queue for whoever reads next.
+    """
+    inbound: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
+    stop = asyncio.Event()
+    read = asyncio.Event()
+    seen: list[str] = []
+
+    async def subscribe_loop() -> None:
+        async for raw, _reply in _iter_until_stopped(inbound, stop=stop):
+            seen.append(raw)
+            read.set()
+
+    async def nudge() -> None:
+        inbound.put_nowait(("wake", None))
+
+    task = asyncio.create_task(subscribe_loop())
+    await _arm(task, read, nudge)
+    taken, queued = len(seen), inbound.qsize()
+
+    inbound.put_nowait(("late", None))
+    # One pass, which is the window: long enough for the read to have completed,
+    # too short for the loop to have been told that it did.
+    await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert (len(seen) - taken) + (inbound.qsize() - queued) == 1
 
 
 @pytest.mark.parametrize("loop_name", ["subscribe", "serve"])
 @pytest.mark.asyncio
-async def test_a_cancelled_plane_loop_leaves_no_reader_behind(
+async def test_a_cancelled_plane_loop_leaves_nothing_pending(
     broker: Broker, loop_name: str
 ) -> None:
     """The same property through the two doors a plane actually goes in by.
@@ -535,29 +613,36 @@ async def test_a_cancelled_plane_loop_leaves_no_reader_behind(
     counts in issue #81 were: one orphan per loop in flight, so an STS session
     holding two contributed two and MD's one contributed one. Worth asserting
     here as well as on the helper, because the leak is only visible to whoever
-    owns the outermost `async for` and a future rearrangement of these two could
-    put a waiter somewhere the helper's `finally` cannot reach.
+    owns the outermost `async for`, and a future rearrangement of these two could
+    park a waiter somewhere the helper's `finally` cannot reach.
     """
     stop = asyncio.Event()
-    before = _queue_readers()
+    read = asyncio.Event()
+    topic = "md.teardown" if loop_name == "subscribe" else "td.teardown"
+    before = frozenset(asyncio.all_tasks())
 
     async def plane_loop() -> None:
         if loop_name == "subscribe":
-            async for _env in broker.subscribe("md.teardown", stop=stop):
-                pass
+            async for _env in broker.subscribe(topic, stop=stop):
+                read.set()
         else:
-            async for _req in broker.serve("td.teardown", stop=stop):
-                pass
+            async for _req in broker.serve(topic, stop=stop):
+                read.set()
+
+    async def nudge() -> None:
+        if loop_name == "subscribe":
+            await broker.publish(topic, _envelope())
+        else:
+            await broker.post(topic, _envelope())
 
     task = asyncio.create_task(plane_loop())
-    while _queue_readers() == before:
-        await asyncio.sleep(0)
+    await _arm(task, read, nudge)
 
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
 
-    assert _queue_readers() == before
+    assert _leftovers(before) == frozenset()
 
 
 @pytest.mark.asyncio
