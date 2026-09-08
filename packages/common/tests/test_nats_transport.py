@@ -472,7 +472,6 @@ async def test_a_stopped_serve_loop_still_hands_over_what_it_had_taken() -> None
     assert seen == [f"work-{n}" for n in range(5)]
 
 
-
 @pytest.mark.asyncio
 async def test_a_ring_longer_than_the_stream_can_hold_is_refused(
     broker: Broker,
@@ -513,7 +512,6 @@ async def test_a_log_line_carries_the_expiry_its_caller_asked_for(
         subject=transport._fanout_subject(topic),  # noqa: SLF001
     )
     assert (msg.headers or {}).get("Nats-TTL") == "1800"
-
 
 
 @pytest.mark.asyncio
