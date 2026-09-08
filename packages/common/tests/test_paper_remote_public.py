@@ -1,4 +1,4 @@
-"""Paper remote public client smoke test (in-process engine + fakeredis)."""
+"""Paper remote public client smoke test (in-process engine + real broker)."""
 
 from __future__ import annotations
 

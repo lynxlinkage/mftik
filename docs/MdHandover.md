@@ -259,7 +259,7 @@ Each stage is useful alone and leaves the tree in a shippable state.
    per-feed token. With one MD this changes nothing observable — which is the
    point, and it is where I1/I2 get their tests.
 4. **The yield handshake.** `YieldFeed` / `FeedYielded`, dedup on `trade_id`,
-   buffer flush. Testable with two MDs against fakeredis and a paper venue.
+   buffer flush. Testable with two MDs against one broker and a paper venue.
 5. **Session migration and RPC cutover.** The last step, and the one gated on
    measuring STS's ACK tolerance first.
 

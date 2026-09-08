@@ -133,8 +133,9 @@ nothing a strategy author imports may require uvloop to work.
 
 All 2,926 tests were run both ways while making this change: every venue adapter
 against its stub server, the OMS, the broker, the TD/MD/STS session machinery.
-209 seconds either way, the suite being bound by fakeredis and sqlite rather
-than by the loop. **No test failed on uvloop that passed on asyncio.**
+209 seconds either way, the suite being bound by its stores rather than by the
+loop. (It ran against fakeredis and sqlite then; the broker suite has since
+moved to a real server, which made it slower without changing that.) **No test failed on uvloop that passed on asyncio.**
 
 The handful that did fail deserve the honest version rather than a rounded one:
 the same set on both loops except one that passed on uvloop, all of them about
