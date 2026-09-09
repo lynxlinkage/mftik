@@ -173,10 +173,15 @@ class SymbolClient:
     # --- internals ---------------------------------------------------------
 
     def _table_fresh(self, key: TableKey) -> bool:
-        return (
-            key in self._cache
-            and time.monotonic() - self._fetched_at.get(key, 0.0) < self.ttl
-        )
+        """Whether a *whole* table was loaded and has not lapsed.
+
+        Keyed on ``_fetched_at`` having an entry rather than defaulting a
+        missing one to ``0.0``: ``time.monotonic`` counts from boot on Linux,
+        so on a node that has just started ``now - 0.0`` is a few seconds and
+        a table nobody ever fetched would read as fresh.
+        """
+        fetched_at = self._fetched_at.get(key)
+        return fetched_at is not None and time.monotonic() - fetched_at < self.ttl
 
     def _cached_one(self, ticker: UniversalTicker) -> SymbolInfo | None:
         """A hit from the single-instrument cache or a still-fresh table."""
@@ -191,10 +196,14 @@ class SymbolClient:
         return None
 
     def _store_one(self, ticker: UniversalTicker, info: SymbolInfo) -> None:
+        """Remember one instrument, and only that.
+
+        Deliberately does not seed ``_cache`` / ``_reverse``: those hold whole
+        venue tables, and a handful of separately resolved rows sitting in
+        them is a table that looks loaded and is missing almost everything.
+        ``list`` and ``symbol_for`` answer from a real load or not at all.
+        """
         self._singles[ticker] = (time.monotonic(), info)
-        key = _key(ticker)
-        self._cache.setdefault(key, {})[ticker.symbol] = info
-        self._reverse.setdefault(key, {})[info.exch_ticker] = ticker.symbol
 
     def _install_table(
         self, key: TableKey, symbols: dict[str, SymbolInfo]

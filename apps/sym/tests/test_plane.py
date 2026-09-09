@@ -21,6 +21,7 @@ from mftik.protocol import (
     Topics,
 )
 from mftik.symbols import SymbolClient, SymbolNotFoundError
+from mftik.symbols import client as sym_client
 from mftik.symbols.client import LIST_PAGE
 from mftik_db.repositories import SymbolRepository
 from mftik_sym.plane import SymbolPlane
@@ -643,6 +644,28 @@ async def test_client_list_walks_pages(broker: Broker, served) -> None:
     assert [s.symbol for s in listed] == [f"S{i:04d}USDT" for i in range(total)]
     assert [p["offset"] for p in pages] == [0, LIST_PAGE]
     assert all(p["venue"] == VENUE and p["category"] == "Spot" for p in pages)
+
+
+async def test_client_get_does_not_pass_off_one_row_as_the_table(
+    broker: Broker, served, monkeypatch
+) -> None:
+    """A resolved single must not make the venue table look loaded.
+
+    ``time.monotonic`` counts from boot on Linux, so on a freshly started
+    node an unset ``_fetched_at`` reads as "fetched at 0.0, seconds ago"
+    and a one-instrument cache is served as the whole venue. Pinned to a
+    small clock so this fails everywhere, not only on a box that just
+    rebooted.
+    """
+    monkeypatch.setattr(sym_client.time, "monotonic", lambda: 1.0)
+    client = SymbolClient(broker)
+
+    assert await client.exch_ticker(_t("BTCUSDT")) == "BTC_USDT"
+
+    assert [i.symbol for i in await client.list(VENUE)] == ["BTCUSDT", "ETHUSDT"]
+    assert (
+        await client.symbol_for(VENUE, "ETH_USDT", category="Spot")
+    ) == _t("ETHUSDT")
 
 
 async def test_client_refetches_once_for_an_unknown_symbol(
