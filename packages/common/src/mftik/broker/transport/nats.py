@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import datetime as dt
 import json
 import logging
@@ -58,6 +59,7 @@ from mftik.broker.errors import (
     BrokerNotConnectedError,
     RequestTimeoutError,
     StateReadIncompleteError,
+    StreamShapeError,
 )
 from mftik.broker.transport.base import (
     LEASE_ANONYMOUS,
@@ -451,11 +453,63 @@ class NatsTransport(BrokerTransport):
                 await self.js.add_stream(config)
             except nats.js.errors.BadRequestError:
                 # Already there with a different shape — an older node's, or
-                # this node's before a constant here changed. Updating is right:
-                # the config in this file is what the code assumes, and a stream
-                # that disagrees is what silently breaks a retention promise.
-                await self.js.update_stream(config)
+                # this node's before a constant here changed. Updating is right
+                # for the difference this is usually about: an operator who
+                # raises ``MD_TAPE_MAXLEN`` wants the streams that already exist
+                # to follow, and refusing would leave MD unable to record a feed
+                # it has ever recorded before until someone deleted them by hand.
+                await self._reshape(config)
             self._ensured.add(config.name)
+
+    async def _reshape(self, config: js_api.StreamConfig) -> None:
+        """Move a live stream to ``config``, or say what stopped it.
+
+        Not every difference is a widening. A stream that has ``allow_msg_ttl``
+        will not give it up — ``update_stream`` answers ``message TTL status can
+        not be disabled`` — and there is no version of "apply the config anyway"
+        that gets past that.
+
+        What matters is where the refusal surfaces. This runs inside
+        :meth:`connect`, so the failure is not one call raising: it is every
+        plane failing to start, at once, and only on servers that already hold
+        the stream — which is every server except the fresh one a developer
+        tests against. A raw ``ServerError`` out of nats-py is a poor thing to
+        find at that moment, so the fields that disagree are named here instead.
+        """
+        try:
+            await self.js.update_stream(config)
+        except nats.js.errors.APIError as exc:
+            differences = await self._stream_differences(config) or ["unknown"]
+            raise StreamShapeError(
+                f"stream {config.name!r} is live with a shape this build cannot "
+                f"move it to: {'; '.join(differences)}. The server refused the "
+                f"change rather than applying it, so the stream has to be "
+                f"migrated or removed before a node declaring this config can "
+                f"start."
+            ) from exc
+
+    async def _stream_differences(self, wanted: js_api.StreamConfig) -> list[str]:
+        """Fields where the live stream disagrees with what this build declares.
+
+        Only the fields the caller set. A ``StreamConfig`` has thirty-eight of
+        them and the server fills most in, so comparing all of them would bury
+        the one that matters under defaults nobody wrote down.
+        """
+        try:
+            live = (await self.js.stream_info(str(wanted.name))).config
+        except Exception:
+            # The message is worth less without this, not worthless: the caller
+            # still learns which stream refused and that it refused.
+            return []
+        out: list[str] = []
+        for field in dataclasses.fields(wanted):
+            declared = getattr(wanted, field.name)
+            if declared is None:
+                continue
+            current = getattr(live, field.name, None)
+            if current != declared:
+                out.append(f"{field.name} is {current!r}, declared {declared!r}")
+        return out
 
     async def _bucket(self, kind: str) -> nats.js.kv.KeyValue:
         """The KV bucket for ``kind``, created on first use.

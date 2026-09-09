@@ -20,11 +20,16 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
 
+import nats.js.api as js_api
 import nats.js.errors
 import pytest
 from broker_harness import a_broker, inject_raw_request
 from mftik.broker import Broker
-from mftik.broker.errors import RequestTimeoutError, StateReadIncompleteError
+from mftik.broker.errors import (
+    RequestTimeoutError,
+    StateReadIncompleteError,
+    StreamShapeError,
+)
 from mftik.broker.transport.nats import (
     _NO_RESPONDERS_CEILING_S,
     FANOUT_MAX_MSGS_PER_SUBJECT,
@@ -34,6 +39,7 @@ from mftik.broker.transport.nats import (
     _check_subject,
     _iter_until_stopped,
     _kv_key,
+    _sanitize,
     _ttl_seconds,
 )
 from mftik.protocol import Envelope, Topics
@@ -107,9 +113,19 @@ async def test_a_live_request_is_not_stored_anywhere(broker: Broker) -> None:
     with pytest.raises(RequestTimeoutError):
         await broker.request(subject, _envelope(), timeout=0.2)
 
+    # This broker's streams, not the server's. ``streams_info`` lists every
+    # stream the server holds, so an unscoped assertion fails on any NATS that
+    # another run has touched — which is the shared one CI would grow into, and
+    # a developer's own the moment they point two checkouts at it.
     transport = _transport(broker)
-    names = [info.config.name for info in await transport.js.streams_info()]
-    assert not any(name and name.endswith("_post") for name in names)
+    mine = _sanitize(broker.config.key_prefix)
+    names = [
+        info.config.name
+        for info in await transport.js.streams_info()
+        if info.config.name and info.config.name.startswith(mine)
+    ]
+    assert names, "the fan-out stream should exist under this broker's prefix"
+    assert not any(name.endswith("_post") for name in names)
 
 
 @pytest.mark.asyncio
@@ -960,3 +976,66 @@ async def test_a_finished_read_leaves_no_consumer_on_the_server(
         await broker.state_all(name)
 
     assert await consumers() == before
+
+
+@pytest.mark.asyncio
+async def test_a_stream_shape_the_server_will_not_take_is_named_not_raw(
+    broker: Broker,
+) -> None:
+    """A refused reshape says which field refused, from inside ``connect``.
+
+    This is #88's failure written down. Moving ``allow_msg_ttl`` off the fan-out
+    stream is fine on a fresh server and impossible on one that has already run
+    the previous build: ``add_stream`` refuses because the shape differs, and
+    the ``update_stream`` behind it refuses because a TTL flag cannot be turned
+    off. ``_ensure_stream`` caught only the first, so the second left
+    ``connect()`` as a bare ``ServerError`` — every plane failing to boot, and
+    only on servers that already held the stream.
+
+    Asserted on the message rather than only the type, because the whole point
+    is that whoever meets this at deploy time is told the field.
+    """
+    transport = _transport(broker)
+    name = _sanitize(f"{broker.config.key_prefix}_shapecheck")
+    subject = f"{broker.config.key_prefix}.shapecheck.>"
+    await transport.js.add_stream(
+        js_api.StreamConfig(name=name, subjects=[subject], allow_msg_ttl=True)
+    )
+
+    with pytest.raises(StreamShapeError) as caught:
+        await transport._ensure_stream(
+            js_api.StreamConfig(name=name, subjects=[subject], allow_msg_ttl=False)
+        )
+
+    message = str(caught.value)
+    assert name in message
+    assert "allow_msg_ttl" in message
+
+    await transport.js.delete_stream(name)
+
+
+@pytest.mark.asyncio
+async def test_a_wider_retention_is_applied_rather_than_refused(
+    broker: Broker,
+) -> None:
+    """Raising a limit on a stream that exists is the case reshaping is for.
+
+    MD hands ``_ensure_tape_stream`` the retention its environment names, so an
+    operator who raises ``MD_TAPE_MAXLEN`` changes the declared shape of every
+    tape stream at once. Refusing all of them would leave MD unable to record a
+    feed it has recorded before until someone deleted the streams by hand, which
+    is a worse answer than widening them.
+    """
+    transport = _transport(broker)
+    name = _sanitize(f"{broker.config.key_prefix}_widecheck")
+    subject = f"{broker.config.key_prefix}.widecheck.>"
+    await transport.js.add_stream(
+        js_api.StreamConfig(name=name, subjects=[subject], max_msgs=10)
+    )
+
+    await transport._ensure_stream(
+        js_api.StreamConfig(name=name, subjects=[subject], max_msgs=100)
+    )
+
+    assert (await transport.js.stream_info(name)).config.max_msgs == 100
+    await transport.js.delete_stream(name)
