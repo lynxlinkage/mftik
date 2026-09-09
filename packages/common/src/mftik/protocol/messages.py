@@ -1342,9 +1342,11 @@ class SymListRequest(BaseModel):
     every ``Perp`` anywhere. A ticker names exactly one row and cannot express
     that. Pass ``universal_ticker`` when you do want exactly one.
 
-    ``q`` / ``limit`` / ``offset`` page a browse; omit ``limit`` to get the
-    whole match (what TD/MD cache loads). ``slim`` keeps only the filters the
-    UI table shows — full filter sets are a follow-up by ticker.
+    ``q`` / ``limit`` / ``offset`` page a browse. Clients that need a whole
+    venue walk pages of ``limit`` (capped at 500) rather than omitting it:
+    an unpaged Gate Spot reply misses the RPC timeout. ``slim`` keeps only
+    the filters the UI table shows — full filter sets are a follow-up by
+    ticker.
     """
 
     model_config = ConfigDict(frozen=True)

@@ -11,6 +11,13 @@ spot pair and the perp, and they have different tick sizes.
 
 Reads are cached in-process. Listings are near-static by definition, so a
 process refetches on a miss or when its TTL lapses, not per order.
+
+A single-instrument read asks the plane for that ticker. Loading a whole
+venue table to resolve one pair is how Gate became silent on MD: 2200+
+rows with filters miss the 5s RPC budget (and NATS's 1 MiB payload), the
+feed pump dies after attach has already returned, and STS sees a live
+session with no prints. ``list`` / reverse lookup still load the table,
+but they page it.
 """
 
 from __future__ import annotations
@@ -39,6 +46,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TTL = 600.0
 
+#: One ``SYM_LIST`` page. Matches :class:`SymListRequest.limit`'s ceiling —
+#: large enough that a venue is a handful of round trips, small enough that
+#: a Gate-sized page with every filter still fits a 1 MiB NATS payload.
+LIST_PAGE = 500
+
 #: Cache bucket: one venue's one market. That is also the unit the plane
 #: refreshes, so a bucket is never half stale.
 TableKey = tuple[str, Category]
@@ -66,22 +78,30 @@ class SymbolClient:
         # (venue, category) → {exch_ticker: symbol}, for the inbound direction
         self._reverse: dict[TableKey, dict[str, str]] = {}
         self._fetched_at: dict[TableKey, float] = {}
+        #: Per-instrument cache for :meth:`get`. Independent of a full table
+        #: load, so resolving ``Gate_Spot_ETHUSDT`` does not pull Gate's 2200
+        #: other pairs.
+        self._singles: dict[UniversalTicker, tuple[float, SymbolInfo]] = {}
         self._lock = asyncio.Lock()
 
     # --- reads -------------------------------------------------------------
 
     async def get(self, ticker: UniversalTicker) -> SymbolInfo:
-        """One instrument, or :class:`SymbolNotFoundError`."""
-        key = _key(ticker)
-        table = await self._table(key)
-        info = table.get(ticker.symbol)
-        if info is None:
-            # Could be newly listed; one forced refresh before giving up.
-            table = await self._table(key, force=True)
-            info = table.get(ticker.symbol)
+        """One instrument, or :class:`SymbolNotFoundError`.
+
+        Hits the plane by exact ticker. A venue-wide ``SYM_LIST`` is how a
+        Gate feed attached, stayed ``live``, and never printed.
+        """
+        async with self._lock:
+            cached = self._cached_one(ticker)
+            if cached is not None:
+                return cached
+        info = await self._fetch_one(ticker)
         if info is None:
             raise SymbolNotFoundError(f"no such instrument: {ticker}")
-        return info
+        async with self._lock:
+            self._store_one(ticker, info)
+            return info
 
     async def list(
         self, venue: str, *, category: Category | str = Category.SPOT
@@ -138,33 +158,104 @@ class SymbolClient:
             self._cache.clear()
             self._reverse.clear()
             self._fetched_at.clear()
+            self._singles.clear()
             return
         for key in [k for k in self._cache if k[0] == venue]:
             self._cache.pop(key, None)
             self._reverse.pop(key, None)
             self._fetched_at.pop(key, None)
+        self._singles = {
+            ticker: item
+            for ticker, item in self._singles.items()
+            if ticker.venue != venue
+        }
 
     # --- internals ---------------------------------------------------------
+
+    def _table_fresh(self, key: TableKey) -> bool:
+        return (
+            key in self._cache
+            and time.monotonic() - self._fetched_at.get(key, 0.0) < self.ttl
+        )
+
+    def _cached_one(self, ticker: UniversalTicker) -> SymbolInfo | None:
+        """A hit from the single-instrument cache or a still-fresh table."""
+        single = self._singles.get(ticker)
+        if single is not None:
+            fetched_at, info = single
+            if time.monotonic() - fetched_at < self.ttl:
+                return info
+        key = _key(ticker)
+        if self._table_fresh(key):
+            return self._cache[key].get(ticker.symbol)
+        return None
+
+    def _store_one(self, ticker: UniversalTicker, info: SymbolInfo) -> None:
+        self._singles[ticker] = (time.monotonic(), info)
+        key = _key(ticker)
+        self._cache.setdefault(key, {})[ticker.symbol] = info
+        self._reverse.setdefault(key, {})[info.exch_ticker] = ticker.symbol
+
+    def _install_table(
+        self, key: TableKey, symbols: dict[str, SymbolInfo]
+    ) -> None:
+        now = time.monotonic()
+        self._cache[key] = symbols
+        self._reverse[key] = {
+            info.exch_ticker: info.symbol for info in symbols.values()
+        }
+        self._fetched_at[key] = now
+        for info in symbols.values():
+            self._singles[info.ticker] = (now, info)
+
+    async def _fetch_one(self, ticker: UniversalTicker) -> SymbolInfo | None:
+        result = SymListResult.model_validate(
+            await self._request(
+                SYM_LIST,
+                SymListRequest(universal_ticker=str(ticker)),
+            )
+        )
+        return result.symbols[0] if result.symbols else None
+
+    async def _fetch_pages(self, key: TableKey) -> dict[str, SymbolInfo]:
+        """Walk ``SYM_LIST`` in :data:`LIST_PAGE` chunks.
+
+        One unpaged Gate Spot reply is 2200+ instruments and does not come
+        back inside :data:`mftik.broker.config.BrokerConfig.request_timeout`.
+        """
+        venue, category = key
+        out: dict[str, SymbolInfo] = {}
+        offset = 0
+        while True:
+            result = SymListResult.model_validate(
+                await self._request(
+                    SYM_LIST,
+                    SymListRequest(
+                        venue=venue,
+                        category=category.value,
+                        limit=LIST_PAGE,
+                        offset=offset,
+                    ),
+                )
+            )
+            for info in result.symbols:
+                out[info.symbol] = info
+            if not result.symbols:
+                break
+            offset += len(result.symbols)
+            if offset >= result.total:
+                break
+        return out
 
     async def _table(
         self, key: TableKey, *, force: bool = False
     ) -> dict[str, SymbolInfo]:
-        venue, category = key
         async with self._lock:
-            fresh = time.monotonic() - self._fetched_at.get(key, 0.0) < self.ttl
-            if not force and fresh and key in self._cache:
+            if not force and self._table_fresh(key):
                 return self._cache[key]
-
-            reply = await self._request(
-                SYM_LIST,
-                SymListRequest(venue=venue, category=category.value),
-            )
-            result = SymListResult.model_validate(reply)
-            self._cache[key] = {info.symbol: info for info in result.symbols}
-            self._reverse[key] = {
-                info.exch_ticker: info.symbol for info in result.symbols
-            }
-            self._fetched_at[key] = time.monotonic()
+        symbols = await self._fetch_pages(key)
+        async with self._lock:
+            self._install_table(key, symbols)
             return self._cache[key]
 
     async def _request(self, type_: str, payload: object) -> dict:
@@ -186,4 +277,4 @@ def _key(ticker: UniversalTicker) -> TableKey:
     return (ticker.venue, ticker.category)
 
 
-__all__ = ["DEFAULT_TTL", "SymbolClient", "SymbolNotFoundError"]
+__all__ = ["DEFAULT_TTL", "LIST_PAGE", "SymbolClient", "SymbolNotFoundError"]
