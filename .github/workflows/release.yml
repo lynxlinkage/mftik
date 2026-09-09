@@ -1,9 +1,9 @@
 name: Build images
 
 # Tags only. A push to main builds nothing. A tag builds images, and a final
-# tag (no hyphen) then rolls the td/md/sts/sym/paper planes on Strategon —
-# JP on cp, TW on yite. Compose on the old host is not touched. NATS is not
-# rolled from here.
+# tag (no hyphen) then rolls the td/md/sts/sym/paper planes on Strategon
+# (JP on cp, TW on yite) and the API compose on the host. NATS is not rolled
+# from here.
 # Tests run here rather than only in tests.yml (which is PR-only) so a red suite
 # stops the release instead of publishing an image nobody should pull.
 on:
@@ -270,8 +270,34 @@ jobs:
             --spec deployment/planes/assignments.json \
             --wait-seconds 240
 
+  # API + frontend on the compose host. Down, keep the previous file as
+  # docker-compose.bak.<shortsha>.yml, scp this repo's file, start. A failed
+  # start or a silent site puts the bak back and ups it.
+  api:
+    needs: merge
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Roll the host compose
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          VERSION: ${{ github.ref_name }}
+          SHORT_SHA: ${{ github.sha }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPOSE_FILE: deployment/docker-compose.yml
+        run: |
+          chmod +x scripts/deploy_prod_compose.sh
+          SHORT_SHA="${SHORT_SHA:0:7}" scripts/deploy_prod_compose.sh
+
   notify:
-    needs: [test, build, merge, deploy]
+    needs: [test, build, merge, deploy, api]
     if: always()
     runs-on: ubuntu-latest
     # Job level, not step level: the `secrets` context is not available in a
@@ -291,6 +317,7 @@ jobs:
           BUILD: ${{ needs.build.result }}
           MERGE: ${{ needs.merge.result }}
           DEPLOY: ${{ needs.deploy.result }}
+          API: ${{ needs.api.result }}
         run: |
           if [ "$TEST" != "success" ]; then
             title="❌ Tests failed"
@@ -312,13 +339,17 @@ jobs:
             title="❌ Strategon deploy failed"
             desc="Images are on GHCR, but TW/JP planes were not rolled to this tag."
             color=15158332
-          elif [ "$DEPLOY" = "skipped" ]; then
+          elif [ "$API" != "success" ] && [ "$API" != "skipped" ]; then
+            title="❌ API compose failed"
+            desc="Planes may have rolled. The host compose was put back to the previous file."
+            color=15158332
+          elif [ "$DEPLOY" = "skipped" ] || [ "$API" = "skipped" ]; then
             title="✅ Images published"
-            desc="Tagged images are on GHCR. Prerelease or manual run — planes were not touched."
+            desc="Tagged images are on GHCR. Prerelease or manual run — production was not touched."
             color=3066993
           else
             title="✅ Deployed"
-            desc="Images are on GHCR. JP (cp) and TW (yite) planes are on this tag."
+            desc="Images are on GHCR. JP/TW planes and the API compose are on this tag."
             color=3066993
           fi
           {
