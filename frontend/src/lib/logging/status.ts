@@ -1,5 +1,4 @@
-import { pingSession } from '$lib/auth';
-import { wsBaseUrl } from '$lib/ws';
+import { shouldReopen, wsBaseUrl } from '$lib/ws';
 
 /**
  * Live STS session state over `/ws/status/sts`.
@@ -58,19 +57,22 @@ export function connectStsStatus(
 			onConnection?.('open');
 		};
 		ws.onerror = () => onConnection?.('error');
-		ws.onclose = () => {
+		ws.onclose = (ev) => {
 			onConnection?.('closed');
 			if (closed) return;
-			// This dashboard is the one people leave open for hours, so it is
-			// the one that outlives its login session. A handshake the auth
-			// chain rejected looks exactly like the API going away, and the
-			// backoff below would retry a dead session forever behind a UI
-			// that still claims to be connecting.
-			void pingSession();
-			// 1s, 2s, 4s … capped at 30s.
-			const delay = Math.min(1000 * 2 ** attempt, 30_000);
-			attempt += 1;
-			retry = setTimeout(open, delay);
+			void (async () => {
+				// This dashboard is the one people leave open for hours, so it
+				// is the one that outlives its login session. A handshake the
+				// auth chain rejected looks exactly like the API going away,
+				// and the backoff below would otherwise retry a dead session
+				// forever behind a UI that still claims to be connecting.
+				if (!(await shouldReopen(ev.code))) return;
+				if (closed) return;
+				// 1s, 2s, 4s … capped at 30s.
+				const delay = Math.min(1000 * 2 ** attempt, 30_000);
+				attempt += 1;
+				retry = setTimeout(open, delay);
+			})();
 		};
 		ws.onmessage = (ev) => {
 			let msg: StatusEnvelope;
