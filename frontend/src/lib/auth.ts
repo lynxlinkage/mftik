@@ -53,6 +53,13 @@ export function handleUnauthorized(): boolean {
 }
 
 /**
+ * What `/auth/me` had to say. `unknown` is not a soft no: it means the request
+ * never reached a verdict, so a caller must fall back on whatever it would
+ * have done without asking.
+ */
+export type SessionVerdict = 'authenticated' | 'unauthenticated' | 'unknown';
+
+/**
  * One authenticated request: slides the idle window when the session is
  * alive, and routes to login when it is not.
  *
@@ -69,13 +76,18 @@ export function handleUnauthorized(): boolean {
  * Best-effort: a network error means we genuinely do not know, so it is left
  * to the caller's reconnect backoff rather than treated as a verdict.
  */
-export async function pingSession(): Promise<void> {
-	if (!browser) return;
+export async function pingSession(): Promise<SessionVerdict> {
+	if (!browser) return 'unknown';
 	try {
 		const res = await fetch('/api/auth/me', { cache: 'no-store' });
-		if (res.status === 401) handleUnauthorized();
+		if (res.status === 401) {
+			handleUnauthorized();
+			return 'unauthenticated';
+		}
+		return res.ok ? 'authenticated' : 'unknown';
 	} catch {
 		/* offline or API down — not an auth verdict */
+		return 'unknown';
 	}
 }
 

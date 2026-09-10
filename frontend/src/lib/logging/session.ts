@@ -1,5 +1,4 @@
-import { pingSession } from '$lib/auth';
-import { wsBaseUrl } from '$lib/ws';
+import { shouldReopen, wsBaseUrl } from '$lib/ws';
 
 export type LogEntry = {
 	id: string;
@@ -32,6 +31,11 @@ export type LogConnection = 'connecting' | 'open' | 'closed' | 'error';
 export type LogConnectionDetail = {
 	code?: number;
 	reason?: string;
+	/**
+	 * Absent while a reconnect is still coming; false once the stream has given
+	 * up, which only happens for a login no retry can repair.
+	 */
+	willRetry?: boolean;
 };
 
 /**
@@ -39,8 +43,8 @@ export type LogConnectionDetail = {
  *
  * Reconnects with backoff, same reason as the status and board sockets: a
  * first-paint close that never comes back looks like an empty log even when
- * REST already has rows. `pingSession` still answers the auth question the
- * browser will not surface on a refused handshake.
+ * REST already has rows. `shouldReopen` is what keeps that from becoming a
+ * loop against a session that will never be accepted again.
  */
 export function connectDomainLog(
 	domain: LogDomain,
@@ -65,16 +69,23 @@ export function connectDomainLog(
 		};
 		ws.onerror = () => onStatus('error');
 		ws.onclose = (ev) => {
-			onStatus('closed', { code: ev.code, reason: ev.reason });
+			const detail = { code: ev.code, reason: ev.reason };
+			onStatus('closed', detail);
 			if (disposed) return;
-			// An expired session closes the handshake with no status the browser
-			// will show us, so a dead login is indistinguishable here from a
-			// finished stream. $lib/auth asks the question over REST instead.
-			void pingSession();
-			// 1s, 2s, 4s … capped at 30s.
-			const delay = Math.min(1000 * 2 ** attempt, 30_000);
-			attempt += 1;
-			retry = setTimeout(open, delay);
+			void (async () => {
+				// An expired session closes the handshake with no status the
+				// browser will show us, so a dead login is indistinguishable
+				// here from a finished stream. $lib/ws asks over REST instead.
+				if (!(await shouldReopen(ev.code))) {
+					if (!disposed) onStatus('closed', { ...detail, willRetry: false });
+					return;
+				}
+				if (disposed) return;
+				// 1s, 2s, 4s … capped at 30s.
+				const delay = Math.min(1000 * 2 ** attempt, 30_000);
+				attempt += 1;
+				retry = setTimeout(open, delay);
+			})();
 		};
 		ws.onmessage = (ev) => {
 			const raw = String(ev.data);

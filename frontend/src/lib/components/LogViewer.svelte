@@ -7,6 +7,7 @@
 		type LogDomain,
 		type LogEntry
 	} from '$lib/logging/session';
+	import { WS_AUTH_REFUSED } from '$lib/ws';
 	import LogDownloadModal from '$lib/components/LogDownloadModal.svelte';
 
 	interface Props {
@@ -31,6 +32,7 @@
 	let closeCode = $state<number | undefined>(undefined);
 	let closeReason = $state('');
 	let sawDisconnect = $state(false);
+	let givenUp = $state(false);
 
 	const HISTORY_PAGE = 100;
 	const SCROLL_TOP_THRESHOLD = 40;
@@ -82,8 +84,11 @@
 
 	const text = $derived(logs.length === 0 ? '' : logs.map(formatLine).join('\n') + '\n');
 
+	// A refused handshake reaches script as 1006 with no reason, so giving up is
+	// the only reliable sign of one; the code is checked too for the cases that
+	// do carry it.
 	function connectionHint(): string {
-		if (closeCode === 1008) return 'authentication required';
+		if (givenUp || closeCode === WS_AUTH_REFUSED) return 'authentication required';
 		if (closeReason) return closeReason;
 		if (closeCode != null && closeCode !== 1005) return `closed (${closeCode})`;
 		return 'disconnected';
@@ -92,7 +97,8 @@
 	const emptyMessage = $derived.by(() => {
 		if (status === 'error') return 'Log stream error. Reconnecting…';
 		if (status === 'closed') {
-			return `Disconnected — ${connectionHint()}. Reconnecting…`;
+			const hint = connectionHint();
+			return givenUp ? `Disconnected — ${hint}.` : `Disconnected — ${hint}. Reconnecting…`;
 		}
 		if (sawDisconnect && status === 'connecting') return 'Reconnecting…';
 		return 'Waiting for log lines…';
@@ -203,6 +209,7 @@
 		closeCode = undefined;
 		closeReason = '';
 		sawDisconnect = false;
+		givenUp = false;
 		copied = false;
 		stickToBottom = true;
 		downloadOpen = false;
@@ -228,12 +235,14 @@
 					if (detail) {
 						closeCode = detail.code;
 						closeReason = detail.reason ?? '';
+						givenUp = detail.willRetry === false;
 					}
 				}
 				if (s === 'open') {
 					sawDisconnect = false;
 					closeCode = undefined;
 					closeReason = '';
+					givenUp = false;
 				}
 			}
 		);

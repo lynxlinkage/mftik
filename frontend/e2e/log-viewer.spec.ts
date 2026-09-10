@@ -40,7 +40,7 @@ async function mockAuth(page: Page) {
 	);
 }
 
-async function mockLogPage(page: Page, logs: LogRow[]) {
+async function mockLogPage(page: Page, logs: LogRow[]): Promise<{ handshakes: number }> {
 	await mockAuth(page);
 	await page.route('**/api/sts/sessions/*/eventlog/info', (route) =>
 		route.fulfill({
@@ -57,12 +57,15 @@ async function mockLogPage(page: Page, logs: LogRow[]) {
 	await page.route('**/api/logs/**', (route) =>
 		route.fulfill({ json: { logs, has_more: false } })
 	);
+	const counter = { handshakes: 0 };
 	await page.routeWebSocket('**/ws/**', (ws) => {
 		// First paint and every reconnect: stay closed so the pane cannot
 		// hide behind a later open. Close code 1008 is what the API auth
 		// gate sends; the viewer must not collapse that to the waiting copy.
+		counter.handshakes += 1;
 		ws.close({ code: 1008, reason: 'authentication required' });
 	});
+	return counter;
 }
 
 const SEEDED: LogRow = {
@@ -91,4 +94,17 @@ test('closed empty pane is not the waiting placeholder', async ({ page }) => {
 	const term = page.getByLabel('STS log terminal');
 	await expect(term).toContainText(/Disconnected|Reconnecting|authentication required/);
 	await expect(term).not.toContainText('Waiting for log lines…');
+});
+
+test('a refused handshake is not retried in a loop', async ({ page }) => {
+	const socket = await mockLogPage(page, []);
+	await page.goto('/sts/sess-refused');
+
+	const term = page.getByLabel('STS log terminal');
+	await expect(term).toContainText('authentication required');
+	// Well past the first two backoff steps (1s, 2s). Retrying a login the gate
+	// has refused cannot succeed, and the loop would hammer /ws and /auth/me.
+	await page.waitForTimeout(3_500);
+	expect(socket.handshakes).toBe(1);
+	await expect(term).not.toContainText('Reconnecting…');
 });
