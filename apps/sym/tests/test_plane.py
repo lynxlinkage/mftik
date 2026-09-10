@@ -14,14 +14,18 @@ from mftik.protocol import (
     SYM_REFRESH,
     SYM_VENUES,
     Envelope,
+    SymbolInfo,
     SymListRequest,
+    SymListResult,
     SymRefreshRequest,
     Topics,
 )
 from mftik.symbols import SymbolClient, SymbolNotFoundError
+from mftik.symbols import client as sym_client
+from mftik.symbols.client import LIST_PAGE
 from mftik_db.repositories import SymbolRepository
 from mftik_sym.plane import SymbolPlane
-from mftik_sym.rpc import dispatch
+from mftik_sym.rpc import dispatch, handle_list
 from mftik_sym.sources.base import Instrument
 
 VENUE = "Gate"
@@ -507,6 +511,35 @@ async def test_rpc_refresh(broker: Broker, served) -> None:
     assert source.fetches == 2  # once in the fixture, once here
 
 
+async def test_rpc_list_reports_an_undeliverable_reply(
+    broker: Broker, served
+) -> None:
+    """An oversized reply must name itself, not vanish into a timeout.
+
+    Gate Spot is 2200+ rows and ~1.1 MiB against NATS's 1 MiB default, so
+    the publish fails and the caller only sees 5s of silence — a feed that
+    attached, stayed ``live``, and never printed (#91).
+    """
+    plane, _source = served
+    sent: list[Envelope] = []
+
+    class _Req:
+        envelope = Envelope[SymListRequest].wrap(
+            SymListRequest(venue=VENUE), type=SYM_LIST, source="test"
+        )
+
+        async def reply(self, envelope):
+            sent.append(envelope)
+            if len(sent) == 1:
+                raise ValueError("nats: maximum payload exceeded")
+
+    await handle_list(_Req(), plane=plane)  # type: ignore[arg-type]
+
+    assert len(sent) == 2
+    assert sent[1].payload.code == "reply_too_large"
+    assert "page the query with limit/offset" in sent[1].payload.message
+
+
 async def test_rpc_unknown_type_errors(broker: Broker, served) -> None:
     reply = await broker.request(
         Topics.SYM,
@@ -545,6 +578,94 @@ async def test_client_caches_reads(broker: Broker, served) -> None:
         await client.exch_ticker(_t("BTCUSDT"))
 
     assert calls == 1
+
+
+async def test_client_get_asks_for_one_ticker(broker: Broker, served) -> None:
+    """MD resolve must not pull a venue table to spell one pair.
+
+    Gate Spot is 2200+ rows; one unpaged ``SYM_LIST`` misses the 5s RPC
+    budget, the feed pump dies after attach, and the session stays live
+    with no prints — #91.
+    """
+    plane, _source = served
+    seen: list[dict] = []
+    original = plane.list_symbols
+
+    async def spy(**kwargs):
+        seen.append(kwargs)
+        return await original(**kwargs)
+
+    plane.list_symbols = spy  # type: ignore[method-assign]
+    client = SymbolClient(broker)
+
+    assert await client.exch_ticker(_t("BTCUSDT")) == "BTC_USDT"
+    assert seen == [
+        {
+            "universal_ticker": "Gate_Spot_BTCUSDT",
+            "venue": None,
+            "category": None,
+            "symbol": None,
+            "active_only": True,
+            "q": None,
+            "limit": None,
+            "offset": 0,
+            "slim": False,
+        }
+    ]
+
+
+async def test_client_list_walks_pages(broker: Broker, served) -> None:
+    """A venue table is assembled from ``LIST_PAGE`` replies, not one blob."""
+    plane, _source = served
+    pages: list[dict] = []
+    total = LIST_PAGE + 3
+
+    def _row(i: int) -> SymbolInfo:
+        symbol = f"S{i:04d}USDT"
+        return SymbolInfo(
+            universal_ticker=f"Gate_Spot_{symbol}",
+            base=f"S{i:04d}",
+            quote="USDT",
+            exch_ticker=f"S{i:04d}_USDT",
+        )
+
+    async def paged(**kwargs):
+        pages.append(dict(kwargs))
+        offset = int(kwargs.get("offset") or 0)
+        limit = kwargs.get("limit")
+        assert limit == LIST_PAGE
+        chunk = [_row(i) for i in range(offset, min(offset + limit, total))]
+        return SymListResult(symbols=chunk, total=total)
+
+    plane.list_symbols = paged  # type: ignore[method-assign]
+    client = SymbolClient(broker)
+    listed = await client.list(VENUE)
+
+    assert [s.symbol for s in listed] == [f"S{i:04d}USDT" for i in range(total)]
+    assert [p["offset"] for p in pages] == [0, LIST_PAGE]
+    assert all(p["venue"] == VENUE and p["category"] == "Spot" for p in pages)
+
+
+async def test_client_get_does_not_pass_off_one_row_as_the_table(
+    broker: Broker, served, monkeypatch
+) -> None:
+    """A resolved single must not make the venue table look loaded.
+
+    ``time.monotonic`` counts from boot on Linux, so on a freshly started
+    node an unset ``_fetched_at`` reads as "fetched at 0.0, seconds ago"
+    and a one-instrument cache is served as the whole venue. Pinned to a
+    small clock so this fails everywhere, not only on a box that just
+    rebooted.
+    """
+    monkeypatch.setattr(sym_client.time, "monotonic", lambda: 1.0)
+    client = SymbolClient(broker)
+
+    assert await client.exch_ticker(_t("BTCUSDT")) == "BTC_USDT"
+
+    assert [i.symbol for i in await client.list(VENUE)] == ["BTCUSDT", "ETHUSDT"]
+    assert (
+        await client.symbol_for(VENUE, "ETH_USDT", category="Spot")
+    ) == _t("ETHUSDT")
 
 
 async def test_client_refetches_once_for_an_unknown_symbol(

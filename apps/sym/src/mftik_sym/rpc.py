@@ -50,9 +50,29 @@ async def handle_list(req: IncomingRequest, *, plane: SymbolPlane) -> None:
         logger.exception("sym.list failed")
         await _error(req, "list_failed", str(exc))
         return
-    await req.reply(
-        SymListResultEnvelope.wrap(result, type=SYM_LIST, source=SOURCE)
-    )
+    try:
+        await req.reply(
+            SymListResultEnvelope.wrap(result, type=SYM_LIST, source=SOURCE)
+        )
+    except Exception as exc:
+        # An unpaged whole-venue reply can outgrow what the transport will
+        # carry — Gate Spot is 2200+ rows and ~1.1 MiB against NATS's 1 MiB
+        # default. The publish fails here, so without this the caller learns
+        # nothing and simply times out: that is how a Gate MD feed attached,
+        # stayed ``live``, and never printed (#91). Say so instead.
+        logger.exception(
+            "sym.list reply undeliverable rows=%s venue=%s category=%s limit=%s",
+            len(result.symbols),
+            payload.venue,
+            payload.category,
+            payload.limit,
+        )
+        await _error(
+            req,
+            "reply_too_large",
+            f"{len(result.symbols)} rows do not fit one reply "
+            f"({exc}) — page the query with limit/offset",
+        )
 
 
 async def handle_venues(req: IncomingRequest, *, plane: SymbolPlane) -> None:
