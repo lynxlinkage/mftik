@@ -4,15 +4,22 @@ Every family the broker speaks maps onto something NATS already has, and the
 mapping is worth stating in one place because three of the choices are not the
 obvious one.
 
-**Fan-out is JetStream, and every subscriber is a consumer of its own.** Core
-NATS would deliver a published message to whoever is listening and forget it,
-which is what Redis Pub/Sub does and would have been the smaller change. It is
-JetStream here so a subject has a history: the same stream that carries a feed
-to a live session is the thing a later reader can address by offset. Each
-:meth:`NatsTransport.subscribe` creates an ephemeral consumer starting at *new*,
-which is what reproduces the promise the broker makes — a message published
-while nobody was subscribed is gone — while leaving the stored message there for
-anything that wants to read the subject rather than follow it.
+**Live fan-out is core NATS. The stream is the tail, not the bus.** A
+``js.publish`` ack comes from the stream's leader, and a stream lives in
+one cluster. Pinning that cluster to JP makes every TW publisher wait;
+leaving it on TW makes every JP publisher wait. Core publish and
+subscribe wait for the server this process connected to, and the gateway
+forwards interest to the other cluster. The fan-out stream still captures
+the same subjects so a later reader can address a subject by offset —
+that is why ``connect`` still ensures it, not because ``nc.publish``
+would fail without one. :meth:`NatsTransport.subscribe` starts at *now*,
+which is the broker's promise: a message published while nobody was
+subscribed is gone.
+
+``publish_log`` and the tape still ``js.publish``. Durability is the
+point of those paths: a late WS subscriber and a warm-up both read what
+the stream kept. They pay the stream leader's ack, wherever first
+``STREAM.CREATE`` put that stream.
 
 **Request-reply is core NATS.** A caller waiting on an answer gains nothing
 from durability: it has a timeout, and a request executed after that timeout
@@ -75,12 +82,12 @@ logger = logging.getLogger(__name__)
 MIN_TTL_SECONDS = 1
 
 #: How long the fan-out stream keeps a subject's messages. A fuse, not a
-#: log: subscribers start at *new*, and a quiet topic's leftover prints
+#: log: live subscribers start at now, and a quiet topic's leftover prints
 #: should not sit forever.
 FANOUT_MAX_AGE_SECONDS = 86_400
 
 #: How many messages one fan-out subject keeps. Live pub/sub is not a log:
-#: subscribers start at *new*, and this cap is only a fuse so a busy feed
+#: subscribers start at now, and this cap is only a fuse so a busy feed
 #: cannot grow the stream. Logs live on their own stream; see
 #: :meth:`NatsTransport.publish_log`.
 FANOUT_MAX_MSGS_PER_SUBJECT = 256
@@ -397,14 +404,17 @@ class NatsTransport(BrokerTransport):
     # --- streams and buckets -----------------------------------------------
 
     async def _ensure_fanout_stream(self) -> None:
-        """One stream for every pub/sub subject this node publishes.
+        """One stream that captures every pub/sub subject this node publishes.
 
         A catch-all ``{prefix}.ps.>`` rather than a stream per subject family,
-        because a family this did not list would fail at the publish — and the
+        because a family this did not list would not be stored — and the
         families are added by whoever writes a new topic, who has no reason to
-        come here. The per-subject bounds are what keep one stream honest: each
-        subject holds its last :data:`FANOUT_MAX_MSGS_PER_SUBJECT` messages, so
-        the size follows how many subjects are live rather than how fast the
+        come here. Live ``publish`` does not wait for that capture.
+        ``nc.publish`` will not fail if the stream is missing; the catch-all
+        is load-bearing for the tail, not for error reporting. The
+        per-subject bounds are what keep one stream honest: each subject
+        holds its last :data:`FANOUT_MAX_MSGS_PER_SUBJECT` messages, so the
+        size follows how many subjects are live rather than how fast the
         busiest one prints.
         """
         await self._ensure_stream(
@@ -516,6 +526,55 @@ class NatsTransport(BrokerTransport):
                 out.append(f"{field.name} is {current!r}, declared {declared!r}")
         return out
 
+    async def _ensure_stream_placement(
+        self, name: str, cfg: dict[str, Any] | None = None
+    ) -> None:
+        """Move a live stream onto ``kv_placement_cluster`` if it is not there.
+
+        Called only for KV buckets. The name is the stream's, because the
+        JS API is STREAM.UPDATE; fan-out does not use this. A stream has
+        one leader, so pinning it to JP makes every TW publisher wait and
+        pinning it to TW makes every JP publisher wait. KV is a different
+        promise: one ledger, one cluster, and a read that cannot be
+        answered locally is a failed read rather than a delayed tick.
+
+        ``cfg`` is the live STREAM.INFO config when the caller already
+        has it, so a KV reshape that just fetched does not fetch again.
+
+        A cluster that cannot take the stream is a warning, not a failed
+        boot: local and CI have no second cluster, and a production move
+        that NATS refuses must not take every plane down with it.
+        """
+        cluster = self.config.kv_placement_cluster
+        if not cluster:
+            return
+        if cfg is None:
+            try:
+                raw = await self._js_api(f"STREAM.INFO.{name}")
+            except nats.js.errors.NotFoundError:
+                return
+            cfg = dict(raw["config"])
+        else:
+            cfg = dict(cfg)
+        live_cluster = ((cfg.get("placement") or {}) or {}).get("cluster") or ""
+        if live_cluster == cluster:
+            return
+        cfg["placement"] = {"cluster": cluster}
+        try:
+            await self._js_api(
+                f"STREAM.UPDATE.{name}",
+                cfg,
+                timeout=_KV_RESHAPE_TIMEOUT_S,
+            )
+        except nats.js.errors.APIError as exc:
+            logger.warning(
+                "could not pin %s to cluster %s; leaving %s: %s",
+                name,
+                cluster,
+                live_cluster or "-",
+                exc,
+            )
+
     async def _js_api(
         self,
         op: str,
@@ -604,25 +663,7 @@ class NatsTransport(BrokerTransport):
                     exc,
                 )
                 return
-            raw = await self._js_api(f"STREAM.INFO.{stream}")
-            cfg = dict(raw["config"])
-        live_cluster = ((cfg.get("placement") or {}) or {}).get("cluster") or ""
-        if cluster and live_cluster != cluster:
-            cfg["placement"] = {"cluster": cluster}
-            try:
-                await self._js_api(
-                    f"STREAM.UPDATE.{stream}",
-                    cfg,
-                    timeout=_KV_RESHAPE_TIMEOUT_S,
-                )
-            except nats.js.errors.APIError as exc:
-                logger.warning(
-                    "could not pin %s to cluster %s; leaving %s: %s",
-                    stream,
-                    cluster,
-                    live_cluster or "-",
-                    exc,
-                )
+        await self._ensure_stream_placement(stream, cfg=cfg)
 
     async def _bucket(self, kind: str) -> nats.js.kv.KeyValue:
         """The KV bucket for ``kind``, created on first use.
@@ -659,17 +700,21 @@ class NatsTransport(BrokerTransport):
     # --- fan-out -----------------------------------------------------------
 
     async def publish(self, topic: str, raw: str) -> None:
-        await self.js.publish(self._fanout_subject(topic), raw.encode())
+        await self.nc.publish(self._fanout_subject(topic), raw.encode())
 
     async def subscribe(
-        self, topics: Sequence[str], *, stop: asyncio.Event | None
+        self,
+        topics: Sequence[str],
+        *,
+        stop: asyncio.Event | None,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[tuple[str, str]]:
         subjects = [
             subject
             for t in topics
             for subject in self._subscribe_subjects(t)
         ]
-        async for item in self._consume(subjects, stop=stop):
+        async for item in self._consume(subjects, stop=stop, ready=ready):
             yield item
 
     async def psubscribe(
@@ -678,13 +723,13 @@ class NatsTransport(BrokerTransport):
         # Patterns are subjects with wildcards in them, so they pass through
         # ``_check_subject``'s refusal of ``*`` — prefixed by hand instead.
         # Log/status patterns also listen on the log stream; everything else
-        # is fan-out only, so a lease or a feed does not pay a second consumer.
+        # is fan-out only, so a lease or a feed does not pay a second subscription.
         subjects = [
             subject
             for p in patterns
             for subject in self._subscribe_subjects(p, pattern=True)
         ]
-        async for item in self._consume(subjects, stop=stop):
+        async for item in self._consume(subjects, stop=stop, ready=None):
             yield item
 
     def _subscribe_subjects(
@@ -700,16 +745,43 @@ class NatsTransport(BrokerTransport):
         )
         return (fanout, log)
 
-    async def _consume(
-        self, subjects: Sequence[str], *, stop: asyncio.Event | None
-    ) -> AsyncIterator[tuple[str, str]]:
-        """One ephemeral consumer per subject, merged, until ``stop``.
+    async def _drain_pending(self) -> None:
+        """Write buffered commands to this server, without a PING/PONG.
 
-        A consumer each is what the fan-out pattern is: the stream holds one
-        copy of the message and every subscriber reads it at its own position,
-        so a slow reader cannot cost a fast one anything and neither can see the
-        other's. Starting at *new* and acknowledging nothing is what makes it
-        behave like the broadcast the broker promises rather than like a queue.
+        ``Client.flush`` is the obvious "wait until the server has it"
+        and the wrong one here: it parks a future in ``_pongs``, and a
+        cancelled waiter is not removed. The next PONG then completes a
+        done future, the read loop dies, and KV / log publishes time out.
+        Forcing the pending write is enough for the SUB to leave this
+        process; nats-py's own flusher already ignores a cancelled wait.
+        """
+        await self.nc._flush_pending(force_flush=True)
+
+    async def _consume(
+        self,
+        subjects: Sequence[str],
+        *,
+        stop: asyncio.Event | None,
+        ready: asyncio.Event | None,
+    ) -> AsyncIterator[tuple[str, str]]:
+        """One core subscription per subject, merged, until ``stop``.
+
+        Core rather than a JetStream consumer: each subscriber still has
+        its own interest, a slow reader cannot cost a fast one anything,
+        and a publisher waits for the server it connected to rather than
+        the stream's leader. The stream still stores the subject for
+        readers; live delivery does not go through it.
+
+        ``nc.subscribe`` does not wait for the SUB to leave ``_pending``.
+        Draining the write buffer is what we need — the bytes reach this
+        process's server. ``Client.flush`` is a PING/PONG instead, and a
+        cancelled waiter leaves its future in ``_pongs``; the next PONG
+        then ``set_result``s a done future, kills the read loop, and
+        every later ``js.publish`` times out. Session start fires several
+        of these pumps at once and a strategy that exits in ``on_start``
+        cancels them immediately.
+
+        This is not a wait for gateway interest to the other cluster.
         """
         if not subjects:
             raise ValueError("a subscription needs at least one subject")
@@ -721,17 +793,11 @@ class NatsTransport(BrokerTransport):
             await inbound.put((topic, msg.data.decode()))
 
         subs = [
-            await self.js.subscribe(
-                subject,
-                cb=handler,
-                config=js_api.ConsumerConfig(
-                    deliver_policy=js_api.DeliverPolicy.NEW,
-                    ack_policy=js_api.AckPolicy.NONE,
-                    inactive_threshold=self.config.consumer_idle_seconds,
-                ),
-            )
-            for subject in subjects
+            await self.nc.subscribe(subject, cb=handler) for subject in subjects
         ]
+        await self._drain_pending()
+        if ready is not None:
+            ready.set()
         try:
             async for item in _iter_until_stopped(inbound, stop=stop):
                 yield item

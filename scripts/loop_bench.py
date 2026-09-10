@@ -249,7 +249,7 @@ async def case_subscribe(messages: int = 6000) -> dict:
                 return
 
     task = asyncio.create_task(consume(), name="loopbench-consume")
-    # Fan-out drops what nobody is listening to (DeliverPolicy.NEW), so the
+    # Fan-out drops what nobody is listening to (core subscribe starts at now), so the
     # consumer has to exist before the first timed publish. Keep sending a
     # warmup until one arrives — that is the subscription landing, not a clock.
     warmup = UntypedEnvelope.wrap({}, type="loopbench_warmup", source="md")

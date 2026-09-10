@@ -90,8 +90,9 @@ choice" this document objects to two paragraphs above, which makes keeping it
 inconsistent as well as dead.
 
 The lesson generalises: a field is Redis-only if its *reader* is, and the
-docstrings are a convenience rather than the index. `consumer_idle_seconds` and
-everything transport-neutral stays.
+docstrings are a convenience rather than the index. `consumer_idle_seconds`
+left with the JetStream fan-out consumer; live `subscribe` is core NATS and
+reads use `_READ_CONSUMER_IDLE_S`. Everything else transport-neutral stays.
 
 Note that `serve_poll_seconds` is referenced in a comment in
 `apps/td/src/mftik_td/session/manager.py` — that comment needs rewriting, not

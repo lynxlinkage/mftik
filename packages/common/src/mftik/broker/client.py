@@ -524,16 +524,20 @@ class Broker:
         topics: str | Sequence[str],
         *,
         stop: asyncio.Event | None = None,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[UntypedEnvelope]:
         """Yield envelopes from one or more fan-out topics until ``stop``.
 
         Messages published while not subscribed are lost unless they were also
-        written via :meth:`publish_log`.
+        written via :meth:`publish_log`. ``ready`` is set once this process's
+        server has the subscription, before the first yield.
         """
         topic_list = (topics,) if isinstance(topics, str) else tuple(topics)
         if not topic_list:
             raise ValueError("subscribe requires at least one topic")
-        async for _topic, raw in self._transport.subscribe(topic_list, stop=stop):
+        async for _topic, raw in self._transport.subscribe(
+            topic_list, stop=stop, ready=ready
+        ):
             yield UntypedEnvelope.from_json(raw)
 
     async def psubscribe(

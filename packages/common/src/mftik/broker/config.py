@@ -25,16 +25,6 @@ class BrokerConfig:
     #: for late WS subscribers. The stream holds a larger ring; this is the
     #: replay window. Live fan-out is unaffected.
     log_buffer_maxlen: int = 100
-    #: How long an idle consumer survives before the server reaps it. Every
-    #: ``subscribe`` is a consumer of its own and every served subject has one,
-    #: and the subjects are per-session and per-account, so the count follows
-    #: the fleet rather than the code. This is what stops a node that has
-    #: churned a thousand sessions from carrying a thousand consumers for the
-    #: rest of its life.
-    #:
-    #: Comfortably above :attr:`request_timeout`, because a consumer reaped
-    #: while a caller is still waiting on it costs that caller its answer.
-    consumer_idle_seconds: float = 300.0
     #: How many JetStream replicas a KV bucket should keep. NATS defaults to
     #: one, which puts the whole bucket on a single server — a 503 on that
     #: server's JS API is then a failed ledger read. Production sets three
@@ -51,9 +41,6 @@ class BrokerConfig:
             key_prefix=os.getenv("BROKER_KEY_PREFIX", "mft"),
             request_timeout=float(os.getenv("BROKER_REQUEST_TIMEOUT", "5")),
             log_buffer_maxlen=max(1, int(os.getenv("BROKER_LOG_BUFFER_MAXLEN", "100"))),
-            consumer_idle_seconds=float(
-                os.getenv("BROKER_CONSUMER_IDLE_SECONDS", "300")
-            ),
             kv_replicas=max(1, int(os.getenv("NATS_KV_REPLICAS", "1"))),
             kv_placement_cluster=os.getenv("NATS_KV_PLACEMENT_CLUSTER", ""),
         )

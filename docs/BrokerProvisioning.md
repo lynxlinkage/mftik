@@ -15,12 +15,13 @@ object that want three different ones.
 |---|---|---|---|
 | **Declared** | the fan-out stream, the log stream, four KV buckets (`state`, `lease`, `counter`, `tapecov`) | `connect()` and `_bucket()`, on first use | deploy time |
 | **Instantiated** | one tape stream per recorded feed | `_ensure_tape_stream`, when MD first records that feed | runtime |
-| **Ephemeral** | a consumer per read, per subscribe, per served subject | the operation | per call |
+| **Ephemeral** | a consumer per read | the operation | per call |
 
 The third tier is settled and correct. Read consumers are deleted when the read
-finishes (`_close_reader`, from #83), and `consumer_idle_seconds` is the backstop
-for a process that died mid-read rather than the policy. Since #85 removed the
-work queue there is no durable consumer left at all. Nothing to move.
+finishes (`_close_reader`, from #83), and `_READ_CONSUMER_IDLE_S` is the backstop
+for a process that died mid-read rather than the policy. Live `subscribe` is
+core NATS. Since #85 removed the work queue there is no durable consumer left
+at all. Nothing to move.
 
 The first tier is the one that wants to be a migration. The second is the
 interesting case, and it is not the one it looks like.

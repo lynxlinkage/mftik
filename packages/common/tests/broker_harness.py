@@ -42,9 +42,6 @@ def test_config(key_prefix: str) -> BrokerConfig:
     return BrokerConfig(
         nats_url=os.getenv("NATS_URL", "nats://localhost:4222"),
         key_prefix=key_prefix,
-        # Long enough that nothing is reaped mid-test, short enough that a
-        # crashed run does not leave consumers on the server for the afternoon.
-        consumer_idle_seconds=60.0,
     )
 
 
