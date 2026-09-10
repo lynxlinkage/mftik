@@ -27,55 +27,86 @@ export type SessionLogMessage = {
 
 export type LogDomain = 'sts' | 'td' | 'md';
 
+export type LogConnection = 'connecting' | 'open' | 'closed' | 'error';
+
+export type LogConnectionDetail = {
+	code?: number;
+	reason?: string;
+};
+
+/**
+ * Subscribe to a domain log stream. Returns a disposer.
+ *
+ * Reconnects with backoff, same reason as the status and board sockets: a
+ * first-paint close that never comes back looks like an empty log even when
+ * REST already has rows. `pingSession` still answers the auth question the
+ * browser will not surface on a refused handshake.
+ */
 export function connectDomainLog(
 	domain: LogDomain,
 	id: string,
 	onMessage: (entry: LogEntry) => void,
-	onStatus: (status: 'connecting' | 'open' | 'closed' | 'error') => void
+	onStatus: (status: LogConnection, detail?: LogConnectionDetail) => void
 ): () => void {
 	const url = `${wsBaseUrl()}/ws/${domain}/${encodeURIComponent(id)}`;
-	onStatus('connecting');
-	const ws = new WebSocket(url);
-	// Distinguishes our own teardown from the socket dropping under us; only
-	// the latter is worth asking the auth chain about.
+	let ws: WebSocket | null = null;
+	let retry: ReturnType<typeof setTimeout> | null = null;
+	let attempt = 0;
 	let disposed = false;
 
-	ws.onopen = () => onStatus('open');
-	ws.onerror = () => onStatus('error');
-	ws.onclose = () => {
-		onStatus('closed');
-		// An expired session closes the handshake with no status the browser
-		// will show us, so a dead login is indistinguishable here from a
-		// finished stream. $lib/auth asks the question over REST instead.
-		if (!disposed) void pingSession();
-	};
-	ws.onmessage = (ev) => {
-		const raw = String(ev.data);
-		try {
-			const msg = JSON.parse(raw) as SessionLogMessage;
-			onMessage({
-				id: msg.id ?? crypto.randomUUID(),
-				ts: msg.ts ?? Date.now() / 1000,
-				source: msg.source ?? 'unknown',
-				level: msg.payload?.level ?? 'info',
-				message: msg.payload?.message ?? raw,
-				raw
-			});
-		} catch {
-			onMessage({
-				id: crypto.randomUUID(),
-				ts: Date.now() / 1000,
-				source: 'raw',
-				level: 'info',
-				message: raw,
-				raw
-			});
-		}
-	};
+	function open() {
+		if (disposed) return;
+		onStatus('connecting');
+		ws = new WebSocket(url);
+
+		ws.onopen = () => {
+			attempt = 0;
+			onStatus('open');
+		};
+		ws.onerror = () => onStatus('error');
+		ws.onclose = (ev) => {
+			onStatus('closed', { code: ev.code, reason: ev.reason });
+			if (disposed) return;
+			// An expired session closes the handshake with no status the browser
+			// will show us, so a dead login is indistinguishable here from a
+			// finished stream. $lib/auth asks the question over REST instead.
+			void pingSession();
+			// 1s, 2s, 4s … capped at 30s.
+			const delay = Math.min(1000 * 2 ** attempt, 30_000);
+			attempt += 1;
+			retry = setTimeout(open, delay);
+		};
+		ws.onmessage = (ev) => {
+			const raw = String(ev.data);
+			try {
+				const msg = JSON.parse(raw) as SessionLogMessage;
+				onMessage({
+					id: msg.id ?? crypto.randomUUID(),
+					ts: msg.ts ?? Date.now() / 1000,
+					source: msg.source ?? 'unknown',
+					level: msg.payload?.level ?? 'info',
+					message: msg.payload?.message ?? raw,
+					raw
+				});
+			} catch {
+				onMessage({
+					id: crypto.randomUUID(),
+					ts: Date.now() / 1000,
+					source: 'raw',
+					level: 'info',
+					message: raw,
+					raw
+				});
+			}
+		};
+	}
+
+	open();
 
 	return () => {
 		disposed = true;
-		ws.close();
+		if (retry !== null) clearTimeout(retry);
+		ws?.close();
 	};
 }
 
@@ -83,7 +114,7 @@ export function connectDomainLog(
 export function connectSessionLog(
 	sessionId: string,
 	onMessage: (entry: LogEntry) => void,
-	onStatus: (status: 'connecting' | 'open' | 'closed' | 'error') => void
+	onStatus: (status: LogConnection, detail?: LogConnectionDetail) => void
 ): () => void {
 	return connectDomainLog('sts', sessionId, onMessage, onStatus);
 }

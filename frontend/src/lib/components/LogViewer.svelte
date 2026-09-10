@@ -1,7 +1,12 @@
 <script lang="ts">
-	import { onDestroy, onMount, tick } from 'svelte';
-	import { api } from '$lib/api';
-	import { connectDomainLog, type LogDomain, type LogEntry } from '$lib/logging/session';
+	import { tick } from 'svelte';
+	import { api, type SessionLog } from '$lib/api';
+	import {
+		connectDomainLog,
+		type LogConnection,
+		type LogDomain,
+		type LogEntry
+	} from '$lib/logging/session';
 	import LogDownloadModal from '$lib/components/LogDownloadModal.svelte';
 
 	interface Props {
@@ -13,21 +18,50 @@
 
 	let { domain, streamId, title = 'Session log', subtitle }: Props = $props();
 
-	let status = $state<'connecting' | 'open' | 'closed' | 'error'>('connecting');
+	let status = $state<LogConnection>('connecting');
 	let logs = $state<LogEntry[]>([]);
 	let copied = $state(false);
 	let preEl = $state<HTMLPreElement | null>(null);
-	let disconnect: (() => void) | null = null;
 	let stickToBottom = true;
 	let loadingOlder = $state(false);
 	let hasMoreHistory = $state(true);
 	let historyLoaded = $state(false);
 	let historyHint = $state('');
 	let downloadOpen = $state(false);
+	let closeCode = $state<number | undefined>(undefined);
+	let closeReason = $state('');
+	let sawDisconnect = $state(false);
 
 	const HISTORY_PAGE = 100;
 	const SCROLL_TOP_THRESHOLD = 40;
 	const LIVE_CAP = 500;
+
+	function fromRestRow(row: SessionLog): LogEntry {
+		return {
+			id: row.id,
+			ts: row.ts,
+			source: row.source,
+			level: row.level,
+			message: row.message,
+			raw: '',
+			dbId: row.db_id
+		};
+	}
+
+	function logOrder(a: LogEntry, b: LogEntry): number {
+		if (a.ts !== b.ts) return a.ts - b.ts;
+		const aDb = a.dbId ?? 0;
+		const bDb = b.dbId ?? 0;
+		if (aDb !== bDb) return aDb - bDb;
+		return a.id.localeCompare(b.id);
+	}
+
+	function mergeLogs(existing: LogEntry[], incoming: LogEntry[]): LogEntry[] {
+		const seen = new Set(existing.map((e) => e.id));
+		const extra = incoming.filter((e) => !seen.has(e.id));
+		if (extra.length === 0) return existing;
+		return [...existing, ...extra].sort(logOrder);
+	}
 
 	function formatTime(ts: number): string {
 		return new Date(ts * 1000).toLocaleTimeString('en-GB', {
@@ -46,9 +80,23 @@
 		return `${t}  ${level}  ${source}  ${entry.message}`;
 	}
 
-	const text = $derived(
-		logs.length === 0 ? '' : logs.map(formatLine).join('\n') + '\n'
-	);
+	const text = $derived(logs.length === 0 ? '' : logs.map(formatLine).join('\n') + '\n');
+
+	function connectionHint(): string {
+		if (closeCode === 1008) return 'authentication required';
+		if (closeReason) return closeReason;
+		if (closeCode != null && closeCode !== 1005) return `closed (${closeCode})`;
+		return 'disconnected';
+	}
+
+	const emptyMessage = $derived.by(() => {
+		if (status === 'error') return 'Log stream error. Reconnecting…';
+		if (status === 'closed') {
+			return `Disconnected — ${connectionHint()}. Reconnecting…`;
+		}
+		if (sawDisconnect && status === 'connecting') return 'Reconnecting…';
+		return 'Waiting for log lines…';
+	});
 
 	async function scrollIfNeeded() {
 		await tick();
@@ -57,8 +105,26 @@
 		}
 	}
 
+	async function seedRecent(d: LogDomain, id: string, isCancelled: () => boolean) {
+		loadingOlder = true;
+		try {
+			const page = await api.logs(d, id, { limit: HISTORY_PAGE });
+			if (isCancelled()) return;
+			const seeded = page.logs.slice().reverse().map(fromRestRow);
+			logs = mergeLogs(logs, seeded);
+			hasMoreHistory = page.has_more;
+			if (seeded.length > 0) historyLoaded = true;
+			void scrollIfNeeded();
+		} catch {
+			if (isCancelled()) return;
+			historyHint = 'Failed to load log history';
+		} finally {
+			if (!isCancelled()) loadingOlder = false;
+		}
+	}
+
 	async function loadOlder() {
-		if (loadingOlder || !hasMoreHistory || logs.length === 0) return;
+		if (loadingOlder || !hasMoreHistory) return;
 		loadingOlder = true;
 		historyHint = 'Loading older…';
 		const oldest = logs[0];
@@ -66,25 +132,16 @@
 		const prevTop = preEl?.scrollTop ?? 0;
 		try {
 			const page = await api.logs(domain, streamId, {
-				beforeTs: oldest.ts,
-				beforeId: oldest.dbId,
+				...(oldest ? { beforeTs: oldest.ts, beforeId: oldest.dbId } : {}),
 				limit: HISTORY_PAGE
 			});
 			const seen = new Set(logs.map((e) => e.id));
 			// API returns newest-first; reverse so oldest is first when prepending.
-			const older: LogEntry[] = page.logs
+			const older = page.logs
 				.slice()
 				.reverse()
 				.filter((row) => !seen.has(row.id))
-				.map((row) => ({
-					id: row.id,
-					ts: row.ts,
-					source: row.source,
-					level: row.level,
-					message: row.message,
-					raw: '',
-					dbId: row.db_id
-				}));
+				.map(fromRestRow);
 			hasMoreHistory = page.has_more;
 			if (older.length === 0) {
 				historyHint = hasMoreHistory ? '' : 'Beginning of history';
@@ -135,24 +192,55 @@
 		sel?.addRange(range);
 	}
 
-	onMount(() => {
-		disconnect = connectDomainLog(
-			domain,
-			streamId,
+	$effect(() => {
+		const d = domain;
+		const id = streamId;
+		logs = [];
+		status = 'connecting';
+		hasMoreHistory = true;
+		historyLoaded = false;
+		historyHint = '';
+		closeCode = undefined;
+		closeReason = '';
+		sawDisconnect = false;
+		copied = false;
+		stickToBottom = true;
+		downloadOpen = false;
+
+		let cancelled = false;
+		void seedRecent(d, id, () => cancelled);
+		const stop = connectDomainLog(
+			d,
+			id,
 			(entry) => {
+				if (cancelled) return;
+				if (logs.some((e) => e.id === entry.id)) return;
 				const next = [...logs, entry];
 				// Cap the live/Redis window only until the user has pulled DB history.
 				logs = historyLoaded ? next : next.slice(-LIVE_CAP);
 				void scrollIfNeeded();
 			},
-			(s) => {
+			(s, detail) => {
+				if (cancelled) return;
 				status = s;
+				if (s === 'closed' || s === 'error') {
+					sawDisconnect = true;
+					if (detail) {
+						closeCode = detail.code;
+						closeReason = detail.reason ?? '';
+					}
+				}
+				if (s === 'open') {
+					sawDisconnect = false;
+					closeCode = undefined;
+					closeReason = '';
+				}
 			}
 		);
-	});
-
-	onDestroy(() => {
-		disconnect?.();
+		return () => {
+			cancelled = true;
+			stop();
+		};
 	});
 </script>
 
@@ -166,6 +254,9 @@
 			<p class="meta">
 				<code>/ws/{domain}/{streamId}</code>
 				<span class="status" data-status={status}>{status}</span>
+				{#if status === 'closed' || status === 'error'}
+					<span class="hint">{status === 'error' ? 'connection error' : connectionHint()}</span>
+				{/if}
 				{#if historyHint}
 					<span class="hint">{historyHint}</span>
 				{/if}
@@ -189,7 +280,7 @@
 		bind:this={preEl}
 		onscroll={onScroll}
 		aria-live="polite"
-		aria-label={`${title} terminal`}>{#if !text}<span class="empty">Waiting for log lines…</span>{:else}{text}{/if}</pre>
+		aria-label={`${title} terminal`}>{#if !text}<span class="empty">{emptyMessage}</span>{:else}{text}{/if}</pre>
 </section>
 
 <LogDownloadModal
@@ -244,6 +335,9 @@
 
 	.status[data-status='open'] {
 		color: var(--ok);
+	}
+	.status[data-status='closed'] {
+		color: var(--warn);
 	}
 	.status[data-status='error'] {
 		color: var(--err);
