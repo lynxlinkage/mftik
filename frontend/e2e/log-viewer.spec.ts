@@ -14,7 +14,17 @@ type LogRow = {
 	message: string;
 };
 
-async function mockAuth(page: Page) {
+type Mocks = { handshakes: number; pings: number };
+
+type LogPageOptions = {
+	/** Passed straight to Playwright's close; `{}` sends no status code. */
+	close?: { code?: number; reason?: string };
+	/** False makes `/auth/me` answer 401, which is the only place a refused
+	 *  handshake is visible. */
+	signedIn?: boolean;
+};
+
+async function mockAuth(page: Page, mocks: Mocks, signedIn: boolean) {
 	await page.route('**/api/auth/status', (route) =>
 		route.fulfill({
 			json: {
@@ -27,8 +37,12 @@ async function mockAuth(page: Page) {
 			}
 		})
 	);
-	await page.route('**/api/auth/me', (route) =>
-		route.fulfill({
+	await page.route('**/api/auth/me', (route) => {
+		mocks.pings += 1;
+		if (!signedIn) {
+			return route.fulfill({ status: 401, json: { detail: 'authentication required' } });
+		}
+		return route.fulfill({
 			json: {
 				user_id: 1,
 				username: 'owner',
@@ -36,12 +50,18 @@ async function mockAuth(page: Page) {
 				email: null,
 				via: 'none'
 			}
-		})
-	);
+		});
+	});
 }
 
-async function mockLogPage(page: Page, logs: LogRow[]): Promise<{ handshakes: number }> {
-	await mockAuth(page);
+async function mockLogPage(
+	page: Page,
+	logs: LogRow[],
+	options: LogPageOptions = {}
+): Promise<Mocks> {
+	const { close = { code: 1008, reason: 'authentication required' }, signedIn = true } = options;
+	const mocks: Mocks = { handshakes: 0, pings: 0 };
+	await mockAuth(page, mocks, signedIn);
 	await page.route('**/api/sts/sessions/*/eventlog/info', (route) =>
 		route.fulfill({
 			json: {
@@ -57,15 +77,14 @@ async function mockLogPage(page: Page, logs: LogRow[]): Promise<{ handshakes: nu
 	await page.route('**/api/logs/**', (route) =>
 		route.fulfill({ json: { logs, has_more: false } })
 	);
-	const counter = { handshakes: 0 };
 	await page.routeWebSocket('**/ws/**', (ws) => {
-		// First paint and every reconnect: stay closed so the pane cannot
-		// hide behind a later open. Close code 1008 is what the API auth
-		// gate sends; the viewer must not collapse that to the waiting copy.
-		counter.handshakes += 1;
-		ws.close({ code: 1008, reason: 'authentication required' });
+		// First paint and every reconnect: stay closed so the pane cannot hide
+		// behind a later open. Only the log socket is counted — the page opens
+		// a status socket too, and it would otherwise pass a count on its own.
+		if (new URL(ws.url()).pathname.startsWith('/ws/sts/')) mocks.handshakes += 1;
+		ws.close(close);
 	});
-	return counter;
+	return mocks;
 }
 
 const SEEDED: LogRow = {
@@ -108,3 +127,35 @@ test('a refused handshake is not retried in a loop', async ({ page }) => {
 	expect(socket.handshakes).toBe(1);
 	await expect(term).not.toContainText('Reconnecting…');
 });
+
+test('a close with no status keeps reconnecting while the session is alive', async ({ page }) => {
+	const socket = await mockLogPage(page, [], { close: {} });
+	await page.goto('/sts/sess-flap');
+
+	// The shape the gate actually produces: it closes before accepting, uvicorn
+	// answers the handshake with 403, and the browser reports a close carrying
+	// no status at all. Indistinguishable from the API restarting — which is
+	// the case backoff exists for, so it has to keep trying.
+	await expect.poll(() => socket.handshakes, { timeout: 8_000 }).toBeGreaterThan(1);
+});
+
+test('a 401 on the close path routes to /login instead of reopening', async ({ page }) => {
+	const socket = await mockLogPage(page, [], { close: {}, signedIn: false });
+	await page.goto('/sts/sess-401');
+
+	await expect(page).toHaveURL(/\/login\?next=/);
+	await page.waitForTimeout(3_500);
+	expect(socket.handshakes).toBe(1);
+});
+
+/**
+ * What the three above do and do not prove, each checked against a tree
+ * regressed on purpose.
+ *
+ * Leaving for /login is what ends the retry here: it unmounts the pane, and
+ * the disposer clears the pending timer. So the test above stays green even
+ * when `shouldReopen` ignores the verdict and answers true — it pins that the
+ * close path still asks `/auth/me` and acts on a 401, and it fails when that
+ * ask is dropped. The verdict check itself is covered by the 1008 test, and
+ * only guards the window before the navigation lands.
+ */
