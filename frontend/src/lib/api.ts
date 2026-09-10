@@ -127,6 +127,8 @@ export type StrategyDeployBody = {
 	type: string;
 	yaml: string;
 	timeout?: number;
+	/** Which STS should run this. Omitted means anycast (PI-5). */
+	instance?: string;
 };
 
 /** A deployable strategy and the document it starts from. */
@@ -955,7 +957,8 @@ export const api = {
 			method: 'POST',
 			body: JSON.stringify({
 				yaml: body.yaml,
-				timeout: body.timeout ?? 30
+				timeout: body.timeout ?? 30,
+				...(body.instance ? { instance: body.instance } : {})
 			})
 		}),
 	stopSts: (id: string) =>
