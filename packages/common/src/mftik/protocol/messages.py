@@ -414,18 +414,68 @@ class StsRegistryGenerationRequest(BaseModel):
 
     Read-only. It does not re-scan the registry, does not import strategy
     trees, and does not retarget ``sys.path``. Opening Settings asks this;
-    a write is what sends :data:`STS_REGISTRY_RELOAD`.
+    an extras write sends :data:`STS_ENV_SYNC` and a registry write sends
+    :data:`STS_REGISTRY_RELOAD`.
     """
 
     model_config = ConfigDict(frozen=True)
 
 
-class StsRegistryGenerationResult(BaseModel):
-    """STS → API: the in-memory env generation, or 0 before the first attach."""
+class StsEnvPackagePin(BaseModel):
+    """One stamped extra, as sent on env sync and generation replies.
+
+    Sync success is name → version+dist equality, not generation arithmetic:
+    an STS that installed the same pins onto its own volume may have a
+    different ``gen-N`` than the API.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    version: str
+    dist: str
+    source: str = "manual"
+
+
+class StsEnvSyncRequest(BaseModel):
+    """API → STS: make this process's overlay match the node's extras.
+
+    The API has already applied and committed the stamp. Each STS either
+    already has those pins on disk (shared volume — just reload) or runs
+    the same installer against its own ``MFTIK_DATA``. ``generation`` is
+    the number the API published; the process uses it when that directory
+    is free, and otherwise takes the next free number.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     generation: int = 0
+    packages: dict[str, StsEnvPackagePin] = Field(default_factory=dict)
+    allow_disruptive: bool = False
+
+
+class StsEnvSyncResult(BaseModel):
+    """STS → API: overlay adopted, then the registry re-scanned."""
+
+    model_config = ConfigDict(frozen=True)
+
+    loaded: list[str] = Field(default_factory=list)
+    generation: int = 0
+    packages: dict[str, StsEnvPackagePin] = Field(default_factory=dict)
+
+
+class StsRegistryGenerationResult(BaseModel):
+    """STS → API: the in-memory env generation, or 0 before the first attach.
+
+    ``packages`` is the in-memory stamp, so a GET can tell "this process
+    has the pins" from "this process has some generation number". An STS
+    that predates the field sends ``{}`` and the caller falls back to
+    comparing ``generation`` alone.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    generation: int = 0
+    packages: dict[str, StsEnvPackagePin] = Field(default_factory=dict)
 
 
 class StsEventLogInfoRequest(BaseModel):
@@ -1025,6 +1075,8 @@ StsRegistryReloadRequestEnvelope = Envelope[StsRegistryReloadRequest]
 StsRegistryReloadResultEnvelope = Envelope[StsRegistryReloadResult]
 StsRegistryGenerationRequestEnvelope = Envelope[StsRegistryGenerationRequest]
 StsRegistryGenerationResultEnvelope = Envelope[StsRegistryGenerationResult]
+StsEnvSyncRequestEnvelope = Envelope[StsEnvSyncRequest]
+StsEnvSyncResultEnvelope = Envelope[StsEnvSyncResult]
 StsEventLogInfoRequestEnvelope = Envelope[StsEventLogInfoRequest]
 StsEventLogInfoEnvelope = Envelope[StsEventLogInfo]
 StsEventLogReadRequestEnvelope = Envelope[StsEventLogReadRequest]
@@ -1178,6 +1230,7 @@ STS_SESSION_STATUS = "sts.session.status"
 STS_EVENTLOG_INFO = "sts.eventlog.info"
 STS_REGISTRY_RELOAD = "sts.registry.reload"
 STS_REGISTRY_GENERATION = "sts.registry.generation"
+STS_ENV_SYNC = "sts.env.sync"
 STS_EVENTLOG_READ = "sts.eventlog.read"
 
 #: ``reason`` written when an operator stopped a session from the UI. A fixed

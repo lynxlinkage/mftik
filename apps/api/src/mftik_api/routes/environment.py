@@ -36,18 +36,10 @@ from mftik.environment import (
     resolved_dists,
 )
 from mftik.protocol import (
-    STS_REGISTRY_GENERATION,
-    STS_REGISTRY_RELOAD,
     STS_SESSION_LIST,
     ListSessionsRequest,
     ListSessionsRequestEnvelope,
     ListSessionsResult,
-    StsRegistryGenerationRequest,
-    StsRegistryGenerationRequestEnvelope,
-    StsRegistryGenerationResult,
-    StsRegistryReloadRequest,
-    StsRegistryReloadRequestEnvelope,
-    StsRegistryReloadResult,
     Topics,
 )
 from mftik.registry import RegistryStore
@@ -72,6 +64,7 @@ from mftik_api.schemas import (
     EnvPackageIn,
     EnvPackageOut,
 )
+from mftik_api.sts_fanout import sts_extras_in_sync, sync_sts
 
 logger = logging.getLogger(__name__)
 
@@ -201,47 +194,6 @@ async def _require_no_live_sessions(broker: BrokerDep) -> None:
         )
 
 
-async def _reload_sts(
-    broker: BrokerDep,
-) -> tuple[frozenset[str], int | None, str | None]:
-    try:
-        result = await request_domain(
-            broker,
-            Topics.STS,
-            StsRegistryReloadRequestEnvelope.wrap(
-                StsRegistryReloadRequest(),
-                type=STS_REGISTRY_RELOAD,
-                source="api",
-            ),
-            result_type=StsRegistryReloadResult,
-            timeout=30.0,
-        )
-    except DomainRpcError as exc:
-        logger.warning("STS registry reload failed: %s", exc.message)
-        return frozenset(), None, exc.message
-    return frozenset(result.loaded), result.generation, None
-
-
-async def _sts_generation(
-    broker: BrokerDep,
-) -> tuple[int | None, str | None]:
-    try:
-        result = await request_domain(
-            broker,
-            Topics.STS,
-            StsRegistryGenerationRequestEnvelope.wrap(
-                StsRegistryGenerationRequest(),
-                type=STS_REGISTRY_GENERATION,
-                source="api",
-            ),
-            result_type=StsRegistryGenerationResult,
-        )
-    except DomainRpcError as exc:
-        logger.warning("STS env generation failed: %s", exc.message)
-        return None, exc.message
-    return result.generation, None
-
-
 def _broken_trees(store: RegistryStore, removed: str) -> list[BrokenTreeOut]:
     return [
         BrokenTreeOut(
@@ -317,20 +269,18 @@ async def _apply_set(
         raise
     await run_in_threadpool(pending.__exit__, None, None, None)
 
-    _keys, sts_generation, rpc_error = await _reload_sts(broker)
-    if rpc_error is not None:
+    fanout = await sync_sts(broker, result.stamp, allow_disruptive=True)
+    if fanout.error is not None:
         loaded = False
         load_error = (
-            f"the environment was applied, but STS did not reload ({rpc_error}). "
+            f"the environment was applied, but STS did not sync ({fanout.error}). "
             "It will be picked up when STS next restarts."
         )
         restart_required = True
     else:
         loaded = True
         load_error = None
-        restart_required = result.restart_required or (
-            sts_generation is not None and sts_generation < result.stamp.generation
-        )
+        restart_required = result.restart_required or not fanout.in_sync
 
     await record_audit(
         user_id=owner,
@@ -353,13 +303,11 @@ async def _apply_set(
 @router.get("", response_model=EnvironmentOut)
 async def get_environment(broker: BrokerDep) -> EnvironmentOut:
     stamp = _env().read_stamp()
-    sts_generation, rpc_error = await _sts_generation(broker)
+    in_sync, rpc_error = await sts_extras_in_sync(broker, stamp)
     if rpc_error is not None:
         restart = stamp.generation > 0
     else:
-        restart = (
-            sts_generation is not None and sts_generation < stamp.generation
-        )
+        restart = not in_sync
     return _view(stamp, restart_required=restart)
 
 

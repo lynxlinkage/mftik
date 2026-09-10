@@ -174,8 +174,23 @@ class NodeEnv:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
-    def begin(self) -> Path:
-        """Create ``gen-{N+1}/site-packages``. Caller must hold :meth:`lock`."""
+    def begin(self, generation: int | None = None) -> Path:
+        """Create ``gen-{N}/site-packages``. Caller must hold :meth:`lock`.
+
+        ``generation`` pins the directory number so a remote STS can publish
+        the same gen the API just committed. If that number is already the
+        live stamp, or cannot be used, this falls through to the next free
+        number — sync success is package equality, not the integer.
+        """
+        if generation is not None and generation > 0:
+            stamp = self.read_stamp()
+            if stamp.generation != generation:
+                gen = self.root / f"gen-{generation}"
+                if gen.exists():
+                    shutil.rmtree(gen, ignore_errors=True)
+                dest = gen / "site-packages"
+                dest.mkdir(parents=True)
+                return dest
         gen = self.root / f"gen-{self._next_generation()}"
         dest = gen / "site-packages"
         dest.mkdir(parents=True)

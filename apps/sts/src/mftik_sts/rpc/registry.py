@@ -31,6 +31,7 @@ from mftik.protocol import (
     StsRegistryReloadResultEnvelope,
 )
 
+from mftik_sts.rpc.env import current_packages
 from mftik_sts.runtime_env import current_stamp, refresh
 
 if TYPE_CHECKING:
@@ -87,7 +88,10 @@ async def handle_registry_generation(
     stamp = current_stamp()
     await req.reply(
         StsRegistryGenerationResultEnvelope.wrap(
-            StsRegistryGenerationResult(generation=stamp.generation),
+            StsRegistryGenerationResult(
+                generation=stamp.generation,
+                packages=current_packages(),
+            ),
             type=STS_REGISTRY_GENERATION,
             source="sts",
             session_id=req.envelope.session_id,

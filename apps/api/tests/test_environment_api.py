@@ -9,12 +9,16 @@ from fastapi import HTTPException
 from mftik.envapply import ApplyFailed, ApplySpec
 from mftik.environment import EnvStamp, NodeEnv
 from mftik.protocol import (
+    STS_ENV_SYNC,
     STS_REGISTRY_GENERATION,
     STS_REGISTRY_RELOAD,
     STS_SESSION_LIST,
     ListSessionsResult,
     ListSessionsResultEnvelope,
     SessionInfo,
+    StsEnvPackagePin,
+    StsEnvSyncResult,
+    StsEnvSyncResultEnvelope,
     StsRegistryGenerationResult,
     StsRegistryGenerationResultEnvelope,
     StsRegistryReloadResult,
@@ -86,15 +90,39 @@ class EnvBroker:
         self.generation = generation
         self.list_calls = 0
         self.reload_calls = 0
+        self.sync_calls = 0
         self.generation_calls = 0
+        self.subjects: list[str] = []
+
+    def _stamp(self):
+        return NodeEnv.from_env().read_stamp()
 
     def _generation(self) -> int:
-        stamp = NodeEnv.from_env().read_stamp()
         if self.generation is not None:
             return self.generation
-        return stamp.generation
+        return self._stamp().generation
+
+    def _packages(self) -> dict[str, StsEnvPackagePin]:
+        stamp = self._stamp()
+        if self._generation() < stamp.generation:
+            return {}
+        return {
+            name: StsEnvPackagePin(version=rec.version, dist=rec.dist)
+            for name, rec in stamp.packages.items()
+        }
+
+    def _adopted(self) -> StsEnvSyncResult:
+        stamp = self._stamp()
+        return StsEnvSyncResult(
+            loaded=[],
+            generation=stamp.generation,
+            packages=self._packages()
+            if self._generation() >= stamp.generation
+            else {},
+        )
 
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+        self.subjects.append(subject)
         if envelope.type == STS_SESSION_LIST:
             self.list_calls += 1
             if self.list_silent:
@@ -107,12 +135,25 @@ class EnvBroker:
                 type=STS_SESSION_LIST,
                 source="sts",
             )
+        if envelope.type == STS_ENV_SYNC:
+            self.sync_calls += 1
+            if self.reload_silent:
+                raise DomainRpcError("timeout", "no reply from sts")
+            adopted = self._adopted()
+            return StsEnvSyncResultEnvelope.wrap(
+                adopted,
+                type=STS_ENV_SYNC,
+                source="sts",
+            )
         if envelope.type == STS_REGISTRY_RELOAD:
             self.reload_calls += 1
             if self.reload_silent:
                 raise DomainRpcError("timeout", "no reply from sts")
             return StsRegistryReloadResultEnvelope.wrap(
-                StsRegistryReloadResult(loaded=[], generation=self._generation()),
+                StsRegistryReloadResult(
+                    loaded=[],
+                    generation=self._generation(),
+                ),
                 type=STS_REGISTRY_RELOAD,
                 source="sts",
             )
@@ -121,7 +162,10 @@ class EnvBroker:
             if self.generation_silent:
                 raise DomainRpcError("timeout", "no reply from sts")
             return StsRegistryGenerationResultEnvelope.wrap(
-                StsRegistryGenerationResult(generation=self._generation()),
+                StsRegistryGenerationResult(
+                    generation=self._generation(),
+                    packages=self._packages(),
+                ),
                 type=STS_REGISTRY_GENERATION,
                 source="sts",
             )
@@ -193,6 +237,7 @@ async def test_get_on_a_fresh_node_is_empty(env_dir: Path) -> None:
     assert out.bytes == 0
     assert out.abi_ok is True
     assert broker.reload_calls == 0
+    assert broker.sync_calls == 0
     assert broker.generation_calls == 1
 
 
@@ -203,6 +248,7 @@ async def test_get_does_not_reload_the_registry(env_dir: Path) -> None:
     assert got.generation == 1
     assert got.restart_required is True
     assert broker.reload_calls == 0
+    assert broker.sync_calls == 0
     assert broker.generation_calls == 1
 
 
@@ -212,7 +258,8 @@ async def test_put_updates_get_and_info(env_dir: Path) -> None:
     assert out.generation == 1
     assert out.loaded is True
     assert out.packages["numpy"].version == "1.26.4"
-    assert broker.reload_calls == 1
+    assert broker.sync_calls == 1
+    assert broker.reload_calls == 0
 
     got = await get_environment(broker=EnvBroker())
     assert got.generation == 1
@@ -241,6 +288,7 @@ async def test_put_installer_failure_does_not_reload(env_dir: Path) -> None:
         await _put({"numpy": ("1.0", "numpy")}, broker)
     assert exc.value.status_code == 502
     assert "nope" in str(exc.value.detail)
+    assert broker.sync_calls == 0
     assert broker.reload_calls == 0
     assert NodeEnv(env_dir).read_stamp().generation == 0
 

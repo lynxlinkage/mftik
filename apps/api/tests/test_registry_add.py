@@ -52,6 +52,7 @@ class ReloadingBroker:
     def __init__(self, loaded: list[str] | None = None) -> None:
         self._loaded = loaded
         self.calls = 0
+        self.subjects: list[str] = []
 
     def with_store(self, store: RegistryStore) -> ReloadingBroker:
         self._store = store
@@ -60,6 +61,7 @@ class ReloadingBroker:
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
         assert envelope.type == STS_REGISTRY_RELOAD
         self.calls += 1
+        self.subjects.append(subject)
         loaded = self._loaded
         if loaded is None:
             loaded = [

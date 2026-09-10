@@ -652,14 +652,19 @@ still has to make *new* extras visible without a restart.
   a matching image), or the stamp names a generation that is not
   there. In both, `extras_names()` is empty regardless of what the
   stamp lists; deploy then answers `incompatible_environment`.
-- Reload: extend `sts.registry.reload` **or** add
-  `sts.env.reload` that (1) re-reads the stamp into memory, (2)
-  ensures `current` is on `sys.path`, (3) `invalidate_caches()`,
-  (4) `load_local_registry()`, (5) returns the qualified keys plus
-  the generation it now believes. Prefer extending the existing
-  RPC so `add` and apply share one "did STS pick it up" answer.
-  The scan stays on the event loop for the same reason the
-  current handler comments: it mutates `sys.modules`.
+- Reload: `sts.registry.reload` re-reads the stamp, puts that
+  generation on `sys.path`, invalidates caches, and
+  `load_local_registry()`. Registry add / delete / connect use
+  that RPC. Apply uses a sibling `sts.env.sync`: when this
+  process's volume already has the pins, it is just a reload;
+  when it does not (a second host, its own `MFTIK_DATA`), it
+  runs the installer locally and then reloads. The scan stays
+  on the event loop; `uv` does not.
+
+  With more than one declared STS the API sends each RPC to
+  every enabled instance (`sts.{name}`), not the anycast
+  subject. One declared STS stays on `sts`. A silent instance
+  is `restart_required`, not a 200 that only one process saw.
 
   Because the path follows the stamp, this reload is what makes a
   committed generation importable at all — `sys.path`, the negative
@@ -761,14 +766,24 @@ removal breaks (ENV-2 put `requires` on the record). The Owner
 learns which strategies stopped being deployable at the moment of
 the removal, not the next time somebody opens the picker.
 
-Each write **is** apply (ENV-4) then ENV-4a's reload, analogue of
-`POST /registry/v1/add` reporting `loaded`. There is no
-`POST /environment/apply`. Failure before commit: previous stamp,
-generation unchanged, 4xx/5xx with installer stderr. Reload
-failure after a successful commit: 200 with a `loaded`-style
-field false and a sentence (files/stamp are on disk; STS will
-see them on next restart) — same posture as add when STS does
-not answer.
+Each write **is** apply (ENV-4) then `sts.env.sync` to every
+enabled STS, analogue of `POST /registry/v1/add` reporting
+`loaded` (that path still fans out `sts.registry.reload`).
+There is no `POST /environment/apply`. Failure before commit:
+previous stamp, generation unchanged, 4xx/5xx with installer
+stderr. Sync failure after a successful commit: 200 with a
+`loaded`-style field false and a sentence naming the
+instance(s) (files/stamp are on disk; those processes pick
+them up on next restart).
+
+`GET /environment` asks every instance's generation RPC.
+`restart_required` if any is silent or any in-memory extras
+do not match the stamp (pin equality; generation is the
+fallback for an STS that predates the packages field).
+
+STS needs the same `UV_INDEX_URL` egress the API uses. The
+image already has `uv`; a host that cannot reach the index
+fails that instance's sync, not the API apply.
 
 `force` query/body on writes that change or remove. The API is
 what knows, because it has the broker: it asks STS for `live`

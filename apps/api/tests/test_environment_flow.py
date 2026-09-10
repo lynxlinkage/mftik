@@ -257,7 +257,7 @@ async def test_s2_declare_then_apply_then_add(data_dir: Path) -> None:
     broker = EnvBroker()
     applied = await _put({"numpy": ("1.0", "numpy")}, broker)
     assert applied.generation == 1
-    assert broker.reload_calls == 1
+    assert broker.sync_calls == 1
     info = await registry_info(principal=_OWNER)
     assert info.extras["numpy"].version == "1.0"
 

@@ -12,13 +12,6 @@ import logging
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 from mftik.environment import NodeEnv, unapproved_present
-from mftik.protocol import (
-    STS_REGISTRY_RELOAD,
-    StsRegistryReloadRequest,
-    StsRegistryReloadRequestEnvelope,
-    StsRegistryReloadResult,
-    Topics,
-)
 from mftik.registry import (
     AddedStrategy,
     MissingRemoteExtras,
@@ -35,7 +28,6 @@ from mftik_db.repositories import StsSessionRepository
 from mftik_db.session import session_scope
 
 from mftik_api.auth import ANONYMOUS, PrincipalDep
-from mftik_api.broker_rpc import DomainRpcError, request_domain
 from mftik_api.deps import BrokerDep, RegistryStoreDep
 from mftik_api.schemas import (
     RegistryAddBody,
@@ -53,6 +45,7 @@ from mftik_api.schemas import (
     RegistryStrategyOut,
     RegistrySyncRow,
 )
+from mftik_api.sts_fanout import reload_sts
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +163,8 @@ async def add_strategy(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     key = qualify(added.origin, added.type)
-    keys, rpc_error = await _reload_sts(broker)
+    fanout = await reload_sts(broker)
+    keys, rpc_error = fanout.loaded, fanout.error
     if rpc_error is not None:
         return RegistryAddOut(
             **_strategy_out(added).model_dump(),
@@ -194,35 +188,6 @@ async def add_strategy(
             "check the STS log for the import error or name collision."
         ),
     )
-
-
-async def _reload_sts(
-    broker: BrokerDep,
-) -> tuple[frozenset[str], str | None]:
-    """Ask STS to re-scan the registry.
-
-    Returns the qualified type keys it answers to afterwards, or an empty set
-    and the reason it could not be asked. Deliberately not "did it work" —
-    ``add`` wants a key to be present and ``delete`` wants one to be absent,
-    and a helper that answered either of those directly would have to be read
-    backwards by the other caller.
-    """
-    try:
-        result = await request_domain(
-            broker,
-            Topics.STS,
-            StsRegistryReloadRequestEnvelope.wrap(
-                StsRegistryReloadRequest(),
-                type=STS_REGISTRY_RELOAD,
-                source="api",
-            ),
-            result_type=StsRegistryReloadResult,
-            timeout=30.0,
-        )
-    except DomainRpcError as exc:
-        logger.warning("STS registry reload failed: %s", exc.message)
-        return frozenset(), exc.message
-    return frozenset(result.loaded), None
 
 
 @router.delete("/strategies/{name}", response_model=RegistryRemovedOut)
@@ -275,7 +240,8 @@ async def delete_strategy(
     except RegistryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    keys, rpc_error = await _reload_sts(broker)
+    fanout = await reload_sts(broker)
+    keys, rpc_error = fanout.loaded, fanout.error
     if rpc_error is not None:
         error = (
             f"the strategy was deleted, but STS did not reload ({rpc_error}). "
@@ -408,7 +374,8 @@ async def connect(
             status_code=502, detail=f"cannot reach remote: {exc}"
         ) from exc
 
-    keys, rpc_error = await _reload_sts(broker)
+    fanout = await reload_sts(broker)
+    keys, rpc_error = fanout.loaded, fanout.error
     pulled_keys = {qualify(rec.origin, rec.type) for rec in result.pulled}
     return RegistryConnectOut(
         name=result.name,
@@ -463,7 +430,8 @@ async def disconnect_remote(
             ),
         )
     remote = store.drop_remote(name)
-    _, rpc_error = await _reload_sts(broker)
+    fanout = await reload_sts(broker)
+    rpc_error = fanout.error
     if rpc_error is not None:
         logger.warning(
             "disconnected %s but STS did not reload (%s); it will go on "

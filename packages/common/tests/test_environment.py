@@ -46,6 +46,24 @@ def test_round_trip_preserves_fields(tmp_path: Path) -> None:
     assert stamp.nbytes > 0
 
 
+def test_begin_can_pin_a_generation_number(tmp_path: Path) -> None:
+    """A remote STS publishes the API's gen-N when that directory is free."""
+    env = NodeEnv(tmp_path)
+    rec = _rec("1.0")
+    with env.lock():
+        dest = env.begin(generation=5)
+        (dest / "numpy").mkdir()
+        (dest / "numpy" / "__init__.py").write_text("x = 1\n")
+        stamp = env.commit(dest, {"numpy": rec})
+    assert stamp.generation == 5
+    assert dest == env.site_packages(5)
+    with env.lock():
+        again = env.begin(generation=5)
+    assert again.parent.name == "gen-6", (
+        "the live stamp already occupies gen-5, so the next apply takes 6"
+    )
+
+
 def test_commit_is_atomic_for_readers(tmp_path: Path) -> None:
     env = NodeEnv(tmp_path)
     rec = PackageRecord(version="1.0", dist="foo", source="manual")

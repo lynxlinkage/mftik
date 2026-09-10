@@ -210,9 +210,11 @@ distribution the peer did not send, `--token` for a peer that withholds pins
 from anonymous callers, and for a pin clash, changing this node's own extra
 first.
 
-Writes say what is owed afterwards: a `force`d change or a reload that did not
-land prints that the STS container needs restarting, because a module already
-imported stays in `sys.modules` and no reload evicts it.
+Writes say what is owed afterwards: a `force`d change or a sync that did not
+land on every STS prints that those containers need restarting, because a
+module already imported stays in `sys.modules` and no reload evicts it. Each
+STS host installs the same extras pins when its volume is not already at that
+stamp.
 
 ### `mftik check --against`
 
@@ -244,15 +246,16 @@ STS imports the registry into a running process. The API writes to it from a
 different one. Everything below follows from that.
 
 **A push has to reach the process, not just the disk.** `POST /registry/v1/add`
-now sends `sts.registry.reload`, and answers with `loaded` saying whether STS
-came back able to resolve the strategy. Three outcomes, and the client should
-say which:
+sends `sts.registry.reload` to every declared STS (the shared `sts` subject
+when only one is declared), and answers with `loaded` saying whether **every**
+instance came back able to resolve the strategy. Three outcomes, and the
+client should say which:
 
 | `loaded` | `load_error` | What happened |
 |---|---|---|
-| true | — | stored and deployable |
-| false | "STS did not reload…" | stored; STS did not answer. Deployable after a restart |
-| false | "STS did not load it as…" | stored; STS reloaded and rejected the tree. Its log says why |
+| true | — | stored and deployable on every STS that answered |
+| false | "STS did not reload…" | stored; at least one STS did not answer. Deployable after those restart |
+| false | "STS did not load it as…" | stored; an STS reloaded and rejected the tree. Its log says why |
 
 Only the first means `run` can proceed.
 
