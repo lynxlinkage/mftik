@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from db_harness import a_database, an_owner
 from fastapi import HTTPException
+from fanout_harness import patch_authoritative_anycast
 from mftik.protocol import (
     STS_REGISTRY_RELOAD,
     StsRegistryReloadResult,
@@ -38,6 +39,11 @@ class Tiny(Strategy):
 """
 
 _YML = "td: {}\nmd: []\nsts:\n  qty: 1\n"
+
+
+@pytest.fixture(autouse=True)
+def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_authoritative_anycast(monkeypatch)
 
 
 class ReloadingBroker:

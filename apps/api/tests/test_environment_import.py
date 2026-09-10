@@ -23,6 +23,7 @@ from mftik_api.routes import environment as environment_routes
 from mftik_api.routes.environment import import_environment
 from mftik_api.routes.sts import list_strategy_types
 from mftik_api.schemas import EnvironmentImportBody
+from fanout_harness import patch_authoritative_anycast
 from test_environment_api import EnvBroker, _write_pkg
 
 _SKLEARN = """\
@@ -55,6 +56,11 @@ def _peer(extras: object) -> httpx.MockTransport:
         return httpx.Response(404)
 
     return httpx.MockTransport(handler)
+
+
+@pytest.fixture(autouse=True)
+def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_authoritative_anycast(monkeypatch)
 
 
 @pytest.fixture

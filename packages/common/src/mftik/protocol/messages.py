@@ -454,28 +454,39 @@ class StsEnvSyncRequest(BaseModel):
 
 
 class StsEnvSyncResult(BaseModel):
-    """STS → API: overlay adopted, then the registry re-scanned."""
+    """STS → API: overlay adopted, then the registry re-scanned.
+
+    ``overlay_live`` is whether this process can import the extras it
+    lists. ``None`` is a pre-upgrade reply: the caller may fall back to
+    comparing ``generation`` when ``packages`` is empty.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     loaded: list[str] = Field(default_factory=list)
     generation: int = 0
     packages: dict[str, StsEnvPackagePin] = Field(default_factory=dict)
+    overlay_live: bool | None = None
 
 
 class StsRegistryGenerationResult(BaseModel):
     """STS → API: the in-memory env generation, or 0 before the first attach.
 
-    ``packages`` is the in-memory stamp, so a GET can tell "this process
-    has the pins" from "this process has some generation number". An STS
-    that predates the field sends ``{}`` and the caller falls back to
-    comparing ``generation`` alone.
+    ``packages`` is what this process can import, so a GET can tell "this
+    process has the pins" from "this process has some generation number".
+    ``overlay_live`` is False when the stamp names extras that are not on
+    ``sys.path`` (ABI mismatch or missing directory); then ``packages``
+    is ``{}`` even if the stamp lists names.
+
+    ``overlay_live is None`` is a pre-upgrade reply: an empty ``packages``
+    falls back to comparing ``generation`` alone.
     """
 
     model_config = ConfigDict(frozen=True)
 
     generation: int = 0
     packages: dict[str, StsEnvPackagePin] = Field(default_factory=dict)
+    overlay_live: bool | None = None
 
 
 class StsEventLogInfoRequest(BaseModel):

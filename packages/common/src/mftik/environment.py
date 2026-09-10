@@ -161,12 +161,19 @@ class NodeEnv:
         return self.current_path
 
     @contextmanager
-    def lock(self) -> Iterator[None]:
+    def lock(self, *, blocking: bool = False) -> Iterator[None]:
+        """Take ``apply.lock``. Non-blocking by default (API 409).
+
+        ``blocking=True`` waits for the holder. A second STS on the same
+        volume uses that after ``EnvironmentLocked`` so it can see the
+        commit rather than failing the fan-out.
+        """
         self.root.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
+            flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, flags)
             except BlockingIOError as exc:
                 raise EnvironmentLocked("another apply holds the lock") from exc
             yield
@@ -179,18 +186,18 @@ class NodeEnv:
 
         ``generation`` pins the directory number so a remote STS can publish
         the same gen the API just committed. If that number is already the
-        live stamp, or cannot be used, this falls through to the next free
-        number — sync success is package equality, not the integer.
+        live stamp, or the directory already exists, this falls through to
+        the next free number — never deletes a tree a live interpreter may
+        still be importing. Sync success is package equality, not the integer.
         """
         if generation is not None and generation > 0:
             stamp = self.read_stamp()
             if stamp.generation != generation:
                 gen = self.root / f"gen-{generation}"
-                if gen.exists():
-                    shutil.rmtree(gen, ignore_errors=True)
-                dest = gen / "site-packages"
-                dest.mkdir(parents=True)
-                return dest
+                if not gen.exists():
+                    dest = gen / "site-packages"
+                    dest.mkdir(parents=True)
+                    return dest
         gen = self.root / f"gen-{self._next_generation()}"
         dest = gen / "site-packages"
         dest.mkdir(parents=True)

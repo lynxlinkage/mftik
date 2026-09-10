@@ -55,6 +55,11 @@ def current_stamp() -> EnvStamp:
     return _stamp
 
 
+def overlay_is_live() -> bool:
+    """Whether this process can import the extras :func:`current_stamp` lists."""
+    return _overlay_live
+
+
 def extras_names() -> frozenset[str]:
     if not _overlay_live or not _stamp.matches_runtime():
         return frozenset()

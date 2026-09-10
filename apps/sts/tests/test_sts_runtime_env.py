@@ -13,7 +13,7 @@ import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.envapply import ApplySpec, apply_packages
-from mftik.environment import EnvStamp, NodeEnv
+from mftik.environment import EnvironmentLocked, EnvStamp, NodeEnv
 from mftik.protocol import (
     STS_ENV_SYNC,
     STS_REGISTRY_GENERATION,
@@ -34,11 +34,12 @@ from mftik.registry import RegistryStore
 from mftik_sts.impl import _REGISTRY, resolve_class
 from mftik_sts.impl.noop import NoopStrategy
 from mftik_sts.rpc import dispatch
-from mftik_sts.rpc.env import apply_requested, local_matches
+from mftik_sts.rpc.env import apply_requested, current_packages, local_matches
 from mftik_sts.runtime_env import (
     _ABI_MISMATCH,
     attach_overlay,
     extras_names,
+    overlay_is_live,
     refresh,
     reset_for_tests,
 )
@@ -371,6 +372,7 @@ async def test_sync_rpc_installs_then_returns_the_generation(
         result = StsEnvSyncResult.model_validate(reply.payload)
         assert result.generation == 4
         assert result.packages["numpy"].version == "1.0"
+        assert result.overlay_live is True
         assert extras_names() == frozenset({"numpy"})
     finally:
         env_rpc.installer_for_sync = None
@@ -501,6 +503,79 @@ def test_the_stamp_not_the_symlink_decides_sys_path(tmp_path: Path) -> None:
     assert str(env.site_packages(1)) not in sys.path
 
 
+def test_sync_locked_then_peer_commit_skips_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    env = NodeEnv(tmp_path)
+    pins = {"numpy": StsEnvPackagePin(version="1.0", dist="numpy")}
+    calls: list[str] = []
+
+    class LockedPeer:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self):
+            apply_packages(
+                env,
+                {"numpy": ApplySpec(version="1.0", dist="numpy")},
+                installer=_plant_numpy,
+            )
+            raise EnvironmentLocked("another apply holds the lock")
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    import mftik_sts.rpc.env as env_rpc
+
+    monkeypatch.setattr(env_rpc, "ApplyInProgress", LockedPeer)
+    env_rpc.installer_for_sync = lambda dest, packages: calls.append("ran")
+    try:
+        apply_requested(
+            StsEnvSyncRequest(generation=1, packages=pins, allow_disruptive=False)
+        )
+    finally:
+        env_rpc.installer_for_sync = None
+    assert calls == []
+    assert local_matches(env, pins) is True
+
+
+def test_sync_locked_and_still_behind_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    pins = {"numpy": StsEnvPackagePin(version="1.0", dist="numpy")}
+    attempts = {"n": 0}
+
+    import mftik_sts.rpc.env as env_rpc
+    from mftik.envapply import ApplyInProgress as RealApply
+
+    def factory(*args: object, **kwargs: object):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+
+            class Locked:
+                def __enter__(self):
+                    raise EnvironmentLocked("another apply holds the lock")
+
+                def __exit__(self, *exc: object) -> bool:
+                    return False
+
+            return Locked()
+        return RealApply(*args, **kwargs)
+
+    monkeypatch.setattr(env_rpc, "ApplyInProgress", factory)
+    env_rpc.installer_for_sync = _plant_numpy
+    try:
+        apply_requested(
+            StsEnvSyncRequest(generation=1, packages=pins, allow_disruptive=False)
+        )
+    finally:
+        env_rpc.installer_for_sync = None
+    assert attempts["n"] == 2
+    assert local_matches(NodeEnv(tmp_path), pins) is True
+
+
 def test_a_stamp_naming_a_missing_generation_has_no_extras(
     tmp_path: Path,
 ) -> None:
@@ -515,4 +590,6 @@ def test_a_stamp_naming_a_missing_generation_has_no_extras(
     stamp = attach_overlay(tmp_path)
     assert stamp.generation == 1, "the stamp is still what it says it is"
     assert extras_names() == frozenset(), "but this process has none of it"
+    assert overlay_is_live() is False
+    assert current_packages() == {}
     assert str(env.site_packages(1)) not in sys.path

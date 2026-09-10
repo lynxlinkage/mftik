@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 from mftik.envapply import ApplyFailed, ApplySpec
 from mftik.environment import EnvStamp, NodeEnv
+from fanout_harness import patch_authoritative_anycast
 from mftik.protocol import (
     STS_ENV_SYNC,
     STS_REGISTRY_GENERATION,
@@ -17,6 +18,7 @@ from mftik.protocol import (
     ListSessionsResultEnvelope,
     SessionInfo,
     StsEnvPackagePin,
+    StsEnvSyncRequest,
     StsEnvSyncResult,
     StsEnvSyncResultEnvelope,
     StsRegistryGenerationResult,
@@ -93,6 +95,7 @@ class EnvBroker:
         self.sync_calls = 0
         self.generation_calls = 0
         self.subjects: list[str] = []
+        self.sync_allow_disruptive: list[bool] = []
 
     def _stamp(self):
         return NodeEnv.from_env().read_stamp()
@@ -137,6 +140,9 @@ class EnvBroker:
             )
         if envelope.type == STS_ENV_SYNC:
             self.sync_calls += 1
+            self.sync_allow_disruptive.append(
+                StsEnvSyncRequest.model_validate(envelope.payload).allow_disruptive
+            )
             if self.reload_silent:
                 raise DomainRpcError("timeout", "no reply from sts")
             adopted = self._adopted()
@@ -170,6 +176,11 @@ class EnvBroker:
                 source="sts",
             )
         raise AssertionError(f"unexpected type {envelope.type}")
+
+
+@pytest.fixture(autouse=True)
+def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_authoritative_anycast(monkeypatch)
 
 
 @pytest.fixture
@@ -668,3 +679,30 @@ async def test_the_resolved_pin_is_what_later_applies_use(env_dir: Path) -> None
     out = await _upsert("httpx", "0.27", "httpx", EnvBroker())
     assert seen == ["httpx==0.27", "pandas==9.9.9"]
     assert out.restart_required is False
+
+
+async def test_first_put_does_not_allow_disruptive(env_dir: Path) -> None:
+    broker = EnvBroker()
+    await _put({"numpy": ("1.0", "numpy")}, broker)
+    assert broker.sync_allow_disruptive == [False]
+
+
+async def test_same_package_retry_does_not_allow_disruptive(env_dir: Path) -> None:
+    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
+    broker = EnvBroker()
+    await _put({"numpy": ("1.0", "numpy")}, broker)
+    assert broker.sync_allow_disruptive == [False]
+
+
+async def test_pin_change_allows_disruptive(env_dir: Path) -> None:
+    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
+    broker = EnvBroker()
+    await _put({"numpy": ("2.0", "numpy")}, broker)
+    assert broker.sync_allow_disruptive == [True]
+
+
+async def test_force_allows_disruptive(env_dir: Path) -> None:
+    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
+    broker = EnvBroker(live=["sess-1"])
+    await _put({"numpy": ("2.0", "numpy")}, broker, force=True)
+    assert broker.sync_allow_disruptive == [True]

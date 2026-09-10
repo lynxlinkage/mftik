@@ -43,6 +43,7 @@ from mftik_api.schemas import (
     RegistryAddBody,
     StrategyDeployBody,
 )
+from fanout_harness import patch_authoritative_anycast
 from test_environment_api import EnvBroker, _write_pkg
 from test_registry_add import ReloadingBroker
 
@@ -86,6 +87,11 @@ class UsesTorch(Strategy):
 """
 
 _OWNER = Principal.owner(1, via="password")
+
+
+@pytest.fixture(autouse=True)
+def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_authoritative_anycast(monkeypatch)
 
 
 @pytest.fixture

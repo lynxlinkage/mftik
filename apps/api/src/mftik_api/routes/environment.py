@@ -269,7 +269,15 @@ async def _apply_set(
         raise
     await run_in_threadpool(pending.__exit__, None, None, None)
 
-    fanout = await sync_sts(broker, result.stamp, allow_disruptive=True)
+    # Each STS measures disruptiveness against *its* stamp. Passing the
+    # API's decision keeps the STS-side guard on when this apply did
+    # not change pins (a retry after a missed sync) so a behind host
+    # cannot swap a dist under a live session.
+    fanout = await sync_sts(
+        broker,
+        result.stamp,
+        allow_disruptive=force or bool(pending.disruptive),
+    )
     if fanout.error is not None:
         loaded = False
         load_error = (

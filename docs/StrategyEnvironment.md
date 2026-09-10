@@ -665,6 +665,11 @@ still has to make *new* extras visible without a restart.
   every enabled instance (`sts.{name}`), not the anycast
   subject. One declared STS stays on `sts`. A silent instance
   is `restart_required`, not a 200 that only one process saw.
+  Zero enabled rows, or an `instances` table the API cannot
+  read, still send anycast so the process that answers can
+  adopt the write, but the answer is not a census:
+  `restart_required` / `loaded=false` until the table is
+  readable.
 
   Because the path follows the stamp, this reload is what makes a
   committed generation importable at all — `sys.path`, the negative

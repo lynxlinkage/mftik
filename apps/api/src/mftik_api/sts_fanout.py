@@ -6,10 +6,13 @@ keeps its in-memory stamp until restart. MD attach and the event-log
 listing already walk the ``instances`` table. This is that walk for the
 control plane that must reach *every* interpreter.
 
-One enabled STS (or none readable) stays on ``Topics.STS``. Two or more
-go to ``sts.{name}`` concurrently. A timeout or RPC error fails the
-whole fan-out: a write has already committed the stamp, and the caller
-reports ``restart_required`` rather than pretending every process saw it.
+One enabled STS stays on ``Topics.STS``. Two or more go to
+``sts.{name}`` concurrently. A timeout, RPC error, or a missing /
+unreadable instance list fails the whole fan-out: a write has already
+committed the stamp, and the caller reports ``restart_required`` rather
+than pretending every process saw it. Anycast is still sent so the
+process that answers can adopt the write; ``in_sync`` stays false until
+the census is authoritative.
 """
 
 from __future__ import annotations
@@ -52,12 +55,17 @@ logger = logging.getLogger(__name__)
 #: run in parallel, so two hosts cost one timeout, not two.
 SYNC_TIMEOUT_S = APPLY_TIMEOUT_S + 30.0
 
+#: Instance table empty or unreadable — anycast is not a census.
+CENSUS_ERROR = "STS instance list is missing or unreadable"
+
+
 @dataclass(frozen=True, slots=True)
 class StsTarget:
     """One address. ``name`` is None when we fell back to the shared subject."""
 
     name: str | None
     subject: str
+    authoritative: bool = True
 
     @property
     def label(self) -> str:
@@ -94,18 +102,26 @@ def extras_match(
     generation: int,
     packages: dict[str, StsEnvPackagePin],
     stamp: EnvStamp,
+    *,
+    overlay_live: bool | None = None,
 ) -> bool:
     """Whether this process's in-memory extras are the stamp.
 
     Package equality is the real check (unshared volumes do not share
-    generation counters). An empty ``packages`` falls back to generation
-    so a pre-upgrade STS that reached the number still reads as in sync.
+    generation counters). ``overlay_live is False`` means the process
+    cannot import its stamp, so a non-empty stamp is a miss.
+
+    ``overlay_live is None`` is a pre-upgrade reply: an empty
+    ``packages`` falls back to generation. A current STS with a live
+    empty overlay sends ``overlay_live=True`` and ``packages={}``.
     """
     want = pins_of_stamp(stamp)
+    if overlay_live is False:
+        return not want
     have = pins_of_wire(packages)
     if have == want:
         return True
-    if not packages:
+    if overlay_live is None and not packages:
         return generation >= stamp.generation
     return False
 
@@ -120,7 +136,12 @@ def format_errors(replies: list[FanoutReply[Any]]) -> str | None:
 
 
 async def list_targets() -> list[StsTarget]:
-    """Enabled STS subjects. Anycast when there is not more than one."""
+    """Enabled STS subjects. Anycast when there is not more than one.
+
+    Zero enabled rows, or a table we cannot read, still send anycast so
+    the process that answers can adopt the write — but the target is
+    marked not authoritative, and the caller must not claim in-sync.
+    """
     try:
         async with session_scope() as db:
             rows = await InstanceRepository(db).list_all(
@@ -129,13 +150,25 @@ async def list_targets() -> list[StsTarget]:
         enabled = [row for row in rows if row.enabled]
     except Exception:
         logger.warning(
-            "sts fan-out: could not list instances — asking the shared subject",
+            "sts fan-out: could not list instances — asking the shared "
+            "subject, answer is not authoritative",
             exc_info=True,
         )
-        return [StsTarget(name=None, subject=Topics.STS)]
-    if len(enabled) <= 1:
-        name = enabled[0].name if enabled else None
-        return [StsTarget(name=name, subject=Topics.STS)]
+        return [
+            StsTarget(name=None, subject=Topics.STS, authoritative=False)
+        ]
+    if not enabled:
+        logger.warning(
+            "sts fan-out: no enabled STS instance is declared — asking "
+            "the shared subject, answer is not authoritative"
+        )
+        return [
+            StsTarget(name=None, subject=Topics.STS, authoritative=False)
+        ]
+    if len(enabled) == 1:
+        return [
+            StsTarget(name=enabled[0].name, subject=Topics.STS, authoritative=True)
+        ]
     return [
         StsTarget(name=row.name, subject=Topics.sts(row.name))
         for row in enabled
@@ -201,14 +234,7 @@ async def reload_sts(broker: Broker) -> StsFanoutResult:
         result_type=StsRegistryReloadResult,
         timeout=30.0,
     )
-    error = format_errors(replies)
-    if error is not None:
-        return StsFanoutResult(loaded=frozenset(), in_sync=False, error=error)
-    return StsFanoutResult(
-        loaded=_intersect_loaded(replies),
-        in_sync=True,
-        error=None,
-    )
+    return _finish(replies, in_sync=True)
 
 
 def _stamp_pins(stamp: EnvStamp) -> dict[str, StsEnvPackagePin]:
@@ -220,11 +246,34 @@ def _stamp_pins(stamp: EnvStamp) -> dict[str, StsEnvPackagePin]:
     }
 
 
+def _census_ok(replies: list[FanoutReply[Any]]) -> bool:
+    return all(reply.target.authoritative for reply in replies)
+
+
+def _finish(
+    replies: list[FanoutReply[Any]],
+    *,
+    in_sync: bool,
+) -> StsFanoutResult:
+    error = format_errors(replies)
+    if error is not None:
+        return StsFanoutResult(loaded=frozenset(), in_sync=False, error=error)
+    if not _census_ok(replies):
+        return StsFanoutResult(
+            loaded=frozenset(), in_sync=False, error=CENSUS_ERROR
+        )
+    return StsFanoutResult(
+        loaded=_intersect_loaded(replies),
+        in_sync=in_sync,
+        error=None,
+    )
+
+
 async def sync_sts(
     broker: Broker,
     stamp: EnvStamp,
     *,
-    allow_disruptive: bool = True,
+    allow_disruptive: bool = False,
 ) -> StsFanoutResult:
     """Make every STS overlay match ``stamp``, then reload its registry."""
     packages = _stamp_pins(stamp)
@@ -245,8 +294,17 @@ async def sync_sts(
     error = format_errors(replies)
     if error is not None:
         return StsFanoutResult(loaded=frozenset(), in_sync=False, error=error)
+    if not _census_ok(replies):
+        return StsFanoutResult(
+            loaded=frozenset(), in_sync=False, error=CENSUS_ERROR
+        )
     in_sync = all(
-        extras_match(reply.result.generation, reply.result.packages, stamp)
+        extras_match(
+            reply.result.generation,
+            reply.result.packages,
+            stamp,
+            overlay_live=reply.result.overlay_live,
+        )
         for reply in replies
         if reply.result is not None
     )
@@ -273,9 +331,16 @@ async def sts_extras_in_sync(
     error = format_errors(replies)
     if error is not None:
         return False, error
+    if not _census_ok(replies):
+        return False, CENSUS_ERROR
     return (
         all(
-            extras_match(reply.result.generation, reply.result.packages, stamp)
+            extras_match(
+                reply.result.generation,
+                reply.result.packages,
+                stamp,
+                overlay_live=reply.result.overlay_live,
+            )
             for reply in replies
             if reply.result is not None
         ),

@@ -32,7 +32,7 @@ from mftik_api.routes import environment as environment_routes
 from mftik_api.routes.environment import get_environment, put_environment
 from mftik_api.routes.registry import add_strategy
 from mftik_api.schemas import EnvironmentPutBody, EnvPackageIn, RegistryAddBody
-from mftik_api.sts_fanout import extras_match, list_targets
+from mftik_api.sts_fanout import CENSUS_ERROR, extras_match, list_targets
 
 ONE = "sts"
 TWO = "sts-2"
@@ -180,6 +180,18 @@ async def one_sts(monkeypatch, database_url):
         yield database.scope
 
 
+@pytest.fixture
+async def no_sts(monkeypatch, database_url):
+    async with a_database(database_url) as database:
+        async with database.maker() as session:
+            await an_owner(session)
+            await session.commit()
+        from mftik_api import sts_fanout
+
+        monkeypatch.setattr(sts_fanout, "session_scope", database.scope)
+        yield database.scope
+
+
 async def _put(broker: TwoStsEnv) -> object:
     return await put_environment(
         EnvironmentPutBody(
@@ -281,6 +293,53 @@ async def test_list_targets_drops_disabled(two_sts) -> None:
 
     targets = await list_targets()
     assert [t.subject for t in targets] == [Topics.STS]
+    assert targets[0].authoritative is True
+
+
+async def test_no_declared_sts_is_not_authoritative(no_sts, env_dir: Path) -> None:
+    targets = await list_targets()
+    assert [t.subject for t in targets] == [Topics.STS]
+    assert targets[0].authoritative is False
+
+    broker = TwoStsEnv()
+    out = await _put(broker)
+    assert out.generation == 1
+    assert NodeEnv(env_dir).read_stamp().generation == 1
+    assert out.loaded is False
+    assert out.restart_required is True
+    assert CENSUS_ERROR in (out.load_error or "")
+    assert broker.subjects == [Topics.STS]
+
+    got = await get_environment(broker=TwoStsEnv())
+    assert got.restart_required is True
+    assert got.generation == 1
+
+
+async def test_get_bare_node_without_instances_is_not_restart(
+    no_sts, env_dir: Path
+) -> None:
+    got = await get_environment(broker=TwoStsEnv())
+    assert got.generation == 0
+    assert got.restart_required is False
+
+
+async def test_unreadable_instances_are_not_authoritative(
+    monkeypatch, env_dir: Path
+) -> None:
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def failing_scope():
+        raise RuntimeError("db down")
+        yield None  # pragma: no cover
+
+    monkeypatch.setattr("mftik_api.sts_fanout.session_scope", failing_scope)
+    targets = await list_targets()
+    assert targets[0].authoritative is False
+    out = await _put(TwoStsEnv())
+    assert out.loaded is False
+    assert out.restart_required is True
+    assert CENSUS_ERROR in (out.load_error or "")
 
 
 def test_extras_match_uses_pins_not_generation() -> None:
@@ -297,3 +356,20 @@ def test_extras_match_uses_pins_not_generation() -> None:
     assert extras_match(0, {}, stamp) is False
     drifted = {"numpy": StsEnvPackagePin(version="2.0", dist="numpy")}
     assert extras_match(5, drifted, stamp) is False
+
+
+def test_extras_match_dead_overlay_is_not_in_sync() -> None:
+    stamp = EnvStamp(
+        generation=4,
+        python=(3, 12),
+        platform="linux",
+        nbytes=1,
+        packages={"numpy": PackageRecord(version="1.0", dist="numpy", source="manual")},
+    )
+    assert extras_match(4, {}, stamp, overlay_live=False) is False
+    assert extras_match(4, {}, stamp, overlay_live=True) is False
+    empty = EnvStamp(
+        generation=0, python=(3, 12), platform="linux", nbytes=0, packages={}
+    )
+    assert extras_match(0, {}, empty, overlay_live=True) is True
+    assert extras_match(0, {}, empty, overlay_live=False) is True

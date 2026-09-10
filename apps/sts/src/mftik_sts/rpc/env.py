@@ -34,7 +34,7 @@ from mftik.protocol import (
     StsEnvSyncResultEnvelope,
 )
 
-from mftik_sts.runtime_env import current_stamp, refresh
+from mftik_sts.runtime_env import current_stamp, overlay_is_live, refresh
 
 if TYPE_CHECKING:
     from mftik_sts.session import SessionManager
@@ -79,11 +79,7 @@ def local_matches(env: NodeEnv, packages: dict[str, StsEnvPackagePin]) -> bool:
     return True
 
 
-def apply_requested(request: StsEnvSyncRequest) -> None:
-    """Install ``request.packages`` when this volume does not already have them."""
-    env = NodeEnv.from_env()
-    if local_matches(env, request.packages):
-        return
+def _apply_once(env: NodeEnv, request: StsEnvSyncRequest) -> None:
     with ApplyInProgress(
         env,
         _specs(request.packages),
@@ -92,6 +88,27 @@ def apply_requested(request: StsEnvSyncRequest) -> None:
         generation=request.generation,
     ) as pending:
         pending.commit()
+
+
+def apply_requested(request: StsEnvSyncRequest) -> None:
+    """Install ``request.packages`` when this volume does not already have them.
+
+    Two processes sharing this volume can both see a miss and race the
+    non-blocking apply lock. The loser waits, then adopts the winner's
+    commit instead of failing the fan-out.
+    """
+    env = NodeEnv.from_env()
+    if local_matches(env, request.packages):
+        return
+    try:
+        _apply_once(env, request)
+        return
+    except EnvironmentLocked:
+        with env.lock(blocking=True):
+            pass
+        if local_matches(env, request.packages):
+            return
+        _apply_once(env, request)
 
 
 def _pins_out(stamp: EnvStamp) -> dict[str, StsEnvPackagePin]:
@@ -153,7 +170,8 @@ async def handle_env_sync(
             StsEnvSyncResult(
                 loaded=loaded,
                 generation=stamp.generation,
-                packages=_pins_out(stamp),
+                packages=current_packages(),
+                overlay_live=overlay_is_live(),
             ),
             type=STS_ENV_SYNC,
             source="sts",
@@ -163,5 +181,7 @@ async def handle_env_sync(
 
 
 def current_packages() -> dict[str, StsEnvPackagePin]:
-    """In-memory stamp as wire pins — what generation RPC reports."""
+    """Extras this process can import — empty when the overlay is not live."""
+    if not overlay_is_live():
+        return {}
     return _pins_out(current_stamp())

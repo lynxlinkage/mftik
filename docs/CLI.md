@@ -248,13 +248,14 @@ different one. Everything below follows from that.
 **A push has to reach the process, not just the disk.** `POST /registry/v1/add`
 sends `sts.registry.reload` to every declared STS (the shared `sts` subject
 when only one is declared), and answers with `loaded` saying whether **every**
-instance came back able to resolve the strategy. Three outcomes, and the
-client should say which:
+instance came back able to resolve the strategy. An unreadable or empty
+instance list is not a census: `loaded` stays false even if the anycast
+subject answered. Three outcomes, and the client should say which:
 
 | `loaded` | `load_error` | What happened |
 |---|---|---|
 | true | — | stored and deployable on every STS that answered |
-| false | "STS did not reload…" | stored; at least one STS did not answer. Deployable after those restart |
+| false | "STS did not reload…" | stored; at least one STS did not answer, or the instance list is missing. Deployable after those restart |
 | false | "STS did not load it as…" | stored; an STS reloaded and rejected the tree. Its log says why |
 
 Only the first means `run` can proceed.

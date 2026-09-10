@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException
+from fanout_harness import patch_authoritative_anycast
 from mftik.protocol import (
     STS_REGISTRY_RELOAD,
     StsRegistryReloadResult,
@@ -32,6 +33,11 @@ from mftik.strategy import Strategy
 class Tiny(Strategy):
     name = "tiny"
 """
+
+
+@pytest.fixture(autouse=True)
+def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_authoritative_anycast(monkeypatch)
 
 
 class HealthyBroker:
