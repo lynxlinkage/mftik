@@ -127,7 +127,15 @@
 					}))
 				: null;
 			const accountsP = withTypes ? api.apis().catch(() => ({ apis: [] })) : null;
-			const instancesP = withTypes ? api.instances('sts') : null;
+			// Settled into a result, not left bare. applyPage can leave through an
+			// epoch guard or the outer catch before it awaits this, and a bare
+			// rejection would surface as an unhandled rejection.
+			const instancesP = withTypes
+				? api.instances('sts').then(
+						(listed) => ({ listed, err: null }),
+						(err: unknown) => ({ listed: null, err })
+					)
+				: null;
 			let offset = Math.max(0, (myPage - 1) * PAGE_SIZE);
 			let list = await api.strategies({
 				status: TAB_STATUS[myTab],
@@ -155,16 +163,15 @@
 				accounts = a.apis;
 			}
 			if (instancesP) {
-				try {
-					const listed = await instancesP;
-					if (epoch !== listEpoch) return;
+				const { listed, err } = await instancesP;
+				if (epoch !== listEpoch) return;
+				if (listed) {
 					instances = listed.instances;
-				} catch (e) {
-					if (epoch !== listEpoch) return;
+				} else {
 					// Keep the previous list and pin. Treating a 500 or a
 					// dropped session as "nothing declared" would hide the
 					// picker and anycast the next Deploy.
-					error = e instanceof Error ? e.message : String(e);
+					error = err instanceof Error ? err.message : String(err);
 				}
 			}
 			if (typesP) {

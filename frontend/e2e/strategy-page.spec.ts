@@ -98,9 +98,18 @@ async function mockStrategyPage(
 			}
 		})
 	);
-	const listed = opts.stsInstances ?? [{ name: 'sts' }];
-	await page.route('**/api/instances**', (route) =>
-		route.fulfill({
+	let listed = opts.stsInstances ?? [{ name: 'sts' }];
+	let instancesFail = false;
+	let instancesDelayMs = 0;
+	let strategiesFail = false;
+	await page.route('**/api/instances**', async (route) => {
+		if (instancesDelayMs > 0) {
+			await new Promise((resolve) => setTimeout(resolve, instancesDelayMs));
+		}
+		if (instancesFail) {
+			return route.fulfill({ status: 500, json: { detail: 'instances down' } });
+		}
+		return route.fulfill({
 			json: {
 				instances: listed.map((i, idx) => ({
 					id: idx + 1,
@@ -112,9 +121,12 @@ async function mockStrategyPage(
 					created_by: 1
 				}))
 			}
-		})
-	);
+		});
+	});
 	await page.route('**/api/sts/strategies**', (route) => {
+		if (strategiesFail) {
+			return route.fulfill({ status: 500, json: { detail: 'strategies down' } });
+		}
 		const url = new URL(route.request().url());
 		const status = url.searchParams.get('status') ?? '';
 		const before = url.searchParams.get('before');
@@ -171,6 +183,25 @@ async function mockStrategyPage(
 	const instancesLoaded = page.waitForResponse((r) => r.url().includes('/api/instances'));
 	await page.goto('/strategy');
 	await instancesLoaded;
+
+	return {
+		/** What the next /instances load returns. */
+		setInstances(next: typeof listed) {
+			listed = next;
+		},
+		/** Make the next /instances load 500 instead. */
+		failInstances() {
+			instancesFail = true;
+		},
+		/** Hold the /instances reply back, to order it after the list's. */
+		delayInstances(ms: number) {
+			instancesDelayMs = ms;
+		},
+		/** Make the next list load 500 instead. */
+		failStrategies() {
+			strategiesFail = true;
+		}
+	};
 }
 
 test('nav offers Strategy instead of STS / TD / MD', async ({ page }) => {
@@ -281,6 +312,91 @@ test('Deploy sends instance when an STS is chosen', async ({ page }) => {
 test('a single STS instance hides the picker', async ({ page }) => {
 	await mockStrategyPage(page, [row('s-live', 'live')]);
 	await expect(page.getByLabel('STS instance')).toHaveCount(0);
+});
+
+/** Refresh reloads with types, so it is the path that refetches /instances. */
+async function refreshInstances(page: Page) {
+	const reloaded = page.waitForResponse((r) => r.url().includes('/api/instances'));
+	await page.getByRole('button', { name: 'Refresh' }).click();
+	await reloaded;
+}
+
+test('a failed /instances load keeps the pin and the picker', async ({ page }) => {
+	const ctl = await mockStrategyPage(page, [row('s-live', 'live')], { stsInstances: TWO_STS });
+
+	const select = page.getByLabel('STS instance');
+	await select.selectOption('sts-2');
+
+	ctl.failInstances();
+	await refreshInstances(page);
+
+	// A 500 is not "nothing declared". Clearing the pin here would hide the
+	// picker and silently anycast the next Deploy.
+	await expect(select).toBeVisible();
+	await expect(select).toHaveValue('sts-2');
+
+	const { body } = await captureDeploy(page);
+	await page.getByRole('button', { name: 'Deploy' }).click();
+	expect((await body).instance).toBe('sts-2');
+});
+
+test('draining the pinned instance clears the pin', async ({ page }) => {
+	const ctl = await mockStrategyPage(page, [row('s-live', 'live')], { stsInstances: TWO_STS });
+
+	const select = page.getByLabel('STS instance');
+	await select.selectOption('sts-2');
+
+	// Drained the way PATCH /instances/{id} does it: still listed, not enabled.
+	ctl.setInstances([
+		{ name: 'sts', region: 'jp' },
+		{ name: 'sts-2', region: 'tw', enabled: false }
+	]);
+	await refreshInstances(page);
+
+	// A browser keeps an already-selected option selected even once it turns
+	// disabled, so the pin has to go explicitly or Deploy 400s on
+	// instance_disabled.
+	await expect(select.locator('option[value="sts-2"]')).toHaveAttribute('disabled', '');
+	await expect(select).toHaveValue('');
+
+	const { body } = await captureDeploy(page);
+	await page.getByRole('button', { name: 'Deploy' }).click();
+	expect((await body).instance).toBeUndefined();
+});
+
+test('a failed list does not abandon the instances load', async ({ page }) => {
+	const ctl = await mockStrategyPage(page, [row('s-live', 'live')], { stsInstances: TWO_STS });
+
+	const crashes: string[] = [];
+	page.on('pageerror', (e) => crashes.push(e.message));
+
+	// The list fails fast, so applyPage leaves through its outer catch long
+	// before it awaits /instances — which then rejects with nobody waiting.
+	ctl.failStrategies();
+	ctl.failInstances();
+	ctl.delayInstances(300);
+	await page.getByRole('button', { name: 'Refresh' }).click();
+	await expect(page.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+	await page.waitForTimeout(800);
+
+	expect(crashes, 'unhandled /instances rejection').toEqual([]);
+});
+
+test('retiring the other instance clears the pin along with the picker', async ({ page }) => {
+	const ctl = await mockStrategyPage(page, [row('s-live', 'live')], { stsInstances: TWO_STS });
+
+	await page.getByLabel('STS instance').selectOption('sts-2');
+
+	ctl.setInstances([{ name: 'sts-2', region: 'tw' }]);
+	await refreshInstances(page);
+
+	// Hidden means anycast. A pin that outlives the control is a choice the
+	// operator can no longer see or undo.
+	await expect(page.getByLabel('STS instance')).toHaveCount(0);
+
+	const { body } = await captureDeploy(page);
+	await page.getByRole('button', { name: 'Deploy' }).click();
+	expect((await body).instance).toBeUndefined();
 });
 
 test('History page 2 replaces page one', async ({

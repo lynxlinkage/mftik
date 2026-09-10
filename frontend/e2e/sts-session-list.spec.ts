@@ -69,6 +69,7 @@ async function mockStsPage(
 	urls: URL[];
 	send: (data: string) => void;
 	releaseLive: () => void;
+	failInstances: () => void;
 }> {
 	const urls: URL[] = [];
 	let statusWs: WebSocketRoute | null = null;
@@ -119,8 +120,12 @@ async function mockStsPage(
 		})
 	);
 	const listed = opts.stsInstances ?? [{ name: 'sts' }];
-	await page.route('**/api/instances**', (route) =>
-		route.fulfill({
+	let instancesFail = false;
+	await page.route('**/api/instances**', (route) => {
+		if (instancesFail) {
+			return route.fulfill({ status: 500, json: { detail: 'instances down' } });
+		}
+		return route.fulfill({
 			json: {
 				instances: listed.map((i, idx) => ({
 					id: idx + 1,
@@ -132,8 +137,8 @@ async function mockStsPage(
 					created_by: 1
 				}))
 			}
-		})
-	);
+		});
+	});
 	await page.route('**/api/sts/strategies**', async (route) => {
 		const url = new URL(route.request().url());
 		urls.push(url);
@@ -223,7 +228,11 @@ async function mockStsPage(
 			if (statusWs === null) throw new Error('status socket is not open');
 			statusWs.send(data);
 		},
-		releaseLive: () => releaseLive?.()
+		releaseLive: () => releaseLive?.(),
+		/** Make the next /instances load 500 instead. */
+		failInstances: () => {
+			instancesFail = true;
+		}
 	};
 }
 
@@ -401,6 +410,27 @@ test('Deploy sends instance when an STS is chosen', async ({ page }) => {
 	await expect(select).toBeVisible();
 	await select.selectOption('sts-2');
 	await expect(page.getByRole('button', { name: 'Deploy' })).toBeEnabled();
+
+	const { body } = await captureDeploy(page);
+	await page.getByRole('button', { name: 'Deploy' }).click();
+	expect((await body).instance).toBe('sts-2');
+});
+
+test('a failed /instances load keeps the pin and the picker', async ({ page }) => {
+	const { failInstances } = await mockStsPage(page, { stsInstances: TWO_STS });
+
+	const select = page.getByLabel('STS instance');
+	await select.selectOption('sts-2');
+
+	failInstances();
+	const reloaded = page.waitForResponse((r) => r.url().includes('/api/instances'));
+	await page.getByRole('button', { name: 'Refresh' }).click();
+	await reloaded;
+
+	// A 500 is not "nothing declared". Clearing the pin here would hide the
+	// picker and silently anycast the next Deploy.
+	await expect(select).toBeVisible();
+	await expect(select).toHaveValue('sts-2');
 
 	const { body } = await captureDeploy(page);
 	await page.getByRole('button', { name: 'Deploy' }).click();
