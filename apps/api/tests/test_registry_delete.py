@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi import HTTPException
 from fanout_harness import patch_authoritative_anycast
+from fastapi import HTTPException
 from mftik.protocol import (
     STS_REGISTRY_RELOAD,
     StsRegistryReloadResult,

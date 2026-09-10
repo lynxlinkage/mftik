@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
+from fanout_harness import patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.envapply import ApplyFailed, ApplySpec
 from mftik.environment import NodeEnv
@@ -23,7 +24,6 @@ from mftik_api.routes import environment as environment_routes
 from mftik_api.routes.environment import import_environment
 from mftik_api.routes.sts import list_strategy_types
 from mftik_api.schemas import EnvironmentImportBody
-from fanout_harness import patch_authoritative_anycast
 from test_environment_api import EnvBroker, _write_pkg
 
 _SKLEARN = """\

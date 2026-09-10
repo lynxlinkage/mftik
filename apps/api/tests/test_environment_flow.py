@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
+from fanout_harness import patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.envapply import ApplyFailed, ApplySpec
 from mftik.environment import EnvStamp, NodeEnv
@@ -43,7 +44,6 @@ from mftik_api.schemas import (
     RegistryAddBody,
     StrategyDeployBody,
 )
-from fanout_harness import patch_authoritative_anycast
 from test_environment_api import EnvBroker, _write_pkg
 from test_registry_add import ReloadingBroker
 

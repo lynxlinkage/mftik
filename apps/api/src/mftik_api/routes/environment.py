@@ -220,6 +220,10 @@ async def _apply_set(
     operation: str,
     broken: list[BrokenTreeOut] | None = None,
 ) -> EnvironmentOut:
+    # Direct unit-test calls leave FastAPI's ``Query(False)`` in place.
+    # That object is truthy, so it must not reach a bool field on the wire.
+    if not isinstance(force, bool):
+        force = False
     preview = merge_packages(
         env.read_stamp(),
         replace=replace,

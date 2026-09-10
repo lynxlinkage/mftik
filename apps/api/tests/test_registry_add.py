@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 from db_harness import a_database, an_owner
-from fastapi import HTTPException
 from fanout_harness import patch_authoritative_anycast
+from fastapi import HTTPException
 from mftik.protocol import (
     STS_REGISTRY_RELOAD,
     StsRegistryReloadResult,
