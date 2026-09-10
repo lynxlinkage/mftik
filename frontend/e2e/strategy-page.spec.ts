@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { captureDeploy } from './capture-deploy';
 
 /**
  * Strategy page — one nav entry that lists a deploy and the TD/MD it attached.
@@ -167,7 +168,9 @@ async function mockStrategyPage(
 		/* accept and stay silent — same as the STS list tests */
 	});
 
+	const instancesLoaded = page.waitForResponse((r) => r.url().includes('/api/instances'));
 	await page.goto('/strategy');
+	await instancesLoaded;
 }
 
 test('nav offers Strategy instead of STS / TD / MD', async ({ page }) => {
@@ -249,24 +252,6 @@ const TWO_STS = [
 	{ name: 'sts-2', region: 'tw' }
 ];
 
-async function captureDeploy(page: Page): Promise<Record<string, unknown>> {
-	return new Promise((resolve) => {
-		void page.route('**/api/sts/deploy/**', async (route) => {
-			resolve(route.request().postDataJSON() as Record<string, unknown>);
-			await route.fulfill({
-				json: {
-					session_id: 's-new',
-					type: 'NoopStrategy',
-					config: {},
-					td: [],
-					md: [],
-					status: 'live'
-				}
-			});
-		});
-	});
-}
-
 test('Deploy pins the chosen STS instance and omits anycast', async ({ page }) => {
 	await mockStrategyPage(page, [row('s-live', 'live')], { stsInstances: TWO_STS });
 
@@ -275,9 +260,9 @@ test('Deploy pins the chosen STS instance and omits anycast', async ({ page }) =
 	await expect(select).toHaveValue('');
 	await expect(page.getByRole('button', { name: 'Deploy' })).toBeEnabled();
 
-	const anycast = captureDeploy(page);
+	const { body } = await captureDeploy(page);
 	await page.getByRole('button', { name: 'Deploy' }).click();
-	expect((await anycast).instance).toBeUndefined();
+	expect((await body).instance).toBeUndefined();
 });
 
 test('Deploy sends instance when an STS is chosen', async ({ page }) => {
@@ -288,9 +273,9 @@ test('Deploy sends instance when an STS is chosen', async ({ page }) => {
 	await select.selectOption('sts-2');
 	await expect(page.getByRole('button', { name: 'Deploy' })).toBeEnabled();
 
-	const pinned = captureDeploy(page);
+	const { body } = await captureDeploy(page);
 	await page.getByRole('button', { name: 'Deploy' }).click();
-	expect((await pinned).instance).toBe('sts-2');
+	expect((await body).instance).toBe('sts-2');
 });
 
 test('a single STS instance hides the picker', async ({ page }) => {

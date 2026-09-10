@@ -8,6 +8,18 @@
 	}
 
 	let { instances, value = $bindable(''), disabled = false }: Props = $props();
+
+	// Hidden means anycast. A pin that outlives the control — one instance
+	// left, or the named row gone / draining — would Deploy a choice the
+	// operator can no longer see or undo.
+	$effect(() => {
+		if (instances.length <= 1) {
+			if (value) value = '';
+			return;
+		}
+		const row = instances.find((i) => i.name === value);
+		if (value && (!row || !row.enabled)) value = '';
+	});
 </script>
 
 <!-- Shown only when there is a choice. A single STS has nothing to decide,

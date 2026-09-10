@@ -130,9 +130,7 @@
 						default: 'NoopStrategy'
 					}))
 				: null;
-			const instancesP = withTypes
-				? api.instances('sts').catch(() => ({ instances: [] }))
-				: null;
+			const instancesP = withTypes ? api.instances('sts') : null;
 			let offset = Math.max(0, (myPage - 1) * PAGE_SIZE);
 			let list = await api.strategies({
 				status: TAB_STATUS[myTab],
@@ -155,11 +153,16 @@
 			total = list.total ?? 0;
 			maxOffset = list.max_offset;
 			if (instancesP) {
-				const listed = await instancesP;
-				if (epoch !== listEpoch) return;
-				instances = listed.instances;
-				if (instance && !instances.some((i) => i.name === instance)) {
-					instance = '';
+				try {
+					const listed = await instancesP;
+					if (epoch !== listEpoch) return;
+					instances = listed.instances;
+				} catch (e) {
+					if (epoch !== listEpoch) return;
+					// Keep the previous list and pin. Treating a 500 or a
+					// dropped session as "nothing declared" would hide the
+					// picker and anycast the next Deploy.
+					error = e instanceof Error ? e.message : String(e);
 				}
 			}
 			if (typesP) {

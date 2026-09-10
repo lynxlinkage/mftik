@@ -1,4 +1,5 @@
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
+import { captureDeploy } from './capture-deploy';
 
 /**
  * STS session list — tabs, cursor, and the socket that must not reset one.
@@ -182,14 +183,38 @@ async function mockStsPage(
 		}
 		await route.fulfill({ json: { strategies: [], total: 0, has_more: false } });
 	});
+	await page.route('**/api/sts/sessions/*/eventlog/info', (route) =>
+		route.fulfill({
+			json: {
+				session_id: 's-new',
+				available: false,
+				enabled: false,
+				parts: 0,
+				total_bytes: 0,
+				live: false
+			}
+		})
+	);
+	await page.route(/\/api\/sts\/sessions\/[^/]+$/, (route) => {
+		const id = new URL(route.request().url()).pathname.split('/').pop() ?? '';
+		const found =
+			[...(opts.live ?? LIVE), ...ATTENTION, ...HISTORY].find((s) => s.session_id === id) ??
+			row(id, 'live');
+		return route.fulfill({ json: found });
+	});
+	await page.route('**/api/logs/**', (route) =>
+		route.fulfill({ json: { logs: [], has_more: false } })
+	);
 	await page.routeWebSocket('**/ws/status/sts', (ws) => {
 		statusWs = ws;
 	});
 
+	const instancesLoaded = page.waitForResponse((r) => r.url().includes('/api/instances'));
 	await page.goto('/sts');
 	// Layout withholds chrome until /auth/status returns; the socket is
 	// opened from the page's onMount, so wait for the page before the poll.
 	await expect(page.getByRole('button', { name: 'Live' })).toBeVisible();
+	await instancesLoaded;
 	await expect.poll(() => statusWs).not.toBeNull();
 
 	return {
@@ -356,78 +381,30 @@ const TWO_STS = [
 	{ name: 'sts-2', region: 'tw' }
 ];
 
-async function captureDeploy(page: Page): Promise<Record<string, unknown>> {
-	return new Promise((resolve) => {
-		void page.route('**/api/sts/deploy/**', async (route) => {
-			resolve(route.request().postDataJSON() as Record<string, unknown>);
-			await route.fulfill({
-				json: {
-					session_id: 's-new',
-					type: 'NoopStrategy',
-					config: {},
-					td: [],
-					md: [],
-					status: 'live'
-				}
-			});
-		});
-	});
-}
-
 test('Deploy pins the chosen STS instance and omits anycast', async ({ page }) => {
 	await mockStsPage(page, { stsInstances: TWO_STS });
-	await page.route('**/api/sts/sessions/*/eventlog/info', (route) =>
-		route.fulfill({
-			json: {
-				session_id: 's-new',
-				available: false,
-				enabled: false,
-				parts: 0,
-				total_bytes: 0,
-				live: false
-			}
-		})
-	);
-	await page.route('**/api/logs/**', (route) =>
-		route.fulfill({ json: { logs: [], has_more: false } })
-	);
 
 	const select = page.getByLabel('STS instance');
 	await expect(select).toBeVisible();
 	await expect(select).toHaveValue('');
 	await expect(page.getByRole('button', { name: 'Deploy' })).toBeEnabled();
 
-	const anycast = captureDeploy(page);
+	const { body } = await captureDeploy(page);
 	await page.getByRole('button', { name: 'Deploy' }).click();
-	expect((await anycast).instance).toBeUndefined();
+	expect((await body).instance).toBeUndefined();
 });
 
 test('Deploy sends instance when an STS is chosen', async ({ page }) => {
 	await mockStsPage(page, { stsInstances: TWO_STS });
-	await page.route('**/api/sts/sessions/*/eventlog/info', (route) =>
-		route.fulfill({
-			json: {
-				session_id: 's-new',
-				available: false,
-				enabled: false,
-				parts: 0,
-				total_bytes: 0,
-				live: false
-			}
-		})
-	);
-	await page.route('**/api/logs/**', (route) =>
-		route.fulfill({ json: { logs: [], has_more: false } })
-	);
 
 	const select = page.getByLabel('STS instance');
 	await expect(select).toBeVisible();
 	await select.selectOption('sts-2');
 	await expect(page.getByRole('button', { name: 'Deploy' })).toBeEnabled();
 
-	const pinned = captureDeploy(page);
+	const { body } = await captureDeploy(page);
 	await page.getByRole('button', { name: 'Deploy' }).click();
-	expect((await pinned).instance).toBe('sts-2');
+	expect((await body).instance).toBe('sts-2');
 });
 
 test('a failed tab switch does not keep the previous tab\'s rows', async ({
