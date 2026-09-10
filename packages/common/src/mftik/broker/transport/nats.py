@@ -745,6 +745,18 @@ class NatsTransport(BrokerTransport):
         )
         return (fanout, log)
 
+    async def _drain_pending(self) -> None:
+        """Write buffered commands to this server, without a PING/PONG.
+
+        ``Client.flush`` is the obvious "wait until the server has it"
+        and the wrong one here: it parks a future in ``_pongs``, and a
+        cancelled waiter is not removed. The next PONG then completes a
+        done future, the read loop dies, and KV / log publishes time out.
+        Forcing the pending write is enough for the SUB to leave this
+        process; nats-py's own flusher already ignores a cancelled wait.
+        """
+        await self.nc._flush_pending(force_flush=True)
+
     async def _consume(
         self,
         subjects: Sequence[str],
@@ -760,12 +772,16 @@ class NatsTransport(BrokerTransport):
         the stream's leader. The stream still stores the subject for
         readers; live delivery does not go through it.
 
-        ``nc.subscribe`` does not wait for the SUB to reach the server.
-        The flush after it is one round trip to *this* server — what
-        ``CONSUMER.CREATE`` used to buy — so a publisher on another
-        connection does not race a subscription that is still in
-        ``_pending``. It does not wait for gateway interest to the other
-        cluster.
+        ``nc.subscribe`` does not wait for the SUB to leave ``_pending``.
+        Draining the write buffer is what we need — the bytes reach this
+        process's server. ``Client.flush`` is a PING/PONG instead, and a
+        cancelled waiter leaves its future in ``_pongs``; the next PONG
+        then ``set_result``s a done future, kills the read loop, and
+        every later ``js.publish`` times out. Session start fires several
+        of these pumps at once and a strategy that exits in ``on_start``
+        cancels them immediately.
+
+        This is not a wait for gateway interest to the other cluster.
         """
         if not subjects:
             raise ValueError("a subscription needs at least one subject")
@@ -779,7 +795,7 @@ class NatsTransport(BrokerTransport):
         subs = [
             await self.nc.subscribe(subject, cb=handler) for subject in subjects
         ]
-        await self.nc.flush()
+        await self._drain_pending()
         if ready is not None:
             ready.set()
         try:

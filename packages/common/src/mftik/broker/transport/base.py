@@ -150,10 +150,11 @@ class BrokerTransport(ABC):
         Yielding the topic even for the single-topic case is what lets
         :meth:`psubscribe` share the plumbing.
 
-        The iterator does not start handing messages until this process's
-        server has the subscription. That is one local flush, not a wait
-        for interest to reach another cluster through the gateway.
-        ``ready`` is set at that moment, before the first yield.
+        The iterator does not start handing messages until pending SUBs
+        have been written to this process's server. That is a local
+        write-buffer drain, not a wait for interest to reach another
+        cluster through the gateway. ``ready`` is set at that moment,
+        before the first yield.
         """
 
     @abstractmethod
