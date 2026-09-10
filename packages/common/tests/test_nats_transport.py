@@ -313,7 +313,7 @@ async def test_two_feeds_that_would_share_a_stream_name_are_refused(
 
 @pytest.mark.asyncio
 async def test_every_subscriber_is_a_consumer_of_its_own(broker: Broker) -> None:
-    """The fan-out shape: one stored copy, each reader at its own position.
+    """The fan-out shape: each subscriber has its own interest.
 
     A slow subscriber cannot cost a fast one anything and neither can see the
     other's progress, which is what makes this a broadcast rather than a queue.
@@ -349,9 +349,9 @@ async def test_every_subscriber_is_a_consumer_of_its_own(broker: Broker) -> None
 async def test_a_subscriber_does_not_receive_what_it_missed(broker: Broker) -> None:
     """Best effort, on a store that could have replayed it.
 
-    The message is *there* — that is the point of fan-out being JetStream, and
-    what makes a subject addressable by offset later. But a subscriber starts at
-    NEW, because the broker promises that a message published while nobody was
+    The stream still captures the subject — that is what makes it
+    addressable by offset later. A live subscriber starts at now, because
+    the broker promises that a message published while nobody was
     listening is gone, and half the callers here are built on it.
     """
     stop = asyncio.Event()
@@ -375,18 +375,72 @@ async def test_a_subscriber_does_not_receive_what_it_missed(broker: Broker) -> N
 
 
 @pytest.mark.asyncio
+async def test_a_publish_does_not_wait_for_the_stream(broker: Broker) -> None:
+    """Live fan-out waits for this process's server, not the stream leader.
+
+    Acknowledging the stream would make every plane wait for whichever
+    cluster first created it — JP waiting for TW, or TW waiting for JP.
+    The stream still captures the subject; the publisher does not sit on
+    that ack.
+    """
+    transport = _transport(broker)
+
+    async def boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("live publish must not wait for js.publish")
+
+    transport._js.publish = boom  # noqa: SLF001
+    stop = asyncio.Event()
+    topic = Topics.md_session("s-core")
+    seen: list[int] = []
+
+    async def reader() -> None:
+        async for envelope in broker.subscribe(topic, stop=stop):
+            seen.append(envelope.payload["n"])
+            return
+
+    task = asyncio.create_task(reader())
+    await asyncio.sleep(0.3)
+    try:
+        await broker.publish(topic, _envelope(1))
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert seen == [1]
+
+
+@pytest.mark.asyncio
 async def test_a_fan_out_subject_keeps_a_bounded_tail(broker: Broker) -> None:
-    """Fan-out is capped per subject so a busy feed cannot grow the stream."""
+    """Fan-out is capped per subject so a busy feed cannot grow the stream.
+
+    Publish no longer waits for the stream ack, so the count is allowed to
+    catch up. The bound is what we are asserting, not the race.
+    """
     topic = Topics.log_sts("abc")
     transport = _transport(broker)
     for n in range(FANOUT_MAX_MSGS_PER_SUBJECT + 20):
         await broker.publish(topic, _envelope(n))
+    await transport.nc.flush()
 
     subject = transport._fanout_subject(topic)  # noqa: SLF001
-    held = (await transport._subject_counts(transport._fanout_stream, subject)).get(  # noqa: SLF001
-        subject, 0
-    )
-    assert held == FANOUT_MAX_MSGS_PER_SUBJECT
+
+    async def held() -> int:
+        return (await transport._subject_counts(transport._fanout_stream, subject)).get(  # noqa: SLF001
+            subject, 0
+        )
+
+    deadline = asyncio.get_running_loop().time() + 5
+    count = 0
+    while True:
+        count = await held()
+        if count == FANOUT_MAX_MSGS_PER_SUBJECT:
+            break
+        if asyncio.get_running_loop().time() >= deadline:
+            break
+        await asyncio.sleep(0.05)
+    assert count == FANOUT_MAX_MSGS_PER_SUBJECT
 
 
 # --- the tape: a stream per feed ----------------------------------------------
@@ -457,6 +511,62 @@ def test_kv_shape_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) 
     config = BrokerConfig.from_env()
     assert config.kv_replicas == 3
     assert config.kv_placement_cluster == "jp"
+
+
+@pytest.mark.asyncio
+async def test_an_unplaced_stream_is_asked_to_move_to_the_declared_cluster() -> None:
+    """A live stream on the wrong cluster is moved, or left with a warning.
+
+    ``_reshape`` must not carry placement: a refused cluster move would
+    fail every plane's ``connect``. The pin is the KV rule — try, warn,
+    keep booting.
+    """
+    transport = NatsTransport(BrokerConfig(kv_placement_cluster="jp"))
+    updates: list[dict] = []
+
+    async def fake_js_api(
+        op: str,
+        payload: dict | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict:
+        if op.startswith("STREAM.INFO."):
+            return {"config": {"name": "mftik_ps", "num_replicas": 1}}
+        if op.startswith("STREAM.UPDATE."):
+            assert payload is not None
+            updates.append(payload)
+            raise nats.js.errors.ServerError(
+                code=500,
+                err_code=10052,
+                description="no cluster named jp",
+            )
+        raise AssertionError(op)
+
+    transport._js_api = fake_js_api  # noqa: SLF001
+    await transport._ensure_stream_placement("mftik_ps")  # noqa: SLF001
+
+    assert updates
+    assert updates[0]["placement"] == {"cluster": "jp"}
+
+
+@pytest.mark.asyncio
+async def test_a_stream_already_on_the_declared_cluster_is_left_alone() -> None:
+    transport = NatsTransport(BrokerConfig(kv_placement_cluster="jp"))
+    calls: list[str] = []
+
+    async def fake_js_api(
+        op: str,
+        payload: dict | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict:
+        calls.append(op)
+        return {"config": {"name": "mftik_ps", "placement": {"cluster": "jp"}}}
+
+    transport._js_api = fake_js_api  # noqa: SLF001
+    await transport._ensure_stream_placement("mftik_ps")  # noqa: SLF001
+
+    assert calls == ["STREAM.INFO.mftik_ps"]
 
 
 @pytest.mark.asyncio

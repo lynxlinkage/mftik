@@ -4,15 +4,15 @@ Every family the broker speaks maps onto something NATS already has, and the
 mapping is worth stating in one place because three of the choices are not the
 obvious one.
 
-**Fan-out is JetStream, and every subscriber is a consumer of its own.** Core
-NATS would deliver a published message to whoever is listening and forget it,
-which is what Redis Pub/Sub does and would have been the smaller change. It is
-JetStream here so a subject has a history: the same stream that carries a feed
-to a live session is the thing a later reader can address by offset. Each
-:meth:`NatsTransport.subscribe` creates an ephemeral consumer starting at *new*,
-which is what reproduces the promise the broker makes — a message published
-while nobody was subscribed is gone — while leaving the stored message there for
-anything that wants to read the subject rather than follow it.
+**Live fan-out is core NATS. The stream is the tail, not the bus.** A
+``js.publish`` ack comes from the stream's leader, and a stream lives in
+one cluster. Pinning that cluster to JP makes every TW publisher wait;
+leaving it on TW makes every JP publisher wait. Core publish and
+subscribe wait for the server this process connected to, and the gateway
+forwards interest to the other cluster. The fan-out stream still captures
+the same subjects so a later reader can address a subject by offset.
+:meth:`NatsTransport.subscribe` starts at *now*, which is the broker's
+promise: a message published while nobody was subscribed is gone.
 
 **Request-reply is core NATS.** A caller waiting on an answer gains nothing
 from durability: it has a timeout, and a request executed after that timeout
@@ -516,6 +516,46 @@ class NatsTransport(BrokerTransport):
                 out.append(f"{field.name} is {current!r}, declared {declared!r}")
         return out
 
+    async def _ensure_stream_placement(self, name: str) -> None:
+        """Move a live KV stream onto ``kv_placement_cluster`` if it is not there.
+
+        Fan-out does not use this. A stream has one leader, so pinning it
+        to JP makes every TW publisher wait and pinning it to TW makes
+        every JP publisher wait. KV is a different promise: one ledger,
+        one cluster, and a read that cannot be answered locally is a
+        failed read rather than a delayed tick.
+
+        A cluster that cannot take the stream is a warning, not a failed
+        boot: local and CI have no second cluster, and a production move
+        that NATS refuses must not take every plane down with it.
+        """
+        cluster = self.config.kv_placement_cluster
+        if not cluster:
+            return
+        try:
+            raw = await self._js_api(f"STREAM.INFO.{name}")
+        except nats.js.errors.NotFoundError:
+            return
+        cfg = dict(raw["config"])
+        live_cluster = ((cfg.get("placement") or {}) or {}).get("cluster") or ""
+        if live_cluster == cluster:
+            return
+        cfg["placement"] = {"cluster": cluster}
+        try:
+            await self._js_api(
+                f"STREAM.UPDATE.{name}",
+                cfg,
+                timeout=_KV_RESHAPE_TIMEOUT_S,
+            )
+        except nats.js.errors.APIError as exc:
+            logger.warning(
+                "could not pin %s to cluster %s; leaving %s: %s",
+                name,
+                cluster,
+                live_cluster or "-",
+                exc,
+            )
+
     async def _js_api(
         self,
         op: str,
@@ -604,25 +644,7 @@ class NatsTransport(BrokerTransport):
                     exc,
                 )
                 return
-            raw = await self._js_api(f"STREAM.INFO.{stream}")
-            cfg = dict(raw["config"])
-        live_cluster = ((cfg.get("placement") or {}) or {}).get("cluster") or ""
-        if cluster and live_cluster != cluster:
-            cfg["placement"] = {"cluster": cluster}
-            try:
-                await self._js_api(
-                    f"STREAM.UPDATE.{stream}",
-                    cfg,
-                    timeout=_KV_RESHAPE_TIMEOUT_S,
-                )
-            except nats.js.errors.APIError as exc:
-                logger.warning(
-                    "could not pin %s to cluster %s; leaving %s: %s",
-                    stream,
-                    cluster,
-                    live_cluster or "-",
-                    exc,
-                )
+        await self._ensure_stream_placement(stream)
 
     async def _bucket(self, kind: str) -> nats.js.kv.KeyValue:
         """The KV bucket for ``kind``, created on first use.
@@ -659,7 +681,7 @@ class NatsTransport(BrokerTransport):
     # --- fan-out -----------------------------------------------------------
 
     async def publish(self, topic: str, raw: str) -> None:
-        await self.js.publish(self._fanout_subject(topic), raw.encode())
+        await self.nc.publish(self._fanout_subject(topic), raw.encode())
 
     async def subscribe(
         self, topics: Sequence[str], *, stop: asyncio.Event | None
@@ -703,13 +725,13 @@ class NatsTransport(BrokerTransport):
     async def _consume(
         self, subjects: Sequence[str], *, stop: asyncio.Event | None
     ) -> AsyncIterator[tuple[str, str]]:
-        """One ephemeral consumer per subject, merged, until ``stop``.
+        """One core subscription per subject, merged, until ``stop``.
 
-        A consumer each is what the fan-out pattern is: the stream holds one
-        copy of the message and every subscriber reads it at its own position,
-        so a slow reader cannot cost a fast one anything and neither can see the
-        other's. Starting at *new* and acknowledging nothing is what makes it
-        behave like the broadcast the broker promises rather than like a queue.
+        Core rather than a JetStream consumer: each subscriber still has
+        its own interest, a slow reader cannot cost a fast one anything,
+        and a publisher waits for the server it connected to rather than
+        the stream's leader. The stream still stores the subject for
+        readers; live delivery does not go through it.
         """
         if not subjects:
             raise ValueError("a subscription needs at least one subject")
@@ -721,16 +743,7 @@ class NatsTransport(BrokerTransport):
             await inbound.put((topic, msg.data.decode()))
 
         subs = [
-            await self.js.subscribe(
-                subject,
-                cb=handler,
-                config=js_api.ConsumerConfig(
-                    deliver_policy=js_api.DeliverPolicy.NEW,
-                    ack_policy=js_api.AckPolicy.NONE,
-                    inactive_threshold=self.config.consumer_idle_seconds,
-                ),
-            )
-            for subject in subjects
+            await self.nc.subscribe(subject, cb=handler) for subject in subjects
         ]
         try:
             async for item in _iter_until_stopped(inbound, stop=stop):
