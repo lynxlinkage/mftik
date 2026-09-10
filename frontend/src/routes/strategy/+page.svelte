@@ -9,11 +9,13 @@
 		shortId,
 		venuesFromMdFeeds,
 		type ApiCredential,
+		type Instance,
 		type StrategyRow,
 		type StrategyTemplate
 	} from '$lib/api';
 	import Pager from '$lib/components/Pager.svelte';
 	import StrategyPicker from '$lib/components/StrategyPicker.svelte';
+	import StsInstancePicker from '$lib/components/StsInstancePicker.svelte';
 	import {
 		connectStsStatus,
 		type StatusConnection,
@@ -43,6 +45,11 @@
 	let selectedType = $state('');
 	let pristineYaml = $state(defaultStrategyYml());
 	let accounts = $state<ApiCredential[]>([]);
+	// Declared STS rows only. A name nothing declared is one the deploy
+	// would refuse, so offering it here would be offering a 400.
+	let instances = $state<Instance[]>([]);
+	// Empty is anycast (PI-5). Not `sts`: pinning is a choice, not a default.
+	let instance = $state('');
 	let error = $state<string | null>(null);
 	let busy = $state(false);
 	let loading = $state(true);
@@ -120,6 +127,9 @@
 					}))
 				: null;
 			const accountsP = withTypes ? api.apis().catch(() => ({ apis: [] })) : null;
+			const instancesP = withTypes
+				? api.instances('sts').catch(() => ({ instances: [] }))
+				: null;
 			let offset = Math.max(0, (myPage - 1) * PAGE_SIZE);
 			let list = await api.strategies({
 				status: TAB_STATUS[myTab],
@@ -145,6 +155,14 @@
 				const a = await accountsP;
 				if (epoch !== listEpoch) return;
 				accounts = a.apis;
+			}
+			if (instancesP) {
+				const listed = await instancesP;
+				if (epoch !== listEpoch) return;
+				instances = listed.instances;
+				if (instance && !instances.some((i) => i.name === instance)) {
+					instance = '';
+				}
 			}
 			if (typesP) {
 				const t = await typesP;
@@ -237,7 +255,11 @@
 		busy = true;
 		error = null;
 		try {
-			const created = await api.deploySts({ type: selectedType, yaml: yamlText });
+			const created = await api.deploySts({
+				type: selectedType,
+				yaml: yamlText,
+				...(instance ? { instance } : {})
+			});
 			tab = 'live';
 			page = 1;
 			total = 0;
@@ -361,6 +383,7 @@
 				onchange={changeType}
 			/>
 		</label>
+		<StsInstancePicker {instances} bind:value={instance} disabled={busy} />
 		<div class="editor-actions">
 			<button type="button" class="secondary" onclick={resetTemplate} disabled={busy}>
 				Reset template

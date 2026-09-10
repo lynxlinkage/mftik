@@ -62,6 +62,7 @@ async function mockStsPage(
 		holdLiveAfter?: number;
 		failHistory?: boolean;
 		attentionPage?: { first: StrategyRow[]; rest: StrategyRow[]; total: number };
+		stsInstances?: { name: string; region?: string | null; enabled?: boolean }[];
 	} = {}
 ): Promise<{
 	urls: URL[];
@@ -113,6 +114,22 @@ async function mockStsPage(
 					}
 				],
 				default: 'NoopStrategy'
+			}
+		})
+	);
+	const listed = opts.stsInstances ?? [{ name: 'sts' }];
+	await page.route('**/api/instances**', (route) =>
+		route.fulfill({
+			json: {
+				instances: listed.map((i, idx) => ({
+					id: idx + 1,
+					name: i.name,
+					domain: 'sts',
+					region: i.region ?? null,
+					enabled: i.enabled ?? true,
+					created_at: 1,
+					created_by: 1
+				}))
 			}
 		})
 	);
@@ -189,6 +206,7 @@ test('the default tab is Live', async ({ page }) => {
 	const { urls } = await mockStsPage(page);
 
 	await expect(page.getByRole('link', { name: 's-live' })).toBeVisible();
+	await expect(page.getByLabel('STS instance')).toHaveCount(0);
 	await expect(page.getByRole('button', { name: 'Pause' })).toHaveCount(0);
 	await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
 	await expect(page.getByRole('button', { name: 'Ack' })).toHaveCount(0);
@@ -331,6 +349,85 @@ test('acking a full Attention page still offers the next page', async ({ page })
 
 	await page.getByRole('button', { name: 'Page 2' }).click();
 	await expect(page.getByRole('link', { name: 's-int' })).toBeVisible();
+});
+
+const TWO_STS = [
+	{ name: 'sts', region: 'jp' },
+	{ name: 'sts-2', region: 'tw' }
+];
+
+async function captureDeploy(page: Page): Promise<Record<string, unknown>> {
+	return new Promise((resolve) => {
+		void page.route('**/api/sts/deploy/**', async (route) => {
+			resolve(route.request().postDataJSON() as Record<string, unknown>);
+			await route.fulfill({
+				json: {
+					session_id: 's-new',
+					type: 'NoopStrategy',
+					config: {},
+					td: [],
+					md: [],
+					status: 'live'
+				}
+			});
+		});
+	});
+}
+
+test('Deploy pins the chosen STS instance and omits anycast', async ({ page }) => {
+	await mockStsPage(page, { stsInstances: TWO_STS });
+	await page.route('**/api/sts/sessions/*/eventlog/info', (route) =>
+		route.fulfill({
+			json: {
+				session_id: 's-new',
+				available: false,
+				enabled: false,
+				parts: 0,
+				total_bytes: 0,
+				live: false
+			}
+		})
+	);
+	await page.route('**/api/logs/**', (route) =>
+		route.fulfill({ json: { logs: [], has_more: false } })
+	);
+
+	const select = page.getByLabel('STS instance');
+	await expect(select).toBeVisible();
+	await expect(select).toHaveValue('');
+	await expect(page.getByRole('button', { name: 'Deploy' })).toBeEnabled();
+
+	const anycast = captureDeploy(page);
+	await page.getByRole('button', { name: 'Deploy' }).click();
+	expect((await anycast).instance).toBeUndefined();
+});
+
+test('Deploy sends instance when an STS is chosen', async ({ page }) => {
+	await mockStsPage(page, { stsInstances: TWO_STS });
+	await page.route('**/api/sts/sessions/*/eventlog/info', (route) =>
+		route.fulfill({
+			json: {
+				session_id: 's-new',
+				available: false,
+				enabled: false,
+				parts: 0,
+				total_bytes: 0,
+				live: false
+			}
+		})
+	);
+	await page.route('**/api/logs/**', (route) =>
+		route.fulfill({ json: { logs: [], has_more: false } })
+	);
+
+	const select = page.getByLabel('STS instance');
+	await expect(select).toBeVisible();
+	await select.selectOption('sts-2');
+	await expect(page.getByRole('button', { name: 'Deploy' })).toBeEnabled();
+
+	const pinned = captureDeploy(page);
+	await page.getByRole('button', { name: 'Deploy' }).click();
+	expect((await pinned).instance).toBe('sts-2');
 });
 
 test('a failed tab switch does not keep the previous tab\'s rows', async ({

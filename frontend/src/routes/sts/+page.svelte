@@ -6,6 +6,7 @@
 		defaultStrategyYml,
 		formatTs,
 		shortId,
+		type Instance,
 		type StrategyRow,
 		type StrategyTemplate,
 		type StrategyYaml
@@ -13,6 +14,7 @@
 	import LogDownloadModal from '$lib/components/LogDownloadModal.svelte';
 	import Pager from '$lib/components/Pager.svelte';
 	import StrategyPicker from '$lib/components/StrategyPicker.svelte';
+	import StsInstancePicker from '$lib/components/StsInstancePicker.svelte';
 	import {
 		connectStsStatus,
 		type StatusConnection,
@@ -39,6 +41,11 @@
 	let yamlText = $state(defaultStrategyYml());
 	let templates = $state<StrategyTemplate[]>([]);
 	let selectedType = $state('');
+	// Declared STS rows only. A name nothing declared is one the deploy
+	// would refuse, so offering it here would be offering a 400.
+	let instances = $state<Instance[]>([]);
+	// Empty is anycast (PI-5). Not `sts`: pinning is a choice, not a default.
+	let instance = $state('');
 	// Tracks whether the editor still holds the selected type's template
 	// untouched, so switching type can only discard what nobody typed.
 	let pristineYaml = $state(defaultStrategyYml());
@@ -123,6 +130,9 @@
 						default: 'NoopStrategy'
 					}))
 				: null;
+			const instancesP = withTypes
+				? api.instances('sts').catch(() => ({ instances: [] }))
+				: null;
 			let offset = Math.max(0, (myPage - 1) * PAGE_SIZE);
 			let list = await api.strategies({
 				status: TAB_STATUS[myTab],
@@ -144,6 +154,14 @@
 			strategies = list.strategies;
 			total = list.total ?? 0;
 			maxOffset = list.max_offset;
+			if (instancesP) {
+				const listed = await instancesP;
+				if (epoch !== listEpoch) return;
+				instances = listed.instances;
+				if (instance && !instances.some((i) => i.name === instance)) {
+					instance = '';
+				}
+			}
 			if (typesP) {
 				const t = await typesP;
 				if (epoch !== listEpoch) return;
@@ -228,7 +246,11 @@
 		busy = true;
 		error = null;
 		try {
-			const created = await api.deploySts({ type: selectedType, yaml: yamlText });
+			const created = await api.deploySts({
+				type: selectedType,
+				yaml: yamlText,
+				...(instance ? { instance } : {})
+			});
 			// The new row is live. Someone who deployed from History would
 			// otherwise refresh a tab that cannot show it.
 			tab = 'live';
@@ -448,6 +470,7 @@
 				onchange={changeType}
 			/>
 		</label>
+		<StsInstancePicker {instances} bind:value={instance} disabled={busy} />
 		<div class="editor-actions">
 			<button type="button" class="secondary" onclick={resetTemplate} disabled={busy}>
 				Reset template

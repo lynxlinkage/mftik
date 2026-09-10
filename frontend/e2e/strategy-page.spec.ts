@@ -36,6 +36,7 @@ async function mockStrategyPage(
 	live: StrategyRow[],
 	opts: {
 		history?: { first: StrategyRow[]; rest: StrategyRow[]; cursor: string };
+		stsInstances?: { name: string; region?: string | null; enabled?: boolean }[];
 	} = {}
 ) {
 	await page.route('**/api/auth/status', (route) =>
@@ -93,6 +94,22 @@ async function mockStrategyPage(
 						created_by: 1
 					}
 				]
+			}
+		})
+	);
+	const listed = opts.stsInstances ?? [{ name: 'sts' }];
+	await page.route('**/api/instances**', (route) =>
+		route.fulfill({
+			json: {
+				instances: listed.map((i, idx) => ({
+					id: idx + 1,
+					name: i.name,
+					domain: 'sts',
+					region: i.region ?? null,
+					enabled: i.enabled ?? true,
+					created_at: 1,
+					created_by: 1
+				}))
 			}
 		})
 	);
@@ -225,6 +242,60 @@ test('opening a run shows STS plus the attached accounts and venues', async ({
 		'/md/Paper'
 	);
 	await expect(page.getByRole('heading', { name: 'STS log' })).toBeVisible();
+});
+
+const TWO_STS = [
+	{ name: 'sts', region: 'jp' },
+	{ name: 'sts-2', region: 'tw' }
+];
+
+async function captureDeploy(page: Page): Promise<Record<string, unknown>> {
+	return new Promise((resolve) => {
+		void page.route('**/api/sts/deploy/**', async (route) => {
+			resolve(route.request().postDataJSON() as Record<string, unknown>);
+			await route.fulfill({
+				json: {
+					session_id: 's-new',
+					type: 'NoopStrategy',
+					config: {},
+					td: [],
+					md: [],
+					status: 'live'
+				}
+			});
+		});
+	});
+}
+
+test('Deploy pins the chosen STS instance and omits anycast', async ({ page }) => {
+	await mockStrategyPage(page, [row('s-live', 'live')], { stsInstances: TWO_STS });
+
+	const select = page.getByLabel('STS instance');
+	await expect(select).toBeVisible();
+	await expect(select).toHaveValue('');
+	await expect(page.getByRole('button', { name: 'Deploy' })).toBeEnabled();
+
+	const anycast = captureDeploy(page);
+	await page.getByRole('button', { name: 'Deploy' }).click();
+	expect((await anycast).instance).toBeUndefined();
+});
+
+test('Deploy sends instance when an STS is chosen', async ({ page }) => {
+	await mockStrategyPage(page, [row('s-live', 'live')], { stsInstances: TWO_STS });
+
+	const select = page.getByLabel('STS instance');
+	await expect(select).toBeVisible();
+	await select.selectOption('sts-2');
+	await expect(page.getByRole('button', { name: 'Deploy' })).toBeEnabled();
+
+	const pinned = captureDeploy(page);
+	await page.getByRole('button', { name: 'Deploy' }).click();
+	expect((await pinned).instance).toBe('sts-2');
+});
+
+test('a single STS instance hides the picker', async ({ page }) => {
+	await mockStrategyPage(page, [row('s-live', 'live')]);
+	await expect(page.getByLabel('STS instance')).toHaveCount(0);
 });
 
 test('History page 2 replaces page one', async ({
