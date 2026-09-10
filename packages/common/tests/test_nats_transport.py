@@ -308,11 +308,11 @@ async def test_two_feeds_that_would_share_a_stream_name_are_refused(
         transport._tape_stream("aggtrade.Gate.Spot_ETH")  # noqa: SLF001
 
 
-# --- fan-out: one consumer per subscriber -------------------------------------
+# --- fan-out: each subscriber has its own interest ----------------------------
 
 
 @pytest.mark.asyncio
-async def test_every_subscriber_is_a_consumer_of_its_own(broker: Broker) -> None:
+async def test_every_subscriber_has_its_own_interest(broker: Broker) -> None:
     """The fan-out shape: each subscriber has its own interest.
 
     A slow subscriber cannot cost a fast one anything and neither can see the
@@ -323,17 +323,20 @@ async def test_every_subscriber_is_a_consumer_of_its_own(broker: Broker) -> None
     first: list[int] = []
     second: list[int] = []
 
-    async def reader(into: list[int]) -> None:
-        async for envelope in broker.subscribe(topic, stop=stop):
+    ready_a = asyncio.Event()
+    ready_b = asyncio.Event()
+
+    async def reader(into: list[int], ready: asyncio.Event) -> None:
+        async for envelope in broker.subscribe(topic, stop=stop, ready=ready):
             into.append(envelope.payload["n"])
             if len(into) == 2:
                 return
 
     tasks = [
-        asyncio.create_task(reader(first)),
-        asyncio.create_task(reader(second)),
+        asyncio.create_task(reader(first, ready_a)),
+        asyncio.create_task(reader(second, ready_b)),
     ]
-    await asyncio.sleep(0.5)
+    await asyncio.wait_for(asyncio.gather(ready_a.wait(), ready_b.wait()), timeout=5)
     await broker.publish(topic, _envelope(1))
     await broker.publish(topic, _envelope(2))
     try:
@@ -359,15 +362,16 @@ async def test_a_subscriber_does_not_receive_what_it_missed(broker: Broker) -> N
     await broker.publish(topic, _envelope(1))
 
     seen: list[int] = []
+    ready = asyncio.Event()
 
     async def reader() -> None:
-        async for envelope in broker.subscribe(topic, stop=stop):
+        async for envelope in broker.subscribe(topic, stop=stop, ready=ready):
             seen.append(envelope.payload["n"])
 
     task = asyncio.create_task(reader())
-    await asyncio.sleep(0.5)
+    await asyncio.wait_for(ready.wait(), timeout=5)
     await broker.publish(topic, _envelope(2))
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0.2)
     stop.set()
     await asyncio.wait_for(task, timeout=10)
 
@@ -378,37 +382,75 @@ async def test_a_subscriber_does_not_receive_what_it_missed(broker: Broker) -> N
 async def test_a_publish_does_not_wait_for_the_stream(broker: Broker) -> None:
     """Live fan-out waits for this process's server, not the stream leader.
 
-    Acknowledging the stream would make every plane wait for whichever
-    cluster first created it — JP waiting for TW, or TW waiting for JP.
-    The stream still captures the subject; the publisher does not sit on
-    that ack.
+    ``js.publish`` is replaced so a local-leader ack cannot hide inside
+    the same call. The message must still land on the fan-out stream —
+    capture is the tail, not the thing the publisher sits on.
     """
     transport = _transport(broker)
+    original = transport._js.publish  # noqa: SLF001
 
     async def boom(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("live publish must not wait for js.publish")
 
     transport._js.publish = boom  # noqa: SLF001
-    stop = asyncio.Event()
     topic = Topics.md_session("s-core")
-    seen: list[int] = []
-
-    async def reader() -> None:
-        async for envelope in broker.subscribe(topic, stop=stop):
-            seen.append(envelope.payload["n"])
-            return
-
-    task = asyncio.create_task(reader())
-    await asyncio.sleep(0.3)
     try:
         await broker.publish(topic, _envelope(1))
-        await asyncio.wait_for(task, timeout=5)
     finally:
-        stop.set()
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        transport._js.publish = original  # noqa: SLF001
 
-    assert seen == [1]
+    await transport.nc.flush()
+    subject = transport._fanout_subject(topic)  # noqa: SLF001
+    deadline = asyncio.get_running_loop().time() + 5
+    held = 0
+    while True:
+        held = (await transport._subject_counts(transport._fanout_stream, subject)).get(  # noqa: SLF001
+            subject, 0
+        )
+        if held >= 1:
+            break
+        if asyncio.get_running_loop().time() >= deadline:
+            pytest.fail(f"fan-out stream held {held} after 5s; expected the publish")
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_a_cross_connection_subscribe_is_visible_before_publish() -> None:
+    """``nc.subscribe`` without a flush misses a publish on another connection.
+
+    Production is that shape: MD publishes, STS subscribes. Same-connection
+    tests cannot see it — SUB and PUB share one ``_pending`` list.
+    """
+    async with a_broker("xconn") as publisher:
+        other = Broker(
+            BrokerConfig(
+                nats_url=publisher.config.nats_url,
+                key_prefix=publisher.config.key_prefix,
+            )
+        )
+        await other.connect()
+        stop = asyncio.Event()
+        ready = asyncio.Event()
+        topic = Topics.md_session("s-xconn")
+        seen: list[int] = []
+
+        async def reader() -> None:
+            async for envelope in other.subscribe(topic, stop=stop, ready=ready):
+                seen.append(envelope.payload["n"])
+                return
+
+        task = asyncio.create_task(reader())
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=5)
+            await publisher.publish(topic, _envelope(7))
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            stop.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await other.close()
+
+        assert seen == [7]
 
 
 @pytest.mark.asyncio
@@ -438,9 +480,10 @@ async def test_a_fan_out_subject_keeps_a_bounded_tail(broker: Broker) -> None:
         if count == FANOUT_MAX_MSGS_PER_SUBJECT:
             break
         if asyncio.get_running_loop().time() >= deadline:
-            break
+            pytest.fail(
+                f"held {count} after 5s; expected {FANOUT_MAX_MSGS_PER_SUBJECT}"
+            )
         await asyncio.sleep(0.05)
-    assert count == FANOUT_MAX_MSGS_PER_SUBJECT
 
 
 # --- the tape: a stream per feed ----------------------------------------------
@@ -517,9 +560,8 @@ def test_kv_shape_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) 
 async def test_an_unplaced_stream_is_asked_to_move_to_the_declared_cluster() -> None:
     """A live stream on the wrong cluster is moved, or left with a warning.
 
-    ``_reshape`` must not carry placement: a refused cluster move would
-    fail every plane's ``connect``. The pin is the KV rule — try, warn,
-    keep booting.
+    The pin is the KV rule — try, warn, keep booting. This is
+    ``_ensure_stream_placement`` itself, not ``_reshape`` or ``connect``.
     """
     transport = NatsTransport(BrokerConfig(kv_placement_cluster="jp"))
     updates: list[dict] = []
@@ -567,6 +609,110 @@ async def test_a_stream_already_on_the_declared_cluster_is_left_alone() -> None:
     await transport._ensure_stream_placement("mftik_ps")  # noqa: SLF001
 
     assert calls == ["STREAM.INFO.mftik_ps"]
+
+
+@pytest.mark.asyncio
+async def test_kv_shape_is_a_no_op_without_replicas_or_cluster() -> None:
+    transport = NatsTransport(BrokerConfig())
+    calls: list[str] = []
+
+    async def fake(
+        op: str,
+        payload: dict | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict:
+        calls.append(op)
+        raise AssertionError(op)
+
+    transport._js_api = fake  # noqa: SLF001
+    await transport._ensure_kv_shape("state")  # noqa: SLF001
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_kv_shape_pins_after_a_replica_update() -> None:
+    """Replica update first, placement second — NATS refuses both at once."""
+    transport = NatsTransport(
+        BrokerConfig(kv_replicas=3, kv_placement_cluster="jp")
+    )
+    updates: list[dict] = []
+
+    async def fake(
+        op: str,
+        payload: dict | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict:
+        if op.startswith("STREAM.INFO."):
+            return {"config": {"name": "KV_x", "num_replicas": 1}}
+        if op.startswith("STREAM.UPDATE."):
+            assert payload is not None
+            updates.append(payload)
+            return {}
+        raise AssertionError(op)
+
+    transport._js_api = fake  # noqa: SLF001
+    await transport._ensure_kv_shape("x")  # noqa: SLF001
+
+    assert len(updates) == 2
+    assert updates[0]["num_replicas"] == 3
+    assert updates[1]["placement"] == {"cluster": "jp"}
+
+
+@pytest.mark.asyncio
+async def test_kv_shape_skips_placement_when_replicas_fail() -> None:
+    transport = NatsTransport(
+        BrokerConfig(kv_replicas=3, kv_placement_cluster="jp")
+    )
+    updates = 0
+
+    async def fake(
+        op: str,
+        payload: dict | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict:
+        nonlocal updates
+        if op.startswith("STREAM.INFO."):
+            return {"config": {"name": "KV_x", "num_replicas": 1}}
+        if op.startswith("STREAM.UPDATE."):
+            updates += 1
+            raise nats.js.errors.ServerError(
+                code=500, err_code=10123, description="cannot scale"
+            )
+        raise AssertionError(op)
+
+    transport._js_api = fake  # noqa: SLF001
+    await transport._ensure_kv_shape("x")  # noqa: SLF001
+    assert updates == 1
+
+
+@pytest.mark.asyncio
+async def test_kv_shape_reuses_the_info_it_already_has() -> None:
+    """A matching replica count must not refetch STREAM.INFO to pin."""
+    transport = NatsTransport(
+        BrokerConfig(kv_replicas=3, kv_placement_cluster="jp")
+    )
+    infos = 0
+
+    async def fake(
+        op: str,
+        payload: dict | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict:
+        nonlocal infos
+        if op.startswith("STREAM.INFO."):
+            infos += 1
+            return {"config": {"name": "KV_x", "num_replicas": 3}}
+        if op.startswith("STREAM.UPDATE."):
+            return {}
+        raise AssertionError(op)
+
+    transport._js_api = fake  # noqa: SLF001
+    await transport._ensure_kv_shape("x")  # noqa: SLF001
+    assert infos == 1
 
 
 @pytest.mark.asyncio

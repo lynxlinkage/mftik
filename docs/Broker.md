@@ -104,7 +104,7 @@ honours; the stream holds its own ring.
 
 | The broker's | What NATS does |
 |---|---|
-| `publish` / `subscribe` | JetStream, one ephemeral consumer per subscriber, `DeliverPolicy.NEW` and no acknowledgement. The stream is `{prefix}.ps.>` with a per-subject cap. A `log.` / `status.` topic also opens a consumer on `{prefix}.log.>`. |
+| `publish` / `subscribe` | Core NATS. The `{prefix}.ps.>` stream still captures the subject as a bounded tail; the publisher does not wait for that ack. `subscribe` flushes once so this process's server has the interest before the iterator starts. A `log.` / `status.` topic also listens on `{prefix}.log.>`. |
 | `psubscribe` | The same, with a wildcard subject. Patterns were already one `*` per segment; see `Topics.log_pattern`. A `log.` / `status.` pattern listens on both streams. |
 | `publish_log` / `fetch_log_buffer` | A dedicated stream (`{prefix}.log.>`), `max_msgs_per_subject = LOG_MAX_MSGS_PER_SUBJECT` (256). The server holds the ring; there is no purge after each line. `maxlen` above that cap raises. `fetch_log_buffer` trims the replay to `BROKER_LOG_BUFFER_MAXLEN` (or the passed `maxlen`). `ttl_seconds` is a per-message TTL, so a line expires on its own clock rather than the buffer expiring as a whole. |
 | `request` / `probe` | Core request-reply. No responders is an immediate error, so the control plane learns a plane is down without spending its whole timeout on it. Re-asked first, for half of what the caller brought and never more than a second: a serve loop registering as its process boots is not a plane being down, and neither is an account subject three hundred milliseconds into a handover — order entry brings two seconds. `probe` opts out and spends only the boot-race grace, because "down" is the answer a probe is *for*. |
@@ -119,7 +119,7 @@ honours; the stream holds its own ring.
 | `tape_append` / `tape_tail` / `tape_trim_before` | A JetStream stream per feed. Per-feed, because retention is per feed in the interface and a stream's limits are the stream's — and because "the newest N records" is then subtraction on a sequence rather than a scan past every other feed's prints. |
 | `tape_coverage` / `tape_coverage_put` | One KV entry holding the whole record, written durably — no per-message TTL, no half-life renewal. The tape stream already expires prints via `max_age`; coverage is a fact about those prints and stays until the next mark overwrites it. |
 | `key_prefix` | A subject root, and the name of every stream and KV bucket this node owns. |
-| `consumer_idle_seconds` | `inactive_threshold` on every consumer. Subjects are per-session and per-account, so the consumer count follows the fleet; this is what stops a node that has churned a thousand sessions from carrying a thousand consumers. For a *read*'s consumer it is only the backstop: `unsubscribe` on a pull subscription tears down the client's inboxes and leaves the server's consumer alone, so every read deletes its own and the threshold covers the process that died before it could. |
+| Read-consumer idle | `_READ_CONSUMER_IDLE_S` (30s) on pull consumers for `state_all`, tape and log reads. `unsubscribe` tears down the client's inboxes and leaves the server's consumer alone, so every read deletes its own and the threshold covers the process that died before it could. Live `subscribe` is core NATS and has no consumer. |
 | Connection policy | `max_reconnect_attempts=-1` and an 8 MB pending buffer. Reconnect forever: the alternative is a plane that gave up on the bus and stays up not doing anything. |
 
 ### Properties a caller has to know
@@ -175,9 +175,9 @@ as a follow-up rather than carried here.
 The dev stack in `docker-compose.yml` runs NATS. The published node template
 (`mftik node init`) does too. Two things there are not optional:
 
-- `-js`. Only bare request-reply is core NATS; state, leases, fan-out, logs
-  and the tape are all JetStream or KV, so a server without it accepts the
-  connection and then refuses everything a plane does.
+- `-js`. Live fan-out and request-reply are core NATS; state, leases, the
+  fan-out tail, logs and the tape are JetStream or KV, so a server without
+  it accepts the connection and then refuses everything a plane does.
 - `-sd` on a volume. That state is the node's open orders, its ledger and its
   recorded tape. A node restarted with an empty store comes back reading as an
   account that closed everything.

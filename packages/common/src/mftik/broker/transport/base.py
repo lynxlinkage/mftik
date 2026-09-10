@@ -139,12 +139,21 @@ class BrokerTransport(ABC):
 
     @abstractmethod
     def subscribe(
-        self, topics: Sequence[str], *, stop: asyncio.Event | None
+        self,
+        topics: Sequence[str],
+        *,
+        stop: asyncio.Event | None,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[tuple[str, str]]:
         """Yield ``(topic, raw)`` from ``topics`` until ``stop`` is set.
 
         Yielding the topic even for the single-topic case is what lets
         :meth:`psubscribe` share the plumbing.
+
+        The iterator does not start handing messages until this process's
+        server has the subscription. That is one local flush, not a wait
+        for interest to reach another cluster through the gateway.
+        ``ready`` is set at that moment, before the first yield.
         """
 
     @abstractmethod
