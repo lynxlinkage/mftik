@@ -24,7 +24,7 @@ import nats.js.api as js_api
 import nats.js.errors
 import pytest
 from broker_harness import a_broker, inject_raw_request
-from mftik.broker import Broker
+from mftik.broker import Broker, BrokerConfig
 from mftik.broker.errors import (
     RequestTimeoutError,
     StateReadIncompleteError,
@@ -449,6 +449,41 @@ async def test_a_coverage_record_is_durable(broker: Broker) -> None:
     assert (msg.headers or {}).get("Nats-TTL") is None
     coverage = await broker.tape_coverage(feed)
     assert coverage["continuous_since_ms"] == "1"
+
+
+def test_kv_shape_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NATS_KV_REPLICAS", "3")
+    monkeypatch.setenv("NATS_KV_PLACEMENT_CLUSTER", "jp")
+    config = BrokerConfig.from_env()
+    assert config.kv_replicas == 3
+    assert config.kv_placement_cluster == "jp"
+
+
+@pytest.mark.asyncio
+async def test_an_existing_bucket_is_bound_when_create_disagrees(
+    broker: Broker,
+) -> None:
+    """``create_key_value`` is STREAM.CREATE, and a live KV often disagrees.
+
+    Production buckets pick up ``allow_msg_ttl`` and a replica count the
+    client did not send. CREATE then answers 10058. Binding and using the
+    stream that is already there is what a restart has to do.
+    """
+    transport = _transport(broker)
+    name = "oms.bind"
+    await broker.state_put_many(name, {"k": "1"})
+
+    bucket_name = _sanitize(f"{transport.config.key_prefix}_state")
+    stream = f"KV_{bucket_name}"
+    raw = await transport._js_api(f"STREAM.INFO.{stream}")  # noqa: SLF001
+    cfg = dict(raw["config"])
+    cfg["description"] = "shape-drift"
+    await transport._js_api(f"STREAM.UPDATE.{stream}", cfg)  # noqa: SLF001
+
+    transport._kv.clear()  # noqa: SLF001
+    transport._kv_status.clear()  # noqa: SLF001
+
+    assert await broker.state_all(name) == {"k": "1"}
 
 
 @pytest.mark.asyncio

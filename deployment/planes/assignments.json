@@ -14,7 +14,9 @@
   "commonEnv": {
     "BROKER_KEY_PREFIX": "mftik",
     "LOG_LEVEL": "INFO",
-    "MFTIK_DEFAULT_USER_ID": "1"
+    "MFTIK_DEFAULT_USER_ID": "1",
+    "NATS_KV_REPLICAS": "3",
+    "NATS_KV_PLACEMENT_CLUSTER": "jp"
   },
   "planes": [
     {

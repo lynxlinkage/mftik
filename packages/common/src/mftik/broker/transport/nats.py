@@ -95,6 +95,11 @@ LOG_MAX_MSGS_PER_SUBJECT = 256
 #: instead of the disk.
 FANOUT_MAX_MSGS = 1_000_000
 
+#: How long a KV replica/placement update may take. The RPC default is five
+#: seconds, which is enough for an empty bucket and not for a full ledger
+#: copying onto two new peers.
+_KV_RESHAPE_TIMEOUT_S = 60.0
+
 #: How long to wait before re-asking a subject that reported no responders.
 _NO_RESPONDERS_GRACE_S = 0.05
 
@@ -511,6 +516,114 @@ class NatsTransport(BrokerTransport):
                 out.append(f"{field.name} is {current!r}, declared {declared!r}")
         return out
 
+    async def _js_api(
+        self,
+        op: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """One JetStream management request, as the server sent it.
+
+        nats-py's ``StreamConfig`` does not carry ``allow_msg_ttl``. An
+        ``update_stream`` built from that type drops the flag, and a stream
+        that has it will not give it up (err 10052). Replica and placement
+        changes have to go through the raw API so the live config is what
+        comes back.
+        """
+        if self._nc is None:
+            raise BrokerNotConnectedError
+        body = json.dumps(payload).encode() if payload is not None else b""
+        wait = self.config.request_timeout if timeout is None else timeout
+        try:
+            msg = await self._nc.request(f"$JS.API.{op}", body, timeout=wait)
+        except nats.errors.NoRespondersError as exc:
+            raise nats.js.errors.ServiceUnavailableError from exc
+        resp = json.loads(msg.data)
+        if "error" in resp:
+            raise nats.js.errors.APIError.from_error(resp["error"])
+        return resp
+
+    async def _open_kv(self, name: str) -> nats.js.kv.KeyValue:
+        """Create the bucket, or bind it if the live stream already disagrees.
+
+        ``create_key_value`` is ``STREAM.CREATE``. A bucket this process did
+        not mint — or one NATS later tagged with ``allow_msg_ttl`` / a
+        replica count this build did not send — comes back as 10058, not as
+        a handle. Binding is the right answer; reshaping is
+        :meth:`_ensure_kv_shape`.
+        """
+        replicas = max(1, self.config.kv_replicas)
+        try:
+            return await self.js.create_key_value(
+                js_api.KeyValueConfig(bucket=name, history=1, replicas=replicas)
+            )
+        except nats.js.errors.BadRequestError:
+            try:
+                return await self.js.key_value(name)
+            except nats.js.errors.BucketNotFoundError:
+                if replicas <= 1:
+                    raise
+                return await self.js.create_key_value(
+                    js_api.KeyValueConfig(bucket=name, history=1, replicas=1)
+                )
+
+    async def _ensure_kv_shape(self, name: str) -> None:
+        """Move a live KV stream to the declared replica count and cluster.
+
+        NATS refuses to scale and move in one update (err 10123), so replicas
+        change first and placement is a second call. A cluster too small to
+        place the declared replica count is a warning, not a failed boot:
+        local and CI stay on one node.
+        """
+        replicas = max(1, self.config.kv_replicas)
+        cluster = self.config.kv_placement_cluster
+        if replicas <= 1 and not cluster:
+            return
+        stream = f"KV_{name}"
+        try:
+            raw = await self._js_api(f"STREAM.INFO.{stream}")
+        except nats.js.errors.NotFoundError:
+            return
+        cfg = dict(raw["config"])
+        live_replicas = int(cfg.get("num_replicas") or 1)
+        if live_replicas != replicas:
+            cfg["num_replicas"] = replicas
+            try:
+                await self._js_api(
+                    f"STREAM.UPDATE.{stream}",
+                    cfg,
+                    timeout=_KV_RESHAPE_TIMEOUT_S,
+                )
+            except nats.js.errors.APIError as exc:
+                logger.warning(
+                    "could not set %s replicas=%s; leaving %s: %s",
+                    stream,
+                    replicas,
+                    live_replicas,
+                    exc,
+                )
+                return
+            raw = await self._js_api(f"STREAM.INFO.{stream}")
+            cfg = dict(raw["config"])
+        live_cluster = ((cfg.get("placement") or {}) or {}).get("cluster") or ""
+        if cluster and live_cluster != cluster:
+            cfg["placement"] = {"cluster": cluster}
+            try:
+                await self._js_api(
+                    f"STREAM.UPDATE.{stream}",
+                    cfg,
+                    timeout=_KV_RESHAPE_TIMEOUT_S,
+                )
+            except nats.js.errors.APIError as exc:
+                logger.warning(
+                    "could not pin %s to cluster %s; leaving %s: %s",
+                    stream,
+                    cluster,
+                    live_cluster or "-",
+                    exc,
+                )
+
     async def _bucket(self, kind: str) -> nats.js.kv.KeyValue:
         """The KV bucket for ``kind``, created on first use.
 
@@ -526,9 +639,8 @@ class NatsTransport(BrokerTransport):
             if existing is not None:
                 return existing
             name = _sanitize(f"{self._prefix}_{kind}")
-            bucket = await self.js.create_key_value(
-                js_api.KeyValueConfig(bucket=name, history=1)
-            )
+            bucket = await self._open_kv(name)
+            await self._ensure_kv_shape(name)
             self._kv[kind] = bucket
             with contextlib.suppress(Exception):
                 self._kv_status[kind] = await bucket.status()

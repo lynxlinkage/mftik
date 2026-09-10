@@ -35,6 +35,14 @@ class BrokerConfig:
     #: Comfortably above :attr:`request_timeout`, because a consumer reaped
     #: while a caller is still waiting on it costs that caller its answer.
     consumer_idle_seconds: float = 300.0
+    #: How many JetStream replicas a KV bucket should keep. NATS defaults to
+    #: one, which puts the whole bucket on a single server — a 503 on that
+    #: server's JS API is then a failed ledger read. Production sets three
+    #: and pins them to the JP cluster (``NATS_KV_REPLICAS``,
+    #: ``NATS_KV_PLACEMENT_CLUSTER``). Tests stay at one: a single-node
+    #: server cannot place three.
+    kv_replicas: int = 1
+    kv_placement_cluster: str = ""
 
     @classmethod
     def from_env(cls) -> BrokerConfig:
@@ -46,4 +54,6 @@ class BrokerConfig:
             consumer_idle_seconds=float(
                 os.getenv("BROKER_CONSUMER_IDLE_SECONDS", "300")
             ),
+            kv_replicas=max(1, int(os.getenv("NATS_KV_REPLICAS", "1"))),
+            kv_placement_cluster=os.getenv("NATS_KV_PLACEMENT_CLUSTER", ""),
         )
