@@ -564,7 +564,6 @@ async def test_a_strategy_with_no_market_data_gets_its_candles(
 
     class Recording(Strategy):
         name = "fetch-e2e"
-        id = 93
 
         def __init__(self) -> None:
             super().__init__()

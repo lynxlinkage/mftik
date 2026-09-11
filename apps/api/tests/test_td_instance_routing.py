@@ -78,7 +78,6 @@ def an_order(api_id: int) -> dict:
         "venue_order_id": None,
         "session_id": f"sess-{api_id}",
         "strategy": None,
-        "cid_slot": None,
         "attribution": Attribution.DIRECT,
         "universal_ticker": "Bybit_Spot_BTCUSDT",
         "side": "buy",

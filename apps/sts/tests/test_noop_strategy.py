@@ -79,7 +79,6 @@ class FakeSession:
         self.md_ids = list(md_ids)
         self.td_api_ids = list(td)
         self.session_id = "noop-test"
-        self.cid_slot = 1
         self.symbols = FakePlane()
         self.exit_reasons: list[str] = []
         self.failures: list[str] = []

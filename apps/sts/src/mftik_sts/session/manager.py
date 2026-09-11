@@ -43,7 +43,7 @@ from mftik.protocol import (
     td_api_ids_of,
 )
 from mftik.strategy import Strategy
-from mftik.strategy.client_order_id import slot_for_session
+from mftik.strategy.client_order_id import is_v1_session_id
 from mftik_db.models.session import SessionDomain, SessionStatus
 
 from mftik_sts.impl import resolve as resolve_strategy
@@ -286,18 +286,12 @@ class SessionManager:
 
         ensure_deployable(request.type or request.strategy)
         strategy = self._strategy_factory(request.strategy)
-        # Derived from the session id, so two STS instances need not agree on
-        # anything to keep their live sessions apart, and a rebuild lands on
-        # the slot its resting orders already carry. Still written to the row:
-        # sessions older than this derivation carry a slot it cannot reproduce.
-        cid_slot = slot_for_session(request.session_id)
         session = StsSession(
             session_id=request.session_id,
             broker=self._broker,
             created_by=request.created_by,
             strategy=strategy,
             td_instance=self._td_instance_lookup,
-            cid_slot=cid_slot,
             remember=self._remember_fact,
             td=dict(request.td),
             md=dict(request.md),
@@ -324,7 +318,6 @@ class SessionManager:
                 td=dump_td(dict(request.td)),
                 md_ids=dict(request.md),
                 st_paras=dict(request.st_paras),
-                cid_slot=cid_slot,
                 restart=request.restart,
                 instance=request.instance,
             )
@@ -720,13 +713,11 @@ class SessionManager:
                     attempts,
                 )
                 continue
-            if getattr(row, "cid_slot", None) is None:
-                # Predates the slot being recorded. Rebuilding would mint
-                # order ids in a different slot, leaving the strategy unable
-                # to recognise anything it placed before — worse than leaving
-                # the session where it is.
+            if not is_v1_session_id(session_id):
+                # Predates the 6-hex session id. Rebuilding would fail inside
+                # the client_order_id factory — worse than leaving the row.
                 logger.warning(
-                    "STS cannot rebuild session=%s: no recorded cid_slot",
+                    "STS cannot rebuild session=%s: not a v1 session_id",
                     session_id,
                 )
                 continue
@@ -903,7 +894,6 @@ class SessionManager:
             created_by=created_by,
             strategy=strategy,
             td_instance=self._td_instance_lookup,
-            cid_slot=int(row.cid_slot),
             td=td,
             md=md,
             st_paras=dict(getattr(row, "st_paras", None) or {}),

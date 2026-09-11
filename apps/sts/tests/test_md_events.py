@@ -45,7 +45,6 @@ async def broker() -> Broker:
 
 class RecordingStrategy(Strategy):
     name = "recording"
-    id = 98
 
     def __init__(self) -> None:
         super().__init__()

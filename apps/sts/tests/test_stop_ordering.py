@@ -84,7 +84,6 @@ async def test_on_stop_runs_before_the_detach(broker: Broker) -> None:
 
     class Cleaner(Strategy):
         name = "cleaner"
-        id = 91
 
         async def on_stop(self) -> None:
             order.append("on_stop")
@@ -125,7 +124,6 @@ async def test_a_hung_on_stop_does_not_hold_the_attach(
 
     class Wedged(Strategy):
         name = "wedged"
-        id = 90
 
         async def on_stop(self) -> None:
             order.append("on_stop_entered")
@@ -169,7 +167,6 @@ async def test_a_hung_on_stop_is_left_running_not_cancelled(
 
     class Wedged(Strategy):
         name = "wedged"
-        id = 89
 
         async def on_stop(self) -> None:
             await released.wait()
@@ -208,7 +205,6 @@ async def test_a_raising_on_stop_still_detaches(broker: Broker) -> None:
 
     class Broken(Strategy):
         name = "broken"
-        id = 88
 
         async def on_stop(self) -> None:
             order.append("on_stop")

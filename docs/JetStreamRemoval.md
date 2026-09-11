@@ -404,6 +404,8 @@ Under the instance contracts above, those questions go away:
 
 **`cid_slot` is derived, not allocated.** `owns()` compares
 `slot_of(cid) == self.session.cid_slot` (`strategy/base.py`)
+(superseded: v1 packs the session id itself; `cid_slot` /
+`slot_for_session` are gone.)
 so a session can ignore fills on `td.{api_id}.global` that
 belong to another session on the same account. Two STS
 instances (`sts-tw`, `sts-jp`) can hold the same `api_id` at

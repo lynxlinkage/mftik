@@ -37,7 +37,6 @@ def order_row(**over) -> dict:
         "venue_order_id": None,
         "session_id": "sess-1",
         "strategy": "twap",
-        "cid_slot": 4,
         "attribution": Attribution.DIRECT,
         "universal_ticker": "Binance_Spot_BTCUSDT",
         "side": "buy",
@@ -129,7 +128,6 @@ async def test_a_backfill_cannot_disown_an_order_we_placed(db) -> None:
             order_row(
                 session_id=None,
                 strategy=None,
-                cid_slot=None,
                 attribution=Attribution.EXTERNAL,
                 submitted_at=None,
                 venue_order_id="4293153",
@@ -144,7 +142,6 @@ async def test_a_backfill_cannot_disown_an_order_we_placed(db) -> None:
     row = await repo.get_by_key(1, "281474976710656001")
     assert row.session_id == "sess-1"
     assert row.strategy == "twap"
-    assert row.cid_slot == 4
     assert row.attribution == Attribution.DIRECT
     assert row.submitted_at == 1000.0, "we were there; the history read was not"
     # The state it did know about still lands.
@@ -160,7 +157,6 @@ async def test_an_order_discovered_by_backfill_first_is_still_attributable(db) -
             order_row(
                 session_id=None,
                 strategy=None,
-                cid_slot=None,
                 attribution=Attribution.EXTERNAL,
                 submitted_at=None,
                 source=Source.BACKFILL,
@@ -186,7 +182,6 @@ async def test_an_order_with_no_client_order_id_keys_on_the_venues(db) -> None:
                 venue_order_id="4293153",
                 session_id=None,
                 strategy=None,
-                cid_slot=None,
                 attribution=Attribution.EXTERNAL,
             )
         ]

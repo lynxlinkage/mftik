@@ -295,7 +295,6 @@ async def test_sts_on_order_book_from_md(
 
     class BookStrategy(Strategy):
         name = "book"
-        id = 99
 
         def __init__(self) -> None:
             super().__init__()
@@ -352,7 +351,6 @@ async def test_sts_ticker_and_order_book_from_md(
 
     class FeedStrategy(Strategy):
         name = "feeds"
-        id = 97
 
         def __init__(self) -> None:
             super().__init__()

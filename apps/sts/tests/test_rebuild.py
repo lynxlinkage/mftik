@@ -1,7 +1,7 @@
 """Restoring sessions that were running when STS last went away.
 
 Candidates are exactly ``status = interrupted``. What makes a rebuild correct
-rather than merely possible: it keeps the cid slot, so the strategy still
+rather than merely possible: it keeps the same session_id, so the strategy still
 recognises its own orders; it hands back what the strategy remembered; and it
 attaches in the order a deploy uses, because TD will not attach to a session
 it cannot hear heartbeating.
@@ -46,7 +46,6 @@ class FakeStsStore:
         *,
         status: str = "interrupted",
         strategy: str = "rebuildable",
-        cid_slot: int | None = 7,
         td: dict[str, Any] | None = None,
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | dict[str, list[str]] | None = None,
@@ -66,7 +65,6 @@ class FakeStsStore:
             reason="STS shut down while this was running",
             strategy=strategy,
             type=type,
-            cid_slot=cid_slot,
             instance=instance,
             restart=restart,
             rebuild_count=rebuild_count,
@@ -246,7 +244,7 @@ async def _serve_attaches(
 async def test_an_interrupted_session_comes_back(broker: Broker) -> None:
     store = FakeStsStore()
     store.seed(
-        "r-1",
+        "aa0001",
         td={"paper trader": {"api_id": 3}},
         md_ids=["bestquote.Paper_Spot_BTCUSDT"],
     )
@@ -257,36 +255,36 @@ async def test_an_interrupted_session_comes_back(broker: Broker) -> None:
     serving = asyncio.create_task(_serve_attaches(broker, stop))
     await asyncio.sleep(0.1)
     try:
-        assert await manager.rebuild_interrupted() == ["r-1"]
+        assert await manager.rebuild_interrupted() == ["aa0001"]
     finally:
         stop.set()
         serving.cancel()
         await asyncio.gather(serving, return_exceptions=True)
 
-    row = store.rows["r-1"]
+    row = store.rows["aa0001"]
     assert row.status == "live"
     # A session that is running again has no end and no reason for one.
     assert row.finished_at is None
     assert row.reason is None
-    session = manager.get("r-1")
+    session = manager.get("aa0001")
     assert session is not None
     assert session.td["paper trader"].api_id == 3
     await manager.close_all()
 
 
 @pytest.mark.asyncio
-async def test_the_cid_slot_survives(broker: Broker) -> None:
+async def test_the_session_id_survives(broker: Broker) -> None:
     """The point of the whole thing: the strategy still owns its old orders."""
     store = FakeStsStore()
-    store.seed("r-2", cid_slot=4242)
+    store.seed("aa0002")
     instances: list[Rebuildable] = []
     manager = _manager(broker, store, instances)
 
     await manager.rebuild_interrupted()
 
-    session = manager.get("r-2")
+    session = manager.get("aa0002")
     assert session is not None
-    assert session.cid_slot == 4242
+    assert session.session_id == "aa0002"
     await manager.close_all()
 
 
@@ -296,7 +294,7 @@ async def test_remembered_facts_arrive_before_any_other_hook(
 ) -> None:
     """`on_rebuild` runs first, so every later hook sees restored state."""
     store = FakeStsStore()
-    store.seed("r-3", st_facts={"ref_start": "50000"})
+    store.seed("aa0003", st_facts={"ref_start": "50000"})
     instances: list[Rebuildable] = []
     manager = _manager(broker, store, instances)
 
@@ -309,15 +307,14 @@ async def test_remembered_facts_arrive_before_any_other_hook(
 
 
 @pytest.mark.asyncio
-async def test_a_session_without_a_slot_is_left_alone(broker: Broker) -> None:
-    """Rebuilding it would mint ids in a different slot, and the strategy
-    would disown every order it placed before the restart."""
+async def test_a_pre_v1_session_id_is_left_alone(broker: Broker) -> None:
+    """A leftover uuid must not reach the client_order_id factory."""
     store = FakeStsStore()
-    store.seed("r-old", cid_slot=None)
+    store.seed("112a28a60a0240d288641807d77a2da0")
     manager = _manager(broker, store, [])
 
     assert await manager.rebuild_interrupted() == []
-    assert store.rows["r-old"].status == "interrupted"
+    assert store.rows["112a28a60a0240d288641807d77a2da0"].status == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -326,7 +323,7 @@ async def test_only_the_derived_instance_rebuilds_an_unpinned_row(
 ) -> None:
     """Placement, not a claim race. Two STS boot; only the derived one takes it."""
     store = FakeStsStore()
-    store.seed("r-4", instance=None)
+    store.seed("aa0004", instance=None)
 
     async def derive(_api_ids: list[int]) -> str:
         return "sts-tw"
@@ -335,7 +332,7 @@ async def test_only_the_derived_instance_rebuilds_an_unpinned_row(
     jp = _manager(broker, store, [], instance="sts-jp", derive_sts=derive)
     try:
         assert await jp.rebuild_interrupted() == []
-        assert await tw.rebuild_interrupted() == ["r-4"]
+        assert await tw.rebuild_interrupted() == ["aa0004"]
     finally:
         await tw.close_all()
         await jp.close_all()
@@ -344,7 +341,7 @@ async def test_only_the_derived_instance_rebuilds_an_unpinned_row(
 @pytest.mark.asyncio
 async def test_a_live_session_is_not_rebuilt(broker: Broker) -> None:
     store = FakeStsStore()
-    store.seed("r-live", status="live")
+    store.seed("aa0006", status="live")
     manager = _manager(broker, store, [])
 
     assert await manager.rebuild_interrupted() == []
@@ -361,7 +358,7 @@ async def test_a_failed_attach_puts_the_session_back(
     monkeypatch.setattr(manager_mod, "_ATTACH_BUDGET_S", 0.02)
     monkeypatch.setattr(manager_mod, "_ATTACH_BACKOFF_S", 0.01)
     store = FakeStsStore()
-    store.seed("r-5", td_api_ids=[3])
+    store.seed("aa0005", td_api_ids=[3])
     manager = _manager(broker, store, [])
 
     stop = asyncio.Event()
@@ -374,8 +371,8 @@ async def test_a_failed_attach_puts_the_session_back(
         serving.cancel()
         await asyncio.gather(serving, return_exceptions=True)
 
-    assert store.rows["r-5"].status == "interrupted"
-    assert manager.get("r-5") is None
+    assert store.rows["aa0005"].status == "interrupted"
+    assert manager.get("aa0005") is None
 
 
 @pytest.mark.asyncio
@@ -388,11 +385,11 @@ async def test_a_stale_session_is_left_where_it_is(broker: Broker) -> None:
     decide to do something about it.
     """
     store = FakeStsStore()
-    store.seed("r-stale", finished_ago_s=4000.0)
+    store.seed("aa0007", finished_ago_s=4000.0)
     manager = _manager(broker, store, [])
 
     assert await manager.rebuild_interrupted() == []
-    row = store.rows["r-stale"]
+    row = store.rows["aa0007"]
     assert row.status == "interrupted"
     assert row.reason == "STS shut down while this was running"
 
@@ -402,10 +399,10 @@ async def test_a_session_inside_the_window_still_comes_back(
     broker: Broker,
 ) -> None:
     store = FakeStsStore()
-    store.seed("r-fresh", finished_ago_s=60.0)
+    store.seed("aa0008", finished_ago_s=60.0)
     manager = _manager(broker, store, [])
 
-    assert await manager.rebuild_interrupted() == ["r-fresh"]
+    assert await manager.rebuild_interrupted() == ["aa0008"]
     await manager.close_all()
 
 
@@ -414,22 +411,22 @@ async def test_an_unknown_age_counts_as_too_old(broker: Broker) -> None:
     """A row that says it is interrupted without saying when is not evidence
     that it stopped recently."""
     store = FakeStsStore()
-    row = store.seed("r-nodate")
+    row = store.seed("aa0009")
     row.finished_at = None
     manager = _manager(broker, store, [])
 
     assert await manager.rebuild_interrupted() == []
-    assert store.rows["r-nodate"].status == "interrupted"
+    assert store.rows["aa0009"].status == "interrupted"
 
 
 @pytest.mark.asyncio
 async def test_the_window_is_configurable(broker: Broker) -> None:
     store = FakeStsStore()
-    store.seed("r-wide", finished_ago_s=4000.0)
+    store.seed("aa000a", finished_ago_s=4000.0)
     manager = _manager(broker, store, [])
     manager._rebuild_max_age_s = 5000.0  # noqa: SLF001
 
-    assert await manager.rebuild_interrupted() == ["r-wide"]
+    assert await manager.rebuild_interrupted() == ["aa000a"]
     await manager.close_all()
 
 
@@ -448,12 +445,12 @@ async def test_a_strategy_that_cannot_be_rebuilt_is_left_alone(
 
     register(NotReady)
     store = FakeStsStore()
-    store.seed("r-noimpl", strategy="not_ready")
+    store.seed("aa000b", strategy="not_ready")
     manager = _manager(broker, store, [])
     manager._strategy_factory = lambda name: NotReady()  # noqa: SLF001
 
     assert await manager.rebuild_interrupted() == []
-    assert store.rows["r-noimpl"].status == "interrupted"
+    assert store.rows["aa000b"].status == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -464,11 +461,11 @@ async def test_a_run_that_asked_not_to_come_back_stays_ended(
     it and the class supporting it. This is the third, and the only one the
     person who deployed the run controls."""
     store = FakeStsStore()
-    store.seed("r-oneshot", restart="never")
+    store.seed("aa000c", restart="never")
     manager = _manager(broker, store, [])
 
     assert await manager.rebuild_interrupted() == []
-    assert store.rows["r-oneshot"].status == "interrupted"
+    assert store.rows["aa000c"].status == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -476,11 +473,11 @@ async def test_a_session_rebuilt_too_often_is_left_alone(broker: Broker) -> None
     """A strategy that takes the process down with it would otherwise be
     restored into the same crash on every boot."""
     store = FakeStsStore()
-    store.seed("r-loop", rebuild_count=3)
+    store.seed("aa000d", rebuild_count=3)
     manager = _manager(broker, store, [])
 
     assert await manager.rebuild_interrupted() == []
-    assert store.rows["r-loop"].status == "interrupted"
+    assert store.rows["aa000d"].status == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -488,7 +485,7 @@ async def test_the_attempt_is_counted_before_it_is_made(broker: Broker) -> None:
     """Counted first, because a rebuild that never returns still has to
     count — that is the loop the cap exists to break."""
     store = FakeStsStore()
-    store.seed("r-count")
+    store.seed("aa000e")
     counted: list[str] = []
 
     async def bump(session_id: str) -> int:
@@ -498,8 +495,8 @@ async def test_the_attempt_is_counted_before_it_is_made(broker: Broker) -> None:
     manager = _manager(broker, store, [])
     manager._bump_rebuild_count = bump  # noqa: SLF001
 
-    assert await manager.rebuild_interrupted() == ["r-count"]
-    assert counted == ["r-count"]
+    assert await manager.rebuild_interrupted() == ["aa000e"]
+    assert counted == ["aa000e"]
     await manager.close_all()
 
 
@@ -531,7 +528,7 @@ async def test_a_strategy_this_build_lacks_is_skipped_without_a_traceback(
     missed.
     """
     store = FakeStsStore()
-    store.seed("r-gone", strategy="macd_volume")
+    store.seed("aa000f", strategy="macd_volume")
 
     def factory(name: str | None) -> Strategy:
         raise KeyError(f"unknown strategy {name!r}")
@@ -541,8 +538,8 @@ async def test_a_strategy_this_build_lacks_is_skipped_without_a_traceback(
     with caplog.at_level(logging.WARNING, logger=manager_mod.__name__):
         assert await manager.rebuild_interrupted() == []
 
-    assert store.rows["r-gone"].status == "interrupted"
-    records = [r for r in caplog.records if "r-gone" in r.getMessage()]
+    assert store.rows["aa000f"].status == "interrupted"
+    records = [r for r in caplog.records if "aa000f" in r.getMessage()]
     assert len(records) == 1
     assert records[0].levelno == logging.WARNING
     assert records[0].exc_info is None
@@ -557,7 +554,7 @@ async def test_a_strategy_that_will_not_construct_keeps_its_traceback(
 ) -> None:
     """The other branch: this one is a fault, and the trace is the point."""
     store = FakeStsStore()
-    store.seed("r-broken", strategy="explodes")
+    store.seed("aa0010", strategy="explodes")
 
     def factory(name: str | None) -> Strategy:
         raise RuntimeError("__init__ blew up")
@@ -567,7 +564,7 @@ async def test_a_strategy_that_will_not_construct_keeps_its_traceback(
     with caplog.at_level(logging.WARNING, logger=manager_mod.__name__):
         assert await manager.rebuild_interrupted() == []
 
-    records = [r for r in caplog.records if "r-broken" in r.getMessage()]
+    records = [r for r in caplog.records if "aa0010" in r.getMessage()]
     assert len(records) == 1
     assert records[0].levelno == logging.ERROR
     assert records[0].exc_info is not None
@@ -579,8 +576,8 @@ async def test_one_unresolvable_row_does_not_stop_the_scan(
 ) -> None:
     """The rows are independent; one stale name must not strand the rest."""
     store = FakeStsStore()
-    store.seed("r-gone", strategy="macd_volume")
-    store.seed("r-good")
+    store.seed("aa000f", strategy="macd_volume")
+    store.seed("aa0011")
     instances: list[Rebuildable] = []
 
     def factory(name: str | None) -> Strategy:
@@ -592,8 +589,8 @@ async def test_one_unresolvable_row_does_not_stop_the_scan(
 
     manager = _manager_with_factory(broker, store, factory)
 
-    assert await manager.rebuild_interrupted() == ["r-good"]
-    assert store.rows["r-gone"].status == "interrupted"
+    assert await manager.rebuild_interrupted() == ["aa0011"]
+    assert store.rows["aa000f"].status == "interrupted"
     await manager.close_all()
 
 
@@ -608,16 +605,16 @@ async def test_a_rebuild_that_keeps_running_forgives_its_attempts(
     for no reason anybody could see from the row.
     """
     store = FakeStsStore()
-    store.seed("r-settle", rebuild_count=2)
+    store.seed("aa0012", rebuild_count=2)
     manager = _manager(broker, store, [])
     manager._rebuild_settle_s = 0.05  # noqa: SLF001
 
-    assert await manager.rebuild_interrupted() == ["r-settle"]
+    assert await manager.rebuild_interrupted() == ["aa0012"]
     # Counted on the way in — the reset is what takes it back down.
-    assert store.rows["r-settle"].rebuild_count == 3
+    assert store.rows["aa0012"].rebuild_count == 3
     await asyncio.sleep(0.15)
 
-    assert store.rows["r-settle"].rebuild_count == 0
+    assert store.rows["aa0012"].rebuild_count == 0
     await manager.close_all()
 
 
@@ -631,17 +628,17 @@ async def test_a_rebuild_that_does_not_hold_keeps_its_attempts(
     can survive being back — only running for a while does.
     """
     store = FakeStsStore()
-    store.seed("r-nohold", rebuild_count=2)
+    store.seed("aa0013", rebuild_count=2)
     manager = _manager(broker, store, [])
     manager._rebuild_settle_s = 0.05  # noqa: SLF001
 
-    assert await manager.rebuild_interrupted() == ["r-nohold"]
+    assert await manager.rebuild_interrupted() == ["aa0013"]
     await manager.close(
-        "r-nohold", status="failed", reason="took the process down"
+        "aa0013", status="failed", reason="took the process down"
     )
     await asyncio.sleep(0.15)
 
-    assert store.rows["r-nohold"].rebuild_count == 3
+    assert store.rows["aa0013"].rebuild_count == 3
 
 
 @pytest.mark.asyncio
@@ -652,19 +649,19 @@ async def test_a_later_run_under_the_same_id_is_not_credited(
     different run, and clearing the count on its behalf would credit it for
     surviving something it was never part of."""
     store = FakeStsStore()
-    store.seed("r-reused", rebuild_count=1)
+    store.seed("aa0014", rebuild_count=1)
     manager = _manager(broker, store, [])
     manager._rebuild_settle_s = 0.05  # noqa: SLF001
 
-    assert await manager.rebuild_interrupted() == ["r-reused"]
-    rebuilt = manager.get("r-reused")
+    assert await manager.rebuild_interrupted() == ["aa0014"]
+    rebuilt = manager.get("aa0014")
     assert rebuilt is not None
     # Stands in for the operator stopping it and deploying it again.
-    manager._sessions["r-reused"] = SimpleNamespace()  # noqa: SLF001
+    manager._sessions["aa0014"] = SimpleNamespace()  # noqa: SLF001
     await asyncio.sleep(0.15)
 
-    assert store.rows["r-reused"].rebuild_count == 2
-    manager._sessions["r-reused"] = rebuilt  # noqa: SLF001
+    assert store.rows["aa0014"].rebuild_count == 2
+    manager._sessions["aa0014"] = rebuilt  # noqa: SLF001
     await manager.close_all()
 
 
@@ -676,16 +673,16 @@ async def test_a_shutdown_mid_settle_leaves_the_count_alone(
     that fired during teardown would clear the count of a session STS is in
     the middle of taking away."""
     store = FakeStsStore()
-    store.seed("r-shutdown", rebuild_count=2)
+    store.seed("aa0015", rebuild_count=2)
     manager = _manager(broker, store, [])
     manager._rebuild_settle_s = 0.05  # noqa: SLF001
 
-    assert await manager.rebuild_interrupted() == ["r-shutdown"]
+    assert await manager.rebuild_interrupted() == ["aa0015"]
     await manager.close_all()
     await asyncio.sleep(0.15)
 
-    assert store.rows["r-shutdown"].rebuild_count == 3
-    assert store.rows["r-shutdown"].status == "interrupted"
+    assert store.rows["aa0015"].rebuild_count == 3
+    assert store.rows["aa0015"].status == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -714,14 +711,14 @@ async def test_incompatible_environment_is_not_rebuilt_and_counts(
     )
     key = f"{added.origin}::{added.type}"
     store = FakeStsStore()
-    store.seed("r-env", strategy="uses_numpy", type=key)
+    store.seed("aa0016", strategy="uses_numpy", type=key)
     instances: list[Rebuildable] = []
     manager = _manager(broker, store, instances)
 
     assert await manager.rebuild_interrupted() == []
     assert instances == []
-    assert store.rows["r-env"].rebuild_count == 1
-    assert store.rows["r-env"].status == "interrupted"
+    assert store.rows["aa0016"].rebuild_count == 1
+    assert store.rows["aa0016"].status == "interrupted"
     reset_for_tests()
 
 
@@ -738,7 +735,7 @@ async def test_a_pinned_row_rebuilds_on_the_instance_it_names(
     to the shared pool, or the pin would survive a deploy and not a restart.
     """
     store = FakeStsStore()
-    store.seed("r-pinned", md_ids={"md-jp-1": ["bestquote.Paper_Spot_BTCUSDT"]})
+    store.seed("aa0017", md_ids={"md-jp-1": ["bestquote.Paper_Spot_BTCUSDT"]})
     instances: list[Rebuildable] = []
     manager = _manager(broker, store, instances)
 
@@ -751,7 +748,7 @@ async def test_a_pinned_row_rebuilds_on_the_instance_it_names(
             await req.reply(
                 MdAttachResultEnvelope.wrap(
                     MdAttachResult(
-                        session_id="r-pinned",
+                        session_id="aa0017",
                         subscriptions=["bestquote.Paper_Spot_BTCUSDT"],
                         refcounts={},
                     ),
@@ -768,7 +765,7 @@ async def test_a_pinned_row_rebuilds_on_the_instance_it_names(
     )
     await asyncio.sleep(0.1)
     try:
-        assert await manager.rebuild_interrupted() == ["r-pinned"]
+        assert await manager.rebuild_interrupted() == ["aa0017"]
         assert subjects == [Topics.md("md-jp-1")], (
             "the shared pool was never asked"
         )
@@ -791,12 +788,12 @@ async def test_a_pinned_row_is_rebuilt_only_by_the_instance_it_names(
     differently on the next restart. Placement is the whole guard.
     """
     store = FakeStsStore()
-    store.seed("pinned-1", instance="sts-tw", md_ids=[])
+    store.seed("aa0018", instance="sts-tw", md_ids=[])
     tw = _manager(broker, store, [], instance="sts-tw")
     jp = _manager(broker, store, [], instance="sts-jp")
     try:
         assert await jp.rebuild_interrupted() == [], "not sts-jp's to take"
-        assert await tw.rebuild_interrupted() == ["pinned-1"]
+        assert await tw.rebuild_interrupted() == ["aa0018"]
     finally:
         await tw.close_all()
         await jp.close_all()
@@ -813,11 +810,11 @@ async def test_a_row_pinned_to_an_instance_nobody_runs_stays_interrupted(
     somebody drew on purpose.
     """
     store = FakeStsStore()
-    store.seed("pinned-gone", instance="sts-retired", md_ids=[])
+    store.seed("aa0019", instance="sts-retired", md_ids=[])
     manager = _manager(broker, store, [], instance="sts-tw")
     try:
         assert await manager.rebuild_interrupted() == []
-        assert store.rows["pinned-gone"].status == "interrupted"
+        assert store.rows["aa0019"].status == "interrupted"
     finally:
         await manager.close_all()
 
@@ -828,7 +825,7 @@ async def test_an_unpinned_row_is_rebuilt_by_the_derived_instance(
 ) -> None:
     """Null means derive, not race. The row still records what was asked."""
     store = FakeStsStore()
-    store.seed("unpinned-1", instance=None, md_ids=[])
+    store.seed("aa001a", instance=None, md_ids=[])
 
     async def derive(_api_ids: list[int]) -> str:
         return "sts-jp"
@@ -837,7 +834,7 @@ async def test_an_unpinned_row_is_rebuilt_by_the_derived_instance(
         broker, store, [], instance="sts-jp", derive_sts=derive
     )
     try:
-        assert await manager.rebuild_interrupted() == ["unpinned-1"]
+        assert await manager.rebuild_interrupted() == ["aa001a"]
     finally:
         await manager.close_all()
 
@@ -847,7 +844,7 @@ async def test_an_unpinned_row_whose_derivation_is_not_unique_stays_interrupted(
     broker: Broker,
 ) -> None:
     store = FakeStsStore()
-    store.seed("cross-1", instance=None, md_ids=[])
+    store.seed("aa001b", instance=None, md_ids=[])
 
     async def nobody(_api_ids: list[int]) -> None:
         return None
@@ -857,6 +854,6 @@ async def test_an_unpinned_row_whose_derivation_is_not_unique_stays_interrupted(
     )
     try:
         assert await manager.rebuild_interrupted() == []
-        assert store.rows["cross-1"].status == "interrupted"
+        assert store.rows["aa001b"].status == "interrupted"
     finally:
         await manager.close_all()

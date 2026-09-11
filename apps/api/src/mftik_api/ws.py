@@ -338,10 +338,10 @@ async def session_of(api_id: int, client_order_id: str | None) -> str | None:
     plumbing because it is the part that can be wrong in a way nobody sees: a
     misattributed fill does not raise, it climbs the wrong row.
 
-    Read from ``orders``, where the submit path recorded it. The slot packed
-    into the id would answer faster and would even be sound for a live stream —
-    it is unambiguous among sessions alive at once — but the recorded answer
-    stays right if this is ever asked about something older.
+    Read from ``orders``, where the submit path recorded it. Decoding the
+    session field packed into a v1 id would answer faster and is exact —
+    but the recorded answer stays right if this is ever asked about
+    something older.
 
     None covers three different things on purpose: no id on the fill, no order
     on file, and an order that was placed outside this platform. All three mean
@@ -372,10 +372,9 @@ async def board_bridge(websocket: WebSocket) -> None:
     nothing of strategy sessions. The attribution is looked up in ``orders``,
     where the submit path recorded it: the order row exists well before any
     fill on it can, so the lookup cannot lose a race with its own event. The
-    slot packed into the ``client_order_id`` would answer faster and would even
-    be sound here — it is unambiguous among sessions alive at once, which is
-    all this stream shows — but the recorded answer is the one that stays right
-    if this ever renders anything older.
+    session field packed into a v1 ``client_order_id`` would answer faster
+    and is exact — but the recorded answer is the one that stays right if
+    this ever renders anything older.
 
     Read-only, like the status bridge and for the same reason: nothing here
     authenticates the caller, and a channel that echoed a browser would let any

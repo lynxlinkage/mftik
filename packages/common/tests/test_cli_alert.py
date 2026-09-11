@@ -111,7 +111,8 @@ class Node_:
         if path == "/alerts/matchers" and request.method == "POST":
             return httpx.Response(201, json=_matcher(id=101))
         if path == "/sts/types":
-            return httpx.Response(200, json={"types": ["NoopStrategy", "CrossArb"]})
+            types = getattr(self, "types", None) or ["NoopStrategy", "CrossArb"]
+            return httpx.Response(200, json={"types": types})
         if path.endswith("/test"):
             return httpx.Response(
                 200,
@@ -272,7 +273,7 @@ def test_source_add_warns_about_a_session_id(monkeypatch, capsys) -> None:
     """A hex id is a legal selector that never matches. Only a person can tell."""
     fake = Node_()
     _install(monkeypatch, fake)
-    session_id = "0123456789abcdef0123456789abcdef"
+    session_id = "aabbcc"
     code = main(
         ["alert", "source", "add", "--domain", "sts", "--selector", session_id]
     )
@@ -287,6 +288,19 @@ def test_source_add_does_not_warn_about_a_type(monkeypatch, capsys) -> None:
     _install(monkeypatch, fake)
     code = main(
         ["alert", "source", "add", "--domain", "sts", "--selector", "private::Tiny"]
+    )
+    assert code == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_source_add_does_not_warn_about_a_hex_type_name(
+    monkeypatch, capsys
+) -> None:
+    """``aabbcc`` is six hex — a session_id — unless the node lists it as a type."""
+    fake = Node_(types=["aabbcc", "NoopStrategy"])
+    _install(monkeypatch, fake)
+    code = main(
+        ["alert", "source", "add", "--domain", "sts", "--selector", "aabbcc"]
     )
     assert code == 0
     assert capsys.readouterr().err == ""

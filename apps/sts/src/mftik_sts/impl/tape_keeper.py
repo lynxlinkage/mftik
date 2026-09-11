@@ -46,7 +46,6 @@ class TapeKeeper(Strategy):
     """Subscribes to feeds and holds them, so MD keeps recording their tape."""
 
     name = "tape_keeper"
-    id = 6
     rebuildable = True
 
     def __init__(self) -> None:

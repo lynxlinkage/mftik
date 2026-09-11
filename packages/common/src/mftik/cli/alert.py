@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import re
 import sys
 from datetime import UTC, datetime
 from typing import Any
@@ -209,6 +210,11 @@ def list_sources(args: argparse.Namespace) -> int:
     return 0
 
 
+#: Six hex digits is a v1 session_id. Short type names that happen to be
+#: hex (``cafe`` is four) are checked against ``/sts/types`` before warning.
+_V1_SESSION_ID = re.compile(r"^[0-9a-f]{6}$", re.IGNORECASE)
+
+
 def add_source(args: argparse.Namespace) -> int:
     """Subscribe to a stream. For STS the selector is the kind, not a session.
 
@@ -219,14 +225,14 @@ def add_source(args: argparse.Namespace) -> int:
     can.
     """
     selector = args.selector
-    if args.domain == "sts" and len(selector) == 32 and _is_hex(selector):
-        print(
-            "warning: that looks like a session_id, not a strategy type. "
-            "It will be stored and will never match — see: mftik alert types",
-            file=sys.stderr,
-        )
     _, client = connected(args.profile)
     with client:
+        if args.domain == "sts" and _looks_like_session_id(selector, client):
+            print(
+                "warning: that looks like a session_id, not a strategy type. "
+                "It will be stored and will never match — see: mftik alert types",
+                file=sys.stderr,
+            )
         created = client.post(
             "/alerts/sources",
             json_body={"domain": args.domain, "selector": selector},
@@ -238,8 +244,15 @@ def add_source(args: argparse.Namespace) -> int:
     return 0
 
 
-def _is_hex(value: str) -> bool:
-    return all(c in "0123456789abcdefABCDEF" for c in value)
+def _looks_like_session_id(selector: str, client: Any) -> bool:
+    if _V1_SESSION_ID.fullmatch(selector) is None:
+        return False
+    try:
+        payload = client.get("/sts/types")
+    except Exception:
+        return True
+    known = (payload or {}).get("types") or []
+    return selector not in known
 
 
 def rm_source(args: argparse.Namespace) -> int:

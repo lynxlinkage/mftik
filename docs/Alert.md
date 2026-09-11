@@ -35,8 +35,9 @@ on a window.**
 
 An operator who wants "tell me when any CrossArb run logs `error`"
 has to sit on `/ws/sts/{session_id}` and already know the id. That
-id is minted in `deploy_strategy` as `uuid4().hex`
-(`apps/api/src/mftik_api/orchestrate.py`) and is the primary key of
+id is minted in `deploy_strategy` as six hex digits
+(`secrets.token_hex(3)`, `apps/api/src/mftik_api/orchestrate.py`)
+and is the primary key of
 one row in `sts_sessions`. Stop and deploy again and it is a
 different topic. Binding an Alert to the session is how the Alert
 dies when the strategy goes offline — the case this epic exists to
@@ -59,14 +60,15 @@ The log line does not carry `type`. `Log` is `level` + `message`
 has to join `sts_sessions`. Packing `type` into `session_id` would
 make the join unnecessary by turning the primary key into a smart
 key. `session_id` is `String(64)` and `type` is `String(128)`; the
-hex id is already 32 characters; `::` is a filename and URL hazard
+hex id is six characters; `::` is a filename and URL hazard
 (eventlog sanitizes `[^A-Za-z0-9._-]`).
 `packages/common/src/mftik/strategy/client_order_id.py` already
 says the class is recovered from the session row, not from the
-packed id — `cid_slot` identifies the *session*, because two runs
-of the same class would otherwise mint the same `client_order_id`
-in the same millisecond. The venue forced that packing. A log
-envelope is ours. The fact travels beside the id, not inside it.
+packed id — the packed field *is* the `session_id`, because two
+runs of the same class would otherwise mint the same
+`client_order_id` in the same second. The venue forced that
+packing. A log envelope is ours. The fact travels beside the id,
+not inside it.
 
 Scanning `session_logs` would be late (`LOG_PERSIST_FLUSH_INTERVAL`
 defaults to 2s) and would re-fire history the first time a regex
@@ -81,7 +83,7 @@ would make an optional disk trail the control plane for alerts.
 - `log.{domain}.{stream_id}` is still the fan-out. Topics do
   not grow a fourth segment. `parse_log_topic` stays a split on
   `.` with maxsplit 2.
-- `session_id` stays `uuid4().hex`. It is an opaque identity.
+- `session_id` stays six lowercase hex digits. It is an opaque identity.
 - `sts_sessions.type` stays the kind id. No surrogate, no hash, no
   second catalog table whose natural key is this string.
 - `run_log_persist` stays its own worker. Matching is a third
@@ -248,9 +250,9 @@ arrives.
 
 ### Session id stays opaque
 
-`deploy_strategy` mints `uuid4().hex` and then passes
-`strategy_type` into `StsCreateSessionRequest`. Both facts are
-known at the same moment. The id stays 32 hex characters.
+`deploy_strategy` mints six hex digits (`token_hex(3)`) and then
+passes `strategy_type` into `StsCreateSessionRequest`. Both facts
+are known at the same moment. The id stays six hex characters.
 `String(64)` on `sts_sessions`, `td_sessions`, `md_sessions`,
 `orders`, and `fills` does not change.
 
@@ -303,16 +305,17 @@ that `split_qualified` would reject when `domain='sts'` and the
 value is not `*` and contains `::` more than once — the same
 rule `list_live_for_origin` already uses.
 
-A 32-character hex `session_id` has no `::`, so it is a
-legal selector — indistinguishable from a bundled type like
-`CrossArb`. It is stored, and it never matches, because
-resolution compares against `payload.type` / `sts_sessions.type`
-and there is no code path that reads
-`sts_sessions.session_id` as a Source. Requiring 422 here
-would mean validating against the catalog, which forbids
+A six-hex `session_id` has no `::`, so it is a legal
+selector — and it collides more easily with a short type-like
+word than the old 32-character id did. It is stored, and it
+never matches, because resolution compares against
+`payload.type` / `sts_sessions.type` and there is no code path
+that reads `sts_sessions.session_id` as a Source. Requiring 422
+here would mean validating against the catalog, which forbids
 pre-wiring a type from a remote this node has not pulled.
-The UI picker does not offer session ids; a hex selector
-can only arrive through the API.
+The UI picker does not offer session ids; a hex selector can
+only arrive through the API. The CLI warns when the selector
+is six hex and is not a known type (`mftik alert types`).
 
 The STS picker is not the session table. It is
 `GET /sts/types` (`apps/api/src/mftik_api/routes/sts.py`) union
@@ -663,7 +666,7 @@ how a strategy emits its own lines — the Signal example
 comes from here, not from the session lifecycle);
 `SessionView` in
 `packages/common/src/mftik/strategy/session.py` — the
-Protocol `Strategy.log` reads (`session_id`, `cid_slot`,
+Protocol `Strategy.log` reads (`session_id`,
 `broker`, `symbols`, `event_log`), and where `type`
 belongs;
 `deploy_strategy` in
@@ -723,7 +726,7 @@ with alerts.
   same as the column). Session-side `publish_sts_log`
   calls pass `type=self.type`.
 - `SessionView` grows `type: str | None` beside
-  `session_id` and `cid_slot`.
+  `session_id`.
 - `Strategy.log` passes
   `type=getattr(self.session, "type", None)` — `getattr`,
   not attribute access, because the doubles are structural
@@ -731,7 +734,7 @@ with alerts.
   `**extra`.
 - `deploy_strategy` passes `type=strategy_type` on every
   `publish_sts_log` it already makes (start, created,
-  failed). `session_id` stays `uuid4().hex`.
+  failed). `session_id` stays six hex digits.
 - `StsSessionStatus.type: str | None = None`.
   `_publish_status` takes `type=` and fills it. Same for
   `SessionInfo`.
@@ -772,7 +775,7 @@ table's job.
 - `test_the_lifecycle_is_announced_as_snapshots` still
   applies; new field is optional so old assertions on the
   known keys hold.
-- `session_id` in `orchestrate.py` is still `uuid4().hex`.
+- `session_id` in `orchestrate.py` is still six hex digits.
   No test starts accepting a prefixed id.
 
 ### ALT-2 — Tables
@@ -1275,9 +1278,10 @@ until someone needs otherwise.
   request at all.
 - `matcher add --as float --value high` exits non-zero with
   nothing stored.
-- `source add --domain sts` with 32 hex characters warns on
+- `source add --domain sts` with six hex digits warns on
   stderr and stores it anyway — the API cannot tell, a person
-  can, and it will never match.
+  can, and it will never match. A six-hex selector that is
+  also a known type (`mftik alert types`) does not warn.
 - `alert test` exits non-zero when the delivery carries an
   error, or a CI job that "checked the webhook" checked
   nothing.

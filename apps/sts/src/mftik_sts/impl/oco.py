@@ -189,7 +189,6 @@ def _positive(raw: dict[str, Any], name: str, where: str) -> Decimal:
 
 class OneCancelOther(Strategy):
     name = "oco"
-    id = 3
     #: Restorable. Nothing has to be remembered: the pair is in ``st_paras``
     #: and what became of it is in recon — see :meth:`on_rebuild`.
     rebuildable = True

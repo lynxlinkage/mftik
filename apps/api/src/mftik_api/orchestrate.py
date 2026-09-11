@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from typing import Any
-from uuid import uuid4
 
 from mftik.broker import Broker
 from mftik.broker.errors import RequestTimeoutError
@@ -41,12 +41,30 @@ from mftik.protocol import (
     td_api_ids_of,
 )
 from mftik_db.models.session import SessionDomain, SessionStatus
-from mftik_db.repositories import ApiRepository, InstanceRepository
+from mftik_db.repositories import (
+    ApiRepository,
+    InstanceRepository,
+    StsSessionRepository,
+)
 from mftik_db.session import session_scope
 
 from mftik_api.broker_rpc import DomainRpcError, request_domain
 
 logger = logging.getLogger(__name__)
+
+#: Random 24-bit ids plus a SELECT is enough; a leftover row must not be
+#: adopted silently (STS persist returns the existing row).
+_SESSION_ID_MINT_ATTEMPTS = 8
+
+
+async def mint_session_id() -> str:
+    """Six lowercase hex digits that do not already name a session row."""
+    for _ in range(_SESSION_ID_MINT_ATTEMPTS):
+        session_id = secrets.token_hex(3)
+        async with session_scope() as db:
+            if await StsSessionRepository(db).get_by_session_id(session_id) is None:
+                return session_id
+    raise RuntimeError("could not mint a free session_id")
 
 
 async def deploy_strategy(
@@ -64,7 +82,7 @@ async def deploy_strategy(
     instance: str | None = None,
 ) -> dict[str, Any]:
     """Mint session_id, create STS, attach MD then each TD api_id. Fail-closed."""
-    session_id = uuid4().hex
+    session_id = await mint_session_id()
     td = dict(td or {})
     md = load_md(md)
     st_paras = dict(st_paras or {})

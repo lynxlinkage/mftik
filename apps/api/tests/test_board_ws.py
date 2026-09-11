@@ -50,7 +50,6 @@ async def seed_order(
                     "venue_order_id": "500",
                     "session_id": session_id,
                     "strategy": None,
-                    "cid_slot": None,
                     "attribution": (
                         Attribution.DIRECT if session_id else Attribution.EXTERNAL
                     ),
