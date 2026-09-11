@@ -123,9 +123,10 @@ detects a stale message from the *same* session and nothing more.
 
 Today, what stops a second process claiming the same session is the lease
 (F, `claim_alive`). [`JetStreamRemoval.md`](JetStreamRemoval.md) withdraws
-that: one instance name is one process, every STS row is stamped with the
-accepting instance, and E's miss count is the only remaining liveness on
-an already-attached link. A same-name second process is refused at boot
+that: one instance name is one process, every STS row is either named or
+derived (TD region → the STS in that region) so exactly one STS rebuilds
+it, and E's miss count is the only remaining liveness on an
+already-attached link. A same-name second process is refused at boot
 if `probe` gets a responder; two that pass `probe` together still both
 look green.
 

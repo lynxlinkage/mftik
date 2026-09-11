@@ -215,7 +215,7 @@ Operator-owned, and the authority on *names*.
 |---|---|
 | `name` | `td-jp-1`. Unique. What `strategy.yml` and `apis` refer to |
 | `domain` | `td` / `md` / `sts` |
-| `region` | Operator label. Free text; nothing routes on it |
+| `region` | Operator label. Free text. Nothing routes *messages* on it; after [`JetStreamRemoval.md`](JetStreamRemoval.md) it decides which STS rebuilds an unnamed session (TD region → STS in that region) |
 | `enabled` | Retire an instance without deleting the rows that reference it |
 | `created_at` | As every other table has |
 | `created_by` | FK to `users.id`, **nullable**. Null means the migration created it, not a person — see *Bootstrap* |
@@ -338,7 +338,10 @@ diagnosis.
 deployment, and a process put in the wrong datacentre would report whatever its
 environment says rather than where it is. Neither can be verified, but the
 declaration is at least a stable record of intent — and this is the dashboard
-compliance is read from.
+compliance is read from. [`JetStreamRemoval.md`](JetStreamRemoval.md) makes it
+load-bearing on one axis: an STS session that named no instance is placed on
+the STS in the same region as its TD, so editing a TD's region moves where
+that TD's unnamed sessions come back after a restart.
 
 Two consequences of probing rather than registering. A probe cannot see a
 process it was not told to ask about, which is the cost priced above. And a
@@ -619,11 +622,14 @@ process, and a restart that overlaps is refused because the old process
 still answers. Two boots in the same window still dual-open.
 
 STS rebuild is the same shape on a different axis. `claim_alive` stops two
-processes restoring one row. After KV goes, the row's `instance` pin is
-what stops `sts-tw` taking a session that belongs to `sts-jp`. Create
-stamps `request.instance or self._instance`; null rows are backfilled
-before `claim_alive` is deleted. An unpinned row left in the table is
-still a race.
+processes restoring one row. After KV goes, the row's `instance` is what
+stops `sts-tw` taking a session that belongs to `sts-jp` — named on the row,
+or derived from it: `td` api_ids → `apis.instance_id` → that TD's `region` →
+the one enabled STS in that region. A null row is rebuilt by the STS the
+derivation names and by nobody else; a null row whose derivation is not
+unique (cross-region keys, two STS in one region, no TD) is rebuilt by
+nobody and waits on the Attention list. Nothing is stamped and nothing is
+backfilled; the scan computes the same answer every restart.
 
 TD's `hold_owner` loop and STS's `mark_alive` leave with the bucket.
 Session fencing stays as heartbeat + ack, with misses instead of a
@@ -1049,10 +1055,11 @@ back.
   ever asked to put there.
 - The rebuild scan filters on the instance — own name, or null for legacy and
   unpinned rows — before `claim_alive`. After
-  [`JetStreamRemoval.md`](JetStreamRemoval.md) the pin *is* the guard:
-  create writes `request.instance or self._instance`, null rows are
-  backfilled, then `claim_alive` goes. A null left in the table is a
-  race two STS will both take.
+  [`JetStreamRemoval.md`](JetStreamRemoval.md) the filter is the whole guard:
+  own name, or null *and* the row's TD region derives to this instance. A
+  null row that derives to nobody (or to more than one) is not rebuilt.
+  `claim_alive` then goes. The row still records what the deploy asked
+  for; null still means "derive".
 
 **Problem.** The scan filters on `restart`, on the strategy building, on
 `rebuildable` and on `claim_alive`, never on placement, and placement was not
@@ -1069,11 +1076,14 @@ and does not guarantee.
   what makes it deterministic.
 - A row pinned to a name nobody runs is rebuilt by nobody and stays
   `INTERRUPTED`, waiting for a person rather than moving itself.
-- A row with a null instance is still rebuilt by whoever claims it. That
-  row is the leftover `claim_alive` race; the destination forbids leaving
-  it unpinned.
+- A row with a null instance is still rebuilt by whoever claims it. After
+  [`JetStreamRemoval.md`](JetStreamRemoval.md) it is rebuilt by the STS in
+  its TD's region, and by nobody when that is not one instance.
 - A deploy that names an STS creates on that instance's subject and records
-  the name; an unpinned one uses the pool and records null.
+  the name; an unpinned one uses the pool and records null. After
+  [`JetStreamRemoval.md`](JetStreamRemoval.md) the API sends an unnamed
+  create to the derived instance's subject, still records null, and refuses
+  a create whose derivation is not unique.
 - Naming an instance of the wrong *domain* is refused — `md-jp-1` is declared
   and answering, and is still not an STS.
 - Checked by regressing the filter and watching the two placement tests fail.

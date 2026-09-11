@@ -60,18 +60,46 @@ both heartbeats will look green.
 `Topics.td(instance)` already do this. A JP key does not land on a
 TW TD.
 
-**An STS session is pinned to one STS instance.** Rebuild already
-skips a row whose `instance` is someone else. Pinning is required,
-and it has to be true in the database, not only in prose. Today
-`persist_live` writes `instance=request.instance`
-(`manager.py`), so an unpinned deploy stores `null` and two STS
-instances will both rebuild it once `claim_alive` is gone.
+**An STS session has one STS instance, and it is derived, not
+chosen by a race.** Rebuild already skips a row whose `instance` is
+someone else. Today `persist_live` writes `instance=request.instance`
+(`manager.py`), so an unpinned deploy stores `null`, and a null row
+is rebuilt by whichever STS wins `claim_alive` — a different one on
+the next restart. Once `claim_alive` is gone, two STS would both
+take it.
 
-- On create: `instance = request.instance or self._instance` —
-  the process that accepted the session stamps itself.
-- Existing `null` rows: a one-shot backfill (or a required
-  migration step) before `claim_alive` is deleted. Leaving them
-  null is the last rebuild race.
+The answer is not to stamp whichever STS happened to accept the
+create. A credential is bound to one TD (`apis.instance_id`, NOT
+NULL), and a TD instance has a `region`. That is enough to derive
+the STS:
+
+```
+sts_sessions.td (api_ids) → apis.instance_id → instances.region
+                          → the enabled STS instance in that region
+```
+
+- `instance` on the row keeps meaning what the deploy asked for
+  (`Instances.md`). Null keeps meaning "derive".
+- Rebuild: a null row is rebuilt by the STS the derivation names,
+  and by nobody else. No `claim_alive`, no backfill, no migration
+  that guesses — the scan computes placement from the row's
+  credentials each time, and gets the same answer each time.
+- Create: an unnamed deploy is sent by the API to the derived
+  instance's subject. The `Topics.STS` pool subject is not needed
+  for creates once every create has a name.
+- Derivation must be unique or it refuses. Two conditions:
+  every `api_id` on the row resolves to the same region, and that
+  region has exactly one enabled STS. A cross-region session
+  (a TW key and a JP key), a region with two STS, or a session
+  with no TD at all, has no derived answer: the deploy must name
+  an instance, and an existing null row of that shape stays
+  `INTERRUPTED` on the Attention list until a person names one.
+  It is not rebuilt by a coin flip.
+
+This makes `instances.region` load-bearing for STS placement.
+[`Instances.md`](Instances.md) declared it a label nothing routes
+on; that sentence changes. It stays free text, but editing a TD's
+region now moves where that TD's null sessions come back.
 
 **Deploy does not overlap.** The old process is gone before the
 new one serves the same instance name. Overlap is what `probe`
@@ -370,7 +398,7 @@ Under the instance contracts above, those questions go away:
 | Today's key | Who asked | After |
 |---|---|---|
 | `td:owner:{api_id}` | TD `claim_owner` before `create()` | One instance, one process, plus boot `probe`. `self._accounts` is the only in-process map. |
-| `{plane}:alive:{session}` | `mark_alive` / `claim_alive` / `is_alive` | Rebuild is pinned in the database. Orphan is "this row names me and I do not have it locally", with strikes. |
+| `{plane}:alive:{session}` | `mark_alive` / `claim_alive` / `is_alive` | Rebuild goes to the named STS, or to the one derived from the row's TD region. Orphan is "this row names me and I do not have it locally", with strikes. |
 | `backfill:lock:{api_id}` | advisory per `api_id` | `td.backfill.{instance}` plus an in-process `set[api_id]`. The subject stops the other instance; the set stops two concurrent walks of the same account on this one. |
 | `cid:slot` (`counter_next`) | one allocation per new STS session | A Postgres sequence. `nextval % 65536` (`SLOT_SPACE`). Not a process-local counter. |
 
@@ -418,9 +446,10 @@ layer is deleted with the bucket.
 **Risk.** `probe` is not a lock. Two boots in the same
 window recreate [`Instances.md`](Instances.md) §7. That
 is narrower than "the broker will not notice", and it is
-what remains. Unpinned STS rows are the other hole;
-stamping `self._instance` on create and backfilling nulls
-closes it before `claim_alive` is deleted.
+what remains. Null STS rows are not a hole: the rebuild
+scan derives their instance from the TD region, and a row
+whose derivation is not unique waits for a person instead
+of being taken by two STS.
 
 ## What leaves `Broker`
 
@@ -473,6 +502,8 @@ New properties they do need:
 - One instance name, one process. Boot `probe` refuses if
   that subject already has a responder.
 - `cid_slot` is a global sequence, not per process.
+- An STS session's instance is named or derived from its TD
+  region. `instances.region` routes STS placement.
 - Tape `read` of a feed this session did not attach raises.
 - `/ws/status/sts` late-replays from REST, not `session_logs`.
 
@@ -481,9 +512,11 @@ New properties they do need:
 1. **Same-name second process that passed `probe` together.**
    Dual venue session; heartbeats stay green. `--scale` and
    overlapped restart should die at boot instead.
-2. **Unpinned STS session.** Two STS instances rebuild one
-   row. Stamp `self._instance` on create; backfill nulls
-   before deleting `claim_alive`.
+2. **Null STS row whose derivation is not unique.** Cross-
+   region credentials, two STS in one region, or no TD. It
+   is not rebuilt; it waits on the Attention list. The
+   deploy path refuses the same shapes without a name, so
+   only rows from before this rule can look like that.
 3. **Tape asked of the wrong MD, or of a feed never
    attached.** Empty warm-up that looks like "never
    recorded", or a raise. Session-level routing; attach
@@ -550,8 +583,10 @@ breaks.
    `/ws/status/sts` from the REST session list;
    `publish_log` → `publish`; delete the log stream and
    `fetch_log_buffer`.
-6. Stamp `instance = request.instance or self._instance`;
-   backfill null `sts_sessions.instance`; cid sequence
+6. Rebuild scan derives a null row's instance from its TD
+   region and rebuilds only when that is this process; deploy
+   sends an unnamed create to the derived subject and refuses
+   when the derivation is not unique; cid sequence
    (`nextval % 65536`); boot `probe` on each plane's
    instance subject. Then delete `liveness.py` SET NX,
    `lease_*`, `counter_next`, the `state` / `lease` /
@@ -564,7 +599,7 @@ breaks.
 Two and three can overlap. Four needs `MdAttachResult.instance`
 before tape reads can be routed. Six depends on two (so
 `mark_alive` is no longer in the heartbeat loop) and on
-the pin being true in the database.
+the derivation filter being in the rebuild scan.
 
 ## Docs this updates
 
@@ -574,7 +609,7 @@ the pin being true in the database.
 | [`BrokerPatterns.md`](BrokerPatterns.md) | A/B/F/G named as families this document retires. |
 | [`BrokerProvisioning.md`](BrokerProvisioning.md) | Stream/bucket migration is moot once those objects are gone. Overlap deploys are forbidden for a different reason. |
 | [`MdHandover.md`](MdHandover.md) | Tape durability is regional Redis. Same-name competing consumers are not a given. |
-| [`Instances.md`](Instances.md) | One process per instance name is an invariant. Tape is not in the broker. `claim_*` is not the long-term guard. |
+| [`Instances.md`](Instances.md) | One process per instance name is an invariant. Tape is not in the broker. `claim_*` is not the long-term guard. `region` routes STS placement for unnamed sessions. |
 | [`RedisRemoval.md`](RedisRemoval.md) | Redis may return only as MD's tape disk. |
 | [`Alert.md`](Alert.md) | Late session-log replay is `session_logs`. Late `/ws/status/sts` is the REST session list. |
 | [`README.md`](../README.md) | Tape / lease sentences match the destination. |
