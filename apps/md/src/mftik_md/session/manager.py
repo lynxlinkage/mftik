@@ -11,6 +11,8 @@ from typing import Any
 from mftik.broker import Broker, LeasedSessionLink
 from mftik.liveness import clear_alive, is_alive, mark_alive
 from mftik.protocol import (
+    LEASE_HEARTBEAT_INTERVAL_S,
+    LEASE_MISS_LIMIT,
     MD_DETACH,
     MD_LEASE_ACK,
     MD_SUBSCRIBE,
@@ -41,7 +43,7 @@ PersistLive = Callable[..., Awaitable[Any]]
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
 
-LEASE_GRACE_S = 3.0
+LEASE_GRACE_S = LEASE_HEARTBEAT_INTERVAL_S * LEASE_MISS_LIMIT
 
 #: How long a lease subscription waits before resubscribing after a transport
 #: failure. Well inside :data:`LEASE_GRACE_S`: reconnecting must not spend so
@@ -626,17 +628,6 @@ class SessionManager:
 
         async def _on_heartbeat(hb: LeaseHeartbeat) -> None:
             link.last_token = hb.token
-            try:
-                await mark_alive(
-                    self._broker,
-                    link.session_id,
-                    domain=self._alive_domain,
-                )
-            except Exception:
-                logger.exception(
-                    "MD liveness refresh failed session=%s",
-                    link.session_id,
-                )
 
         async def _on_message(env: Any) -> bool:
             if env.type == MD_SUBSCRIBE:

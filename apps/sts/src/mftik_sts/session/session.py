@@ -23,9 +23,9 @@ from mftik.exchange.models import (
     Trade,
 )
 from mftik.exchange.oms import Position
-from mftik.liveness import mark_alive
 from mftik.protocol import (
     ANY_INSTANCE,
+    LEASE_MISS_LIMIT,
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_BESTQUOTE_RESULT,
@@ -144,19 +144,12 @@ TD_GLOBAL_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
 #: ``api_id`` → the TD instance allowed to use that credential.
 TdInstanceLookup = Callable[[int], Awaitable[str | None]]
 
-#: How long an attached MD may go without acknowledging before this session
-#: gives up on it.
-#:
-#: Mirrors MD's own ``LEASE_GRACE_S``, and deliberately: the lease is one
-#: agreement and both ends should tolerate the same silence. A blip long
-#: enough to expire MD's view of this session is one that has already cost the
-#: feeds, so a session that survived it would be running on data that stopped.
-#:
-#: Armed by the first acknowledgement from each instance rather than at start,
-#: because there is a real window between a session starting its heartbeat and
-#: an MD attaching to hear it. An MD that never acknowledges at all is caught
-#: by the attach failing, not by this.
-MD_ACK_GRACE_S = 3.0
+#: How many missed heartbeat intervals an attached peer may go silent
+#: before this session gives up on it. Same fuse both ways: one drop is a
+#: lost core message, three is a dead peer. Armed by the first
+#: acknowledgement from each instance (MD) or api_id (TD) rather than at
+#: start — counting from zero would fail every deploy.
+PEER_MISS_LIMIT = LEASE_MISS_LIMIT
 
 #: How long a detach may wait for a reply. The lease is the real teardown;
 #: this is promptness. Must stay well under the old two-attempt five-second
@@ -187,7 +180,7 @@ class StsSession:
         event_log: EventLog | None = None,
         strategy_type: str | None = None,
         td_instance: TdInstanceLookup | None = None,
-        md_ack_grace: float = MD_ACK_GRACE_S,
+        md_ack_grace: float | None = None,
     ) -> None:
         self.session_id = session_id
         self.broker = broker
@@ -253,6 +246,10 @@ class StsSession:
         #: single timestamp would be kept fresh by whichever one was still
         #: talking.
         self._md_acks: dict[str, float] = {}
+        #: ``api_id`` → when that TD last acknowledged. Same arming rule as
+        #: MD: a quiet TD stops the strategy, but only after it has acked
+        #: once. Attach is what catches a TD that never answers.
+        self._td_acks: dict[int, float] = {}
         self._md_ack_grace = md_ack_grace
         self._md_lease_logged = False
         self._on_stop_task: asyncio.Task[Any] | None = None
@@ -687,20 +684,25 @@ class StsSession:
                 "STS detach log failed session=%s", self.session_id
             )
 
+    def _peer_grace(self) -> float:
+        """Silence a peer may keep after its first ack.
+
+        Tests pass ``md_ack_grace`` as an absolute window. Production counts
+        :data:`PEER_MISS_LIMIT` of this session's heartbeat interval.
+        """
+        if self._md_ack_grace is not None:
+            return self._md_ack_grace
+        return self.heartbeat_interval * PEER_MISS_LIMIT
+
     async def _lease_heartbeat_loop(self) -> None:
         """Publish fencing heartbeats on sts.td.* and/or sts.md.*."""
         while not self._stop.is_set():
-            # Renewed here rather than on its own timer: this loop is what
-            # stops when the session stops, so the key expiring means the
-            # session really is gone and not merely quiet.
-            try:
-                await mark_alive(self.broker, self.session_id, domain="sts")
-            except Exception:
-                logger.exception(
-                    "STS liveness refresh failed session=%s", self.session_id
-                )
             self._token += 1
-            hb = LeaseHeartbeat(session_id=self.session_id, token=self._token)
+            hb = LeaseHeartbeat(
+                session_id=self.session_id,
+                token=self._token,
+                interval=self.heartbeat_interval,
+            )
             env = Envelope[LeaseHeartbeat].wrap(
                 hb,
                 type=STS_LEASE_HEARTBEAT,
@@ -723,32 +725,41 @@ class StsSession:
                 self._fail_from_infrastructure("lease heartbeat")
                 return
 
-            # Checked here rather than on a timer of its own: this loop runs
-            # for exactly as long as the session does, and it is already the
-            # place a lease is kept. The lease was one-directional until now —
-            # MD and TD watched this heartbeat and tore down when it stopped,
-            # while the acknowledgements coming back were recorded and never
-            # read. An MD that died therefore just stopped delivering, and
-            # ``on_best_quote`` quietly never fired again.
-            stale = self._stale_md_instances(self._md_ack_grace)
-            if stale:
+            # Armed per instance / api_id on the first ack. One quiet MD of
+            # two stops the session; a quiet TD does too — there is no book
+            # in a cache to keep trading against.
+            grace = self._peer_grace()
+            stale_md = self._stale_keys(self._md_acks, grace)
+            if stale_md:
                 logger.error(
                     "STS lost market data from %s session=%s",
-                    ", ".join(stale),
+                    ", ".join(stale_md),
                     self.session_id,
                 )
                 await self._publish_log(
-                    f"no market-data acknowledgement from {', '.join(stale)} "
-                    f"for {self._md_ack_grace:.0f}s",
+                    f"no market-data acknowledgement from {', '.join(stale_md)} "
+                    f"for {grace:.0f}s",
                     level="error",
                 )
-                # Named so the reason says which instance went quiet. Half a
-                # picture is more dangerous than none: a session that loses
-                # every feed does nothing, while one that loses a subset keeps
-                # acting on the rest — a cross-venue quote against a hedge
-                # price that has stopped moving.
                 self._fail_from_infrastructure(
-                    f"md feed from {', '.join(stale)}"
+                    f"md feed from {', '.join(stale_md)}"
+                )
+                return
+            stale_td = self._stale_keys(self._td_acks, grace)
+            if stale_td:
+                names = [f"api_id={api}" for api in stale_td]
+                logger.error(
+                    "STS lost trading desk from %s session=%s",
+                    ", ".join(names),
+                    self.session_id,
+                )
+                await self._publish_log(
+                    f"no trading-desk acknowledgement from {', '.join(names)} "
+                    f"for {grace:.0f}s",
+                    level="error",
+                )
+                self._fail_from_infrastructure(
+                    f"td from {', '.join(names)}"
                 )
                 return
 
@@ -857,22 +868,19 @@ class StsSession:
         self._md_lease_logged = True
         await self._publish_log("MD lease established")
 
-    def _stale_md_instances(self, grace: float) -> list[str]:
-        """Attached MDs that have stopped acknowledging.
+    def _stale_keys(self, seen: dict[Any, float], grace: float) -> list[Any]:
+        """Peers that have acked once and then gone quiet.
 
-        Only instances that have acknowledged at least once are considered.
-        Arming on the first ACK is what makes this safe to run from the moment
-        the session starts: a session begins heartbeating before MD has
-        attached to hear it, and a watchdog armed at start would fire in that
-        window every time.
+        Only keys that have acknowledged at least once are considered.
+        Arming on the first ACK is what makes this safe to run from the
+        moment the session starts: a session begins heartbeating before
+        the peer has attached to hear it.
         """
-        if not self._md_acks:
+        if not seen:
             return []
         now = asyncio.get_running_loop().time()
         return sorted(
-            instance
-            for instance, seen in self._md_acks.items()
-            if now - seen > grace
+            key for key, at in seen.items() if now - at > grace
         )
 
     async def _on_market_data(self, env: UntypedEnvelope) -> None:
@@ -1000,6 +1008,12 @@ class StsSession:
             self._ack_tokens[api_id] = ack.token
         except Exception:
             return
+        first = api_id not in self._td_acks
+        self._td_acks[api_id] = asyncio.get_running_loop().time()
+        if first:
+            self.event_log.record(
+                "lease", "td_ack_armed", dir="self", api_id=api_id
+            )
         # First ACK means TD session is established → Strategy sends Recon.
         if api_id in self._recon_sent:
             return

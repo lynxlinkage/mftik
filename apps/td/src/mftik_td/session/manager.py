@@ -34,6 +34,8 @@ from mftik.liveness import (
     release_owner,
 )
 from mftik.protocol import (
+    LEASE_HEARTBEAT_INTERVAL_S,
+    LEASE_MISS_LIMIT,
     STS_DETACH,
     STS_ENSURE_LEVERAGE,
     STS_ORDER_CANCEL,
@@ -78,9 +80,9 @@ PersistLive = Callable[..., Awaitable[Any]]
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
 
-#: STS heartbeats every ~1s; grace must tolerate brief lease-loop stalls
-#: (e.g. a slow venue round-trip) without false expiry.
-LEASE_GRACE_S = 5.0
+#: Three missed heartbeats at the protocol interval. Tightened from 5s so
+#: both sides of the link use the same fuse.
+LEASE_GRACE_S = LEASE_HEARTBEAT_INTERVAL_S * LEASE_MISS_LIMIT
 
 #: How long a parked ``sts.recon`` waits for the book to come clean before TD
 #: answers with it as-is. Comfortably past the forced venue recon behind it,

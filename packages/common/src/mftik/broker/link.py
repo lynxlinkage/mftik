@@ -1,7 +1,7 @@
 """Pattern E — a fenced session link.
 
 STS publishes heartbeats on one topic; MD or TD acks on the other, echoes the
-fencing token, and detaches when the grace window expires. Both domains used
+fencing token, and detaches after three missed intervals. Both domains used
 to write that loop themselves.
 """
 
@@ -13,6 +13,8 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from mftik.protocol import (
+    LEASE_HEARTBEAT_INTERVAL_S,
+    LEASE_MISS_LIMIT,
     STS_LEASE_HEARTBEAT,
     Envelope,
     LeaseHeartbeat,
@@ -31,7 +33,12 @@ Action = Callable[[], Awaitable[None]]
 
 
 class LeasedSessionLink:
-    """Subscribe ``rx``, ack on ``tx``, expire when heartbeats stop.
+    """Subscribe ``rx``, ack on ``tx``, expire after missed intervals.
+
+    Counting starts on the first heartbeat. Counting from start would kill
+    every deploy: attach waits for that first beat with its own timeout.
+    After that, silence of ``interval * miss_limit`` (three beats at 1 Hz)
+    is a dead peer. ``grace`` overrides that window for tests.
 
     Domain traffic that is not a heartbeat — subscribe, recon, an in-band
     detach — goes to ``on_message``. Returning True from that hook ends the
@@ -47,7 +54,6 @@ class LeasedSessionLink:
         rx: str,
         tx: str,
         stop: asyncio.Event,
-        grace: float,
         ready: asyncio.Event,
         ack: AckFactory,
         on_expired: Action,
@@ -56,19 +62,25 @@ class LeasedSessionLink:
         on_died: Action | None = None,
         resubscribe_delay: float = 0.5,
         watch_interval: float = 0.5,
+        interval: float = LEASE_HEARTBEAT_INTERVAL_S,
+        miss_limit: int = LEASE_MISS_LIMIT,
+        grace: float | None = None,
         name: str = "lease",
     ) -> None:
         if not rx or not tx:
             raise ValueError("rx and tx topics are required")
         if rx == tx:
             raise ValueError("rx and tx must be different topics")
-        if grace <= 0:
+        if interval <= 0:
+            raise ValueError("interval must be positive")
+        if miss_limit < 1:
+            raise ValueError("miss_limit must be at least 1")
+        if grace is not None and grace <= 0:
             raise ValueError("grace must be positive")
         self._broker = broker
         self.rx = rx
         self.tx = tx
         self.stop = stop
-        self.grace = grace
         self.ready = ready
         self._ack = ack
         self._on_expired = on_expired
@@ -77,19 +89,30 @@ class LeasedSessionLink:
         self._on_died = on_died
         self._resubscribe_delay = resubscribe_delay
         self._watch_interval = watch_interval
+        self._interval = interval
+        self._miss_limit = miss_limit
+        self._grace = grace
         self._name = name
         self.last_token = 0
 
+    def _window(self, interval: float) -> float:
+        if self._grace is not None:
+            return self._grace
+        return interval * self._miss_limit
+
     async def run(self) -> None:
-        last_seen = asyncio.get_running_loop().time()
+        last_seen: float | None = None
+        interval = self._interval
 
         async def _watch_timeout() -> None:
             nonlocal last_seen
             while not self.stop.is_set():
                 await asyncio.sleep(self._watch_interval)
+                if last_seen is None:
+                    continue
                 if (
                     asyncio.get_running_loop().time() - last_seen
-                    > self.grace
+                    > self._window(interval)
                 ):
                     logger.warning("%s lease expired", self._name)
                     asyncio.create_task(
@@ -98,13 +121,15 @@ class LeasedSessionLink:
                     return
 
         async def _pump() -> bool:
-            nonlocal last_seen
+            nonlocal last_seen, interval
             async for env in self._broker.subscribe(self.rx, stop=self.stop):
                 if env.type == STS_LEASE_HEARTBEAT:
                     try:
                         hb = LeaseHeartbeat.model_validate(env.payload)
                     except Exception:
                         continue
+                    if hb.interval > 0:
+                        interval = hb.interval
                     last_seen = asyncio.get_running_loop().time()
                     self.last_token = hb.token
                     if not self.ready.is_set():

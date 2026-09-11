@@ -591,6 +591,15 @@ class StsSessionStatus(BaseModel):
     type: str | None = None
 
 
+#: How often STS publishes a fencing heartbeat. Peers that have not heard
+#: one yet use this so attach-before-first-hb still has a timeout.
+LEASE_HEARTBEAT_INTERVAL_S = 1.0
+
+#: Missed intervals before a fenced link is dead. One drop is a lost core
+#: message; three is the fuse. 1 Hz → ~3s.
+LEASE_MISS_LIMIT = 3
+
+
 class LeaseHeartbeat(BaseModel):
     """STS fencing lease heartbeat on ``sts.td.*`` / ``sts.md.*``."""
 
@@ -598,6 +607,9 @@ class LeaseHeartbeat(BaseModel):
 
     session_id: str
     token: int
+    #: Seconds between heartbeats. A peer that has armed on this message
+    #: counts :data:`LEASE_MISS_LIMIT` of these, not a separate grace.
+    interval: float = LEASE_HEARTBEAT_INTERVAL_S
 
 
 class LeaseAck(BaseModel):
