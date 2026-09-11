@@ -50,10 +50,13 @@ class Instance(Base):
     #: ``SymbolClient``'s cache, and one shared book is the whole point of
     #: paper.
     domain: Mapped[str] = mapped_column(String(16), index=True)
-    #: Operator label. Nothing routes on it. Declared rather than reported
-    #: because a process put in the wrong datacentre would report whatever its
-    #: environment says rather than where it is; neither can be verified, but
-    #: the declaration is at least a stable record of intent.
+    #: Operator label, and the axis unnamed STS sessions are placed on.
+    #: A credential's TD instance has a region; the unique enabled STS in
+    #: that region is who rebuilds a null row and who receives an unnamed
+    #: create. Editing a TD's region moves where those sessions come back.
+    #: Declared rather than reported because a process put in the wrong
+    #: datacentre would report whatever its environment says rather than
+    #: where it is.
     region: Mapped[str | None] = mapped_column(String(64), nullable=True)
     #: Retire an instance without deleting the rows that reference it. Drains
     #: rather than evicts: new deploys refuse to name it, sessions already

@@ -9,10 +9,12 @@ import signal
 
 import uvloop
 from mftik import (
+    InstanceAlreadyServing,
     configure_logging,
     control_subjects,
     instance_name,
     instance_role,
+    refuse_if_serving,
     run_until_stopped,
     serve_health,
 )
@@ -99,8 +101,8 @@ async def run_rpc(
 
 #: How often to look for rows whose MD process died. Well under the window
 #: someone would spend wondering why a session claims a feed that is not
-#: running, and far enough above the liveness TTL that a key is never
-#: checked mid-refresh.
+#: running, and far enough above two reap scans that a row between persist
+#: and ``_links`` is not closed on the first look.
 REAP_INTERVAL_SECONDS = 60.0
 
 
@@ -219,6 +221,11 @@ async def amain() -> bool:
             pass
 
     async with Broker() as broker:
+        try:
+            await refuse_if_serving(broker, domain=SOURCE, instance=INSTANCE)
+        except InstanceAlreadyServing as exc:
+            logger.error("%s", exc)
+            return False
         factory = VenuePublicFactory(broker)
         sessions = SessionManager(
             factory,

@@ -83,6 +83,7 @@ class FakeStsStore:
             strategy=strategy,
             type=type,
             cid_slot=7,
+            instance="sts",
             restart="always",
             rebuild_count=rebuild_count,
             td={},

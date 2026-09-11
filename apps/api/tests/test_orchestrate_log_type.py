@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from mftik.protocol import (
     STS_SESSION_CREATE,
     TD_SESSION_ATTACH,
@@ -15,6 +16,18 @@ from mftik_api import orchestrate
 from mftik_api.orchestrate import deploy_strategy
 
 
+@pytest.fixture(autouse=True)
+def _named_sts_without_a_database(monkeypatch) -> None:
+    async def _target(instance, td):  # noqa: ANN001
+        return instance or "sts"
+
+    async def _ok(broker, instance):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(orchestrate, "_sts_target", _target)
+    monkeypatch.setattr(orchestrate, "_check_sts_instance", _ok)
+
+
 class RecordingBroker:
     def __init__(self) -> None:
         self.logs: list[object] = []
@@ -24,6 +37,8 @@ class RecordingBroker:
         return 1
 
     async def publish(self, topic: str, envelope: object) -> int:
+        if topic.startswith("log."):
+            self.logs.append(envelope)
         return 1
 
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001

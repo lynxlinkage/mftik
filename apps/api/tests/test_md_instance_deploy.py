@@ -20,12 +20,16 @@ from mftik.protocol import (
     MD_SESSION_DETACH,
     STS_SESSION_CREATE,
     STS_SESSION_FAIL,
+    TD_SESSION_ATTACH,
     MdAttachResult,
     MdAttachResultEnvelope,
     StsCreateSessionResult,
     StsCreateSessionResultEnvelope,
     StsSessionControlResult,
     StsSessionControlResultEnvelope,
+    TdAccountRef,
+    TdAttachResult,
+    TdAttachResultEnvelope,
     Topics,
 )
 from mftik_api import orchestrate
@@ -34,6 +38,7 @@ from mftik_api.orchestrate import deploy_strategy
 
 JP1 = "md-jp-1"
 JP2 = "md-jp-2"
+STS = "sts-tw"
 FEED_A = "bestquote.Paper_Spot_BTCUSDT"
 FEED_B = "aggtrade.Paper_Spot_ETHUSDT"
 
@@ -95,6 +100,16 @@ class Recording:
                 type=MD_SESSION_ATTACH,
                 source="md",
             )
+        if envelope.type == TD_SESSION_ATTACH:
+            return TdAttachResultEnvelope.wrap(
+                TdAttachResult(
+                    session_id=envelope.payload.session_id,
+                    api_id=envelope.payload.api_id,
+                    refcount=1,
+                ),
+                type=TD_SESSION_ATTACH,
+                source="td",
+            )
         if envelope.type == STS_SESSION_FAIL:
             self.failed = envelope.payload.reason
             return StsSessionControlResultEnvelope.wrap(
@@ -128,13 +143,14 @@ async def db(monkeypatch, database_url):
 
 async def test_each_instance_is_attached_to_its_own_feeds(db) -> None:
     """PI-3. Two attaches, each carrying only what its instance was given."""
-    broker = Recording(up={JP1, JP2})
+    broker = Recording(up={STS, JP1, JP2})
 
     await deploy_strategy(
         broker,
         strategy_id="tiny",
         md={JP1: [FEED_A], JP2: [FEED_B]},
         created_by=1,
+        instance=STS,
     )
 
     assert broker.attaches == [
@@ -143,15 +159,16 @@ async def test_each_instance_is_attached_to_its_own_feeds(db) -> None:
     ]
 
 
-async def test_an_unpinned_deploy_still_uses_the_shared_pool(db) -> None:
-    """PI-5. A document that names nothing behaves exactly as it did."""
-    broker = Recording(up=set())
+async def test_an_unpinned_md_deploy_still_uses_the_shared_pool(db) -> None:
+    """Feeds that name no MD still go to ``Topics.MD``. STS must be named."""
+    broker = Recording(up={STS})
 
     await deploy_strategy(
         broker,
         strategy_id="tiny",
         md={ANY_INSTANCE: [FEED_A, FEED_B]},
         created_by=1,
+        instance=STS,
     )
 
     assert broker.attaches == [(Topics.MD, [FEED_A, FEED_B])]
@@ -159,10 +176,10 @@ async def test_an_unpinned_deploy_still_uses_the_shared_pool(db) -> None:
 
 async def test_a_plain_list_is_read_as_unpinned(db) -> None:
     """The shape every document written before instances existed uses."""
-    broker = Recording(up=set())
+    broker = Recording(up={STS})
 
     await deploy_strategy(
-        broker, strategy_id="tiny", md=[FEED_A], created_by=1
+        broker, strategy_id="tiny", md=[FEED_A], created_by=1, instance=STS
     )
 
     assert broker.attaches == [(Topics.MD, [FEED_A])]
@@ -172,7 +189,7 @@ async def test_a_name_nothing_declared_is_refused_before_any_attach(
     db,
 ) -> None:
     """PI-2, first half: a typo in the document."""
-    broker = Recording(up={JP1})
+    broker = Recording(up={STS, JP1})
 
     with pytest.raises(DomainRpcError) as refused:
         await deploy_strategy(
@@ -180,6 +197,7 @@ async def test_a_name_nothing_declared_is_refused_before_any_attach(
             strategy_id="tiny",
             md={"md-jp-9": [FEED_A]},
             created_by=1,
+            instance=STS,
         )
 
     assert refused.value.code == "unknown_instance"
@@ -196,11 +214,15 @@ async def test_a_declared_name_that_is_silent_is_refused_differently(
     the document; a declared name that does not answer is fixed by deploying
     something. Collapsing them tells the operator neither.
     """
-    broker = Recording(up=set())
+    broker = Recording(up={STS})
 
     with pytest.raises(DomainRpcError) as refused:
         await deploy_strategy(
-            broker, strategy_id="tiny", md={JP1: [FEED_A]}, created_by=1
+            broker,
+            strategy_id="tiny",
+            md={JP1: [FEED_A]},
+            created_by=1,
+            instance=STS,
         )
 
     assert refused.value.code == "instance_down"
@@ -218,10 +240,14 @@ async def test_a_disabled_instance_is_refused_but_not_evicted(db) -> None:
         await repo.update(row, enabled=False)
         await session.commit()
 
-    broker = Recording(up={JP1})
+    broker = Recording(up={STS, JP1})
     with pytest.raises(DomainRpcError) as refused:
         await deploy_strategy(
-            broker, strategy_id="tiny", md={JP1: [FEED_A]}, created_by=1
+            broker,
+            strategy_id="tiny",
+            md={JP1: [FEED_A]},
+            created_by=1,
+            instance=STS,
         )
 
     assert refused.value.code == "instance_disabled"
@@ -234,7 +260,7 @@ async def test_a_failure_partway_unwinds_the_attaches_that_landed(db) -> None:
     second leaves the first pumping feeds for a session that is about to be
     failed — until a reaper noticed, two scans and up to a minute later.
     """
-    broker = Recording(up={JP1, JP2}, fail_after=1)
+    broker = Recording(up={STS, JP1, JP2}, fail_after=1)
 
     with pytest.raises(DomainRpcError):
         await deploy_strategy(
@@ -242,6 +268,7 @@ async def test_a_failure_partway_unwinds_the_attaches_that_landed(db) -> None:
             strategy_id="tiny",
             md={JP1: [FEED_A], JP2: [FEED_B]},
             created_by=1,
+            instance=STS,
         )
 
     assert broker.detaches == [Topics.md(JP1)], (
@@ -262,15 +289,54 @@ async def test_a_deploy_may_name_the_sts_that_runs_it(db) -> None:
     assert broker.create.instance == "sts-tw"
 
 
-async def test_an_unpinned_deploy_goes_to_the_sts_pool(db) -> None:
+async def test_an_unpinned_deploy_without_a_unique_sts_is_refused(db) -> None:
+    """No TD accounts → no derived instance. The deploy must name one."""
     broker = Recording(up=set())
 
-    await deploy_strategy(broker, strategy_id="tiny", md={}, created_by=1)
+    with pytest.raises(DomainRpcError) as refused:
+        await deploy_strategy(broker, strategy_id="tiny", md={}, created_by=1)
 
-    assert broker.created_on == Topics.STS
-    assert broker.create.instance is None, (
-        "null means the deploy did not care, and anyone may rebuild it"
+    assert refused.value.code == "sts_unpinned_ambiguous"
+    assert broker.created_on is None
+
+
+async def test_an_unpinned_deploy_goes_to_the_derived_sts(db) -> None:
+    """The create is addressed to the derived instance; the row stays null."""
+    from mftik_db.models.api import Api, ApiType
+    from mftik_db.models.instance import Instance
+    from sqlalchemy import select
+
+    async with db() as session:
+        td = await an_instance(session, "td-tw", "td", region="tw")
+        sts = (
+            await session.execute(
+                select(Instance).where(Instance.name == "sts-tw")
+            )
+        ).scalar_one()
+        sts.region = "tw"
+        api = Api(
+            owner_id=1,
+            venue="Paper",
+            api_key="k",
+            api_secret="s",
+            type=ApiType.HMAC.value,
+            instance_id=td.id,
+        )
+        session.add(api)
+        await session.flush()
+        api_id = api.id
+
+    broker = Recording(up={"sts-tw"})
+    await deploy_strategy(
+        broker,
+        strategy_id="tiny",
+        td={"paper": TdAccountRef(api_id=api_id)},
+        md={},
+        created_by=1,
     )
+
+    assert broker.created_on == Topics.sts("sts-tw")
+    assert broker.create.instance is None
 
 
 async def test_an_sts_that_does_not_answer_is_refused_before_creating(

@@ -1,16 +1,8 @@
 """Two MDs holding one session must not corrupt each other's rows.
 
-Three separate pieces of the tree assumed one MD owned a session, and all
-three are silent until a second one exists — which is why nothing here could
-have failed before. The liveness key was per plane, so the first detach
-cleared the one the survivor was living behind; `mark_done_session` closed
-every row a session had whatever wrote it; and the reap scan decided a peer's
-rows against its own key.
-
-The scan is deliberately still global. An instance that dies outright leaves
-rows only some *other* process can notice, and noticing them is what the
-reaper is for — so the fix is to decide each row against *its own* instance's
-key rather than to stop looking at it.
+The scan is still global so a process can *see* a peer's rows, but it
+decides only the rows that name this instance. A peer that died is
+reaped by the next process of that same instance name, not by a neighbour.
 """
 
 from __future__ import annotations
@@ -26,7 +18,6 @@ from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange.paper import PaperExchange
 from mftik.exchange.tickers import UniversalTicker
-from mftik.liveness import clear_alive, is_alive
 from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     Envelope,
@@ -40,10 +31,6 @@ ONE = "md-jp-1"
 TWO = "md-jp-2"
 SESSION = "shared-sts"
 FEED = Topics.md_feed("orderbook", UniversalTicker.parse("Paper_Spot_BTCUSDT"))
-
-
-def _alive(instance: str) -> str:
-    return f"md:{instance}"
 
 
 @dataclass
@@ -189,13 +176,15 @@ async def _both_attached(broker, paper, store):
 
 
 @pytest.mark.asyncio
-async def test_each_instance_holds_its_own_liveness_key(
+async def test_each_instance_keeps_its_own_link_and_rows(
     broker, paper, store
 ) -> None:
     one, two, stop, pub = await _both_attached(broker, paper, store)
     try:
-        assert await is_alive(broker, SESSION, domain=_alive(ONE))
-        assert await is_alive(broker, SESSION, domain=_alive(TWO))
+        assert SESSION in one._links  # noqa: SLF001
+        assert SESSION in two._links  # noqa: SLF001
+        assert store.live(ONE) == [SESSION]
+        assert store.live(TWO) == [SESSION]
     finally:
         stop.set()
         await pub
@@ -216,10 +205,6 @@ async def test_one_detaching_leaves_the_other_running(
         assert SESSION in two._links, "the peer's link survived"  # noqa: SLF001
         assert store.live(ONE) == []
         assert store.live(TWO) == [SESSION], "the peer's rows stayed live"
-        assert not await is_alive(broker, SESSION, domain=_alive(ONE))
-        assert await is_alive(
-            broker, SESSION, domain=_alive(TWO)
-        ), "detaching one must not clear the key the other lives behind"
     finally:
         stop.set()
         await pub
@@ -231,14 +216,7 @@ async def test_one_detaching_leaves_the_other_running(
 async def test_a_reap_scan_does_not_close_a_session_only_the_peer_holds(
     broker, paper, store
 ) -> None:
-    """PI-6, and the shape that actually exposes it.
-
-    Both instances attached to the *same* session proves nothing: this
-    instance's own key exists for that session too, so deciding the peer's row
-    against the wrong key still says "alive". The bug only shows when the peer
-    holds a session this instance does not — then the wrong key is missing, the
-    row looks orphaned, and a healthy feed's row is closed underneath it.
-    """
+    """A neighbour's live row is never decided against this process's map."""
     two = _manager(broker, paper, store, TWO)
     one = _manager(broker, paper, store, ONE)
     theirs = "only-theirs"
@@ -253,11 +231,9 @@ async def test_a_reap_scan_does_not_close_a_session_only_the_peer_holds(
                 timeout=5.0,
             )
         )
-        assert not await is_alive(broker, theirs, domain=_alive(ONE))
 
-        reaped = await one.reap_orphans()
-
-        assert reaped == []
+        assert await one.reap_orphans() == []
+        assert await one.reap_orphans() == []
         assert store.live(TWO) == [theirs]
         assert theirs in two._links  # noqa: SLF001
     finally:
@@ -268,21 +244,32 @@ async def test_a_reap_scan_does_not_close_a_session_only_the_peer_holds(
 
 
 @pytest.mark.asyncio
-async def test_a_peer_that_died_is_still_reaped(broker, paper, store) -> None:
-    """The recovery the global scan exists for, kept.
+async def test_a_peer_that_died_is_left_for_that_instance(
+    broker, paper, store
+) -> None:
+    """A neighbour does not close another instance's leftover rows.
 
-    Filtering the scan to this instance's own rows would have been the easy
-    fix for the test above, and it would have left the rows of an MD that died
-    outright live forever — with no process anywhere in a position to notice.
+    The next process of that instance name is the one that reaps them.
     """
     one = _manager(broker, paper, store, ONE)
     store.seed(TWO, "orphaned-sts")
-    await clear_alive(broker, "orphaned-sts", domain=_alive(TWO))
 
-    reaped = await one.reap_orphans()
+    assert await one.reap_orphans() == []
+    assert await one.reap_orphans() == []
+    assert store.live(TWO) == ["orphaned-sts"]
+    await one.close_all()
 
-    assert reaped == ["orphaned-sts"]
-    assert store.live(TWO) == []
+
+@pytest.mark.asyncio
+async def test_this_instance_reaps_its_own_ghost_rows(
+    broker, paper, store
+) -> None:
+    one = _manager(broker, paper, store, ONE)
+    store.seed(ONE, "orphaned-sts")
+
+    assert await one.reap_orphans() == []
+    assert await one.reap_orphans() == ["orphaned-sts"]
+    assert store.live(ONE) == []
     await one.close_all()
 
 

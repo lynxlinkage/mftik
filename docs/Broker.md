@@ -1,10 +1,12 @@
 # The broker — what a plane may say, and what NATS does to answer it
 
 This is the tree today: core NATS plus leftover JetStream streams and KV.
-Tape has already moved to regional Redis. The remaining store map — books
-in TD, session fencing by heartbeat misses, then deleting JetStream — is
-[`docs/JetStreamRemoval.md`](JetStreamRemoval.md). Until that finishes, the
-tables below are the contract a caller can test against.
+Tape has already moved to regional Redis. Session logs and status
+late-replay left the log stream. Ownership, rebuild, orphans and
+`cid_slot` no longer use KV leases or the counter. What remains of the
+store map is leftover façade methods until JetStream itself is deleted —
+see [`docs/JetStreamRemoval.md`](JetStreamRemoval.md). The tables below
+are the contract a caller can test against.
 
 Six processes and none of them import each other. What they share is
 `mftik.broker.Broker`. It used to be doing two jobs at once: it was the
@@ -75,8 +77,8 @@ back in through a side door.
 | Request-reply | `request`, `probe`, `serve`, `serve_handler` | The control plane. Attach, deploy, stop, health, backfill, market-data queries. Nobody serving is an immediate error. |
 | Session link | `leased_link` / `LeasedSessionLink` | The fenced STS↔MD / STS↔TD heartbeat: token echo, grace watchdog, expiry on a sibling task. [`JetStreamRemoval.md`](JetStreamRemoval.md) keeps a timeout (`subscribe` does not wake on silence) and counts three missed intervals both ways; arm on the first ack; interval rides on the heartbeat or is a protocol constant. |
 | Shared state | `state_put`, `state_put_many`, `state_replace`, `state_get`, `state_all`, `state_drop`, `state_clear`, `state_watch`, `state_projection` | TD's order book and ledger. Writers `put` / `replace`; readers that care about the cost open a `StateProjection`. |
-| Leases | `lease_put`, `lease_take`, `lease_owner`, `lease_held`, `lease_hold`, `lease_release`, `lease_drop` | "Is anybody still running this", "may I be the one who runs it". Session liveness, account ownership, the backfill lock. |
-| Counters | `counter_next` | STS's cid slot, allocated across processes that all serve one subject. |
+| Leases | leftover `lease_*` | Callers are gone. Session fencing is three missed heartbeats; ownership is one instance / one process plus boot `probe`; backfill is an in-process `set`; rebuild and orphan decide from placement. The façade stays until JetStream is deleted. |
+| Counters | leftover `counter_next` | STS allocates `cid_slot` with Postgres `nextval % 65536` into `sts_sessions.cid_slot`. The façade stays until JetStream is deleted. |
 | Recorded tape | MD Redis + `md.tape.tail` on `Topics.md(instance)` | Per-region standalone Redis (AOF + volume). STS `StrategyTape.read` requests the MD this session attached; an unattached feed raises. Broker `tape_*` still exist as leftover JetStream until that family is deleted. |
 
 Four of those carry a promise a caller used to make for itself, and each is a

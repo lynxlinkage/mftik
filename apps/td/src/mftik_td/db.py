@@ -56,3 +56,9 @@ async def get_api(api_id: int) -> Api | None:
     """Load the venue credential row backing ``api_id``."""
     async with session_scope() as db:
         return await ApiRepository(db).get(api_id)
+
+
+async def instance_name(api_id: int) -> str | None:
+    """Which TD instance may use this credential."""
+    async with session_scope() as db:
+        return await ApiRepository(db).instance_name(api_id)

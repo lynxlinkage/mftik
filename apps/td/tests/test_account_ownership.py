@@ -1,29 +1,33 @@
-"""PI-7 — an `api_id` is held by exactly one TD process, enforced.
+"""An ``api_id`` is held in-process; a second process is a boot-probe refusal.
 
-`attach` used to decide this from `self._accounts`, which is process-local
-memory: nothing stopped two processes each building a `TradingAccount` for one
-credential and each serving `td.order.{api_id}`. That subject is a `BLPOP`, so
-they become competing consumers — the account's order flow split between two
-processes with their own OMS, their own ledger and their own reservations,
-both publishing to `td.oms.{api_id}` while the strategy watches its balances
-alternate between two half-pictures.
-
-Latent rather than live before instances: nothing in the tree configured
-replicas. This design is the first thing that makes several TDs ordinary,
-which is why the invariant had to stop being an assertion.
+The KV claim is gone. ``self._accounts`` is the only map. A second attach
+on the same manager is a refcount. A second *process* of the same instance
+name is refused at boot by ``refuse_if_serving`` — not a lock, and a
+same-window dual-open is still accepted.
 """
 
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 
 import pytest
-from broker_harness import MIN_LEASE_TTL, a_broker
+from broker_harness import a_broker
 from mftik.broker import Broker
-from mftik.liveness import claim_owner, hold_owner, owner_name, release_owner
+from mftik.exchange import PaperExchange
+from mftik.health import InstanceAlreadyServing, refuse_if_serving
+from mftik.protocol import (
+    STS_LEASE_HEARTBEAT,
+    Envelope,
+    HealthStatus,
+    HealthStatusEnvelope,
+    LeaseHeartbeat,
+    TdAttachRequest,
+    Topics,
+)
+from mftik_td.session import PaperSessionFactory, SessionManager
 
-DOMAIN = "td"
-API = "42"
+API_ID = 3
 
 
 @pytest.fixture
@@ -32,108 +36,127 @@ async def broker() -> Broker:
         yield client
 
 
-async def test_the_first_claim_wins_and_the_second_is_told_who_holds_it(
+@pytest.fixture
+async def paper() -> PaperExchange:
+    async with PaperExchange(
+        symbols={"BTCUSDT": Decimal("50000")},
+        tick_interval=0.05,
+        seed=3,
+        volatility_bps=0,
+    ) as ex:
+        yield ex
+
+
+def _manager(broker: Broker, paper: PaperExchange) -> SessionManager:
+    factory = PaperSessionFactory(broker, paper)
+    factory.bind_api(API_ID, api_key="key-3", api_secret="sec-3")
+    return SessionManager(factory, broker, lease_grace=2.0, instance="td")
+
+
+async def _lease_publisher(
+    broker: Broker, session_id: str, stop: asyncio.Event
+) -> None:
+    token = 0
+    topic = Topics.sts_td_session(session_id)
+    while not stop.is_set():
+        token += 1
+        await broker.publish(
+            topic,
+            Envelope[LeaseHeartbeat].wrap(
+                LeaseHeartbeat(session_id=session_id, token=token),
+                type=STS_LEASE_HEARTBEAT,
+                source="sts",
+                session_id=session_id,
+            ),
+        )
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=0.05)
+        except TimeoutError:
+            continue
+
+
+@pytest.mark.asyncio
+async def test_a_second_attach_on_one_manager_is_a_refcount(
+    broker: Broker, paper: PaperExchange
+) -> None:
+    manager = _manager(broker, paper)
+    stop = asyncio.Event()
+    first = asyncio.create_task(_lease_publisher(broker, "sts-a", stop))
+    second = asyncio.create_task(_lease_publisher(broker, "sts-b", stop))
+    try:
+        await manager.attach(
+            TdAttachRequest(
+                session_id="sts-a", api_id=API_ID, timeout=2.0, created_by=1
+            )
+        )
+        result = await manager.attach(
+            TdAttachRequest(
+                session_id="sts-b", api_id=API_ID, timeout=2.0, created_by=1
+            )
+        )
+        assert manager.active_api_ids == [API_ID]
+        assert result.refcount == 2
+        assert manager.refcount(API_ID) == 2
+    finally:
+        stop.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_closing_the_account_lets_another_manager_attach(
+    broker: Broker, paper: PaperExchange
+) -> None:
+    first = _manager(broker, paper)
+    second = _manager(broker, paper)
+    stop = asyncio.Event()
+    pub = asyncio.create_task(_lease_publisher(broker, "hand-over", stop))
+    try:
+        await first.attach(
+            TdAttachRequest(
+                session_id="hand-over", api_id=API_ID, timeout=2.0, created_by=1
+            )
+        )
+        await first.close_all()
+
+        await second.attach(
+            TdAttachRequest(
+                session_id="hand-over", api_id=API_ID, timeout=2.0, created_by=1
+            )
+        )
+        assert second.active_api_ids == [API_ID]
+    finally:
+        stop.set()
+        await pub
+        await second.close_all()
+
+
+@pytest.mark.asyncio
+async def test_boot_probe_refuses_a_second_process_of_the_same_instance(
     broker: Broker,
 ) -> None:
-    """A refusal has to name the holder, or nobody can act on it."""
-    assert await claim_owner(broker, API, domain=DOMAIN, owner="a") is None
-    assert await claim_owner(broker, API, domain=DOMAIN, owner="b") == "a"
+    stop = asyncio.Event()
 
+    async def serve() -> None:
+        async for req in broker.serve(Topics.td("td"), stop=stop):
+            await req.reply(
+                HealthStatusEnvelope.wrap(
+                    HealthStatus(status="ok", service="td", instance="td"),
+                    type="td.health",
+                    source="td",
+                )
+            )
 
-async def test_a_claim_is_keyed_by_process_not_by_instance(
-    broker: Broker,
-) -> None:
-    """Two processes sharing an `MFTIK_INSTANCE` is the case being guarded.
-
-    A claim keyed by instance name would hand the account straight to the
-    second one — the two would agree they were the same owner.
-    """
-    assert await claim_owner(broker, API, domain=DOMAIN, owner="pid-1") is None
-    assert (
-        await claim_owner(broker, API, domain=DOMAIN, owner="pid-2") == "pid-1"
-    )
-
-
-async def test_holding_refreshes_only_while_it_is_ours(broker: Broker) -> None:
-    await claim_owner(broker, API, domain=DOMAIN, owner="a", ttl=30)
-
-    assert await hold_owner(broker, API, domain=DOMAIN, owner="a") is True
-    assert await hold_owner(broker, API, domain=DOMAIN, owner="b") is False
-
-
-async def test_a_lapsed_claim_is_not_re_created_by_a_refresh(
-    broker: Broker,
-) -> None:
-    """Losing a claim must send a process back through `claim_owner`.
-
-    Refreshing a key that is gone would be the quiet way to end up with two
-    owners: the process that let its claim expire would carry on believing it
-    still held the account, with no moment at which a rival could say no.
-    """
-    await claim_owner(broker, API, domain=DOMAIN, owner="a")
-    await broker.lease_drop(owner_name(API, domain=DOMAIN))
-
-    assert await hold_owner(broker, API, domain=DOMAIN, owner="a") is False
-    assert not await broker.lease_held(owner_name(API, domain=DOMAIN))
-
-
-async def test_a_claim_taken_over_is_not_stolen_back_by_a_refresh(
-    broker: Broker,
-) -> None:
-    """The race the read-then-`PEXPIRE` shape exists to make harmless.
-
-    If A's claim lapses and B takes it, A's next refresh must not write its own
-    token back over B's. The worst it may do is extend B's TTL once — B keeps
-    the account, and A finds out on its next pass.
-    """
-    await claim_owner(broker, API, domain=DOMAIN, owner="a", ttl=30)
-    await broker.lease_drop(owner_name(API, domain=DOMAIN))
-    await claim_owner(broker, API, domain=DOMAIN, owner="b", ttl=30)
-
-    assert await hold_owner(broker, API, domain=DOMAIN, owner="a") is False
-    assert await broker.lease_owner(owner_name(API, domain=DOMAIN)) == "b"
-
-
-async def test_releasing_lets_the_next_process_take_it(broker: Broker) -> None:
-    """A redeploy that had to wait out a TTL would be an outage nobody caused."""
-    await claim_owner(broker, API, domain=DOMAIN, owner="a")
-    await release_owner(broker, API, domain=DOMAIN, owner="a")
-
-    assert await claim_owner(broker, API, domain=DOMAIN, owner="b") is None
-
-
-async def test_releasing_a_claim_that_moved_on_leaves_it_alone(
-    broker: Broker,
-) -> None:
-    await claim_owner(broker, API, domain=DOMAIN, owner="a")
-    await release_owner(broker, API, domain=DOMAIN, owner="b")
-
-    assert await claim_owner(broker, API, domain=DOMAIN, owner="c") == "a"
-
-
-async def test_a_claim_lapses_so_a_restarted_process_can_take_the_account(
-    broker: Broker,
-) -> None:
-    """The cost of keying on the process: a restart waits out the TTL.
-
-    Accepted deliberately. Keying on anything a restarted process could
-    reproduce would also be reproducible by a rival, which is the whole point.
-    """
-    # Cut its remaining life to the shortest the transport can express rather
-    # than waiting out a real thirty second claim.
-    await claim_owner(broker, API, domain=DOMAIN, owner="old-pid", ttl=1)
-    await broker.lease_hold(
-        owner_name(API, domain=DOMAIN), owner="old-pid", ttl=MIN_LEASE_TTL
-    )
-
-    # Retried rather than slept past, which is also what a booting process
-    # does. When the claim goes is the store's business — Redis drops a key on
-    # the millisecond it expires, and NATS sweeps its expiries a little after
-    # the second it floors them to — and a test that guessed a margin instead
-    # would be asserting on that.
-    deadline = asyncio.get_running_loop().time() + MIN_LEASE_TTL + 3.0
-    while asyncio.get_running_loop().time() < deadline:
-        if await claim_owner(broker, API, domain=DOMAIN, owner="new-pid") is None:
-            return
-        await asyncio.sleep(0.05)
-    raise AssertionError("the old claim never lapsed, so the account is stuck")
+    task = asyncio.create_task(serve())
+    await asyncio.sleep(0.05)
+    try:
+        with pytest.raises(InstanceAlreadyServing) as refused:
+            await refuse_if_serving(
+                broker, domain="td", instance="td", timeout=1.0
+            )
+        assert refused.value.subject == Topics.td("td")
+        assert "td" in str(refused.value)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

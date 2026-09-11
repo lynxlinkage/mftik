@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from mftik_db.models.session import SessionStatus, StsSessionRow
-from mftik_db.repositories import ApiRepository, StsSessionRepository
+from mftik_db.repositories import ApiRepository, InstanceRepository, StsSessionRepository
 from mftik_db.session import session_scope
 
 
@@ -101,6 +101,18 @@ async def reset_rebuild_count(session_id: str) -> StsSessionRow | None:
     async with session_scope() as db:
         repo = StsSessionRepository(db)
         return await repo.reset_rebuild_count(session_id)
+
+
+async def next_cid_slot() -> int:
+    """The next global ``cid_slot``. See :meth:`StsSessionRepository.next_cid_slot`."""
+    async with session_scope() as db:
+        return await StsSessionRepository(db).next_cid_slot()
+
+
+async def derived_sts(api_ids: list[int]) -> str | None:
+    """The unique enabled STS in the region these credentials share."""
+    async with session_scope() as db:
+        return await InstanceRepository(db).derived_sts(api_ids)
 
 
 async def td_instance(api_id: int) -> str | None:
