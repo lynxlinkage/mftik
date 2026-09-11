@@ -216,7 +216,6 @@ async def amain() -> bool:
             rebuild_max_age_s=_rebuild_max_age_s(),
             td_instance=sts_db.td_instance,
             derive_sts=sts_db.derived_sts,
-            allocate_cid_slot=sts_db.next_cid_slot,
             instance=INSTANCE,
         )
         logger.info("STS started instance=%s", INSTANCE)

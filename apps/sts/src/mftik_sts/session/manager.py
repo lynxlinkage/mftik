@@ -43,7 +43,7 @@ from mftik.protocol import (
     td_api_ids_of,
 )
 from mftik.strategy import Strategy
-from mftik.strategy.client_order_id import SLOT_SPACE
+from mftik.strategy.client_order_id import slot_for_session
 from mftik_db.models.session import SessionDomain, SessionStatus
 
 from mftik_sts.impl import resolve as resolve_strategy
@@ -136,8 +136,6 @@ ResetRebuildCount = Callable[..., Awaitable[Any]]
 TdInstanceLookup = Callable[[int], Awaitable[str | None]]
 #: ``api_ids`` → the unique enabled STS in those credentials' TD region.
 DeriveSts = Callable[[list[int]], Awaitable[str | None]]
-#: Next global ``cid_slot``.
-AllocateCidSlot = Callable[[], Awaitable[int]]
 #: ``(session_id, *, status, reason)`` — move the row to a terminal status.
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
@@ -165,7 +163,6 @@ class SessionManager:
         strategy_factory: StrategyFactory | None = None,
         td_instance: TdInstanceLookup | None = None,
         derive_sts: DeriveSts | None = None,
-        allocate_cid_slot: AllocateCidSlot | None = None,
         instance: str = SessionDomain.STS.value,
     ) -> None:
         self._broker = broker
@@ -187,8 +184,6 @@ class SessionManager:
         self._td_instance_lookup = td_instance
         #: ``api_ids`` → derived STS instance, or None when that is not unique.
         self._derive_sts = derive_sts
-        self._allocate_cid = allocate_cid_slot
-        self._local_cid = 0
         #: Which STS this is. Only the rebuild scan reads it: a session is
         #: addressed by the subject it was created on, not by this.
         self._instance = instance
@@ -283,21 +278,6 @@ class SessionManager:
     def active_session_ids(self) -> list[str]:
         return list(self._sessions)
 
-    async def _allocate_cid_slot(self) -> int:
-        """Reserve the 16-bit ``client_order_id`` slot for a new session.
-
-        Allocation is a global sequence (Postgres, via the injected
-        callback). A process-local counter would give two STS instances —
-        or one instance after a restart — the same slot, and ``owns()``
-        would treat the other's fills as its own.
-
-        Tests that do not wire the database increment a local counter.
-        """
-        if self._allocate_cid is not None:
-            return await self._allocate_cid()
-        self._local_cid = (self._local_cid + 1) % SLOT_SPACE
-        return self._local_cid
-
     async def create_session(
         self, request: StsCreateSessionRequest
     ) -> StsCreateSessionResult:
@@ -306,7 +286,11 @@ class SessionManager:
 
         ensure_deployable(request.type or request.strategy)
         strategy = self._strategy_factory(request.strategy)
-        cid_slot = await self._allocate_cid_slot()
+        # Derived from the session id, so two STS instances need not agree on
+        # anything to keep their live sessions apart, and a rebuild lands on
+        # the slot its resting orders already carry. Still written to the row:
+        # sessions older than this derivation carry a slot it cannot reproduce.
+        cid_slot = slot_for_session(request.session_id)
         session = StsSession(
             session_id=request.session_id,
             broker=self._broker,

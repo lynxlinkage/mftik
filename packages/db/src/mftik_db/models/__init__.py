@@ -20,7 +20,6 @@ from mftik_db.models.auth import (
     KeyKind,
 )
 from mftik_db.models.base import Base
-from mftik_db.models.cid_slot import CidSlotSeq
 from mftik_db.models.history import (
     Attribution,
     BackfillCursorRow,
@@ -70,7 +69,6 @@ __all__ = [
     "BackfillCursorRow",
     "Base",
     "CashFlowRow",
-    "CidSlotSeq",
     "FillRow",
     "Instance",
     "MdSessionRow",

@@ -107,12 +107,6 @@ async def reset_rebuild_count(session_id: str) -> StsSessionRow | None:
         return await repo.reset_rebuild_count(session_id)
 
 
-async def next_cid_slot() -> int:
-    """The next global ``cid_slot``. See :meth:`StsSessionRepository.next_cid_slot`."""
-    async with session_scope() as db:
-        return await StsSessionRepository(db).next_cid_slot()
-
-
 async def derived_sts(api_ids: list[int]) -> str | None:
     """The unique enabled STS in the region these credentials share."""
     async with session_scope() as db:

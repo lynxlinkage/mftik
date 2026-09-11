@@ -217,7 +217,9 @@ class StsSession:
         self.st_paras = dict(st_paras or {})
         self.heartbeat_interval = heartbeat_interval
         #: 16-bit id packed into every client_order_id this session mints.
-        #: Unique among concurrently live sessions (see ``SessionManager``).
+        #: 16 bits of the session id (``slot_for_session``), so a rebuild keeps
+        #: it. Drawn, not allocated: two live sessions can share one, and
+        #: ``owns()`` is wrong about the other's fills when they do.
         self.cid_slot = cid_slot
         #: Symbol plane reads. Strategies round their own prices and sizes,
         #: so they need tick/step/notional at hand — TD does not check.

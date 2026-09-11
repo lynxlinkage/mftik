@@ -23,7 +23,7 @@ NATS core     fan-out, request-reply, session heartbeats,
               ledger / OMS / tape RPC
 Regional Redis   tape only — MD writes, MD reads
                  (AOF + volume; see Tape)
-Postgres      session rows, session_logs, cid_slot sequence
+Postgres      session rows, session_logs
 JetStream     gone
 ```
 
@@ -117,7 +117,7 @@ Today's objects, from [`docs/Broker.md`](Broker.md) and
 | `{prefix}_tape_{feed}` | stream per recorded feed | Regional Redis next to the MD that pumps the feed. STS does not open Redis. |
 | KV `state` | bucket | Deleted. TD memory is the book. STS reads it over `td.account.{api_id}`. |
 | KV `lease` | bucket | Deleted. Session fencing is heartbeat + ack. Ownership is the instance contract plus boot `probe`. |
-| KV `counter` | bucket | Deleted. `cid_slot` comes from a Postgres sequence (`nextval % 65536`). |
+| KV `counter` | bucket | Deleted. `cid_slot` is 16 bits of the session id, derived where it is needed. |
 | KV `tapecov` | bucket | Deleted. Coverage lives next to the prints, in the same regional Redis. |
 
 Ephemeral pull consumers (`state_all`, tape tail, log buffer) leave
@@ -400,28 +400,36 @@ Under the instance contracts above, those questions go away:
 | `td:owner:{api_id}` | TD `claim_owner` before `create()` | One instance, one process, plus boot `probe`. `self._accounts` is the only in-process map. |
 | `{plane}:alive:{session}` | `mark_alive` / `claim_alive` / `is_alive` | Rebuild goes to the named STS, or to the one derived from the row's TD region. Orphan is "this row names me and I do not have it locally", with strikes. |
 | `backfill:lock:{api_id}` | advisory per `api_id` | `td.backfill.{instance}` plus an in-process `set[api_id]`. The subject stops the other instance; the set stops two concurrent walks of the same account on this one. |
-| `cid:slot` (`counter_next`) | one allocation per new STS session | A Postgres sequence. `nextval % 65536` (`SLOT_SPACE`). Not a process-local counter. |
+| `cid:slot` (`counter_next`) | one allocation per new STS session | Nothing asks. The slot is 16 bits of the session id (`slot_for_session`). |
 
-**`cid_slot` is global.** `owns()` compares
+**`cid_slot` is derived, not allocated.** `owns()` compares
 `slot_of(cid) == self.session.cid_slot` (`strategy/base.py`)
 so a session can ignore fills on `td.{api_id}.global` that
 belong to another session on the same account. Two STS
 instances (`sts-tw`, `sts-jp`) can hold the same `api_id` at
 once — STS is not sharded by account.
 
-`_allocate_cid_slot` already says this: allocation goes
-through the broker because several STS processes create
-sessions at once. A process-local counter starting at 0 on
-every STS gives two live sessions the same slot. Same-ms
-submits mint the same cid, and `owns()` treats the other's
-fills as its own. Restart zeroes the counter: a rebuild
-keeps `row.cid_slot`, a new session gets 0 again.
+An allocator is what a *guarantee* costs. Two STS processes
+create sessions at once, so a counter that is not shared
+gives two live sessions the same slot; a shared one is a
+round trip and a row to keep seeded. `slot_for_session`
+takes neither: `blake2b(session_id, 2)` is the same 16 bits
+in every process and every release, so the sessions cannot
+disagree, and a rebuild lands on the slot its resting orders
+already carry without anyone having reserved it.
 
-The row `sts_sessions.cid_slot` is already the durable
-home. Replace `counter_next` with `nextval` on a Postgres
-sequence, then `% SLOT_SPACE`, then store it on the row
-as today. Rebuild keeps reading the row. Wrap after 65536
-creations is the same bound the broker counter had.
+What that gives up is exclusivity. Slots are drawn from
+`SLOT_SPACE` rather than walked, so two sessions can share
+one, and `owns()` then reads the other's fills as its own.
+It costs something only when both trade the same account —
+`td.{api_id}.global` is per credential, so sessions on
+different accounts never see each other. Measured against
+the platform's own history (peak 2 live sessions per
+account, ~1770 order-placing sessions a year) that is
+~2.7% a year, accepted deliberately in exchange for
+deleting the allocator. `sts_sessions.cid_slot` stays: rows
+older than this derivation carry a slot it cannot reproduce,
+and rebuild still reads the row, never recomputes.
 
 **Orphan strikes stay.** TD's `_is_orphan` (`manager.py`)
 counts `_ORPHAN_STRIKES` so a row that exists between two
@@ -501,7 +509,8 @@ New properties they do need:
 - Tape RPC is chunked. A single reply is not the slice.
 - One instance name, one process. Boot `probe` refuses if
   that subject already has a responder.
-- `cid_slot` is a global sequence, not per process.
+- `cid_slot` is derived from the session id, so it is the
+  same in every process without one being asked.
 - An STS session's instance is named or derived from its TD
   region. `instances.region` routes STS placement.
 - Tape `read` of a feed this session did not attach raises.
@@ -537,9 +546,9 @@ New properties they do need:
    guard must exempt that module the way it exempts
    `mftik.broker`, and nowhere else. A Redis client in STS
    or `packages/common/src/mftik/strategy` is a regression.
-10. **Process-local `cid_slot`.** Two STS instances, or a
-    restart, collide `owns()`. The sequence is the whole
-    point of deleting KV `counter`.
+10. **Recomputing `cid_slot` on rebuild.** The row is the
+    only truth for a session created before the derivation
+    existed. Read it; deriving would disown its live orders.
 
 ## What this is not
 

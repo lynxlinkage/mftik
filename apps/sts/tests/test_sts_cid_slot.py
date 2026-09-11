@@ -10,7 +10,12 @@ from mftik.broker import Broker
 from mftik.exchange.models import Side
 from mftik.protocol import StsCreateSessionRequest
 from mftik.strategy import Strategy
-from mftik.strategy.client_order_id import SLOT_MASK, ClientOrderIdFactory, slot_of
+from mftik.strategy.client_order_id import (
+    SLOT_MASK,
+    ClientOrderIdFactory,
+    slot_for_session,
+    slot_of,
+)
 from mftik_sts.impl import register
 from mftik_sts.session import SessionManager
 
@@ -123,13 +128,16 @@ async def test_owns_rejects_junk(manager: SessionManager) -> None:
     await manager.close_all()
 
 
-async def test_slot_survives_session_churn(manager: SessionManager) -> None:
-    """A closed session's slot is not handed straight back to the next one."""
-    a = await _create(manager, "churn-a")
-    first = a.cid_slot
-    await manager.close("churn-a")
+async def test_the_session_gets_the_slot_its_id_derives(
+    manager: SessionManager,
+) -> None:
+    """No allocator is reached: the slot is 16 bits of the session id.
 
-    b = await _create(manager, "churn-b")
-    assert b.cid_slot != first
+    Which is what makes it survive a restart — the rebuild reads the row, but
+    a row written by this release agrees with the derivation, so the two can
+    never disagree about which orders the strategy owns.
+    """
+    a = await _create(manager, "derive-a")
+    assert a.cid_slot == slot_for_session("derive-a")
 
     await manager.close_all()

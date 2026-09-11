@@ -12,11 +12,15 @@ strategy class would otherwise mint identical ids whenever they submit their
 n-th order in the same millisecond (common — they are woken by the same MD
 tick). The strategy class is recoverable from the ``sts_sessions`` row.
 
+The slot is derived from the session id (:func:`slot_for_session`), not handed
+out by an allocator.
+
 Wire form is the decimal string of the packed ``uint64``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import time
 from datetime import UTC, datetime
 
@@ -31,7 +35,7 @@ SLOT_MASK = (1 << SLOT_BITS) - 1
 TS_MASK = (1 << TS_BITS) - 1
 SEQ_MASK = (1 << SEQ_BITS) - 1
 
-#: Slot values wrap at this many allocations; see ``SessionManager``.
+#: How many distinct slots exist; see :func:`slot_for_session`.
 SLOT_SPACE = 1 << SLOT_BITS
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
@@ -79,6 +83,28 @@ def unpack(client_order_id: int | str) -> tuple[int, int, int]:
 def slot_of(client_order_id: int | str) -> int:
     """Return just the session slot packed into ``client_order_id``."""
     return (int(client_order_id) >> SLOT_SHIFT) & SLOT_MASK
+
+
+def slot_for_session(session_id: str) -> int:
+    """The slot a session mints under — 16 bits of its own id.
+
+    Derived, not allocated. One session id always gives one slot, so a rebuild
+    keeps recognising the orders it left resting at the venue without reading
+    the row back, and creating a session reaches no allocator at all.
+
+    The price is that slots are drawn rather than walked: two sessions can hold
+    the same one. ``Strategy.owns`` is the only reader, and it only sees fills
+    on accounts its own session is attached to, so a shared slot goes wrong
+    just when both sessions trade the same account.
+
+    A hash, not the leading hex digits: this has to answer for every session id
+    the platform mints, and they are not all hex. ``blake2b`` because it takes
+    the output width as an argument; any stable digest would do, but never
+    :func:`hash`, which is salted per process.
+    """
+    return int.from_bytes(
+        hashlib.blake2b(session_id.encode(), digest_size=2).digest(), "big"
+    )
 
 
 def format_client_order_id(slot: int, ts_ms: int, seq: int) -> str:
