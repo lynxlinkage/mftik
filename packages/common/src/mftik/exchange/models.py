@@ -88,6 +88,32 @@ class OrderStatus(StrEnum):
     REJECTED = "rejected"
     UNKNOWN = "unknown"
 
+    def is_pending(self) -> bool:
+        """Waiting on the venue to answer a submit or a cancel.
+
+        A pending order cannot be cancelled: ``PENDING_NEW`` has no venue id,
+        and ``PENDING_CANCEL`` already has a cancel on the wire.
+        """
+        return self in PENDING_STATUSES
+
+    def is_terminal(self) -> bool:
+        return self in TERMINAL_STATUSES
+
+    def is_working(self) -> bool:
+        """Confirmed resting at the venue and able to trade."""
+        return self in WORKING_STATUSES
+
+    def is_open(self) -> bool:
+        """Not finished — still holding exposure and reservations."""
+        return self in OPEN_STATUSES
+
+    def can_transition(self, nxt: OrderStatus) -> bool:
+        """Whether this status may move to ``nxt``."""
+        return nxt in _TRANSITIONS[self]
+
+    def next_statuses(self) -> frozenset[OrderStatus]:
+        return _TRANSITIONS[self]
+
 
 #: No transitions out — the order is done and its reservations are released.
 TERMINAL_STATUSES: frozenset[OrderStatus] = frozenset(
@@ -179,34 +205,6 @@ _TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
     _S.CANCELED: frozenset(),
     _S.REJECTED: frozenset(),
 }
-
-
-def is_terminal(status: OrderStatus) -> bool:
-    return status in TERMINAL_STATUSES
-
-
-def is_pending(status: OrderStatus) -> bool:
-    """Waiting on the venue to answer a submit or a cancel."""
-    return status in PENDING_STATUSES
-
-
-def is_working(status: OrderStatus) -> bool:
-    """Confirmed resting at the venue and able to trade."""
-    return status in WORKING_STATUSES
-
-
-def is_open(status: OrderStatus) -> bool:
-    """Not finished — still holding exposure and reservations."""
-    return status in OPEN_STATUSES
-
-
-def can_transition(current: OrderStatus, nxt: OrderStatus) -> bool:
-    """Whether ``current → nxt`` is a move this lifecycle allows."""
-    return nxt in _TRANSITIONS[current]
-
-
-def next_statuses(current: OrderStatus) -> frozenset[OrderStatus]:
-    return _TRANSITIONS[current]
 
 
 class InstrumentScoped(BaseModel):

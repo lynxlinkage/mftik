@@ -7,7 +7,12 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from mftik.broker.errors import RequestTimeoutError
-from mftik.exchange.models import Order, OrderType, Side, TimeInForce
+from mftik.exchange.models import (
+    Order,
+    OrderType,
+    Side,
+    TimeInForce,
+)
 from mftik.exchange.oms import OmsView
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
@@ -38,6 +43,16 @@ logger = logging.getLogger(__name__)
 #: leaving a strategy blocked for long.
 ORDER_ACK_TIMEOUT_S = 2.0
 
+#: Reject codes where the venue outcome is unknown. The cid stays inflight
+#: so a cancel is still refused — the order may be resting.
+_TRANSPORT_AMBIGUOUS = frozenset(
+    {
+        RejectCode.TD_SEND_FAILED,
+        RejectCode.TD_NO_ACK,
+        RejectCode.TD_VENUE_NOT_CONNECTED,
+    }
+)
+
 
 class StrategyOms:
     """Order entry, and reads of TD's book over ``td.account.{api_id}``.
@@ -54,7 +69,9 @@ class StrategyOms:
     both wait for TD's ack and return whether it took the request. Venue
     outcomes are separate and still arrive asynchronously on
     ``td.{api_id}.global`` as order updates, fills or rejects — a ``True`` here
-    does **not** mean the venue accepted anything.
+    does **not** mean the venue accepted anything. A submit TD accepts is
+    pending until :meth:`note_order` sees a non-pending status;
+    :meth:`cancel_order` will not send for those cids.
 
     ``submit_order`` mints the uint64 ``client_order_id`` itself::
 
@@ -70,10 +87,72 @@ class StrategyOms:
         self._last_cid: str | None = None
         self._last_reason: str = ""
         self._last_code: int | str = RejectCode.NONE
+        #: Cids whose submit or cancel is still on the wire. Not a book
+        #: mirror — only what this session itself sent and has not seen
+        #: leave :meth:`~mftik.exchange.models.OrderStatus.is_pending`.
+        self._inflight: set[str] = set()
+        #: Cids that have already left pending for good. A late
+        #: ``PENDING_NEW`` snapshot must not revive them — reject can
+        #: overtake the local book announcement.
+        self._done: set[str] = set()
 
     def bind(self, strategy: Strategy, *, cid_slot: int) -> None:
         self._strategy = strategy
         self._cid_factory = ClientOrderIdFactory(cid_slot)
+        self._inflight.clear()
+        self._done.clear()
+
+    def is_inflight(self, client_order_id: str | int) -> bool:
+        """Whether this session's submit or cancel for ``cid`` is still open."""
+        return str(client_order_id) in self._inflight
+
+    def note_order(self, order: Order) -> None:
+        """Fold a venue (or TD) status into the pending set.
+
+        Pending statuses stay marked; anything else — working, terminal,
+        ``UNKNOWN`` — means a cancel may now be sent.
+        """
+        cid = order.client_order_id
+        if not cid:
+            return
+        key = str(cid)
+        if not order.status.is_pending():
+            self._inflight.discard(key)
+            self._done.add(key)
+            return
+        if key not in self._done:
+            self._inflight.add(key)
+
+    def note_gone(self, client_order_id: str | int | None) -> None:
+        """The cid is no longer inflight — reject, or a cancel that failed."""
+        if client_order_id is None:
+            return
+        key = str(client_order_id)
+        self._inflight.discard(key)
+        self._done.add(key)
+
+    def note_reject(
+        self,
+        error_code: int | str | None,
+        client_order_id: str | int | None,
+    ) -> None:
+        """Clear inflight only for a determined refuse.
+
+        Transport ambiguity must not look like "gone": the submit may have
+        landed, and a cancel then would have to wait for UNKNOWN / recovery.
+        """
+        if error_code in _TRANSPORT_AMBIGUOUS:
+            return
+        self.note_gone(client_order_id)
+
+    def clear_inflight(self) -> None:
+        """Drop every inflight mark. Used on rebuild / bind."""
+        self._inflight.clear()
+        self._done.clear()
+
+    def _mark_inflight(self, cid: str) -> None:
+        if cid not in self._done:
+            self._inflight.add(cid)
 
     async def view(self, api_id: int | None = None) -> OmsView:
         """Read TD's live book for ``api_id`` over ``td.account``."""
@@ -281,6 +360,11 @@ class StrategyOms:
         # After the await, not before: a submit that overlapped ours would
         # otherwise leave its cid here for our caller to read.
         self._last_cid = cid
+        # The reject can be processed before this line runs: TD acks,
+        # then the venue refuses, and that pub/sub lands while we are
+        # still inside ``_request_ack``. Do not revive a settled cid.
+        if accepted:
+            self._mark_inflight(cid)
         return accepted
 
     async def cancel_order(self, api_id: int, client_order_id: str | int) -> bool:
@@ -288,10 +372,19 @@ class StrategyOms:
 
         True if TD accepted the request; the venue's answer still arrives
         asynchronously as an order update or a cancel reject.
+
+        Refuses locally when the cid is still inflight — same outcome as
+        TD's ``TD_NOT_CANCELABLE``, without the round-trip or the warn.
         """
-        session = self._require_session()
         cid = str(client_order_id)
-        return await self._request_ack(
+        if cid in self._inflight:
+            self._last_reason = (
+                "order is inflight; it cannot be cancelled from that state"
+            )
+            self._last_code = RejectCode.TD_NOT_CANCELABLE
+            return False
+        session = self._require_session()
+        accepted = await self._request_ack(
             api_id,
             cid,
             Envelope[OrderCancel].wrap(
@@ -305,6 +398,9 @@ class StrategyOms:
                 session_id=session.session_id,
             ),
         )
+        if accepted:
+            self._mark_inflight(cid)
+        return accepted
 
     async def _request_ack(
         self, api_id: int, cid: str, envelope: Envelope[Any]

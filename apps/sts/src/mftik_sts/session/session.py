@@ -972,6 +972,20 @@ class StsSession:
             )
             return
         handler = getattr(self.strategy, name)
+        # Inflight tracking is session-owned: submit marks the cid, and
+        # these events are the only thing that can clear it. The strategy
+        # hook still sees the same payload; it must not be the sole writer.
+        if name == "on_order_update":
+            self.strategy.oms.note_order(payload)
+        elif name == "on_order_reject":
+            self.strategy.oms.note_reject(
+                getattr(payload, "error_code", None),
+                getattr(payload, "client_order_id", None),
+            )
+        elif name == "on_cancel_reject":
+            self.strategy.oms.note_gone(
+                getattr(payload, "client_order_id", None)
+            )
         try:
             await handler(api_id, payload)
         except Exception as exc:

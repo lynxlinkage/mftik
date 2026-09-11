@@ -73,8 +73,8 @@ class RejectCode(IntEnum):
     TD_INSUFFICIENT_BALANCE = 104
     #: TD could not persist the order before sending, so it did not send.
     TD_STATE_WRITE_FAILED = 105
-    #: Cancel refused locally: the order is PENDING_NEW (no venue id to cancel
-    #: against) or already finished.
+    #: Cancel refused locally: the order is inflight (PENDING_NEW has no
+    #: venue id; PENDING_CANCEL already has a cancel out) or already finished.
     TD_NOT_CANCELABLE = 106
     #: The venue client is not connected, so the call never left the process.
     TD_VENUE_NOT_CONNECTED = 107

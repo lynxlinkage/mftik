@@ -7,7 +7,7 @@ import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange
-from mftik.exchange.models import Side, is_terminal, limit_order
+from mftik.exchange.models import Side, limit_order
 from mftik.protocol import (
     ReconDone,
     StsCreateSessionRequest,
@@ -111,7 +111,7 @@ async def test_recon_handshake_and_strategy_oms(broker: Broker) -> None:
     # Keyed by client_order_id, and every entry still live.
     for cid, order in orders.items():
         assert cid == (order.client_order_id or order.order_id)
-        assert not is_terminal(order.status)
+        assert not order.status.is_terminal()
 
     balances = await strat.ledger.balances(1)
     assert balances  # paper seeds quote/base balances

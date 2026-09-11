@@ -127,7 +127,6 @@ from mftik.exchange.models import (
     Side,
     TimeInForce,
     Trade,
-    is_terminal,
 )
 from mftik.exchange.oms import Position
 from mftik.exchange.tickers import Category, UniversalTicker
@@ -868,7 +867,7 @@ class MacdDollarBars(Strategy):
         if (
             self._pending_cid is not None
             and str(order.client_order_id) == str(self._pending_cid)
-            and is_terminal(order.status)
+            and order.status.is_terminal()
         ):
             self._pending_cid = None
 

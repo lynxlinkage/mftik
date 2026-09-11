@@ -70,7 +70,10 @@ class Strategy:
     Order entry — request-reply on ``td.order.{api_id}`` (wired):
         submit_order / cancel_order return True once TD acks the request.
         False means it never reached the venue (no ack, or TD refused it).
-        A True says nothing about the venue's answer — that arrives below.
+        cancel_order also returns False without sending when the cid is
+        still pending (PENDING_NEW / PENDING_CANCEL) — there is no venue
+        id to cancel against. A True says nothing about the venue's answer
+        — that arrives below.
         submit_order mints the uint64 client_order_id
         (session cid_slot | ms since 2026-01-01 | seq++) and leaves it in
         oms.last_client_order_id; cancel_order takes that id.
