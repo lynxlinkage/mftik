@@ -38,6 +38,7 @@ from mftik.protocol import (
     md_instances_of,
     publish_md_log,
     publish_sts_log,
+    td_api_ids_of,
 )
 from mftik_db.models.session import SessionDomain, SessionStatus
 from mftik_db.repositories import ApiRepository, InstanceRepository
@@ -83,7 +84,8 @@ async def deploy_strategy(
     await sts_log(f"deploy start strategy={strategy_id} td={td} md={md}")
 
     try:
-        await _check_sts_instance(broker, instance)
+        target = await _sts_target(instance, td)
+        await _check_sts_instance(broker, target)
     except DomainRpcError as exc:
         await sts_log(
             f"STS instance check failed: {exc.message}", level="error"
@@ -93,7 +95,7 @@ async def deploy_strategy(
     try:
         sts = await request_domain(
             broker,
-            Topics.STS if instance is None else Topics.sts(instance),
+            Topics.sts(target),
             StsCreateSessionRequestEnvelope.wrap(
                 StsCreateSessionRequest(
                     session_id=session_id,
@@ -342,24 +344,50 @@ async def _check_md_instances(
             )
 
 
+async def _sts_target(
+    instance: str | None, td: dict[str, TdAccountRef]
+) -> str:
+    """Which STS subject an unnamed create is sent to.
+
+    A named deploy keeps the name. An unnamed one is derived from the
+    credentials' TD region — null on the row still means "derive", and
+    the create is addressed to that instance so the pool is not a lottery.
+    A derivation that is not unique must be named.
+    """
+    if instance is not None:
+        return instance
+    async with session_scope() as db:
+        derived = await InstanceRepository(db).derived_sts(td_api_ids_of(td))
+    if derived is None:
+        raise DomainRpcError(
+            "sts_unpinned_ambiguous",
+            "this deploy does not name an STS instance and its TD "
+            "accounts do not derive to exactly one enabled STS — "
+            "name instance= on the deploy",
+        )
+    return derived
+
+
 async def _check_sts_instance(
     broker: Broker, instance: str | None
 ) -> None:
     """Same two checks as MD's, on the plane that runs the strategy.
 
-    Nothing to check when no name was given: an unpinned deploy goes to the
-    shared pool, and the pool answering is what the create's own timeout is
-    for.
+    Every create has a name by the time it reaches here — either the
+    deploy asked for one, or the TD region derived it.
     """
     if instance is None:
-        return
+        raise DomainRpcError(
+            "sts_unpinned_ambiguous",
+            "this deploy does not name an STS instance",
+        )
     async with session_scope() as db:
         row = await InstanceRepository(db).get_by_name(instance)
     if row is None or row.domain != SessionDomain.STS.value:
         raise DomainRpcError(
             "unknown_instance",
             f"no sts instance named {instance!r} — declare it first, or "
-            f"omit it to use any sts",
+            f"omit it to derive from the TD region",
         )
     if not row.enabled:
         raise DomainRpcError(

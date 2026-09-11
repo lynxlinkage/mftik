@@ -66,22 +66,26 @@ services:
       timeout: 3s
       retries: 10
 
-  # The whole broker: order RPC, ledger and OMS state, liveness, and the
-  # recorded tape.
-  #
-  # `-js` is not optional. Only bare request-reply is core NATS; everything else
-  # a plane does is a JetStream stream or a KV bucket, and a server started
-  # without it accepts the connection and then refuses each of them.
-  #
-  # `-sd /data` on a volume, because that is what the state above is. A node
-  # restarted with an empty store comes back with no open orders, no ledger and
-  # no tape — which reads as an account that closed everything.
+  # Regional tape disk. Standalone, AOF plus a volume. Production compose
+  # is outside this repo; a node that records tape needs the same service.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # The bus. Core NATS only. Tape is regional Redis (AOF + volume);
+  # the ledger lives in TD memory; session logs live in Postgres.
   nats:
     image: nats:2.11-alpine
     restart: unless-stopped
-    command: ["-js", "-sd", "/data", "-m", "8222"]
-    volumes:
-      - nats_data:/data
+    command: ["-m", "8222"]
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:8222/healthz || exit 1"]
       interval: 5s
@@ -189,8 +193,11 @@ services:
       # number of recorded feeds is what the nats volume has to hold: 150k x 8
       # feeds is ~240 MB.
       MD_TAPE_MAXLEN: "150000"
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       nats:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -234,7 +241,7 @@ services:
 
 volumes:
   postgres_data:
-  nats_data:
+  redis_data:
   mftik_data:
   sts_eventlog:
   caddy_data:

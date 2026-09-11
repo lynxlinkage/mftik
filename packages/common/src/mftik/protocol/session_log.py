@@ -6,9 +6,7 @@ from typing import Any, Protocol
 
 
 class _LogPublisher(Protocol):
-    async def publish(self, topic: str, envelope: Any) -> int: ...
-
-    async def publish_log(self, topic: str, envelope: Any, **kwargs: Any) -> int: ...
+    async def publish(self, topic: str, envelope: Any) -> None: ...
 
 
 async def publish_sts_log(
@@ -21,7 +19,9 @@ async def publish_sts_log(
     type: str | None = None,
     **extra: Any,
 ) -> None:
-    """Fan out a log line for ``/ws/sts/{session_id}`` (buffered + live).
+    """Fan out a log line for ``/ws/sts/{session_id}``.
+
+    Live subscribers see it now. A late socket replays ``session_logs``.
 
     ``type`` is the qualified registry key and the only way
     :attr:`Log.type` is set. A ``type`` key in ``extra`` is dropped so a
@@ -38,11 +38,7 @@ async def publish_sts_log(
         source=source,
         session_id=session_id,
     )
-    publish_log = getattr(broker, "publish_log", None)
-    if publish_log is not None:
-        await publish_log(topic, envelope)
-    else:
-        await broker.publish(topic, envelope)
+    await broker.publish(topic, envelope)
 
 
 async def publish_td_log(
@@ -54,7 +50,7 @@ async def publish_td_log(
     level: str = "info",
     **extra: Any,
 ) -> None:
-    """Fan out a log line for ``/ws/td/{api_id}`` (buffered + live)."""
+    """Fan out a log line for ``/ws/td/{api_id}``."""
     from mftik.protocol.messages import Log, LogEnvelope
     from mftik.protocol.topics import Topics
 
@@ -65,11 +61,7 @@ async def publish_td_log(
         source=source,
         session_id=str(api_id),
     )
-    publish_log = getattr(broker, "publish_log", None)
-    if publish_log is not None:
-        await publish_log(topic, envelope)
-    else:
-        await broker.publish(topic, envelope)
+    await broker.publish(topic, envelope)
 
 
 async def publish_md_log(
@@ -82,7 +74,7 @@ async def publish_md_log(
     instance: str | None = None,
     **extra: Any,
 ) -> None:
-    """Fan out a log line for ``/ws/md/{venue}`` (buffered + live).
+    """Fan out a log line for ``/ws/md/{venue}``.
 
     ``instance`` names the MD that wrote it, and is null when nothing can:
     an unpinned attach is one where the deploy did not choose, so the API has
@@ -98,11 +90,7 @@ async def publish_md_log(
         source=source,
         session_id=venue,
     )
-    publish_log = getattr(broker, "publish_log", None)
-    if publish_log is not None:
-        await publish_log(topic, envelope)
-    else:
-        await broker.publish(topic, envelope)
+    await broker.publish(topic, envelope)
 
 
 # Backward-compatible alias (STS session logs).

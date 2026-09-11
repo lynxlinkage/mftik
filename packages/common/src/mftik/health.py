@@ -20,8 +20,10 @@ import logging
 from collections.abc import Callable
 
 from mftik.broker import Broker
+from mftik.broker.errors import RequestTimeoutError
 from mftik.protocol import (
     Envelope,
+    HealthCheck,
     HealthStatus,
     Topics,
     probe_is_stale,
@@ -108,3 +110,46 @@ async def serve_health(
                 )
             except TimeoutError:
                 continue
+
+
+class InstanceAlreadyServing(RuntimeError):
+    """A process is already answering this instance's control subject."""
+
+    def __init__(self, subject: str, source: str) -> None:
+        self.subject = subject
+        self.source = source
+        super().__init__(
+            f"{subject} is already served by {source} — a second process "
+            f"with this MFTIK_INSTANCE is not a supported topology"
+        )
+
+
+async def refuse_if_serving(
+    broker: Broker, *, domain: str, instance: str, timeout: float = 1.0
+) -> None:
+    """Exit-path probe: refuse to boot if this instance name is already up.
+
+    ``probe`` is not a lock. Two processes that pass in the same window can
+    still both start; that remaining race is accepted. ``--scale`` and an
+    overlapped restart should die here and name who answered.
+    """
+    named = {"td": Topics.td, "md": Topics.md, "sts": Topics.sts}
+    if domain not in named:
+        raise ValueError(f"{domain} is not an instanced plane")
+    subject = named[domain](instance)
+    try:
+        reply = await broker.probe(
+            subject,
+            Envelope[HealthCheck].wrap(
+                HealthCheck(),
+                type=f"{domain}.health",
+                source="boot",
+            ),
+            timeout=timeout,
+        )
+    except RequestTimeoutError:
+        return
+    source = reply.source
+    if isinstance(reply.payload, dict):
+        source = str(reply.payload.get("instance") or source)
+    raise InstanceAlreadyServing(subject, source)

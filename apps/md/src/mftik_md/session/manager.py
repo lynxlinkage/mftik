@@ -9,8 +9,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from mftik.broker import Broker, LeasedSessionLink
-from mftik.liveness import clear_alive, is_alive, mark_alive
 from mftik.protocol import (
+    LEASE_HEARTBEAT_INTERVAL_S,
+    LEASE_MISS_LIMIT,
     MD_DETACH,
     MD_LEASE_ACK,
     MD_SUBSCRIBE,
@@ -34,6 +35,7 @@ from mftik_md.session.dispatcher import Dispatcher, FeedKey
 from mftik_md.session.factory import ConnectorFactory
 from mftik_md.session.venue import VenueSession
 from mftik_md.tape import TapeRecorder
+from mftik_md.tape_store import TapeStore
 
 logger = logging.getLogger(__name__)
 
@@ -41,31 +43,16 @@ PersistLive = Callable[..., Awaitable[Any]]
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
 
-LEASE_GRACE_S = 3.0
+LEASE_GRACE_S = LEASE_HEARTBEAT_INTERVAL_S * LEASE_MISS_LIMIT
 
 #: How long a lease subscription waits before resubscribing after a transport
 #: failure. Well inside :data:`LEASE_GRACE_S`: reconnecting must not spend so
 #: much of the grace window that a still-live STS reads as expired.
 RESUBSCRIBE_DELAY_S = 0.5
 
-def _alive_domain(instance: str) -> str:
-    """Which liveness key one MD instance's attach holds.
-
-    MD's own, not the STS session's: the two processes die independently, and
-    it is MD's row being guarded. Keyed per *instance* rather than per plane,
-    because ``liveness.py`` writes one key per ``(domain, session)`` — so two
-    MDs holding one session would share a key, and the first to detach would
-    ``clear_alive`` the one the survivor is living behind. Its reaper would
-    then tear down a link with nothing wrong with it.
-    """
-    return f"{SessionDomain.MD.value}:{instance}"
-
-#: How many consecutive scans must agree before a link this process holds is
-#: torn down. The key is refreshed by the lease loop and by nothing else, so
-#: its absence usually means that loop is gone — but a broker outage past the
-#: 30s TTL looks identical for one scan, and detaching costs a running
-#: strategy its feeds. Rows with no link behind them are closed on the first
-#: scan: nothing is running to be wrong about.
+#: How many consecutive scans must agree before a row this instance owns
+#: and does not hold locally is closed. Covers the window between persist
+#: and the link landing in ``_links``.
 _ORPHAN_STRIKES = 2
 
 #: How many live rows one reap scan will consider. Well above any plausible
@@ -107,7 +94,6 @@ class SessionManager:
         #: ``MFTIK_INSTANCE`` resolves to when nobody has set it and what
         #: migration 0031 declares.
         self._instance = instance
-        self._alive_domain = _alive_domain(instance)
         self._persist_live = persist_live
         self._mark_done = mark_done
         self._list_db_sessions = list_db_sessions
@@ -120,9 +106,9 @@ class SessionManager:
         self._venues: dict[str, VenueSession] = {}
         self._links: dict[str, StsLink] = {}
         #: ``(instance, session_id)`` → consecutive scans that found no
-        #: liveness key. Keyed by the pair because one session can have rows
-        #: from several instances and each is decided separately. See
-        #: :data:`_ORPHAN_STRIKES`.
+        #: local link (or a link whose lease tasks have died). Keyed by the
+        #: pair because one session can have rows from several instances and
+        #: each is decided separately. See :data:`_ORPHAN_STRIKES`.
         self._orphan_strikes: dict[tuple[str, str], int] = {}
         #: Venue disconnects still running. Held so :meth:`close_all` can wait
         #: for them and a stray task cannot be garbage-collected mid-close.
@@ -134,6 +120,13 @@ class SessionManager:
 
     def feed_refcount(self, feed: str) -> int:
         return self._dispatcher.refcount(*Topics.parse_md_feed(feed))
+
+    @property
+    def tape_store(self) -> TapeStore | None:
+        """This region's tape disk, or None when recording is off."""
+        if self._recorder is None:
+            return None
+        return self._recorder.store
 
     async def trim_tapes(self) -> None:
         """Apply the retention window to every feed currently recording.
@@ -154,6 +147,7 @@ class SessionManager:
                 session_id=request.session_id,
                 subscriptions=sorted(existing.subscriptions),
                 refcounts=self._dispatcher.refcounts(),
+                instance=self._instance,
             )
 
         link = StsLink(
@@ -182,12 +176,6 @@ class SessionManager:
 
         self._links[request.session_id] = link
         self._dispatcher.register_link(link)
-
-        # Before the row, not after: a reaper that saw a live row with no
-        # key yet would close an attach that is a moment old.
-        await mark_alive(
-            self._broker, request.session_id, domain=self._alive_domain
-        )
 
         for feed in request.subscriptions:
             await self._subscribe_feed(link, feed)
@@ -223,6 +211,7 @@ class SessionManager:
             session_id=request.session_id,
             subscriptions=feeds,
             refcounts=self._dispatcher.refcounts(),
+            instance=self._instance,
         )
 
     async def detach(
@@ -252,16 +241,6 @@ class SessionManager:
         if self._mark_done is not None:
             await self._mark_done(
                 session_id=session_id, instance=self._instance
-            )
-        try:
-            await clear_alive(
-                self._broker, session_id, domain=self._alive_domain
-            )
-        except Exception:
-            # The row is already closed, and the key expires on its own —
-            # the reaper only ever looks at rows that are still live.
-            logger.exception(
-                "MD liveness release failed session=%s", session_id
             )
         logger.info(
             "MD detached session=%s reason=%s", session_id, reason
@@ -337,22 +316,10 @@ class SessionManager:
         :meth:`list_sessions` answers from the table, the API reports a feed
         nobody is pumping.
 
-        A row is an orphan when nobody holds the ``md`` liveness key for its
-        session. That is MD's own key and deliberately not the STS one: the
-        two processes die independently, and MD killed under a strategy that
-        is still running is exactly the case an STS check would call
-        healthy. Testing a key rather than local state is also what keeps
-        this safe to run in every MD process at once — several serve the
-        same RPC subject, so "not in my links" says nothing about a peer's,
-        while "no key" is true for all of them at the same time.
-
-        A link this process still holds is *not* exempt. The key is renewed
-        by the lease loop and by nothing else, so a link whose key has gone
-        is one whose loop has stopped — an attach holding feeds open for a
-        session nobody is leasing. That case used to be skipped outright,
-        and it is the one that left a td/md pair live for hours. It is torn
-        down properly rather than merely marked done, or the venue keeps
-        pumping a feed the refcount says is still wanted.
+        A row is an orphan when it names this instance and this process
+        does not have the link — or the lease tasks have died. Another
+        instance's rows are left for that instance. Strikes cover the
+        window between persist and ``_links``.
 
         Returns the session ids reaped, for logging and tests.
         """
@@ -389,35 +356,21 @@ class SessionManager:
             # own liveness key: a perfectly healthy md-jp-2 would then be
             # closed by every scan md-jp-1 runs.
             instance = getattr(row, "instance", None) or self._instance
+            if instance != self._instance:
+                continue
             key = (instance, session_id)
-            # The mark below closes one instance's rows for a session, so each
-            # pair is worth deciding about once however many venues it spans.
             if key in seen:
                 continue
             seen.add(key)
-            try:
-                if await is_alive(
-                    self._broker, session_id, domain=_alive_domain(instance)
-                ):
-                    self._orphan_strikes.pop(key, None)
-                    continue
-            except Exception:
-                # Unreadable liveness is not evidence of death. A stale row
-                # survives to the next scan; a row closed by mistake hides a
-                # feed that is still running.
-                logger.exception(
-                    "MD liveness check failed instance=%s session=%s",
-                    instance,
-                    session_id,
-                )
+            link = self._links.get(session_id)
+            if link is not None and not any(t.done() for t in link.tasks):
                 self._orphan_strikes.pop(key, None)
                 continue
-
-            if instance == self._instance and session_id in self._links:
-                strikes = self._orphan_strikes.get(key, 0) + 1
-                self._orphan_strikes[key] = strikes
-                if strikes < _ORPHAN_STRIKES:
-                    continue
+            strikes = self._orphan_strikes.get(key, 0) + 1
+            self._orphan_strikes[key] = strikes
+            if strikes < _ORPHAN_STRIKES:
+                continue
+            if link is not None:
                 logger.warning(
                     "MD reaping orphaned link session=%s", session_id
                 )
@@ -454,11 +407,10 @@ class SessionManager:
                 session_id,
                 getattr(row, "venue", None),
             )
-        # Strikes only mean something for a session still in front of us.
         self._orphan_strikes = {
-            session_id: strikes
-            for session_id, strikes in self._orphan_strikes.items()
-            if session_id in seen
+            key: strikes
+            for key, strikes in self._orphan_strikes.items()
+            if key in seen
         }
         return reaped
 
@@ -473,6 +425,8 @@ class SessionManager:
         # exit rather than by handshake is one the venue has to time out.
         if self._disconnects:
             await asyncio.gather(*self._disconnects, return_exceptions=True)
+        if self._recorder is not None:
+            await self._recorder.aclose()
 
     async def _subscribe_feed(self, link: StsLink, feed: str) -> None:
         topic, ticker = Topics.parse_md_feed(feed)
@@ -626,17 +580,6 @@ class SessionManager:
 
         async def _on_heartbeat(hb: LeaseHeartbeat) -> None:
             link.last_token = hb.token
-            try:
-                await mark_alive(
-                    self._broker,
-                    link.session_id,
-                    domain=self._alive_domain,
-                )
-            except Exception:
-                logger.exception(
-                    "MD liveness refresh failed session=%s",
-                    link.session_id,
-                )
 
         async def _on_message(env: Any) -> bool:
             if env.type == MD_SUBSCRIBE:

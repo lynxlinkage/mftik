@@ -21,7 +21,6 @@ import mftik_sts.session.manager as manager_mod
 import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
-from mftik.liveness import is_alive, mark_alive
 from mftik.protocol import (
     MD_SESSION_ATTACH,
     TD_SESSION_ATTACH,
@@ -56,7 +55,7 @@ class FakeStsStore:
         restart: str = "always",
         rebuild_count: int = 0,
         type: str | None = None,
-        instance: str | None = None,
+        instance: str | None = "sts",
     ) -> SimpleNamespace:
         row = SimpleNamespace(
             session_id=session_id,
@@ -172,6 +171,7 @@ def _manager(
     instances: list[Rebuildable],
     *,
     instance: str = "sts",
+    derive_sts=None,
 ) -> SessionManager:
     register(Rebuildable)
 
@@ -191,6 +191,7 @@ def _manager(
         list_db_sessions=store.list_sessions,
         bump_rebuild_count=store.bump_rebuild_count,
         reset_rebuild_count=store.reset_rebuild_count,
+        derive_sts=derive_sts,
     )
 
 
@@ -320,17 +321,24 @@ async def test_a_session_without_a_slot_is_left_alone(broker: Broker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_only_one_process_rebuilds_a_session(broker: Broker) -> None:
-    """Several STS processes boot at once. Without the atomic claim they
-    would each restore the same session and run two of it."""
+async def test_only_the_derived_instance_rebuilds_an_unpinned_row(
+    broker: Broker,
+) -> None:
+    """Placement, not a claim race. Two STS boot; only the derived one takes it."""
     store = FakeStsStore()
-    store.seed("r-4")
-    # Stands in for the peer that got there first.
-    await mark_alive(broker, "r-4", domain="sts")
-    manager = _manager(broker, store, [])
+    store.seed("r-4", instance=None)
 
-    assert await manager.rebuild_interrupted() == []
-    assert store.rows["r-4"].status == "interrupted"
+    async def derive(_api_ids: list[int]) -> str:
+        return "sts-tw"
+
+    tw = _manager(broker, store, [], instance="sts-tw", derive_sts=derive)
+    jp = _manager(broker, store, [], instance="sts-jp", derive_sts=derive)
+    try:
+        assert await jp.rebuild_interrupted() == []
+        assert await tw.rebuild_interrupted() == ["r-4"]
+    finally:
+        await tw.close_all()
+        await jp.close_all()
 
 
 @pytest.mark.asyncio
@@ -368,8 +376,6 @@ async def test_a_failed_attach_puts_the_session_back(
 
     assert store.rows["r-5"].status == "interrupted"
     assert manager.get("r-5") is None
-    # The claim is released, so the next boot may try again.
-    assert not await is_alive(broker, "r-5", domain="sts")
 
 
 @pytest.mark.asyncio
@@ -389,7 +395,6 @@ async def test_a_stale_session_is_left_where_it_is(broker: Broker) -> None:
     row = store.rows["r-stale"]
     assert row.status == "interrupted"
     assert row.reason == "STS shut down while this was running"
-    assert not await is_alive(broker, "r-stale", domain="sts")
 
 
 @pytest.mark.asyncio
@@ -449,8 +454,6 @@ async def test_a_strategy_that_cannot_be_rebuilt_is_left_alone(
 
     assert await manager.rebuild_interrupted() == []
     assert store.rows["r-noimpl"].status == "interrupted"
-    # No claim taken, so nothing has to release one.
-    assert not await is_alive(broker, "r-noimpl", domain="sts")
 
 
 @pytest.mark.asyncio
@@ -466,7 +469,6 @@ async def test_a_run_that_asked_not_to_come_back_stays_ended(
 
     assert await manager.rebuild_interrupted() == []
     assert store.rows["r-oneshot"].status == "interrupted"
-    assert not await is_alive(broker, "r-oneshot", domain="sts")
 
 
 @pytest.mark.asyncio
@@ -786,8 +788,7 @@ async def test_a_pinned_row_is_rebuilt_only_by_the_instance_it_names(
     Every STS scans every interrupted row, because the table is shared.
     Without the filter the two below race for this session and whichever boots
     first takes it — so a run deployed to `sts-tw` comes back on `sts-jp`, and
-    differently on the next restart. `claim_alive` makes that safe; it does not
-    make it *right*.
+    differently on the next restart. Placement is the whole guard.
     """
     store = FakeStsStore()
     store.seed("pinned-1", instance="sts-tw", md_ids=[])
@@ -822,19 +823,40 @@ async def test_a_row_pinned_to_an_instance_nobody_runs_stays_interrupted(
 
 
 @pytest.mark.asyncio
-async def test_an_unpinned_row_is_rebuilt_by_whoever_claims_it(
+async def test_an_unpinned_row_is_rebuilt_by_the_derived_instance(
     broker: Broker,
 ) -> None:
-    """Today's behaviour, unchanged — and why the row records what was *asked*.
-
-    If it recorded where a session happened to land, an unpinned deploy would
-    become pinned the moment it ran, and retiring that instance would strand a
-    session nobody ever asked to put there.
-    """
+    """Null means derive, not race. The row still records what was asked."""
     store = FakeStsStore()
     store.seed("unpinned-1", instance=None, md_ids=[])
-    manager = _manager(broker, store, [], instance="sts-jp")
+
+    async def derive(_api_ids: list[int]) -> str:
+        return "sts-jp"
+
+    manager = _manager(
+        broker, store, [], instance="sts-jp", derive_sts=derive
+    )
     try:
         assert await manager.rebuild_interrupted() == ["unpinned-1"]
+    finally:
+        await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_an_unpinned_row_whose_derivation_is_not_unique_stays_interrupted(
+    broker: Broker,
+) -> None:
+    store = FakeStsStore()
+    store.seed("cross-1", instance=None, md_ids=[])
+
+    async def nobody(_api_ids: list[int]) -> None:
+        return None
+
+    manager = _manager(
+        broker, store, [], instance="sts-jp", derive_sts=nobody
+    )
+    try:
+        assert await manager.rebuild_interrupted() == []
+        assert store.rows["cross-1"].status == "interrupted"
     finally:
         await manager.close_all()

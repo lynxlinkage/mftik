@@ -472,8 +472,8 @@ async def ingest(runtime: MatchRuntime, topic: str, envelope: UntypedEnvelope) -
 async def run_alert_match(stop: asyncio.Event) -> None:
     """``psubscribe log.*`` and resolve Sources until stop.
 
-    Does not drain ``fetch_log_buffer``. Does not import ``flush_rows``.
-    Does not subscribe ``status.sts``.
+    Live ``log.*`` only. Does not replay ``session_logs``. Does not
+    import ``flush_rows``. Does not subscribe ``status.sts``.
     """
     global _runtime
     runtime = MatchRuntime(arm_timers=True)

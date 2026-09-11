@@ -10,10 +10,12 @@ from typing import Any
 
 import uvloop
 from mftik import (
+    InstanceAlreadyServing,
     configure_logging,
     control_subjects,
     instance_name,
     instance_role,
+    refuse_if_serving,
     run_until_stopped,
     serve_health,
 )
@@ -130,9 +132,10 @@ def _rebuild_max_age_s() -> float:
         return _DEFAULT_REBUILD_MAX_AGE_S
 
 
-#: How often to look for sessions whose process died. Well under the window
-#: someone would spend wondering why a strategy is not doing anything, and
-#: far enough above the liveness TTL that a key is never checked mid-refresh.
+#: How often to look for sessions this instance owns and does not hold.
+#: Well under the window someone would spend wondering why a strategy is
+#: not doing anything, and far enough above two reap scans that a row
+#: between persist and ``_sessions`` is not closed on the first look.
 REAP_INTERVAL_SECONDS = 60.0
 
 
@@ -183,6 +186,11 @@ async def amain() -> bool:
             pass
 
     async with Broker() as broker:
+        try:
+            await refuse_if_serving(broker, domain=SOURCE, instance=INSTANCE)
+        except InstanceAlreadyServing as exc:
+            logger.error("%s", exc)
+            return False
         loaded, stamp = refresh()
         if loaded:
             logger.info(
@@ -207,6 +215,8 @@ async def amain() -> bool:
             reset_rebuild_count=sts_db.reset_rebuild_count,
             rebuild_max_age_s=_rebuild_max_age_s(),
             td_instance=sts_db.td_instance,
+            derive_sts=sts_db.derived_sts,
+            allocate_cid_slot=sts_db.next_cid_slot,
             instance=INSTANCE,
         )
         logger.info("STS started instance=%s", INSTANCE)

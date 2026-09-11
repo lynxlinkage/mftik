@@ -18,6 +18,9 @@ while its refcount is above zero (``Dispatcher``), so the recording starts with
 the first subscriber and stops with the last — and both edges are stamped into
 the coverage hash, which is what lets a reader tell a continuous two hours from
 two hours with a hole in the middle.
+
+The store is this region's standalone Redis. Append failure must not raise:
+the fan-out this runs behind is feeding strategies that are trading now.
 """
 
 from __future__ import annotations
@@ -26,9 +29,10 @@ import logging
 import time
 from collections.abc import Iterable, Sequence
 
-from mftik.broker import Broker
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import Topics
+
+from mftik_md.tape_store import TapeStore
 
 logger = logging.getLogger(__name__)
 
@@ -58,17 +62,17 @@ def _now_ms() -> int:
 
 
 class TapeRecorder:
-    """Appends trade prints to a per-feed stream and tracks what it covers."""
+    """Appends trade prints to this region's Redis and tracks what it covers."""
 
     def __init__(
         self,
-        broker: Broker,
+        store: TapeStore,
         *,
         topics: Sequence[str] = DEFAULT_TOPICS,
         maxlen: int = DEFAULT_MAXLEN,
         retention_s: float = DEFAULT_RETENTION_S,
     ) -> None:
-        self._broker = broker
+        self._store = store
         self._topics = frozenset(topics)
         self._maxlen = max(1, maxlen)
         self._retention_s = max(1.0, retention_s)
@@ -79,12 +83,19 @@ class TapeRecorder:
         self._ttl_seconds = int(self._retention_s * 2)
 
     @property
+    def store(self) -> TapeStore:
+        return self._store
+
+    @property
     def topics(self) -> frozenset[str]:
         return self._topics
 
     def records(self, topic: str) -> bool:
         """Whether ``topic`` is one of the recorded feeds."""
         return topic in self._topics
+
+    async def aclose(self) -> None:
+        await self._store.aclose()
 
     async def append(
         self, topic: str, ticker: UniversalTicker, payload: dict[str, object]
@@ -103,7 +114,7 @@ class TapeRecorder:
             logger.exception("MD tape record unreadable feed=%s", feed)
             return
         try:
-            await self._broker.tape_append(
+            await self._store.append(
                 feed,
                 fields,
                 maxlen=self._maxlen,
@@ -119,11 +130,10 @@ class TapeRecorder:
         recorder stopped cleanly it left a stamp, and the two together measure
         the hole — the records before it stay readable, carrying a gap the
         reader can weigh. If it did not, the hole is unmeasurable and
-        continuity restarts here. :meth:`Broker.tape_mark_recording` decides
-        which of those happened; this only reports the clock.
+        continuity restarts here.
         """
         try:
-            await self._broker.tape_mark_recording(
+            await self._store.mark_recording(
                 feed, since_ms=_now_ms(), ttl_seconds=self._ttl_seconds
             )
         except Exception:
@@ -132,7 +142,7 @@ class TapeRecorder:
     async def stopped(self, feed: str) -> None:
         """Stamp the moment ``feed`` stopped recording."""
         try:
-            await self._broker.tape_mark_stopped(
+            await self._store.mark_stopped(
                 feed, at_ms=_now_ms(), ttl_seconds=self._ttl_seconds
             )
         except Exception:
@@ -146,7 +156,7 @@ class TapeRecorder:
             if topic not in self._topics:
                 continue
             try:
-                dropped = await self._broker.tape_trim_before(feed, min_id_ms=horizon)
+                dropped = await self._store.trim_before(feed, min_id_ms=horizon)
             except Exception:
                 logger.exception("MD tape trim failed feed=%s", feed)
                 continue

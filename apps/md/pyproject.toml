@@ -12,6 +12,8 @@ dependencies = [
     # into the same venv, and a per-app sync would start this process on a
     # missing import.
     "uvloop>=0.21",
+    # Regional tape disk. Not a BrokerTransport — STS never opens this.
+    "redis>=5",
 ]
 
 [tool.uv.sources]

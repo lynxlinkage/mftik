@@ -3,11 +3,13 @@
 Every other ending records its own row. This covers the one that cannot —
 SIGKILL, OOM, the machine going away — where the row would otherwise keep
 claiming a session is running with no owner left to say otherwise.
+
+A row is an orphan when it belongs to this instance and this process does
+not have it locally. Two scans must agree.
 """
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -15,7 +17,6 @@ from types import SimpleNamespace
 import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
-from mftik.liveness import alive_name, clear_alive, is_alive, mark_alive
 from mftik.protocol import StsCreateSessionRequest
 from mftik.strategy import Strategy
 from mftik_sts.impl import register
@@ -32,6 +33,7 @@ class FakeStsStore:
         strategy: str = "oco",
         cid_slot: int | None = None,
         restart: str = "always",
+        instance: str | None = "sts",
     ) -> SimpleNamespace:
         row = SimpleNamespace(
             session_id=session_id,
@@ -44,6 +46,8 @@ class FakeStsStore:
             restart=restart,
             rebuild_count=0,
             reason=None,
+            instance=instance,
+            td={},
         )
         self.rows[session_id] = row
         return row
@@ -110,6 +114,13 @@ def _manager(broker: Broker, store: FakeStsStore) -> SessionManager:
     )
 
 
+async def _reap_twice(manager: SessionManager) -> list[str]:
+    first = await manager.reap_orphans()
+    if first:
+        return first
+    return await manager.reap_orphans()
+
+
 @pytest.mark.asyncio
 async def test_a_row_with_no_owner_is_interrupted(broker: Broker) -> None:
     """Interrupted rather than failed: nothing was wrong with the strategy
@@ -122,6 +133,7 @@ async def test_a_row_with_no_owner_is_interrupted(broker: Broker) -> None:
     store.seed_live("ghost-1")
     manager = _manager(broker, store)
 
+    assert await manager.reap_orphans() == []
     assert await manager.reap_orphans() == ["ghost-1"]
     row = store.rows["ghost-1"]
     assert row.status == "interrupted"
@@ -139,39 +151,45 @@ async def test_a_session_this_process_runs_is_left_alone(broker: Broker) -> None
         )
     )
 
-    assert await manager.reap_orphans() == []
+    assert await _reap_twice(manager) == []
     assert store.rows["mine-1"].status == "live"
     await manager.close_all()
 
 
 @pytest.mark.asyncio
-async def test_a_session_another_process_runs_is_left_alone(
+async def test_a_session_another_instance_owns_is_left_alone(
     broker: Broker,
 ) -> None:
-    """The point of the key: "not mine" is not the same as "nobody's".
-
-    Several STS processes serve the same RPC subject, so reaping on ownership
-    alone would have each one killing the others' sessions.
-    """
     store = FakeStsStore()
-    store.seed_live("theirs-1")
-    # Stands in for the peer that owns it holding its key.
-    await mark_alive(broker, "theirs-1", domain="sts")
+    store.seed_live("theirs-1", instance="sts-jp")
     manager = _manager(broker, store)
 
-    assert await manager.reap_orphans() == []
+    assert await _reap_twice(manager) == []
     assert store.rows["theirs-1"].status == "live"
 
 
 @pytest.mark.asyncio
-async def test_the_key_is_claimed_before_the_row_exists(broker: Broker) -> None:
-    """Otherwise a reaper could see a live row with no key and fail a
-    session that is a moment old."""
+async def test_an_unpinned_row_without_a_derivation_is_left_alone(
+    broker: Broker,
+) -> None:
+    store = FakeStsStore()
+    store.seed_live("cross-1", instance=None)
+    manager = _manager(broker, store)
+
+    assert await _reap_twice(manager) == []
+    assert store.rows["cross-1"].status == "live"
+
+
+@pytest.mark.asyncio
+async def test_the_session_is_registered_before_the_row_exists(
+    broker: Broker,
+) -> None:
+    """Otherwise a reaper could see a live row with no local session."""
     store = FakeStsStore()
     seen: list[bool] = []
 
     async def watching_persist(**kwargs):
-        seen.append(await is_alive(broker, kwargs["session_id"], domain="sts"))
+        seen.append(kwargs["session_id"] in manager._sessions)  # noqa: SLF001
         return await store.persist_live(**kwargs)
 
     manager = _manager(broker, store)
@@ -187,83 +205,11 @@ async def test_the_key_is_claimed_before_the_row_exists(broker: Broker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_closing_releases_the_key(broker: Broker) -> None:
-    store = FakeStsStore()
-    manager = _manager(broker, store)
-    await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="rel-1", created_by=1, strategy="idle_reap"
-        )
-    )
-    assert await is_alive(broker, "rel-1", domain="sts")
-
-    await manager.close("rel-1")
-    assert not await is_alive(broker, "rel-1", domain="sts")
-
-
-@pytest.mark.asyncio
-async def test_the_key_is_renewed_while_the_session_runs(
-    broker: Broker,
-) -> None:
-    """A long-running session must not be reaped when its key would expire."""
-    store = FakeStsStore()
-    manager = _manager(broker, store)
-    await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="renew-1", created_by=1, strategy="idle_reap"
-        )
-    )
-    # Expire it out from under the session; the heartbeat must put it back.
-    await broker.lease_drop(alive_name("renew-1", domain="sts"))
-    for _ in range(50):
-        if await is_alive(broker, "renew-1", domain="sts"):
-            break
-        await asyncio.sleep(0.02)
-
-    assert await is_alive(broker, "renew-1", domain="sts")
-    await manager.close_all()
-
-
-@pytest.mark.asyncio
-async def test_an_unreadable_liveness_check_reaps_nothing(
-    broker: Broker,
-) -> None:
-    """A broker that will not answer is not evidence that a session died.
-
-    Leaving a stale row is recoverable on the next scan; failing a strategy
-    that is still trading is not.
-    """
-    store = FakeStsStore()
-    store.seed_live("unknown-1")
-    manager = _manager(broker, store)
-
-    original = broker.lease_held
-
-    async def exploding_read(*args, **kwargs):
-        raise RuntimeError("broker gone")
-
-    broker.lease_held = exploding_read  # type: ignore[method-assign]
-    try:
-        assert await manager.reap_orphans() == []
-    finally:
-        broker.lease_held = original  # type: ignore[method-assign]
-    assert store.rows["unknown-1"].status == "live"
-
-
-@pytest.mark.asyncio
 async def test_reaping_is_safe_to_repeat(broker: Broker) -> None:
     store = FakeStsStore()
     store.seed_live("ghost-2")
     manager = _manager(broker, store)
 
-    assert await manager.reap_orphans() == ["ghost-2"]
-    # Already terminal, so it is no longer in the live listing.
+    assert await _reap_twice(manager) == ["ghost-2"]
     assert await manager.reap_orphans() == []
     assert store.rows["ghost-2"].status == "interrupted"
-
-
-@pytest.mark.asyncio
-async def test_clearing_a_key_that_was_never_claimed_is_fine(
-    broker: Broker,
-) -> None:
-    await clear_alive(broker, "never-existed", domain="sts")

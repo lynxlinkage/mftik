@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mftik_db.models.api import Api
 from mftik_db.models.instance import Instance
 from mftik_db.models.session import (
     MdSessionRow,
@@ -53,6 +54,42 @@ class InstanceRepository(BaseRepository[Instance]):
             )
         )
 
+    async def derived_sts(self, api_ids: Sequence[int]) -> str | None:
+        """The unique enabled STS in the region those credentials share.
+
+        ``None`` when there is no unique answer: no accounts, a missing
+        credential, a missing or empty region, mixed regions, or that
+        region not having exactly one enabled STS. Callers must not coin
+        flip — a create names an instance, an existing null row stays
+        interrupted.
+        """
+        ids = list(dict.fromkeys(int(i) for i in api_ids))
+        if not ids:
+            return None
+        result = await self.session.execute(
+            select(Instance.region)
+            .join(Api, Api.instance_id == Instance.id)
+            .where(Api.id.in_(ids))
+        )
+        regions = [row[0] for row in result.all()]
+        if len(regions) != len(ids) or any(not region for region in regions):
+            return None
+        unique = set(regions)
+        if len(unique) != 1:
+            return None
+        region = next(iter(unique))
+        sts = await self.session.execute(
+            select(Instance.name).where(
+                Instance.domain == SessionDomain.STS.value,
+                Instance.region == region,
+                Instance.enabled.is_(True),
+            )
+        )
+        names = list(sts.scalars().all())
+        if len(names) != 1:
+            return None
+        return names[0]
+
     async def update(
         self,
         instance: Instance,
@@ -60,12 +97,14 @@ class InstanceRepository(BaseRepository[Instance]):
         region: str | None = None,
         enabled: bool | None = None,
     ) -> Instance:
-        """Change what nothing routes on.
+        """Change the label and the drain flag.
 
         Deliberately cannot touch ``name`` or ``domain``. A process learns its
         name from ``MFTIK_INSTANCE`` in an environment this service cannot
         write, so a rename here would leave the row and the process disagreeing
-        with nothing to reconcile them — see :class:`Instance`.
+        with nothing to reconcile them — see :class:`Instance`. ``region``
+        places unnamed STS sessions, so editing a TD's region moves where
+        those sessions come back.
         """
         if region is not None:
             instance.region = region

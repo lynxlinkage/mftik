@@ -5,7 +5,7 @@ rather than in the STS app so it installs beside a strategy on a developer's
 machine. Nothing in it needs a database or a running node.
 """
 
-from mftik.health import serve_health
+from mftik.health import InstanceAlreadyServing, refuse_if_serving, serve_health
 from mftik.instance import (
     INSTANCE_ENV,
     INSTANCED_PLANES,
@@ -34,6 +34,8 @@ __all__ = [
     "instance_name",
     "instance_role",
     "validate_instance_name",
+    "InstanceAlreadyServing",
+    "refuse_if_serving",
     "serve_health",
     "run_heartbeat_service",
     "run_until_stopped",

@@ -8,10 +8,12 @@ import signal
 
 import uvloop
 from mftik import (
+    InstanceAlreadyServing,
     configure_logging,
     control_subjects,
     instance_name,
     instance_role,
+    refuse_if_serving,
     run_until_stopped,
     serve_health,
 )
@@ -93,10 +95,11 @@ async def run_rpc(
                 continue
 
 
-#: How often to look for attaches whose strategy is gone. Well under the
-#: window someone would spend wondering why an api_id still reports a session
-#: nobody is running, and far enough above the liveness TTL that a key is
-#: never checked mid-refresh.
+#: How often to look for attaches this instance owns and does not hold.
+#: Well under the window someone would spend wondering why an api_id still
+#: reports a session nobody is running, and far enough above two reap
+#: scans that a row between persist and ``_accounts`` is not closed on
+#: the first look.
 REAP_INTERVAL_SECONDS = 60.0
 
 
@@ -136,6 +139,11 @@ async def amain() -> bool:
             pass
 
     async with Broker() as broker:
+        try:
+            await refuse_if_serving(broker, domain=SOURCE, instance=INSTANCE)
+        except InstanceAlreadyServing as exc:
+            logger.error("%s", exc)
+            return False
         # Venue comes from the apis row: paper goes to the paper-engine
         # container, Gate connects to the venue directly.
         # One symbol client for the process: its cache is what keeps symbol
@@ -164,6 +172,8 @@ async def amain() -> bool:
             mark_done=td_db.mark_session_done,
             list_db_sessions=td_db.list_sessions,
             history=history,
+            instance=INSTANCE,
+            td_instance=td_db.instance_name,
         )
         logger.info("TD started instance=%s (venue session factory)", INSTANCE)
         subjects = control_subjects(SOURCE, INSTANCE, ROLE)

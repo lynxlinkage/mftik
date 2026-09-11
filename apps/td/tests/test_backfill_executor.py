@@ -26,7 +26,7 @@ from mftik_db.repositories import (
     FillRepository,
     OrderRepository,
 )
-from mftik_td.backfill.executor import BackfillExecutor, lock_name
+from mftik_td.backfill.executor import BackfillExecutor
 from mftik_td.backfill.reader import HistoryPage, NoHistoryReaderError
 from mftik_td.history import order_row
 
@@ -484,7 +484,7 @@ async def test_a_second_run_on_one_account_declines(broker, scope) -> None:
     """The rate-limit budget is shared with whatever is trading on the key."""
     await seed_order(scope, ts=ago(3600))
     ex = executor(broker, scope, FakeFactory(FakeReader()))
-    await broker.lease_take(lock_name(API_ID), ttl=60, owner="someone-else")
+    ex._inflight.add(API_ID)
 
     outcome = await ex.run(API_ID)
 

@@ -71,6 +71,16 @@ async def test_stop_one_sts_drops_td_refcount(broker: Broker) -> None:
     assert r2.refcount == 2
     assert td.get(1) is not None
 
+    td_logs: list[str] = []
+    log_stop = asyncio.Event()
+
+    async def listen_td_logs() -> None:
+        async for env in broker.subscribe(Topics.log_td(1), stop=log_stop):
+            td_logs.append(env.to_json())
+
+    log_task = asyncio.create_task(listen_td_logs())
+    await asyncio.sleep(0.05)
+
     await sts.close("a")
     # The detach is answered before close returns, but the teardown behind it
     # (stopping the link, destroying an account at refcount 0) settles just
@@ -83,8 +93,10 @@ async def test_stop_one_sts_drops_td_refcount(broker: Broker) -> None:
     assert td.get(1) is not None
     assert td._accounts[1].refcount == 1
 
-    buf = await broker.fetch_log_buffer(Topics.log_td(1))
-    assert any("refcount 2→1" in line for line in buf)
+    assert any("refcount 2→1" in line for line in td_logs)
+    log_stop.set()
+    log_task.cancel()
+    await asyncio.gather(log_task, return_exceptions=True)
 
     await sts.close("b")
     for _ in range(30):

@@ -5,9 +5,16 @@ different question about the same objects: who brings them into existence, at
 what point in a deploy, and what happens when two versions disagree about their
 shape.
 
-Today the answer is "whichever process gets there first, on connect, using the
-constants it was compiled with". That is one answer applied to three kinds of
-object that want three different ones.
+[`docs/JetStreamRemoval.md`](JetStreamRemoval.md) deleted the declared
+streams, the tape streams, and the four KV buckets. `connect()` opens a
+core NATS connection and does not ensure anything. A
+`mftik-broker-migrate` for stream shape is moot — there is nothing to
+reshape. The overlap hazard below (old and new `update_stream` during a
+rolling deploy) is the class of problem that document forbids for another
+reason: two processes must not serve one instance name at once.
+
+This file is the history of how those objects used to appear. The live
+contract is [`Broker.md`](Broker.md).
 
 ## Three lifetimes, one mechanism
 
@@ -86,14 +93,17 @@ Tape streams cannot be declared: the feed set is venue symbols times recorded
 topics, discovered at runtime. But they do not need to be, because **the set is
 dynamic and the shape is not**.
 
+Tape recording lives on regional Redis (`apps/md/.../tape_store.py`).
+`MD_TAPE_MAXLEN` and `MD_TAPE_RETENTION_S` are still read once and handed
+to every feed; they are `XADD MAXLEN` and `XTRIM MINID` / key TTL, not
+JetStream stream limits. There are no broker `tape_*` streams.
+
 `_ensure_tape_stream` takes `maxlen` and `ttl_seconds` per call, and
 `transport/nats.py` explains the per-feed stream partly on that basis — that
 retention "is per feed in the interface". No caller uses it that way.
-`_build_recorder` (`apps/md/app.py`) reads `MD_TAPE_MAXLEN` and
-`MD_TAPE_RETENTION_S` once and hands the same two numbers to every feed. The
-load-bearing reason for a stream per feed is the other one the comment gives:
-sequences are the stream's, so "the newest N records" is subtraction rather than
-a scan past every other feed's prints.
+The load-bearing reason for a leftover stream per feed is the other one
+the comment gives: sequences are the stream's, so "the newest N records"
+is subtraction rather than a scan past every other feed's prints.
 
 So the rule is not "declare everything". It is:
 

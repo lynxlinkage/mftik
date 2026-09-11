@@ -26,6 +26,7 @@ from mftik.registry.errors import MissingRemoteExtras, RegistryError
 from mftik.registry.inspect import inspect_files
 from mftik.registry.protocol import handshake_info
 from mftik.registry.sync import connect_remote
+from mftik_api import orchestrate
 from mftik_api.auth.principal import Principal
 from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.routes import environment as environment_routes
@@ -92,6 +93,20 @@ _OWNER = Principal.owner(1, via="password")
 @pytest.fixture(autouse=True)
 def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
     patch_authoritative_anycast(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _named_sts_without_a_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These sequences are about extras and deploy, not STS placement."""
+
+    async def _target(instance, td):  # noqa: ANN001
+        return instance or "sts"
+
+    async def _ok(broker, instance):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(orchestrate, "_sts_target", _target)
+    monkeypatch.setattr(orchestrate, "_check_sts_instance", _ok)
 
 
 @pytest.fixture

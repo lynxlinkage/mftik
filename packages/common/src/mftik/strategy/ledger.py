@@ -26,14 +26,16 @@ from typing import TYPE_CHECKING
 
 from mftik.broker.errors import RequestTimeoutError
 from mftik.exchange.models import Balance
-from mftik.exchange.oms import LedgerEntry, LedgerView
+from mftik.exchange.oms import LedgerView
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     STS_ENSURE_LEVERAGE,
+    TD_LEDGER_VIEW,
     EnsureLeverage,
     Envelope,
     LeverageAck,
     RejectCode,
+    TdLedgerViewRequest,
     Topics,
 )
 from mftik.protocol.reject_codes import describe
@@ -80,7 +82,24 @@ class StrategyLedger:
         return self._last_code
 
     async def view(self, api_id: int | None = None) -> LedgerView:
-        """Read ``td.ledger.{api_id}``: asset → free / prelock / lock."""
+        """Read the book in the TD that holds ``api_id``."""
+        return await self._ask_view(api_id, asset=None)
+
+    async def available(self, asset: str, api_id: int | None = None) -> Decimal:
+        """Spendable ``asset`` — venue-free minus TD's pre-locks."""
+        return (await self._ask_view(api_id, asset=asset)).available(asset)
+
+    async def free(self, asset: str, api_id: int | None = None) -> Decimal:
+        """What the venue calls free, ignoring pre-locks."""
+        return (await self._ask_view(api_id, asset=asset)).free(asset)
+
+    async def prelock(self, asset: str, api_id: int | None = None) -> Decimal:
+        """Committed by orders TD has sent but the venue has not confirmed."""
+        return (await self._ask_view(api_id, asset=asset)).prelock(asset)
+
+    async def _ask_view(
+        self, api_id: int | None, *, asset: str | None
+    ) -> LedgerView:
         resolved = self._resolve(api_id)
         log = session_log(self._strategy)
         if resolved is None or self._strategy is None:
@@ -90,55 +109,28 @@ class StrategyLedger:
         if session is None:
             log.record("read", "ledger.view", dir="out", resolved=False)
             return LedgerView()
-        getter = getattr(session, "projected_state", None)
-        rows = getter(Topics.td_ledger(resolved)) if getter is not None else None
-        if rows is None:
-            rows = await session.broker.state_all(Topics.td_ledger(resolved))
-        # Every sizing decision downstream rests on these numbers, and they are
-        # TD's, read at one moment. Nothing else in the log can reconstruct
-        # what the balance was when the strategy asked.
+        envelope = Envelope[TdLedgerViewRequest].wrap(
+            TdLedgerViewRequest(api_id=resolved, asset=asset),
+            type=TD_LEDGER_VIEW,
+            source=_source_name(session),
+            session_id=getattr(session, "session_id", None),
+        )
+        reply = await session.broker.request(
+            Topics.td_account(resolved),
+            envelope,
+            timeout=self._ack_timeout,
+        )
+        view = LedgerView.model_validate(reply.payload or {})
         log.record(
             "read",
             "ledger.view",
             dir="out",
             api_id=resolved,
-            count=len(rows),
-            payload=rows,
+            asset=asset,
+            count=len(view.balances),
+            payload=view.model_dump(mode="json"),
         )
-        return LedgerView.from_rows(resolved, rows)
-
-    async def available(self, asset: str, api_id: int | None = None) -> Decimal:
-        """Spendable ``asset`` — venue-free minus TD's pre-locks."""
-        return (await self._fresh_view(asset, api_id)).available(asset)
-
-    async def free(self, asset: str, api_id: int | None = None) -> Decimal:
-        """What the venue calls free, ignoring pre-locks."""
-        return (await self._fresh_view(asset, api_id)).free(asset)
-
-    async def prelock(self, asset: str, api_id: int | None = None) -> Decimal:
-        """Committed by orders TD has sent but the venue has not confirmed."""
-        return (await self._fresh_view(asset, api_id)).prelock(asset)
-
-    async def _fresh_view(self, asset: str, api_id: int | None) -> LedgerView:
-        """``view()`` for the log, with ``asset`` overlaid from a direct read.
-
-        The projection can lag the reserve that just ran; a sizing decision
-        must see that write, not the last watch delivery.
-        """
-        view = await self.view(api_id)
-        resolved = self._resolve(api_id)
-        if resolved is None or self._strategy is None:
-            return view
-        session = self._strategy.session
-        if session is None:
-            return view
-        row = await session.broker.state_get(Topics.td_ledger(resolved), asset)
-        balances = dict(view.balances)
-        if row is None:
-            balances.pop(asset, None)
-        else:
-            balances[asset] = LedgerEntry.model_validate(row).to_balance(asset)
-        return LedgerView(api_id=view.api_id, balances=balances)
+        return view
 
     async def balances(self, api_id: int | None = None) -> dict[str, Balance]:
         return dict((await self.view(api_id)).balances)
@@ -289,3 +281,9 @@ class StrategyLedger:
         if self._strategy is None or self._strategy.session is None:
             raise RuntimeError("strategy ledger is not bound to a session")
         return self._strategy.session
+
+
+def _source_name(session: object) -> str:
+    strategy = getattr(session, "strategy", None)
+    name = getattr(strategy, "name", None)
+    return f"strategy.{name}" if name else "sts"

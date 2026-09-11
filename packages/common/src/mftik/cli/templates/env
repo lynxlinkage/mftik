@@ -31,9 +31,11 @@ POSTGRES_DB=mftik
 DATABASE_URL=postgresql+asyncpg://mftik:{password}@postgres:5432/mftik
 DATABASE_URL_SYNC=postgresql+psycopg://mftik:{password}@postgres:5432/mftik
 NATS_URL=nats://nats:4222
+# MD only — this region's tape disk. STS must not set this.
+REDIS_URL=redis://redis:6379/0
 
-# Namespaces every subject, stream and KV bucket this node owns. Worth setting
-# if the broker is ever shared; harmless here.
+# Namespaces every subject this node owns. Worth setting if the broker is
+# ever shared; harmless here.
 BROKER_KEY_PREFIX=mftik
 
 # --- the app ---------------------------------------------------------------

@@ -15,7 +15,7 @@ neighbour on the box biases both loops instead of whichever went second.
     just loop-bench --probe               # behaviour, not throughput
 
 Needs a NATS server nobody else is using — it publishes thousands of messages
-and writes a tape under its own key prefix. Point it somewhere scratch:
+under its own key prefix. Point it somewhere scratch:
 
     NATS_URL=nats://localhost:4222 just loop-bench
 
@@ -91,31 +91,23 @@ def quote_envelope(seq: int) -> UntypedEnvelope:
 async def case_fanout(messages: int = 4000, sessions: int = 8) -> dict:
     """MD's hot path: `Dispatcher.publish` as it is written today.
 
-    One awaited PUBLISH per subscribed session, then the tape append — so
-    `sessions + 1` serialised round trips per print. The loop cannot make a
-    round trip that does not happen, which is why `pipelined_fanout` exists
-    beside this one.
+    One awaited PUBLISH per subscribed session — so `sessions` serialised
+    round trips per print. The loop cannot make a round trip that does
+    not happen, which is why `pipelined_fanout` exists beside this one.
     """
     broker = Broker(broker_config())
     await broker.connect()
     topics = [Topics.md_session(f"loopbench-{i}") for i in range(sessions)]
-    feed = "binance.spot.BTC/USDT.best_quote"
 
     cpu0, t0 = cpu_seconds(), time.perf_counter()
     for seq in range(messages):
         envelope = quote_envelope(seq)
         for topic in topics:
             await broker.publish(topic, envelope)
-        await broker.tape_append(
-            feed,
-            {"payload": json.dumps(envelope.payload)},
-            maxlen=10_000,
-            ttl_seconds=60,
-        )
     wall, cpu = time.perf_counter() - t0, cpu_seconds() - cpu0
     await broker.close()
 
-    round_trips = messages * (sessions + 1)
+    round_trips = messages * sessions
     return {
         "messages": messages,
         "sessions": sessions,
@@ -137,26 +129,17 @@ async def case_pipelined_fanout(messages: int = 4000, sessions: int = 8) -> dict
     broker = Broker(broker_config())
     await broker.connect()
     topics = [Topics.md_session(f"loopbench-{i}") for i in range(sessions)]
-    feed = "binance.spot.BTC/USDT.best_quote"
 
     cpu0, t0 = cpu_seconds(), time.perf_counter()
     for seq in range(messages):
         envelope = quote_envelope(seq)
         await asyncio.gather(
             *(broker.publish(topic, envelope) for topic in topics),
-            broker.tape_append(
-                feed,
-                {"payload": json.dumps(envelope.payload)},
-                maxlen=10_000,
-                ttl_seconds=60,
-            ),
         )
     wall, cpu = time.perf_counter() - t0, cpu_seconds() - cpu0
     await broker.close()
 
-    # Same count as ``case_fanout``: ``gather`` overlaps PubAcks, it does not
-    # fold them into one JetStream round trip.
-    round_trips = messages * (sessions + 1)
+    round_trips = messages * sessions
     return {
         "messages": messages,
         "sessions": sessions,

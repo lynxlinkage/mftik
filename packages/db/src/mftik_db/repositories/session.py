@@ -6,9 +6,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Generic, TypeVar
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mftik_db.models.cid_slot import SLOT_SPACE, CidSlotSeq
 from mftik_db.models.session import (
     MdSessionRow,
     SessionStatus,
@@ -66,6 +67,25 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
 
     async def get_by_session_id(self, session_id: str) -> StsSessionRow | None:
         return await self.session.get(StsSessionRow, session_id)
+
+    async def next_cid_slot(self) -> int:
+        """Reserve the next global ``cid_slot`` (``nextval % 65536``).
+
+        One row, incremented here. A process-local counter would collide
+        across STS instances and again after a restart.
+        """
+        result = await self.session.execute(
+            update(CidSlotSeq)
+            .where(CidSlotSeq.id == 1)
+            .values(value=CidSlotSeq.value + 1)
+            .returning(CidSlotSeq.value)
+        )
+        value = result.scalar_one_or_none()
+        if value is None:
+            self.session.add(CidSlotSeq(id=1, value=1))
+            await self.session.flush()
+            value = 1
+        return int(value) % SLOT_SPACE
 
     def _list_filters(
         self,

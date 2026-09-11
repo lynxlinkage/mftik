@@ -21,8 +21,24 @@ from mftik.protocol import (
     StsSessionControlResultEnvelope,
     TdAccountRef,
 )
+from mftik_api import orchestrate
 from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.orchestrate import deploy_strategy
+
+
+@pytest.fixture(autouse=True)
+def _named_sts_without_a_database(monkeypatch) -> None:
+    """These tests are about create/attach outcomes, not STS placement."""
+
+    async def _target(instance, td):  # noqa: ANN001
+        return instance or "sts"
+
+    async def _ok(broker, instance):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(orchestrate, "_sts_target", _target)
+    monkeypatch.setattr(orchestrate, "_check_sts_instance", _ok)
+
 
 REFUSAL = (
     "no bestquote feed for BinanceUM_Perp_BTCUSDT in md "

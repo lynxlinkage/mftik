@@ -1,10 +1,8 @@
-"""Closing attaches whose strategy is gone, in memory and in the table.
+"""Closing attaches this instance owns and does not hold locally.
 
-The lease is the primary signal, and it has one blind spot: it can only
-expire while something is reading it, so a lease loop that stops takes the
-expiry with it. This scan is the check that does not run inside the thing it
-is checking — it asks whether the STS session behind an attach still exists,
-which is answered by a key no TD loop has to be alive to read.
+A live link's STS death is the session heartbeat. This scan is the
+restart case: rows left in our name with no local link, after strikes
+so a row between two attaches is not reaped on the first look.
 """
 
 from __future__ import annotations
@@ -19,7 +17,6 @@ import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange
-from mftik.liveness import clear_alive, mark_alive
 from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     Envelope,
@@ -152,7 +149,6 @@ async def _attached(
     broker: Broker, sessions: SessionManager, session_id: str
 ) -> tuple[asyncio.Task, asyncio.Event]:
     """Attach ``session_id`` the way a running STS session would."""
-    await mark_alive(broker, session_id, domain="sts")
     stop = asyncio.Event()
     task = asyncio.create_task(_lease_publisher(broker, session_id, stop))
     await sessions.attach(
@@ -164,21 +160,19 @@ async def _attached(
 
 
 @pytest.mark.asyncio
-async def test_a_link_whose_strategy_is_gone_is_detached(
+async def test_a_link_whose_lease_loop_died_is_detached(
     broker: Broker, sessions: SessionManager, store: FakeStore
 ) -> None:
-    """The case the lease cannot reach, because its reader is what died."""
     task, stop = await _attached(broker, sessions, "gone-1")
-    await clear_alive(broker, "gone-1", domain="sts")
+    link = sessions._accounts[API_ID].links["gone-1"]  # noqa: SLF001
+    link.stop.set()
+    await asyncio.gather(*link.tasks, return_exceptions=True)
 
-    # One scan is a suspicion, not a verdict.
     assert await sessions.reap_orphans() == []
     assert store.status("gone-1") == "live"
 
     assert await sessions.reap_orphans() == [("gone-1", API_ID)]
     assert store.status("gone-1") == "done"
-    # The point of detaching rather than only closing the row: the venue
-    # session behind the last link goes too.
     assert sessions.get(API_ID) is None
 
     stop.set()
@@ -204,19 +198,20 @@ async def test_a_running_strategy_keeps_its_link(
 
 
 @pytest.mark.asyncio
-async def test_a_key_that_comes_back_clears_the_strikes(
+async def test_a_revived_lease_loop_clears_the_strikes(
     broker: Broker, sessions: SessionManager, store: FakeStore
 ) -> None:
-    """A Redis outage past the TTL looks exactly like a stopped strategy for
-    one scan. Two in a row, with the key absent throughout, is what separates
-    them — so a key that returns must start the count over."""
+    """One dead-task scan is a suspicion. A live task afterwards starts over."""
     task, stop = await _attached(broker, sessions, "blip-1")
+    link = sessions._accounts[API_ID].links["blip-1"]  # noqa: SLF001
+    link.stop.set()
+    await asyncio.gather(*link.tasks, return_exceptions=True)
 
-    await clear_alive(broker, "blip-1", domain="sts")
     assert await sessions.reap_orphans() == []
-    await mark_alive(broker, "blip-1", domain="sts")
+    link.tasks = [asyncio.create_task(asyncio.sleep(60))]
     assert await sessions.reap_orphans() == []
-    await clear_alive(broker, "blip-1", domain="sts")
+    link.stop.set()
+    await asyncio.gather(*link.tasks, return_exceptions=True)
     assert await sessions.reap_orphans() == []
 
     assert store.status("blip-1") == "live"
@@ -229,66 +224,40 @@ async def test_a_key_that_comes_back_clears_the_strikes(
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_liveness_check_detaches_nothing(
+async def test_a_row_left_by_a_previous_process_is_closed_after_two_scans(
     broker: Broker, sessions: SessionManager, store: FakeStore
 ) -> None:
-    """A broker that will not answer is not evidence that a strategy stopped.
-
-    A stale link survives to the next scan; one detached by mistake takes the
-    attach out from under a strategy that is still trading.
-    """
-    task, stop = await _attached(broker, sessions, "unreadable-1")
-    await clear_alive(broker, "unreadable-1", domain="sts")
-    original = broker.lease_held
-
-    async def exploding_read(*args, **kwargs):
-        raise RuntimeError("broker gone")
-
-    broker.lease_held = exploding_read  # type: ignore[method-assign]
-    try:
-        assert await sessions.reap_orphans() == []
-        assert await sessions.reap_orphans() == []
-    finally:
-        broker.lease_held = original  # type: ignore[method-assign]
-
-    assert store.status("unreadable-1") == "live"
-    assert sessions.get(API_ID) is not None
-
-    stop.set()
-    await sessions.detach(
-        session_id="unreadable-1", api_id=API_ID, reason="test"
-    )
-    await asyncio.gather(task, return_exceptions=True)
-    await sessions.close_all()
-
-
-@pytest.mark.asyncio
-async def test_a_row_left_by_a_previous_process_is_closed(
-    broker: Broker, sessions: SessionManager, store: FakeStore
-) -> None:
-    """A restart clears the links but not the table.
-
-    Nothing is running behind this row to be wrong about, so it goes on the
-    first scan — the strike count guards live attaches, not dead rows.
-    """
+    """A restart clears the links but not the table. Strikes still apply."""
     store.seed_live("ghost-1")
 
+    assert await sessions.reap_orphans() == []
     assert await sessions.reap_orphans() == [("ghost-1", API_ID)]
     assert store.status("ghost-1") == "done"
 
 
 @pytest.mark.asyncio
-async def test_a_row_whose_strategy_still_runs_is_left_alone(
-    broker: Broker, sessions: SessionManager, store: FakeStore
+async def test_a_row_for_another_td_is_left_alone(
+    broker: Broker, paper: PaperExchange, store: FakeStore
 ) -> None:
-    """Not this process's link is not the same as nobody's.
+    factory = PaperSessionFactory(broker, paper)
+    factory.bind_api(API_ID, api_key="key-3", api_secret="sec-3")
 
-    Several TD processes serve the same subject; the key is what tells a row
-    another one is running from a row with no owner at all.
-    """
+    async def other_td(_api_id: int) -> str:
+        return "td-jp"
+
+    sessions = SessionManager(
+        factory,
+        broker,
+        persist_live=store.persist_live,
+        mark_done=store.mark_done,
+        list_db_sessions=store.list_sessions,
+        lease_grace=2.0,
+        instance="td-tw",
+        td_instance=other_td,
+    )
     store.seed_live("theirs-1")
-    await mark_alive(broker, "theirs-1", domain="sts")
 
+    assert await sessions.reap_orphans() == []
     assert await sessions.reap_orphans() == []
     assert store.status("theirs-1") == "live"
 

@@ -123,11 +123,13 @@ class Strategy:
         self.tape.read(ticker, topic="aggtrade") — the trade history MD kept
         while something else held the feed, as the same Trade / AggTrade the
         live hooks are handed. Only ``aggtrade`` and ``trade`` are recorded.
-        The slice says what it covers (``continuous_since_ms``, ``recording``,
-        ``span_ms``): a count of prints is not a length of history, and a
-        strategy that needs N of something has to check rather than assume.
-        Empty is a normal answer — nothing was holding the feed, or MD runs
-        with recording off.
+        Routed to the MD instance this session attached; a feed that is not
+        on the session's ``md`` map raises. The slice says what it covers
+        (``continuous_since_ms``, ``recording``, ``span_ms``): a count of
+        prints is not a length of history, and a strategy that needs N of
+        something has to check rather than assume. Empty from the right MD
+        is a normal answer — nothing was holding the feed, or recording is
+        off.
 
     Event log (wired, nothing to call):
         Every event reaching a hook here, and every order, cancel and query

@@ -16,6 +16,7 @@ from mftik.protocol import (
     StsRegistryReloadResultEnvelope,
 )
 from mftik.registry import RegistryStore, qualify
+from mftik_api import orchestrate
 from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.routes import registry as registry_routes
 from mftik_api.routes.registry import (
@@ -44,6 +45,20 @@ _YML = "td: {}\nmd: []\nsts:\n  qty: 1\n"
 @pytest.fixture(autouse=True)
 def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
     patch_authoritative_anycast(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _named_sts_without_a_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests are about registry add and deploy errors, not placement."""
+
+    async def _target(instance, td):  # noqa: ANN001
+        return instance or "sts"
+
+    async def _ok(broker, instance):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(orchestrate, "_sts_target", _target)
+    monkeypatch.setattr(orchestrate, "_check_sts_instance", _ok)
 
 
 class ReloadingBroker:

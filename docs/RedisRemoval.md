@@ -4,6 +4,12 @@ The broker has had two transports since #80 landed the strategy pattern and
 made NATS the default. This is the design for taking the second one out, and
 the reasoning for doing it now rather than after the first deploy.
 
+Redis does not return as a `BrokerTransport`.
+[`docs/JetStreamRemoval.md`](JetStreamRemoval.md) may put a Redis next to
+each region's MD as the tape disk only — STS never opens it, and lease /
+state / log stay off Redis. That is a new store with one caller, not this
+transport coming back.
+
 It is written before the change so the commits that follow can be read against
 it. Nothing here is a code change; the first commit of the PR is this file.
 

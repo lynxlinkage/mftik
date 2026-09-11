@@ -288,9 +288,6 @@ async def test_s4_live_only_no_history(world, monkeypatch) -> None:
         async def close(self) -> None:
             return None
 
-        async def fetch_log_buffer(self, _topic: str):
-            raise AssertionError("match worker must not drain the ring")
-
         async def psubscribe(self, _pattern: str, *, stop: asyncio.Event):
             ready.set()
             await stop.wait()
@@ -320,9 +317,6 @@ async def test_s5_no_ring_buffer_replay(world, monkeypatch) -> None:
 
         async def close(self) -> None:
             return None
-
-        async def fetch_log_buffer(self, _topic: str):
-            raise AssertionError("match worker must not drain the ring")
 
         async def psubscribe(self, _pattern: str, *, stop: asyncio.Event):
             ready.set()

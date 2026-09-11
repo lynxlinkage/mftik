@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -19,7 +18,7 @@ from mftik.exchange.models import (
     PlaceOrderRequest,
     is_terminal,
 )
-from mftik.exchange.oms import OmsView
+from mftik.exchange.oms import LedgerView, OmsView
 from mftik.exchange.order_check import (
     REDUCE_ONLY,
     SHAPE,
@@ -27,20 +26,19 @@ from mftik.exchange.order_check import (
     classify,
 )
 from mftik.exchange.tickers import InvalidTickerError, UniversalTicker
-from mftik.liveness import (
-    claim_owner,
-    hold_owner,
-    is_alive,
-    release_owner,
-)
 from mftik.protocol import (
+    LEASE_HEARTBEAT_INTERVAL_S,
+    LEASE_MISS_LIMIT,
     STS_DETACH,
     STS_ENSURE_LEVERAGE,
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
     STS_RECON,
     TD_LEASE_ACK,
+    TD_LEDGER_VIEW,
     TD_LEVERAGE_ACK,
+    TD_OMS_ORDER,
+    TD_OMS_VIEW,
     TD_ORDER_ACK,
     TD_RECON_DONE,
     EnsureLeverage,
@@ -60,6 +58,9 @@ from mftik.protocol import (
     StsDetach,
     TdAttachRequest,
     TdAttachResult,
+    TdLedgerViewRequest,
+    TdOmsOrderRequest,
+    TdOmsViewRequest,
     Topics,
     publish_td_log,
 )
@@ -78,9 +79,9 @@ PersistLive = Callable[..., Awaitable[Any]]
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
 
-#: STS heartbeats every ~1s; grace must tolerate brief lease-loop stalls
-#: (e.g. a slow venue round-trip) without false expiry.
-LEASE_GRACE_S = 5.0
+#: Three missed heartbeats at the protocol interval. Tightened from 5s so
+#: both sides of the link use the same fuse.
+LEASE_GRACE_S = LEASE_HEARTBEAT_INTERVAL_S * LEASE_MISS_LIMIT
 
 #: How long a parked ``sts.recon`` waits for the book to come clean before TD
 #: answers with it as-is. Comfortably past the forced venue recon behind it,
@@ -98,48 +99,17 @@ RPC_RESTART_DELAY_S = 0.5
 #: much of the grace window that a still-live STS reads as expired.
 RESUBSCRIBE_DELAY_S = 0.5
 
-#: Which plane's liveness key :meth:`SessionManager.reap_orphans` reads. STS's,
-#: not one of TD's own: a td row exists only because a strategy asked for it,
-#: so the strategy going away is what makes the row and its link stale.
-_STS_ALIVE_DOMAIN = SessionDomain.STS.value
-
 #: How many live rows one reap scan will consider. Well above any plausible
 #: number of concurrent attaches, and named so the scan can say when it hit
 #: the limit rather than truncating in silence.
 _REAP_SCAN_LIMIT = 500
 
-#: How many consecutive scans must agree that an STS session is gone before
-#: TD detaches a link it still holds. One scan cannot tell a stopped strategy
-#: from a broker outage that outlasted the 30s liveness TTL, and the lease
-#: already handles the fast case in seconds — so there is nothing to gain by
-#: being quick here, and a trading strategy to lose. Rows with no link behind
-#: them are closed on the first scan: nothing is running to be wrong about.
+#: How many consecutive scans must agree before a row this process owns
+#: and does not hold locally is closed. Covers the window between persist
+#: and the link landing in ``_accounts``.
 _ORPHAN_STRIKES = 2
 
-#: Where an account's ownership claim lives. One TD *process* may hold an
-#: ``api_id``: the lease, the OMS and the ``client_order_id`` slot all rest on
-#: that, and two processes serving ``td.order.{api_id}`` as competing consumers
-#: would split an account's order flow between two half-pictures of it.
-_OWNER_DOMAIN = "td"
-
-
-class AccountHeldElsewhere(RuntimeError):
-    """Another TD process holds this account, and says which.
-
-    Raised rather than logged because an attach that quietly proceeds is the
-    failure: nothing downstream would notice, and the operator would see two
-    processes each convinced they own one credential.
-    """
-
-    def __init__(self, api_id: int, holder: str) -> None:
-        self.api_id = api_id
-        self.holder = holder
-        super().__init__(
-            f"api_id={api_id} is held by TD process {holder} — an account has "
-            f"one owner; check for a second process sharing this "
-            f"MFTIK_INSTANCE"
-        )
-
+TdInstanceLookup = Callable[[int], Awaitable[str | None]]
 
 
 @dataclass
@@ -169,6 +139,9 @@ class TradingAccount:
     #: Serves STS account reads on ``td.account.{api_id}`` (e.g. leverage).
     #: Kept off the order loop so a venue round-trip cannot stall submit acks.
     account_task: asyncio.Task[Any] | None = None
+    #: In-flight account RPC handlers. Views are memory reads and must not
+    #: queue behind a leverage REST call, so each request is its own task.
+    rpc_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     #: ``client_order_id`` → the STS ``session_id`` that submitted it, kept
     #: until the order reaches a terminal state. Advisory only: a cancel from
     #: another session is logged, never blocked. Recon-discovered orders have
@@ -201,18 +174,16 @@ class SessionManager:
         history: HistoryWriter | None = None,
         lease_grace: float = LEASE_GRACE_S,
         instance: str = "td",
+        td_instance: TdInstanceLookup | None = None,
     ) -> None:
         self._factory = factory
         self._broker = broker
-        #: Identifies this *process*, not this instance. Two processes sharing
-        #: an ``MFTIK_INSTANCE`` is the mistake the account claim guards
-        #: against, so a claim keyed by instance name would hand the account
-        #: to the second one.
-        self._owner = uuid.uuid4().hex
         #: Which TD this is. Backfill is posted to this instance's queue: it
         #: loads the credential and opens a venue connection with it, so which
         #: host runs it is the compliance question.
         self._instance = instance
+        #: ``api_id`` → the TD instance allowed to use that credential.
+        self._td_instance = td_instance
         #: Account teardowns started from the keepalive loop. Held so a task
         #: nothing else points at is not garbage-collected before it runs, and
         #: so ``close_all`` can wait for them.
@@ -226,9 +197,9 @@ class SessionManager:
         self._history = history
         self._lease_grace = lease_grace
         self._accounts: dict[int, TradingAccount] = {}
-        #: ``(session_id, api_id)`` → consecutive scans that found no STS
-        #: liveness key. Cleared the moment one does — see
-        #: :data:`_ORPHAN_STRIKES`.
+        #: ``(session_id, api_id)`` → consecutive scans that found no local
+        #: link, or a link whose lease tasks have died. Cleared the moment
+        #: one is healthy — see :data:`_ORPHAN_STRIKES`.
         self._orphan_strikes: dict[tuple[str, int], int] = {}
 
     def get(self, api_id: int) -> Session | None:
@@ -248,16 +219,6 @@ class SessionManager:
         """Attach ``api_id`` to STS ``session_id`` (refcount + lease)."""
         acct = self._accounts.get(request.api_id)
         if acct is None:
-            # Before the connector, not after: a refused claim must cost a
-            # refusal, not a venue session opened and then thrown away.
-            holder = await claim_owner(
-                self._broker,
-                str(request.api_id),
-                domain=_OWNER_DOMAIN,
-                owner=self._owner,
-            )
-            if holder is not None:
-                raise AccountHeldElsewhere(request.api_id, holder)
             trading = await self._factory.create(request.api_id)
             # Set before start(): recon runs inside it and its order updates
             # are history too.
@@ -403,42 +364,27 @@ class SessionManager:
         return rows
 
     async def reap_orphans(self) -> list[tuple[str, int]]:
-        """Close attaches whose STS session is gone — in memory and in the table.
+        """Close rows this instance owns and does not hold locally.
 
-        The lease is the primary signal and this is deliberately not a second
-        one: it asks a different question, of a different plane, over a
-        different key. A lease can only expire while something is reading it,
-        so a lease loop that dies takes the expiry with it — which is how a
-        td row once outlived its strategy by three hours, with the link still
-        counted against its api_id and the venue session held open behind it.
-        This is the check that holds when TD's own per-link machinery does
-        not, whether it died, wedged, or never ran because the process that
-        owned it was replaced.
-
-        Read on STS's key rather than one of TD's own because the question is
-        about the strategy — see :data:`_STS_ALIVE_DOMAIN`. The answer is the
-        same in every TD process at once, which is what makes this safe to run
-        in all of them: local state cannot say whether a peer holds a link,
-        while "no key" is true for everyone simultaneously.
-
-        What it does not cover is TD dying while the strategy keeps running.
-        That row's STS key is healthy, and closing it needs a key of TD's own,
-        per ``(session_id, api_id)``. Left until TD runs more than one process
-        — until then a restart clears the links and this scan closes the rows
-        they left behind.
+        A live link's STS death is the session heartbeat (three misses).
+        This scan is the restart case: rows left in our name with no
+        local link, after strikes so a row between two attaches is not
+        reaped on the first look. A row whose credential belongs to
+        another TD is left alone.
 
         Returns the ``(session_id, api_id)`` pairs it closed.
         """
         closed: list[tuple[str, int]] = []
         seen: set[tuple[str, int]] = set()
 
-        # Links this process still holds for a session that has ended. The
-        # detach is the full one: the row is the visible symptom, but the
-        # refcount and the venue session behind it are the expensive part.
         for api_id, acct in list(self._accounts.items()):
-            for session_id in list(acct.links):
-                seen.add((session_id, api_id))
-                if not await self._is_orphan(session_id, api_id):
+            for session_id, link in list(acct.links.items()):
+                pair = (session_id, api_id)
+                seen.add(pair)
+                if not any(t.done() for t in link.tasks):
+                    self._orphan_strikes.pop(pair, None)
+                    continue
+                if not self._strike(pair):
                     continue
                 logger.warning(
                     "TD reaping orphaned link session=%s api_id=%s",
@@ -447,7 +393,7 @@ class SessionManager:
                 )
                 try:
                     await self.detach(
-                        session_id=session_id, api_id=api_id, reason="sts_gone"
+                        session_id=session_id, api_id=api_id, reason="lease_loop_died"
                     )
                 except Exception:
                     logger.exception(
@@ -456,10 +402,8 @@ class SessionManager:
                         api_id,
                     )
                     continue
-                closed.append((session_id, api_id))
+                closed.append(pair)
 
-        # Rows with no link behind them anywhere. A restart clears the links
-        # but not the table, so these are what a previous process left.
         if self._list_db_sessions is not None and self._mark_done is not None:
             try:
                 rows = await self._list_db_sessions(
@@ -471,8 +415,6 @@ class SessionManager:
                 logger.exception("TD orphan scan failed to list sessions")
                 rows = []
             if len(rows) >= _REAP_SCAN_LIMIT:
-                # Truncation is the one thing a scan must not do quietly: the
-                # rows past the limit look exactly like rows with a live owner.
                 logger.warning(
                     "TD orphan scan hit its %d-row limit — there may be live "
                     "rows it did not consider",
@@ -483,23 +425,14 @@ class SessionManager:
                 api_id = getattr(row, "api_id", None)
                 if session_id is None or api_id is None:
                     continue
-                if (session_id, api_id) in seen:
+                pair = (session_id, int(api_id))
+                if pair in seen:
                     continue
-                seen.add((session_id, api_id))
-                try:
-                    if await is_alive(
-                        self._broker, session_id, domain=_STS_ALIVE_DOMAIN
-                    ):
-                        continue
-                except Exception:
-                    # Unreadable liveness is not evidence of death.
-                    logger.exception(
-                        "TD liveness check failed session=%s", session_id
-                    )
+                if not await self._api_is_mine(int(api_id)):
                     continue
-                # ``_mark_done`` rather than ``detach``: there is no link to
-                # stop, and detach would read a refcount of zero on an account
-                # between attaches as a reason to destroy it.
+                seen.add(pair)
+                if not self._strike(pair):
+                    continue
                 try:
                     await self._mark_done(session_id=session_id, api_id=api_id)
                 except Exception:
@@ -509,14 +442,13 @@ class SessionManager:
                         api_id,
                     )
                     continue
-                closed.append((session_id, api_id))
+                closed.append(pair)
                 logger.warning(
                     "TD reaped orphaned row session=%s api_id=%s",
                     session_id,
                     api_id,
                 )
 
-        # Strikes only mean something for a pair still in front of us.
         self._orphan_strikes = {
             pair: strikes
             for pair, strikes in self._orphan_strikes.items()
@@ -524,25 +456,20 @@ class SessionManager:
         }
         return closed
 
-    async def _is_orphan(self, session_id: str, api_id: int) -> bool:
-        """Has STS been missing for :data:`_ORPHAN_STRIKES` scans running?"""
-        pair = (session_id, api_id)
-        try:
-            if await is_alive(
-                self._broker, session_id, domain=_STS_ALIVE_DOMAIN
-            ):
-                self._orphan_strikes.pop(pair, None)
-                return False
-        except Exception:
-            # Unreadable liveness is not evidence of death. A stale link
-            # survives to the next scan; one detached by mistake takes the
-            # attach out from under a strategy that is still trading.
-            logger.exception("TD liveness check failed session=%s", session_id)
-            self._orphan_strikes.pop(pair, None)
-            return False
+    def _strike(self, pair: tuple[str, int]) -> bool:
         strikes = self._orphan_strikes.get(pair, 0) + 1
         self._orphan_strikes[pair] = strikes
         return strikes >= _ORPHAN_STRIKES
+
+    async def _api_is_mine(self, api_id: int) -> bool:
+        if self._td_instance is None:
+            return True
+        try:
+            name = await self._td_instance(api_id)
+        except Exception:
+            logger.exception("TD instance lookup failed api_id=%s", api_id)
+            return False
+        return name == self._instance
 
     async def detach(
         self, *, session_id: str, api_id: int, reason: str = "detach"
@@ -660,20 +587,6 @@ class SessionManager:
         if acct is None:
             return
         acct.global_stop.set()
-        try:
-            # Released here rather than left to lapse: a redeploy that has to
-            # wait out a TTL before it can attach is an outage nobody caused.
-            await release_owner(
-                self._broker,
-                str(api_id),
-                domain=_OWNER_DOMAIN,
-                owner=self._owner,
-            )
-        except Exception:
-            logger.warning(
-                "TD claim release failed api_id=%s — it will lapse", api_id,
-                exc_info=True,
-            )
         current = asyncio.current_task()
         if (
             acct.recon_deadline_task is not None
@@ -708,53 +621,13 @@ class SessionManager:
         logger.info("TD trading destroyed api_id=%s", api_id)
 
     async def _global_keepalive(self, acct: TradingAccount) -> None:
-        """Publish a keepalive on td.{api_id}.global, and hold the claim.
+        """Publish a keepalive on td.{api_id}.global for as long as the account lives.
 
-        The two belong in one loop because they end together. This is the task
-        that runs for exactly as long as the account does, so it is where a
-        claim can be refreshed without a timer of its own — and, more to the
-        point, where losing one can be acted on. A claim that has gone is not a
-        missed refresh to shrug at: some other process now owns this account,
-        and continuing to serve ``td.order.{api_id}`` would make the pair of us
-        competing consumers on one credential.
+        Ownership is the instance contract plus boot ``probe``. This loop
+        no longer refreshes a KV claim.
         """
         topic = Topics.td_global(acct.api_id)
         while not acct.global_stop.is_set():
-            try:
-                if not await hold_owner(
-                    self._broker,
-                    str(acct.api_id),
-                    domain=_OWNER_DOMAIN,
-                    owner=self._owner,
-                ):
-                    logger.error(
-                        "TD lost its claim on api_id=%s — another process "
-                        "holds it; tearing this one down",
-                        acct.api_id,
-                    )
-                    # On a sibling task, because ``_destroy_account``
-                    # cancels the very loop this runs in — and *held*, because
-                    # asyncio keeps only a weak reference and a task nothing
-                    # points at can be collected before it runs. Losing this
-                    # one would leave the process serving
-                    # ``td.order.{api_id}`` for an account a rival now owns,
-                    # which is the exact state the claim exists to prevent.
-                    # Same reasoning as MD's ``_disconnects``.
-                    task = asyncio.create_task(
-                        self._destroy_account(acct.api_id),
-                        name=f"td-yield-{acct.api_id}",
-                    )
-                    self._yields.add(task)
-                    task.add_done_callback(self._yields.discard)
-                    return
-            except Exception:
-                # An unreadable broker is not evidence of a rival. The TTL is many
-                # refreshes wide, so a blip costs nothing and giving the
-                # account up over one would be the expensive mistake.
-                logger.warning(
-                    "TD claim refresh failed api_id=%s", acct.api_id,
-                    exc_info=True,
-                )
             try:
                 await self._broker.publish(
                     topic,
@@ -1095,7 +968,15 @@ class SessionManager:
                 async for req in self._broker.serve(
                     subject, stop=acct.global_stop
                 ):
-                    await self._handle_account_rpc(acct, req)
+                    # Each request is its own task so a leverage REST call
+                    # cannot hold a ledger/OMS view. The view is a memory
+                    # read and has to stay one.
+                    task = asyncio.create_task(
+                        self._dispatch_account_rpc(acct, req),
+                        name=f"td-acct-{acct.api_id}-{req.envelope.type}",
+                    )
+                    acct.rpc_tasks.add(task)
+                    task.add_done_callback(acct.rpc_tasks.discard)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1115,6 +996,85 @@ class SessionManager:
                     )
                 except TimeoutError:
                     continue
+
+    async def _dispatch_account_rpc(
+        self, acct: TradingAccount, req: IncomingRequest
+    ) -> None:
+        """Route one ``td.account`` request. Views stay off the venue path."""
+        env = req.envelope
+        if env.type == TD_LEDGER_VIEW:
+            await self._handle_ledger_view(acct, req)
+            return
+        if env.type == TD_OMS_VIEW:
+            await self._handle_oms_view(acct, req)
+            return
+        if env.type == TD_OMS_ORDER:
+            await self._handle_oms_order(acct, req)
+            return
+        await self._handle_account_rpc(acct, req)
+
+    async def _handle_ledger_view(
+        self, acct: TradingAccount, req: IncomingRequest
+    ) -> None:
+        try:
+            payload = TdLedgerViewRequest.model_validate(req.envelope.payload or {})
+        except Exception:
+            await req.reply(
+                Envelope[LedgerView].wrap(
+                    LedgerView(api_id=acct.api_id),
+                    type=TD_LEDGER_VIEW,
+                    source="td",
+                )
+            )
+            return
+        view = acct.trading.ledger_view()
+        if payload.asset is not None:
+            balance = view.balances.get(payload.asset)
+            view = LedgerView(
+                api_id=acct.api_id,
+                balances={} if balance is None else {payload.asset: balance},
+            )
+        await req.reply(
+            Envelope[LedgerView].wrap(view, type=TD_LEDGER_VIEW, source="td")
+        )
+
+    async def _handle_oms_view(
+        self, acct: TradingAccount, req: IncomingRequest
+    ) -> None:
+        try:
+            TdOmsViewRequest.model_validate(req.envelope.payload or {})
+        except Exception:
+            await req.reply(
+                Envelope[OmsView].wrap(
+                    OmsView(), type=TD_OMS_VIEW, source="td"
+                )
+            )
+            return
+        await req.reply(
+            Envelope[OmsView].wrap(
+                acct.trading.oms.view(), type=TD_OMS_VIEW, source="td"
+            )
+        )
+
+    async def _handle_oms_order(
+        self, acct: TradingAccount, req: IncomingRequest
+    ) -> None:
+        try:
+            payload = TdOmsOrderRequest.model_validate(req.envelope.payload or {})
+        except Exception:
+            await req.reply(
+                Envelope[dict].wrap({}, type=TD_OMS_ORDER, source="td")
+            )
+            return
+        order = acct.trading.oms.get_order(payload.client_order_id)
+        if order is None:
+            await req.reply(
+                Envelope[dict].wrap({}, type=TD_OMS_ORDER, source="td")
+            )
+            return
+        await req.reply(
+            Envelope[Order].wrap(order, type=TD_OMS_ORDER, source="td")
+        )
 
     async def _handle_account_rpc(
         self, acct: TradingAccount, req: IncomingRequest

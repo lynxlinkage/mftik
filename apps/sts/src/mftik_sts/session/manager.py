@@ -11,7 +11,6 @@ from typing import Any
 
 from mftik.broker import Broker
 from mftik.broker.errors import RequestTimeoutError
-from mftik.liveness import claim_alive, clear_alive, is_alive, mark_alive
 from mftik.protocol import (
     ANY_INSTANCE,
     MD_ERROR,
@@ -23,6 +22,7 @@ from mftik.protocol import (
     ListSessionsRequest,
     MdAttachRequest,
     MdAttachRequestEnvelope,
+    MdAttachResult,
     RpcError,
     SessionInfo,
     StsCreateSessionRequest,
@@ -33,6 +33,7 @@ from mftik.protocol import (
     TdAttachRequest,
     TdAttachRequestEnvelope,
     Topics,
+    attached_api_ids,
     dump_td,
     load_md,
     load_td,
@@ -51,9 +52,6 @@ from mftik_sts.session.session import StsSession
 
 logger = logging.getLogger(__name__)
 
-#: The broker counter backing cid slot allocation.
-CID_SLOT_KEY = "cid:slot"
-
 #: Why a session in ``interrupted`` stopped. A constant because it is the
 #: same event for every session in the process, not a per-session diagnosis.
 #: How long a shutdown waits for control loops to notice they were asked to
@@ -62,12 +60,6 @@ CID_SLOT_KEY = "cid:slot"
 _CONTROL_RETIRE_S = 2.0
 
 _SHUTDOWN_REASON = "STS shut down while this was running"
-
-#: How many status events the replay buffer keeps, and for how long. Sized for
-#: "what happened recently", not history — the DB is the record, this only has
-#: to cover the gap between a page loading and its socket being live.
-_STATUS_BUFFER = 200
-_STATUS_TTL_SECONDS = 3600
 
 #: How long a rebuild keeps trying to attach one domain. TD and MD may still be
 #: starting — nothing makes them come up before STS — so waiting is the whole
@@ -111,6 +103,11 @@ _REBUILD_SETTLE_S = 300.0
 #: reported rather than silently dropping the rest.
 _REBUILD_SCAN_LIMIT = 1000
 
+#: How many consecutive scans must agree a live row is ours and not running
+#: before it is interrupted. Covers the window between persist and the
+#: session landing in ``_sessions`` on a peer, and a broker blip.
+_ORPHAN_STRIKES = 2
+
 def _age_seconds(finished_at: Any, now: datetime) -> float | None:
     """Seconds since a session ended, or None when that cannot be told.
 
@@ -137,6 +134,10 @@ BumpRebuildCount = Callable[..., Awaitable[Any]]
 #: ``(session_id)`` — clear the attempt count of a rebuild that has settled.
 ResetRebuildCount = Callable[..., Awaitable[Any]]
 TdInstanceLookup = Callable[[int], Awaitable[str | None]]
+#: ``api_ids`` → the unique enabled STS in those credentials' TD region.
+DeriveSts = Callable[[list[int]], Awaitable[str | None]]
+#: Next global ``cid_slot``.
+AllocateCidSlot = Callable[[], Awaitable[int]]
 #: ``(session_id, *, status, reason)`` — move the row to a terminal status.
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
@@ -163,6 +164,8 @@ class SessionManager:
         heartbeat_interval: float = 1.0,
         strategy_factory: StrategyFactory | None = None,
         td_instance: TdInstanceLookup | None = None,
+        derive_sts: DeriveSts | None = None,
+        allocate_cid_slot: AllocateCidSlot | None = None,
         instance: str = SessionDomain.STS.value,
     ) -> None:
         self._broker = broker
@@ -182,9 +185,14 @@ class SessionManager:
         #: Injected like every other database reach here, so a test can drive
         #: a rebuild without one.
         self._td_instance_lookup = td_instance
+        #: ``api_ids`` → derived STS instance, or None when that is not unique.
+        self._derive_sts = derive_sts
+        self._allocate_cid = allocate_cid_slot
+        self._local_cid = 0
         #: Which STS this is. Only the rebuild scan reads it: a session is
         #: addressed by the subject it was created on, not by this.
         self._instance = instance
+        self._orphan_strikes: dict[str, int] = {}
         #: ``session_id`` → the loop serving that session's control subject,
         #: and the event that ends it. One per live session: stop and fail are
         #: answered from ``self._sessions``, so only the process holding a
@@ -240,10 +248,9 @@ class SessionManager:
         Always called *after* the DB write, never before: a UI that reacts to
         the event by re-reading REST must not be able to read the old row.
 
-        Published through ``publish_log`` for its ring buffer — plain pub/sub
-        drops everything sent while no browser is connected, and a page that
-        loads a second after a session failed would never hear about it. The
-        bridge replays the buffer on connect.
+        Published on the live channel. A socket that opens late reads the
+        current rows (the same source as REST) and then this subject — the
+        row is written first, so that read cannot see the previous status.
         """
         terminal = status != SessionStatus.LIVE.value
         payload = StsSessionStatus(
@@ -262,12 +269,7 @@ class SessionManager:
             session_id=session_id,
         )
         try:
-            await self._broker.publish_log(
-                Topics.status_sts(),
-                envelope,
-                maxlen=_STATUS_BUFFER,
-                ttl_seconds=_STATUS_TTL_SECONDS,
-            )
+            await self._broker.publish(Topics.status_sts(), envelope)
         except Exception:
             # The row is already written, so the UI recovers on its next load.
             # Never let a status announcement take the session down with it.
@@ -284,16 +286,17 @@ class SessionManager:
     async def _allocate_cid_slot(self) -> int:
         """Reserve the 16-bit ``client_order_id`` slot for a new session.
 
-        Allocation goes through the broker, not a process-local counter: STS
-        serves RPC as competing consumers, so several STS processes may be
-        creating sessions at once.
+        Allocation is a global sequence (Postgres, via the injected
+        callback). A process-local counter would give two STS instances —
+        or one instance after a restart — the same slot, and ``owns()``
+        would treat the other's fills as its own.
 
-        The counter is monotonic and wraps at :data:`SLOT_SPACE`, so two live
-        sessions share a slot only if 65536 sessions were created while one of
-        them was still running. Reuse after that is harmless — TD keys order
-        ownership on the whole cid, whose ``ts_ms`` differs.
+        Tests that do not wire the database increment a local counter.
         """
-        return await self._broker.counter_next(CID_SLOT_KEY) % SLOT_SPACE
+        if self._allocate_cid is not None:
+            return await self._allocate_cid()
+        self._local_cid = (self._local_cid + 1) % SLOT_SPACE
+        return self._local_cid
 
     async def create_session(
         self, request: StsCreateSessionRequest
@@ -320,12 +323,10 @@ class SessionManager:
             strategy_type=request.type,
         )
         # Register before start so Strategy.exit() during on_start/on_ready works.
+        # Also before persist: the reaper treats "names me and not in
+        # ``_sessions``" as an orphan, and strikes only cover a short window.
         self._sessions[request.session_id] = session
         self._serve_control(request.session_id)
-        # Claim liveness before the row exists, not after: a reaper that saw a
-        # live row with no key would read it as an orphan and fail a session
-        # that is only a moment old.
-        await mark_alive(self._broker, request.session_id, domain="sts")
         # Persist before start, not after: a strategy that ends inside
         # on_start / on_ready reaches close() before start() returns, and a
         # row written afterwards would resurrect it as live forever.
@@ -355,7 +356,6 @@ class SessionManager:
                     status=SessionStatus.FAILED.value,
                     reason=reason,
                 )
-            await clear_alive(self._broker, request.session_id, domain="sts")
             await self._publish_status(
                 request.session_id,
                 status=SessionStatus.FAILED.value,
@@ -535,12 +535,6 @@ class SessionManager:
         await session.stop()
         if self._mark_done is not None:
             await self._mark_done(session_id, status=status, reason=reason)
-        try:
-            await clear_alive(broker, session_id, domain="sts")
-        except Exception:
-            logger.exception(
-                "STS liveness release failed session=%s", session_id
-            )
         await self._publish_status(
             session_id,
             status=status,
@@ -599,10 +593,11 @@ class SessionManager:
         cannot: the process vanishing outright, where the row keeps claiming a
         session is running and nothing else will ever say otherwise.
 
-        A row is an orphan when nobody holds its liveness key. That test is
-        what makes this safe to run in every STS process at once — several
-        serve the same RPC subject, so "not mine" says nothing about whether a
-        peer is running it, while "no key" is true for all of them at once.
+        A row is an orphan when it belongs to this instance — named, or
+        derived from its TD region — and this process does not have it
+        locally. Strikes cover the window between persist and
+        ``_sessions``. A row that derives to nobody, or to someone else,
+        is left alone.
 
         Returns the session ids reaped, for logging and tests.
         """
@@ -620,16 +615,14 @@ class SessionManager:
         for row in rows:
             session_id = getattr(row, "session_id", None)
             if session_id is None or session_id in self._sessions:
+                self._orphan_strikes.pop(session_id, None)
                 continue
-            try:
-                if await is_alive(self._broker, session_id, domain="sts"):
-                    continue
-            except Exception:
-                # Unreadable liveness is not evidence of death. Leaving a
-                # stale row is recoverable; failing a running strategy is not.
-                logger.exception(
-                    "STS liveness check failed session=%s", session_id
-                )
+            if not await self._placement_is_mine(row):
+                self._orphan_strikes.pop(session_id, None)
+                continue
+            strikes = self._orphan_strikes.get(session_id, 0) + 1
+            self._orphan_strikes[session_id] = strikes
+            if strikes < _ORPHAN_STRIKES:
                 continue
 
             # `interrupted`, not `failed`: nothing was wrong with the
@@ -654,6 +647,7 @@ class SessionManager:
                 created_by=getattr(row, "created_by", None),
                 type=getattr(row, "type", None),
             )
+            self._orphan_strikes.pop(session_id, None)
             reaped.append(session_id)
             logger.warning(
                 "STS reaped orphaned session id=%s strategy=%s",
@@ -671,8 +665,9 @@ class SessionManager:
         process killed outright, neither of which is the strategy deciding to
         stop. Returns the session ids restored.
 
-        Runs in every STS process at once without coordination beyond the
-        liveness key — see :func:`claim_alive`.
+        Placement is the whole guard: a named row is rebuilt only by that
+        instance, a null row only by the STS its TD region derives to.
+        A derivation that is not unique waits on the Attention list.
         """
         if self._list_db_sessions is None:
             return []
@@ -714,24 +709,13 @@ class SessionManager:
                     self._rebuild_max_age_s,
                 )
                 continue
-            pinned = getattr(row, "instance", None)
-            if pinned is not None and pinned != self._instance:
-                # Somebody else's run. The scan sees every interrupted row
-                # because the table is shared, and without this every STS
-                # would race for all of them: a session deployed to `sts-tw`
-                # would come back on whichever instance booted first, and
-                # differently on the next restart.
-                #
-                # A row pinned to an instance nobody runs is therefore rebuilt
-                # by nobody, and stays `interrupted` on the Attention list
-                # waiting for a person. That is the same rule as everywhere
-                # else here — the node reports the mismatch and does not
-                # quietly resolve it by moving a session across a boundary
-                # somebody drew on purpose.
+            if not await self._placement_is_mine(row):
+                # Somebody else's run, or a null row whose derivation is
+                # not this process — including "not unique", which waits
+                # on the Attention list rather than a coin flip.
                 logger.debug(
-                    "STS not rebuilding session=%s: pinned to %s, this is %s",
+                    "STS not rebuilding session=%s: placement is not %s",
                     session_id,
-                    pinned,
                     self._instance,
                 )
                 continue
@@ -817,8 +801,6 @@ class SessionManager:
                     strategy.name,
                 )
                 continue
-            if not await claim_alive(self._broker, session_id, domain="sts"):
-                continue
             if self._bump_rebuild_count is not None:
                 try:
                     await self._bump_rebuild_count(session_id)
@@ -892,6 +874,28 @@ class SessionManager:
             session_id,
             self._rebuild_settle_s,
         )
+
+    async def _placement_is_mine(self, row: Any) -> bool:
+        """Whether this process is the one instance that may run ``row``.
+
+        A name on the row is what the deploy asked for. Null means derive
+        from the credentials' TD region. Missing or non-unique derivation
+        is nobody's.
+        """
+        pinned = getattr(row, "instance", None)
+        if pinned is not None:
+            return pinned == self._instance
+        if self._derive_sts is None:
+            return False
+        try:
+            derived = await self._derive_sts(attached_api_ids(row))
+        except Exception:
+            logger.exception(
+                "STS placement derive failed session=%s",
+                getattr(row, "session_id", None),
+            )
+            return False
+        return derived == self._instance
 
     async def _rebuild_one(self, row: Any, strategy: Strategy) -> None:
         """Restore one session, in the order a deploy uses and for the reason.
@@ -973,15 +977,9 @@ class SessionManager:
         )
 
     async def _abandon_rebuild(self, session_id: str) -> None:
-        """Drop a claim so the next boot — or another process — may retry."""
+        """Drop a half-built session so the next boot may retry."""
         self._sessions.pop(session_id, None)
         self._stop_serving_control(session_id)
-        try:
-            await clear_alive(self._broker, session_id, domain="sts")
-        except Exception:
-            logger.exception(
-                "STS rebuild claim release failed session=%s", session_id
-            )
 
     async def _attach_md(
         self, session_id: str, created_by: int, md: dict[str, list[str]]
@@ -996,7 +994,7 @@ class SessionManager:
             feeds = md.get(instance) or []
             if not feeds:
                 continue
-            await self._attach_with_retry(
+            reply = await self._attach_with_retry(
                 what=f"md instance={instance} feeds={feeds}",
                 subject=(
                     Topics.MD
@@ -1016,6 +1014,21 @@ class SessionManager:
                 ),
                 error_type=MD_ERROR,
             )
+            session = self._sessions.get(session_id)
+            if session is not None and reply is not None:
+                try:
+                    result = MdAttachResult.model_validate(reply.payload)
+                except Exception:
+                    result = None
+                owner = (
+                    (result.instance if result is not None else "")
+                    or ("" if instance == ANY_INSTANCE else instance)
+                )
+                if owner:
+                    session.note_md_owner(
+                        list(result.subscriptions if result else feeds),
+                        owner,
+                    )
 
     async def _td_instance(self, api_id: int) -> str:
         """Which TD may take this attach.
@@ -1072,7 +1085,7 @@ class SessionManager:
         subject: str,
         envelope: Any,
         error_type: str,
-    ) -> None:
+    ) -> Any:
         """Send an attach until it lands, or give up and say so.
 
         Retried rather than gated on a readiness probe: the domain may simply
@@ -1096,7 +1109,7 @@ class SessionManager:
                 last = exc
             else:
                 if reply.type != error_type:
-                    return
+                    return reply
                 err = RpcError.model_validate(reply.payload)
                 last = RuntimeError(f"{err.code}: {err.message}")
             left = deadline - asyncio.get_running_loop().time()

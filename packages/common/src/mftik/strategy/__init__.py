@@ -14,12 +14,13 @@ an instance, so naming the class is the rarer case.
 
 from mftik.strategy.base import Strategy
 from mftik.strategy.session import SessionView
-from mftik.strategy.tape import TapeSlice
+from mftik.strategy.tape import TapeFeedNotAttached, TapeSlice
 from mftik.strategy.timer import Timer, TimerToken, now_ms
 
 __all__ = [
     "SessionView",
     "Strategy",
+    "TapeFeedNotAttached",
     "TapeSlice",
     "Timer",
     "TimerToken",

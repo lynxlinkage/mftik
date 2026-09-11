@@ -84,6 +84,9 @@ async def an_instance(
     session: AsyncSession,
     name: str = DEFAULT_INSTANCE,
     domain: str = "td",
+    *,
+    region: str | None = None,
+    enabled: bool = True,
 ) -> Instance:
     """The instance row an ``apis.instance_id`` points at.
 
@@ -92,7 +95,7 @@ async def an_instance(
     test that writes an ``Api`` needs one of these, the way every test that
     writes a ``created_by`` needs :func:`an_owner`.
     """
-    instance = Instance(name=name, domain=domain)
+    instance = Instance(name=name, domain=domain, region=region, enabled=enabled)
     session.add(instance)
     await session.flush()
     return instance

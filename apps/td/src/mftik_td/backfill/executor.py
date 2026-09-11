@@ -81,7 +81,7 @@ def _safety_lag() -> float:
 
 
 def lock_name(api_id: int) -> str:
-    """The broker lease one account's backfill run holds."""
+    """Legacy name. The lock is now an in-process set on the executor."""
     return f"backfill:lock:{api_id}"
 
 
@@ -131,6 +131,7 @@ class BackfillExecutor:
         self._page_size = page_size
         self._page_pause = page_pause
         self._lock_ttl = lock_ttl
+        self._inflight: set[int] = set()
 
     async def run(
         self,
@@ -435,21 +436,15 @@ class BackfillExecutor:
         rate-limit budget they share with whatever is trading on the same key,
         which is the whole reason this exists.
         """
-        try:
-            return await self._broker.lease_take(
-                lock_name(api_id), ttl=self._lock_ttl, owner=token
-            )
-        except Exception:
-            # A lock we cannot take is not a reason to skip work that is safe
-            # to repeat.
-            logger.warning("TD backfill lock unavailable api_id=%s", api_id)
-            return True
+        del token
+        if api_id in self._inflight:
+            return False
+        self._inflight.add(api_id)
+        return True
 
     async def _unlock(self, api_id: int, token: str) -> None:
-        try:
-            await self._broker.lease_release(lock_name(api_id), owner=token)
-        except Exception:
-            logger.debug("TD backfill unlock failed api_id=%s", api_id, exc_info=True)
+        del token
+        self._inflight.discard(api_id)
 
 
 __all__ = [

@@ -44,17 +44,12 @@ jobs:
           enable-cache: true
           python-version: "3.12"
 
-      # The broker, and a step rather than a service container because JetStream
-      # is a command-line flag and a service container takes an image and
-      # options but no command. Everything the broker does beyond bare
-      # request-reply is a JetStream stream or a KV bucket, so a server started
-      # without `-js` accepts the connection and refuses the rest — and
-      # `conftest.py` fails the run outright if nothing is listening at all,
-      # because the broker suite has no fake left to fall back on.
-      - name: Start NATS with JetStream
+      # The bus. Core NATS; no JetStream. `conftest.py` fails the run
+      # if nothing is listening at all.
+      - name: Start NATS
         run: |
           docker run -d --name nats -p 4222:4222 -p 8222:8222 \
-            nats:2.11-alpine -js -sd /data -m 8222
+            nats:2.11-alpine -m 8222
           for _ in $(seq 30); do
             if curl -sf http://localhost:8222/healthz > /dev/null; then
               exit 0

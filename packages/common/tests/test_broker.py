@@ -58,20 +58,9 @@ async def test_pubsub_roundtrip(broker: Broker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_log_buffers_for_late_subscribers(broker: Broker) -> None:
+async def test_publish_log_is_live_fan_out(broker: Broker) -> None:
+    """Late replay left the broker. ``publish_log`` is ``publish``."""
     topic = "log.sts.late"
-    first = Envelope[dict].wrap(
-        {"level": "info", "message": "before connect"},
-        type="log",
-        source="sts",
-        session_id="late",
-    )
-    await broker.publish_log(topic, first)
-
-    buffered = await broker.fetch_log_buffer(topic)
-    assert len(buffered) == 1
-    assert '"before connect"' in buffered[0]
-
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     received: asyncio.Future[UntypedEnvelope] = loop.create_future()
@@ -86,70 +75,16 @@ async def test_publish_log_buffers_for_late_subscribers(broker: Broker) -> None:
     task = asyncio.create_task(reader())
     await asyncio.sleep(0.05)
 
-    second = Envelope[dict].wrap(
+    sent = Envelope[dict].wrap(
         {"level": "info", "message": "live"},
         type="log",
         source="sts",
         session_id="late",
     )
-    await broker.publish_log(topic, second)
+    await broker.publish_log(topic, sent)
     got = await asyncio.wait_for(received, timeout=2)
     await task
     assert got.payload == {"level": "info", "message": "live"}
-    assert len(await broker.fetch_log_buffer(topic)) == 2
-
-
-@pytest.mark.asyncio
-async def test_fetch_log_buffer_trims_to_maxlen(broker: Broker) -> None:
-    topic = "log.sts.trim"
-    for i in range(5):
-        await broker.publish_log(
-            topic,
-            Envelope[dict].wrap(
-                {"level": "info", "message": f"line-{i}"},
-                type="log",
-                source="sts",
-                session_id="trim",
-            ),
-            maxlen=3,
-        )
-
-    buffered = await broker.fetch_log_buffer(topic, maxlen=3)
-    assert len(buffered) == 3
-    assert '"line-4"' in buffered[-1]
-
-
-#: The ring STS and the API both ask for, as ``_STATUS_BUFFER`` in each. Named
-#: here because the test below is only interesting at a length a caller really
-#: uses: everything else in this file asks for a handful of lines, and a
-#: transport whose own per-subject cap sat at 100 answered all of those
-#: correctly while halving this one.
-STATUS_RING = 200
-
-
-@pytest.mark.asyncio
-async def test_a_ring_the_size_production_asks_for_is_the_size_it_gets(
-    broker: Broker,
-) -> None:
-    """Replay ``maxlen`` is exact, not "up to", and not "up to some cap of ours"."""
-    topic = Topics.status_sts()
-    for i in range(STATUS_RING + 5):
-        await broker.publish_log(
-            topic,
-            Envelope[dict].wrap(
-                {"level": "info", "message": f"line-{i}"},
-                type="log",
-                source="sts",
-            ),
-            maxlen=STATUS_RING,
-            ttl_seconds=3600,
-        )
-
-    buffered = await broker.fetch_log_buffer(topic, maxlen=STATUS_RING)
-    assert len(buffered) == STATUS_RING
-    # The newest, so a UI opening late sees the end of the story and not a
-    # window from the middle of it.
-    assert f'"line-{STATUS_RING + 4}"' in buffered[-1]
 
 
 @pytest.mark.asyncio
@@ -247,11 +182,11 @@ async def test_leased_link_acks_and_expires(broker: Broker) -> None:
         rx="sts.md.e1",
         tx="md.e1",
         stop=stop,
-        grace=0.4,
         ready=ready,
         ack=ack,
         on_expired=on_expired,
         watch_interval=0.1,
+        grace=0.4,
         name="test-lease",
     )
     task = asyncio.create_task(link.run())
@@ -259,7 +194,7 @@ async def test_leased_link_acks_and_expires(broker: Broker) -> None:
     await broker.publish(
         "sts.md.e1",
         Envelope[LeaseHeartbeat].wrap(
-            LeaseHeartbeat(session_id="e1", token=7),
+            LeaseHeartbeat(session_id="e1", token=7, interval=0.1),
             type=STS_LEASE_HEARTBEAT,
             source="sts",
         ),
@@ -273,65 +208,42 @@ async def test_leased_link_acks_and_expires(broker: Broker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_state_projection_tracks_writes(broker: Broker) -> None:
-    name = "td.oms.1"
-    await broker.state_put(name, "cid-1", {"status": "new"})
-    proj = broker.state_projection(name)
-    await proj.start()
-    try:
-        assert proj.get("cid-1") == {"status": "new"}
-        await broker.state_put(name, "cid-1", {"status": "filled"})
-        await broker.state_drop(name, "cid-1")
-        for _ in range(40):
-            if proj.get("cid-1") is None and "cid-1" not in proj.all():
-                break
-            await asyncio.sleep(0.05)
-        assert proj.all() == {} or proj.get("cid-1") is None
-    finally:
-        await proj.close()
-
-
-@pytest.mark.asyncio
-async def test_a_dead_projection_is_not_live(broker: Broker) -> None:
-    """A watch that dies must not keep serving the last map it saw."""
-    name = "td.oms.fail"
-
-    async def dying_watch(_name: str, *, stop=None):
-        raise RuntimeError("watch died")
-        yield "", None
-
-    broker.state_watch = dying_watch  # type: ignore[method-assign]
-    await broker.state_put(name, "cid-1", {"status": "new"})
-    proj = broker.state_projection(name)
-    await proj.start()
-    try:
-        for _ in range(40):
-            if not proj.live:
-                break
-            await asyncio.sleep(0.05)
-        assert not proj.live
-    finally:
-        await proj.close()
-
-
-@pytest.mark.asyncio
-async def test_a_non_dict_field_is_dropped_from_the_projection(
+async def test_leased_link_does_not_expire_before_first_heartbeat(
     broker: Broker,
 ) -> None:
-    """Keeping the last dict would freeze a field the writer has replaced."""
-    name = "td.oms.nondict"
-    await broker.state_put(name, "cid-1", {"status": "new"})
-    proj = broker.state_projection(name)
-    await proj.start()
+    """Counting from start would fail every deploy."""
+    stop = asyncio.Event()
+    ready = asyncio.Event()
+    expired = asyncio.Event()
+
+    def ack(hb: LeaseHeartbeat) -> Envelope[dict]:
+        return Envelope[dict].wrap(
+            {"token": hb.token}, type="lease.ack", source="md"
+        )
+
+    async def on_expired() -> None:
+        expired.set()
+
+    link = LeasedSessionLink(
+        broker,
+        rx="sts.md.e2",
+        tx="md.e2",
+        stop=stop,
+        ready=ready,
+        ack=ack,
+        on_expired=on_expired,
+        watch_interval=0.05,
+        grace=0.15,
+        name="test-lease-unarmed",
+    )
+    task = asyncio.create_task(link.run())
     try:
-        await broker.transport.state_put_many(name, {"cid-1": "42"})
-        for _ in range(40):
-            if proj.get("cid-1") is None:
-                break
-            await asyncio.sleep(0.05)
-        assert proj.get("cid-1") is None
+        await asyncio.sleep(0.4)
+        assert not expired.is_set()
+        assert not ready.is_set()
     finally:
-        await proj.close()
+        stop.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
