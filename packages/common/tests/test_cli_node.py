@@ -49,6 +49,7 @@ def test_the_compose_file_parses(tmp_path: Path) -> None:
 
     assert set(compose["services"]) == {
         "postgres",
+        "redis",
         "nats",
         "migrate",
         "seed",
@@ -80,9 +81,14 @@ def test_the_database_and_broker_come_with_it(tmp_path: Path) -> None:
 
     assert compose["services"]["postgres"]["image"].startswith("postgres:")
     assert compose["services"]["nats"]["image"].startswith("nats:")
+    redis = compose["services"]["redis"]
+    assert redis["image"].startswith("redis:")
+    assert "--appendonly" in redis["command"]
+    assert "yes" in redis["command"]
     body = _written(root)[".env"]
     assert "@postgres:5432/mftik" in body
     assert "nats://nats:4222" in body
+    assert "REDIS_URL=redis://redis:6379/0" in body
 
 
 def test_the_bus_is_core_nats(tmp_path: Path) -> None:
