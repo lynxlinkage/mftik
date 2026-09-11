@@ -6,7 +6,11 @@ from collections.abc import Sequence
 from typing import Any
 
 from mftik_db.models.session import SessionStatus, StsSessionRow
-from mftik_db.repositories import ApiRepository, InstanceRepository, StsSessionRepository
+from mftik_db.repositories import (
+    ApiRepository,
+    InstanceRepository,
+    StsSessionRepository,
+)
 from mftik_db.session import session_scope
 
 

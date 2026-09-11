@@ -33,12 +33,12 @@ from mftik.protocol import (
     TdAttachRequest,
     TdAttachRequestEnvelope,
     Topics,
+    attached_api_ids,
     dump_td,
     load_md,
     load_td,
     md_feeds_of,
     md_instances_of,
-    attached_api_ids,
     publish_sts_log,
     td_api_ids_of,
 )
