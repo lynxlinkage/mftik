@@ -247,68 +247,6 @@ async def test_leased_link_does_not_expire_before_first_heartbeat(
 
 
 @pytest.mark.asyncio
-async def test_state_projection_tracks_writes(broker: Broker) -> None:
-    name = "td.oms.1"
-    await broker.state_put(name, "cid-1", {"status": "new"})
-    proj = broker.state_projection(name)
-    await proj.start()
-    try:
-        assert proj.get("cid-1") == {"status": "new"}
-        await broker.state_put(name, "cid-1", {"status": "filled"})
-        await broker.state_drop(name, "cid-1")
-        for _ in range(40):
-            if proj.get("cid-1") is None and "cid-1" not in proj.all():
-                break
-            await asyncio.sleep(0.05)
-        assert proj.all() == {} or proj.get("cid-1") is None
-    finally:
-        await proj.close()
-
-
-@pytest.mark.asyncio
-async def test_a_dead_projection_is_not_live(broker: Broker) -> None:
-    """A watch that dies must not keep serving the last map it saw."""
-    name = "td.oms.fail"
-
-    async def dying_watch(_name: str, *, stop=None):
-        raise RuntimeError("watch died")
-        yield "", None
-
-    broker.state_watch = dying_watch  # type: ignore[method-assign]
-    await broker.state_put(name, "cid-1", {"status": "new"})
-    proj = broker.state_projection(name)
-    await proj.start()
-    try:
-        for _ in range(40):
-            if not proj.live:
-                break
-            await asyncio.sleep(0.05)
-        assert not proj.live
-    finally:
-        await proj.close()
-
-
-@pytest.mark.asyncio
-async def test_a_non_dict_field_is_dropped_from_the_projection(
-    broker: Broker,
-) -> None:
-    """Keeping the last dict would freeze a field the writer has replaced."""
-    name = "td.oms.nondict"
-    await broker.state_put(name, "cid-1", {"status": "new"})
-    proj = broker.state_projection(name)
-    await proj.start()
-    try:
-        await broker.transport.state_put_many(name, {"cid-1": "42"})
-        for _ in range(40):
-            if proj.get("cid-1") is None:
-                break
-            await asyncio.sleep(0.05)
-        assert proj.get("cid-1") is None
-    finally:
-        await proj.close()
-
-
-@pytest.mark.asyncio
 async def test_psubscribe_receives_channel_and_envelope(broker: Broker) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

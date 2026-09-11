@@ -57,25 +57,17 @@ services:
       timeout: 3s
       retries: 10
 
-  # The broker. `-js` is not optional: fan-out, posted work, state,
-  # leases and the tape are all JetStream or KV, and a server without it answers
-  # core requests and nothing else.
-  #
-  # 8222 is the monitoring port, which is what the healthcheck asks and what
-  # `nats stream ls` is worth pointing at when a subject is not behaving.
+  # The bus. Core NATS only — fan-out, request-reply, session heartbeats.
+  # Tape is regional Redis; the ledger lives in TD memory; session logs
+  # live in Postgres. 8222 is the monitoring port the healthcheck asks.
   nats:
     image: nats:2.11-alpine
     command:
-      - "-js"
-      - "-sd"
-      - "/data"
       - "-m"
       - "8222"
     ports:
       - "4222:4222"
       - "8222:8222"
-    volumes:
-      - nats_data:/data
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:8222/healthz || exit 1"]
       interval: 5s
@@ -249,7 +241,6 @@ services:
 
 volumes:
   postgres_data:
-  nats_data:
   redis_data:
   sts_eventlog:
   mftik_data:

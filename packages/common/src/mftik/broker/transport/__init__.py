@@ -9,7 +9,7 @@ rather than a rewrite of the client.
 from __future__ import annotations
 
 from mftik.broker.config import BrokerConfig
-from mftik.broker.transport.base import LEASE_ANONYMOUS, BrokerTransport
+from mftik.broker.transport.base import BrokerTransport
 from mftik.broker.transport.nats import NatsTransport
 
 
@@ -19,7 +19,6 @@ def build(config: BrokerConfig) -> BrokerTransport:
 
 
 __all__ = [
-    "LEASE_ANONYMOUS",
     "BrokerTransport",
     "NatsTransport",
     "build",

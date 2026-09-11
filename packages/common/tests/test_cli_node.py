@@ -85,23 +85,16 @@ def test_the_database_and_broker_come_with_it(tmp_path: Path) -> None:
     assert "nats://nats:4222" in body
 
 
-def test_the_broker_is_started_with_jetstream_and_a_volume(tmp_path: Path) -> None:
-    """A node whose broker has neither looks fine and then is not.
-
-    Only bare request-reply is core NATS. State, leases, fan-out, posted work
-    and the tape are all JetStream or KV, so a server started without ``-js``
-    accepts the connection and refuses everything a plane actually does. And
-    that state is the node's open orders, its ledger and its recorded tape — on
-    no volume, a restart comes back reading as an account that closed
-    everything.
-    """
+def test_the_bus_is_core_nats(tmp_path: Path) -> None:
+    """JetStream is gone. Tape is Redis; the ledger is TD memory."""
     root = tmp_path / "mynode"
     main(["node-init", str(root)])
 
     nats = _compose(root)["services"]["nats"]
 
-    assert "-js" in nats["command"]
-    assert any(volume.endswith(":/data") for volume in nats["volumes"])
+    assert "-js" not in nats["command"]
+    assert "-sd" not in nats["command"]
+    assert "volumes" not in nats
 
 
 def test_one_port_serves_the_ui_the_api_and_the_sockets(tmp_path: Path) -> None:

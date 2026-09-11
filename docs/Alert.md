@@ -126,10 +126,9 @@ would make an optional disk trail the control plane for alerts.
    optional field. Old lines without it fall back to
    `sts_sessions`. The primary key does not parse.
 3. **Matching is live `log.*` only.** The worker does not replay
-   `Broker.fetch_log_buffer` (100 lines, for late WebSockets). It
-   does not walk `session_logs`. An API restart accepts a brief
-   gap, the same way persist does. Changing a regex does not
-   Discord the last week.
+   `session_logs` and does not subscribe `status.sts`. An API
+   restart accepts a brief gap, the same way persist does.
+   Changing a regex does not Discord the last week.
 4. **The graph is three layers.** Two join tables express the
    only legal wires: `alert_source_matcher` and
    `alert_matcher_alert`. There is no row shape for
@@ -512,10 +511,9 @@ started mid-session; new STS lines should not need it.
 `Strategy.log` and the deploy lines in `orchestrate.py` are
 why they will not.
 
-Do not call `fetch_log_buffer` on start. Those hundred lines
-exist so a browser that opens `/ws/sts/{id}` a second late
-still sees deploy. Replaying them into Discord would re-fire
-every restart.
+Do not replay `session_logs` on start. Those rows exist so a
+browser that opens `/ws/sts/{id}` a second late still sees
+deploy. Replaying them into Discord would re-fire every restart.
 
 [`JetStreamRemoval.md`](JetStreamRemoval.md) deletes the log
 stream. A late `/ws/sts|td|md/{id}` reads `session_logs` (the
@@ -980,7 +978,7 @@ an Alert from a status snapshot is the later epic.
   applies; `sts:CrossArb` does not.
 - Persist tests still pass; killing the match worker in a
   test does not prevent a persist flush.
-- Worker start does not drain `fetch_log_buffer`.
+- Worker start does not replay `session_logs`.
 - Unknown matcher kind: no inject, worker continues.
 
 ### ALT-5 — `level`, `regex`, `extract`

@@ -167,10 +167,10 @@ async def test_unknown_kind_does_not_inject() -> None:
     assert runtime.pending_events(3) == []
 
 
-async def test_worker_does_not_drain_the_ring(
+async def test_worker_only_subscribes_live_logs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fetched = {"n": 0}
+    seen: list[str] = []
 
     class FakeBroker:
         async def connect(self) -> None:
@@ -179,11 +179,8 @@ async def test_worker_does_not_drain_the_ring(
         async def close(self) -> None:
             return None
 
-        async def fetch_log_buffer(self, _topic: str):
-            fetched["n"] += 1
-            return []
-
-        async def psubscribe(self, _pattern: str, *, stop: asyncio.Event):
+        async def psubscribe(self, pattern: str, *, stop: asyncio.Event):
+            seen.append(pattern)
             stop.set()
             if False:
                 yield None
@@ -195,7 +192,7 @@ async def test_worker_does_not_drain_the_ring(
     monkeypatch.setattr(alert_match, "load_graph", no_graph)
     stop = asyncio.Event()
     await run_alert_match(stop)
-    assert fetched["n"] == 0
+    assert seen == [log_persist.LOG_PATTERN]
 
 
 async def test_killing_the_match_worker_does_not_block_persist(

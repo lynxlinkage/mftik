@@ -21,8 +21,8 @@ use the broker's own vocabulary and nothing below it:
 * no `.redis`, `.js` or `.nc` attribute access — the escape hatches
   themselves;
 * no `.key_prefix` attribute access, because a name a caller builds is a name
-  the broker cannot change. The prefix is a subject root, a stream name and a
-  KV bucket at once, and a caller's flat string is not any of them.
+  the broker cannot change. The prefix is a subject root, and a caller's
+  flat string is not one.
 
 `packages/common/src/mftik/broker/` is the exception: the transport *is* the
 store-specific code, and everything this file forbids elsewhere is what it
@@ -51,8 +51,8 @@ IMPLEMENTATION = ROOT / "packages" / "common" / "src" / "mftik" / "broker"
 TAPE_STORE = ROOT / "apps" / "md" / "src" / "mftik_md" / "tape_store.py"
 
 #: Attribute names that only the implementation may read. ``redis`` is the
-#: old Redis client's escape hatch; ``js`` and ``nc`` are NATS' JetStream
-#: context and connection.
+#: old Redis client's escape hatch; ``js`` was JetStream's; ``nc`` is the
+#: core connection.
 FORBIDDEN_ATTRIBUTES = ("redis", "js", "nc", "key_prefix")
 
 #: Import roots that only the implementation may name.
@@ -120,9 +120,9 @@ def test_no_domain_talks_to_a_store_directly() -> None:
     assert leaks == [], (
         "the transport is the broker's business, and these go around it:\n  "
         + "\n  ".join(leaks)
-        + "\n\nThe broker has a family for each of these — leases, counters, "
-        "shared state, tape, fan-out, request-reply. If none of them fits, add "
-        "one to BrokerTransport rather than reaching for the store's command "
-        "here: a caller that does is a caller that only works on the transport "
-        "it was written against."
+        + "\n\nThe broker's families are fan-out, request-reply, and the "
+        "fenced session link. Tape is MD Redis, not a broker method. If none "
+        "of those fit, add one to BrokerTransport rather than reaching for "
+        "the store's command here: a caller that does is a caller that only "
+        "works on the transport it was written against."
     )
