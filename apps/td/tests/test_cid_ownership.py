@@ -157,6 +157,16 @@ async def test_foreign_cancel_is_warned_not_blocked(
     assert manager._accounts[API_ID].cid_owner[cid] == "sts-a"
     assert _order_by_cid(manager, cid) is not None
 
+    td_logs: list[str] = []
+    log_stop = asyncio.Event()
+
+    async def listen_td_logs() -> None:
+        async for env in broker.subscribe(Topics.log_td(API_ID), stop=log_stop):
+            td_logs.append(env.to_json())
+
+    log_task = asyncio.create_task(listen_td_logs())
+    await asyncio.sleep(0.05)
+
     # sts-b sees the cid on td.oms.{api_id} and cancels it.
     with caplog.at_level(logging.WARNING, logger="mftik_td.session.manager"):
         await _cancel(broker, "sts-b", cid)
@@ -171,9 +181,11 @@ async def test_foreign_cancel_is_warned_not_blocked(
     assert warned, "expected a warning for the cross-session cancel"
     assert "owner=sts-a (live)" in warned[0].getMessage()
 
-    # The operator-facing log stream carries it too.
-    lines = await broker.fetch_log_buffer(Topics.log_td(API_ID))
-    assert any("cross-session cancel" in raw and cid in raw for raw in lines)
+    # The operator-facing log channel carries it too.
+    assert any("cross-session cancel" in raw and cid in raw for raw in td_logs)
+    log_stop.set()
+    log_task.cancel()
+    await asyncio.gather(log_task, return_exceptions=True)
 
 
 async def test_detached_owner_is_reported_as_detached(

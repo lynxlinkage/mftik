@@ -20,6 +20,7 @@ def test_parse_log_topic_rejects_junk() -> None:
     assert log_persist.parse_log_topic("log.sts") is None
     assert log_persist.parse_log_topic("log.xx.y") is None
     assert log_persist.parse_log_topic("sys.heartbeat") is None
+    assert log_persist.parse_log_topic("status.sts") is None
 
 
 def test_envelope_to_row() -> None:

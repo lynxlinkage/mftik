@@ -82,10 +82,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sts", tags=["sts"])
 
-#: Replay buffer sizing matches STS manager — cover the gap between a
-#: page loading and its socket being live, not history.
-_STATUS_BUFFER = 200
-_STATUS_TTL_SECONDS = 3600
 _ACKABLE = frozenset(
     {SessionStatus.FAILED.value, SessionStatus.INTERRUPTED.value}
 )
@@ -425,12 +421,7 @@ async def ack_session(
         session_id=session_id_,
     )
     try:
-        await broker.publish_log(
-            Topics.status_sts(),
-            envelope,
-            maxlen=_STATUS_BUFFER,
-            ttl_seconds=_STATUS_TTL_SECONDS,
-        )
+        await broker.publish(Topics.status_sts(), envelope)
     except Exception:
         logger.exception("STS ack status publish failed session=%s", session_id)
 

@@ -18,9 +18,8 @@ class FakeBroker:
     def __init__(self) -> None:
         self.published: list[tuple[str, object]] = []
 
-    async def publish_log(self, topic: str, envelope: object, **_kwargs: object) -> int:
+    async def publish(self, topic: str, envelope: object) -> None:
         self.published.append((topic, envelope))
-        return 1
 
 
 @pytest.fixture

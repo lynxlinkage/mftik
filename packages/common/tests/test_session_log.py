@@ -9,9 +9,8 @@ class RecordingBroker:
     def __init__(self) -> None:
         self.envelopes: list[object] = []
 
-    async def publish_log(self, topic: str, envelope: object, **_kwargs: object) -> int:
+    async def publish(self, topic: str, envelope: object) -> None:
         self.envelopes.append(envelope)
-        return 1
 
 
 async def test_type_comes_from_the_argument() -> None:

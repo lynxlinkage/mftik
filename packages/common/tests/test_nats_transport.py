@@ -33,7 +33,6 @@ from mftik.broker.errors import (
 from mftik.broker.transport.nats import (
     _NO_RESPONDERS_CEILING_S,
     FANOUT_MAX_MSGS_PER_SUBJECT,
-    LOG_MAX_MSGS_PER_SUBJECT,
     MIN_TTL_SECONDS,
     NatsTransport,
     _check_subject,
@@ -936,46 +935,6 @@ async def test_a_cancelled_plane_loop_leaves_nothing_pending(
         await task
 
     assert _leftovers(before) == frozenset()
-
-
-@pytest.mark.asyncio
-async def test_a_ring_longer_than_the_stream_can_hold_is_refused(
-    broker: Broker,
-) -> None:
-    """Loudly, because the stream has already discarded by the time we know.
-
-    ``maxlen`` above the log stream's per-subject cap is refused, because the
-    stream has already discarded by then. The only honest answers are "hold
-    that many" and "no".
-    """
-    with pytest.raises(ValueError, match="per-subject ceiling"):
-        await broker.publish_log(
-            Topics.status_sts(),
-            _envelope(),
-            maxlen=LOG_MAX_MSGS_PER_SUBJECT + 1,
-        )
-
-
-@pytest.mark.asyncio
-async def test_a_log_line_carries_the_expiry_its_caller_asked_for(
-    broker: Broker,
-) -> None:
-    """``ttl_seconds`` was accepted and dropped on the floor.
-
-    The fan-out stream has one ``max_age`` for every subject on it, so the
-    caller's number had nowhere to go and every line lived the stream's full
-    day. A per-message TTL is where it goes — the same mechanism a lease uses,
-    which is why the stream is created with ``allow_msg_ttl``.
-    """
-    transport = _transport(broker)
-    topic = "log.sts.expiry"
-    await broker.publish_log(topic, _envelope(), maxlen=10, ttl_seconds=1800)
-
-    msg = await transport.js.get_msg(
-        transport._log_stream,  # noqa: SLF001
-        subject=transport._log_subject(topic),  # noqa: SLF001
-    )
-    assert (msg.headers or {}).get("Nats-TTL") == "1800"
 
 
 @pytest.mark.asyncio

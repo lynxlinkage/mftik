@@ -477,9 +477,8 @@ class Broker:
         """Publish an envelope to a fan-out topic.
 
         Nothing comes back. Fan-out here is best effort by design: a message
-        published while nobody is subscribed is gone, and where that is not
-        acceptable the topic is written through :meth:`publish_log` or the
-        caller is using request-reply instead.
+        published while nobody is subscribed is gone. Session-log late
+        replay is ``session_logs``; status late replay is the session list.
         """
         await self._transport.publish(topic, envelope.to_json())
 
@@ -491,18 +490,14 @@ class Broker:
         maxlen: int | None = None,
         ttl_seconds: int = 86_400,
     ) -> None:
-        """Publish a log line onto the log stream.
+        """Publish onto a log topic. Same as :meth:`publish`.
 
-        Fan-out alone drops messages when nobody is listening (e.g. the UI
-        opens ``/ws/sts/...`` after a deploy). The stream holds its own
-        per-subject ring; :meth:`fetch_log_buffer` trims the replay to
-        ``maxlen`` (default :attr:`BrokerConfig.log_buffer_maxlen`). A
-        ``maxlen`` above the stream's cap raises rather than keeping fewer.
+        Late replay no longer lives in a stream ring. ``maxlen`` and
+        ``ttl_seconds`` are accepted and ignored so existing callers do
+        not have to change on the same commit.
         """
-        keep = self.config.log_buffer_maxlen if maxlen is None else max(1, maxlen)
-        await self._transport.publish_log(
-            topic, envelope.to_json(), maxlen=keep, ttl_seconds=ttl_seconds
-        )
+        del maxlen, ttl_seconds
+        await self.publish(topic, envelope)
 
     async def fetch_log_buffer(
         self, topic: str, *, maxlen: int | None = None
@@ -528,9 +523,9 @@ class Broker:
     ) -> AsyncIterator[UntypedEnvelope]:
         """Yield envelopes from one or more fan-out topics until ``stop``.
 
-        Messages published while not subscribed are lost unless they were also
-        written via :meth:`publish_log`. ``ready`` is set once this process's
-        server has the subscription, before the first yield.
+        Messages published while not subscribed are gone. ``ready`` is set
+        once this process's server has the subscription, before the first
+        yield.
         """
         topic_list = (topics,) if isinstance(topics, str) else tuple(topics)
         if not topic_list:
@@ -548,8 +543,8 @@ class Broker:
     ) -> AsyncIterator[tuple[str, UntypedEnvelope]]:
         """Yield ``(topic, envelope)`` from pattern subscriptions until ``stop``.
 
-        Messages published while not subscribed are lost unless they were also
-        written via :meth:`publish_log`, exactly as in :meth:`subscribe`.
+        Messages published while not subscribed are gone, exactly as in
+        :meth:`subscribe`.
 
         Patterns belong on :class:`~mftik.protocol.Topics` and must use one
         wildcard per segment — ``log.*.*``, not ``log.*``. Redis globs the

@@ -7,8 +7,22 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 from mftik.broker import Broker
-from mftik.protocol import TD_FILL, Log, LogEnvelope, Topics, UntypedEnvelope
-from mftik_db.repositories import OrderRepository
+from mftik.protocol import (
+    STS_SESSION_STATUS,
+    TD_FILL,
+    Envelope,
+    Log,
+    LogEnvelope,
+    StsSessionStatus,
+    StsSessionStatusEnvelope,
+    Topics,
+    UntypedEnvelope,
+)
+from mftik_db.repositories import (
+    OrderRepository,
+    SessionLogRepository,
+    StsSessionRepository,
+)
 from mftik_db.session import session_scope
 
 from mftik_api.decimals import wire_decimal
@@ -19,8 +33,88 @@ logger = logging.getLogger(__name__)
 #: session, which is what :func:`board_bridge` exists to bridge.
 TD_GLOBAL_PATTERN = Topics.td_global_pattern()
 
-#: Replay window for ``status.sts``. Matches STS / API publish ``maxlen``.
-_STATUS_BUFFER = 200
+#: How many persisted session-log lines a late socket gets. Newest of
+#: these, then live. The REST log page is the rest of history.
+_LOG_REPLAY = 100
+
+#: How many session rows a late ``/ws/status/sts`` gets. Same source as
+#: the REST session list — not ``session_logs``.
+_STATUS_REPLAY = 200
+
+
+def _epoch(value: Any) -> float | None:
+    if value is None:
+        return None
+    if hasattr(value, "timestamp"):
+        return float(value.timestamp())
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def session_log_replay(domain: str, stream_id: str) -> list[str]:
+    """Persisted ``log.{domain}.{id}`` lines, oldest first, for a late socket.
+
+    Built from ``session_logs``, not a broker ring. A persist worker that
+    is down loses this window; live subscribers are unaffected.
+    """
+    try:
+        async with session_scope() as db:
+            rows = await SessionLogRepository(db).list_before(
+                domain, stream_id, limit=_LOG_REPLAY
+            )
+    except Exception:
+        logger.exception(
+            "session-log replay failed domain=%s id=%s", domain, stream_id
+        )
+        return []
+    out: list[str] = []
+    for row in reversed(rows):
+        env = Envelope[Log](
+            id=row.envelope_id,
+            type="log",
+            source=row.source,
+            session_id=row.stream_id,
+            ts=row.ts,
+            payload=Log(level=row.level, message=row.message),
+        )
+        out.append(env.to_json())
+    return out
+
+
+async def status_replay() -> list[str]:
+    """Current STS rows as status snapshots, for a late ``/ws/status/sts``.
+
+    The same facts the REST session list returns. ``status.sts`` is not
+    stored in ``session_logs``.
+    """
+    try:
+        async with session_scope() as db:
+            rows = await StsSessionRepository(db).list_sessions(
+                status=None, limit=_STATUS_REPLAY
+            )
+    except Exception:
+        logger.exception("status replay failed")
+        return []
+    out: list[str] = []
+    for row in reversed(list(rows)):
+        env = StsSessionStatusEnvelope.wrap(
+            StsSessionStatus(
+                session_id=row.session_id,
+                status=row.status,
+                strategy=row.strategy,
+                reason=row.reason,
+                created_by=row.created_by,
+                finished_at=_epoch(row.finished_at),
+                type=row.type,
+            ),
+            type=STS_SESSION_STATUS,
+            source="api",
+            session_id=row.session_id,
+        )
+        out.append(env.to_json())
+    return out
 
 
 async def _log_bridge(
@@ -32,7 +126,7 @@ async def _log_bridge(
 ) -> None:
     """Bridge a broker log topic to a WebSocket client.
 
-    Replays the broker's log buffer first (so deploy-time lines are not lost),
+    Replays ``session_logs`` first (so deploy-time lines are not lost),
     then forwards live pub/sub. Envelope ids are deduped across the seam.
     """
     await websocket.accept()
@@ -68,7 +162,7 @@ async def _log_bridge(
         await asyncio.sleep(0.05)
 
         # Historical lines first (Noop on_start / on_ready / recon, etc.).
-        for raw in await broker.fetch_log_buffer(channel):
+        for raw in await session_log_replay(source, stream_id):
             if not await send_raw(raw):
                 break
 
@@ -106,7 +200,7 @@ async def _log_bridge(
         try:
             while True:
                 data = await websocket.receive_text()
-                await broker.publish_log(
+                await broker.publish(
                     channel,
                     LogEnvelope.wrap(
                         Log(level="debug", message=data),
@@ -164,10 +258,10 @@ async def sts_status_bridge(websocket: WebSocket) -> None:
     the status channel it would let any connected page forge session states
     for every other viewer, and nothing here authenticates the caller.
 
-    Replays the buffer before going live so a page that loads just after a
-    session ended still learns about it, and dedupes by envelope id across
-    the seam. Consumers apply the newest event per ``session_id``: replayed
-    history and live events can overlap, and each event is a full snapshot.
+    Replays the current session rows (the REST list) before going live so
+    a page that loads just after a session ended still learns about it.
+    Dedupes by envelope id across the seam. Consumers apply the newest
+    event per ``session_id``: each event is a full snapshot.
     """
     await websocket.accept()
     stop = asyncio.Event()
@@ -202,9 +296,7 @@ async def sts_status_bridge(websocket: WebSocket) -> None:
         sub_task = asyncio.create_task(pump_pubsub())
         await asyncio.sleep(0.05)
 
-        for raw in await broker.fetch_log_buffer(
-            channel, maxlen=_STATUS_BUFFER
-        ):
+        for raw in await status_replay():
             if not await send_raw(raw):
                 break
 

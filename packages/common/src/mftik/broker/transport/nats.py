@@ -16,10 +16,9 @@ would fail without one. :meth:`NatsTransport.subscribe` starts at *now*,
 which is the broker's promise: a message published while nobody was
 subscribed is gone.
 
-``publish_log`` and the tape still ``js.publish``. Durability is the
-point of those paths: a late WS subscriber and a warm-up both read what
-the stream kept. They pay the stream leader's ack, wherever first
-``STREAM.CREATE`` put that stream.
+The tape still ``js.publish``. Session logs and status are core
+``publish``; a late WebSocket reads ``session_logs`` or the session
+list, not a stream ring. ``connect`` no longer ensures ``{prefix}_log``.
 
 **Request-reply is core NATS.** A caller waiting on an answer gains nothing
 from durability: it has a timeout, and a request executed after that timeout
@@ -88,8 +87,7 @@ FANOUT_MAX_AGE_SECONDS = 86_400
 
 #: How many messages one fan-out subject keeps. Live pub/sub is not a log:
 #: subscribers start at now, and this cap is only a fuse so a busy feed
-#: cannot grow the stream. Logs live on their own stream; see
-#: :meth:`NatsTransport.publish_log`.
+#: cannot grow the stream. Session-log late replay is ``session_logs``.
 FANOUT_MAX_MSGS_PER_SUBJECT = 256
 
 #: Ceiling on a log ring. STS and the API ask for 200 for the session status
@@ -161,11 +159,6 @@ _KV_KEY_OK = re.compile(r"^[-/_=.a-zA-Z0-9]+$")
 #: What one subject token may not contain. ``.`` is absent on purpose: the
 #: broker's topics are already dotted and those dots are meant as hierarchy.
 _SUBJECT_BAD = re.compile(r"[\s*>]")
-
-
-def _carries_log(topic: str) -> bool:
-    """Whether ``topic`` is ever written through :meth:`NatsTransport.publish_log`."""
-    return topic.startswith(("log.", "status."))
 
 
 def _ttl_seconds(ttl: float) -> int:
@@ -365,7 +358,6 @@ class NatsTransport(BrokerTransport):
             self._owns_connection = True
         self._js = self._nc.jetstream()
         await self._ensure_fanout_stream()
-        await self._ensure_log_stream()
 
     async def close(self) -> None:
         if self._nc is not None and self._owns_connection:
@@ -426,7 +418,6 @@ class NatsTransport(BrokerTransport):
                 max_msgs_per_subject=FANOUT_MAX_MSGS_PER_SUBJECT,
                 max_msgs=FANOUT_MAX_MSGS,
                 max_age=FANOUT_MAX_AGE_SECONDS,
-                # Kept even though ``publish_log`` has moved to its own stream:
                 # NATS refuses to disable message TTLs on a stream that has
                 # them, so removing this turns every upgrade against a live
                 # server into a failed boot.
@@ -722,8 +713,6 @@ class NatsTransport(BrokerTransport):
     ) -> AsyncIterator[tuple[str, str]]:
         # Patterns are subjects with wildcards in them, so they pass through
         # ``_check_subject``'s refusal of ``*`` — prefixed by hand instead.
-        # Log/status patterns also listen on the log stream; everything else
-        # is fan-out only, so a lease or a feed does not pay a second subscription.
         subjects = [
             subject
             for p in patterns
@@ -738,12 +727,7 @@ class NatsTransport(BrokerTransport):
         fanout = (
             f"{self._prefix}.ps.{topic}" if pattern else self._fanout_subject(topic)
         )
-        if not _carries_log(topic):
-            return (fanout,)
-        log = (
-            f"{self._prefix}.log.{topic}" if pattern else self._log_subject(topic)
-        )
-        return (fanout, log)
+        return (fanout,)
 
     async def _drain_pending(self) -> None:
         """Write buffered commands to this server, without a PING/PONG.

@@ -70,8 +70,8 @@ back in through a side door.
 
 | Family | Methods | What it is for |
 |---|---|---|
-| Fan-out | `publish`, `subscribe`, `psubscribe` | Market data, heartbeats, per-session events. Best effort: a message published while nobody is subscribed is gone. `subscribe` / `psubscribe` on a `log.` / `status.` topic also see the log stream, so a live log subscriber does not need a second call. |
-| Fan-out with a tail | `publish_log`, `fetch_log_buffer` | Logs, where a UI socket that opens after the deploy still wants the last hundred lines. Own stream (`{prefix}.log.>`), own per-subject ring. |
+| Fan-out | `publish`, `subscribe`, `psubscribe` | Market data, heartbeats, per-session events, session logs, `status.sts`. Best effort: a message published while nobody is subscribed is gone. Late `/ws/{domain}/{id}` reads `session_logs`; late `/ws/status/sts` reads the session list. |
+| Fan-out with a tail | `publish_log` (alias of `publish`), leftover `fetch_log_buffer` | `publish_log` is `publish`. The `{prefix}_log` stream is no longer ensured. `fetch_log_buffer` remains on the façade until JetStream is deleted and returns empty when the stream is absent. |
 | Request-reply | `request`, `probe`, `serve`, `serve_handler` | The control plane. Attach, deploy, stop, health, backfill, market-data queries. Nobody serving is an immediate error. |
 | Session link | `leased_link` / `LeasedSessionLink` | The fenced STS↔MD / STS↔TD heartbeat: token echo, grace watchdog, expiry on a sibling task. [`JetStreamRemoval.md`](JetStreamRemoval.md) keeps a timeout (`subscribe` does not wake on silence) and counts three missed intervals both ways; arm on the first ack; interval rides on the heartbeat or is a protocol constant. |
 | Shared state | `state_put`, `state_put_many`, `state_replace`, `state_get`, `state_all`, `state_drop`, `state_clear`, `state_watch`, `state_projection` | TD's order book and ledger. Writers `put` / `replace`; readers that care about the cost open a `StateProjection`. |
@@ -102,19 +102,17 @@ wearing different clothes.
 **`maxlen` means `maxlen`, and a transport that cannot must say so.** Trimming
 is exact. Approximate forms stop at macro-node boundaries, so the fuse did not
 hold until a feed was a hundred records past it and a sweep reported nothing
-dropped. `publish_log` has the other half of the rule: a ring longer than the
-log stream's per-subject cap (`LOG_MAX_MSGS_PER_SUBJECT`, 256) raises, because
-a caller quietly handed half of what it asked for reads the same as a topic
-that has been quiet. A smaller `maxlen` is the replay cap `fetch_log_buffer`
-honours; the stream holds its own ring.
+dropped. Session-log and status late-replay no longer use a broker ring:
+`publish_log` ignores `maxlen`, and a late socket reads Postgres (session
+logs) or the session list (status).
 
 ## How NATS answers
 
 | The broker's | What NATS does |
 |---|---|
-| `publish` / `subscribe` | Core NATS. The `{prefix}.ps.>` stream still captures the subject as a bounded tail; the publisher does not wait for that ack. `subscribe` flushes once so this process's server has the interest before the iterator starts. A `log.` / `status.` topic also listens on `{prefix}.log.>`. |
-| `psubscribe` | The same, with a wildcard subject. Patterns were already one `*` per segment; see `Topics.log_pattern`. A `log.` / `status.` pattern listens on both streams. |
-| `publish_log` / `fetch_log_buffer` | A dedicated stream (`{prefix}.log.>`), `max_msgs_per_subject = LOG_MAX_MSGS_PER_SUBJECT` (256). The server holds the ring; there is no purge after each line. `maxlen` above that cap raises. `fetch_log_buffer` trims the replay to `BROKER_LOG_BUFFER_MAXLEN` (or the passed `maxlen`). `ttl_seconds` is a per-message TTL, so a line expires on its own clock rather than the buffer expiring as a whole. |
+| `publish` / `subscribe` | Core NATS. The `{prefix}.ps.>` stream still captures the subject as a bounded tail; the publisher does not wait for that ack. `subscribe` flushes once so this process's server has the interest before the iterator starts. `log.` / `status.` topics are ordinary fan-out — they do not dual-listen on a log stream. |
+| `psubscribe` | The same, with a wildcard subject. Patterns were already one `*` per segment; see `Topics.log_pattern`. |
+| `publish_log` / `fetch_log_buffer` | `publish_log` is `publish`. `connect()` no longer ensures `{prefix}_log`. Leftover `fetch_log_buffer` reads that stream if a previous process created it, otherwise returns empty. Late `/ws/{domain}/{id}` reads `session_logs`; late `/ws/status/sts` reads the session list. |
 | `request` / `probe` | Core request-reply. No responders is an immediate error, so the control plane learns a plane is down without spending its whole timeout on it. Re-asked first, for half of what the caller brought and never more than a second: a serve loop registering as its process boots is not a plane being down, and neither is an account subject three hundred milliseconds into a handover — order entry brings two seconds. `probe` opts out and spends only the boot-race grace, because "down" is the answer a probe is *for*. |
 | `serve` | A core NATS queue-group subscription. The stop event is delivered *through* the inbound queue rather than raced against it, so a serve loop stops on the message after the one it is reading, and everything queued ahead of the stop is still handed over. |
 | Reply inbox | The protocol's own reply subject. `reply_inbox` returns `None` and `serve` produces the address on the way in, so nothing is stamped on the envelope. |

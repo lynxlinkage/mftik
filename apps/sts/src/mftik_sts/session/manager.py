@@ -64,12 +64,6 @@ _CONTROL_RETIRE_S = 2.0
 
 _SHUTDOWN_REASON = "STS shut down while this was running"
 
-#: How many status events the replay buffer keeps, and for how long. Sized for
-#: "what happened recently", not history — the DB is the record, this only has
-#: to cover the gap between a page loading and its socket being live.
-_STATUS_BUFFER = 200
-_STATUS_TTL_SECONDS = 3600
-
 #: How long a rebuild keeps trying to attach one domain. TD and MD may still be
 #: starting — nothing makes them come up before STS — so waiting is the whole
 #: strategy, and attach is idempotent on both sides, which is what makes
@@ -241,10 +235,9 @@ class SessionManager:
         Always called *after* the DB write, never before: a UI that reacts to
         the event by re-reading REST must not be able to read the old row.
 
-        Published through ``publish_log`` for its ring buffer — plain pub/sub
-        drops everything sent while no browser is connected, and a page that
-        loads a second after a session failed would never hear about it. The
-        bridge replays the buffer on connect.
+        Published on the live channel. A socket that opens late reads the
+        current rows (the same source as REST) and then this subject — the
+        row is written first, so that read cannot see the previous status.
         """
         terminal = status != SessionStatus.LIVE.value
         payload = StsSessionStatus(
@@ -263,12 +256,7 @@ class SessionManager:
             session_id=session_id,
         )
         try:
-            await self._broker.publish_log(
-                Topics.status_sts(),
-                envelope,
-                maxlen=_STATUS_BUFFER,
-                ttl_seconds=_STATUS_TTL_SECONDS,
-            )
+            await self._broker.publish(Topics.status_sts(), envelope)
         except Exception:
             # The row is already written, so the UI recovers on its next load.
             # Never let a status announcement take the session down with it.
