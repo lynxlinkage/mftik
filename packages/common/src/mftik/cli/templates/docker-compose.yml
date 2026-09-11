@@ -66,6 +66,20 @@ services:
       timeout: 3s
       retries: 10
 
+  # Regional tape disk. Standalone, AOF plus a volume. Production compose
+  # is outside this repo; a node that records tape needs the same service.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # The whole broker: order RPC, ledger and OMS state, liveness, and the
   # recorded tape.
   #
@@ -189,8 +203,11 @@ services:
       # number of recorded feeds is what the nats volume has to hold: 150k x 8
       # feeds is ~240 MB.
       MD_TAPE_MAXLEN: "150000"
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       nats:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -235,6 +252,7 @@ services:
 volumes:
   postgres_data:
   nats_data:
+  redis_data:
   mftik_data:
   sts_eventlog:
   caddy_data:

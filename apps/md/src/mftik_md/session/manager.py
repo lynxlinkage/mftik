@@ -36,6 +36,7 @@ from mftik_md.session.dispatcher import Dispatcher, FeedKey
 from mftik_md.session.factory import ConnectorFactory
 from mftik_md.session.venue import VenueSession
 from mftik_md.tape import TapeRecorder
+from mftik_md.tape_store import TapeStore
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,13 @@ class SessionManager:
     def feed_refcount(self, feed: str) -> int:
         return self._dispatcher.refcount(*Topics.parse_md_feed(feed))
 
+    @property
+    def tape_store(self) -> TapeStore | None:
+        """This region's tape disk, or None when recording is off."""
+        if self._recorder is None:
+            return None
+        return self._recorder.store
+
     async def trim_tapes(self) -> None:
         """Apply the retention window to every feed currently recording.
 
@@ -156,6 +164,7 @@ class SessionManager:
                 session_id=request.session_id,
                 subscriptions=sorted(existing.subscriptions),
                 refcounts=self._dispatcher.refcounts(),
+                instance=self._instance,
             )
 
         link = StsLink(
@@ -225,6 +234,7 @@ class SessionManager:
             session_id=request.session_id,
             subscriptions=feeds,
             refcounts=self._dispatcher.refcounts(),
+            instance=self._instance,
         )
 
     async def detach(
@@ -475,6 +485,8 @@ class SessionManager:
         # exit rather than by handshake is one the venue has to time out.
         if self._disconnects:
             await asyncio.gather(*self._disconnects, return_exceptions=True)
+        if self._recorder is not None:
+            await self._recorder.aclose()
 
     async def _subscribe_feed(self, link: StsLink, feed: str) -> None:
         topic, ticker = Topics.parse_md_feed(feed)

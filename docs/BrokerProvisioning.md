@@ -94,14 +94,18 @@ Tape streams cannot be declared: the feed set is venue symbols times recorded
 topics, discovered at runtime. But they do not need to be, because **the set is
 dynamic and the shape is not**.
 
+Tape recording has moved to regional Redis (`apps/md/.../tape_store.py`).
+`MD_TAPE_MAXLEN` and `MD_TAPE_RETENTION_S` are still read once and handed
+to every feed; they are now `XADD MAXLEN` and `XTRIM MINID` / key TTL,
+not JetStream stream limits. Broker `tape_*` streams remain until
+JetStream is deleted.
+
 `_ensure_tape_stream` takes `maxlen` and `ttl_seconds` per call, and
 `transport/nats.py` explains the per-feed stream partly on that basis — that
 retention "is per feed in the interface". No caller uses it that way.
-`_build_recorder` (`apps/md/app.py`) reads `MD_TAPE_MAXLEN` and
-`MD_TAPE_RETENTION_S` once and hands the same two numbers to every feed. The
-load-bearing reason for a stream per feed is the other one the comment gives:
-sequences are the stream's, so "the newest N records" is subtraction rather than
-a scan past every other feed's prints.
+The load-bearing reason for a leftover stream per feed is the other one
+the comment gives: sequences are the stream's, so "the newest N records"
+is subtraction rather than a scan past every other feed's prints.
 
 So the rule is not "declare everything". It is:
 

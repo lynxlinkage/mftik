@@ -203,6 +203,10 @@ class StsSession:
         self._td_instance_lookup = td_instance
         #: Instance name → feeds, for addressing attach and detach.
         self.md = load_md(md) if md is not None else load_md(md_ids)
+        #: Feed → the MD instance that answered attach (or the first lease
+        #: ack, for an unpinned ``*``). Named YAML instances do not need
+        #: this: ``StrategyTape`` reads them off :attr:`md` before attach.
+        self.md_owners: dict[str, str] = {}
         #: Every feed, flat, whatever instance holds it. This is what a
         #: strategy reads — ``TwapStrategy``, ``OneCancelOther`` and
         #: ``NoopStrategy`` all take ``md_ids[0]`` to find the instrument they
@@ -262,6 +266,17 @@ class StsSession:
     @td_api_ids.setter
     def td_api_ids(self, ids: list[int]) -> None:
         self.td = load_td(list(ids or []))
+
+    def note_md_owner(self, feeds: list[str], instance: str) -> None:
+        """Remember which MD holds ``feeds`` so a tape read can address it.
+
+        ``*`` is not an owner. An empty name is a mixed-version attach
+        result and is ignored the same way.
+        """
+        if not instance or instance == ANY_INSTANCE:
+            return
+        for feed in feeds:
+            self.md_owners[feed] = instance
 
     def td_account(self, name: str) -> TdAccountRef:
         try:
@@ -822,6 +837,11 @@ class StsSession:
         instance = ack.instance or "md"
         first = instance not in self._md_acks
         self._md_acks[instance] = asyncio.get_running_loop().time()
+        # Unpinned feeds have no name in the YAML. The first ack is the
+        # first moment we know who took them — too late for on_start, but
+        # enough for a later read.
+        for feed in self.md.get(ANY_INSTANCE, []):
+            self.md_owners.setdefault(feed, instance)
         if first and self._md_acks:
             self.event_log.record(
                 "lease", "md_ack_armed", dir="self", what=instance

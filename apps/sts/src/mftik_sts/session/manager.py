@@ -23,6 +23,7 @@ from mftik.protocol import (
     ListSessionsRequest,
     MdAttachRequest,
     MdAttachRequestEnvelope,
+    MdAttachResult,
     RpcError,
     SessionInfo,
     StsCreateSessionRequest,
@@ -996,7 +997,7 @@ class SessionManager:
             feeds = md.get(instance) or []
             if not feeds:
                 continue
-            await self._attach_with_retry(
+            reply = await self._attach_with_retry(
                 what=f"md instance={instance} feeds={feeds}",
                 subject=(
                     Topics.MD
@@ -1016,6 +1017,21 @@ class SessionManager:
                 ),
                 error_type=MD_ERROR,
             )
+            session = self._sessions.get(session_id)
+            if session is not None and reply is not None:
+                try:
+                    result = MdAttachResult.model_validate(reply.payload)
+                except Exception:
+                    result = None
+                owner = (
+                    (result.instance if result is not None else "")
+                    or ("" if instance == ANY_INSTANCE else instance)
+                )
+                if owner:
+                    session.note_md_owner(
+                        list(result.subscriptions if result else feeds),
+                        owner,
+                    )
 
     async def _td_instance(self, api_id: int) -> str:
         """Which TD may take this attach.
@@ -1072,7 +1088,7 @@ class SessionManager:
         subject: str,
         envelope: Any,
         error_type: str,
-    ) -> None:
+    ) -> Any:
         """Send an attach until it lands, or give up and say so.
 
         Retried rather than gated on a readiness probe: the domain may simply
@@ -1096,7 +1112,7 @@ class SessionManager:
                 last = exc
             else:
                 if reply.type != error_type:
-                    return
+                    return reply
                 err = RpcError.model_validate(reply.payload)
                 last = RuntimeError(f"{err.code}: {err.message}")
             left = deadline - asyncio.get_running_loop().time()

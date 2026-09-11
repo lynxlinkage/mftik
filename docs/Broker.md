@@ -1,9 +1,9 @@
 # The broker — what a plane may say, and what NATS does to answer it
 
-This is the tree today: core NATS plus JetStream streams and KV. The
-intended store map — no JetStream, tape on regional Redis, books in TD,
-session fencing by heartbeat misses — is
-[`docs/JetStreamRemoval.md`](JetStreamRemoval.md). Until that lands, the
+This is the tree today: core NATS plus leftover JetStream streams and KV.
+Tape has already moved to regional Redis. The remaining store map — books
+in TD, session fencing by heartbeat misses, then deleting JetStream — is
+[`docs/JetStreamRemoval.md`](JetStreamRemoval.md). Until that finishes, the
 tables below are the contract a caller can test against.
 
 Six processes and none of them import each other. What they share is
@@ -50,10 +50,12 @@ it:
   and a caller's flat string is not any of them.
 
 `packages/common/src/mftik/broker/` is exempt: the transport *is* the
-store-specific code. `scripts/` and the test suites are outside the rule —
-`redacted_url` is a credential's problem and names it on purpose, and
-`broker_harness` reaches through deliberately so the tests above it do not have
-to.
+store-specific code. The MD tape module (`apps/md/.../tape_store.py`) is
+the other exemption: regional Redis is that plane's disk, not a second
+broker, and STS still must not import `redis`. `scripts/` and the test
+suites are outside the rule — `redacted_url` is a credential's problem
+and names it on purpose, and `broker_harness` reaches through deliberately
+so the tests above it do not have to.
 
 [`packages/common/tests/test_broker_is_the_only_transport.py`](../packages/common/tests/test_broker_is_the_only_transport.py)
 walks the trees and fails with file and line. It also asserts the walk found
@@ -75,7 +77,7 @@ back in through a side door.
 | Shared state | `state_put`, `state_put_many`, `state_replace`, `state_get`, `state_all`, `state_drop`, `state_clear`, `state_watch`, `state_projection` | TD's order book and ledger. Writers `put` / `replace`; readers that care about the cost open a `StateProjection`. |
 | Leases | `lease_put`, `lease_take`, `lease_owner`, `lease_held`, `lease_hold`, `lease_release`, `lease_drop` | "Is anybody still running this", "may I be the one who runs it". Session liveness, account ownership, the backfill lock. |
 | Counters | `counter_next` | STS's cid slot, allocated across processes that all serve one subject. |
-| Recorded tape | `tape_append`, `tape_tail`, `tape_trim_before`, `tape_mark_recording`, `tape_mark_stopped`, `tape_coverage` | MD's recording, and the warm-up a strategy reads out of it. |
+| Recorded tape | MD Redis + `md.tape.tail` on `Topics.md(instance)` | Per-region standalone Redis (AOF + volume). STS `StrategyTape.read` requests the MD this session attached; an unattached feed raises. Broker `tape_*` still exist as leftover JetStream until that family is deleted. |
 
 Four of those carry a promise a caller used to make for itself, and each is a
 promise the transport has to keep rather than reimplement:

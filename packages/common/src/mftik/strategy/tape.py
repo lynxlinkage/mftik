@@ -1,20 +1,19 @@
 """Strategy-side tape reads — the prints a session was not running for.
 
-MD records the trade feeds it pumps (see ``mftik_md.tape``). This reads one back,
-so a strategy that has to see a few hundred prints before it can act does not
-have to spend the first hour of its life watching them arrive.
+MD records the trade feeds it pumps (see ``mftik_md.tape``). This reads one
+back, so a strategy that has to see a few hundred prints before it can act
+does not have to spend the first hour of its life watching them arrive.
 
-A direct broker read rather than a query to MD, for the reason
-:class:`~mftik.strategy.ledger.StrategyLedger` reads ``td.ledger.{api_id}`` directly:
-the data is already sitting in a key that MD owns and keeps current, and asking
-its owner to hand over a copy would add a round trip and a second answer that
-can disagree with the first. The ``mds.fetch_*`` plane is for the other case —
-something only the venue knows, which somebody has to go and ask for.
+The read is a request to the MD instance this session already attached —
+the process that has been recording. STS does not open Redis and does not
+anycast ``Topics.MD`` or ``md.fetch``. A ticker that is not on this
+session's ``md`` map raises: there is no owner to invent. Asking the
+wrong region's MD is an empty :class:`TapeSlice` (``recording=false``).
 
 What comes back is the same :class:`~mftik.exchange.models.Trade` /
-:class:`~mftik.exchange.models.AggTrade` the live hooks are handed, so a strategy
-can feed history and live prints through one code path instead of writing its
-aggregation twice and hoping the two agree.
+:class:`~mftik.exchange.models.AggTrade` the live hooks are handed, so a
+strategy can feed history and live prints through one code path instead of
+writing its aggregation twice and hoping the two agree.
 """
 
 from __future__ import annotations
@@ -24,14 +23,22 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
-from mftik.broker.client import decode_tape_gaps
 from mftik.exchange.models import AggTrade, Side, Trade
 from mftik.exchange.tickers import UniversalTicker
-from mftik.protocol import Topics
+from mftik.protocol import (
+    ANY_INSTANCE,
+    MD_TAPE_TAIL,
+    MdTapeRecord,
+    MdTapeTailChunk,
+    MdTapeTailRequest,
+    MdTapeTailRequestEnvelope,
+    Topics,
+)
 from mftik.strategy.eventlog import session_log
 
 if TYPE_CHECKING:
     from mftik.strategy.base import Strategy
+    from mftik.strategy.session import SessionView
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +72,35 @@ LOG_CHUNK = 1_000
 DEFAULT_MAX_GAP_MS = 30_000
 
 
+class TapeFeedNotAttached(LookupError):
+    """This session never attached the feed, so it has no MD to ask."""
+
+
+def md_instance_for_feed(session: SessionView, feed: str) -> str:
+    """The named MD that holds ``feed`` for this session.
+
+    Named YAML instances are enough for a warm-up in ``on_start`` — attach
+    has not happened yet, and waiting for the first lease ack is a race.
+    ``*`` does not invent an owner: the session must have recorded one
+    (rebuild attach or a lease ack) or this raises.
+    """
+    owners = getattr(session, "md_owners", None) or {}
+    named = owners.get(feed)
+    if named and named != ANY_INSTANCE:
+        return named
+    md = getattr(session, "md", None) or {}
+    if isinstance(md, list):
+        raise TapeFeedNotAttached(feed)
+    matches = [
+        instance
+        for instance, feeds in md.items()
+        if instance != ANY_INSTANCE and feed in (feeds or [])
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    raise TapeFeedNotAttached(feed)
+
+
 @dataclass(frozen=True)
 class TapeGap:
     """An interruption somebody measured, between two stretches of recording.
@@ -75,9 +111,9 @@ class TapeGap:
     recording instead, and the tape before it never reaches the reader.
     """
 
-    #: When recording stopped, in the broker's clock — the same clock record ids
-    #: :attr:`TapeSlice.continuous_since_ms` are stamped against, not the
-    #: venue's event time that rides on each record.
+    #: When recording stopped, in the recorder's clock — the same clock record
+    #: ids and :attr:`TapeSlice.continuous_since_ms` are stamped against, not
+    #: the venue's event time that rides on each record.
     start_ms: int
     #: When recording resumed.
     end_ms: int
@@ -164,25 +200,29 @@ class StrategyTape:
         reports the gaps it does span, on :attr:`TapeSlice.gaps`, so a strategy
         that wants to be stricter than the number it passed still can be.
 
-        An empty slice is a normal answer, not a failure. Nothing has ever
-        subscribed to this feed, MD is running with recording off, or the tape
-        expired while nobody held the feed.
+        A feed this session never attached raises
+        :class:`TapeFeedNotAttached`. An empty slice from the right MD is a
+        normal answer: nothing has ever subscribed, recording is off, or
+        the tape expired.
         """
         if self._strategy is None or self._strategy.session is None:
             raise RuntimeError("strategy tape is not bound to a session")
-        broker = self._strategy.session.broker
+        session = self._strategy.session
+        broker = session.broker
         resolved = UniversalTicker.resolve(str(ticker))
         feed = Topics.md_feed(topic, resolved)
+        instance = md_instance_for_feed(session, feed)
         # Resolved once, not once per record: a warm-up read is hundreds of
         # thousands of rows, and every one of them carries the same ticker.
         universal_ticker = str(resolved)
 
-        coverage = await broker.tape_coverage(feed)
-        since_ms = _int_or_none(coverage.get("continuous_since_ms"))
-        recording = coverage.get("recording") == "1"
+        rows, coverage = await _fetch_tail(
+            broker, instance, feed, limit=max(0, limit)
+        )
+        since_ms = coverage["continuous_since_ms"]
+        recording = coverage["recording"]
         gaps = [
-            TapeGap(start_ms=start, end_ms=end)
-            for start, end in decode_tape_gaps(coverage.get("gaps"))
+            TapeGap(start_ms=start, end_ms=end) for start, end in coverage["gaps"]
         ]
 
         # Where the series actually begins. The continuity mark is the floor;
@@ -196,14 +236,13 @@ class StrategyTape:
             resumed = max(gap.end_ms for gap in too_long)
             start_ms = resumed if start_ms is None else max(start_ms, resumed)
 
-        rows = await broker.tape_tail(feed, count=max(0, limit))
         records: list[Trade] = []
         dropped = 0
         oldest_kept_ms: int | None = None
         for record_ms, fields in rows:
-            # The record's stamp is the broker's clock at append time, which is
-            # what the continuity mark is measured against. The venue's own ts
-            # rides on the record and is what the strategy reads — the two
+            # The record's stamp is the recorder's clock at append time, which
+            # is what the continuity mark is measured against. The venue's own
+            # ts rides on the record and is what the strategy reads — the two
             # answer different questions and are not interchangeable here.
             if start_ms is not None and record_ms < start_ms:
                 dropped += 1
@@ -265,6 +304,52 @@ class StrategyTape:
         )
 
 
+async def _fetch_tail(
+    broker: object,
+    instance: str,
+    feed: str,
+    *,
+    limit: int,
+) -> tuple[list[tuple[int, dict[str, str]]], dict[str, object]]:
+    """Pull every page of ``md.tape.tail`` and assemble oldest → newest."""
+    pages: list[list[tuple[int, dict[str, str]]]] = []
+    coverage: dict[str, object] = {
+        "continuous_since_ms": None,
+        "recording": False,
+        "gaps": [],
+    }
+    before: str | None = None
+    remaining = limit
+    while remaining > 0:
+        reply = await broker.request(  # type: ignore[attr-defined]
+            Topics.md(instance),
+            MdTapeTailRequestEnvelope.wrap(
+                MdTapeTailRequest(feed=feed, limit=remaining, before=before),
+                type=MD_TAPE_TAIL,
+                source="sts",
+            ),
+        )
+        chunk = MdTapeTailChunk.model_validate(reply.payload)
+        coverage = {
+            "continuous_since_ms": chunk.continuous_since_ms,
+            "recording": chunk.recording,
+            "gaps": list(chunk.gaps),
+        }
+        if not chunk.records:
+            break
+        pages.append(_records_of(chunk.records))
+        remaining -= len(chunk.records)
+        if not chunk.more or not chunk.before:
+            break
+        before = chunk.before
+    rows = [row for page in reversed(pages) for row in page]
+    return rows, coverage
+
+
+def _records_of(records: list[MdTapeRecord]) -> list[tuple[int, dict[str, str]]]:
+    return [(row.ms, dict(row.fields)) for row in records]
+
+
 def _log_records(log, feed: str, records: list[Trade]) -> None:  # noqa: ANN001
     """Write the prints themselves, in chunks, up to the cap.
 
@@ -291,15 +376,6 @@ def _log_records(log, feed: str, records: list[Trade]) -> None:  # noqa: ANN001
             count=len(chunk),
             payload=chunk,
         )
-
-
-def _int_or_none(raw: str | None) -> int | None:
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
 
 
 def _parse(

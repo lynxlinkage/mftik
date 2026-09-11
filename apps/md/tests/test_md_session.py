@@ -278,6 +278,7 @@ async def test_md_rpc_attach(broker: Broker, paper: PaperExchange) -> None:
     result = MdAttachResult.model_validate(reply.payload)
     assert result.subscriptions == [feed]
     assert result.refcounts[feed] == 1
+    assert result.instance == "md"
 
     stop.set()
     rpc_stop.set()

@@ -23,6 +23,7 @@ dev = [
     "pytest-asyncio>=1.4",
     "ruff>=0.9",
     "aiosqlite>=0.20",
+    "fakeredis>=2.23",
 ]
 
 [tool.ruff]

@@ -30,6 +30,7 @@ from mftik_md.tape import (
     DEFAULT_TOPICS,
     TapeRecorder,
 )
+from mftik_md.tape_store import TapeStore
 
 SOURCE = "md"
 #: Which MD this process is. ``MFTIK_INSTANCE``, defaulting to the
@@ -136,7 +137,7 @@ async def reap_loop(
 TRIM_INTERVAL_SECONDS = 60.0
 
 
-def _build_recorder(broker: Broker) -> TapeRecorder | None:
+def _build_recorder() -> TapeRecorder | None:
     """Configure tape recording from the environment.
 
     On by default: recording is what makes a warm-up possible at all, and a
@@ -165,16 +166,28 @@ def _build_recorder(broker: Broker) -> TapeRecorder | None:
             )
             return fallback
 
+    url = os.getenv("REDIS_URL", "").strip()
+    if not url:
+        logger.warning(
+            "MD tape recording disabled (REDIS_URL is unset) — live "
+            "fan-out is unaffected; warm-up reads will be empty"
+        )
+        return None
+
     retention_s = _number("MD_TAPE_RETENTION_S", DEFAULT_RETENTION_S)
     maxlen = int(_number("MD_TAPE_MAXLEN", DEFAULT_MAXLEN))
     logger.info(
-        "MD tape recording topics=%s retention=%.0fs maxlen=%d",
+        "MD tape recording topics=%s retention=%.0fs maxlen=%d redis=%s",
         topics,
         retention_s,
         maxlen,
+        url,
     )
     return TapeRecorder(
-        broker, topics=topics, maxlen=maxlen, retention_s=retention_s
+        TapeStore.from_url(url),
+        topics=topics,
+        maxlen=maxlen,
+        retention_s=retention_s,
     )
 
 
@@ -213,9 +226,11 @@ async def amain() -> bool:
             persist_live=md_db.persist_live_session,
             mark_done=md_db.mark_session_done,
             list_db_sessions=md_db.list_sessions,
-            recorder=_build_recorder(broker),
+            recorder=_build_recorder(),
             instance=INSTANCE,
         )
+        if sessions.tape_store is not None:
+            await sessions.tape_store.ping()
         # Up for as long as the process is, and attached to nothing. A read
         # is owned by nobody, so the fetch plane needs no lease and no
         # subscription to answer — which is the whole point of it being

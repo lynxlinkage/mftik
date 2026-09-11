@@ -7,21 +7,29 @@ how a warm-up ends up describing a market that had a hole in it.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 from decimal import Decimal
+from pathlib import Path
 
+import fakeredis.aioredis
 import pytest
-from broker_harness import a_broker, append_tape_at
+from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange.models import AggTrade, Side, Trade
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import Topics
 from mftik.strategy.eventlog import EventLog
-from mftik.strategy.tape import StrategyTape
+from mftik.strategy.tape import StrategyTape, TapeFeedNotAttached
+from mftik_md.rpc.tape import TAPE_RPC_CHUNK
+from mftik_md.tape_store import TapeStore
+from tape_rpc import serve_tape
 
 TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
+OTHER = UniversalTicker.parse("BinanceUM_Perp_ETHUSDT")
 AGG_FEED = Topics.md_feed("aggtrade", TICKER)
 TRADE_FEED = Topics.md_feed("trade", TICKER)
+INSTANCE = "md-jp"
 
 
 @pytest.fixture
@@ -30,32 +38,51 @@ async def broker() -> Broker:
         yield client
 
 
+@pytest.fixture
+async def store() -> TapeStore:
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    store = TapeStore(redis)
+    try:
+        yield store
+    finally:
+        await store.aclose()
+
+
 class _Session:
-    def __init__(self, broker: Broker) -> None:
+    def __init__(
+        self,
+        broker: Broker,
+        *,
+        md: dict[str, list[str]] | None = None,
+        md_owners: dict[str, str] | None = None,
+    ) -> None:
         self.broker = broker
-        # Disabled, as it is in any deployment without STS_EVENTLOG_DIR — the
-        # read still logs what it covered, to nowhere.
         self.event_log = EventLog("tape-read", directory=None)
+        self.md = md or {
+            INSTANCE: [AGG_FEED, TRADE_FEED],
+        }
+        self.md_owners = md_owners or {}
 
 
 class _Strategy:
-    def __init__(self, broker: Broker) -> None:
-        self.session = _Session(broker)
+    def __init__(self, session: _Session) -> None:
+        self.session = session
 
 
-def _tape(broker: Broker) -> StrategyTape:
+def _tape(broker: Broker, **kwargs) -> StrategyTape:
     tape = StrategyTape()
-    tape.bind(_Strategy(broker))  # type: ignore[arg-type]
+    tape.bind(_Strategy(_Session(broker, **kwargs)))  # type: ignore[arg-type]
     return tape
 
 
 async def _record(
-    broker: Broker,
+    store: TapeStore,
     feed: str,
     trade_id: str,
     price: str,
     *,
     agg: bool = True,
+    recorded_ms: int | None = None,
 ) -> None:
     fields = {
         "trade_id": trade_id,
@@ -67,16 +94,27 @@ async def _record(
     if agg:
         fields["first_trade_id"] = trade_id
         fields["last_trade_id"] = trade_id
-    await broker.tape_append(feed, fields, maxlen=1000, ttl_seconds=3600)
+    await store.append(
+        feed, fields, maxlen=1000, ttl_seconds=3600, recorded_ms=recorded_ms
+    )
 
 
 @pytest.mark.asyncio
-async def test_reads_back_as_aggtrade_models(broker: Broker) -> None:
+async def test_reads_back_as_aggtrade_models(
+    broker: Broker, store: TapeStore
+) -> None:
     """Same type the live hook is handed, so one code path serves both."""
-    await broker.tape_mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
-    await _record(broker, AGG_FEED, "1", "68000")
+    await store.mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
+    await _record(store, AGG_FEED, "1", "68000")
 
-    result = await _tape(broker).read(TICKER)
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert len(result) == 1
     record = result.records[0]
@@ -88,57 +126,80 @@ async def test_reads_back_as_aggtrade_models(broker: Broker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_trade_topic_reads_back_as_trade(broker: Broker) -> None:
-    await broker.tape_mark_recording(TRADE_FEED, since_ms=1, ttl_seconds=3600)
-    await _record(broker, TRADE_FEED, "1", "68000", agg=False)
+async def test_trade_topic_reads_back_as_trade(
+    broker: Broker, store: TapeStore
+) -> None:
+    await store.mark_recording(TRADE_FEED, since_ms=1, ttl_seconds=3600)
+    await _record(store, TRADE_FEED, "1", "68000", agg=False)
 
-    result = await _tape(broker).read(TICKER, topic="trade")
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER, topic="trade")
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert len(result) == 1
     assert type(result.records[0]) is Trade
 
 
 @pytest.mark.asyncio
-async def test_records_from_before_a_gap_are_dropped(broker: Broker) -> None:
+async def test_records_from_before_a_gap_are_dropped(
+    broker: Broker, store: TapeStore
+) -> None:
     """Reading across a hole is the failure this whole mechanism prevents."""
-    await _record(broker, AGG_FEED, "old", "1")
-    rows = await broker.tape_tail(AGG_FEED, count=1)
-    after_old = rows[0][0] + 1
-    # A real millisecond has to pass, or the record standing in for "after the
-    # gap" lands in the same millisecond as the one standing in for "before"
-    # and the test cannot tell them apart. A record's stamp is a clock.
-    await asyncio.sleep(0.01)
-    # Recording restarted after that record — it is on the far side of a gap.
-    await broker.tape_mark_recording(
-        AGG_FEED, since_ms=after_old, ttl_seconds=3600
-    )
-    await _record(broker, AGG_FEED, "new", "2")
+    await _record(store, AGG_FEED, "old", "1", recorded_ms=1_000)
+    await store.mark_recording(AGG_FEED, since_ms=1_001, ttl_seconds=3600)
+    await _record(store, AGG_FEED, "new", "2", recorded_ms=2_000)
 
-    result = await _tape(broker).read(TICKER)
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert [r.trade_id for r in result.records] == ["new"]
     assert result.dropped_before_gap == 1
 
 
 @pytest.mark.asyncio
-async def test_coverage_is_reported(broker: Broker) -> None:
-    await broker.tape_mark_recording(AGG_FEED, since_ms=99, ttl_seconds=3600)
-    await _record(broker, AGG_FEED, "1", "1")
+async def test_coverage_is_reported(broker: Broker, store: TapeStore) -> None:
+    await store.mark_recording(AGG_FEED, since_ms=99, ttl_seconds=3600)
+    await _record(store, AGG_FEED, "1", "1")
 
-    result = await _tape(broker).read(TICKER)
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert result.continuous_since_ms == 99
     assert result.recording is True
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_feed_says_so(broker: Broker) -> None:
+async def test_a_stopped_feed_says_so(broker: Broker, store: TapeStore) -> None:
     """History that ends in the past is still history — but it ends."""
-    await broker.tape_mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
-    await _record(broker, AGG_FEED, "1", "1")
-    await broker.tape_mark_stopped(AGG_FEED, at_ms=2, ttl_seconds=3600)
+    await store.mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
+    await _record(store, AGG_FEED, "1", "1")
+    await store.mark_stopped(AGG_FEED, at_ms=2, ttl_seconds=3600)
 
-    result = await _tape(broker).read(TICKER)
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert len(result) == 1
     assert result.recording is False
@@ -146,9 +207,16 @@ async def test_a_stopped_feed_says_so(broker: Broker) -> None:
 
 @pytest.mark.asyncio
 async def test_nothing_recorded_is_an_empty_slice_not_an_error(
-    broker: Broker,
+    broker: Broker, store: TapeStore
 ) -> None:
-    result = await _tape(broker).read(TICKER)
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     assert len(result) == 0
     assert result.continuous_since_ms is None
     assert result.recording is False
@@ -156,79 +224,77 @@ async def test_nothing_recorded_is_an_empty_slice_not_an_error(
 
 @pytest.mark.asyncio
 async def test_one_unreadable_record_does_not_lose_the_read(
-    broker: Broker,
+    broker: Broker, store: TapeStore
 ) -> None:
-    await broker.tape_mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
-    await _record(broker, AGG_FEED, "1", "68000")
-    await broker.tape_append(
+    await store.mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
+    await _record(store, AGG_FEED, "1", "68000")
+    await store.append(
         AGG_FEED,
         {"trade_id": "2", "price": "nonsense", "qty": "1", "side": "buy",
          "ts": "1"},
         maxlen=1000,
         ttl_seconds=3600,
     )
-    await _record(broker, AGG_FEED, "3", "68100")
+    await _record(store, AGG_FEED, "3", "68100")
 
-    result = await _tape(broker).read(TICKER)
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert [r.trade_id for r in result.records] == ["1", "3"]
 
 
 @pytest.mark.asyncio
-async def test_limit_takes_the_most_recent(broker: Broker) -> None:
-    await broker.tape_mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
+async def test_limit_takes_the_most_recent(
+    broker: Broker, store: TapeStore
+) -> None:
+    await store.mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
     for n in range(5):
-        await _record(broker, AGG_FEED, str(n), str(68000 + n))
+        await _record(store, AGG_FEED, str(n), str(68000 + n), recorded_ms=100 + n)
 
-    result = await _tape(broker).read(TICKER, limit=2)
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER, limit=2)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert [r.trade_id for r in result.records] == ["3", "4"]
 
 
-async def _record_at(
-    broker: Broker, feed: str, trade_id: str, ms: int, *, agg: bool = True
-) -> None:
-    """Append a record stamped ``ms``.
-
-    That stamp is the clock the continuity mark and the gaps are measured
-    against, so a test about holes has to be able to place a record on one side
-    of one. Letting the store stamp them means the only reachable gaps are
-    however long the test slept for.
-    """
-    fields = {
-        "trade_id": trade_id,
-        "price": "68000",
-        "qty": "0.5",
-        "side": "buy",
-        "ts": "1700000000.5",
-    }
-    if agg:
-        fields["first_trade_id"] = trade_id
-        fields["last_trade_id"] = trade_id
-    await append_tape_at(broker, feed, fields, recorded_ms=ms)
-
-
 async def _interrupted(
-    broker: Broker, *, stopped_ms: int, resumed_ms: int
+    store: TapeStore, *, stopped_ms: int, resumed_ms: int
 ) -> None:
     """One clean stop/start cycle — the shape a deploy leaves behind."""
-    await broker.tape_mark_stopped(AGG_FEED, at_ms=stopped_ms, ttl_seconds=3600)
-    await broker.tape_mark_recording(
-        AGG_FEED, since_ms=resumed_ms, ttl_seconds=3600
-    )
+    await store.mark_stopped(AGG_FEED, at_ms=stopped_ms, ttl_seconds=3600)
+    await store.mark_recording(AGG_FEED, since_ms=resumed_ms, ttl_seconds=3600)
 
 
 @pytest.mark.asyncio
 async def test_a_short_measured_gap_is_read_across_and_reported(
-    broker: Broker,
+    broker: Broker, store: TapeStore
 ) -> None:
     """A deploy costs seconds. Ending the series over it costs the warm-up."""
-    await broker.tape_mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
-    await _record_at(broker, AGG_FEED, "old", 2_000)
-    await _interrupted(broker, stopped_ms=3_000, resumed_ms=5_000)
-    await _record_at(broker, AGG_FEED, "new", 6_000)
+    await store.mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
+    await _record(store, AGG_FEED, "old", "68000", recorded_ms=2_000)
+    await _interrupted(store, stopped_ms=3_000, resumed_ms=5_000)
+    await _record(store, AGG_FEED, "new", "68000", recorded_ms=6_000)
 
-    result = await _tape(broker).read(TICKER)
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert [r.trade_id for r in result.records] == ["old", "new"]
     assert result.dropped_before_gap == 0
@@ -238,32 +304,46 @@ async def test_a_short_measured_gap_is_read_across_and_reported(
 
 @pytest.mark.asyncio
 async def test_a_gap_too_long_to_span_still_ends_the_series(
-    broker: Broker,
+    broker: Broker, store: TapeStore
 ) -> None:
     """Measured is not the same as tolerable. An outage is still an outage."""
-    await broker.tape_mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
-    await _record_at(broker, AGG_FEED, "old", 2_000)
-    await _interrupted(broker, stopped_ms=3_000, resumed_ms=123_000)
-    await _record_at(broker, AGG_FEED, "new", 130_000)
+    await store.mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
+    await _record(store, AGG_FEED, "old", "68000", recorded_ms=2_000)
+    await _interrupted(store, stopped_ms=3_000, resumed_ms=123_000)
+    await _record(store, AGG_FEED, "new", "68000", recorded_ms=130_000)
 
-    result = await _tape(broker).read(TICKER)
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert [r.trade_id for r in result.records] == ["new"]
     assert result.dropped_before_gap == 1
-    # Reported holes are holes in what came back. This one is behind where the
-    # answer starts, so it is not one.
     assert result.gaps == []
 
 
 @pytest.mark.asyncio
-async def test_a_caller_can_refuse_every_gap(broker: Broker) -> None:
+async def test_a_caller_can_refuse_every_gap(
+    broker: Broker, store: TapeStore
+) -> None:
     """``max_gap_ms=0`` is the absolute rule this used to apply to everyone."""
-    await broker.tape_mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
-    await _record_at(broker, AGG_FEED, "old", 2_000)
-    await _interrupted(broker, stopped_ms=3_000, resumed_ms=5_000)
-    await _record_at(broker, AGG_FEED, "new", 6_000)
+    await store.mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
+    await _record(store, AGG_FEED, "old", "68000", recorded_ms=2_000)
+    await _interrupted(store, stopped_ms=3_000, resumed_ms=5_000)
+    await _record(store, AGG_FEED, "new", "68000", recorded_ms=6_000)
 
-    result = await _tape(broker).read(TICKER, max_gap_ms=0)
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER, max_gap_ms=0)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert [r.trade_id for r in result.records] == ["new"]
     assert result.dropped_before_gap == 1
@@ -271,21 +351,118 @@ async def test_a_caller_can_refuse_every_gap(broker: Broker) -> None:
 
 @pytest.mark.asyncio
 async def test_a_gap_the_records_no_longer_reach_is_not_reported(
-    broker: Broker,
+    broker: Broker, store: TapeStore
 ) -> None:
-    """Trimming ages a hole out of the answer along with the prints around it.
+    """Trimming ages a hole out of the answer along with the prints around it."""
+    await store.mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
+    await _interrupted(store, stopped_ms=3_000, resumed_ms=5_000)
+    await _record(store, AGG_FEED, "new", "68000", recorded_ms=6_000)
 
-    This is what bounds the list a long-lived feed hands back: coverage keeps
-    every gap inside the retention window, and the read reports the ones its
-    own records actually span.
-    """
-    await broker.tape_mark_recording(AGG_FEED, since_ms=1_000, ttl_seconds=3600)
-    await _interrupted(broker, stopped_ms=3_000, resumed_ms=5_000)
-    # Everything from before the gap has been trimmed out of the stream.
-    await _record_at(broker, AGG_FEED, "new", 6_000)
-
-    result = await _tape(broker).read(TICKER)
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert [r.trade_id for r in result.records] == ["new"]
     assert result.dropped_before_gap == 0
     assert result.gaps == []
+
+
+@pytest.mark.asyncio
+async def test_an_unattached_feed_raises(
+    broker: Broker, store: TapeStore
+) -> None:
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        with pytest.raises(TapeFeedNotAttached):
+            await _tape(broker).read(OTHER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_star_mapping_does_not_invent_an_owner(
+    broker: Broker, store: TapeStore
+) -> None:
+    with pytest.raises(TapeFeedNotAttached):
+        await _tape(broker, md={"*": [AGG_FEED]}).read(TICKER)
+
+
+@pytest.mark.asyncio
+async def test_the_wrong_instance_returns_an_empty_slice(
+    broker: Broker, store: TapeStore
+) -> None:
+    """JP tape lives on JP Redis. Asking TW is empty, not a fallback."""
+    await store.mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
+    await _record(store, AGG_FEED, "1", "68000")
+
+    empty = TapeStore(fakeredis.aioredis.FakeRedis(decode_responses=True))
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, empty, instance="md-tw", stop=stop))
+    try:
+        result = await _tape(broker, md={"md-tw": [AGG_FEED]}).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await empty.aclose()
+
+    assert len(result) == 0
+    assert result.recording is False
+
+
+@pytest.mark.asyncio
+async def test_a_read_assembles_chunks_into_one_slice(
+    broker: Broker, store: TapeStore, monkeypatch
+) -> None:
+    monkeypatch.setattr("mftik_md.rpc.tape.TAPE_RPC_CHUNK", 2)
+    await store.mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
+    for n in range(5):
+        await _record(store, AGG_FEED, str(n), str(68000 + n), recorded_ms=100 + n)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        serve_tape(broker, store, instance=INSTANCE, stop=stop, chunk=2)
+    )
+    try:
+        result = await _tape(broker).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert [r.trade_id for r in result.records] == ["0", "1", "2", "3", "4"]
+    assert TAPE_RPC_CHUNK > 2  # production chunk stays large
+
+
+def test_sts_and_strategy_do_not_import_redis() -> None:
+    """The regional disk is MD's. A session in TW must not open JP Redis."""
+    roots = [
+        Path(__file__).resolve().parents[1] / "src",
+        Path(__file__).resolve().parents[3]
+        / "packages"
+        / "common"
+        / "src"
+        / "mftik"
+        / "strategy",
+    ]
+    leaks: list[str] = []
+    for root in roots:
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name.partition(".")[0] == "redis":
+                            leaks.append(f"{path}:{node.lineno}")
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module and node.module.partition(".")[0] == "redis":
+                        leaks.append(f"{path}:{node.lineno}")
+    assert leaks == []

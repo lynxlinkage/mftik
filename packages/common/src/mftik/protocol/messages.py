@@ -661,6 +661,11 @@ class MdAttachResult(BaseModel):
     session_id: str
     subscriptions: list[str] = Field(default_factory=list)
     refcounts: dict[str, int] = Field(default_factory=dict)
+    #: Which MD answered. A warm-up read in ``on_start`` cannot wait for
+    #: the first :class:`MdLeaseAck`, so the attach result is what the
+    #: session routes ``md.tape.tail`` on. Empty only on a mixed-version
+    #: reply that predates the field — treat that as unroutable.
+    instance: str = ""
 
 
 class MdDetachRequest(BaseModel):
@@ -683,6 +688,52 @@ class MdDetachResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     session_id: str
+
+
+class MdTapeRecord(BaseModel):
+    """One recorded print, stamped with the recorder's clock."""
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Broker / recorder clock at append time, not the venue's ``ts``.
+    ms: int
+    fields: dict[str, str] = Field(default_factory=dict)
+
+
+class MdTapeTailRequest(BaseModel):
+    """STS → MD: one page of a feed's recorded tape on ``Topics.md(instance)``.
+
+    Cursor-chunked because ``DEFAULT_LIMIT`` (200k) is tens of megabytes
+    and a core NATS message is about 1 MiB. The strategy still sees one
+    :class:`~mftik.strategy.tape.TapeSlice`. ``before`` is the oldest
+    stream id of the previous (newer) page; omit it to start at the
+    newest. Do not send this to :meth:`Topics.md_fetch` or the anycast
+    :attr:`Topics.MD`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    feed: str
+    limit: int = 200_000
+    before: str | None = None
+
+
+class MdTapeTailChunk(BaseModel):
+    """MD → STS: one page of tape, oldest → newest within the page."""
+
+    model_config = ConfigDict(frozen=True)
+
+    feed: str
+    records: list[MdTapeRecord] = Field(default_factory=list)
+    #: Stream id of the oldest record in this page. The next request
+    #: passes it as ``before``. Empty when the page is empty.
+    before: str = ""
+    #: Older records remain inside the requested window.
+    more: bool = False
+    continuous_since_ms: int | None = None
+    recording: bool = False
+    #: Measured holes, oldest first — ``[start_ms, end_ms]``.
+    gaps: list[tuple[int, int]] = Field(default_factory=list)
 
 
 class MdSubscribe(BaseModel):
@@ -1157,6 +1208,9 @@ MdAttachRequestEnvelope = Envelope[MdAttachRequest]
 MdAttachResultEnvelope = Envelope[MdAttachResult]
 MdDetachRequestEnvelope = Envelope[MdDetachRequest]
 MdDetachResultEnvelope = Envelope[MdDetachResult]
+MdTapeRecordEnvelope = Envelope[MdTapeRecord]
+MdTapeTailRequestEnvelope = Envelope[MdTapeTailRequest]
+MdTapeTailChunkEnvelope = Envelope[MdTapeTailChunk]
 MdSubscribeEnvelope = Envelope[MdSubscribe]
 MdUnsubscribeEnvelope = Envelope[MdUnsubscribe]
 MdDetachEnvelope = Envelope[MdDetach]
@@ -1310,6 +1364,7 @@ MD_ERROR = "md.error"
 MD_SESSION_ATTACH = "md.session.attach"
 MD_SESSION_DETACH = "md.session.detach"
 MD_SESSION_LIST = "md.session.list"
+MD_TAPE_TAIL = "md.tape.tail"
 MD_LEASE_ACK = "md.lease.ack"
 MD_ORDERBOOK = "md.orderbook"
 MD_TICKER = "md.ticker"

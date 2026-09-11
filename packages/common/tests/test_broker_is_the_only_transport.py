@@ -26,7 +26,8 @@ use the broker's own vocabulary and nothing below it:
 
 `packages/common/src/mftik/broker/` is the exception: the transport *is* the
 store-specific code, and everything this file forbids elsewhere is what it
-is for.
+is for. The MD tape module is the other: regional Redis is that plane's
+disk, not a second broker, and STS still must not import ``redis``.
 
 Only `src` trees are read. `scripts/` is deliberately outside: `redacted_url`
 is a credential's problem and names it on purpose. Tests are outside too —
@@ -44,8 +45,10 @@ from pathlib import Path
 #: the check is the same under `pytest packages` and `pytest` at the root.
 ROOT = Path(__file__).resolve().parents[3]
 
-#: Where a store's client is allowed to be touched: the transport itself.
+#: Where a store's client is allowed to be touched: the transport itself,
+#: and the MD tape module that *is* the regional disk.
 IMPLEMENTATION = ROOT / "packages" / "common" / "src" / "mftik" / "broker"
+TAPE_STORE = ROOT / "apps" / "md" / "src" / "mftik_md" / "tape_store.py"
 
 #: Attribute names that only the implementation may read. ``redis`` is the
 #: old Redis client's escape hatch; ``js`` and ``nc`` are NATS' JetStream
@@ -69,7 +72,7 @@ def _sources() -> list[Path]:
         path
         for tree in trees
         for path in sorted(tree.rglob("*.py"))
-        if IMPLEMENTATION not in path.parents
+        if IMPLEMENTATION not in path.parents and path.resolve() != TAPE_STORE.resolve()
     ]
 
 

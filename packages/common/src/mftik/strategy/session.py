@@ -44,6 +44,9 @@ class SessionView(Protocol):
     #: Account name → resolved attach. ``td_api_ids`` is derived from this.
     td: Mapping[str, TdAccountRef]
     td_api_ids: list[int]
+    #: Instance name → feeds this session attached. ``*`` means any MD;
+    #: a tape read cannot route on that alone.
+    md: Mapping[str, list[str]]
 
     def td_account(self, name: str) -> TdAccountRef:
         """The attach named ``name``, or KeyError."""

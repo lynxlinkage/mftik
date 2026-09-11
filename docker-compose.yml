@@ -39,6 +39,24 @@ services:
       timeout: 3s
       retries: 10
 
+  # Regional tape disk. Standalone (not a cluster), AOF plus a volume —
+  # RDB alone loses everything since the last snapshot, and that is the
+  # warm-up window the venue cannot rebuild. One of these per region in
+  # production; that compose lives on the servers, not in this repo, and
+  # the roll has to add the same service there.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # The broker. `-js` is not optional: fan-out, posted work, state,
   # leases and the tape are all JetStream or KV, and a server without it answers
   # core requests and nothing else.
@@ -136,8 +154,12 @@ services:
       # Raising it needs a bigger volume or a smaller feed list, not just a
       # bigger number.
       MD_TAPE_MAXLEN: "150000"
+      # This region's Redis. STS never sees this URL.
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       <<: *broker
+      redis:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       migrate:
@@ -228,5 +250,6 @@ services:
 volumes:
   postgres_data:
   nats_data:
+  redis_data:
   sts_eventlog:
   mftik_data:

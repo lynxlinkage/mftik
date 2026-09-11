@@ -7,8 +7,9 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+import fakeredis.aioredis
 import pytest
-from broker_harness import a_broker, append_tape_at
+from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange.models import Balance, Order, OrderStatus, OrderType, Side, Ticker
 from mftik.exchange.oms import LedgerView, OmsView
@@ -35,7 +36,9 @@ from mftik.protocol import (
 from mftik.strategy import Strategy
 from mftik.strategy import tape as tape_module
 from mftik.strategy.eventlog import DIR_ENV, EventLog
+from mftik_md.tape_store import TapeStore
 from mftik_sts.session.session import StsSession
+from tape_rpc import serve_tape
 
 
 @pytest.fixture
@@ -702,15 +705,32 @@ async def test_symbol_reads_are_recorded(
     assert reads[1]["payload"] == "0.01"
 
 
+async def _tape_session(
+    broker: Broker, tmp_path: Path, strategy: Strategy, feed: str, *, session_id: str
+) -> StsSession:
+    return _session(
+        broker,
+        tmp_path,
+        strategy,
+        session_id=session_id,
+        md={"md": [feed]},
+    )
+
+
+async def _a_store() -> TapeStore:
+    return TapeStore(fakeredis.aioredis.FakeRedis(decode_responses=True))
+
+
 async def test_tape_read_records_the_prints_not_just_the_coverage(
     broker: Broker, tmp_path: Path, monkeypatch
 ) -> None:  # noqa: ANN001
     """MD's tape is the only copy and it expires — so this one must be kept."""
     monkeypatch.setattr(tape_module, "LOG_CHUNK", 2)
     feed = Topics.md_feed("aggtrade", UniversalTicker.parse("Paper_Spot_BTCUSDT"))
-    await broker.tape_mark_recording(feed, since_ms=1, ttl_seconds=3600)
+    store = await _a_store()
+    await store.mark_recording(feed, since_ms=1, ttl_seconds=3600)
     for index in range(3):
-        await broker.tape_append(
+        await store.append(
             feed,
             {
                 "trade_id": str(index),
@@ -726,12 +746,20 @@ async def test_tape_read_records_the_prints_not_just_the_coverage(
         )
 
     strategy = ProbeStrategy()
-    sts = _session(broker, tmp_path, strategy, session_id="ev-tape")
+    sts = await _tape_session(
+        broker, tmp_path, strategy, feed, session_id="ev-tape"
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance="md", stop=stop))
     await sts.start()
 
     slice_ = await strategy.tape.read("Paper_Spot_BTCUSDT")
     assert len(slice_) == 3
     await sts.stop()
+    stop.set()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await store.aclose()
 
     reads = _events(_read(tmp_path / "ev-tape.jsonl"), "read")
     summary = [r for r in reads if r["event"] == "tape.read"][0]
@@ -754,9 +782,9 @@ async def test_a_spanned_gap_is_written_to_the_log(
     the strategy never had — continuous where the real one had a deploy in it.
     """
     feed = Topics.md_feed("aggtrade", UniversalTicker.parse("Paper_Spot_BTCUSDT"))
-    await broker.tape_mark_recording(feed, since_ms=1_000, ttl_seconds=3600)
-    await append_tape_at(
-        broker,
+    store = await _a_store()
+    await store.mark_recording(feed, since_ms=1_000, ttl_seconds=3600)
+    await store.append(
         feed,
         {
             "trade_id": "0",
@@ -767,17 +795,27 @@ async def test_a_spanned_gap_is_written_to_the_log(
             "first_trade_id": "0",
             "last_trade_id": "0",
         },
+        maxlen=1000,
+        ttl_seconds=3600,
         recorded_ms=2_000,
     )
-    await broker.tape_mark_stopped(feed, at_ms=3_000, ttl_seconds=3600)
-    await broker.tape_mark_recording(feed, since_ms=5_000, ttl_seconds=3600)
+    await store.mark_stopped(feed, at_ms=3_000, ttl_seconds=3600)
+    await store.mark_recording(feed, since_ms=5_000, ttl_seconds=3600)
 
     strategy = ProbeStrategy()
-    sts = _session(broker, tmp_path, strategy, session_id="ev-tape-gap")
+    sts = await _tape_session(
+        broker, tmp_path, strategy, feed, session_id="ev-tape-gap"
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance="md", stop=stop))
     await sts.start()
     slice_ = await strategy.tape.read("Paper_Spot_BTCUSDT")
     assert slice_.missing_ms == 2_000
     await sts.stop()
+    stop.set()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await store.aclose()
 
     reads = _events(_read(tmp_path / "ev-tape-gap.jsonl"), "read")
     summary = [r for r in reads if r["event"] == "tape.read"][0]
@@ -792,9 +830,10 @@ async def test_a_capped_tape_read_says_it_was_capped(
     monkeypatch.setattr(tape_module, "LOG_CHUNK", 2)
     monkeypatch.setattr(tape_module, "LOG_MAX_RECORDS", 2)
     feed = Topics.md_feed("aggtrade", UniversalTicker.parse("Paper_Spot_BTCUSDT"))
-    await broker.tape_mark_recording(feed, since_ms=1, ttl_seconds=3600)
+    store = await _a_store()
+    await store.mark_recording(feed, since_ms=1, ttl_seconds=3600)
     for index in range(3):
-        await broker.tape_append(
+        await store.append(
             feed,
             {
                 "trade_id": str(index),
@@ -810,12 +849,20 @@ async def test_a_capped_tape_read_says_it_was_capped(
         )
 
     strategy = ProbeStrategy()
-    sts = _session(broker, tmp_path, strategy, session_id="ev-tape-cap")
+    sts = await _tape_session(
+        broker, tmp_path, strategy, feed, session_id="ev-tape-cap"
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance="md", stop=stop))
     await sts.start()
 
     slice_ = await strategy.tape.read("Paper_Spot_BTCUSDT")
     assert len(slice_) == 3  # the strategy still gets all of them
     await sts.stop()
+    stop.set()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await store.aclose()
 
     reads = _events(_read(tmp_path / "ev-tape-cap.jsonl"), "read")
     summary = [r for r in reads if r["event"] == "tape.read"][0]
