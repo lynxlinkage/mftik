@@ -1,0 +1,14 @@
+{
+  "name": "MFTIK",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/start.sh",
+  "ports": [
+    { "name": "api", "port": 8000 },
+    { "name": "ui", "port": 5173 },
+    { "name": "postgres", "port": 5432 },
+    { "name": "nats", "port": 4222 },
+    { "name": "nats-monitor", "port": 8222 },
+    { "name": "redis", "port": 6379 }
+  ]
+}
