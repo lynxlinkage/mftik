@@ -69,16 +69,59 @@ async def flush_rows(rows: list[dict[str, Any]]) -> None:
     logger.debug("flushed %d session log row(s)", len(rows))
 
 
+class _Buffer:
+    """The persist worker's unflushed rows, visible to a late socket."""
+
+    __slots__ = ("lock", "rows")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.rows: list[dict[str, Any]] = []
+
+
+#: Set while :func:`run_log_persist` is running. ``None`` means no worker.
+_buffer: _Buffer | None = None
+
+
+async def flush_pending() -> None:
+    """Write the persist worker's unflushed rows, if it is running.
+
+    A late ``/ws/{domain}/{id}`` calls this before reading
+    ``session_logs``. Without it, a line still sitting in the batch
+    (up to ``LOG_PERSIST_FLUSH_INTERVAL``) is in neither Postgres nor
+    the live subscription. No-op when the worker is down — that window
+    is already lost.
+    """
+    buf = _buffer
+    if buf is None:
+        return
+    await _flush(buf)
+
+
+async def _flush(buf: _Buffer) -> None:
+    async with buf.lock:
+        if not buf.rows:
+            return
+        to_write = list(buf.rows)
+        buf.rows.clear()
+    try:
+        await flush_rows(to_write)
+    except Exception:
+        logger.exception("failed to flush %d log row(s)", len(to_write))
+
+
 async def run_log_persist(stop: asyncio.Event) -> None:
     """Subscribe to ``log.*`` and batch-insert into ``session_logs`` until stop.
 
     Flushes when the buffer reaches ``LOG_PERSIST_BATCH_SIZE`` or every
-    ``LOG_PERSIST_FLUSH_INTERVAL`` seconds (whichever comes first).
+    ``LOG_PERSIST_FLUSH_INTERVAL`` seconds (whichever comes first), and
+    when a late socket asks via :func:`flush_pending`.
     """
+    global _buffer
     batch_size = _batch_size()
     flush_interval = _flush_interval()
-    buffer: list[dict[str, Any]] = []
-    lock = asyncio.Lock()
+    buf = _Buffer()
+    _buffer = buf
 
     broker = Broker()
     await broker.connect()
@@ -88,24 +131,13 @@ async def run_log_persist(stop: asyncio.Event) -> None:
         flush_interval,
     )
 
-    async def do_flush() -> None:
-        async with lock:
-            if not buffer:
-                return
-            to_write = list(buffer)
-            buffer.clear()
-        try:
-            await flush_rows(to_write)
-        except Exception:
-            logger.exception("failed to flush %d log row(s)", len(to_write))
-
     async def ticker() -> None:
         while not stop.is_set():
             try:
                 await asyncio.wait_for(stop.wait(), timeout=flush_interval)
             except TimeoutError:
                 pass
-            await do_flush()
+            await _flush(buf)
 
     ticker_task = asyncio.create_task(ticker())
     try:
@@ -113,11 +145,11 @@ async def run_log_persist(stop: asyncio.Event) -> None:
             row = envelope_to_row(topic, envelope)
             if row is None:
                 continue
-            async with lock:
-                buffer.append(row)
-                full = len(buffer) >= batch_size
+            async with buf.lock:
+                buf.rows.append(row)
+                full = len(buf.rows) >= batch_size
             if full:
-                await do_flush()
+                await _flush(buf)
     finally:
         stop.set()
         ticker_task.cancel()
@@ -125,6 +157,7 @@ async def run_log_persist(stop: asyncio.Event) -> None:
             await ticker_task
         except asyncio.CancelledError:
             pass
-        await do_flush()
+        await _flush(buf)
+        _buffer = None
         await broker.close()
         logger.info("log persist worker stopped")

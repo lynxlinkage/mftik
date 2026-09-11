@@ -19,6 +19,7 @@ from decimal import Decimal
 import pytest
 from db_harness import a_database, an_owner
 from mftik.protocol import STS_SESSION_STATUS
+from mftik_api import log_persist
 from mftik_api import ws as ws_module
 from mftik_db.models.history import Attribution, Source
 from mftik_db.models.session import SessionStatus, StsSessionRow
@@ -158,6 +159,33 @@ async def test_session_log_replay_reads_postgres(db) -> None:
     messages = [json.loads(line)["payload"]["message"] for line in lines]
     assert messages == ["first", "second"]
     assert json.loads(lines[0])["id"] == "env-old"
+
+
+async def test_session_log_replay_flushes_the_persist_batch(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A line still in the worker buffer must not miss the late socket."""
+    monkeypatch.setattr(log_persist, "session_scope", db)
+    buf = log_persist._Buffer()
+    buf.rows.append(
+        {
+            "envelope_id": "env-gap",
+            "domain": "sts",
+            "stream_id": "s-gap",
+            "source": "sts",
+            "level": "info",
+            "message": "on_start",
+            "ts": 1.0,
+        }
+    )
+    log_persist._buffer = buf
+    try:
+        lines = await ws_module.session_log_replay("sts", "s-gap")
+    finally:
+        log_persist._buffer = None
+    assert [json.loads(line)["payload"]["message"] for line in lines] == [
+        "on_start"
+    ]
 
 
 async def test_status_replay_is_the_session_list_not_session_logs(db) -> None:

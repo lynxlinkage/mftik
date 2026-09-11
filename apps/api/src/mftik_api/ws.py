@@ -26,6 +26,7 @@ from mftik_db.repositories import (
 from mftik_db.session import session_scope
 
 from mftik_api.decimals import wire_decimal
+from mftik_api.log_persist import flush_pending
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +57,13 @@ def _epoch(value: Any) -> float | None:
 async def session_log_replay(domain: str, stream_id: str) -> list[str]:
     """Persisted ``log.{domain}.{id}`` lines, oldest first, for a late socket.
 
-    Built from ``session_logs``, not a broker ring. A persist worker that
-    is down loses this window; live subscribers are unaffected.
+    Built from ``session_logs``, not a broker ring. Flushes the persist
+    worker's batch first so a line published in the last
+    ``LOG_PERSIST_FLUSH_INTERVAL`` is not sitting only in memory. A
+    persist worker that is down loses this window; live subscribers are
+    unaffected.
     """
+    await flush_pending()
     try:
         async with session_scope() as db:
             rows = await SessionLogRepository(db).list_before(
@@ -126,8 +131,9 @@ async def _log_bridge(
 ) -> None:
     """Bridge a broker log topic to a WebSocket client.
 
-    Replays ``session_logs`` first (so deploy-time lines are not lost),
-    then forwards live pub/sub. Envelope ids are deduped across the seam.
+    Flushes the persist batch, replays ``session_logs`` (so deploy-time
+    lines are not lost to the flush interval), then forwards live
+    pub/sub. Envelope ids are deduped across the seam.
     """
     await websocket.accept()
     stop = asyncio.Event()

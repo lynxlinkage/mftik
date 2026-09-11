@@ -137,3 +137,62 @@ async def test_run_log_persist_flushes_on_interval(
 
     assert len(flushed) == 1
     assert flushed[0][0]["message"] == "slow"
+
+
+async def test_flush_pending_is_a_noop_when_the_worker_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[object] = []
+
+    async def fake_flush(rows: list[dict[str, Any]]) -> None:
+        called.append(rows)
+
+    monkeypatch.setattr(log_persist, "flush_rows", fake_flush)
+    await log_persist.flush_pending()
+    assert called == []
+
+
+async def test_flush_pending_writes_before_the_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOG_PERSIST_BATCH_SIZE", "100")
+    monkeypatch.setenv("LOG_PERSIST_FLUSH_INTERVAL", "30")
+
+    flushed: list[list[dict[str, Any]]] = []
+
+    async def fake_flush(rows: list[dict[str, Any]]) -> None:
+        flushed.append(list(rows))
+
+    monkeypatch.setattr(log_persist, "flush_rows", fake_flush)
+
+    ready = asyncio.Event()
+
+    class FakeBroker:
+        async def connect(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+        async def psubscribe(self, _pattern: str, *, stop: asyncio.Event):
+            env = Envelope[dict].wrap(
+                {"level": "info", "message": "on_start"},
+                type="log",
+                source="sts",
+                session_id="s-gap",
+            )
+            yield "log.sts.s-gap", env
+            ready.set()
+            await stop.wait()
+
+    monkeypatch.setattr(log_persist, "Broker", FakeBroker)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(log_persist.run_log_persist(stop))
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=2)
+        await log_persist.flush_pending()
+        assert flushed[0][0]["message"] == "on_start"
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=2)
