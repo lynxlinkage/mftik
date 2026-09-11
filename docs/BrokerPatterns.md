@@ -6,7 +6,8 @@ seven patterns were made native.
 
 A, B, F and G are the families [`docs/JetStreamRemoval.md`](JetStreamRemoval.md)
 retires: the log ring, the per-feed tape, KV leases/counters, and KV state.
-C and E stay (E counts misses instead of a sibling watchdog). Until that
+C and E stay (E counts three missed intervals both ways; the timeout
+stays, because `subscribe` does not wake on silence). Until that
 work lands, the table below is what the tree calls.
 
 The first pass counted ten patterns. Three of those were one pattern under
@@ -62,7 +63,7 @@ pattern wearing different names, and saying so is worth more than the count:
 | **B** | Keyed log — one stream per feed | `tape_append` / `tape_tail` / `tape_trim_before` | Native. "Newest N" is sequence arithmetic because a feed owns its stream. Coverage is a durable KV put. |
 | **C** | Request / response | `request` / `probe` / `serve` | Native. Core request-reply; no-responders answers a request to nobody at once rather than at the timeout. |
 | **D** | *(removed)* | — | The work-queue stream is gone. Nobody asked for at-least-once delivery. |
-| **E** | Fenced session link | `LeasedSessionLink` / `broker.leased_link` | Native transport, one abstraction. Today: MD grace 3s, TD grace 5s, sibling watchdog. Destination ([`JetStreamRemoval.md`](JetStreamRemoval.md)): three missed acks, same rule on TD as on MD, no `_watch_timeout`. |
+| **E** | Fenced session link | `LeasedSessionLink` / `broker.leased_link` | Native transport, one abstraction. Today: MD grace 3s, TD grace 5s, sibling watchdog. Destination ([`JetStreamRemoval.md`](JetStreamRemoval.md)): three missed intervals both ways; timeout kept (`wait_for` or the sibling timer); interval on the heartbeat or as a constant. |
 | **F** | Atomic register | `lease_*`, `counter_next`, all of `liveness.py` | KV with per-message TTL and compare-and-set on revision. Signatures stay apart from G. Bucket status is cached. |
 | **G** | Shared mutable state | `state_*`, `state_watch`, `StateProjection` | Key-per-field, push via KV watch, last-written cache on the writer. |
 
@@ -122,10 +123,11 @@ detects a stale message from the *same* session and nothing more.
 
 Today, what stops a second process claiming the same session is the lease
 (F, `claim_alive`). [`JetStreamRemoval.md`](JetStreamRemoval.md) withdraws
-that: one instance name is one process, every STS row is pinned, and E's
-miss count is the only remaining liveness on an already-attached link.
-A same-name second process is a misconfiguration the broker will not
-detect — both links stay green.
+that: one instance name is one process, every STS row is stamped with the
+accepting instance, and E's miss count is the only remaining liveness on
+an already-attached link. A same-name second process is refused at boot
+if `probe` gets a responder; two that pass `probe` together still both
+look green.
 
 ### D is gone
 
@@ -167,9 +169,10 @@ ack on `tx`, echo the fencing token, expire when the grace window lapses,
 resubscribe after a transport failure, and hand every other envelope to
 `on_message`. Expiry and an unexpected exit run on a sibling task so they
 cannot cancel the loop from inside itself. [`JetStreamRemoval.md`](JetStreamRemoval.md)
-drops the sibling poller: STS counts three heartbeats without an ack
-(armed after the first), TD/MD detach after two silent intervals, and
-STS applies the same rule to TD that it already applies to MD.
+keeps a timeout — the receive loop does not wake when STS dies —
+and counts three missed intervals both ways. STS applies the same
+rule to TD that it already applies to MD. The interval is on
+`LeaseHeartbeat` or is a protocol constant.
 
 | | MD | TD |
 |---|---|---|

@@ -518,12 +518,15 @@ still sees deploy. Replaying them into Discord would re-fire
 every restart.
 
 [`JetStreamRemoval.md`](JetStreamRemoval.md) deletes the log
-stream. The late socket then reads `session_logs` (the table
-`run_log_persist` already fills) and only then attaches to the
-live `log.*` subject. A persist worker that is down loses the
-late window; it does not lose the live tail. The "do not drain
-on start" rule is unchanged — Discord still must not replay
-deploy.
+stream. A late `/ws/sts|td|md/{id}` reads `session_logs` (the
+table `run_log_persist` already fills) and only then attaches
+to the live `log.*` subject. `/ws/status/sts` is a different
+topic (`status.sts`); persist does not store it. A late status
+socket reads the session list over REST — the row is written
+before the publish — then attaches live. A persist worker that
+is down loses the session-log late window; it does not lose
+status or the live tail. The "do not drain on start" rule is
+unchanged — Discord still must not replay deploy.
 
 ### Auth
 

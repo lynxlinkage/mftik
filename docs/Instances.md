@@ -114,10 +114,11 @@ most of it. **Out of scope here, and it should stay a separate document.**
   owner. The OMS and the `client_order_id` slot all rest on that, and
   serving one key from two TDs is two processes deciding to trade.
 - **Not two processes for one instance name.** `MFTIK_INSTANCE=td-jp-1`
-  is one OS process. A second process with that name is forbidden, not
-  refused at attach. [`JetStreamRemoval.md`](JetStreamRemoval.md) deletes
-  `claim_owner` / `claim_alive` on that basis; overlapping a restart is
-  the same bug as `--scale`.
+  is one OS process. [`JetStreamRemoval.md`](JetStreamRemoval.md) deletes
+  `claim_owner` / `claim_alive` on that basis. A second process is
+  refused at boot if `probe` of that instance subject gets a responder
+  (`--scale`, overlapped restart). Two processes that pass `probe` in
+  the same window can still both start; that race is accepted.
 - **Not high availability.** A named instance that is down fails the deploy
   with a sentence. Failing over to a peer is `docs/MdHandover.md`'s problem and
   wants the cooperative handshake described there, not a retry here.
@@ -152,9 +153,9 @@ Each is meant to be a test.
   [`JetStreamRemoval.md`](JetStreamRemoval.md) there are no keys — orphan
   means "this row names me and I do not have it locally".
 - **PI-7** An `api_id` is held by exactly one TD process. Today `claim_owner`
-  refuses a second process and names the holder. The destination contract is
-  stronger and has no refusal path: one instance name is one process, so a
-  second `MFTIK_INSTANCE=td-jp-1` is forbidden to exist. If it does, both
+  refuses a second process and names the holder. The destination refuses
+  a second process of the same instance name at boot (`probe` of
+  `Topics.td(instance)`). If two processes pass `probe` together, both
   attaches succeed and both heartbeats stay green.
 - **PI-8** A session whose feeds are split across MD instances notices when any
   one of them stops answering. Losing part of the picture never leaves the
@@ -613,15 +614,16 @@ configured with the same `MFTIK_INSTANCE` from building its own
 
 Today `claim_owner` is the SET NX in front of `create()`.
 [`JetStreamRemoval.md`](JetStreamRemoval.md) deletes it. The replacement is
-the deployment contract: one instance name is one process, and a restart
-does not overlap. A `--scale` or a copied compose block is not refused at
-attach — both links heartbeat, both look healthy, and the venue sees two
-sessions.
+the deployment contract plus boot `probe`: one instance name is one
+process, and a restart that overlaps is refused because the old process
+still answers. Two boots in the same window still dual-open.
 
 STS rebuild is the same shape on a different axis. `claim_alive` stops two
 processes restoring one row. After KV goes, the row's `instance` pin is
-what stops `sts-tw` taking a session that belongs to `sts-jp`. An unpinned
-row is still a race. Pinning is required.
+what stops `sts-tw` taking a session that belongs to `sts-jp`. Create
+stamps `request.instance or self._instance`; null rows are backfilled
+before `claim_alive` is deleted. An unpinned row left in the table is
+still a race.
 
 TD's `hold_owner` loop and STS's `mark_alive` leave with the bucket.
 Session fencing stays as heartbeat + ack, with misses instead of a
@@ -1048,8 +1050,9 @@ back.
 - The rebuild scan filters on the instance — own name, or null for legacy and
   unpinned rows — before `claim_alive`. After
   [`JetStreamRemoval.md`](JetStreamRemoval.md) the pin *is* the guard:
-  `claim_alive` is gone, and a null instance is a race two STS will both
-  take. New sessions must be pinned.
+  create writes `request.instance or self._instance`, null rows are
+  backfilled, then `claim_alive` goes. A null left in the table is a
+  race two STS will both take.
 
 **Problem.** The scan filters on `restart`, on the strategy building, on
 `rebuildable` and on `claim_alive`, never on placement, and placement was not

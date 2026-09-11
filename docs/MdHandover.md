@@ -20,10 +20,11 @@ Facts this design rests on, all of them checkable in the tree today.
 stream per feed, and a restart of the MD container leaves that stream
 intact. [`docs/JetStreamRemoval.md`](JetStreamRemoval.md) moves the same
 promise to a Redis that lives next to the MD, one node per region, not
-replicated across TW/JP. Same-region handover (`md-jp-1` → `md-jp-2`)
-appends to the same key. A memory deque is not a replacement: the venue
-cannot rebuild an `aggtrade`. STS never opens that Redis; it asks the MD
-instance that already holds the feed.
+replicated across TW/JP, running AOF on a volume. Same-region handover
+(`md-jp-1` → `md-jp-2`) appends to the same key. A memory deque, or
+Redis with only RDB snapshots, is not a replacement: the venue cannot
+rebuild an `aggtrade`. STS never opens that Redis; it asks the MD
+instance that already holds the feed (`MdAttachResult` names it).
 
 **The fan-out is addressed per session.** `Dispatcher.publish` sends each update
 to `Topics.md_session(session_id)` for every subscribed link, and only then calls
