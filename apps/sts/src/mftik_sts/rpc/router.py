@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from mftik.broker import IncomingRequest
 from mftik.protocol import (
+    STS_ENV_SYNC,
     STS_ERROR,
     STS_EVENTLOG_INFO,
     STS_EVENTLOG_READ,
@@ -22,6 +23,7 @@ from mftik.protocol import (
     RpcErrorEnvelope,
 )
 
+from mftik_sts.rpc.env import handle_env_sync
 from mftik_sts.rpc.eventlog import handle_eventlog_info, handle_eventlog_read
 from mftik_sts.rpc.health import handle_health
 from mftik_sts.rpc.registry import (
@@ -46,6 +48,7 @@ _HANDLERS: dict[str, Handler] = {
     STS_HEALTH: handle_health,
     STS_EVENTLOG_INFO: handle_eventlog_info,
     STS_EVENTLOG_READ: handle_eventlog_read,
+    STS_ENV_SYNC: handle_env_sync,
     STS_REGISTRY_GENERATION: handle_registry_generation,
     STS_REGISTRY_RELOAD: handle_registry_reload,
     STS_SESSION_CREATE: handle_session_create,

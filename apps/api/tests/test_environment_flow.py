@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
+from fanout_harness import patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.envapply import ApplyFailed, ApplySpec
 from mftik.environment import EnvStamp, NodeEnv
@@ -86,6 +87,11 @@ class UsesTorch(Strategy):
 """
 
 _OWNER = Principal.owner(1, via="password")
+
+
+@pytest.fixture(autouse=True)
+def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_authoritative_anycast(monkeypatch)
 
 
 @pytest.fixture
@@ -257,7 +263,7 @@ async def test_s2_declare_then_apply_then_add(data_dir: Path) -> None:
     broker = EnvBroker()
     applied = await _put({"numpy": ("1.0", "numpy")}, broker)
     assert applied.generation == 1
-    assert broker.reload_calls == 1
+    assert broker.sync_calls == 1
     info = await registry_info(principal=_OWNER)
     assert info.extras["numpy"].version == "1.0"
 

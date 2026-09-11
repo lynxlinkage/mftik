@@ -32,6 +32,18 @@ def _boom(dest: Path, packages: dict[str, ApplySpec]) -> None:
     raise ApplyFailed("nope")
 
 
+def test_apply_can_publish_a_chosen_generation(tmp_path: Path) -> None:
+    env = NodeEnv(tmp_path)
+    result = apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=_write_pkg,
+        generation=4,
+    )
+    assert result.stamp.generation == 4
+    assert (tmp_path / "env" / "gen-4" / "site-packages" / "numpy").is_dir()
+
+
 def test_apply_writes_generation(tmp_path: Path) -> None:
     env = NodeEnv(tmp_path)
     spec = ApplySpec(version="1.26.4", dist="numpy", source="manual")

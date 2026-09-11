@@ -13,10 +13,15 @@ import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.envapply import ApplySpec, apply_packages
-from mftik.environment import EnvStamp, NodeEnv
+from mftik.environment import EnvironmentLocked, EnvStamp, NodeEnv
 from mftik.protocol import (
+    STS_ENV_SYNC,
     STS_REGISTRY_GENERATION,
     STS_REGISTRY_RELOAD,
+    StsEnvPackagePin,
+    StsEnvSyncRequest,
+    StsEnvSyncRequestEnvelope,
+    StsEnvSyncResult,
     StsRegistryGenerationRequest,
     StsRegistryGenerationRequestEnvelope,
     StsRegistryGenerationResult,
@@ -29,10 +34,12 @@ from mftik.registry import RegistryStore
 from mftik_sts.impl import _REGISTRY, resolve_class
 from mftik_sts.impl.noop import NoopStrategy
 from mftik_sts.rpc import dispatch
+from mftik_sts.rpc.env import apply_requested, current_packages, local_matches
 from mftik_sts.runtime_env import (
     _ABI_MISMATCH,
     attach_overlay,
     extras_names,
+    overlay_is_live,
     refresh,
     reset_for_tests,
 )
@@ -160,6 +167,108 @@ def test_reload_moves_the_in_memory_stamp_and_loads_the_tree(
     assert resolve_class("private::UsesNumpy").name == "uses_numpy"
 
 
+def test_sync_no_ops_when_the_stamp_already_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=_plant_numpy,
+    )
+    pins = {"numpy": StsEnvPackagePin(version="1.0", dist="numpy")}
+    assert local_matches(env, pins) is True
+    calls: list[str] = []
+
+    def record(dest: Path, packages: dict[str, ApplySpec]) -> None:
+        calls.append("ran")
+        _plant_numpy(dest, packages)
+
+    import mftik_sts.rpc.env as env_rpc
+
+    env_rpc.installer_for_sync = record
+    try:
+        apply_requested(
+            StsEnvSyncRequest(generation=1, packages=pins, allow_disruptive=True)
+        )
+    finally:
+        env_rpc.installer_for_sync = None
+    assert calls == []
+    assert env.read_stamp().generation == 1
+
+
+def test_sync_installs_when_the_overlay_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    calls: list[str] = []
+
+    def record(dest: Path, packages: dict[str, ApplySpec]) -> None:
+        calls.append("ran")
+        _plant_numpy(dest, packages)
+
+    import mftik_sts.rpc.env as env_rpc
+
+    env_rpc.installer_for_sync = record
+    try:
+        apply_requested(
+            StsEnvSyncRequest(
+                generation=3,
+                packages={"numpy": StsEnvPackagePin(version="1.0", dist="numpy")},
+                allow_disruptive=True,
+            )
+        )
+    finally:
+        env_rpc.installer_for_sync = None
+    assert calls == ["ran"]
+    stamp = NodeEnv(tmp_path).read_stamp()
+    assert stamp.generation == 3
+    assert stamp.packages["numpy"].version == "1.0"
+    assert (tmp_path / "env" / "gen-3" / "site-packages" / "numpy").is_dir()
+
+
+def test_sync_reinstalls_when_abi_mismatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    env = NodeEnv(tmp_path)
+    apply_packages(
+        env,
+        {"numpy": ApplySpec(version="1.0", dist="numpy")},
+        installer=_plant_numpy,
+    )
+    matching = env.read_stamp()
+    env._write_stamp(
+        EnvStamp(
+            generation=matching.generation,
+            python=(3, 11),
+            platform=matching.platform,
+            nbytes=matching.nbytes,
+            packages=matching.packages,
+        )
+    )
+    pins = {"numpy": StsEnvPackagePin(version="1.0", dist="numpy")}
+    assert local_matches(env, pins) is False
+    calls: list[str] = []
+
+    def record(dest: Path, packages: dict[str, ApplySpec]) -> None:
+        calls.append("ran")
+        _plant_numpy(dest, packages)
+
+    import mftik_sts.rpc.env as env_rpc
+
+    env_rpc.installer_for_sync = record
+    try:
+        apply_requested(
+            StsEnvSyncRequest(generation=2, packages=pins, allow_disruptive=True)
+        )
+    finally:
+        env_rpc.installer_for_sync = None
+    assert calls == ["ran"]
+    assert env.read_stamp().matches_runtime()
+
+
 def test_amain_and_refresh_never_call_the_installer() -> None:
     import mftik_sts.app as app
     import mftik_sts.runtime_env as runtime_env
@@ -224,6 +333,49 @@ async def test_reload_rpc_returns_the_generation_it_now_believes(
         assert result.generation == 1
         assert extras_names() == frozenset({"numpy"})
     finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_sync_rpc_installs_then_returns_the_generation(
+    broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    import mftik_sts.rpc.env as env_rpc
+
+    env_rpc.installer_for_sync = _plant_numpy
+    stop = asyncio.Event()
+
+    async def serve() -> None:
+        async for req in broker.serve(Topics.STS, stop=stop):
+            await dispatch(req, sessions=SimpleNamespace())
+
+    task = asyncio.create_task(serve())
+    try:
+        reply = await broker.request(
+            Topics.STS,
+            StsEnvSyncRequestEnvelope.wrap(
+                StsEnvSyncRequest(
+                    generation=4,
+                    packages={
+                        "numpy": StsEnvPackagePin(version="1.0", dist="numpy")
+                    },
+                    allow_disruptive=True,
+                ),
+                type=STS_ENV_SYNC,
+                source="test",
+            ),
+            timeout=5.0,
+        )
+        result = StsEnvSyncResult.model_validate(reply.payload)
+        assert result.generation == 4
+        assert result.packages["numpy"].version == "1.0"
+        assert result.overlay_live is True
+        assert extras_names() == frozenset({"numpy"})
+    finally:
+        env_rpc.installer_for_sync = None
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -351,6 +503,79 @@ def test_the_stamp_not_the_symlink_decides_sys_path(tmp_path: Path) -> None:
     assert str(env.site_packages(1)) not in sys.path
 
 
+def test_sync_locked_then_peer_commit_skips_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    env = NodeEnv(tmp_path)
+    pins = {"numpy": StsEnvPackagePin(version="1.0", dist="numpy")}
+    calls: list[str] = []
+
+    class LockedPeer:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self):
+            apply_packages(
+                env,
+                {"numpy": ApplySpec(version="1.0", dist="numpy")},
+                installer=_plant_numpy,
+            )
+            raise EnvironmentLocked("another apply holds the lock")
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    import mftik_sts.rpc.env as env_rpc
+
+    monkeypatch.setattr(env_rpc, "ApplyInProgress", LockedPeer)
+    env_rpc.installer_for_sync = lambda dest, packages: calls.append("ran")
+    try:
+        apply_requested(
+            StsEnvSyncRequest(generation=1, packages=pins, allow_disruptive=False)
+        )
+    finally:
+        env_rpc.installer_for_sync = None
+    assert calls == []
+    assert local_matches(env, pins) is True
+
+
+def test_sync_locked_and_still_behind_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    pins = {"numpy": StsEnvPackagePin(version="1.0", dist="numpy")}
+    attempts = {"n": 0}
+
+    import mftik_sts.rpc.env as env_rpc
+    from mftik.envapply import ApplyInProgress as RealApply
+
+    def factory(*args: object, **kwargs: object):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+
+            class Locked:
+                def __enter__(self):
+                    raise EnvironmentLocked("another apply holds the lock")
+
+                def __exit__(self, *exc: object) -> bool:
+                    return False
+
+            return Locked()
+        return RealApply(*args, **kwargs)
+
+    monkeypatch.setattr(env_rpc, "ApplyInProgress", factory)
+    env_rpc.installer_for_sync = _plant_numpy
+    try:
+        apply_requested(
+            StsEnvSyncRequest(generation=1, packages=pins, allow_disruptive=False)
+        )
+    finally:
+        env_rpc.installer_for_sync = None
+    assert attempts["n"] == 2
+    assert local_matches(NodeEnv(tmp_path), pins) is True
+
+
 def test_a_stamp_naming_a_missing_generation_has_no_extras(
     tmp_path: Path,
 ) -> None:
@@ -365,4 +590,6 @@ def test_a_stamp_naming_a_missing_generation_has_no_extras(
     stamp = attach_overlay(tmp_path)
     assert stamp.generation == 1, "the stamp is still what it says it is"
     assert extras_names() == frozenset(), "but this process has none of it"
+    assert overlay_is_live() is False
+    assert current_packages() == {}
     assert str(env.site_packages(1)) not in sys.path

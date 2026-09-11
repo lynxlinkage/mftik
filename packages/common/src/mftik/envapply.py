@@ -1,8 +1,10 @@
 """Install a target extras set into a new generation directory.
 
-STS never calls this. The API does, then asks STS to reload. The installer
-writes ``gen-{N}/site-packages`` only; :meth:`NodeEnv.commit` is what
-makes that generation visible.
+The API applies first so handshake and Settings read one stamp. Each STS
+then either reloads that overlay (shared volume) or calls this against
+its own ``MFTIK_DATA`` so a second host keeps the same pins. The
+installer writes ``gen-{N}/site-packages`` only; :meth:`NodeEnv.commit`
+is what makes that generation visible.
 """
 
 from __future__ import annotations
@@ -171,6 +173,7 @@ class ApplyInProgress:
         remove: Collection[str] | None = None,
         allow_disruptive: bool = False,
         installer: Installer | None = None,
+        generation: int | None = None,
     ) -> None:
         if packages is not None and (upsert is not None or remove):
             raise TypeError("replace cannot be combined with upsert/remove")
@@ -183,6 +186,7 @@ class ApplyInProgress:
         self.packages: dict[str, ApplySpec] = {}
         self.allow_disruptive = allow_disruptive
         self.installer = installer or run_uv_installer
+        self.generation = generation
         self.changed: tuple[str, ...] = ()
         self.dest: Path | None = None
         self._lock_cm: object | None = None
@@ -225,7 +229,7 @@ class ApplyInProgress:
             if self.changed and not self.allow_disruptive:
                 raise EnvironmentDisruptive(self.changed)
             previous = resolved_dists(self.env.site_packages(stamp.generation))
-            dest = self.env.begin()
+            dest = self.env.begin(generation=self.generation)
             self.dest = dest
             if self.packages:
                 self.installer(dest, self.packages)
@@ -275,6 +279,7 @@ def apply_packages(
     allow_disruptive: bool = False,
     installer: Installer | None = None,
     before_commit: Callable[[], None] | None = None,
+    generation: int | None = None,
 ) -> ApplyResult:
     """Replace the overlay with ``packages``. Pins are ``==``."""
     with ApplyInProgress(
@@ -282,6 +287,7 @@ def apply_packages(
         packages,
         allow_disruptive=allow_disruptive,
         installer=installer,
+        generation=generation,
     ) as pending:
         if before_commit is not None:
             before_commit()

@@ -46,6 +46,43 @@ def test_round_trip_preserves_fields(tmp_path: Path) -> None:
     assert stamp.nbytes > 0
 
 
+def test_begin_does_not_delete_an_existing_generation(tmp_path: Path) -> None:
+    """A pinned gen-N that is already on disk is left alone.
+
+    ``read_stamp`` fails soft to generation 0, so the old ``!=`` guard
+    would have treated a live ``gen-3`` as free and ``rmtree``d it from
+    under the interpreter still importing it.
+    """
+    env = NodeEnv(tmp_path)
+    live = tmp_path / "env" / "gen-3" / "site-packages"
+    live.mkdir(parents=True)
+    (live / "numpy.py").write_text("x = 1\n")
+    env.stamp_path.write_text("{not json", encoding="utf-8")
+    with env.lock():
+        dest = env.begin(generation=3)
+    assert dest.parent.name == "gen-4"
+    assert live.is_dir()
+    assert (live / "numpy.py").read_text() == "x = 1\n"
+
+
+def test_begin_can_pin_a_generation_number(tmp_path: Path) -> None:
+    """A remote STS publishes the API's gen-N when that directory is free."""
+    env = NodeEnv(tmp_path)
+    rec = _rec("1.0")
+    with env.lock():
+        dest = env.begin(generation=5)
+        (dest / "numpy").mkdir()
+        (dest / "numpy" / "__init__.py").write_text("x = 1\n")
+        stamp = env.commit(dest, {"numpy": rec})
+    assert stamp.generation == 5
+    assert dest == env.site_packages(5)
+    with env.lock():
+        again = env.begin(generation=5)
+    assert again.parent.name == "gen-6", (
+        "the live stamp already occupies gen-5, so the next apply takes 6"
+    )
+
+
 def test_commit_is_atomic_for_readers(tmp_path: Path) -> None:
     env = NodeEnv(tmp_path)
     rec = PackageRecord(version="1.0", dist="foo", source="manual")
@@ -108,6 +145,29 @@ def test_second_lock_raises(tmp_path: Path) -> None:
         with pytest.raises(EnvironmentLocked):
             with held.lock():
                 pass
+
+
+def test_blocking_lock_waits_for_the_holder(tmp_path: Path) -> None:
+    import threading
+    import time
+
+    env = NodeEnv(tmp_path)
+    order: list[str] = []
+
+    def holder() -> None:
+        with env.lock():
+            order.append("hold")
+            time.sleep(0.05)
+        order.append("released")
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    while "hold" not in order:
+        time.sleep(0.001)
+    with env.lock(blocking=True):
+        order.append("waited")
+    thread.join()
+    assert order == ["hold", "released", "waited"]
 
 
 def test_ensure_current_creates_empty_gen0(tmp_path: Path) -> None:

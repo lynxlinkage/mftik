@@ -5,16 +5,22 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from fanout_harness import patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.envapply import ApplyFailed, ApplySpec
 from mftik.environment import EnvStamp, NodeEnv
 from mftik.protocol import (
+    STS_ENV_SYNC,
     STS_REGISTRY_GENERATION,
     STS_REGISTRY_RELOAD,
     STS_SESSION_LIST,
     ListSessionsResult,
     ListSessionsResultEnvelope,
     SessionInfo,
+    StsEnvPackagePin,
+    StsEnvSyncRequest,
+    StsEnvSyncResult,
+    StsEnvSyncResultEnvelope,
     StsRegistryGenerationResult,
     StsRegistryGenerationResultEnvelope,
     StsRegistryReloadResult,
@@ -86,15 +92,40 @@ class EnvBroker:
         self.generation = generation
         self.list_calls = 0
         self.reload_calls = 0
+        self.sync_calls = 0
         self.generation_calls = 0
+        self.subjects: list[str] = []
+        self.sync_allow_disruptive: list[bool] = []
+
+    def _stamp(self):
+        return NodeEnv.from_env().read_stamp()
 
     def _generation(self) -> int:
-        stamp = NodeEnv.from_env().read_stamp()
         if self.generation is not None:
             return self.generation
-        return stamp.generation
+        return self._stamp().generation
+
+    def _packages(self) -> dict[str, StsEnvPackagePin]:
+        stamp = self._stamp()
+        if self._generation() < stamp.generation:
+            return {}
+        return {
+            name: StsEnvPackagePin(version=rec.version, dist=rec.dist)
+            for name, rec in stamp.packages.items()
+        }
+
+    def _adopted(self) -> StsEnvSyncResult:
+        stamp = self._stamp()
+        return StsEnvSyncResult(
+            loaded=[],
+            generation=stamp.generation,
+            packages=self._packages()
+            if self._generation() >= stamp.generation
+            else {},
+        )
 
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+        self.subjects.append(subject)
         if envelope.type == STS_SESSION_LIST:
             self.list_calls += 1
             if self.list_silent:
@@ -107,12 +138,28 @@ class EnvBroker:
                 type=STS_SESSION_LIST,
                 source="sts",
             )
+        if envelope.type == STS_ENV_SYNC:
+            self.sync_calls += 1
+            self.sync_allow_disruptive.append(
+                StsEnvSyncRequest.model_validate(envelope.payload).allow_disruptive
+            )
+            if self.reload_silent:
+                raise DomainRpcError("timeout", "no reply from sts")
+            adopted = self._adopted()
+            return StsEnvSyncResultEnvelope.wrap(
+                adopted,
+                type=STS_ENV_SYNC,
+                source="sts",
+            )
         if envelope.type == STS_REGISTRY_RELOAD:
             self.reload_calls += 1
             if self.reload_silent:
                 raise DomainRpcError("timeout", "no reply from sts")
             return StsRegistryReloadResultEnvelope.wrap(
-                StsRegistryReloadResult(loaded=[], generation=self._generation()),
+                StsRegistryReloadResult(
+                    loaded=[],
+                    generation=self._generation(),
+                ),
                 type=STS_REGISTRY_RELOAD,
                 source="sts",
             )
@@ -121,11 +168,19 @@ class EnvBroker:
             if self.generation_silent:
                 raise DomainRpcError("timeout", "no reply from sts")
             return StsRegistryGenerationResultEnvelope.wrap(
-                StsRegistryGenerationResult(generation=self._generation()),
+                StsRegistryGenerationResult(
+                    generation=self._generation(),
+                    packages=self._packages(),
+                ),
                 type=STS_REGISTRY_GENERATION,
                 source="sts",
             )
         raise AssertionError(f"unexpected type {envelope.type}")
+
+
+@pytest.fixture(autouse=True)
+def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_authoritative_anycast(monkeypatch)
 
 
 @pytest.fixture
@@ -193,6 +248,7 @@ async def test_get_on_a_fresh_node_is_empty(env_dir: Path) -> None:
     assert out.bytes == 0
     assert out.abi_ok is True
     assert broker.reload_calls == 0
+    assert broker.sync_calls == 0
     assert broker.generation_calls == 1
 
 
@@ -203,6 +259,7 @@ async def test_get_does_not_reload_the_registry(env_dir: Path) -> None:
     assert got.generation == 1
     assert got.restart_required is True
     assert broker.reload_calls == 0
+    assert broker.sync_calls == 0
     assert broker.generation_calls == 1
 
 
@@ -212,7 +269,8 @@ async def test_put_updates_get_and_info(env_dir: Path) -> None:
     assert out.generation == 1
     assert out.loaded is True
     assert out.packages["numpy"].version == "1.26.4"
-    assert broker.reload_calls == 1
+    assert broker.sync_calls == 1
+    assert broker.reload_calls == 0
 
     got = await get_environment(broker=EnvBroker())
     assert got.generation == 1
@@ -241,6 +299,7 @@ async def test_put_installer_failure_does_not_reload(env_dir: Path) -> None:
         await _put({"numpy": ("1.0", "numpy")}, broker)
     assert exc.value.status_code == 502
     assert "nope" in str(exc.value.detail)
+    assert broker.sync_calls == 0
     assert broker.reload_calls == 0
     assert NodeEnv(env_dir).read_stamp().generation == 0
 
@@ -620,3 +679,30 @@ async def test_the_resolved_pin_is_what_later_applies_use(env_dir: Path) -> None
     out = await _upsert("httpx", "0.27", "httpx", EnvBroker())
     assert seen == ["httpx==0.27", "pandas==9.9.9"]
     assert out.restart_required is False
+
+
+async def test_first_put_does_not_allow_disruptive(env_dir: Path) -> None:
+    broker = EnvBroker()
+    await _put({"numpy": ("1.0", "numpy")}, broker)
+    assert broker.sync_allow_disruptive == [False]
+
+
+async def test_same_package_retry_does_not_allow_disruptive(env_dir: Path) -> None:
+    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
+    broker = EnvBroker()
+    await _put({"numpy": ("1.0", "numpy")}, broker)
+    assert broker.sync_allow_disruptive == [False]
+
+
+async def test_pin_change_allows_disruptive(env_dir: Path) -> None:
+    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
+    broker = EnvBroker()
+    await _put({"numpy": ("2.0", "numpy")}, broker)
+    assert broker.sync_allow_disruptive == [True]
+
+
+async def test_force_allows_disruptive(env_dir: Path) -> None:
+    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
+    broker = EnvBroker(live=["sess-1"])
+    await _put({"numpy": ("2.0", "numpy")}, broker, force=True)
+    assert broker.sync_allow_disruptive == [True]

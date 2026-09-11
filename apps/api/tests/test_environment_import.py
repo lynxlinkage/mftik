@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
+from fanout_harness import patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.envapply import ApplyFailed, ApplySpec
 from mftik.environment import NodeEnv
@@ -55,6 +56,11 @@ def _peer(extras: object) -> httpx.MockTransport:
         return httpx.Response(404)
 
     return httpx.MockTransport(handler)
+
+
+@pytest.fixture(autouse=True)
+def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_authoritative_anycast(monkeypatch)
 
 
 @pytest.fixture
