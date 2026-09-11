@@ -1038,6 +1038,37 @@ class LeverageAck(BaseModel):
     error_code: int | str = RejectCode.NONE
 
 
+class TdLedgerViewRequest(BaseModel):
+    """STS → TD: read the book in TD memory on ``td.account.{api_id}``.
+
+    ``asset`` names one row; omit it for the whole ledger. The reply is
+    :class:`~mftik.exchange.oms.LedgerView`. This is a memory read — it
+    must not wait on venue I/O.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    asset: str | None = None
+
+
+class TdOmsViewRequest(BaseModel):
+    """STS → TD: live orders and positions on ``td.account.{api_id}``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+
+
+class TdOmsOrderRequest(BaseModel):
+    """STS → TD: one live order by ``client_order_id``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    client_order_id: str
+
+
 class OrderReject(BaseModel):
     """TD → STS: submit rejected (publish on ``td.{api_id}.global``).
 
@@ -1116,6 +1147,9 @@ OrderCancelEnvelope = Envelope[OrderCancel]
 OrderAckEnvelope = Envelope[OrderAck]
 EnsureLeverageEnvelope = Envelope[EnsureLeverage]
 LeverageAckEnvelope = Envelope[LeverageAck]
+TdLedgerViewRequestEnvelope = Envelope[TdLedgerViewRequest]
+TdOmsViewRequestEnvelope = Envelope[TdOmsViewRequest]
+TdOmsOrderRequestEnvelope = Envelope[TdOmsOrderRequest]
 OrderRejectEnvelope = Envelope[OrderReject]
 CancelRejectEnvelope = Envelope[CancelReject]
 MdLeaseAckEnvelope = Envelope[MdLeaseAck]
@@ -1147,6 +1181,7 @@ TD_SESSION_LIST = "td.session.list"
 TD_LEASE_ACK = "td.lease.ack"
 TD_RECON_DONE = "td.recon.done"
 TD_OMS_VIEW = "td.oms.view"
+TD_OMS_ORDER = "td.oms.order"
 TD_LEDGER_VIEW = "td.ledger.view"
 TD_ORDER_UPDATE = "td.order.update"
 TD_BACKFILL = "td.backfill"

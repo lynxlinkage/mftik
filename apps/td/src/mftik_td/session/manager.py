@@ -19,7 +19,7 @@ from mftik.exchange.models import (
     PlaceOrderRequest,
     is_terminal,
 )
-from mftik.exchange.oms import OmsView
+from mftik.exchange.oms import LedgerView, OmsView
 from mftik.exchange.order_check import (
     REDUCE_ONLY,
     SHAPE,
@@ -42,7 +42,10 @@ from mftik.protocol import (
     STS_ORDER_SUBMIT,
     STS_RECON,
     TD_LEASE_ACK,
+    TD_LEDGER_VIEW,
     TD_LEVERAGE_ACK,
+    TD_OMS_ORDER,
+    TD_OMS_VIEW,
     TD_ORDER_ACK,
     TD_RECON_DONE,
     EnsureLeverage,
@@ -62,6 +65,9 @@ from mftik.protocol import (
     StsDetach,
     TdAttachRequest,
     TdAttachResult,
+    TdLedgerViewRequest,
+    TdOmsOrderRequest,
+    TdOmsViewRequest,
     Topics,
     publish_td_log,
 )
@@ -171,6 +177,9 @@ class TradingAccount:
     #: Serves STS account reads on ``td.account.{api_id}`` (e.g. leverage).
     #: Kept off the order loop so a venue round-trip cannot stall submit acks.
     account_task: asyncio.Task[Any] | None = None
+    #: In-flight account RPC handlers. Views are memory reads and must not
+    #: queue behind a leverage REST call, so each request is its own task.
+    rpc_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     #: ``client_order_id`` → the STS ``session_id`` that submitted it, kept
     #: until the order reaches a terminal state. Advisory only: a cancel from
     #: another session is logged, never blocked. Recon-discovered orders have
@@ -1097,7 +1106,15 @@ class SessionManager:
                 async for req in self._broker.serve(
                     subject, stop=acct.global_stop
                 ):
-                    await self._handle_account_rpc(acct, req)
+                    # Each request is its own task so a leverage REST call
+                    # cannot hold a ledger/OMS view. The view is a memory
+                    # read and has to stay one.
+                    task = asyncio.create_task(
+                        self._dispatch_account_rpc(acct, req),
+                        name=f"td-acct-{acct.api_id}-{req.envelope.type}",
+                    )
+                    acct.rpc_tasks.add(task)
+                    task.add_done_callback(acct.rpc_tasks.discard)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1117,6 +1134,85 @@ class SessionManager:
                     )
                 except TimeoutError:
                     continue
+
+    async def _dispatch_account_rpc(
+        self, acct: TradingAccount, req: IncomingRequest
+    ) -> None:
+        """Route one ``td.account`` request. Views stay off the venue path."""
+        env = req.envelope
+        if env.type == TD_LEDGER_VIEW:
+            await self._handle_ledger_view(acct, req)
+            return
+        if env.type == TD_OMS_VIEW:
+            await self._handle_oms_view(acct, req)
+            return
+        if env.type == TD_OMS_ORDER:
+            await self._handle_oms_order(acct, req)
+            return
+        await self._handle_account_rpc(acct, req)
+
+    async def _handle_ledger_view(
+        self, acct: TradingAccount, req: IncomingRequest
+    ) -> None:
+        try:
+            payload = TdLedgerViewRequest.model_validate(req.envelope.payload or {})
+        except Exception:
+            await req.reply(
+                Envelope[LedgerView].wrap(
+                    LedgerView(api_id=acct.api_id),
+                    type=TD_LEDGER_VIEW,
+                    source="td",
+                )
+            )
+            return
+        view = acct.trading.ledger_view()
+        if payload.asset is not None:
+            balance = view.balances.get(payload.asset)
+            view = LedgerView(
+                api_id=acct.api_id,
+                balances={} if balance is None else {payload.asset: balance},
+            )
+        await req.reply(
+            Envelope[LedgerView].wrap(view, type=TD_LEDGER_VIEW, source="td")
+        )
+
+    async def _handle_oms_view(
+        self, acct: TradingAccount, req: IncomingRequest
+    ) -> None:
+        try:
+            TdOmsViewRequest.model_validate(req.envelope.payload or {})
+        except Exception:
+            await req.reply(
+                Envelope[OmsView].wrap(
+                    OmsView(), type=TD_OMS_VIEW, source="td"
+                )
+            )
+            return
+        await req.reply(
+            Envelope[OmsView].wrap(
+                acct.trading.oms.view(), type=TD_OMS_VIEW, source="td"
+            )
+        )
+
+    async def _handle_oms_order(
+        self, acct: TradingAccount, req: IncomingRequest
+    ) -> None:
+        try:
+            payload = TdOmsOrderRequest.model_validate(req.envelope.payload or {})
+        except Exception:
+            await req.reply(
+                Envelope[dict].wrap({}, type=TD_OMS_ORDER, source="td")
+            )
+            return
+        order = acct.trading.oms.get_order(payload.client_order_id)
+        if order is None:
+            await req.reply(
+                Envelope[dict].wrap({}, type=TD_OMS_ORDER, source="td")
+            )
+            return
+        await req.reply(
+            Envelope[Order].wrap(order, type=TD_OMS_ORDER, source="td")
+        )
 
     async def _handle_account_rpc(
         self, acct: TradingAccount, req: IncomingRequest

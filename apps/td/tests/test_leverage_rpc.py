@@ -11,16 +11,19 @@ from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange
 from mftik.exchange.errors import ExchangeError
+from mftik.exchange.oms import LedgerView
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     STS_ENSURE_LEVERAGE,
     STS_LEASE_HEARTBEAT,
+    TD_LEDGER_VIEW,
     EnsureLeverage,
     Envelope,
     LeaseHeartbeat,
     LeverageAck,
     RejectCode,
     TdAttachRequest,
+    TdLedgerViewRequest,
     Topics,
 )
 from mftik_td.session import PaperSessionFactory, SessionManager
@@ -156,3 +159,37 @@ async def test_wrong_session_is_refused(
     ack = LeverageAck.model_validate(reply.payload)
     assert ack.ok is False
     assert ack.error_code == RejectCode.TD_SESSION_NOT_ATTACHED
+
+
+async def test_a_ledger_view_is_not_queued_behind_leverage_rest(
+    broker: Broker, attached: SessionManager
+) -> None:
+    """A venue lookup must not stall a memory read of the book."""
+    acct = attached._accounts[API_ID]
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow(ticker: UniversalTicker) -> Decimal:
+        started.set()
+        await release.wait()
+        return Decimal("3")
+
+    acct.trading.private.fetch_leverage = _slow  # type: ignore[attr-defined]
+
+    leverage = asyncio.create_task(
+        broker.request(Topics.td_account(API_ID), _ensure_envelope(), timeout=5.0)
+    )
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    reply = await broker.request(
+        Topics.td_account(API_ID),
+        Envelope[TdLedgerViewRequest].wrap(
+            TdLedgerViewRequest(api_id=API_ID),
+            type=TD_LEDGER_VIEW,
+            source="test",
+        ),
+        timeout=2.0,
+    )
+    LedgerView.model_validate(reply.payload or {})
+    release.set()
+    await leverage

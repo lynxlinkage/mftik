@@ -10,14 +10,18 @@ from pathlib import Path
 import pytest
 from broker_harness import a_broker, append_tape_at
 from mftik.broker import Broker
-from mftik.exchange.models import Order, OrderStatus, OrderType, Side, Ticker
-from mftik.exchange.oms import LedgerEntry
+from mftik.exchange.models import Balance, Order, OrderStatus, OrderType, Side, Ticker
+from mftik.exchange.oms import LedgerView, OmsView
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_TICKER,
     TD_LEASE_ACK,
+    TD_LEDGER_VIEW,
     TD_LEVERAGE_ACK,
+    TD_OMS_ORDER,
+    TD_OMS_VIEW,
     TD_ORDER_ACK,
+    Envelope,
     LeaseAck,
     LeverageAck,
     LeverageAckEnvelope,
@@ -50,6 +54,47 @@ def _read(path: Path) -> list[dict]:
 
 def _events(records: list[dict], kind: str) -> list[dict]:
     return [r for r in records if r["kind"] == kind]
+
+
+async def _serve_account(
+    broker: Broker,
+    api_id: int,
+    stop: asyncio.Event,
+    *,
+    orders: dict[str, Order] | None = None,
+    balances: dict[str, Balance] | None = None,
+) -> None:
+    orders = orders or {}
+    balances = balances or {}
+    async for req in broker.serve(Topics.td_account(api_id), stop=stop):
+        if req.envelope.type == TD_OMS_VIEW:
+            await req.reply(
+                Envelope[OmsView].wrap(
+                    OmsView(orders=orders), type=TD_OMS_VIEW, source="td"
+                )
+            )
+        elif req.envelope.type == TD_OMS_ORDER:
+            cid = (req.envelope.payload or {}).get("client_order_id")
+            order = orders.get(str(cid))
+            if order is None:
+                await req.reply(Envelope[dict].wrap({}, type=TD_OMS_ORDER, source="td"))
+            else:
+                await req.reply(
+                    Envelope[Order].wrap(order, type=TD_OMS_ORDER, source="td")
+                )
+        elif req.envelope.type == TD_LEDGER_VIEW:
+            asset = (req.envelope.payload or {}).get("asset")
+            chosen = balances
+            if asset is not None:
+                bal = balances.get(asset)
+                chosen = {} if bal is None else {asset: bal}
+            await req.reply(
+                Envelope[LedgerView].wrap(
+                    LedgerView(api_id=api_id, balances=chosen),
+                    type=TD_LEDGER_VIEW,
+                    source="td",
+                )
+            )
 
 
 def _ticker_payload() -> dict:
@@ -474,32 +519,34 @@ async def test_oms_view_records_the_book_it_was_given(
     sts = _session(
         broker, tmp_path, strategy, td_api_ids=[11], session_id="ev-oms-read"
     )
-    await broker.state_put(
-        Topics.td_oms(11),
-        "555",
-        Order(
-            client_order_id="555",
-            universal_ticker="Paper_Spot_BTCUSDT",
-            side=Side.BUY,
-            type=OrderType.LIMIT,
-            qty=Decimal("2"),
-            price=Decimal("99"),
-            status=OrderStatus.NEW,
-        ),
+    stop = asyncio.Event()
+    order = Order(
+        client_order_id="555",
+        universal_ticker="Paper_Spot_BTCUSDT",
+        side=Side.BUY,
+        type=OrderType.LIMIT,
+        qty=Decimal("2"),
+        price=Decimal("99"),
+        status=OrderStatus.NEW,
+    )
+    server = asyncio.create_task(
+        _serve_account(broker, 11, stop, orders={"555": order})
     )
     await sts.start()
-
-    view = await strategy.oms.view()
-    assert set(view.orders) == {"555"}
-    await sts.stop()
+    try:
+        view = await strategy.oms.view()
+        assert set(view.orders) == {"555"}
+    finally:
+        await sts.stop()
+        stop.set()
+        await asyncio.gather(server, return_exceptions=True)
 
     reads = _events(_read(tmp_path / "ev-oms-read.jsonl"), "read")
     assert [r["event"] for r in reads] == ["oms.view"]
     assert reads[0]["dir"] == "out"
     assert reads[0]["api_id"] == 11
     assert reads[0]["count"] == 1
-    # The rows themselves, so TD's book at that moment can be rebuilt.
-    assert reads[0]["payload"]["555"]["price"] == "99"
+    assert reads[0]["payload"]["orders"]["555"]["price"] == "99"
 
 
 async def test_oms_order_records_a_miss_as_a_miss(
@@ -510,10 +557,15 @@ async def test_oms_order_records_a_miss_as_a_miss(
     sts = _session(
         broker, tmp_path, strategy, td_api_ids=[11], session_id="ev-oms-miss"
     )
+    stop = asyncio.Event()
+    server = asyncio.create_task(_serve_account(broker, 11, stop))
     await sts.start()
-
-    assert await strategy.oms.order("nope") is None
-    await sts.stop()
+    try:
+        assert await strategy.oms.order("nope") is None
+    finally:
+        await sts.stop()
+        stop.set()
+        await asyncio.gather(server, return_exceptions=True)
 
     reads = _events(_read(tmp_path / "ev-oms-miss.jsonl"), "read")
     assert reads[0]["event"] == "oms.order"
@@ -529,23 +581,34 @@ async def test_ledger_view_records_the_balances(
     sts = _session(
         broker, tmp_path, strategy, td_api_ids=[11], session_id="ev-ledger"
     )
-    await broker.state_put(
-        Topics.td_ledger(11),
-        "USDT",
-        LedgerEntry(
-            free=Decimal("1000"), prelock=Decimal("400"), lock=Decimal("0")
-        ),
+    stop = asyncio.Event()
+    server = asyncio.create_task(
+        _serve_account(
+            broker,
+            11,
+            stop,
+            balances={
+                "USDT": Balance(
+                    asset="USDT",
+                    free=Decimal("1000"),
+                    locked=Decimal("0"),
+                    prelock=Decimal("400"),
+                )
+            },
+        )
     )
     await sts.start()
-
-    assert await strategy.ledger.available("USDT") == Decimal("600")
-    await sts.stop()
+    try:
+        assert await strategy.ledger.available("USDT") == Decimal("600")
+    finally:
+        await sts.stop()
+        stop.set()
+        await asyncio.gather(server, return_exceptions=True)
 
     reads = _events(_read(tmp_path / "ev-ledger.jsonl"), "read")
     assert [r["event"] for r in reads] == ["ledger.view"]
-    # 600 is derived; 1000 and 400 are what TD actually said.
-    assert reads[0]["payload"]["USDT"]["free"] == "1000"
-    assert reads[0]["payload"]["USDT"]["prelock"] == "400"
+    assert reads[0]["payload"]["balances"]["USDT"]["free"] == "1000"
+    assert reads[0]["payload"]["balances"]["USDT"]["prelock"] == "400"
 
 
 async def test_leverage_cache_hit_is_recorded_too(

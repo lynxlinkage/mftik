@@ -7,7 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from mftik.broker import Broker, RequestTimeoutError, StateProjection
+from mftik.broker import Broker, RequestTimeoutError
 from mftik.exchange.models import (
     AggTrade,
     Balance,
@@ -254,7 +254,6 @@ class StsSession:
         self._md_lease_logged = False
         self._on_stop_task: asyncio.Task[Any] | None = None
         self._recon_sent: set[int] = set()
-        self._state: dict[str, StateProjection] = {}
 
     @property
     def td_api_ids(self) -> list[int]:
@@ -307,40 +306,6 @@ class StsSession:
     def strategy_name(self) -> str:
         return self.strategy.name
 
-    def projected_state(self, name: str) -> dict[str, dict[str, Any]] | None:
-        """Local OMS/ledger projection, or ``None`` if this name is not live.
-
-        ``None`` is the cue for strategy views to ``state_all`` / ``state_get``
-        rather than serve a map whose watch has died.
-        """
-        proj = self._state.get(name)
-        if proj is None or not proj.live:
-            return None
-        return proj.all()
-
-    async def _start_state_projections(self) -> None:
-        for api_id in self.td_api_ids:
-            for name in (Topics.td_oms(api_id), Topics.td_ledger(api_id)):
-                if name in self._state:
-                    continue
-                proj = self.broker.state_projection(name)
-                try:
-                    await proj.start()
-                except Exception:
-                    logger.exception(
-                        "STS state projection failed to start name=%s "
-                        "session=%s — views will pull",
-                        name,
-                        self.session_id,
-                    )
-                    continue
-                self._state[name] = proj
-
-    async def _close_state_projections(self) -> None:
-        for proj in self._state.values():
-            await proj.close()
-        self._state.clear()
-
     async def _publish_log(
         self, message: str, *, source: str = "sts", level: str = "info"
     ) -> None:
@@ -362,7 +327,6 @@ class StsSession:
         # Before the pumps: the first thing on a feed must not arrive with
         # nowhere to be written.
         await self.event_log.start()
-        await self._start_state_projections()
         self.event_log.record(
             "lifecycle",
             "session_start",
@@ -512,7 +476,6 @@ class StsSession:
         except Exception:
             pass
         self.event_log.record("lifecycle", "session_stop", dir="self")
-        await self._close_state_projections()
         # Last, and awaited: the records above are the ones a post-mortem opens
         # the file for, and they are still in the queue at this point.
         await self.event_log.close()

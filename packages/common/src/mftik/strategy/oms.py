@@ -13,11 +13,15 @@ from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
+    TD_OMS_ORDER,
+    TD_OMS_VIEW,
     Envelope,
     OrderAck,
     OrderCancel,
     OrderSubmit,
     RejectCode,
+    TdOmsOrderRequest,
+    TdOmsViewRequest,
     Topics,
 )
 from mftik.protocol.reject_codes import describe
@@ -36,13 +40,11 @@ ORDER_ACK_TIMEOUT_S = 2.0
 
 
 class StrategyOms:
-    """Order entry, and reads of TD's book out of the broker.
+    """Order entry, and reads of TD's book over ``td.account.{api_id}``.
 
-    TD writes ``td.oms.{api_id}`` (client_order_id → Order). ``view`` and
-    ``orders`` read STS's local projection of that state when the session is
-    watching it, and fall back to ``state_all`` when it is not. A single
-    order after submit is always ``state_get``: the watch can still be a
-    tick behind the ack, and a miss here looks like the order was refused.
+    ``view`` and ``order`` are request-reply against the TD that holds the
+    account. One writer, one picture. A miss on ``order`` after submit is
+    still a money bug — it is a miss on the authority, not a lagging cache.
 
     ``on_order_update`` and friends are the cue to go and look, not a
     stream to fold into a private mirror — rebuilding state from a fan-out
@@ -74,37 +76,33 @@ class StrategyOms:
         self._cid_factory = ClientOrderIdFactory(cid_slot)
 
     async def view(self, api_id: int | None = None) -> OmsView:
-        """Read TD's live book for ``api_id`` out of ``td.oms.{api_id}``.
-
-        The projection when the session is watching it, otherwise a pull.
-        TD is the only writer, so two strategies on the same account cannot
-        drift apart by each maintaining their own book.
-        """
+        """Read TD's live book for ``api_id`` over ``td.account``."""
         resolved = self._resolve(api_id)
         log = session_log(self._strategy)
         if resolved is None:
-            # An empty book and an unanswerable question look identical to the
-            # caller, so the log has to be the thing that tells them apart.
             log.record("read", "oms.view", dir="out", resolved=False, count=0)
             return OmsView()
-        rows = self._state_rows(Topics.td_oms(resolved))
-        if rows is None:
-            rows = await self._session_broker().state_all(Topics.td_oms(resolved))
-        # The rows, not the view built from them. This read is an input to
-        # whatever the strategy did next, and only the answer it was actually
-        # given can stand in for TD's book after the fact.
+        session = self._require_session()
+        reply = await session.broker.request(
+            Topics.td_account(resolved),
+            Envelope[TdOmsViewRequest].wrap(
+                TdOmsViewRequest(api_id=resolved),
+                type=TD_OMS_VIEW,
+                source=_source_name(session),
+                session_id=getattr(session, "session_id", None),
+            ),
+            timeout=self._ack_timeout,
+        )
+        view = OmsView.model_validate(reply.payload or {})
         log.record(
             "read",
             "oms.view",
             dir="out",
             api_id=resolved,
-            count=len(rows),
-            payload=rows,
+            count=len(view.orders),
+            payload=view.model_dump(mode="json"),
         )
-        orders = {
-            cid: Order.model_validate(row) for cid, row in rows.items()
-        }
-        return OmsView(orders=orders)
+        return view
 
     async def orders(self, api_id: int | None = None) -> dict[str, Order]:
         """Live orders keyed by ``client_order_id``."""
@@ -115,8 +113,7 @@ class StrategyOms:
     ) -> Order | None:
         """One order by ``client_order_id``, or None if it is not live.
 
-        Always a direct read. The projection can lag the ack that told the
-        strategy the order was taken, and a miss here is a money bug.
+        Always a direct read of TD memory. A miss here is a money bug.
         """
         resolved = self._resolve(api_id)
         log = session_log(self._strategy)
@@ -124,20 +121,29 @@ class StrategyOms:
         if resolved is None:
             log.record("read", "oms.order", dir="out", cid=cid, resolved=False)
             return None
-        row = await self._session_broker().state_get(Topics.td_oms(resolved), cid)
-        # ``found`` rather than inferring it from a missing payload: an order
-        # that is no longer live is a different answer from one nobody asked
-        # about, and both arrive here as None.
+        session = self._require_session()
+        reply = await session.broker.request(
+            Topics.td_account(resolved),
+            Envelope[TdOmsOrderRequest].wrap(
+                TdOmsOrderRequest(api_id=resolved, client_order_id=cid),
+                type=TD_OMS_ORDER,
+                source=_source_name(session),
+                session_id=getattr(session, "session_id", None),
+            ),
+            timeout=self._ack_timeout,
+        )
+        payload = reply.payload or {}
+        found = bool(payload)
         log.record(
             "read",
             "oms.order",
             dir="out",
             api_id=resolved,
             cid=cid,
-            found=row is not None,
-            payload=row,
+            found=found,
+            payload=payload or None,
         )
-        return None if row is None else Order.model_validate(row)
+        return None if not found else Order.model_validate(payload)
 
     def _resolve(self, api_id: int | None) -> int | None:
         """Pick the account: the one asked for, or the only one attached.
@@ -152,13 +158,6 @@ class StrategyOms:
             return api_id
         attached = self.api_ids
         return attached[0] if len(attached) == 1 else None
-
-    def _state_rows(self, name: str) -> dict[str, Any] | None:
-        session = self._strategy.session if self._strategy is not None else None
-        getter = getattr(session, "projected_state", None)
-        if getter is None:
-            return None
-        return getter(name)
 
     def _session_broker(self):
         return self._require_session().broker
@@ -404,3 +403,9 @@ class StrategyOms:
         if self._strategy is None or self._strategy.session is None:
             raise RuntimeError("strategy OMS is not bound to a session")
         return self._strategy.session
+
+
+def _source_name(session: object) -> str:
+    strategy = getattr(session, "strategy", None)
+    name = getattr(strategy, "name", None)
+    return f"strategy.{name}" if name else "sts"

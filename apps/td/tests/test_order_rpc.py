@@ -24,10 +24,14 @@ from mftik.exchange.models import (
     OrderType,
     PlaceOrderRequest,
 )
+from mftik.exchange.oms import LedgerView, OmsView
 from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
+    TD_LEDGER_VIEW,
+    TD_OMS_ORDER,
+    TD_OMS_VIEW,
     TD_ORDER_REJECT,
     TD_ORDER_UPDATE,
     Envelope,
@@ -37,6 +41,9 @@ from mftik.protocol import (
     OrderSubmit,
     RejectCode,
     TdAttachRequest,
+    TdLedgerViewRequest,
+    TdOmsOrderRequest,
+    TdOmsViewRequest,
     Topics,
     UntypedEnvelope,
 )
@@ -45,6 +52,72 @@ from mftik_td.session import PaperSessionFactory, SessionManager
 
 API_ID = 42
 SESSION = "sts-rpc"
+
+
+async def _ledger_row(broker: Broker, asset: str) -> dict[str, Any] | None:
+    reply = await broker.request(
+        Topics.td_account(API_ID),
+        Envelope[TdLedgerViewRequest].wrap(
+            TdLedgerViewRequest(api_id=API_ID, asset=asset),
+            type=TD_LEDGER_VIEW,
+            source="test",
+        ),
+        timeout=2,
+    )
+    view = LedgerView.model_validate(reply.payload or {})
+    bal = view.balances.get(asset)
+    if bal is None:
+        return None
+    return {"free": str(bal.free), "prelock": str(bal.prelock), "lock": str(bal.locked)}
+
+
+async def _ledger_all(broker: Broker) -> dict[str, Any]:
+    reply = await broker.request(
+        Topics.td_account(API_ID),
+        Envelope[TdLedgerViewRequest].wrap(
+            TdLedgerViewRequest(api_id=API_ID),
+            type=TD_LEDGER_VIEW,
+            source="test",
+        ),
+        timeout=2,
+    )
+    view = LedgerView.model_validate(reply.payload or {})
+    return {
+        asset: {
+            "free": str(bal.free),
+            "prelock": str(bal.prelock),
+            "lock": str(bal.locked),
+        }
+        for asset, bal in view.balances.items()
+    }
+
+
+async def _oms_row(broker: Broker, cid: str) -> dict[str, Any] | None:
+    reply = await broker.request(
+        Topics.td_account(API_ID),
+        Envelope[TdOmsOrderRequest].wrap(
+            TdOmsOrderRequest(api_id=API_ID, client_order_id=cid),
+            type=TD_OMS_ORDER,
+            source="test",
+        ),
+        timeout=2,
+    )
+    payload = reply.payload or {}
+    return payload or None
+
+
+async def _oms_all(broker: Broker) -> dict[str, Any]:
+    reply = await broker.request(
+        Topics.td_account(API_ID),
+        Envelope[TdOmsViewRequest].wrap(
+            TdOmsViewRequest(api_id=API_ID),
+            type=TD_OMS_VIEW,
+            source="test",
+        ),
+        timeout=2,
+    )
+    view = OmsView.model_validate(reply.payload or {})
+    return {cid: order.model_dump(mode="json") for cid, order in view.orders.items()}
 
 
 class _StubSymbols:
@@ -327,7 +400,7 @@ async def test_state_is_written_before_the_ack_returns(
 
         assert ack.accepted is True
         # Read the state the way STS does — no sleep, no polling.
-        row = await broker.state_get(Topics.td_ledger(API_ID), "USDT")
+        row = await _ledger_row(broker, "USDT")
         assert row is not None
         assert Decimal(row["prelock"]) == Decimal("500")  # 0.01 @ 50000
     finally:
@@ -387,7 +460,7 @@ async def test_a_venue_reject_hands_the_prelock_back(
     assert not session.ledger.has_reservation("cid-refused")
     assert session.ledger.available("USDT") == Decimal("1000")
     # And STS sees the same thing, since that is where it reads balances.
-    row = await broker.state_get(Topics.td_ledger(API_ID), "USDT")
+    row = await _ledger_row(broker, "USDT")
     assert row is not None
     assert Decimal(row["prelock"]) == Decimal("0")
 
@@ -483,7 +556,7 @@ async def test_pending_new_is_in_redis_before_the_ack(
     ack = await _ack(broker, _submit_envelope(client_order_id="cid-pn"))
 
     assert ack.accepted is True
-    row = await broker.state_get(Topics.td_oms(API_ID), "cid-pn")
+    row = await _oms_row(broker, "cid-pn")
     assert row is not None
     # It has no venue id yet — that is what PENDING_NEW means.
     assert row["status"] in (
@@ -517,14 +590,14 @@ async def test_an_unacknowledged_order_becomes_unknown_then_resolves(
         )
     )
     assert order.status is OrderStatus.PENDING_NEW
-    assert await broker.state_get(Topics.td_oms(API_ID), "cid-ghost")
+    assert await _oms_row(broker, "cid-ghost")
 
     moved = await session.sweep_pending()
 
     assert [o.status for o in moved] == [OrderStatus.UNKNOWN]
     # Resolution ran inside the sweep: the venue has no such order, so it is
     # terminal and gone from the live book.
-    assert await broker.state_get(Topics.td_oms(API_ID), "cid-ghost") is None
+    assert await _oms_row(broker, "cid-ghost") is None
     assert session.oms.get_order("cid-ghost") is None
 
 
@@ -548,7 +621,7 @@ async def test_a_live_order_is_not_swept(
     )
 
     assert await session.sweep_pending() == []
-    row = await broker.state_get(Topics.td_oms(API_ID), "cid-fresh")
+    row = await _oms_row(broker, "cid-fresh")
     assert row is not None
     assert row["status"] == OrderStatus.PENDING_NEW.value
 
@@ -565,14 +638,18 @@ async def test_state_is_cleared_when_the_session_dies(
             session_id=SESSION, api_id=API_ID, timeout=2.0, created_by=1
         )
     )
-    assert await broker.state_all(Topics.td_ledger(API_ID))
+    assert await _ledger_all(broker)
 
     stop.set()
     await asyncio.gather(pub, return_exceptions=True)
     await manager.close_all()
 
-    assert await broker.state_all(Topics.td_ledger(API_ID)) == {}
-    assert await broker.state_all(Topics.td_oms(API_ID)) == {}
+    from mftik.broker import RequestTimeoutError
+
+    with pytest.raises(RequestTimeoutError):
+        await _ledger_all(broker)
+    with pytest.raises(RequestTimeoutError):
+        await _oms_all(broker)
 
 
 def _cancel_envelope(cid: str, session_id: str = SESSION) -> Envelope[Any]:
@@ -627,7 +704,7 @@ async def test_pending_cancel_is_written_before_the_venue_answers(
 
     assert await session.record_pending_cancel("cid-mark") is None
 
-    row = await broker.state_get(Topics.td_oms(API_ID), "cid-mark")
+    row = await _oms_row(broker, "cid-mark")
     assert row is not None
     assert row["status"] == OrderStatus.PENDING_CANCEL.value
 
@@ -645,7 +722,7 @@ async def test_cancelling_a_pending_new_order_is_refused(
     assert ack.accepted is False
     assert "pending_new" in ack.reason
     assert ack.error_code == RejectCode.TD_NOT_CANCELABLE
-    row = await broker.state_get(Topics.td_oms(API_ID), "cid-inflight")
+    row = await _oms_row(broker, "cid-inflight")
     assert row["status"] == OrderStatus.PENDING_NEW.value
 
 
@@ -675,7 +752,7 @@ async def test_a_refused_cancel_puts_the_order_back(
     # Back to exactly where it was, not merely "open".
     assert restored is not None
     assert restored.status is OrderStatus.PARTIALLY_FILLED
-    row = await broker.state_get(Topics.td_oms(API_ID), "cid-back")
+    row = await _oms_row(broker, "cid-back")
     assert row["status"] == OrderStatus.PARTIALLY_FILLED.value
 
 
@@ -762,7 +839,7 @@ async def test_both_sizes_on_a_market_order_are_refused_before_booking(
     attached: SessionManager, broker: Broker
 ) -> None:
     """Shape is the request's own: neither size wins, and nothing is reserved."""
-    before = await broker.state_all(Topics.td_oms(API_ID))
+    before = await _oms_all(broker)
     ack = await _ack(
         broker,
         _submit_envelope(
@@ -774,7 +851,7 @@ async def test_both_sizes_on_a_market_order_are_refused_before_booking(
     )
     assert ack.accepted is False
     assert ack.error_code == RejectCode.TD_INVALID_REQUEST
-    assert await broker.state_all(Topics.td_oms(API_ID)) == before
+    assert await _oms_all(broker) == before
 
 
 def test_a_gate_market_buy_sized_in_base_is_unsupported_shape() -> None:
@@ -807,12 +884,12 @@ async def test_a_refused_reduce_only_reserves_nothing(
     attached: SessionManager, broker: Broker
 ) -> None:
     """Checked beside the instrument, so before anything is committed."""
-    before = await broker.state_all(Topics.td_ledger(API_ID))
+    before = await _ledger_all(broker)
 
     ack = await _ack(broker, _submit_envelope(reduce_only=True))
 
     assert ack.accepted is False
-    assert await broker.state_all(Topics.td_ledger(API_ID)) == before
+    assert await _ledger_all(broker) == before
 
 
 async def test_an_ordinary_spot_order_is_unaffected(
@@ -829,13 +906,13 @@ async def test_a_refused_instrument_reserves_nothing(
 ) -> None:
     """Refused before the pre-lock: nothing about it can be made to work, so
     committing funds against it would strand them until recon."""
-    before = await broker.state_all(Topics.td_ledger(API_ID))
+    before = await _ledger_all(broker)
     ack = await _ack(
         broker, _submit_envelope(universal_ticker="Gate_Spot_BTCUSDT")
     )
 
     assert ack.accepted is False
-    assert await broker.state_all(Topics.td_ledger(API_ID)) == before
+    assert await _ledger_all(broker) == before
 
 
 # --- transport-ambiguous send failures --------------------------------------
@@ -859,7 +936,7 @@ async def test_cancel_send_failure_resolves_missing_as_canceled(
     await asyncio.sleep(0.2)
 
     assert session.oms.get_order("cid-sendfail") is None
-    assert await broker.state_get(Topics.td_oms(API_ID), "cid-sendfail") is None
+    assert await _oms_row(broker, "cid-sendfail") is None
 
 
 async def test_cancel_send_failure_keeps_order_when_venue_still_has_it(
@@ -913,7 +990,7 @@ async def test_submit_send_failure_resolves_missing_as_rejected(
     await asyncio.sleep(0.2)
 
     assert session.oms.get_order("cid-ghost-send") is None
-    assert await broker.state_get(Topics.td_oms(API_ID), "cid-ghost-send") is None
+    assert await _oms_row(broker, "cid-ghost-send") is None
 
 
 async def test_submit_send_failure_stays_unknown_when_resolve_fails(
@@ -983,7 +1060,7 @@ async def test_cancel_ack_settles_without_waiting_on_stream(
 
     assert session.oms.get_order("cid-ack") is None
     assert "cid-ack" not in session._cancel_since
-    assert await broker.state_get(Topics.td_oms(API_ID), "cid-ack") is None
+    assert await _oms_row(broker, "cid-ack") is None
 
 
 async def test_view_for_sts_uses_ledger_balances(

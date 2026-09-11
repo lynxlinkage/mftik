@@ -20,7 +20,7 @@ from mftik.exchange.models import (
     is_pending,
     is_terminal,
 )
-from mftik.exchange.oms import LedgerEntry, LedgerView, OmsView, Position
+from mftik.exchange.oms import LedgerView, OmsView, Position
 from mftik.exchange.reservations import is_linear_margin, reservation_for
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
@@ -48,7 +48,6 @@ from mftik_td.oms import (
     InsufficientAvailable,
     Ledger,
     Oms,
-    order_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -503,18 +502,10 @@ class Session:
         """
         self.ledger.release_all()
         self._leverage.clear()
-        await self.broker.state_clear(self._ledger_key, self._oms_key)
 
     async def publish_oms(self, view: OmsView | None = None) -> None:
-        """Write the OMS to ``td.oms.{api_id}``: client_order_id → Order.
-
-        Whole-hash replace, so what STS reads is exactly TD's live book — a
-        cancelled order disappears rather than lingering as a stale field.
-        """
-        snap = view if view is not None else self.oms.view()
-        await self.broker.state_replace(
-            self._oms_key, {order_key(o): o for o in snap.orders.values()}
-        )
+        """OMS memory is the book. Used to persist a snapshot to KV."""
+        return
 
     async def record_pending_new(
         self, request: PlaceOrderRequest, *, session_id: str | None = None
@@ -1001,17 +992,8 @@ class Session:
             )
 
     async def write_order(self, order: Order) -> None:
-        """Persist one order, or drop it once it is finished.
-
-        Terminal orders leave the hash entirely: STS reads this to know what
-        is live, and a filled order sitting there reads as an open position
-        that does not exist.
-        """
-        field = order_key(order)
-        if is_terminal(order.status):
-            await self.broker.state_drop(self._oms_key, field)
-        else:
-            await self.broker.state_put(self._oms_key, field, order)
+        """OMS memory is the book. Used to persist one order to KV."""
+        return
 
     def cached_leverage(self, ticker: UniversalTicker | str) -> Decimal | None:
         """Leverage last stored for ``ticker``, or None if never ensured."""
@@ -1106,11 +1088,8 @@ class Session:
             self.ledger.reserve(request.client_order_id, asset, amount)
         except InsufficientAvailable as exc:
             return str(exc)
-        # Both awaited, not scheduled. The caller acks the submit off the back
-        # of this, and STS reads the ledger out of the broker — so the write has to
-        # have landed before True goes out, or a strategy could act on a
-        # balance that does not yet know about the order it just placed.
-        await self.write_ledger(asset)
+        # Memory is the book. Fan-out tells STS it moved; a sizing read
+        # after reserve is an RPC of this process, not a KV ack.
         await self._publish_balance(asset)
         return None
 
@@ -1119,7 +1098,6 @@ class Session:
         asset = self.ledger.asset_for(client_order_id)
         released = self.ledger.release(client_order_id)
         if released and asset is not None:
-            await self.write_ledger(asset)
             await self._publish_balance(asset)
         return released
 
@@ -1162,31 +1140,8 @@ class Session:
         return LedgerView(api_id=self.api_id, balances=self.ledger.snapshot())
 
     async def write_ledger(self, *assets: str) -> None:
-        """Write the ledger to ``td.ledger.{api_id}``: asset → free/prelock/lock.
-
-        Named assets only, or the whole hash when none are given. This is the
-        state STS reads; TD is its sole writer.
-        """
-        snapshot = self.ledger.snapshot()
-        if assets:
-            rows = {
-                asset: LedgerEntry.of(self.ledger.balance(asset))
-                for asset in assets
-            }
-            await self.broker.state_put_many(self._ledger_key, rows)
-            return
-        await self.broker.state_replace(
-            self._ledger_key,
-            {a: LedgerEntry.of(b) for a, b in snapshot.items()},
-        )
-
-    @property
-    def _ledger_key(self) -> str:
-        return Topics.td_ledger(self.api_id)
-
-    @property
-    def _oms_key(self) -> str:
-        return Topics.td_oms(self.api_id)
+        """Ledger memory is the book. Used to persist rows to KV."""
+        return
 
     async def publish_order_reject(
         self,
