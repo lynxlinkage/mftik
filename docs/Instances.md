@@ -96,10 +96,12 @@ moving MD next to the venue buys nothing — it relocates the long leg from
 Instance routing is therefore necessary for colocation and not sufficient for
 it. A per-region broker is a much deeper change — `Broker()` is constructed
 once per process and `StsSession` holds a single `self.broker` for TD RPC, MD
-fan-out, lease, eventlog and logs; the tape lives in the broker's own streams,
-so a split broker splits warm-up history; and the `instances` table would stay
-global on the shared Postgres while a health probe could not leave its own
-broker, so Home
+fan-out, lease, eventlog and logs; today the tape lives in the broker's own
+streams, so a split broker splits warm-up history. After
+[`JetStreamRemoval.md`](JetStreamRemoval.md) the tape is a Redis next to the
+MD that records it, and STS asks that MD — a split broker no longer splits
+the disk, only the RPC path. The `instances` table would stay global on the
+shared Postgres while a health probe could not leave its own broker, so Home
 could name every instance and vouch for none outside its own region. That
 change is the federated-nodes design, and `docker-compose.peer.yml` is already
 most of it. **Out of scope here, and it should stay a separate document.**
@@ -109,8 +111,13 @@ most of it. **Out of scope here, and it should stay a separate document.**
 - **Not a per-region broker.** One broker, one `DATABASE_URL`, unchanged.
   Every subject named below is a new name in the broker this node already has.
 - **Not two owners for one credential.** An `api_id` keeps exactly one TD
-  owner. The lease, the OMS and the `client_order_id` slot all rest on that,
-  and serving one key from two TDs is two processes deciding to trade.
+  owner. The OMS and the `client_order_id` slot all rest on that, and
+  serving one key from two TDs is two processes deciding to trade.
+- **Not two processes for one instance name.** `MFTIK_INSTANCE=td-jp-1`
+  is one OS process. A second process with that name is forbidden, not
+  refused at attach. [`JetStreamRemoval.md`](JetStreamRemoval.md) deletes
+  `claim_owner` / `claim_alive` on that basis; overlapping a restart is
+  the same bug as `--scale`.
 - **Not high availability.** A named instance that is down fails the deploy
   with a sentence. Failing over to a peer is `docs/MdHandover.md`'s problem and
   wants the cooperative handshake described there, not a retry here.
@@ -141,10 +148,14 @@ Each is meant to be a test.
 - **PI-5** A `strategy.yml` with no instance named behaves exactly as it does
   today: any instance of the plane may answer.
 - **PI-6** An instance that dies is reaped by its own rows only. A peer's rows
-  and liveness keys are untouched.
-- **PI-7** An `api_id` is held by exactly one TD *process*, enforced rather
-  than asserted. Two processes configured with the same `MFTIK_INSTANCE` do not
-  both take it — the second is refused and says who holds it.
+  are untouched. Today that also means its liveness keys; after
+  [`JetStreamRemoval.md`](JetStreamRemoval.md) there are no keys — orphan
+  means "this row names me and I do not have it locally".
+- **PI-7** An `api_id` is held by exactly one TD process. Today `claim_owner`
+  refuses a second process and names the holder. The destination contract is
+  stronger and has no refusal path: one instance name is one process, so a
+  second `MFTIK_INSTANCE=td-jp-1` is forbidden to exist. If it does, both
+  attaches succeed and both heartbeats stay green.
 - **PI-8** A session whose feeds are split across MD instances notices when any
   one of them stops answering. Losing part of the picture never leaves the
   strategy running on the rest.
@@ -591,44 +602,30 @@ and is the second line of defence — see *How NATS answers* in
 once; the lease and the settlement cursor are the backstops, not a durable
 queue.
 
-### 7. Nothing enforces one TD per `api_id`
+### 7. One TD per `api_id` is a process, not a name
 
-`SessionManager.attach` (`apps/td/src/mftik_td/session/manager.py:204`) starts
-with `acct = self._accounts.get(request.api_id)` and builds the account if it
-is missing. `self._accounts` is process-local memory. **There is no
-cross-process guard on `api_id` at all.**
+`SessionManager.attach` starts with `acct = self._accounts.get(request.api_id)`
+and builds the account if it is missing. `self._accounts` is process-local
+memory. `Topics.td(instance)` plus `apis.instance_id` already keep one
+credential off a second *instance*. They do not keep a second *process*
+configured with the same `MFTIK_INSTANCE` from building its own
+`TradingAccount` and serving `td.order.{api_id}` as a competing consumer.
 
-Two processes configured with the same `MFTIK_INSTANCE` — a copy-pasted compose
-block, a `--scale` — each build a `TradingAccount` and each run
-`_serve_orders` on `td.order.{api_id}`. That subject is anycast, so they become
-competing consumers and the account's order flow is split between two processes
-that each believe they own it. Each keeps its own OMS, its own ledger and its
-own reservations, and both publish to `td.oms.{api_id}` and
-`td.ledger.{api_id}` — so the strategy watches its balances alternate between
-two half-pictures.
+Today `claim_owner` is the SET NX in front of `create()`.
+[`JetStreamRemoval.md`](JetStreamRemoval.md) deletes it. The replacement is
+the deployment contract: one instance name is one process, and a restart
+does not overlap. A `--scale` or a copied compose block is not refused at
+attach — both links heartbeat, both look healthy, and the venue sees two
+sessions.
 
-This is latent rather than live today: nothing in the tree configures replicas.
-There is no `replicas`, `scale` or `deploy:` key in `docker-compose.yml`,
-`docker-compose.peer.yml` or the CLI's template, and no test runs two
-`SessionManager`s of one plane at once. **So this is not a defect being
-inherited — it is one this design would create**, because this design is the
-first thing that makes running several TDs an ordinary operation rather than a
-typo. Declaring "an `api_id` keeps exactly one TD owner" in *Non-goals* while
-nothing enforces it is not good enough once that is true.
+STS rebuild is the same shape on a different axis. `claim_alive` stops two
+processes restoring one row. After KV goes, the row's `instance` pin is
+what stops `sts-tw` taking a session that belongs to `sts-jp`. An unpinned
+row is still a race. Pinning is required.
 
-The primitive exists and is used for exactly this shape of problem one level
-down. STS guards rebuild with `claim_alive`'s `SET NX` so two processes cannot
-restore one session, and `liveness.py`'s docstring gives the reason: "several
-processes of a plane serve the same RPC subject as competing consumers, so one
-finding a live row it does not own has no way of knowing, by itself, whether a
-peer is running it."
-
-TD is the only plane with no key of its own — it imports `is_alive` and nothing
-else, reading STS's key to reap orphans and never claiming anything. So where
-*The hard parts, 1* found MD's liveness key needed fixing, TD's finding is the
-opposite: there is none to fix and one to add. `attach` takes a `SET NX` claim
-on `api_id` before building the account, renews it while held, releases it at
-refcount zero, and refuses the attach naming the holder when it cannot.
+TD's `hold_owner` loop and STS's `mark_alive` leave with the bucket.
+Session fencing stays as heartbeat + ack, with misses instead of a
+watchdog — that is E, not F.
 
 ### 8. STS cannot tell that an MD stopped
 
@@ -1049,7 +1046,10 @@ back.
   the moment it ran, and retiring that instance would strand a session nobody
   ever asked to put there.
 - The rebuild scan filters on the instance — own name, or null for legacy and
-  unpinned rows — before `claim_alive`.
+  unpinned rows — before `claim_alive`. After
+  [`JetStreamRemoval.md`](JetStreamRemoval.md) the pin *is* the guard:
+  `claim_alive` is gone, and a null instance is a race two STS will both
+  take. New sessions must be pinned.
 
 **Problem.** The scan filters on `restart`, on the strategy building, on
 `rebuildable` and on `claim_alive`, never on placement, and placement was not
@@ -1066,7 +1066,9 @@ and does not guarantee.
   what makes it deterministic.
 - A row pinned to a name nobody runs is rebuilt by nobody and stays
   `INTERRUPTED`, waiting for a person rather than moving itself.
-- A row with a null instance is still rebuilt by whoever claims it.
+- A row with a null instance is still rebuilt by whoever claims it. That
+  row is the leftover `claim_alive` race; the destination forbids leaving
+  it unpinned.
 - A deploy that names an STS creates on that instance's subject and records
   the name; an unpinned one uses the pool and records null.
 - Naming an instance of the wrong *domain* is refused — `md-jp-1` is declared

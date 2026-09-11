@@ -187,9 +187,10 @@ today
   Discord = login only
 
 target
-  STS/TD/MD ──publish_log──► log.{domain}.{stream_id}
-                                ├── WS tail
+  STS/TD/MD ──publish──► log.{domain}.{stream_id}
+                                ├── live WS
                                 ├── run_log_persist ──► session_logs
+                                │                         └── late WS
                                 └── run_alert_match
                                       │
                                       ├─ resolve Source (td/md stream_id;
@@ -515,6 +516,14 @@ Do not call `fetch_log_buffer` on start. Those hundred lines
 exist so a browser that opens `/ws/sts/{id}` a second late
 still sees deploy. Replaying them into Discord would re-fire
 every restart.
+
+[`JetStreamRemoval.md`](JetStreamRemoval.md) deletes the log
+stream. The late socket then reads `session_logs` (the table
+`run_log_persist` already fills) and only then attaches to the
+live `log.*` subject. A persist worker that is down loses the
+late window; it does not lose the live tail. The "do not drain
+on start" rule is unchanged — Discord still must not replay
+deploy.
 
 ### Auth
 

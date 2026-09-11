@@ -16,10 +16,14 @@ Nothing here is built yet.
 
 Facts this design rests on, all of them checkable in the tree today.
 
-**The tape is not lost on restart.** `TapeRecorder` writes a JetStream stream
-per feed, and NATS is long-lived substrate on another host — the production
-compose file does not manage it. A restart of the MD container leaves the
-stream intact.
+**The tape is not lost on restart.** Today `TapeRecorder` writes a JetStream
+stream per feed, and a restart of the MD container leaves that stream
+intact. [`docs/JetStreamRemoval.md`](JetStreamRemoval.md) moves the same
+promise to a Redis that lives next to the MD, one node per region, not
+replicated across TW/JP. Same-region handover (`md-jp-1` → `md-jp-2`)
+appends to the same key. A memory deque is not a replacement: the venue
+cannot rebuild an `aggtrade`. STS never opens that Redis; it asks the MD
+instance that already holds the feed.
 
 **The fan-out is addressed per session.** `Dispatcher.publish` sends each update
 to `Topics.md_session(session_id)` for every subscribed link, and only then calls
@@ -32,16 +36,23 @@ refcount zero. Feed lifetime is derived entirely from attached STS links. A
 process with no links pumps nothing — which is the single biggest obstacle here,
 because a green MD has no links by definition.
 
-**MD instances are already competing consumers.** `run_rpc` serves
-`Topics.MD`, one shared subject, and `liveness.py` says so outright: several
-processes of a plane serve the same subject, which is why per-`(plane, session)`
-alive keys exist to tell "a peer owns this" from "nobody does". So a second MD
-coming up is not a new idea — but today it would immediately start stealing
-attach requests, which a warming-up instance must not do.
+**MD instances are already competing consumers — and that topology is
+withdrawn.** Today `run_rpc` can serve `Topics.MD`, and `liveness.py` exists
+because several processes of a plane may share a subject. A second MD
+coming up would steal attach requests, which a warming-up instance must
+not do.
 
-**`reap_orphans` is already safe against a peer.** It reads the alive key rather
-than assuming an unowned row is dead. A green MD booting will not reap blue's
-sessions. This one needs no work; it is listed because it looks like it should.
+[`JetStreamRemoval.md`](JetStreamRemoval.md) makes one instance name one
+process. A handover is then two *different* instance names (or a
+stop-then-start of one), not two processes on `md`. `claim_alive` /
+`is_alive` are not the long-term guard; a green that shares `md-jp-1`
+with blue is a misconfiguration both heartbeats will call healthy.
+
+**`reap_orphans` is already safe against a peer** while the alive key
+exists: it reads the key rather than assuming an unowned row is dead.
+After the key goes, orphan means "this row names me and I do not have
+it locally". A green must not reap blue's pinned rows, and must not
+share blue's instance name.
 
 **Fencing exists, on a different axis.** `LeaseHeartbeat`, `LeaseAck` and
 `MdLeaseAck` fence *a session's* ownership: the lease is held by STS, keyed by
@@ -145,6 +156,8 @@ last write (I4 — otherwise this feed is not ready and may not cut over):
    green → blue   YieldFeed{feed, token}
    blue           stops fan-out and tape append for this feed
    blue  → green  FeedYielded{feed, last_stream_id, last_trade_id, at_ms}
+                  (`last_stream_id` is today's JetStream seq; after
+                  JetStreamRemoval.md it is the regional Redis id)
    green          drops buffered prints <= last_trade_id            (I3)
                   appends the remainder, then continues live        (I4)
 

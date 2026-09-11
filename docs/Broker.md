@@ -1,5 +1,11 @@
 # The broker — what a plane may say, and what NATS does to answer it
 
+This is the tree today: core NATS plus JetStream streams and KV. The
+intended store map — no JetStream, tape on regional Redis, books in TD,
+session fencing by heartbeat misses — is
+[`docs/JetStreamRemoval.md`](JetStreamRemoval.md). Until that lands, the
+tables below are the contract a caller can test against.
+
 Six processes and none of them import each other. What they share is
 `mftik.broker.Broker`. It used to be doing two jobs at once: it was the
 vocabulary a plane speaks, and it was the store implementation of that
@@ -65,7 +71,7 @@ back in through a side door.
 | Fan-out | `publish`, `subscribe`, `psubscribe` | Market data, heartbeats, per-session events. Best effort: a message published while nobody is subscribed is gone. `subscribe` / `psubscribe` on a `log.` / `status.` topic also see the log stream, so a live log subscriber does not need a second call. |
 | Fan-out with a tail | `publish_log`, `fetch_log_buffer` | Logs, where a UI socket that opens after the deploy still wants the last hundred lines. Own stream (`{prefix}.log.>`), own per-subject ring. |
 | Request-reply | `request`, `probe`, `serve`, `serve_handler` | The control plane. Attach, deploy, stop, health, backfill, market-data queries. Nobody serving is an immediate error. |
-| Session link | `leased_link` / `LeasedSessionLink` | The fenced STS↔MD / STS↔TD heartbeat: token echo, grace watchdog, expiry on a sibling task. |
+| Session link | `leased_link` / `LeasedSessionLink` | The fenced STS↔MD / STS↔TD heartbeat: token echo, grace watchdog, expiry on a sibling task. [`JetStreamRemoval.md`](JetStreamRemoval.md) folds the watchdog into miss counts (three heartbeats without an ack; arm on the first ack; per instance). |
 | Shared state | `state_put`, `state_put_many`, `state_replace`, `state_get`, `state_all`, `state_drop`, `state_clear`, `state_watch`, `state_projection` | TD's order book and ledger. Writers `put` / `replace`; readers that care about the cost open a `StateProjection`. |
 | Leases | `lease_put`, `lease_take`, `lease_owner`, `lease_held`, `lease_hold`, `lease_release`, `lease_drop` | "Is anybody still running this", "may I be the one who runs it". Session liveness, account ownership, the backfill lock. |
 | Counters | `counter_next` | STS's cid slot, allocated across processes that all serve one subject. |
@@ -160,6 +166,11 @@ and MD's live fan-out are one stream read two ways, and the tape stops being a
 second write of the same prints. That is the interesting version of this port
 and it is not what is here.
 
+[`JetStreamRemoval.md`](JetStreamRemoval.md) takes a different unification:
+live fan-out stays core NATS, the recorded window moves to a regional Redis
+the recording MD owns, and STS reads it by RPC. Merging tape into the
+fan-out stream is then off the table — the stream itself is deleted.
+
 What stands in the way is not the broker. The tape carries flattened string
 fields and the fan-out carries whole envelopes; the subject spaces differ; and
 retention is per feed while a fan-out subject is capped by count. Unifying them
@@ -173,14 +184,19 @@ as a follow-up rather than carried here.
 `NATS_URL` is read by `BrokerConfig.from_env` and nowhere else.
 
 The dev stack in `docker-compose.yml` runs NATS. The published node template
-(`mftik node init`) does too. Two things there are not optional:
+(`mftik node init`) does too. Two things there are not optional **on this
+build**:
 
 - `-js`. Live fan-out and request-reply are core NATS; state, leases, the
   fan-out tail, logs and the tape are JetStream or KV, so a server without
   it accepts the connection and then refuses everything a plane does.
+  [`JetStreamRemoval.md`](JetStreamRemoval.md) deletes those objects; `-js`
+  leaves with them.
 - `-sd` on a volume. That state is the node's open orders, its ledger and its
   recorded tape. A node restarted with an empty store comes back reading as an
-  account that closed everything.
+  account that closed everything. After the move the ledger lives in TD
+  memory (recon rebuilds it) and the tape lives in regional Redis, so the
+  NATS volume is not that store.
 
 Port 8222 is the monitoring endpoint. It is what the healthcheck asks, and it
 is worth pointing `nats stream ls` at when a subject is not behaving.

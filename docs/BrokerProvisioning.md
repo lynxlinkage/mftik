@@ -5,6 +5,14 @@ different question about the same objects: who brings them into existence, at
 what point in a deploy, and what happens when two versions disagree about their
 shape.
 
+[`docs/JetStreamRemoval.md`](JetStreamRemoval.md) deletes the declared
+streams, the tape streams, and the four KV buckets. A `mftik-broker-migrate`
+for their shape is then moot — there is nothing to reshape. The overlap
+hazard below (old and new `update_stream` during a rolling deploy) is the
+same class of problem that document forbids for another reason: two
+processes must not serve one instance name at once. Until JetStream is
+gone, this file is still the contract for how those objects appear.
+
 Today the answer is "whichever process gets there first, on connect, using the
 constants it was compiled with". That is one answer applied to three kinds of
 object that want three different ones.
