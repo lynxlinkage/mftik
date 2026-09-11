@@ -1,9 +1,14 @@
 name: Build images
 
 # Tags only. A push to main builds nothing. A tag builds images, and a final
-# tag (no hyphen) then rolls the td/md/sts/sym/paper planes on Strategon
-# (JP on cp, TW on yite) and the API compose on the host. NATS is not rolled
-# from here.
+# tag (no hyphen) then rolls the plane AssignmentSets on Strategon and the API
+# compose on the host.
+#
+# Only the plane layer. The infra layer — NATS and the regional Redis, in
+# `deployment/sets/infra.json` — is applied by hand and does not move with a
+# tag: the bus and the tape disk have no reason to restart because a strategy
+# changed, and a tag that rolled them would take every session down with it.
+# See docs/Deployment.md.
 # Tests run here rather than only in tests.yml (which is PR-only) so a red suite
 # stops the release instead of publishing an image nobody should pull.
 on:
@@ -225,11 +230,14 @@ jobs:
             $(printf "${NAME}@sha256:%s " *)
           docker buildx imagetools inspect "${NAME}:${VERSION}"
 
-  # The eight planes rehearsed by hand: docker save the amd64 app image,
-  # register it under each strategy name, ApplyAssignment on cp and yite.
-  # Prereleases stay pullable by tag and do not move TW/JP, for the same
-  # reason they do not move :latest.
-  deploy:
+  # The plane layer: docker save the amd64 app image, register it under each
+  # set's artifact family, then ApplyAssignmentSet for td / sts / md / sym /
+  # paper. Each set rolls its own members one at a time, so a TD restart — which
+  # now reaps every session in its name — is not simultaneous in both regions.
+  #
+  # Prereleases do not roll production, for the same reason they do not move
+  # :latest.
+  planes:
     needs: merge
     if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
@@ -253,17 +261,17 @@ jobs:
           docker save "$IMAGE" -o /tmp/mftik.tar
           ls -lh /tmp/mftik.tar
 
-      - name: Apply planes on Strategon
+      - name: Apply the plane sets
         env:
           STRATEGON_API_KEY: ${{ secrets.STRATEGON_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
         run: |
-          python3 scripts/s7n_deploy_planes.py \
-            --tar /tmp/mftik.tar \
+          python3 scripts/s7n_apply_sets.py \
+            --spec deployment/sets/planes.json \
             --version "${{ github.ref_name }}" \
-            --spec deployment/planes/assignments.json \
-            --wait-seconds 240
+            --tar /tmp/mftik.tar \
+            --wait-seconds 300
 
   # API + frontend on the compose host. Down, keep the previous file as
   # docker-compose.bak.<shortsha>.yml, scp this repo's file, start. A failed
@@ -292,7 +300,7 @@ jobs:
           SHORT_SHA="${SHORT_SHA:0:7}" scripts/deploy_prod_compose.sh
 
   notify:
-    needs: [test, build, merge, deploy, api]
+    needs: [test, build, merge, planes, api]
     if: always()
     runs-on: ubuntu-latest
     # Job level, not step level: the `secrets` context is not available in a
@@ -311,7 +319,7 @@ jobs:
           TEST: ${{ needs.test.result }}
           BUILD: ${{ needs.build.result }}
           MERGE: ${{ needs.merge.result }}
-          DEPLOY: ${{ needs.deploy.result }}
+          PLANES: ${{ needs.planes.result }}
           API: ${{ needs.api.result }}
         run: |
           if [ "$TEST" != "success" ]; then
@@ -330,21 +338,21 @@ jobs:
             title="❌ Manifest merge failed"
             desc="Architectures built but were never tagged. No image was published for this tag."
             color=15158332
-          elif [ "$DEPLOY" != "success" ] && [ "$DEPLOY" != "skipped" ]; then
-            title="❌ Strategon deploy failed"
-            desc="Images are on GHCR, but TW/JP planes were not rolled to this tag."
+          elif [ "$PLANES" != "success" ] && [ "$PLANES" != "skipped" ]; then
+            title="❌ Plane sets failed"
+            desc="Images are on GHCR, but the plane sets were not rolled to this tag. A set that rolled partway auto-rolls back per member; check which members are on which version."
             color=15158332
           elif [ "$API" != "success" ] && [ "$API" != "skipped" ]; then
             title="❌ API compose failed"
-            desc="Planes may have rolled. The host compose was put back to the previous file."
+            desc="Planes are on this tag. The host compose was put back to the previous file."
             color=15158332
-          elif [ "$DEPLOY" = "skipped" ] || [ "$API" = "skipped" ]; then
+          elif [ "$PLANES" = "skipped" ] || [ "$API" = "skipped" ]; then
             title="✅ Images published"
             desc="Tagged images are on GHCR. Prerelease or manual run — production was not touched."
             color=3066993
           else
             title="✅ Deployed"
-            desc="Images are on GHCR. JP/TW planes and the API compose are on this tag."
+            desc="Images are on GHCR. The plane sets and the API compose are on this tag. Infra (NATS, Redis) is unchanged by design."
             color=3066993
           fi
           {

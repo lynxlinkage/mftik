@@ -1,0 +1,113 @@
+{
+  "layer": "planes",
+  "artifactVersion": "set-by-tag",
+  "secretKeysFromProdEnv": ["DATABASE_URL", "DATABASE_URL_SYNC"],
+  "commonEnv": {
+    "BROKER_KEY_PREFIX": "mftik",
+    "LOG_LEVEL": "INFO",
+    "MFTIK_DEFAULT_USER_ID": "1"
+  },
+  "deployPolicy": {
+    "startsecs": 5,
+    "healthWindowSeconds": 90,
+    "maxCrashesInWindow": 3,
+    "stopGraceSeconds": 15,
+    "enableAutoRollback": true
+  },
+  "limits": { "memoryBytes": "805306368" },
+  "update": { "maxUnavailable": 1, "waitReadySeconds": 120 },
+  "sets": [
+    {
+      "metadata": { "name": "td" },
+      "spec": {
+        "strategy": "td",
+        "template": {
+          "args": ["td"],
+          "env": {
+            "MFTIK_INSTANCE": "${member.name}",
+            "NATS_URL": "nats://${member.vars.NATS}:4222"
+          }
+        },
+        "members": [
+          { "machine": "cp", "name": "td-jp", "vars": { "NATS": "100.108.10.2" } },
+          { "machine": "yite", "name": "td-tw", "vars": { "NATS": "100.65.26.119" } }
+        ]
+      }
+    },
+    {
+      "metadata": { "name": "sts" },
+      "spec": {
+        "strategy": "sts",
+        "template": {
+          "args": ["sts"],
+          "env": {
+            "MFTIK_INSTANCE": "${member.name}",
+            "NATS_URL": "nats://${member.vars.NATS}:4222",
+            "MFTIK_DATA": "/var/lib/strategon-agent/strategies/${member.name}/work/registry",
+            "STS_REBUILD_ON_BOOT": "1",
+            "STS_EVENTLOG_DIR": "/var/lib/strategon-agent/strategies/${member.name}/work/eventlog",
+            "STS_EVENTLOG_QUEUE": "20000",
+            "STS_EVENTLOG_MAX_BYTES": "134217728",
+            "STS_EVENTLOG_BACKUPS": "2"
+          }
+        },
+        "members": [
+          { "machine": "cp", "name": "sts-jp", "vars": { "NATS": "100.108.10.2" } },
+          { "machine": "yite", "name": "sts-tw", "vars": { "NATS": "100.65.26.119" } }
+        ]
+      }
+    },
+    {
+      "metadata": { "name": "md" },
+      "spec": {
+        "strategy": "md",
+        "template": {
+          "args": ["md"],
+          "env": {
+            "MFTIK_INSTANCE": "${member.name}",
+            "NATS_URL": "nats://${member.vars.NATS}:4222",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "MD_TAPE_TOPICS": "aggtrade",
+            "MD_TAPE_RETENTION_S": "7200",
+            "MD_TAPE_MAXLEN": "150000"
+          }
+        },
+        "members": [
+          { "machine": "cp", "name": "md-jp", "vars": { "NATS": "100.108.10.2" } },
+          { "machine": "yite", "name": "md-tw", "vars": { "NATS": "100.65.26.119" } }
+        ]
+      }
+    },
+    {
+      "metadata": { "name": "sym" },
+      "spec": {
+        "strategy": "sym",
+        "template": {
+          "args": ["sym"],
+          "env": {
+            "NATS_URL": "nats://${member.vars.NATS}:4222",
+            "SYM_REFRESH_INTERVAL": "3600"
+          }
+        },
+        "members": [
+          { "machine": "yite", "name": "sym-tw", "vars": { "NATS": "100.65.26.119" } }
+        ]
+      }
+    },
+    {
+      "metadata": { "name": "paper" },
+      "spec": {
+        "strategy": "paper",
+        "template": {
+          "args": ["paper"],
+          "env": {
+            "NATS_URL": "nats://${member.vars.NATS}:4222"
+          }
+        },
+        "members": [
+          { "machine": "yite", "name": "paper-tw", "vars": { "NATS": "100.65.26.119" } }
+        ]
+      }
+    }
+  ]
+}

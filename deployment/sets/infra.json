@@ -1,0 +1,85 @@
+{
+  "layer": "infra",
+  "sets": [
+    {
+      "metadata": { "name": "nats" },
+      "spec": {
+        "strategy": "nats",
+        "artifactVersion": "2.14.6",
+        "configVersion": "v1",
+        "template": {
+          "args": ["-c", "${CONFIG}"],
+          "env": {
+            "NATS_SERVER_NAME": "${member.name}",
+            "NATS_CLIENT_LISTEN": "${member.vars.HOST}:4222",
+            "NATS_CLIENT_ADVERTISE": "${member.vars.HOST}:4222",
+            "NATS_HTTP_LISTEN": "127.0.0.1:8222",
+            "NATS_GATEWAY_NAME": "${member.vars.GATEWAY}",
+            "NATS_GATEWAY_LISTEN": "${member.vars.HOST}:7222",
+            "NATS_GATEWAY_ADVERTISE": "${member.vars.HOST}:7222",
+            "NATS_REMOTE_GW": "${member.vars.REMOTE_GATEWAY}",
+            "NATS_REMOTE_GW_URL": "${member.vars.REMOTE_URL}"
+          },
+          "readiness": {
+            "endpoint": "http://127.0.0.1:8222/healthz"
+          },
+          "deployPolicy": {
+            "startsecs": 3,
+            "healthWindowSeconds": 60,
+            "maxCrashesInWindow": 3,
+            "stopGraceSeconds": 15,
+            "enableAutoRollback": true
+          },
+          "limits": { "memoryBytes": "536870912" }
+        },
+        "members": [
+          {
+            "machine": "cp",
+            "name": "nats-jp",
+            "vars": {
+              "HOST": "100.108.10.2",
+              "GATEWAY": "jp",
+              "REMOTE_GATEWAY": "tw",
+              "REMOTE_URL": "nats://100.65.26.119:7222"
+            }
+          },
+          {
+            "machine": "yite",
+            "name": "nats-tw",
+            "vars": {
+              "HOST": "100.65.26.119",
+              "GATEWAY": "tw",
+              "REMOTE_GATEWAY": "jp",
+              "REMOTE_URL": "nats://100.108.10.2:7222"
+            }
+          }
+        ],
+        "update": { "maxUnavailable": 1, "waitReadySeconds": 60 }
+      }
+    },
+    {
+      "metadata": { "name": "redis" },
+      "spec": {
+        "strategy": "redis",
+        "artifactVersion": "8.2.1",
+        "configVersion": "v1",
+        "template": {
+          "args": ["${CONFIG}"],
+          "deployPolicy": {
+            "startsecs": 3,
+            "healthWindowSeconds": 60,
+            "maxCrashesInWindow": 3,
+            "stopGraceSeconds": 30,
+            "enableAutoRollback": true
+          },
+          "limits": { "memoryBytes": "1073741824" }
+        },
+        "members": [
+          { "machine": "cp", "name": "redis-jp" },
+          { "machine": "yite", "name": "redis-tw" }
+        ],
+        "update": { "maxUnavailable": 1, "waitReadySeconds": 60 }
+      }
+    }
+  ]
+}
