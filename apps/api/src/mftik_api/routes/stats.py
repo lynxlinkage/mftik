@@ -78,39 +78,17 @@ async def _probe(broker: Broker, row: Instance) -> HealthStatus | None:
 async def get_stats(broker: BrokerDep) -> StatsResponse:
     async with session_scope() as db:
         instances = list(await InstanceRepository(db).list_all())
-        sts = StsSessionRepository(db)
-        td = TdSessionRepository(db)
-        md = MdSessionRepository(db)
-        live = {
-            SessionDomain.STS.value: await sts.count(
-                status=SessionStatus.LIVE.value
+        # One grouped query per table, not one count per status per plane.
+        # Unpinned STS rows (instance IS NULL) stay off every card.
+        by_domain = {
+            SessionDomain.STS.value: (
+                await StsSessionRepository(db).count_by_instance()
             ),
-            SessionDomain.TD.value: await td.count(status=SessionStatus.LIVE.value),
-            SessionDomain.MD.value: await md.count(status=SessionStatus.LIVE.value),
-        }
-        done = {
-            SessionDomain.STS.value: await sts.count(
-                status=SessionStatus.DONE.value
+            SessionDomain.TD.value: (
+                await TdSessionRepository(db).count_by_instance()
             ),
-            SessionDomain.TD.value: await td.count(status=SessionStatus.DONE.value),
-            SessionDomain.MD.value: await md.count(status=SessionStatus.DONE.value),
-        }
-        # Counted apart from done: these are finished, but lumping them in
-        # with it is how a run that died — or one STS cut short and someone
-        # may want back — stops being noticed.
-        failed = {
-            SessionDomain.STS.value: await sts.count(
-                status=SessionStatus.FAILED.value
-            ),
-        }
-        interrupted = {
-            SessionDomain.STS.value: await sts.count(
-                status=SessionStatus.INTERRUPTED.value
-            ),
-        }
-        ack = {
-            SessionDomain.STS.value: await sts.count(
-                status=SessionStatus.ACK.value
+            SessionDomain.MD.value: (
+                await MdSessionRepository(db).count_by_instance()
             ),
         }
 
@@ -123,15 +101,7 @@ async def get_stats(broker: BrokerDep) -> StatsResponse:
     domains: list[DomainStats] = []
     for row, reply in zip(instances, replies, strict=True):
         connected = reply is not None
-        # Session counts are per plane, not per instance: the tables record
-        # which plane ran a session, and splitting them by instance is INS-7's
-        # and INS-8's job, not this one's. Repeating the plane's numbers on
-        # each of its instances would be a lie about where they came from, so
-        # they are attached to the first row of each plane and left at zero on
-        # the rest.
-        first_of_plane = row is next(
-            r for r in instances if r.domain == row.domain
-        )
+        counts = by_domain.get(row.domain, {}).get(row.name, {})
         domains.append(
             DomainStats(
                 domain=row.domain,
@@ -143,13 +113,11 @@ async def get_stats(broker: BrokerDep) -> StatsResponse:
                 version=reply.version if reply else None,
                 venues=list(reply.venues) if reply else [],
                 api_ids=list(reply.api_ids) if reply else [],
-                live=live.get(row.domain, 0) if first_of_plane else 0,
-                done=done.get(row.domain, 0) if first_of_plane else 0,
-                failed=failed.get(row.domain, 0) if first_of_plane else 0,
-                interrupted=(
-                    interrupted.get(row.domain, 0) if first_of_plane else 0
-                ),
-                ack=ack.get(row.domain, 0) if first_of_plane else 0,
+                live=counts.get(SessionStatus.LIVE.value, 0),
+                done=counts.get(SessionStatus.DONE.value, 0),
+                failed=counts.get(SessionStatus.FAILED.value, 0),
+                interrupted=counts.get(SessionStatus.INTERRUPTED.value, 0),
+                ack=counts.get(SessionStatus.ACK.value, 0),
             )
         )
 

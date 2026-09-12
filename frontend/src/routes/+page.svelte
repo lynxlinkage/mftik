@@ -328,9 +328,8 @@
 		{#if d.version}<span class="muted-n">{d.version}</span>{/if}
 	</div>
 	{/if}
-	<!-- Session counts belong to the plane, not to one of its processes, so
-	     they ride the first instance of each plane and the rest show none.
-	     Repeating them per card would claim a split the tables do not record. -->
+	<!-- Counts are this instance's. A card with nothing attributed stays
+	     blank so a permanent zero does not train people to stop reading. -->
 	{#if sessionCounts(d)}
 		<div class="nums">
 			<div>
