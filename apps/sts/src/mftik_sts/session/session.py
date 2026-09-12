@@ -240,11 +240,13 @@ class StsSession:
         self._token = 0
         self._ack_tokens: dict[int, int] = {}
         self._md_ack_token: int | None = None
-        #: Instance name → when it last acknowledged, on this loop's clock.
-        #: Keyed per instance because a session's feeds may be split across
-        #: MDs: one of them going quiet is the case worth catching, and a
-        #: single timestamp would be kept fresh by whichever one was still
-        #: talking.
+        #: Instance name → when it last showed it was still talking, on this
+        #: loop's clock. A lease ack or a processed feed print both count.
+        #: Prints do not arm a new key — quiet books still rely on
+        #: ``MdLeaseAck``. Keyed per instance because a session's feeds may
+        #: be split across MDs: one of them going quiet is the case worth
+        #: catching, and a single timestamp would be kept fresh by whichever
+        #: one was still talking.
         self._md_acks: dict[str, float] = {}
         #: ``api_id`` → when that TD last acknowledged. Same arming rule as
         #: MD: a quiet TD stops the strategy, but only after it has acked
@@ -831,7 +833,7 @@ class StsSession:
         # as the one instance it is rather than not tracked at all.
         instance = ack.instance or "md"
         first = instance not in self._md_acks
-        self._md_acks[instance] = asyncio.get_running_loop().time()
+        self._touch_md_ack(instance)
         # Unpinned feeds have no name in the YAML. The first ack is the
         # first moment we know who took them — too late for on_start, but
         # enough for a later read.
@@ -845,6 +847,72 @@ class StsSession:
             return
         self._md_lease_logged = True
         await self._publish_log("MD lease established")
+
+    def _touch_md_ack(self, instance: str) -> None:
+        """Stamp that ``instance`` is still talking, on this loop's clock.
+
+        Lease acks call this to arm and to refresh. Feed prints call it
+        only after the instance is already in :attr:`_md_acks` — a burst
+        of ticks is the same fact as an ack for liveness, but not for
+        first contact.
+        """
+        self._md_acks[instance] = asyncio.get_running_loop().time()
+
+    def _refresh_md_ack_from_print(self, env: UntypedEnvelope) -> None:
+        """Treat a dequeued feed print as liveness for its MD instance.
+
+        Under a burst the pump may apply ticks for longer than the ack
+        grace without running :meth:`_on_md_lease_ack`. The peer is
+        clearly still delivering; counting the print avoids a false
+        MD-death. Does not arm — a book that has gone quiet still needs
+        lease acks.
+        """
+        instance = self._md_instance_for_print(env)
+        if instance is None:
+            if len(self._md_acks) != 1:
+                return
+            instance = next(iter(self._md_acks))
+        if instance in self._md_acks:
+            self._touch_md_ack(instance)
+
+    def _md_instance_for_print(self, env: UntypedEnvelope) -> str | None:
+        """Which attached MD this print belongs to, if we can tell.
+
+        The envelope does not name the writer (``source`` is the plane).
+        The feed key does: owners recorded at attach / first unpinned
+        ack, then pinned :attr:`md`. Unresolved is None, not a guess —
+        guessing would keep a dead instance alive from the other's tape.
+        """
+        feed = self._md_feed_key_for_print(env)
+        if feed is None:
+            return None
+        owner = self.md_owners.get(feed)
+        if owner:
+            return owner
+        for instance, feeds in self.md.items():
+            if instance == ANY_INSTANCE:
+                continue
+            if feed in feeds:
+                return instance
+        return None
+
+    def _md_feed_key_for_print(self, env: UntypedEnvelope) -> str | None:
+        payload = env.payload
+        if not isinstance(payload, dict):
+            return None
+        ticker = payload.get("universal_ticker")
+        if not isinstance(ticker, str) or not ticker:
+            return None
+        if env.type == MD_KLINE:
+            interval = payload.get("interval")
+            if not isinstance(interval, str) or not interval:
+                return None
+            topic = f"kline_{interval}"
+        else:
+            topic = env.type.removeprefix("md.")
+            if not topic or topic == env.type:
+                return None
+        return Topics.md_feed(topic, ticker)
 
     def _stale_keys(self, seen: dict[Any, float], grace: float) -> list[Any]:
         """Peers that have acked once and then gone quiet.
@@ -862,6 +930,7 @@ class StsSession:
         )
 
     async def _on_market_data(self, env: UntypedEnvelope) -> None:
+        self._refresh_md_ack_from_print(env)
         name, model = MD_HANDLERS[env.type]
         # The wire dict, not the model built from it. It is what arrived, it
         # costs nothing to record — the parse has already happened, upstream —

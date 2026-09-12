@@ -16,21 +16,29 @@ is more dangerous than none.
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 
 import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
+from mftik.exchange.models import BestQuote
 from mftik.protocol import (
+    MD_BEST_QUOTE,
     MD_LEASE_ACK,
     Envelope,
     MdLeaseAck,
     Topics,
+    UntypedEnvelope,
 )
 from mftik.strategy import Strategy
 from mftik_sts.session.session import StsSession
 
 GRACE = 0.25
 SESSION = "watchdog-sts"
+FEED_A = "bestquote.Paper_Spot_BTCUSDT"
+FEED_B = "bestquote.Gate_Spot_ETHUSDT"
+TICKER_A = "Paper_Spot_BTCUSDT"
+TICKER_B = "Gate_Spot_ETHUSDT"
 
 
 class Quiet(Strategy):
@@ -49,7 +57,7 @@ def _session(broker: Broker, **over) -> StsSession:
         "broker": broker,
         "created_by": 1,
         "strategy": Quiet(),
-        "md_ids": ["bestquote.Paper_Spot_BTCUSDT"],
+        "md_ids": [FEED_A],
         "heartbeat_interval": 0.05,
         "md_ack_grace": GRACE,
     }
@@ -102,6 +110,30 @@ async def _acking(
         token += 1
         for instance in instances:
             await _ack(broker, instance, token)
+        await asyncio.sleep(0.05)
+
+
+async def _print(broker: Broker, ticker: str = TICKER_A) -> None:
+    await broker.publish(
+        Topics.md_session(SESSION),
+        UntypedEnvelope.wrap(
+            BestQuote(
+                universal_ticker=ticker,
+                bid=Decimal("100"),
+                bid_qty=Decimal("1"),
+                ask=Decimal("101"),
+                ask_qty=Decimal("2"),
+            ).model_dump(mode="json"),
+            type=MD_BEST_QUOTE,
+            source="md",
+            session_id=SESSION,
+        ),
+    )
+
+
+async def _printing(broker: Broker, ticker: str, stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        await _print(broker, ticker)
         await asyncio.sleep(0.05)
 
 
@@ -212,4 +244,79 @@ async def test_an_md_that_does_not_name_itself_is_still_watched(
         assert reason is not None
         assert "md" in reason
     finally:
+        await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_live_print_stream_never_trips_the_watchdog(
+    broker: Broker,
+) -> None:
+    """Ticks are the same liveness fact as a lease ack.
+
+    Under a burst the pump may apply prints for longer than the grace
+    without running the ack handler. The peer is still delivering; the
+    watchdog must not call that MD death.
+    """
+    session = _session(broker)
+    stop = asyncio.Event()
+    await session.start()
+    try:
+        await _arm(session, broker, "md-jp-1")
+        pub = asyncio.create_task(_printing(broker, TICKER_A, stop))
+        await asyncio.sleep(GRACE * 4)
+        assert session.exit_reason is None
+    finally:
+        stop.set()
+        await pub
+        await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_prints_from_one_instance_do_not_keep_another_alive(
+    broker: Broker,
+) -> None:
+    """A print refreshes only the MD that owns that feed."""
+    session = _session(
+        broker,
+        md={"md-jp-1": [FEED_A], "md-jp-2": [FEED_B]},
+    )
+    stop = asyncio.Event()
+    await session.start()
+    try:
+        await _arm(session, broker, "md-jp-1")
+        await _arm(session, broker, "md-jp-2")
+        pub = asyncio.create_task(_printing(broker, TICKER_B, stop))
+
+        reason = await _exit_reason(session)
+
+        assert reason is not None
+        assert "md-jp-1" in reason
+        assert "md-jp-2" not in reason, (
+            "the instance still printing is not the one at fault"
+        )
+    finally:
+        stop.set()
+        await pub
+        await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_prints_do_not_arm_the_watchdog(broker: Broker) -> None:
+    """Quiet books still arm on the first lease ack, not on a tick.
+
+    A session that has only seen prints has not heard an acknowledgement.
+    Arming from the tape would fail a deploy whose MD has not acked yet
+    the moment the book went quiet again.
+    """
+    session = _session(broker)
+    stop = asyncio.Event()
+    pub = asyncio.create_task(_printing(broker, TICKER_A, stop))
+    await session.start()
+    try:
+        await asyncio.sleep(GRACE * 3)
+        assert session.exit_reason is None
+        assert session._md_acks == {}
+    finally:
+        stop.set()
+        await pub
         await session.stop()
