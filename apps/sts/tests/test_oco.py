@@ -61,6 +61,8 @@ class FakeOms:
         self.accept_cancel = True
         self.reject_reason = "no funds"
         self.reject_code: int | str = RejectCode.TD_INSUFFICIENT_BALANCE
+        self.waits: list[tuple] = []
+        self.wait_ok = True
         self._n = 0
         self._last_cid: str | None = None
         self._accepted_last = True
@@ -104,6 +106,14 @@ class FakeOms:
         self.cancelled.append(str(client_order_id))
         self._accepted_last = self.accept_cancel
         return self.accept_cancel
+
+    async def wait_cids(self, api_id, cids, *, until, timeout):
+        if isinstance(cids, (str, int)):
+            recorded = [str(cids)]
+        else:
+            recorded = [str(cid) for cid in cids]
+        self.waits.append((api_id, recorded, timeout))
+        return self.wait_ok
 
 
 class _FakeToken:
@@ -767,6 +777,7 @@ async def test_stopping_leaves_nothing_resting() -> None:
     strat = await _placed()
     await strat.on_stop()
 
+    assert strat.oms.waits
     assert sorted(strat.oms.cancelled) == ["cid-1", "cid-2"]
 
 

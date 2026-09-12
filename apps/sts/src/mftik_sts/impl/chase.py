@@ -77,6 +77,7 @@ from mftik.protocol import (
 )
 from mftik.protocol.reject_codes import describe, is_normalized
 from mftik.strategy import Strategy
+from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S
 from mftik.strategy.timer import TimerToken
 
 DEFAULT_REFRESH_INTERVAL_MS = 1000
@@ -449,7 +450,21 @@ class ChaseOrder(Strategy):
             and len(self.session.td_api_ids) == 1
             and self._open_cid is not None
         ):
-            await self._cancel_open(self.session.td_sole())
+            api_id = self.session.td_sole()
+            cleared = await self.oms.wait_cids(
+                api_id,
+                self._open_cid,
+                until=lambda o: o.status is not OrderStatus.PENDING_NEW,
+                timeout=WAIT_CIDS_TIMEOUT_S,
+            )
+            if not cleared:
+                await self.log(
+                    f"ChaseOrder stop: cid={self._open_cid} still "
+                    f"PENDING_NEW after {WAIT_CIDS_TIMEOUT_S}s — "
+                    "cancelling anyway",
+                    level="warn",
+                )
+            await self._cancel_open(api_id)
         await self.log("ChaseOrder stopped")
 
     # --- market data -------------------------------------------------------
