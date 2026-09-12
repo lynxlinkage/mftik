@@ -1,8 +1,10 @@
 name: Build images
 
 # Tags only. A push to main builds nothing. A tag builds images, and a final
-# tag (no hyphen) then rolls the plane AssignmentSets on Strategon and the API
-# compose on the host.
+# tag (no hyphen) then publishes the `mftik` wheel to PyPI, rolls the plane
+# AssignmentSets on Strategon, and rolls the API compose on the host.
+# The wheel version is the tag with the leading v stripped (v0.9.5 → 0.9.5);
+# the image tag stays github.ref_name. They are the same release.
 #
 # Only the plane layer. The infra layer — NATS and the regional Redis, in
 # `deployment/sets/infra.json` — is applied by hand and does not move with a
@@ -89,6 +91,38 @@ jobs:
           diff -u contracts/openapi.json /tmp/openapi.json \
             || { echo "contracts/openapi.json is stale — run: just openapi" >&2; exit 1; }
 
+  # v0.9.5 → 0.9.5. A manual run is not a release: pep440 is 0.0.0 and the
+  # publish job will not run. Pre-release hyphens become PEP 440 (v0.9.5-rc1
+  # → 0.9.5rc1) so a future change that publishes those wheels stays honest.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      pep440: ${{ steps.ver.outputs.pep440 }}
+    steps:
+      - id: ver
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          if os.environ["REF_TYPE"] == "tag":
+              raw = os.environ["REF_NAME"].removeprefix("v")
+          else:
+              raw = "0.0.0"
+          raw = re.sub(r"-rc(\d+)$", r"rc\1", raw)
+          raw = re.sub(r"-alpha(\d+)$", r"a\1", raw)
+          raw = re.sub(r"-beta(\d+)$", r"b\1", raw)
+          raw = re.sub(r"-a(\d+)$", r"a\1", raw)
+          raw = re.sub(r"-b(\d+)$", r"b\1", raw)
+          Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8").write(
+              f"pep440={raw}\n"
+          )
+          PY
+
   # Each architecture on a runner that is that architecture, then one manifest
   # list stitched from the digests. QEMU worked and cost about five minutes,
   # but emulating a CPU to compile for it is a strange thing to do when GitHub
@@ -98,7 +132,7 @@ jobs:
   # is what makes those digests answer to `v1.2.3` — so a half-finished matrix
   # leaves the old tag intact rather than a manifest missing an architecture.
   build:
-    needs: test
+    needs: [test, version]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -150,6 +184,7 @@ jobs:
           context: ${{ matrix.context }}
           target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
+          build-args: ${{ matrix.image == 'app' && format('MFTIK_DIST_VERSION={0}', needs.version.outputs.pep440) || '' }}
           outputs: >-
             type=image,name=${{ matrix.image == 'app' && env.APP_IMAGE || env.FRONTEND_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           # Scoped per architecture: one cache shared by both would be two
@@ -230,6 +265,51 @@ jobs:
             $(printf "${NAME}@sha256:%s " *)
           docker buildx imagetools inspect "${NAME}:${VERSION}"
 
+  # Same condition as planes / :latest: only a final tag is a PyPI release.
+  # Trusted Publisher (OIDC) — register this workflow + the `pypi` environment
+  # at https://pypi.org/manage/project/mftik/settings/publishing/ before the
+  # next final tag, or this job fails while the images still ship.
+  pypi:
+    needs: [merge, version]
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Build and publish the wheel
+        env:
+          MFTIK_DIST_VERSION: ${{ needs.version.outputs.pep440 }}
+        run: |
+          uv build --package mftik
+          python3 <<'PY'
+          import os
+          import zipfile
+          from pathlib import Path
+
+          expected = os.environ["MFTIK_DIST_VERSION"]
+          wheels = list(Path("dist").glob("mftik-*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one wheel, got {wheels}")
+          with zipfile.ZipFile(wheels[0]) as zf:
+              meta = next(n for n in zf.namelist() if n.endswith(".dist-info/METADATA"))
+              text = zf.read(meta).decode()
+          version = next(
+              line.split(":", 1)[1].strip()
+              for line in text.splitlines()
+              if line.startswith("Version:")
+          )
+          if version != expected:
+              raise SystemExit(f"wheel version {version!r} != {expected!r}")
+          PY
+          uv publish
+
   # The plane layer: docker save the amd64 app image, register it under each
   # set's artifact family, then ApplyAssignmentSet for td / sts / md / sym /
   # paper. Each set rolls its own members one at a time, so a TD restart — which
@@ -300,7 +380,7 @@ jobs:
           SHORT_SHA="${SHORT_SHA:0:7}" scripts/deploy_prod_compose.sh
 
   notify:
-    needs: [test, build, merge, planes, api]
+    needs: [test, build, merge, pypi, planes, api]
     if: always()
     runs-on: ubuntu-latest
     # Job level, not step level: the `secrets` context is not available in a
@@ -319,6 +399,7 @@ jobs:
           TEST: ${{ needs.test.result }}
           BUILD: ${{ needs.build.result }}
           MERGE: ${{ needs.merge.result }}
+          PYPI: ${{ needs.pypi.result }}
           PLANES: ${{ needs.planes.result }}
           API: ${{ needs.api.result }}
         run: |
@@ -346,13 +427,17 @@ jobs:
             title="❌ API compose failed"
             desc="Planes are on this tag. The host compose was put back to the previous file."
             color=15158332
+          elif [ "$PYPI" != "success" ] && [ "$PYPI" != "skipped" ]; then
+            title="❌ PyPI publish failed"
+            desc="Images are on GHCR, but the wheel was not published. pip install mftik will not see this tag."
+            color=15158332
           elif [ "$PLANES" = "skipped" ] || [ "$API" = "skipped" ]; then
             title="✅ Images published"
             desc="Tagged images are on GHCR. Prerelease or manual run — production was not touched."
             color=3066993
           else
             title="✅ Deployed"
-            desc="Images are on GHCR. The plane sets and the API compose are on this tag. Infra (NATS, Redis) is unchanged by design."
+            desc="Images are on GHCR. The wheel is on PyPI. The plane sets and the API compose are on this tag. Infra (NATS, Redis) is unchanged by design."
             color=3066993
           fi
           {

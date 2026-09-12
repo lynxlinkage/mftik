@@ -124,7 +124,7 @@ docker compose pull
 docker compose up -d
 ```
 
-`node-init` writes compose, a Caddyfile, and a `.env` (mode `0600`, with a generated database password). Postgres, NATS, and the edge are part of the stack — you do not have to bring them. The images come from GHCR. Pin `MFTIK_VERSION` in `.env` once the node matters; `:latest` moves under you.
+`node-init` writes compose, a Caddyfile, and a `.env` (mode `0600`, with a generated database password). Postgres, NATS, and the edge are part of the stack — you do not have to bring them. The images come from GHCR. Pin `MFTIK_VERSION` to a git tag (`vX.Y.Z`) once the node matters — the same release as `pip install mftik==X.Y.Z`. `:latest` moves under you.
 
 `up` waits for `migrate` (`alembic upgrade head`, idempotent) and `seed` (Owner row + two paper accounts, also idempotent) before the planes start. A later `pull` + `up` applies new revisions the same way.
 

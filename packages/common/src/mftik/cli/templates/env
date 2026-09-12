@@ -6,12 +6,8 @@
 # Which published images to run.
 #
 # `latest` is what a first look wants and not what a running node should sit
-# on: it moves under you on the next release. Pin it to a tag from
-# https://github.com/lynxlinkage/mftik/releases once the node matters.
-#
-# This is not the version of the `mftik` package you installed. The images are
-# tagged from the repository's git tags and the package is versioned on PyPI;
-# they are two numbering schemes and this template will not pretend otherwise.
+# on: it moves under you on the next release. Pin it to a git tag
+# (vX.Y.Z) once the node matters — the same number as `pip install mftik==X.Y.Z`.
 MFTIK_VERSION={version}
 
 # Where the node answers. One port for everything — UI, /api and /ws — because
