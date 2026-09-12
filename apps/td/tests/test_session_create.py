@@ -10,6 +10,7 @@ import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange
+from mftik.exchange.deribit.protocol import DeribitWsError
 from mftik.protocol import (
     STS_LEASE_HEARTBEAT,
     TD_ERROR,
@@ -24,6 +25,7 @@ from mftik.protocol import (
 )
 from mftik_td.rpc import dispatch
 from mftik_td.session import PaperSessionFactory, SessionManager
+from mftik_td.session.session import Session
 
 
 @dataclass
@@ -307,6 +309,79 @@ async def test_rpc_attach_on_the_instance_subject(
     assert manager.refcount(3) == 1
 
     await manager.close_all()
+
+
+class _BoomPrivate:
+    """Connect raises a method-qualified Deribit error — the attach-fail case."""
+
+    name = "Deribit"
+    connected = False
+
+    async def connect(self) -> None:
+        raise DeribitWsError(
+            -32602,
+            "Invalid params",
+            op="private/get_account_summaries",
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+class _BoomFactory:
+    def __init__(self, broker: Broker) -> None:
+        self._broker = broker
+
+    async def create(self, api_id: int) -> Session:
+        return Session(api_id=api_id, broker=self._broker, private=_BoomPrivate())
+
+
+@pytest.mark.asyncio
+async def test_attach_failure_publishes_a_durable_method_line(
+    broker: Broker,
+) -> None:
+    """Venue connect failure must name instance / api / venue / method / code.
+
+    ``GET /logs/td/{api_id}`` is empty today because attach dies before
+    ``trading started`` and stderr is discarded. One ``publish_td_log``
+    line is the channel that survives.
+    """
+    manager = SessionManager(_BoomFactory(broker), broker, instance="td-jp")
+    seen: list[str] = []
+    stop = asyncio.Event()
+
+    async def listen() -> None:
+        async for env in broker.subscribe(Topics.log_td(14), stop=stop):
+            seen.append(env.payload["message"])
+
+    task = asyncio.create_task(listen())
+    await asyncio.sleep(0.05)
+
+    with pytest.raises(DeribitWsError, match="private/get_account_summaries"):
+        await manager.attach(
+            TdAttachRequest(
+                session_id="s-fail",
+                api_id=14,
+                timeout=2.0,
+                created_by=1,
+            )
+        )
+
+    await asyncio.sleep(0.05)
+    stop.set()
+    await task
+
+    assert manager.get(14) is None
+    assert seen
+    line = seen[0]
+    assert "attach failed" in line
+    assert "instance=td-jp" in line
+    assert "api_id=14" in line
+    assert "venue=Deribit" in line
+    assert "method=private/get_account_summaries" in line
+    assert "code=-32602" in line
+    assert "Invalid params" in line
+    assert "secret" not in line.lower()
 
 
 @pytest.mark.asyncio

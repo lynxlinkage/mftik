@@ -21,6 +21,7 @@ from mftik.exchange.deribit.private import DeribitPrivateClient
 from mftik.exchange.deribit.protocol import (
     MARGIN_MODELS,
     DeribitAuthError,
+    DeribitWsError,
     expiry_code_from_name,
     expiry_suffix_from_code,
 )
@@ -205,6 +206,35 @@ def test_a_missing_secret_fails_before_anything_is_sent() -> None:
             api_secret="",
             symbols=StubSymbols(),
         )
+
+
+async def test_connect_names_the_rpc_that_refused(deribit: FakeDeribit) -> None:
+    """Attach runs auth then summaries; the error must say which one failed."""
+    deribit.rpc_errors[ch.PRIVATE_GET_ACCOUNT_SUMMARIES] = (
+        -32602,
+        "Invalid params",
+    )
+    client = DeribitPrivateClient(
+        api_key=WIRE_API_KEY,
+        api_secret=WIRE_API_SECRET,
+        symbols=StubSymbols(),
+        private_url=deribit.url,
+        stream=DeribitPrivateStream(
+            api_key=WIRE_API_KEY,
+            api_secret=WIRE_API_SECRET,
+            url=deribit.url,
+            ping_interval=0,
+            heartbeat=0,
+        ),
+    )
+    try:
+        await client.connect()
+    except DeribitWsError as exc:
+        assert exc.op == ch.PRIVATE_GET_ACCOUNT_SUMMARIES
+        assert str(exc) == "private/get_account_summaries: [-32602] Invalid params"
+    else:
+        raise AssertionError("expected DeribitWsError")
+    assert not client.connected
 
 
 @pytest.mark.parametrize("model", sorted(MARGIN_MODELS))

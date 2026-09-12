@@ -8,7 +8,7 @@ from deribit_stub import API_KEY, API_SECRET, FakeDeribit
 from mftik.exchange.deribit import channels as ch
 from mftik.exchange.deribit.account import DeribitPrivateStream
 from mftik.exchange.deribit.feed import DeribitPublicStream
-from mftik.exchange.deribit.protocol import DeribitResponse
+from mftik.exchange.deribit.protocol import DeribitResponse, DeribitWsError
 from mftik.exchange.deribit.socket import DEFAULT_HEARTBEAT
 
 
@@ -123,6 +123,51 @@ async def test_the_heartbeat_is_on_by_default(deribit_public: FakeDeribit) -> No
     async with feed:
         assert feed.heartbeat == DEFAULT_HEARTBEAT
     assert deribit_public.heartbeats == 1
+
+
+async def test_an_auth_refusal_names_public_auth(deribit: FakeDeribit) -> None:
+    stream = DeribitPrivateStream(
+        api_key=API_KEY,
+        api_secret="wrong-secret",
+        url=deribit.url,
+        ping_interval=0,
+        heartbeat=0,
+    )
+    try:
+        await stream.connect()
+    except DeribitWsError as exc:
+        assert exc.op == ch.PUBLIC_AUTH
+        assert exc.code == 10000
+        assert "public/auth:" in str(exc)
+    else:
+        raise AssertionError("expected DeribitWsError")
+    finally:
+        await stream.close()
+
+
+async def test_a_summaries_refusal_names_the_rpc(deribit: FakeDeribit) -> None:
+    deribit.rpc_errors[ch.PRIVATE_GET_ACCOUNT_SUMMARIES] = (
+        -32602,
+        "Invalid params",
+    )
+    stream = DeribitPrivateStream(
+        api_key=API_KEY,
+        api_secret=API_SECRET,
+        url=deribit.url,
+        ping_interval=0,
+        heartbeat=0,
+    )
+    async with stream:
+        try:
+            await stream.rpc(ch.PRIVATE_GET_ACCOUNT_SUMMARIES, {"extended": True})
+        except DeribitWsError as exc:
+            assert exc.op == ch.PRIVATE_GET_ACCOUNT_SUMMARIES
+            assert exc.code == -32602
+            assert str(exc) == (
+                "private/get_account_summaries: [-32602] Invalid params"
+            )
+        else:
+            raise AssertionError("expected DeribitWsError")
 
 
 async def test_the_watchdog_probes_an_idle_socket_instead_of_dropping_it(

@@ -218,11 +218,20 @@ class SessionManager:
         """Attach ``api_id`` to STS ``session_id`` (refcount + lease)."""
         acct = self._accounts.get(request.api_id)
         if acct is None:
-            trading = await self._factory.create(request.api_id)
-            # Set before start(): recon runs inside it and its order updates
-            # are history too.
-            trading.history = self._history
-            await trading.start()
+            trading = None
+            try:
+                trading = await self._factory.create(request.api_id)
+                # Set before start(): recon runs inside it and its order updates
+                # are history too.
+                trading.history = self._history
+                await trading.start()
+            except Exception as exc:
+                await self._log_attach_failure(
+                    request,
+                    exc,
+                    venue=trading.venue if trading is not None else "",
+                )
+                raise
             acct = TradingAccount(api_id=request.api_id, trading=trading)
             self._accounts[request.api_id] = acct
             trading.on_order(partial(self._on_order_settled, acct))
@@ -306,6 +315,41 @@ class SessionManager:
             api_id=request.api_id,
             refcount=acct.refcount,
         )
+
+    async def _log_attach_failure(
+        self,
+        request: TdAttachRequest,
+        exc: BaseException,
+        *,
+        venue: str = "",
+    ) -> None:
+        """One durable line on venue connect failure — survives OCI discarding stdout.
+
+        ``GET /logs/td/{api_id}`` reads ``session_logs``, which is filled from
+        ``publish_td_log``. Process stderr is not enough: Strategon drops it.
+        """
+        method = str(getattr(exc, "op", None) or getattr(exc, "method", None) or "")
+        code = getattr(exc, "code", None)
+        raw = getattr(exc, "msg", None)
+        message = raw if isinstance(raw, str) and raw else str(exc)
+        line = (
+            f"attach failed instance={self._instance} api_id={request.api_id} "
+            f"venue={venue or '-'} method={method or '-'} "
+            f"code={'-' if code is None else code} message={message}"
+        )
+        logger.error("%s", line)
+        try:
+            await publish_td_log(
+                self._broker,
+                request.api_id,
+                line,
+                source="td",
+                level="error",
+            )
+        except Exception:
+            logger.exception(
+                "TD attach failure log failed api_id=%s", request.api_id
+            )
 
     # Alias for older call sites
     async def create_session(self, request: TdAttachRequest) -> TdAttachResult:
