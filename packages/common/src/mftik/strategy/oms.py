@@ -53,7 +53,7 @@ WAIT_CIDS_TIMEOUT_S = 5.0
 _UNREAD = object()
 
 
-@dataclass
+@dataclass(eq=False)
 class _CidWaiter:
     api_id: int
     cids: frozenset[str]
@@ -270,7 +270,7 @@ class StrategyOms:
                     break
                 try:
                     await asyncio.wait_for(waiter.event.wait(), remaining)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     ok = await self._cids_ready(api_id, wanted, until, waiter)
                     break
         finally:
