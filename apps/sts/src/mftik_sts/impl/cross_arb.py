@@ -187,7 +187,6 @@ def _defer_cancel(leg: _OpenLeg, now: float) -> None:
 
 class CrossArb(Strategy):
     name = "cross_arb"
-    id = 4
     #: Restorable as a clean restart — see :meth:`on_rebuild`.
     rebuildable = True
 

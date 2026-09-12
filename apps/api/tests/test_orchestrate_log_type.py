@@ -1,6 +1,8 @@
-"""Deploy lines carry ``strategy_type``; ``session_id`` stays a hex uuid."""
+"""Deploy lines carry ``strategy_type``; ``session_id`` is six hex digits."""
 
 from __future__ import annotations
+
+from contextlib import asynccontextmanager
 
 import pytest
 from mftik.protocol import (
@@ -26,6 +28,14 @@ def _named_sts_without_a_database(monkeypatch) -> None:
 
     monkeypatch.setattr(orchestrate, "_sts_target", _target)
     monkeypatch.setattr(orchestrate, "_check_sts_instance", _ok)
+
+
+@pytest.fixture
+def minted_session_id(monkeypatch) -> None:
+    async def _mint() -> str:
+        return "aabb01"
+
+    monkeypatch.setattr(orchestrate, "mint_session_id", _mint)
 
 
 class RecordingBroker:
@@ -55,7 +65,7 @@ class RecordingBroker:
         raise AssertionError(f"unexpected rpc: {envelope.type}")
 
 
-async def test_deploy_lines_carry_strategy_type() -> None:
+async def test_deploy_lines_carry_strategy_type(minted_session_id) -> None:
     broker = RecordingBroker()
     result = await deploy_strategy(
         broker,
@@ -65,8 +75,7 @@ async def test_deploy_lines_carry_strategy_type() -> None:
         created_by=1,
         strategy_type="private::Tiny",
     )
-    assert len(result["session_id"]) == 32
-    assert result["session_id"].isalnum()
+    assert result["session_id"] == "aabb01"
     payloads = [e.payload for e in broker.logs]  # type: ignore[attr-defined]
     assert payloads
     assert all(p.type == "private::Tiny" for p in payloads)
@@ -75,7 +84,9 @@ async def test_deploy_lines_carry_strategy_type() -> None:
     assert any(p.message.startswith("deploy complete") for p in payloads)
 
 
-async def test_deploy_without_strategy_type_leaves_type_null() -> None:
+async def test_deploy_without_strategy_type_leaves_type_null(
+    minted_session_id,
+) -> None:
     broker = RecordingBroker()
     await deploy_strategy(
         broker, strategy_id="tiny", td={}, md=[], created_by=1
@@ -120,7 +131,9 @@ class CaptureCreateBroker:
         raise AssertionError(f"unexpected rpc: {envelope.type}")
 
 
-async def test_deploy_create_payload_keeps_account_names(monkeypatch) -> None:
+async def test_deploy_create_payload_keeps_account_names(
+    monkeypatch, minted_session_id
+) -> None:
     # The deploy resolves each credential's TD instance from the `apis` row.
     # This test has no database and is not about that question, so the lookup
     # is answered directly — a broker double with no `apis` behind it would
@@ -141,3 +154,29 @@ async def test_deploy_create_payload_keeps_account_names(monkeypatch) -> None:
     assert list(broker.create.td) == ["paper trader", "binance quoter"]  # type: ignore[attr-defined]
     assert broker.create.td["paper trader"].api_id == 3  # type: ignore[attr-defined]
     assert broker.create.td["binance quoter"].api_id == 7  # type: ignore[attr-defined]
+
+
+async def test_mint_session_id_retries_when_the_row_exists(monkeypatch) -> None:
+    seen: list[str] = []
+
+    class FakeRepo:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        async def get_by_session_id(self, session_id: str) -> object | None:
+            seen.append(session_id)
+            if len(seen) == 1:
+                return object()
+            return None
+
+    ids = iter(["aaaaaa", "bbbbbb"])
+    monkeypatch.setattr(orchestrate.secrets, "token_hex", lambda _n: next(ids))
+    monkeypatch.setattr(orchestrate, "StsSessionRepository", FakeRepo)
+
+    @asynccontextmanager
+    async def scope():
+        yield object()
+
+    monkeypatch.setattr(orchestrate, "session_scope", scope)
+    assert await orchestrate.mint_session_id() == "bbbbbb"
+    assert seen == ["aaaaaa", "bbbbbb"]

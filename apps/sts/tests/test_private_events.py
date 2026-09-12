@@ -43,7 +43,6 @@ from mftik_td.session import SessionManager as TdSessionManager
 
 class PrivateEventsStrategy(Strategy):
     name = "private_events"
-    id = 42
 
     def __init__(self) -> None:
         super().__init__()
@@ -148,7 +147,7 @@ async def _boot(
 
     await sts.create_session(
         StsCreateSessionRequest(
-            session_id="priv-1",
+            session_id="aa00a1",
             created_by=1,
             strategy="private_events",
             td={"paper": TdAccountRef(api_id=7)},
@@ -156,7 +155,7 @@ async def _boot(
     )
     await td.attach(
         TdAttachRequest(
-            session_id="priv-1",
+            session_id="aa00a1",
             api_id=7,
             timeout=2.0,
             created_by=1,
@@ -205,8 +204,8 @@ async def test_private_events_from_td_global(broker: Broker) -> None:
         type=OrderType.MARKET,
     )
     cid = strat.oms.last_client_order_id
-    slot, _ts, seq = unpack(cid)
-    assert slot == strat.cid_slot
+    ver, session_id, _ts, seq = unpack(cid)
+    assert session_id == strat.session_id
     assert seq == 1
     assert strat.owns(cid)
 
@@ -256,7 +255,7 @@ async def test_order_and_cancel_reject_paths(broker: Broker) -> None:
     reject = await asyncio.wait_for(strat.order_rejects.get(), timeout=3.0)
     assert reject.client_order_id == bad_cid
     assert reject.api_id == 7
-    assert unpack(bad_cid)[2] == 1
+    assert unpack(bad_cid)[3] == 1
     # The venue's refusal arrives normalized, with its own words kept in
     # ``reason``.
     assert reject.error_code == RejectCode.VENUE_INSUFFICIENT_BALANCE
@@ -280,7 +279,7 @@ async def test_order_and_cancel_reject_paths(broker: Broker) -> None:
         price=Decimal("1000"),
     )
     cid = strat.oms.last_client_order_id
-    assert unpack(cid)[2] == 2
+    assert unpack(cid)[3] == 2
     open_order = await _await_status(strat, OrderStatus.NEW)
     assert open_order.client_order_id == cid
 

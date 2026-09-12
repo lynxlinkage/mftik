@@ -24,7 +24,6 @@ async def persist_live_session(
     td: dict[str, Any] | None = None,
     md_ids: list[str] | None = None,
     st_paras: dict[str, Any] | None = None,
-    cid_slot: int | None = None,
     restart: str = "always",
     instance: str | None = None,
 ) -> StsSessionRow:
@@ -42,7 +41,6 @@ async def persist_live_session(
             td=td,
             md_ids=md_ids,
             st_paras=st_paras,
-            cid_slot=cid_slot,
             restart=restart,
             instance=instance,
         )

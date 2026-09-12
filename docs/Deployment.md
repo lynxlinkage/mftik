@@ -63,8 +63,8 @@ alone.
 
 There is no `jetstream` block either, and no `-js` or `-sd`. Every store family
 left JetStream (`docs/JetStreamRemoval.md`): tape is the regional Redis, the
-ledger is TD memory, session rows are Postgres and `cid_slot` is 16 bits of
-the session id. That is what
+ledger is TD memory, session rows are Postgres and `session_id` is six hex
+digits packed into every `client_order_id`. That is what
 makes one server per site a complete site instead of a degraded cluster — there
 is no meta group to keep a quorum for, so there is nothing to lose by not having
 three of them. `NATS_KV_REPLICAS` and `NATS_KV_PLACEMENT_CLUSTER` left with the

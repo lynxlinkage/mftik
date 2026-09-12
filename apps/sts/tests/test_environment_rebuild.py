@@ -82,7 +82,6 @@ class FakeStsStore:
             reason="STS shut down while this was running",
             strategy=strategy,
             type=type,
-            cid_slot=7,
             instance="sts",
             restart="always",
             rebuild_count=rebuild_count,
@@ -167,7 +166,7 @@ async def test_s3_restart_does_not_install(
     resolve(loaded[0])
 
     db = FakeStsStore()
-    db.seed("r-numpy", type=loaded[0], strategy="uses_numpy")
+    db.seed("aa00e1", type=loaded[0], strategy="uses_numpy")
     manager = SessionManager(
         broker,
         heartbeat_interval=0.05,
@@ -180,7 +179,7 @@ async def test_s3_restart_does_not_install(
         reset_rebuild_count=db.reset_rebuild_count,
     )
     rebuilt = await manager.rebuild_interrupted()
-    assert rebuilt == ["r-numpy"]
+    assert rebuilt == ["aa00e1"]
     await manager.close_all()
 
 
@@ -194,7 +193,7 @@ async def test_s7_rebuild_names_the_missing_extra(
     added = store.add({"strategy.py": _NUMPY}, applied_extras={"numpy": "1.0"})
     key = f"{added.origin}::{added.type}"
     db = FakeStsStore()
-    db.seed("r-env", type=key)
+    db.seed("aa00e2", type=key)
     manager = SessionManager(
         broker,
         heartbeat_interval=0.05,
@@ -207,8 +206,8 @@ async def test_s7_rebuild_names_the_missing_extra(
         reset_rebuild_count=db.reset_rebuild_count,
     )
     assert await manager.rebuild_interrupted() == []
-    assert db.rows["r-env"].status == "interrupted"
-    assert db.rows["r-env"].rebuild_count == 1
+    assert db.rows["aa00e2"].status == "interrupted"
+    assert db.rows["aa00e2"].rebuild_count == 1
 
 
 @pytest.mark.asyncio

@@ -85,7 +85,6 @@ async def an_order(
                     "venue_order_id": None,
                     "session_id": session_id,
                     "strategy": None,
-                    "cid_slot": None,
                     "attribution": Attribution.DIRECT,
                     "universal_ticker": ticker,
                     "side": "buy",

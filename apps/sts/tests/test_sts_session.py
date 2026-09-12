@@ -46,7 +46,6 @@ class FakeStsStore:
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_paras: dict | None = None,
-        cid_slot: int | None = None,
         restart: str = "always",
         **_extra: object,
     ) -> SimpleNamespace:
@@ -63,7 +62,6 @@ class FakeStsStore:
             td_api_ids=list(td_api_ids or []),
             md_ids=list(md_ids or []),
             st_paras=dict(st_paras or {}),
-            cid_slot=cid_slot,
             restart=restart,
             rebuild_count=0,
             reason=None,

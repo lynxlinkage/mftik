@@ -88,9 +88,6 @@ class OrderRepository(BaseRepository[OrderRow]):
                 "strategy": func.coalesce(
                     stmt.excluded.strategy, OrderRow.strategy
                 ),
-                "cid_slot": func.coalesce(
-                    stmt.excluded.cid_slot, OrderRow.cid_slot
-                ),
                 "attribution": case(
                     (OrderRow.attribution == Attribution.DIRECT, Attribution.DIRECT),
                     else_=stmt.excluded.attribution,
