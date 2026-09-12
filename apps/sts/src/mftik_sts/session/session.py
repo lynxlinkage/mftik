@@ -140,6 +140,12 @@ TD_GLOBAL_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     TD_POSITION_UPDATE: ("on_position_update", Position),
 }
 
+#: Fan-out types that can change a watched cid's readiness. After the
+#: strategy hook returns, these wake :meth:`StrategyOms.wait_cids`.
+_OMS_WAIT_TYPES = frozenset(
+    {TD_ORDER_UPDATE, TD_FILL, TD_ORDER_REJECT, TD_CANCEL_REJECT}
+)
+
 
 #: ``api_id`` → the TD instance allowed to use that credential.
 TdInstanceLookup = Callable[[int], Awaitable[str | None]]
@@ -1045,6 +1051,16 @@ class StsSession:
                 api_id,
                 env.type,
             )
+        finally:
+            # After the hook: a fill's hedge runs before on_stop's waiter
+            # proceeds to cancel. Still signal if the hook raised — a
+            # wedged strategy must not strand wait_cids until its timeout.
+            if env.type in _OMS_WAIT_TYPES:
+                self.strategy.oms.signal(
+                    api_id,
+                    getattr(payload, "client_order_id", None),
+                    payload if isinstance(payload, Order) else None,
+                )
 
     async def _on_lease_ack(self, api_id: int, env: UntypedEnvelope) -> None:
         # The closest thing this system has to a login: TD has accepted the

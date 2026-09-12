@@ -85,6 +85,7 @@ from mftik.protocol import (
 )
 from mftik.protocol.reject_codes import describe
 from mftik.strategy import Strategy
+from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S
 from mftik.strategy.timer import TimerToken
 
 #: How long to wait for the two things that arm the pair — TD recon and the
@@ -415,6 +416,20 @@ class OneCancelOther(Strategy):
         # left watching for the fill that would cancel the other.
         if self.session is not None and len(self.session.td_api_ids) == 1:
             api_id = self.session.td_sole()
+            cids = list(self._open)
+            if cids:
+                cleared = await self.oms.wait_cids(
+                    api_id,
+                    cids,
+                    until=lambda o: o.status is not OrderStatus.PENDING_NEW,
+                    timeout=WAIT_CIDS_TIMEOUT_S,
+                )
+                if not cleared:
+                    await self.log(
+                        "OneCancelOther stop: legs still PENDING_NEW after "
+                        f"{WAIT_CIDS_TIMEOUT_S}s — cancelling anyway",
+                        level="warn",
+                    )
             for cid in list(self._open):
                 await self._cancel(api_id, cid, "session stopping")
         await self.log("OneCancelOther stopped")

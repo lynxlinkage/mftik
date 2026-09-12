@@ -31,6 +31,8 @@ class FakeOms:
         self.submitted: list[dict] = []
         self.cancelled: list[str] = []
         self.accept = accept
+        self.waits: list[tuple] = []
+        self.wait_ok = True
         self._n = 0
         self._last_cid: str | None = None
 
@@ -57,6 +59,14 @@ class FakeOms:
     async def cancel_order(self, api_id, cid):
         self.cancelled.append(cid)
         return self.accept
+
+    async def wait_cids(self, api_id, cids, *, until, timeout):
+        if isinstance(cids, (str, int)):
+            recorded = [str(cids)]
+        else:
+            recorded = [str(cid) for cid in cids]
+        self.waits.append((api_id, recorded, timeout))
+        return self.wait_ok
 
     def get(self, api_id):
         return None
@@ -216,6 +226,7 @@ async def test_on_stop_cancels_remaining_order() -> None:
 
     await strat.on_stop()
 
+    assert strat.oms.waits
     assert strat.oms.cancelled == ["cid-1"]
     assert strat._open_cid is None
 

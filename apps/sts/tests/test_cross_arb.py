@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 
 import pytest
@@ -25,6 +26,7 @@ from mftik.protocol import (
     get_template,
     parse_strategy_yml,
 )
+from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S
 from mftik_sts.impl.cross_arb import (
     CrossArb,
     _OpenLeg,
@@ -76,6 +78,9 @@ class FakeOms:
         self.accept_cancel = True
         self.reject_reason = "no funds"
         self.reject_code: int | str = RejectCode.TD_INSUFFICIENT_BALANCE
+        self.waits: list[tuple[int, list[str], float]] = []
+        self.wait_ok = True
+        self.seq: list[str] = []
         self._n = 0
         self._last_cid: str | None = None
         self._accepted_last = True
@@ -117,9 +122,19 @@ class FakeOms:
         return accepted
 
     async def cancel_order(self, api_id, client_order_id):
+        self.seq.append("cancel")
         self.cancelled.append(str(client_order_id))
         self._accepted_last = self.accept_cancel
         return self.accept_cancel
+
+    async def wait_cids(self, api_id, cids, *, until, timeout):
+        if isinstance(cids, (str, int)):
+            recorded = [str(cids)]
+        else:
+            recorded = [str(cid) for cid in cids]
+        self.seq.append("wait")
+        self.waits.append((api_id, recorded, timeout))
+        return self.wait_ok
 
 
 class FakeLedger:
@@ -363,6 +378,47 @@ async def test_on_stop_still_runs_when_quote_account_is_missing() -> None:
     await strat.on_stop()
     assert strat._stopping
     assert strat.oms.cancelled == []
+    assert strat.oms.waits == []
+
+
+async def test_on_stop_waits_out_pending_new_then_cancels() -> None:
+    strat = await _armed(side=["sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    cid = strat.oms.submitted[0]["cid"]
+
+    await strat.on_stop()
+
+    assert strat.oms.waits == [(QUOTE_API, [cid], WAIT_CIDS_TIMEOUT_S)]
+    assert strat.oms.cancelled == [cid]
+    assert strat.oms.seq == ["wait", "cancel"]
+    assert strat._stopping
+
+
+async def test_on_stop_cancels_after_a_wait_timeout() -> None:
+    """Timeout is not permission to skip the cancel — just not to assume it."""
+    strat = await _armed(side=["sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    cid = strat.oms.submitted[0]["cid"]
+    strat.oms.wait_ok = False
+
+    await strat.on_stop()
+
+    assert strat.oms.waits
+    assert strat.oms.cancelled == [cid]
+
+
+async def test_on_stop_force_cancels_through_the_retry_cooldown() -> None:
+    """A deferred cancel during life must not skip the teardown cancel."""
+    strat = await _armed(side=["sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    cid = strat.oms.submitted[0]["cid"]
+    strat._open[Side.SELL].retry_cancel_at = (
+        asyncio.get_running_loop().time() + 60
+    )
+
+    await strat.on_stop()
+
+    assert strat.oms.cancelled == [cid]
 
 
 async def test_on_recon_done_is_quiet_when_an_account_is_missing() -> None:

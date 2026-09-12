@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +41,27 @@ logger = logging.getLogger(__name__)
 #: leaving a strategy blocked for long.
 ORDER_ACK_TIMEOUT_S = 2.0
 
+#: How long :meth:`StrategyOms.wait_cids` should sit on ``PENDING_NEW`` from
+#: ``on_stop``. Matches TD's own pending-new sweeper: long enough for a
+#: venue ack, short enough that ``ON_STOP_TIMEOUT_S`` still has room to
+#: cancel afterwards. Required at the call — this is only the value
+#: strategies should pass, not a silent default that could hang.
+WAIT_CIDS_TIMEOUT_S = 5.0
+
+#: Sentinel: TD did not answer the live-book read. Distinct from ``None``,
+#: which means the cid is not on the book (already gone).
+_UNREAD = object()
+
+
+@dataclass(eq=False)
+class _CidWaiter:
+    api_id: int
+    cids: frozenset[str]
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    #: Last fan-out ``Order`` per cid. Used when the live book has already
+    #: dropped a terminal order — ``order()`` then returns None.
+    latest: dict[str, Order] = field(default_factory=dict)
+
 
 class StrategyOms:
     """Order entry, and reads of TD's book over ``td.account.{api_id}``.
@@ -61,6 +85,10 @@ class StrategyOms:
         [ver 4][session_id 24][ts_sec_from_2026-01-01 28][seq 8]
 
     and leaves it in :attr:`last_client_order_id` for the caller to keep.
+
+    :meth:`wait_cids` is the teardown helper: sit on a condition (typically
+    ``status is not PENDING_NEW``) until the live book says so, woken by
+    :meth:`signal` from the TD fan-out. It does not keep a private mirror.
     """
 
     def __init__(self, *, ack_timeout: float = ORDER_ACK_TIMEOUT_S) -> None:
@@ -70,6 +98,7 @@ class StrategyOms:
         self._last_cid: str | None = None
         self._last_reason: str = ""
         self._last_code: int | str = RejectCode.NONE
+        self._waiters: set[_CidWaiter] = set()
 
     def bind(self, strategy: Strategy) -> None:
         if strategy.session is None:
@@ -152,6 +181,153 @@ class StrategyOms:
             payload=payload or None,
         )
         return None if not found else Order.model_validate(payload)
+
+    def signal(
+        self,
+        api_id: int,
+        cid: str | int | None,
+        order: Order | None = None,
+    ) -> None:
+        """Wake waiters watching ``cid`` on ``api_id``.
+
+        The session calls this from the TD fan-out after the strategy hook
+        returns, so a fill's hedge runs before ``on_stop`` proceeds to
+        cancel. Tests can call it directly. ``order``, when given, is the
+        event payload — kept for a cid the live book has already dropped.
+        """
+        if cid is None:
+            return
+        key = str(cid)
+        for waiter in list(self._waiters):
+            if waiter.api_id != api_id or key not in waiter.cids:
+                continue
+            if order is not None:
+                waiter.latest[key] = order
+            waiter.event.set()
+
+    async def wait_cids(
+        self,
+        api_id: int,
+        cids: str | int | Iterable[str | int],
+        *,
+        until: Callable[[Order], bool],
+        timeout: float,
+    ) -> bool:
+        """Wait until every ``cid`` satisfies ``until``, or ``timeout`` elapses.
+
+        Used from ``on_stop`` so a strategy can wait out ``PENDING_NEW``
+        before it cancels::
+
+            ok = await self.oms.wait_cids(
+                api_id,
+                cids,
+                until=lambda o: o.status is not OrderStatus.PENDING_NEW,
+                timeout=WAIT_CIDS_TIMEOUT_S,
+            )
+
+        TD's live book is the authority: each wake re-reads :meth:`order`.
+        An ``on_order_update`` (or reject / fill) is only the cue to look
+        again — the same rule as the rest of this accessor. A cid that is
+        not in the book and has not been seen on the fan-out is already
+        gone (terminal orders are popped), so it counts as ready.
+
+        Returns True if every cid is ready before the deadline. Returns
+        False on timeout — the caller still cancels; it must not assume
+        the cancel can succeed. Never hangs: ``timeout`` is required and
+        must be >= 0.
+        """
+        if timeout < 0:
+            raise ValueError(f"timeout must be >= 0, got {timeout}")
+        wanted = _cid_list(cids)
+        if not wanted:
+            return True
+        waiter = _CidWaiter(api_id=api_id, cids=frozenset(wanted))
+        self._waiters.add(waiter)
+        log = session_log(self._strategy)
+        log.record(
+            "order",
+            "oms.wait_cids",
+            dir="self",
+            api_id=api_id,
+            cids=wanted,
+            timeout_s=timeout,
+        )
+        deadline = asyncio.get_running_loop().time() + timeout
+        try:
+            while True:
+                if await self._cids_ready(api_id, wanted, until, waiter):
+                    ok = True
+                    break
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    ok = False
+                    break
+                waiter.event.clear()
+                # Re-check after clear so a signal between the last look
+                # and the wait is not lost.
+                if await self._cids_ready(api_id, wanted, until, waiter):
+                    ok = True
+                    break
+                try:
+                    await asyncio.wait_for(waiter.event.wait(), remaining)
+                except TimeoutError:
+                    ok = await self._cids_ready(api_id, wanted, until, waiter)
+                    break
+        finally:
+            self._waiters.discard(waiter)
+        if not ok:
+            logger.warning(
+                "wait_cids timed out api_id=%s cids=%s timeout=%s",
+                api_id,
+                wanted,
+                timeout,
+            )
+        log.record(
+            "order",
+            "oms.wait_cids_done",
+            dir="self",
+            api_id=api_id,
+            cids=wanted,
+            timeout_s=timeout,
+            ok=ok,
+        )
+        return ok
+
+    async def _cids_ready(
+        self,
+        api_id: int,
+        cids: list[str],
+        until: Callable[[Order], bool],
+        waiter: _CidWaiter,
+    ) -> bool:
+        for cid in cids:
+            current = await self._wait_order(api_id, cid, waiter)
+            if current is False:
+                return False
+            if current is None:
+                continue
+            if not until(current):
+                return False
+        return True
+
+    async def _wait_order(
+        self, api_id: int, cid: str, waiter: _CidWaiter
+    ) -> Order | None | bool:
+        """The order to evaluate, or a readiness signal.
+
+        * an :class:`Order` — evaluate ``until`` against it
+        * ``None`` — not on the live book and no fan-out yet: already gone
+        * ``False`` — TD did not answer and nothing has been seen: wait
+        """
+        try:
+            live = await self.order(cid, api_id)
+        except RequestTimeoutError:
+            live = _UNREAD
+        if live is _UNREAD:
+            return waiter.latest[cid] if cid in waiter.latest else False
+        if live is not None:
+            return live
+        return waiter.latest.get(cid)
 
     def _resolve(self, api_id: int | None) -> int | None:
         """Pick the account: the one asked for, or the only one attached.
@@ -406,6 +582,12 @@ class StrategyOms:
         if self._strategy is None or self._strategy.session is None:
             raise RuntimeError("strategy OMS is not bound to a session")
         return self._strategy.session
+
+
+def _cid_list(cids: str | int | Iterable[str | int]) -> list[str]:
+    if isinstance(cids, (str, int)):
+        return [str(cids)]
+    return [str(cid) for cid in cids]
 
 
 def _source_name(session: object) -> str:

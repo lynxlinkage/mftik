@@ -66,6 +66,7 @@ from mftik.protocol import (
 )
 from mftik.protocol.reject_codes import describe
 from mftik.strategy import Strategy
+from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S
 
 BPS = Decimal("10000")
 
@@ -338,8 +339,23 @@ class CrossArb(Strategy):
         self._stopping = True
         api_id = self._quote_api_id()
         if api_id is not None:
+            cids = [leg.cid for leg in self._open.values()]
+            if cids:
+                cleared = await self.oms.wait_cids(
+                    api_id,
+                    cids,
+                    until=lambda o: o.status is not OrderStatus.PENDING_NEW,
+                    timeout=WAIT_CIDS_TIMEOUT_S,
+                )
+                if not cleared:
+                    await self.log(
+                        "CrossArb stop: owned quote cids still PENDING_NEW "
+                        f"after {WAIT_CIDS_TIMEOUT_S}s — cancelling anyway; "
+                        "a late fill may be unhedged",
+                        level="warn",
+                    )
             for side in list(self._open):
-                await self._cancel_leg(api_id, side)
+                await self._cancel_leg(api_id, side, force=True)
         await self.log("CrossArb stopped")
 
     async def on_recon_done(self, msg: ReconDone) -> None:
@@ -526,12 +542,14 @@ class CrossArb(Strategy):
             f"{_fmt(price)}@{_fmt(qty)} cid={cid}"
         )
 
-    async def _cancel_leg(self, api_id: int, side: Side) -> None:
+    async def _cancel_leg(
+        self, api_id: int, side: Side, *, force: bool = False
+    ) -> None:
         leg = self._open.get(side)
         if leg is None:
             return
         now = asyncio.get_running_loop().time()
-        if now < leg.retry_cancel_at:
+        if not force and now < leg.retry_cancel_at:
             return
         leg.canceling = True
         try:
