@@ -771,9 +771,17 @@ class CrossArb(Strategy):
     # --- helpers -----------------------------------------------------------
 
     async def _on_quote_live(self, api_id: int, side: Side) -> None:
-        """Honour a forced cancel, or the band, once the cid is no longer inflight."""
+        """Honour a forced cancel, or the band, once the cid is no longer inflight.
+
+        ``canceling`` is the same gate: a cancel RPC is already out, and
+        the PENDING_CANCEL update must not fire a second one.
+        """
         leg = self._open.get(side)
-        if leg is None or self.oms.is_inflight(leg.cid):
+        if (
+            leg is None
+            or leg.canceling
+            or self.oms.is_inflight(leg.cid)
+        ):
             return
         if leg.cancel_requested:
             await self._cancel_leg(api_id, side, force=True)

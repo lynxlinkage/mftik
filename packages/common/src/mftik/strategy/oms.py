@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from mftik.broker.errors import RequestTimeoutError
 from mftik.exchange.models import (
     Order,
+    OrderStatus,
     OrderType,
     Side,
     TimeInForce,
@@ -95,7 +96,9 @@ class StrategyOms:
     ``td.{api_id}.global`` as order updates, fills or rejects — a ``True`` here
     does **not** mean the venue accepted anything. A submit TD accepts is
     pending until :meth:`note_order` sees a non-pending status;
-    :meth:`cancel_order` will not send for those cids.
+    :meth:`cancel_order` will not send for those cids. A later cancel is a
+    new episode: ``PENDING_CANCEL`` (or the cancel RPC itself) marks the
+    cid inflight again even after it has been ``NEW``.
 
     ``submit_order`` mints the uint64 ``client_order_id`` itself::
 
@@ -119,9 +122,10 @@ class StrategyOms:
         #: mirror — only what this session itself sent and has not seen
         #: leave :meth:`~mftik.exchange.models.OrderStatus.is_pending`.
         self._inflight: set[str] = set()
-        #: Cids that have already left pending for good. A late
-        #: ``PENDING_NEW`` snapshot must not revive them — reject can
-        #: overtake the local book announcement.
+        #: Submit episode settled. A late ``PENDING_NEW`` must not revive
+        #: the cid — reject can overtake the local book announcement. A
+        #: later ``PENDING_CANCEL`` is a new episode and may mark inflight
+        #: again.
         self._done: set[str] = set()
         self._waiters: set[_CidWaiter] = set()
 
@@ -141,7 +145,10 @@ class StrategyOms:
         """Fold a venue (or TD) status into the pending set.
 
         Pending statuses stay marked; anything else — working, terminal,
-        ``UNKNOWN`` — means a cancel may now be sent.
+        ``UNKNOWN`` — means a cancel may now be sent. ``PENDING_CANCEL``
+        after ``NEW`` is a new request and must mark inflight again;
+        a late ``PENDING_NEW`` after the cid has already left pending
+        must not.
         """
         cid = order.client_order_id
         if not cid:
@@ -151,8 +158,9 @@ class StrategyOms:
             self._inflight.discard(key)
             self._done.add(key)
             return
-        if key not in self._done:
-            self._inflight.add(key)
+        if order.status is OrderStatus.PENDING_NEW and key in self._done:
+            return
+        self._inflight.add(key)
 
     def note_gone(self, client_order_id: str | int | None) -> None:
         """The cid is no longer inflight — reject, or a cancel that failed."""
@@ -182,6 +190,7 @@ class StrategyOms:
         self._done.clear()
 
     def _mark_inflight(self, cid: str) -> None:
+        """Submit ack. Do not revive a cid the reject path already settled."""
         if cid not in self._done:
             self._inflight.add(cid)
 
@@ -568,6 +577,10 @@ class StrategyOms:
             self._last_code = RejectCode.TD_NOT_CANCELABLE
             return False
         session = self._require_session()
+        # Before the await: TD publishes PENDING_CANCEL before the ack, and
+        # a concurrent cancel must see us. `_done` is the submit episode;
+        # this cancel is a new one, so `_mark_inflight` would no-op.
+        self._inflight.add(cid)
         accepted = await self._request_ack(
             api_id,
             cid,
@@ -583,8 +596,10 @@ class StrategyOms:
             ),
         )
         if accepted:
-            self._mark_inflight(cid)
-        return accepted
+            return True
+        if self._last_code not in _TRANSPORT_AMBIGUOUS:
+            self._inflight.discard(cid)
+        return False
 
     async def _request_ack(
         self, api_id: int, cid: str, envelope: Envelope[Any]

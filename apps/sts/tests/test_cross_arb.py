@@ -551,6 +551,44 @@ async def test_out_of_band_does_not_cancel_inflight_quote() -> None:
     assert cid in strat.oms.cancelled
 
 
+async def test_pending_cancel_update_does_not_send_a_second_cancel() -> None:
+    """TD publishes PENDING_CANCEL before the cancel ack.
+
+    ``_on_quote_live`` used to treat that as 'live again' and fire another
+    cancel, which TD refused as TD_NOT_CANCELABLE.
+    """
+    strat = await _armed(side=["sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    cid = strat.oms.submitted[0]["cid"]
+    await _go_live(strat, cid, Side.SELL)
+
+    await strat.on_best_quote(_hedge_quote("50000", "50100"))
+    assert strat.oms.cancelled == [cid]
+    assert strat._open[Side.SELL].canceling is True
+
+    await strat.on_order_update(
+        QUOTE_API,
+        _update(cid, OrderStatus.PENDING_CANCEL, side=Side.SELL, price="50050"),
+    )
+    assert strat.oms.cancelled == [cid]
+
+
+async def test_quote_live_does_not_cancel_while_leg_canceling() -> None:
+    """Even if OMS has not marked inflight yet, canceling is enough."""
+    strat = await _armed(side=["sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    cid = strat.oms.submitted[0]["cid"]
+    await _go_live(strat, cid, Side.SELL)
+    strat._hedge_quote = _hedge_quote("50000", "50100")
+    strat._open[Side.SELL].canceling = True
+
+    await strat.on_order_update(
+        QUOTE_API,
+        _update(cid, OrderStatus.NEW, side=Side.SELL, price="50050"),
+    )
+    assert strat.oms.cancelled == []
+
+
 async def test_out_of_band_cancels_and_reprices() -> None:
     strat = await _armed(side=["sell"])
     await strat.on_best_quote(_hedge_quote("50000", "50000"))

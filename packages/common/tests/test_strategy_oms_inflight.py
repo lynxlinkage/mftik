@@ -81,3 +81,42 @@ def test_ack_mark_does_not_revive_a_settled_cid() -> None:
     oms.note_gone("cid-1")
     oms._mark_inflight("cid-1")
     assert not oms.is_inflight("cid-1")
+
+
+def test_pending_cancel_after_new_is_inflight_again() -> None:
+    """A live order's cancel is a new pending episode.
+
+    ``_done`` exists so a late PENDING_NEW cannot revive a rejected cid.
+    After NEW it must not also swallow PENDING_CANCEL — that is how a
+    second cancel reached TD as TD_NOT_CANCELABLE.
+    """
+    oms = StrategyOms()
+    oms.note_order(_order("cid-1", OrderStatus.PENDING_NEW))
+    oms.note_order(_order("cid-1", OrderStatus.NEW))
+    assert not oms.is_inflight("cid-1")
+    assert "cid-1" in oms._done
+
+    oms.note_order(_order("cid-1", OrderStatus.PENDING_CANCEL))
+    assert oms.is_inflight("cid-1")
+
+
+def test_late_pending_new_after_new_still_does_not_revive() -> None:
+    oms = StrategyOms()
+    oms.note_order(_order("cid-1", OrderStatus.NEW))
+    assert not oms.is_inflight("cid-1")
+    oms.note_order(_order("cid-1", OrderStatus.PENDING_NEW))
+    assert not oms.is_inflight("cid-1")
+
+
+@pytest.mark.asyncio
+async def test_second_cancel_after_new_is_refused_locally() -> None:
+    """Once a cancel is on the wire, another cancel must not reach TD."""
+    oms = StrategyOms()
+    oms.note_order(_order("cid-1", OrderStatus.NEW))
+    oms._inflight.add("cid-1")
+
+    accepted = await oms.cancel_order(1, "cid-1")
+    assert accepted is False
+    assert oms.last_reject_code == RejectCode.TD_NOT_CANCELABLE
+    assert "inflight" in oms.last_reject_reason
+    assert oms.is_inflight("cid-1")
