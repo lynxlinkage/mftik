@@ -84,6 +84,7 @@ class FakeOms:
         self._n = 0
         self._last_cid: str | None = None
         self._accepted_last = True
+        self._inflight: set[str] = set()
 
     @property
     def last_client_order_id(self) -> str | None:
@@ -106,6 +107,8 @@ class FakeOms:
         if self.accepts is not None and self._n <= len(self.accepts):
             accepted = self.accepts[self._n - 1]
         self._accepted_last = accepted
+        if accepted:
+            self._inflight.add(self._last_cid)
         self.submitted.append(
             {
                 "cid": self._last_cid,
@@ -122,10 +125,41 @@ class FakeOms:
         return accepted
 
     async def cancel_order(self, api_id, client_order_id):
+        cid = str(client_order_id)
+        if cid in self._inflight:
+            self._accepted_last = False
+            self.reject_code = RejectCode.TD_NOT_CANCELABLE
+            self.reject_reason = (
+                "order is inflight; it cannot be cancelled from that state"
+            )
+            return False
         self.seq.append("cancel")
-        self.cancelled.append(str(client_order_id))
+        self.cancelled.append(cid)
         self._accepted_last = self.accept_cancel
+        if self.accept_cancel:
+            self._inflight.add(cid)
         return self.accept_cancel
+
+    def is_inflight(self, client_order_id) -> bool:
+        return str(client_order_id) in self._inflight
+
+    def note_order(self, order: Order) -> None:
+        cid = order.client_order_id
+        if not cid:
+            return
+        key = str(cid)
+        if order.status.is_pending():
+            self._inflight.add(key)
+        else:
+            self._inflight.discard(key)
+
+    def note_gone(self, client_order_id) -> None:
+        if client_order_id is None:
+            return
+        self._inflight.discard(str(client_order_id))
+
+    def clear_inflight(self) -> None:
+        self._inflight.clear()
 
     async def wait_cids(self, api_id, cids, *, until, timeout):
         if isinstance(cids, (str, int)):
@@ -134,6 +168,9 @@ class FakeOms:
             recorded = [str(cid) for cid in cids]
         self.seq.append("wait")
         self.waits.append((api_id, recorded, timeout))
+        if self.wait_ok:
+            for cid in recorded:
+                self._inflight.discard(cid)
         return self.wait_ok
 
 
@@ -251,6 +288,18 @@ def _quote_quote(bid: str = "50000", ask: str = "50010") -> BestQuote:
         bid_qty=Decimal("1"),
         ask=Decimal(ask),
         ask_qty=Decimal("1"),
+    )
+
+
+async def _go_live(
+    strat: CrossArb,
+    cid: str,
+    side: Side,
+    price: str = "50050",
+) -> None:
+    """Venue has acknowledged the quote — it is no longer inflight."""
+    await strat.on_order_update(
+        QUOTE_API, _update(cid, OrderStatus.NEW, side=side, price=price)
     )
 
 
@@ -394,8 +443,8 @@ async def test_on_stop_waits_out_pending_new_then_cancels() -> None:
     assert strat._stopping
 
 
-async def test_on_stop_cancels_after_a_wait_timeout() -> None:
-    """Timeout is not permission to skip the cancel — just not to assume it."""
+async def test_on_stop_timeout_while_inflight_does_not_send_cancel() -> None:
+    """Still PENDING_NEW after the wait: cancel would be TD_NOT_CANCELABLE."""
     strat = await _armed(side=["sell"])
     await strat.on_best_quote(_hedge_quote("50000", "50000"))
     cid = strat.oms.submitted[0]["cid"]
@@ -404,7 +453,9 @@ async def test_on_stop_cancels_after_a_wait_timeout() -> None:
     await strat.on_stop()
 
     assert strat.oms.waits
-    assert strat.oms.cancelled == [cid]
+    assert strat.oms.cancelled == []
+    assert strat.oms.is_inflight(cid)
+    assert strat._open[Side.SELL].cancel_requested is True
 
 
 async def test_on_stop_force_cancels_through_the_retry_cooldown() -> None:
@@ -485,11 +536,27 @@ async def test_skips_leg_when_hedge_balance_short() -> None:
     assert strat.session.failures == []
 
 
+async def test_out_of_band_does_not_cancel_inflight_quote() -> None:
+    """PENDING_NEW has no venue id — reprice waits until the order is live."""
+    strat = await _armed(side=["sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    cid = strat.oms.submitted[0]["cid"]
+
+    await strat.on_best_quote(_hedge_quote("50000", "50100"))
+    assert strat.oms.cancelled == []
+    assert Side.SELL in strat._open
+    assert strat.oms.is_inflight(cid)
+
+    await _go_live(strat, cid, Side.SELL)
+    assert cid in strat.oms.cancelled
+
+
 async def test_out_of_band_cancels_and_reprices() -> None:
     strat = await _armed(side=["sell"])
     await strat.on_best_quote(_hedge_quote("50000", "50000"))
     assert len(strat.oms.submitted) == 1
     cid = strat.oms.submitted[0]["cid"]
+    await _go_live(strat, cid, Side.SELL)
 
     # Hedge ask jumps so resting 50050 edge collapses below x_lo.
     await strat.on_best_quote(_hedge_quote("50000", "50100"))
@@ -568,6 +635,7 @@ async def test_fill_cancels_sibling_leg() -> None:
     await strat.on_best_quote(_hedge_quote("50000", "50000"))
     assert len(strat.oms.submitted) == 2
     by_side = {r["side"]: r["cid"] for r in strat.oms.submitted}
+    await _go_live(strat, by_side[Side.BUY], Side.BUY, price="49950")
     await strat.on_order_update(
         QUOTE_API,
         _update(
@@ -578,6 +646,29 @@ async def test_fill_cancels_sibling_leg() -> None:
             price="50050",
         ),
     )
+    assert by_side[Side.BUY] in strat.oms.cancelled
+
+
+async def test_fill_defers_sibling_cancel_while_inflight() -> None:
+    """A just-placed sibling has no venue id; cancel waits for NEW."""
+    strat = await _armed(side=["buy", "sell"])
+    await strat.on_best_quote(_hedge_quote("50000", "50000"))
+    by_side = {r["side"]: r["cid"] for r in strat.oms.submitted}
+
+    await strat.on_order_update(
+        QUOTE_API,
+        _update(
+            by_side[Side.SELL],
+            OrderStatus.FILLED,
+            side=Side.SELL,
+            filled="0.001",
+            price="50050",
+        ),
+    )
+    assert by_side[Side.BUY] not in strat.oms.cancelled
+    assert strat._open[Side.BUY].cancel_requested is True
+
+    await _go_live(strat, by_side[Side.BUY], Side.BUY, price="49950")
     assert by_side[Side.BUY] in strat.oms.cancelled
 
 
@@ -636,6 +727,7 @@ async def test_cancel_send_failed_keeps_leg_until_terminal() -> None:
     strat = await _armed(side=["sell"])
     await strat.on_best_quote(_hedge_quote("50000", "50000"))
     cid = strat.oms.submitted[0]["cid"]
+    await _go_live(strat, cid, Side.SELL)
     leg = strat._open[Side.SELL]
     leg.canceling = True
 
@@ -691,6 +783,7 @@ async def test_cancel_ack_not_cancelable_keeps_leg() -> None:
     strat = await _armed(side=["sell"])
     await strat.on_best_quote(_hedge_quote("50000", "50000"))
     cid = strat.oms.submitted[0]["cid"]
+    await _go_live(strat, cid, Side.SELL)
     strat.oms.accept_cancel = False
     strat.oms.reject_code = RejectCode.TD_NOT_CANCELABLE
     strat.oms.reject_reason = "order is unknown; it cannot be cancelled"
@@ -711,6 +804,7 @@ async def test_refused_cancel_is_paced_not_retried_every_tick() -> None:
     strat = await _armed(side=["sell"])
     await strat.on_best_quote(_hedge_quote("50000", "50000"))
     cid = strat.oms.submitted[0]["cid"]
+    await _go_live(strat, cid, Side.SELL)
     strat.oms.accept_cancel = False
     strat.oms.reject_code = RejectCode.TD_SEND_FAILED
     strat.oms.reject_reason = "connection lost"

@@ -16,9 +16,6 @@ from mftik.exchange.models import (
     Order,
     OrderStatus,
     PlaceOrderRequest,
-    can_transition,
-    is_pending,
-    is_terminal,
 )
 from mftik.exchange.oms import LedgerView, OmsView, Position
 from mftik.exchange.reservations import is_linear_margin, reservation_for
@@ -266,7 +263,7 @@ class Session:
         cid = order.client_order_id
         if cid:
             current = self.oms.get_order(cid)
-            if current is None and not is_terminal(order.status):
+            if current is None and not order.status.is_terminal():
                 # Filled, or reconciled away, while the call was in flight.
                 # Re-inserting it live from the ack would resurrect an order
                 # no stream will ever terminate again.
@@ -291,7 +288,7 @@ class Session:
         for cb in list(self._order_cbs):
             cb(order)
         await self._store_then_announce_order(order)
-        if cid and is_terminal(order.status):
+        if cid and order.status.is_terminal():
             self.cancel_settled(cid)
             self._forget_unknown(cid)
             self._pending_since.pop(cid, None)
@@ -576,7 +573,7 @@ class Session:
         # commitment could not be priced never reserved it at all.
         await self.release(client_order_id)
         order = self.oms.get_order(client_order_id)
-        if order is None or is_terminal(order.status):
+        if order is None or order.status.is_terminal():
             return None
         rejected = order.model_copy(update={"status": OrderStatus.REJECTED})
         self.oms.handle_order(rejected)
@@ -613,7 +610,7 @@ class Session:
         self._pending_since.pop(client_order_id, None)
         await self.release(client_order_id)
         order = self.oms.get_order(client_order_id)
-        if order is None or is_terminal(order.status):
+        if order is None or order.status.is_terminal():
             return None
         canceled = order.model_copy(update={"status": OrderStatus.CANCELED})
         self.oms.handle_order(canceled)
@@ -641,7 +638,7 @@ class Session:
             # Not in our book — recon found it, or another process placed it.
             # The venue may still know it, so let the cancel through unmarked.
             return None
-        if not can_transition(order.status, OrderStatus.PENDING_CANCEL):
+        if not order.status.can_transition(OrderStatus.PENDING_CANCEL):
             return (
                 f"order is {order.status.value}; "
                 "it cannot be cancelled from that state"
@@ -711,7 +708,7 @@ class Session:
             self._cancel_since.pop(cid, None)
             async with self._recon_lock:
                 order = self.oms.get_order(cid)
-                if order is None or not is_pending(order.status):
+                if order is None or not order.status.is_pending():
                     continue
                 prior_status = order.status
                 unknown = order.model_copy(
@@ -784,11 +781,11 @@ class Session:
             order = self.oms.get_order(client_order_id)
             if order is None:
                 return None
-            if is_terminal(order.status):
+            if order.status.is_terminal():
                 self._forget_unknown(client_order_id)
                 return order
             if order.status is not OrderStatus.UNKNOWN:
-                if not can_transition(order.status, OrderStatus.UNKNOWN):
+                if not order.status.can_transition(OrderStatus.UNKNOWN):
                     logger.warning(
                         "TD cannot mark UNKNOWN api_id=%s cid=%s from %s",
                         self.api_id,

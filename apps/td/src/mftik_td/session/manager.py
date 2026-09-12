@@ -16,7 +16,6 @@ from mftik.exchange.models import (
     Order,
     OrderStatus,
     PlaceOrderRequest,
-    is_terminal,
 )
 from mftik.exchange.oms import LedgerView, OmsView
 from mftik.exchange.order_check import (
@@ -747,7 +746,7 @@ class SessionManager:
                 acct.trading.release(cid),
                 name=f"td-release-{acct.api_id}-{cid}",
             )
-        if is_terminal(order.status):
+        if order.status.is_terminal():
             acct.cid_owner.pop(cid, None)
 
     async def _handle_recon(

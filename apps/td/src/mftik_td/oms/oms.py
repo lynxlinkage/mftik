@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from mftik.exchange.models import Balance, Fill, Order, Side, is_open, is_terminal
+from mftik.exchange.models import Balance, Fill, Order, Side
 from mftik.exchange.oms import OmsView, Position
 
 if TYPE_CHECKING:
@@ -72,7 +72,7 @@ class Oms:
         positions: Sequence[Position] | None = None,
     ) -> OmsView:
         """Replace OMS books from venue snapshots (full recon)."""
-        self._orders = {order_key(o): o for o in orders if is_open(o.status)}
+        self._orders = {order_key(o): o for o in orders if o.status.is_open()}
         self._balances = {b.asset: b for b in balances}
         if positions is not None:
             self._positions = {
@@ -94,7 +94,7 @@ class Oms:
         # Keyed by client_order_id so an order we minted is findable from the
         # moment it is created — before the venue has given it an id at all.
         key = order_key(order)
-        if is_terminal(order.status):
+        if order.status.is_terminal():
             self._orders.pop(key, None)
         else:
             self._orders[key] = order

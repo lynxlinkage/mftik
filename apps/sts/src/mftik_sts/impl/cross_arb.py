@@ -12,8 +12,9 @@ ignoring fees. Both quote legs are ``POST_ONLY``.
 
 **Repricing.** On each hedge-quote update the resting edge of every open leg
 is recomputed against the new touch. Outside ``[x_lo, x_hi]`` the leg is
-cancelled; the replacement waits for the cancel to go terminal, then posts at
-the fresh ``x_mid`` price on a later quote.
+cancelled once it is live; an inflight submit (``PENDING_NEW``) is not
+cancelled — there is no venue id yet. The replacement waits for the cancel
+to go terminal, then posts at the fresh ``x_mid`` price on a later quote.
 
 **Hedging.** The first ``PARTIALLY_FILLED`` or ``FILLED`` on a quote
 ``client_order_id`` fires one IOC for the *full configured* ``qty`` on the
@@ -174,6 +175,10 @@ class _OpenLeg:
     #: we mean to retry has to be paced: ``_maintain_quotes`` runs on every
     #: book update, so an un-paced retry is a cancel per quote tick.
     retry_cancel_at: float = 0.0
+    #: Cancel as soon as the cid leaves inflight, even if the edge is back
+    #: in band. Fill-of-sibling and stop set this; reprice does not — it
+    #: re-checks the band once the order is live.
+    cancel_requested: bool = False
 
 
 def _defer_cancel(leg: _OpenLeg, now: float) -> None:
@@ -330,6 +335,7 @@ class CrossArb(Strategy):
         self._hedge_quote = None
         self._recon.clear()
         self._armed = False
+        self.oms.clear_inflight()
         await self.log(
             "CrossArb restoring as a restart — will cancel leftovers on "
             "recon, then quote again"
@@ -466,9 +472,11 @@ class CrossArb(Strategy):
                     continue
                 if not edge_in_band(side, leg.price, hedge, x_lo, x_hi):
                     edge = edge_bps(side, leg.price, hedge)
+                    waiting = self.oms.is_inflight(leg.cid)
                     await self.log(
                         f"CrossArb {side.value} edge {_fmt(edge)}bps "
-                        f"outside [{_fmt(x_lo)}, {_fmt(x_hi)}] — cancel "
+                        f"outside [{_fmt(x_lo)}, {_fmt(x_hi)}] — "
+                        f"{'cancel when live' if waiting else 'cancel'} "
                         f"cid={leg.cid}"
                     )
                     await self._cancel_leg(api_id, side)
@@ -548,9 +556,17 @@ class CrossArb(Strategy):
         leg = self._open.get(side)
         if leg is None:
             return
+        if self.oms.is_inflight(leg.cid):
+            # No venue id yet (or a cancel already out). Remember only when
+            # the caller needs this gone regardless of the band — a fill of
+            # the other side, or stop. Reprice waits for the next live tick.
+            if force:
+                leg.cancel_requested = True
+            return
         now = asyncio.get_running_loop().time()
         if not force and now < leg.retry_cancel_at:
             return
+        leg.cancel_requested = False
         leg.canceling = True
         try:
             if not await self.oms.cancel_order(api_id, leg.cid):
@@ -591,7 +607,7 @@ class CrossArb(Strategy):
         quote_api = self._quote_api_id()
         if quote_api is not None:
             for side in list(self._open):
-                await self._cancel_leg(quote_api, side)
+                await self._cancel_leg(quote_api, side, force=True)
 
         hedge = self._hedge_quote
         hedge_api = self._hedge_api_id()
@@ -656,6 +672,9 @@ class CrossArb(Strategy):
         cid = order.client_order_id
         if not self.owns(cid) or cid is None:
             return
+        # Unit tests dispatch the hook without the session pump; the live
+        # path also notes in the session, and a second call is idempotent.
+        self.oms.note_order(order)
         key = str(cid)
         self._filled[key] = order.filled_qty
 
@@ -685,6 +704,9 @@ class CrossArb(Strategy):
 
             if order.status in _TERMINAL and side is not None:
                 self._open.pop(side, None)
+                return
+            if side is not None:
+                await self._on_quote_live(api_id, side)
             return
 
         # Hedge-account updates: log only.
@@ -710,8 +732,10 @@ class CrossArb(Strategy):
         side = self._side_of(cid)
         # Same rule as cancel rejects: transport ambiguity is not "gone".
         # Wait for a terminal order update (or a determined venue refuse).
-        if side is not None and reject.error_code not in _TRANSPORT_AMBIGUOUS:
-            self._open.pop(side, None)
+        if reject.error_code not in _TRANSPORT_AMBIGUOUS:
+            self.oms.note_gone(cid)
+            if side is not None:
+                self._open.pop(side, None)
         await self.log(
             f"CrossArb order refused cid={cid} "
             f"[{describe(reject.error_code)}] {reject.reason}",
@@ -724,6 +748,7 @@ class CrossArb(Strategy):
         if not self.owns(reject.client_order_id):
             return
         cid = str(reject.client_order_id)
+        self.oms.note_gone(cid)
         side = self._side_of(cid)
         # Transport ambiguity: the cancel may already have landed. Keep the
         # leg so we do not double-quote; clear canceling so the next tick can
@@ -744,6 +769,26 @@ class CrossArb(Strategy):
         )
 
     # --- helpers -----------------------------------------------------------
+
+    async def _on_quote_live(self, api_id: int, side: Side) -> None:
+        """Honour a forced cancel, or the band, once the cid is no longer inflight."""
+        leg = self._open.get(side)
+        if leg is None or self.oms.is_inflight(leg.cid):
+            return
+        if leg.cancel_requested:
+            await self._cancel_leg(api_id, side, force=True)
+            return
+        hedge = self._hedge_quote
+        if hedge is None:
+            return
+        if not edge_in_band(
+            side,
+            leg.price,
+            hedge,
+            self.paras["x_lo_bps"],
+            self.paras["x_hi_bps"],
+        ):
+            await self._cancel_leg(api_id, side)
 
     def _side_of(self, cid: str) -> Side | None:
         for side, leg in self._open.items():
