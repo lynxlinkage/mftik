@@ -24,9 +24,9 @@ class DomainStats(BaseModel):
     version: str | None = None
     venues: list[str] = Field(default_factory=list)
     api_ids: list[int] = Field(default_factory=list)
-    #: Session counts are per plane. They ride the first instance of each plane
-    #: and are zero on the rest, because repeating them per instance would
-    #: claim a split the tables do not yet record.
+    #: Session counts for *this* instance. STS uses the deploy pin
+    #: (``sts_sessions.instance``); unpinned rows are omitted. MD uses the
+    #: process that wrote the attach. TD follows ``apis.instance_id``.
     live: int = 0
     done: int = 0
     #: Sessions that ended badly. Only ``sts`` records these — td/md rows

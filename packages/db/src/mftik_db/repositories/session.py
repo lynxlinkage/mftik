@@ -9,6 +9,8 @@ from typing import Any, Generic, TypeVar
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mftik_db.models.api import Api
+from mftik_db.models.instance import Instance
 from mftik_db.models.session import (
     MdSessionRow,
     SessionStatus,
@@ -18,6 +20,20 @@ from mftik_db.models.session import (
 from mftik_db.repositories.base import BaseRepository
 
 RowT = TypeVar("RowT")
+
+
+def _fold_instance_counts(rows: Sequence[Any]) -> dict[str, dict[str, int]]:
+    """``(instance, status, n)`` rows → ``{instance: {status: n}}``.
+
+    Drops a NULL instance rather than inventing a key: Home cards only show
+    work that named one.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for instance, status, n in rows:
+        if instance is None:
+            continue
+        out.setdefault(instance, {})[status] = int(n)
+    return out
 
 
 class _SessionListMixin(BaseRepository[RowT], Generic[RowT]):
@@ -107,6 +123,22 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
             return 0
         result = await self.session.execute(stmt)
         return int(result.scalar_one())
+
+    async def count_by_instance(self) -> dict[str, dict[str, int]]:
+        """How many sessions each named instance has, by status.
+
+        Unpinned rows (``instance`` is NULL) are omitted — a Home card only
+        shows work that asked for that instance. A pin to a name that is no
+        longer declared still lands under that name; the route does not turn
+        it into a card.
+        """
+        stmt = (
+            select(StsSessionRow.instance, StsSessionRow.status, func.count())
+            .where(StsSessionRow.instance.is_not(None))
+            .group_by(StsSessionRow.instance, StsSessionRow.status)
+        )
+        result = await self.session.execute(stmt)
+        return _fold_instance_counts(result.all())
 
     async def list_sessions(
         self,
@@ -407,10 +439,36 @@ class TdSessionRepository(_SessionListMixin[TdSessionRow]):
         )
         return int(result.scalar_one())
 
+    async def count_by_instance(self) -> dict[str, dict[str, int]]:
+        """How many attaches each TD instance has, by status.
+
+        ``td_sessions`` has no instance column. The credential's
+        ``apis.instance_id`` is the same fact rebuild routing reads — a
+        snapshot taken at deploy time would send a later count to the
+        instance that used to be allowed to use it.
+        """
+        stmt = (
+            select(Instance.name, TdSessionRow.status, func.count())
+            .select_from(TdSessionRow)
+            .join(Api, Api.id == TdSessionRow.api_id)
+            .join(Instance, Instance.id == Api.instance_id)
+            .group_by(Instance.name, TdSessionRow.status)
+        )
+        result = await self.session.execute(stmt)
+        return _fold_instance_counts(result.all())
+
 
 class MdSessionRepository(_SessionListMixin[MdSessionRow]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, MdSessionRow)
+
+    async def count_by_instance(self) -> dict[str, dict[str, int]]:
+        """How many attaches each MD instance has, by status."""
+        stmt = select(
+            MdSessionRow.instance, MdSessionRow.status, func.count()
+        ).group_by(MdSessionRow.instance, MdSessionRow.status)
+        result = await self.session.execute(stmt)
+        return _fold_instance_counts(result.all())
 
     async def get_live(
         self, *, instance: str, venue: str, session_id: str

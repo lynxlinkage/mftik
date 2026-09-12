@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from db_harness import a_database, an_owner
+from db_harness import a_database, an_instance, an_owner
+from mftik_db.models.api import Api, ApiType
 from mftik_db.models.session import SessionStatus
 from mftik_db.repositories import (
     MdSessionRepository,
@@ -357,3 +358,70 @@ async def test_mark_ack_refuses_live_and_done(db) -> None:
     assert await repo.mark_ack("s-live") is None
     assert await repo.mark_ack("s-done") is None
     assert await repo.mark_ack("nope") is None
+
+
+async def test_sts_count_by_instance_omits_unpinned_and_splits(db) -> None:
+    repo = StsSessionRepository(db)
+    await repo.create_live(
+        session_id="s-fail-tw", created_by=1, instance="sts-tw"
+    )
+    await repo.mark_failed("s-fail-tw", "boom")
+    await repo.create_live(
+        session_id="s-live-jp", created_by=1, instance="sts-jp"
+    )
+    await repo.create_live(session_id="s-unpinned", created_by=1, instance=None)
+
+    assert await repo.count_by_instance() == {
+        "sts-tw": {SessionStatus.FAILED.value: 1},
+        "sts-jp": {SessionStatus.LIVE.value: 1},
+    }
+
+
+async def test_md_count_by_instance_splits(db) -> None:
+    repo = MdSessionRepository(db)
+    await repo.create_live(
+        instance="md-jp-1", venue="Bybit", session_id="s1", created_by=1
+    )
+    await repo.create_live(
+        instance="md-jp-2", venue="Bybit", session_id="s2", created_by=1
+    )
+    await repo.mark_done(instance="md-jp-1", venue="Bybit", session_id="s1")
+
+    assert await repo.count_by_instance() == {
+        "md-jp-1": {SessionStatus.DONE.value: 1},
+        "md-jp-2": {SessionStatus.LIVE.value: 1},
+    }
+
+
+async def test_td_count_by_instance_follows_the_credential(db) -> None:
+    tw = await an_instance(db, "td-tw", "td")
+    jp = await an_instance(db, "td-jp", "td")
+    api_tw = Api(
+        owner_id=1,
+        venue="Paper",
+        api_key="tw",
+        api_secret="s",
+        type=ApiType.HMAC.value,
+        instance_id=tw.id,
+    )
+    api_jp = Api(
+        owner_id=1,
+        venue="Deribit",
+        api_key="jp",
+        api_secret="s",
+        type=ApiType.HMAC.value,
+        instance_id=jp.id,
+    )
+    db.add(api_tw)
+    db.add(api_jp)
+    await db.flush()
+
+    repo = TdSessionRepository(db)
+    await repo.create_live(session_id="s-tw", created_by=1, api_id=api_tw.id)
+    await repo.create_live(session_id="s-jp", created_by=1, api_id=api_jp.id)
+    await repo.mark_done(session_id="s-jp", api_id=api_jp.id)
+
+    assert await repo.count_by_instance() == {
+        "td-tw": {SessionStatus.LIVE.value: 1},
+        "td-jp": {SessionStatus.DONE.value: 1},
+    }

@@ -19,6 +19,12 @@ from mftik.broker.errors import RequestTimeoutError
 from mftik.protocol import Envelope, HealthStatus, Topics, UntypedEnvelope
 from mftik_api.routes import stats as stats_routes
 from mftik_api.routes.stats import router as stats_router
+from mftik_db.models.api import Api, ApiType
+from mftik_db.repositories import (
+    MdSessionRepository,
+    StsSessionRepository,
+    TdSessionRepository,
+)
 
 
 class _Answering:
@@ -143,16 +149,90 @@ async def test_probes_run_concurrently_so_the_page_costs_one_timeout(
     assert elapsed < 0.12, "two 60ms probes did not run back to back"
 
 
-async def test_session_counts_are_not_repeated_on_every_instance(db) -> None:
-    """They belong to the plane, and the tables do not record a split.
+async def test_session_counts_belong_to_the_instance_that_ran_them(db) -> None:
+    """Each card is that instance's work, not the plane total on the first name.
 
-    Showing the same numbers on both MD cards would claim each instance ran
-    them, which is a statement nothing here can support.
+    Unpinned STS (``instance`` NULL) and a pin to a retired name increment
+    no declared card. TD follows the credential's current instance.
     """
+    async with db() as session:
+        await an_instance(session, "sts-tw", "sts")
+        await an_instance(session, "sts-jp", "sts")
+        td_tw = await an_instance(session, "td-tw", "td")
+        td_jp = await an_instance(session, "td-jp", "td")
+
+        sts = StsSessionRepository(session)
+        await sts.create_live(
+            session_id="s-fail-tw", created_by=1, instance="sts-tw"
+        )
+        await sts.mark_failed("s-fail-tw", "attach died")
+        await sts.create_live(
+            session_id="s-unpinned", created_by=1, instance=None
+        )
+        await sts.create_live(
+            session_id="s-retired", created_by=1, instance="sts-retired"
+        )
+
+        md = MdSessionRepository(session)
+        await md.create_live(
+            instance="md-jp-2",
+            venue="Bybit",
+            session_id="s-md",
+            created_by=1,
+        )
+
+        api_tw = Api(
+            owner_id=1,
+            venue="Paper",
+            api_key="tw",
+            api_secret="s",
+            type=ApiType.HMAC.value,
+            instance_id=td_tw.id,
+        )
+        api_jp = Api(
+            owner_id=1,
+            venue="Deribit",
+            api_key="jp",
+            api_secret="s",
+            type=ApiType.HMAC.value,
+            instance_id=td_jp.id,
+        )
+        session.add(api_tw)
+        session.add(api_jp)
+        await session.flush()
+
+        td = TdSessionRepository(session)
+        await td.create_live(
+            session_id="s-td-tw", created_by=1, api_id=api_tw.id
+        )
+        await td.create_live(
+            session_id="s-td-jp", created_by=1, api_id=api_jp.id
+        )
+        await td.mark_done(session_id="s-td-jp", api_id=api_jp.id)
+
     broker = _Answering(up={})
     async with a_client(_app(broker)) as client:
         res = await client.get("/stats")
 
-    md_rows = [r for r in res.json()["domains"] if r["domain"] == "md"]
-    assert len(md_rows) == 2
-    assert sum(1 for r in md_rows if r["live"] or r["done"]) <= 1
+    rows = {row["instance"]: row for row in res.json()["domains"]}
+    assert set(rows) == {
+        "md-jp-1",
+        "md-jp-2",
+        "sts-jp",
+        "sts-tw",
+        "td-jp",
+        "td-tw",
+    }
+
+    assert rows["sts-tw"]["failed"] == 1
+    assert rows["sts-tw"]["live"] == 0
+    assert rows["sts-jp"]["failed"] == 0
+    assert rows["sts-jp"]["live"] == 0
+
+    assert rows["md-jp-2"]["live"] == 1
+    assert rows["md-jp-1"]["live"] == 0
+
+    assert rows["td-tw"]["live"] == 1
+    assert rows["td-tw"]["done"] == 0
+    assert rows["td-jp"]["live"] == 0
+    assert rows["td-jp"]["done"] == 1
