@@ -61,6 +61,8 @@ class FakeOms:
         self.reject_reason = ""
         self.reject_code: int | str = RejectCode.NONE
         self.cancelled: list[str] = []
+        self.waits: list[tuple] = []
+        self.wait_ok = True
         self.accept = accept
         self.accept_cancel = accept_cancel
         self.strategy: ChaseOrder | None = None
@@ -120,6 +122,14 @@ class FakeOms:
         if self.answer_cancels and self.strategy is not None and self.accept_cancel:
             asyncio.create_task(self._answer_cancel(str(client_order_id)))
         return self.accept_cancel
+
+    async def wait_cids(self, api_id, cids, *, until, timeout):
+        if isinstance(cids, (str, int)):
+            recorded = [str(cids)]
+        else:
+            recorded = [str(cid) for cid in cids]
+        self.waits.append((api_id, recorded, timeout))
+        return self.wait_ok
 
     async def _answer_cancel(self, cid: str) -> None:
         await asyncio.sleep(0)

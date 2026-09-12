@@ -35,6 +35,7 @@ from mftik.exchange.models import (
     Fill,
     Order,
     OrderBook,
+    OrderStatus,
     OrderType,
     Side,
 )
@@ -48,6 +49,7 @@ from mftik.protocol import (
 )
 from mftik.protocol.reject_codes import describe
 from mftik.strategy import Strategy
+from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S
 from mftik.strategy.timer import TimerToken
 
 DEFAULT_EXEC_INTERVAL_MS = 1000
@@ -155,7 +157,22 @@ class NoopStrategy(Strategy):
     async def on_stop(self) -> None:
         self._cancel_timer()
         if self.session is not None and len(self.session.td_api_ids) == 1:
-            await self._cancel_open(self.session.td_sole())
+            api_id = self.session.td_sole()
+            cid = self._open_cid
+            if cid is not None:
+                cleared = await self.oms.wait_cids(
+                    api_id,
+                    cid,
+                    until=lambda o: o.status is not OrderStatus.PENDING_NEW,
+                    timeout=WAIT_CIDS_TIMEOUT_S,
+                )
+                if not cleared:
+                    await self.log(
+                        f"NoopStrategy stop: cid={cid} still PENDING_NEW "
+                        f"after {WAIT_CIDS_TIMEOUT_S}s — cancelling anyway",
+                        level="warn",
+                    )
+            await self._cancel_open(api_id)
         await self.log("NoopStrategy stopped")
 
     # --- market data -------------------------------------------------------

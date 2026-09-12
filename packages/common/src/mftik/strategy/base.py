@@ -77,6 +77,9 @@ class Strategy:
         submit_order mints the uint64 client_order_id
         (ver | session_id | seconds since 2026-01-01 | seq++) and leaves it in
         oms.last_client_order_id; cancel_order takes that id.
+        wait_cids(api_id, cids, until=..., timeout=...) parks until every
+        cid satisfies ``until`` (typically ``status is not PENDING_NEW``)
+        or the timeout fires. Use it from on_stop before cancel_order.
 
     Private events from ``td.{api_id}.global`` (wired):
         on_order_update, on_fill, on_balance_update
