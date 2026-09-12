@@ -7,6 +7,9 @@ you write strategies on.
 pip install mftik
 ```
 
+A final git tag `vX.Y.Z` is both this wheel (`mftik==X.Y.Z`) and the GHCR
+images (`:vX.Y.Z`). They are the same release.
+
 The package is `packages/common` — the same one every service in this workspace
 installs. It carries three things: the shared library, `mftik.strategy` (what a
 strategy is written against), and `mftik.cli`.

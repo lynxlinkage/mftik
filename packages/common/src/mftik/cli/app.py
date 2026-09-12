@@ -389,8 +389,8 @@ def _setup_node_init(parser: argparse.ArgumentParser) -> None:
         "--tag",
         default="latest",
         help=(
-            "image tag to run, from the repository's releases. Not the version "
-            "of this package — they are numbered separately"
+            "image tag to run (vX.Y.Z). Same release as this package: "
+            "mftik==0.9.5 is ghcr.io/lynxlinkage/mftik:v0.9.5"
         ),
     )
     parser.add_argument(

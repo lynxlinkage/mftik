@@ -721,7 +721,7 @@ route.
 Audit writes for mutations (`docs/AuditIdentity.md` vocabulary: `via`,
 not just `user_id`). `just openapi` — `contracts/openapi.json` is
 generated; `just check-contracts` and
-`.github/workflows/{tests,publish,release}.yml` fail the job when
+`.github/workflows/{tests,release}.yml` fail the job when
 it is stale. That is this ticket, not ENV-10.
 `packages/common/src/mftik/cli/templates/` Caddyfile / compose
 timeout for `/environment`.

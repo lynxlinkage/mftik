@@ -5,7 +5,7 @@
 # you `import mftik` and the `mftik` command, and nothing about "common"
 # survives being read from outside this repository.
 name = "mftik"
-version = "0.9.4"
+dynamic = ["version"]
 description = "MFTIK — strategy SDK and client for a self-hosted trading node"
 readme = "README.md"
 license = "MIT"
@@ -45,6 +45,16 @@ mftik = "mftik.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# The git tag is the version. CI sets MFTIK_DIST_VERSION from github.ref_name
+# (strip the leading v, PEP 440-normalize a pre-release). Hatch's env source
+# has no fallback — unset fails the build — so a short module reads the
+# same variable and defaults to 0.0.0. The name is not MFTIK_VERSION: compose
+# already uses that for the image tag, and env_file would overwrite a runtime
+# copy. A source tree is not a release.
+[tool.hatch.version]
+source = "code"
+path = "hatch_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mftik"]
