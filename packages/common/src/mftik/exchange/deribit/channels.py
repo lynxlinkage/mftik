@@ -92,7 +92,8 @@ PRIVATE_BUY = "private/buy"
 PRIVATE_SELL = "private/sell"
 PRIVATE_CANCEL = "private/cancel"
 PRIVATE_CANCEL_BY_LABEL = "private/cancel_by_label"
-PRIVATE_GET_OPEN_ORDERS = "private/get_open_orders_by_currency"
+PRIVATE_GET_OPEN_ORDERS = "private/get_open_orders"
+PRIVATE_GET_OPEN_ORDERS_BY_INSTRUMENT = "private/get_open_orders_by_instrument"
 PRIVATE_GET_ORDER_STATE = "private/get_order_state"
 PRIVATE_GET_ORDER_STATE_BY_LABEL = "private/get_order_state_by_label"
 PRIVATE_GET_ACCOUNT_SUMMARIES = "private/get_account_summaries"
@@ -109,6 +110,7 @@ __all__ = [
     "PRIVATE_CANCEL_BY_LABEL",
     "PRIVATE_GET_ACCOUNT_SUMMARIES",
     "PRIVATE_GET_OPEN_ORDERS",
+    "PRIVATE_GET_OPEN_ORDERS_BY_INSTRUMENT",
     "PRIVATE_GET_ORDER_STATE",
     "PRIVATE_GET_ORDER_STATE_BY_LABEL",
     "PRIVATE_GET_POSITIONS",

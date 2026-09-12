@@ -290,15 +290,15 @@ class DeribitPrivateClient(BaseClient):
 
     async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
         self._ensure_connected()
-        params: dict[str, Any] = {"currency": "any"}
         if symbol is not None:
             native = await self._venue_symbol(symbol)
             raw = await self.stream.rpc(
-                ch.PRIVATE_GET_OPEN_ORDERS,
-                {"currency": "any", "instrument_name": native},
+                ch.PRIVATE_GET_OPEN_ORDERS_BY_INSTRUMENT,
+                {"instrument_name": native},
             )
         else:
-            raw = await self.stream.rpc(ch.PRIVATE_GET_OPEN_ORDERS, params)
+            # Cross-currency. by_currency rejects currency="any" (-32602).
+            raw = await self.stream.rpc(ch.PRIVATE_GET_OPEN_ORDERS, {})
         rows = raw if isinstance(raw, list) else []
         out: list[Order] = []
         for item in rows:

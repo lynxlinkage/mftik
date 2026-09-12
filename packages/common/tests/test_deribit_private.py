@@ -158,6 +158,7 @@ class FakeStream:
                 },
             ],
             ch.PRIVATE_GET_OPEN_ORDERS: [],
+            ch.PRIVATE_GET_OPEN_ORDERS_BY_INSTRUMENT: [],
         }
         self._reconnect_cbs: list[Any] = []
         self.portfolios: list[str] = []
@@ -381,6 +382,61 @@ async def test_inverse_and_dated_positions_resolve_home() -> None:
     assert by_ticker[str(PERP)] == Decimal("0.01")
     assert by_ticker[str(INVERSE)] == Decimal("100")
     assert by_ticker[str(DATED)] == Decimal("50")
+
+
+async def test_open_orders_use_the_cross_currency_rpc() -> None:
+    stream = FakeStream()
+    stream.results[ch.PRIVATE_GET_OPEN_ORDERS] = [
+        {
+            "instrument_name": "BTC_USDC",
+            "order_id": "ord-1",
+            "label": "c-1",
+            "direction": "buy",
+            "order_type": "limit",
+            "order_state": "open",
+            "amount": "0.001",
+            "price": "60000",
+        },
+        {
+            "instrument_name": "BTC_USDC-PERPETUAL",
+            "order_id": "ord-2",
+            "direction": "sell",
+            "order_type": "limit",
+            "order_state": "open",
+            "amount": "0.01",
+            "price": "60100",
+        },
+    ]
+    async with _client(stream) as client:
+        orders = await client.fetch_open_orders()
+    method, params = stream.calls[-1]
+    assert method == "private/get_open_orders"
+    assert "currency" not in (params or {})
+    assert [row.order_id for row in orders] == ["ord-1", "ord-2"]
+    assert orders[0].universal_ticker == "Deribit_Spot_BTCUSDC"
+    assert orders[1].universal_ticker == str(PERP)
+
+
+async def test_open_orders_for_a_symbol_use_instrument_rpc() -> None:
+    stream = FakeStream()
+    stream.results[ch.PRIVATE_GET_OPEN_ORDERS_BY_INSTRUMENT] = [
+        {
+            "instrument_name": "BTC_USDC",
+            "order_id": "ord-1",
+            "direction": "buy",
+            "order_type": "limit",
+            "order_state": "open",
+            "amount": "0.001",
+            "price": "60000",
+        }
+    ]
+    async with _client(stream) as client:
+        orders = await client.fetch_open_orders("BTCUSDC")
+    method, params = stream.calls[-1]
+    assert method == "private/get_open_orders_by_instrument"
+    assert params == {"instrument_name": "BTC_USDC"}
+    assert orders[0].order_id == "ord-1"
+    assert orders[0].universal_ticker == "Deribit_Spot_BTCUSDC"
 
 
 async def test_inverse_limit_sends_usd_amount() -> None:
