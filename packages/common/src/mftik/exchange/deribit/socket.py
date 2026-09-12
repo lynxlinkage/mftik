@@ -196,7 +196,7 @@ class DeribitSocket:
             raise DeribitWsError(None, f"no reply within {wait}s", op=op) from exc
         finally:
             self._pending.pop(req_id, None)
-        resp.raise_for_error()
+        resp.raise_for_error(op=op)
         return resp
 
     async def handshake(
@@ -230,7 +230,7 @@ class DeribitSocket:
             if resp.req_id != req_id:
                 logger.debug("%s dropping pre-handshake frame %r", self.name, resp)
                 continue
-            resp.raise_for_error()
+            resp.raise_for_error(op=op)
             return resp
 
     async def rpc(

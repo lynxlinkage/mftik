@@ -71,6 +71,7 @@ class DeribitError(ExchangeError):
     def __init__(self, code: int | None, message: str, *, op: str = "") -> None:
         self.code = code
         self.op = op
+        self.msg = message
         prefix = f"{op}: " if op else ""
         super().__init__(f"{prefix}[{code}] {message}")
 
@@ -516,11 +517,17 @@ class DeribitResponse:
     def is_reply(self) -> bool:
         return self.req_id is not None and not self.is_push
 
-    def raise_for_error(self) -> None:
+    def raise_for_error(self, *, op: str = "") -> None:
+        """Raise if this frame refused the call.
+
+        Deribit error replies often omit ``method``. Pass the requested
+        method as ``op`` so the exception still names the call that was
+        in flight.
+        """
         if self.success:
             return
         raise DeribitWsError(
-            self.code, self.msg or "request failed", op=self.method
+            self.code, self.msg or "request failed", op=op or self.method
         )
 
     def rows(self) -> list[dict[str, Any]]:

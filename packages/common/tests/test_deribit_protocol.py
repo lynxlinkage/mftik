@@ -240,3 +240,41 @@ def test_v9_balance_maps_available_funds_and_equity() -> None:
 def test_hosts_are_production_not_testnet() -> None:
     assert p.DERIBIT_REST_URL == "https://www.deribit.com/api/v2"
     assert p.DERIBIT_WS_URL == "wss://www.deribit.com/ws/api/v2"
+
+
+def test_raise_for_error_uses_the_requested_method_when_the_reply_omits_it() -> None:
+    """Deribit error replies have no ``method``; the caller still knows it."""
+    resp = p.DeribitResponse(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "error": {"code": -32602, "message": "Invalid params"},
+        }
+    )
+    assert resp.method == ""
+    try:
+        resp.raise_for_error(op="public/auth")
+    except p.DeribitWsError as exc:
+        assert exc.op == "public/auth"
+        assert exc.code == -32602
+        assert exc.msg == "Invalid params"
+        assert str(exc) == "public/auth: [-32602] Invalid params"
+    else:
+        raise AssertionError("expected DeribitWsError")
+
+
+def test_raise_for_error_without_op_stays_bare_when_the_reply_has_no_method() -> None:
+    resp = p.DeribitResponse(
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "error": {"code": -32602, "message": "Invalid params"},
+        }
+    )
+    try:
+        resp.raise_for_error()
+    except p.DeribitWsError as exc:
+        assert exc.op == ""
+        assert str(exc) == "[-32602] Invalid params"
+    else:
+        raise AssertionError("expected DeribitWsError")
