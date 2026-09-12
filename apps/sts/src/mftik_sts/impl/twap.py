@@ -92,7 +92,6 @@ def _refusal_reason(code: int | str, reason: str) -> str:
 
 class TwapStrategy(Strategy):
     name = "twap"
-    id = 5
 
     def __init__(self) -> None:
         super().__init__()

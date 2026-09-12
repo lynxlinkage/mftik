@@ -264,7 +264,6 @@ class MacdDollarBars(Strategy):
     """MACD on dollar bars. Long only, IOC through the touch."""
 
     name = "macd_dollar"
-    id = 7
     rebuildable = False
 
     def __init__(self) -> None:

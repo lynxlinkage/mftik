@@ -34,7 +34,7 @@ from mftik.protocol import (
     Topics,
     publish_sts_log,
 )
-from mftik.strategy.client_order_id import slot_of
+from mftik.strategy.client_order_id import VERSION, session_id_of, version_of
 from mftik.strategy.ledger import StrategyLedger
 from mftik.strategy.mds import StrategyMds
 from mftik.strategy.oms import StrategyOms
@@ -75,7 +75,7 @@ class Strategy:
         id to cancel against. A True says nothing about the venue's answer
         — that arrives below.
         submit_order mints the uint64 client_order_id
-        (session cid_slot | ms since 2026-01-01 | seq++) and leaves it in
+        (ver | session_id | seconds since 2026-01-01 | seq++) and leaves it in
         oms.last_client_order_id; cancel_order takes that id.
 
     Private events from ``td.{api_id}.global`` (wired):
@@ -155,9 +155,6 @@ class Strategy:
     #: resting at the venue. Readiness is a property of the strategy, not of
     #: whoever set the environment variable.
     rebuildable: bool = False
-    #: Numeric id for this strategy *class*. Not packed into client_order_id —
-    #: that carries the per-session slot; see :mod:`mftik.strategy.client_order_id`.
-    id: int = 0
 
     def __init__(self) -> None:
         self.session: SessionView | None = None
@@ -187,7 +184,7 @@ class Strategy:
                 f"{self.session.session_id}"
             )
         self.session = session
-        self.oms.bind(self, cid_slot=session.cid_slot)
+        self.oms.bind(self)
         self.mds.bind(self)
         self.ledger.bind(self)
         self.tape.bind(self)
@@ -232,11 +229,6 @@ class Strategy:
         """
         return self._symbols if self.session is not None else None
 
-    @property
-    def cid_slot(self) -> int | None:
-        """This session's 16-bit ``client_order_id`` slot."""
-        return self.session.cid_slot if self.session is not None else None
-
     def owns(self, client_order_id: str | int | None) -> bool:
         """Whether ``client_order_id`` was minted by this session.
 
@@ -251,7 +243,10 @@ class Strategy:
         if client_order_id is None or self.session is None:
             return False
         try:
-            return slot_of(client_order_id) == self.session.cid_slot
+            return (
+                version_of(client_order_id) == VERSION
+                and session_id_of(client_order_id) == self.session.session_id
+            )
         except (TypeError, ValueError):
             return False
 

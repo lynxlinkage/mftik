@@ -104,12 +104,6 @@ class StsSessionRow(Base):
     #: person wrote, comments and all. Null for deploys that never got that
     #: far.
     yaml_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    #: The 16-bit slot packed into every ``client_order_id`` this session
-    #: mints. Persisted so a rebuilt session can keep it: ``Strategy.owns()``
-    #: matches orders by slot, so a new one would leave the strategy unable to
-    #: recognise the orders it placed before the restart. Null for rows
-    #: written before this was recorded.
-    cid_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: Which STS was asked to run this. Nullable: a row written before
     #: instances existed was not pinned, and an unpinned deploy still is not.
     #: The rebuild scan filters on it, so a run pinned to ``sts-tw`` comes back

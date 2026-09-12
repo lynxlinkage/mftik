@@ -17,7 +17,6 @@ class TypedSession:
     def __init__(self, broker: RecordingBroker, type: str | None) -> None:
         self.broker = broker
         self.session_id = "s-typed"
-        self.cid_slot = 0
         self.type = type
 
 
@@ -27,7 +26,6 @@ class BareSession:
     def __init__(self, broker: RecordingBroker) -> None:
         self.broker = broker
         self.session_id = "s-bare"
-        self.cid_slot = 0
 
 
 class Probe(Strategy):

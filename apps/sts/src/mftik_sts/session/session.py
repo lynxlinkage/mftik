@@ -173,7 +173,6 @@ class StsSession:
         md: dict[str, list[str]] | None = None,
         st_paras: dict[str, Any] | None = None,
         heartbeat_interval: float = 1.0,
-        cid_slot: int = 0,
         symbols: SymbolClient | None = None,
         on_exit: ExitHandler | None = None,
         remember: RememberHandler | None = None,
@@ -216,11 +215,6 @@ class StsSession:
         self.md_ids = md_feeds_of(self.md)
         self.st_paras = dict(st_paras or {})
         self.heartbeat_interval = heartbeat_interval
-        #: 16-bit id packed into every client_order_id this session mints.
-        #: 16 bits of the session id (``slot_for_session``), so a rebuild keeps
-        #: it. Drawn, not allocated: two live sessions can share one, and
-        #: ``owns()`` is wrong about the other's fills when they do.
-        self.cid_slot = cid_slot
         #: Symbol plane reads. Strategies round their own prices and sizes,
         #: so they need tick/step/notional at hand — TD does not check.
         self.symbols = symbols or SymbolClient(broker)
@@ -232,7 +226,7 @@ class StsSession:
         #: can reach it through the session from their first call.
         self.event_log = event_log or EventLog.from_env(session_id)
 
-        # Must follow cid_slot: bind() builds the client_order_id factory.
+        # bind() builds the client_order_id factory from session_id.
         strategy.bind(self)
         self.strategy.paras = type(strategy).on_initialized(self.st_paras)
 
@@ -351,7 +345,6 @@ class StsSession:
             strategy=self.strategy_name,
             td=self.td_api_ids,
             md=self.md_ids,
-            cid_slot=self.cid_slot,
             paras=self.st_paras or None,
         )
 

@@ -125,23 +125,6 @@ async def test_type_and_yaml_text_are_kept(db) -> None:
     assert row.yaml_text == "sts: {}\n"
 
 
-async def test_the_cid_slot_is_kept(db) -> None:
-    """A rebuilt session has to mint order ids in the same slot.
-
-    `Strategy.owns()` matches orders by slot, so a session that came back with
-    a new one would not recognise the orders it placed before the restart.
-    """
-    repo = StsSessionRepository(db)
-    await repo.create_live(
-        session_id="s-slot", created_by=1, strategy="oco", cid_slot=4242
-    )
-
-    row = await repo.get_by_session_id("s-slot")
-    assert row is not None
-    assert row.cid_slot == 4242
-    assert row.st_facts == {}
-
-
 async def test_mark_live_undoes_the_ending(db) -> None:
     repo = StsSessionRepository(db)
     await _live(repo, "s-back")

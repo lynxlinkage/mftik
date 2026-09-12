@@ -44,7 +44,6 @@ class FakeStsStore:
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_paras: dict | None = None,
-        cid_slot: int | None = None,
         restart: str = "always",
         **_extra: object,
     ) -> SimpleNamespace:
@@ -55,7 +54,6 @@ class FakeStsStore:
             finished_at=None,
             status="live",
             strategy=strategy,
-            cid_slot=cid_slot,
             restart=restart,
             rebuild_count=0,
             reason=None,
@@ -445,30 +443,6 @@ async def test_an_operator_stop_is_not_interrupted(broker: Broker) -> None:
     await manager.stop_session("op-1")
 
     assert store.rows["op-1"].status == "done"
-
-
-@pytest.mark.asyncio
-async def test_the_cid_slot_is_recorded_with_the_session(broker: Broker) -> None:
-    """Without it on the row, a rebuilt session cannot keep its slot, and
-    `owns()` would disown every order placed before the restart."""
-    store = FakeStsStore()
-    manager, _ = _manager(broker, store, ExitingStrategy)
-
-    class Idle(Strategy):
-        name = "idle_slot"
-
-    register(Idle)
-    manager._strategy_factory = lambda name: Idle()  # noqa: SLF001
-    await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="slot-1", created_by=1, strategy="idle_slot"
-        )
-    )
-
-    session = manager.get("slot-1")
-    assert session is not None
-    assert store.rows["slot-1"].cid_slot == session.cid_slot
-    await manager.close_all()
 
 
 @pytest.mark.asyncio

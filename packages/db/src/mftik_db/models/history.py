@@ -11,7 +11,10 @@ Four tables, and the split between them is the point:
 * ``orders`` — one row per order, carrying **who placed it**. Written when the
   order is submitted, which is the only moment both the ``client_order_id`` and
   the ``session_id`` are in the same hand. Everything downstream reads
-  attribution from here rather than decoding it.
+  attribution from here rather than decoding it. A v1 ``client_order_id``
+  encodes the session id exactly (``session_id_of``), so a later backfill
+  could fill ``session_id`` on an order the live writer missed; that is not
+  done here.
 * ``fills`` — one row per execution, append-mostly.
 * ``cash_flows`` — money that moved for reasons no fill reports: funding,
   transfers, rebates. Account-level, deliberately not attributed to a session;
@@ -66,10 +69,6 @@ class Attribution:
 
     #: Written at submit, from the request itself. The only authoritative one.
     DIRECT = "direct"
-    #: Recovered later by decoding the ``cid_slot`` and matching a session's
-    #: lifetime. Sound for history predating this table, a guess after a slot
-    #: has wrapped and been reused.
-    INFERRED = "inferred"
     #: Not ours. Placed by hand, by another tool, or before the account was
     #: attached. ``session_id`` is null and must stay that way.
     EXTERNAL = "external"
@@ -127,10 +126,6 @@ class OrderRow(Base):
     #: Denormalized off ``sts_sessions`` so listing a period's orders does not
     #: join for a label.
     strategy: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    #: The 16-bit slot packed into ``client_order_id``, decoded once on the way
-    #: in. Kept so a later pass can re-derive attribution without re-parsing,
-    #: and so a slot collision is visible rather than silent.
-    cid_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
     attribution: Mapped[str] = mapped_column(
         String(8), nullable=False, default=Attribution.DIRECT
     )

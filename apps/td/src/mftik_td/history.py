@@ -88,10 +88,6 @@ def order_row(
         "client_order_id": order.client_order_id,
         "venue_order_id": order.order_id or None,
         "session_id": session_id,
-        # Left to the backfill, which is the pass that needs it: at submit the
-        # session is known outright, so decoding the slot would answer a
-        # question nobody is asking.
-        "cid_slot": None,
         "strategy": None,
         "attribution": (
             Attribution.DIRECT if session_id else Attribution.EXTERNAL

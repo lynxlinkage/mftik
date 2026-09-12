@@ -36,8 +36,12 @@ def _named_sts_without_a_database(monkeypatch) -> None:
     async def _ok(broker, instance):  # noqa: ANN001
         return None
 
+    async def _mint() -> str:
+        return "aabb01"
+
     monkeypatch.setattr(orchestrate, "_sts_target", _target)
     monkeypatch.setattr(orchestrate, "_check_sts_instance", _ok)
+    monkeypatch.setattr(orchestrate, "mint_session_id", _mint)
 
 
 REFUSAL = (

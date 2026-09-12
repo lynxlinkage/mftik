@@ -40,7 +40,7 @@ def _oms(broker: Broker, *api_ids: int) -> StrategyOms:
         session_id="s-oms",
         strategy=SimpleNamespace(name="quiet"),
     )
-    oms.bind(SimpleNamespace(session=session), cid_slot=1)
+    oms.bind(SimpleNamespace(session=session))
     return oms
 
 

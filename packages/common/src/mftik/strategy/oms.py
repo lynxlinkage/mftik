@@ -75,7 +75,7 @@ class StrategyOms:
 
     ``submit_order`` mints the uint64 ``client_order_id`` itself::
 
-        [session slot 16][ts_ms_from_2026-01-01 40][seq 8]
+        [ver 4][session_id 24][ts_sec_from_2026-01-01 28][seq 8]
 
     and leaves it in :attr:`last_client_order_id` for the caller to keep.
     """
@@ -96,9 +96,11 @@ class StrategyOms:
         #: overtake the local book announcement.
         self._done: set[str] = set()
 
-    def bind(self, strategy: Strategy, *, cid_slot: int) -> None:
+    def bind(self, strategy: Strategy) -> None:
+        if strategy.session is None:
+            raise RuntimeError("strategy OMS bind requires a session")
         self._strategy = strategy
-        self._cid_factory = ClientOrderIdFactory(cid_slot)
+        self._cid_factory = None
         self._inflight.clear()
         self._done.clear()
 
@@ -153,6 +155,12 @@ class StrategyOms:
     def _mark_inflight(self, cid: str) -> None:
         if cid not in self._done:
             self._inflight.add(cid)
+
+    def _next_client_order_id(self) -> str:
+        if self._cid_factory is None:
+            session = self._require_session()
+            self._cid_factory = ClientOrderIdFactory(session.session_id)
+        return self._cid_factory.next()
 
     async def view(self, api_id: int | None = None) -> OmsView:
         """Read TD's live book for ``api_id`` over ``td.account``."""
@@ -279,11 +287,6 @@ class StrategyOms:
         free-form and will drift.
         """
         return self._last_code
-
-    def _next_client_order_id(self) -> str:
-        if self._cid_factory is None:
-            raise RuntimeError("strategy OMS is not bound to a session")
-        return self._cid_factory.next()
 
     async def submit_order(
         self,

@@ -248,7 +248,6 @@ async def test_unwritable_directory_does_not_fail_the_session(
 
 class ProbeStrategy(Strategy):
     name = "eventlog_probe"
-    id = 97
 
     def __init__(self) -> None:
         super().__init__()
@@ -453,7 +452,7 @@ async def test_order_submit_and_ack_are_both_recorded(
 
     strategy = ProbeStrategy()
     sts = _session(
-        broker, tmp_path, strategy, td_api_ids=[11], session_id="ev-order"
+        broker, tmp_path, strategy, td_api_ids=[11], session_id="aa0e01"
     )
     await sts.start()
     server = asyncio.create_task(fake_td())
@@ -472,7 +471,7 @@ async def test_order_submit_and_ack_are_both_recorded(
     await server
     await sts.stop()
 
-    orders = _events(_read(tmp_path / "ev-order.jsonl"), "order")
+    orders = _events(_read(tmp_path / "aa0e01.jsonl"), "order")
     assert [r["event"] for r in orders] == ["sts.order.submit", "order_ack"]
     assert orders[0]["dir"] == "out"
     assert orders[0]["cid"] == cid
@@ -488,7 +487,7 @@ async def test_order_with_no_td_records_the_refusal(
     """Nothing is serving the account: the log must show the attempt anyway."""
     strategy = ProbeStrategy()
     sts = _session(
-        broker, tmp_path, strategy, td_api_ids=[12], session_id="ev-noack"
+        broker, tmp_path, strategy, td_api_ids=[12], session_id="aa0e02"
     )
     strategy.oms._ack_timeout = 0.2
     await sts.start()
@@ -503,7 +502,7 @@ async def test_order_with_no_td_records_the_refusal(
     assert accepted is False
     await sts.stop()
 
-    orders = _events(_read(tmp_path / "ev-noack.jsonl"), "order")
+    orders = _events(_read(tmp_path / "aa0e02.jsonl"), "order")
     assert [r["event"] for r in orders] == ["sts.order.submit", "order_ack"]
     assert orders[1]["accepted"] is False
     assert orders[1]["reason"] == "no ack from TD"

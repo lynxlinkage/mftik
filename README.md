@@ -83,7 +83,7 @@ A subscribe the venue does not serve is **refused at attach**, not silently empt
 
 **The tape.** MD records `trade` / `aggtrade` while somebody holds the feed. `self.tape.read(...)` hands a later session the same `Trade` / `AggTrade` objects the live hooks get, plus coverage — `continuous_since_ms`, measured gaps, whether recording is still on. A count of prints is not a length of history; the slice says what it covers. `TapeKeeper` is a bundled strategy that subscribes and does nothing else, so the tape exists before the strategy that will need it is deployed.
 
-**Private events** arrive from the account, not from a candle: order updates, fills, rejects, balances, positions (contracts only). `td.{api_id}.global` is account-wide — filter with `self.owns(cid)` before you treat a fill as yours.
+**Private events** arrive from the account, not from a candle: order updates, fills, rejects, balances, positions (contracts only). `td.{api_id}.global` is account-wide — filter with `self.owns(cid)` before you treat a fill as yours. `owns` decodes the six-hex session id packed into the cid.
 
 Instruments are **universal tickers**: `Venue_Category_SYMBOL`. `Gate_Spot_BTCUSDT`, `BinanceUM_Perp_BTCUSDT`, `Bybit_Spot_ETHUSDT`. The middle part is the book, not a nickname.
 
