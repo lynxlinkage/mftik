@@ -164,6 +164,11 @@ def normalize_symbol(symbol: str, *, category: str | None = None) -> str:
         strike = spell_strike(parts[-2])
         if pair and strike:
             return f"{pair}-{parts[-3]}-{strike}-{parts[-1]}"
+        # A strike we cannot fold (``10_000``, ``10 000``) stays as typed.
+        # Falling through to ``canonical`` would glue it onto the pair and
+        # ``of`` would accept a ticker ``parse`` cannot split back.
+        if pair:
+            return f"{pair}-{parts[-3]}-{parts[-2]}-{parts[-1]}"
     if len(parts) >= 2 and _DATE_CODE.match(parts[-1]):
         pair = canonical("-".join(parts[:-1]))
         if pair:

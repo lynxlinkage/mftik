@@ -46,6 +46,7 @@ def test_canonical_tolerates_empty_input() -> None:
         # Uppercased before the split, which is what makes a typed
         # ``6d4`` and a typed ``6.4`` one spelling for free.
         ("AVAXUSDC-260905-6D4-C", "option", "AVAXUSDC-260905-6D4-C"),
+        ("BTCUSDT-260905-10_000-C", "option", "BTCUSDT-260905-10000-C"),
         ("BTCUSDT", Category.PERP, "BTCUSDT"),
     ],
 )
@@ -60,6 +61,7 @@ def test_normalize_symbol_keeps_structured_hyphens(
     [
         (Decimal("70000.0"), "70000"),
         ("7E4", "70000"),
+        ("10_000", "10000"),
         (Decimal("6.4"), "6D4"),
         ("6.4", "6D4"),
         ("6d4", "6D4"),
