@@ -1,11 +1,14 @@
-"""Deribit JSON-RPC framing, signing, listing filter (V1 / V2 / V3 / V12)."""
+"""Deribit JSON-RPC framing, signing, listing filter (V1 / V2 / V3 / V12 / V13)."""
 
 from __future__ import annotations
+
+from decimal import Decimal
 
 from mftik.exchange.deribit import protocol as p
 from mftik.exchange.deribit.listing import to_listed
 from mftik.exchange.deribit.models import DeribitSummary
 from mftik.exchange.tickers import Category, UniversalTicker
+from mftik.symbols.listed import MIN_QTY, PRICE_TICK, QTY_STEP
 
 SPOT_NATIVE = {
     "instrument_name": "BTC_USDC",
@@ -90,6 +93,57 @@ DATED_LINEAR = {
     "is_active": True,
 }
 
+OPTION_INVERSE = {
+    "instrument_name": "BTC-13SEP26-70000-C",
+    "kind": "option",
+    "instrument_type": "reversed",
+    "option_type": "call",
+    "strike": 70000,
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "counter_currency": "USD",
+    "settlement_currency": "BTC",
+    "tick_size": "0.0001",
+    "min_trade_amount": "0.1",
+    "contract_size": "1",
+    "expiration_timestamp": 1_789_286_400_000,
+    "is_active": True,
+}
+
+OPTION_LINEAR = {
+    "instrument_name": "BTC_USDC-13SEP26-70000-C",
+    "kind": "option",
+    "instrument_type": "linear",
+    "option_type": "call",
+    "strike": 70000,
+    "base_currency": "BTC",
+    "quote_currency": "USDC",
+    "counter_currency": "USDC",
+    "settlement_currency": "USDC",
+    "tick_size": "5",
+    "min_trade_amount": "0.01",
+    "contract_size": "1",
+    "expiration_timestamp": 1_789_286_400_000,
+    "is_active": True,
+}
+
+OPTION_AVAX = {
+    "instrument_name": "AVAX_USDC-13SEP26-6d4-C",
+    "kind": "option",
+    "instrument_type": "linear",
+    "option_type": "call",
+    "strike": 6.4,
+    "base_currency": "AVAX",
+    "quote_currency": "USDC",
+    "counter_currency": "USDC",
+    "settlement_currency": "USDC",
+    "tick_size": "0.0005",
+    "min_trade_amount": "100",
+    "contract_size": "100",
+    "expiration_timestamp": 1_789_286_400_000,
+    "is_active": True,
+}
+
 
 def test_v1_ws_sign_matches_the_published_vector() -> None:
     """timestamp + newline + nonce + newline + data; milliseconds."""
@@ -154,6 +208,12 @@ def test_v3_each_future_book_keeps_only_its_own_rows() -> None:
     assert to_listed(PERP_LINEAR, category=Category.INVERSE) is None
     assert to_listed(DATED_INVERSE, category=Category.INVERSE) is None
     assert to_listed(PERP_INVERSE, category=Category.FUTURE) is None
+    assert to_listed(OPTION_INVERSE, category=Category.SPOT) is None
+    assert to_listed(OPTION_INVERSE, category=Category.PERP) is None
+    assert to_listed(OPTION_INVERSE, category=Category.INVERSE) is None
+    assert to_listed(OPTION_INVERSE, category=Category.FUTURE) is None
+    assert to_listed(PERP_LINEAR, category=Category.OPTION) is None
+    assert to_listed(DATED_INVERSE, category=Category.OPTION) is None
 
 
 def test_v3_inverse_perp_identity_is_btc_usd() -> None:
@@ -183,6 +243,49 @@ def test_v3_dated_identity_hyphenates_yymmdd() -> None:
     assert linear.settlement_asset == "USDC"
 
 
+def test_v13_option_identity_uses_counter_currency() -> None:
+    inverse = to_listed(OPTION_INVERSE, category=Category.OPTION)
+    linear = to_listed(OPTION_LINEAR, category=Category.OPTION)
+    avax = to_listed(OPTION_AVAX, category=Category.OPTION)
+    assert inverse is not None
+    assert linear is not None
+    assert avax is not None
+    assert str(inverse.ticker) == "Deribit_Option_BTCUSD-260913-70000-C"
+    assert inverse.exch_ticker == "BTC-13SEP26-70000-C"
+    assert inverse.quote == "USD"
+    assert inverse.settlement_asset == "BTC"
+    assert inverse.expiry_code == "260913"
+    assert inverse.strike == Decimal("70000")
+    assert inverse.option_type == "C"
+    assert inverse.filters[PRICE_TICK] == Decimal("0.0001")
+    assert inverse.filters[QTY_STEP] == Decimal("0.1")
+    assert inverse.filters[MIN_QTY] == Decimal("0.1")
+    assert str(linear.ticker) == "Deribit_Option_BTCUSDC-260913-70000-C"
+    assert linear.exch_ticker == "BTC_USDC-13SEP26-70000-C"
+    assert linear.quote == "USDC"
+    assert linear.settlement_asset == "USDC"
+    assert str(avax.ticker) == "Deribit_Option_AVAXUSDC-260913-6D4-C"
+    assert avax.exch_ticker == "AVAX_USDC-13SEP26-6d4-C"
+    assert avax.strike == Decimal("6.4")
+    assert avax.filters[QTY_STEP] == Decimal("100")
+    assert avax.filters[MIN_QTY] == Decimal("100")
+
+
+def test_v13_option_skips_a_row_missing_identity() -> None:
+    missing_strike = dict(OPTION_INVERSE)
+    missing_strike["strike"] = None
+    missing_flag = dict(OPTION_INVERSE)
+    missing_flag["option_type"] = ""
+    missing_counter = dict(OPTION_INVERSE)
+    missing_counter["counter_currency"] = ""
+    combo = dict(OPTION_INVERSE)
+    combo["kind"] = "option_combo"
+    assert to_listed(missing_strike, category=Category.OPTION) is None
+    assert to_listed(missing_flag, category=Category.OPTION) is None
+    assert to_listed(missing_counter, category=Category.OPTION) is None
+    assert to_listed(combo, category=Category.OPTION) is None
+
+
 def test_v12_cbe_is_listed_and_detected_by_presence() -> None:
     listed = to_listed(SPOT_CBE, category=Category.SPOT)
     assert listed is not None
@@ -198,16 +301,27 @@ def test_kind_and_instrument_name_round_trip() -> None:
     perp = UniversalTicker.parse("Deribit_Perp_BTCUSDC")
     inverse = UniversalTicker.parse("Deribit_Inverse_BTCUSD")
     dated = UniversalTicker.parse("Deribit_Future_BTCUSD-260906")
+    option = UniversalTicker.parse("Deribit_Option_BTCUSD-260913-70000-C")
     assert p.kind_of(spot) == p.KIND_SPOT
     assert p.kind_of(perp) == p.KIND_FUTURE
     assert p.kind_of(inverse) == p.KIND_FUTURE
     assert p.kind_of(dated) == p.KIND_FUTURE
+    assert p.kind_of(option) == p.KIND_OPTION
+    assert p.kind_of(Category.OPTION) == p.KIND_OPTION
+    assert p.category_of("option") is Category.OPTION
     assert p.category_from_instrument("BTC_USDC") is Category.SPOT
     assert p.category_from_instrument("BTC_USDC-PERPETUAL") is Category.PERP
     assert p.category_from_instrument("BTC-PERPETUAL") is Category.INVERSE
     assert p.category_from_instrument("BTC-6SEP26") is Category.FUTURE
     assert p.category_from_instrument("BTC_USDC-6SEP26") is Category.FUTURE
-    assert p.category_from_instrument("BTC-6SEP26-100000-C") is Category.SPOT
+    assert p.category_from_instrument("BTC-6SEP26-100000-C") is Category.OPTION
+    assert p.category_from_instrument("BTC-13SEP26-70000-C") is Category.OPTION
+    assert p.is_option_name("BTC-13SEP26-70000-C")
+    assert p.is_option_name("BTC_USDC-13SEP26-70000-P")
+    assert not p.is_option_name("BTC-6SEP26")
+    assert p.expiry_code_from_option_name("BTC-13SEP26-70000-C") == "260913"
+    assert p.expiry_code_from_name("BTC-13SEP26-70000-C") is None
+    assert Category.OPTION not in p.TRADED_CATEGORIES
     assert p.is_linear_perp_name("BTC_USDC-PERPETUAL")
     assert not p.is_linear_perp_name("BTC-PERPETUAL")
     assert p.is_inverse_perp_name("BTC-PERPETUAL")

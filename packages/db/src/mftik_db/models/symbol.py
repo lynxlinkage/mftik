@@ -109,6 +109,11 @@ class SymbolTicker(Base):
     expiry: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    #: Option strike as the venue published it. NULL on every other book.
+    #: The platform spelling still lives in ``universal_ticker``.
+    strike: Mapped[Decimal | None] = mapped_column(QUANTITY, nullable=True)
+    #: ``C`` or ``P``. NULL on every book that is not an option.
+    option_type: Mapped[str | None] = mapped_column(String(1), nullable=True)
 
     #: False once the venue stops listing it. Rows are never deleted — orders
     #: and sessions reference instruments that may since have been delisted.

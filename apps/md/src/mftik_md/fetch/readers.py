@@ -71,7 +71,7 @@ from mftik.exchange.bybit.public import (
 )
 from mftik.exchange.bybit.public import venue_interval as bybit_interval
 from mftik.exchange.bybit.rest import BybitPublicRest
-from mftik.exchange.deribit.protocol import DERIBIT_REST_URL
+from mftik.exchange.deribit.protocol import DERIBIT_REST_URL, TRADED_CATEGORIES
 from mftik.exchange.deribit.public import (
     FUNDING_CATEGORIES as DERIBIT_FUNDING_CATEGORIES,
 )
@@ -977,13 +977,13 @@ class BitgetReader:
 
 
 class DeribitReader:
-    """Deribit reads over REST, across every book this venue lists.
+    """Deribit reads over REST, across every book this venue trades.
 
     One reader. The ticker names the book; ``exch_ticker`` is the wire
     ``instrument_name``. Funding history is perp and inverse only;
-    open interest is perp, inverse and dated. Spot is refused before
-    HTTP. There is no trade-history fetch — CBE spots answer ``11060``
-    on ``get_last_trades_*``.
+    open interest is perp, inverse and dated. Spot funding/OI and
+    Option are refused before HTTP. There is no trade-history fetch —
+    CBE spots answer ``11060`` on ``get_last_trades_*``.
     """
 
     venue = "Deribit"
@@ -1008,6 +1008,10 @@ class DeribitReader:
         if ticker.venue != self.venue:
             raise ValueError(
                 f"{self.venue} reader was handed a {ticker.venue} ticker: {ticker}"
+            )
+        if ticker.category not in TRADED_CATEGORIES:
+            raise NoReaderError(
+                f"{self.venue} {ticker.category} serves no market data"
             )
         return await self.symbols.exch_ticker(ticker)
 

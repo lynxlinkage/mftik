@@ -1424,6 +1424,10 @@ class SymbolInfo(BaseModel):
     contract_size: Decimal | None = None
     settlement_asset: str | None = None
     expiry: float | None = None
+    #: Venue-published strike. ``None`` on every book that is not an option.
+    strike: Decimal | None = None
+    #: ``C`` or ``P``. ``None`` on every book that is not an option.
+    option_type: str | None = None
     is_active: bool = True
     filters: list[SymbolFilterInfo] = Field(default_factory=list)
     updated_at: float | None = None

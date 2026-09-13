@@ -25,6 +25,7 @@ SPOT = UniversalTicker.parse("Deribit_Spot_BTCUSDC")
 PERP = UniversalTicker.parse("Deribit_Perp_BTCUSDC")
 INVERSE = UniversalTicker.parse("Deribit_Inverse_BTCUSD")
 DATED = UniversalTicker.parse("Deribit_Future_BTCUSD-260906")
+OPTION = UniversalTicker.parse("Deribit_Option_BTCUSD-260913-70000-C")
 BASE = "https://deribit.test"
 
 
@@ -132,6 +133,18 @@ async def test_i6_spot_has_no_funding_or_oi() -> None:
         client.stream_open_interest(PERP)
         client.stream_open_interest(INVERSE)
         client.stream_open_interest(DATED)
+
+
+async def test_option_is_refused_before_http() -> None:
+    api = FakeApi()
+    async with _client(api) as client:
+        with pytest.raises(ValueError, match="Option"):
+            await client.fetch_ticker(OPTION)
+        with pytest.raises(ValueError, match="Option"):
+            await client.fetch_order_book(OPTION)
+        with pytest.raises(ValueError, match="funding"):
+            client.stream_funding_rate(OPTION)
+    assert not api.requests
 
 
 async def test_a_spot_ticker_prints_on_the_one_public_socket(

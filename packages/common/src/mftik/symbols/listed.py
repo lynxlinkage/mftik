@@ -7,7 +7,9 @@ plane persists these rows and is the only thing that serves
 ``symbol`` is derived from ``base`` + ``quote`` rather than by splitting the
 venue's ticker — the venue tells us both, so no guessing is involved. A dated
 contract that shares that pair with a perpetual also carries ``expiry_code``
-(``YYMMDD``), joined with ``-`` so the two cannot render the same ticker.
+(``YYMMDD``), joined with ``-`` so the two cannot render the same ticker. An
+option also carries ``strike`` and ``option_type``, so the chain
+``PAIR-YYMMDD-STRIKE-C`` cannot collapse onto one expiry.
 
 This module must not import :mod:`mftik.exchange` at load time. Adapters load
 it while the exchange package is still initializing; a reverse import would
@@ -92,6 +94,11 @@ class ListedInstrument:
     #: with the perpetual that shares its base and quote. ``None`` on
     #: everything that does not expire.
     expiry_code: str | None = None
+    #: Option strike as the venue published it. Platform spelling is
+    #: :func:`~mftik.exchange.symbols.spell_strike` at render time.
+    strike: Decimal | None = None
+    #: ``C`` or ``P``. ``None`` on every book that is not an option.
+    option_type: str | None = None
     is_active: bool = True
     #: name → bound. A key with a ``None`` value means the venue publishes the
     #: restriction but sets no limit, which is not the same as omitting it.
@@ -102,11 +109,19 @@ class ListedInstrument:
         """Canonical symbol — exact, because base and quote came from the venue.
 
         Dated contracts append ``expiry_code`` after a hyphen
-        (``BTCUSDT-250926``). The underscore that Binance puts in
-        ``BTCUSDT_250926`` cannot survive a ticker parse, so the
-        separator inside a symbol is ``-``.
+        (``BTCUSDT-250926``). An option also appends the strike and
+        ``C``/``P`` (``BTCUSDC-260913-70000-C``). The underscore that
+        Binance puts in ``BTCUSDT_250926`` cannot survive a ticker
+        parse, so the separator inside a symbol is ``-``.
         """
         pair = f"{self.base.upper()}{self.quote.upper()}"
+        flag = (self.option_type or "").strip().upper()
+        if self.expiry_code and flag in {"C", "P"}:
+            from mftik.exchange.symbols import spell_strike
+
+            strike = spell_strike(self.strike)
+            if strike:
+                return f"{pair}-{self.expiry_code}-{strike}-{flag}"
         if self.expiry_code:
             return f"{pair}-{self.expiry_code}"
         return pair

@@ -2,6 +2,7 @@
 
 One public client, one public socket (V4). Spot, linear perps, inverse
 perps and dated futures share it; the channel names the instrument.
+Options are listed on the symbol plane and refused before subscribe.
 
 **V5:** funding and open interest ride the ticker row. They are a second
 pump on a shared wire identity (MDS-1), not a second ``SUBSCRIBE``. Spot
@@ -24,6 +25,7 @@ from mftik.exchange.deribit.models import kline_from_tick
 from mftik.exchange.deribit.protocol import (
     DERIBIT_REST_URL,
     DERIBIT_WS_URL,
+    TRADED_CATEGORIES,
     kind_of,
 )
 from mftik.exchange.deribit.rest import DeribitPublicRest
@@ -312,6 +314,10 @@ class DeribitPublicClient(BaseClient):
         if ticker.venue != self.name:
             raise ValueError(
                 f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
+            )
+        if ticker.category not in TRADED_CATEGORIES:
+            raise ValueError(
+                f"{self.name} serves no {ticker.category.value} market data"
             )
         return await self.symbols.exch_ticker(ticker)
 

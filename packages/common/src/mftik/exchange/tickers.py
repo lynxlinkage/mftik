@@ -209,12 +209,12 @@ def _check_symbol(symbol: str, category: Category) -> str:
     ASCII-only rule would reject the CJK meme tokens Gate actually lists.
 
     That test alone is not enough, which is why the character check comes
-    first. Normalizing is not validating: the structured grammar keeps an
-    option's strike verbatim, so ``BTCUSDT-260905-10_000-C`` is its own
-    normal form and would pass — and then render a ticker that
-    :meth:`UniversalTicker.parse` splits into four parts and refuses. A
-    value this can build but cannot read back is the one failure this type
-    exists to prevent, so ``_``, whitespace and ``/`` are refused by name.
+    first. Normalizing is not validating: a strike ``spell_strike`` cannot
+    fold (``10 000``, ``10/000``) is kept verbatim, and would pass
+    ``normalize_symbol(s) == s`` — then render a ticker that
+    :meth:`UniversalTicker.parse` cannot split back. A value this can
+    build but cannot read is the one failure this type exists to prevent,
+    so leftover ``_``, whitespace and ``/`` are refused by name.
     """
     bad = forbidden_in_symbol(symbol)
     if bad is not None:

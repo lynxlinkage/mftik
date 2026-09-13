@@ -1229,6 +1229,38 @@ DERIBIT_DATED_LINEAR = {
 }
 
 
+DERIBIT_OPTION_INVERSE = {
+    "instrument_name": "BTC-13SEP26-70000-C",
+    "kind": "option",
+    "option_type": "call",
+    "strike": 70000,
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "counter_currency": "USD",
+    "settlement_currency": "BTC",
+    "tick_size": "0.0001",
+    "min_trade_amount": "0.1",
+    "contract_size": "1",
+    "expiration_timestamp": 1_789_286_400_000,
+    "is_active": True,
+}
+
+DERIBIT_OPTION_LINEAR = {
+    "instrument_name": "BTC_USDC-13SEP26-70000-C",
+    "kind": "option",
+    "option_type": "call",
+    "strike": 70000,
+    "base_currency": "BTC",
+    "quote_currency": "USDC",
+    "counter_currency": "USDC",
+    "settlement_currency": "USDC",
+    "tick_size": "5",
+    "min_trade_amount": "0.01",
+    "expiration_timestamp": 1_789_286_400_000,
+    "is_active": True,
+}
+
+
 def _deribit(
     rows: list[dict],
     *,
@@ -1237,6 +1269,9 @@ def _deribit(
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/public/get_instruments")
         assert request.url.params["currency"] == "any"
+        if category is Category.OPTION:
+            assert request.url.params["kind"] == "option"
+            assert request.url.params["expired"] == "false"
         return httpx.Response(200, json={"jsonrpc": "2.0", "result": rows})
 
     return DeribitInstrumentSource(
@@ -1296,6 +1331,31 @@ async def test_deribit_future_fetch_keeps_linear_and_inverse_dated() -> None:
     )
 
 
+_DERIBIT_OPTION_ROWS = [
+    DERIBIT_OPTION_INVERSE,
+    DERIBIT_OPTION_LINEAR,
+    DERIBIT_LINEAR,
+    DERIBIT_DATED_INVERSE,
+    {"kind": "option_combo"},
+]
+
+
+async def test_deribit_option_fetch_keeps_only_options() -> None:
+    source = _deribit(_DERIBIT_OPTION_ROWS, category=Category.OPTION)
+    instruments = await source.fetch()
+    tickers = {str(i.ticker): i for i in instruments}
+    assert set(tickers) == {
+        "Deribit_Option_BTCUSD-260913-70000-C",
+        "Deribit_Option_BTCUSDC-260913-70000-C",
+    }
+    assert tickers["Deribit_Option_BTCUSD-260913-70000-C"].exch_ticker == (
+        "BTC-13SEP26-70000-C"
+    )
+    assert tickers["Deribit_Option_BTCUSDC-260913-70000-C"].exch_ticker == (
+        "BTC_USDC-13SEP26-70000-C"
+    )
+
+
 def test_default_sources_has_one_deribit_source_per_book() -> None:
     class _Broker:
         pass
@@ -1308,9 +1368,11 @@ def test_default_sources_has_one_deribit_source_per_book() -> None:
         Category.PERP,
         Category.INVERSE,
         Category.FUTURE,
+        Category.OPTION,
     }
     assert by_book[Category.SPOT].kind == "spot"
     assert by_book[Category.PERP].kind == "future"
     assert by_book[Category.INVERSE].kind == "future"
     assert by_book[Category.FUTURE].kind == "future"
+    assert by_book[Category.OPTION].kind == "option"
 

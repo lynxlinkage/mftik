@@ -10,7 +10,7 @@ from decimal import Decimal
 
 import pytest
 from mftik.exchange import symbols
-from mftik.exchange.symbols import canonical, join, normalize_symbol
+from mftik.exchange.symbols import canonical, join, normalize_symbol, spell_strike
 from mftik.exchange.tickers import Category, UniversalTicker
 
 
@@ -46,6 +46,7 @@ def test_canonical_tolerates_empty_input() -> None:
         # Uppercased before the split, which is what makes a typed
         # ``6d4`` and a typed ``6.4`` one spelling for free.
         ("AVAXUSDC-260905-6D4-C", "option", "AVAXUSDC-260905-6D4-C"),
+        ("BTCUSDT-260905-10_000-C", "option", "BTCUSDT-260905-10000-C"),
         ("BTCUSDT", Category.PERP, "BTCUSDT"),
     ],
 )
@@ -53,6 +54,25 @@ def test_normalize_symbol_keeps_structured_hyphens(
     symbol: str, category: str | Category, want: str
 ) -> None:
     assert normalize_symbol(symbol, category=category) == want
+
+
+@pytest.mark.parametrize(
+    ("value", "want"),
+    [
+        (Decimal("70000.0"), "70000"),
+        ("7E4", "70000"),
+        ("10_000", "10000"),
+        (Decimal("6.4"), "6D4"),
+        ("6.4", "6D4"),
+        ("6d4", "6D4"),
+        (None, None),
+        ("", None),
+    ],
+)
+def test_spell_strike_folds_scientific_and_decimal_forms(
+    value: object, want: str | None
+) -> None:
+    assert spell_strike(value) == want
 
 
 @pytest.mark.parametrize(

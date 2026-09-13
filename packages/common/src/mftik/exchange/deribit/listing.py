@@ -15,19 +15,27 @@
   dated quote USD and settle the coin.
 * CBE-routed spots set ``is_cbe_routed`` / ``is_csr``; native spots omit
   both. Presence, not ``== false`` (V12).
+* Options (V13) are one ``Option`` book. Platform quote is
+  ``counter_currency`` (inverse ``USD``, linear ``USDC``), not
+  ``quote_currency`` (inverse options quote the coin). Identity is
+  ``Deribit_Option_BTCUSD-260913-70000-C`` /
+  ``Deribit_Option_BTCUSDC-260913-70000-C``. Combos stay unlisted.
 """
 
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
 from mftik.exchange.deribit.protocol import (
     KIND_FUTURE,
+    KIND_OPTION,
     KIND_SPOT,
     expiry_code_from_name,
+    expiry_code_from_option_name,
     expiry_from_code,
     expiry_from_timestamp,
     is_cbe_routed,
@@ -35,6 +43,7 @@ from mftik.exchange.deribit.protocol import (
     is_inverse_perp,
     is_linear_perp,
 )
+from mftik.exchange.symbols import spell_strike
 from mftik.exchange.tickers import Category
 from mftik.symbols.listed import (
     MAX_NOTIONAL,
@@ -55,7 +64,9 @@ logger = logging.getLogger(__name__)
 
 VENUE = "Deribit"
 
-_DERIVS = frozenset({Category.PERP, Category.INVERSE, Category.FUTURE})
+_DERIVS = frozenset(
+    {Category.PERP, Category.INVERSE, Category.FUTURE, Category.OPTION}
+)
 
 
 class DeribitInstrumentRow(BaseModel):
@@ -70,7 +81,10 @@ class DeribitInstrumentRow(BaseModel):
     settlement_period: WireStr = ""
     base_currency: WireStr = ""
     quote_currency: WireStr = ""
+    counter_currency: WireStr = ""
     settlement_currency: WireStr = ""
+    option_type: WireStr = ""
+    strike: Any = None
     tick_size: WireStr = ""
     min_trade_amount: WireStr = ""
     contract_size: WireStr = ""
@@ -93,6 +107,8 @@ def to_listed(
         return None
 
     kind = parsed.kind.strip().casefold()
+    strike = None
+    option_type = None
     if category is Category.SPOT:
         if kind != KIND_SPOT:
             return None
@@ -130,20 +146,42 @@ def to_listed(
         expiry = expiry_from_timestamp(parsed.expiration_timestamp) or expiry_from_code(
             expiry_code
         )
+    elif category is Category.OPTION:
+        if kind != KIND_OPTION:
+            return None
+        expiry_code = expiry_code_from_option_name(parsed.instrument_name)
+        if expiry_code is None:
+            return None
+        expiry = expiry_from_timestamp(parsed.expiration_timestamp) or expiry_from_code(
+            expiry_code
+        )
+        strike = _option_strike(parsed.strike)
+        option_type = _option_flag(parsed.option_type)
+        if strike is None or option_type is None:
+            return None
     else:
         return None
 
     base = parsed.base_currency.upper()
-    quote = parsed.quote_currency.upper()
+    quote = (
+        parsed.counter_currency.upper()
+        if category is Category.OPTION
+        else parsed.quote_currency.upper()
+    )
     exch_ticker = parsed.instrument_name
     if not base or not quote or not exch_ticker:
         logger.warning("%s skipping malformed instrument: %r", venue, row)
+        return None
+    if category is Category.OPTION and spell_strike(strike) is None:
         return None
 
     raw = row if isinstance(row, dict) else parsed.model_dump()
     _ = is_cbe_routed(raw)  # presence is the fact; listing still includes it
 
     settle = (parsed.settlement_currency or quote).upper() or None
+    qty_step = listing_decimal(parsed.min_trade_amount)
+    if category is not Category.OPTION:
+        qty_step = listing_decimal(parsed.contract_size) or qty_step
     return ListedInstrument(
         venue=venue,
         base=base,
@@ -154,11 +192,12 @@ def to_listed(
         contract_size=listing_decimal(parsed.contract_size),
         expiry=expiry,
         expiry_code=expiry_code,
+        strike=strike if category is Category.OPTION else None,
+        option_type=option_type if category is Category.OPTION else None,
         is_active=bool(parsed.is_active) or parsed.state.strip().casefold() == "open",
         filters={
             PRICE_TICK: listing_decimal(parsed.tick_size),
-            QTY_STEP: listing_decimal(parsed.contract_size)
-            or listing_decimal(parsed.min_trade_amount),
+            QTY_STEP: qty_step,
             MIN_QTY: listing_decimal(parsed.min_trade_amount),
             MAX_QTY: None,
             MIN_NOTIONAL: None,
@@ -167,6 +206,27 @@ def to_listed(
             MAX_PRICE: None,
         },
     )
+
+
+def _option_flag(value: str) -> str | None:
+    folded = (value or "").strip().casefold()
+    if folded in {"c", "call"}:
+        return "C"
+    if folded in {"p", "put"}:
+        return "P"
+    return None
+
+
+def _option_strike(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except Exception:
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
 
 
 __all__ = [

@@ -115,19 +115,26 @@ def test_a_non_ascii_symbol_still_has_to_be_canonical() -> None:
     assert str(UniversalTicker.of("Gate", "Spot", "龙虾/usdt")) == "Gate_Spot_龙虾USDT"
 
 
-@pytest.mark.parametrize(
-    "strike", ["10_000", "10 000", "10/000"]
-)
+def test_of_folds_a_thousands_separator_in_a_strike() -> None:
+    """``10_000`` is a number ``spell_strike`` can write, not ticker punctuation.
+
+    Left verbatim it would render ``Bybit_Option_BTCUSDT-260905-10_000-C``,
+    which ``parse`` splits into four parts. Folding it to ``10000`` is the
+    same as ``7E4`` → ``70000``: the lenient boundary takes a person's
+    spelling and stores the one ``parse`` can read back.
+    """
+    built = UniversalTicker.of("Bybit", "option", "BTCUSDT-260905-10_000-C")
+    assert str(built) == "Bybit_Option_BTCUSDT-260905-10000-C"
+    assert UniversalTicker.parse(str(built)) == built
+
+
+@pytest.mark.parametrize("strike", ["10 000", "10/000"])
 def test_of_refuses_a_field_it_would_render_unparseable(strike: str) -> None:
     """``of`` must not build what ``parse`` will not read back.
 
-    The structured grammar keeps an option's strike verbatim rather than
-    folding it, so a strike carrying pair punctuation is its own normal
-    form. Left to the ``normalize_symbol(s) == s`` test alone it would pass
-    — and then render ``Bybit_Option_BTCUSDT-260905-10_000-C``, which
-    splits into four parts and is refused on the way home. A value the
-    lenient boundary can build but the strict one cannot read is the exact
-    failure this type exists to prevent, so it is refused where it is made.
+    Space and ``/`` are pair punctuation ``spell_strike`` cannot fold.
+    Kept on the strike they ride into a ticker ``parse`` cannot split;
+    glued onto the pair they would stop being an option. Refuse at ``of``.
     """
     with pytest.raises(InvalidTickerError, match="cannot"):
         UniversalTicker.of("Bybit", "option", f"BTCUSDT-260905-{strike}-C")

@@ -36,9 +36,10 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
     :mod:`mftik_sym.sources.bybit`, :mod:`mftik_sym.sources.okx` and
     :mod:`mftik_sym.sources.bitget`. Bitget's Perp source is itself a
     union of two wire categories; a second Perp source would deactivate
-    the first. Deribit appears four times: Spot, linear Perp, Inverse
-    and dated Future, each a filter on the same ``get_instruments``
-    call.
+    the first. Deribit appears five times: Spot, linear Perp, Inverse,
+    dated Future and Option, each a filter on the same
+    ``get_instruments`` call. Option is one source so linear and
+    inverse options do not delist each other.
 
     Binance appears as three venues — ``Binance``, ``BinanceUM`` and
     ``BinanceCM`` — because those are three credentials and three
@@ -67,6 +68,7 @@ def default_sources(broker: Broker) -> list[InstrumentSource]:
         DeribitInstrumentSource(category=Category.PERP),
         DeribitInstrumentSource(category=Category.INVERSE),
         DeribitInstrumentSource(category=Category.FUTURE),
+        DeribitInstrumentSource(category=Category.OPTION),
     ]
 
 

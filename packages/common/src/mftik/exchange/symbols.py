@@ -161,8 +161,14 @@ def normalize_symbol(symbol: str, *, category: str | None = None) -> str:
     parts = raw.split("-")
     if _is_option_parts(parts):
         pair = canonical("-".join(parts[:-3]))
+        strike = spell_strike(parts[-2])
+        if pair and strike:
+            return f"{pair}-{parts[-3]}-{strike}-{parts[-1]}"
+        # A strike we cannot fold (``10_000``, ``10 000``) stays as typed.
+        # Falling through to ``canonical`` would glue it onto the pair and
+        # ``of`` would accept a ticker ``parse`` cannot split back.
         if pair:
-            return f"{pair}-{parts[-3]}-{_strike(parts[-2])}-{parts[-1]}"
+            return f"{pair}-{parts[-3]}-{parts[-2]}-{parts[-1]}"
     if len(parts) >= 2 and _DATE_CODE.match(parts[-1]):
         pair = canonical("-".join(parts[:-1]))
         if pair:
@@ -190,16 +196,29 @@ def forbidden_in_symbol(symbol: str) -> str | None:
     return found.group(0) if found else None
 
 
-def _strike(field: str) -> str:
-    """A strike in platform form: ``6.4``, ``6d4`` and ``6D4`` all land here.
+def spell_strike(value: object) -> str | None:
+    """A strike in platform form: ``70000``, ``6.4`` and ``6d4`` all land here.
 
-    Only the decimal point needs folding. The case is already folded by
-    the time this runs — :func:`normalize_symbol` uppercases before it
-    splits — which is the whole reason :data:`STRIKE_DECIMAL` is
-    uppercase. A lowercase marker would make this two folds, and two
-    spellings of one strike the first time one of them was forgotten.
+    Integers drop the trailing zero run (``70000.0`` / ``7E4`` → ``70000``).
+    A fractional strike spells its decimal point :data:`STRIKE_DECIMAL`,
+    so ``6.4`` and the venue's own ``6d4`` become ``6D4``. ``None`` and
+    the empty string have no spelling — the caller skips the row.
     """
-    return field.replace(".", STRIKE_DECIMAL)
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    folded = raw.upper().replace(STRIKE_DECIMAL, ".")
+    try:
+        parsed = Decimal(folded)
+    except Exception:
+        return None
+    integral = parsed.to_integral_value()
+    if parsed == integral:
+        return str(int(integral))
+    text = format(parsed, "f").rstrip("0").rstrip(".")
+    return text.replace(".", STRIKE_DECIMAL)
 
 
 def _is_option_parts(parts: list[str]) -> bool:
@@ -228,4 +247,5 @@ __all__ = [
     "forbidden_in_symbol",
     "join",
     "normalize_symbol",
+    "spell_strike",
 ]

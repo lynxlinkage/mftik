@@ -468,6 +468,8 @@ export type SymbolInfo = {
 	base: string;
 	quote: string;
 	exch_ticker: string;
+	strike?: string | null;
+	option_type?: string | null;
 	is_active: boolean;
 	filters: SymbolFilter[];
 	updated_at: number | null;

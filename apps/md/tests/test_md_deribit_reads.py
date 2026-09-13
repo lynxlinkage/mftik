@@ -23,6 +23,7 @@ SPOT = UniversalTicker.parse("Deribit_Spot_BTCUSDC")
 PERP = UniversalTicker.parse("Deribit_Perp_BTCUSDC")
 INVERSE = UniversalTicker.parse("Deribit_Inverse_BTCUSD")
 DATED = UniversalTicker.parse("Deribit_Future_BTCUSD-260906")
+OPTION = UniversalTicker.parse("Deribit_Option_BTCUSD-260913-70000-C")
 BASE = "https://deribit.test"
 
 
@@ -136,6 +137,17 @@ async def test_an_interval_deribit_does_not_serve_is_refused() -> None:
     api = FakeApi()
     with pytest.raises(InvalidIntervalError):
         await _reader(api).fetch_klines(SPOT, "4h", limit=1)
+    assert not api.requests
+
+
+async def test_option_is_refused_before_http() -> None:
+    api = FakeApi()
+    with pytest.raises(NoReaderError, match="Option"):
+        await _reader(api).fetch_klines(OPTION, "1h", limit=1)
+    with pytest.raises(NoReaderError, match="Option"):
+        await _reader(api).fetch_order_book(OPTION, depth=5)
+    with pytest.raises(NoReaderError, match="Option"):
+        await _reader(api).fetch_best_quote(OPTION)
     assert not api.requests
 
 

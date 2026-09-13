@@ -64,6 +64,7 @@ async def test_list_venues_exposes_every_registered_venue() -> None:
     assert by_name["Deribit"].categories == [
         "Future",
         "Inverse",
+        "Option",
         "Perp",
         "Spot",
     ]

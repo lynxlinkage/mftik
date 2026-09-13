@@ -84,6 +84,10 @@ def commitment_for(
     does not take. Returning a spot or linear figure would lock the wrong
     asset.
 
+    Options are unknowable here. Premium, contract size and coin vs
+    linear quote are not arguments, and a spot ``qty * price`` would
+    lock the wrong asset.
+
     ``None`` means unknowable, never nothing: a caller that then reserves
     nothing has *decided* to, which is not the same as reserving zero.
 
@@ -91,6 +95,8 @@ def commitment_for(
     asks this to decide whether to build one at all. See
     :func:`reservation_for` for the reading of an order already built.
     """
+    if category is Category.OPTION:
+        return None
     if category is Category.INVERSE or (
         category is Category.FUTURE
         and not is_linear_margin(category, venue=venue, quote=quote)

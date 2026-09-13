@@ -1,10 +1,11 @@
-"""Deribit adapter — one HMAC credential, four books, one public socket.
+"""Deribit adapter — one HMAC credential, five books, one public socket.
 
 Deribit is a **unified** venue: one Client ID / Client Secret (no
 passphrase) trades spot, linear perps, inverse perps and dated futures,
 so ``Deribit_Spot_BTCUSDC``, ``Deribit_Perp_BTCUSDC``,
 ``Deribit_Inverse_BTCUSD`` and ``Deribit_Future_BTCUSD-260906`` are
-instruments behind one connection. Options are not modelled.
+instruments behind one connection. Options are listed
+(``Deribit_Option_BTCUSD-260913-70000-C``) and not traded.
 
 HTTP and WebSocket speak the same JSON-RPC 2.0 methods. v1 places and
 cancels on the authenticated socket; REST is listing and MDS.
@@ -39,10 +40,12 @@ from mftik.exchange.deribit.protocol import (
     DERIBIT_REST_URL,
     DERIBIT_WS_URL,
     KIND_FUTURE,
+    KIND_OPTION,
     KIND_SPOT,
     LINEAR,
     MARGIN_MODELS,
     PERPETUAL,
+    TRADED_CATEGORIES,
     DeribitAuthError,
     DeribitError,
     DeribitResponse,
@@ -51,12 +54,14 @@ from mftik.exchange.deribit.protocol import (
     auth_params,
     category_from_instrument,
     expiry_code_from_name,
+    expiry_code_from_option_name,
     is_cbe_routed,
     is_dated_future,
     is_inverse_perp,
     is_inverse_perp_name,
     is_linear_perp,
     is_linear_perp_name,
+    is_option_name,
     kind_of,
     sign_rest,
     sign_ws,
@@ -77,11 +82,13 @@ __all__ = [
     "DERIBIT_WS_URL",
     "FUNDING_CATEGORIES",
     "KIND_FUTURE",
+    "KIND_OPTION",
     "KIND_SPOT",
     "LINEAR",
     "MARGIN_MODELS",
     "OPEN_INTEREST_CATEGORIES",
     "PERPETUAL",
+    "TRADED_CATEGORIES",
     "DeribitAccountSummaries",
     "DeribitAuthError",
     "DeribitBook",
@@ -109,12 +116,14 @@ __all__ = [
     "category_from_instrument",
     "category_of",
     "expiry_code_from_name",
+    "expiry_code_from_option_name",
     "is_cbe_routed",
     "is_dated_future",
     "is_inverse_perp",
     "is_inverse_perp_name",
     "is_linear_perp",
     "is_linear_perp_name",
+    "is_option_name",
     "kind_of",
     "kline_from_chart",
     "kline_from_tick",
