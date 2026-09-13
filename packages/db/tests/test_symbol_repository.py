@@ -109,6 +109,23 @@ async def test_same_symbol_in_two_categories_is_two_instruments(db) -> None:
     assert spot.contract_size is None
 
 
+async def test_upsert_stores_option_strike_and_type(db) -> None:
+    repo = SymbolRepository(db)
+    option = await _btc(
+        repo,
+        universal_ticker="Deribit_Option_BTCUSD-260913-70000-C",
+        quote="USD",
+        exch_ticker="BTC-13SEP26-70000-C",
+        strike=Decimal("70000"),
+        option_type="C",
+    )
+    assert option.strike == Decimal("70000")
+    assert option.option_type == "C"
+    spot = await _btc(repo)
+    assert spot.strike is None
+    assert spot.option_type is None
+
+
 async def test_delisting_deactivates_rather_than_deletes(db) -> None:
     """Orders and sessions still reference instruments that got delisted."""
     repo = SymbolRepository(db)

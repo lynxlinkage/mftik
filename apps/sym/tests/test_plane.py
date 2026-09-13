@@ -156,6 +156,34 @@ async def test_refresh_writes_the_golden_record(plane_factory) -> None:
     assert btc.filter("min_notional") is None
 
 
+async def test_refresh_persists_option_strike_and_type(plane_factory) -> None:
+    source = StubSource(
+        [
+            _inst(
+                "BTC",
+                "USD",
+                category=Category.OPTION,
+                exch_ticker="BTC-13SEP26-70000-C",
+                expiry_code="260913",
+                strike=Decimal("70000"),
+                option_type="C",
+            )
+        ],
+        category=Category.OPTION,
+    )
+    plane = plane_factory([source])
+
+    await plane.refresh()
+
+    page = await plane.list_symbols(venue=VENUE)
+    assert [s.universal_ticker for s in page.symbols] == [
+        "Gate_Option_BTCUSD-260913-70000-C"
+    ]
+    option = page.symbols[0]
+    assert option.strike == Decimal("70000")
+    assert option.option_type == "C"
+
+
 async def test_list_symbols_loads_filters_in_one_query(plane_factory) -> None:
     """Regression: this used to be one query per instrument.
 

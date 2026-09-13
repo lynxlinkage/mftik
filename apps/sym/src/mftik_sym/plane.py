@@ -109,6 +109,8 @@ class SymbolPlane:
                         contract_size=inst.contract_size,
                         settlement_asset=inst.settlement_asset,
                         expiry=inst.expiry,
+                        strike=inst.strike,
+                        option_type=inst.option_type,
                         is_active=inst.is_active,
                     )
                     if inst.is_active:
@@ -238,6 +240,8 @@ class SymbolPlane:
             contract_size=row.contract_size,
             settlement_asset=row.settlement_asset,
             expiry=row.expiry.timestamp() if row.expiry else None,
+            strike=row.strike,
+            option_type=row.option_type,
             is_active=row.is_active,
             filters=filters,
             updated_at=row.updated_at.timestamp() if row.updated_at else None,

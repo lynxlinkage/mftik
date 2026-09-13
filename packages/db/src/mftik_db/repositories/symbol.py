@@ -178,6 +178,8 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
         contract_size: Decimal | None = None,
         settlement_asset: str | None = None,
         expiry: object = None,
+        strike: Decimal | None = None,
+        option_type: str | None = None,
         is_active: bool = True,
     ) -> SymbolTicker:
         """Insert or update one instrument and reconcile its filter rows.
@@ -197,6 +199,8 @@ class SymbolRepository(BaseRepository[SymbolTicker]):
         ticker.contract_size = contract_size
         ticker.settlement_asset = settlement_asset
         ticker.expiry = expiry  # type: ignore[assignment]
+        ticker.strike = strike
+        ticker.option_type = option_type
         ticker.is_active = is_active
         await self.session.flush()
 
