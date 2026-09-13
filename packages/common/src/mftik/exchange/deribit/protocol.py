@@ -4,7 +4,8 @@ Deribit is a **unified** venue: one HMAC credential (Client ID / Client
 Secret, no passphrase) covers spot, linear perps, inverse perps and
 dated futures. The market an instrument trades on is its ``kind`` /
 ``instrument_type`` / ``settlement_period``, not a different host.
-Options, combos, Starbase/FIX and demo hosts are not modelled.
+Options are listed on the symbol plane and refused here until sizing
+is measured. Combos, Starbase/FIX and demo hosts are not modelled.
 
 HTTP and WebSocket speak the same methods. A private socket authenticates
 once with ``public/auth`` ``grant_type=client_signature`` (V1) and then
@@ -134,12 +135,21 @@ _EXPIRY_SENTINEL_MS = 4_000_000_000_000
 
 _FUTURE_KINDS = frozenset({Category.PERP, Category.INVERSE, Category.FUTURE})
 
+#: Books this adapter will place, cancel, and subscribe. Option is listed
+#: on the symbol plane and refused here until sizing and private
+#: ``kind=option`` are measured.
+TRADED_CATEGORIES = frozenset(
+    {Category.SPOT, Category.PERP, Category.INVERSE, Category.FUTURE}
+)
+
 
 def kind_of(category: Category | UniversalTicker) -> str:
     """Our category → Deribit's ``kind`` on listing and private filters."""
     resolved = category.category if isinstance(category, UniversalTicker) else category
     if resolved is Category.SPOT:
         return KIND_SPOT
+    if resolved is Category.OPTION:
+        return KIND_OPTION
     if resolved in _FUTURE_KINDS:
         return KIND_FUTURE
     raise ExchangeError(f"Deribit has no kind for category {resolved!r}")
@@ -157,11 +167,13 @@ def category_of(
 
     Linear perpetuals are ``Perp``. Inverse perpetuals are ``Inverse`` —
     never a second Perp. Dated rows (linear USDC and inverse USD) are
-    ``Future``. Options stay on ``default``.
+    ``Future``. Options are ``Option``.
     """
     folded = (kind or "").strip().casefold()
     if folded == KIND_SPOT:
         return Category.SPOT
+    if folded == KIND_OPTION:
+        return Category.OPTION
     if folded != KIND_FUTURE:
         return default
     if is_linear_perp(
@@ -238,6 +250,35 @@ def is_inverse_perp_name(instrument_name: str) -> bool:
     return "_" not in name and name.endswith("-PERPETUAL")
 
 
+def is_option_name(instrument_name: str) -> bool:
+    """Wire name of a vanilla option: ``BTC-13SEP26-70000-C``.
+
+    Last field is ``C`` / ``P``; the date is the third field from the
+    end, so a dated future (``BTC-6SEP26``) does not match.
+    """
+    parts = (instrument_name or "").split("-")
+    return (
+        len(parts) >= 4
+        and parts[-1].upper() in {"C", "P"}
+        and _DATE_SUFFIX.fullmatch(parts[-3]) is not None
+    )
+
+
+def _expiry_code_from_suffix(suffix: str) -> str | None:
+    found = _DATE_SUFFIX.fullmatch(suffix or "")
+    if found is None:
+        return None
+    day = int(found.group("day"))
+    month = _MONTHS[found.group("mon").upper()]
+    year = int(found.group("year"))
+    code = f"{year:02d}{month:02d}{day:02d}"
+    try:
+        expiry_from_code(code)
+    except ValueError:
+        return None
+    return code
+
+
 def expiry_code_from_name(instrument_name: str) -> str | None:
     """Deribit ``6SEP26`` / ``25SEP26`` → platform ``YYMMDD``.
 
@@ -250,18 +291,14 @@ def expiry_code_from_name(instrument_name: str) -> str | None:
     :func:`expiry_from_code` and take the whole listing refresh with it.
     """
     tail = (instrument_name or "").rsplit("-", 1)[-1]
-    found = _DATE_SUFFIX.fullmatch(tail)
-    if found is None:
+    return _expiry_code_from_suffix(tail)
+
+
+def expiry_code_from_option_name(instrument_name: str) -> str | None:
+    """Option wire date (third field from the end) → platform ``YYMMDD``."""
+    if not is_option_name(instrument_name):
         return None
-    day = int(found.group("day"))
-    month = _MONTHS[found.group("mon").upper()]
-    year = int(found.group("year"))
-    code = f"{year:02d}{month:02d}{day:02d}"
-    try:
-        expiry_from_code(code)
-    except ValueError:
-        return None
-    return code
+    return _expiry_code_from_suffix((instrument_name or "").split("-")[-3])
 
 
 def expiry_suffix_from_code(code: str) -> str | None:
@@ -301,6 +338,8 @@ def expiry_from_code(code: str) -> datetime:
 
 def category_from_instrument(instrument_name: str) -> Category:
     """Inbound ``instrument_name`` → category for the books this adapter serves."""
+    if is_option_name(instrument_name):
+        return Category.OPTION
     if is_linear_perp_name(instrument_name):
         return Category.PERP
     if is_inverse_perp_name(instrument_name):
@@ -565,6 +604,7 @@ __all__ = [
     "REVERSED",
     "SUBSCRIPTION",
     "TEST_REQUEST",
+    "TRADED_CATEGORIES",
     "DeribitAuthError",
     "DeribitError",
     "DeribitResponse",
@@ -574,6 +614,7 @@ __all__ = [
     "category_from_instrument",
     "category_of",
     "expiry_code_from_name",
+    "expiry_code_from_option_name",
     "expiry_from_code",
     "expiry_from_timestamp",
     "expiry_suffix_from_code",
@@ -583,6 +624,7 @@ __all__ = [
     "is_inverse_perp_name",
     "is_linear_perp",
     "is_linear_perp_name",
+    "is_option_name",
     "kind_of",
     "next_id",
     "now_ms",

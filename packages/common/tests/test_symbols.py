@@ -10,7 +10,7 @@ from decimal import Decimal
 
 import pytest
 from mftik.exchange import symbols
-from mftik.exchange.symbols import canonical, join, normalize_symbol
+from mftik.exchange.symbols import canonical, join, normalize_symbol, spell_strike
 from mftik.exchange.tickers import Category, UniversalTicker
 
 
@@ -53,6 +53,24 @@ def test_normalize_symbol_keeps_structured_hyphens(
     symbol: str, category: str | Category, want: str
 ) -> None:
     assert normalize_symbol(symbol, category=category) == want
+
+
+@pytest.mark.parametrize(
+    ("value", "want"),
+    [
+        (Decimal("70000.0"), "70000"),
+        ("7E4", "70000"),
+        (Decimal("6.4"), "6D4"),
+        ("6.4", "6D4"),
+        ("6d4", "6D4"),
+        (None, None),
+        ("", None),
+    ],
+)
+def test_spell_strike_folds_scientific_and_decimal_forms(
+    value: object, want: str | None
+) -> None:
+    assert spell_strike(value) == want
 
 
 @pytest.mark.parametrize(

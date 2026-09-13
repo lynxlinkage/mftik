@@ -1,10 +1,12 @@
-# Deribit — unified venue, Spot + linear/inverse perps + dated
+# Deribit — unified venue, Spot + linear/inverse perps + dated + listed Option
 
 Deribit is one venue with one HMAC credential (Client ID + Client Secret,
-no passphrase). Identity is `{Spot, Perp, Inverse, Future}`. Routing is
-not a second socket: one public WS and one private WS, and the wire name
-(`instrument_name`) picks the book. Options, combos, Starbase/FIX, demo
-hosts, subaccount switching, and wallet transfers are out of scope.
+no passphrase). Identity is `{Spot, Perp, Inverse, Future, Option}`.
+Routing is not a second socket: one public WS and one private WS, and
+the wire name (`instrument_name`) picks the book. Options are listed on
+the symbol plane and refused by TD / MD until sizing is measured.
+Combos, Starbase/FIX, demo hosts, subaccount switching, and wallet
+transfers stay out of scope.
 
 The wallet is **per currency**, not per product. There is no funding
 account and no UTA-style split. Connect reads
@@ -23,9 +25,10 @@ account and no UTA-style split. Connect reads
 | V7 | `post_only` default | **`true` on `private/buy` / `private/sell`.** Non-`POST_ONLY` must send `post_only=false`. `POST_ONLY` sends `post_only=true` and `reject_post_only=true` (CBE otherwise `post_only_not_allowed`). | DRB-5 |
 | V8 | Margin models that can trade | Accept `segregated_sm`, `segregated_pm`, `cross_sm`, `cross_pm`. Missing model is logged, not refused. One-way net positions; no `posSide`. | DRB-5 |
 | V9 | Wallet read | Only `private/get_account_summaries` / `user.portfolio.{currency}`. `free=available_funds`, `locked=max(0, equity - available_funds)`. Never a funding-account call. Transfers stay out of scope. | DRB-5 |
-| V10 | `currency=any` on instruments | Legal. `public/get_instruments` is 1 rps / 10k credits. SYM uses `currency=any` four times (one source per book; three of them share `kind=future`). `currency=USDT&kind=future` was empty on 2026-09-06; empty is not a bug. | DRB-3 |
+| V10 | `currency=any` on instruments | Legal. `public/get_instruments` is 1 rps / 10k credits. SYM uses `currency=any` five times (one source per book; three share `kind=future`; Option uses `kind=option&expired=false`). `currency=USDT&kind=future` was empty on 2026-09-06; empty is not a bug. | DRB-3 |
 | V11 | Error codes | JSON-RPC `error.code` integers. Unmapped codes pass through. At least `10000`, `10004`, `10009`, `10028`, `11050`, `11060`. | DRB-6 |
 | V12 | CBE-routed spot | `is_cbe_routed` / `is_csr` **present only when true**. Live: `SOL_USDC`, `PAXG_USDC`, `SOL_ETH`; `BNB_USDC` inactive. Native spots omit both fields. Test for presence, not `== false`. Still listed and tradeable. | DRB-3 |
+| V13 | Option identity and quote | One `Option` book. Platform quote is `counter_currency` (inverse `USD`, linear `USDC`), not `quote_currency` (inverse options quote the coin). Wire `BTC-13SEP26-70000-C` → `Deribit_Option_BTCUSD-260913-70000-C`; `BTC_USDC-13SEP26-70000-C` → `Deribit_Option_BTCUSDC-260913-70000-C`; `AVAX_USDC-13SEP26-6d4-C` → `Deribit_Option_AVAXUSDC-260913-6D4-C`. Live 2026-09-13: 5124 rows (~4.3MB; 3302 linear / 1822 reversed). Longest platform ticker 38, longest wire 25. Filters store base `tick_size` and `min_trade_amount` only. TD / MD refuse Option by name. | DRB-7 |
 
 V2 and V3 did not contradict the constants this doc assumed for identity.
 
@@ -37,6 +40,7 @@ V2 and V3 did not contradict the constants this doc assumed for identity.
 | **Deribit Perp (linear)** | yes | yes | yes | yes | yes | yes | — | — | yes (ticker) | yes (REST + ticker) |
 | **Deribit Inverse** | yes | yes | yes | yes | yes | yes | — | — | yes (ticker) | yes (REST + ticker) |
 | **Deribit Future (dated)** | yes | yes | yes | yes | yes | yes | — | — | — | yes (REST + ticker) |
+| **Deribit Option** | — | — | — | — | — | — | — | — | — | — |
 
 `yes` means the adapter serves it. `—` means refused by name.
 

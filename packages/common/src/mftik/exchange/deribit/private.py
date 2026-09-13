@@ -31,6 +31,7 @@ from mftik.exchange.deribit.protocol import (
     DERIBIT_WS_URL,
     KIND_FUTURE,
     MARGIN_MODELS,
+    TRADED_CATEGORIES,
     DeribitAuthError,
     DeribitError,
     category_from_instrument,
@@ -176,7 +177,7 @@ class DeribitPrivateClient(BaseClient):
                 )
 
         ticker = request.ticker
-        check_venue(ticker, self.name)
+        check_venue(ticker, self.name, categories=TRADED_CATEGORIES)
         native = await self.symbols.exch_ticker(ticker)
         label = request.client_order_id
         if label and len(label) > _LABEL_MAX:

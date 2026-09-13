@@ -154,6 +154,31 @@ def test_deribit_linear_dated_commits_quote_margin() -> None:
     assert not is_linear_margin(Category.FUTURE, venue="Deribit")
 
 
+def test_a_deribit_option_commits_nothing_knowable() -> None:
+    """Premium and contract size are not arguments; a spot figure is wrong."""
+    request = _request(
+        universal_ticker="Deribit_Option_BTCUSD-260913-70000-C"
+    )
+    assert (
+        commitment_for(
+            category=Category.OPTION,
+            side=request.side,
+            order_type=request.type,
+            base="BTC",
+            quote="USD",
+            qty=request.qty,
+            price=request.price,
+            leverage=Decimal("10"),
+            venue="Deribit",
+        )
+        is None
+    )
+    assert (
+        reservation_for(request, base="BTC", quote="USD", leverage=Decimal("10"))
+        is None
+    )
+
+
 def test_an_inverse_order_commits_nothing_knowable() -> None:
     """Margin is in the coin and size is a contract count.
 

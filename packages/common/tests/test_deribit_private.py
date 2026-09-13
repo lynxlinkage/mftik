@@ -39,6 +39,7 @@ from mftik.exchange.tickers import Category, UniversalTicker
 PERP = UniversalTicker.parse("Deribit_Perp_BTCUSDC")
 INVERSE = UniversalTicker.parse("Deribit_Inverse_BTCUSD")
 DATED = UniversalTicker.parse("Deribit_Future_BTCUSD-260906")
+OPTION = UniversalTicker.parse("Deribit_Option_BTCUSD-260913-70000-C")
 API_KEY = "cid"
 API_SECRET = "secret"
 
@@ -321,6 +322,24 @@ async def test_v6_quote_qty_is_refused() -> None:
                     side=Side.BUY,
                     type=OrderType.MARKET,
                     quote_qty=Decimal("10"),
+                )
+            )
+    assert not any(
+        method in {ch.PRIVATE_BUY, ch.PRIVATE_SELL} for method, _ in stream.calls
+    )
+
+
+async def test_option_is_refused_by_name() -> None:
+    stream = FakeStream()
+    async with _client(stream) as client:
+        with pytest.raises(OrderError, match="Option"):
+            await client.place_order(
+                PlaceOrderRequest(
+                    universal_ticker=str(OPTION),
+                    side=Side.BUY,
+                    type=OrderType.LIMIT,
+                    qty=Decimal("0.1"),
+                    price=Decimal("0.01"),
                 )
             )
     assert not any(

@@ -58,6 +58,9 @@ _MARKET_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     ("Deribit", Category.PERP): _BOTH_QTY,
     ("Deribit", Category.INVERSE): _BOTH_QTY,
     ("Deribit", Category.FUTURE): _BOTH_QTY,
+    # Listed, not traded. The row is how the book would size; the
+    # adapter refuses Option before the wire.
+    ("Deribit", Category.OPTION): _BOTH_QTY,
 }
 
 #: The same question for a limit order. Uniformly base today, which is why it
@@ -86,6 +89,7 @@ _LIMIT_SIZE: dict[tuple[str, Category], dict[Side, str]] = {
     ("Deribit", Category.PERP): _BOTH_QTY,
     ("Deribit", Category.INVERSE): _BOTH_QTY,
     ("Deribit", Category.FUTURE): _BOTH_QTY,
+    ("Deribit", Category.OPTION): _BOTH_QTY,
 }
 
 #: Every book in :mod:`~mftik.exchange.venues` needs a row in *both* tables. A

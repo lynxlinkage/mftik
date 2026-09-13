@@ -6,7 +6,9 @@ Public JSON-RPC, no signing.
 HMAC credential trades spot, linear perps, inverse perps and dated
 futures, but listing is still one filter at a time, and that is the unit
 :meth:`~mftik_sym.plane.SymbolPlane.refresh` can safely delist within.
-So ``Deribit`` contributes exactly four sources.
+So ``Deribit`` contributes exactly five sources. Option is one book —
+linear and inverse options share ``kind=option`` and are distinguished
+by platform quote. A second Option source would deactivate the first.
 
 **The Perp source is the linear union.** ``kind=future`` also returns
 inverse and dated rows. :func:`~mftik.exchange.deribit.listing.to_listed`
@@ -14,9 +16,11 @@ keeps linear perpetuals on Perp, inverse perpetuals on Inverse, and
 every dated row (linear USDC and inverse USD) on Future. A second source
 of the same category would deactivate the first.
 
-**V2 / V3:** platform symbol is ``base+quote``. The underscore stays on
-``exch_ticker``. Dated identity hyphenates ``YYMMDD``
+**V2 / V3 / V13:** platform symbol is ``base+quote``. The underscore
+stays on ``exch_ticker``. Dated identity hyphenates ``YYMMDD``
 (``Deribit_Future_BTCUSD-260906``); the wire keeps ``BTC-6SEP26``.
+Option identity is ``PAIR-YYMMDD-STRIKE-C``
+(``Deribit_Option_BTCUSD-260913-70000-C``).
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from mftik.exchange.deribit.listing import VENUE, to_listed
 from mftik.exchange.deribit.protocol import (
     DERIBIT_REST_URL,
     KIND_FUTURE,
+    KIND_OPTION,
     KIND_SPOT,
 )
 from mftik.exchange.tickers import Category
@@ -37,7 +42,13 @@ from mftik_sym.sources.base import Instrument
 logger = logging.getLogger(__name__)
 
 _BOOKS = frozenset(
-    {Category.SPOT, Category.PERP, Category.INVERSE, Category.FUTURE}
+    {
+        Category.SPOT,
+        Category.PERP,
+        Category.INVERSE,
+        Category.FUTURE,
+        Category.OPTION,
+    }
 )
 
 
@@ -45,8 +56,8 @@ class DeribitInstrumentSource:
     """Every instrument Deribit lists on one of its books.
 
     ``category`` picks the book in the platform's vocabulary. Spot fetches
-    ``kind=spot``. Perp / Inverse / Future all fetch ``kind=future`` and
-    keep their own rows.
+    ``kind=spot``. Option fetches ``kind=option``. Perp / Inverse /
+    Future all fetch ``kind=future`` and keep their own rows.
     """
 
     venue = VENUE
@@ -61,7 +72,7 @@ class DeribitInstrumentSource:
     ) -> None:
         if category not in _BOOKS:
             raise ValueError(
-                f"{VENUE} source trades Spot, Perp, Inverse and Future; "
+                f"{VENUE} source lists Spot, Perp, Inverse, Future and Option; "
                 f"got {category.value}"
             )
         self.category = category
@@ -72,7 +83,11 @@ class DeribitInstrumentSource:
 
     @property
     def kind(self) -> str:
-        return KIND_SPOT if self.category is Category.SPOT else KIND_FUTURE
+        if self.category is Category.SPOT:
+            return KIND_SPOT
+        if self.category is Category.OPTION:
+            return KIND_OPTION
+        return KIND_FUTURE
 
     async def _http(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -89,9 +104,12 @@ class DeribitInstrumentSource:
 
     async def fetch(self) -> list[Instrument]:
         client = await self._http()
+        params: dict[str, str] = {"currency": "any", "kind": self.kind}
+        if self.category is Category.OPTION:
+            params["expired"] = "false"
         response = await client.get(
             "public/get_instruments",
-            params={"currency": "any", "kind": self.kind},
+            params=params,
         )
         response.raise_for_status()
         payload = response.json() or {}
