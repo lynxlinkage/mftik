@@ -315,6 +315,11 @@ jobs:
   # paper. Each set rolls its own members one at a time, so a TD restart — which
   # now reaps every session in its name — is not simultaneous in both regions.
   #
+  # The only secret here is the Strategon token. The database URLs the planes
+  # need are `secret.*` tokens in deployment/sets/planes.json, resolved by the
+  # control plane from its own catalog — put there once with
+  # `scripts/s7n.py secrets put`, never through this workflow.
+  #
   # Prereleases do not roll production, for the same reason they do not move
   # :latest.
   planes:
@@ -344,12 +349,10 @@ jobs:
       - name: Apply the plane sets
         env:
           STRATEGON_API_KEY: ${{ secrets.STRATEGON_API_KEY }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+          VERSION: ${{ github.ref_name }}
         run: |
-          python3 scripts/s7n_apply_sets.py \
-            --spec deployment/sets/planes.json \
-            --version "${{ github.ref_name }}" \
+          python3 scripts/s7n.py apply deployment/sets/planes.json \
+            --version "$VERSION" \
             --tar /tmp/mftik.tar \
             --wait-seconds 300
 

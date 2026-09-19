@@ -1,11 +1,17 @@
 {
   "layer": "planes",
   "artifactVersion": "set-by-tag",
-  "secretKeysFromProdEnv": ["DATABASE_URL", "DATABASE_URL_SYNC"],
+  "labels": { "app": "mftik", "layer": "planes" },
+  "volumes": [
+    { "machine": "cp", "name": "mftik-data" },
+    { "machine": "yite", "name": "mftik-data" }
+  ],
   "commonEnv": {
     "BROKER_KEY_PREFIX": "mftik",
     "LOG_LEVEL": "INFO",
-    "MFTIK_DEFAULT_USER_ID": "1"
+    "MFTIK_DEFAULT_USER_ID": "1",
+    "DATABASE_URL": "secret.mftik-database-url",
+    "DATABASE_URL_SYNC": "secret.mftik-database-url-sync"
   },
   "deployPolicy": {
     "startsecs": 5,
@@ -16,6 +22,7 @@
   },
   "limits": { "memoryBytes": "805306368" },
   "update": { "maxUnavailable": 1, "waitReadySeconds": 120 },
+  "captureStdio": true,
   "sets": [
     {
       "metadata": { "name": "td" },
@@ -40,12 +47,15 @@
         "strategy": "sts",
         "template": {
           "args": ["sts"],
+          "volumeMounts": [
+            { "name": "mftik-data", "containerPath": "/var/lib/mftik" }
+          ],
           "env": {
             "MFTIK_INSTANCE": "${member.name}",
             "NATS_URL": "nats://${member.vars.NATS}:4222",
-            "MFTIK_DATA": "/var/lib/strategon-agent/strategies/${member.name}/work/registry",
+            "MFTIK_DATA": "/var/lib/mftik/registry",
             "STS_REBUILD_ON_BOOT": "1",
-            "STS_EVENTLOG_DIR": "/var/lib/strategon-agent/strategies/${member.name}/work/eventlog",
+            "STS_EVENTLOG_DIR": "/var/lib/mftik/eventlog",
             "STS_EVENTLOG_QUEUE": "20000",
             "STS_EVENTLOG_MAX_BYTES": "134217728",
             "STS_EVENTLOG_BACKUPS": "2"
