@@ -114,6 +114,33 @@ up *args:
 down:
     docker compose down
 
+# Strategon. Every recipe wants STRATEGON_API_KEY in the environment; the
+# token is minted on the control plane's API tokens page and is not in .env.
+#
+# Phase and members of every set.
+s7n-status *args:
+    python3 scripts/s7n.py status {{args}}
+
+# Preflight the plane sets against the control plane and print what a tag
+# would apply — secrets show as their `secret.*` tokens, so this is safe to
+# paste. Nothing is written.
+s7n-plan version="v0.0.0":
+    python3 scripts/s7n.py apply deployment/sets/planes.json --version {{version}} --dry-run
+
+# Roll the plane sets to a tag that is already in the catalog: a rollback, or
+# a spec change under the running version. `--tar` is only for a new tag,
+# which is the release workflow's job.
+s7n-planes version:
+    python3 scripts/s7n.py apply deployment/sets/planes.json --version {{version}}
+
+# The secret catalog. `put` reads the value from stdin so it is never in argv:
+#   ssh cp 'grep ^DATABASE_URL= /opt/mftik/deploy/.env | cut -d= -f2-' | just s7n-secret-put mftik-database-url
+s7n-secrets:
+    python3 scripts/s7n.py secrets list
+
+s7n-secret-put name:
+    python3 scripts/s7n.py secrets put {{name}}
+
 # Point git at the tracked hooks in scripts/git-hooks. `.git/hooks` is not
 # cloned, so every checkout has to opt in once; run this after `just sync`.
 install-hooks:
