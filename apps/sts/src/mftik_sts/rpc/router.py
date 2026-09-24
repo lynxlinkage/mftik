@@ -8,6 +8,13 @@ from typing import TYPE_CHECKING
 
 from mftik.broker import IncomingRequest
 from mftik.protocol import (
+    STS_ARTIFACT_ABORT,
+    STS_ARTIFACT_BEGIN,
+    STS_ARTIFACT_CHUNK,
+    STS_ARTIFACT_COMMIT,
+    STS_ARTIFACT_DELETE,
+    STS_ARTIFACT_LIST,
+    STS_ARTIFACT_READ,
     STS_ENV_SYNC,
     STS_ERROR,
     STS_EVENTLOG_INFO,
@@ -23,6 +30,15 @@ from mftik.protocol import (
     RpcErrorEnvelope,
 )
 
+from mftik_sts.rpc.artifacts import (
+    handle_artifact_abort,
+    handle_artifact_begin,
+    handle_artifact_chunk,
+    handle_artifact_commit,
+    handle_artifact_delete,
+    handle_artifact_list,
+    handle_artifact_read,
+)
 from mftik_sts.rpc.env import handle_env_sync
 from mftik_sts.rpc.eventlog import handle_eventlog_info, handle_eventlog_read
 from mftik_sts.rpc.health import handle_health
@@ -46,6 +62,13 @@ Handler = Callable[..., Awaitable[None]]
 
 _HANDLERS: dict[str, Handler] = {
     STS_HEALTH: handle_health,
+    STS_ARTIFACT_LIST: handle_artifact_list,
+    STS_ARTIFACT_READ: handle_artifact_read,
+    STS_ARTIFACT_BEGIN: handle_artifact_begin,
+    STS_ARTIFACT_CHUNK: handle_artifact_chunk,
+    STS_ARTIFACT_COMMIT: handle_artifact_commit,
+    STS_ARTIFACT_ABORT: handle_artifact_abort,
+    STS_ARTIFACT_DELETE: handle_artifact_delete,
     STS_EVENTLOG_INFO: handle_eventlog_info,
     STS_EVENTLOG_READ: handle_eventlog_read,
     STS_ENV_SYNC: handle_env_sync,

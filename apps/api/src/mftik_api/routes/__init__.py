@@ -2,6 +2,7 @@
 
 from mftik_api.routes.alerts import router as alerts_router
 from mftik_api.routes.apis import router as apis_router
+from mftik_api.routes.artifacts import router as artifacts_router
 from mftik_api.routes.audits import router as audits_router
 from mftik_api.routes.board import router as board_router
 from mftik_api.routes.environment import router as environment_router
@@ -17,6 +18,7 @@ from mftik_api.routes.td import router as td_router
 
 __all__ = [
     "alerts_router",
+    "artifacts_router",
     "apis_router",
     "audits_router",
     "board_router",

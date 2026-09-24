@@ -2,7 +2,8 @@
 
 Subclass :class:`Strategy`, override the hooks you care about, and reach the
 platform through the accessors it binds — ``self.oms``, ``self.ledger``,
-``self.mds``, ``self.tape``, ``self.symbols``, ``self.timer``. Nothing here
+``self.mds``, ``self.tape``, ``self.artifacts``, ``self.symbols``,
+``self.timer``. Nothing here
 needs a database or a running STS, which is what lets it be installed beside
 a strategy on a developer's machine rather than only inside the node.
 

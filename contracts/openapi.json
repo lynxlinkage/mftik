@@ -1867,6 +1867,237 @@
         }
       }
     },
+    "/sts/artifacts": {
+      "get": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "Artifacts",
+        "description": "List one STS's uploaded objects, or download / stat one key.\n\n``sessions/`` is not in the list. A download is streamed a slice at a\ntime. ``stat`` returns the metadata without the body; the list already\ncarries the same fields.",
+        "operationId": "artifacts_sts_artifacts_get",
+        "parameters": [
+          {
+            "name": "instance",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Instance"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Path"
+            }
+          },
+          {
+            "name": "stat",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Stat"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "Put Artifact",
+        "description": "Replace ``path`` on one STS with the request body.",
+        "operationId": "put_artifact_sts_artifacts_put",
+        "parameters": [
+          {
+            "name": "instance",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Instance"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactObjectOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "Delete Artifact",
+        "description": "Remove one uploaded key. A ``sessions/`` key is refused by STS.",
+        "operationId": "delete_artifact_sts_artifacts_delete",
+        "parameters": [
+          {
+            "name": "instance",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Instance"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactObjectOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sts/sessions/{session_id}/artifacts": {
+      "get": {
+        "tags": [
+          "sts"
+        ],
+        "summary": "Session Artifacts",
+        "description": "Objects this session has written, on every declared STS.\n\nRows are not merged. Two instances holding the same key hold two objects,\nand each row names the disk it came from. An instance that does not\nanswer is listed in ``unanswered`` rather than rendered as empty.",
+        "operationId": "session_artifacts_sts_sessions__session_id__artifacts_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/td/sessions": {
       "get": {
         "tags": [
@@ -4217,6 +4448,66 @@
         ],
         "title": "ApiRenameBody",
         "description": "Rename the trading account bound to an API credential."
+      },
+      "ArtifactListResponse": {
+        "properties": {
+          "objects": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactObjectOut"
+            },
+            "type": "array",
+            "title": "Objects"
+          },
+          "unanswered": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unanswered"
+          }
+        },
+        "type": "object",
+        "title": "ArtifactListResponse"
+      },
+      "ArtifactObjectOut": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "size": {
+            "type": "integer",
+            "title": "Size"
+          },
+          "mtime": {
+            "type": "number",
+            "title": "Mtime"
+          },
+          "digest": {
+            "type": "string",
+            "title": "Digest"
+          },
+          "instance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "size",
+          "mtime",
+          "digest"
+        ],
+        "title": "ArtifactObjectOut",
+        "description": "One object on one STS disk."
       },
       "AuditListResponse": {
         "properties": {

@@ -89,6 +89,7 @@
 		{ href: '/strategy', label: 'Strategy' },
 		{ href: '/alerts', label: 'Alert' },
 		{ href: '/registry', label: 'Registry' },
+		{ href: '/artifacts', label: 'Artifact' },
 		{ href: '/sym', label: 'Symbol' },
 		{ href: '/audit', label: 'Audit' },
 		{ href: '/settings', label: 'Settings' }

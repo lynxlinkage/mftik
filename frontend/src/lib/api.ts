@@ -369,6 +369,21 @@ export type ApiCredential = {
 	instance: string | null;
 };
 
+/** One object on one STS disk (`GET /sts/artifacts`). */
+export type ArtifactObject = {
+	path: string;
+	size: number;
+	mtime: number;
+	digest: string;
+	instance: string | null;
+};
+
+export type ArtifactList = {
+	objects: ArtifactObject[];
+	/** Declared STS processes that did not answer. Silence is not an empty store. */
+	unanswered: string[];
+};
+
 /** A declared plane instance (`GET /instances`). */
 export type Instance = {
 	id: number;
@@ -971,6 +986,24 @@ export const api = {
 		request<StsControl>(`/sts/sessions/${encodeURIComponent(id)}/ack`, {
 			method: 'POST'
 		}),
+	/** Uploaded objects on one STS. `sessions/` is not in this list. */
+	artifacts: (instance: string) =>
+		request<ArtifactList>(`/sts/artifacts?instance=${encodeURIComponent(instance)}`),
+	/** Objects one session wrote, on every declared STS. Rows are not merged. */
+	sessionArtifacts: (sessionId: string) =>
+		request<ArtifactList>(`/sts/sessions/${encodeURIComponent(sessionId)}/artifacts`),
+	putArtifact: (instance: string, path: string, body: Blob) => {
+		const q = new URLSearchParams({ instance, path });
+		return request<ArtifactObject>(`/sts/artifacts?${q}`, {
+			method: 'PUT',
+			body,
+			headers: { 'Content-Type': 'application/octet-stream' }
+		});
+	},
+	deleteArtifact: (instance: string, path: string) => {
+		const q = new URLSearchParams({ instance, path });
+		return request<ArtifactObject>(`/sts/artifacts?${q}`, { method: 'DELETE' });
+	},
 	audits: (opts: { offset?: number; limit?: number } = {}) => {
 		const q = new URLSearchParams();
 		if (opts.offset != null && opts.offset > 0) q.set('offset', String(opts.offset));
@@ -1105,6 +1138,13 @@ export function formatDecimal(value: string | number | null | undefined): string
 	if (!/^-?\d+\.\d+$/.test(s)) return s || null;
 	const trimmed = s.replace(/0+$/, '').replace(/\.$/, '');
 	return trimmed === '' || trimmed === '-' ? '0' : trimmed;
+}
+
+export function formatBytes(n: number): string {
+	if (n < 1024) return `${n} B`;
+	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+	if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+	return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 export function formatTs(ts: number | null | undefined): string {
