@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import time
@@ -206,3 +207,82 @@ async def test_a_bound_strategy_reads_what_it_wrote(
     # The upload under the same relative tail is a different key.
     assert await strategy.artifacts.read("weights/model.pt") is None
     assert get_store().read(key) is not None
+
+
+@pytest.mark.asyncio
+async def test_writing_replaces_the_key_when_the_block_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DIR_ENV, str(tmp_path))
+    reset_store()
+    strategy = Strategy()
+    strategy.session = SimpleNamespace(session_id="abc123")  # type: ignore[assignment]
+    strategy.artifacts.bind(strategy)
+    key = f"sessions/{strategy.session.session_id}/weights/model.pt"
+    await strategy.artifacts.write(key, b"first")
+
+    async with strategy.artifacts.writing(key) as out:
+        await asyncio.to_thread(out.write, b"second")
+
+    async with strategy.artifacts.reading(key) as inp:
+        body = await asyncio.to_thread(inp.read)
+    assert body == b"second"
+    assert list(tmp_path.rglob("*.part")) == []
+    stated = await strategy.artifacts.stat(key)
+    assert stated is not None
+    assert stated.digest == "sha256:" + hashlib.sha256(b"second").hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_writing_keeps_the_previous_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DIR_ENV, str(tmp_path))
+    reset_store()
+    strategy = Strategy()
+    strategy.session = SimpleNamespace(session_id="abc123")  # type: ignore[assignment]
+    strategy.artifacts.bind(strategy)
+    key = "weights/model.pt"
+    await strategy.artifacts.write(key, b"first")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        async with strategy.artifacts.writing(key) as out:
+            await asyncio.to_thread(out.write, b"partial")
+            raise RuntimeError("boom")
+
+    opened = await strategy.artifacts.read(key)
+    assert opened is not None
+    assert opened.body == b"first"
+    assert list(tmp_path.rglob("*.part")) == []
+
+
+@pytest.mark.asyncio
+async def test_reading_a_missing_key_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DIR_ENV, str(tmp_path))
+    reset_store()
+    strategy = Strategy()
+    strategy.session = SimpleNamespace(session_id="abc123")  # type: ignore[assignment]
+    strategy.artifacts.bind(strategy)
+    with pytest.raises(ArtifactNotFound):
+        async with strategy.artifacts.reading("weights/model.pt"):
+            pass
+
+
+def test_a_swapped_part_file_is_not_committed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.write("weights/model.pt", b"first")
+    opened = store.open_write("weights/model.pt")
+    opened.handle.write(b"second")
+    opened.handle.flush()
+    opened.handle.close()
+    opened.path.unlink()
+    opened.path.symlink_to("/etc/passwd")
+    with pytest.raises(BadArtifactKey):
+        store.commit_stream(opened)
+    body = store.read("weights/model.pt")
+    assert body is not None
+    assert body.body == b"first"
+    assert not opened.path.exists()
+    assert not opened.path.is_symlink()

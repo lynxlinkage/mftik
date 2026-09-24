@@ -140,6 +140,8 @@ class Strategy:
 
     Artifacts — opaque bytes on this STS's disk (wired):
         self.artifacts.read(path) / stat(path) / write(path, body)
+        self.artifacts.reading(path) / writing(path) — the same object as a
+        file, so a large checkpoint is not also held as ``bytes``.
         One relative path is one object. ``weights/model.pt`` is not
         ``sessions/{session_id}/weights/model.pt``. A missing key is None;
         a key that is not a relative path raises. These read or replace a

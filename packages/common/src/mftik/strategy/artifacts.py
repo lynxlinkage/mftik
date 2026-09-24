@@ -21,11 +21,14 @@ import asyncio
 import hashlib
 import os
 import secrets
+import stat
 import threading
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from mftik.strategy.base import Strategy
@@ -78,6 +81,17 @@ class _Upload:
     key: str
     path: Path
     lock: threading.Lock
+
+
+@dataclass
+class _StreamWrite:
+    """A part file a strategy is writing. Commit checks it is still this file."""
+
+    key: str
+    path: Path
+    handle: IO[bytes]
+    dev: int
+    ino: int
 
 
 def artifact_dir() -> Path:
@@ -214,6 +228,81 @@ class ArtifactStore:
             os.fsync(handle.fileno())
         os.replace(part, dest)
         return self._remember(key, dest, _DIGEST_PREFIX + digest.hexdigest())
+
+    def open_read(self, key: str) -> IO[bytes]:
+        """Open ``key`` for reading, or raise when the listing has no such object.
+
+        The name is one the directory walk would offer. A caller that streams
+        the file does not also hold the body as ``bytes``.
+        """
+        found = self._listed(key)
+        if found is None:
+            raise ArtifactNotFound(key)
+        return found.open("rb")
+
+    def open_write(self, key: str) -> _StreamWrite:
+        """Create a part file for ``key`` and return it still open.
+
+        The caller writes the body. :meth:`commit_stream` replaces the key;
+        :meth:`abort_stream` unlinks the part. A ``sessions/`` key is allowed:
+        this is the strategy, not an operator upload.
+        """
+        dest = self._destination(key)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        token = secrets.token_hex(8)
+        part = dest.parent / f".{dest.name}.{token}.part"
+        handle = part.open("w+b")
+        st = os.fstat(handle.fileno())
+        return _StreamWrite(
+            key=key, path=part, handle=handle, dev=st.st_dev, ino=st.st_ino
+        )
+
+    def commit_stream(self, opened: _StreamWrite) -> ArtifactMeta:
+        """fsync the part, hash it, and replace ``key`` with it.
+
+        The part must still be the regular file this call opened. A symlink
+        planted at that path is not replaced onto the key.
+        """
+        try:
+            self._same_part(opened)
+            if not opened.handle.closed:
+                opened.handle.flush()
+                os.fsync(opened.handle.fileno())
+                opened.handle.seek(0)
+                digest = self._hash_handle(opened.handle)
+                opened.handle.flush()
+                os.fsync(opened.handle.fileno())
+                opened.handle.close()
+            else:
+                with opened.path.open("rb") as handle:
+                    digest = self._hash_handle(handle)
+                    os.fsync(handle.fileno())
+            self._same_part(opened)
+            dest = self._destination(opened.key)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(opened.path, dest)
+        except Exception:
+            self.abort_stream(opened)
+            raise
+        return self._remember(opened.key, dest, digest)
+
+    def abort_stream(self, opened: _StreamWrite) -> None:
+        """Close the part and unlink it when it is still the file we opened."""
+        if not opened.handle.closed:
+            opened.handle.close()
+        try:
+            st = os.lstat(opened.path)
+        except OSError:
+            return
+        ours = stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == (
+            opened.dev,
+            opened.ino,
+        )
+        if ours or stat.S_ISLNK(st.st_mode):
+            try:
+                os.unlink(opened.path)
+            except OSError:
+                return
 
     def remove(self, key: str) -> None:
         """Unlink an uploaded object. A ``sessions/`` key is refused."""
@@ -404,6 +493,26 @@ class ArtifactStore:
         with self._lock:
             self._digests.pop((st.st_size, st.st_mtime_ns, st.st_ino), None)
 
+    def _same_part(self, opened: _StreamWrite) -> None:
+        try:
+            st = os.lstat(opened.path)
+        except OSError as exc:
+            raise ArtifactUploadError(opened.key) from exc
+        if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (
+            opened.dev,
+            opened.ino,
+        ):
+            raise BadArtifactKey(
+                f"{opened.key} part file is no longer the file the store opened"
+            )
+
+    @staticmethod
+    def _hash_handle(handle: IO[bytes]) -> str:
+        digest = hashlib.sha256()
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+        return _DIGEST_PREFIX + digest.hexdigest()
+
     def _refuse_session_key(self, key: str) -> None:
         check_key(key)
         if is_session_key(key):
@@ -483,6 +592,43 @@ class StrategyArtifacts:
     async def write(self, key: str, body: bytes) -> ArtifactMeta:
         self._bound()
         return await asyncio.to_thread(get_store().write, key, body)
+
+    @asynccontextmanager
+    async def reading(self, key: str) -> AsyncIterator[IO[bytes]]:
+        """Open ``key`` for a streaming read.
+
+        The file is the object the directory lists. A missing key raises
+        :class:`ArtifactNotFound` before the block runs. Close happens here;
+        the body reads the file, usually from :func:`asyncio.to_thread`.
+        """
+        self._bound()
+        handle = await asyncio.to_thread(get_store().open_read, key)
+        try:
+            yield handle
+        finally:
+            await asyncio.to_thread(handle.close)
+
+    @asynccontextmanager
+    async def writing(self, key: str) -> AsyncIterator[IO[bytes]]:
+        """Open a part file. The block writes it; leaving the block replaces ``key``.
+
+        An exception unlinks the part and leaves the previous object. The file
+        object is the one to hand to ``torch.save`` inside
+        :func:`asyncio.to_thread` — the body is not assembled as ``bytes`` first.
+        """
+        self._bound()
+        opened = await asyncio.to_thread(get_store().open_write, key)
+        try:
+            yield opened.handle
+        except BaseException:
+            await asyncio.to_thread(get_store().abort_stream, opened)
+            raise
+        else:
+            try:
+                await asyncio.to_thread(get_store().commit_stream, opened)
+            except BaseException:
+                await asyncio.to_thread(get_store().abort_stream, opened)
+                raise
 
 
 def _token_of(name: str) -> str | None:

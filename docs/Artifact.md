@@ -150,15 +150,28 @@ await self.artifacts.write(
     f"sessions/{self.session_id}/weights/model.pt",
     body,
 )
+
+async with self.artifacts.writing(
+    f"sessions/{self.session_id}/weights/model.pt"
+) as out:
+    await asyncio.to_thread(torch.save, model, out)
+
+async with self.artifacts.reading("weights/model.pt") as inp:
+    state = await asyncio.to_thread(torch.load, inp, weights_only=True)
 ```
 
 `read` returns the key it was given. It does not fall back from a
 session key to an uploaded key, or the other way around. `stat` is the
 call that answers size and mtime without pulling a large body into the
-process.
+process. `read` and `write` hand the body across as `bytes`. `reading`
+and `writing` hand a file instead, so a checkpoint large enough to mind
+does not also sit in memory as that `bytes`. `writing` still replaces
+the key only when the block finishes: `fsync`, digest, then
+`os.replace`. An exception deletes the part file and leaves the previous
+object. A missing key raises from `reading` before the block runs.
 
 Loading a torch checkpoint is the strategy's work. The store returns
-bytes:
+bytes, or a file the caller reads:
 
 ```python
 model.load_state_dict(
