@@ -45,6 +45,12 @@ SESSIONS = "sessions"
 
 _DIGEST_PREFIX = "sha256:"
 
+#: Entries kept in the digest cache. It is keyed by ``(size, mtime_ns, inode)``,
+#: so every version of every object it has hashed is a new key and nothing but
+#: a delete ever removes one. An STS process lives for weeks and a strategy
+#: that checkpoints every minute would otherwise grow this without end.
+_DIGEST_CACHE_MAX = 4096
+
 
 class BadArtifactKey(ValueError):
     """The key is not a relative path this store will accept."""
@@ -174,22 +180,20 @@ class ArtifactStore:
         found = self._listed(key)
         if found is None:
             return None
-        digest = hashlib.sha256()
-        chunks: list[bytes] = []
+        # One copy of the body, not a list of blocks and then a join of them:
+        # this is already the call that admits to holding a whole checkpoint,
+        # and holding it twice at the peak is what ``reading`` exists to avoid.
         with found.open("rb") as handle:
-            for block in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(block)
-                chunks.append(block)
-        text = _DIGEST_PREFIX + digest.hexdigest()
-        st = found.stat()
-        with self._lock:
-            self._digests[(st.st_size, st.st_mtime_ns, st.st_ino)] = text
+            st = os.fstat(handle.fileno())
+            body = handle.read()
+        text = _DIGEST_PREFIX + hashlib.sha256(body).hexdigest()
+        self._cache(st, text)
         return ArtifactObject(
             path=key,
-            size=st.st_size,
+            size=len(body),
             mtime=st.st_mtime,
             digest=text,
-            body=b"".join(chunks),
+            body=body,
         )
 
     def read_at(self, key: str, offset: int, length: int) -> tuple[bytes, bool]:
@@ -221,12 +225,20 @@ class ArtifactStore:
         token = secrets.token_hex(8)
         part = dest.parent / f".{dest.name}.{token}.part"
         digest = hashlib.sha256()
-        with part.open("wb") as handle:
-            digest.update(body)
-            handle.write(body)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(part, dest)
+        try:
+            with part.open("wb") as handle:
+                digest.update(body)
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(part, dest)
+        except OSError:
+            # A key that collides with a directory, a full disk: the object
+            # that was there is untouched, and the part must not be left
+            # behind for the sweeper to find an hour later.
+            part.unlink(missing_ok=True)
+            raise
+        _fsync_dir(dest.parent)
         return self._remember(key, dest, _DIGEST_PREFIX + digest.hexdigest())
 
     def open_read(self, key: str) -> IO[bytes]:
@@ -284,6 +296,7 @@ class ArtifactStore:
         except Exception:
             self.abort_stream(opened)
             raise
+        _fsync_dir(dest.parent)
         return self._remember(opened.key, dest, digest)
 
     def abort_stream(self, opened: _StreamWrite) -> None:
@@ -305,7 +318,12 @@ class ArtifactStore:
                 return
 
     def remove(self, key: str) -> None:
-        """Unlink an uploaded object. A ``sessions/`` key is refused."""
+        """Unlink an uploaded object. A ``sessions/`` key is refused.
+
+        The name is what goes: ``unlink`` never follows a symlink, so
+        removing one takes the directory entry away and leaves the object it
+        pointed at under its own key.
+        """
         self._refuse_session_key(key)
         found = self._listed(key)
         if found is None:
@@ -349,15 +367,22 @@ class ArtifactStore:
         """fsync the part, hash it, and replace the key with it."""
         upload = self._take_upload(token)
         with upload.lock:
-            digest = hashlib.sha256()
-            with upload.path.open("rb") as handle:
-                for block in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(block)
-                handle.flush()
-                os.fsync(handle.fileno())
-            dest = self._destination(upload.key)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(upload.path, dest)
+            try:
+                digest = hashlib.sha256()
+                with upload.path.open("rb") as handle:
+                    for block in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(block)
+                    os.fsync(handle.fileno())
+                dest = self._destination(upload.key)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(upload.path, dest)
+            except Exception:
+                # The token is already off the registry, so nothing else will
+                # ever name this part. Drop it here rather than leave it for
+                # the sweeper an hour from now.
+                upload.path.unlink(missing_ok=True)
+                raise
+        _fsync_dir(dest.parent)
         return self._remember(upload.key, dest, _DIGEST_PREFIX + digest.hexdigest())
 
     def abort(self, token: str) -> None:
@@ -402,15 +427,27 @@ class ArtifactStore:
     def _list(self) -> list[ArtifactMeta]:
         rows: list[ArtifactMeta] = []
         for key, path in self._walk():
-            rows.append(self._meta(key, path))
+            try:
+                rows.append(self._meta(key, path))
+            except OSError:
+                # Unlinked between the walk and the stat — a delete on the
+                # other STS subject, or a session replacing its own object.
+                # A row that is gone is left out, not raised out of the whole
+                # listing.
+                continue
         rows.sort(key=lambda row: row.path)
         return rows
 
     def _walk(self) -> list[tuple[str, Path]]:
-        """Objects the directory actually holds, as ``(key, resolved path)``.
+        """Objects the directory actually holds, as ``(key, walked path)``.
 
-        A leading-dot name is a part file, not an object. A symlink that
-        resolves outside the root is not an object either.
+        The key is the name the directory entry carries, not the name of
+        whatever it points at. A symlink is not folded into its target: with
+        ``link -> data.bin`` in the tree those are two keys, ``ls`` shows
+        both, and removing one leaves the other.
+
+        A leading-dot name is a part file, not an object. ``resolve`` is the
+        escape check only — see :meth:`_is_object`.
         """
         if not self.root.is_dir():
             return []
@@ -422,38 +459,83 @@ class ArtifactStore:
                 if name.startswith("."):
                     continue
                 path = Path(dirpath) / name
-                try:
-                    resolved = path.resolve()
-                    rel = resolved.relative_to(root)
-                except (OSError, ValueError):
+                if not self._is_object(path):
                     continue
-                if any(part.startswith(".") for part in rel.parts):
-                    continue
-                found.append((rel.as_posix(), resolved))
+                found.append((path.relative_to(root).as_posix(), path))
         return found
 
+    def _is_object(self, path: Path) -> bool:
+        """Whether the entry at ``path`` is one of this store's objects.
+
+        ``resolve`` is the escape check and nothing else: the target has to
+        be a regular file under the root, which rules out a symlink pointing
+        out of the store and a dangling one. It does not rename the entry —
+        what the object is called is the name it is filed under.
+        """
+        root = self.root.resolve()
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            return False
+        return resolved.is_file()
+
     def _listed(self, key: str) -> Path | None:
+        """The entry ``key`` names, or None when the listing would not offer it.
+
+        Looked up directly rather than by walking the tree: a download asks
+        for one slice at a time, and walking every object on the disk once per
+        256 KiB of a checkpoint is the whole store's cost per chunk.
+
+        Which makes agreeing with :meth:`_walk` this method's whole job, and
+        the agreement is reached the same way the walk reaches it rather than
+        by comparing resolved names. Every directory above the last segment
+        must be a real directory: ``os.walk(followlinks=False)`` does not
+        descend into a symlinked one, so a key underneath it is a name the
+        listing never offers. The last segment is then put to
+        :meth:`_is_object`, which resolves it only to check it stays inside.
+
+        The path returned is the walked one, so a caller that opens it follows
+        the link to the bytes and a caller that unlinks it takes the name away
+        and leaves the target alone.
+        """
         check_key(key)
-        for found, path in self._walk():
-            if found == key:
-                return path
-        return None
+        parts = key.split("/")
+        if any(part.startswith(".") for part in parts):
+            return None
+        if not self.root.is_dir():
+            return None
+        path = self.root.resolve()
+        for part in parts[:-1]:
+            path = path / part
+            if path.is_symlink() or not path.is_dir():
+                return None
+        path = path / parts[-1]
+        return path if self._is_object(path) else None
 
     def _destination(self, key: str) -> Path:
         """The absolute path ``key`` will occupy, once it exists.
 
-        Resolved, then checked to still be under the root. That is the check
-        a string rule cannot make: a symlink already in the tree.
+        The directories above the last segment are resolved and checked to be
+        under the root. That is the check a string rule cannot make: a symlink
+        already in the tree.
+
+        The last segment is not resolved. POSIX ``rename`` does not follow a
+        symlink in its final component, so the ``os.replace`` that lands the
+        object swaps this directory entry for a regular file. Writing ``link``
+        therefore replaces ``link`` and leaves the file it pointed at alone,
+        which is the same name-is-the-name rule ``remove`` follows.
         """
         check_key(key)
-        root = self.root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        resolved = (root / key).resolve()
+        root = self.root.resolve()
+        dest = root.joinpath(key)
         try:
-            resolved.relative_to(root)
-        except ValueError as exc:
+            parent = dest.parent.resolve()
+            parent.relative_to(root)
+        except (OSError, ValueError) as exc:
             raise BadArtifactKey(f"{key} is outside the artifact store") from exc
-        return resolved
+        return parent / dest.name
 
     def _meta(self, key: str, path: Path) -> ArtifactMeta:
         st = path.stat()
@@ -475,14 +557,23 @@ class ArtifactStore:
             for block in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(block)
         text = _DIGEST_PREFIX + digest.hexdigest()
-        with self._lock:
-            self._digests[cache_key] = text
+        self._cache(st, text)
         return text
+
+    def _cache(self, st: os.stat_result, digest: str) -> None:
+        """Remember one digest, and forget the oldest when the cache is full.
+
+        Insertion order is eviction order: the entry least recently written is
+        the one whose object is least likely to be asked for again.
+        """
+        with self._lock:
+            self._digests[(st.st_size, st.st_mtime_ns, st.st_ino)] = digest
+            while len(self._digests) > _DIGEST_CACHE_MAX:
+                self._digests.pop(next(iter(self._digests)))
 
     def _remember(self, key: str, path: Path, digest: str) -> ArtifactMeta:
         st = path.stat()
-        with self._lock:
-            self._digests[(st.st_size, st.st_mtime_ns, st.st_ino)] = digest
+        self._cache(st, digest)
         return ArtifactMeta(path=key, size=st.st_size, mtime=st.st_mtime, digest=digest)
 
     def _forget(self, path: Path) -> None:
@@ -559,6 +650,26 @@ def reset_store() -> None:
 
 def _is_part_name(name: str) -> bool:
     return name.startswith(".") and name.endswith(".part")
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make the rename itself durable, not only the bytes it renamed.
+
+    ``os.replace`` of an fsync'd part is atomic, but a crash before the
+    directory entry reaches the disk can still lose it — and ``commit`` has
+    already handed the operator a digest by then. Best effort: a filesystem
+    that refuses to open a directory is not a reason to fail the write.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 class StrategyArtifacts:

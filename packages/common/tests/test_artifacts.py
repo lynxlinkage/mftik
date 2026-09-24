@@ -129,6 +129,59 @@ def test_a_symlink_that_leaves_the_store_is_not_an_object(tmp_path: Path) -> Non
         store.write("escape/secret", b"no")
 
 
+def test_a_symlink_inside_the_store_keeps_its_own_name(tmp_path: Path) -> None:
+    """The key is the directory entry, not what it resolves to."""
+    store = _store(tmp_path)
+    store.write("data.bin", b"hello")
+    (tmp_path / "link").symlink_to(tmp_path / "data.bin")
+
+    # Listed once under each name, not twice under the target's.
+    assert [row.path for row in store.list_catalog()] == ["data.bin", "link"]
+    opened = store.read("link")
+    assert opened is not None
+    assert opened.body == b"hello"
+
+    # Removing the name removes the name.
+    store.remove("link")
+    assert not (tmp_path / "link").is_symlink()
+    assert (tmp_path / "data.bin").read_bytes() == b"hello"
+    assert [row.path for row in store.list_catalog()] == ["data.bin"]
+
+
+def test_writing_a_symlink_key_replaces_the_entry_not_the_target(
+    tmp_path: Path,
+) -> None:
+    """``os.replace`` does not follow a symlink in its final component."""
+    store = _store(tmp_path)
+    store.write("data.bin", b"hello")
+    (tmp_path / "link").symlink_to(tmp_path / "data.bin")
+
+    store.write("link", b"new")
+
+    assert not (tmp_path / "link").is_symlink()
+    assert (tmp_path / "link").read_bytes() == b"new"
+    assert (tmp_path / "data.bin").read_bytes() == b"hello"
+
+
+def test_a_dangling_symlink_is_not_an_object(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    (tmp_path / "gone").symlink_to(tmp_path / "never-written")
+    assert store.stat("gone") is None
+    assert store.read("gone") is None
+    assert store.list_catalog() == []
+
+
+def test_a_key_under_a_symlinked_directory_is_not_offered(tmp_path: Path) -> None:
+    """``os.walk`` does not descend into one, so a lookup must not either."""
+    store = _store(tmp_path)
+    store.write("real/a.bin", b"A")
+    (tmp_path / "linkdir").symlink_to(tmp_path / "real")
+
+    assert [row.path for row in store.list_catalog()] == ["real/a.bin"]
+    assert store.stat("linkdir/a.bin") is None
+    assert store.read("linkdir/a.bin") is None
+
+
 def test_idle_part_files_are_swept(tmp_path: Path) -> None:
     store = _store(tmp_path)
     token = store.begin("weights/model.pt")

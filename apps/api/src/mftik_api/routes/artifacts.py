@@ -445,7 +445,10 @@ async def _abort(broker: BrokerDep, instance: str | None, token: str) -> None:
             result_type=StsArtifactAck,
             timeout=15.0,
         )
-    except DomainRpcError:
+    except Exception:
+        # This runs while another exception is on its way up. Letting a second
+        # one out of here would replace the reason the upload failed with the
+        # reason the cleanup did, and swallow the ``raise`` that follows it.
         logger.exception("artifact abort failed instance=%s", instance)
 
 

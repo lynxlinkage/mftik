@@ -101,6 +101,16 @@ be under the root, which is what catches a symlink already planted in
 the tree — the directory is a mounted volume and the store is not the
 only thing that can write to it.
 
+A key is the name of a directory entry. A symlink in the store is not
+folded into the name of its target: with `link -> data.bin` in the tree
+those are two keys, `ls` shows both under the names the directory gives
+them, and `rm link` takes that name away and leaves `data.bin` where it
+is. Resolving is the escape check and nothing more — a link whose
+target is outside the root, or dangling, is not an object and cannot be
+read. A write is the same rule from the other side: POSIX `rename` does
+not follow a symlink in its last component, so writing `link` replaces
+that entry with a regular file rather than through it.
+
 `log_parts` in the event log is the same intent reached a stronger way:
 it matches a name against a directory listing rather than validating a
 string, so a caller cannot name a file the listing would not have

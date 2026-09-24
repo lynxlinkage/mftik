@@ -20,6 +20,7 @@ from mftik import (
     serve_health,
 )
 from mftik.broker import Broker
+from mftik.strategy.artifacts import get_store
 
 from mftik_sts import db as sts_db
 from mftik_sts.rpc import dispatch
@@ -161,8 +162,6 @@ async def reap_loop(
         try:
             # An upload nobody committed — the API died, the laptop closed —
             # leaves a part file. Hidden from listings, and not an object.
-            from mftik.strategy.artifacts import get_store
-
             swept = await asyncio.to_thread(get_store().sweep_parts)
             if swept:
                 logger.info("STS swept %d idle artifact upload(s)", swept)

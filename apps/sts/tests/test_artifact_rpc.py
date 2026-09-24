@@ -204,3 +204,43 @@ async def test_an_upload_under_sessions_is_refused(
     err = RpcError.model_validate(reply.payload)
     assert err.code == "bad_key"
     assert list(serving.rglob("*.part")) == []
+
+
+@pytest.mark.asyncio
+async def test_a_key_that_is_a_directory_is_answered_not_dropped(
+    broker: Broker, serving: Path
+) -> None:
+    """A filesystem failure comes back as an error, not as silence.
+
+    The serve loop logs an exception out of a handler and moves on without
+    replying, so an uncaught ``IsADirectoryError`` would cost the caller the
+    whole RPC timeout and then read as "the STS did not answer".
+    """
+    (serving / "weights").mkdir()
+    (serving / "weights" / "model.pt").write_bytes(b"first")
+
+    begun = StsArtifactBeginResult.model_validate(
+        (
+            await _ask(
+                broker,
+                StsArtifactBeginRequestEnvelope.wrap(
+                    StsArtifactBeginRequest(path="weights"),
+                    type=STS_ARTIFACT_BEGIN,
+                    source="api",
+                ),
+            )
+        ).payload
+    )
+    reply = await _ask(
+        broker,
+        StsArtifactCommitRequestEnvelope.wrap(
+            StsArtifactCommitRequest(token=begun.token),
+            type=STS_ARTIFACT_COMMIT,
+            source="api",
+        ),
+    )
+    assert reply.type == STS_ERROR
+    assert RpcError.model_validate(reply.payload).code == "io_failed"
+    # The object that was there is untouched, and the part is not left behind.
+    assert (serving / "weights" / "model.pt").read_bytes() == b"first"
+    assert list(serving.rglob("*.part")) == []

@@ -85,6 +85,9 @@ async def handle_artifact_list(
     except BadArtifactKey as exc:
         await _error(req, "bad_key", str(exc))
         return
+    except OSError as exc:
+        await _io_error(req, "list", payload.session_id or "the catalog", exc)
+        return
     await req.reply(
         StsArtifactListResultEnvelope.wrap(
             StsArtifactListResult(
@@ -128,6 +131,9 @@ async def handle_artifact_read(
     except ArtifactNotFound as exc:
         await _error(req, "not_found", str(exc))
         return
+    except OSError as exc:
+        await _io_error(req, "read", payload.path, exc)
+        return
     await req.reply(
         StsArtifactReadChunkEnvelope.wrap(
             StsArtifactReadChunk(
@@ -159,6 +165,9 @@ async def handle_artifact_begin(
         token = await asyncio.to_thread(get_store().begin, payload.path)
     except BadArtifactKey as exc:
         await _error(req, "bad_key", str(exc))
+        return
+    except OSError as exc:
+        await _io_error(req, "begin", payload.path, exc)
         return
     await req.reply(
         StsArtifactBeginResultEnvelope.wrap(
@@ -201,6 +210,9 @@ async def handle_artifact_chunk(
     except BadArtifactKey as exc:
         await _error(req, "bad_key", str(exc))
         return
+    except OSError as exc:
+        await _io_error(req, "chunk", payload.token, exc)
+        return
     await req.reply(
         StsArtifactAckEnvelope.wrap(
             StsArtifactAck(),
@@ -230,6 +242,9 @@ async def handle_artifact_commit(
     except BadArtifactKey as exc:
         await _error(req, "bad_key", str(exc))
         return
+    except OSError as exc:
+        await _io_error(req, "commit", payload.token, exc)
+        return
     await req.reply(
         StsArtifactCommitResultEnvelope.wrap(
             StsArtifactCommitResult(
@@ -256,7 +271,11 @@ async def handle_artifact_abort(
     except Exception as exc:
         await _error(req, "invalid_payload", str(exc))
         return
-    await asyncio.to_thread(get_store().abort, payload.token)
+    try:
+        await asyncio.to_thread(get_store().abort, payload.token)
+    except OSError as exc:
+        await _io_error(req, "abort", payload.token, exc)
+        return
     await req.reply(
         StsArtifactAckEnvelope.wrap(
             StsArtifactAck(),
@@ -286,6 +305,9 @@ async def handle_artifact_delete(
     except ArtifactNotFound as exc:
         await _error(req, "not_found", str(exc))
         return
+    except OSError as exc:
+        await _io_error(req, "delete", payload.path, exc)
+        return
     await req.reply(
         StsArtifactAckEnvelope.wrap(
             StsArtifactAck(),
@@ -294,6 +316,21 @@ async def handle_artifact_delete(
             session_id=req.envelope.session_id,
         )
     )
+
+
+async def _io_error(
+    req: IncomingRequest, verb: str, what: str, exc: OSError
+) -> None:
+    """Answer a filesystem failure instead of letting it escape the handler.
+
+    The serve loop logs an exception out of a handler and moves on without
+    replying, so an uncaught ``IsADirectoryError`` — a put whose key is a
+    directory another object already lives under — costs the caller the whole
+    RPC timeout and then reads as "the STS did not answer". A disk that is
+    full, read-only or missing is the same story. Name it instead.
+    """
+    logger.exception("artifact %s failed for %s", verb, what)
+    await _error(req, "io_failed", f"artifact {verb} failed for {what}: {exc}")
 
 
 async def _error(req: IncomingRequest, code: str, message: str) -> None:
