@@ -137,6 +137,7 @@ mftik profiles              the nodes this machine is connected to
 mftik disconnect <name>     forget one, and the key it issued
 mftik check <path> [cfg]    the import gate and on_initialized, offline
 mftik env <verb>            the third-party packages this node has applied
+mftik artifact <verb>       opaque files on one STS, uploaded from this machine
 mftik push <path>           copy a strategy tree into the node's private registry
 mftik rm <name>             delete a strategy from the node's private registry
 mftik run <path> [cfg]      push, deploy, and tail the session's log
@@ -218,6 +219,26 @@ land on every STS prints that those containers need restarting, because a
 module already imported stays in `sys.modules` and no reload evicts it. Each
 STS host installs the same extras pins when its volume is not already at that
 stamp.
+
+### `mftik artifact`
+
+One STS's uploaded objects. The same routes as the Artifact page. Verbs
+rather than flags: `put` and `rm` replace or delete a file, `ls` reads, and
+one parser would put a delete next to a typo on a list.
+
+```
+mftik artifact ls                 uploaded objects on one STS
+mftik artifact put <file> <key>   replace that key with a file on this machine
+mftik artifact rm <key>           remove one uploaded key
+```
+
+`--instance` names the STS. It is required when more than one is declared:
+`sts-jp` and `sts-tw` do not share a disk, so a put with no instance has no
+single place to land. The first path of `put` is a file on this machine; the
+second is the key on that STS. The CLI sends the file as one HTTP body; the
+API slices it. `ls` does not list `sessions/`, and `put` and `rm` refuse a
+key under that prefix — a tree the catalog hides is not one an operator
+deletes.
 
 ### `mftik check --against`
 

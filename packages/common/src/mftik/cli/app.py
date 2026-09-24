@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 
 from mftik.cli import alert as alert_cmd
+from mftik.cli import artifact as artifact_cmd
 from mftik.cli import check as check_cmd
 from mftik.cli import connect as connect_cmd
 from mftik.cli import env as env_cmd
@@ -172,6 +173,54 @@ def _run_env(args: argparse.Namespace) -> int:
     run = getattr(args, "_env_run", None)
     if run is None:
         print("usage: mftik env {list,deps,add,approve,rm,import}")
+        return EXIT_ERROR
+    return run(args)
+
+
+def _setup_artifact(parser: argparse.ArgumentParser) -> None:
+    """``artifact`` has its own verbs, and they are not equally safe.
+
+    ``put`` and ``rm`` replace or delete a file on an STS disk. ``ls`` reads.
+    One parser would put a delete next to a typo on a list.
+
+    The handler goes on ``_artifact_run``, not ``_run``: argparse fills a
+    nested parser's defaults only when the attribute is absent, and the outer
+    command has already set ``_run`` by then.
+    """
+    verbs = parser.add_subparsers(dest="artifact_command", metavar="<verb>")
+
+    listed = verbs.add_parser("ls", help="uploaded objects on one STS")
+    listed.add_argument(
+        "--instance",
+        default=None,
+        help="which STS; required when more than one is declared",
+    )
+    listed.set_defaults(_artifact_run=artifact_cmd.show)
+
+    added = verbs.add_parser("put", help="replace one key with a local file")
+    added.add_argument("file", help="a file on this machine")
+    added.add_argument("key", help="the path on that STS, e.g. weights/model.pt")
+    added.add_argument(
+        "--instance",
+        default=None,
+        help="which STS; required when more than one is declared",
+    )
+    added.set_defaults(_artifact_run=artifact_cmd.put)
+
+    removed = verbs.add_parser("rm", help="remove one uploaded key")
+    removed.add_argument("key", help="the path on that STS")
+    removed.add_argument(
+        "--instance",
+        default=None,
+        help="which STS; required when more than one is declared",
+    )
+    removed.set_defaults(_artifact_run=artifact_cmd.remove)
+
+
+def _run_artifact(args: argparse.Namespace) -> int:
+    run = getattr(args, "_artifact_run", None)
+    if run is None:
+        print("usage: mftik artifact {ls,put,rm}")
         return EXIT_ERROR
     return run(args)
 
@@ -523,6 +572,12 @@ COMMANDS: tuple[Command, ...] = (
         help="the third-party packages this node has applied",
         setup=_setup_env,
         run=_run_env,
+    ),
+    Command(
+        name="artifact",
+        help="opaque files on one STS, uploaded from this machine",
+        setup=_setup_artifact,
+        run=_run_artifact,
     ),
     Command(
         name="alert",

@@ -1,12 +1,15 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
 	import { page } from '$app/state';
 	import {
 		api,
 		apiLabel,
+		formatBytes,
 		formatTs,
 		venueFromMdFeed,
 		venuesFromMdFeeds,
 		type ApiCredential,
+		type ArtifactObject,
 		type StrategyRow,
 		type StrategyYaml
 	} from '$lib/api';
@@ -27,6 +30,10 @@
 	let showYaml = $state(false);
 	let copied = $state(false);
 	let download = $state<{ domain: 'td' | 'md'; streamId: string } | null>(null);
+	let artifacts = $state<ArtifactObject[]>([]);
+	let unanswered = $state<string[]>([]);
+	let artifactsError = $state<string | null>(null);
+	let artifactsLoading = $state(true);
 
 	const tdIds = $derived(session?.td_api_ids ?? []);
 	const mdFeeds = $derived(session?.md_ids ?? []);
@@ -49,6 +56,24 @@
 		return row.status ?? '—';
 	}
 
+	async function loadArtifacts(id: string) {
+		artifactsLoading = true;
+		artifactsError = null;
+		try {
+			const listed = await api.sessionArtifacts(id);
+			if (id !== sessionId) return;
+			artifacts = listed.objects;
+			unanswered = listed.unanswered;
+		} catch (e) {
+			if (id !== sessionId) return;
+			artifacts = [];
+			unanswered = [];
+			artifactsError = e instanceof Error ? e.message : String(e);
+		} finally {
+			if (id === sessionId) artifactsLoading = false;
+		}
+	}
+
 	async function refresh() {
 		const id = sessionId;
 		loading = true;
@@ -56,7 +81,8 @@
 		try {
 			const [row, creds] = await Promise.all([
 				api.strategySession(id),
-				api.apis().catch(() => ({ apis: [] as ApiCredential[] }))
+				api.apis().catch(() => ({ apis: [] as ApiCredential[] })),
+				loadArtifacts(id)
 			]);
 			if (id !== sessionId) return;
 			session = row;
@@ -124,6 +150,12 @@
 			busy = false;
 		}
 	}
+
+	$effect(() => {
+		if (!browser) return;
+		const id = sessionId;
+		void loadArtifacts(id);
+	});
 
 	$effect(() => {
 		const id = sessionId;
@@ -316,6 +348,44 @@
 		{/if}
 	</section>
 
+	<section class="panel">
+		<h2>Artifacts</h2>
+		<p class="muted note">Objects this session has written. Each row is one disk.</p>
+		{#if artifactsError}
+			<p class="empty-state">{artifactsError}</p>
+		{:else if artifactsLoading}
+			<p class="empty-state">Loading…</p>
+		{:else if artifacts.length === 0}
+			<p class="empty-state">No objects written by this session.</p>
+		{:else}
+			<table class="data">
+				<thead>
+					<tr>
+						<th>Path</th>
+						<th>Size</th>
+						<th>Modified</th>
+						<th>STS</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each artifacts as row (`${row.instance ?? ''}:${row.path}`)}
+						<tr>
+							<td class="path">{row.path}</td>
+							<td>{formatBytes(row.size)}</td>
+							<td class="muted">{formatTs(row.mtime)}</td>
+							<td>{row.instance ?? '—'}</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		{/if}
+		{#if unanswered.length > 0}
+			<p class="muted note">
+				{unanswered.join(', ')} did not answer. That silence is not an empty store.
+			</p>
+		{/if}
+	</section>
+
 	<EventLogDownload {sessionId} />
 	<LogViewer
 		domain="sts"
@@ -373,6 +443,11 @@
 
 	dd {
 		margin: 0.25rem 0 0;
+	}
+
+	.path {
+		font-family: var(--font);
+		word-break: break-all;
 	}
 
 	.panel {

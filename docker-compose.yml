@@ -187,6 +187,9 @@ services:
       # made. A named volume, not the container filesystem — the moment the
       # log is worth reading is usually the moment the container went away.
       STS_EVENTLOG_DIR: "/var/log/mftik/sts"
+      # Opaque objects for this STS. On the data volume, beside the registry,
+      # because the event log lives on its own volume in this file.
+      STS_ARTIFACT_DIR: "/var/lib/mftik/artifacts"
       # Records held between the session and the disk. Overflow is dropped and
       # counted into the file rather than blocking the dispatch path — a full
       # queue must not put disk latency in front of an order.

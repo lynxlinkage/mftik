@@ -16,6 +16,7 @@ from mftik_api.log_persist import run_log_persist
 from mftik_api.routes import (
     alerts_router,
     apis_router,
+    artifacts_router,
     audits_router,
     board_router,
     environment_router,
@@ -119,6 +120,7 @@ app.include_router(instances_router)
 app.include_router(registry_router)
 app.include_router(environment_router)
 app.include_router(sts_router)
+app.include_router(artifacts_router)
 app.include_router(td_router)
 app.include_router(md_router)
 app.include_router(sym_router)

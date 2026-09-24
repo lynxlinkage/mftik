@@ -34,6 +34,7 @@ from mftik.protocol import (
     Topics,
     publish_sts_log,
 )
+from mftik.strategy.artifacts import StrategyArtifacts
 from mftik.strategy.client_order_id import VERSION, session_id_of, version_of
 from mftik.strategy.ledger import StrategyLedger
 from mftik.strategy.mds import StrategyMds
@@ -137,6 +138,14 @@ class Strategy:
         is a normal answer — nothing was holding the feed, or recording is
         off.
 
+    Artifacts — opaque bytes on this STS's disk (wired):
+        self.artifacts.read(path) / stat(path) / write(path, body)
+        One relative path is one object. ``weights/model.pt`` is not
+        ``sessions/{session_id}/weights/model.pt``. A missing key is None;
+        a key that is not a relative path raises. These read or replace a
+        whole object — ``on_start``, ``on_stop``, ``on_rebuild``, not a
+        hot hook. See :mod:`mftik.strategy.artifacts`.
+
     Event log (wired, nothing to call):
         Every event reaching a hook here, and every order, cancel and query
         going the other way, is written to one jsonl per session — see
@@ -170,6 +179,9 @@ class Strategy:
         #: Recorded trade history from MD, for warming up on what this session
         #: was not running for.
         self.tape = StrategyTape()
+        #: Objects on this STS's disk. Bound in :meth:`bind` — an unbound
+        #: strategy has no session, and must not invent a key for one.
+        self.artifacts = StrategyArtifacts()
         #: Symbol plane reads, recorded like the rest of them. Bound here
         #: rather than in :meth:`bind` because it needs nothing from the
         #: session but a way back to it, and a strategy handed a session
@@ -191,6 +203,7 @@ class Strategy:
         self.mds.bind(self)
         self.ledger.bind(self)
         self.tape.bind(self)
+        self.artifacts.bind(self)
         self.timer.bind(self)
 
     @classmethod

@@ -159,6 +159,16 @@ async def reap_loop(
         except Exception:
             logger.exception("STS orphan reaper failed")
         try:
+            # An upload nobody committed — the API died, the laptop closed —
+            # leaves a part file. Hidden from listings, and not an object.
+            from mftik.strategy.artifacts import get_store
+
+            swept = await asyncio.to_thread(get_store().sweep_parts)
+            if swept:
+                logger.info("STS swept %d idle artifact upload(s)", swept)
+        except Exception:
+            logger.exception("STS artifact sweep failed")
+        try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
         except TimeoutError:
             continue

@@ -2,6 +2,7 @@
 	import RiArchive2Line from 'svelte-remixicon/RiArchive2Line.svelte';
 	import RiDashboardLine from 'svelte-remixicon/RiDashboardLine.svelte';
 	import RiFileList3Line from 'svelte-remixicon/RiFileList3Line.svelte';
+	import RiFolderOpenLine from 'svelte-remixicon/RiFolderOpenLine.svelte';
 	import RiHome5Line from 'svelte-remixicon/RiHome5Line.svelte';
 	import RiKey2Line from 'svelte-remixicon/RiKey2Line.svelte';
 	import RiNotification3Line from 'svelte-remixicon/RiNotification3Line.svelte';
@@ -30,6 +31,8 @@
 	<RiNotification3Line {size} />
 {:else if href === '/registry'}
 	<RiArchive2Line {size} />
+{:else if href === '/artifacts'}
+	<RiFolderOpenLine {size} />
 {:else if href === '/sym'}
 	<RiStockLine {size} />
 {:else if href === '/audit'}

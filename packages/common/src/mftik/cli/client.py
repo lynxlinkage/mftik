@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import urlparse, urlunparse
 
 import httpx
@@ -139,12 +139,17 @@ class Client:
         *,
         json_body: Any | None = None,
         params: dict[str, Any] | None = None,
+        content: bytes | BinaryIO | None = None,
     ) -> Any:
-        """Call the API and return the decoded body, or raise something legible."""
+        """Call the API and return the decoded body, or raise something legible.
+
+        ``content`` is a raw body. Artifact upload uses it: the file is one
+        HTTP body, and the API is what slices it onto the broker.
+        """
         url = self.node.url(path)
         try:
             response = self._http.request(
-                method, url, json=json_body, params=params
+                method, url, json=json_body, params=params, content=content
             )
         except httpx.HTTPError as exc:
             raise NodeUnreachable(f"cannot reach {url}: {exc}") from exc

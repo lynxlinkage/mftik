@@ -833,3 +833,21 @@ class AlertDeliveryListResponse(BaseModel):
 
 class AlertTestResponse(BaseModel):
     delivery: AlertDeliveryOut
+
+
+class ArtifactObjectOut(BaseModel):
+    """One object on one STS disk."""
+
+    path: str
+    size: int
+    mtime: float
+    digest: str
+    #: Which STS answered. A session can hold the same key on two disks.
+    instance: str | None = None
+
+
+class ArtifactListResponse(BaseModel):
+    objects: list[ArtifactObjectOut] = Field(default_factory=list)
+    #: Declared STS processes that did not answer. Their silence is not an
+    #: empty store.
+    unanswered: list[str] = Field(default_factory=list)

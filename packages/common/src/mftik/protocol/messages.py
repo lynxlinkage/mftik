@@ -564,6 +564,127 @@ class StsEventLogChunk(BaseModel):
     eof: bool = True
 
 
+class StsArtifactObject(BaseModel):
+    """One object: the key, and the metadata of the file it names."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    size: int
+    #: Seconds since the epoch.
+    mtime: float
+    digest: str
+
+
+class StsArtifactListRequest(BaseModel):
+    """API → STS: list this disk.
+
+    ``session_id`` set lists ``sessions/{session_id}/``. Unset lists the
+    uploaded tree and leaves that prefix out.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str | None = None
+
+
+class StsArtifactListResult(BaseModel):
+    """STS → API: the objects this process holds for that request."""
+
+    model_config = ConfigDict(frozen=True)
+
+    objects: list[StsArtifactObject] = Field(default_factory=list)
+    instance: str | None = None
+
+
+class StsArtifactReadRequest(BaseModel):
+    """API → STS: one slice of one object.
+
+    Paged for the same reason an event log is: the RPC subject is served in
+    turn, and a checkpoint does not fit in one broker message.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    offset: int = 0
+    length: int = 262_144
+
+
+class StsArtifactReadChunk(BaseModel):
+    """STS → API: one slice, base64'd. Not gzipped — a checkpoint already is."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    offset: int
+    data: str = ""
+    raw_bytes: int = 0
+    eof: bool = True
+
+
+class StsArtifactBeginRequest(BaseModel):
+    """API → STS: open a part file for ``path``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+
+
+class StsArtifactBeginResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    token: str
+
+
+class StsArtifactChunkRequest(BaseModel):
+    """API → STS: write ``data`` at ``offset`` of the part ``token`` names."""
+
+    model_config = ConfigDict(frozen=True)
+
+    token: str
+    offset: int
+    #: base64 of the raw slice.
+    data: str = ""
+
+
+class StsArtifactCommitRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    token: str
+
+
+class StsArtifactCommitResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    size: int
+    mtime: float
+    digest: str
+
+
+class StsArtifactTokenRequest(BaseModel):
+    """API → STS: drop the part file ``token`` names."""
+
+    model_config = ConfigDict(frozen=True)
+
+    token: str
+
+
+class StsArtifactDeleteRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+
+
+class StsArtifactAck(BaseModel):
+    """STS → API: a delete or an abort finished."""
+
+    model_config = ConfigDict(frozen=True)
+
+    ok: bool = True
+
+
 class StsSessionStatus(BaseModel):
     """STS → UI: one session's control-plane state, as a full snapshot.
 
@@ -1186,6 +1307,18 @@ StsEventLogInfoRequestEnvelope = Envelope[StsEventLogInfoRequest]
 StsEventLogInfoEnvelope = Envelope[StsEventLogInfo]
 StsEventLogReadRequestEnvelope = Envelope[StsEventLogReadRequest]
 StsEventLogChunkEnvelope = Envelope[StsEventLogChunk]
+StsArtifactListRequestEnvelope = Envelope[StsArtifactListRequest]
+StsArtifactListResultEnvelope = Envelope[StsArtifactListResult]
+StsArtifactReadRequestEnvelope = Envelope[StsArtifactReadRequest]
+StsArtifactReadChunkEnvelope = Envelope[StsArtifactReadChunk]
+StsArtifactBeginRequestEnvelope = Envelope[StsArtifactBeginRequest]
+StsArtifactBeginResultEnvelope = Envelope[StsArtifactBeginResult]
+StsArtifactChunkRequestEnvelope = Envelope[StsArtifactChunkRequest]
+StsArtifactCommitRequestEnvelope = Envelope[StsArtifactCommitRequest]
+StsArtifactCommitResultEnvelope = Envelope[StsArtifactCommitResult]
+StsArtifactTokenRequestEnvelope = Envelope[StsArtifactTokenRequest]
+StsArtifactDeleteRequestEnvelope = Envelope[StsArtifactDeleteRequest]
+StsArtifactAckEnvelope = Envelope[StsArtifactAck]
 ListSessionsRequestEnvelope = Envelope[ListSessionsRequest]
 ListSessionsResultEnvelope = Envelope[ListSessionsResult]
 LeaseHeartbeatEnvelope = Envelope[LeaseHeartbeat]
@@ -1344,6 +1477,13 @@ STS_REGISTRY_RELOAD = "sts.registry.reload"
 STS_REGISTRY_GENERATION = "sts.registry.generation"
 STS_ENV_SYNC = "sts.env.sync"
 STS_EVENTLOG_READ = "sts.eventlog.read"
+STS_ARTIFACT_LIST = "sts.artifact.list"
+STS_ARTIFACT_READ = "sts.artifact.read"
+STS_ARTIFACT_BEGIN = "sts.artifact.begin"
+STS_ARTIFACT_CHUNK = "sts.artifact.chunk"
+STS_ARTIFACT_COMMIT = "sts.artifact.commit"
+STS_ARTIFACT_ABORT = "sts.artifact.abort"
+STS_ARTIFACT_DELETE = "sts.artifact.delete"
 
 #: ``reason`` written when an operator stopped a session from the UI. A fixed
 #: sentinel rather than prose because it is matched, not just displayed: it is
