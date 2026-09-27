@@ -10,17 +10,22 @@ anycast ``Topics.MD`` or ``md.fetch``. A ticker that is not on this
 session's ``md`` map raises: there is no owner to invent. Asking the
 wrong region's MD is an empty :class:`TapeSlice` (``recording=false``).
 
-What comes back is the same :class:`~mftik.exchange.models.Trade` /
+Each print is the same :class:`~mftik.exchange.models.Trade` /
 :class:`~mftik.exchange.models.AggTrade` the live hooks are handed, so a
 strategy can feed history and live prints through one code path instead of
-writing its aggregation twice and hoping the two agree.
+writing its aggregation twice and hoping the two agree. Pass ``on_print``
+and the read does not keep those objects. Omit it and the slice carries
+them, which is what existing callers read.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
+from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
@@ -43,6 +48,10 @@ if TYPE_CHECKING:
     from mftik.strategy.session import SessionView
 
 logger = logging.getLogger(__name__)
+
+#: Receives one parsed print. Sync or async. The read does not keep the
+#: object after this returns, so a caller that wants the series appends it.
+PrintHandler = Callable[[Trade], Awaitable[None] | None]
 
 #: The feed topics MD records. Asking for anything else is not an error worth
 #: raising over — it simply has no tape, and the slice comes back empty.
@@ -164,10 +173,17 @@ class TapeSlice:
     here, so a strategy can decide rather than assume.
     """
 
-    #: Oldest → newest. Continuous up to :attr:`gaps`, which are short enough
-    #: that the caller said it would rather have the history than the purity;
-    #: anything on the far side of a break too long for that is already gone.
+    #: Oldest → newest. Filled when the caller did not pass ``on_print``.
+    #: A callback takes each print and this stays empty, so the series is
+    #: not held twice. Empty here with a non-zero :attr:`count` means the
+    #: prints were handed over, not that the read found nothing.
     records: list[Trade] = field(default_factory=list)
+    #: How many prints were handed to ``on_print`` (or would have been).
+    count: int = 0
+    #: Venue time of the oldest and newest handed print. ``span_ms`` is
+    #: read from these so the slice can describe a series it does not hold.
+    first_ts: float | None = None
+    last_ts: float | None = None
     #: When the current recording began, or None if never recorded. It may
     #: predate one or more :attr:`gaps` — a measured interruption does not end
     #: the series, it puts a hole in it.
@@ -179,17 +195,25 @@ class TapeSlice:
     #: series: either the continuity mark, or the end of a gap too long to
     #: read across.
     dropped_before_gap: int = 0
-    #: Measured holes inside :attr:`records`, oldest first. Only those the
-    #: returned records actually span — a gap whose far side has already been
-    #: trimmed out of the tape is not a hole in what came back.
+    #: Measured holes inside the handed series, oldest first. Only those the
+    #: prints actually span — a gap whose far side has already been trimmed
+    #: out of the tape is not a hole in what came back.
     gaps: list[TapeGap] = field(default_factory=list)
 
     def __len__(self) -> int:
-        return len(self.records)
+        if self.records:
+            return len(self.records)
+        return self.count
 
     @property
     def span_ms(self) -> int:
         """Wall-clock milliseconds the records cover, 0 if fewer than two."""
+        if (
+            self.first_ts is not None
+            and self.last_ts is not None
+            and self.count >= 2
+        ):
+            return int((self.last_ts - self.first_ts) * 1000)
         if len(self.records) < 2:
             return 0
         return int((self.records[-1].ts - self.records[0].ts) * 1000)
@@ -216,6 +240,7 @@ class StrategyTape:
         topic: str = "aggtrade",
         limit: int = DEFAULT_LIMIT,
         max_gap_ms: int = DEFAULT_MAX_GAP_MS,
+        on_print: PrintHandler | None = None,
     ) -> TapeSlice:
         """Read up to ``limit`` of the most recent prints on one feed.
 
@@ -230,6 +255,13 @@ class StrategyTape:
         recording that restarted without saying when. What comes back always
         reports the gaps it does span, on :attr:`TapeSlice.gaps`, so a strategy
         that wants to be stricter than the number it passed still can be.
+
+        Pass ``on_print`` and each kept print is handed to it and dropped:
+        the returned slice says what the series covers, and
+        :attr:`TapeSlice.records` is empty, because the caller is keeping
+        whatever it wants. Omit it and the slice carries the prints, which
+        is what a caller looping ``records`` is reading. History and the
+        live hooks still see one :class:`~mftik.exchange.models.Trade`.
 
         A feed this session never attached raises
         :class:`TapeFeedNotAttached`. An empty slice from the right MD is a
@@ -247,7 +279,7 @@ class StrategyTape:
         # thousands of rows, and every one of them carries the same ticker.
         universal_ticker = str(resolved)
 
-        rows, coverage = await _fetch_tail(
+        pages, coverage = await _fetch_tail(
             broker, instance, feed, limit=max(0, limit)
         )
         since_ms = coverage["continuous_since_ms"]
@@ -267,32 +299,66 @@ class StrategyTape:
             resumed = max(gap.end_ms for gap in too_long)
             start_ms = resumed if start_ms is None else max(start_ms, resumed)
 
-        # The pages already awaited, one RPC at a time. This loop is the
-        # rest of the read, still on the strategy task. Parsing the tail
-        # without returning to the scheduler is what stops every session's
-        # heartbeat, including sessions that are only keeping a tape.
+        # Pages arrive newest-first because that is how the cursor walks.
+        # Hand them back oldest-first, one page at a time, and drop the page.
+        # A callback keeps what it wants. Without one, the slice is the
+        # only place the prints go, and leaving it empty is a warm-up that
+        # reads nothing and raises nothing.
         deadline = slice_deadline()
-        records: list[Trade] = []
+        count = 0
         dropped = 0
+        logged = 0
         oldest_kept_ms: int | None = None
-        for record_ms, fields in rows:
-            deadline = await breathe(deadline)
-            # The record's stamp is the recorder's clock at append time, which
-            # is what the continuity mark is measured against. The venue's own
-            # ts rides on the record and is what the strategy reads — the two
-            # answer different questions and are not interchangeable here.
-            if start_ms is not None and record_ms < start_ms:
-                dropped += 1
-                continue
-            parsed = _parse(topic, universal_ticker, fields)
-            if parsed is not None:
-                records.append(parsed)
+        first_ts: float | None = None
+        last_ts: float | None = None
+        kept: list[Trade] = []
+        log = session_log(self._strategy)
+        pending: list[Trade] = []
+        log_offset = 0
+        oldest_first: deque[list[tuple[int, dict[str, str]]]] = deque(reversed(pages))
+        del pages
+        while oldest_first:
+            page = oldest_first.popleft()
+            for record_ms, fields in page:
+                deadline = await breathe(deadline)
+                # The record's stamp is the recorder's clock at append time,
+                # which is what the continuity mark is measured against. The
+                # venue's own ts rides on the record and is what the strategy
+                # reads — the two answer different questions and are not
+                # interchangeable here.
+                if start_ms is not None and record_ms < start_ms:
+                    dropped += 1
+                    continue
+                parsed = _parse(topic, universal_ticker, fields)
+                if parsed is None:
+                    continue
                 if oldest_kept_ms is None:
                     oldest_kept_ms = record_ms
+                if first_ts is None:
+                    first_ts = parsed.ts
+                last_ts = parsed.ts
+                count += 1
+                if on_print is None:
+                    kept.append(parsed)
+                else:
+                    await _deliver(on_print, parsed)
+                if logged < LOG_MAX_RECORDS:
+                    pending.append(parsed)
+                    logged += 1
+                    if len(pending) >= LOG_CHUNK:
+                        deadline = await _flush_log(
+                            log, feed, pending, log_offset, deadline
+                        )
+                        log_offset += len(pending)
+                        pending = []
+            del page
 
-        # A gap the returned records do not reach back to is not a hole in
-        # them. This is also what keeps the list bounded over time: gaps age
-        # out of the answer along with the records around them.
+        if pending:
+            await _flush_log(log, feed, pending, log_offset, deadline)
+
+        # A gap the handed prints do not reach back to is not a hole in
+        # them. This is also what keeps the list bounded over time: gaps
+        # age out of the answer along with the records around them.
         gaps = (
             [gap for gap in gaps if gap.start_ms >= oldest_kept_ms]
             if oldest_kept_ms is not None
@@ -312,14 +378,13 @@ class StrategyTape:
                 sum(gap.duration_ms for gap in gaps),
                 feed,
             )
-        log = session_log(self._strategy)
         log.record(
             "read",
             "tape.read",
             dir="out",
             feed=feed,
             limit=limit,
-            records=len(records),
+            records=count,
             continuous_since_ms=since_ms,
             recording=recording,
             dropped_before_gap=dropped,
@@ -328,12 +393,14 @@ class StrategyTape:
             # sees the records and not these would rebuild a series the
             # strategy never actually had.
             gaps=[[gap.start_ms, gap.end_ms] for gap in gaps],
-            logged=min(len(records), LOG_MAX_RECORDS),
-            truncated=len(records) > LOG_MAX_RECORDS or None,
+            logged=logged,
+            truncated=count > LOG_MAX_RECORDS or None,
         )
-        await _log_records(log, feed, records, deadline)
         return TapeSlice(
-            records=records,
+            records=kept,
+            count=count,
+            first_ts=first_ts,
+            last_ts=last_ts,
             continuous_since_ms=since_ms,
             recording=recording,
             dropped_before_gap=dropped,
@@ -347,8 +414,14 @@ async def _fetch_tail(
     feed: str,
     *,
     limit: int,
-) -> tuple[list[tuple[int, dict[str, str]]], dict[str, object]]:
-    """Pull every page of ``md.tape.tail`` and assemble oldest → newest."""
+) -> tuple[list[list[tuple[int, dict[str, str]]]], dict[str, object]]:
+    """Pull every page of ``md.tape.tail``. Newest page first.
+
+    The cursor walks backward, so the pages cannot be handed to the
+    caller until the walk finishes. What is held here is the raw rows.
+    Parsing them into models happens one page at a time after this
+    returns, and that page is then dropped.
+    """
     pages: list[list[tuple[int, dict[str, str]]]] = []
     coverage: dict[str, object] = {
         "continuous_since_ms": None,
@@ -379,23 +452,32 @@ async def _fetch_tail(
         if not chunk.more or not chunk.before:
             break
         before = chunk.before
-    rows = [row for page in reversed(pages) for row in page]
-    return rows, coverage
+    return pages, coverage
 
 
 def _records_of(records: list[MdTapeRecord]) -> list[tuple[int, dict[str, str]]]:
     return [(row.ms, dict(row.fields)) for row in records]
 
 
-async def _log_records(
+async def _deliver(handler: PrintHandler | None, trade: Trade) -> None:
+    """Hand one print over. An async handler is awaited; the trade is not kept."""
+    if handler is None:
+        return
+    returned = handler(trade)
+    if inspect.isawaitable(returned):
+        await returned
+
+
+async def _flush_log(
     log,  # noqa: ANN001
     feed: str,
     records: list[Trade],
+    offset: int,
     deadline: float,
-) -> None:
-    """Write the prints themselves, in chunks, up to the cap.
+) -> float:
+    """Queue one chunk of prints. Returns the slice deadline after yielding.
 
-    The one read in this class whose answer cannot be inferred from anything
+    The one record of a read whose answer cannot be inferred from anything
     else on disk. MD's tape is the only copy, it expires within hours, and a
     warm-up is the whole basis of what the strategy does for its first
     minutes — a coverage summary says how much history there was, not what was
@@ -403,23 +485,21 @@ async def _log_records(
 
     Chunked because one line per print would multiply the per-record overhead
     by a hundred thousand, and one line for all of them would be a forty-megabyte
-    string that no jsonl reader will take in a single bite. Queuing those
-    chunks is still on this turn, so it keeps the same slice as the parse.
+    string that no jsonl reader will take in a single bite. The models go to
+    the queue unserialized; dumping them here would put the warm-up back on
+    the event loop. The chunk is not kept beside that queue.
     """
-    for start in range(0, min(len(records), LOG_MAX_RECORDS), LOG_CHUNK):
-        deadline = await breathe(deadline)
-        chunk = records[start : start + LOG_CHUNK]
-        # The models, unserialized: they are frozen, and dumping them here
-        # would put the cost of a whole warm-up on the event loop.
-        log.record(
-            "read",
-            "tape.records",
-            dir="out",
-            feed=feed,
-            offset=start,
-            count=len(chunk),
-            payload=chunk,
-        )
+    deadline = await breathe(deadline)
+    log.record(
+        "read",
+        "tape.records",
+        dir="out",
+        feed=feed,
+        offset=offset,
+        count=len(records),
+        payload=records,
+    )
+    return deadline
 
 
 def _parse(

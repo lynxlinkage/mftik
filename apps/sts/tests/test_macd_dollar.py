@@ -10,6 +10,7 @@ and replaying a print that was already on the tape.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from decimal import Decimal
 
@@ -115,8 +116,15 @@ class FakeTape:
         self.slice = slice_ or TapeSlice()
         self.calls: list[tuple] = []
 
-    async def read(self, ticker, *, topic="aggtrade", limit=0):
+    async def read(self, ticker, *, topic="aggtrade", limit=0, on_print=None):
         self.calls.append((str(ticker), topic, limit))
+        # The real read hands each print over and does not keep the list.
+        # A slice built for a test still carries ``records``; deliver those.
+        if on_print is not None:
+            for record in self.slice.records:
+                returned = on_print(record)
+                if inspect.isawaitable(returned):
+                    await returned
         return self.slice
 
 
@@ -391,11 +399,11 @@ async def test_a_print_already_on_the_tape_is_not_counted_twice() -> None:
 async def test_warm_up_ingest_yields_the_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Folding the slice is the same turn as the read that returned it.
+    """Folding each print yields, because that is where the records are spent.
 
-    ``read`` yielding inside its own parse does not yield on the way out.
-    A sibling task that observes an ingest in progress is scheduled from
-    the warm-up loop, which is where this strategy spends the records.
+    ``read`` hands each print to ``on_print`` and does not keep the list.
+    This strategy ingests there. A sibling that observes an ingest in
+    progress is scheduled from that callback.
     """
     monkeypatch.setattr(tape_mod, "SLICE_S", -1.0)
     strat = _strategy()

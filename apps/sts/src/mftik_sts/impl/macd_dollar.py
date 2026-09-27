@@ -114,6 +114,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -413,9 +414,41 @@ class MacdDollarBars(Strategy):
     async def _warm_up(self) -> None:
         """Build bars from MD's recorded tape, then from live prints."""
         topic = self.paras["feed"]
+        # The read does not keep the prints. What can overlap the live feed
+        # is only the tail, so that is all that stays after each one is folded.
+        seen_tail: deque[str] = deque(maxlen=_OVERLAP_GUARD)
+        deadline = slice_deadline()
+        handler_error: Exception | None = None
+
+        async def on_print(record: Trade) -> None:
+            nonlocal deadline, handler_error
+            if handler_error is not None:
+                return
+            try:
+                # Still this task, on the loop the lease heartbeat is waiting
+                # on. The read yields while it parses; folding the print has
+                # to yield too, or the stall just moves here.
+                deadline = await breathe(deadline)
+                self._ingest(record)
+                if record.trade_id:
+                    seen_tail.append(record.trade_id)
+                self._last_tape_ts = (
+                    record.ts
+                    if self._last_tape_ts is None
+                    else max(self._last_tape_ts, record.ts)
+                )
+            except Exception as exc:
+                # A failure here is this strategy's, not a missed tape. Held
+                # until the read returns so a fetch error and this one are
+                # not the same log line.
+                handler_error = exc
+
         try:
             tape = await self.tape.read(
-                self._ticker, topic=topic, limit=self.paras["warmup_limit"]
+                self._ticker,
+                topic=topic,
+                limit=self.paras["warmup_limit"],
+                on_print=on_print,
             )
         except Exception as exc:
             # Not fatal. A warm-up that cannot read history is a warm-up that
@@ -426,29 +459,13 @@ class MacdDollarBars(Strategy):
             )
             tape = None
 
-        if tape is not None and tape.records:
-            # read() returning does not await. Folding the slice in is the
-            # same turn, on the same loop the lease heartbeat is waiting on.
-            deadline = slice_deadline()
-            for record in tape.records:
-                deadline = await breathe(deadline)
-                self._ingest(record)
-                if record.trade_id:
-                    self._seen_ids.add(record.trade_id)
-                self._last_tape_ts = (
-                    record.ts
-                    if self._last_tape_ts is None
-                    else max(self._last_tape_ts, record.ts)
-                )
-            if len(self._seen_ids) > _OVERLAP_GUARD:
-                # Only the tail can overlap with what arrived during the read.
-                self._seen_ids = set(
-                    r.trade_id
-                    for r in tape.records[-_OVERLAP_GUARD:]
-                    if r.trade_id
-                )
+        if handler_error is not None:
+            raise handler_error
+
+        if tape is not None and len(tape):
+            self._seen_ids = set(seen_tail)
             await self.log(
-                f"warm-up read {len(tape.records)} print(s) covering "
+                f"warm-up read {len(tape)} print(s) covering "
                 f"{tape.span_ms / 1000:.0f}s → {self._bars_seen} bar(s); "
                 f"tape recording={tape.recording}"
                 + (

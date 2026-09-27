@@ -16,6 +16,8 @@ is more dangerous than none.
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from decimal import Decimal
 
 import pytest
@@ -25,13 +27,15 @@ from mftik.exchange.models import BestQuote
 from mftik.protocol import (
     MD_BEST_QUOTE,
     MD_LEASE_ACK,
+    TD_LEASE_ACK,
     Envelope,
+    LeaseAck,
     MdLeaseAck,
     Topics,
     UntypedEnvelope,
 )
 from mftik.strategy import Strategy
-from mftik_sts.session.session import StsSession
+from mftik_sts.session.session import HEARTBEAT_LATE_S, StsSession
 
 GRACE = 0.25
 SESSION = "watchdog-sts"
@@ -319,4 +323,121 @@ async def test_prints_do_not_arm_the_watchdog(broker: Broker) -> None:
     finally:
         stop.set()
         await pub
+        await session.stop()
+
+
+API_ID = 7
+
+
+async def _arm_td(
+    session: StsSession, broker: Broker, api_id: int, timeout: float = 3.0
+) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    token = 0
+    while asyncio.get_running_loop().time() < deadline:
+        token += 1
+        await broker.publish(
+            Topics.td_session(api_id, session.session_id),
+            Envelope[LeaseAck].wrap(
+                LeaseAck(api_id=api_id, session_id=session.session_id, token=token),
+                type=TD_LEASE_ACK,
+                source="td",
+                session_id=session.session_id,
+            ),
+        )
+        if api_id in session._td_acks:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"session never heard an acknowledgement from api_id={api_id}")
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_loop_does_not_judge_acks_it_could_not_read(
+    broker: Broker,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stall is not peer silence, and it is not a fresh acknowledgement.
+
+    The heartbeat task and both ack pumps share this loop. Blocking it
+    leaves the clocks old while any ack sent during the block sits
+    unread. The late slice is credited and then judged. Stamping the
+    clocks to now would also avoid failing on this wake, and would keep
+    avoiding it for as long as the loop kept oversleeping.
+    """
+    caplog.set_level(logging.INFO, logger="mftik_sts.session.session")
+    session = _session(broker, td_api_ids=[API_ID])
+    waiting = asyncio.Event()
+    wait = session._stop.wait
+
+    async def mark_wait() -> bool:
+        waiting.set()
+        return await wait()
+
+    session._stop.wait = mark_wait  # type: ignore[method-assign]
+    await session.start()
+    try:
+        await _arm(session, broker, "md-jp-1")
+        await _arm_td(session, broker, API_ID)
+        # The next heartbeat wait, not one already in progress: the stall
+        # has to be inside the wait the following pass measures.
+        waiting.clear()
+        await waiting.wait()
+        md_at = session._md_acks["md-jp-1"]
+        td_at = session._td_acks[API_ID]
+        time.sleep(GRACE + HEARTBEAT_LATE_S)
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while session._md_acks["md-jp-1"] == md_at:
+            if asyncio.get_running_loop().time() > deadline:
+                raise AssertionError("ack clock was not shifted")
+            await asyncio.sleep(0)
+
+        waited = session._heartbeat_wait_s
+        assert waited is not None
+        late = waited - session.heartbeat_interval
+        now = asyncio.get_running_loop().time()
+        # min(now, ack + lateness). Not now: the overrun is all that was
+        # unobservable, and the rest of the silence still counts.
+        assert session._md_acks["md-jp-1"] == pytest.approx(md_at + late, abs=0.02)
+        assert session._td_acks[API_ID] == pytest.approx(td_at + late, abs=0.02)
+        assert session._md_acks["md-jp-1"] < now
+        assert session.exit_reason is None
+        assert "shifted" in caplog.text
+        assert session.session_id in caplog.text
+
+        reason = await _exit_reason(session)
+        assert reason is not None
+        assert "md-jp-1" in reason
+    finally:
+        await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_overrunning_every_beat_still_notices_a_quiet_peer(
+    broker: Broker,
+) -> None:
+    """A late wake on every beat must not freeze the watchdog.
+
+    Crediting the clocks all the way to now makes this miss a peer that
+    stays silent for many times the grace. Crediting the lateness leaves
+    one interval of silence on each beat, so the grace still arrives.
+    """
+    session = _session(broker, td_api_ids=[API_ID])
+    wait = session._stop.wait
+    # Past the slack on every wait. The timeout cannot fire while this
+    # sleep holds the loop, so each measured wait is this long.
+    block = HEARTBEAT_LATE_S + session.heartbeat_interval
+
+    async def slow_wait() -> bool:
+        time.sleep(block)
+        return await wait()
+
+    session._stop.wait = slow_wait  # type: ignore[method-assign]
+    await session.start()
+    try:
+        await _arm(session, broker, "md-jp-1")
+        await _arm_td(session, broker, API_ID)
+        reason = await _exit_reason(session, timeout=GRACE * 20)
+        assert reason is not None
+        assert "md-jp-1" in reason
+    finally:
         await session.stop()
