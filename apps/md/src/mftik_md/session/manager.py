@@ -87,6 +87,10 @@ class StsLink:
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     tasks: list[asyncio.Task[Any]] = field(default_factory=list)
     last_token: int = 0
+    #: Tail of the subscribe/unsubscribe chain for this link. Runtime
+    #: subscribe waits on a symbol-plane read; unsubscribe must not
+    #: overtake it or a quick sub-then-unsub leaves the feed up.
+    feed_op: asyncio.Task[Any] | None = None
 
 
 class SessionManager:
@@ -510,6 +514,31 @@ class SessionManager:
         if self._recorder is not None:
             await self._recorder.aclose()
 
+    def _enqueue_feed_op(
+        self, link: StsLink, op: Callable[[], Awaitable[None]]
+    ) -> None:
+        """Run ``op`` after earlier subscribe/unsubscribe on this link.
+
+        Runtime subscribe waits on the symbol plane. Unsubscribe is
+        otherwise immediate, so a sub-then-unsub would apply backwards
+        and leave the feed up. One chain per session keeps the order.
+        """
+        prev = link.feed_op
+
+        async def _run() -> None:
+            if prev is not None:
+                await asyncio.gather(prev, return_exceptions=True)
+            if self._links.get(link.session_id) is not link:
+                return
+            await op()
+
+        task = asyncio.create_task(
+            _run(), name=f"md-feed-op-{link.session_id}"
+        )
+        link.feed_op = task
+        self._subscribe_tasks.add(task)
+        task.add_done_callback(self._subscribe_tasks.discard)
+
     async def _subscribe_runtime(self, link: StsLink, feed: str) -> None:
         try:
             await self._subscribe_feed(link, feed, arm=True)
@@ -520,12 +549,24 @@ class SessionManager:
                 feed,
             )
 
+    async def _unsubscribe_runtime(self, link: StsLink, feed: str) -> None:
+        try:
+            await self._unsubscribe_feed(link, feed)
+        except Exception:
+            logger.exception(
+                "MD unsubscribe failed session=%s feed=%s",
+                link.session_id,
+                feed,
+            )
+
     async def _subscribe_feed(
         self, link: StsLink, feed: str, *, arm: bool = True
     ) -> None:
         topic, ticker = Topics.parse_md_feed(feed)
         if arm:
             listed = await self._try_resolve(ticker)
+            if self._links.get(link.session_id) is not link:
+                return
             if listed is not None and listed <= time.time():
                 if ticker not in self._expired:
                     await self._expire_ticker(ticker, listed)
@@ -540,6 +581,8 @@ class SessionManager:
         old_rc = 0
         new_rc = 0
         async with self._expiry_lock:
+            if self._links.get(link.session_id) is not link:
+                return
             if ticker in self._expired:
                 expiry = self._expiry_at[ticker]
                 notify_topics = [topic]
@@ -691,6 +734,9 @@ class SessionManager:
                 waiter.set_exception(err)
             raise err from exc
         else:
+            # Inactive rows are included: a settled option is deactivated
+            # on the hourly refresh, and its expiry is how we still cut
+            # it instead of treating the miss as "no listed time".
             expiry = info.expiry
             if expiry is None:
                 self._timeless.add(ticker)
@@ -941,12 +987,10 @@ class SessionManager:
                     return False
                 if msg.session_id != link.session_id:
                     return False
-                task = asyncio.create_task(
-                    self._subscribe_runtime(link, msg.feed),
-                    name=f"md-sub-{link.session_id}",
+                feed = msg.feed
+                self._enqueue_feed_op(
+                    link, lambda: self._subscribe_runtime(link, feed)
                 )
-                self._subscribe_tasks.add(task)
-                task.add_done_callback(self._subscribe_tasks.discard)
                 return False
             if env.type == MD_UNSUBSCRIBE:
                 try:
@@ -955,14 +999,10 @@ class SessionManager:
                     return False
                 if msg.session_id != link.session_id:
                     return False
-                try:
-                    await self._unsubscribe_feed(link, msg.feed)
-                except Exception:
-                    logger.exception(
-                        "MD unsubscribe failed session=%s feed=%s",
-                        link.session_id,
-                        msg.feed,
-                    )
+                feed = msg.feed
+                self._enqueue_feed_op(
+                    link, lambda: self._unsubscribe_runtime(link, feed)
+                )
                 return False
             if env.type == MD_DETACH:
                 try:

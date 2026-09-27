@@ -17,12 +17,14 @@ from mftik.protocol import (
     MD_LEASE_ACK,
     MD_ORDERBOOK,
     MD_SUBSCRIBE,
+    MD_UNSUBSCRIBE,
     STS_LEASE_HEARTBEAT,
     Envelope,
     LeaseHeartbeat,
     MdAttachRequest,
     MdLeaseAck,
     MdSubscribe,
+    MdUnsubscribe,
     SymbolInfo,
     Topics,
 )
@@ -37,8 +39,11 @@ TICKER_FEED = Topics.md_feed("ticker", TICKER)
 class StubSymbols:
     """One listed expiry for whatever ticker MD asks about."""
 
-    def __init__(self, expiry: float | None) -> None:
+    def __init__(
+        self, expiry: float | None, *, is_active: bool = True
+    ) -> None:
         self.expiry = expiry
+        self.is_active = is_active
 
     async def get(self, ticker: UniversalTicker) -> SymbolInfo:
         return SymbolInfo(
@@ -47,6 +52,7 @@ class StubSymbols:
             quote="USDT",
             exch_ticker=ticker.symbol,
             expiry=self.expiry,
+            is_active=self.is_active,
         )
 
 
@@ -554,6 +560,170 @@ async def test_ensure_feed_after_expiry_does_not_leave_an_orphan_pump(
     assert sessions.feed_refcount(TICKER_FEED) == 0
     venue = sessions._venues.get("Paper")  # noqa: SLF001
     assert venue is None or venue.feed_count == 0
+
+    stop.set()
+    await asyncio.gather(hb_task, collect_task, return_exceptions=True)
+    await sessions.close_all()
+
+
+def _feed_idle(sessions: SessionManager, session_id: str) -> bool:
+    link = sessions._links.get(session_id)  # noqa: SLF001
+    if link is None:
+        return True
+    return link.feed_op is None or link.feed_op.done()
+
+
+async def _publish_sub(broker: Broker, session_id: str, feed: str) -> None:
+    await broker.publish(
+        Topics.sts_md_session(session_id),
+        Envelope[MdSubscribe].wrap(
+            MdSubscribe(session_id=session_id, feed=feed),
+            type=MD_SUBSCRIBE,
+            source="sts",
+            session_id=session_id,
+        ),
+    )
+
+
+async def _publish_unsub(broker: Broker, session_id: str, feed: str) -> None:
+    await broker.publish(
+        Topics.sts_md_session(session_id),
+        Envelope[MdUnsubscribe].wrap(
+            MdUnsubscribe(session_id=session_id, feed=feed),
+            type=MD_UNSUBSCRIBE,
+            source="sts",
+            session_id=session_id,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_unsub_waits_for_in_flight_subscribe(
+    broker: Broker, paper: PaperExchange
+) -> None:
+    """R1: sub-then-unsub must not apply backwards and leave the feed up."""
+    started = asyncio.Event()
+
+    class SlowSymbols:
+        async def get(self, ticker: UniversalTicker) -> SymbolInfo:
+            started.set()
+            await asyncio.sleep(0.35)
+            return _info(ticker, None)
+
+    sessions = SessionManager(
+        PaperPublicFactory(broker, paper),
+        broker,
+        lease_grace=2.0,
+        symbols=SlowSymbols(),  # type: ignore[arg-type]
+    )
+    session_id = "sts-md-sub-unsub-order"
+    stop = asyncio.Event()
+    hb_task = asyncio.create_task(_md_lease_publisher(broker, session_id, stop))
+    await asyncio.sleep(0.05)
+    await sessions.attach(
+        MdAttachRequest(
+            session_id=session_id,
+            created_by=1,
+            subscriptions=[],
+            timeout=3.0,
+        )
+    )
+    await _publish_sub(broker, session_id, ORDERBOOK)
+    await _wait_until(started.is_set)
+    await _publish_unsub(broker, session_id, ORDERBOOK)
+    await _wait_until(lambda: _feed_idle(sessions, session_id), timeout=3.0)
+    assert sessions.feed_refcount(ORDERBOOK) == 0
+    assert sessions._venues == {}  # noqa: SLF001
+
+    stop.set()
+    await asyncio.gather(hb_task, return_exceptions=True)
+    await sessions.close_all()
+
+
+@pytest.mark.asyncio
+async def test_detach_during_subscribe_does_not_leave_an_orphan_pump(
+    broker: Broker, paper: PaperExchange
+) -> None:
+    """R2: a session that dies mid-lookup must not open a venue feed."""
+    started = asyncio.Event()
+
+    class SlowSymbols:
+        async def get(self, ticker: UniversalTicker) -> SymbolInfo:
+            started.set()
+            await asyncio.sleep(0.35)
+            return _info(ticker, None)
+
+    sessions = SessionManager(
+        PaperPublicFactory(broker, paper),
+        broker,
+        lease_grace=2.0,
+        symbols=SlowSymbols(),  # type: ignore[arg-type]
+    )
+    session_id = "sts-md-detach-during-sub"
+    stop = asyncio.Event()
+    hb_task = asyncio.create_task(_md_lease_publisher(broker, session_id, stop))
+    await asyncio.sleep(0.05)
+    await sessions.attach(
+        MdAttachRequest(
+            session_id=session_id,
+            created_by=1,
+            subscriptions=[],
+            timeout=3.0,
+        )
+    )
+    await _publish_sub(broker, session_id, ORDERBOOK)
+    await _wait_until(started.is_set)
+    await sessions.detach(session_id=session_id, reason="test")
+    await asyncio.sleep(0.45)
+    assert sessions.feed_refcount(ORDERBOOK) == 0
+    assert sessions._venues == {}  # noqa: SLF001
+    assert session_id not in sessions._links  # noqa: SLF001
+
+    stop.set()
+    await asyncio.gather(hb_task, return_exceptions=True)
+    await sessions.close_all()
+
+
+@pytest.mark.asyncio
+async def test_inactive_settled_instrument_expires_without_opening(
+    broker: Broker, paper: PaperExchange
+) -> None:
+    """G1: a deactivated settled row still yields on_expiry, and no pump."""
+    listed = time.time() - 30
+    sessions = SessionManager(
+        PaperPublicFactory(broker, paper),
+        broker,
+        lease_grace=2.0,
+        symbols=StubSymbols(listed, is_active=False),  # type: ignore[arg-type]
+    )
+    session_id = "sts-md-inactive-settled"
+    stop = asyncio.Event()
+    hb_task = asyncio.create_task(_md_lease_publisher(broker, session_id, stop))
+    events: list[Expiry] = []
+
+    async def _collect() -> None:
+        async for env in broker.subscribe(
+            Topics.md_session(session_id), stop=stop
+        ):
+            if env.type == MD_EXPIRY:
+                events.append(Expiry.model_validate(env.payload))
+
+    collect_task = asyncio.create_task(_collect())
+    await asyncio.sleep(0.05)
+    result = await sessions.attach(
+        MdAttachRequest(
+            session_id=session_id,
+            created_by=1,
+            subscriptions=[ORDERBOOK],
+            timeout=3.0,
+        )
+    )
+    await _wait_until(lambda: len(events) == 1)
+    assert result.subscriptions == []
+    assert events[0].expiry == listed
+    assert events[0].topics == ["orderbook"]
+    assert sessions.feed_refcount(ORDERBOOK) == 0
+    assert sessions._venues == {}  # noqa: SLF001
 
     stop.set()
     await asyncio.gather(hb_task, collect_task, return_exceptions=True)

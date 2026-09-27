@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -633,13 +634,49 @@ async def test_client_get_asks_for_one_ticker(broker: Broker, served) -> None:
             "venue": None,
             "category": None,
             "symbol": None,
-            "active_only": True,
+            "active_only": False,
             "q": None,
             "limit": None,
             "offset": 0,
             "slim": False,
         }
     ]
+
+
+async def test_client_get_finds_inactive_settled_instrument(
+    broker: Broker, plane_factory
+) -> None:
+    """Hourly refresh deactivates a settled book; get() still returns it.
+
+    Default ``SYM_LIST`` is active-only, so a rebuilt MD that asked
+    that way would miss the listed expiry and reopen nothing — and
+    never fire ``on_expiry``. The single-ticker read includes the
+    inactive row.
+    """
+    import asyncio
+
+    settled = datetime(2026, 9, 27, 8, tzinfo=UTC)
+    source = StubSource([_inst("BTC"), _inst("ETH", expiry=settled)])
+    plane = plane_factory([source])
+    await plane.refresh()
+    source.instruments = [_inst("BTC")]
+    await plane.refresh()
+    assert [s.symbol for s in (await plane.list_symbols()).symbols] == [
+        "BTCUSDT"
+    ]
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(_serve(broker, plane, stop))
+    try:
+        client = SymbolClient(broker)
+        info = await client.get(_t("ETHUSDT"))
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert info.is_active is False
+    assert info.expiry is not None
 
 
 async def test_client_list_walks_pages(broker: Broker, served) -> None:

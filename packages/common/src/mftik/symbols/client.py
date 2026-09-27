@@ -218,10 +218,16 @@ class SymbolClient:
             self._singles[info.ticker] = (now, info)
 
     async def _fetch_one(self, ticker: UniversalTicker) -> SymbolInfo | None:
+        # Inactive rows stay after settlement — the hourly refresh marks
+        # them untradable rather than deleting them. MD still needs the
+        # listed expiry so a rebuilt session can fire ``on_expiry``
+        # instead of opening a book the venue has already taken down.
         result = SymListResult.model_validate(
             await self._request(
                 SYM_LIST,
-                SymListRequest(universal_ticker=str(ticker)),
+                SymListRequest(
+                    universal_ticker=str(ticker), active_only=False
+                ),
             )
         )
         return result.symbols[0] if result.symbols else None
