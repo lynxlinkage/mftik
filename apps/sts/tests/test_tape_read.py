@@ -76,6 +76,19 @@ def _tape(broker: Broker, **kwargs) -> StrategyTape:
     return tape
 
 
+async def _read(tape: StrategyTape, *args, **kwargs):
+    """Read, keeping the prints the slice itself no longer keeps."""
+    got: list[Trade] = []
+
+    def take(trade: Trade) -> None:
+        got.append(trade)
+
+    result = await tape.read(*args, on_print=take, **kwargs)
+    assert result.records == []
+    assert len(result) == len(got)
+    return result, got
+
+
 async def _record(
     store: TapeStore,
     feed: str,
@@ -111,14 +124,14 @@ async def test_reads_back_as_aggtrade_models(
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER)
+        result, prints = await _read(_tape(broker), TICKER)
     finally:
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
     assert len(result) == 1
-    record = result.records[0]
+    record = prints[0]
     assert isinstance(record, AggTrade)
     assert record.price == Decimal("68000")
     assert record.side is Side.BUY
@@ -136,14 +149,14 @@ async def test_trade_topic_reads_back_as_trade(
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER, topic="trade")
+        result, prints = await _read(_tape(broker), TICKER, topic="trade")
     finally:
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
     assert len(result) == 1
-    assert type(result.records[0]) is Trade
+    assert type(prints[0]) is Trade
 
 
 @pytest.mark.asyncio
@@ -158,13 +171,13 @@ async def test_records_from_before_a_gap_are_dropped(
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER)
+        result, prints = await _read(_tape(broker), TICKER)
     finally:
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    assert [r.trade_id for r in result.records] == ["new"]
+    assert [r.trade_id for r in prints] == ["new"]
     assert result.dropped_before_gap == 1
 
 
@@ -176,7 +189,7 @@ async def test_coverage_is_reported(broker: Broker, store: TapeStore) -> None:
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER)
+        result, _prints = await _read(_tape(broker), TICKER)
     finally:
         stop.set()
         task.cancel()
@@ -196,7 +209,7 @@ async def test_a_stopped_feed_says_so(broker: Broker, store: TapeStore) -> None:
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER)
+        result, _prints = await _read(_tape(broker), TICKER)
     finally:
         stop.set()
         task.cancel()
@@ -213,7 +226,7 @@ async def test_nothing_recorded_is_an_empty_slice_not_an_error(
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER)
+        result, _prints = await _read(_tape(broker), TICKER)
     finally:
         stop.set()
         task.cancel()
@@ -241,13 +254,13 @@ async def test_one_unreadable_record_does_not_lose_the_read(
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER)
+        result, prints = await _read(_tape(broker), TICKER)
     finally:
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    assert [r.trade_id for r in result.records] == ["1", "3"]
+    assert [r.trade_id for r in prints] == ["1", "3"]
 
 
 @pytest.mark.asyncio
@@ -261,13 +274,13 @@ async def test_limit_takes_the_most_recent(
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER, limit=2)
+        result, prints = await _read(_tape(broker), TICKER, limit=2)
     finally:
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    assert [r.trade_id for r in result.records] == ["3", "4"]
+    assert [r.trade_id for r in prints] == ["3", "4"]
 
 
 async def _interrupted(
@@ -291,13 +304,13 @@ async def test_a_short_measured_gap_is_read_across_and_reported(
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER)
+        result, prints = await _read(_tape(broker), TICKER)
     finally:
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    assert [r.trade_id for r in result.records] == ["old", "new"]
+    assert [r.trade_id for r in prints] == ["old", "new"]
     assert result.dropped_before_gap == 0
     assert [(g.start_ms, g.end_ms) for g in result.gaps] == [(3_000, 5_000)]
     assert result.missing_ms == 2_000
@@ -316,13 +329,13 @@ async def test_a_gap_too_long_to_span_still_ends_the_series(
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER)
+        result, prints = await _read(_tape(broker), TICKER)
     finally:
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    assert [r.trade_id for r in result.records] == ["new"]
+    assert [r.trade_id for r in prints] == ["new"]
     assert result.dropped_before_gap == 1
     assert result.gaps == []
 
@@ -340,13 +353,13 @@ async def test_a_caller_can_refuse_every_gap(
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER, max_gap_ms=0)
+        result, prints = await _read(_tape(broker), TICKER, max_gap_ms=0)
     finally:
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    assert [r.trade_id for r in result.records] == ["new"]
+    assert [r.trade_id for r in prints] == ["new"]
     assert result.dropped_before_gap == 1
 
 
@@ -362,13 +375,13 @@ async def test_a_gap_the_records_no_longer_reach_is_not_reported(
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
     try:
-        result = await _tape(broker).read(TICKER)
+        result, prints = await _read(_tape(broker), TICKER)
     finally:
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    assert [r.trade_id for r in result.records] == ["new"]
+    assert [r.trade_id for r in prints] == ["new"]
     assert result.dropped_before_gap == 0
     assert result.gaps == []
 
@@ -408,7 +421,9 @@ async def test_the_wrong_instance_returns_an_empty_slice(
     stop = asyncio.Event()
     task = asyncio.create_task(serve_tape(broker, empty, instance="md-tw", stop=stop))
     try:
-        result = await _tape(broker, md={"md-tw": [AGG_FEED]}).read(TICKER)
+        result, _prints = await _read(
+            _tape(broker, md={"md-tw": [AGG_FEED]}), TICKER
+        )
     finally:
         stop.set()
         task.cancel()
@@ -433,13 +448,13 @@ async def test_a_read_assembles_chunks_into_one_slice(
         serve_tape(broker, store, instance=INSTANCE, stop=stop, chunk=2)
     )
     try:
-        result = await _tape(broker).read(TICKER)
+        result, prints = await _read(_tape(broker), TICKER)
     finally:
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    assert [r.trade_id for r in result.records] == ["0", "1", "2", "3", "4"]
+    assert [r.trade_id for r in prints] == ["0", "1", "2", "3", "4"]
     assert TAPE_RPC_CHUNK > 2  # production chunk stays large
 
 
@@ -482,14 +497,14 @@ async def test_parse_yields_the_loop_between_records(
         serve_tape(broker, store, instance=INSTANCE, stop=stop)
     )
     try:
-        result = await _tape(broker).read(TICKER)
+        result, prints = await _read(_tape(broker), TICKER)
     finally:
         stop.set()
         serve.cancel()
         watcher.cancel()
         await asyncio.gather(serve, watcher, return_exceptions=True)
 
-    assert [r.trade_id for r in result.records] == ["0", "1", "2"]
+    assert [r.trade_id for r in prints] == ["0", "1", "2"]
     assert interleaved
 
 

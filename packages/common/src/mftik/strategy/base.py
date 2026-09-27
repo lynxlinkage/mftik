@@ -127,16 +127,19 @@ class Strategy:
         ``mftik.exchange.intervals``; the month is ``1mo``, never ``1M``.
 
     Recorded tape — warm-up on prints from before this session (wired):
-        self.tape.read(ticker, topic="aggtrade") — the trade history MD kept
-        while something else held the feed, as the same Trade / AggTrade the
-        live hooks are handed. Only ``aggtrade`` and ``trade`` are recorded.
-        Routed to the MD instance this session attached; a feed that is not
-        on the session's ``md`` map raises. The slice says what it covers
-        (``continuous_since_ms``, ``recording``, ``span_ms``): a count of
-        prints is not a length of history, and a strategy that needs N of
-        something has to check rather than assume. Empty from the right MD
-        is a normal answer — nothing was holding the feed, or recording is
-        off.
+        self.tape.read(ticker, topic="aggtrade", on_print=...) — each print
+        MD kept while something else held the feed, handed to ``on_print``
+        as the same Trade / AggTrade the live hooks are handed, then dropped.
+        The returned slice says what the series covers (``count``,
+        ``span_ms``, ``continuous_since_ms``, ``recording``, ``gaps``) and
+        does not keep the prints. A strategy that wants the series keeps it
+        from the callback; that cost is the strategy's. Only ``aggtrade``
+        and ``trade`` are recorded. Routed to the MD instance this session
+        attached; a feed that is not on the session's ``md`` map raises. A
+        count of prints is not a length of history, and a strategy that
+        needs N of something has to check rather than assume. Empty from the
+        right MD is a normal answer — nothing was holding the feed, or
+        recording is off.
 
     Artifacts — opaque bytes on this STS's disk (wired):
         self.artifacts.read(path) / stat(path) / write(path, body)

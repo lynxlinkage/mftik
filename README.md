@@ -81,7 +81,7 @@ A subscribe the venue does not serve is **refused at attach**, not silently empt
 
 **Queries** are the other half. `self.mds.fetch_klines` / `fetch_order_book` / `fetch_best_quote` ask once and answer once. Needing the book at one moment is a query. Living on every change is a subscription. An OCO in this tree does the first; a chase does the second.
 
-**The tape.** MD records `trade` / `aggtrade` while somebody holds the feed. `self.tape.read(...)` hands a later session the same `Trade` / `AggTrade` objects the live hooks get, plus coverage — `continuous_since_ms`, measured gaps, whether recording is still on. A count of prints is not a length of history; the slice says what it covers. `TapeKeeper` is a bundled strategy that subscribes and does nothing else, so the tape exists before the strategy that will need it is deployed.
+**The tape.** MD records `trade` / `aggtrade` while somebody holds the feed. `self.tape.read(..., on_print=...)` hands each print to the callback as the same `Trade` / `AggTrade` the live hooks get, then drops it. The returned slice is the coverage — count, span, `continuous_since_ms`, measured gaps, whether recording is still on — not the series. A strategy that wants the prints keeps them. A count of prints is not a length of history. `TapeKeeper` is a bundled strategy that subscribes and does nothing else, so the tape exists before the strategy that will need it is deployed.
 
 **Private events** arrive from the account, not from a candle: order updates, fills, rejects, balances, positions (contracts only). `td.{api_id}.global` is account-wide — filter with `self.owns(cid)` before you treat a fill as yours. `owns` decodes the six-hex session id packed into the cid.
 
