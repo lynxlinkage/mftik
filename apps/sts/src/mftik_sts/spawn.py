@@ -1,0 +1,176 @@
+"""Spawn one OS process per STS session.
+
+The parent stays the instance. A worker is not an instance: it does not
+serve health or the instance subject, and it is started with
+``start_new_session`` so a terminal SIGINT reaches only the parent.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+#: Why a worker that never reported a result is ``failed``. A crash after
+#: that report is ``interrupted`` and may be rebuilt; this one must not be,
+#: or a deploy the API already rejected comes back on its own.
+START_FAIL_REASON = "worker exited during start"
+
+#: Passed to the worker so it can tell its parent from PID 1. In a container
+#: the parent *is* PID 1, and ``getppid() == 1`` is the normal case.
+PARENT_PID_ENV = "MFTIK_STS_PARENT_PID"
+
+#: Write end of the result pipe. One JSON line, then the worker closes it.
+RESULT_FD_ENV = "MFTIK_STS_RESULT_FD"
+
+#: How long ``close_all`` waits after SIGTERM before SIGKILL. Shorter than
+#: ``ON_STOP_TIMEOUT_S`` and shorter than Docker's default grace. A strategy
+#: whose ``on_stop`` uses the whole ten seconds is still cut off; the wait
+#: is how long a fast detach gets, not a promise that cleanup finished.
+WORKER_STOP_WAIT_S = 8.0
+
+
+@dataclass
+class WorkerSlot:
+    """One worker in the parent's process table.
+
+    ``started`` is set only after a success line. Until then a crash is a
+    failed start. ``strategy_name`` and ``type`` are the names ``list`` and
+    the event-log ``live`` bit read off an in-process session, so a slot
+    can stand in for one there.
+    """
+
+    session_id: str
+    role: str
+    started: bool = False
+    abandoned: bool = False
+    strategy_name: str | None = None
+    type: str | None = None
+    created_by: int | None = None
+    process: Any = None
+    watcher: asyncio.Task[None] | None = None
+    #: Bumped when this object is the one a settle timer is watching.
+    #: Identity of the slot itself is the comparison; this exists so a
+    #: replaced slot under the same id is a different object.
+    _token: int = field(default=0, repr=False)
+
+
+class SpawnedWorker(Protocol):
+    """A worker the parent can read one result line from."""
+
+    process: Any
+
+    async def read_result(self) -> str | None:
+        """The result line, or None on EOF before one arrives."""
+
+
+class SessionSpawner(Protocol):
+    async def spawn(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        request_json: bytes | None,
+    ) -> SpawnedWorker:
+        """Start a worker. ``request_json`` is the create body, or None."""
+
+
+def parse_worker_result(line: str | None) -> dict[str, Any] | None:
+    """The JSON object on the result line, or None if there wasn't one.
+
+    ``ok`` is the caller's to check. A line that says ``ok: false`` means
+    the worker explained a start failure; it is not a session that may be
+    rebuilt. EOF and a line that is not JSON are the same outcome.
+    """
+    if line is None:
+        return None
+    text = line.strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+class _PipeWorker:
+    def __init__(self, process: asyncio.subprocess.Process, read_fd: int) -> None:
+        self.process = process
+        self._read_fd = read_fd
+
+    async def read_result(self) -> str | None:
+        fd = self._read_fd
+
+        def _read() -> str:
+            try:
+                chunks: list[bytes] = []
+                while True:
+                    data = os.read(fd, 65536)
+                    if not data:
+                        break
+                    chunks.append(data)
+                    if b"\n" in data:
+                        break
+                return b"".join(chunks).decode()
+            finally:
+                os.close(fd)
+
+        text = await asyncio.to_thread(_read)
+        return text or None
+
+
+class SubprocessSpawner:
+    """``exec`` ``python -m mftik_sts.worker`` on the parent's loop.
+
+    stdout and stderr are inherited so Docker's log is the worker's log.
+    The result is a separate pipe: a log line must not be parsed as one.
+    """
+
+    async def spawn(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        request_json: bytes | None,
+    ) -> SpawnedWorker:
+        read_fd, write_fd = os.pipe()
+        os.set_inheritable(write_fd, True)
+        env = os.environ.copy()
+        env[PARENT_PID_ENV] = str(os.getpid())
+        env[RESULT_FD_ENV] = str(write_fd)
+        env["MFTIK_DB_POOL_SIZE"] = "1"
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "mftik_sts.worker",
+                session_id,
+                role,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=None,
+                stderr=None,
+                pass_fds=(write_fd,),
+                env=env,
+                start_new_session=True,
+            )
+        except Exception:
+            os.close(read_fd)
+            os.close(write_fd)
+            raise
+        os.close(write_fd)
+        stdin = process.stdin
+        if stdin is not None:
+            try:
+                if request_json:
+                    stdin.write(request_json)
+                    await stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            stdin.close()
+        return _PipeWorker(process, read_fd)

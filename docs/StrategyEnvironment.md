@@ -44,8 +44,12 @@ logs "no strategy named X in this build". Putting extras in
 
 ### Non-goals
 
-- Per-strategy venvs or worker processes. Two numpys in one interpreter
-  are impossible; isolation is a later epic.
+- Per-strategy venvs. Two numpys in one interpreter are impossible, and a
+  session process does not add a venv: every worker is this image and the
+  `$MFTIK_DATA/env` generation it read at start. The parent still constructs
+  the strategy before spawn, to resolve it and to read `rebuildable`, so
+  `__init__` runs in the instance as well as in the worker. Isolation starts
+  at `start()`, not at class load.
 - A platform catalog of allowed PyPI names. The Owner's stamp on the
   volume is the whitelist. The gate's job is declaration and presence,
   not taste.
@@ -1465,7 +1469,8 @@ ENV-7), not in a mop-up ticket.
 
 ## Out of scope (later epics)
 
-- Strategy worker processes / per-tree lockfiles.
+- Per-tree lockfiles. A live session is its own process, not its own venv,
+  and it keeps the generation it read at start.
 - `mftik check --against` if ENV-10 ships without it.
 - Baking extras into the GHCR image. The volume is the extra; the
   image stays the SDK.

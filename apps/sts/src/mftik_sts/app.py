@@ -26,6 +26,7 @@ from mftik_sts import db as sts_db
 from mftik_sts.rpc import dispatch
 from mftik_sts.runtime_env import extras_names, refresh
 from mftik_sts.session import SessionManager
+from mftik_sts.spawn import SubprocessSpawner
 
 SOURCE = "sts"
 #: Which STS this process is. ``MFTIK_INSTANCE``, defaulting to the
@@ -226,6 +227,8 @@ async def amain() -> bool:
             td_instance=sts_db.td_instance,
             derive_sts=sts_db.derived_sts,
             instance=INSTANCE,
+            spawner=SubprocessSpawner(),
+            rebuild_on_worker_exit=_rebuild_enabled(),
         )
         logger.info("STS started instance=%s", INSTANCE)
         subjects = control_subjects(SOURCE, INSTANCE, ROLE)
@@ -303,9 +306,8 @@ def main() -> None:
     # tells anyone reading ``docker ps`` that STS did not just stop.
     #
     # ``uvloop.run`` rather than ``asyncio.run`` — docs/EventLoop.md has the
-    # measurements, and this is the process they matter most in: every session
-    # is a task on this one loop. It builds that loop for this call alone and
-    # leaves the global policy untouched, so a strategy that asks for the
-    # running loop gets uvloop and nothing else in the image changes.
+    # measurements. This loop serves the instance. Each live session is a
+    # worker process with a loop of its own. It builds that loop for this
+    # call alone and leaves the global policy untouched.
     if not uvloop.run(amain()):
         raise SystemExit(1)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ from mftik.protocol import (
     ANY_INSTANCE,
     MD_ERROR,
     MD_SESSION_ATTACH,
+    STS_ERROR,
     STS_REASON_OPERATOR_STOP,
     STS_SESSION_STATUS,
     TD_ERROR,
@@ -24,6 +26,7 @@ from mftik.protocol import (
     MdAttachRequestEnvelope,
     MdAttachResult,
     RpcError,
+    RpcErrorEnvelope,
     SessionInfo,
     StsCreateSessionRequest,
     StsCreateSessionResult,
@@ -49,6 +52,13 @@ from mftik_db.models.session import SessionDomain, SessionStatus
 from mftik_sts.impl import resolve as resolve_strategy
 from mftik_sts.runtime_env import IncompatibleEnvironment, ensure_deployable
 from mftik_sts.session.session import StsSession
+from mftik_sts.spawn import (
+    START_FAIL_REASON,
+    WORKER_STOP_WAIT_S,
+    SessionSpawner,
+    WorkerSlot,
+    parse_worker_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +96,13 @@ _REBUILD_MAX_AGE_S = 1800.0
 
 #: How many times one session may be rebuilt before it is left alone. A
 #: strategy that takes the process down with it would otherwise be restored
-#: into the same crash on every boot, for as long as the age window holds.
+#: into the same crash, for as long as the age window holds.
+#:
+#: The count is cleared once a rebuild has stayed up for
+#: ``_REBUILD_SETTLE_S``. A crash after that is a new run with a fresh
+#: count, and the watcher starts it immediately — a strategy that lives
+#: about five minutes and then dies is restored without a cap. The window
+#: still means "died on the way back", not "may only ever crash three times".
 _REBUILD_MAX_ATTEMPTS = 3
 
 #: How long a rebuilt session must keep running before its attempt count is
@@ -95,7 +111,8 @@ _REBUILD_MAX_ATTEMPTS = 3
 #: the rebuild itself returns successfully in both cases. Long enough that a
 #: strategy which dies on the way back has died before this fires, short
 #: enough that a session which is plainly fine is not carrying attempts from
-#: yesterday into tonight's restart.
+#: yesterday into tonight's restart. Compared by the holder — the session
+#: object, or the worker slot when the session is a process.
 _REBUILD_SETTLE_S = 300.0
 
 #: How many interrupted rows one scan will consider. Well above any plausible
@@ -164,6 +181,9 @@ class SessionManager:
         td_instance: TdInstanceLookup | None = None,
         derive_sts: DeriveSts | None = None,
         instance: str = SessionDomain.STS.value,
+        spawner: SessionSpawner | None = None,
+        rebuild_on_worker_exit: bool = False,
+        control_types: frozenset[str] | None = None,
     ) -> None:
         self._broker = broker
         self._persist_live = persist_live
@@ -187,6 +207,16 @@ class SessionManager:
         #: Which STS this is. Only the rebuild scan reads it: a session is
         #: addressed by the subject it was created on, not by this.
         self._instance = instance
+        #: None runs sessions in this process. The parent sets a spawner;
+        #: tests and the worker leave it unset.
+        self._spawner = spawner
+        #: A worker that already reported success and then died. Off unless
+        #: this deployment restores interrupted sessions at all.
+        self._rebuild_on_worker_exit = rebuild_on_worker_exit
+        #: The worker's control subject answers only stop and fail. None
+        #: dispatches whatever arrives, which is the in-process manager.
+        self._control_types = control_types
+        self._shutting_down = False
         self._orphan_strikes: dict[str, int] = {}
         #: ``session_id`` → the loop serving that session's control subject,
         #: and the event that ends it. One per live session: stop and fail are
@@ -198,10 +228,21 @@ class SessionManager:
         #: and so one is not garbage-collected before it notices.
         self._retiring: set[asyncio.Task[Any]] = set()
         self._sessions: dict[str, StsSession] = {}
+        #: ``session_id`` → the worker running it. Not a :class:`StsSession`:
+        #: stop and fail are served in the child, on the session's subject.
+        self._workers: dict[str, WorkerSlot] = {}
+        #: Ids a rebuild has claimed and not yet registered. Checked in the
+        #: same breath as the insert, before any await, so two scans cannot
+        #: both decide the id is free.
+        self._claims: set[str] = set()
         # Held so shutdown can cancel them: each outlives the rebuild scan
         # that started it, and a pending task at loop close is a warning
         # nobody can act on.
         self._settle_tasks: set[asyncio.Task[None]] = set()
+        #: Processes that failed before ``started`` and still need ``wait``.
+        #: A worker that exits without a watcher is a zombie until something
+        #: collects it.
+        self._reaps: set[asyncio.Task[None]] = set()
 
     @property
     def instance(self) -> str:
@@ -209,8 +250,24 @@ class SessionManager:
         disk a part is on so a read can be addressed there."""
         return self._instance
 
-    def get(self, session_id: str) -> StsSession | None:
-        return self._sessions.get(session_id)
+    def get(self, session_id: str) -> StsSession | WorkerSlot | None:
+        """The in-process session, or the worker slot when this is the parent.
+
+        Callers that only need to know the session is held — the event log's
+        ``live`` bit — accept either. A worker slot is not a strategy.
+        """
+        session = self._sessions.get(session_id)
+        if session is not None:
+            return session
+        return self._workers.get(session_id)
+
+    def _holds(self, session_id: str) -> bool:
+        """Whether this process has the session, or has claimed it."""
+        return (
+            session_id in self._sessions
+            or session_id in self._workers
+            or session_id in self._claims
+        )
 
     async def _remember_fact(self, session_id: str, key: str, value: str) -> None:
         """Persist one fact for ``session_id``, or drop it if nothing can.
@@ -276,9 +333,16 @@ class SessionManager:
 
     @property
     def active_session_ids(self) -> list[str]:
-        return list(self._sessions)
+        return list(dict.fromkeys([*self._sessions, *self._workers]))
 
     async def create_session(
+        self, request: StsCreateSessionRequest
+    ) -> StsCreateSessionResult:
+        if self._spawner is not None:
+            return await self._create_via_worker(request)
+        return await self._create_in_process(request)
+
+    async def _create_in_process(
         self, request: StsCreateSessionRequest
     ) -> StsCreateSessionResult:
         if request.session_id in self._sessions:
@@ -394,6 +458,202 @@ class SessionManager:
             strategy=strategy.name,
         )
 
+    async def _create_via_worker(
+        self, request: StsCreateSessionRequest
+    ) -> StsCreateSessionResult:
+        """Persist the row here, then let a worker run the session.
+
+        The slot is claimed before the row is written, same as an in-process
+        session is registered before persist: the reaper treats a live row
+        this instance does not hold as an orphan. The request goes to the
+        worker on stdin. Rebuilding it from the row would not be the same
+        object — ``load_md`` exists because those two have already drifted.
+        """
+        if self._holds(request.session_id):
+            raise KeyError(f"sts session already exists: {request.session_id}")
+        ensure_deployable(request.type or request.strategy)
+        # Constructed here so an unknown strategy fails before a process
+        # exists. ``__init__`` therefore runs in the parent as well as the
+        # worker; a fault in it can still take this process down.
+        strategy = self._strategy_factory(request.strategy)
+        slot = WorkerSlot(
+            session_id=request.session_id,
+            role="create",
+            strategy_name=strategy.name,
+            type=request.type,
+            created_by=request.created_by,
+        )
+        self._workers[request.session_id] = slot
+        reported = False
+        try:
+            if self._persist_live is not None:
+                await self._persist_live(
+                    session_id=request.session_id,
+                    created_by=request.created_by,
+                    strategy=strategy.name,
+                    type=request.type,
+                    yaml_text=request.yaml_text,
+                    td=dump_td(dict(request.td)),
+                    md_ids=dict(request.md),
+                    st_paras=dict(request.st_paras),
+                    restart=request.restart,
+                    instance=request.instance,
+                )
+            assert self._spawner is not None
+            spawned = await self._spawner.spawn(
+                session_id=request.session_id,
+                role="create",
+                request_json=request.model_dump_json().encode(),
+            )
+            slot.process = spawned.process
+            parsed = parse_worker_result(await spawned.read_result())
+            if parsed is None or not parsed.get("ok"):
+                reported = True
+                detail = START_FAIL_REASON
+                if parsed is not None and parsed.get("error"):
+                    detail = f"{START_FAIL_REASON}: {parsed['error']}"
+                await self._fail_unstarted(slot, request, detail)
+                raise RuntimeError(detail)
+            slot.started = True
+            slot.strategy_name = (
+                str(parsed.get("strategy") or "") or slot.strategy_name
+            )
+            self._arm_watcher(slot)
+            return StsCreateSessionResult(
+                session_id=request.session_id,
+                strategy=slot.strategy_name or strategy.name,
+                status=str(parsed.get("status") or SessionStatus.LIVE.value),
+                reason=(
+                    str(parsed["reason"])
+                    if parsed.get("reason") is not None
+                    else None
+                ),
+            )
+        except Exception:
+            if not slot.started and not reported:
+                await self._fail_unstarted(slot, request, START_FAIL_REASON)
+            raise
+
+    async def _fail_unstarted(
+        self,
+        slot: WorkerSlot,
+        request: StsCreateSessionRequest,
+        reason: str,
+    ) -> None:
+        """A worker that never reported success. Not a rebuild candidate."""
+        if slot.started or slot.abandoned:
+            return
+        slot.abandoned = True
+        if self._workers.get(slot.session_id) is slot:
+            self._workers.pop(slot.session_id, None)
+        self._reap_failed(slot.process)
+        if self._mark_done is not None:
+            try:
+                await self._mark_done(
+                    slot.session_id,
+                    status=SessionStatus.FAILED.value,
+                    reason=reason,
+                )
+            except Exception:
+                logger.exception(
+                    "STS failed to mark a start failure session=%s",
+                    slot.session_id,
+                )
+        await self._publish_status(
+            slot.session_id,
+            status=SessionStatus.FAILED.value,
+            strategy=slot.strategy_name,
+            created_by=request.created_by,
+            reason=reason,
+            type=request.type,
+        )
+
+    def _arm_watcher(self, slot: WorkerSlot) -> None:
+        task = asyncio.create_task(
+            self._on_worker_exit(slot),
+            name=f"sts-worker-{slot.session_id}",
+        )
+        slot.watcher = task
+
+    async def _on_worker_exit(self, slot: WorkerSlot) -> None:
+        """A worker that dies after it reported success.
+
+        Exit 0 means the worker wrote the terminal row itself. Anything else,
+        while the row is still live, is the same interrupted state a dead
+        STS process used to leave, and the same rebuild flag decides whether
+        to bring it back. A worker that had not reported yet is the create
+        path's problem: marking it interrupted would rebuild a deploy the
+        API already failed.
+        """
+        process = slot.process
+        if process is None:
+            return
+        try:
+            code = await process.wait()
+        except Exception:
+            logger.exception(
+                "STS worker wait failed session=%s", slot.session_id
+            )
+            return
+        if not slot.started or slot.abandoned or self._shutting_down:
+            return
+        if self._workers.get(slot.session_id) is not slot:
+            return
+        self._workers.pop(slot.session_id, None)
+        if code == 0:
+            return
+        if not await self._row_is_live(slot.session_id):
+            return
+        reason = "process died"
+        if self._mark_done is not None:
+            try:
+                await self._mark_done(
+                    slot.session_id,
+                    status=SessionStatus.INTERRUPTED.value,
+                    reason=reason,
+                )
+            except Exception:
+                logger.exception(
+                    "STS failed to mark a dead worker session=%s",
+                    slot.session_id,
+                )
+                return
+        await self._publish_status(
+            slot.session_id,
+            status=SessionStatus.INTERRUPTED.value,
+            strategy=slot.strategy_name,
+            reason=reason,
+            created_by=slot.created_by,
+            type=slot.type,
+        )
+        if not self._rebuild_on_worker_exit or self._shutting_down:
+            return
+        try:
+            await self.rebuild_session(slot.session_id)
+        except Exception:
+            logger.exception(
+                "STS rebuild after worker exit failed session=%s",
+                slot.session_id,
+            )
+
+    async def _row_is_live(self, session_id: str) -> bool:
+        if self._list_db_sessions is None:
+            return False
+        try:
+            rows = await self._list_db_sessions(
+                status=SessionStatus.LIVE.value,
+                created_by=None,
+            )
+        except Exception:
+            logger.exception(
+                "STS could not tell whether session=%s is still live",
+                session_id,
+            )
+            return False
+        return any(
+            getattr(row, "session_id", None) == session_id for row in rows
+        )
+
     async def list_sessions(
         self, request: ListSessionsRequest
     ) -> list[SessionInfo]:
@@ -407,7 +667,9 @@ class SessionManager:
             )
             out: list[SessionInfo] = []
             for row in db_rows:
-                live = self._sessions.get(row.session_id)
+                live = self._sessions.get(row.session_id) or self._workers.get(
+                    row.session_id
+                )
                 out.append(
                     SessionInfo(
                         session_id=row.session_id,
@@ -591,7 +853,7 @@ class SessionManager:
         reaped: list[str] = []
         for row in rows:
             session_id = getattr(row, "session_id", None)
-            if session_id is None or session_id in self._sessions:
+            if session_id is None or self._holds(session_id):
                 self._orphan_strikes.pop(session_id, None)
                 continue
             if not await self._placement_is_mine(row):
@@ -668,137 +930,278 @@ class SessionManager:
             )
 
         rebuilt: list[str] = []
-        now = datetime.now(UTC)
         for row in rows:
             session_id = getattr(row, "session_id", None)
-            if session_id is None or session_id in self._sessions:
+            if session_id is None:
                 continue
-            age = _age_seconds(getattr(row, "finished_at", None), now)
-            if age is None or age > self._rebuild_max_age_s:
-                # Not an error — nothing failed, this is the policy. The row
-                # keeps its status and its reason, so it stays visible and a
-                # person can still decide to do something with it.
-                logger.warning(
-                    "STS not rebuilding session=%s: interrupted %s ago, "
-                    "past the %.0fs window",
-                    session_id,
-                    "an unknown time" if age is None else f"{age:.0f}s",
-                    self._rebuild_max_age_s,
-                )
-                continue
-            if not await self._placement_is_mine(row):
-                # Somebody else's run, or a null row whose derivation is
-                # not this process — including "not unique", which waits
-                # on the Attention list rather than a coin flip.
-                logger.debug(
-                    "STS not rebuilding session=%s: placement is not %s",
-                    session_id,
-                    self._instance,
-                )
-                continue
-            if str(getattr(row, "restart", "always")) != "always":
-                # This run said it would rather stay ended. Nothing to warn
-                # about — it is doing what it was deployed to do.
-                logger.info(
-                    "STS not rebuilding session=%s: deployed with restart=%s",
-                    session_id,
-                    getattr(row, "restart", None),
-                )
-                continue
-            attempts = int(getattr(row, "rebuild_count", 0) or 0)
-            if attempts >= self._rebuild_max_attempts:
-                logger.warning(
-                    "STS not rebuilding session=%s: already tried %d times",
-                    session_id,
-                    attempts,
-                )
-                continue
-            if not is_v1_session_id(session_id):
-                # Predates the 6-hex session id. Rebuilding would fail inside
-                # the client_order_id factory — worse than leaving the row.
-                logger.warning(
-                    "STS cannot rebuild session=%s: not a v1 session_id",
-                    session_id,
-                )
-                continue
-            try:
-                ensure_deployable(
-                    getattr(row, "type", None) or getattr(row, "strategy", None)
-                )
-                strategy = self._strategy_factory(getattr(row, "strategy", None))
-            except IncompatibleEnvironment as exc:
-                logger.warning(
-                    "STS not rebuilding session=%s: incompatible environment "
-                    "(%s)",
-                    session_id,
-                    exc,
-                )
-                if self._bump_rebuild_count is not None:
-                    try:
-                        await self._bump_rebuild_count(session_id)
-                    except Exception:
-                        logger.exception(
-                            "STS rebuild count bump failed session=%s",
-                            session_id,
-                        )
-                continue
-            except KeyError:
-                # A row naming a strategy this build does not have. Expected —
-                # a strategy can be renamed or withdrawn while a session that
-                # ran it is still on file — so it reads like its neighbours
-                # here rather than like a fault. A stack trace every boot for
-                # a row that will never resolve teaches the operator to skip
-                # the tracebacks.
-                logger.warning(
-                    "STS not rebuilding session=%s: no strategy named %r in "
-                    "this build",
-                    session_id,
-                    getattr(row, "strategy", None),
-                )
-                continue
-            except Exception:
-                # Anything else is the class failing to construct, which is a
-                # fault and keeps its traceback.
-                logger.exception(
-                    "STS cannot rebuild session=%s: strategy %r would not "
-                    "build",
-                    session_id,
-                    getattr(row, "strategy", None),
-                )
-                continue
-            if not strategy.rebuildable:
-                # Readiness is the class flag, not the env var. Without it a
-                # rebuilt instance would treat recon as a clean account and
-                # place beside the orders this session left resting.
-                logger.warning(
-                    "STS not rebuilding session=%s: %s does not support it",
-                    session_id,
-                    strategy.name,
-                )
-                continue
+            if await self.rebuild_session(session_id, row=row):
+                rebuilt.append(session_id)
+        return rebuilt
+
+    async def rebuild_session(
+        self, session_id: str, *, row: Any | None = None
+    ) -> bool:
+        """Restore one interrupted session, and only that one.
+
+        The claim happens before the first await. A boot scan and a
+        worker-exit watcher can both reach here; the second finds the id
+        already held and does not spawn another process. Releasing the
+        claim on the way out is what makes a session that was not eligible
+        available to a later scan — a spawn that reported success keeps
+        its worker slot, which is a different hold.
+        """
+        if self._holds(session_id):
+            return False
+        slot: WorkerSlot | None = None
+        if self._spawner is not None:
+            slot = WorkerSlot(session_id=session_id, role="rebuild")
+            self._workers[session_id] = slot
+        else:
+            self._claims.add(session_id)
+        try:
+            if row is None:
+                row = await self._find_interrupted(session_id)
+                if row is None:
+                    return False
+            return await self._rebuild_claimed(row, slot)
+        finally:
+            self._claims.discard(session_id)
+            if (
+                slot is not None
+                and not slot.started
+                and self._workers.get(session_id) is slot
+            ):
+                self._workers.pop(session_id, None)
+
+    async def _find_interrupted(self, session_id: str) -> Any | None:
+        if self._list_db_sessions is None:
+            return None
+        try:
+            rows = await self._list_db_sessions(
+                status=SessionStatus.INTERRUPTED.value,
+                created_by=None,
+                limit=_REBUILD_SCAN_LIMIT,
+            )
+        except Exception:
+            logger.exception(
+                "STS could not load interrupted session=%s", session_id
+            )
+            return None
+        for row in rows:
+            if getattr(row, "session_id", None) == session_id:
+                return row
+        return None
+
+    async def _rebuild_claimed(self, row: Any, slot: WorkerSlot | None) -> bool:
+        """Eligibility and the restore itself. The id is already claimed."""
+        session_id = row.session_id
+        now = datetime.now(UTC)
+        age = _age_seconds(getattr(row, "finished_at", None), now)
+        if age is None or age > self._rebuild_max_age_s:
+            # Not an error — nothing failed, this is the policy. The row
+            # keeps its status and its reason, so it stays visible and a
+            # person can still decide to do something with it.
+            logger.warning(
+                "STS not rebuilding session=%s: interrupted %s ago, "
+                "past the %.0fs window",
+                session_id,
+                "an unknown time" if age is None else f"{age:.0f}s",
+                self._rebuild_max_age_s,
+            )
+            return False
+        if not await self._placement_is_mine(row):
+            # Somebody else's run, or a null row whose derivation is
+            # not this process — including "not unique", which waits
+            # on the Attention list rather than a coin flip.
+            logger.debug(
+                "STS not rebuilding session=%s: placement is not %s",
+                session_id,
+                self._instance,
+            )
+            return False
+        if str(getattr(row, "restart", "always")) != "always":
+            # This run said it would rather stay ended. Nothing to warn
+            # about — it is doing what it was deployed to do.
+            logger.info(
+                "STS not rebuilding session=%s: deployed with restart=%s",
+                session_id,
+                getattr(row, "restart", None),
+            )
+            return False
+        attempts = int(getattr(row, "rebuild_count", 0) or 0)
+        if attempts >= self._rebuild_max_attempts:
+            logger.warning(
+                "STS not rebuilding session=%s: already tried %d times",
+                session_id,
+                attempts,
+            )
+            return False
+        if not is_v1_session_id(session_id):
+            # Predates the 6-hex session id. Rebuilding would fail inside
+            # the client_order_id factory — worse than leaving the row.
+            logger.warning(
+                "STS cannot rebuild session=%s: not a v1 session_id",
+                session_id,
+            )
+            return False
+        try:
+            ensure_deployable(
+                getattr(row, "type", None) or getattr(row, "strategy", None)
+            )
+            strategy = self._strategy_factory(getattr(row, "strategy", None))
+        except IncompatibleEnvironment as exc:
+            logger.warning(
+                "STS not rebuilding session=%s: incompatible environment "
+                "(%s)",
+                session_id,
+                exc,
+            )
             if self._bump_rebuild_count is not None:
                 try:
                     await self._bump_rebuild_count(session_id)
                 except Exception:
                     logger.exception(
-                        "STS rebuild count bump failed session=%s", session_id
+                        "STS rebuild count bump failed session=%s",
+                        session_id,
                     )
-            try:
-                await self._rebuild_one(row, strategy)
-            except Exception:
-                logger.exception("STS rebuild failed session=%s", session_id)
-                await self._abandon_rebuild(session_id)
-                continue
-            rebuilt.append(session_id)
-            self._watch_rebuild_settle(session_id)
-            logger.info(
-                "STS rebuilt session=%s strategy=%s",
+            return False
+        except KeyError:
+            # A row naming a strategy this build does not have. Expected —
+            # a strategy can be renamed or withdrawn while a session that
+            # ran it is still on file — so it reads like its neighbours
+            # here rather than like a fault. A stack trace every boot for
+            # a row that will never resolve teaches the operator to skip
+            # the tracebacks.
+            logger.warning(
+                "STS not rebuilding session=%s: no strategy named %r in "
+                "this build",
                 session_id,
                 getattr(row, "strategy", None),
             )
-        return rebuilt
+            return False
+        except Exception:
+            # Anything else is the class failing to construct, which is a
+            # fault and keeps its traceback.
+            logger.exception(
+                "STS cannot rebuild session=%s: strategy %r would not "
+                "build",
+                session_id,
+                getattr(row, "strategy", None),
+            )
+            return False
+        if not strategy.rebuildable:
+            # Readiness is the class flag, not the env var. Without it a
+            # rebuilt instance would treat recon as a clean account and
+            # place beside the orders this session left resting.
+            logger.warning(
+                "STS not rebuilding session=%s: %s does not support it",
+                session_id,
+                strategy.name,
+            )
+            return False
+        if self._bump_rebuild_count is not None:
+            try:
+                await self._bump_rebuild_count(session_id)
+            except Exception:
+                logger.exception(
+                    "STS rebuild count bump failed session=%s", session_id
+                )
+        if slot is not None:
+            return await self._spawn_rebuild(row, strategy, slot)
+        try:
+            await self._rebuild_one(row, strategy)
+        except Exception:
+            logger.exception("STS rebuild failed session=%s", session_id)
+            await self._abandon_rebuild(session_id)
+            return False
+        session = self._sessions.get(session_id)
+        if session is not None:
+            self._watch_rebuild_settle(session_id, session)
+        logger.info(
+            "STS rebuilt session=%s strategy=%s",
+            session_id,
+            getattr(row, "strategy", None),
+        )
+        return True
 
-    def _watch_rebuild_settle(self, session_id: str) -> None:
+    async def _spawn_rebuild(
+        self, row: Any, strategy: Strategy, slot: WorkerSlot
+    ) -> bool:
+        """Hand a claimed slot to a worker. No success line is not a retry."""
+        session_id = row.session_id
+        assert self._spawner is not None
+        try:
+            spawned = await self._spawner.spawn(
+                session_id=session_id,
+                role="rebuild",
+                request_json=None,
+            )
+        except Exception:
+            logger.exception(
+                "STS could not spawn a rebuild worker session=%s", session_id
+            )
+            return False
+        slot.process = spawned.process
+        parsed = parse_worker_result(await spawned.read_result())
+        if parsed is None or not parsed.get("ok"):
+            # Collect the process. This path does not arm a watcher, and a
+            # worker that exits without ``wait`` stays a zombie.
+            self._reap_failed(slot.process)
+            # The row stays interrupted when the worker managed to say so,
+            # and live when it died after ``mark_live`` without a result.
+            # Either way this call does not spawn again. A live row is
+            # reaped; an interrupted one waits for the next scan.
+            logger.warning(
+                "STS rebuild worker exited during start session=%s",
+                session_id,
+            )
+            return False
+        slot.started = True
+        slot.strategy_name = str(parsed.get("strategy") or strategy.name)
+        slot.type = getattr(row, "type", None)
+        slot.created_by = int(getattr(row, "created_by", 0) or 0)
+        self._arm_watcher(slot)
+        self._watch_rebuild_settle(session_id, slot)
+        logger.info(
+            "STS rebuilt session=%s strategy=%s",
+            session_id,
+            slot.strategy_name,
+        )
+        return True
+
+    async def adopt_interrupted(self, session_id: str) -> StsCreateSessionResult:
+        """Run one interrupted row in this process. The parent already counted it.
+
+        The worker calls this. Eligibility and the attempt bump happened
+        before the spawn, so doing them again would charge the session twice
+        and could refuse a row the parent has already decided to restore.
+        """
+        row = await self._find_interrupted(session_id)
+        if row is None:
+            raise RuntimeError(f"no interrupted session {session_id}")
+        strategy = self._strategy_factory(getattr(row, "strategy", None))
+        await self._rebuild_one(row, strategy)
+        return StsCreateSessionResult(
+            session_id=session_id,
+            strategy=strategy.name,
+        )
+
+    async def wait_until_quiet(self) -> None:
+        """Block until no session is held and every control loop has retired.
+
+        Stop replies from inside the control task, after ``close`` returns.
+        The task stays in ``_retiring`` until that reply has been handed to
+        the broker. A worker that exited on an empty ``_sessions`` alone
+        would be gone before the reply was flushed.
+        """
+        while self._sessions or self._retiring:
+            retiring = set(self._retiring)
+            if retiring:
+                await asyncio.wait(retiring, timeout=0.05)
+            else:
+                await asyncio.sleep(0.05)
+
+    def _watch_rebuild_settle(self, session_id: str, token: object) -> None:
         """Start the timer that forgives this session's attempt count.
 
         The session is read here rather than inside the task: a task does not
@@ -808,26 +1211,27 @@ class SessionManager:
         """
         if self._reset_rebuild_count is None or self._rebuild_settle_s <= 0:
             return
-        session = self._sessions.get(session_id)
-        if session is None:
-            return
         task = asyncio.create_task(
-            self._settle_rebuild(session_id, session),
+            self._settle_rebuild(session_id, token),
             name=f"sts-rebuild-settle-{session_id}",
         )
         self._settle_tasks.add(task)
         task.add_done_callback(self._settle_tasks.discard)
 
-    async def _settle_rebuild(self, session_id: str, session: StsSession) -> None:
+    async def _settle_rebuild(self, session_id: str, token: object) -> None:
         """Clear the attempt count once a rebuilt session has kept running.
 
-        The session is compared by identity, not by id: a session that stopped
+        The holder is compared by identity, not by id: a session that stopped
         and was deployed again under the same id is a different run, and
         clearing the count on its behalf would credit it for surviving
-        something it was never part of.
+        something it was never part of. A worker slot is that holder when
+        the session is a process.
         """
         await asyncio.sleep(self._rebuild_settle_s)
-        if self._sessions.get(session_id) is not session:
+        current = self._sessions.get(session_id)
+        if current is None:
+            current = self._workers.get(session_id)
+        if current is not token:
             # Gone, or replaced. Either way the rebuild did not hold, and the
             # count it was carrying is exactly what the next boot should see.
             return
@@ -1101,6 +1505,112 @@ class SessionManager:
     async def close_all(self) -> None:
         """Shut every session down, recording the terminal status first.
 
+        Workers are signalled together. ``ON_STOP_TIMEOUT_S`` is longer than
+        the wait below, so a strategy that spends the whole of ``on_stop``
+        is still killed; the wait is not a claim that every child exited
+        cleanly. The row is written first, before the signal, for the same
+        reason an in-process shutdown writes it before ``close``.
+        """
+        self._shutting_down = True
+        # Before any await that could let a settle timer fire and forgive a
+        # session this method is in the middle of interrupting.
+        for task in list(self._settle_tasks):
+            task.cancel()
+        self._settle_tasks.clear()
+        await self._stop_workers()
+        if self._reaps:
+            await asyncio.wait(list(self._reaps), timeout=WORKER_STOP_WAIT_S)
+        await self._close_in_process()
+
+    async def _stop_workers(self) -> None:
+        if not self._workers:
+            return
+        for slot in list(self._workers.values()):
+            if self._mark_done is None:
+                break
+            try:
+                await self._mark_done(
+                    slot.session_id,
+                    status=SessionStatus.INTERRUPTED.value,
+                    reason=_SHUTDOWN_REASON,
+                )
+            except Exception:
+                logger.exception(
+                    "STS shutdown pre-mark failed session=%s", slot.session_id
+                )
+        waiters: list[asyncio.Task[Any]] = []
+        for slot in list(self._workers.values()):
+            process = slot.process
+            if process is None or process.returncode is not None:
+                continue
+            try:
+                process.send_signal(signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            if slot.watcher is not None and not slot.watcher.done():
+                waiters.append(slot.watcher)
+            else:
+                waiters.append(asyncio.create_task(process.wait()))
+        if waiters:
+            await asyncio.wait(waiters, timeout=WORKER_STOP_WAIT_S)
+        for slot in list(self._workers.values()):
+            process = slot.process
+            if process is not None and process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+        still = [
+            task
+            for task in (
+                *(
+                    slot.watcher
+                    for slot in self._workers.values()
+                    if slot.watcher is not None
+                ),
+                *waiters,
+            )
+            if not task.done()
+        ]
+        self._workers.clear()
+        if still:
+            # ``kill`` unblocks ``wait``. Give those tasks a moment to
+            # finish, so none is pending at loop close. This is not a
+            # claim that ``on_stop`` ran.
+            await asyncio.wait(still, timeout=1.0)
+
+    def _reap_failed(self, process: Any) -> None:
+        """Collect a worker that will not get a watcher.
+
+        Signalled only when it is still running. One that already exited
+        just needs ``wait``, or it stays a zombie for the life of this
+        process.
+        """
+        if process is None:
+            return
+
+        async def _reap() -> None:
+            if process.returncode is None:
+                try:
+                    process.send_signal(signal.SIGTERM)
+                except ProcessLookupError:
+                    return
+            try:
+                await asyncio.wait_for(process.wait(), timeout=WORKER_STOP_WAIT_S)
+            except TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+
+        task = asyncio.create_task(_reap(), name="sts-worker-reap")
+        self._reaps.add(task)
+        task.add_done_callback(self._reaps.discard)
+
+    async def _close_in_process(self) -> None:
+        """Shut every in-process session down, recording the terminal status first.
+
         Order matters here in a way it does not for a single ``close``. A
         shutdown runs against a deadline — Docker sends SIGKILL ten seconds
         after SIGTERM — while the teardown it has to finish first can block on
@@ -1199,6 +1709,24 @@ class SessionManager:
             try:
                 async for req in self._broker.serve(subject, stop=stop):
                     try:
+                        if (
+                            self._control_types is not None
+                            and req.envelope.type not in self._control_types
+                        ):
+                            await req.reply(
+                                RpcErrorEnvelope.wrap(
+                                    RpcError(
+                                        code="unknown_type",
+                                        message=(
+                                            f"unknown type: {req.envelope.type}"
+                                        ),
+                                    ),
+                                    type=STS_ERROR,
+                                    source="sts",
+                                    session_id=session_id,
+                                )
+                            )
+                            continue
                         await dispatch(req, sessions=self)
                     except Exception:
                         logger.exception(
