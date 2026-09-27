@@ -9,6 +9,7 @@ does not stick a name as subscribed with nothing on the wire.
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 from mftik.exchange.wire import (
@@ -479,6 +480,61 @@ async def test_release_waits_out_a_resync_cycle() -> None:
     await releasing
     assert sent == [["a"]]
     assert not ledger.held()
+
+
+async def _second_cycle_waits() -> None:
+    ledger: WireLedger[str] = WireLedger()
+
+    async def subscribe(keys: list[str]) -> None:
+        del keys
+
+    await ledger.acquire(["a"], subscribe)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    second_in = asyncio.Event()
+    other_ran = asyncio.Event()
+
+    async def first() -> None:
+        async with ledger.cycling("a"):
+            started.set()
+            await release.wait()
+
+    async def second() -> None:
+        async with ledger.cycling("a"):
+            second_in.set()
+
+    async def other() -> None:
+        await asyncio.sleep(0)
+        other_ran.set()
+
+    first_task = asyncio.create_task(first())
+    await started.wait()
+    second_task = asyncio.create_task(second())
+    other_task = asyncio.create_task(other())
+    await asyncio.wait_for(other_ran.wait(), 0.5)
+    assert not second_in.is_set()
+    release.set()
+    await asyncio.wait_for(second_task, 0.5)
+    await first_task
+    await other_task
+    assert second_in.is_set()
+
+
+def test_a_second_cycle_waits_on_the_one_already_running() -> None:
+    """Another resync for the same key awaits the cycle, and the loop still runs."""
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            asyncio.run(_second_cycle_waits())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(1)
+    assert not thread.is_alive()
+    assert errors == []
 
 
 async def test_discard_forgets_an_explicit_unsubscribe() -> None:

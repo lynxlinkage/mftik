@@ -421,19 +421,24 @@ class WireLedger(Generic[K]):
         Book resync speaks ``UNSUBSCRIBE`` then ``SUBSCRIBE`` on the
         wire itself. A release between those two frames would drop the
         channel the snapshot is meant to restore. Waits out an
-        unsubscribe already in flight, and does not touch ``_held``.
+        unsubscribe or another resync already in flight for ``key``,
+        and does not touch ``_held``. The wait has to be the existing
+        future: the lock is free, so looping without one never yields
+        and the process stops pumping.
         """
         while True:
             async with self._lock:
                 releasing = self._releasing.get(key)
-                if releasing is None and key not in self._cycling:
+                cycling = self._cycling.get(key)
+                if releasing is None and cycling is None:
                     fut: asyncio.Future[None] = (
                         asyncio.get_running_loop().create_future()
                     )
                     self._cycling[key] = fut
                     break
-            if releasing is not None:
-                await releasing
+                pending = releasing if releasing is not None else cycling
+            assert pending is not None
+            await pending
         try:
             yield
         finally:

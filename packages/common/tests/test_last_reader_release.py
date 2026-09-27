@@ -234,6 +234,36 @@ async def test_a_failed_resync_subscribe_reconnects_the_reader(
         assert [level.price for level in book.bids] == [Decimal("3")]
 
 
+async def test_an_already_subscribed_resync_keeps_the_socket(
+    bybit_public: FakeBybit,
+) -> None:
+    """A subscribe that landed, whose ack missed the timeout, is not a failure."""
+    topic = "orderbook.50.BTCUSDT"
+    async with _bybit(
+        bybit_public, release_linger=0, ack_timeout=0.05, retry_backoff=0.01
+    ) as feed:
+        books = await feed.subscribe_order_book(NATIVE, depth=50)
+        await bybit_public.push(topic, _book(1, [["1", "1"]], []), kind="snapshot")
+        await asyncio.wait_for(anext(books), timeout=2)
+        bybit_public.silent_times["subscribe"] = 1
+        bybit_public.errors["subscribe"] = (1, "already subscribed")
+        await bybit_public.push(topic, _book(99, [["2", "1"]], []), kind="delta")
+        for _ in range(100):
+            subs = len(bybit_public.frames_for("subscribe"))
+            unsubs = len(bybit_public.frames_for("unsubscribe"))
+            if subs >= 3 and unsubs >= 1:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)
+        assert bybit_public.connections == 1
+        assert len(bybit_public.frames_for("subscribe")) == 3
+        assert topic in feed._ledger.held()
+        bybit_public.errors.pop("subscribe", None)
+        await bybit_public.push(topic, _book(1, [["3", "1"]], []), kind="snapshot")
+        book = await asyncio.wait_for(anext(books), timeout=2)
+        assert [level.price for level in book.bids] == [Decimal("3")]
+
+
 # --- Deribit ---------------------------------------------------------------
 
 

@@ -582,7 +582,10 @@ class BybitPublicStream(BybitSocket):
         re-subscribe does not land, the key is discarded and the
         connection dropped so ``_restore`` resubscribes every reader
         still attached. An explicit unsubscribe rejection leaves the
-        key held: Bybit is still sending the topic.
+        key held: Bybit is still sending the topic. ``already
+        subscribed`` on the re-subscribe is success — the first frame
+        can land and its ack can miss the timeout, and dropping the
+        socket for that would cut off every other reader.
         """
 
         async def unsubscribe() -> None:
@@ -590,8 +593,7 @@ class BybitPublicStream(BybitSocket):
             await self.request(frame, req_id, op=UNSUBSCRIBE)
 
         async def subscribe() -> None:
-            frame, req_id = subscribe_frame([topic])
-            await self.request(frame, req_id, op=SUBSCRIBE)
+            await self._send_subscribe([topic])
 
         result = await resync_channel(
             self._ledger,

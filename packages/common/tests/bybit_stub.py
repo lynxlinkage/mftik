@@ -58,6 +58,8 @@ class FakeBybit:
         #: op → how many of the next replies fail, then succeed.
         self.fail_times: dict[str, int] = {}
         self.fail_messages: dict[str, str] = {}
+        #: op → how many of the next frames are recorded and not answered.
+        self.silent_times: dict[str, int] = {}
         #: Ops recorded but not answered, so the client waits out its ack.
         self.silent_ops: set[str] = set()
         #: Answer pongs the way the private socket does — ``op: pong``, no
@@ -114,6 +116,10 @@ class FakeBybit:
         if op in ("subscribe", "unsubscribe"):
             args = [str(a) for a in msg.get("args") or []]
             if op in self.silent_ops:
+                return
+            silent_left = self.silent_times.get(op, 0)
+            if silent_left > 0:
+                self.silent_times[op] = silent_left - 1
                 return
             remaining = self.fail_times.get(op, 0)
             if remaining > 0:
