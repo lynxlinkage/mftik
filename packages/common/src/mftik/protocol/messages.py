@@ -1045,10 +1045,16 @@ class MdOrderBookResult(MdFetchResult):
 class MdBestQuoteResult(MdFetchResult):
     """The answer to :class:`MdFetchBestQuote`.
 
-    ``quote`` is None when the query failed **or** when the book had no resting
-    order on one side, which is not an error and not a quote either — a caller
-    checking whether its price can rest has nothing to check against, and
-    should treat it as "ask again", not as "the book is empty at zero".
+    ``quote`` is None when the query failed **or** when a non-option book had
+    no resting order on one side, which is not an error and not a quote either
+    — a caller checking whether its price can rest has nothing to check
+    against, and should treat it as "ask again", not as "the book is empty at
+    zero".
+
+    **Options are the exception.** An option book is one-sided for days at a
+    time, so "ask again" would never end: an Option answer is a quote even
+    then, and an empty side is ``price == qty == 0`` (``bid_qty == 0`` means
+    no bid, not a bid at zero). See :class:`~mftik.exchange.models.BestQuote`.
     """
 
     quote: BestQuote | None = None
@@ -1515,6 +1521,7 @@ MD_BEST_QUOTE = "md.bestquote"
 MD_LIQUIDATION = "md.liquidation"
 MD_FUNDING_RATE = "md.funding_rate"
 MD_OPEN_INTEREST = "md.open_interest"
+MD_GREEKS = "md.greeks"
 MD_SUBSCRIBE = "md.subscribe"
 MD_UNSUBSCRIBE = "md.unsubscribe"
 MD_DETACH = "md.detach"

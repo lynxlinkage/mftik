@@ -10,6 +10,7 @@ from mftik.exchange.models import (
     BestQuote,
     Fill,
     FundingRate,
+    Greeks,
     Kline,
     Liquidation,
     OpenInterest,
@@ -102,7 +103,8 @@ class Strategy:
 
     Public events from ``md.{session_id}`` (wired):
         on_ticker, on_order_book, on_kline, on_trade, on_agg_trade,
-        on_best_quote, on_liquidation, on_funding_rate, on_open_interest
+        on_best_quote, on_liquidation, on_funding_rate, on_open_interest,
+        on_greeks
         One hook per feed topic subscribed in ``md_ids``
         (``topic.UniversalTicker``; kline carries its interval in the topic,
         e.g. ``paper.kline_1m.BTCUSDT``).
@@ -368,7 +370,9 @@ class Strategy:
     async def on_ticker(self, ticker: Ticker) -> None:
         """Handle ticker updates from MD — 24h stats + top of book.
 
-        Feed topic ``ticker``.
+        Feed topic ``ticker``. On an Option an empty side is ``0`` — there is
+        no size on a :class:`Ticker` to say so, and no ``last`` fallback. Do
+        not average ``bid`` and ``ask`` without checking both are non-zero.
         """
 
     async def on_order_book(self, book: OrderBook) -> None:
@@ -459,6 +463,22 @@ class Strategy:
         than silently producing nothing.
         """
 
+    async def on_greeks(self, greeks: Greeks) -> None:
+        """Handle live option greeks / IV / mark from MD.
+
+        Feed topic ``greeks``. ``delta``, ``gamma``, ``theta`` and
+        ``vega`` are always set. ``rho`` is ``None`` when the venue
+        has none. IVs are decimal fractions (``0.65`` = 65%), ``None``
+        for an empty side. Units are one convention across venues —
+        BS, per one base, quote currency, vega per vol point, theta
+        per calendar day; see :class:`~mftik.exchange.models.Greeks`.
+        Open interest is not here — that is :meth:`on_open_interest`.
+
+        Not every venue publishes this. Deribit Option does, on the
+        same ticker row as bid/ask. Subscribing where it is absent is
+        refused at attach rather than silently producing nothing.
+        """
+
     # --- query answers -----------------------------------------------------
     #
     # One hook per kind of query, each firing once per ``mds.fetch_*`` call and
@@ -502,10 +522,15 @@ class Strategy:
         ``result.quote`` carries the touch with its resting sizes. Distinct
         from :meth:`on_best_quote`, which pushes one on every change.
 
-        ``quote`` is None when the query failed **or** when a side of the book
-        was empty. The second is not an error and not a quote either: a
-        strategy checking whether its own price can rest has nothing to check
-        against, and should ask again rather than read it as a quote of zero.
+        ``quote`` is None when the query failed **or** when a side of a
+        non-option book was empty. The second is not an error and not a quote
+        either: a strategy checking whether its own price can rest has nothing
+        to check against, and should ask again rather than read it as a quote
+        of zero.
+
+        Option books are one-sided too often for that, so an Option answer is
+        always a quote and an empty side is ``price == qty == 0``. Read
+        ``bid_qty == 0`` as "no bid" — never price off a zero side.
         """
 
     async def on_fetch_funding_history(

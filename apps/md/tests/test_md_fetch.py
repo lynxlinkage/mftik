@@ -681,6 +681,33 @@ async def test_a_one_sided_book_is_a_success_with_no_quote(
     await session.stop()
 
 
+async def test_a_one_sided_option_quote_arrives_with_its_zero_side(
+    broker: Broker, caller: Caller
+) -> None:
+    """Option answers carry the zero side over the wire rather than None."""
+    reader = FakeReader()
+    reader.quote = BestQuote(
+        universal_ticker="Deribit_Option_BTCUSD-260928-93000-C",
+        bid=Decimal("0"),
+        bid_qty=Decimal("0"),
+        ask=Decimal("0.0001"),
+        ask_qty=Decimal("30.2"),
+    )
+    session = FetchSession(broker, FakeFactory(reader))
+    await session.start()
+    await asyncio.sleep(0.05)
+
+    await caller.ask(type=MD_FETCH_BESTQUOTE, payload=_quote_req())
+    result = await caller.next_result(model=MdBestQuoteResult)
+
+    assert result.ok is True
+    assert result.quote is not None
+    assert (result.quote.bid, result.quote.bid_qty) == (0, 0)
+    assert result.quote.ask == Decimal("0.0001")
+
+    await session.stop()
+
+
 async def test_a_read_the_venue_does_not_serve_is_refused_by_name(
     broker: Broker, caller: Caller
 ) -> None:

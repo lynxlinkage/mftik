@@ -1,12 +1,13 @@
 """The Deribit market-data connector.
 
 One public client, one public socket (V4). Spot, linear perps, inverse
-perps and dated futures share it; the channel names the instrument.
-Options are listed on the symbol plane and refused before subscribe.
+perps, dated futures and options share it; the channel names the
+instrument. Private / TD still refuses Option.
 
 **V5:** funding and open interest ride the ticker row. They are a second
 pump on a shared wire identity (MDS-1), not a second ``SUBSCRIBE``. Spot
 has neither. Dated futures have open interest and no funding hook.
+Option has open interest and greeks on the same row, and no funding.
 Those methods raise before the iterator runs when the book has none.
 
 There is no aggregated tape and no liquidation channel.
@@ -14,6 +15,7 @@ There is no aggregated tape and no liquidation channel.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -25,7 +27,7 @@ from mftik.exchange.deribit.models import kline_from_tick
 from mftik.exchange.deribit.protocol import (
     DERIBIT_REST_URL,
     DERIBIT_WS_URL,
-    TRADED_CATEGORIES,
+    PUBLIC_CATEGORIES,
     kind_of,
 )
 from mftik.exchange.deribit.rest import DeribitPublicRest
@@ -33,6 +35,7 @@ from mftik.exchange.intervals import InvalidIntervalError, normalize_interval
 from mftik.exchange.models import (
     BestQuote,
     FundingRate,
+    Greeks,
     Kline,
     OpenInterest,
     OrderBook,
@@ -65,8 +68,9 @@ DERIBIT_INTERVALS: dict[str, str] = {
 
 FUNDING_CATEGORIES = frozenset({Category.PERP, Category.INVERSE})
 OPEN_INTEREST_CATEGORIES = frozenset(
-    {Category.PERP, Category.INVERSE, Category.FUTURE}
+    {Category.PERP, Category.INVERSE, Category.FUTURE, Category.OPTION}
 )
+GREEKS_CATEGORIES = frozenset({Category.OPTION})
 
 
 def venue_interval(interval: str) -> str:
@@ -100,6 +104,8 @@ class DeribitPublicClient(BaseClient):
         self._ws_url = ws_url
         self.rest = rest or DeribitPublicRest(base_url=rest_url)
         self._feed = feed
+        #: Pumps open the socket lazily and at once; one of them opens it.
+        self._feed_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         await self.rest.connect()
@@ -116,12 +122,19 @@ class DeribitPublicClient(BaseClient):
         await self.rest.close()
 
     async def feed(self) -> DeribitPublicStream:
-        """The one public socket, opened on first use."""
-        if self._feed is None:
-            self._feed = DeribitPublicStream(self._ws_url)
-        if not self._feed.connected:
-            await self._feed.connect()
-        return self._feed
+        """The one public socket, opened on first use.
+
+        Every pump calls this, and on an attach they all call it at once.
+        Under the lock one creates and connects the socket and the rest
+        find it connected; without it each built its own
+        ``DeribitPublicStream`` or raced ``connect`` on the shared one.
+        """
+        async with self._feed_lock:
+            if self._feed is None:
+                self._feed = DeribitPublicStream(self._ws_url)
+            if not self._feed.connected:
+                await self._feed.connect()
+            return self._feed
 
     # --- snapshots ---------------------------------------------------------
 
@@ -217,6 +230,21 @@ class DeribitPublicClient(BaseClient):
             )
         return self._open_interests(ticker)
 
+    def stream_greeks(self, ticker: UniversalTicker) -> AsyncIterator[Greeks]:
+        """Ticker fields — refused on books that are not options."""
+        self._ensure_connected()
+        if ticker.venue != self.name:
+            raise ValueError(
+                f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
+            )
+        if ticker.category not in GREEKS_CATEGORIES:
+            names = ", ".join(sorted(c.value for c in GREEKS_CATEGORIES))
+            raise ValueError(
+                f"Deribit {ticker.category} serves no greeks stream; "
+                f"supported: {names}"
+            )
+        return self._greeks(ticker)
+
     async def _tickers(self, ticker: UniversalTicker) -> AsyncIterator[Ticker]:
         native = await self._resolve(ticker)
         feed = await self.feed()
@@ -302,6 +330,19 @@ class DeribitPublicClient(BaseClient):
                 continue
             yield interest
 
+    async def _greeks(self, ticker: UniversalTicker) -> AsyncIterator[Greeks]:
+        """``ticker`` — yield every option row carrying ``greeks`` (V13)."""
+        native = await self._resolve(ticker)
+        feed = await self.feed()
+        stream = await feed.subscribe_tickers(native)
+        async for row in self._rows(stream):
+            if row.instrument_name and row.instrument_name != native:
+                continue
+            greeks = row.to_greeks(ticker)
+            if greeks is None:
+                continue
+            yield greeks
+
     @staticmethod
     async def _rows(stream: EventStream[T]) -> AsyncIterator[T]:
         try:
@@ -315,7 +356,7 @@ class DeribitPublicClient(BaseClient):
             raise ValueError(
                 f"{self.name} client was handed a {ticker.venue} ticker: {ticker}"
             )
-        if ticker.category not in TRADED_CATEGORIES:
+        if ticker.category not in PUBLIC_CATEGORIES:
             raise ValueError(
                 f"{self.name} serves no {ticker.category.value} market data"
             )
@@ -325,6 +366,7 @@ class DeribitPublicClient(BaseClient):
 __all__ = [
     "DERIBIT_INTERVALS",
     "FUNDING_CATEGORIES",
+    "GREEKS_CATEGORIES",
     "OPEN_INTEREST_CATEGORIES",
     "DeribitPublicClient",
     "venue_interval",

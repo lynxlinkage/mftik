@@ -4,8 +4,9 @@ Deribit is a **unified** venue: one HMAC credential (Client ID / Client
 Secret, no passphrase) covers spot, linear perps, inverse perps and
 dated futures. The market an instrument trades on is its ``kind`` /
 ``instrument_type`` / ``settlement_period``, not a different host.
-Options are listed on the symbol plane and refused here until sizing
-is measured. Combos, Starbase/FIX and demo hosts are not modelled.
+Options are listed on the symbol plane. Public MD resolves them;
+private / TD still refuses until sizing is measured. Combos,
+Starbase/FIX and demo hosts are not modelled.
 
 HTTP and WebSocket speak the same methods. A private socket authenticates
 once with ``public/auth`` ``grant_type=client_signature`` (V1) and then
@@ -141,6 +142,10 @@ _FUTURE_KINDS = frozenset({Category.PERP, Category.INVERSE, Category.FUTURE})
 TRADED_CATEGORIES = frozenset(
     {Category.SPOT, Category.PERP, Category.INVERSE, Category.FUTURE}
 )
+#: Public market data. Option tickers, trades, books, quotes, klines,
+#: open interest and greeks resolve here; private still uses
+#: :data:`TRADED_CATEGORIES`.
+PUBLIC_CATEGORIES = TRADED_CATEGORIES | {Category.OPTION}
 
 
 def kind_of(category: Category | UniversalTicker) -> str:
@@ -604,6 +609,7 @@ __all__ = [
     "REVERSED",
     "SUBSCRIPTION",
     "TEST_REQUEST",
+    "PUBLIC_CATEGORIES",
     "TRADED_CATEGORIES",
     "DeribitAuthError",
     "DeribitError",
