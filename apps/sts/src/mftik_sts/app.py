@@ -20,6 +20,7 @@ from mftik import (
     serve_health,
 )
 from mftik.broker import Broker
+from mftik.protocol import STS_SESSION_CREATE
 from mftik.strategy.artifacts import get_store
 
 from mftik_sts import db as sts_db
@@ -53,6 +54,17 @@ RPC_RESTART_DELAY_SECONDS = 1.0
 _DEFAULT_REBUILD_MAX_AGE_S = 1800.0
 
 
+async def _dispatch_request(req: Any, sessions: SessionManager) -> None:
+    try:
+        await dispatch(req, sessions=sessions)
+    except Exception:
+        logger.exception(
+            "STS RPC handler failed type=%s id=%s",
+            req.envelope.type,
+            req.envelope.id,
+        )
+
+
 async def run_rpc(
     broker: Broker,
     sessions: SessionManager,
@@ -70,14 +82,22 @@ async def run_rpc(
     while not stop.is_set():
         try:
             async for req in broker.serve(subject, stop=stop):
-                try:
-                    await dispatch(req, sessions=sessions)
-                except Exception:
-                    logger.exception(
-                        "STS RPC handler failed type=%s id=%s",
-                        req.envelope.type,
-                        req.envelope.id,
+                # Create waits on the worker's result line. Awaiting it
+                # here would hold every other RPC on this subject — list,
+                # artifacts — for as long as ``on_start`` cares to run.
+                # The API's own timeout is unchanged. If that timeout
+                # already fired and the worker later reports success, the
+                # session stays live and the deploy has not attached it.
+                # This process does not kill the worker and does not mark
+                # the row failed.
+                if req.envelope.type == STS_SESSION_CREATE:
+                    task = asyncio.create_task(
+                        _dispatch_request(req, sessions),
+                        name="sts-rpc-create",
                     )
+                    sessions.track_create(task)
+                    continue
+                await _dispatch_request(req, sessions)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -219,6 +239,7 @@ async def amain() -> bool:
             persist_live=sts_db.persist_live_session,
             mark_done=sts_db.mark_session_finished,
             list_db_sessions=sts_db.list_sessions,
+            load_session=sts_db.load_session,
             remember_fact=sts_db.remember_fact,
             mark_live=sts_db.mark_session_live,
             bump_rebuild_count=sts_db.bump_rebuild_count,

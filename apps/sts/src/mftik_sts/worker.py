@@ -3,20 +3,25 @@
 The parent is the instance. This process is not: it does not take the
 health subject and it does not answer the instance subject. It serves
 stop and fail on the session's control subject, and it exits only after
-that session is gone, its control loop has finished, and the broker has
-closed. A stop reply is sent from inside the control task; leaving
-before that reply is flushed drops it.
+the last ``close`` has returned, its control loop has finished, and the
+broker has closed. ``close`` pops the session before it writes the row,
+so an empty ``_sessions`` is not that condition. A stop reply is sent
+from inside the control task; leaving before that reply is flushed
+drops it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ctypes
 import json
 import logging
 import os
+import select
 import signal
 import sys
+import threading
 from typing import Any
 
 import uvloop
@@ -32,7 +37,7 @@ from mftik.protocol import (
 from mftik_sts import db as sts_db
 from mftik_sts.runtime_env import refresh
 from mftik_sts.session import SessionManager
-from mftik_sts.spawn import PARENT_PID_ENV, RESULT_FD_ENV
+from mftik_sts.spawn import LIFELINE_FD_ENV, PARENT_PID_ENV, RESULT_FD_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,68 @@ def arm_parent_death() -> None:
         raise SystemExit(1)
 
 
+def _lifeline_fd() -> int | None:
+    raw = os.environ.get(LIFELINE_FD_ENV, "").strip()
+    if not raw:
+        return None
+    return int(raw)
+
+
+def _lifeline_already_closed() -> bool:
+    """True when the parent is already gone.
+
+    Checked before the session starts, so a parent that died between
+    fork and ``prctl`` does not get a strategy that begins trading.
+    """
+    fd = _lifeline_fd()
+    if fd is None:
+        return False
+    os.set_blocking(fd, False)
+    try:
+        data = os.read(fd, 1)
+    except BlockingIOError:
+        return False
+    if data == b"":
+        os.close(fd)
+        os.environ[LIFELINE_FD_ENV] = ""
+        return True
+    return False
+
+
+def _lifeline_eof(done: threading.Event) -> bool:
+    """Block until the lifeline closes or ``done`` is set.
+
+    The parent holds the write end and does not write. EOF is the parent
+    dying, on Linux and on Darwin. A short ``select`` is what lets this
+    thread exit when the session ended on its own: a blocking ``read``
+    would keep the process up after ``amain`` returned.
+    """
+    fd = _lifeline_fd()
+    if fd is None:
+        return False
+    try:
+        os.set_blocking(fd, True)
+        while not done.is_set():
+            readable, _, _ = select.select([fd], [], [], 0.5)
+            if done.is_set():
+                return False
+            if not readable:
+                continue
+            if not os.read(fd, 1):
+                return True
+        return False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+async def _watch_lifeline(stop: asyncio.Event, done: threading.Event) -> None:
+    if await asyncio.to_thread(_lifeline_eof, done):
+        stop.set()
+
+
 def write_result(payload: dict[str, Any]) -> None:
     """One JSON line on the result pipe, then close it.
 
@@ -131,11 +198,13 @@ async def _start(
 
 
 async def hold_until_quiet(sessions: SessionManager, stop: asyncio.Event) -> None:
-    """Stay up until the session is gone, or until a signal says to stop.
+    """Stay up until the last ``close`` has returned, or a signal says stop.
 
     On the signal, tear the session down as interrupted and wait again.
     The broker is still open here; the caller closes it after this
-    returns, which is what flushes the last reply.
+    returns, which is what flushes the last reply. Returning because the
+    session ended means the row has already been written: ``wait_until_quiet``
+    does not return while a ``close`` is still in ``stop`` or ``mark_done``.
     """
     quiet = asyncio.create_task(sessions.wait_until_quiet(), name="sts-worker-quiet")
     stopped = asyncio.create_task(stop.wait(), name="sts-worker-signal")
@@ -154,51 +223,73 @@ async def hold_until_quiet(sessions: SessionManager, stop: asyncio.Event) -> Non
 
 async def amain(session_id: str, role: str) -> bool:
     stop = asyncio.Event()
+    if _lifeline_already_closed():
+        logger.error("STS worker parent is already gone session=%s", session_id)
+        return False
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, stop.set)
         except NotImplementedError:
             pass
-
-    async with Broker() as broker:
-        sessions: SessionManager | None = None
-        try:
-            refresh()
-            sessions = SessionManager(
-                broker,
-                persist_live=sts_db.persist_live_session,
-                mark_done=sts_db.mark_session_finished,
-                list_db_sessions=sts_db.list_sessions,
-                remember_fact=sts_db.remember_fact,
-                mark_live=sts_db.mark_session_live,
-                bump_rebuild_count=sts_db.bump_rebuild_count,
-                reset_rebuild_count=sts_db.reset_rebuild_count,
-                td_instance=sts_db.td_instance,
-                derive_sts=sts_db.derived_sts,
-                instance=instance_name("sts"),
-                control_types=frozenset({STS_SESSION_STOP, STS_SESSION_FAIL}),
-            )
-            result = await _start(sessions, session_id, role)
-            write_result(
-                {
-                    "ok": True,
-                    "strategy": result.strategy,
-                    "status": result.status,
-                    "reason": result.reason,
-                }
-            )
-        except Exception as exc:
-            logger.exception(
-                "STS worker failed to start session=%s role=%s", session_id, role
-            )
-            _report({"ok": False, "error": str(exc)})
-            if sessions is not None:
-                await sessions.close_all()
-            return False
-        assert sessions is not None
-        await hold_until_quiet(sessions, stop)
-    return True
+    life_done = threading.Event()
+    life = asyncio.create_task(
+        _watch_lifeline(stop, life_done), name="sts-worker-lifeline"
+    )
+    try:
+        async with Broker() as broker:
+            sessions: SessionManager | None = None
+            try:
+                refresh()
+                sessions = SessionManager(
+                    broker,
+                    persist_live=sts_db.persist_live_session,
+                    mark_done=sts_db.mark_session_finished,
+                    list_db_sessions=sts_db.list_sessions,
+                    load_session=sts_db.load_session,
+                    remember_fact=sts_db.remember_fact,
+                    mark_live=sts_db.mark_session_live,
+                    bump_rebuild_count=sts_db.bump_rebuild_count,
+                    reset_rebuild_count=sts_db.reset_rebuild_count,
+                    td_instance=sts_db.td_instance,
+                    derive_sts=sts_db.derived_sts,
+                    instance=instance_name("sts"),
+                    control_types=frozenset({STS_SESSION_STOP, STS_SESSION_FAIL}),
+                )
+                result = await _start(sessions, session_id, role)
+                if stop.is_set():
+                    await sessions.close_all()
+                    return False
+                write_result(
+                    {
+                        "ok": True,
+                        "strategy": result.strategy,
+                        "status": result.status,
+                        "reason": result.reason,
+                    }
+                )
+            except Exception as exc:
+                logger.exception(
+                    "STS worker failed to start session=%s role=%s",
+                    session_id,
+                    role,
+                )
+                _report({"ok": False, "error": str(exc)})
+                # A rebuild failure has already left the row interrupted.
+                # ``close_all`` would stamp the shutdown reason over it and
+                # reset ``finished_at``. Create still needs it: a start
+                # failure has popped the session, and anything left over
+                # should not stay live.
+                if sessions is not None and role != "rebuild":
+                    await sessions.close_all()
+                return False
+            assert sessions is not None
+            await hold_until_quiet(sessions, stop)
+        return True
+    finally:
+        life_done.set()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(life, timeout=1.5)
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -20,8 +20,14 @@ import pytest
 from broker_harness import a_broker
 from mftik.protocol import (
     STS_ERROR,
+    STS_SESSION_CREATE,
+    STS_SESSION_LIST,
     STS_SESSION_STOP,
+    ListSessionsRequest,
+    ListSessionsRequestEnvelope,
     StsCreateSessionRequest,
+    StsCreateSessionRequestEnvelope,
+    StsCreateSessionResult,
     StsSessionControlRequest,
     StsSessionControlRequestEnvelope,
     StsSessionControlResult,
@@ -36,7 +42,13 @@ from mftik_sts.app import run_rpc
 from mftik_sts.runtime_env import IncompatibleEnvironment
 from mftik_sts.session import SessionManager
 from mftik_sts.session import manager as manager_mod
-from mftik_sts.spawn import PARENT_PID_ENV, START_FAIL_REASON, SubprocessSpawner
+from mftik_sts.spawn import (
+    LIFELINE_FD_ENV,
+    PARENT_PID_ENV,
+    START_FAIL_REASON,
+    SubprocessSpawner,
+    WorkerSlot,
+)
 from mftik_sts.worker import arm_parent_death, set_pdeathsig
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -85,11 +97,20 @@ class StubbornProcess(FakeProcess):
 
 
 class FakeSpawned:
-    def __init__(self, process: FakeProcess, line: str | None) -> None:
+    def __init__(
+        self,
+        process: FakeProcess,
+        line: str | None,
+        gate: asyncio.Event | None = None,
+    ) -> None:
         self.process = process
         self._line = line
+        self.gate = gate
+        self.lifeline: int | None = None
 
     async def read_result(self) -> str | None:
+        if self.gate is not None:
+            await self.gate.wait()
         return self._line
 
 
@@ -100,10 +121,12 @@ class FakeSpawner:
         line: str | None = None,
         boom: bool = False,
         process: FakeProcess | None = None,
+        gate: asyncio.Event | None = None,
     ) -> None:
         self.line = line
         self.boom = boom
         self.process = process
+        self.gate = gate
         self.calls: list[dict[str, Any]] = []
 
     async def spawn(
@@ -126,7 +149,7 @@ class FakeSpawner:
         if self.line is None and process.returncode is None:
             process.returncode = 1
             process._exit.set()
-        return FakeSpawned(process, self.line)
+        return FakeSpawned(process, self.line, self.gate)
 
 
 def _request(session_id: str = "s1") -> StsCreateSessionRequest:
@@ -223,6 +246,11 @@ async def test_eof_before_a_result_line_fails_and_does_not_rebuild() -> None:
 
 
 async def test_a_failed_result_line_is_not_rebuilt() -> None:
+    """An error line means the worker already wrote the row.
+
+    The parent drops the slot and raises for the API. It does not mark
+    the row again: the worker's reason would be replaced.
+    """
     store: dict[str, SimpleNamespace] = {}
     spawner = FakeSpawner(
         line=json.dumps({"ok": False, "error": "on_start exploded"}),
@@ -233,11 +261,12 @@ async def test_a_failed_result_line_is_not_rebuilt() -> None:
         await manager.create_session(_request())
     await asyncio.sleep(0.05)
 
-    assert store["s1"].status == "failed"
-    assert store["s1"].reason is not None
-    assert store["s1"].reason.startswith(START_FAIL_REASON)
+    assert store["s1"].status == "live"
+    assert store["s1"].reason is None
+    assert "s1" not in manager._workers
     assert len(spawner.calls) == 1
     await manager.close_all()
+    assert store["s1"].status == "live"
 
 
 async def test_exec_failure_drops_the_slot_and_fails_the_row() -> None:
@@ -326,13 +355,18 @@ async def test_the_same_id_is_spawned_once_when_rebuilds_overlap(
     assert spawner.calls[0]["role"] == "rebuild"
     assert spawner.calls[0]["request_json"] is None
     assert manager._workers["aa0001"].started is True
+    assert manager._workers["aa0001"].strategy_name == "rebuildable"
     await manager.close_all()
 
 
 async def test_a_rebuild_that_never_reports_is_not_failed_or_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No success line leaves the row interrupted. The next scan may retry."""
+    """No success line leaves the row interrupted. The next scan may retry.
+
+    ``close_all`` afterwards does not see the slot, so it does not stamp
+    the shutdown reason or move ``finished_at``.
+    """
     monkeypatch.setattr(manager_mod, "ensure_deployable", lambda *_a, **_k: None)
     row = SimpleNamespace(
         session_id="aa0001",
@@ -375,13 +409,19 @@ async def test_a_rebuild_that_never_reports_is_not_failed_or_retried(
         instance="sts",
     )
     try:
+        finished_at = row.finished_at
         assert await manager.rebuild_session("aa0001") is False
         await asyncio.sleep(0.05)
         assert marked == []
         assert row.status == "interrupted"
+        assert row.finished_at == finished_at
         assert row.rebuild_count == 1
         assert "aa0001" not in manager._workers
         assert len(spawner.calls) == 1
+        await manager.close_all()
+        assert marked == []
+        assert row.status == "interrupted"
+        assert row.finished_at == finished_at
     finally:
         await manager.close_all()
 
@@ -483,7 +523,10 @@ async def test_spawner_execs_a_worker_in_its_own_session(
         role="create",
         request_json=b'{"session_id":"aa0001"}',
     )
-    assert await spawned.read_result() is None
+    try:
+        assert await spawned.read_result() is None
+    finally:
+        os.close(spawned.lifeline)
 
     kwargs = captured["kwargs"]
     assert kwargs["start_new_session"] is True
@@ -499,6 +542,8 @@ async def test_spawner_execs_a_worker_in_its_own_session(
     env = kwargs["env"]
     assert env["MFTIK_DB_POOL_SIZE"] == "1"
     assert env[PARENT_PID_ENV] == str(os.getpid())
+    assert env[LIFELINE_FD_ENV] == str(kwargs["pass_fds"][1])
+    assert len(kwargs["pass_fds"]) == 2
     assert captured["stdin"] == b'{"session_id":"aa0001"}'
     assert captured["closed"] is True
 
@@ -551,6 +596,243 @@ def test_linux_arms_pdeathsig(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls
     assert calls[0][0] == 1
     assert calls[0][1] == signal.SIGTERM
+
+
+class _Exits(Strategy):
+    name = "exits"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def on_ready(self) -> None:
+        self.exit("oco_filled")
+
+    async def on_stop(self) -> None:
+        self.entered.set()
+        await self.release.wait()
+
+
+async def test_a_strategy_exit_writes_the_row_before_the_worker_can_leave(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``exit`` after ``on_ready`` keeps its reason.
+
+    ``close`` has already popped the session and stopped the control loop
+    by the time ``on_stop`` runs. The worker's exit condition is that
+    ``close`` returned, which is when the row has the strategy's reason.
+    """
+    monkeypatch.setattr(manager_mod, "ensure_deployable", lambda *_a, **_k: None)
+    strategy = _Exits()
+    marks: list[tuple[str, str, str | None]] = []
+
+    async def mark(session_id: str, *, status: str, reason: str | None) -> None:
+        marks.append((session_id, status, reason))
+
+    async with a_broker("sts-exit") as broker:
+        manager = SessionManager(
+            broker,
+            mark_done=mark,
+            strategy_factory=lambda _name: strategy,
+            instance="sts",
+        )
+        created = asyncio.create_task(
+            manager.create_session(
+                StsCreateSessionRequest(
+                    session_id="exit1",
+                    created_by=1,
+                    strategy="exits",
+                    type="Exits",
+                )
+            )
+        )
+        try:
+            await asyncio.wait_for(strategy.entered.wait(), timeout=5)
+            waiter = asyncio.create_task(manager.wait_until_quiet())
+            await asyncio.sleep(0.05)
+            assert not waiter.done()
+            assert marks == []
+            strategy.release.set()
+            await asyncio.wait_for(waiter, timeout=5)
+            assert marks == [("exit1", "done", "oco_filled")]
+            result = await created
+            assert result.status == "done"
+            assert result.reason == "oco_filled"
+        finally:
+            strategy.release.set()
+            await manager.close_all()
+            await asyncio.gather(created, return_exceptions=True)
+
+
+async def test_list_answers_while_create_waits_for_its_result() -> None:
+    """A result line that has not arrived does not stall the instance subject."""
+    gate = asyncio.Event()
+    spawner = FakeSpawner(line=_ok_line(), process=FakeProcess(), gate=gate)
+    store: dict[str, SimpleNamespace] = {}
+
+    async def persist(**kwargs: Any) -> SimpleNamespace:
+        row = SimpleNamespace(status="live", reason=None, **kwargs)
+        store[kwargs["session_id"]] = row
+        return row
+
+    async def mark(session_id: str, *, status: str, reason: str | None) -> None:
+        row = store[session_id]
+        row.status = status
+        row.reason = reason
+
+    async with a_broker("sts-create-wait") as broker:
+        manager = SessionManager(
+            broker,
+            persist_live=persist,
+            mark_done=mark,
+            spawner=spawner,  # type: ignore[arg-type]
+            strategy_factory=lambda _name: Rebuildable(),
+            instance="sts",
+        )
+        stop = asyncio.Event()
+        rpc = asyncio.create_task(
+            run_rpc(broker, manager, stop, subject=Topics.sts("sts"))
+        )
+        create_task: asyncio.Task[Any] | None = None
+        try:
+            await asyncio.sleep(0.05)
+            create_task = asyncio.create_task(
+                broker.request(
+                    Topics.sts("sts"),
+                    StsCreateSessionRequestEnvelope.wrap(
+                        _request(),
+                        type=STS_SESSION_CREATE,
+                        source="api",
+                    ),
+                    timeout=5,
+                )
+            )
+            for _ in range(50):
+                if spawner.calls:
+                    break
+                await asyncio.sleep(0.02)
+            assert spawner.calls
+            assert not create_task.done()
+            listed = await broker.request(
+                Topics.sts("sts"),
+                ListSessionsRequestEnvelope.wrap(
+                    ListSessionsRequest(domain="sts"),
+                    type=STS_SESSION_LIST,
+                    source="api",
+                ),
+                timeout=2,
+            )
+            assert listed.type == STS_SESSION_LIST
+            assert not create_task.done()
+            gate.set()
+            reply = await create_task
+            created = StsCreateSessionResult.model_validate(reply.payload)
+            assert created.status == "live"
+            assert store["s1"].status == "live"
+        finally:
+            gate.set()
+            stop.set()
+            rpc.cancel()
+            await asyncio.gather(rpc, return_exceptions=True)
+            if create_task is not None:
+                await asyncio.gather(create_task, return_exceptions=True)
+            await manager.close_all()
+
+
+async def test_close_all_while_rebuild_is_paused_does_not_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rebuild parked on a read has no process yet. Shutdown must not spawn."""
+    monkeypatch.setattr(manager_mod, "ensure_deployable", lambda *_a, **_k: None)
+    release = asyncio.Event()
+    listed = asyncio.Event()
+    row = SimpleNamespace(
+        session_id="aa0001",
+        created_by=1,
+        strategy="rebuildable",
+        type="Rebuildable",
+        instance="sts",
+        restart="always",
+        rebuild_count=0,
+        finished_at=datetime.now(UTC),
+        st_facts={},
+        st_paras={},
+        td={},
+        md_ids=[],
+    )
+    spawner = FakeSpawner(line=_ok_line(), process=FakeProcess())
+
+    async def list_sessions(**_kwargs: Any) -> list[SimpleNamespace]:
+        listed.set()
+        await release.wait()
+        return [row]
+
+    async def bump(_session_id: str) -> int:
+        row.rebuild_count += 1
+        return row.rebuild_count
+
+    manager = SessionManager(
+        _Broker(),  # type: ignore[arg-type]
+        list_db_sessions=list_sessions,
+        bump_rebuild_count=bump,
+        spawner=spawner,  # type: ignore[arg-type]
+        strategy_factory=lambda _name: Rebuildable(),
+        instance="sts",
+    )
+    task = asyncio.create_task(manager.rebuild_session("aa0001"))
+    try:
+        await listed.wait()
+        await manager.close_all()
+        release.set()
+        assert await task is False
+        assert spawner.calls == []
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await manager.close_all()
+
+
+async def test_a_dead_worker_is_judged_from_its_own_row() -> None:
+    seen: list[str] = []
+
+    async def load(session_id: str) -> SimpleNamespace:
+        seen.append(session_id)
+        return SimpleNamespace(status="live")
+
+    manager = SessionManager(
+        _Broker(),  # type: ignore[arg-type]
+        load_session=load,
+    )
+    assert await manager._row_is_live("aa0001") is True
+    assert seen == ["aa0001"]
+
+
+async def test_list_uses_the_row_when_the_rebuild_slot_has_no_name() -> None:
+    row = SimpleNamespace(
+        session_id="aa0001",
+        created_by=1,
+        created_at=None,
+        finished_at=None,
+        status="interrupted",
+        strategy="rebuildable",
+        type="Rebuildable",
+        reason=None,
+    )
+
+    async def list_sessions(**_kwargs: Any) -> list[SimpleNamespace]:
+        return [row]
+
+    manager = SessionManager(
+        _Broker(),  # type: ignore[arg-type]
+        list_db_sessions=list_sessions,
+    )
+    manager._workers["aa0001"] = WorkerSlot(session_id="aa0001", role="rebuild")
+    listed = await manager.list_sessions(
+        ListSessionsRequest(domain="sts", status="interrupted")
+    )
+    assert listed[0].strategy == "rebuildable"
+    assert listed[0].type == "Rebuildable"
 
 
 async def test_a_real_worker_answers_stop_on_its_control_subject(
@@ -655,6 +937,80 @@ async def test_a_real_worker_answers_stop_on_its_control_subject(
             stop.set()
             rpc.cancel()
             await asyncio.gather(rpc, return_exceptions=True)
+            await manager.close_all()
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+    await engine.dispose()
+
+
+async def test_closing_the_lifeline_makes_the_worker_exit(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EOF on the lifeline is the parent disappearing.
+
+    Darwin has no PDEATHSIG, and ``start_new_session`` keeps a terminal
+    signal from reaching the worker. Closing the write end is the same
+    EOF the kernel delivers when the parent process dies.
+    """
+    url = f"sqlite+aiosqlite:///{tmp_path / 'sts.db'}"
+    engine = build_engine(url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as db:
+        db.add(User(id=1, email="owner-1@test.invalid"))
+        await db.commit()
+
+    async def persist(**kwargs: Any) -> Any:
+        async with maker() as db:
+            repo = StsSessionRepository(db)
+            existing = await repo.get_by_session_id(kwargs["session_id"])
+            if existing is not None:
+                return existing
+            row = await repo.create_live(**kwargs)
+            await db.commit()
+            return row
+
+    async with a_broker("sts-lifeline") as broker:
+        monkeypatch.setenv("DATABASE_URL", url)
+        monkeypatch.setenv("BROKER_KEY_PREFIX", broker.config.key_prefix)
+        monkeypatch.setenv("NATS_URL", broker.config.nats_url)
+        monkeypatch.setenv("MFTIK_DATA", str(tmp_path / "data"))
+        manager = SessionManager(
+            broker,
+            persist_live=persist,
+            spawner=SubprocessSpawner(),
+            instance="sts",
+        )
+        process = None
+        try:
+            await manager.create_session(
+                StsCreateSessionRequest(
+                    session_id="aa00ab",
+                    created_by=1,
+                    strategy="noop",
+                    type="NoopStrategy",
+                    td={"main": {"api_id": 1}},
+                    instance="sts",
+                )
+            )
+            slot = manager.get("aa00ab")
+            assert isinstance(slot, WorkerSlot)
+            assert slot.lifeline_fd is not None
+            process = slot.process
+            fd = slot.lifeline_fd
+            slot.lifeline_fd = None
+            os.close(fd)
+            assert slot.watcher is not None
+            await asyncio.wait_for(slot.watcher, timeout=5.0)
+            assert process.returncode == 0
+            async with maker() as db:
+                row = await StsSessionRepository(db).get_by_session_id("aa00ab")
+            assert row is not None
+            assert row.status == "interrupted"
+            assert row.reason == "STS shut down while this was running"
+        finally:
             await manager.close_all()
             if process is not None and process.returncode is None:
                 process.kill()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -156,6 +157,9 @@ DeriveSts = Callable[[list[int]], Awaitable[str | None]]
 #: ``(session_id, *, status, reason)`` — move the row to a terminal status.
 MarkDone = Callable[..., Awaitable[Any]]
 ListDbSessions = Callable[..., Awaitable[Sequence[Any]]]
+#: ``(session_id)`` — one row, not a list. A live check that pages the
+#: fleet would miss a session older than the page.
+LoadSession = Callable[[str], Awaitable[Any]]
 StrategyFactory = Callable[[str | None], Strategy]
 
 
@@ -169,6 +173,7 @@ class SessionManager:
         persist_live: PersistLive | None = None,
         mark_done: MarkDone | None = None,
         list_db_sessions: ListDbSessions | None = None,
+        load_session: LoadSession | None = None,
         remember_fact: RememberFact | None = None,
         mark_live: MarkLive | None = None,
         bump_rebuild_count: BumpRebuildCount | None = None,
@@ -189,6 +194,7 @@ class SessionManager:
         self._persist_live = persist_live
         self._mark_done = mark_done
         self._list_db_sessions = list_db_sessions
+        self._load_session = load_session
         self._remember = remember_fact
         self._mark_live = mark_live
         self._bump_rebuild_count = bump_rebuild_count
@@ -217,6 +223,10 @@ class SessionManager:
         #: dispatches whatever arrives, which is the in-process manager.
         self._control_types = control_types
         self._shutting_down = False
+        #: Set at the start of ``close_all``, before any await. A rebuild
+        #: paused on a database read has no process yet, so the process
+        #: table alone cannot stop it from spawning on the way out.
+        self._closing = False
         self._orphan_strikes: dict[str, int] = {}
         #: ``session_id`` → the loop serving that session's control subject,
         #: and the event that ends it. One per live session: stop and fail are
@@ -227,6 +237,14 @@ class SessionManager:
         #: can wait for them rather than leaving tasks pending at loop close,
         #: and so one is not garbage-collected before it notices.
         self._retiring: set[asyncio.Task[Any]] = set()
+        #: ``close`` calls that have popped a session and not yet returned.
+        #: A strategy that calls ``exit`` runs that ``close`` as its own
+        #: task, after the session has already left ``_sessions`` and after
+        #: the control loop has been asked to stop. The worker stays up
+        #: until the last of these returns, which is when the row has been
+        #: written. A ``close`` that finds nothing does not count: it must
+        #: not release the worker while the real one is still in ``stop``.
+        self._closes = 0
         self._sessions: dict[str, StsSession] = {}
         #: ``session_id`` → the worker running it. Not a :class:`StsSession`:
         #: stop and fail are served in the child, on the session's subject.
@@ -239,6 +257,13 @@ class SessionManager:
         # that started it, and a pending task at loop close is a warning
         # nobody can act on.
         self._settle_tasks: set[asyncio.Task[None]] = set()
+        #: Watcher-started ``rebuild_session`` tasks. ``close_all`` cancels
+        #: these. It does not cancel the watcher itself, which is blocked
+        #: in ``process.wait`` and has to observe the signal.
+        self._rebuild_tasks: set[asyncio.Task[Any]] = set()
+        #: Create RPCs waiting on a result line. They are not the serve
+        #: loop: a worker stuck in ``on_start`` must not stop list.
+        self._create_tasks: set[asyncio.Task[Any]] = set()
         #: Processes that failed before ``started`` and still need ``wait``.
         #: A worker that exits without a watcher is a zombie until something
         #: collects it.
@@ -500,19 +525,32 @@ class SessionManager:
                     instance=request.instance,
                 )
             assert self._spawner is not None
+            if self._closing:
+                await self._fail_unstarted(slot, request, START_FAIL_REASON)
+                raise RuntimeError(START_FAIL_REASON)
             spawned = await self._spawner.spawn(
                 session_id=request.session_id,
                 role="create",
                 request_json=request.model_dump_json().encode(),
             )
             slot.process = spawned.process
+            slot.lifeline_fd = getattr(spawned, "lifeline", None)
+            if self._closing:
+                await self._fail_unstarted(slot, request, START_FAIL_REASON)
+                raise RuntimeError(START_FAIL_REASON)
             parsed = parse_worker_result(await spawned.read_result())
-            if parsed is None or not parsed.get("ok"):
+            if parsed is None:
+                # No line at all: the worker never said it had written the
+                # row. This path is the one that marks ``failed``.
                 reported = True
-                detail = START_FAIL_REASON
-                if parsed is not None and parsed.get("error"):
-                    detail = f"{START_FAIL_REASON}: {parsed['error']}"
-                await self._fail_unstarted(slot, request, detail)
+                await self._fail_unstarted(slot, request, START_FAIL_REASON)
+                raise RuntimeError(START_FAIL_REASON)
+            if not parsed.get("ok"):
+                # The worker explained itself. A start() failure has already
+                # marked the row; writing it again would replace that reason.
+                reported = True
+                detail = str(parsed.get("error") or START_FAIL_REASON)
+                self._drop_unstarted(slot)
                 raise RuntimeError(detail)
             slot.started = True
             slot.strategy_name = (
@@ -529,10 +567,42 @@ class SessionManager:
                     else None
                 ),
             )
+        except asyncio.CancelledError:
+            # ``except Exception`` does not see this. Shutdown cancels the
+            # create task while it is still in ``read_result``; leaving the
+            # slot would leak the process.
+            if not slot.started and not reported:
+                await self._fail_unstarted(slot, request, START_FAIL_REASON)
+            raise
         except Exception:
             if not slot.started and not reported:
                 await self._fail_unstarted(slot, request, START_FAIL_REASON)
             raise
+
+    def _drop_unstarted(self, slot: WorkerSlot) -> None:
+        """Take a worker that never reported success out of the table.
+
+        Does not write the row. An error result line means the worker
+        already did, and a second write would replace its reason.
+        """
+        if slot.started or slot.abandoned:
+            return
+        slot.abandoned = True
+        if self._workers.get(slot.session_id) is slot:
+            self._workers.pop(slot.session_id, None)
+        self._release_lifeline(slot)
+        self._reap_failed(slot.process)
+
+    def _release_lifeline(self, slot: WorkerSlot) -> None:
+        """Close the write end. The worker reads that as its parent dying."""
+        fd = slot.lifeline_fd
+        slot.lifeline_fd = None
+        if fd is None:
+            return
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
     async def _fail_unstarted(
         self,
@@ -540,13 +610,10 @@ class SessionManager:
         request: StsCreateSessionRequest,
         reason: str,
     ) -> None:
-        """A worker that never reported success. Not a rebuild candidate."""
+        """A worker that never reported a result line. Not a rebuild candidate."""
         if slot.started or slot.abandoned:
             return
-        slot.abandoned = True
-        if self._workers.get(slot.session_id) is slot:
-            self._workers.pop(slot.session_id, None)
-        self._reap_failed(slot.process)
+        self._drop_unstarted(slot)
         if self._mark_done is not None:
             try:
                 await self._mark_done(
@@ -600,7 +667,13 @@ class SessionManager:
         if self._workers.get(slot.session_id) is not slot:
             return
         self._workers.pop(slot.session_id, None)
+        self._release_lifeline(slot)
         if code == 0:
+            # The worker returned from its last ``close`` before exiting, so
+            # the row already has the strategy's reason. Rewriting it here,
+            # or leaving a still-live row for the reaper, would replace that
+            # reason. A 0 with the row still live is a bug, and the reaper
+            # is only the fallback for that bug.
             return
         if not await self._row_is_live(slot.session_id):
             return
@@ -626,32 +699,60 @@ class SessionManager:
             created_by=slot.created_by,
             type=slot.type,
         )
-        if not self._rebuild_on_worker_exit or self._shutting_down:
+        if (
+            not self._rebuild_on_worker_exit
+            or self._shutting_down
+            or self._closing
+        ):
             return
+        self._schedule_rebuild(slot.session_id)
+
+    def _schedule_rebuild(self, session_id: str) -> None:
+        """Run ``rebuild_session`` where ``close_all`` can cancel it."""
+        if self._closing or self._shutting_down:
+            return
+        task = asyncio.create_task(
+            self._rebuild_after_exit(session_id),
+            name=f"sts-rebuild-{session_id}",
+        )
+        self._rebuild_tasks.add(task)
+        task.add_done_callback(self._rebuild_tasks.discard)
+
+    async def _rebuild_after_exit(self, session_id: str) -> None:
         try:
-            await self.rebuild_session(slot.session_id)
+            await self.rebuild_session(session_id)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception(
                 "STS rebuild after worker exit failed session=%s",
-                slot.session_id,
+                session_id,
             )
 
+    def track_create(self, task: asyncio.Task[Any]) -> None:
+        """Hold a create RPC so shutdown can cancel it."""
+        self._create_tasks.add(task)
+        task.add_done_callback(self._create_tasks.discard)
+
     async def _row_is_live(self, session_id: str) -> bool:
-        if self._list_db_sessions is None:
+        """Whether this one row is still ``live``.
+
+        ``list_sessions`` pages the fleet, newest first, and would treat a
+        live session past that page as already gone.
+        """
+        if self._load_session is None:
             return False
         try:
-            rows = await self._list_db_sessions(
-                status=SessionStatus.LIVE.value,
-                created_by=None,
-            )
+            row = await self._load_session(session_id)
         except Exception:
             logger.exception(
                 "STS could not tell whether session=%s is still live",
                 session_id,
             )
             return False
-        return any(
-            getattr(row, "session_id", None) == session_id for row in rows
+        return (
+            row is not None
+            and getattr(row, "status", None) == SessionStatus.LIVE.value
         )
 
     async def list_sessions(
@@ -685,9 +786,12 @@ class SessionManager:
                         api_id=None,
                         sts_session_id=row.session_id,
                         strategy=(
-                            live.strategy_name
-                            if live is not None
-                            else getattr(row, "strategy", None)
+                            (
+                                getattr(live, "strategy_name", None)
+                                if live is not None
+                                else None
+                            )
+                            or getattr(row, "strategy", None)
                         ),
                         reason=getattr(row, "reason", None),
                         type=(
@@ -767,43 +871,49 @@ class SessionManager:
         self._stop_serving_control(session_id)
         if session is None:
             return
+        # Counted before the first await. ``wait_until_quiet`` treats this
+        # as still running until the row write below has returned.
+        self._closes += 1
         broker = session.broker
         strategy_name = session.strategy_name
         created_by = session.created_by
         session_type = session.type
-        await session.stop()
-        if self._mark_done is not None:
-            await self._mark_done(session_id, status=status, reason=reason)
-        await self._publish_status(
-            session_id,
-            status=status,
-            strategy=strategy_name,
-            reason=reason,
-            created_by=created_by,
-            type=session_type,
-        )
-        if status == SessionStatus.FAILED.value:
-            # The row carries the reason for later, but the operator watching
-            # the live stream should not have to reload the page to see it.
-            try:
-                await publish_sts_log(
-                    broker,
-                    session_id,
-                    f"session failed: {reason or 'no reason given'}",
-                    source="sts",
-                    level="error",
-                    type=session_type,
-                )
-            except Exception:
-                logger.exception(
-                    "STS failure log publish failed session=%s", session_id
-                )
-        logger.info(
-            "STS session closed id=%s status=%s reason=%s",
-            session_id,
-            status,
-            reason or "—",
-        )
+        try:
+            await session.stop()
+            if self._mark_done is not None:
+                await self._mark_done(session_id, status=status, reason=reason)
+            await self._publish_status(
+                session_id,
+                status=status,
+                strategy=strategy_name,
+                reason=reason,
+                created_by=created_by,
+                type=session_type,
+            )
+            if status == SessionStatus.FAILED.value:
+                # The row carries the reason for later, but the operator watching
+                # the live stream should not have to reload the page to see it.
+                try:
+                    await publish_sts_log(
+                        broker,
+                        session_id,
+                        f"session failed: {reason or 'no reason given'}",
+                        source="sts",
+                        level="error",
+                        type=session_type,
+                    )
+                except Exception:
+                    logger.exception(
+                        "STS failure log publish failed session=%s", session_id
+                    )
+            logger.info(
+                "STS session closed id=%s status=%s reason=%s",
+                session_id,
+                status,
+                reason or "—",
+            )
+        finally:
+            self._closes -= 1
 
     async def _on_session_exit(
         self, session_id: str, reason: str, failed: bool = False
@@ -950,7 +1060,7 @@ class SessionManager:
         available to a later scan — a spawn that reported success keeps
         its worker slot, which is a different hold.
         """
-        if self._holds(session_id):
+        if self._closing or self._holds(session_id):
             return False
         slot: WorkerSlot | None = None
         if self._spawner is not None:
@@ -963,6 +1073,7 @@ class SessionManager:
                 row = await self._find_interrupted(session_id)
                 if row is None:
                     return False
+            self._note_rebuild_row(slot, row)
             return await self._rebuild_claimed(row, slot)
         finally:
             self._claims.discard(session_id)
@@ -972,8 +1083,38 @@ class SessionManager:
                 and self._workers.get(session_id) is slot
             ):
                 self._workers.pop(session_id, None)
+                self._release_lifeline(slot)
+                self._reap_failed(slot.process)
+
+    def _note_rebuild_row(self, slot: WorkerSlot | None, row: Any) -> None:
+        """The slot is claimed before the row is read, so its name starts empty.
+
+        Filled as soon as the row is in hand, before the next await. List
+        also falls back to the row while this is still None.
+        """
+        if slot is None:
+            return
+        slot.strategy_name = getattr(row, "strategy", None)
+        slot.type = getattr(row, "type", None)
+        created_by = getattr(row, "created_by", None)
+        if created_by is not None:
+            slot.created_by = int(created_by)
 
     async def _find_interrupted(self, session_id: str) -> Any | None:
+        if self._load_session is not None:
+            try:
+                row = await self._load_session(session_id)
+            except Exception:
+                logger.exception(
+                    "STS could not load interrupted session=%s", session_id
+                )
+                return None
+            if (
+                row is None
+                or getattr(row, "status", None) != SessionStatus.INTERRUPTED.value
+            ):
+                return None
+            return row
         if self._list_db_sessions is None:
             return None
         try:
@@ -1127,9 +1268,17 @@ class SessionManager:
     async def _spawn_rebuild(
         self, row: Any, strategy: Strategy, slot: WorkerSlot
     ) -> bool:
-        """Hand a claimed slot to a worker. No success line is not a retry."""
+        """Hand a claimed slot to a worker. No success line is not a retry.
+
+        A missing result line leaves the row interrupted. This method does
+        not mark it again, and ``close_all`` does not either: the slot is
+        dropped on the way out, and an unstarted rebuild slot is not a live
+        session this shutdown interrupted.
+        """
         session_id = row.session_id
         assert self._spawner is not None
+        if self._closing or self._workers.get(session_id) is not slot:
+            return False
         try:
             spawned = await self._spawner.spawn(
                 session_id=session_id,
@@ -1142,15 +1291,23 @@ class SessionManager:
             )
             return False
         slot.process = spawned.process
+        slot.lifeline_fd = getattr(spawned, "lifeline", None)
+        if self._closing or self._workers.get(session_id) is not slot:
+            if self._workers.get(session_id) is not slot:
+                self._release_lifeline(slot)
+                self._reap_failed(slot.process)
+            return False
         parsed = parse_worker_result(await spawned.read_result())
         if parsed is None or not parsed.get("ok"):
             # Collect the process. This path does not arm a watcher, and a
             # worker that exits without ``wait`` stays a zombie.
             self._reap_failed(slot.process)
-            # The row stays interrupted when the worker managed to say so,
-            # and live when it died after ``mark_live`` without a result.
-            # Either way this call does not spawn again. A live row is
-            # reaped; an interrupted one waits for the next scan.
+            # No second write. The row stays interrupted when the worker
+            # managed to say so, and live when it died after ``mark_live``
+            # without a result line — the reaper collects that one. This
+            # call does not spawn again. An interrupted row waits for the
+            # next scan. ``close_all`` does not see the slot: it is dropped
+            # below, and an unstarted rebuild is not pre-marked.
             logger.warning(
                 "STS rebuild worker exited during start session=%s",
                 session_id,
@@ -1180,21 +1337,55 @@ class SessionManager:
         if row is None:
             raise RuntimeError(f"no interrupted session {session_id}")
         strategy = self._strategy_factory(getattr(row, "strategy", None))
-        await self._rebuild_one(row, strategy)
+        try:
+            await self._rebuild_one(row, strategy)
+        except Exception:
+            await self._unwind_failed_rebuild(session_id)
+            raise
         return StsCreateSessionResult(
             session_id=session_id,
             strategy=strategy.name,
         )
 
-    async def wait_until_quiet(self) -> None:
-        """Block until no session is held and every control loop has retired.
+    async def _unwind_failed_rebuild(self, session_id: str) -> None:
+        """Leave an interrupted row's reason and ``finished_at`` alone.
 
-        Stop replies from inside the control task, after ``close`` returns.
-        The task stays in ``_retiring`` until that reply has been handed to
-        the broker. A worker that exited on an empty ``_sessions`` alone
-        would be gone before the reply was flushed.
+        ``_rebuild_one`` writes the row itself when attach fails, and pops
+        the session as it does. A failure before ``mark_live`` has not
+        touched the row; dropping the session must not stamp the shutdown
+        reason over it. Only a row that was already put back to ``live``
+        is marked interrupted again.
         """
-        while self._sessions or self._retiring:
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+        if await self._row_is_live(session_id):
+            await self.close(
+                session_id,
+                status=SessionStatus.INTERRUPTED.value,
+                reason="rebuild failed",
+            )
+            return
+        await self._abandon_rebuild(session_id)
+        try:
+            await session.stop()
+        except Exception:
+            logger.exception(
+                "STS rebuild unwind failed to stop session=%s", session_id
+            )
+
+    async def wait_until_quiet(self) -> None:
+        """Block until the last ``close`` has returned and control loops are done.
+
+        ``close`` pops the session and stops the control loop before it
+        awaits ``stop``, the row write, and the publish. A strategy that
+        calls ``exit`` runs that ``close`` as its own task. Waiting only
+        for an empty ``_sessions`` returns while that write is still in
+        flight, and the process exit cancels it. ``_closes`` stays above
+        zero until the write has returned. The control task stays in
+        ``_retiring`` until its reply has been handed to the broker.
+        """
+        while self._sessions or self._retiring or self._closes:
             retiring = set(self._retiring)
             if retiring:
                 await asyncio.wait(retiring, timeout=0.05)
@@ -1512,20 +1703,46 @@ class SessionManager:
         reason an in-process shutdown writes it before ``close``.
         """
         self._shutting_down = True
-        # Before any await that could let a settle timer fire and forgive a
-        # session this method is in the middle of interrupting.
-        for task in list(self._settle_tasks):
+        self._closing = True
+        # Cancel before the first await. Create and rebuild are not awaited
+        # yet: their ``read_result`` sits in a thread, and that thread
+        # unblocks when the worker is signalled below. Awaiting them first
+        # would stall shutdown on a worker stuck in ``on_start``.
+        settle = self._drain_tracked(self._settle_tasks)
+        rebuilds = self._drain_tracked(self._rebuild_tasks)
+        creates = self._drain_tracked(self._create_tasks)
+        for task in (*settle, *rebuilds, *creates):
             task.cancel()
-        self._settle_tasks.clear()
+        if settle:
+            await asyncio.gather(*settle, return_exceptions=True)
         await self._stop_workers()
+        if rebuilds or creates:
+            await asyncio.gather(*rebuilds, *creates, return_exceptions=True)
         if self._reaps:
             await asyncio.wait(list(self._reaps), timeout=WORKER_STOP_WAIT_S)
         await self._close_in_process()
+
+    def _drain_tracked(
+        self, tasks: set[asyncio.Task[Any]]
+    ) -> list[asyncio.Task[Any]]:
+        pending = [task for task in list(tasks) if not task.done()]
+        tasks.clear()
+        return pending
 
     async def _stop_workers(self) -> None:
         if not self._workers:
             return
         for slot in list(self._workers.values()):
+            # The cancelled create task also tries to fail this slot. One
+            # write is enough, and it is the one below.
+            if not slot.started:
+                slot.abandoned = True
+        for slot in list(self._workers.values()):
+            # An unstarted rebuild slot is a claim, not a live session.
+            # Marking it would stamp the shutdown reason over the
+            # interrupted row and reset ``finished_at``.
+            if slot.role == "rebuild" and not slot.started:
+                continue
             if self._mark_done is None:
                 break
             try:
@@ -1572,6 +1789,8 @@ class SessionManager:
             )
             if not task.done()
         ]
+        for slot in list(self._workers.values()):
+            self._release_lifeline(slot)
         self._workers.clear()
         if still:
             # ``kill`` unblocks ``wait``. Give those tasks a moment to

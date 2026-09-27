@@ -26,6 +26,13 @@ PARENT_PID_ENV = "MFTIK_STS_PARENT_PID"
 #: Write end of the result pipe. One JSON line, then the worker closes it.
 RESULT_FD_ENV = "MFTIK_STS_RESULT_FD"
 
+#: Read end of the lifeline pipe. The parent holds the write end and never
+#: writes. EOF means the parent is gone. Darwin has no PDEATHSIG, and
+#: ``start_new_session`` keeps a terminal signal from reaching the worker,
+#: so this is how a dead parent is noticed on both platforms — including
+#: the window between fork and ``prctl``.
+LIFELINE_FD_ENV = "MFTIK_STS_LIFELINE_FD"
+
 #: How long ``close_all`` waits after SIGTERM before SIGKILL. Shorter than
 #: ``ON_STOP_TIMEOUT_S`` and shorter than Docker's default grace. A strategy
 #: whose ``on_stop`` uses the whole ten seconds is still cut off; the wait
@@ -51,6 +58,9 @@ class WorkerSlot:
     type: str | None = None
     created_by: int | None = None
     process: Any = None
+    #: Parent's write end. Closed when the slot is dropped. The worker
+    #: blocks in a read of the other end and treats EOF as parent death.
+    lifeline_fd: int | None = None
     watcher: asyncio.Task[None] | None = None
     #: Bumped when this object is the one a settle timer is watching.
     #: Identity of the slot itself is the comparison; this exists so a
@@ -81,9 +91,11 @@ class SessionSpawner(Protocol):
 def parse_worker_result(line: str | None) -> dict[str, Any] | None:
     """The JSON object on the result line, or None if there wasn't one.
 
-    ``ok`` is the caller's to check. A line that says ``ok: false`` means
-    the worker explained a start failure; it is not a session that may be
-    rebuilt. EOF and a line that is not JSON are the same outcome.
+    ``ok`` is the caller's to check. A line that says ``ok: false`` is a
+    result: the worker already wrote the row, and the parent must not
+    write it again. EOF, an empty read, and a line that is not JSON are
+    not a result line. That is the only case where the parent marks
+    ``failed``.
     """
     if line is None:
         return None
@@ -100,9 +112,17 @@ def parse_worker_result(line: str | None) -> dict[str, Any] | None:
 
 
 class _PipeWorker:
-    def __init__(self, process: asyncio.subprocess.Process, read_fd: int) -> None:
+    def __init__(
+        self,
+        process: asyncio.subprocess.Process,
+        read_fd: int,
+        lifeline: int,
+    ) -> None:
         self.process = process
         self._read_fd = read_fd
+        #: Parent's write end of the lifeline. Left open for the life of
+        #: the worker. Closing it is how the worker learns the parent died.
+        self.lifeline = lifeline
 
     async def read_result(self) -> str | None:
         fd = self._read_fd
@@ -140,10 +160,13 @@ class SubprocessSpawner:
         request_json: bytes | None,
     ) -> SpawnedWorker:
         read_fd, write_fd = os.pipe()
+        life_read, life_write = os.pipe()
         os.set_inheritable(write_fd, True)
+        os.set_inheritable(life_read, True)
         env = os.environ.copy()
         env[PARENT_PID_ENV] = str(os.getpid())
         env[RESULT_FD_ENV] = str(write_fd)
+        env[LIFELINE_FD_ENV] = str(life_read)
         env["MFTIK_DB_POOL_SIZE"] = "1"
         try:
             process = await asyncio.create_subprocess_exec(
@@ -155,15 +178,16 @@ class SubprocessSpawner:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=None,
                 stderr=None,
-                pass_fds=(write_fd,),
+                pass_fds=(write_fd, life_read),
                 env=env,
                 start_new_session=True,
             )
         except Exception:
-            os.close(read_fd)
-            os.close(write_fd)
+            for fd in (read_fd, write_fd, life_read, life_write):
+                os.close(fd)
             raise
         os.close(write_fd)
+        os.close(life_read)
         stdin = process.stdin
         if stdin is not None:
             try:
@@ -173,4 +197,4 @@ class SubprocessSpawner:
             except (BrokenPipeError, ConnectionResetError):
                 pass
             stdin.close()
-        return _PipeWorker(process, read_fd)
+        return _PipeWorker(process, read_fd, life_write)

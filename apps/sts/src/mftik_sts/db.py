@@ -78,6 +78,12 @@ async def mark_session_done(session_id: str) -> StsSessionRow | None:
     return await mark_session_finished(session_id)
 
 
+async def load_session(session_id: str) -> StsSessionRow | None:
+    """One row by id. A fleet list is paged and is the wrong question."""
+    async with session_scope() as db:
+        return await StsSessionRepository(db).get_by_session_id(session_id)
+
+
 async def list_sessions(
     *,
     status: str | None = "live",

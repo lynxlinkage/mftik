@@ -66,8 +66,11 @@ in that process, which is why the CPU saving was worth having and why there
 was one loop per container to convert. A noop session with one TD account
 and no market data took 0.46s from `exec` to the worker's result line
 (`test_a_real_worker_answers_stop_on_its_control_subject`). The API create
-timeout stays 10s. A worker that is still starting when that RPC times out
-is left running.
+timeout stays 10s. Create is dispatched on its own task, so a worker that
+has not reported yet does not stop this process answering list or artifact
+RPCs. If the API has already timed out and the worker later reports
+success, the session stays live and the deploy has not attached TD or MD.
+The parent does not kill that worker and does not mark the row failed.
 
 **uvloop implements the subprocess call the STS parent uses.** The worker
 does not spawn further processes, and neither do TD or MD. No `add_reader`
