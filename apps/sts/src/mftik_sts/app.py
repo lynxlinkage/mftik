@@ -20,12 +20,14 @@ from mftik import (
     serve_health,
 )
 from mftik.broker import Broker
+from mftik.protocol import STS_SESSION_CREATE
 from mftik.strategy.artifacts import get_store
 
 from mftik_sts import db as sts_db
 from mftik_sts.rpc import dispatch
 from mftik_sts.runtime_env import extras_names, refresh
 from mftik_sts.session import SessionManager
+from mftik_sts.spawn import SubprocessSpawner
 
 SOURCE = "sts"
 #: Which STS this process is. ``MFTIK_INSTANCE``, defaulting to the
@@ -52,6 +54,17 @@ RPC_RESTART_DELAY_SECONDS = 1.0
 _DEFAULT_REBUILD_MAX_AGE_S = 1800.0
 
 
+async def _dispatch_request(req: Any, sessions: SessionManager) -> None:
+    try:
+        await dispatch(req, sessions=sessions)
+    except Exception:
+        logger.exception(
+            "STS RPC handler failed type=%s id=%s",
+            req.envelope.type,
+            req.envelope.id,
+        )
+
+
 async def run_rpc(
     broker: Broker,
     sessions: SessionManager,
@@ -69,14 +82,22 @@ async def run_rpc(
     while not stop.is_set():
         try:
             async for req in broker.serve(subject, stop=stop):
-                try:
-                    await dispatch(req, sessions=sessions)
-                except Exception:
-                    logger.exception(
-                        "STS RPC handler failed type=%s id=%s",
-                        req.envelope.type,
-                        req.envelope.id,
+                # Create waits on the worker's result line. Awaiting it
+                # here would hold every other RPC on this subject — list,
+                # artifacts — for as long as ``on_start`` cares to run.
+                # The API's own timeout is unchanged. If that timeout
+                # already fired and the worker later reports success, the
+                # session stays live and the deploy has not attached it.
+                # This process does not kill the worker and does not mark
+                # the row failed.
+                if req.envelope.type == STS_SESSION_CREATE:
+                    task = asyncio.create_task(
+                        _dispatch_request(req, sessions),
+                        name="sts-rpc-create",
                     )
+                    sessions.track_create(task)
+                    continue
+                await _dispatch_request(req, sessions)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -218,6 +239,7 @@ async def amain() -> bool:
             persist_live=sts_db.persist_live_session,
             mark_done=sts_db.mark_session_finished,
             list_db_sessions=sts_db.list_sessions,
+            load_session=sts_db.load_session,
             remember_fact=sts_db.remember_fact,
             mark_live=sts_db.mark_session_live,
             bump_rebuild_count=sts_db.bump_rebuild_count,
@@ -226,6 +248,8 @@ async def amain() -> bool:
             td_instance=sts_db.td_instance,
             derive_sts=sts_db.derived_sts,
             instance=INSTANCE,
+            spawner=SubprocessSpawner(),
+            rebuild_on_worker_exit=_rebuild_enabled(),
         )
         logger.info("STS started instance=%s", INSTANCE)
         subjects = control_subjects(SOURCE, INSTANCE, ROLE)
@@ -303,9 +327,8 @@ def main() -> None:
     # tells anyone reading ``docker ps`` that STS did not just stop.
     #
     # ``uvloop.run`` rather than ``asyncio.run`` — docs/EventLoop.md has the
-    # measurements, and this is the process they matter most in: every session
-    # is a task on this one loop. It builds that loop for this call alone and
-    # leaves the global policy untouched, so a strategy that asks for the
-    # running loop gets uvloop and nothing else in the image changes.
+    # measurements. This loop serves the instance. Each live session is a
+    # worker process with a loop of its own. It builds that loop for this
+    # call alone and leaves the global policy untouched.
     if not uvloop.run(amain()):
         raise SystemExit(1)

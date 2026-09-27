@@ -54,22 +54,36 @@ there was nothing to unpick — only `asyncio.run` to replace, in
 `apps/sts/src/mftik_sts/app.py`, `apps/sym/src/mftik_sym/app.py` and
 `apps/paper/src/mftik_paper/app.py`.
 
-**Sessions are tasks, not processes.** STS, TD and MD all multiplex sessions
-onto one loop with `asyncio.create_task`. That is why the CPU saving is the part
-worth having: one slow callback is felt by every session in the process, so a
-tenth of the CPU back is a tenth more headroom before a plane has to be split.
-It is also why there was exactly one loop per container to convert.
+**STS sessions are processes. TD and MD sessions are tasks.** An STS instance
+no longer runs strategies on its own loop. That loop is the supervisor:
+health, create, list, the reaper, rebuild, and the artifact and event-log
+RPCs. Each live strategy is one `asyncio.create_subprocess_exec` of
+`python -m mftik_sts.worker`, and that process is one session on one loop —
+the shape a session had when it was a task, with the stall and the native
+crash confined to the worker. TD and MD still multiplex sessions with
+`asyncio.create_task`. A slow callback there is still felt by every session
+in that process, which is why the CPU saving was worth having and why there
+was one loop per container to convert. A noop session with one TD account
+and no market data took 0.46s from `exec` to the worker's result line
+(`test_a_real_worker_answers_stop_on_its_control_subject`). The API create
+timeout stays 10s. Create is dispatched on its own task, so a worker that
+has not reported yet does not stop this process answering list or artifact
+RPCs. If the API has already timed out and the worker later reports
+success, the session stays live and the deploy has not attached TD or MD.
+The parent does not kill that worker and does not mark the row failed.
 
-**Nothing in the tree uses the parts of asyncio uvloop does not implement.**
-No `add_reader` or `add_writer`, no child watchers, no `subprocess_exec` or
-`create_subprocess_*`, no Unix-socket servers, no `SelectorEventLoop`
-references, and no `EventLoopPolicy` subclass. The four loop APIs that *are*
-used — `loop.add_signal_handler` for SIGINT/SIGTERM in all five domains,
-`asyncio.to_thread` for eventlog disk writes
+**uvloop implements the subprocess call the STS parent uses.** The worker
+does not spawn further processes, and neither do TD or MD. No `add_reader`
+or `add_writer`, no Unix-socket servers, no `SelectorEventLoop` references,
+and no `EventLoopPolicy` subclass. The loop APIs the planes share —
+`loop.add_signal_handler` for SIGINT/SIGTERM, `asyncio.to_thread` for
+eventlog disk writes
 (`packages/common/src/mftik/strategy/eventlog.py:293`),
 `loop.run_in_executor` against a dedicated pool for alert matching
-(`apps/api/src/mftik_api/alert_eval.py:20`), and `loop.time()` — are all
-supported. Two of them behave differently, which is the next section.
+(`apps/api/src/mftik_api/alert_eval.py:20`), and `loop.time()` — are
+supported. `create_subprocess_exec` is too: it is how the STS parent starts
+a worker. Two of the shared APIs behave differently, which is the next
+section.
 
 **The scripts under `scripts/` were left on `asyncio.run`.** They are one-shot
 operator tools — seed, fetch, a cursor reset, a backfill probe — that make a

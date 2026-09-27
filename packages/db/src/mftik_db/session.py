@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -30,6 +31,33 @@ def _enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:
         cursor.close()
 
 
+#: A worker sets this so its pool is one connection. Unset leaves
+#: SQLAlchemy's defaults, which is what every other process wants.
+#: ``max_overflow`` is set with it: the default overflow is 10, so a
+#: ``pool_size`` of 1 would still open 11 connections.
+POOL_SIZE_ENV = "MFTIK_DB_POOL_SIZE"
+
+
+def _pool_kwargs(url: str) -> dict:
+    """Pool limits from :data:`POOL_SIZE_ENV`, or nothing.
+
+    sqlite's pool does not take ``pool_size`` or ``max_overflow``. Passing
+    them raises, so a worker pointed at sqlite keeps the pool it has today.
+    """
+    if url.startswith("sqlite"):
+        return {}
+    raw = os.getenv(POOL_SIZE_ENV, "").strip()
+    if not raw:
+        return {}
+    try:
+        size = int(raw)
+    except ValueError:
+        return {}
+    if size < 1:
+        return {}
+    return {"pool_size": size, "max_overflow": 0}
+
+
 def build_engine(url: str) -> AsyncEngine:
     """An engine with the SQLite FK listener attached when needed.
 
@@ -39,6 +67,7 @@ def build_engine(url: str) -> AsyncEngine:
     kwargs: dict = {"pool_pre_ping": True}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
+    kwargs.update(_pool_kwargs(url))
     engine = create_async_engine(url, **kwargs)
     if url.startswith("sqlite"):
         _enable_sqlite_foreign_keys(engine)
