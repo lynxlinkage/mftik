@@ -5,7 +5,8 @@ passphrase) trades spot, linear perps, inverse perps and dated futures,
 so ``Deribit_Spot_BTCUSDC``, ``Deribit_Perp_BTCUSDC``,
 ``Deribit_Inverse_BTCUSD`` and ``Deribit_Future_BTCUSD-260906`` are
 instruments behind one connection. Options are listed
-(``Deribit_Option_BTCUSD-260913-70000-C``) and not traded.
+(``Deribit_Option_BTCUSD-260913-70000-C``) and served on the public
+MD path; TD still refuses them.
 
 HTTP and WebSocket speak the same JSON-RPC 2.0 methods. v1 places and
 cancels on the authenticated socket; REST is listing and MDS.
@@ -45,6 +46,7 @@ from mftik.exchange.deribit.protocol import (
     LINEAR,
     MARGIN_MODELS,
     PERPETUAL,
+    PUBLIC_CATEGORIES,
     TRADED_CATEGORIES,
     DeribitAuthError,
     DeribitError,
@@ -69,6 +71,7 @@ from mftik.exchange.deribit.protocol import (
 from mftik.exchange.deribit.public import (
     DERIBIT_INTERVALS,
     FUNDING_CATEGORIES,
+    GREEKS_CATEGORIES,
     OPEN_INTEREST_CATEGORIES,
     DeribitPublicClient,
     venue_interval,
@@ -81,6 +84,7 @@ __all__ = [
     "DERIBIT_REST_URL",
     "DERIBIT_WS_URL",
     "FUNDING_CATEGORIES",
+    "GREEKS_CATEGORIES",
     "KIND_FUTURE",
     "KIND_OPTION",
     "KIND_SPOT",
@@ -88,6 +92,7 @@ __all__ = [
     "MARGIN_MODELS",
     "OPEN_INTEREST_CATEGORIES",
     "PERPETUAL",
+    "PUBLIC_CATEGORIES",
     "TRADED_CATEGORIES",
     "DeribitAccountSummaries",
     "DeribitAuthError",

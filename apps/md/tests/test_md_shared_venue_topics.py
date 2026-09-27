@@ -16,6 +16,7 @@ from mftik.exchange.models import (
     AggTrade,
     BestQuote,
     FundingRate,
+    Greeks,
     OpenInterest,
     Ticker,
 )
@@ -236,6 +237,76 @@ async def test_detach_ticker_leaves_the_open_interest_pump_fed() -> None:
     assert "open_interest" not in public.closed
     public.push("open_interest", _open_interest(qty="2000"))
     await _wait_until(lambda: seen.count("open_interest") >= 2)
+    await sess.stop()
+
+
+def _greeks(*, delta: str = "0.55") -> Greeks:
+    return Greeks(
+        universal_ticker=str(FAKE),
+        delta=Decimal(delta),
+        gamma=Decimal("0.01"),
+        theta=Decimal("-12.5"),
+        vega=Decimal("18.2"),
+        ts=1_700_000_000.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_detach_greeks_leaves_the_ticker_pump_fed() -> None:
+    public = FakePublic()
+    seen: list[str] = []
+
+    async def _on_update(topic, ticker, env) -> None:  # noqa: ANN001
+        seen.append(f"{topic}:{env.payload.get('last', env.payload.get('delta'))}")
+
+    disp = Dispatcher(broker=None)  # type: ignore[arg-type]
+    sess = VenueSession(FAKE.venue, public, on_update=_on_update)
+    await sess.start()
+    disp.subscribe("s1", "ticker", FAKE)
+    disp.subscribe("s1", "greeks", FAKE)
+    await sess.ensure_feed("ticker", FAKE)
+    await sess.ensure_feed("greeks", FAKE)
+    await _wait_until(
+        lambda: "ticker" in public.opened and "greeks" in public.opened
+    )
+
+    emptied, rc = disp.unsubscribe("s1", "greeks", FAKE)
+    assert emptied and rc == 0
+    await sess.stop_feed("greeks", FAKE)
+    await _wait_until(lambda: "greeks" in public.closed)
+
+    assert "ticker" not in public.closed
+    assert disp.refcount("ticker", FAKE) == 1
+    public.push("ticker", _ticker(last="200"))
+    await _wait_until(lambda: any(row.startswith("ticker:200") for row in seen))
+    await sess.stop()
+
+
+@pytest.mark.asyncio
+async def test_detach_ticker_leaves_the_greeks_pump_fed() -> None:
+    public = FakePublic()
+    seen: list[object] = []
+
+    async def _on_update(topic, ticker, env) -> None:  # noqa: ANN001
+        seen.append(topic)
+
+    disp = Dispatcher(broker=None)  # type: ignore[arg-type]
+    sess = VenueSession(FAKE.venue, public, on_update=_on_update)
+    await sess.start()
+    disp.subscribe("s1", "ticker", FAKE)
+    disp.subscribe("s1", "greeks", FAKE)
+    await sess.ensure_feed("ticker", FAKE)
+    await sess.ensure_feed("greeks", FAKE)
+    await _wait_until(lambda: len(seen) >= 2)
+
+    emptied, _ = disp.unsubscribe("s1", "ticker", FAKE)
+    assert emptied
+    await sess.stop_feed("ticker", FAKE)
+    await _wait_until(lambda: "ticker" in public.closed)
+
+    assert "greeks" not in public.closed
+    public.push("greeks", _greeks(delta="0.70"))
+    await _wait_until(lambda: seen.count("greeks") >= 2)
     await sess.stop()
 
 

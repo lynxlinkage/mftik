@@ -322,6 +322,7 @@ def test_kind_and_instrument_name_round_trip() -> None:
     assert p.expiry_code_from_option_name("BTC-13SEP26-70000-C") == "260913"
     assert p.expiry_code_from_name("BTC-13SEP26-70000-C") is None
     assert Category.OPTION not in p.TRADED_CATEGORIES
+    assert Category.OPTION in p.PUBLIC_CATEGORIES
     assert p.is_linear_perp_name("BTC_USDC-PERPETUAL")
     assert not p.is_linear_perp_name("BTC-PERPETUAL")
     assert p.is_inverse_perp_name("BTC-PERPETUAL")

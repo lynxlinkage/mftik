@@ -26,6 +26,7 @@ from mftik.exchange.models import (
     BookLevel,
     Fill,
     FundingRate,
+    Greeks,
     Kline,
     OpenInterest,
     Order,
@@ -332,8 +333,30 @@ class DeribitPublicTrade(DeribitMessage):
         )
 
 
+class DeribitGreeks(DeribitMessage):
+    """Nested ``greeks`` object on an option ticker row."""
+
+    delta: OptDec = None
+    gamma: OptDec = None
+    theta: OptDec = None
+    vega: OptDec = None
+    rho: OptDec = None
+
+
+def _iv_fraction(value: Decimal | None) -> Decimal | None:
+    """Deribit publishes IV as a percent; the shared model is a fraction."""
+    if value is None:
+        return None
+    return value / Decimal("100")
+
+
 class DeribitTicker(DeribitMessage):
-    """REST ``public/ticker`` and the public ``ticker`` push. V5 lives here."""
+    """REST ``public/ticker`` and the public ``ticker`` push.
+
+    V5 funding and open interest live here. Option rows also carry
+    greeks / IV / mark / underlying — a third pump on the same
+    ``SUBSCRIBE``.
+    """
 
     instrument_name: str = ""
     last_price: OptDec = None
@@ -344,6 +367,12 @@ class DeribitTicker(DeribitMessage):
     current_funding: OptDec = None
     funding_8h: OptDec = None
     open_interest: OptDec = None
+    mark_price: OptDec = None
+    underlying_price: OptDec = None
+    bid_iv: OptDec = None
+    ask_iv: OptDec = None
+    mark_iv: OptDec = None
+    greeks: DeribitGreeks | None = None
     timestamp: Ms = 0.0
 
     @property
@@ -402,6 +431,34 @@ class DeribitTicker(DeribitMessage):
         return OpenInterest(
             universal_ticker=str(ticker),
             qty=self.open_interest,
+            ts=ts or self.timestamp,
+        )
+
+    def to_greeks(
+        self, ticker: UniversalTicker, *, ts: float = 0.0
+    ) -> Greeks | None:
+        raw = self.greeks
+        if raw is None:
+            return None
+        if (
+            raw.delta is None
+            or raw.gamma is None
+            or raw.theta is None
+            or raw.vega is None
+        ):
+            return None
+        return Greeks(
+            universal_ticker=str(ticker),
+            delta=raw.delta,
+            gamma=raw.gamma,
+            theta=raw.theta,
+            vega=raw.vega,
+            rho=raw.rho,
+            mark=self.mark_price,
+            underlying=self.underlying_price,
+            bid_iv=_iv_fraction(self.bid_iv),
+            ask_iv=_iv_fraction(self.ask_iv),
+            mark_iv=_iv_fraction(self.mark_iv),
             ts=ts or self.timestamp,
         )
 

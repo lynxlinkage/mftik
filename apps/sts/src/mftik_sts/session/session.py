@@ -14,6 +14,7 @@ from mftik.exchange.models import (
     BestQuote,
     Fill,
     FundingRate,
+    Greeks,
     Kline,
     Liquidation,
     OpenInterest,
@@ -31,6 +32,7 @@ from mftik.protocol import (
     MD_BESTQUOTE_RESULT,
     MD_FUNDING_HISTORY_RESULT,
     MD_FUNDING_RATE,
+    MD_GREEKS,
     MD_KLINE,
     MD_KLINES_RESULT,
     MD_LEASE_ACK,
@@ -110,6 +112,7 @@ MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     MD_LIQUIDATION: ("on_liquidation", Liquidation),
     MD_FUNDING_RATE: ("on_funding_rate", FundingRate),
     MD_OPEN_INTEREST: ("on_open_interest", OpenInterest),
+    MD_GREEKS: ("on_greeks", Greeks),
 }
 
 #: Query result type → (strategy hook, payload model). Separate from

@@ -203,8 +203,8 @@ async def test_deribit_venue_builds_one_client_for_every_category(
 ) -> None:
     """A unified venue is still one connector here.
 
-    One public socket. Funding and OI ride the ticker (V5). There is no
-    aggregated tape and no liquidation channel.
+    One public socket. Funding, OI and option greeks ride the ticker.
+    There is no aggregated tape and no liquidation channel.
     """
     factory = VenuePublicFactory(broker)
     client = await factory.create("Deribit")
@@ -216,6 +216,7 @@ async def test_deribit_venue_builds_one_client_for_every_category(
     assert hasattr(client, "stream_best_quote")
     assert hasattr(client, "stream_funding_rate")
     assert hasattr(client, "stream_open_interest")
+    assert hasattr(client, "stream_greeks")
     assert not hasattr(client, "stream_liquidation")
     assert not hasattr(client, "stream_agg_trades")
 

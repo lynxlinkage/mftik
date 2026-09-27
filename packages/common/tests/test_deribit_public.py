@@ -11,7 +11,7 @@ import pytest
 from deribit_stub import FakeDeribit
 from mftik.exchange.deribit import channels as ch
 from mftik.exchange.deribit.feed import DeribitBook, DeribitPublicStream
-from mftik.exchange.deribit.models import DeribitOrderBook
+from mftik.exchange.deribit.models import DeribitOrderBook, DeribitTicker
 from mftik.exchange.deribit.protocol import (
     expiry_code_from_name,
     expiry_suffix_from_code,
@@ -31,6 +31,19 @@ BASE = "https://deribit.test"
 
 def _wire(ticker: UniversalTicker) -> str:
     symbol = ticker.symbol
+    if ticker.category is Category.OPTION:
+        parts = symbol.split("-")
+        if len(parts) >= 4:
+            pair, code, strike, flag = parts[0], parts[1], parts[2], parts[3]
+            suffix = expiry_suffix_from_code(code)
+            if suffix:
+                for quote in ("USDC", "USDT", "USD"):
+                    if pair.endswith(quote) and pair != quote:
+                        base = pair[: -len(quote)]
+                        if quote == "USD":
+                            return f"{base}-{suffix}-{strike}-{flag}"
+                        return f"{base}_{quote}-{suffix}-{strike}-{flag}"
+        return symbol
     code = None
     if "-" in symbol:
         pair, maybe = symbol.rsplit("-", 1)
@@ -117,6 +130,7 @@ async def test_feeds_start_empty_and_refuse_missing_methods() -> None:
         assert not hasattr(client, "stream_liquidation")
         assert hasattr(client, "stream_funding_rate")
         assert hasattr(client, "stream_open_interest")
+        assert hasattr(client, "stream_greeks")
 
 
 async def test_i6_spot_has_no_funding_or_oi() -> None:
@@ -133,18 +147,72 @@ async def test_i6_spot_has_no_funding_or_oi() -> None:
         client.stream_open_interest(PERP)
         client.stream_open_interest(INVERSE)
         client.stream_open_interest(DATED)
+        client.stream_open_interest(OPTION)
+        with pytest.raises(ValueError, match="greeks"):
+            client.stream_greeks(SPOT)
+        with pytest.raises(ValueError, match="greeks"):
+            client.stream_greeks(PERP)
+        client.stream_greeks(OPTION)
 
 
-async def test_option_is_refused_before_http() -> None:
+def _option_ticker_row() -> dict[str, Any]:
+    return {
+        "instrument_name": "BTC-13SEP26-70000-C",
+        "last_price": "0.052",
+        "best_bid_price": "0.051",
+        "best_bid_amount": "2.5",
+        "best_ask_price": "0.053",
+        "best_ask_amount": "1.5",
+        "open_interest": "123.4",
+        "mark_price": "0.0525",
+        "underlying_price": "65000",
+        "bid_iv": "64.0",
+        "ask_iv": "66.0",
+        "mark_iv": "65.0",
+        "greeks": {
+            "delta": "0.55",
+            "gamma": "0.01",
+            "theta": "-12.5",
+            "vega": "18.2",
+            "rho": "3.1",
+        },
+        "timestamp": 1700000001000,
+    }
+
+
+async def test_option_ticker_and_book_resolve() -> None:
     api = FakeApi()
+    api.results["/public/ticker"] = _option_ticker_row()
+    api.results["/public/get_order_book"] = {
+        "bids": [["0.051", "2.5"]],
+        "asks": [["0.053", "1.5"]],
+        "timestamp": 1700000000000,
+    }
     async with _client(api) as client:
-        with pytest.raises(ValueError, match="Option"):
-            await client.fetch_ticker(OPTION)
-        with pytest.raises(ValueError, match="Option"):
-            await client.fetch_order_book(OPTION)
+        ticker = await client.fetch_ticker(OPTION)
+        book = await client.fetch_order_book(OPTION)
         with pytest.raises(ValueError, match="funding"):
             client.stream_funding_rate(OPTION)
-    assert not api.requests
+    assert ticker.last == Decimal("0.052")
+    assert ticker.universal_ticker == str(OPTION)
+    assert book.bids[0].price == Decimal("0.051")
+    assert "instrument_name=BTC-13SEP26-70000-C" in api.requests[0].url.query.decode()
+
+
+def test_option_iv_is_a_decimal_fraction() -> None:
+    row = DeribitTicker.model_validate(_option_ticker_row())
+    greeks = row.to_greeks(OPTION)
+    assert greeks is not None
+    assert greeks.mark_iv == Decimal("0.65")
+    assert greeks.bid_iv == Decimal("0.64")
+    assert greeks.ask_iv == Decimal("0.66")
+    assert greeks.delta == Decimal("0.55")
+    assert greeks.rho == Decimal("3.1")
+    assert greeks.mark == Decimal("0.0525")
+    assert greeks.underlying == Decimal("65000")
+    assert DeribitTicker.model_validate(
+        {"instrument_name": "BTC_USDC-PERPETUAL", "last_price": "60000"}
+    ).to_greeks(PERP) is None
 
 
 async def test_a_spot_ticker_prints_on_the_one_public_socket(
@@ -200,6 +268,60 @@ async def test_v5_funding_and_oi_ride_the_ticker(
     assert funding.rate == Decimal("0.0001")
     assert interest.qty == Decimal("487")
     assert deribit_public.subscribed == {ch.ticker("BTC_USDC-PERPETUAL")}
+
+
+async def test_option_ticker_oi_and_greeks_share_one_subscribe(
+    deribit_public: FakeDeribit,
+) -> None:
+    api = FakeApi()
+    feed = DeribitPublicStream(deribit_public.url, ping_interval=0, heartbeat=0)
+    client = _client(api, feed)
+    async with client:
+        ticker_stream = client.stream_ticker(OPTION)
+        oi_stream = client.stream_open_interest(OPTION)
+        greeks_stream = client.stream_greeks(OPTION)
+        ticker_task = asyncio.ensure_future(ticker_stream.__anext__())
+        oi_task = asyncio.ensure_future(oi_stream.__anext__())
+        greeks_task = asyncio.ensure_future(greeks_stream.__anext__())
+        await asyncio.sleep(0.05)
+        await deribit_public.push(
+            ch.ticker("BTC-13SEP26-70000-C"), _option_ticker_row()
+        )
+        ticker = await asyncio.wait_for(ticker_task, 2)
+        interest = await asyncio.wait_for(oi_task, 2)
+        greeks = await asyncio.wait_for(greeks_task, 2)
+    assert ticker.last == Decimal("0.052")
+    assert interest.qty == Decimal("123.4")
+    assert greeks.mark_iv == Decimal("0.65")
+    assert greeks.delta == Decimal("0.55")
+    assert deribit_public.subscribed == {ch.ticker("BTC-13SEP26-70000-C")}
+
+
+async def test_option_quote_prints(
+    deribit_public: FakeDeribit,
+) -> None:
+    api = FakeApi()
+    client = _client(
+        api,
+        DeribitPublicStream(deribit_public.url, ping_interval=0, heartbeat=0),
+    )
+    async with client:
+        stream = client.stream_best_quote(OPTION)
+        task = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)
+        await deribit_public.push(
+            ch.quote("BTC-13SEP26-70000-C"),
+            {
+                "instrument_name": "BTC-13SEP26-70000-C",
+                "best_bid_price": "0.051",
+                "best_bid_amount": "2.5",
+                "best_ask_price": "0.053",
+                "best_ask_amount": "1.5",
+            },
+        )
+        quote = await asyncio.wait_for(task, 2)
+    assert quote.bid == Decimal("0.051")
+    assert quote.universal_ticker == str(OPTION)
 
 
 async def test_bestquote_and_trade_share_one_socket(

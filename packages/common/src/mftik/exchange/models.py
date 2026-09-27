@@ -451,6 +451,35 @@ class OpenInterest(InstrumentScoped):
     ts: float = Field(default_factory=_ts)
 
 
+class Greeks(InstrumentScoped):
+    """Live option greeks, IVs, and mark.
+
+    Feed topic ``greeks``. ``delta``, ``gamma``, ``theta`` and ``vega``
+    are required. ``rho`` is ``None`` when the venue does not publish
+    it (Bybit and Binance later). Mark, underlying, and the three IVs
+    are optional.
+
+    Implied vol is a **decimal fraction**: ``0.65`` is 65%. A venue that
+    publishes percent converts before the hook. Open interest is not
+    here — that is :class:`OpenInterest` / ``on_open_interest``.
+
+    A venue that cannot push this feed has no ``stream_greeks``, and
+    subscribing there is refused at attach.
+    """
+
+    delta: Decimal
+    gamma: Decimal
+    theta: Decimal
+    vega: Decimal
+    rho: Decimal | None = None
+    mark: Decimal | None = None
+    underlying: Decimal | None = None
+    bid_iv: Decimal | None = None
+    ask_iv: Decimal | None = None
+    mark_iv: Decimal | None = None
+    ts: float = Field(default_factory=_ts)
+
+
 class OrderBook(InstrumentScoped):
     bids: list[BookLevel]
     asks: list[BookLevel]

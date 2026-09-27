@@ -13,6 +13,7 @@ from mftik.exchange.models import (
     BestQuote,
     BookLevel,
     FundingRate,
+    Greeks,
     Kline,
     Liquidation,
     OpenInterest,
@@ -24,6 +25,7 @@ from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_FUNDING_RATE,
+    MD_GREEKS,
     MD_KLINE,
     MD_LIQUIDATION,
     MD_OPEN_INTEREST,
@@ -58,6 +60,7 @@ class RecordingStrategy(Strategy):
             "liquidation": [],
             "funding_rate": [],
             "open_interest": [],
+            "greeks": [],
         }
 
     async def on_ticker(self, ticker: Ticker) -> None:
@@ -86,6 +89,9 @@ class RecordingStrategy(Strategy):
 
     async def on_open_interest(self, open_interest: OpenInterest) -> None:
         self.seen["open_interest"].append(open_interest)
+
+    async def on_greeks(self, greeks: Greeks) -> None:
+        self.seen["greeks"].append(greeks)
 
 
 def _payloads() -> list[tuple[str, str, dict]]:
@@ -185,6 +191,20 @@ def _payloads() -> list[tuple[str, str, dict]]:
             OpenInterest(
                 universal_ticker="Bybit_Perp_BTCUSDT",
                 qty=Decimal("1000"),
+                ts=1_700_000_000.0,
+            ).model_dump(mode="json"),
+        ),
+        (
+            MD_GREEKS,
+            "greeks",
+            Greeks(
+                universal_ticker="Deribit_Option_BTCUSDT",
+                delta=Decimal("0.55"),
+                gamma=Decimal("0.01"),
+                theta=Decimal("-12.5"),
+                vega=Decimal("18.2"),
+                rho=Decimal("3.1"),
+                mark_iv=Decimal("0.65"),
                 ts=1_700_000_000.0,
             ).model_dump(mode="json"),
         ),

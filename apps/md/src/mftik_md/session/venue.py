@@ -14,6 +14,7 @@ from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_FUNDING_RATE,
+    MD_GREEKS,
     MD_KLINE,
     MD_LIQUIDATION,
     MD_OPEN_INTEREST,
@@ -35,15 +36,16 @@ class MarketDataConnector(Protocol):
     provide: a lifecycle and the three feeds nobody lacks.
 
     ``stream_kline``, ``stream_best_quote``, ``stream_agg_trades``,
-    ``stream_liquidation``, ``stream_funding_rate`` and
-    ``stream_open_interest`` are deliberately absent. Gate serves kline
-    and best-quote and paper does not; only Binance has the aggregated
-    tape; Bybit, OKX, GateFutures and ``BinanceUM`` have
-    liquidations; perpetual venues have funding. Open interest is the
-    same optional: a venue that cannot should have no such method rather
-    than one that raises — :meth:`VenueSession._open` looks for them and
-    refuses the subscribe when they are missing, which is the same
-    answer one venue short of the full set was always going to give.
+    ``stream_liquidation``, ``stream_funding_rate``,
+    ``stream_open_interest`` and ``stream_greeks`` are deliberately
+    absent. Gate serves kline and best-quote and paper does not; only
+    Binance has the aggregated tape; Bybit, OKX, GateFutures and
+    ``BinanceUM`` have liquidations; perpetual venues have funding.
+    Open interest is the same optional; greeks is Option-only. A venue
+    that cannot should have no such method rather than one that
+    raises — :meth:`VenueSession._open` looks for them and refuses the
+    subscribe when they are missing, which is the same answer one
+    venue short of the full set was always going to give.
 
     Streams are opened on a :class:`~mftik.exchange.tickers.UniversalTicker`, not
     a symbol. A unified-account venue is one connector serving several markets,
@@ -87,6 +89,11 @@ TOPIC_FUNDING_RATE = "funding_rate"
 #: (Bybit, Gate) is silent until the next size-bearing delta — the pump
 #: is not REST-filled.
 TOPIC_OPEN_INTEREST = "open_interest"
+#: Live option greeks / IV / mark. Deribit Option publishes them on the
+#: same ticker row as bid/ask and open interest; a venue without the
+#: method refuses by name. Subscribing ``greeks`` does not start
+#: ``on_ticker``.
+TOPIC_GREEKS = "greeks"
 #: Klines need an interval, and a feed key is only ``topic.ticker`` — so the
 #: interval rides in the topic: ``kline_1m.Paper_Spot_BTCUSDT``. The split is
 #: on ``.``, so the underscore here is not ambiguous with the ticker's.
@@ -204,6 +211,8 @@ class VenueSession:
             return self._stream("stream_funding_rate")(ticker), MD_FUNDING_RATE
         if topic == TOPIC_OPEN_INTEREST:
             return self._stream("stream_open_interest")(ticker), MD_OPEN_INTEREST
+        if topic == TOPIC_GREEKS:
+            return self._stream("stream_greeks")(ticker), MD_GREEKS
         if topic.startswith(KLINE_PREFIX):
             interval = topic[len(KLINE_PREFIX) :]
             if not interval:

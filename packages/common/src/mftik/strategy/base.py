@@ -10,6 +10,7 @@ from mftik.exchange.models import (
     BestQuote,
     Fill,
     FundingRate,
+    Greeks,
     Kline,
     Liquidation,
     OpenInterest,
@@ -102,7 +103,8 @@ class Strategy:
 
     Public events from ``md.{session_id}`` (wired):
         on_ticker, on_order_book, on_kline, on_trade, on_agg_trade,
-        on_best_quote, on_liquidation, on_funding_rate, on_open_interest
+        on_best_quote, on_liquidation, on_funding_rate, on_open_interest,
+        on_greeks
         One hook per feed topic subscribed in ``md_ids``
         (``topic.UniversalTicker``; kline carries its interval in the topic,
         e.g. ``paper.kline_1m.BTCUSDT``).
@@ -457,6 +459,19 @@ class Strategy:
         their contract books; Binance futures has no stream, and spot and
         paper have none. Subscribing there is refused at attach rather
         than silently producing nothing.
+        """
+
+    async def on_greeks(self, greeks: Greeks) -> None:
+        """Handle live option greeks / IV / mark from MD.
+
+        Feed topic ``greeks``. ``delta``, ``gamma``, ``theta`` and
+        ``vega`` are always set. ``rho`` is ``None`` when the venue
+        has none. IVs are decimal fractions (``0.65`` = 65%). Open
+        interest is not here — that is :meth:`on_open_interest`.
+
+        Not every venue publishes this. Deribit Option does, on the
+        same ticker row as bid/ask. Subscribing where it is absent is
+        refused at attach rather than silently producing nothing.
         """
 
     # --- query answers -----------------------------------------------------

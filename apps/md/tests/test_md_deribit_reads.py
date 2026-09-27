@@ -1,4 +1,4 @@
-"""Deribit on MD's read side — one reader, spot funding/OI refused."""
+"""Deribit on MD's read side — spot funding/OI refused; Option MD served."""
 
 from __future__ import annotations
 
@@ -29,6 +29,19 @@ BASE = "https://deribit.test"
 
 def _wire(ticker: UniversalTicker) -> str:
     symbol = ticker.symbol
+    if ticker.category is Category.OPTION:
+        parts = symbol.split("-")
+        if len(parts) >= 4:
+            pair, code, strike, flag = parts[0], parts[1], parts[2], parts[3]
+            suffix = expiry_suffix_from_code(code)
+            if suffix:
+                for quote in ("USDC", "USDT", "USD"):
+                    if pair.endswith(quote) and pair != quote:
+                        base = pair[: -len(quote)]
+                        if quote == "USD":
+                            return f"{base}-{suffix}-{strike}-{flag}"
+                        return f"{base}_{quote}-{suffix}-{strike}-{flag}"
+        return symbol
     code = None
     if "-" in symbol:
         pair, maybe = symbol.rsplit("-", 1)
@@ -140,15 +153,46 @@ async def test_an_interval_deribit_does_not_serve_is_refused() -> None:
     assert not api.requests
 
 
-async def test_option_is_refused_before_http() -> None:
+async def test_option_klines_book_bestquote_and_oi_are_served() -> None:
     api = FakeApi()
+    api.results["/public/get_tradingview_chart_data"] = {
+        "status": "ok",
+        "ticks": [1700000000000],
+        "open": [0.05],
+        "high": [0.06],
+        "low": [0.04],
+        "close": [0.055],
+        "volume": [10],
+    }
+    api.results["/public/get_order_book"] = {
+        "bids": [["0.051", "2.5"]],
+        "asks": [["0.053", "1.5"]],
+        "timestamp": 1700000000000,
+    }
+    api.results["/public/ticker"] = {
+        "instrument_name": "BTC-13SEP26-70000-C",
+        "best_bid_price": "0.051",
+        "best_bid_amount": "2.5",
+        "best_ask_price": "0.053",
+        "best_ask_amount": "1.5",
+        "open_interest": "123.4",
+        "timestamp": 1700000000000,
+    }
+    reader = _reader(api)
+    klines = await reader.fetch_klines(OPTION, "1h", limit=1)
+    book = await reader.fetch_order_book(OPTION, depth=5)
+    quote = await reader.fetch_best_quote(OPTION)
+    interest = await reader.fetch_open_interest(OPTION)
+    assert klines[0].close == Decimal("0.055")
+    assert book.bids[0].price == Decimal("0.051")
+    assert quote is not None
+    assert quote.ask == Decimal("0.053")
+    assert interest.qty == Decimal("123.4")
+    assert "instrument_name=BTC-13SEP26-70000-C" in api.query_for(
+        "/public/get_tradingview_chart_data"
+    )
     with pytest.raises(NoReaderError, match="Option"):
-        await _reader(api).fetch_klines(OPTION, "1h", limit=1)
-    with pytest.raises(NoReaderError, match="Option"):
-        await _reader(api).fetch_order_book(OPTION, depth=5)
-    with pytest.raises(NoReaderError, match="Option"):
-        await _reader(api).fetch_best_quote(OPTION)
-    assert not api.requests
+        await reader.fetch_funding_history(OPTION, limit=5)
 
 
 async def test_spot_funding_and_oi_are_unsupported_reads() -> None:

@@ -12,6 +12,7 @@ from mftik.exchange.models import (
     BestQuote,
     BookLevel,
     FundingRate,
+    Greeks,
     Kline,
     Liquidation,
     OpenInterest,
@@ -24,6 +25,7 @@ from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_FUNDING_RATE,
+    MD_GREEKS,
     MD_KLINE,
     MD_LIQUIDATION,
     MD_OPEN_INTEREST,
@@ -189,6 +191,21 @@ class FakePublic:
             ),
         )
 
+    def stream_greeks(self, ticker: UniversalTicker) -> AsyncIterator[Greeks]:
+        return self._once(
+            "greeks",
+            Greeks(
+                universal_ticker=str(ticker),
+                delta=Decimal("0.55"),
+                gamma=Decimal("0.01"),
+                theta=Decimal("-12.5"),
+                vega=Decimal("18.2"),
+                rho=Decimal("3.1"),
+                mark_iv=Decimal("0.65"),
+                ts=1_700_000_000.0,
+            ),
+        )
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -202,6 +219,7 @@ class FakePublic:
         ("liquidation", MD_LIQUIDATION),
         ("funding_rate", MD_FUNDING_RATE),
         ("open_interest", MD_OPEN_INTEREST),
+        ("greeks", MD_GREEKS),
         ("kline_1m", MD_KLINE),
     ],
 )
@@ -321,6 +339,21 @@ async def test_a_venue_without_open_interest_refuses_that_topic() -> None:
     await sess.start()
     with pytest.raises(ValueError, match="does not publish stream_open_interest"):
         await sess.ensure_feed("open_interest", FAKE)
+    assert sess.feed_count == 0
+    await sess.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_venue_without_greeks_refuses_that_topic() -> None:
+    """A venue without the method refuses; Option books grow one later."""
+
+    class NoGreeks(FakePublic):
+        stream_greeks = None
+
+    sess = VenueSession(FAKE.venue, NoGreeks(), on_update=_noop_update)
+    await sess.start()
+    with pytest.raises(ValueError, match="does not publish stream_greeks"):
+        await sess.ensure_feed("greeks", FAKE)
     assert sess.feed_count == 0
     await sess.stop()
 
