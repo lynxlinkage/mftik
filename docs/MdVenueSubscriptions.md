@@ -862,6 +862,10 @@ changes neither `ensure_feed` nor `_stop_feed_if_unused`.
 It does not reopen these tickets. OI-4 edits one late-joiner row here
 when that feed lands.
 
+`docs/MdExpiry.md` is the control event that retires a dated
+instrument. `md.expiry` is not a product topic and is not listed in
+`md_ids`.
+
 Update a doc in the ticket that makes its sentence false, not in a mop-up
 ticket.
 
