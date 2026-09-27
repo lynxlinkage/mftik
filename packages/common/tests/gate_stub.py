@@ -31,6 +31,8 @@ class FakeGate:
         self.errors: dict[str, dict[str, Any]] = {}
         #: channel -> the ``data`` block to answer trading calls with.
         self.api_data: dict[str, dict[str, Any]] = {}
+        #: Payloads whose subscribe or unsubscribe ack is an explicit rejection.
+        self.reject_payloads: set[tuple[str, ...]] = set()
         self.connections = 0
         self.drop_next = False
         self.hold_api_replies = 0
@@ -61,7 +63,10 @@ class FakeGate:
                     "channel": channel,
                     "event": event,
                 }
-                if channel in self.errors:
+                payload = tuple(msg.get("payload") or [])
+                if payload in self.reject_payloads:
+                    ack["error"] = {"code": 2, "message": "rejected"}
+                elif channel in self.errors:
                     ack["error"] = self.errors[channel]
                 else:
                     ack["result"] = {"status": "success"}

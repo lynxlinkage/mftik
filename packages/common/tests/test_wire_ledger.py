@@ -11,7 +11,12 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from mftik.exchange.wire import WireLedger, first_seen
+from mftik.exchange.wire import (
+    ReleaseOutcome,
+    WireLedger,
+    classify_release,
+    first_seen,
+)
 
 
 def test_first_seen_keeps_order_and_drops_duplicates() -> None:
@@ -221,6 +226,259 @@ async def test_a_leader_that_fails_after_clear_does_not_kill_a_fresh_reservation
     await waiter
     assert sent == [["k"]]
     assert ledger.held() == frozenset({"k"})
+
+
+def test_a_timeout_message_is_unknown_and_a_venue_error_is_rejected() -> None:
+    assert classify_release(TimeoutError()) is ReleaseOutcome.UNKNOWN
+    assert classify_release(ConnectionError("reset")) is ReleaseOutcome.UNKNOWN
+    assert (
+        classify_release(RuntimeError("no reply within 10s")) is ReleaseOutcome.UNKNOWN
+    )
+    assert classify_release(RuntimeError("unknown stream")) is ReleaseOutcome.REJECTED
+
+
+async def test_release_of_the_last_reader_drops_the_key() -> None:
+    ledger: WireLedger[str] = WireLedger()
+    sent: list[list[str]] = []
+
+    async def subscribe(keys: list[str]) -> None:
+        sent.append(list(keys))
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        sent.append(list(keys))
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    await ledger.acquire(["a", "b"], subscribe)
+    outcomes = await ledger.release(["a"], unsubscribe, lambda _key: False)
+    assert outcomes == {"a": ReleaseOutcome.ACKED}
+    assert ledger.held() == frozenset({"b"})
+    assert sent == [["a", "b"], ["a"]]
+
+
+async def test_release_leaves_a_key_a_reader_still_wants() -> None:
+    ledger: WireLedger[str] = WireLedger()
+    sent: list[list[str]] = []
+
+    async def subscribe(keys: list[str]) -> None:
+        pass
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        sent.append(list(keys))
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    await ledger.acquire(["a"], subscribe)
+    outcomes = await ledger.release(["a"], unsubscribe, lambda _key: True)
+    assert outcomes == {}
+    assert sent == []
+    assert ledger.held() == frozenset({"a"})
+
+
+async def test_an_explicit_rejection_puts_the_key_back() -> None:
+    ledger: WireLedger[str] = WireLedger()
+    subscribed: list[list[str]] = []
+
+    async def subscribe(keys: list[str]) -> None:
+        subscribed.append(list(keys))
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        return {key: ReleaseOutcome.REJECTED for key in keys}
+
+    await ledger.acquire(["a"], subscribe)
+    await ledger.release(["a"], unsubscribe, lambda _key: False)
+    assert ledger.held() == frozenset({"a"})
+
+    await ledger.acquire(["a"], subscribe)
+    assert subscribed == [["a"]]
+
+
+async def test_an_unknown_unsubscribe_lets_the_next_acquire_subscribe() -> None:
+    ledger: WireLedger[str] = WireLedger()
+    subscribed: list[list[str]] = []
+
+    async def subscribe(keys: list[str]) -> None:
+        subscribed.append(list(keys))
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        return {key: ReleaseOutcome.UNKNOWN for key in keys}
+
+    await ledger.acquire(["a"], subscribe)
+    await ledger.release(["a"], unsubscribe, lambda _key: False)
+    assert not ledger.held()
+
+    await ledger.acquire(["a"], subscribe)
+    assert subscribed == [["a"], ["a"]]
+
+
+async def test_a_raised_unsubscribe_is_unknown_and_propagates() -> None:
+    ledger: WireLedger[str] = WireLedger()
+
+    async def subscribe(keys: list[str]) -> None:
+        pass
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        raise ConnectionError("socket lost")
+
+    await ledger.acquire(["a"], subscribe)
+    with pytest.raises(ConnectionError, match="socket lost"):
+        await ledger.release(["a"], unsubscribe, lambda _key: False)
+    assert not ledger.held()
+
+
+async def test_acquire_during_release_resubscribes_without_reserving_a_sibling() -> (
+    None
+):
+    ledger: WireLedger[str] = WireLedger()
+
+    async def subscribe(keys: list[str]) -> None:
+        pass
+
+    await ledger.acquire(["a", "b"], subscribe)
+
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    sent: list[list[str]] = []
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        started.set()
+        await finish.wait()
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    releasing = asyncio.create_task(
+        ledger.release(["a"], unsubscribe, lambda _key: False)
+    )
+    await started.wait()
+
+    async def resubscribe(keys: list[str]) -> None:
+        sent.append(list(keys))
+
+    acquiring = asyncio.create_task(ledger.acquire(["a", "b"], resubscribe))
+    for _ in range(20):
+        if sent:
+            break
+        await asyncio.sleep(0)
+    assert sent == []
+    finish.set()
+    await releasing
+    await acquiring
+    assert sent == [["a"]]
+    assert ledger.held() == frozenset({"a", "b"})
+
+
+async def test_clear_during_release_does_not_mark_the_new_generation_held() -> None:
+    ledger: WireLedger[str] = WireLedger()
+
+    async def subscribe(keys: list[str]) -> None:
+        pass
+
+    await ledger.acquire(["a"], subscribe)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        started.set()
+        await finish.wait()
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    releasing = asyncio.create_task(
+        ledger.release(["a"], unsubscribe, lambda _key: False)
+    )
+    await started.wait()
+    ledger.clear()
+    finish.set()
+    await releasing
+    assert not ledger.held()
+
+    sent: list[list[str]] = []
+
+    async def send(keys: list[str]) -> None:
+        sent.append(list(keys))
+
+    await ledger.acquire(["a"], send)
+    assert sent == [["a"]]
+    assert ledger.held() == frozenset({"a"})
+
+
+async def test_one_release_can_ack_one_key_and_reject_another() -> None:
+    ledger: WireLedger[str] = WireLedger()
+
+    async def subscribe(keys: list[str]) -> None:
+        pass
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        return {"a": ReleaseOutcome.ACKED, "b": ReleaseOutcome.REJECTED}
+
+    await ledger.acquire(["a", "b"], subscribe)
+    outcomes = await ledger.release(["a", "b"], unsubscribe, lambda _key: False)
+    assert outcomes["a"] is ReleaseOutcome.ACKED
+    assert outcomes["b"] is ReleaseOutcome.REJECTED
+    assert ledger.held() == frozenset({"b"})
+
+
+async def test_a_second_release_waits_instead_of_sending_again() -> None:
+    ledger: WireLedger[str] = WireLedger()
+
+    async def subscribe(keys: list[str]) -> None:
+        pass
+
+    await ledger.acquire(["a"], subscribe)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    sent: list[list[str]] = []
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        sent.append(list(keys))
+        started.set()
+        await finish.wait()
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    first = asyncio.create_task(ledger.release(["a"], unsubscribe, lambda _key: False))
+    await started.wait()
+    second = asyncio.create_task(ledger.release(["a"], unsubscribe, lambda _key: False))
+    for _ in range(20):
+        if second.done():
+            break
+        await asyncio.sleep(0)
+    assert not second.done()
+    finish.set()
+    assert await first == {"a": ReleaseOutcome.ACKED}
+    assert await second == {"a": ReleaseOutcome.ACKED}
+    assert sent == [["a"]]
+    assert not ledger.held()
+
+
+async def test_release_waits_out_a_resync_cycle() -> None:
+    ledger: WireLedger[str] = WireLedger()
+
+    async def subscribe(keys: list[str]) -> None:
+        pass
+
+    await ledger.acquire(["a"], subscribe)
+    sent: list[list[str]] = []
+    entered = asyncio.Event()
+    finish_cycle = asyncio.Event()
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        sent.append(list(keys))
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    async def cycle() -> None:
+        async with ledger.cycling("a"):
+            entered.set()
+            await finish_cycle.wait()
+
+    cycling = asyncio.create_task(cycle())
+    await entered.wait()
+    releasing = asyncio.create_task(
+        ledger.release(["a"], unsubscribe, lambda _key: False)
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert sent == []
+    finish_cycle.set()
+    await cycling
+    await releasing
+    assert sent == [["a"]]
+    assert not ledger.held()
 
 
 async def test_discard_forgets_an_explicit_unsubscribe() -> None:

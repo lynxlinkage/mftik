@@ -55,6 +55,11 @@ class FakeBybit:
         self.results: dict[str, Any] = {}
         #: op → ``(retCode, retMsg)`` to refuse with instead.
         self.errors: dict[str, tuple[int, str]] = {}
+        #: op → how many of the next replies fail, then succeed.
+        self.fail_times: dict[str, int] = {}
+        self.fail_messages: dict[str, str] = {}
+        #: Ops recorded but not answered, so the client waits out its ack.
+        self.silent_ops: set[str] = set()
         #: Answer pongs the way the private socket does — ``op: pong``, no
         #: ``req_id`` — rather than the public socket's echo.
         self.private_pong = False
@@ -108,6 +113,23 @@ class FakeBybit:
 
         if op in ("subscribe", "unsubscribe"):
             args = [str(a) for a in msg.get("args") or []]
+            if op in self.silent_ops:
+                return
+            remaining = self.fail_times.get(op, 0)
+            if remaining > 0:
+                self.fail_times[op] = remaining - 1
+                await self._send(
+                    websocket,
+                    {
+                        "op": op,
+                        "req_id": req_id,
+                        "success": False,
+                        "ret_msg": self.fail_messages.get(op, "nope"),
+                        "retCode": 1,
+                        "conn_id": "conn-1",
+                    },
+                )
+                return
             failure = self.errors.get(op)
             if failure is not None:
                 code, message = failure

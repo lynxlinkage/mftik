@@ -12,13 +12,16 @@ satisfied by a single venue topic. When a product refcount hits zero,
 same venue topic may still be feeding another pump, or the pump that just
 died may have been only one of two streams that pump was holding.
 
-MDS-1 shipped on `exchange/wire-ledger` (`c555593`, [#16]). The tree now
-shares a wire identity across pumps and reserves it before the ack — on
-every venue except Gate, where the key it shipped is still too coarse to
-deliver I2. MDS-1b through MDS-5 are open; MDS-6 is deliberately parked.
-This stays the design record rather than becoming a changelog: what the
-tickets say is what was built, and where a ticket and the tree disagree the
-tree is the bug.
+MDS-1 shipped on `exchange/wire-ledger` (`c555593`, [#16]). MDS-1b through
+MDS-6 have since landed: `clear()` fails in-flight waiters, a late joiner
+is replayed, a successful book resync leaves `held()` unchanged, Gate keys
+one payload item and `unsubscribe()` refuses a co-reader, and the MD
+scenarios live in `apps/md/tests/test_md_shared_venue_topics.py`. A public
+socket whose last reader has closed waits `RELEASE_LINGER`, then sends one
+batched `UNSUBSCRIBE`. Private and user streams still leave the venue
+subscription up. This stays the design record rather than becoming a
+changelog: what the tickets say is what was built, and where a ticket and
+the tree disagree the tree is the bug.
 
 [#16]: https://github.com/lynxlinkage/mftik/pull/16
 
@@ -199,7 +202,7 @@ decides which one a name lands on.
 | Late joiner | accidental snapshot from the duplicate frame | **nothing** — silent, and a folded book is reset | MDS-2 |
 | Book-gap resync | direct `request`, bypasses the ledger | same, unpinned by any test | MDS-3 |
 | `unsubscribe()` | closed every intersecting `_Sub` | same, and now frees the ledger key too | MDS-4 |
-| Refcount-zero → wire | never wired | never wired | MDS-6, or never |
+| Refcount-zero → wire | never wired | never wired | shipped: linger, then one public `UNSUBSCRIBE` |
 
 ## What is already true
 
@@ -782,53 +785,74 @@ soon as the ledger is in, which is now. MDS-4 does not gate S2/S3 — the
 detach path does not go through `unsubscribe()` — and MDS-4 carries its own
 tests for the API it changes.
 
-### MDS-6 — Last-consumer `UNSUBSCRIBE` — parked
+### MDS-6 — Last-reader `UNSUBSCRIBE` — shipped
 
 **Goal.** An identity nothing reads stops arriving, without racing
-reconnect, resync or a handover pin.
+reconnect, resync, or a handover pin.
 
-**Scope.** `WireLedger` plus each socket's `_drop`. Not started, and not
-scheduled.
+**Scope.** `WireLedger.release` and one `IdleReleaser` per public socket.
+The hook is `_drop` on Binance, Bybit, OKX, Bitget, and Deribit, and
+`_drop_stream` on Gate. Private and user streams are unchanged: TD closes
+and reopens the order stream around a reconnect, so those sockets leave
+the venue subscription up. Paper has no wire subscribe.
 
-**Problem.** An idle topic on an already-open socket costs bandwidth and
-parse time, and a long-lived MD process accumulates them. That is the whole
-upside, and it is small.
+**Behavior.** `_drop` stays synchronous. Idle keys are the closed sub's
+index minus every key still present on any `_Sub`, and they go into a
+pending set that one task drains. The task waits `RELEASE_LINGER` (2s),
+then calls `release` once. Keys that arrive during the wait join that
+drain, so a burst of closes is one frame on venues that take a list.
+`still_wanted` runs again under the ledger lock at send time, so a
+reattach inside the linger sends nothing. Gate structured channels
+(order book, candlesticks) are one frame per identity inside that call,
+and each frame has its own outcome. A private Gate close enqueues
+nothing; `still_wanted` still counts a private `_Sub`.
 
-The downside is a race with three writers. `BybitPrivateStream._drop`
-already documents one: TD closes and reopens the order stream around a
-reconnect, and a socket that had unsubscribed in between would miss
-whatever arrived in the gap. Resync is the second — MDS-3 exists because an
-unsubscribe and a resync look identical on the wire. Handover pins are the
-third: `docs/MdHandover.md` has a feed pumping at refcount zero, so "no
-consumer" is not a stable fact during a swap.
+`release` takes only keys that are held, not in flight, not in a book
+resync cycle, and not still wanted. It moves them to releasing and asks
+the socket for a per-key outcome. An explicit venue rejection puts the
+key back in `held`, so the next `acquire` does not send `SUBSCRIBE`. A
+timeout or a connection error leaves the key not held, so the next
+`acquire` does send it. Bybit's "already subscribed" reply on that
+follow-up counts as success. `acquire` that finds any requested key
+releasing waits and reserves nothing, then starts the whole call over.
+`clear()` drops releasing state with the generation.
 
-**Solution.** Only with a story for all three. Derive the last reader by
-scanning `_subs` (never a counter — `EventStream.close()` is idempotent and
-a double-close would decrement twice). Send `UNSUBSCRIBE` then `discard`,
-under the same lock `acquire` uses, so a concurrent `acquire` for that
-identity either waits and re-sends or is serialised behind the close.
+Book resync on Bybit, OKX, and Deribit holds the key in a cycle so
+`release` cannot unsubscribe between the two frames. A successful resync
+leaves `held()` unchanged. `SUBSCRIBE` is retried a few times. If those
+fail, the key is discarded and the live connection is dropped without
+`_teardown`, so the read loop runs `_restore`. An explicit rejection of
+the resync `UNSUBSCRIBE` leaves the key held and does not reconnect.
 
-Until that story exists, leaving the venue topic up on an already-open
-socket is the known, cheaper wrong.
+`unsubscribe()` claims the keys out of the pending set and awaits
+`release` immediately, so the venue error still reaches the caller.
+`_teardown` and Gate `_fail_streams` cancel the flusher, `clear()` the
+ledger, then close streams. A release armed by those closes finds
+nothing held.
 
-**Verify.** Not specified. Write it with the ticket, not before.
+Handover does not share a socket across processes. The linger covers a
+close that lands a few seconds before its successor `_Sub` on the same
+socket. The last reader is a scan of `_subs`, never a counter and never
+MD's product refcount.
 
-**Depends.** MDS-1b, MDS-2, MDS-3, MDS-4 — the reservation has to be
-complete (MDS-1b) before a close can be serialised against it. Blocked on a
-decision that the bandwidth is worth the race, which has not been made.
+**Verify.** `packages/common/tests/test_wire_ledger.py` and
+`packages/common/tests/test_last_reader_release.py`.
+
+**Depends.** MDS-1b, MDS-2, MDS-3, MDS-4, and the success-path resync
+invariant: `held()` is unchanged across a resync that lands.
 
 ## Order
 
 ```
 MDS-1 wire ledger + reservation             [shipped, c555593]
-  ├── MDS-1b _inflight on clear, OKX + futures coverage
-  ├── MDS-2  late-joiner policy
-  ├── MDS-3  pin resync as a force path
-  ├── MDS-4  Gate per-item key + last-reader-only unsubscribe()
-  └── MDS-5  cross-key scenarios (all six)
+  ├── MDS-1b _inflight on clear, OKX + futures coverage   [shipped]
+  ├── MDS-2  late-joiner policy                            [shipped]
+  ├── MDS-3  pin resync as a force path                    [shipped]
+  ├── MDS-4  Gate per-item key + last-reader-only unsubscribe() [shipped]
+  └── MDS-5  cross-key scenarios (all six)                 [shipped]
 
 MDS-1b + MDS-2 + MDS-3 + MDS-4
-  └── MDS-6  last-consumer UNSUBSCRIBE      [parked]
+  └── MDS-6  last-reader UNSUBSCRIBE                       [shipped]
 ```
 
 Everything below MDS-1 is unblocked today and nothing in that row gates
@@ -849,7 +873,8 @@ Recommended order if they land one at a time:
    piece of work in the epic because it needs a stub that does not exist.
 5. **MDS-3** — a guard rail on behaviour that is already correct.
 
-MDS-6 is not scheduled and its `Verify` is deliberately empty.
+MDS-1b through MDS-6 have shipped. The list above is the order they were
+written in.
 
 ## Docs that stay right
 

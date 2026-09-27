@@ -29,7 +29,16 @@ from typing import Any, TypeVar
 from mftik.exchange.binance.protocol import BinanceResponse, subscribe_frame
 from mftik.exchange.binance.socket import BinanceSocket
 from mftik.exchange.stream import EventStream
-from mftik.exchange.wire import WireLedger, assert_last_reader, first_seen
+from mftik.exchange.wire import (
+    IdleReleaser,
+    ReleaseOutcome,
+    WireLedger,
+    assert_last_reader,
+    first_seen,
+    map_release,
+    orphaned_keys,
+    raise_for_release,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +85,7 @@ class BinanceStreamSocket(BinanceSocket):
         retry_backoff: float = 1.0,
         max_retry_backoff: float = 30.0,
         keepalive: float = 20.0,
+        release_linger: float = 2.0,
     ) -> None:
         super().__init__(
             url,
@@ -88,6 +98,12 @@ class BinanceStreamSocket(BinanceSocket):
         )
         self._subs: list[_Sub] = []
         self._ledger: WireLedger[str] = WireLedger()
+        self._releaser: IdleReleaser[str] = IdleReleaser(
+            self._ledger,
+            self._send_unsubscribe,
+            self._still_wanted,
+            linger=release_linger,
+        )
 
     # --- raw plumbing ------------------------------------------------------
 
@@ -101,21 +117,25 @@ class BinanceStreamSocket(BinanceSocket):
         A co-reader or a wider ``_Sub`` that is only partly covered
         raises. Matching streams close even if the venue frame fails, so
         a reconnect cannot resurrect a name the caller just dropped.
-        The ledger key is discarded only after the venue acks: a
-        rejected ``UNSUBSCRIBE`` means the socket is still carrying it,
-        and the next subscribe must not send again.
+        An explicit rejection puts the key back: the socket is still
+        carrying it, and the next subscribe must not send again. A
+        timeout or a lost connection leaves it free, so the next
+        subscribe does send.
         """
         wanted = frozenset(names)
         assert_last_reader(
             {name: [s.index for s in self._subs if name in s.index] for name in wanted}
         )
-        try:
-            frame, req_id = subscribe_frame(UNSUBSCRIBE, list(names))
-            await self.request(frame, req_id, method=UNSUBSCRIBE)
-        finally:
-            for sub in [s for s in self._subs if s.index <= wanted and s.index]:
-                sub.stream.close()
-        self._ledger.discard(names)
+        errors: list[BaseException] = []
+        for sub in [s for s in self._subs if s.index <= wanted and s.index]:
+            sub.stream.close()
+        self._releaser.claim(wanted)
+        outcomes = await self._ledger.release(
+            list(wanted),
+            lambda keys: self._send_unsubscribe(keys, errors),
+            self._still_wanted,
+        )
+        raise_for_release(outcomes, errors)
 
     async def list_subscriptions(self) -> list[str]:
         """What this socket is currently subscribed to, per Binance."""
@@ -150,8 +170,29 @@ class BinanceStreamSocket(BinanceSocket):
         )
         return stream
 
+    async def _send_unsubscribe(
+        self, keys: list[str], errors: list[BaseException] | None = None
+    ) -> dict[str, ReleaseOutcome]:
+        try:
+            frame, req_id = subscribe_frame(UNSUBSCRIBE, list(keys))
+            await self.request(frame, req_id, method=UNSUBSCRIBE)
+        except Exception as exc:
+            if errors is not None:
+                errors.append(exc)
+            return map_release(keys, exc)
+        return map_release(keys, None)
+
+    def _still_wanted(self, key: str) -> bool:
+        return any(key in sub.index for sub in self._subs)
+
     def _drop(self, stream: EventStream[Any]) -> None:
-        self._subs = [s for s in self._subs if s.stream is not stream]
+        closed = next((sub for sub in self._subs if sub.stream is stream), None)
+        self._subs = [sub for sub in self._subs if sub.stream is not stream]
+        if closed is None:
+            return
+        idle = orphaned_keys(closed.index, (sub.index for sub in self._subs))
+        if idle:
+            self._releaser.enqueue(idle)
 
     # --- socket hooks ------------------------------------------------------
 
@@ -191,10 +232,12 @@ class BinanceStreamSocket(BinanceSocket):
                 )
 
     def _teardown(self) -> None:
+        self._releaser.cancel()
         self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
+        self._releaser.cancel()
 
 
 __all__ = [

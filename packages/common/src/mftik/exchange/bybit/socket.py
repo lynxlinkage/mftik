@@ -452,6 +452,19 @@ class BybitSocket:
     def _push(self, resp: BybitResponse) -> None:
         """Route a topic frame. Default: nothing subscribes."""
 
+    async def drop_connection(self) -> None:
+        """Close the live websocket without shutting the socket down.
+
+        The read loop treats this as a network drop and reconnects.
+        ``_closing`` stays false, so ``_teardown`` does not run and the
+        readers survive for ``_restore``.
+        """
+        conn = self._conn
+        if conn is None:
+            return
+        with contextlib.suppress(Exception):
+            await conn.close()
+
     def _teardown(self) -> None:
         """Close every stream reading this socket. On close and on give-up."""
 

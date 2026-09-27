@@ -43,6 +43,7 @@ from mftik.exchange.bybit.protocol import (
     SUBSCRIBE,
     UNSUBSCRIBE,
     BybitResponse,
+    BybitWsError,
     public_url,
     subscribe_frame,
 )
@@ -50,7 +51,18 @@ from mftik.exchange.bybit.socket import DEFAULT_PING_INTERVAL, BybitSocket
 from mftik.exchange.models import BookLevel, OrderBook
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import UniversalTicker
-from mftik.exchange.wire import WireLedger, assert_last_reader, first_seen
+from mftik.exchange.wire import (
+    IdleReleaser,
+    ReleaseOutcome,
+    ResyncResult,
+    WireLedger,
+    assert_last_reader,
+    first_seen,
+    map_release,
+    orphaned_keys,
+    raise_for_release,
+    resync_channel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +256,7 @@ class BybitPublicStream(BybitSocket):
         retry_backoff: float = 1.0,
         max_retry_backoff: float = 30.0,
         ping_interval: float = DEFAULT_PING_INTERVAL,
+        release_linger: float = 2.0,
     ) -> None:
         super().__init__(
             url or public_url(product, testnet=testnet),
@@ -262,6 +275,12 @@ class BybitPublicStream(BybitSocket):
         #: topic → the book being folded for it.
         self._books: dict[str, BybitBook] = {}
         self._ledger: WireLedger[str] = WireLedger()
+        self._releaser: IdleReleaser[str] = IdleReleaser(
+            self._ledger,
+            self._send_unsubscribe,
+            self._still_wanted,
+            linger=release_linger,
+        )
 
     # --- raw plumbing ------------------------------------------------------
 
@@ -273,10 +292,13 @@ class BybitPublicStream(BybitSocket):
         """Unsubscribe topics. Last-reader only.
 
         A co-reader or a wider ``_Sub`` that is only partly covered
-        raises. Streams close even if the venue frame fails. The ledger
-        key is discarded only after the venue acks — a rejected
-        ``UNSUBSCRIBE`` leaves the name held, so the next subscribe
-        does not send a duplicate Bybit would refuse.
+        raises. Streams close even if the venue frame fails, so a
+        reconnect cannot resurrect a topic the caller just dropped. An
+        explicit rejection puts the key back: Bybit is still carrying
+        it, and the next subscribe must not send a duplicate Bybit
+        would refuse. A timeout or a lost connection leaves it free.
+        A follow-up subscribe that Bybit answers with "already
+        subscribed" is success.
         """
         wanted = frozenset(topics)
         assert_last_reader(
@@ -285,22 +307,44 @@ class BybitPublicStream(BybitSocket):
                 for topic in wanted
             }
         )
+        errors: list[BaseException] = []
+        for topic in wanted:
+            self._books.pop(topic, None)
+        for sub in [s for s in self._subs if s.index <= wanted and s.index]:
+            sub.stream.close()
+        self._releaser.claim(wanted)
+        outcomes = await self._ledger.release(
+            list(wanted),
+            lambda keys: self._send_unsubscribe(keys, errors),
+            self._still_wanted,
+        )
+        raise_for_release(outcomes, errors)
+
+    async def _send_subscribe(self, topics: list[str]) -> None:
+        frame, req_id = subscribe_frame(list(topics))
         try:
-            frame, req_id = subscribe_frame(list(topics), op=UNSUBSCRIBE)
+            await self.request(frame, req_id, op=SUBSCRIBE)
+        except BybitWsError as exc:
+            if "already subscribed" not in str(exc).lower():
+                raise
+
+    async def _send_unsubscribe(
+        self, keys: list[str], errors: list[BaseException] | None = None
+    ) -> dict[str, ReleaseOutcome]:
+        try:
+            frame, req_id = subscribe_frame(list(keys), op=UNSUBSCRIBE)
             await self.request(frame, req_id, op=UNSUBSCRIBE)
-        finally:
-            for topic in wanted:
-                self._books.pop(topic, None)
-            for sub in [s for s in self._subs if s.index <= wanted and s.index]:
-                sub.stream.close()
-        self._ledger.discard(topics)
+        except Exception as exc:
+            if errors is not None:
+                errors.append(exc)
+            return map_release(keys, exc)
+        return map_release(keys, None)
+
+    def _still_wanted(self, key: str) -> bool:
+        return any(key in sub.index for sub in self._subs)
 
     async def _acquire(self, topics: tuple[str, ...]) -> None:
-        async def send(missing: list[str]) -> None:
-            frame, req_id = subscribe_frame(list(missing))
-            await self.request(frame, req_id, op=SUBSCRIBE)
-
-        await self._ledger.acquire(list(topics), send)
+        await self._ledger.acquire(list(topics), self._send_subscribe)
 
     async def _subscribe(self, topics: tuple[str, ...], parse: Parse) -> EventStream[T]:
         await self._acquire(topics)
@@ -316,8 +360,14 @@ class BybitPublicStream(BybitSocket):
         return stream
 
     def _drop(self, stream: EventStream[Any]) -> None:
-        self._subs = [s for s in self._subs if s.stream is not stream]
+        closed = next((sub for sub in self._subs if sub.stream is stream), None)
+        self._subs = [sub for sub in self._subs if sub.stream is not stream]
         self._forget_orphaned_books()
+        if closed is None:
+            return
+        idle = orphaned_keys(closed.index, (sub.index for sub in self._subs))
+        if idle:
+            self._releaser.enqueue(idle)
 
     def _forget_orphaned_books(self) -> None:
         """Drop folds nobody is reading, so a later folder does not replay them."""
@@ -526,21 +576,38 @@ class BybitPublicStream(BybitSocket):
     async def _force_resubscribe(self, topic: str) -> None:
         """End and restart one topic so the venue sends a fresh snapshot.
 
-        This is not a ledger open or close. The identity stays held — a
-        co-reader is still on it, and routing the ``SUBSCRIBE`` through
-        ``acquire`` would no-op because the key is already reserved, so
-        no snapshot would arrive. ``discard`` on the way out would mark
-        the identity free and let the next ``acquire`` double-subscribe.
+        The identity stays held across a successful round trip. Routing
+        the ``SUBSCRIBE`` through ``acquire`` would no-op because the
+        key is already reserved, so no snapshot would arrive. If the
+        re-subscribe does not land, the key is discarded and the
+        connection dropped so ``_restore`` resubscribes every reader
+        still attached. An explicit unsubscribe rejection leaves the
+        key held: Bybit is still sending the topic.
         """
-        try:
+
+        async def unsubscribe() -> None:
             frame, req_id = subscribe_frame([topic], op=UNSUBSCRIBE)
             await self.request(frame, req_id, op=UNSUBSCRIBE)
+
+        async def subscribe() -> None:
             frame, req_id = subscribe_frame([topic])
             await self.request(frame, req_id, op=SUBSCRIBE)
-        except Exception:
-            logger.exception("%s failed to resync %s", self.name, topic)
-            return
-        logger.info("%s resynced %s after a book gap", self.name, topic)
+
+        result = await resync_channel(
+            self._ledger,
+            topic,
+            still_wanted=self._still_wanted,
+            unsubscribe=unsubscribe,
+            subscribe=subscribe,
+            drop_connection=self.drop_connection,
+        )
+        book = self._books.get(topic)
+        if result is ResyncResult.STILL_HELD and book is not None:
+            book.resyncing = False
+        if not self._still_wanted(topic):
+            self._releaser.enqueue([topic])
+        elif result is ResyncResult.DONE:
+            logger.info("%s resynced %s after a book gap", self.name, topic)
 
     # --- socket hooks ------------------------------------------------------
 
@@ -558,11 +625,7 @@ class BybitPublicStream(BybitSocket):
         for topic in list(self._books):
             self._books[topic] = BybitBook(ch.symbol_of(topic))
 
-        async def send(missing: list[str]) -> None:
-            frame, req_id = subscribe_frame(list(missing))
-            await self.request(frame, req_id, op=SUBSCRIBE)
-
-        await self._ledger.acquire(topics, send)
+        await self._ledger.acquire(topics, self._send_subscribe)
         logger.info("%s resubscribed %s topics", self.name, len(topics))
 
     def _push(self, resp: BybitResponse) -> None:
@@ -588,11 +651,13 @@ class BybitPublicStream(BybitSocket):
                     sub.stream.push(parsed)
 
     def _teardown(self) -> None:
+        self._releaser.cancel()
         self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
         self._books.clear()
+        self._releaser.cancel()
 
 
 __all__ = [

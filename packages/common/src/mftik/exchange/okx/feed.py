@@ -41,7 +41,15 @@ from mftik.exchange.okx.protocol import (
 from mftik.exchange.okx.socket import DEFAULT_PING_INTERVAL, OkxSocket
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import UniversalTicker
-from mftik.exchange.wire import WireLedger
+from mftik.exchange.wire import (
+    IdleReleaser,
+    ReleaseOutcome,
+    ResyncResult,
+    WireLedger,
+    map_release,
+    orphaned_keys,
+    resync_channel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +198,7 @@ class OkxPublicStream(OkxSocket):
         retry_backoff: float = 1.0,
         max_retry_backoff: float = 30.0,
         ping_interval: float = DEFAULT_PING_INTERVAL,
+        release_linger: float = 2.0,
     ) -> None:
         super().__init__(
             url,
@@ -203,6 +212,13 @@ class OkxPublicStream(OkxSocket):
         self._subs: list[_Sub] = []
         self._books: dict[tuple[str, str, str], OkxBook] = {}
         self._ledger: WireLedger[tuple[str, str, str]] = WireLedger()
+        self._args: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._releaser: IdleReleaser[tuple[str, str, str]] = IdleReleaser(
+            self._ledger,
+            self._send_unsubscribe,
+            self._still_wanted,
+            linger=release_linger,
+        )
 
     async def subscribe_trades(self, inst_id: str) -> EventStream[OkxPublicTrade]:
         return await self._subscribe(
@@ -321,19 +337,38 @@ class OkxPublicStream(OkxSocket):
     async def _force_resubscribe(self, arg: dict[str, Any]) -> None:
         """End and restart one channel so the venue sends a fresh snapshot.
 
-        Not a ledger open or close: the identity stays held. ``acquire``
-        would no-op (already reserved); ``discard`` would free a
-        co-reader's key. Everyone on the topic is blind for this RTT.
+        The identity stays held across a successful round trip.
+        ``acquire`` would no-op (already reserved) and no snapshot would
+        arrive. If the re-subscribe does not land, the key is discarded
+        and the connection dropped so ``_restore`` resubscribes every
+        reader still attached. An explicit unsubscribe rejection leaves
+        the key held.
         """
-        try:
+        key = ch.arg_key(arg)
+
+        async def unsubscribe() -> None:
             frame, req_id = subscribe_frame([arg], op=UNSUBSCRIBE)
             await self.request(frame, req_id, op=UNSUBSCRIBE)
+
+        async def subscribe() -> None:
             frame, req_id = subscribe_frame([arg])
             await self.request(frame, req_id, op=SUBSCRIBE)
-        except Exception:
-            logger.exception("%s failed to resync %s", self.name, arg)
-            return
-        logger.info("%s resynced %s after a book gap", self.name, arg)
+
+        result = await resync_channel(
+            self._ledger,
+            key,
+            still_wanted=self._still_wanted,
+            unsubscribe=unsubscribe,
+            subscribe=subscribe,
+            drop_connection=self.drop_connection,
+        )
+        book = self._books.get(key)
+        if result is ResyncResult.STILL_HELD and book is not None:
+            book.resyncing = False
+        if not self._still_wanted(key):
+            self._releaser.enqueue([key])
+        elif result is ResyncResult.DONE:
+            logger.info("%s resynced %s after a book gap", self.name, arg)
 
     async def _subscribe(
         self, args: tuple[dict[str, Any], ...], parse: Parse
@@ -347,6 +382,8 @@ class OkxPublicStream(OkxSocket):
             await self.request(frame, req_id, op=SUBSCRIBE)
 
         await self._ledger.acquire([ch.arg_key(arg) for arg in args], send)
+        for arg in args:
+            self._args[ch.arg_key(arg)] = arg
         stream: EventStream[T] = EventStream(on_close=self._drop)
         self._subs.append(
             _Sub(
@@ -358,12 +395,36 @@ class OkxPublicStream(OkxSocket):
         )
         return stream
 
+    async def _send_unsubscribe(
+        self, keys: list[tuple[str, str, str]]
+    ) -> dict[tuple[str, str, str], ReleaseOutcome]:
+        wanted = [self._args[key] for key in keys if key in self._args]
+        if not wanted:
+            return map_release(keys, None)
+        try:
+            frame, req_id = subscribe_frame(wanted, op=UNSUBSCRIBE)
+            await self.request(frame, req_id, op=UNSUBSCRIBE)
+        except Exception as exc:
+            return map_release(keys, exc)
+        for key in keys:
+            self._args.pop(key, None)
+        return map_release(keys, None)
+
+    def _still_wanted(self, key: tuple[str, str, str]) -> bool:
+        return any(key in sub.index for sub in self._subs)
+
     def _drop(self, stream: EventStream[Any]) -> None:
-        self._subs = [s for s in self._subs if s.stream is not stream]
+        closed = next((sub for sub in self._subs if sub.stream is stream), None)
+        self._subs = [sub for sub in self._subs if sub.stream is not stream]
         live = {key for sub in self._subs if sub.folder for key in sub.index}
         for key in list(self._books):
             if key not in live:
                 self._books.pop(key)
+        if closed is None:
+            return
+        idle = orphaned_keys(closed.index, (sub.index for sub in self._subs))
+        if idle:
+            self._releaser.enqueue(idle)
 
     def _wanted(self) -> list[dict[str, Any]]:
         """Live subscribe args, each identity once, in first-seen order."""
@@ -435,11 +496,14 @@ class OkxPublicStream(OkxSocket):
                     sub.stream.push(parsed)
 
     def _teardown(self) -> None:
+        self._releaser.cancel()
         self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
         self._books.clear()
+        self._args.clear()
+        self._releaser.cancel()
 
 
 __all__ = [

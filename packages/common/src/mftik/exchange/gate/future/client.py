@@ -47,7 +47,15 @@ from mftik.exchange.gate.future.protocol import (
     session_api_frame,
 )
 from mftik.exchange.stream import EventStream
-from mftik.exchange.wire import WireLedger, assert_last_reader
+from mftik.exchange.wire import (
+    IdleReleaser,
+    ReleaseOutcome,
+    WireLedger,
+    assert_last_reader,
+    map_release,
+    orphaned_keys,
+    raise_for_release,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +177,7 @@ class GateFuturesWebSocket:
         retry_backoff: float = 1.0,
         max_retry_backoff: float = 30.0,
         close_timeout: float = 2.0,
+        release_linger: float = 2.0,
     ) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
@@ -185,6 +194,12 @@ class GateFuturesWebSocket:
         self._conn: ClientConnection | None = None
         self._subs: list[_Sub] = []
         self._ledger: WireLedger[WireKey] = WireLedger()
+        self._releaser: IdleReleaser[WireKey] = IdleReleaser(
+            self._ledger,
+            self._send_unsubscribe,
+            self._still_wanted,
+            linger=release_linger,
+        )
         self._pending: list[_Pending] = []
         self._tasks: list[asyncio.Task[Any]] = []
         self._connected = False
@@ -240,10 +255,12 @@ class GateFuturesWebSocket:
             if not pending.future.done():
                 pending.future.cancel()
         self._pending.clear()
+        self._releaser.cancel()
+        self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
-        self._ledger.clear()
+        self._releaser.cancel()
         if self._conn is not None:
             with contextlib.suppress(Exception):
                 await self._conn.close()
@@ -392,8 +409,11 @@ class GateFuturesWebSocket:
     ) -> None:
         """Unsubscribe payload items. Last-reader only.
 
-        Streams close even if the venue frame fails; the ledger key is
-        discarded only after the venue acks.
+        Streams close even if the venue frame fails, so a reconnect
+        cannot resurrect them. An explicit rejection puts those keys
+        back. A timeout or a lost connection leaves them free.
+        Structured channels are one frame each, so one frame can fail
+        while an earlier one in the same call has already landed.
         """
         wanted = frozenset(_wire_keys(channel, payload))
         assert_last_reader(
@@ -406,18 +426,22 @@ class GateFuturesWebSocket:
                 for key in wanted
             }
         )
-        try:
-            await self.request(channel, ch.UNSUBSCRIBE, payload, private=private)
-        finally:
-            for sub in [
-                s
-                for s in self._subs
-                if s.channel == channel
-                and frozenset(_wire_keys(s.channel, s.payload)) <= wanted
-                and _wire_keys(s.channel, s.payload)
-            ]:
-                sub.stream.close()
-        self._ledger.discard(wanted)
+        errors: list[BaseException] = []
+        for sub in [
+            s
+            for s in self._subs
+            if s.channel == channel
+            and frozenset(_wire_keys(s.channel, s.payload)) <= wanted
+            and _wire_keys(s.channel, s.payload)
+        ]:
+            sub.stream.close()
+        self._releaser.claim(wanted)
+
+        async def send(keys: list[WireKey]) -> dict[WireKey, ReleaseOutcome]:
+            return await self._send_unsubscribe(keys, errors, private=private)
+
+        outcomes = await self._ledger.release(list(wanted), send, self._still_wanted)
+        raise_for_release(outcomes, errors)
 
     async def ping(self) -> None:
         await self.send(ping_frame(ch.PING))
@@ -450,8 +474,54 @@ class GateFuturesWebSocket:
         )
         return stream
 
+    async def _send_unsubscribe(
+        self,
+        keys: list[WireKey],
+        errors: list[BaseException] | None = None,
+        private: bool = False,
+    ) -> dict[WireKey, ReleaseOutcome]:
+        """One outcome per key. Structured channels are one frame each."""
+        outstanding = set(keys)
+        by_channel: dict[str, list[tuple[str, ...]]] = {}
+        for channel, ident in keys:
+            by_channel.setdefault(channel, []).append(ident)
+        outcomes: dict[WireKey, ReleaseOutcome] = {}
+        for channel, idents in by_channel.items():
+            for payload in _payloads_of(channel, idents):
+                frame_keys = [
+                    key
+                    for key in _wire_keys(channel, payload)
+                    if key in outstanding
+                ]
+                if not frame_keys:
+                    continue
+                try:
+                    await self.request(
+                        channel, ch.UNSUBSCRIBE, payload, private=private
+                    )
+                except Exception as exc:
+                    if errors is not None:
+                        errors.append(exc)
+                    outcomes.update(map_release(frame_keys, exc))
+                else:
+                    outcomes.update(map_release(frame_keys, None))
+        return outcomes
+
+    def _still_wanted(self, key: WireKey) -> bool:
+        """Every live ``_Sub`` counts, private ones included."""
+        return any(key in _wire_keys(sub.channel, sub.payload) for sub in self._subs)
+
     def _drop_stream(self, stream: EventStream[Any]) -> None:
-        self._subs = [s for s in self._subs if s.stream is not stream]
+        closed = next((sub for sub in self._subs if sub.stream is stream), None)
+        self._subs = [sub for sub in self._subs if sub.stream is not stream]
+        if closed is None or closed.private:
+            return
+        idle = orphaned_keys(
+            _wire_keys(closed.channel, closed.payload),
+            (_wire_keys(sub.channel, sub.payload) for sub in self._subs),
+        )
+        if idle:
+            self._releaser.enqueue(idle)
 
     async def subscribe_tickers(
         self, *contracts: str
@@ -795,12 +865,14 @@ class GateFuturesWebSocket:
         logger.info("gate.futures resubscribed %s identities", len(keys))
 
     def _fail_streams(self) -> None:
+        self._releaser.cancel()
         self._connected = False
         self._logged_in = False
         self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
+        self._releaser.cancel()
 
 
 __all__ = ["GATE_FUTURES_WS_URL", "GateFuturesWebSocket"]

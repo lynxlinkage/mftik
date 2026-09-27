@@ -464,8 +464,9 @@ async def test_a_book_gap_resubscribes_and_frees_the_ledger(
         )
         await asyncio.sleep(0.1)
         assert deribit_public.frames_for(ch.PUBLIC_UNSUBSCRIBE)
-        # The unsubscribe landed, so the ledger must not still call the
-        # channel held: the re-subscribe is what puts it back.
+        # A successful resync leaves the ledger key held. The venue
+        # subscription is the one the re-subscribe puts back.
+        assert ch.book("BTC_USDC") in feed._ledger.held()
         assert deribit_public.subscribed == {ch.book("BTC_USDC")}
         assert len(deribit_public.frames_for(ch.PUBLIC_SUBSCRIBE)) == 2
     assert [level.price for level in first.bids] == [Decimal("100")]

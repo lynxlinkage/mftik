@@ -65,6 +65,7 @@ class BinanceDeliveryStream(BinanceStreamSocket):
         retry_backoff: float = 1.0,
         max_retry_backoff: float = 30.0,
         keepalive: float = 20.0,
+        release_linger: float = 2.0,
     ) -> None:
         super().__init__(
             url,
@@ -74,6 +75,7 @@ class BinanceDeliveryStream(BinanceStreamSocket):
             retry_backoff=retry_backoff,
             max_retry_backoff=max_retry_backoff,
             keepalive=keepalive,
+            release_linger=release_linger,
         )
 
     async def subscribe_agg_trades(
