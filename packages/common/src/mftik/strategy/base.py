@@ -110,9 +110,9 @@ class Strategy:
         (``topic.UniversalTicker``; kline carries its interval in the topic,
         e.g. ``paper.kline_1m.BTCUSDT``).
         on_expiry — not a subscribed topic. MD fires it once per
-        instrument when a dated contract or option reaches the listed
-        expiry, after every feed on that ticker has been dropped and
-        will not be resubscribed.
+        instrument per MD process when a dated contract or option
+        reaches the listed expiry, after every feed on that ticker
+        has been dropped and will not be resubscribed.
 
     Market-data queries — request-reply on ``md.fetch`` (wired):
         self.mds.fetch_klines(ticker, interval, limit=...)
@@ -491,10 +491,12 @@ class Strategy:
         """Handle an instrument that has reached its listed expiry.
 
         Not a feed topic and not listed in ``md_ids``. MD fires this
-        once per instrument, to every session that held a feed on
-        that ticker, then drops those feeds and will not reopen
-        them. ``expiry.topics`` names the product keys that were
-        cut (``ticker``, ``greeks``, ``kline_1h``, …).
+        once per instrument per MD process, to every session that
+        held a feed on that ticker, then drops those feeds and will
+        not reopen them. A later MD process may notify a rebuilt
+        session again without reopening the socket.
+        ``expiry.topics`` names the product keys that were cut
+        (``ticker``, ``greeks``, ``kline_1h``, …).
         ``expiry.expiry`` is the listed settlement time.
 
         Spot and perpetual books have no expiry and never arrive

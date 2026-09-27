@@ -66,6 +66,16 @@ _ORPHAN_STRIKES = 2
 #: the limit rather than truncating in silence.
 _REAP_SCAN_LIMIT = 500
 
+#: How long a failed symbol-plane read waits before the next try. A
+#: dated book that attached during a brief outage must still be cut
+#: at settlement; treating the failure as "no expiry" would leave
+#: the pump up. Capped at 30s by the retry loop.
+_LOOKUP_RETRY_S = 1.0
+
+
+class _SymbolLookupError(Exception):
+    """The symbol plane did not answer. Expiry is unknown, not absent."""
+
 
 @dataclass
 class StsLink:
@@ -94,6 +104,7 @@ class SessionManager:
         recorder: TapeRecorder | None = None,
         instance: str = SessionDomain.MD.value,
         symbols: SymbolClient | None = None,
+        expiry_lookup_retry_s: float = _LOOKUP_RETRY_S,
     ) -> None:
         self._factory = factory
         self._broker = broker
@@ -132,7 +143,17 @@ class SessionManager:
         #: and refused.
         self._expired: set[UniversalTicker] = set()
         self._expiry_at: dict[UniversalTicker, float] = {}
+        #: Confirmed no listed settlement (spot, perp, unknown symbol).
+        #: Stops a later subscribe from hitting the plane again.
+        self._timeless: set[UniversalTicker] = set()
+        self._resolve_waits: dict[
+            UniversalTicker, asyncio.Future[float | None]
+        ] = {}
         self._expiry_lock = asyncio.Lock()
+        self._lookup_retry_s = expiry_lookup_retry_s
+        #: Runtime ``md.subscribe`` work. Held so shutdown can cancel a
+        #: lookup / ``ensure_feed`` that is no longer on the lease loop.
+        self._subscribe_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -197,14 +218,24 @@ class SessionManager:
         self._links[request.session_id] = link
         self._dispatcher.register_link(link)
 
+        await self._prefetch_expiries(request.subscriptions)
         already: dict[UniversalTicker, list[str]] = {}
+        opened: set[UniversalTicker] = set()
+        now = time.time()
         for feed in request.subscriptions:
             topic, ticker = Topics.parse_md_feed(feed)
-            if ticker in self._expired:
+            listed = self._expiry_at.get(ticker)
+            if ticker in self._expired or (
+                listed is not None and listed <= now
+            ):
+                if ticker not in self._expired and listed is not None:
+                    await self._expire_ticker(ticker, listed)
                 already.setdefault(ticker, []).append(topic)
                 continue
             await self._subscribe_feed(link, feed, arm=False)
-        await self._arm_subscribed_tickers(request.subscriptions)
+            opened.add(ticker)
+        for ticker in opened:
+            self._schedule_arm(ticker)
         for ticker, topics in already.items():
             await self._publish_expiry(
                 [request.session_id],
@@ -452,6 +483,13 @@ class SessionManager:
         return reaped
 
     async def close_all(self) -> None:
+        for task in list(self._subscribe_tasks):
+            task.cancel()
+        if self._subscribe_tasks:
+            await asyncio.gather(
+                *self._subscribe_tasks, return_exceptions=True
+            )
+        self._subscribe_tasks.clear()
         for task in list(self._expiry_tasks.values()):
             task.cancel()
         if self._expiry_tasks:
@@ -472,10 +510,32 @@ class SessionManager:
         if self._recorder is not None:
             await self._recorder.aclose()
 
+    async def _subscribe_runtime(self, link: StsLink, feed: str) -> None:
+        try:
+            await self._subscribe_feed(link, feed, arm=True)
+        except Exception:
+            logger.exception(
+                "MD subscribe failed session=%s feed=%s",
+                link.session_id,
+                feed,
+            )
+
     async def _subscribe_feed(
         self, link: StsLink, feed: str, *, arm: bool = True
     ) -> None:
         topic, ticker = Topics.parse_md_feed(feed)
+        if arm:
+            listed = await self._try_resolve(ticker)
+            if listed is not None and listed <= time.time():
+                if ticker not in self._expired:
+                    await self._expire_ticker(ticker, listed)
+                await self._publish_expiry(
+                    [link.session_id],
+                    ticker,
+                    expiry=listed,
+                    topics=[topic],
+                )
+                return
         first = False
         old_rc = 0
         new_rc = 0
@@ -509,8 +569,26 @@ class SessionManager:
             source="md",
         )
         if first:
+            if (
+                ticker in self._expired
+                or self._dispatcher.refcount(topic, ticker) == 0
+            ):
+                return
             venue_sess = await self._ensure_venue(ticker.venue)
+            if (
+                ticker in self._expired
+                or self._dispatcher.refcount(topic, ticker) == 0
+            ):
+                if venue_sess.feed_count == 0:
+                    self._destroy_venue(ticker.venue)
+                return
             await venue_sess.ensure_feed(topic, ticker)
+            if (
+                ticker in self._expired
+                or self._dispatcher.refcount(topic, ticker) == 0
+            ):
+                await self._stop_feed_if_unused((topic, ticker))
+                return
             # Stamped here rather than on the first record: this is the moment
             # continuity broke, and a feed that starts pumping into a silent
             # market would otherwise look like it had been recording all along.
@@ -524,7 +602,7 @@ class SessionManager:
                 instance=self._instance,
             )
         if arm:
-            await self._arm_expiry(ticker)
+            self._schedule_arm(ticker)
 
     async def _unsubscribe_feed(self, link: StsLink, feed: str) -> None:
         topic, ticker = Topics.parse_md_feed(feed)
@@ -546,49 +624,102 @@ class SessionManager:
             await self._stop_feed_if_unused((topic, ticker))
         self._disarm_if_idle(ticker)
 
-    async def _arm_subscribed_tickers(self, feeds: Sequence[str]) -> None:
-        seen: set[UniversalTicker] = set()
+    async def _prefetch_expiries(self, feeds: Sequence[str]) -> None:
+        if self._symbols is None:
+            return
+        seen: list[UniversalTicker] = []
         for feed in feeds:
             try:
                 _topic, ticker = Topics.parse_md_feed(feed)
             except ValueError:
                 continue
-            if ticker in seen:
-                continue
-            seen.add(ticker)
-            await self._arm_expiry(ticker)
+            if ticker not in seen:
+                seen.append(ticker)
+        if not seen:
+            return
+        results = await asyncio.gather(
+            *(self._resolve_expiry(ticker) for ticker in seen),
+            return_exceptions=True,
+        )
+        for ticker, result in zip(seen, results, strict=True):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "MD symbol lookup failed ticker=%s: %s",
+                    ticker,
+                    result,
+                )
 
-    async def _listed_expiry(self, ticker: UniversalTicker) -> float | None:
-        if self._symbols is None:
+    async def _try_resolve(self, ticker: UniversalTicker) -> float | None:
+        if self._symbols is None or ticker in self._timeless:
             return None
+        if ticker in self._expiry_at:
+            return self._expiry_at[ticker]
+        try:
+            return await self._resolve_expiry(ticker)
+        except _SymbolLookupError:
+            logger.warning("MD symbol lookup failed ticker=%s", ticker)
+            return None
+
+    async def _resolve_expiry(self, ticker: UniversalTicker) -> float | None:
+        if self._symbols is None:
+            self._timeless.add(ticker)
+            return None
+        loop = asyncio.get_running_loop()
+        async with self._expiry_lock:
+            if ticker in self._timeless:
+                return None
+            if ticker in self._expiry_at:
+                return self._expiry_at[ticker]
+            waiter = self._resolve_waits.get(ticker)
+            mine = False
+            if waiter is None:
+                waiter = loop.create_future()
+                self._resolve_waits[ticker] = waiter
+                mine = True
+        if not mine:
+            return await waiter
         try:
             info = await self._symbols.get(ticker)
         except SymbolNotFoundError:
+            self._timeless.add(ticker)
+            if not waiter.done():
+                waiter.set_result(None)
             return None
-        except Exception:
-            logger.exception("MD symbol lookup failed ticker=%s", ticker)
-            return None
-        return info.expiry
+        except Exception as exc:
+            err = _SymbolLookupError(str(exc))
+            if not waiter.done():
+                waiter.set_exception(err)
+            raise err from exc
+        else:
+            expiry = info.expiry
+            if expiry is None:
+                self._timeless.add(ticker)
+            else:
+                self._expiry_at[ticker] = expiry
+            if not waiter.done():
+                waiter.set_result(expiry)
+            return expiry
+        finally:
+            if self._resolve_waits.get(ticker) is waiter:
+                self._resolve_waits.pop(ticker, None)
 
-    async def _arm_expiry(self, ticker: UniversalTicker) -> None:
-        if ticker in self._expired or ticker in self._expiry_tasks:
+    def _schedule_arm(self, ticker: UniversalTicker) -> None:
+        if self._symbols is None:
             return
-        expiry = await self._listed_expiry(ticker)
-        if expiry is None:
+        if ticker in self._expired or ticker in self._timeless:
             return
-        delay = expiry - time.time()
-        if delay <= 0:
-            await self._expire_ticker(ticker, expiry)
+        if ticker in self._expiry_tasks:
             return
         self._expiry_tasks[ticker] = asyncio.create_task(
-            self._watch_expiry(ticker, expiry),
+            self._run_expiry(ticker),
             name=f"md-expiry-{ticker}",
         )
 
-    async def _watch_expiry(
-        self, ticker: UniversalTicker, expiry: float
-    ) -> None:
+    async def _run_expiry(self, ticker: UniversalTicker) -> None:
         try:
+            expiry = await self._expiry_or_retry(ticker)
+            if expiry is None:
+                return
             delay = expiry - time.time()
             if delay > 0:
                 await asyncio.sleep(delay)
@@ -601,6 +732,26 @@ class SessionManager:
             current = asyncio.current_task()
             if self._expiry_tasks.get(ticker) is current:
                 self._expiry_tasks.pop(ticker, None)
+
+    async def _expiry_or_retry(self, ticker: UniversalTicker) -> float | None:
+        delay = self._lookup_retry_s
+        while True:
+            if ticker in self._expired:
+                return self._expiry_at.get(ticker)
+            if ticker in self._timeless:
+                return None
+            if ticker in self._expiry_at:
+                return self._expiry_at[ticker]
+            try:
+                return await self._resolve_expiry(ticker)
+            except _SymbolLookupError:
+                logger.warning(
+                    "MD symbol lookup failed ticker=%s; retry in %.1fs",
+                    ticker,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30.0)
 
     async def _expire_ticker(
         self, ticker: UniversalTicker, expiry: float
@@ -790,14 +941,12 @@ class SessionManager:
                     return False
                 if msg.session_id != link.session_id:
                     return False
-                try:
-                    await self._subscribe_feed(link, msg.feed)
-                except Exception:
-                    logger.exception(
-                        "MD subscribe failed session=%s feed=%s",
-                        link.session_id,
-                        msg.feed,
-                    )
+                task = asyncio.create_task(
+                    self._subscribe_runtime(link, msg.feed),
+                    name=f"md-sub-{link.session_id}",
+                )
+                self._subscribe_tasks.add(task)
+                task.add_done_callback(self._subscribe_tasks.discard)
                 return False
             if env.type == MD_UNSUBSCRIBE:
                 try:

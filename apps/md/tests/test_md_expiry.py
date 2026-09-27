@@ -27,6 +27,7 @@ from mftik.protocol import (
     Topics,
 )
 from mftik_md.session import PaperPublicFactory, SessionManager
+from mftik_md.session.venue import VenueSession
 
 TICKER = UniversalTicker.parse("Paper_Spot_BTCUSDT")
 ORDERBOOK = Topics.md_feed("orderbook", TICKER)
@@ -155,6 +156,7 @@ async def test_already_expired_cuts_every_feed_and_notifies(
     assert events[0].universal_ticker == str(TICKER)
     assert events[0].expiry == listed
     assert events[0].topics == ["orderbook", "ticker"]
+    assert sessions._venues == {}  # noqa: SLF001
 
     after = len(books)
     await asyncio.sleep(0.2)
@@ -364,4 +366,195 @@ async def test_second_attach_after_expiry_is_notified_not_resubscribed(
     await asyncio.gather(
         hb_a, hb_b, collect_a, collect_b, return_exceptions=True
     )
+    await sessions.close_all()
+
+
+def _info(ticker: UniversalTicker, expiry: float | None) -> SymbolInfo:
+    return SymbolInfo(
+        universal_ticker=str(ticker),
+        base="BTC",
+        quote="USDT",
+        exch_ticker=ticker.symbol,
+        expiry=expiry,
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_subscribe_does_not_stall_lease_acks(
+    broker: Broker, paper: PaperExchange
+) -> None:
+    started = asyncio.Event()
+
+    class SlowSymbols:
+        async def get(self, ticker: UniversalTicker) -> SymbolInfo:
+            started.set()
+            await asyncio.sleep(1.2)
+            return _info(ticker, None)
+
+    sessions = SessionManager(
+        PaperPublicFactory(broker, paper),
+        broker,
+        lease_grace=2.0,
+        symbols=SlowSymbols(),  # type: ignore[arg-type]
+    )
+    session_id = "sts-md-slow-lookup"
+    stop = asyncio.Event()
+    hb_task = asyncio.create_task(
+        _md_lease_publisher(broker, session_id, stop, interval=0.1)
+    )
+    acks: list[int] = []
+
+    async def _collect() -> None:
+        async for env in broker.subscribe(
+            Topics.md_session(session_id), stop=stop
+        ):
+            if env.type == MD_LEASE_ACK:
+                acks.append(MdLeaseAck.model_validate(env.payload).token)
+
+    collect_task = asyncio.create_task(_collect())
+    await asyncio.sleep(0.05)
+    await sessions.attach(
+        MdAttachRequest(
+            session_id=session_id,
+            created_by=1,
+            subscriptions=[],
+            timeout=3.0,
+        )
+    )
+    await _wait_until(lambda: len(acks) >= 1)
+    await broker.publish(
+        Topics.sts_md_session(session_id),
+        Envelope[MdSubscribe].wrap(
+            MdSubscribe(session_id=session_id, feed=ORDERBOOK),
+            type=MD_SUBSCRIBE,
+            source="sts",
+            session_id=session_id,
+        ),
+    )
+    await _wait_until(started.is_set)
+    before = len(acks)
+    await asyncio.sleep(0.45)
+    assert len(acks) > before, (
+        "lease acks stalled while the symbol plane was slow"
+    )
+
+    stop.set()
+    await asyncio.gather(hb_task, collect_task, return_exceptions=True)
+    await sessions.close_all()
+
+
+@pytest.mark.asyncio
+async def test_failed_lookup_retries_and_still_cuts(
+    broker: Broker, paper: PaperExchange
+) -> None:
+    class FlakySymbols:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get(self, ticker: UniversalTicker) -> SymbolInfo:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("sym down")
+            return _info(ticker, time.time() - 1)
+
+    sessions = SessionManager(
+        PaperPublicFactory(broker, paper),
+        broker,
+        lease_grace=2.0,
+        symbols=FlakySymbols(),  # type: ignore[arg-type]
+        expiry_lookup_retry_s=0.05,
+    )
+    session_id = "sts-md-lookup-retry"
+    stop = asyncio.Event()
+    hb_task = asyncio.create_task(_md_lease_publisher(broker, session_id, stop))
+    events: list[Expiry] = []
+
+    async def _collect() -> None:
+        async for env in broker.subscribe(
+            Topics.md_session(session_id), stop=stop
+        ):
+            if env.type == MD_EXPIRY:
+                events.append(Expiry.model_validate(env.payload))
+
+    collect_task = asyncio.create_task(_collect())
+    await asyncio.sleep(0.05)
+    result = await sessions.attach(
+        MdAttachRequest(
+            session_id=session_id,
+            created_by=1,
+            subscriptions=[ORDERBOOK],
+            timeout=3.0,
+        )
+    )
+    assert ORDERBOOK in result.subscriptions
+    await _wait_until(lambda: len(events) == 1, timeout=3.0)
+    assert sessions.feed_refcount(ORDERBOOK) == 0
+    assert TICKER in sessions._expired  # noqa: SLF001
+
+    stop.set()
+    await asyncio.gather(hb_task, collect_task, return_exceptions=True)
+    await sessions.close_all()
+
+
+@pytest.mark.asyncio
+async def test_ensure_feed_after_expiry_does_not_leave_an_orphan_pump(
+    broker: Broker, paper: PaperExchange, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listed = time.time() + 0.2
+    real = VenueSession.ensure_feed
+
+    async def slow_ensure(
+        self: VenueSession, topic: str, ticker: UniversalTicker
+    ) -> None:
+        if topic == "orderbook":
+            await asyncio.sleep(0.45)
+        await real(self, topic, ticker)
+
+    monkeypatch.setattr(VenueSession, "ensure_feed", slow_ensure)
+    sessions = SessionManager(
+        PaperPublicFactory(broker, paper),
+        broker,
+        lease_grace=2.0,
+        symbols=StubSymbols(listed),  # type: ignore[arg-type]
+    )
+    session_id = "sts-md-orphan-pump"
+    stop = asyncio.Event()
+    hb_task = asyncio.create_task(_md_lease_publisher(broker, session_id, stop))
+    events: list[Expiry] = []
+
+    async def _collect() -> None:
+        async for env in broker.subscribe(
+            Topics.md_session(session_id), stop=stop
+        ):
+            if env.type == MD_EXPIRY:
+                events.append(Expiry.model_validate(env.payload))
+
+    collect_task = asyncio.create_task(_collect())
+    await asyncio.sleep(0.05)
+    await sessions.attach(
+        MdAttachRequest(
+            session_id=session_id,
+            created_by=1,
+            subscriptions=[TICKER_FEED],
+            timeout=3.0,
+        )
+    )
+    await broker.publish(
+        Topics.sts_md_session(session_id),
+        Envelope[MdSubscribe].wrap(
+            MdSubscribe(session_id=session_id, feed=ORDERBOOK),
+            type=MD_SUBSCRIBE,
+            source="sts",
+            session_id=session_id,
+        ),
+    )
+    await _wait_until(lambda: len(events) == 1, timeout=3.0)
+    await asyncio.sleep(0.55)
+    assert sessions.feed_refcount(ORDERBOOK) == 0
+    assert sessions.feed_refcount(TICKER_FEED) == 0
+    venue = sessions._venues.get("Paper")  # noqa: SLF001
+    assert venue is None or venue.feed_count == 0
+
+    stop.set()
+    await asyncio.gather(hb_task, collect_task, return_exceptions=True)
     await sessions.close_all()
