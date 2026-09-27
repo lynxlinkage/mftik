@@ -169,10 +169,14 @@ class StrategyMds:
     async def fetch_best_quote(self, ticker: UniversalTicker) -> str | None:
         """Ask MD for the touch with its resting sizes. Returns the query id.
 
-        The answer reaches ``on_fetch_bestquote``. Its ``quote`` is None when
-        a side of the book was empty — not an error, but nothing to price
-        against either, so a caller checking whether its own order can rest
-        should ask again rather than treat it as a quote of zero.
+        The answer reaches ``on_fetch_bestquote``. On a non-option book its
+        ``quote`` is None when a side was empty — not an error, but nothing
+        to price against either, so a caller checking whether its own order
+        can rest should ask again rather than treat it as a quote of zero.
+
+        An Option answer is always a quote: an empty side there is
+        ``price == qty == 0``. Check ``bid_qty`` / ``ask_qty`` before using
+        a side.
         """
         return await self._send(
             MD_FETCH_BESTQUOTE, MdFetchBestQuote, ticker=str(ticker)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 from collections.abc import Callable
@@ -34,6 +35,17 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PING_INTERVAL = 15.0
 DEFAULT_HEARTBEAT = 15
+
+#: True only inside the code that brings a socket up — ``connect`` and the
+#: reconnect block of ``_read_loop``. That code may read replies itself
+#: (``handshake``), because nothing else is reading yet. Every other caller
+#: that finds the socket between read loops waits for :attr:`_ready`
+#: instead: two readers on one connection is ``ConcurrencyError: cannot
+#: call recv while another coroutine is already running recv``, and each
+#: one of those used to cost a reconnect.
+_SETUP: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "deribit_socket_setup", default=False
+)
 
 
 @dataclass
@@ -86,6 +98,12 @@ class DeribitSocket:
         self._closing = False
         self._pumping = False
         self._reconnect_cbs: list[Callable[[], Any]] = []
+        #: Serialises ``connect``: pumps open the socket lazily and all at
+        #: once, and a second concurrent ``_open`` would replace ``_conn``
+        #: under the first one's read loop.
+        self._connect_lock = asyncio.Lock()
+        #: Set while the read loop owns ``recv``.
+        self._ready = asyncio.Event()
         self.stats = _Stats()
 
     @property
@@ -95,11 +113,18 @@ class DeribitSocket:
     async def connect(self) -> None:
         if self._connected:
             return
+        async with self._connect_lock:
+            if self._connected:
+                return
+            await self._connect()
+
+    async def _connect(self) -> None:
         self._closing = False
+        token = _SETUP.set(True)
         try:
             await self._open()
             await self._on_open()
-            self._pumping = True
+            self._set_pumping(True)
             self._task = asyncio.create_task(
                 self._read_loop(), name=f"{self.name}-read"
             )
@@ -111,10 +136,20 @@ class DeribitSocket:
         except Exception:
             await self.close()
             raise
+        finally:
+            _SETUP.reset(token)
+
+    def _set_pumping(self, on: bool) -> None:
+        self._pumping = on
+        if on:
+            self._ready.set()
+        else:
+            self._ready.clear()
 
     async def close(self) -> None:
         self._closing = True
         self._connected = False
+        self._ready.clear()
         for task in (self._task, self._watch_task):
             if task is not None:
                 task.cancel()
@@ -182,10 +217,19 @@ class DeribitSocket:
             raise ExchangeNotConnectedError(
                 f"{self.name} is not connected; call connect() first"
             )
-        if not self._pumping:
-            return await self.handshake(frame, req_id, op=op)
-        self._ensure_connected()
         wait = timeout or self.ack_timeout
+        if not self._pumping:
+            if _SETUP.get():
+                return await self.handshake(frame, req_id, op=op)
+            # Between read loops (a reconnect in progress): wait for the
+            # loop to own the socket again rather than reading it too.
+            try:
+                await asyncio.wait_for(self._ready.wait(), timeout=wait)
+            except TimeoutError as exc:
+                raise DeribitWsError(
+                    None, f"socket not ready within {wait}s", op=op
+                ) from exc
+        self._ensure_connected()
         loop = asyncio.get_running_loop()
         pending = _Pending(future=loop.create_future())
         self._pending[req_id] = pending
@@ -245,13 +289,13 @@ class DeribitSocket:
         while not self._closing:
             reason: object
             try:
-                self._pumping = True
+                self._set_pumping(True)
                 await self._pump()
                 reason = "server closed the connection"
             except (ConnectionClosed, WebSocketException, OSError) as exc:
                 reason = exc
             finally:
-                self._pumping = False
+                self._set_pumping(False)
             if self._closing:
                 return
             if not self.reconnect:
@@ -276,6 +320,7 @@ class DeribitSocket:
                 reason,
             )
             await asyncio.sleep(delay)
+            token = _SETUP.set(True)
             try:
                 await self._open()
                 await self._on_open()
@@ -283,6 +328,8 @@ class DeribitSocket:
             except Exception:
                 logger.exception("%s reconnect failed", self.name)
                 continue
+            finally:
+                _SETUP.reset(token)
             self.stats.reconnects += 1
             self._fire_reconnect()
             retries = 0

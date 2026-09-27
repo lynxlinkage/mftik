@@ -195,6 +195,36 @@ async def test_option_klines_book_bestquote_and_oi_are_served() -> None:
         await reader.fetch_funding_history(OPTION, limit=5)
 
 
+async def test_a_one_sided_option_fetch_is_a_quote_with_a_zero_side() -> None:
+    """Option: ``fetch_best_quote`` answers even with no bid (live 93000-C row)."""
+    api = FakeApi()
+    api.results["/public/ticker"] = {
+        "instrument_name": "BTC-13SEP26-70000-C",
+        "last_price": 0.0001,
+        "best_bid_price": 0.0,
+        "best_bid_amount": 0.0,
+        "best_ask_price": 0.0001,
+        "best_ask_amount": 30.2,
+        "timestamp": 1790491013053,
+    }
+    quote = await _reader(api).fetch_best_quote(OPTION)
+    assert quote is not None
+    assert (quote.bid, quote.bid_qty) == (0, 0)
+    assert (quote.ask, quote.ask_qty) == (Decimal("0.0001"), Decimal("30.2"))
+
+
+async def test_a_one_sided_perp_fetch_is_still_no_quote() -> None:
+    api = FakeApi()
+    api.results["/public/ticker"] = {
+        "instrument_name": "BTC_USDC-PERPETUAL",
+        "best_bid_price": 0.0,
+        "best_bid_amount": 0.0,
+        "best_ask_price": 60001,
+        "best_ask_amount": 10,
+    }
+    assert await _reader(api).fetch_best_quote(PERP) is None
+
+
 async def test_spot_funding_and_oi_are_unsupported_reads() -> None:
     api = FakeApi()
     with pytest.raises(NoReaderError, match="Spot"):

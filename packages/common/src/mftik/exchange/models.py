@@ -277,6 +277,16 @@ class InstrumentScoped(BaseModel):
 
 
 class Ticker(InstrumentScoped):
+    """Bid, ask and last on a venue-chosen cadence.
+
+    An empty side is venue-specific on non-option books (Deribit falls back
+    to ``last`` there). On an **Option** an empty side is ``0`` — option
+    books are one-sided for days, and ``last`` can be hours old, so it is
+    never substituted. ``0`` there means "no bid" / "no ask", not a price:
+    ``(bid + ask) / 2`` on a one-sided option is half the ask. Use
+    :class:`BestQuote` when you need sizes to tell the two apart.
+    """
+
     bid: Decimal
     ask: Decimal
     last: Decimal

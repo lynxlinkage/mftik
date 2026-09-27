@@ -370,7 +370,9 @@ class Strategy:
     async def on_ticker(self, ticker: Ticker) -> None:
         """Handle ticker updates from MD — 24h stats + top of book.
 
-        Feed topic ``ticker``.
+        Feed topic ``ticker``. On an Option an empty side is ``0`` — there is
+        no size on a :class:`Ticker` to say so, and no ``last`` fallback. Do
+        not average ``bid`` and ``ask`` without checking both are non-zero.
         """
 
     async def on_order_book(self, book: OrderBook) -> None:
@@ -520,10 +522,15 @@ class Strategy:
         ``result.quote`` carries the touch with its resting sizes. Distinct
         from :meth:`on_best_quote`, which pushes one on every change.
 
-        ``quote`` is None when the query failed **or** when a side of the book
-        was empty. The second is not an error and not a quote either: a
-        strategy checking whether its own price can rest has nothing to check
-        against, and should ask again rather than read it as a quote of zero.
+        ``quote`` is None when the query failed **or** when a side of a
+        non-option book was empty. The second is not an error and not a quote
+        either: a strategy checking whether its own price can rest has nothing
+        to check against, and should ask again rather than read it as a quote
+        of zero.
+
+        Option books are one-sided too often for that, so an Option answer is
+        always a quote and an empty side is ``price == qty == 0``. Read
+        ``bid_qty == 0`` as "no bid" — never price off a zero side.
         """
 
     async def on_fetch_funding_history(

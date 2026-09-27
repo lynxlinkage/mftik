@@ -15,6 +15,7 @@ There is no aggregated tape and no liquidation channel.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -103,6 +104,8 @@ class DeribitPublicClient(BaseClient):
         self._ws_url = ws_url
         self.rest = rest or DeribitPublicRest(base_url=rest_url)
         self._feed = feed
+        #: Pumps open the socket lazily and at once; one of them opens it.
+        self._feed_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         await self.rest.connect()
@@ -119,12 +122,19 @@ class DeribitPublicClient(BaseClient):
         await self.rest.close()
 
     async def feed(self) -> DeribitPublicStream:
-        """The one public socket, opened on first use."""
-        if self._feed is None:
-            self._feed = DeribitPublicStream(self._ws_url)
-        if not self._feed.connected:
-            await self._feed.connect()
-        return self._feed
+        """The one public socket, opened on first use.
+
+        Every pump calls this, and on an attach they all call it at once.
+        Under the lock one creates and connects the socket and the rest
+        find it connected; without it each built its own
+        ``DeribitPublicStream`` or raced ``connect`` on the shared one.
+        """
+        async with self._feed_lock:
+            if self._feed is None:
+                self._feed = DeribitPublicStream(self._ws_url)
+            if not self._feed.connected:
+                await self._feed.connect()
+            return self._feed
 
     # --- snapshots ---------------------------------------------------------
 
