@@ -159,11 +159,12 @@ PEER_MISS_LIMIT = LEASE_MISS_LIMIT
 
 #: How far past its timeout a heartbeat wait may return and still be the
 #: timeout. A healthy ``wait_for`` on uvloop comes back within microseconds
-#: of the interval. Past this, the loop was not running: peer silence in
-#: that window was not observed, and the ack clocks restart instead of
-#: being judged. Measured on the wait alone — the publish in the same
-#: turn already makes a whole iteration longer than the interval, and
-#: treating that as a stall would refresh the clocks on every beat.
+#: of the interval. Past this, the loop was not running: that slice of the
+#: wait was not observed, and the ack clocks move forward by the lateness
+#: only. Stamping them to now would refresh a dead peer on every overrun.
+#: Measured on the wait alone — the publish in the same turn already makes
+#: a whole iteration longer than the interval, and treating that as a stall
+#: would shift the clocks on every beat.
 HEARTBEAT_LATE_S = 0.05
 
 #: How long a detach may wait for a reply. The lease is the real teardown;
@@ -685,19 +686,38 @@ class StsSession:
             return False
         return waited > self.heartbeat_interval + HEARTBEAT_LATE_S
 
-    def _rearm_peer_acks(self) -> None:
-        """Stamp every armed peer as just heard.
+    def _shift_peer_acks(self, waited: float) -> None:
+        """Credit a late heartbeat wait, and only the part that was late.
+
+        ``ack = min(now, ack + (waited - interval))``. The loop could not
+        read acks during the overrun, so that slice is not silence. Moving
+        the clocks all the way to now is a different claim: every peer just
+        answered. A strategy that overruns every beat would then keep a
+        dead peer fresh forever.
 
         Only keys that have already acked. An empty map stays empty, so a
         peer that has never answered is still not watched. MD and TD share
-        the stall: rearming one leaves the other's stale check to fail the
+        the stall: shifting one leaves the other's stale check to fail the
         session for a silence it also could not see.
         """
+        late = waited - self.heartbeat_interval
         now = asyncio.get_running_loop().time()
-        for key in self._md_acks:
-            self._md_acks[key] = now
-        for key in self._td_acks:
-            self._td_acks[key] = now
+        moved = 0
+        for acks in (self._md_acks, self._td_acks):
+            for key in acks:
+                acks[key] = min(now, acks[key] + late)
+                moved += 1
+        if moved == 0:
+            return
+        logger.info(
+            "STS heartbeat wait took %.3fs against an interval of %.3fs; "
+            "shifted %d peer ack clock(s) by %.3fs session=%s",
+            waited,
+            self.heartbeat_interval,
+            moved,
+            late,
+            self.session_id,
+        )
 
     def _peer_grace(self) -> float:
         """Silence a peer may keep after its first ack.
@@ -742,11 +762,12 @@ class StsSession:
 
             # A stall leaves these clocks old while the acks that would
             # refresh them are still queued. The heartbeat task can wake
-            # before either pump drains, and both peers look dead. The
-            # window was unobservable; restart the clocks and judge the
-            # next grace, which is silence this loop was awake for.
-            if self._heartbeat_overslept():
-                self._rearm_peer_acks()
+            # before either pump drains, and both peers look dead. Credit
+            # the lateness, then judge what remains: a peer that stays
+            # quiet still expires, one interval of silence at a time.
+            waited = self._heartbeat_wait_s
+            if waited is not None and self._heartbeat_overslept():
+                self._shift_peer_acks(waited)
 
             # Armed per instance / api_id on the first ack. One quiet MD of
             # two stops the session; a quiet TD does too — there is no book
