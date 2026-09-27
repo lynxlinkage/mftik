@@ -18,7 +18,9 @@ writing its aggregation twice and hoping the two agree.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
@@ -70,6 +72,35 @@ LOG_CHUNK = 1_000
 #: should pass its own. ``0`` restores the older, absolute behaviour: no gap is
 #: tolerable, and anything before one is dropped.
 DEFAULT_MAX_GAP_MS = 30_000
+
+#: How long a tape read may compute before returning to the loop.
+#:
+#: STS is one loop, and every session's lease heartbeat is a task on it.
+#: The heartbeat interval is 1s and the fuse is three missed intervals, so
+#: a warm-up that does not await holds every lease on the process. A slice
+#: leaves most of that interval for the other tasks. ``time.perf_counter``
+#: rather than the loop clock: on uvloop that clock steps in milliseconds.
+SLICE_S = 0.05
+
+
+def slice_deadline() -> float:
+    """When the current compute slice must return to the loop."""
+    return time.perf_counter() + SLICE_S
+
+
+async def breathe(deadline: float) -> float:
+    """Hand the loop back once ``deadline`` has passed.
+
+    Awaiting this does not, by itself, let another task run. While the
+    slice still has time the coroutine returns without suspending, and the
+    caller continues in the same turn. Only the ``sleep(0)`` yields — one
+    reschedule, not a timer — so a heartbeat waiting on this loop can
+    publish before the next slice.
+    """
+    if time.perf_counter() < deadline:
+        return deadline
+    await asyncio.sleep(0)
+    return slice_deadline()
 
 
 class TapeFeedNotAttached(LookupError):
@@ -236,10 +267,16 @@ class StrategyTape:
             resumed = max(gap.end_ms for gap in too_long)
             start_ms = resumed if start_ms is None else max(start_ms, resumed)
 
+        # The pages already awaited, one RPC at a time. This loop is the
+        # rest of the read, still on the strategy task. Parsing the tail
+        # without returning to the scheduler is what stops every session's
+        # heartbeat, including sessions that are only keeping a tape.
+        deadline = slice_deadline()
         records: list[Trade] = []
         dropped = 0
         oldest_kept_ms: int | None = None
         for record_ms, fields in rows:
+            deadline = await breathe(deadline)
             # The record's stamp is the recorder's clock at append time, which
             # is what the continuity mark is measured against. The venue's own
             # ts rides on the record and is what the strategy reads — the two
@@ -294,7 +331,7 @@ class StrategyTape:
             logged=min(len(records), LOG_MAX_RECORDS),
             truncated=len(records) > LOG_MAX_RECORDS or None,
         )
-        _log_records(log, feed, records)
+        await _log_records(log, feed, records, deadline)
         return TapeSlice(
             records=records,
             continuous_since_ms=since_ms,
@@ -350,7 +387,12 @@ def _records_of(records: list[MdTapeRecord]) -> list[tuple[int, dict[str, str]]]
     return [(row.ms, dict(row.fields)) for row in records]
 
 
-def _log_records(log, feed: str, records: list[Trade]) -> None:  # noqa: ANN001
+async def _log_records(
+    log,  # noqa: ANN001
+    feed: str,
+    records: list[Trade],
+    deadline: float,
+) -> None:
     """Write the prints themselves, in chunks, up to the cap.
 
     The one read in this class whose answer cannot be inferred from anything
@@ -361,9 +403,11 @@ def _log_records(log, feed: str, records: list[Trade]) -> None:  # noqa: ANN001
 
     Chunked because one line per print would multiply the per-record overhead
     by a hundred thousand, and one line for all of them would be a forty-megabyte
-    string that no jsonl reader will take in a single bite.
+    string that no jsonl reader will take in a single bite. Queuing those
+    chunks is still on this turn, so it keeps the same slice as the parse.
     """
     for start in range(0, min(len(records), LOG_MAX_RECORDS), LOG_CHUNK):
+        deadline = await breathe(deadline)
         chunk = records[start : start + LOG_CHUNK]
         # The models, unserialized: they are frozen, and dumping them here
         # would put the cost of a whole warm-up on the event loop.

@@ -132,6 +132,7 @@ from mftik.exchange.oms import Position
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol import CancelReject, OrderReject, ReconDone, SymbolInfo
 from mftik.strategy import Strategy
+from mftik.strategy.tape import breathe, slice_deadline
 
 logger = logging.getLogger(__name__)
 
@@ -426,7 +427,11 @@ class MacdDollarBars(Strategy):
             tape = None
 
         if tape is not None and tape.records:
+            # read() returning does not await. Folding the slice in is the
+            # same turn, on the same loop the lease heartbeat is waiting on.
+            deadline = slice_deadline()
             for record in tape.records:
+                deadline = await breathe(deadline)
                 self._ingest(record)
                 if record.trade_id:
                     self._seen_ids.add(record.trade_id)
