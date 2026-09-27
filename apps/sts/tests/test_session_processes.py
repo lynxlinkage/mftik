@@ -280,27 +280,64 @@ async def test_a_stop_during_start_keeps_the_row_the_worker_wrote() -> None:
 
 
 async def test_a_failed_result_line_is_not_rebuilt() -> None:
-    """An error line means the worker already wrote the row.
-
-    The parent drops the slot and raises for the API. It does not mark
-    the row again: the worker's reason would be replaced.
-    """
+    """``start()`` already wrote ``failed``. The error line must not replace it."""
     store: dict[str, SimpleNamespace] = {}
+    gate = asyncio.Event()
     spawner = FakeSpawner(
         line=json.dumps({"ok": False, "error": "on_start exploded"}),
         process=FakeProcess(returncode=1),
+        gate=gate,
     )
-    manager = _manager(spawner, store, rebuild=True)
+    manager = _manager(spawner, store, rebuild=True, load=True)
+    create = asyncio.create_task(manager.create_session(_request()))
+    while "s1" not in store:
+        await asyncio.sleep(0)
+    store["s1"].status = "failed"
+    store["s1"].reason = "start failed: on_start exploded"
+    gate.set()
     with pytest.raises(RuntimeError, match="on_start exploded"):
-        await manager.create_session(_request())
+        await create
     await asyncio.sleep(0.05)
 
-    assert store["s1"].status == "live"
-    assert store["s1"].reason is None
+    assert store["s1"].status == "failed"
+    assert store["s1"].reason == "start failed: on_start exploded"
     assert "s1" not in manager._workers
     assert len(spawner.calls) == 1
     await manager.close_all()
-    assert store["s1"].status == "live"
+    assert store["s1"].reason == "start failed: on_start exploded"
+
+
+async def test_an_error_line_fails_a_row_the_worker_left_live() -> None:
+    """Validation and ``__init__`` raise before ``start()`` writes the row.
+
+    The parent already persisted ``live``. The error line is the worker
+    saying it never got as far as ``start()``, so the row is still
+    ``live`` and nothing is running it. Leaving it there makes stop 502
+    and, after the reaper, a rebuild of a deploy that was rejected.
+    """
+    store: dict[str, SimpleNamespace] = {}
+    spawner = FakeSpawner(
+        line=json.dumps(
+            {
+                "ok": False,
+                "error": "report_interval_ms must be positive, got -5",
+            }
+        ),
+        process=FakeProcess(returncode=1),
+    )
+    manager = _manager(spawner, store, rebuild=True, load=True)
+    with pytest.raises(RuntimeError, match="report_interval_ms must be positive"):
+        await manager.create_session(_request())
+    await asyncio.sleep(0.05)
+
+    assert store["s1"].status == "failed"
+    assert store["s1"].reason == (
+        f"{START_FAIL_REASON}: report_interval_ms must be positive, got -5"
+    )
+    assert "s1" not in manager._workers
+    assert len(spawner.calls) == 1
+    await manager.close_all()
+    assert store["s1"].status == "failed"
 
 
 async def test_exec_failure_drops_the_slot_and_fails_the_row() -> None:

@@ -91,11 +91,11 @@ class SessionSpawner(Protocol):
 def parse_worker_result(line: str | None) -> dict[str, Any] | None:
     """The JSON object on the result line, or None if there wasn't one.
 
-    ``ok`` is the caller's to check. A line that says ``ok: false`` is a
-    result: the worker already wrote the row, and the parent must not
-    write it again. EOF, an empty read, and a line that is not JSON are
-    not a result line. That is the only case where the parent marks
-    ``failed``.
+    ``ok`` is the caller's to check. On ``ok: false`` the parent marks
+    ``failed`` only when the row is still ``live``: ``start()`` has
+    already written a terminal row, and validation or ``__init__`` has
+    not. EOF, an empty read, and a line that is not JSON are not a
+    result line; the parent marks ``failed`` there too.
     """
     if line is None:
         return None

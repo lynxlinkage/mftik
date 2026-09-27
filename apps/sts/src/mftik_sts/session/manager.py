@@ -546,11 +546,19 @@ class SessionManager:
                 await self._fail_unstarted(slot, request, START_FAIL_REASON)
                 raise RuntimeError(START_FAIL_REASON)
             if not parsed.get("ok"):
-                # The worker explained itself. A start() failure has already
-                # marked the row; writing it again would replace that reason.
+                # The worker only writes the row when ``start()`` fails.
+                # Validation, ``__init__``, and ``ensure_deployable`` raise
+                # before that, and the row the parent persisted stays
+                # ``live`` with no process behind it. A row that is already
+                # terminal — ``start()`` wrote ``failed`` — is left alone.
                 reported = True
-                detail = str(parsed.get("error") or START_FAIL_REASON)
+                detail = START_FAIL_REASON
+                error = parsed.get("error")
+                if error:
+                    detail = f"{START_FAIL_REASON}: {error}"
                 self._drop_unstarted(slot)
+                if await self._row_is_live(slot.session_id):
+                    await self._write_failed(slot, request, detail)
                 raise RuntimeError(detail)
             slot.started = True
             slot.strategy_name = (
@@ -582,8 +590,9 @@ class SessionManager:
     def _drop_unstarted(self, slot: WorkerSlot) -> None:
         """Take a worker that never reported success out of the table.
 
-        Does not write the row. An error result line means the worker
-        already did, and a second write would replace its reason.
+        Does not write the row. The caller decides that from the row's
+        status: an error line leaves a ``live`` row to be marked, and a
+        row the worker already finished is left as it is.
         """
         if slot.started or slot.abandoned:
             return
@@ -627,6 +636,14 @@ class SessionManager:
                 slot.session_id,
             )
             return
+        await self._write_failed(slot, request, reason)
+
+    async def _write_failed(
+        self,
+        slot: WorkerSlot,
+        request: StsCreateSessionRequest,
+        reason: str,
+    ) -> None:
         if self._mark_done is not None:
             try:
                 await self._mark_done(
