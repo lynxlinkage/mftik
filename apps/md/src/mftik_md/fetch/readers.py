@@ -981,8 +981,8 @@ class DeribitReader:
 
     One reader. The ticker names the book; ``exch_ticker`` is the wire
     ``instrument_name``. Funding history is perp and inverse only;
-    open interest is perp, inverse and dated. Spot funding/OI and
-    Option are refused before HTTP. There is no trade-history fetch —
+    open interest is perp, inverse, dated and option. Spot funding/OI
+    and Option funding are refused before HTTP. There is no trade-history fetch —
     CBE spots answer ``11060`` on ``get_last_trades_*``.
     """
 

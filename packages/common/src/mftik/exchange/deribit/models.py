@@ -38,7 +38,7 @@ from mftik.exchange.models import (
     Trade,
 )
 from mftik.exchange.oms import Position
-from mftik.exchange.tickers import UniversalTicker
+from mftik.exchange.tickers import Category, UniversalTicker
 
 _STATUS: dict[str, OrderStatus] = {
     "OPEN": OrderStatus.NEW,
@@ -343,11 +343,72 @@ class DeribitGreeks(DeribitMessage):
     rho: OptDec = None
 
 
+_ZERO = Decimal("0")
+
+
 def _iv_fraction(value: Decimal | None) -> Decimal | None:
-    """Deribit publishes IV as a percent; the shared model is a fraction."""
-    if value is None:
+    """Deribit publishes IV as a percent; the shared model is a fraction.
+
+    ``0`` is not a volatility. Deribit sends ``bid_iv: 0.0`` when the bid
+    side is empty (and ``ask_iv: 0.0`` for an empty ask), and also when no
+    vol solves the quote. Both read as "no IV", so both become ``None`` —
+    a 0% bid IV on the hook would be a number a strategy could trade on.
+    """
+    if value is None or value <= 0:
         return None
     return value / Decimal("100")
+
+
+def _side(price: Decimal | None, qty: Decimal | None) -> tuple[Decimal, Decimal]:
+    """One side of an option book, with an empty side as ``(0, 0)``.
+
+    Deribit marks an empty side with ``0`` (``ticker``) or ``null``
+    (``quote``, book summary). Either way there is no price there, and the
+    pair must say so together: a price with no size is not a level.
+    """
+    if not price or not qty:
+        return _ZERO, _ZERO
+    return price, qty
+
+
+def _best_quote(
+    ticker: UniversalTicker,
+    *,
+    bid: Decimal | None,
+    bid_qty: Decimal | None,
+    ask: Decimal | None,
+    ask_qty: Decimal | None,
+    ts: float,
+) -> BestQuote | None:
+    """Top of book, or ``None`` when a non-option book has an empty side.
+
+    Option books are one-sided all the time — a deep OTM strike has an ask
+    and no bid for days. Dropping those frames would leave the consumer
+    holding the last two-sided quote after a side was pulled, so an Option
+    quote is always emitted and an empty side is ``price == qty == 0``.
+    Other books keep the old contract: an empty side is a gap, not a print.
+    """
+    if ticker.category is Category.OPTION:
+        bid_px, bid_sz = _side(bid, bid_qty)
+        ask_px, ask_sz = _side(ask, ask_qty)
+        return BestQuote(
+            universal_ticker=str(ticker),
+            bid=bid_px,
+            bid_qty=bid_sz,
+            ask=ask_px,
+            ask_qty=ask_sz,
+            ts=ts,
+        )
+    if not bid or not ask or not bid_qty or not ask_qty:
+        return None
+    return BestQuote(
+        universal_ticker=str(ticker),
+        bid=bid,
+        bid_qty=bid_qty,
+        ask=ask,
+        ask_qty=ask_qty,
+        ts=ts,
+    )
 
 
 class DeribitTicker(DeribitMessage):
@@ -372,6 +433,8 @@ class DeribitTicker(DeribitMessage):
     bid_iv: OptDec = None
     ask_iv: OptDec = None
     mark_iv: OptDec = None
+    index_price: OptDec = None
+    underlying_index: str | None = None
     greeks: DeribitGreeks | None = None
     timestamp: Ms = 0.0
 
@@ -382,9 +445,20 @@ class DeribitTicker(DeribitMessage):
         )
 
     def to_ticker(self, ticker: UniversalTicker, *, ts: float = 0.0) -> Ticker:
-        last = self.last_price or Decimal("0")
-        bid = self.best_bid_price if self.best_bid_price else last
-        ask = self.best_ask_price if self.best_ask_price else last
+        """Bid / ask / last.
+
+        On non-option books an empty side falls back to ``last``. Option
+        books are routinely one-sided and ``last`` can be hours old, so
+        there an empty side is ``0`` — never a bid made up from a stale
+        print.
+        """
+        last = self.last_price or _ZERO
+        if ticker.category is Category.OPTION:
+            bid = self.best_bid_price or _ZERO
+            ask = self.best_ask_price or _ZERO
+        else:
+            bid = self.best_bid_price if self.best_bid_price else last
+            ask = self.best_ask_price if self.best_ask_price else last
         fields: dict[str, Any] = {} if ts <= 0 else {"ts": ts}
         return Ticker(
             universal_ticker=str(ticker), bid=bid, ask=ask, last=last, **fields
@@ -393,15 +467,8 @@ class DeribitTicker(DeribitMessage):
     def to_best_quote(
         self, ticker: UniversalTicker, *, ts: float = 0.0
     ) -> BestQuote | None:
-        if (
-            not self.best_bid_price
-            or not self.best_ask_price
-            or not self.best_bid_amount
-            or not self.best_ask_amount
-        ):
-            return None
-        return BestQuote(
-            universal_ticker=str(ticker),
+        return _best_quote(
+            ticker,
             bid=self.best_bid_price,
             bid_qty=self.best_bid_amount,
             ask=self.best_ask_price,
@@ -456,6 +523,8 @@ class DeribitTicker(DeribitMessage):
             rho=raw.rho,
             mark=self.mark_price,
             underlying=self.underlying_price,
+            underlying_index=self.underlying_index or None,
+            index=self.index_price,
             bid_iv=_iv_fraction(self.bid_iv),
             ask_iv=_iv_fraction(self.ask_iv),
             mark_iv=_iv_fraction(self.mark_iv),
@@ -474,15 +543,8 @@ class DeribitQuote(DeribitMessage):
     def to_best_quote(
         self, ticker: UniversalTicker, *, ts: float = 0.0
     ) -> BestQuote | None:
-        if (
-            not self.best_bid_price
-            or not self.best_ask_price
-            or not self.best_bid_amount
-            or not self.best_ask_amount
-        ):
-            return None
-        return BestQuote(
-            universal_ticker=str(ticker),
+        return _best_quote(
+            ticker,
             bid=self.best_bid_price,
             bid_qty=self.best_bid_amount,
             ask=self.best_ask_price,

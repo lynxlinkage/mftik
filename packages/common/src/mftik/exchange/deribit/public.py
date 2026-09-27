@@ -321,7 +321,7 @@ class DeribitPublicClient(BaseClient):
             yield interest
 
     async def _greeks(self, ticker: UniversalTicker) -> AsyncIterator[Greeks]:
-        """``ticker`` — yield when the delta names greeks (V13)."""
+        """``ticker`` — yield every option row carrying ``greeks`` (V13)."""
         native = await self._resolve(ticker)
         feed = await self.feed()
         stream = await feed.subscribe_tickers(native)

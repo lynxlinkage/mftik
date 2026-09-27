@@ -11,7 +11,11 @@ import pytest
 from deribit_stub import FakeDeribit
 from mftik.exchange.deribit import channels as ch
 from mftik.exchange.deribit.feed import DeribitBook, DeribitPublicStream
-from mftik.exchange.deribit.models import DeribitOrderBook, DeribitTicker
+from mftik.exchange.deribit.models import (
+    DeribitOrderBook,
+    DeribitQuote,
+    DeribitTicker,
+)
 from mftik.exchange.deribit.protocol import (
     expiry_code_from_name,
     expiry_suffix_from_code,
@@ -476,3 +480,201 @@ async def test_fetch_klines_window_is_sized_by_the_interval() -> None:
     span = int(query["end_timestamp"]) - int(query["start_timestamp"])
     # 101 minutes, not 100 days.
     assert span == 101 * 60 * 1000
+
+
+# --- live option rows (public/ticker, 2026-09-27) ---------------------------
+#
+# Verbatim, numbers as JSON numbers — including ``5.0e-5`` and the empty-side
+# ``0.0`` encoding — rather than the string rows above.
+
+#: BTC-28SEP26-93000-C, one day out, no bid on the book.
+LIVE_OTM_NO_BID: dict[str, Any] = {
+    "timestamp": 1790491013053,
+    "state": "open",
+    "stats": {"high": 0.0001, "low": 0.0001, "price_change": 0.0, "volume": 58.9},
+    "greeks": {
+        "delta": 6.2e-4,
+        "gamma": 0.0,
+        "vega": 0.09933,
+        "theta": -0.41349,
+        "rho": 0.00152,
+    },
+    "index_price": 84526.82,
+    "instrument_name": "BTC-28SEP26-93000-C",
+    "last_price": 0.0001,
+    "settlement_price": 1.0042e-4,
+    "min_price": 0.0001,
+    "max_price": 0.015,
+    "open_interest": 110.0,
+    "mark_price": 0.0,
+    "interest_rate": 0.0,
+    "estimated_delivery_price": 84526.82,
+    "best_ask_price": 0.0001,
+    "best_bid_price": 0.0,
+    "mark_iv": 54.76,
+    "bid_iv": 0.0,
+    "ask_iv": 72.85,
+    "underlying_price": 84523.63,
+    "underlying_index": "BTC-28SEP26",
+    "best_ask_amount": 30.2,
+    "best_bid_amount": 0.0,
+}
+
+#: BTC-30OCT26-85000-C, ~ATM, two-sided.
+LIVE_ATM: dict[str, Any] = {
+    "timestamp": 1790491080526,
+    "state": "open",
+    "greeks": {
+        "delta": 0.51498,
+        "gamma": 5.0e-5,
+        "vega": 101.83638,
+        "theta": -52.37354,
+        "rho": 36.50317,
+    },
+    "index_price": 84527.22,
+    "instrument_name": "BTC-30OCT26-85000-C",
+    "last_price": 0.0375,
+    "open_interest": 2656.8,
+    "mark_price": 0.0401,
+    "interest_rate": 0.0,
+    "best_ask_price": 0.0405,
+    "best_bid_price": 0.0395,
+    "mark_iv": 34.0,
+    "bid_iv": 33.47,
+    "ask_iv": 34.3,
+    "underlying_price": 84881.73,
+    "underlying_index": "BTC-30OCT26",
+    "best_ask_amount": 2.1,
+    "best_bid_amount": 53.2,
+}
+
+OTM = UniversalTicker.parse("Deribit_Option_BTCUSD-260928-93000-C")
+ATM = UniversalTicker.parse("Deribit_Option_BTCUSD-261030-85000-C")
+
+
+def test_an_empty_side_iv_is_none_not_zero_percent() -> None:
+    greeks = DeribitTicker.model_validate(LIVE_OTM_NO_BID).to_greeks(OTM)
+    assert greeks is not None
+    assert greeks.bid_iv is None
+    assert greeks.ask_iv == Decimal("0.7285")
+    assert greeks.mark_iv == Decimal("0.5476")
+
+
+def test_an_empty_option_side_is_zero_not_last() -> None:
+    row = DeribitTicker.model_validate(LIVE_OTM_NO_BID)
+    ticker = row.to_ticker(OTM)
+    assert ticker.bid == 0
+    assert ticker.ask == Decimal("0.0001")
+    assert ticker.last == Decimal("0.0001")
+    quote = row.to_best_quote(OTM)
+    assert quote is not None
+    assert (quote.bid, quote.bid_qty) == (0, 0)
+    assert (quote.ask, quote.ask_qty) == (Decimal("0.0001"), Decimal("30.2"))
+
+
+def test_non_option_books_keep_their_old_empty_side_contract() -> None:
+    row = DeribitTicker.model_validate(
+        {
+            "instrument_name": "BTC-PERPETUAL",
+            "last_price": 60000,
+            "best_bid_price": 0.0,
+            "best_bid_amount": 0.0,
+            "best_ask_price": 60001,
+            "best_ask_amount": 10,
+        }
+    )
+    assert row.to_ticker(INVERSE).bid == Decimal("60000")
+    assert row.to_best_quote(INVERSE) is None
+
+
+def test_greeks_follow_the_shared_convention_on_a_live_row() -> None:
+    greeks = DeribitTicker.model_validate(LIVE_ATM).to_greeks(ATM)
+    assert greeks is not None
+    assert greeks.delta == Decimal("0.51498")
+    assert greeks.gamma == Decimal("0.00005")
+    assert greeks.vega == Decimal("101.83638")
+    assert greeks.theta == Decimal("-52.37354")
+    assert greeks.mark == Decimal("0.0401")
+    assert greeks.underlying == Decimal("84881.73")
+    assert greeks.underlying_index == "BTC-30OCT26"
+    assert greeks.index == Decimal("84527.22")
+    assert greeks.mark_iv == Decimal("0.34")
+    assert greeks.bid_iv == Decimal("0.3347")
+    assert greeks.ts == pytest.approx(1790491080.526)
+
+
+@pytest.mark.parametrize("empty", [0.0, None])
+async def test_option_bestquote_pushes_when_the_bid_is_pulled(
+    deribit_public: FakeDeribit, empty: float | None
+) -> None:
+    native = "BTC-30OCT26-85000-C"
+    client = _client(
+        FakeApi(),
+        DeribitPublicStream(deribit_public.url, ping_interval=0, heartbeat=0),
+    )
+    async with client:
+        stream = client.stream_best_quote(ATM)
+        first = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)
+        await deribit_public.push(
+            ch.quote(native),
+            {
+                "instrument_name": native,
+                "best_bid_price": 0.0395,
+                "best_bid_amount": 53.2,
+                "best_ask_price": 0.0405,
+                "best_ask_amount": 2.1,
+                "timestamp": 1790491080526,
+            },
+        )
+        two_sided = await asyncio.wait_for(first, 2)
+        second = asyncio.ensure_future(stream.__anext__())
+        await deribit_public.push(
+            ch.quote(native),
+            {
+                "instrument_name": native,
+                "best_bid_price": empty,
+                "best_bid_amount": empty,
+                "best_ask_price": 0.0405,
+                "best_ask_amount": 2.1,
+                "timestamp": 1790491081526,
+            },
+        )
+        pulled = await asyncio.wait_for(second, 2)
+    assert two_sided.bid == Decimal("0.0395")
+    assert (pulled.bid, pulled.bid_qty) == (0, 0)
+    assert pulled.ask == Decimal("0.0405")
+
+
+def test_a_perp_quote_with_an_empty_side_is_still_skipped() -> None:
+    quote = DeribitQuote.model_validate(
+        {
+            "instrument_name": "BTC-PERPETUAL",
+            "best_bid_price": None,
+            "best_ask_price": 60001,
+            "best_ask_amount": 10,
+        }
+    )
+    assert quote.to_best_quote(INVERSE) is None
+
+
+async def test_live_row_prints_ticker_and_greeks_on_one_subscribe(
+    deribit_public: FakeDeribit,
+) -> None:
+    client = _client(
+        FakeApi(),
+        DeribitPublicStream(deribit_public.url, ping_interval=0, heartbeat=0),
+    )
+    async with client:
+        ticker_stream = client.stream_ticker(OTM)
+        greeks_stream = client.stream_greeks(OTM)
+        ticker_task = asyncio.ensure_future(ticker_stream.__anext__())
+        greeks_task = asyncio.ensure_future(greeks_stream.__anext__())
+        await asyncio.sleep(0.05)
+        await deribit_public.push(ch.ticker("BTC-28SEP26-93000-C"), LIVE_OTM_NO_BID)
+        ticker = await asyncio.wait_for(ticker_task, 2)
+        greeks = await asyncio.wait_for(greeks_task, 2)
+    assert deribit_public.subscribed == {ch.ticker("BTC-28SEP26-93000-C")}
+    assert ticker.bid == 0
+    assert greeks.bid_iv is None
+    assert greeks.gamma == 0

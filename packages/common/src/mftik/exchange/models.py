@@ -371,6 +371,11 @@ class BestQuote(InstrumentScoped):
     Distinct from :class:`Ticker`, which carries 24h stats on a venue-chosen
     cadence: this is the quote alone, at book speed, and it has the resting
     sizes a :class:`Ticker` does not.
+
+    Option books are often one-sided, so an Option quote is pushed even
+    then: an empty side is ``price == qty == 0``. Read ``bid_qty == 0`` as
+    "no bid", not as a bid at zero. Other books skip a frame with an empty
+    side rather than print one.
     """
 
     bid: Decimal
@@ -452,16 +457,48 @@ class OpenInterest(InstrumentScoped):
 
 
 class Greeks(InstrumentScoped):
-    """Live option greeks, IVs, and mark.
+    """Live option greeks, IVs, and mark — in one convention for every venue.
 
     Feed topic ``greeks``. ``delta``, ``gamma``, ``theta`` and ``vega``
-    are required. ``rho`` is ``None`` when the venue does not publish
-    it (Bybit and Binance later). Mark, underlying, and the three IVs
-    are optional.
+    are required. ``rho`` is ``None`` when the venue does not publish it
+    (Bybit and OKX do not). Everything else is optional.
 
-    Implied vol is a **decimal fraction**: ``0.65`` is 65%. A venue that
-    publishes percent converts before the hook. Open interest is not
-    here — that is :class:`OpenInterest` / ``on_open_interest``.
+    **Convention.** Each venue converts to this before the hook, the way
+    IV is already converted; nothing downstream should need to know
+    which venue a figure came from. All greeks are Black-Scholes /
+    Black-76 on :attr:`underlying`, per **one unit of base** notional
+    (one BTC, not one contract), in the instrument's **quote** currency
+    (USD for ``Deribit_Option_BTCUSD-…``, USDC for ``…BTCUSDC-…``):
+
+    ============  =========================================================
+    ``delta``     dV/dF. Not premium-adjusted (OKX ``deltaBS``, not
+                  ``delta``). Dimensionless: ``0.51`` means 0.51 base.
+    ``gamma``     d²V/dF² per one quote-currency move of F (``5e-5``).
+    ``vega``      quote currency per one vol **point** (sigma + 0.01).
+    ``theta``     quote currency per **calendar day**; negative for a long.
+    ``rho``       quote currency per one rate point (r + 0.01).
+    ``*_iv``      a **decimal fraction**: ``0.65`` is 65%. ``None`` when
+                  that side of the book is empty or no vol solves it —
+                  never ``0``.
+    ============  =========================================================
+
+    A venue that publishes coin-denominated or premium-adjusted greeks
+    (OKX's un-suffixed fields) must map its BS fields here, or convert.
+
+    ``mark`` is the premium in the instrument's **price** currency, which
+    is not always the greeks' currency: an inverse option
+    (``Deribit_Option_BTCUSD-…``) is priced in BTC while its greeks are
+    in USD. ``underlying`` is the price the greeks were taken against —
+    on Deribit the forward named by ``underlying_index`` (a listed
+    future, a ``SYN.`` synthetic, or ``index_price``), not the spot
+    index; ``index`` is the index itself. Delta against the index is
+    ``delta * underlying / index``.
+
+    Venue figures are rounded by the venue. Deribit rounds greeks to five
+    decimals, so BTC ``gamma`` carries about one significant figure
+    (``4.59e-5`` arrives as ``5e-5``); recompute from ``mark_iv`` when
+    the figure matters. Open interest is not here — that is
+    :class:`OpenInterest` / ``on_open_interest``.
 
     A venue that cannot push this feed has no ``stream_greeks``, and
     subscribing there is refused at attach.
@@ -474,6 +511,8 @@ class Greeks(InstrumentScoped):
     rho: Decimal | None = None
     mark: Decimal | None = None
     underlying: Decimal | None = None
+    underlying_index: str | None = None
+    index: Decimal | None = None
     bid_iv: Decimal | None = None
     ask_iv: Decimal | None = None
     mark_iv: Decimal | None = None

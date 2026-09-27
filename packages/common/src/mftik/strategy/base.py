@@ -466,8 +466,11 @@ class Strategy:
 
         Feed topic ``greeks``. ``delta``, ``gamma``, ``theta`` and
         ``vega`` are always set. ``rho`` is ``None`` when the venue
-        has none. IVs are decimal fractions (``0.65`` = 65%). Open
-        interest is not here — that is :meth:`on_open_interest`.
+        has none. IVs are decimal fractions (``0.65`` = 65%), ``None``
+        for an empty side. Units are one convention across venues —
+        BS, per one base, quote currency, vega per vol point, theta
+        per calendar day; see :class:`~mftik.exchange.models.Greeks`.
+        Open interest is not here — that is :meth:`on_open_interest`.
 
         Not every venue publishes this. Deribit Option does, on the
         same ticker row as bid/ask. Subscribing where it is absent is
