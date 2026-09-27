@@ -12,6 +12,7 @@ from mftik.exchange.models import (
     AggTrade,
     BestQuote,
     BookLevel,
+    Expiry,
     FundingRate,
     Greeks,
     Kline,
@@ -24,6 +25,7 @@ from mftik.exchange.models import (
 from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
+    MD_EXPIRY,
     MD_FUNDING_RATE,
     MD_GREEKS,
     MD_KLINE,
@@ -61,6 +63,7 @@ class RecordingStrategy(Strategy):
             "funding_rate": [],
             "open_interest": [],
             "greeks": [],
+            "expiry": [],
         }
 
     async def on_ticker(self, ticker: Ticker) -> None:
@@ -92,6 +95,9 @@ class RecordingStrategy(Strategy):
 
     async def on_greeks(self, greeks: Greeks) -> None:
         self.seen["greeks"].append(greeks)
+
+    async def on_expiry(self, expiry: Expiry) -> None:
+        self.seen["expiry"].append(expiry)
 
 
 def _payloads() -> list[tuple[str, str, dict]]:
@@ -206,6 +212,15 @@ def _payloads() -> list[tuple[str, str, dict]]:
                 rho=Decimal("3.1"),
                 mark_iv=Decimal("0.65"),
                 ts=1_700_000_000.0,
+            ).model_dump(mode="json"),
+        ),
+        (
+            MD_EXPIRY,
+            "expiry",
+            Expiry(
+                universal_ticker="Deribit_Option_BTCUSDT",
+                expiry=1_700_000_000.0,
+                topics=["greeks", "ticker"],
             ).model_dump(mode="json"),
         ),
     ]

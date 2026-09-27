@@ -226,7 +226,8 @@ async def amain() -> bool:
         except InstanceAlreadyServing as exc:
             logger.error("%s", exc)
             return False
-        factory = VenuePublicFactory(broker)
+        symbols = SymbolClient(broker)
+        factory = VenuePublicFactory(broker, symbols=symbols)
         sessions = SessionManager(
             factory,
             broker,
@@ -235,6 +236,7 @@ async def amain() -> bool:
             list_db_sessions=md_db.list_sessions,
             recorder=_build_recorder(),
             instance=INSTANCE,
+            symbols=symbols,
         )
         if sessions.tape_store is not None:
             await sessions.tape_store.ping()

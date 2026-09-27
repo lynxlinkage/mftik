@@ -94,6 +94,18 @@ class Dispatcher:
     def refcount(self, topic: str, ticker: UniversalTicker) -> int:
         return len(self._subs.get((topic, ticker), ()))
 
+    def feeds_for_ticker(self, ticker: UniversalTicker) -> list[FeedKey]:
+        """Every live ``(topic, ticker)`` key on this instrument."""
+        return [key for key in self._subs if key[1] == ticker]
+
+    def sessions_on_ticker(self, ticker: UniversalTicker) -> set[str]:
+        """Sessions that hold any feed on this instrument."""
+        sessions: set[str] = set()
+        for (_topic, tk), subs in self._subs.items():
+            if tk == ticker:
+                sessions.update(subs)
+        return sessions
+
     def refcounts(self) -> dict[str, int]:
         return {
             Topics.md_feed(topic, ticker): len(subs)

@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from mftik.broker import Broker, LeasedSessionLink
+from mftik.exchange.models import Expiry
+from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     LEASE_HEARTBEAT_INTERVAL_S,
     LEASE_MISS_LIMIT,
     MD_DETACH,
+    MD_EXPIRY,
     MD_LEASE_ACK,
     MD_SUBSCRIBE,
     MD_UNSUBSCRIBE,
@@ -27,8 +31,10 @@ from mftik.protocol import (
     MdUnsubscribe,
     SessionInfo,
     Topics,
+    UntypedEnvelope,
     publish_md_log,
 )
+from mftik.symbols import SymbolClient, SymbolNotFoundError
 from mftik_db.models.session import SessionDomain, SessionStatus
 
 from mftik_md.session.dispatcher import Dispatcher, FeedKey
@@ -87,9 +93,14 @@ class SessionManager:
         lease_grace: float = LEASE_GRACE_S,
         recorder: TapeRecorder | None = None,
         instance: str = SessionDomain.MD.value,
+        symbols: SymbolClient | None = None,
     ) -> None:
         self._factory = factory
         self._broker = broker
+        #: Symbol plane, for listed settlement times. None leaves every
+        #: feed running until detach — tests and a process without the
+        #: plane never cut on expiry.
+        self._symbols = symbols
         #: Which MD this is. Defaults to the plane name, which is what
         #: ``MFTIK_INSTANCE`` resolves to when nobody has set it and what
         #: migration 0031 declares.
@@ -113,6 +124,15 @@ class SessionManager:
         #: Venue disconnects still running. Held so :meth:`close_all` can wait
         #: for them and a stray task cannot be garbage-collected mid-close.
         self._disconnects: set[asyncio.Task[Any]] = set()
+        #: Per-instrument sleep until listed settlement. Cancelled when
+        #: the last reader leaves before expiry, or when the cut runs.
+        self._expiry_tasks: dict[UniversalTicker, asyncio.Task[Any]] = {}
+        #: Instruments that have already been cut. ``ensure_feed`` is
+        #: not called again for these; a later subscribe is notified
+        #: and refused.
+        self._expired: set[UniversalTicker] = set()
+        self._expiry_at: dict[UniversalTicker, float] = {}
+        self._expiry_lock = asyncio.Lock()
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -177,8 +197,21 @@ class SessionManager:
         self._links[request.session_id] = link
         self._dispatcher.register_link(link)
 
+        already: dict[UniversalTicker, list[str]] = {}
         for feed in request.subscriptions:
-            await self._subscribe_feed(link, feed)
+            topic, ticker = Topics.parse_md_feed(feed)
+            if ticker in self._expired:
+                already.setdefault(ticker, []).append(topic)
+                continue
+            await self._subscribe_feed(link, feed, arm=False)
+        await self._arm_subscribed_tickers(request.subscriptions)
+        for ticker, topics in already.items():
+            await self._publish_expiry(
+                [request.session_id],
+                ticker,
+                expiry=self._expiry_at[ticker],
+                topics=topics,
+            )
 
         feeds = sorted(link.subscriptions)
         venues = sorted(_venues_from_feeds(feeds))
@@ -222,8 +255,10 @@ class SessionManager:
             return
         changed = self._dispatcher.unsubscribe_all(session_id)
         venues: set[str] = set()
+        tickers: set[UniversalTicker] = set()
         for (topic, ticker), old_rc, new_rc in changed:
             venues.add(ticker.venue)
+            tickers.add(ticker)
             feed = Topics.md_feed(topic, ticker)
             await publish_md_log(
                 self._broker,
@@ -237,6 +272,8 @@ class SessionManager:
             )
             if new_rc == 0:
                 await self._stop_feed_if_unused((topic, ticker))
+        for ticker in tickers:
+            self._disarm_if_idle(ticker)
         await self._stop_link(link)
         if self._mark_done is not None:
             await self._mark_done(
@@ -415,6 +452,13 @@ class SessionManager:
         return reaped
 
     async def close_all(self) -> None:
+        for task in list(self._expiry_tasks.values()):
+            task.cancel()
+        if self._expiry_tasks:
+            await asyncio.gather(
+                *self._expiry_tasks.values(), return_exceptions=True
+            )
+        self._expiry_tasks.clear()
         for session_id in list(self._links):
             await self.detach(session_id=session_id, reason="shutdown")
         for venue in list(self._venues):
@@ -428,11 +472,33 @@ class SessionManager:
         if self._recorder is not None:
             await self._recorder.aclose()
 
-    async def _subscribe_feed(self, link: StsLink, feed: str) -> None:
+    async def _subscribe_feed(
+        self, link: StsLink, feed: str, *, arm: bool = True
+    ) -> None:
         topic, ticker = Topics.parse_md_feed(feed)
-        first, new_rc = self._dispatcher.subscribe(link.session_id, topic, ticker)
-        old_rc = new_rc - 1
-        link.subscriptions.add(feed)
+        first = False
+        old_rc = 0
+        new_rc = 0
+        async with self._expiry_lock:
+            if ticker in self._expired:
+                expiry = self._expiry_at[ticker]
+                notify_topics = [topic]
+            else:
+                expiry = None
+                notify_topics = []
+                first, new_rc = self._dispatcher.subscribe(
+                    link.session_id, topic, ticker
+                )
+                old_rc = new_rc - 1
+                link.subscriptions.add(feed)
+        if expiry is not None:
+            await self._publish_expiry(
+                [link.session_id],
+                ticker,
+                expiry=expiry,
+                topics=notify_topics,
+            )
+            return
         await publish_md_log(
             self._broker,
             ticker.venue,
@@ -457,6 +523,8 @@ class SessionManager:
                 source="md",
                 instance=self._instance,
             )
+        if arm:
+            await self._arm_expiry(ticker)
 
     async def _unsubscribe_feed(self, link: StsLink, feed: str) -> None:
         topic, ticker = Topics.parse_md_feed(feed)
@@ -476,6 +544,137 @@ class SessionManager:
         )
         if emptied:
             await self._stop_feed_if_unused((topic, ticker))
+        self._disarm_if_idle(ticker)
+
+    async def _arm_subscribed_tickers(self, feeds: Sequence[str]) -> None:
+        seen: set[UniversalTicker] = set()
+        for feed in feeds:
+            try:
+                _topic, ticker = Topics.parse_md_feed(feed)
+            except ValueError:
+                continue
+            if ticker in seen:
+                continue
+            seen.add(ticker)
+            await self._arm_expiry(ticker)
+
+    async def _listed_expiry(self, ticker: UniversalTicker) -> float | None:
+        if self._symbols is None:
+            return None
+        try:
+            info = await self._symbols.get(ticker)
+        except SymbolNotFoundError:
+            return None
+        except Exception:
+            logger.exception("MD symbol lookup failed ticker=%s", ticker)
+            return None
+        return info.expiry
+
+    async def _arm_expiry(self, ticker: UniversalTicker) -> None:
+        if ticker in self._expired or ticker in self._expiry_tasks:
+            return
+        expiry = await self._listed_expiry(ticker)
+        if expiry is None:
+            return
+        delay = expiry - time.time()
+        if delay <= 0:
+            await self._expire_ticker(ticker, expiry)
+            return
+        self._expiry_tasks[ticker] = asyncio.create_task(
+            self._watch_expiry(ticker, expiry),
+            name=f"md-expiry-{ticker}",
+        )
+
+    async def _watch_expiry(
+        self, ticker: UniversalTicker, expiry: float
+    ) -> None:
+        try:
+            delay = expiry - time.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self._expire_ticker(ticker, expiry)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("MD expiry watch failed ticker=%s", ticker)
+        finally:
+            current = asyncio.current_task()
+            if self._expiry_tasks.get(ticker) is current:
+                self._expiry_tasks.pop(ticker, None)
+
+    async def _expire_ticker(
+        self, ticker: UniversalTicker, expiry: float
+    ) -> None:
+        async with self._expiry_lock:
+            if ticker in self._expired:
+                return
+            keys = self._dispatcher.feeds_for_ticker(ticker)
+            sessions = self._dispatcher.sessions_on_ticker(ticker)
+            topics = sorted({topic for topic, _tk in keys})
+            self._expired.add(ticker)
+            self._expiry_at[ticker] = expiry
+            task = self._expiry_tasks.pop(ticker, None)
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+            for session_id in sessions:
+                link = self._links.get(session_id)
+                if link is None:
+                    continue
+                for topic, _tk in keys:
+                    link.subscriptions.discard(Topics.md_feed(topic, ticker))
+            for topic, tk in keys:
+                for session_id in list(self._dispatcher.subscribers(topic, tk)):
+                    self._dispatcher.unsubscribe(session_id, topic, tk)
+        for key in keys:
+            await self._stop_feed_if_unused(key)
+        if sessions:
+            await self._publish_expiry(
+                sessions, ticker, expiry=expiry, topics=topics
+            )
+        await publish_md_log(
+            self._broker,
+            ticker.venue,
+            (
+                f"instrument expired {ticker} topics={topics} "
+                f"sessions={sorted(sessions)}"
+            ),
+            source="md",
+            instance=self._instance,
+        )
+
+    async def _publish_expiry(
+        self,
+        session_ids: Sequence[str],
+        ticker: UniversalTicker,
+        *,
+        expiry: float,
+        topics: list[str],
+    ) -> None:
+        env = UntypedEnvelope.wrap(
+            Expiry(
+                universal_ticker=str(ticker),
+                expiry=expiry,
+                topics=sorted(topics),
+            ).model_dump(mode="json"),
+            type=MD_EXPIRY,
+            source="md",
+        )
+        for session_id in session_ids:
+            try:
+                await self._broker.publish(Topics.md_session(session_id), env)
+            except Exception:
+                logger.exception(
+                    "MD expiry notify failed session=%s ticker=%s",
+                    session_id,
+                    ticker,
+                )
+
+    def _disarm_if_idle(self, ticker: UniversalTicker) -> None:
+        if self._dispatcher.feeds_for_ticker(ticker):
+            return
+        task = self._expiry_tasks.pop(ticker, None)
+        if task is not None:
+            task.cancel()
 
     async def _ensure_venue(self, venue: str) -> VenueSession:
         existing = self._venues.get(venue)
