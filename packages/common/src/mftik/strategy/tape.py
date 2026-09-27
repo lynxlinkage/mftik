@@ -10,12 +10,12 @@ anycast ``Topics.MD`` or ``md.fetch``. A ticker that is not on this
 session's ``md`` map raises: there is no owner to invent. Asking the
 wrong region's MD is an empty :class:`TapeSlice` (``recording=false``).
 
-Each print handed to ``on_print`` is the same
-:class:`~mftik.exchange.models.Trade` /
+Each print is the same :class:`~mftik.exchange.models.Trade` /
 :class:`~mftik.exchange.models.AggTrade` the live hooks are handed, so a
 strategy can feed history and live prints through one code path instead of
-writing its aggregation twice and hoping the two agree. The read does not
-keep those objects: a caller that wants the series keeps it itself.
+writing its aggregation twice and hoping the two agree. Pass ``on_print``
+and the read does not keep those objects. Omit it and the slice carries
+them, which is what existing callers read.
 """
 
 from __future__ import annotations
@@ -173,9 +173,10 @@ class TapeSlice:
     here, so a strategy can decide rather than assume.
     """
 
-    #: Oldest → newest, when the caller built this slice itself.
-    #: :meth:`StrategyTape.read` leaves it empty and hands each print to
-    #: ``on_print`` instead — keeping the series is the caller's cost.
+    #: Oldest → newest. Filled when the caller did not pass ``on_print``.
+    #: A callback takes each print and this stays empty, so the series is
+    #: not held twice. Empty here with a non-zero :attr:`count` means the
+    #: prints were handed over, not that the read found nothing.
     records: list[Trade] = field(default_factory=list)
     #: How many prints were handed to ``on_print`` (or would have been).
     count: int = 0
@@ -255,11 +256,12 @@ class StrategyTape:
         reports the gaps it does span, on :attr:`TapeSlice.gaps`, so a strategy
         that wants to be stricter than the number it passed still can be.
 
-        Each kept print is passed to ``on_print`` and then dropped. The
-        returned slice says what the series covers — count, span, gaps —
-        and its :attr:`TapeSlice.records` is empty. A strategy that wants
-        the prints keeps them from the callback. History and the live hooks
-        still see one :class:`~mftik.exchange.models.Trade`.
+        Pass ``on_print`` and each kept print is handed to it and dropped:
+        the returned slice says what the series covers, and
+        :attr:`TapeSlice.records` is empty, because the caller is keeping
+        whatever it wants. Omit it and the slice carries the prints, which
+        is what a caller looping ``records`` is reading. History and the
+        live hooks still see one :class:`~mftik.exchange.models.Trade`.
 
         A feed this session never attached raises
         :class:`TapeFeedNotAttached`. An empty slice from the right MD is a
@@ -299,7 +301,9 @@ class StrategyTape:
 
         # Pages arrive newest-first because that is how the cursor walks.
         # Hand them back oldest-first, one page at a time, and drop the page.
-        # The models live with the caller, if it kept them, not on this slice.
+        # A callback keeps what it wants. Without one, the slice is the
+        # only place the prints go, and leaving it empty is a warm-up that
+        # reads nothing and raises nothing.
         deadline = slice_deadline()
         count = 0
         dropped = 0
@@ -307,6 +311,7 @@ class StrategyTape:
         oldest_kept_ms: int | None = None
         first_ts: float | None = None
         last_ts: float | None = None
+        kept: list[Trade] = []
         log = session_log(self._strategy)
         pending: list[Trade] = []
         log_offset = 0
@@ -333,7 +338,10 @@ class StrategyTape:
                     first_ts = parsed.ts
                 last_ts = parsed.ts
                 count += 1
-                await _deliver(on_print, parsed)
+                if on_print is None:
+                    kept.append(parsed)
+                else:
+                    await _deliver(on_print, parsed)
                 if logged < LOG_MAX_RECORDS:
                     pending.append(parsed)
                     logged += 1
@@ -389,6 +397,7 @@ class StrategyTape:
             truncated=count > LOG_MAX_RECORDS or None,
         )
         return TapeSlice(
+            records=kept,
             count=count,
             first_ts=first_ts,
             last_ts=last_ts,

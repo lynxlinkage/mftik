@@ -754,7 +754,7 @@ async def test_tape_read_records_the_prints_not_just_the_coverage(
 
     slice_ = await strategy.tape.read("Paper_Spot_BTCUSDT")
     assert len(slice_) == 3
-    assert slice_.records == []
+    assert [r.trade_id for r in slice_.records] == ["0", "1", "2"]
     await sts.stop()
     stop.set()
     task.cancel()
@@ -857,10 +857,10 @@ async def test_a_capped_tape_read_says_it_was_capped(
     await sts.start()
 
     slice_ = await strategy.tape.read("Paper_Spot_BTCUSDT")
-    # Counted in full. The log below is what is short, and the slice does
-    # not keep the prints either way.
+    # No callback, so the caller still receives every print. The log
+    # below is what is short.
     assert len(slice_) == 3
-    assert slice_.records == []
+    assert len(slice_.records) == 3
     await sts.stop()
     stop.set()
     task.cancel()

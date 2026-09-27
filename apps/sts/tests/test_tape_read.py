@@ -140,6 +140,33 @@ async def test_reads_back_as_aggtrade_models(
 
 
 @pytest.mark.asyncio
+async def test_omitting_on_print_keeps_the_prints_on_the_slice(
+    broker: Broker, store: TapeStore
+) -> None:
+    """A caller that loops ``records`` is reading the series.
+
+    Passing ``on_print`` opts out of that copy. Omitting the callback and
+    returning an empty list is a warm-up that aggregates nothing and
+    raises nothing. ``len`` counts the prints in either case.
+    """
+    await store.mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
+    await _record(store, AGG_FEED, "1", "68000")
+    await _record(store, AGG_FEED, "2", "68001")
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve_tape(broker, store, instance=INSTANCE, stop=stop))
+    try:
+        result = await _tape(broker).read(TICKER)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert [r.trade_id for r in result.records] == ["1", "2"]
+    assert len(result) == 2
+
+
+@pytest.mark.asyncio
 async def test_trade_topic_reads_back_as_trade(
     broker: Broker, store: TapeStore
 ) -> None:
