@@ -634,6 +634,21 @@ async def test_client_get_asks_for_one_ticker(broker: Broker, served) -> None:
             "venue": None,
             "category": None,
             "symbol": None,
+            "active_only": True,
+            "q": None,
+            "limit": None,
+            "offset": 0,
+            "slim": False,
+        }
+    ]
+    seen.clear()
+    assert (await client.get(_t("ETHUSDT"), include_inactive=True)).is_active
+    assert seen == [
+        {
+            "universal_ticker": "Gate_Spot_ETHUSDT",
+            "venue": None,
+            "category": None,
+            "symbol": None,
             "active_only": False,
             "q": None,
             "limit": None,
@@ -646,12 +661,11 @@ async def test_client_get_asks_for_one_ticker(broker: Broker, served) -> None:
 async def test_client_get_finds_inactive_settled_instrument(
     broker: Broker, plane_factory
 ) -> None:
-    """Hourly refresh deactivates a settled book; get() still returns it.
+    """Hourly refresh deactivates a settled book; default get() still misses.
 
-    Default ``SYM_LIST`` is active-only, so a rebuilt MD that asked
-    that way would miss the listed expiry and reopen nothing — and
-    never fire ``on_expiry``. The single-ticker read includes the
-    inactive row.
+    MD's expiry watch passes ``include_inactive`` so it can still
+    read the listed time. A strategy or TD order keeps seeing
+    ``SymbolNotFoundError``.
     """
     import asyncio
 
@@ -669,7 +683,11 @@ async def test_client_get_finds_inactive_settled_instrument(
     task = asyncio.create_task(_serve(broker, plane, stop))
     try:
         client = SymbolClient(broker)
-        info = await client.get(_t("ETHUSDT"))
+        with pytest.raises(SymbolNotFoundError, match="Gate_Spot_ETHUSDT"):
+            await client.get(_t("ETHUSDT"))
+        info = await client.get(_t("ETHUSDT"), include_inactive=True)
+        with pytest.raises(SymbolNotFoundError, match="Gate_Spot_ETHUSDT"):
+            await client.get(_t("ETHUSDT"))
     finally:
         stop.set()
         task.cancel()

@@ -86,18 +86,29 @@ class SymbolClient:
 
     # --- reads -------------------------------------------------------------
 
-    async def get(self, ticker: UniversalTicker) -> SymbolInfo:
+    async def get(
+        self, ticker: UniversalTicker, *, include_inactive: bool = False
+    ) -> SymbolInfo:
         """One instrument, or :class:`SymbolNotFoundError`.
 
         Hits the plane by exact ticker. A venue-wide ``SYM_LIST`` is how a
         Gate feed attached, stayed ``live``, and never printed.
+
+        Inactive rows (a settled dated book the hourly refresh marked
+        untradable) are omitted unless ``include_inactive`` is set. MD's
+        expiry watch is the caller that needs those; a strategy or a
+        TD order should fail the same way a missing instrument does.
         """
         async with self._lock:
             cached = self._cached_one(ticker)
             if cached is not None:
-                return cached
-        info = await self._fetch_one(ticker)
-        if info is None:
+                if include_inactive or cached.is_active:
+                    return cached
+                raise SymbolNotFoundError(f"no such instrument: {ticker}")
+        info = await self._fetch_one(
+            ticker, active_only=not include_inactive
+        )
+        if info is None or (not include_inactive and not info.is_active):
             raise SymbolNotFoundError(f"no such instrument: {ticker}")
         async with self._lock:
             self._store_one(ticker, info)
@@ -217,16 +228,14 @@ class SymbolClient:
         for info in symbols.values():
             self._singles[info.ticker] = (now, info)
 
-    async def _fetch_one(self, ticker: UniversalTicker) -> SymbolInfo | None:
-        # Inactive rows stay after settlement — the hourly refresh marks
-        # them untradable rather than deleting them. MD still needs the
-        # listed expiry so a rebuilt session can fire ``on_expiry``
-        # instead of opening a book the venue has already taken down.
+    async def _fetch_one(
+        self, ticker: UniversalTicker, *, active_only: bool = True
+    ) -> SymbolInfo | None:
         result = SymListResult.model_validate(
             await self._request(
                 SYM_LIST,
                 SymListRequest(
-                    universal_ticker=str(ticker), active_only=False
+                    universal_ticker=str(ticker), active_only=active_only
                 ),
             )
         )

@@ -37,10 +37,11 @@ here.
 ## When MD cuts
 
 On attach (and on a later `md.subscribe`), MD reads the symbol
-plane for each ticker. A single-instrument `get` includes inactive
-rows: the hourly refresh marks a settled contract untradable rather
-than deleting it, and the listed time is how a rebuilt MD still
-fires `on_expiry` instead of treating the miss as "no expiry".
+plane for each ticker via `SymbolClient.get(..., include_inactive=True)`.
+The default `get()` stays active-only — strategies and TD still
+see a settled book as missing. The hourly refresh marks a settled
+contract untradable rather than deleting it; only the expiry watch
+asks for that row, so a rebuilt MD can still fire `on_expiry`.
 
 - Listed time in the future — open the pumps, sleep until it.
 - Listed time already past, or inactive and past — do not

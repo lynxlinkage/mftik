@@ -45,7 +45,7 @@ class StubSymbols:
         self.expiry = expiry
         self.is_active = is_active
 
-    async def get(self, ticker: UniversalTicker) -> SymbolInfo:
+    async def get(self, ticker: UniversalTicker, **_: object) -> SymbolInfo:
         return SymbolInfo(
             universal_ticker=str(ticker),
             base="BTC",
@@ -392,7 +392,7 @@ async def test_runtime_subscribe_does_not_stall_lease_acks(
     started = asyncio.Event()
 
     class SlowSymbols:
-        async def get(self, ticker: UniversalTicker) -> SymbolInfo:
+        async def get(self, ticker: UniversalTicker, **_: object) -> SymbolInfo:
             started.set()
             await asyncio.sleep(1.2)
             return _info(ticker, None)
@@ -457,7 +457,7 @@ async def test_failed_lookup_retries_and_still_cuts(
         def __init__(self) -> None:
             self.calls = 0
 
-        async def get(self, ticker: UniversalTicker) -> SymbolInfo:
+        async def get(self, ticker: UniversalTicker, **_: object) -> SymbolInfo:
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("sym down")
@@ -605,7 +605,7 @@ async def test_runtime_unsub_waits_for_in_flight_subscribe(
     started = asyncio.Event()
 
     class SlowSymbols:
-        async def get(self, ticker: UniversalTicker) -> SymbolInfo:
+        async def get(self, ticker: UniversalTicker, **_: object) -> SymbolInfo:
             started.set()
             await asyncio.sleep(0.35)
             return _info(ticker, None)
@@ -648,7 +648,7 @@ async def test_detach_during_subscribe_does_not_leave_an_orphan_pump(
     started = asyncio.Event()
 
     class SlowSymbols:
-        async def get(self, ticker: UniversalTicker) -> SymbolInfo:
+        async def get(self, ticker: UniversalTicker, **_: object) -> SymbolInfo:
             started.set()
             await asyncio.sleep(0.35)
             return _info(ticker, None)

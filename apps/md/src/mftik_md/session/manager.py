@@ -722,7 +722,7 @@ class SessionManager:
         if not mine:
             return await waiter
         try:
-            info = await self._symbols.get(ticker)
+            info = await self._symbols.get(ticker, include_inactive=True)
         except SymbolNotFoundError:
             self._timeless.add(ticker)
             if not waiter.done():
