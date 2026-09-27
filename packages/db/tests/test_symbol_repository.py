@@ -256,6 +256,23 @@ async def test_list_tickers_exact_universal_ticker(db) -> None:
     assert [t.universal_ticker for t in found] == ["Gate_Spot_BTCUSDT"]
 
 
+async def test_exact_ticker_lookup_includes_inactive(db) -> None:
+    """A settled row is deactivated, not deleted; an exact get still finds it."""
+    repo = SymbolRepository(db)
+    await _btc(repo)
+    await repo.deactivate_missing(venue="Gate", category=SPOT, keep=set())
+
+    assert (
+        await repo.list_tickers(universal_ticker="Gate_Spot_BTCUSDT")
+        == []
+    )
+    found = await repo.list_tickers(
+        universal_ticker="Gate_Spot_BTCUSDT", active_only=False
+    )
+    assert len(found) == 1
+    assert found[0].is_active is False
+
+
 async def test_list_filters_for_can_restrict_names(db) -> None:
     repo = SymbolRepository(db)
     ticker = await _btc(repo)

@@ -48,6 +48,11 @@ V2 and V3 did not contradict the constants this doc assumed for identity.
 
 `yes` means the adapter serves it. `—` means refused by name.
 
+Dated futures and options carry `SymbolInfo.expiry`. MD drops every
+feed on that ticker at the listed time and notifies STS with
+`md.expiry` → `on_expiry`. That is not a subscribed topic; see
+`docs/MdExpiry.md`.
+
 A live place/cancel pass was **not** run in this environment (no test
 key). Public instruments / tickers were probed against
 `www.deribit.com` when the constants above were locked.

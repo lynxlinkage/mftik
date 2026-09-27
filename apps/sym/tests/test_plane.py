@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -640,6 +641,60 @@ async def test_client_get_asks_for_one_ticker(broker: Broker, served) -> None:
             "slim": False,
         }
     ]
+    seen.clear()
+    assert (await client.get(_t("ETHUSDT"), include_inactive=True)).is_active
+    assert seen == [
+        {
+            "universal_ticker": "Gate_Spot_ETHUSDT",
+            "venue": None,
+            "category": None,
+            "symbol": None,
+            "active_only": False,
+            "q": None,
+            "limit": None,
+            "offset": 0,
+            "slim": False,
+        }
+    ]
+
+
+async def test_client_get_finds_inactive_settled_instrument(
+    broker: Broker, plane_factory
+) -> None:
+    """Hourly refresh deactivates a settled book; default get() still misses.
+
+    MD's expiry watch passes ``include_inactive`` so it can still
+    read the listed time. A strategy or TD order keeps seeing
+    ``SymbolNotFoundError``.
+    """
+    import asyncio
+
+    settled = datetime(2026, 9, 27, 8, tzinfo=UTC)
+    source = StubSource([_inst("BTC"), _inst("ETH", expiry=settled)])
+    plane = plane_factory([source])
+    await plane.refresh()
+    source.instruments = [_inst("BTC")]
+    await plane.refresh()
+    assert [s.symbol for s in (await plane.list_symbols()).symbols] == [
+        "BTCUSDT"
+    ]
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(_serve(broker, plane, stop))
+    try:
+        client = SymbolClient(broker)
+        with pytest.raises(SymbolNotFoundError, match="Gate_Spot_ETHUSDT"):
+            await client.get(_t("ETHUSDT"))
+        info = await client.get(_t("ETHUSDT"), include_inactive=True)
+        with pytest.raises(SymbolNotFoundError, match="Gate_Spot_ETHUSDT"):
+            await client.get(_t("ETHUSDT"))
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert info.is_active is False
+    assert info.expiry is not None
 
 
 async def test_client_list_walks_pages(broker: Broker, served) -> None:

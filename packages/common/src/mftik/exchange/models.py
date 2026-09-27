@@ -529,6 +529,28 @@ class Greeks(InstrumentScoped):
     ts: float = Field(default_factory=_ts)
 
 
+class Expiry(InstrumentScoped):
+    """Listed instrument reached settlement. MD dropped every feed on it.
+
+    Not a subscribed topic and not listed in ``md_ids``. One print per
+    instrument **per MD process**, to every session that held a feed
+    on this ticker (or asked for one after it had already settled),
+    then those feeds stay down — a later attach or ``md.subscribe``
+    is refused and notified rather than reopened. A new MD process
+    looks the listed time up again and will not reopen a settled
+    book; the rebuilt session may be notified once more.
+    ``topics`` names the product keys that were cut (``ticker``,
+    ``greeks``, ``kline_1h``, …). ``expiry`` is the listed settlement
+    time from the symbol plane.
+
+    Spot and perpetual books have no expiry and never produce this.
+    """
+
+    expiry: float
+    topics: list[str]
+    ts: float = Field(default_factory=_ts)
+
+
 class OrderBook(InstrumentScoped):
     bids: list[BookLevel]
     asks: list[BookLevel]
