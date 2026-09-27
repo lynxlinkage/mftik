@@ -125,24 +125,20 @@ class _PipeWorker:
         self.lifeline = lifeline
 
     async def read_result(self) -> str | None:
-        fd = self._read_fd
-
-        def _read() -> str:
-            try:
-                chunks: list[bytes] = []
-                while True:
-                    data = os.read(fd, 65536)
-                    if not data:
-                        break
-                    chunks.append(data)
-                    if b"\n" in data:
-                        break
-                return b"".join(chunks).decode()
-            finally:
-                os.close(fd)
-
-        text = await asyncio.to_thread(_read)
-        return text or None
+        # On the loop, not in a thread: a worker stuck in on_start would hold
+        # a default-executor thread for as long as it stays stuck, and a
+        # cancelled create could not let go of it until the pipe closed.
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        transport, _ = await loop.connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader),
+            os.fdopen(self._read_fd, "rb", buffering=0),
+        )
+        try:
+            line = await reader.readline()
+        finally:
+            transport.close()
+        return line.decode() or None
 
 
 class SubprocessSpawner:

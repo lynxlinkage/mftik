@@ -614,6 +614,19 @@ class SessionManager:
         if slot.started or slot.abandoned:
             return
         self._drop_unstarted(slot)
+        if self._load_session is not None and not await self._row_is_live(
+            slot.session_id
+        ):
+            # The worker ended the session itself before it could report —
+            # an operator stop while it sat in on_start writes ``done`` and
+            # exits without a result line. That row says what happened;
+            # ``failed`` here would replace it with a deploy failure.
+            logger.info(
+                "STS worker exited before reporting, row already final "
+                "session=%s",
+                slot.session_id,
+            )
+            return
         if self._mark_done is not None:
             try:
                 await self._mark_done(

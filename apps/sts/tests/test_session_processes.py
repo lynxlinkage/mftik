@@ -48,6 +48,7 @@ from mftik_sts.spawn import (
     START_FAIL_REASON,
     SubprocessSpawner,
     WorkerSlot,
+    _PipeWorker,
 )
 from mftik_sts.worker import arm_parent_death, set_pdeathsig
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -166,6 +167,7 @@ def _manager(
     store: dict[str, SimpleNamespace],
     *,
     rebuild: bool = False,
+    load: bool = False,
 ) -> SessionManager:
     async def persist(**kwargs: Any) -> SimpleNamespace:
         row = SimpleNamespace(status="live", reason=None, **kwargs)
@@ -177,10 +179,14 @@ def _manager(
         row.status = status
         row.reason = reason
 
+    async def load_session(session_id: str) -> SimpleNamespace | None:
+        return store.get(session_id)
+
     return SessionManager(
         _Broker(),  # type: ignore[arg-type]
         persist_live=persist,
         mark_done=mark,
+        load_session=load_session if load else None,
         spawner=spawner,  # type: ignore[arg-type]
         strategy_factory=lambda _name: Rebuildable(),
         rebuild_on_worker_exit=rebuild,
@@ -230,10 +236,13 @@ async def _done() -> None:
     return None
 
 
-async def test_eof_before_a_result_line_fails_and_does_not_rebuild() -> None:
+@pytest.mark.parametrize("load", [False, True])
+async def test_eof_before_a_result_line_fails_and_does_not_rebuild(
+    load: bool,
+) -> None:
     store: dict[str, SimpleNamespace] = {}
     spawner = FakeSpawner(line=None)
-    manager = _manager(spawner, store, rebuild=True)
+    manager = _manager(spawner, store, rebuild=True, load=load)
     with pytest.raises(RuntimeError, match=START_FAIL_REASON):
         await manager.create_session(_request())
     await asyncio.sleep(0.05)
@@ -242,6 +251,31 @@ async def test_eof_before_a_result_line_fails_and_does_not_rebuild() -> None:
     assert store["s1"].reason == START_FAIL_REASON
     assert "s1" not in manager._workers
     assert len(spawner.calls) == 1
+    await manager.close_all()
+
+
+async def test_a_stop_during_start_keeps_the_row_the_worker_wrote() -> None:
+    """Stopped while in on_start: the worker wrote ``done`` and left no line.
+
+    The row already says what happened. Marking it ``failed`` would turn an
+    operator's stop into a deploy failure.
+    """
+    store: dict[str, SimpleNamespace] = {}
+    gate = asyncio.Event()
+    spawner = FakeSpawner(line=None, gate=gate)
+    manager = _manager(spawner, store, load=True)
+    create = asyncio.create_task(manager.create_session(_request()))
+    while not spawner.calls:
+        await asyncio.sleep(0)
+    store["s1"].status = "done"
+    store["s1"].reason = "operator_stop"
+    gate.set()
+    with pytest.raises(RuntimeError, match=START_FAIL_REASON):
+        await create
+
+    assert store["s1"].status == "done"
+    assert store["s1"].reason == "operator_stop"
+    assert "s1" not in manager._workers
     await manager.close_all()
 
 
@@ -546,6 +580,36 @@ async def test_spawner_execs_a_worker_in_its_own_session(
     assert len(kwargs["pass_fds"]) == 2
     assert captured["stdin"] == b'{"session_id":"aa0001"}'
     assert captured["closed"] is True
+
+
+async def test_a_cancelled_result_read_lets_go_of_the_pipe() -> None:
+    """Read on the loop: cancelling it closes the fd at once.
+
+    A read in a thread would keep the fd until the worker wrote or died.
+    """
+    read_fd, write_fd = os.pipe()
+    worker = _PipeWorker(None, read_fd, -1)  # type: ignore[arg-type]
+    task = asyncio.create_task(worker.read_result())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    try:
+        with pytest.raises(OSError):
+            os.fstat(read_fd)
+    finally:
+        os.close(write_fd)
+
+
+async def test_the_result_line_arrives_while_the_worker_keeps_the_pipe() -> None:
+    read_fd, write_fd = os.pipe()
+    worker = _PipeWorker(None, read_fd, -1)  # type: ignore[arg-type]
+    try:
+        os.write(write_fd, b'{"ok": true}\n')
+        line = await asyncio.wait_for(worker.read_result(), timeout=2.0)
+    finally:
+        os.close(write_fd)
+    assert line == '{"ok": true}\n'
 
 
 def test_parent_pid_must_match(monkeypatch: pytest.MonkeyPatch) -> None:
