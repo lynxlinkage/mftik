@@ -22,6 +22,7 @@ from mftik import (
 from mftik.broker import Broker
 from mftik.protocol import STS_SESSION_CREATE
 from mftik.strategy.artifacts import get_store
+from mftik_db.schema import SchemaTooOld, require_sts_schema
 
 from mftik_sts import db as sts_db
 from mftik_sts.rpc import dispatch
@@ -206,7 +207,36 @@ async def _rebuild_on_boot(sessions: SessionManager) -> None:
         logger.info("STS found no interrupted sessions to rebuild")
 
 
+async def schema_is_current() -> bool:
+    """Whether this build may serve the database it is pointed at.
+
+    The deploy this build belongs to has an order, and this is the step that
+    catches it being run out of it: a session row written before
+    ``0034_strategy_type_key`` keeps its strategy's short name in a column
+    this build does not read, so every one of them reads as a row naming no
+    strategy. Refusing to start is the only answer that leaves those rows for
+    the migration to fix.
+
+    Only a definite answer refuses. A read that fails says nothing either way
+    — Postgres may not be up yet, which is a wait rather than a
+    misconfiguration — so it is logged and boot goes on.
+    """
+    try:
+        await require_sts_schema()
+    except SchemaTooOld as exc:
+        logger.error("STS will not start: %s", exc)
+        return False
+    except Exception:
+        logger.exception(
+            "STS could not read the database's migration revision — "
+            "starting anyway"
+        )
+    return True
+
+
 async def amain() -> bool:
+    if not await schema_is_current():
+        return False
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
