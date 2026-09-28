@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from mftik.exchange.models import OrderBook, Ticker, Trade
+from mftik.exchange.stream import SourceEnded
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_AGG_TRADE,
@@ -294,6 +295,10 @@ class VenueSession:
             if feed.stop.is_set():
                 return
             outcome = ("down", "transport", "source ended")
+        except SourceEnded as exc:
+            if feed.stop.is_set():
+                return
+            outcome = ("down", "transport", str(exc))
         except asyncio.CancelledError:
             raise
         except SymbolNotFoundError as exc:

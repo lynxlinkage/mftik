@@ -10,6 +10,7 @@ from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange
 from mftik.exchange.models import BookLevel, FeedEnd, OrderBook
+from mftik.exchange.stream import SourceEnded
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_FEED_END,
@@ -725,6 +726,78 @@ async def test_one_socket_ending_leaves_the_other_up(broker: Broker) -> None:
 
     stop.set()
     await asyncio.gather(hb, collect, return_exceptions=True)
+    await sessions.close_all()
+
+
+class GaveUp(_Connector):
+    def stream_ticker(self, ticker: UniversalTicker):
+        return self._end()
+
+    async def _end(self):
+        raise SourceEnded("Fake giving up after 11 reconnect attempts")
+        yield None
+
+
+@pytest.mark.asyncio
+async def test_transport_reason_is_the_sockets_own_words(broker: Broker) -> None:
+    sessions = _sessions(Sequenced([GaveUp()]), broker)
+    stop = asyncio.Event()
+    session_id = "sts-feed-reason"
+    hb = asyncio.create_task(_lease(broker, session_id, stop))
+    events: list[FeedEnd] = []
+    collect = asyncio.create_task(_collect(broker, session_id, stop, events))
+    await asyncio.sleep(0.05)
+    await _attach(sessions, session_id, [TICKER_FEED])
+    await _wait_until(lambda: len(events) == 1)
+    assert events[0].state == "down"
+    assert events[0].code == "transport"
+    assert events[0].reason == "Fake giving up after 11 reconnect attempts"
+
+    stop.set()
+    await asyncio.gather(hb, collect, return_exceptions=True)
+    await sessions.close_all()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_open_fails_every_attach_still_waiting(
+    broker: Broker,
+) -> None:
+    factory = Gated(RuntimeError("connect refused"))
+    sessions = _sessions(factory, broker)
+    stop = asyncio.Event()
+    first = "sts-feed-join-a"
+    second = "sts-feed-join-b"
+    hb = [
+        asyncio.create_task(_lease(broker, first, stop)),
+        asyncio.create_task(_lease(broker, second, stop)),
+    ]
+    a: list[FeedEnd] = []
+    b: list[FeedEnd] = []
+    collectors = [
+        asyncio.create_task(_collect(broker, first, stop, a)),
+        asyncio.create_task(_collect(broker, second, stop, b)),
+    ]
+    await asyncio.sleep(0.05)
+    opening = asyncio.create_task(_attach(sessions, first, [TICKER_FEED]))
+    await factory.entered.wait()
+    joined = asyncio.create_task(_attach(sessions, second, [TICKER_FEED]))
+    await _wait_until(lambda: sessions.feed_refcount(TICKER_FEED) == 2)
+    factory.gate.set()
+    with pytest.raises(AttachError, match="connect refused") as first_err:
+        await opening
+    with pytest.raises(AttachError, match="connect refused") as second_err:
+        await joined
+    assert first_err.value.code == "MD_VENUE_NOT_CONNECTED"
+    assert second_err.value.code == "MD_VENUE_NOT_CONNECTED"
+    await asyncio.sleep(0.05)
+    assert a == []
+    assert b == []
+    assert first not in sessions._links  # noqa: SLF001
+    assert second not in sessions._links  # noqa: SLF001
+    assert sessions.feed_refcount(TICKER_FEED) == 0
+
+    stop.set()
+    await asyncio.gather(*hb, *collectors, return_exceptions=True)
     await sessions.close_all()
 
 

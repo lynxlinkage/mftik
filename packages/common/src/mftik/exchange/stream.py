@@ -10,6 +10,15 @@ T = TypeVar("T")
 _STOP = object()
 
 
+class SourceEnded(Exception):
+    """The stream was closed, and the closer left a reason.
+
+    A clean ``StopAsyncIteration`` still means "the iterator ended"
+    with nothing more to say. This is the same end, carrying the
+    socket's own words (reconnect give-up, a frame that was too big).
+    """
+
+
 class EventStream(AsyncIterator[T]):
     """Fan-out subscription backed by an ``asyncio.Queue``."""
 
@@ -22,6 +31,7 @@ class EventStream(AsyncIterator[T]):
         self._queue: asyncio.Queue[T | object] = asyncio.Queue(maxsize=maxsize)
         self._on_close = on_close
         self._closed = False
+        self._end_reason: str | None = None
 
     def push(self, item: T) -> None:
         if self._closed:
@@ -39,10 +49,12 @@ class EventStream(AsyncIterator[T]):
             except asyncio.QueueFull:
                 pass
 
-    def close(self) -> None:
+    def close(self, reason: str | None = None) -> None:
         if self._closed:
             return
         self._closed = True
+        if reason:
+            self._end_reason = reason
         # A full queue used to drop the stop marker, so a backlogged reader
         # never saw the end. Make a slot, then put it.
         while True:
@@ -63,6 +75,8 @@ class EventStream(AsyncIterator[T]):
     async def __anext__(self) -> T:
         item = await self._queue.get()
         if item is _STOP:
+            if self._end_reason:
+                raise SourceEnded(self._end_reason)
             raise StopAsyncIteration
         return item  # type: ignore[return-value]
 

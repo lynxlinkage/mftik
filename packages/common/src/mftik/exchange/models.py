@@ -545,11 +545,12 @@ class FeedEnd(InstrumentScoped):
       failed. Subscribing the same key again is allowed and fails the
       same way until the instrument exists.
     * ``down`` / ``transport`` — the source iterator ended on its own
-      (the socket gave up after retries). Only the feeds on that
-      socket are retired. Other sockets on the same connector keep
-      running, and a later subscribe of a retired topic opens a fresh
-      pump on it. The connector is dropped once the session has no
-      feeds left.
+      (the socket gave up after retries). ``reason`` is the socket's
+      own text when it has one, otherwise ``source ended``. Only the
+      feeds on that socket are retired. Other sockets on the same
+      connector keep running, and a later subscribe of a retired
+      topic opens a fresh pump on it. The connector is dropped once
+      the session has no feeds left.
     * ``down`` / ``connect`` — the venue client never connected. Same
       recovery as transport.
     * ``down`` / ``error`` — the pump raised something else.

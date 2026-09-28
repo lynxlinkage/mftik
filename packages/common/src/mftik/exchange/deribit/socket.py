@@ -299,15 +299,15 @@ class DeribitSocket:
             if self._closing:
                 return
             if not self.reconnect:
-                logger.warning("%s connection lost: %s", self.name, reason)
-                self._fail()
+                text = f"{self.name} connection lost: {reason}"
+                logger.warning("%s", text)
+                self._fail(text)
                 return
             retries += 1
             if 0 <= self.max_retries < retries:
-                logger.error(
-                    "%s giving up after %s reconnect attempts", self.name, retries
-                )
-                self._fail()
+                text = f"{self.name} giving up after {retries} reconnect attempts"
+                logger.error("%s", text)
+                self._fail(text)
                 return
             delay = min(
                 self.retry_backoff * (2 ** (retries - 1)), self.max_retry_backoff
@@ -426,7 +426,8 @@ class DeribitSocket:
         with contextlib.suppress(Exception):
             await self._send_test()
 
-    def _fail(self) -> None:
+    def _fail(self, reason: str | None = None) -> None:
+        self._end_reason = reason
         self._connected = False
         self._teardown()
 

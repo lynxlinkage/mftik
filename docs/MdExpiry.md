@@ -60,13 +60,15 @@ does not notify.
 - `SymbolNotFoundError` — `down` / `symbol_not_found`. Other feeds
   on the same socket stay up.
 - The iterator ends and nobody called `stop_feed` — `down` /
-  `transport`. That socket gave up. MD retires each feed whose
-  iterator ended, and only those. Another socket on the same
-  connector keeps running, and so does a sibling still inside its
-  publish. The connector stays. A later subscribe of a retired topic
-  opens a fresh pump on it. The connector is dropped only once that
-  session has no feeds left, and only if a newer session has not
-  already replaced it.
+  `transport`. That socket gave up. `reason` is the socket's own
+  text when it has one (reconnect give-up, a frame past the
+  websocket size limit), otherwise `source ended`. MD retires each
+  feed whose iterator ended, and only those. Another socket on the
+  same connector keeps running, and so does a sibling still inside
+  its publish. The connector stays. A later subscribe of a retired
+  topic opens a fresh pump on it. The connector is dropped only
+  once that session has no feeds left, and only if a newer session
+  has not already replaced it.
 - Any other exception — `down` / `error`. `reason` is the exception
   text, plus a venue code or label when the text does not already
   contain it.
@@ -86,8 +88,16 @@ earlier in the same attach is stopped with the rest.
 - The symbol plane has no such instrument — `VENUE_SYMBOL_NOT_FOUND`.
   The miss is not cached, so a later subscribe asks again and can
   still arm an expiry watch.
+- The symbol plane errors (timeout, unavailable) — `MD_INTERNAL`.
+  Nothing is opened. A later attach asks again. A feed that is
+  already open still retries the plane on its expiry watch.
 - `_open` refuses the topic — `MD_VENUE_UNSUPPORTED_READ`.
 - Venue `connect()` fails — `MD_VENUE_NOT_CONNECTED`.
+
+Two attaches that ask for the same feed share one open. If it
+fails, every attach still waiting on it fails too. A session whose
+attach already answered, or a runtime `md.subscribe`, is told with
+`md.feed.end` and dropped from the key.
 
 A runtime `md.subscribe` has no RPC reply to fail, so the same
 refusals still publish `md.feed.end` to the sessions that joined
@@ -110,8 +120,9 @@ asks for that row, so a rebuilt MD can still fire `on_feed_end`.
 - Listed time already past, or inactive and past — do not
   `ensure_feed`. Tombstone the ticker, publish `expired` once per
   requested topic to the session that asked.
-- Lookup failed — open if attach already asked for the feed, retry
-  the plane; a later success that is past then cuts.
+- Lookup failed at attach — the RPC fails and nothing opens. A
+  feed already open retries the plane; a later success that is
+  past then cuts.
 - Last reader leaves before expiry — the watch is cancelled. No
   print. A later attach re-arms.
 - The timer fires — drop every feed on that ticker and publish

@@ -523,16 +523,14 @@ async def test_failed_lookup_retries_and_still_cuts(
 
     collect_task = asyncio.create_task(_collect())
     await asyncio.sleep(0.05)
-    result = await sessions.attach(
-        MdAttachRequest(
-            session_id=session_id,
-            created_by=1,
-            subscriptions=[ORDERBOOK],
-            timeout=3.0,
-        )
-    )
-    assert ORDERBOOK in result.subscriptions
+    with pytest.raises(AttachError, match="sym down") as raised:
+        await _attach(sessions, session_id, [ORDERBOOK])
+    assert raised.value.code == "MD_INTERNAL"
+    assert session_id not in sessions._links  # noqa: SLF001
+    assert events == []
+    await _attach(sessions, session_id, [ORDERBOOK])
     await _wait_until(lambda: len(events) == 1, timeout=3.0)
+    assert events[0].code == "expired"
     assert sessions.feed_refcount(ORDERBOOK) == 0
     assert TICKER in sessions._expired  # noqa: SLF001
 

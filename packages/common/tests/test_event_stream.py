@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from mftik.exchange.stream import EventStream
+from mftik.exchange.stream import EventStream, SourceEnded
 
 
 @pytest.mark.asyncio
@@ -32,3 +32,16 @@ async def test_close_on_a_full_queue_still_ends_the_reader() -> None:
     # The stop marker needs the only slot, so the queued item is dropped.
     # What matters is that the reader is not stuck on ``get``.
     assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_close_with_a_reason_raises_it_after_the_queued_item() -> None:
+    stream: EventStream[int] = EventStream(maxsize=2)
+    stream.push(1)
+    stream.close("giving up after 11 reconnect attempts")
+    seen: list[int] = []
+    with pytest.raises(SourceEnded, match="11 reconnect attempts"):
+        async with asyncio.timeout(1):
+            async for item in stream:
+                seen.append(item)
+    assert seen == [1]

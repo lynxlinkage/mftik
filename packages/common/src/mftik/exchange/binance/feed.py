@@ -234,8 +234,9 @@ class BinanceStreamSocket(BinanceSocket):
     def _teardown(self) -> None:
         self._releaser.cancel()
         self._ledger.clear()
+        reason = getattr(self, "_end_reason", None)
         for sub in list(self._subs):
-            sub.stream.close()
+            sub.stream.close(reason)
         self._subs.clear()
         self._releaser.cancel()
 

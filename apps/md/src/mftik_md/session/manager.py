@@ -193,6 +193,12 @@ class SessionManager:
         #: Runtime ``md.subscribe`` work. Held so shutdown can cancel a
         #: lookup / ``ensure_feed`` that is no longer on the lease loop.
         self._subscribe_tasks: set[asyncio.Task[Any]] = set()
+        #: The in-flight open of a key, and the attach sessions waiting
+        #: on it. A joiner that does not wait (a runtime subscribe) is
+        #: told with ``md.feed.end`` if the open fails. An attach that
+        #: is still waiting fails its own RPC instead.
+        self._opening: dict[FeedKey, asyncio.Future[AttachError | None]] = {}
+        self._opening_waiters: dict[FeedKey, set[str]] = {}
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -269,7 +275,7 @@ class SessionManager:
         self._links[request.session_id] = link
         self._dispatcher.register_link(link)
 
-        missing = await self._prefetch_expiries(request.subscriptions)
+        missing, failed = await self._prefetch_expiries(request.subscriptions)
         if missing:
             names = ", ".join(str(ticker) for ticker in sorted(missing, key=str))
             await self.detach(
@@ -278,6 +284,18 @@ class SessionManager:
             raise AttachError(
                 QueryCode.VENUE_SYMBOL_NOT_FOUND.name,
                 f"symbol not found: {names}",
+            )
+        if failed:
+            detail = "; ".join(
+                f"{ticker}: {exc}"
+                for ticker, exc in sorted(failed.items(), key=lambda item: str(item[0]))
+            )
+            await self.detach(
+                session_id=request.session_id, reason="symbol lookup failed"
+            )
+            raise AttachError(
+                QueryCode.MD_INTERNAL.name,
+                f"symbol lookup failed: {detail}",
             )
         opened: set[UniversalTicker] = set()
         now = time.time()
@@ -664,6 +682,7 @@ class SessionManager:
         first = False
         old_rc = 0
         new_rc = 0
+        pending: asyncio.Future[AttachError | None] | None = None
         async with self._expiry_lock:
             if self._links.get(link.session_id) is not link:
                 return
@@ -671,11 +690,21 @@ class SessionManager:
                 expiry = self._expiry_at[ticker]
             else:
                 expiry = None
+                key = (topic, ticker)
                 first, new_rc = self._dispatcher.subscribe(
                     link.session_id, topic, ticker
                 )
                 old_rc = new_rc - 1
                 link.subscriptions.add(feed)
+                if first:
+                    pending = asyncio.get_running_loop().create_future()
+                    self._opening[key] = pending
+                else:
+                    pending = self._opening.get(key)
+                    if pending is not None and not emit_failure:
+                        self._opening_waiters.setdefault(key, set()).add(
+                            link.session_id
+                        )
         if expiry is not None:
             await self._emit_feed_end(
                 [link.session_id],
@@ -697,6 +726,7 @@ class SessionManager:
                 old_rc=old_rc,
                 new_rc=new_rc,
                 emit_failure=emit_failure,
+                pending=pending,
             )
         except AttachError:
             raise
@@ -714,6 +744,7 @@ class SessionManager:
                 emit=emit_failure,
                 state="down",
                 feed_code="error",
+                session_id=link.session_id,
             )
         if arm and feed in link.subscriptions:
             self._schedule_arm(ticker)
@@ -729,15 +760,16 @@ class SessionManager:
         old_rc: int,
         new_rc: int,
         emit_failure: bool = True,
+        pending: asyncio.Future[AttachError | None] | None = None,
     ) -> None:
         """Finish a subscribe that already holds a refcount.
 
         Connect and ``_open`` failures retire every subscriber of the
         key — another session may have joined during the awaits.
-        Runtime subscribe tells each of them. Attach does not: it
-        raises :class:`AttachError` and the caller rolls the session
-        back, so a deploy does not stay live on a feed that never
-        opened.
+        A runtime subscribe is told with ``md.feed.end``. An attach
+        that is still waiting fails its own RPC. One whose reply
+        already went out is told with ``md.feed.end``, because that
+        reply listed a feed that never opened.
         """
         await publish_md_log(
             self._broker,
@@ -749,7 +781,31 @@ class SessionManager:
             source="md",
         )
         if not first:
+            if pending is not None and not emit_failure:
+                outcome = await pending
+                if isinstance(outcome, AttachError):
+                    raise AttachError(outcome.code, str(outcome))
             return
+        try:
+            await self._open_first(
+                link,
+                feed,
+                topic,
+                ticker,
+                emit_failure=emit_failure,
+            )
+        finally:
+            self._finish_opening((topic, ticker), None)
+
+    async def _open_first(
+        self,
+        link: StsLink,
+        feed: str,
+        topic: str,
+        ticker: UniversalTicker,
+        *,
+        emit_failure: bool,
+    ) -> None:
         if (
             ticker in self._expired
             or self._dispatcher.refcount(topic, ticker) == 0
@@ -769,6 +825,7 @@ class SessionManager:
                 emit=emit_failure,
                 state="down",
                 feed_code="connect",
+                session_id=link.session_id,
             )
             return
         if (
@@ -819,6 +876,7 @@ class SessionManager:
                 emit=emit_failure,
                 state=state,
                 feed_code=feed_code,
+                session_id=link.session_id,
             )
             return
         if (
@@ -867,15 +925,18 @@ class SessionManager:
 
     async def _prefetch_expiries(
         self, feeds: Sequence[str]
-    ) -> set[UniversalTicker]:
-        """Resolve listed expiries. Returns tickers the plane does not know.
+    ) -> tuple[set[UniversalTicker], dict[UniversalTicker, BaseException]]:
+        """Resolve listed expiries.
 
-        A miss is not cached. The next subscribe asks again, so an
-        instrument that lists later can still arm an expiry watch.
+        The first set is tickers the plane does not know. A miss is
+        not cached. The second is tickers whose lookup failed for any
+        other reason: attach fails rather than opening a pump that
+        later reports ``symbol_not_found``.
         """
         missing: set[UniversalTicker] = set()
+        failed: dict[UniversalTicker, BaseException] = {}
         if self._symbols is None:
-            return missing
+            return missing, failed
         seen: list[UniversalTicker] = []
         for feed in feeds:
             try:
@@ -885,7 +946,7 @@ class SessionManager:
             if ticker not in seen:
                 seen.append(ticker)
         if not seen:
-            return missing
+            return missing, failed
         results = await asyncio.gather(
             *(self._resolve_expiry(ticker) for ticker in seen),
             return_exceptions=True,
@@ -899,7 +960,8 @@ class SessionManager:
                     ticker,
                     result,
                 )
-        return missing
+                failed[ticker] = result
+        return missing, failed
 
     async def _try_resolve(self, ticker: UniversalTicker) -> float | None:
         if self._symbols is None or ticker in self._timeless:
@@ -1096,6 +1158,17 @@ class SessionManager:
             reason=reason,
         )
 
+    def _finish_opening(
+        self, key: FeedKey, result: AttachError | None
+    ) -> None:
+        """Release attach sessions waiting on this open. Once only."""
+        fut = self._opening.pop(key, None)
+        if fut is None:
+            return
+        self._opening_waiters.pop(key, None)
+        if not fut.done():
+            fut.set_result(result)
+
     async def _refuse(
         self,
         topic: str,
@@ -1106,45 +1179,42 @@ class SessionManager:
         emit: bool,
         state: str,
         feed_code: str,
+        session_id: str,
     ) -> None:
         """Drop a key that never started pumping.
 
-        Runtime subscribe tells the holders. Attach raises instead, so
-        the RPC fails and the deploy rolls back.
+        Sessions still inside their attach wait on the open and fail
+        that RPC. Anyone else who already holds the key — a runtime
+        subscribe, or an attach that already answered — is told with
+        ``md.feed.end``.
         """
+        err = AttachError(code, reason)
+        key = (topic, ticker)
+        async with self._expiry_lock:
+            waiters = self._opening_waiters.pop(key, set())
+            fut = self._opening.pop(key, None)
+        if fut is not None and not fut.done():
+            fut.set_result(err)
+        targets = await self._retire_key(key, stop_pump=True) or []
         if emit:
-            await self._fail_open(
-                topic,
+            notify = [sid for sid in targets if sid not in waiters]
+        else:
+            notify = [
+                sid
+                for sid in targets
+                if sid not in waiters and sid != session_id
+            ]
+        if notify:
+            await self._emit_feed_end(
+                notify,
                 ticker,
+                topic=topic,
                 state=state,
                 code=feed_code,
                 reason=reason,
             )
-            return
-        await self._retire_key((topic, ticker), stop_pump=True)
-        raise AttachError(code, reason)
-
-    async def _fail_open(
-        self,
-        topic: str,
-        ticker: UniversalTicker,
-        *,
-        state: str,
-        code: str,
-        reason: str,
-    ) -> None:
-        """The first subscriber never got a pump. Drop everyone on the key."""
-        targets = await self._retire_key((topic, ticker), stop_pump=True)
-        if targets is None:
-            return
-        await self._emit_feed_end(
-            targets,
-            ticker,
-            topic=topic,
-            state=state,
-            code=code,
-            reason=reason,
-        )
+        if not emit:
+            raise err
 
     def _drop_key_locked(
         self,

@@ -275,11 +275,12 @@ async def amain(session_id: str, role: str) -> bool:
                     role,
                 )
                 _report({"ok": False, "error": str(exc)})
-                # A rebuild failure has already left the row interrupted.
-                # ``close_all`` would stamp the shutdown reason over it and
-                # reset ``finished_at``. Create still needs it: a start
-                # failure has popped the session, and anything left over
-                # should not stay live.
+                # A rebuild has already recorded its terminal status:
+                # failed when the attach was refused, interrupted when it
+                # never got an answer. ``close_all`` would stamp the
+                # shutdown reason over it and reset ``finished_at``.
+                # Create still needs it: a start failure has popped the
+                # session, and anything left over should not stay live.
                 if sessions is not None and role != "rebuild":
                     await sessions.close_all()
                 return False
