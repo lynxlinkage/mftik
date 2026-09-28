@@ -103,11 +103,6 @@ def resolve_class(name: str | None) -> type[Strategy]:
     return cls
 
 
-def known_strategy_types() -> list[str]:
-    """Return distinct class type names for strategy.yml ``sts.type``."""
-    return sorted({cls.__name__ for cls in _REGISTRY.values()})
-
-
 def load_local_registry(store: RegistryStore | None = None) -> list[str]:
     """Import ``local/`` and ``pulled/`` trees under qualified type keys.
 
