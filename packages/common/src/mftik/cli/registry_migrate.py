@@ -3,6 +3,10 @@
 Offline, and only safe while STS is not running. The scan that loads a tree
 drops a directory whose name is not the class, without an error. Starting
 either build against the other layout looks like the registry is empty.
+
+All or nothing: a run that fails leaves the registry as it was, and one that
+is killed outright leaves trees parked under a temp name that the next run
+recovers. Either way the command has to exit 0 before the new build starts.
 """
 
 from __future__ import annotations
@@ -23,9 +27,15 @@ def registry_migrate(args: argparse.Namespace) -> int:
         result = migrate_registry(data)
     except RegistryError as exc:
         raise CliError(str(exc)) from exc
-    if not result.renamed and not result.removed_pulled:
+    except OSError as exc:
+        # A rename that the filesystem refused. The trees are back where they
+        # were, and this is the sentence that says the deploy must not go on.
+        raise CliError(f"{data}: registry migration failed: {exc}") from exc
+    if not result.renamed and not result.removed_pulled and not result.recovered:
         print(f"{data}: registry already uses class names")
         return 0
+    for old, new in result.recovered:
+        print(f"recovered {old} -> {new}, left by an interrupted run")
     for old, new in result.renamed:
         print(f"renamed {old} -> {new}")
     for name in result.removed_pulled:
