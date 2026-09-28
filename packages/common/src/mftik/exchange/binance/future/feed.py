@@ -90,6 +90,7 @@ class BinanceFutureStream:
         retry_backoff: float = 1.0,
         max_retry_backoff: float = 30.0,
         keepalive: float = 20.0,
+        release_linger: float = 2.0,
     ) -> None:
         self._urls = {st.PUBLIC: public_url, st.MARKET: market_url}
         #: group → its live socket. Pre-seeded ones (a test's fakes) are used
@@ -102,6 +103,7 @@ class BinanceFutureStream:
             "retry_backoff": retry_backoff,
             "max_retry_backoff": max_retry_backoff,
             "keepalive": keepalive,
+            "release_linger": release_linger,
         }
         self._reconnect_cbs: list[Callable[[], Any]] = []
         self._connected = False

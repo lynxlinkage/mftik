@@ -206,6 +206,8 @@ class FakeBinanceStream:
         self.drop_next = False
         #: method -> the ``error`` block to answer a subscribe with.
         self.errors: dict[str, dict[str, Any]] = {}
+        #: Methods recorded but not answered, so the client waits out its ack.
+        self.silent_methods: set[str] = set()
 
     async def handler(self, websocket: Any) -> None:
         self.connections += 1
@@ -216,6 +218,8 @@ class FakeBinanceStream:
                 self.received.append(msg)
                 method = msg.get("method", "")
                 params = msg.get("params") or []
+                if method in self.silent_methods:
+                    continue
                 if method in self.errors:
                     await websocket.send(
                         json.dumps(

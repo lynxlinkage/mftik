@@ -38,7 +38,16 @@ from mftik.exchange.deribit.socket import (
 from mftik.exchange.models import BookLevel, OrderBook
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import UniversalTicker
-from mftik.exchange.wire import WireLedger, first_seen
+from mftik.exchange.wire import (
+    IdleReleaser,
+    ReleaseOutcome,
+    ResyncResult,
+    WireLedger,
+    first_seen,
+    map_release,
+    orphaned_keys,
+    resync_channel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +164,7 @@ class DeribitPublicStream(DeribitSocket):
         max_retry_backoff: float = 30.0,
         ping_interval: float = DEFAULT_PING_INTERVAL,
         heartbeat: int = DEFAULT_HEARTBEAT,
+        release_linger: float = 2.0,
     ) -> None:
         super().__init__(
             url,
@@ -169,6 +179,12 @@ class DeribitPublicStream(DeribitSocket):
         self._subs: list[_Sub] = []
         self._books: dict[str, DeribitBook] = {}
         self._ledger: WireLedger[str] = WireLedger()
+        self._releaser: IdleReleaser[str] = IdleReleaser(
+            self._ledger,
+            self._send_unsubscribe,
+            self._still_wanted,
+            linger=release_linger,
+        )
 
     async def _on_open(self) -> None:
         await self._enable_heartbeat()
@@ -247,33 +263,59 @@ class DeribitPublicStream(DeribitSocket):
     async def _resync_book(self, channel: str, book: DeribitBook) -> None:
         """Unsubscribe and subscribe again so the venue sends a fresh snapshot.
 
-        The re-subscribe goes back through the ledger. Once the
-        unsubscribe lands the venue is no longer sending this channel,
-        so a ledger that still calls it held would keep every later
-        subscriber from re-sending SUBSCRIBE — and a failed re-subscribe
-        would leave the stream silent until the socket reconnects.
+        The key stays held across a successful round trip. Discarding it
+        and routing the re-subscribe through ``acquire`` would also
+        work, but a subscribe that then fails used to leave readers
+        silent until something else reconnected. A failed re-subscribe
+        now discards the key and drops the connection, so ``_restore``
+        resubscribes every reader still attached. An explicit
+        unsubscribe rejection leaves the key held: Deribit is still
+        sending the channel.
         """
-        try:
+        instrument = book.instrument
+
+        async def unsubscribe() -> None:
             unsub, req_id = rpc_frame(
                 ch.PUBLIC_UNSUBSCRIBE, {"channels": [channel]}
             )
             await self.request(unsub, req_id, op=ch.PUBLIC_UNSUBSCRIBE)
-        except Exception:
-            logger.exception(
-                "%s book resync unsubscribe failed for %s", self.name, channel
-            )
-            book.resyncing = False
-            return
-        self._ledger.discard([channel])
-        self._books[channel] = DeribitBook(book.instrument)
-        try:
-            await self._ledger.acquire([channel], self._send_subscribe)
-        except Exception:
-            logger.exception("%s book resync failed for %s", self.name, channel)
+            if self._still_wanted(channel):
+                fresh = DeribitBook(instrument)
+                fresh.resyncing = True
+                self._books[channel] = fresh
+
+        result = await resync_channel(
+            self._ledger,
+            channel,
+            still_wanted=self._still_wanted,
+            unsubscribe=unsubscribe,
+            subscribe=lambda: self._send_subscribe([channel]),
+            drop_connection=self.drop_connection,
+        )
+        current = self._books.get(channel)
+        if result is ResyncResult.STILL_HELD and current is not None:
+            current.resyncing = False
+        if not self._still_wanted(channel):
+            self._releaser.enqueue([channel])
 
     async def _send_subscribe(self, keys: Sequence[str]) -> None:
         frame, req_id = rpc_frame(ch.PUBLIC_SUBSCRIBE, {"channels": list(keys)})
         await self.request(frame, req_id, op=ch.PUBLIC_SUBSCRIBE)
+
+    async def _send_unsubscribe(
+        self, keys: list[str]
+    ) -> dict[str, ReleaseOutcome]:
+        try:
+            frame, req_id = rpc_frame(
+                ch.PUBLIC_UNSUBSCRIBE, {"channels": list(keys)}
+            )
+            await self.request(frame, req_id, op=ch.PUBLIC_UNSUBSCRIBE)
+        except Exception as exc:
+            return map_release(keys, exc)
+        return map_release(keys, None)
+
+    def _still_wanted(self, key: str) -> bool:
+        return any(key in sub.index for sub in self._subs)
 
     async def _subscribe(
         self, channels: tuple[str, ...], parse: Parse
@@ -292,11 +334,17 @@ class DeribitPublicStream(DeribitSocket):
         return stream
 
     def _drop(self, stream: EventStream[Any]) -> None:
-        self._subs = [s for s in self._subs if s.stream is not stream]
+        closed = next((sub for sub in self._subs if sub.stream is stream), None)
+        self._subs = [sub for sub in self._subs if sub.stream is not stream]
         live = {key for sub in self._subs if sub.folder for key in sub.index}
         for key in list(self._books):
             if key not in live:
                 self._books.pop(key)
+        if closed is None:
+            return
+        idle = orphaned_keys(closed.index, (sub.index for sub in self._subs))
+        if idle:
+            self._releaser.enqueue(idle)
 
     def _wanted(self) -> list[str]:
         return first_seen(channel for sub in self._subs for channel in sub.channels)
@@ -333,11 +381,13 @@ class DeribitPublicStream(DeribitSocket):
                     sub.stream.push(parsed)
 
     def _teardown(self) -> None:
+        self._releaser.cancel()
         self._ledger.clear()
         for sub in list(self._subs):
             sub.stream.close()
         self._subs.clear()
         self._books.clear()
+        self._releaser.cancel()
 
 
 __all__ = ["DeribitBook", "DeribitBookSnapshot", "DeribitPublicStream"]

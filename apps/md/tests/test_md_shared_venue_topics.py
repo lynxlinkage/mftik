@@ -1,8 +1,9 @@
 """Cross-key scenarios at the MD boundary — I1 and I6, no sockets.
 
-Detach never reaches a venue ``unsubscribe()``. These tests assert what MD
-can observe: which ``stream_*`` the connector was asked for, which sources
-closed, and which pumps stay fed.
+MD does not call a venue ``unsubscribe()``. A public socket unsubscribes an
+idle identity after a linger; these tests assert what MD can observe: which
+``stream_*`` the connector was asked for, which sources closed, and which
+pumps stay fed.
 """
 
 from __future__ import annotations
