@@ -396,7 +396,7 @@ async def ack_session(
         snapshot = (
             row.session_id,
             row.status,
-            row.strategy,
+            row.type,
             row.reason,
             row.created_by,
             _epoch(row.finished_at),

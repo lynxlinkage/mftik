@@ -292,9 +292,9 @@ async def test_s3_bundled_noop_still_deploys_on_a_bare_overlay(
         StsCreateSessionRequest(
             session_id="noop-1",
             created_by=1,
-            strategy="noop",
+            strategy="NoopStrategy",
             td={"paper": TdAccountRef(api_id=1)},
         )
     )
-    assert result.strategy == "noop"
+    assert result.strategy == "NoopStrategy"
     await manager.close_all()

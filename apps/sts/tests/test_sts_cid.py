@@ -19,7 +19,7 @@ from mftik_sts.session import SessionManager
 
 
 class CidStrategy(Strategy):
-    name = "cid_probe"
+    """Two sessions of one class still mint different client order ids."""
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def manager(broker: Broker) -> SessionManager:
 async def _create(manager: SessionManager, session_id: str):
     await manager.create_session(
         StsCreateSessionRequest(
-            session_id=session_id, created_by=1, strategy="cid_probe"
+            session_id=session_id, created_by=1, strategy="CidStrategy"
         )
     )
     session = manager.get(session_id)
@@ -51,7 +51,7 @@ async def test_same_strategy_class_gets_distinct_session_ids(
     a = await _create(manager, "aa0001")
     b = await _create(manager, "aa0002")
 
-    assert a.strategy.name == b.strategy.name == "cid_probe"
+    assert a.strategy.registry_key == b.strategy.registry_key == "CidStrategy"
     assert a.session_id != b.session_id
 
     await manager.close_all()

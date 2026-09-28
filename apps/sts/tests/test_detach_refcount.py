@@ -49,7 +49,7 @@ async def test_stop_one_sts_drops_td_refcount(broker: Broker) -> None:
         StsCreateSessionRequest(
             session_id="a",
             created_by=1,
-            strategy="noop",
+            strategy="NoopStrategy",
             td={"paper": TdAccountRef(api_id=1)},
         )
     )
@@ -57,7 +57,7 @@ async def test_stop_one_sts_drops_td_refcount(broker: Broker) -> None:
         StsCreateSessionRequest(
             session_id="b",
             created_by=1,
-            strategy="noop",
+            strategy="NoopStrategy",
             td={"paper": TdAccountRef(api_id=1)},
         )
     )

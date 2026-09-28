@@ -31,7 +31,7 @@ _TINY = """\
 from mftik.strategy import Strategy
 
 class Tiny(Strategy):
-    name = "tiny"
+    name = "Tiny"
 """
 
 
@@ -149,12 +149,12 @@ async def test_add_says_so_when_sts_did_not_answer(tmp_path: Path) -> None:
         RegistryAddBody(files={"strategy.py": _TINY}), store=store, broker=DeadBroker()
     )
 
-    assert out.name == "tiny"
+    assert out.name == "Tiny"
     assert out.loaded is False
     assert "no reply from sts" in out.load_error
     assert "restarts" in out.load_error
     # The add itself stands.
-    assert [r.name for r in store.list_private()] == ["tiny"]
+    assert [r.name for r in store.list_private()] == ["Tiny"]
 
 
 async def test_add_says_so_when_sts_reloaded_and_skipped_it(
@@ -185,10 +185,10 @@ async def test_delete_removes_the_tree_and_reports_it_unloaded(
     await _add(store)
 
     out = await delete_strategy(
-        "tiny", store=store, broker=HealthyBroker(store), origin="private"
+        "Tiny", store=store, broker=HealthyBroker(store), origin="private"
     )
 
-    assert out.name == "tiny"
+    assert out.name == "Tiny"
     assert out.type == "Tiny"
     assert out.unloaded is True
     assert out.unload_error is None
@@ -204,11 +204,11 @@ async def test_delete_picks_the_origin_it_was_given(
     await _add(store, origin="public")
 
     await delete_strategy(
-        "tiny", store=store, broker=HealthyBroker(store), origin="public"
+        "Tiny", store=store, broker=HealthyBroker(store), origin="public"
     )
 
     assert store.list_public() == []
-    assert [r.name for r in store.list_private()] == ["tiny"]
+    assert [r.name for r in store.list_private()] == ["Tiny"]
 
 
 async def test_deleting_what_is_not_there_is_404(
@@ -219,7 +219,7 @@ async def test_deleting_what_is_not_there_is_404(
 
     with pytest.raises(HTTPException) as caught:
         await delete_strategy(
-            "tiny", store=store, broker=HealthyBroker(store), origin="private"
+            "Tiny", store=store, broker=HealthyBroker(store), origin="private"
         )
 
     assert caught.value.status_code == 404
@@ -234,12 +234,12 @@ async def test_a_pulled_copy_is_not_deletable_here(
 
     with pytest.raises(HTTPException) as caught:
         await delete_strategy(
-            "tiny", store=store, broker=HealthyBroker(store), origin="node1"
+            "Tiny", store=store, broker=HealthyBroker(store), origin="node1"
         )
 
     assert caught.value.status_code == 400
     assert "remotes" in str(caught.value.detail)
-    assert [r.name for r in store.list_pulled()] == ["tiny"]
+    assert [r.name for r in store.list_pulled()] == ["Tiny"]
 
 
 async def test_delete_refuses_while_a_session_is_running_it(
@@ -257,12 +257,12 @@ async def test_delete_refuses_while_a_session_is_running_it(
 
     with pytest.raises(HTTPException) as caught:
         await delete_strategy(
-            "tiny", store=store, broker=HealthyBroker(store), origin="private"
+            "Tiny", store=store, broker=HealthyBroker(store), origin="private"
         )
 
     assert caught.value.status_code == 409
     assert "sts-7" in str(caught.value.detail)
-    assert [r.name for r in store.list_private()] == ["tiny"]
+    assert [r.name for r in store.list_private()] == ["Tiny"]
 
 
 async def test_another_strategys_session_does_not_block_the_delete(
@@ -274,10 +274,10 @@ async def test_another_strategys_session_does_not_block_the_delete(
     await _add(store)
 
     out = await delete_strategy(
-        "tiny", store=store, broker=HealthyBroker(store), origin="private"
+        "Tiny", store=store, broker=HealthyBroker(store), origin="private"
     )
 
-    assert out.name == "tiny"
+    assert out.name == "Tiny"
 
 
 async def test_delete_says_so_when_sts_still_answers_to_it(
@@ -288,7 +288,7 @@ async def test_delete_says_so_when_sts_still_answers_to_it(
     await _add(store)
 
     out = await delete_strategy(
-        "tiny",
+        "Tiny",
         store=store,
         broker=StuckBroker(["private::Tiny"]),
         origin="private",
@@ -308,7 +308,7 @@ async def test_delete_says_so_when_sts_did_not_answer(
     await _add(store)
 
     out = await delete_strategy(
-        "tiny", store=store, broker=DeadBroker(), origin="private"
+        "Tiny", store=store, broker=DeadBroker(), origin="private"
     )
 
     assert out.unloaded is False

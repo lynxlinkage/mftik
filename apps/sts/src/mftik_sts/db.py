@@ -18,7 +18,6 @@ async def persist_live_session(
     *,
     session_id: str,
     created_by: int,
-    strategy: str | None = None,
     type: str | None = None,
     yaml_text: str | None = None,
     td: dict[str, Any] | None = None,
@@ -35,7 +34,6 @@ async def persist_live_session(
         return await repo.create_live(
             session_id=session_id,
             created_by=created_by,
-            strategy=strategy,
             type=type,
             yaml_text=yaml_text,
             td=td,

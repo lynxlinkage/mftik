@@ -197,7 +197,6 @@ async def test_status_replay_is_the_session_list_not_session_logs(db) -> None:
                 created_by=1,
                 created_at=datetime(2026, 9, 1, tzinfo=UTC),
                 status=SessionStatus.LIVE.value,
-                strategy="idle",
                 type="private::Tiny",
             )
         )

@@ -27,6 +27,7 @@ from mftik.cli import init as init_cmd
 from mftik.cli import node as node_cmd
 from mftik.cli import profiles, sessions
 from mftik.cli import push as push_cmd
+from mftik.cli import registry_migrate as registry_migrate_cmd
 from mftik.cli import rm as rm_cmd
 from mftik.cli import run as run_cmd
 from mftik.cli.client import CliError, NodeUnreachable
@@ -402,6 +403,17 @@ def _run_alert(args: argparse.Namespace) -> int:
     return run(args)
 
 
+def _setup_registry_migrate(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--data",
+        default=None,
+        help=(
+            "node data directory (MFTIK_DATA). Stop STS before running this: "
+            "a process started on the other side of the rename sees no trees"
+        ),
+    )
+
+
 def _setup_init(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "path",
@@ -608,6 +620,12 @@ COMMANDS: tuple[Command, ...] = (
         help="delete a strategy from this node's registry",
         setup=_setup_rm,
         run=rm_cmd.rm,
+    ),
+    Command(
+        name="registry-migrate",
+        help="rename registry trees to their class name; STS must be stopped",
+        setup=_setup_registry_migrate,
+        run=registry_migrate_cmd.registry_migrate,
     ),
     Command(
         name="run",

@@ -45,7 +45,7 @@ def _touch_newer(path: Path) -> None:
 
 
 def _private_py(tmp_path: Path) -> Path:
-    return tmp_path / "registry" / "private" / "tiny" / "strategy.py"
+    return tmp_path / "registry" / "private" / "Tiny" / "strategy.py"
 
 
 def _tiny(marker: str) -> str:
@@ -92,7 +92,7 @@ def test_a_removed_tree_stops_resolving(tmp_path) -> None:
     load_local_registry(store)
     assert resolve_class("private::Tiny").__name__ == "Tiny"
 
-    store.remove("tiny")
+    store.remove("Tiny")
     loaded = load_local_registry(store)
 
     assert loaded == []
@@ -154,7 +154,6 @@ def test_reloading_never_unregisters_a_bundled_strategy(tmp_path) -> None:
 
     assert load_local_registry(store) == []
 
-    assert resolve_class("noop") is NoopStrategy
     assert resolve_class("NoopStrategy") is NoopStrategy
 
 

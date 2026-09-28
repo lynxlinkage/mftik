@@ -419,7 +419,7 @@ async def test_delete_names_trees_that_required_the_extra(env_dir: Path) -> None
     )
     assert out.generation == 2
     assert out.packages == {}
-    assert [row.name for row in out.broken] == ["uses_numpy"]
+    assert [row.name for row in out.broken] == ["UsesNumpy"]
     assert out.broken[0].requires == ["numpy"]
 
 

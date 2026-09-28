@@ -47,17 +47,21 @@ The kind is already on the row. `sts_sessions.type` is the qualified
 registry key (`CrossArb`, `private::Tiny`, `node1::Tiny`), indexed,
 and what `list_live_for_origin` prefix-matches when a registry
 delete is refused (`packages/db/src/mftik_db/models/session.py`,
-`packages/db/src/mftik_db/repositories/session.py`). The short
-`strategy` column is `Strategy.name` and can collide across remotes.
-There is no surrogate strategy id. There was a `strategies.id`
-once; 0024 folded that table into the session and said the integer
-cannot be reconstructed.
+`packages/db/src/mftik_db/repositories/session.py`). It is the only
+strategy identity on the row: the short `strategy` column held
+`Strategy.name`, which could collide across remotes, and
+`0034_strategy_type_key` dropped it. There is no surrogate strategy
+id. There was a `strategies.id` once; 0024 folded that table into
+the session and said the integer cannot be reconstructed.
 
-The log line does not carry `type`. `Log` is `level` + `message`
-(`packages/common/src/mftik/protocol/messages.py`).
-`StsSessionStatus` carries `strategy` (the short name) and not
-`type`. A subscriber on `log.sts.{session_id}` that wants the kind
-has to join `sts_sessions`. Packing `type` into `session_id` would
+The log line did not carry `type`. `Log` was `level` + `message`
+(`packages/common/src/mftik/protocol/messages.py`), and
+`StsSessionStatus` carried `strategy` and not `type`, so a
+subscriber on `log.sts.{session_id}` that wanted the kind had to
+join `sts_sessions`. ALT-1 added the optional `type` to both
+(invariant 2). The `strategy` field stayed, and its value is the
+qualified key since `0034_strategy_type_key` — the wire name is
+older than the fact it carries. Packing `type` into `session_id` would
 make the join unnecessary by turning the primary key into a smart
 key. `session_id` is `String(64)` and `type` is `String(128)`; the
 hex id is six characters; `::` is a filename and URL hazard

@@ -404,6 +404,30 @@ def _book_frame(**kwargs: Any) -> DeribitOrderBook:
     return DeribitOrderBook.model_validate(row)
 
 
+def test_the_book_channel_is_the_top_twenty_levels() -> None:
+    assert ch.book("BTC_USDC") == "book.BTC_USDC.none.20.100ms"
+    assert ch.book("BTC-PERPETUAL", depth=10, group="1") == (
+        "book.BTC-PERPETUAL.1.10.100ms"
+    )
+    assert ch.book("BTC_USDC", depth=None) == "book.BTC_USDC.100ms"
+    assert ch.instrument_of(ch.book("BTC_USDC")) == "BTC_USDC"
+    assert ch.unbounded_book("book.BTC_USDC.100ms")
+    assert not ch.unbounded_book(ch.book("BTC_USDC"))
+    with pytest.raises(ValueError, match="depth"):
+        ch.book("BTC_USDC", depth=50)
+
+
+def test_a_grouped_book_frame_replaces_the_whole_book() -> None:
+    """Depth channels send ``[price, amount]`` and no ``prev_change_id``."""
+    book = DeribitBook("BTC_USDC")
+    assert book.apply(
+        _book_frame(change_id=1, bids=[[100, 5], [99, 4]], asks=[[101, 1]])
+    )
+    assert book.apply(_book_frame(change_id=2, bids=[[100, 1]], asks=[[102, 2]]))
+    assert [level.price for level in book.snapshot().bids] == [Decimal("100")]
+    assert [level.price for level in book.snapshot().asks] == [Decimal("102")]
+
+
 def test_a_stale_book_will_not_fold_a_delta_as_a_snapshot() -> None:
     book = DeribitBook("BTC_USDC")
     assert book.apply(
@@ -470,6 +494,132 @@ async def test_a_book_gap_resubscribes_and_frees_the_ledger(
         assert deribit_public.subscribed == {ch.book("BTC_USDC")}
         assert len(deribit_public.frames_for(ch.PUBLIC_SUBSCRIBE)) == 2
     assert [level.price for level in first.bids] == [Decimal("100")]
+
+
+async def test_a_depth_book_snapshot_replaces_the_previous_one(
+    deribit_public: FakeDeribit,
+) -> None:
+    feed = DeribitPublicStream(deribit_public.url, ping_interval=0, heartbeat=0)
+    channel = ch.book("BTC_USDC")
+    async with feed:
+        stream = await feed.subscribe_order_book("BTC_USDC")
+        await deribit_public.push(
+            channel,
+            {
+                "instrument_name": "BTC_USDC",
+                "change_id": 1,
+                "timestamp": 1700000000000,
+                "bids": [[100, 5], [99, 4]],
+                "asks": [[101, 1]],
+            },
+        )
+        first = await asyncio.wait_for(stream.__anext__(), 2)
+        await deribit_public.push(
+            channel,
+            {
+                "instrument_name": "BTC_USDC",
+                "change_id": 2,
+                "timestamp": 1700000001000,
+                "bids": [[100, 1]],
+                "asks": [[102, 2]],
+            },
+        )
+        second = await asyncio.wait_for(stream.__anext__(), 2)
+    assert channel == "book.BTC_USDC.none.20.100ms"
+    assert [level.price for level in first.bids] == [Decimal("100"), Decimal("99")]
+    assert [level.price for level in second.bids] == [Decimal("100")]
+    assert [level.price for level in second.asks] == [Decimal("102")]
+
+
+def _fast(url: str, **kwargs: Any) -> DeribitPublicStream:
+    return DeribitPublicStream(
+        url,
+        ping_interval=0,
+        heartbeat=0,
+        max_size=256,
+        max_retries=4,
+        retry_backoff=0.01,
+        max_retry_backoff=0.05,
+        **kwargs,
+    )
+
+
+async def test_an_oversized_full_book_is_dropped_and_other_feeds_stay(
+    deribit_public: FakeDeribit,
+) -> None:
+    """One unbounded book must not reconnect the shared public socket forever."""
+    feed = _fast(deribit_public.url)
+    full = ch.book("BTC_USDC", depth=None)
+    ticker = ch.ticker("ETH_USDC")
+    async with feed:
+        books = await feed.subscribe_order_book("BTC_USDC", depth=None)
+        tickers = await feed.subscribe_tickers("ETH_USDC")
+        await deribit_public.push(full, {"pad": "x" * 2000})
+        for _ in range(100):
+            held = feed._ledger.held()
+            if (
+                feed.connected
+                and deribit_public.connections >= 2
+                and ticker in held
+                and full not in held
+            ):
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError(
+                f"connections={deribit_public.connections} held={feed._ledger.held()} "
+                f"connected={feed.connected}"
+            )
+        restored = deribit_public.frames_for(ch.PUBLIC_SUBSCRIBE)[-1]
+        assert restored["params"]["channels"] == [ticker]
+        await deribit_public.push(
+            ticker, {"instrument_name": "ETH_USDC", "last_price": 1}
+        )
+        update = await asyncio.wait_for(tickers.__anext__(), 2)
+        assert update.instrument_name == "ETH_USDC"
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(books.__anext__(), 0.5)
+        seen = deribit_public.connections
+        await asyncio.sleep(0.25)
+        assert deribit_public.connections == seen
+
+
+async def test_a_depth_book_is_restored_after_one_oversize_frame(
+    deribit_public: FakeDeribit,
+) -> None:
+    """The top-20 channel is not the subscription a 1009 drops."""
+    feed = _fast(deribit_public.url)
+    channel = ch.book("BTC_USDC")
+    async with feed:
+        books = await feed.subscribe_order_book("BTC_USDC")
+        await deribit_public.push(channel, {"pad": "x" * 2000})
+        for _ in range(100):
+            if (
+                feed.connected
+                and deribit_public.connections >= 2
+                and channel in feed._ledger.held()
+            ):
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError(
+                f"connections={deribit_public.connections} held={feed._ledger.held()}"
+            )
+        await deribit_public.push(
+            channel,
+            {
+                "instrument_name": "BTC_USDC",
+                "change_id": 1,
+                "timestamp": 1700000000000,
+                "bids": [[100, 5]],
+                "asks": [[101, 1]],
+            },
+        )
+        snap = await asyncio.wait_for(books.__anext__(), 2)
+        assert [level.price for level in snap.bids] == [Decimal("100")]
+        seen = deribit_public.connections
+        await asyncio.sleep(0.25)
+        assert deribit_public.connections == seen
 
 
 async def test_fetch_klines_window_is_sized_by_the_interval() -> None:

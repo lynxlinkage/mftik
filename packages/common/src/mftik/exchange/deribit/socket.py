@@ -22,6 +22,7 @@ from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
+from websockets.frames import CloseCode
 
 from mftik.exchange.deribit import channels as ch
 from mftik.exchange.deribit.protocol import (
@@ -36,6 +37,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_PING_INTERVAL = 15.0
 DEFAULT_HEARTBEAT = 15
 
+#: ``websockets`` defaults this to 1 MiB and then closes with 1009.
+#: Deribit's unbounded book snapshot is already larger than that on
+#: BTC_USDC. Eight MiB covers it; ``None`` would drop the only memory
+#: bound on a socket that also carries every other public feed.
+DEFAULT_MAX_SIZE = 8 * 1024 * 1024
+
 #: True only inside the code that brings a socket up — ``connect`` and the
 #: reconnect block of ``_read_loop``. That code may read replies itself
 #: (``handshake``), because nothing else is reading yet. Every other caller
@@ -43,6 +50,11 @@ DEFAULT_HEARTBEAT = 15
 #: instead: two readers on one connection is ``ConcurrencyError: cannot
 #: call recv while another coroutine is already running recv``, and each
 #: one of those used to cost a reconnect.
+#:
+#: ``asyncio.create_task`` copies the current context, and ``reset`` does
+#: not reach that copy. A read loop started while this is true would keep
+#: the permission, and so would every task it starts. :meth:`DeribitSocket._spawn`
+#: clears the flag in the copy.
 _SETUP: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "deribit_socket_setup", default=False
 )
@@ -79,6 +91,7 @@ class DeribitSocket:
         ping_interval: float = DEFAULT_PING_INTERVAL,
         heartbeat: int = DEFAULT_HEARTBEAT,
         close_timeout: float = 2.0,
+        max_size: int | None = DEFAULT_MAX_SIZE,
     ) -> None:
         self.url = url
         self.ack_timeout = ack_timeout
@@ -89,6 +102,7 @@ class DeribitSocket:
         self.ping_interval = ping_interval
         self.heartbeat = heartbeat
         self.close_timeout = close_timeout
+        self.max_size = max_size
 
         self._conn: ClientConnection | None = None
         self._pending: dict[str, _Pending] = {}
@@ -110,6 +124,18 @@ class DeribitSocket:
     def connected(self) -> bool:
         return self._connected
 
+    def _spawn(self, coro: Any, *, name: str) -> asyncio.Task[Any]:
+        """Start ``coro`` where :data:`_SETUP` is false.
+
+        Connect and reconnect set the flag so they can ``recv`` while no
+        read loop is running. A task created in that context inherits the
+        set value, and ``reset`` in the caller leaves the copy untouched,
+        so the task and every task it starts would take the direct read.
+        """
+        ctx = contextvars.copy_context()
+        ctx.run(_SETUP.set, False)
+        return asyncio.create_task(coro, name=name, context=ctx)
+
     async def connect(self) -> None:
         if self._connected:
             return
@@ -125,12 +151,10 @@ class DeribitSocket:
             await self._open()
             await self._on_open()
             self._set_pumping(True)
-            self._task = asyncio.create_task(
-                self._read_loop(), name=f"{self.name}-read"
-            )
+            self._task = self._spawn(self._read_loop(), name=f"{self.name}-read")
             self._connected = True
             if self.ping_interval > 0:
-                self._watch_task = asyncio.create_task(
+                self._watch_task = self._spawn(
                     self._watchdog(), name=f"{self.name}-watch"
                 )
         except Exception:
@@ -186,11 +210,14 @@ class DeribitSocket:
                 logger.exception("%s reconnect callback failed", self.name)
                 continue
             if asyncio.iscoroutine(result):
-                asyncio.create_task(result, name=f"{self.name}-reconnect-cb")
+                self._spawn(result, name=f"{self.name}-reconnect-cb")
 
     async def _open(self) -> None:
         self._conn = await connect(
-            self.url, ping_interval=None, close_timeout=self.close_timeout
+            self.url,
+            ping_interval=None,
+            close_timeout=self.close_timeout,
+            max_size=self.max_size,
         )
 
     def _ensure_connected(self) -> None:
@@ -287,6 +314,7 @@ class DeribitSocket:
     async def _read_loop(self) -> None:
         retries = 0
         while not self._closing:
+            frames_at_start = self.stats.frames
             reason: object
             try:
                 self._set_pumping(True)
@@ -303,6 +331,13 @@ class DeribitSocket:
                 logger.warning("%s", text)
                 self._fail(text)
                 return
+            # A 1009 lands before ``_decode``, and ``_restore`` has
+            # already succeeded, so resetting ``retries`` here used to
+            # reconnect forever: the same snapshot closed the socket
+            # again, and every other feed on it starved.
+            progressed = self.stats.frames > frames_at_start
+            too_big = _frame_too_big(reason)
+            dropped = self._drop_oversize_subscriptions() if too_big else False
             retries += 1
             if 0 <= self.max_retries < retries:
                 text = f"{self.name} giving up after {retries} reconnect attempts"
@@ -332,7 +367,8 @@ class DeribitSocket:
                 _SETUP.reset(token)
             self.stats.reconnects += 1
             self._fire_reconnect()
-            retries = 0
+            if progressed and (not too_big or dropped):
+                retries = 0
 
     async def _pump(self) -> None:
         assert self._conn is not None
@@ -392,9 +428,7 @@ class DeribitSocket:
     def _dispatch(self, resp: DeribitResponse) -> None:
         if resp.is_test_request:
             self.stats.heartbeats += 1
-            asyncio.create_task(
-                self._answer_heartbeat(), name=f"{self.name}-heartbeat"
-            )
+            self._spawn(self._answer_heartbeat(), name=f"{self.name}-heartbeat")
             return
         if resp.is_heartbeat:
             return
@@ -442,6 +476,16 @@ class DeribitSocket:
     async def _restore(self) -> None:
         """Replay live subscriptions onto a fresh socket."""
 
+    def _drop_oversize_subscriptions(self) -> bool:
+        """Forget subscriptions whose next frame will exceed ``max_size``.
+
+        The refused frame never reaches ``_decode``, so the channel is
+        not in the payload. The public stream drops the unbounded book;
+        anything still wanted is what :meth:`_restore` replays. Returns
+        whether a subscription was removed.
+        """
+        return False
+
     def _push(self, resp: DeribitResponse) -> None:
         """Route a channel frame. Default: nothing subscribes."""
 
@@ -462,4 +506,23 @@ class DeribitSocket:
         """Close every stream reading this socket."""
 
 
-__all__ = ["DEFAULT_HEARTBEAT", "DEFAULT_PING_INTERVAL", "DeribitSocket"]
+def _frame_too_big(reason: object) -> bool:
+    """True when this client or the peer closed because a frame was too big.
+
+    websockets reports that as close code 1009, usually on ``sent``
+    (this client refused the frame) with no close from the peer.
+    """
+    if isinstance(reason, ConnectionClosed):
+        for close in (reason.rcvd, reason.sent):
+            if close is not None and close.code == CloseCode.MESSAGE_TOO_BIG:
+                return True
+    text = str(reason).lower()
+    return "message too big" in text or "frame exceeds limit" in text
+
+
+__all__ = [
+    "DEFAULT_HEARTBEAT",
+    "DEFAULT_MAX_SIZE",
+    "DEFAULT_PING_INTERVAL",
+    "DeribitSocket",
+]

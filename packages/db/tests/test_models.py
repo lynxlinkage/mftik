@@ -104,7 +104,6 @@ def test_session_row_columns() -> None:
         "created_at",
         "finished_at",
         "status",
-        "strategy",
         "type",
         "yaml_text",
         "td",

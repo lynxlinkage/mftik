@@ -206,7 +206,7 @@ async def test_s1_bare_node_stdlib_tree(data_dir: Path) -> None:
         broker=_reload(store),
     )
     assert out.loaded is True
-    dest = data_dir / "registry" / "private" / "tiny" / "strategy.py"
+    dest = data_dir / "registry" / "private" / "Tiny" / "strategy.py"
     assert dest.is_file()
     info = await registry_info(principal=_OWNER)
     assert info.extras == {}
@@ -256,7 +256,7 @@ async def test_s2_declare_then_apply_then_add(data_dir: Path) -> None:
         )
     assert undeclared.value.status_code == 400
     assert "requires" in str(undeclared.value.detail)
-    assert not (data_dir / "registry" / "private" / "uses_numpy").exists()
+    assert not (data_dir / "registry" / "private" / "UsesNumpy").exists()
 
     inspect_files({"strategy.py": _NUMPY})
     with pytest.raises(HTTPException) as bare:
@@ -348,7 +348,7 @@ async def test_s4b_new_connect_allows_pin_drift(data_dir: Path) -> None:
         result = await connect_remote(
             store, name="peer", url="http://peer", client=client
         )
-    assert [rec.name for rec in result.pulled] == ["tiny"]
+    assert [rec.name for rec in result.pulled] == ["Tiny"]
 
 
 async def test_s5_import_then_connect(data_dir: Path) -> None:
@@ -385,7 +385,7 @@ async def test_s5_import_then_connect(data_dir: Path) -> None:
         result = await connect_remote(
             store, name="peer", url="http://peer", client=client
         )
-    assert [rec.name for rec in result.pulled] == ["tiny"]
+    assert [rec.name for rec in result.pulled] == ["Tiny"]
 
 
 async def test_s5_sklearn_dist_is_what_the_installer_sees(data_dir: Path) -> None:
@@ -468,7 +468,7 @@ async def test_s6_already_connected_can_pull_a_heavier_tree(data_dir: Path) -> N
             store, name="peer", url="http://peer", client=client
         )
     names = {rec.name for rec in result.pulled}
-    assert names == {"uses_numpy", "uses_torch"}
+    assert names == {"UsesNumpy", "UsesTorch"}
     listed = await list_strategy_types(store=store)
     types = {t.type for t in listed.templates}
     assert "peer::UsesNumpy" in types
@@ -524,7 +524,7 @@ async def test_s7_delete_extra_breaks_deploy(data_dir: Path) -> None:
         principal=_OWNER,
     )
     assert "numpy" not in NodeEnv(data_dir).read_stamp().packages
-    assert [row.name for row in out.broken] == ["uses_numpy"]
+    assert [row.name for row in out.broken] == ["UsesNumpy"]
     listed = await list_strategy_types(store=store)
     row = next(t for t in listed.templates if t.type == "private::UsesNumpy")
     assert row.env_ok is False
@@ -557,7 +557,7 @@ async def test_s7_delete_extra_breaks_deploy(data_dir: Path) -> None:
         principal=_OWNER,
     )
     assert forced.restart_required is True
-    assert forced.broken[0].name == "uses_numpy"
+    assert forced.broken[0].name == "UsesNumpy"
 
 
 async def test_s8_pin_clash_on_confirm(data_dir: Path) -> None:

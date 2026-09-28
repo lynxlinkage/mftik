@@ -45,7 +45,6 @@ DEFAULT_REPORT_INTERVAL_MS = 300_000
 class TapeKeeper(Strategy):
     """Subscribes to feeds and holds them, so MD keeps recording their tape."""
 
-    name = "tape_keeper"
     rebuildable = True
 
     def __init__(self) -> None:

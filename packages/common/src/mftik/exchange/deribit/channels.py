@@ -20,6 +20,12 @@ CHART = "chart.trades"
 INTERVAL_100MS = "100ms"
 INTERVAL_RAW = "raw"
 
+#: ``book.{instrument}.{group}.{depth}.{interval}`` depths. Deribit
+#: accepts only these three. ``none`` is a legal group for every currency.
+BOOK_DEPTHS = (1, 10, 20)
+DEFAULT_BOOK_DEPTH = 20
+DEFAULT_BOOK_GROUP = "none"
+
 # --- private channels ------------------------------------------------------
 
 USER_ORDERS = "user.orders"
@@ -35,8 +41,37 @@ def trades(instrument: str, *, interval: str = INTERVAL_100MS) -> str:
     return f"{TRADES}.{instrument}.{interval}"
 
 
-def book(instrument: str, *, interval: str = INTERVAL_100MS) -> str:
-    return f"{BOOK}.{instrument}.{interval}"
+def book(
+    instrument: str,
+    *,
+    interval: str = INTERVAL_100MS,
+    depth: int | None = DEFAULT_BOOK_DEPTH,
+    group: str = DEFAULT_BOOK_GROUP,
+) -> str:
+    """``book.BTC_USDC.none.20.100ms`` — a snapshot of the top ``depth`` levels.
+
+    Every notification on that channel is the whole truncated book
+    (``[price, amount]``, no ``prev_change_id``). ``depth=None`` is the
+    unbounded ``book.{instrument}.{interval}`` channel: one full snapshot,
+    then increments. That snapshot is already past 1 MiB on BTC_USDC.
+    """
+    if depth is None:
+        return f"{BOOK}.{instrument}.{interval}"
+    if depth not in BOOK_DEPTHS:
+        raise ValueError(
+            f"Deribit book depth must be one of {BOOK_DEPTHS}, got {depth}"
+        )
+    return f"{BOOK}.{instrument}.{group}.{depth}.{interval}"
+
+
+def unbounded_book(channel: str) -> bool:
+    """True for ``book.{instrument}.{interval}``, the no-depth channel.
+
+    ``book.{instrument}.{group}.{depth}.{interval}`` has five segments.
+    Instrument names do not contain dots.
+    """
+    parts = (channel or "").split(".")
+    return len(parts) == 3 and parts[0] == BOOK
 
 
 def quote(instrument: str) -> str:
@@ -102,7 +137,10 @@ PRIVATE_GET_POSITIONS = "private/get_positions"
 
 __all__ = [
     "BOOK",
+    "BOOK_DEPTHS",
     "CHART",
+    "DEFAULT_BOOK_DEPTH",
+    "DEFAULT_BOOK_GROUP",
     "INTERVAL_100MS",
     "INTERVAL_RAW",
     "PRIVATE_BUY",
@@ -139,6 +177,7 @@ __all__ = [
     "quote",
     "ticker",
     "trades",
+    "unbounded_book",
     "user_orders",
     "user_portfolio",
     "user_trades",

@@ -185,7 +185,7 @@ class StrategyLedger:
                 universal_ticker=key,
             ),
             type=STS_ENSURE_LEVERAGE,
-            source=f"strategy.{session.strategy.name}",
+            source=f"strategy.{session.strategy.registry_key}",
             session_id=session.session_id,
         )
         try:

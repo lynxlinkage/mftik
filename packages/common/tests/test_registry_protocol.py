@@ -24,6 +24,22 @@ def test_handshake_info_shape(tmp_path, monkeypatch) -> None:
     check_handshake(info)
 
 
+def test_protocol_2_is_refused() -> None:
+    """A node still addressing trees by the short name must not connect.
+
+    Keeping version 2 would let it treat ``tiny`` as deleted and ``Tiny`` as
+    added. Both sides at 3 refuse a 2/2 peer.
+    """
+    with pytest.raises(RegistryError, match="incompatible"):
+        check_handshake(
+            {
+                "protocol": PROTOCOL,
+                "protocol_version": 2,
+                "protocol_min": 2,
+            }
+        )
+
+
 def test_incompatible_protocol_is_refused() -> None:
     with pytest.raises(RegistryError, match="incompatible"):
         check_handshake(

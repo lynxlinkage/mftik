@@ -109,13 +109,13 @@ async def test_add_returns_the_record_and_writes_files(tmp_path: Path) -> None:
 
     out = await add_strategy(body, store=store, broker=_broker(store))
 
-    assert out.name == "tiny"
+    assert out.name == "Tiny"
     assert out.type == "Tiny"
     assert out.digest.startswith("sha256:")
     assert out.origin == "private"
     assert out.files == ["strategy.py"]
     assert out.requires == []
-    written = tmp_path / "registry" / "private" / "tiny" / "strategy.py"
+    written = tmp_path / "registry" / "private" / "Tiny" / "strategy.py"
     assert written.read_text() == _TINY
 
 
@@ -152,7 +152,7 @@ async def test_own_add_without_applied_extras_is_400(
         )
     assert caught.value.status_code == 400
     assert "numpy" in str(caught.value.detail)
-    assert not (tmp_path / "registry" / "private" / "tiny").exists()
+    assert not (tmp_path / "registry" / "private" / "Tiny").exists()
 
 
 async def test_own_add_with_applied_extras_is_loaded(
@@ -335,7 +335,7 @@ async def test_add_keeps_strategy_yml_as_the_template(tmp_path: Path) -> None:
         broker=_broker(store),
     )
     assert "strategy.yml" in out.files
-    written = tmp_path / "registry" / "private" / "tiny" / "strategy.yml"
+    written = tmp_path / "registry" / "private" / "Tiny" / "strategy.yml"
     assert written.read_text() == _YML
 
     listed = await list_strategy_types(store=store)
@@ -372,14 +372,14 @@ async def test_published_list_is_public_only(tmp_path: Path) -> None:
     store.add({"strategy.py": _TINY}, origin="node1")
 
     published = await list_published(store=store)
-    assert [s.name for s in published.strategies] == ["tiny"]
+    assert [s.name for s in published.strategies] == ["Tiny"]
     assert published.strategies[0].origin == "public"
 
     hidden = await list_private(store=store)
-    assert [s.name for s in hidden.strategies] == ["tiny"]
+    assert [s.name for s in hidden.strategies] == ["Tiny"]
     assert hidden.strategies[0].origin == "private"
 
-    detail = await get_published("tiny", store=store)
+    detail = await get_published("Tiny", store=store)
     assert detail.contents == {"strategy.py": _TINY}
     assert detail.origin == "public"
 
@@ -397,7 +397,7 @@ async def test_get_remote_returns_pulled_strategies(tmp_path: Path) -> None:
     detail = await get_remote("node1", store=store)
     assert detail.name == "node1"
     assert detail.url == "http://example:8000"
-    assert [s.name for s in detail.strategies] == ["tiny"]
+    assert [s.name for s in detail.strategies] == ["Tiny"]
     assert detail.strategies[0].origin == "node1"
 
 
@@ -445,7 +445,7 @@ async def registry_db(monkeypatch, database_url):
 async def _live_strategy(scope, *, session_id: str, type: str) -> None:
     async with scope() as db:
         await StsSessionRepository(db).create_live(
-            session_id=session_id, created_by=1, strategy=type, type=type
+            session_id=session_id, created_by=1, type=type
         )
 
 

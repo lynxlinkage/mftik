@@ -34,6 +34,7 @@ from mftik.exchange.deribit.protocol import (
 )
 from mftik.exchange.deribit.socket import (
     DEFAULT_HEARTBEAT,
+    DEFAULT_MAX_SIZE,
     DEFAULT_PING_INTERVAL,
     DeribitSocket,
 )
@@ -79,6 +80,7 @@ class DeribitPrivateStream(DeribitSocket):
         max_retry_backoff: float = 30.0,
         ping_interval: float = DEFAULT_PING_INTERVAL,
         heartbeat: int = DEFAULT_HEARTBEAT,
+        max_size: int | None = DEFAULT_MAX_SIZE,
     ) -> None:
         super().__init__(
             url or DERIBIT_WS_URL,
@@ -89,6 +91,7 @@ class DeribitPrivateStream(DeribitSocket):
             max_retry_backoff=max_retry_backoff,
             ping_interval=ping_interval,
             heartbeat=heartbeat,
+            max_size=max_size,
         )
         if not api_key or not api_secret:
             raise DeribitAuthError(

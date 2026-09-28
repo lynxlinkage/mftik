@@ -546,7 +546,7 @@ class StrategyOms:
                     client_order_id=cid,
                 ),
                 type=STS_ORDER_SUBMIT,
-                source=f"strategy.{session.strategy.name}",
+                source=f"strategy.{session.strategy.registry_key}",
                 session_id=session.session_id,
             ),
         )
@@ -591,7 +591,7 @@ class StrategyOms:
                     client_order_id=cid,
                 ),
                 type=STS_ORDER_CANCEL,
-                source=f"strategy.{session.strategy.name}",
+                source=f"strategy.{session.strategy.registry_key}",
                 session_id=session.session_id,
             ),
         )

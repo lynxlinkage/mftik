@@ -203,6 +203,14 @@ services:
       STS_EVENTLOG_BACKUPS: "2"
     depends_on:
       <<: *broker
+      # STS reads the schema revision at boot and will not serve a database
+      # that predates the migration its session rows need. It waits for one,
+      # so without this the stack merely starts slowly — but the wait is
+      # bounded and then fatal, and there is no reason to spend it here.
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   # Symbol plane. Lifecycle is independent of td/md/sts — it is up whenever
   # the stack is, so an instrument can be resolved before anything trades.

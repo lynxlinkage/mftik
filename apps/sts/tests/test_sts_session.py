@@ -42,7 +42,7 @@ class FakeStsStore:
         *,
         session_id: str,
         created_by: int,
-        strategy: str | None = None,
+        type: str | None = None,
         td_api_ids: list[int] | None = None,
         md_ids: list[str] | None = None,
         st_paras: dict | None = None,
@@ -58,7 +58,7 @@ class FakeStsStore:
             created_at=datetime.now(UTC),
             finished_at=None,
             status="live",
-            strategy=strategy,
+            type=type,
             td_api_ids=list(td_api_ids or []),
             md_ids=list(md_ids or []),
             st_paras=dict(st_paras or {}),
@@ -178,12 +178,12 @@ async def test_sts_session_lives_independently(
         StsCreateSessionRequest(
             session_id="s1",
             created_by=1,
-            strategy="noop",
+            strategy="NoopStrategy",
             td={"paper": TdAccountRef(api_id=1)},
         )
     )
     assert result.session_id == "s1"
-    assert sts_store.rows["s1"].strategy == "noop"
+    assert sts_store.rows["s1"].type == "NoopStrategy"
     session = sts_manager.get("s1")
     assert session is not None
 
@@ -203,7 +203,7 @@ async def test_sts_lease_enables_td_attach(
         StsCreateSessionRequest(
             session_id="lease1",
             created_by=2,
-            strategy="noop",
+            strategy="NoopStrategy",
             td={"paper": TdAccountRef(api_id=11)},
         )
     )
@@ -277,7 +277,7 @@ async def test_sts_rpc_create_list_health(
             StsCreateSessionRequest(
                 session_id="rpc1",
                 created_by=5,
-                strategy="noop",
+                strategy="NoopStrategy",
                 td={"paper": TdAccountRef(api_id=1)},
             ),
             type=STS_SESSION_CREATE,

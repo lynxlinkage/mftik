@@ -35,11 +35,16 @@ class FakeDeribit:
         self.heartbeats = 0
         self.rpc_results: dict[str, Any] = {}
         self.rpc_errors: dict[str, tuple[int, str]] = {}
+        #: Sent once, as soon as a client connects, before any request.
+        #: A frame larger than the client's ``max_size`` closes with 1009.
+        self.opening_frame: str | None = None
 
     async def handler(self, websocket: Any) -> None:
         self.connections += 1
         self.clients.add(websocket)
         try:
+            if self.opening_frame is not None:
+                await websocket.send(self.opening_frame)
             async for raw in websocket:
                 text = raw.decode() if isinstance(raw, bytes) else raw
                 msg = json.loads(text)

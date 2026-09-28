@@ -172,7 +172,6 @@ class Strategy:
         second reaches the UI.
     """
 
-    name: str = "base"
     #: Whether a session running this strategy may be restored after STS
     #: restarts. Off until the class implements :meth:`on_rebuild`: a rebuilt
     #: strategy that does not know it was ever away treats recon as a clean
@@ -183,6 +182,10 @@ class Strategy:
 
     def __init__(self) -> None:
         self.session: SessionView | None = None
+        #: Qualified registry key (``CrossArb``, ``private::Tiny``). Set in
+        #: :meth:`bind` from the session. Until then, the class name — a unit
+        #: test that never binds still has something to log.
+        self.registry_key: str = type(self).__name__
         self.paras: dict[str, Any] = {}
         self.oms = StrategyOms()
         #: On-demand market-data reads — history the feeds do not carry.
@@ -208,10 +211,13 @@ class Strategy:
         """Attach this strategy to its session (called once by the session)."""
         if self.session is not None:
             raise RuntimeError(
-                f"strategy {self.name!r} already bound to session "
+                f"strategy {self.registry_key!r} already bound to session "
                 f"{self.session.session_id}"
             )
         self.session = session
+        qualified = getattr(session, "type", None)
+        if qualified:
+            self.registry_key = qualified
         self.oms.bind(self)
         self.mds.bind(self)
         self.ledger.bind(self)
@@ -329,7 +335,7 @@ class Strategy:
             Envelope[Recon].wrap(
                 Recon(session_id=self.session.session_id, api_id=api_id),
                 type=STS_RECON,
-                source=f"strategy.{self.name}",
+                source=f"strategy.{self.registry_key}",
                 session_id=self.session.session_id,
             ),
         )
@@ -635,7 +641,7 @@ class Strategy:
             self.session.broker,
             self.session.session_id,
             message,
-            source=f"strategy.{self.name}",
+            source=f"strategy.{self.registry_key}",
             level=level,
             type=getattr(self.session, "type", None),
             **extra,

@@ -45,7 +45,7 @@ async def a_session(
     session_id: str,
     *,
     status: str = "done",
-    strategy: str = "twap",
+    strategy: str = "TwapStrategy",
     started: datetime = START,
     ran_for: timedelta | None = timedelta(minutes=10),
     api_ids: list[int] | None = None,
@@ -58,7 +58,7 @@ async def a_session(
                 created_at=started,
                 finished_at=(started + ran_for) if ran_for else None,
                 status=status,
-                strategy=strategy,
+                type=strategy,
                 td={
                     f"account-{i}": {"api_id": i}
                     for i in (api_ids if api_ids is not None else [API_ID])
@@ -189,7 +189,7 @@ async def test_a_run_reports_what_it_traded_and_how_long_it_ran(db) -> None:
     (row,) = await rows()
 
     assert row.session_id == "s1"
-    assert row.strategy == "twap"
+    assert row.strategy == "TwapStrategy"
     assert row.fills == 2
     assert row.duration_s == pytest.approx(600.0)
     assert row.running is False

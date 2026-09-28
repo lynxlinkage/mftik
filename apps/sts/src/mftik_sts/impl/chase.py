@@ -185,7 +185,6 @@ def _bps(value: Decimal | None) -> str:
 
 
 class ChaseOrder(Strategy):
-    name = "chase"
     #: Restorable: `on_rebuild` takes back the clock and the slippage anchor,
     #: and recon says what is still resting.
     rebuildable = True
