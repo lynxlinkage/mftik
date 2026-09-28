@@ -207,8 +207,44 @@ async def _rebuild_on_boot(sessions: SessionManager) -> None:
         logger.info("STS found no interrupted sessions to rebuild")
 
 
-async def schema_is_current() -> bool:
-    """Whether this build may serve the database it is pointed at.
+#: How long boot waits for the database to say it has run the migrations this
+#: build needs, before giving up and exiting.
+#:
+#: Bounded, and then fatal. The compose stack starts STS beside Postgres and
+#: the one-shot migration step without ordering them, so "not listening yet",
+#: "no tables yet" and "one revision short" are all states a cold start sees
+#: for its first seconds — each of which becomes the right answer on its own,
+#: given a moment. None of them is a reason to serve: the rebuild scan reads
+#: every interrupted row once, at boot, and a scan that ran against the old
+#: schema is not repeated when the migration lands.
+#:
+#: Wide enough for Postgres to pass its healthcheck (up to ~50s in that
+#: stack) and for a cold database to run the whole migration history behind
+#: it. ``STS_SCHEMA_WAIT_S`` widens it for a node where that takes longer.
+SCHEMA_WAIT_S = 180.0
+SCHEMA_WAIT_ENV = "STS_SCHEMA_WAIT_S"
+_SCHEMA_RETRY_S = 1.0
+_SCHEMA_RETRY_MAX_S = 15.0
+
+
+def _schema_wait_s() -> float:
+    raw = os.getenv(SCHEMA_WAIT_ENV, "").strip()
+    if not raw:
+        return SCHEMA_WAIT_S
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "ignoring %s=%r — not a number, using %.0fs",
+            SCHEMA_WAIT_ENV,
+            raw,
+            SCHEMA_WAIT_S,
+        )
+        return SCHEMA_WAIT_S
+
+
+async def schema_is_current(budget_s: float | None = None) -> bool:
+    """Wait for a database this build may serve. False means do not start.
 
     The deploy this build belongs to has an order, and this is the step that
     catches it being run out of it: a session row written before
@@ -217,21 +253,35 @@ async def schema_is_current() -> bool:
     strategy. Refusing to start is the only answer that leaves those rows for
     the migration to fix.
 
-    Only a definite answer refuses. A read that fails says nothing either way
-    — Postgres may not be up yet, which is a wait rather than a
-    misconfiguration — so it is logged and boot goes on.
+    Every wait is logged with what is wrong, so an operator who ran the steps
+    in the wrong order reads the reason in the first second rather than at
+    the end of the window. Returning False rather than raising: the caller
+    turns it into an exit code, and a traceback would say less than the line
+    already logged.
     """
-    try:
-        await require_sts_schema()
-    except SchemaTooOld as exc:
-        logger.error("STS will not start: %s", exc)
-        return False
-    except Exception:
-        logger.exception(
-            "STS could not read the database's migration revision — "
-            "starting anyway"
+    budget = _schema_wait_s() if budget_s is None else budget_s
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    delay = _SCHEMA_RETRY_S
+    while True:
+        try:
+            await require_sts_schema()
+            return True
+        except SchemaTooOld as exc:
+            problem = str(exc)
+        except Exception as exc:
+            problem = f"the database could not be read: {exc}"
+        left = deadline - loop.time()
+        if left <= 0:
+            logger.error(
+                "STS will not start: %s (waited %.0fs)", problem, budget
+            )
+            return False
+        logger.warning(
+            "STS is waiting for the database: %s (%.0fs left)", problem, left
         )
-    return True
+        await asyncio.sleep(min(delay, left))
+        delay = min(delay * 2, _SCHEMA_RETRY_MAX_S)
 
 
 async def amain() -> bool:

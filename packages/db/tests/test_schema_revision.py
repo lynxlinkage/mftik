@@ -49,14 +49,19 @@ def test_a_later_revision_serves() -> None:
     assert describe_too_old(SchemaState("0041_something", _AFTER)) is None
 
 
-def test_a_database_with_no_sts_sessions_table_is_not_refused() -> None:
-    """Nothing has migrated it yet. Whatever does will do so at head.
+def test_a_database_with_no_sts_sessions_table_is_not_servable() -> None:
+    """Nothing has migrated it yet, and this read cannot tell why.
 
-    STS starting before the migration step is a wait — its own reads fail
-    until that finishes — and refusing here would leave it down instead.
+    A cold start passes through it on the way to a migrated schema, so the
+    caller waits — but it is not a state to serve, and this read does not
+    pretend it is one.
     """
-    assert describe_too_old(SchemaState("0033_option_strike", frozenset())) is None
-    assert describe_too_old(SchemaState(None, frozenset())) is None
+    for state in (
+        SchemaState("0033_option_strike", frozenset()),
+        SchemaState(None, frozenset()),
+    ):
+        problem = describe_too_old(state)
+        assert problem is not None and "no sts_sessions table" in problem
 
 
 async def _engine(tmp_path: Path, columns: str, revision: str | None) -> AsyncEngine:

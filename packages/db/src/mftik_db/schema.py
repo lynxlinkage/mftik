@@ -2,8 +2,14 @@
 
 A process that starts against a schema older than its own code does not fail
 on the first query — it fails on the one row that happens to need the column
-that is not there yet, hours later. This is read once at boot, and the answer
-is a sentence naming the revision to run.
+that is not there yet, hours later. This is read at boot, and the answer is a
+sentence naming the revision to run.
+
+Every unsatisfactory answer reads the same way on purpose: unreachable, no
+tables yet, and one revision short are all states a cold start passes through
+while the database and the one-shot migration step come up, and all of them
+become the right answer on their own. The caller retries until one does or
+until it runs out of patience — see ``mftik_sts.app.schema_is_current``.
 
 ``0034_strategy_type_key`` is the floor for STS because it is the migration
 that made ``sts_sessions.type`` the only strategy identity. Before it, a row
@@ -65,12 +71,16 @@ def describe_too_old(state: SchemaState) -> str | None:
     reason.
     """
     if not state.sts_columns:
-        # No table at all is a database nothing has migrated yet, not a
-        # revision that is behind — whatever creates it creates it at head,
-        # and every read until then fails on its own. Refusing here would
-        # turn a service that merely started before the migration step into
-        # a container that stays down.
-        return None
+        # A database nothing has migrated yet. On a cold start that is a
+        # state to wait out rather than serve: whatever creates the schema
+        # creates it at head, and until then this process cannot tell a
+        # database that is coming up from one nobody ever migrated. The
+        # caller decides how long to wait; what it must not do is start.
+        return (
+            "the database has no sts_sessions table, so nothing has "
+            "migrated it yet. Run mftik-db-migrate up to at least "
+            f"{MIN_STS_REVISION}."
+        )
     at = (
         f"is at revision {state.revision}"
         if state.revision is not None
