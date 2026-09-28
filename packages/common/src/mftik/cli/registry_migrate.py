@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 
 from mftik.cli.client import CliError
 from mftik.registry.errors import RegistryError
@@ -28,16 +29,29 @@ def registry_migrate(args: argparse.Namespace) -> int:
     except RegistryError as exc:
         raise CliError(str(exc)) from exc
     except OSError as exc:
-        # A rename that the filesystem refused. The trees are back where they
-        # were, and this is the sentence that says the deploy must not go on.
+        # A rename the filesystem refused. Nothing this run moved is left
+        # somewhere else, and nothing was deleted — the drops come after the
+        # last rename. This is the sentence that says the deploy must not go
+        # on.
         raise CliError(f"{data}: registry migration failed: {exc}") from exc
-    if not result.renamed and not result.removed_pulled and not result.recovered:
+    changed = (
+        result.renamed
+        or result.recovered
+        or result.dropped_pulled
+        or result.left_behind
+    )
+    if not changed:
         print(f"{data}: registry already uses class names")
         return 0
     for old, new in result.recovered:
         print(f"recovered {old} -> {new}, left by an interrupted run")
     for old, new in result.renamed:
         print(f"renamed {old} -> {new}")
-    for name in result.removed_pulled:
-        print(f"removed pulled/{name} — connect again to fetch it")
+    for path in result.dropped_pulled:
+        print(f"dropped {path}: nothing here names a class — connect again")
+    for problem in result.left_behind:
+        # Not an error: every rename has landed, and this is a directory no
+        # listing shows. It has to be said, because the class it holds the
+        # name of cannot be pulled again while it is there.
+        print(f"could not drop {problem} — remove it by hand", file=sys.stderr)
     return 0

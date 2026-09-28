@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mftik.registry import RegistryStore
+from mftik.registry.migrate import migrate_registry
 from mftik_sts.impl import load_local_registry, resolve, resolve_class
 from mftik_sts.impl.noop import NoopStrategy
 
@@ -92,3 +93,27 @@ def test_public_and_private_both_load(tmp_path) -> None:
     assert loaded == ["public::Tiny", "private::Tiny"]
     assert resolve("public::Tiny").name == "tiny"
     assert resolve("private::Tiny").name == "tiny"
+
+
+def test_a_pulled_copy_resolves_once_the_migration_has_renamed_it(
+    tmp_path,
+) -> None:
+    """The state a node upgrades from, and the state it boots into.
+
+    A copy pulled under the old short name is invisible: the scan drops a
+    directory whose name is not the class. The boot scan is also the only
+    thing that restores an interrupted session, so ``node1::Tiny`` has to
+    resolve when STS starts — running ``connect`` again afterwards is too
+    late for a session that was running it.
+    """
+    old = tmp_path / "registry" / "pulled" / "node1" / "tiny"
+    old.mkdir(parents=True)
+    (old / "strategy.py").write_text(_TINY)
+
+    store = RegistryStore(tmp_path)
+    assert load_local_registry(store) == []
+
+    migrate_registry(tmp_path)
+
+    assert load_local_registry(store) == ["node1::Tiny"]
+    assert resolve("node1::Tiny").name == "tiny"

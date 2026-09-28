@@ -1,4 +1,4 @@
-"""Move own registry trees onto their class name, and drop pulled copies.
+"""Move registry trees onto their class name — this node's, and pulled copies.
 
 Run this while STS is stopped. ``_scan_tree`` treats a directory whose name
 is not the class as absent, and it does that by returning nothing. A process
@@ -6,8 +6,14 @@ started on the wrong side of this rename — an old STS after the directories
 moved, or a new one before they have — loads an empty registry and does not
 say why.
 
-``pulled/`` is removed rather than renamed. Those trees are copies. The next
-``connect`` fetches them again, under the class name the peer now publishes.
+``pulled/{remote}/`` is renamed too, rather than deleted and left for the next
+``connect`` to fetch again. Two reasons, and neither is about saving a
+download. A session that was running ``node1::Tiny`` when STS stopped is
+restored by the boot scan and only by the boot scan; a registry that is
+missing that key at boot leaves the session interrupted, and ``connect``
+later does not go back for it. And deleting copies that are already named by
+their class would make a second run destructive, when "run it again" is what
+this command tells an operator to do.
 
 The batch is all or nothing. A tree is parked under a dot-prefixed temp name
 before it lands on the class name, and every listing skips dot entries — so a
@@ -15,6 +21,13 @@ run that stopped half way would not leave a registry half renamed, it would
 leave one with strategies missing. Anything that fails puts every tree back
 under the name it had, and a run that is killed outright is picked up by the
 next one, which recovers what it finds parked before it plans anything.
+
+The one thing that is deleted is a pulled tree nothing can name — no strategy
+files, or no class this build will pick. It cannot be renamed, no listing
+shows it, and a directory sitting on the name its own class would take is
+what makes the next ``connect`` of that class a conflict. It is a copy, so
+that is a deletion the peer can undo. It happens last, after every rename has
+landed, so nothing that fails ever has to put a deleted tree back.
 """
 
 from __future__ import annotations
@@ -41,11 +54,17 @@ class RegistryMigration:
     """What one successful run changed. Every tuple is empty when it was a no-op."""
 
     renamed: tuple[tuple[str, str], ...]
-    removed_pulled: tuple[str, ...]
+    #: Pulled trees this run deleted because nothing could name them. Paths,
+    #: not remote names: one unreadable copy is dropped, not the remote.
+    dropped_pulled: tuple[str, ...]
     #: ``(temp path, restored path)`` for each tree an interrupted earlier run
     #: had left parked. Not a rename anyone asked for — it is the state that
     #: run was in the middle of, undone.
     recovered: tuple[tuple[str, str], ...] = ()
+    #: Unnameable pulled trees this run meant to delete and could not. Said
+    #: rather than raised: every rename has landed by then, which is what the
+    #: deploy needs, and what is left is a directory no listing shows.
+    left_behind: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +74,21 @@ class _Parked:
     src: Path
     tmp: Path
     dst: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _RootPlan:
+    """What one origin's directory needs.
+
+    ``unnameable`` is fatal for this node's own trees and disposable for a
+    pulled copy, so the plan reports it and the caller decides.
+    """
+
+    moves: list[tuple[Path, Path]]
+    #: ``(path, why)`` for each tree whose class this build cannot read.
+    unnameable: list[tuple[Path, str]]
+    #: Names two trees in this root would land on each other. Always fatal.
+    collisions: list[str]
 
 
 def class_type_of(dest: Path) -> str:
@@ -72,34 +106,86 @@ def class_type_of(dest: Path) -> str:
 
 
 def migrate_registry(data_dir: str | Path) -> RegistryMigration:
-    """Rename ``public/`` and ``private/`` trees. Delete ``pulled/``.
+    """Rename every tree — ``public/``, ``private/``, and each pulled copy.
 
     Refuses the whole batch when two trees in one origin would land on
-    directory names that compare equal ignoring case, or when a tree cannot
-    be read. Nothing is renamed and ``pulled/`` stays until that is clean.
+    directory names that compare equal ignoring case, and when one of this
+    node's own trees cannot be read. Nothing is renamed until that is clean.
+    A collision inside ``pulled/{remote}/`` is the peer's registry to fix;
+    ``mftik disconnect {remote}`` is the way past it without waiting.
+
+    A pulled tree that cannot be read is dropped instead, after the renames
+    have landed. It is a copy, and one that no listing shows.
 
     Trees an interrupted earlier run left parked are put back first, before
     anything is planned. Planning around them instead would read a registry
     those strategies are absent from and report that it had nothing to do.
+
+    Idempotent: a registry already on class names plans no moves and drops
+    nothing, which is what makes "run it again" the answer to a run that
+    stopped part way.
     """
     store = RegistryStore(data_dir)
-    roots = (store.public_dir, store.private_dir)
-    recovered = tuple(_unpark_leftovers(roots))
+    own = (store.public_dir, store.private_dir)
+    pulled = _pulled_roots(store.pulled_dir)
+    recovered = tuple(_unpark_leftovers((*own, *pulled)))
     problems: list[str] = []
     moves: list[tuple[Path, Path]] = []
-    for root in roots:
-        moves.extend(_plan_root(root, problems))
+    disposable: list[Path] = []
+    for root in own:
+        plan = _plan_root(root)
+        problems.extend(plan.collisions)
+        problems.extend(why for _path, why in plan.unnameable)
+        moves.extend(plan.moves)
+    for root in pulled:
+        plan = _plan_root(root)
+        problems.extend(plan.collisions)
+        disposable.extend(path for path, _why in plan.unnameable)
+        moves.extend(plan.moves)
     if problems:
         raise RegistryError(
             "registry migration refused:\n" + "\n".join(problems)
         )
     renamed = tuple(_rename_all(moves))
-    removed = _drop_pulled(store.pulled_dir)
+    dropped, left_behind = _drop_unnameable(disposable)
     return RegistryMigration(
         renamed=renamed,
-        removed_pulled=tuple(removed),
+        dropped_pulled=tuple(dropped),
         recovered=recovered,
+        left_behind=tuple(left_behind),
     )
+
+
+def _pulled_roots(pulled: Path) -> tuple[Path, ...]:
+    """One root per remote. Each holds that peer's trees, keyed by class name.
+
+    A remote is its own root rather than part of one: two peers may both
+    publish ``Tiny``, and ``pulled/a/Tiny`` and ``pulled/b/Tiny`` are
+    different strategies under different keys.
+    """
+    if not pulled.is_dir():
+        return ()
+    return tuple(pulled / name for name in _dir_names(pulled))
+
+
+def _drop_unnameable(paths: list[Path]) -> tuple[list[str], list[str]]:
+    """Delete pulled trees nothing can name. ``(dropped, left behind)``.
+
+    Last, and only after every rename has landed, so no failure anywhere else
+    has to put a deleted tree back. A delete that fails is reported rather
+    than raised: the migration itself is done by then, and what is left is a
+    directory that no listing shows.
+    """
+    dropped: list[str] = []
+    left_behind: list[str] = []
+    for path in paths:
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            left_behind.append(f"{path}: {exc}")
+            continue
+        dropped.append(str(path))
+    return dropped, left_behind
 
 
 def _unpark_leftovers(roots: tuple[Path, ...]) -> list[tuple[str, str]]:
@@ -151,25 +237,31 @@ def _parked_name(entry: str) -> str | None:
     return rest or None
 
 
-def _plan_root(root: Path, problems: list[str]) -> list[tuple[Path, Path]]:
+def _plan_root(root: Path) -> _RootPlan:
     if not root.is_dir():
-        return []
+        return _RootPlan(moves=[], unnameable=[], collisions=[])
     entries = _dir_names(root)
     planned: list[tuple[str, str]] = []
+    unnameable: list[tuple[Path, str]] = []
     for actual in entries:
         try:
             type_name = class_type_of(root / actual)
         except RegistryError as exc:
-            problems.append(str(exc))
+            unnameable.append((root / actual, str(exc)))
             continue
         planned.append((actual, type_name))
-    if not _targets_ok(root, entries, planned, problems):
-        return []
-    return [
-        (root / actual, root / type_name)
-        for actual, type_name in planned
-        if actual != type_name
-    ]
+    collisions: list[str] = []
+    if not _targets_ok(root, entries, planned, collisions):
+        return _RootPlan(moves=[], unnameable=unnameable, collisions=collisions)
+    return _RootPlan(
+        moves=[
+            (root / actual, root / type_name)
+            for actual, type_name in planned
+            if actual != type_name
+        ],
+        unnameable=unnameable,
+        collisions=collisions,
+    )
 
 
 def _targets_ok(
@@ -292,19 +384,6 @@ def _taken_by(root: Path, type_name: str) -> str | None:
         if entry.casefold() == folded and (root / entry).is_dir():
             return entry
     return None
-
-
-def _drop_pulled(pulled: Path) -> list[str]:
-    if not pulled.is_dir():
-        return []
-    removed: list[str] = []
-    for entry in sorted(os.listdir(pulled)):
-        path = pulled / entry
-        if entry.startswith(".") or not path.is_dir():
-            continue
-        shutil.rmtree(path)
-        removed.append(entry)
-    return removed
 
 
 def _dir_names(root: Path) -> list[str]:
