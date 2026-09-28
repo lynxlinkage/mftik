@@ -83,6 +83,8 @@ A subscribe the venue does not serve is **refused at attach**, not silently empt
 
 **The tape.** MD records `trade` / `aggtrade` while somebody holds the feed. `self.tape.read(...)` returns those prints as the same `Trade` / `AggTrade` the live hooks get, on `records`, plus coverage — count, span, `continuous_since_ms`, measured gaps, whether recording is still on. Pass `on_print` and each print is handed to the callback instead, and `records` is left empty so the series is not held twice; `len` is still the count. A count of prints is not a length of history. `TapeKeeper` is a bundled strategy that subscribes and does nothing else, so the tape exists before the strategy that will need it is deployed.
 
+**Hooks share the loop with the lease.** A hook that computes for about three seconds without awaiting misses the heartbeats that hold this session's market data, and the session fails with `md feed from md stopped`. Two hundred thousand prints is easily that long, so `breathe` and `slice_deadline` — from `mftik.strategy`, same as `Strategy` — pace a loop over them: `deadline = await breathe(deadline)` per record, which reads a clock and only yields once the slice is spent.
+
 **Private events** arrive from the account, not from a candle: order updates, fills, rejects, balances, positions (contracts only). `td.{api_id}.global` is account-wide — filter with `self.owns(cid)` before you treat a fill as yours. `owns` decodes the six-hex session id packed into the cid.
 
 Instruments are **universal tickers**: `Venue_Category_SYMBOL`. `Gate_Spot_BTCUSDT`, `BinanceUM_Perp_BTCUSDT`, `Bybit_Spot_ETHUSDT`. The middle part is the book, not a nickname.

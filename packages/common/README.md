@@ -45,6 +45,40 @@ directory — nothing else. The node runs the source you send it rather than an
 environment you built, so a third-party import would be a module that is not
 there. `mftik check` tells you before you push.
 
+## Hand the loop back while you compute
+
+Your hooks are coroutines on the session's own loop, and the lease that lets
+the session hold its market data is a heartbeat task on the same loop. A hook
+that computes for about 3 seconds without awaiting — `LEASE_HEARTBEAT_INTERVAL_S`
+× `LEASE_MISS_LIMIT` — misses enough heartbeats that MD expires the lease, and
+the session fails with `md feed from md stopped`.
+
+`self.tape.read` hands back up to 200,000 prints, which is well past that, so
+work through them in slices, breathing between records:
+
+```python
+from mftik.strategy import Strategy, breathe, slice_deadline
+
+
+class MyStrategy(Strategy):
+    async def on_start(self) -> None:
+        tape = await self.tape.read(self.paras["ticker"], topic="aggtrade")
+        deadline = slice_deadline()
+        for print_ in tape.records:
+            deadline = await breathe(deadline)
+            self._fold(print_)
+```
+
+`slice_deadline()` says when the current slice is spent. `breathe(deadline)`
+returns without suspending while that slice still has time and yields only
+once it does not, so the cost per record is a clock read rather than a
+reschedule. Keep what it returns and pass it back in — that is the next
+deadline.
+
+The same pair belongs in a `read(..., on_print=...)` callback, and around any
+other long stretch of computation in a hook: the read yields between records,
+but it cannot yield inside your code.
+
 ## The client
 
 ```bash

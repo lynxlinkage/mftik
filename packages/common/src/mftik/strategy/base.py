@@ -149,6 +149,31 @@ class Strategy:
         assume. Empty from the right MD is a normal answer — nothing was
         holding the feed, or recording is off.
 
+    Yielding while you compute — ``breathe`` / ``slice_deadline`` (import them):
+        A hook is a coroutine on the session's own loop, and the MD lease
+        heartbeat is another task on it. A hook that computes for about 3s
+        (``LEASE_HEARTBEAT_INTERVAL_S`` × ``LEASE_MISS_LIMIT``) without
+        awaiting misses the heartbeats, MD expires the lease, and the
+        session fails with ``md feed from md stopped``. A read of 200k
+        prints is easily that long, so a loop over one has to hand the loop
+        back as it goes::
+
+            from mftik.strategy import breathe, slice_deadline
+
+            tape = await self.tape.read(ticker, topic="aggtrade")
+            deadline = slice_deadline()
+            for print_ in tape.records:
+                deadline = await breathe(deadline)
+                self._fold(print_)
+
+        ``breathe`` only suspends once the slice it was given is spent, so
+        the cost per record is a clock read, not a reschedule. Hold the
+        value it returns and pass it back — that is the next deadline. The
+        same applies to anything else long in a hook, tape or not; the
+        ``on_print`` callback of :meth:`~mftik.strategy.tape.StrategyTape.read`
+        included, because the read yields between records but cannot yield
+        inside your callback.
+
     Artifacts — opaque bytes on this STS's disk (wired):
         self.artifacts.read(path) / stat(path) / write(path, body)
         self.artifacts.reading(path) / writing(path) — the same object as a

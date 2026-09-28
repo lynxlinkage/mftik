@@ -16,6 +16,11 @@ strategy can feed history and live prints through one code path instead of
 writing its aggregation twice and hoping the two agree. Pass ``on_print``
 and the read does not keep those objects. Omit it and the slice carries
 them, which is what existing callers read.
+
+A read hands back up to :data:`DEFAULT_LIMIT` prints, and working through
+that many of them is long enough to cost a session its MD lease. The read
+paces itself with :func:`slice_deadline` and :func:`breathe`; a loop over
+what it returns has to pace itself with the same two.
 """
 
 from __future__ import annotations
@@ -84,21 +89,39 @@ DEFAULT_MAX_GAP_MS = 30_000
 
 #: How long a tape read may compute before returning to the loop.
 #:
-#: STS is one loop, and every session's lease heartbeat is a task on it.
-#: The heartbeat interval is 1s and the fuse is three missed intervals, so
-#: a warm-up that does not await holds every lease on the process. A slice
-#: leaves most of that interval for the other tasks. ``time.perf_counter``
-#: rather than the loop clock: on uvloop that clock steps in milliseconds.
+#: A session is one worker process on one loop, and its lease heartbeat is a
+#: task on that loop. The heartbeat interval is 1s and the fuse is three
+#: missed intervals, so a warm-up that does not await expires this session's
+#: own MD lease — the stall stays with the strategy that wrote it, but it
+#: still ends the session. A slice leaves most of that interval for the other
+#: tasks. ``time.perf_counter`` rather than the loop clock: on uvloop that
+#: clock steps in milliseconds.
 SLICE_S = 0.05
 
 
 def slice_deadline() -> float:
-    """When the current compute slice must return to the loop."""
+    """When the current compute slice must return to the loop.
+
+    Opens a stretch of computation that :func:`breathe` then paces. Keep the
+    number it returns and hand it back on every call::
+
+        deadline = slice_deadline()
+        for record in tape.records:
+            deadline = await breathe(deadline)
+            self._fold(record)
+    """
     return time.perf_counter() + SLICE_S
 
 
 async def breathe(deadline: float) -> float:
-    """Hand the loop back once ``deadline`` has passed.
+    """Hand the loop back once ``deadline`` has passed. Returns the next one.
+
+    For a strategy chewing through something long enough to matter — the up
+    to :data:`DEFAULT_LIMIT` prints one :meth:`StrategyTape.read` can hand
+    over, a fit computed in ``on_start``. A hook that does not await for
+    ``LEASE_HEARTBEAT_INTERVAL_S`` × ``LEASE_MISS_LIMIT`` (about 3s) misses
+    enough heartbeats that MD expires this session's lease, and the session
+    fails with ``md feed from md stopped``.
 
     Awaiting this does not, by itself, let another task run. While the
     slice still has time the coroutine returns without suspending, and the
@@ -262,6 +285,13 @@ class StrategyTape:
         whatever it wants. Omit it and the slice carries the prints, which
         is what a caller looping ``records`` is reading. History and the
         live hooks still see one :class:`~mftik.exchange.models.Trade`.
+
+        This yields to the loop as it parses, and an ``on_print`` callback
+        runs inside that pacing — but it is one call, so a callback that
+        computes has to :func:`breathe` too, and so does a plain loop over
+        :attr:`TapeSlice.records` after this returns. Without it a warm-up
+        big enough to be worth reading misses enough lease heartbeats to
+        fail the session.
 
         A feed this session never attached raises
         :class:`TapeFeedNotAttached`. An empty slice from the right MD is a
