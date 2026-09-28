@@ -56,8 +56,12 @@ MARGIN_MODELS = frozenset(
 
 # --- errors ----------------------------------------------------------------
 
-NOT_FOUND_CODES = frozenset({10009, 10003, 11044})
-AUTH_CODES = frozenset({10000, 10003, 10010, 13668})
+#: ``order_not_found`` (10004) and ``not_open_order`` (11044).
+#: ``10009`` is ``not_enough_funds``; ``10003`` is ``order_overlap``.
+NOT_FOUND_CODES = frozenset({10004, 11044})
+#: ``authorization_required``. ``10010`` is ``already_closed``, not auth.
+#: ``13668`` is not in the published table.
+AUTH_CODES = frozenset({10000, 13668})
 RATE_LIMIT_CODES = frozenset({10028})
 CBE_UNSUPPORTED = 11060
 

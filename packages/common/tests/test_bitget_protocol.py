@@ -146,6 +146,12 @@ def test_json_body_drops_none_and_stringifies_decimals() -> None:
     assert p.json_body({"qty": Decimal("0.10"), "posSide": None}) == '{"qty":"0.1"}'
 
 
+def test_not_found_is_a_missing_order_not_a_short_balance() -> None:
+    assert p.BitgetError(43001, "The order does not exist").not_found
+    assert p.BitgetError(22001, "No order to cancel").not_found
+    assert not p.BitgetError(43012, "Insufficient balance").not_found
+
+
 def test_hosts_are_production_not_demo() -> None:
     assert p.BITGET_REST_URL == "https://api.bitget.com"
     assert p.public_url().startswith("wss://ws.bitget.com/v3/ws/public")

@@ -169,18 +169,18 @@ BITGET = VenueErrors(
         40015: QueryCode.VENUE_INVALID_PARAM,
         40016: QueryCode.VENUE_INVALID_PARAM,
         40034: QueryCode.VENUE_RATE_LIMITED,
-        45110: QueryCode.VENUE_SYMBOL_NOT_FOUND,
+        # 45110 is "less than the minimum amount". QueryCode has no
+        # below-minimum, so the native code passes through.
         40085: QueryCode.VENUE_INTERNAL_ERROR,
     },
 )
 
 #: Deribit JSON-RPC. Numeric ``error.code`` (V11). A public read has no
-#: funds and no order to be wrong about.
+#: funds and no order to be wrong about, so ``10009`` not_enough_funds,
+#: ``10003`` order_overlap and ``10004`` / ``11044`` order-state codes
+#: stay native rather than being called a missing symbol.
 DERIBIT = VenueErrors(
     codes={
-        10009: QueryCode.VENUE_SYMBOL_NOT_FOUND,
-        10003: QueryCode.VENUE_INVALID_PARAM,
-        11044: QueryCode.VENUE_SYMBOL_NOT_FOUND,
         10028: QueryCode.VENUE_RATE_LIMITED,
         11050: QueryCode.VENUE_INVALID_PARAM,
         11060: QueryCode.VENUE_INVALID_PARAM,

@@ -501,12 +501,14 @@ BITGET = VenueErrors(
         40015: RejectCode.VENUE_INVALID_PARAM,
         40016: RejectCode.VENUE_INVALID_PARAM,
         40017: RejectCode.VENUE_INVALID_PARAM,
-        43001: RejectCode.VENUE_ORDER_NOT_FOUND,
-        43012: RejectCode.VENUE_ORDER_NOT_FOUND,
-        22001: RejectCode.VENUE_ORDER_NOT_FOUND,
-        43011: RejectCode.VENUE_INSUFFICIENT_BALANCE,
-        40762: RejectCode.VENUE_BELOW_MINIMUM,
-        45110: RejectCode.VENUE_SYMBOL_NOT_TRADABLE,
+        43001: RejectCode.VENUE_ORDER_NOT_FOUND,  # order does not exist
+        22001: RejectCode.VENUE_ORDER_NOT_FOUND,  # no order to cancel
+        43012: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # insufficient balance
+        43011: RejectCode.VENUE_INVALID_PARAM,  # parameter out of spec
+        # 40762 is "greater than the max open size". Bitget also raises
+        # it when the balance is what capped that size, so it is not one
+        # RejectCode. Left unmapped rather than guessed.
+        45110: RejectCode.VENUE_BELOW_MINIMUM,  # under the min USDT amount
     },
 )
 
@@ -519,16 +521,18 @@ DERIBIT = VenueErrors(
         ("label is at most", RejectCode.VENUE_INVALID_PARAM),
     ),
     codes={
-        10000: RejectCode.VENUE_AUTH_FAILED,
-        10010: RejectCode.VENUE_AUTH_FAILED,
+        10000: RejectCode.VENUE_AUTH_FAILED,  # authorization_required
+        # Not in Deribit's published error table.
         13668: RejectCode.VENUE_AUTH_FAILED,
-        10004: RejectCode.VENUE_INSUFFICIENT_BALANCE,
-        10009: RejectCode.VENUE_ORDER_NOT_FOUND,
-        10003: RejectCode.VENUE_ORDER_NOT_FOUND,
-        11044: RejectCode.VENUE_ORDER_NOT_FOUND,
-        10028: RejectCode.VENUE_RATE_LIMITED,
-        11050: RejectCode.VENUE_INVALID_PARAM,
-        11060: RejectCode.VENUE_INVALID_PARAM,
+        10009: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # not_enough_funds
+        10004: RejectCode.VENUE_ORDER_NOT_FOUND,  # order_not_found
+        11044: RejectCode.VENUE_ORDER_NOT_FOUND,  # not_open_order
+        10010: RejectCode.VENUE_ORDER_ALREADY_CLOSED,  # already_closed
+        # order_overlap: the book would trade with itself. No self-trade code.
+        10003: RejectCode.VENUE_REJECTED,
+        10028: RejectCode.VENUE_RATE_LIMITED,  # too_many_requests
+        11050: RejectCode.VENUE_INVALID_PARAM,  # bad_request
+        11060: RejectCode.VENUE_INVALID_PARAM,  # cbe-routed spot
     },
 )
 
