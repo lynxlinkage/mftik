@@ -12,7 +12,7 @@ from mftik.exchange.models import (
     AggTrade,
     BestQuote,
     BookLevel,
-    Expiry,
+    FeedEnd,
     FundingRate,
     Greeks,
     Kline,
@@ -25,7 +25,7 @@ from mftik.exchange.models import (
 from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
-    MD_EXPIRY,
+    MD_FEED_END,
     MD_FUNDING_RATE,
     MD_GREEKS,
     MD_KLINE,
@@ -63,7 +63,7 @@ class RecordingStrategy(Strategy):
             "funding_rate": [],
             "open_interest": [],
             "greeks": [],
-            "expiry": [],
+            "feed_end": [],
         }
 
     async def on_ticker(self, ticker: Ticker) -> None:
@@ -96,8 +96,8 @@ class RecordingStrategy(Strategy):
     async def on_greeks(self, greeks: Greeks) -> None:
         self.seen["greeks"].append(greeks)
 
-    async def on_expiry(self, expiry: Expiry) -> None:
-        self.seen["expiry"].append(expiry)
+    async def on_feed_end(self, end: FeedEnd) -> None:
+        self.seen["feed_end"].append(end)
 
 
 def _payloads() -> list[tuple[str, str, dict]]:
@@ -215,12 +215,15 @@ def _payloads() -> list[tuple[str, str, dict]]:
             ).model_dump(mode="json"),
         ),
         (
-            MD_EXPIRY,
-            "expiry",
-            Expiry(
+            MD_FEED_END,
+            "feed_end",
+            FeedEnd(
                 universal_ticker="Deribit_Option_BTCUSDT",
+                topic="greeks",
+                state="expired",
+                code="expired",
+                reason="instrument expired",
                 expiry=1_700_000_000.0,
-                topics=["greeks", "ticker"],
             ).model_dump(mode="json"),
         ),
     ]
@@ -249,9 +252,7 @@ async def test_md_events_reach_every_hook(broker: Broker) -> None:
             UntypedEnvelope.wrap(payload, type=msg_type, source="md"),
         )
 
-    await _wait_until(
-        lambda: all(strategy.seen[key] for _t, key, _p in cases)
-    )
+    await _wait_until(lambda: all(strategy.seen[key] for _t, key, _p in cases))
     for _msg_type, key, _payload in cases:
         assert len(strategy.seen[key]) == 1, key
         assert strategy.seen[key][0].symbol == "BTCUSDT"
@@ -288,9 +289,7 @@ async def test_md_hook_failure_does_not_kill_the_pump(broker: Broker) -> None:
     for msg_type in (MD_TICKER, MD_TRADE):
         await broker.publish(
             Topics.md_session(session_id),
-            UntypedEnvelope.wrap(
-                by_type[msg_type], type=msg_type, source="md"
-            ),
+            UntypedEnvelope.wrap(by_type[msg_type], type=msg_type, source="md"),
         )
 
     await _wait_until(lambda: bool(strategy.seen["trade"]))

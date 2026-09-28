@@ -902,7 +902,7 @@ It does not reopen these tickets. OI-4 edits one late-joiner row here
 when that feed lands.
 
 `docs/MdExpiry.md` is the control event that retires a dated
-instrument. `md.expiry` is not a product topic and is not listed in
+instrument. `md.feed.end` is not a product topic and is not listed in
 `md_ids`.
 
 Update a doc in the ticket that makes its sentence false, not in a mop-up
@@ -937,15 +937,11 @@ the method.
 - **A shared `Ticker` carrying funding.** The shared model is
   bid/ask/last/ts. Conversion belongs on the venue wire models, not on
   `Ticker`.
-- **A dead pump that never restarts.** Its own epic, and the largest
-  silent-failure left in MD. `VenueSession._pump` catches `Exception`, logs,
-  and returns with the `self._feeds` entry still present, so `ensure_feed`
-  early-returns forever: the product refcount claims a live feed that has no
-  reader. Any `subscribe_*` failure reaches it — MDS-1b only changes how
-  fast. Fixing it means deciding what a dead pump should do (drop the
-  `_feeds` entry and let the next `ensure_feed` rebuild, or retry with
-  backoff and a give-up that tells STS), which is a control-plane question
-  this epic has no business answering.
+- **A dead pump that never restarts.** Shipped as `md.feed.end` /
+  `on_feed_end` (`docs/MdExpiry.md`). The pump drops its `Feed`, clears
+  the refcount, and tells the sessions that held that topic. Transport
+  give-up also drops the venue connector so the next subscribe opens a
+  new one. MD does not restart the pump itself.
 - **Per-identity metrics or a dashboard of the wire ledger.** `held()` is
   enough to answer "why is `@bookTicker` still up" from a REPL.
 - **Cross-socket sharing.** Two sockets to the same host are two ledgers.

@@ -23,6 +23,7 @@ from mftik.protocol import (
     MD_TRADE,
     UntypedEnvelope,
 )
+from mftik.symbols import SymbolNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,9 @@ TOPIC_GREEKS = "greeks"
 KLINE_PREFIX = "kline_"
 
 OnUpdate = Callable[[str, UniversalTicker, UntypedEnvelope], Awaitable[None]]
+#: ``(feed, state, code, reason)`` — the pump task reached a terminal
+#: outcome that was not ``stop_feed``. The feed has already been popped.
+OnEnd = Callable[["Feed", str, str, str], Awaitable[None]]
 
 
 @dataclass
@@ -121,16 +125,21 @@ class VenueSession:
         public: MarketDataConnector,
         *,
         on_update: OnUpdate,
+        on_end: OnEnd | None = None,
     ) -> None:
         self.venue = venue
         self.public = public
         self._on_update = on_update
+        self._on_end = on_end
         self._feeds: dict[tuple[str, UniversalTicker], Feed] = {}
         self._started = False
 
     @property
     def feed_count(self) -> int:
         return len(self._feeds)
+
+    def has_feed(self, topic: str, ticker: UniversalTicker) -> bool:
+        return (topic, ticker) in self._feeds
 
     async def start(self) -> None:
         if self._started:
@@ -164,14 +173,40 @@ class VenueSession:
         logger.info("MD feed started topic=%s ticker=%s", topic, ticker)
 
     async def stop_feed(self, topic: str, ticker: UniversalTicker) -> None:
-        feed = self._feeds.pop((topic, ticker), None)
+        feed = self.release_feed(topic, ticker, cancel=True)
         if feed is None:
             return
-        feed.stop.set()
-        if feed.task is not None:
-            feed.task.cancel()
+        if feed.task is not None and feed.task is not asyncio.current_task():
             await asyncio.gather(feed.task, return_exceptions=True)
         logger.info("MD feed stopped topic=%s ticker=%s", topic, ticker)
+
+    def release_feed(
+        self, topic: str, ticker: UniversalTicker, *, cancel: bool
+    ) -> Feed | None:
+        """Pop the live feed without waiting for its task.
+
+        ``cancel`` asks the task to leave. The caller awaits it outside
+        any lock. A pump that is already reporting its own end has
+        popped itself, so this returns ``None`` and does not cancel
+        the task it is running on.
+        """
+        feed = self._feeds.pop((topic, ticker), None)
+        if feed is None:
+            return None
+        feed.stop.set()
+        task = feed.task
+        if cancel and task is not None and task is not asyncio.current_task():
+            task.cancel()
+        return feed
+
+    def take_ended(self, feed: Feed) -> bool:
+        """Pop ``feed`` if this task still owns it and nobody stopped it."""
+        key = (feed.topic, feed.ticker)
+        current = self._feeds.get(key)
+        if current is not feed or feed.stop.is_set():
+            return False
+        self._feeds.pop(key, None)
+        return True
 
     def _stream(self, name: str) -> Any:
         """The connector's ``name`` stream, or a refusal naming the venue.
@@ -229,6 +264,7 @@ class VenueSession:
         source: AsyncIterator[Any],
         msg_type: str,
     ) -> None:
+        outcome: tuple[str, str, str] | None = None
         try:
             async for item in source:
                 if feed.stop.is_set():
@@ -239,9 +275,43 @@ class VenueSession:
                     source="md",
                 )
                 await self._on_update(feed.topic, feed.ticker, env)
+            if feed.stop.is_set():
+                return
+            outcome = ("down", "transport", "source ended")
         except asyncio.CancelledError:
             raise
+        except SymbolNotFoundError as exc:
+            if feed.stop.is_set():
+                return
+            logger.warning(
+                "MD %s symbol not found ticker=%s: %s",
+                feed.topic,
+                feed.ticker,
+                exc,
+            )
+            outcome = (
+                "down",
+                "symbol_not_found",
+                str(exc) or "symbol not found",
+            )
+        except Exception as exc:
+            if feed.stop.is_set():
+                return
+            logger.exception("MD %s pump failed ticker=%s", feed.topic, feed.ticker)
+            outcome = ("down", "error", f"{type(exc).__name__}: {exc}")
+        if outcome is None or not self.take_ended(feed):
+            return
+        # Sibling pumps on the same socket end together. Yield once so
+        # they can pop themselves before a transport retire destroys
+        # the venue and cancels whoever is still in ``_feeds``.
+        await asyncio.sleep(0)
+        if feed.stop.is_set() or self._on_end is None:
+            return
+        try:
+            await self._on_end(feed, *outcome)
         except Exception:
             logger.exception(
-                "MD %s pump failed ticker=%s", feed.topic, feed.ticker
+                "MD feed end notify failed topic=%s ticker=%s",
+                feed.topic,
+                feed.ticker,
             )

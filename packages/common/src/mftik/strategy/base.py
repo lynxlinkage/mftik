@@ -8,7 +8,7 @@ from mftik.exchange.models import (
     AggTrade,
     Balance,
     BestQuote,
-    Expiry,
+    FeedEnd,
     Fill,
     FundingRate,
     Greeks,
@@ -109,10 +109,11 @@ class Strategy:
         One hook per feed topic subscribed in ``md_ids``
         (``topic.UniversalTicker``; kline carries its interval in the topic,
         e.g. ``paper.kline_1m.BTCUSDT``).
-        on_expiry — not a subscribed topic. MD fires it once per
-        instrument per MD process when a dated contract or option
-        reaches the listed expiry, after every feed on that ticker
-        has been dropped and will not be resubscribed.
+        on_feed_end — not a subscribed topic. MD fires it once per
+        (session, topic) when that subscription reaches a terminal
+        outcome: the pump died, the venue never connected, the topic
+        is unsupported, or the instrument reached its listed expiry.
+        One ticker with two topics is two calls.
 
     Market-data queries — request-reply on ``md.fetch`` (wired):
         self.mds.fetch_klines(ticker, interval, limit=...)
@@ -487,21 +488,25 @@ class Strategy:
         refused at attach rather than silently producing nothing.
         """
 
-    async def on_expiry(self, expiry: Expiry) -> None:
-        """Handle an instrument that has reached its listed expiry.
+    async def on_feed_end(self, end: FeedEnd) -> None:
+        """Handle a feed subscription that has reached a terminal outcome.
 
-        Not a feed topic and not listed in ``md_ids``. MD fires this
-        once per instrument per MD process, to every session that
-        held a feed on that ticker, then drops those feeds and will
-        not reopen them. A later MD process may notify a rebuilt
-        session again without reopening the socket.
-        ``expiry.topics`` names the product keys that were cut
-        (``ticker``, ``greeks``, ``kline_1h``, …).
-        ``expiry.expiry`` is the listed settlement time.
+        Not a feed topic and not listed in ``md_ids``. One call per
+        topic this session held or had just asked for. ``end.state``
+        and ``end.code`` say which outcome; ``end.reason`` is a
+        sentence. ``end.expiry`` is set only when the code is
+        ``expired``.
 
-        Spot and perpetual books have no expiry and never arrive
-        here.
+        ``down`` means this attempt is over and a later subscribe may
+        rebuild the pump. ``rejected`` and ``expired`` mean
+        subscribing again gets the same answer. Detach and an
+        explicit unsubscribe do not arrive here. A rebuilt session
+        re-attaches its saved feeds, so ``rejected`` and
+        ``symbol_not_found`` are notified again after a restart.
         """
+        await self.log(
+            f"{end.topic} {end.state}/{end.code}: {end.reason}",
+        )
 
     # --- query answers -----------------------------------------------------
     #
@@ -557,9 +562,7 @@ class Strategy:
         ``bid_qty == 0`` as "no bid" — never price off a zero side.
         """
 
-    async def on_fetch_funding_history(
-        self, result: MdFundingHistoryResult
-    ) -> None:
+    async def on_fetch_funding_history(self, result: MdFundingHistoryResult) -> None:
         """Handle the answer to ``self.mds.fetch_funding_history(...)``.
 
         Distinct from :meth:`on_funding_rate`, which is the live prediction

@@ -10,13 +10,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from mftik.broker import Broker, LeasedSessionLink
-from mftik.exchange.models import Expiry
+from mftik.exchange.models import FeedEnd
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     LEASE_HEARTBEAT_INTERVAL_S,
     LEASE_MISS_LIMIT,
     MD_DETACH,
-    MD_EXPIRY,
+    MD_FEED_END,
     MD_LEASE_ACK,
     MD_SUBSCRIBE,
     MD_UNSUBSCRIBE,
@@ -39,7 +39,7 @@ from mftik_db.models.session import SessionDomain, SessionStatus
 
 from mftik_md.session.dispatcher import Dispatcher, FeedKey
 from mftik_md.session.factory import ConnectorFactory
-from mftik_md.session.venue import VenueSession
+from mftik_md.session.venue import Feed, VenueSession
 from mftik_md.tape import TapeRecorder
 from mftik_md.tape_store import TapeStore
 
@@ -223,30 +223,47 @@ class SessionManager:
         self._dispatcher.register_link(link)
 
         await self._prefetch_expiries(request.subscriptions)
-        already: dict[UniversalTicker, list[str]] = {}
         opened: set[UniversalTicker] = set()
         now = time.time()
         for feed in request.subscriptions:
-            topic, ticker = Topics.parse_md_feed(feed)
+            try:
+                topic, ticker = Topics.parse_md_feed(feed)
+            except ValueError:
+                logger.exception(
+                    "MD attach skipped unparseable feed session=%s feed=%s",
+                    request.session_id,
+                    feed,
+                )
+                continue
             listed = self._expiry_at.get(ticker)
             if ticker in self._expired or (
                 listed is not None and listed <= now
             ):
                 if ticker not in self._expired and listed is not None:
                     await self._expire_ticker(ticker, listed)
-                already.setdefault(ticker, []).append(topic)
+                expiry = self._expiry_at[ticker]
+                await self._emit_feed_end(
+                    [request.session_id],
+                    ticker,
+                    topic=topic,
+                    state="expired",
+                    code="expired",
+                    reason=f"instrument expired at {expiry}",
+                    expiry=expiry,
+                )
                 continue
-            await self._subscribe_feed(link, feed, arm=False)
-            opened.add(ticker)
+            try:
+                await self._subscribe_feed(link, feed, arm=False)
+            except Exception:
+                logger.exception(
+                    "MD attach feed failed session=%s feed=%s",
+                    request.session_id,
+                    feed,
+                )
+            if feed in link.subscriptions:
+                opened.add(ticker)
         for ticker in opened:
             self._schedule_arm(ticker)
-        for ticker, topics in already.items():
-            await self._publish_expiry(
-                [request.session_id],
-                ticker,
-                expiry=self._expiry_at[ticker],
-                topics=topics,
-            )
 
         feeds = sorted(link.subscriptions)
         venues = sorted(_venues_from_feeds(feeds))
@@ -570,11 +587,14 @@ class SessionManager:
             if listed is not None and listed <= time.time():
                 if ticker not in self._expired:
                     await self._expire_ticker(ticker, listed)
-                await self._publish_expiry(
+                await self._emit_feed_end(
                     [link.session_id],
                     ticker,
+                    topic=topic,
+                    state="expired",
+                    code="expired",
+                    reason=f"instrument expired at {listed}",
                     expiry=listed,
-                    topics=[topic],
                 )
                 return
         first = False
@@ -585,23 +605,65 @@ class SessionManager:
                 return
             if ticker in self._expired:
                 expiry = self._expiry_at[ticker]
-                notify_topics = [topic]
             else:
                 expiry = None
-                notify_topics = []
                 first, new_rc = self._dispatcher.subscribe(
                     link.session_id, topic, ticker
                 )
                 old_rc = new_rc - 1
                 link.subscriptions.add(feed)
         if expiry is not None:
-            await self._publish_expiry(
+            await self._emit_feed_end(
                 [link.session_id],
                 ticker,
+                topic=topic,
+                state="expired",
+                code="expired",
+                reason=f"instrument expired at {expiry}",
                 expiry=expiry,
-                topics=notify_topics,
             )
             return
+        try:
+            await self._open_subscribed(
+                link, feed, topic, ticker, first=first, old_rc=old_rc, new_rc=new_rc
+            )
+        except Exception as exc:
+            logger.exception(
+                "MD subscribe failed session=%s feed=%s",
+                link.session_id,
+                feed,
+            )
+            venue = self._venues.get(ticker.venue)
+            live = venue is not None and venue.has_feed(topic, ticker)
+            if not live and self._dispatcher.refcount(topic, ticker) > 0:
+                await self._fail_open(
+                    topic,
+                    ticker,
+                    state="down",
+                    code="error",
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            return
+        if arm and feed in link.subscriptions:
+            self._schedule_arm(ticker)
+
+    async def _open_subscribed(
+        self,
+        link: StsLink,
+        feed: str,
+        topic: str,
+        ticker: UniversalTicker,
+        *,
+        first: bool,
+        old_rc: int,
+        new_rc: int,
+    ) -> None:
+        """Finish a subscribe that already holds a refcount.
+
+        Connect and ``_open`` failures retire every subscriber of the
+        key — another session may have joined during the awaits — and
+        tell each of them. They do not propagate to attach.
+        """
         await publish_md_log(
             self._broker,
             ticker.venue,
@@ -611,41 +673,71 @@ class SessionManager:
             ),
             source="md",
         )
-        if first:
-            if (
-                ticker in self._expired
-                or self._dispatcher.refcount(topic, ticker) == 0
-            ):
-                return
+        if not first:
+            return
+        if (
+            ticker in self._expired
+            or self._dispatcher.refcount(topic, ticker) == 0
+        ):
+            return
+        try:
             venue_sess = await self._ensure_venue(ticker.venue)
-            if (
-                ticker in self._expired
-                or self._dispatcher.refcount(topic, ticker) == 0
-            ):
-                if venue_sess.feed_count == 0:
-                    self._destroy_venue(ticker.venue)
-                return
-            await venue_sess.ensure_feed(topic, ticker)
-            if (
-                ticker in self._expired
-                or self._dispatcher.refcount(topic, ticker) == 0
-            ):
-                await self._stop_feed_if_unused((topic, ticker))
-                return
-            # Stamped here rather than on the first record: this is the moment
-            # continuity broke, and a feed that starts pumping into a silent
-            # market would otherwise look like it had been recording all along.
-            if self._recorder is not None and self._recorder.records(topic):
-                await self._recorder.started(feed)
-            await publish_md_log(
-                self._broker,
-                ticker.venue,
-                f"feed pump started {feed}",
-                source="md",
-                instance=self._instance,
+        except Exception as exc:
+            logger.exception(
+                "MD venue connect failed venue=%s", ticker.venue
             )
-        if arm:
-            self._schedule_arm(ticker)
+            await self._fail_open(
+                topic,
+                ticker,
+                state="down",
+                code="connect",
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+            return
+        if (
+            ticker in self._expired
+            or self._dispatcher.refcount(topic, ticker) == 0
+        ):
+            if venue_sess.feed_count == 0:
+                self._destroy_venue(ticker.venue)
+            return
+        try:
+            await venue_sess.ensure_feed(topic, ticker)
+        except Exception as exc:
+            logger.exception(
+                "MD feed rejected topic=%s ticker=%s", topic, ticker
+            )
+            await self._fail_open(
+                topic,
+                ticker,
+                state="rejected",
+                code="unsupported",
+                reason=str(exc),
+            )
+            return
+        if (
+            ticker in self._expired
+            or self._dispatcher.refcount(topic, ticker) == 0
+        ):
+            await self._stop_feed_if_unused((topic, ticker))
+            # Expiry may already have dropped this venue. The pump then
+            # lives on the session ``ensure_feed`` just used, not on
+            # ``_venues``, and still has to be stopped.
+            if venue_sess.has_feed(topic, ticker):
+                await venue_sess.stop_feed(topic, ticker)
+            return
+        # Stamped here rather than on the first record: this is the moment
+        # continuity broke, and a feed that starts pumping into a silent
+        # market would otherwise look like it had been recording all along.
+        if self._recorder is not None and self._recorder.records(topic):
+            await self._recorder.started(feed)
+        await publish_md_log(
+            self._broker,
+            ticker.venue,
+            f"feed pump started {feed}",
+            source="md",
+            instance=self._instance,
+        )
 
     async def _unsubscribe_feed(self, link: StsLink, feed: str) -> None:
         topic, ticker = Topics.parse_md_feed(feed)
@@ -806,63 +898,197 @@ class SessionManager:
             if ticker in self._expired:
                 return
             keys = self._dispatcher.feeds_for_ticker(ticker)
-            sessions = self._dispatcher.sessions_on_ticker(ticker)
+            held: dict[str, list[str]] = {}
+            released: list[Feed] = []
             topics = sorted({topic for topic, _tk in keys})
             self._expired.add(ticker)
             self._expiry_at[ticker] = expiry
             task = self._expiry_tasks.pop(ticker, None)
             if task is not None and task is not asyncio.current_task():
                 task.cancel()
-            for session_id in sessions:
-                link = self._links.get(session_id)
-                if link is None:
-                    continue
-                for topic, _tk in keys:
-                    link.subscriptions.discard(Topics.md_feed(topic, ticker))
             for topic, tk in keys:
-                for session_id in list(self._dispatcher.subscribers(topic, tk)):
-                    self._dispatcher.unsubscribe(session_id, topic, tk)
-        for key in keys:
-            await self._stop_feed_if_unused(key)
-        if sessions:
-            await self._publish_expiry(
-                sessions, ticker, expiry=expiry, topics=topics
-            )
+                session_ids, feed = self._drop_key_locked(topic, tk, cancel=True)
+                for session_id in session_ids:
+                    held.setdefault(session_id, []).append(topic)
+                if feed is not None:
+                    released.append(feed)
+        for feed in released:
+            if feed.task is not None and feed.task is not asyncio.current_task():
+                await asyncio.gather(feed.task, return_exceptions=True)
+        for topic, _tk in keys:
+            await self._stamp_stopped(topic, ticker)
+        self._disarm_if_idle(ticker)
+        venue = self._venues.get(ticker.venue)
+        if venue is not None and venue.feed_count == 0:
+            self._destroy_venue(ticker.venue)
+        reason = f"instrument expired at {expiry}"
+        for session_id, session_topics in held.items():
+            for topic in sorted(session_topics):
+                await self._emit_feed_end(
+                    [session_id],
+                    ticker,
+                    topic=topic,
+                    state="expired",
+                    code="expired",
+                    reason=reason,
+                    expiry=expiry,
+                )
         await publish_md_log(
             self._broker,
             ticker.venue,
             (
                 f"instrument expired {ticker} topics={topics} "
-                f"sessions={sorted(sessions)}"
+                f"sessions={sorted(held)}"
             ),
             source="md",
             instance=self._instance,
         )
 
-    async def _publish_expiry(
+    async def _on_feed_end(
+        self, feed: Feed, state: str, code: str, reason: str
+    ) -> None:
+        """Pump task finished on its own. Retire the key, then tell subscribers."""
+        targets = await self._retire_key(
+            (feed.topic, feed.ticker),
+            stop_pump=False,
+            destroy_venue=code == "transport",
+        )
+        if targets is None:
+            return
+        await self._emit_feed_end(
+            targets,
+            feed.ticker,
+            topic=feed.topic,
+            state=state,
+            code=code,
+            reason=reason,
+        )
+
+    async def _fail_open(
+        self,
+        topic: str,
+        ticker: UniversalTicker,
+        *,
+        state: str,
+        code: str,
+        reason: str,
+    ) -> None:
+        """The first subscriber never got a pump. Drop everyone on the key."""
+        targets = await self._retire_key(
+            (topic, ticker), stop_pump=True, destroy_venue=False
+        )
+        if targets is None:
+            return
+        await self._emit_feed_end(
+            targets,
+            ticker,
+            topic=topic,
+            state=state,
+            code=code,
+            reason=reason,
+        )
+
+    def _drop_key_locked(
+        self, topic: str, ticker: UniversalTicker, *, cancel: bool
+    ) -> tuple[list[str], Feed | None]:
+        """Clear one key. Caller holds ``_expiry_lock`` and must not await.
+
+        Returns the sessions that held it, and the feed if one was still
+        in ``_feeds`` (already asked to stop when ``cancel`` is set).
+        """
+        session_ids = list(self._dispatcher.subscribers(topic, ticker))
+        for session_id in session_ids:
+            self._dispatcher.unsubscribe(session_id, topic, ticker)
+            link = self._links.get(session_id)
+            if link is not None:
+                link.subscriptions.discard(Topics.md_feed(topic, ticker))
+        venue = self._venues.get(ticker.venue)
+        released = None
+        if venue is not None:
+            released = venue.release_feed(topic, ticker, cancel=cancel)
+        return session_ids, released
+
+    async def _retire_key(
+        self,
+        key: FeedKey,
+        *,
+        stop_pump: bool,
+        destroy_venue: bool,
+        only_if_unused: bool = False,
+    ) -> list[str] | None:
+        """Drop subscribers and the feed before any further await can subscribe.
+
+        ``stop_pump`` awaits a task this call cancelled. A pump reporting
+        its own end passes False: it has already popped itself, and
+        waiting on that task would deadlock.
+
+        ``only_if_unused`` leaves the key alone when a subscriber arrived
+        after the caller decided it was idle. Returns None in that case.
+        The check is inside the lock: a refcount read before the lock can
+        go stale, and dropping that new subscriber would not tell them.
+        """
+        topic, ticker = key
+        async with self._expiry_lock:
+            if only_if_unused and self._dispatcher.refcount(topic, ticker) > 0:
+                return None
+            session_ids, released = self._drop_key_locked(
+                topic, ticker, cancel=stop_pump
+            )
+        if (
+            stop_pump
+            and released is not None
+            and released.task is not None
+            and released.task is not asyncio.current_task()
+        ):
+            await asyncio.gather(released.task, return_exceptions=True)
+        await self._stamp_stopped(topic, ticker)
+        self._disarm_if_idle(ticker)
+        venue = self._venues.get(ticker.venue)
+        if destroy_venue or (venue is not None and venue.feed_count == 0):
+            self._destroy_venue(ticker.venue)
+        return session_ids
+
+    async def _stamp_stopped(self, topic: str, ticker: UniversalTicker) -> None:
+        # The tape is left where it is. Two hours of history does not stop
+        # being true because nobody is subscribed any more — it stops being
+        # *current*, and saying so is what this stamp is for.
+        if self._recorder is not None and self._recorder.records(topic):
+            await self._recorder.stopped(Topics.md_feed(topic, ticker))
+
+    async def _emit_feed_end(
         self,
         session_ids: Sequence[str],
         ticker: UniversalTicker,
         *,
-        expiry: float,
-        topics: list[str],
+        topic: str,
+        state: str,
+        code: str,
+        reason: str,
+        expiry: float | None = None,
     ) -> None:
+        """Publish one ``md.feed.end`` to each session whose lease is up."""
         env = UntypedEnvelope.wrap(
-            Expiry(
+            FeedEnd(
                 universal_ticker=str(ticker),
+                topic=topic,
+                state=state,
+                code=code,
+                reason=reason,
                 expiry=expiry,
-                topics=sorted(topics),
             ).model_dump(mode="json"),
-            type=MD_EXPIRY,
+            type=MD_FEED_END,
             source="md",
         )
         for session_id in session_ids:
+            if session_id not in self._links:
+                continue
             try:
                 await self._broker.publish(Topics.md_session(session_id), env)
             except Exception:
                 logger.exception(
-                    "MD expiry notify failed session=%s ticker=%s",
+                    "MD feed end notify failed session=%s topic=%s ticker=%s",
                     session_id,
+                    topic,
                     ticker,
                 )
 
@@ -882,6 +1108,7 @@ class SessionManager:
             venue,
             public,
             on_update=self._dispatcher.publish,
+            on_end=self._on_feed_end,
         )
         await sess.start()
         self._venues[venue] = sess
@@ -896,25 +1123,17 @@ class SessionManager:
 
     async def _stop_feed_if_unused(self, key: FeedKey) -> None:
         topic, ticker = key
-        if self._dispatcher.refcount(topic, ticker) > 0:
+        retired = await self._retire_key(
+            key, stop_pump=True, destroy_venue=False, only_if_unused=True
+        )
+        if retired is None:
             return
-        venue_sess = self._venues.get(ticker.venue)
-        if venue_sess is None:
-            return
-        await venue_sess.stop_feed(topic, ticker)
-        # The tape is left where it is. Two hours of history does not stop
-        # being true because nobody is subscribed any more — it stops being
-        # *current*, and saying so is what this stamp is for.
-        if self._recorder is not None and self._recorder.records(topic):
-            await self._recorder.stopped(Topics.md_feed(topic, ticker))
         await publish_md_log(
             self._broker,
             ticker.venue,
             f"feed pump stopped {Topics.md_feed(topic, ticker)} (refcount 0)",
             source="md",
         )
-        if venue_sess.feed_count == 0:
-            self._destroy_venue(ticker.venue)
 
     def _destroy_venue(self, venue: str) -> None:
         """Drop the venue and disconnect it in the background.
