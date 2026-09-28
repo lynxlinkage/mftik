@@ -12,7 +12,6 @@ the book stale and resubscribes; it does not invent levels.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from collections.abc import Callable, Sequence
@@ -253,7 +252,7 @@ class DeribitPublicStream(DeribitSocket):
         if not book.apply(payload):
             if not book.resyncing:
                 book.resyncing = True
-                asyncio.create_task(
+                self._spawn(
                     self._resync_book(channel, book),
                     name=f"{self.name}-book-resync",
                 )

@@ -43,6 +43,11 @@ DEFAULT_HEARTBEAT = 15
 #: instead: two readers on one connection is ``ConcurrencyError: cannot
 #: call recv while another coroutine is already running recv``, and each
 #: one of those used to cost a reconnect.
+#:
+#: ``asyncio.create_task`` copies the current context, and ``reset`` does
+#: not reach that copy. A read loop started while this is true would keep
+#: the permission, and so would every task it starts. :meth:`DeribitSocket._spawn`
+#: clears the flag in the copy.
 _SETUP: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "deribit_socket_setup", default=False
 )
@@ -110,6 +115,18 @@ class DeribitSocket:
     def connected(self) -> bool:
         return self._connected
 
+    def _spawn(self, coro: Any, *, name: str) -> asyncio.Task[Any]:
+        """Start ``coro`` where :data:`_SETUP` is false.
+
+        Connect and reconnect set the flag so they can ``recv`` while no
+        read loop is running. A task created in that context inherits the
+        set value, and ``reset`` in the caller leaves the copy untouched,
+        so the task and every task it starts would take the direct read.
+        """
+        ctx = contextvars.copy_context()
+        ctx.run(_SETUP.set, False)
+        return asyncio.create_task(coro, name=name, context=ctx)
+
     async def connect(self) -> None:
         if self._connected:
             return
@@ -125,12 +142,10 @@ class DeribitSocket:
             await self._open()
             await self._on_open()
             self._set_pumping(True)
-            self._task = asyncio.create_task(
-                self._read_loop(), name=f"{self.name}-read"
-            )
+            self._task = self._spawn(self._read_loop(), name=f"{self.name}-read")
             self._connected = True
             if self.ping_interval > 0:
-                self._watch_task = asyncio.create_task(
+                self._watch_task = self._spawn(
                     self._watchdog(), name=f"{self.name}-watch"
                 )
         except Exception:
@@ -186,7 +201,7 @@ class DeribitSocket:
                 logger.exception("%s reconnect callback failed", self.name)
                 continue
             if asyncio.iscoroutine(result):
-                asyncio.create_task(result, name=f"{self.name}-reconnect-cb")
+                self._spawn(result, name=f"{self.name}-reconnect-cb")
 
     async def _open(self) -> None:
         self._conn = await connect(
@@ -392,9 +407,7 @@ class DeribitSocket:
     def _dispatch(self, resp: DeribitResponse) -> None:
         if resp.is_test_request:
             self.stats.heartbeats += 1
-            asyncio.create_task(
-                self._answer_heartbeat(), name=f"{self.name}-heartbeat"
-            )
+            self._spawn(self._answer_heartbeat(), name=f"{self.name}-heartbeat")
             return
         if resp.is_heartbeat:
             return
