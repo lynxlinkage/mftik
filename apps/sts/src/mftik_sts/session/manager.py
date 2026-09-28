@@ -168,6 +168,19 @@ def _row_key(row: Any) -> str | None:
     return getattr(row, "type", None) or getattr(row, "strategy", None)
 
 
+#: Why a row that names no strategy is refused rather than defaulted.
+#: ``resolve(None)`` builds :data:`mftik_sts.impl.DEFAULT_STRATEGY`, and a
+#: session restored onto a strategy nobody deployed would place orders of its
+#: own against that session's accounts. A row reads this way when it was
+#: written before ``0034_strategy_type_key`` — the short name it carries is in
+#: a column this build does not select — so the fix is the migration, not a
+#: guess here.
+_NO_TYPE_REASON = (
+    "the row names no strategy type. It predates "
+    "0034_strategy_type_key, or that migration could not name it"
+)
+
+
 class SessionManager:
     """Owns STS sessions. Each binds exactly one Strategy (1-1)."""
 
@@ -1222,6 +1235,14 @@ class SessionManager:
             )
             return False
         key = _row_key(row)
+        if key is None:
+            # Before the factory, not after: it answers ``None`` with the
+            # default strategy, and "not rebuildable" is then reported
+            # against a class this session never ran.
+            logger.warning(
+                "STS not rebuilding session=%s: %s", session_id, _NO_TYPE_REASON
+            )
+            return False
         try:
             ensure_deployable(key)
             strategy = self._strategy_factory(key)
@@ -1372,6 +1393,13 @@ class SessionManager:
         if row is None:
             raise RuntimeError(f"no interrupted session {session_id}")
         key = _row_key(row)
+        if key is None:
+            # The parent refuses this row too. Said again here because the
+            # worker is also reached by a rebuild the parent never planned —
+            # and because defaulting is the one thing that must not happen.
+            raise RuntimeError(
+                f"cannot rebuild session {session_id}: {_NO_TYPE_REASON}"
+            )
         strategy = self._strategy_factory(key)
         try:
             await self._rebuild_one(row, strategy)

@@ -959,3 +959,59 @@ async def test_type_null_bundled_row_uses_the_strategy_column(
         await manager.close_all()
         _REGISTRY.clear()
         _REGISTRY.update(before)
+
+
+@pytest.mark.asyncio
+async def test_a_row_naming_no_strategy_is_refused_not_defaulted(
+    broker: Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Both columns null. ``resolve(None)`` would build the default strategy.
+
+    That is the shape of every live row written before
+    ``0034_strategy_type_key``: the short name it carries is in a column this
+    build does not select. Restoring it as NoopStrategy would put a strategy
+    nobody deployed in front of the session's accounts.
+    """
+    store = FakeStsStore()
+    store.seed("aa00c5", strategy=None, type=None)
+    built: list[str | None] = []
+
+    def factory(name: str | None) -> Strategy:
+        built.append(name)
+        return Probe()
+
+    manager = SessionManager(
+        broker,
+        heartbeat_interval=0.05,
+        strategy_factory=factory,
+        mark_done=store.mark_finished,
+        mark_live=store.mark_live,
+        list_db_sessions=store.list_sessions,
+        load_session=lambda session_id: _load(store, session_id),
+        bump_rebuild_count=store.bump_rebuild_count,
+    )
+    try:
+        with caplog.at_level(logging.WARNING, logger="mftik_sts.session.manager"):
+            assert await manager.rebuild_interrupted() == []
+        assert built == []
+        assert manager.get("aa00c5") is None
+        assert store.rows["aa00c5"].status == "interrupted"
+        assert store.rows["aa00c5"].rebuild_count == 0
+        assert "names no strategy type" in caplog.text
+    finally:
+        await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_adopt_refuses_a_row_naming_no_strategy(broker: Broker) -> None:
+    """The worker says the same thing, and does not start a session either."""
+    store = FakeStsStore()
+    store.seed("aa00c6", strategy=None, type=None)
+    manager = _qualified_manager(broker, store)
+    try:
+        with pytest.raises(RuntimeError, match="names no strategy type"):
+            await manager.adopt_interrupted("aa00c6")
+        assert manager.get("aa00c6") is None
+        assert store.rows["aa00c6"].status == "interrupted"
+    finally:
+        await manager.close_all()
