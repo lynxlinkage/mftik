@@ -150,13 +150,16 @@ class Strategy:
         holding the feed, or recording is off.
 
     Yielding while you compute — ``breathe`` / ``slice_deadline`` (import them):
-        A hook is a coroutine on the session's own loop, and the MD lease
-        heartbeat is another task on it. A hook that computes for about 3s
-        (``LEASE_HEARTBEAT_INTERVAL_S`` × ``LEASE_MISS_LIMIT``) without
-        awaiting misses the heartbeats, MD expires the lease, and the
-        session fails with ``md feed from md stopped``. A read of 200k
-        prints is easily that long, so a loop over one has to hand the loop
-        back as it goes::
+        A hook is a coroutine on the session's own loop, and the heartbeat
+        task that watches MD's acknowledgements is another task on it. A
+        hook that does not await keeps that task from running, and once an
+        acknowledgement has gone unseen for ``LEASE_HEARTBEAT_INTERVAL_S``
+        × ``LEASE_MISS_LIMIT`` the session fails itself with ``md feed from
+        {instance} stopped: session can no longer run`` (``{instance}`` is
+        the MD's name — ``md`` by default). That window is ~3s and it is
+        measured from the last acknowledgement, not from where the stall
+        began, so stay well under it. A read of 200k prints is easily past
+        it, and a loop over one has to hand the loop back as it goes::
 
             from mftik.strategy import breathe, slice_deadline
 
@@ -169,10 +172,13 @@ class Strategy:
         ``breathe`` only suspends once the slice it was given is spent, so
         the cost per record is a clock read, not a reschedule. Hold the
         value it returns and pass it back — that is the next deadline. The
-        same applies to anything else long in a hook, tape or not; the
-        ``on_print`` callback of :meth:`~mftik.strategy.tape.StrategyTape.read`
-        included, because the read yields between records but cannot yield
-        inside your callback.
+        same applies to anything else long in a hook, tape or not.
+
+        ``read(..., on_print=...)`` is the exception: the read breathes
+        before every record, and that clock check counts whatever the
+        previous callback spent, so an ordinary callback — which may be a
+        plain sync function — needs nothing added. If one call of it is
+        long, make the callback ``async`` and breathe inside it.
 
     Artifacts — opaque bytes on this STS's disk (wired):
         self.artifacts.read(path) / stat(path) / write(path, body)

@@ -47,11 +47,15 @@ there. `mftik check` tells you before you push.
 
 ## Hand the loop back while you compute
 
-Your hooks are coroutines on the session's own loop, and the lease that lets
-the session hold its market data is a heartbeat task on the same loop. A hook
-that computes for about 3 seconds without awaiting — `LEASE_HEARTBEAT_INTERVAL_S`
-× `LEASE_MISS_LIMIT` — misses enough heartbeats that MD expires the lease, and
-the session fails with `md feed from md stopped`.
+Your hooks are coroutines on the session's own loop, and the heartbeat task
+that watches for MD's acknowledgements is another task on the same loop. A
+hook that does not await keeps that task from running, and once an
+acknowledgement has gone unseen for `LEASE_HEARTBEAT_INTERVAL_S` ×
+`LEASE_MISS_LIMIT` the session fails itself with `md feed from {instance}
+stopped: session can no longer run` — `{instance}` being the name of the MD
+holding the feed, `md` by default. That window is about 3 seconds, measured
+from the last acknowledgement rather than from where you stopped awaiting, so
+stay well under it.
 
 `self.tape.read` hands back up to 200,000 prints, which is well past that, so
 work through them in slices, breathing between records:
@@ -75,9 +79,12 @@ once it does not, so the cost per record is a clock read rather than a
 reschedule. Keep what it returns and pass it back in — that is the next
 deadline.
 
-The same pair belongs in a `read(..., on_print=...)` callback, and around any
-other long stretch of computation in a hook: the read yields between records,
-but it cannot yield inside your code.
+The same pair belongs around any other long stretch of computation in a hook.
+A `read(..., on_print=...)` callback is the exception: the read breathes
+before every record, and that clock check counts whatever your previous
+callback spent — so an ordinary callback, which may be a plain sync function,
+needs nothing added. If one call of it is long, make the callback `async` and
+breathe inside it.
 
 ## The client
 

@@ -18,9 +18,9 @@ and the read does not keep those objects. Omit it and the slice carries
 them, which is what existing callers read.
 
 A read hands back up to :data:`DEFAULT_LIMIT` prints, and working through
-that many of them is long enough to cost a session its MD lease. The read
-paces itself with :func:`slice_deadline` and :func:`breathe`; a loop over
-what it returns has to pace itself with the same two.
+that many of them is long enough to cost a session its market data. The
+read paces itself with :func:`slice_deadline` and :func:`breathe`; a loop
+over what it returns has to pace itself with the same two.
 """
 
 from __future__ import annotations
@@ -89,13 +89,13 @@ DEFAULT_MAX_GAP_MS = 30_000
 
 #: How long a tape read may compute before returning to the loop.
 #:
-#: A session is one worker process on one loop, and its lease heartbeat is a
-#: task on that loop. The heartbeat interval is 1s and the fuse is three
-#: missed intervals, so a warm-up that does not await expires this session's
-#: own MD lease — the stall stays with the strategy that wrote it, but it
-#: still ends the session. A slice leaves most of that interval for the other
-#: tasks. ``time.perf_counter`` rather than the loop clock: on uvloop that
-#: clock steps in milliseconds.
+#: A session is one worker process on one loop, and the task watching its MD
+#: acknowledgements is on that loop. The heartbeat interval is 1s and the fuse
+#: is three missed intervals, so a warm-up that does not await stops that
+#: watch seeing the acks and fails its own session — the stall stays with the
+#: strategy that wrote it, but it still ends the session. A slice leaves most
+#: of that interval for the other tasks. ``time.perf_counter`` rather than the
+#: loop clock: on uvloop that clock steps in milliseconds.
 SLICE_S = 0.05
 
 
@@ -118,10 +118,13 @@ async def breathe(deadline: float) -> float:
 
     For a strategy chewing through something long enough to matter — the up
     to :data:`DEFAULT_LIMIT` prints one :meth:`StrategyTape.read` can hand
-    over, a fit computed in ``on_start``. A hook that does not await for
-    ``LEASE_HEARTBEAT_INTERVAL_S`` × ``LEASE_MISS_LIMIT`` (about 3s) misses
-    enough heartbeats that MD expires this session's lease, and the session
-    fails with ``md feed from md stopped``.
+    over, a fit computed in ``on_start``. A hook that does not await stops
+    this session's heartbeat task reading MD's acknowledgements, and once
+    one has been unseen for ``LEASE_HEARTBEAT_INTERVAL_S`` ×
+    ``LEASE_MISS_LIMIT`` that task fails its own session with ``md feed
+    from {instance} stopped: session can no longer run``. That is ~3s, and
+    the clock starts at the last ack rather than at the stall, so stay well
+    under it.
 
     Awaiting this does not, by itself, let another task run. While the
     slice still has time the coroutine returns without suspending, and the
@@ -286,12 +289,14 @@ class StrategyTape:
         is what a caller looping ``records`` is reading. History and the
         live hooks still see one :class:`~mftik.exchange.models.Trade`.
 
-        This yields to the loop as it parses, and an ``on_print`` callback
-        runs inside that pacing — but it is one call, so a callback that
-        computes has to :func:`breathe` too, and so does a plain loop over
-        :attr:`TapeSlice.records` after this returns. Without it a warm-up
-        big enough to be worth reading misses enough lease heartbeats to
-        fail the session.
+        This yields to the loop as it parses, and the check it makes before
+        each record counts whatever the previous ``on_print`` call spent —
+        so an ordinary callback, sync or async, needs nothing added. Only a
+        single call long enough to matter on its own does: make that
+        callback ``async`` and :func:`breathe` inside it. A plain loop over
+        :attr:`TapeSlice.records` after this returns has no such pacing and
+        has to add it, or a warm-up big enough to be worth reading fails the
+        session for market data it stopped acknowledging.
 
         A feed this session never attached raises
         :class:`TapeFeedNotAttached`. An empty slice from the right MD is a
