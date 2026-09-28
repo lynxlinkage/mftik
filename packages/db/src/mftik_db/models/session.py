@@ -99,6 +99,16 @@ class StsSessionRow(Base):
     #: a deploy failed before the document was recorded, or when a finished
     #: row predates the key and its short name did not map to a bundled class.
     type: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    #: The short ``Strategy.name`` a finished row was deployed under, kept by
+    #: ``0034_strategy_type_key`` for the rows it could not name. History, not
+    #: identity: nothing resolves a strategy from this, nothing routes on it,
+    #: and no new row ever writes it. It exists because the alternative was to
+    #: drop the column that held it and leave those sessions labelled with
+    #: nothing at all — a deploy is not a reason for history to forget what
+    #: ran. Null everywhere else, which is everywhere that ``type`` answers.
+    legacy_strategy: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
     #: The strategy.yml exactly as submitted — the only record of what a
     #: person wrote, comments and all. Null for deploys that never got that
     #: far.

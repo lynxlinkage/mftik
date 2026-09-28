@@ -78,6 +78,16 @@ def _types(conn: sa.Connection) -> dict[str, str | None]:
     return {row[0]: row[1] for row in rows}
 
 
+def _labels(conn: sa.Connection) -> dict[str, str | None]:
+    rows = conn.execute(
+        sa.text(
+            "SELECT session_id, legacy_strategy FROM sts_sessions "
+            "ORDER BY session_id"
+        )
+    ).all()
+    return {row[0]: row[1] for row in rows}
+
+
 def _columns(conn: sa.Connection) -> set[str]:
     return {
         row[1]
@@ -87,23 +97,31 @@ def _columns(conn: sa.Connection) -> set[str]:
 
 def test_resolved_rules() -> None:
     mod = _migration()
-    assert mod._resolved("live", "noop", None) == ("NoopStrategy", False)
-    assert mod._resolved("done", "cross_arb", None) == ("CrossArb", False)
+    assert mod._resolved("live", "noop", None) == ("NoopStrategy", None, False)
+    assert mod._resolved("done", "cross_arb", None) == ("CrossArb", None, False)
     assert mod._resolved("interrupted", "macd_volume", "macd_dollar") == (
         "MacdDollarBars",
+        None,
         False,
     )
     assert mod._resolved("live", "pr130_probe", "private::Probe") == (
         "private::Probe",
+        None,
         False,
     )
-    assert mod._resolved("live", "CrossArb", "CrossArb") == ("CrossArb", False)
-    assert mod._resolved("live", None, None) == (None, False)
-    assert mod._resolved("failed", None, None) == (None, False)
-    assert mod._resolved("done", "tiny", None) == (None, False)
-    assert mod._resolved("failed", "tiny", "not_a_key") == (None, False)
-    assert mod._resolved("live", "tiny", None) == (None, True)
-    assert mod._resolved("interrupted", None, "not_a_key") == (None, True)
+    assert mod._resolved("live", "CrossArb", "CrossArb") == (
+        "CrossArb",
+        None,
+        False,
+    )
+    assert mod._resolved("live", None, None) == (None, None, False)
+    assert mod._resolved("failed", None, None) == (None, None, False)
+    # A finished row nothing can name keeps its label, out of the key column.
+    assert mod._resolved("done", "tiny", None) == (None, "tiny", False)
+    assert mod._resolved("failed", "tiny", "not_a_key") == (None, "tiny", False)
+    assert mod._resolved("done", None, "not_a_key") == (None, "not_a_key", False)
+    assert mod._resolved("live", "tiny", None) == (None, None, True)
+    assert mod._resolved("interrupted", None, "not_a_key") == (None, None, True)
 
 
 def test_upgrade_rewrites_mapped_rows_and_drops_strategy(tmp_path: Path) -> None:
@@ -133,8 +151,20 @@ def test_upgrade_rewrites_mapped_rows_and_drops_strategy(tmp_path: Path) -> None
             "done-tiny": None,
             "failed-junk": None,
         }
+        # The rows nothing could name keep their label where nothing
+        # resolves it. Every row that has a type has no label.
+        assert _labels(conn) == {
+            "live-noop": None,
+            "type-short": None,
+            "qualified": None,
+            "already": None,
+            "both-null": None,
+            "done-tiny": "tiny",
+            "failed-junk": "tiny",
+        }
         _down(conn)
         assert "strategy" in _columns(conn)
+        assert "legacy_strategy" not in _columns(conn)
         restored = conn.execute(
             sa.text(
                 "SELECT session_id, strategy FROM sts_sessions "
@@ -144,6 +174,9 @@ def test_upgrade_rewrites_mapped_rows_and_drops_strategy(tmp_path: Path) -> None
     assert dict(restored)["live-noop"] == "NoopStrategy"
     assert dict(restored)["qualified"] == "private::Probe"
     assert dict(restored)["both-null"] is None
+    # Back to the short name it came in with, not to nothing.
+    assert dict(restored)["done-tiny"] == "tiny"
+    assert dict(restored)["failed-junk"] == "tiny"
 
 
 def test_a_live_unmapped_row_stops_the_migration(tmp_path: Path) -> None:
@@ -160,4 +193,5 @@ def test_a_live_unmapped_row_stops_the_migration(tmp_path: Path) -> None:
         with pytest.raises(RuntimeError, match="aa00c9"):
             _up(conn)
         assert "strategy" in _columns(conn)
+        assert "legacy_strategy" not in _columns(conn)
         assert _types(conn) == {"aa00c9": None, "ok": None}
