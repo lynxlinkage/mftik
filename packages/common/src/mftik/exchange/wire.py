@@ -426,13 +426,16 @@ class WireLedger(Generic[K]):
                 if existing is not None:
                     joined[key] = existing
                     continue
+                # In-flight keys are not held yet. This has to run
+                # before the not-held check, or a subscribe that has
+                # not acked is reported acked and never retried.
+                if key in self._acquiring or key in self._inflight:
+                    results[key] = ReleaseOutcome.DEFERRED
+                    continue
                 if key not in self._held:
                     results[key] = ReleaseOutcome.ACKED
                     continue
                 if key in self._cycling:
-                    continue
-                if key in self._acquiring or key in self._inflight:
-                    results[key] = ReleaseOutcome.DEFERRED
                     continue
                 if still_wanted(key):
                     continue
@@ -599,17 +602,24 @@ class IdleReleaser(Generic[K]):
         self.reconcile_interval = reconcile_interval
         #: key → loop time at which it may be released.
         self._pending: dict[K, float] = {}
+        #: Held keys whose unsubscribe was rejected. Reconcile retries
+        #: only these, so a subscription left up on purpose — a closed
+        #: Gate private channel — is not swept just because it is held.
+        self._rejected: set[K] = set()
         self._task: asyncio.Task[None] | None = None
         self._reconcile: asyncio.Task[None] | None = None
 
     def enqueue(self, keys: Iterable[K]) -> None:
+        """Queue keys. A key already waiting gets a fresh deadline.
+
+        Reopening and closing again during the linger must not keep
+        the first close's deadline, or the second close unsubscribes
+        almost immediately.
+        """
         deadline = asyncio.get_running_loop().time() + self.linger
-        added = False
         for key in keys:
-            if key not in self._pending:
-                self._pending[key] = deadline
-                added = True
-        if added:
+            self._pending[key] = deadline
+        if self._pending:
             self._arm()
             self._arm_reconcile()
 
@@ -621,6 +631,7 @@ class IdleReleaser(Generic[K]):
     def cancel(self) -> None:
         """Drop a queued release. Safe to call from synchronous teardown."""
         self._pending.clear()
+        self._rejected.clear()
         task = self._task
         self._task = None
         if task is not None and not task.done():
@@ -651,6 +662,13 @@ class IdleReleaser(Generic[K]):
             self._reconcile = asyncio.create_task(
                 self._reconcile_loop(), name="wire-reconcile"
             )
+
+    def _remember(self, outcomes: Mapping[K, ReleaseOutcome]) -> None:
+        for key, outcome in outcomes.items():
+            if outcome is ReleaseOutcome.REJECTED:
+                self._rejected.add(key)
+            else:
+                self._rejected.discard(key)
 
     def _defer(self, keys: Iterable[K]) -> None:
         """Give keys whose subscribe has not finished another full linger."""
@@ -686,6 +704,7 @@ class IdleReleaser(Generic[K]):
                 except Exception:
                     logger.exception("idle wire release failed")
                     continue
+                self._remember(outcomes)
                 self._defer(
                     key
                     for key, outcome in outcomes.items()
@@ -700,25 +719,33 @@ class IdleReleaser(Generic[K]):
                 self._arm()
 
     async def _reconcile_loop(self) -> None:
-        """Retry held keys the linger already gave up on.
+        """Retry unsubscribes the venue rejected.
 
-        A rejected unsubscribe stays held and is not put back on the
-        linger. Keys still waiting out their own linger are left in
-        ``_pending``.
+        Only keys that came back ``REJECTED`` are tried again. Scanning
+        every held key would unsubscribe a Gate private channel that
+        ``_drop_stream`` left up on purpose. Keys still inside their
+        linger stay in ``_pending``.
         """
         try:
             while True:
                 await asyncio.sleep(self.reconcile_interval)
-                pending = set(self._pending)
-                keys = [key for key in self._ledger.held() if key not in pending]
+                keys = [
+                    key
+                    for key in self._rejected
+                    if key not in self._pending and key in self._ledger.held()
+                ]
                 if not keys:
                     continue
                 try:
-                    await self._ledger.release(keys, self._send, self._still_wanted)
+                    outcomes = await self._ledger.release(
+                        keys, self._send, self._still_wanted
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     logger.exception("wire reconcile failed")
+                    continue
+                self._remember(outcomes)
         except asyncio.CancelledError:
             raise
 

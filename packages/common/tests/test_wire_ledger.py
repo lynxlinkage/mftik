@@ -628,6 +628,80 @@ async def test_each_idle_key_waits_out_its_own_linger() -> None:
         releaser.cancel()
 
 
+async def test_a_release_of_an_unacked_subscribe_is_deferred() -> None:
+    """A subscribe that has not acked is not held, and must not look done.
+
+    Reporting it acked drops the retry. The venue then keeps pushing a
+    key nobody will release until the socket reconnects.
+    """
+    ledger: WireLedger[str] = WireLedger()
+    unsubscribed: list[list[str]] = []
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def subscribe(keys: list[str]) -> None:
+        del keys
+        started.set()
+        await gate.wait()
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        unsubscribed.append(list(keys))
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    acquiring = asyncio.create_task(ledger.acquire(["a"], subscribe))
+    await started.wait()
+    releaser = IdleReleaser(
+        ledger,
+        unsubscribe,
+        lambda _key: False,
+        linger=0.05,
+        reconcile_interval=60,
+    )
+    try:
+        releaser.enqueue(["a"])
+        await asyncio.sleep(0.12)
+        assert unsubscribed == []
+        assert "a" not in ledger.held()
+        gate.set()
+        await acquiring
+        await releaser.drained()
+        assert unsubscribed == [["a"]]
+        assert "a" not in ledger.held()
+    finally:
+        releaser.cancel()
+
+
+async def test_closing_again_restarts_the_linger() -> None:
+    ledger: WireLedger[str] = WireLedger()
+    sent: list[list[str]] = []
+
+    async def subscribe(keys: list[str]) -> None:
+        del keys
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        sent.append(list(keys))
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    await ledger.acquire(["a"], subscribe)
+    releaser = IdleReleaser(
+        ledger,
+        unsubscribe,
+        lambda _key: False,
+        linger=0.3,
+        reconcile_interval=60,
+    )
+    try:
+        releaser.enqueue(["a"])
+        await asyncio.sleep(0.2)
+        releaser.enqueue(["a"])
+        await asyncio.sleep(0.2)
+        assert sent == []
+        await releaser.drained()
+        assert sent == [["a"]]
+    finally:
+        releaser.cancel()
+
+
 async def test_reconcile_retries_a_rejected_unsubscribe() -> None:
     ledger: WireLedger[str] = WireLedger()
     sent: list[list[str]] = []
@@ -646,18 +720,47 @@ async def test_reconcile_retries_a_rejected_unsubscribe() -> None:
         ledger,
         unsubscribe,
         lambda _key: False,
-        linger=60,
+        linger=0.05,
         reconcile_interval=0.05,
     )
     try:
         releaser.enqueue(["a"])
-        releaser.claim(["a"])
         for _ in range(40):
             if len(sent) >= 2:
                 break
             await asyncio.sleep(0.02)
         assert sent == [["a"], ["a"]]
         assert "a" not in ledger.held()
+    finally:
+        releaser.cancel()
+
+
+async def test_reconcile_leaves_a_key_that_was_never_unsubscribed() -> None:
+    """A held key the flusher never attempted is not a failed unsubscribe."""
+    ledger: WireLedger[str] = WireLedger()
+    sent: list[list[str]] = []
+
+    async def subscribe(keys: list[str]) -> None:
+        del keys
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        sent.append(list(keys))
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    await ledger.acquire(["public", "private"], subscribe)
+    releaser = IdleReleaser(
+        ledger,
+        unsubscribe,
+        lambda _key: False,
+        linger=0.05,
+        reconcile_interval=0.05,
+    )
+    try:
+        releaser.enqueue(["public"])
+        await releaser.drained()
+        await asyncio.sleep(0.15)
+        assert sent == [["public"]]
+        assert ledger.held() == frozenset({"private"})
     finally:
         releaser.cancel()
 

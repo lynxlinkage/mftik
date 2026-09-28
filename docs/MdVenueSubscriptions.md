@@ -798,7 +798,8 @@ the venue subscription up. Paper has no wire subscribe.
 
 **Behavior.** `_drop` stays synchronous. Idle keys are the closed sub's
 index minus every key still present on any `_Sub`. Each key waits
-`RELEASE_LINGER` (2s) from the moment it was closed. Keys whose
+`RELEASE_LINGER` (2s) from the moment it was closed. Closing that same
+key again while it is still waiting starts the 2s over. Keys whose
 deadlines fall together go out in one `release`, so a burst of closes
 in one turn is still one frame on venues that take a list. A key closed
 while another key is already waiting gets its own 2s.
@@ -812,19 +813,23 @@ frame per identity inside that call, and each frame has its own
 outcome. A private Gate close enqueues nothing; `still_wanted` still
 counts a private `_Sub`.
 
-`release` takes only keys that are held, not in flight, not being
-attached by an `acquire`, not in a book resync cycle, and not still
-wanted. It moves them to releasing and asks the socket for a per-key
-outcome. An explicit venue rejection puts the key back in `held`, so
-the next `acquire` does not send `SUBSCRIBE`. A timeout, a dropped
-connection, "not connected", or Deribit's "socket not ready" leaves
-the key not held, so the next `acquire` does send it. Bybit's "already
-subscribed" reply on that follow-up counts as success. Every
-`RECONCILE_INTERVAL` (30s) the socket releases held keys that are not
-still inside their linger and not wanted, so a rejected unsubscribe is
-retried. `acquire` that finds any requested key releasing waits and
-reserves nothing, then starts the whole call over. `clear()` drops
-releasing state with the generation.
+`release` reports a key deferred when it is in flight or an `acquire`
+is still attaching it, including a subscribe that has not acked and is
+therefore not held yet. Reporting that key acked would drop the retry,
+and the venue would keep pushing after the ledger forgot it. Otherwise
+`release` takes only keys that are held, not in a book resync cycle,
+and not still wanted. It moves them to releasing and asks the socket
+for a per-key outcome. An explicit venue rejection puts the key back in
+`held`, so the next `acquire` does not send `SUBSCRIBE`. A timeout, a
+dropped connection, "not connected", or Deribit's "socket not ready"
+leaves the key not held, so the next `acquire` does send it. Bybit's
+"already subscribed" reply on that follow-up counts as success. Every
+`RECONCILE_INTERVAL` (30s) the socket retries keys whose unsubscribe
+came back rejected and that are not still inside their linger. A key
+that was never unsubscribed — a closed Gate private subscription left
+up on purpose — is not part of that sweep. `acquire` that finds any
+requested key releasing waits and reserves nothing, then starts the
+whole call over. `clear()` drops releasing state with the generation.
 
 Book resync on Bybit, OKX, and Deribit holds the key in a cycle so
 `release` cannot unsubscribe between the two frames. A successful resync

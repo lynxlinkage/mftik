@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from binance_stub import FakeBinanceStream
+from bitget_stub import FakeBitget
 from bybit_stub import FakeBybit
 from deribit_stub import FakeDeribit
 from gate_stub import API_KEY, API_SECRET, FakeGate
@@ -21,12 +22,17 @@ from mftik.exchange.binance.future import streams as fst
 from mftik.exchange.binance.future.feed import BinanceFutureStream
 from mftik.exchange.binance.spot import streams as st
 from mftik.exchange.binance.spot.feed import BinanceSpotStream
+from mftik.exchange.bitget import channels as bgch
+from mftik.exchange.bitget.feed import BitgetPublicStream
 from mftik.exchange.bybit.feed import BybitPublicStream
 from mftik.exchange.deribit import channels as dch
 from mftik.exchange.deribit.feed import DeribitPublicStream
 from mftik.exchange.gate.spot import channels as gch
 from mftik.exchange.gate.spot.client import GateSpotWebSocket
+from mftik.exchange.okx import channels as och
+from mftik.exchange.okx.feed import OkxPublicStream
 from mftik.exchange.stream import EventStream
+from okx_stub import FakeOkx
 from test_binance_spot_client import AGG_TRADE
 from test_bybit_public import NATIVE, TRADE_ROW, _book
 
@@ -400,3 +406,80 @@ async def test_fail_streams_clears_before_close_and_sends_nothing(
         ws._fail_streams()
         assert order.index("clear") < order.index("close")
     assert gate.frames_for(gch.TRADES, gch.UNSUBSCRIBE) == []
+
+
+async def test_reconcile_leaves_a_closed_private_sub(gate: FakeGate) -> None:
+    """A public close arms reconcile. A private key left up stays up."""
+    async with _gate(gate, release_linger=0) as ws:
+        ws._releaser.reconcile_interval = 0.05
+        private = await ws._subscribe(
+            gch.ORDERS, ["BTC_USDT"], lambda row: row, private=True
+        )
+        private.close()
+        public = await ws.subscribe_trades("ETH_USDT")
+        public.close()
+        await ws._releaser.drained()
+        await asyncio.sleep(0.15)
+        assert (gch.ORDERS, ("BTC_USDT",)) in ws._ledger.held()
+        assert gate.frames_for(gch.ORDERS, gch.UNSUBSCRIBE) == []
+        assert (gch.TRADES, ("ETH_USDT",)) not in ws._ledger.held()
+
+
+# --- OKX and Bitget books --------------------------------------------------
+
+
+def _okx(stub: FakeOkx, **kwargs: Any) -> OkxPublicStream:
+    return OkxPublicStream(stub.url, ping_interval=0, **kwargs)  # type: ignore[attr-defined]
+
+
+def _bitget(stub: FakeBitget, **kwargs: Any) -> BitgetPublicStream:
+    return BitgetPublicStream(
+        stub.url,  # type: ignore[attr-defined]
+        inst_type="spot",
+        ping_interval=0,
+        **kwargs,
+    )
+
+
+async def test_okx_book_close_sends_unsubscribe(okx_public: FakeOkx) -> None:
+    arg = och.books("BTC-USDT")
+    async with _okx(okx_public, release_linger=0) as feed:
+        books = await feed.subscribe_order_book("BTC-USDT")
+        books.close()
+        await feed._releaser.drained()
+        frames = okx_public.frames_for("unsubscribe")
+        assert frames[-1]["args"] == [arg]
+        assert och.arg_key(arg) not in feed._ledger.held()
+
+
+async def test_okx_book_without_args_stays_held(okx_public: FakeOkx) -> None:
+    arg = och.books("BTC-USDT")
+    async with _okx(okx_public, release_linger=0) as feed:
+        books = await feed.subscribe_order_book("BTC-USDT")
+        feed._args.clear()
+        books.close()
+        await feed._releaser.drained()
+        assert okx_public.frames_for("unsubscribe") == []
+        assert och.arg_key(arg) in feed._ledger.held()
+
+
+async def test_bitget_book_close_sends_unsubscribe(bitget_public: FakeBitget) -> None:
+    arg = bgch.books("spot", "BTCUSDT")
+    async with _bitget(bitget_public, release_linger=0) as feed:
+        books = await feed.subscribe_order_book("spot", "BTCUSDT")
+        books.close()
+        await feed._releaser.drained()
+        frames = bitget_public.frames_for("unsubscribe")
+        assert frames[-1]["args"] == [arg]
+        assert bgch.arg_key(arg) not in feed._ledger.held()
+
+
+async def test_bitget_book_without_args_stays_held(bitget_public: FakeBitget) -> None:
+    arg = bgch.books("spot", "BTCUSDT")
+    async with _bitget(bitget_public, release_linger=0) as feed:
+        books = await feed.subscribe_order_book("spot", "BTCUSDT")
+        feed._args.clear()
+        books.close()
+        await feed._releaser.drained()
+        assert bitget_public.frames_for("unsubscribe") == []
+        assert bgch.arg_key(arg) in feed._ledger.held()

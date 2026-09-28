@@ -297,6 +297,7 @@ class OkxPublicStream(OkxSocket):
             await self.request(frame, req_id, op=SUBSCRIBE)
 
         await self._ledger.acquire([key], send)
+        self._args[key] = arg
         # Replay and append in one step so ``_push`` cannot land first.
         stream: EventStream[OkxBookSnapshot] = EventStream(on_close=self._drop)
         book = self._books.setdefault(key, OkxBook(inst_id))
@@ -398,17 +399,33 @@ class OkxPublicStream(OkxSocket):
     async def _send_unsubscribe(
         self, keys: list[tuple[str, str, str]]
     ) -> dict[tuple[str, str, str], ReleaseOutcome]:
-        wanted = [self._args[key] for key in keys if key in self._args]
-        if not wanted:
-            return map_release(keys, None)
+        """Unsubscribe keys whose subscribe arg was stored.
+
+        A key with no arg is rejected, not acked: reporting success
+        would drop it from the ledger while OKX keeps pushing, and
+        reconcile only retries keys that stayed held.
+        """
+        missing = [key for key in keys if key not in self._args]
+        present = [key for key in keys if key in self._args]
+        outcomes: dict[tuple[str, str, str], ReleaseOutcome] = {
+            key: ReleaseOutcome.REJECTED for key in missing
+        }
+        if missing:
+            logger.warning("%s unsubscribe has no args for %s", self.name, missing)
+        if not present:
+            return outcomes
         try:
-            frame, req_id = subscribe_frame(wanted, op=UNSUBSCRIBE)
+            frame, req_id = subscribe_frame(
+                [self._args[key] for key in present], op=UNSUBSCRIBE
+            )
             await self.request(frame, req_id, op=UNSUBSCRIBE)
         except Exception as exc:
-            return map_release(keys, exc)
-        for key in keys:
+            outcomes.update(map_release(present, exc))
+            return outcomes
+        for key in present:
             self._args.pop(key, None)
-        return map_release(keys, None)
+        outcomes.update(map_release(present, None))
+        return outcomes
 
     def _still_wanted(self, key: tuple[str, str, str]) -> bool:
         return any(key in sub.index for sub in self._subs)
@@ -449,6 +466,8 @@ class OkxPublicStream(OkxSocket):
             await self.request(frame, req_id, op=SUBSCRIBE)
 
         await self._ledger.acquire([ch.arg_key(arg) for arg in args], send)
+        for arg in args:
+            self._args[ch.arg_key(arg)] = arg
         logger.info("%s resubscribed %s channels", self.name, len(args))
 
     def _push(self, resp: OkxResponse) -> None:
