@@ -26,7 +26,7 @@ async def db(database_url):
 
 async def _live(repo: StsSessionRepository, session_id: str) -> None:
     await repo.create_live(
-        session_id=session_id, created_by=1, strategy="NoopStrategy"
+        session_id=session_id, created_by=1, type="NoopStrategy"
     )
 
 
@@ -115,7 +115,6 @@ async def test_type_and_yaml_text_are_kept(db) -> None:
     await repo.create_live(
         session_id="s-doc",
         created_by=1,
-        strategy="tiny",
         type="node1::Tiny",
         yaml_text="sts: {}\n",
     )

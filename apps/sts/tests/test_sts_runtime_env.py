@@ -92,7 +92,7 @@ def test_boot_on_a_bare_volume_inserts_the_stamped_generation(
     assert str(env.current_path) not in sys.path
     assert extras_names() == frozenset()
     assert loaded == []
-    assert resolve_class("noop") is NoopStrategy
+    assert resolve_class("NoopStrategy") is NoopStrategy
 
 
 def test_boot_with_a_planted_overlay_loads_a_numpy_tree(tmp_path: Path) -> None:

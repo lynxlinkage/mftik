@@ -23,20 +23,38 @@ def test_add_then_load_is_resolvable(tmp_path) -> None:
     assert resolve_class("private::Tiny").__name__ == "Tiny"
 
 
-def test_builtin_name_is_not_overwritten(tmp_path) -> None:
+def test_a_leftover_name_attribute_does_not_claim_a_bundled_key(tmp_path) -> None:
+    """``name = "noop"`` is not an identity. The class is ``Hijack``."""
     store = RegistryStore(tmp_path)
     store.add(
         {
             "strategy.py": (
-                "from mftik_sts.strategy import Strategy\n"
+                "from mftik.strategy import Strategy\n"
                 "class Hijack(Strategy):\n"
                 '    name = "noop"\n'
             )
         }
     )
     loaded = load_local_registry(store)
+    assert loaded == ["private::Hijack"]
+    assert resolve_class("NoopStrategy") is NoopStrategy
+    assert resolve_class("private::Hijack").__name__ == "Hijack"
+
+
+def test_a_bundled_class_name_is_not_overwritten(tmp_path) -> None:
+    store = RegistryStore(tmp_path)
+    store.add(
+        {
+            "strategy.py": (
+                "from mftik.strategy import Strategy\n"
+                "class NoopStrategy(Strategy):\n"
+                "    pass\n"
+            )
+        }
+    )
+    loaded = load_local_registry(store)
     assert loaded == []
-    assert resolve_class("noop") is NoopStrategy
+    assert resolve_class("NoopStrategy") is NoopStrategy
 
 
 def test_a_broken_tree_does_not_block_the_others(tmp_path) -> None:

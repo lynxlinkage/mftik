@@ -54,10 +54,9 @@ def check(args: argparse.Namespace) -> int:
 
     if not isinstance(cls, type) or not issubclass(cls, Strategy):
         raise CliError(f"{inspected.cls.type} is not a Strategy")
-    if cls.name != inspected.name:
+    if cls.__name__ != inspected.cls.type:
         raise CliError(
-            f"{inspected.cls.type}.name is {cls.name!r} but the source "
-            f"said {inspected.name!r}"
+            f"imported {cls.__name__} but the source names {inspected.cls.type}"
         )
 
     if spec is not None:
@@ -68,7 +67,7 @@ def check(args: argparse.Namespace) -> int:
                 _from_your_code(f"{cls.__name__}.on_initialized", exc, args)
             ) from exc
 
-    print(f"ok  {inspected.name}  ({inspected.cls.type})")
+    print(f"ok  {inspected.cls.type}")
     print(f"    {len(inspected.files)} file(s), {digest}")
     requires = tuple(inspected.cls.requires)
     if requires:

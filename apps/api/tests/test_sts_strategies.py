@@ -34,11 +34,10 @@ async def test_an_attach_failure_still_appears_on_the_list(db) -> None:
         await repo.create_live(
             session_id="s-ok",
             created_by=1,
-            strategy="tiny",
             type="private::Tiny",
             yaml_text="sts: {}\n",
         )
-        await repo.create_live(session_id="s-orphan", created_by=1, strategy="tiny")
+        await repo.create_live(session_id="s-orphan", created_by=1)
         await repo.mark_failed(
             "s-orphan", "attach failed — rolled back during deploy"
         )

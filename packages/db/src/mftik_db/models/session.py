@@ -92,13 +92,12 @@ class StsSessionRow(Base):
     #: Why the session ended. Carries the exit reason for ``failed``; left
     #: null for a session that is still live or ended naturally.
     reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    strategy: Mapped[str | None] = mapped_column(String(128), nullable=True)
     #: Qualified registry key — ``CrossArb``, ``private::Tiny``,
-    #: ``node1::Tiny``. Not the same fact as :attr:`strategy`, which holds
-    #: the short ``Strategy.name``. ``list_live_for_origin`` prefix-matches
-    #: this on ``{origin}::`` to refuse deleting a registry entry a live
-    #: session is using. Null when a deploy failed before the document was
-    #: recorded.
+    #: ``node1::Tiny``. The only strategy identity on the row.
+    #: ``list_live_for_origin`` prefix-matches this on ``{origin}::`` to
+    #: refuse deleting a registry entry a live session is using. Null when
+    #: a deploy failed before the document was recorded, or when a finished
+    #: row predates the key and its short name did not map to a bundled class.
     type: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     #: The strategy.yml exactly as submitted — the only record of what a
     #: person wrote, comments and all. Null for deploys that never got that

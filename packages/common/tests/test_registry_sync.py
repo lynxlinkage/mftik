@@ -94,7 +94,7 @@ async def test_connect_pulls_into_named_origin(tmp_path) -> None:
     assert result.name == "node1"
     assert len(result.pulled) == 1
     assert result.pulled[0].origin == "node1"
-    dest = tmp_path / "local" / "registry" / "pulled" / "node1" / "tiny"
+    dest = tmp_path / "local" / "registry" / "pulled" / "node1" / "Tiny"
     assert (dest / "strategy.py").read_text() == _TINY
     assert local.list_public() == []
     assert local.list_private() == []
@@ -116,7 +116,7 @@ async def test_connect_pulls_strategy_yml_without_changing_digest(tmp_path) -> N
         result = await connect_remote(
             local, name="node1", url="http://node1", client=client
         )
-    dest = tmp_path / "local" / "registry" / "pulled" / "node1" / "tiny"
+    dest = tmp_path / "local" / "registry" / "pulled" / "node1" / "Tiny"
     assert (dest / TEMPLATE_NAME).read_text() == _YML
     assert result.pulled[0].digest == added.digest
     assert TEMPLATE_NAME in result.pulled[0].files
@@ -143,7 +143,7 @@ async def test_connect_does_not_pull_private(tmp_path) -> None:
         result = await connect_remote(
             local, name="node1", url="http://node1", client=client
         )
-    assert [rec.name for rec in result.pulled] == ["extra"]
+    assert [rec.name for rec in result.pulled] == ["Extra"]
 
 
 @pytest.mark.asyncio
@@ -174,9 +174,9 @@ async def test_diff_marks_synced_diverged_and_remote_only(tmp_path) -> None:
         result = await diff_remote(local, name="node1", client=client)
     by_name = {row.name: row for row in result.rows}
     assert result.reachable is True
-    assert by_name["tiny"].status == "diverged"
-    assert by_name["extra"].status == "remote_only"
-    assert by_name["extra"].local_digest is None
+    assert by_name["Tiny"].status == "diverged"
+    assert by_name["Extra"].status == "remote_only"
+    assert by_name["Extra"].local_digest is None
 
 
 @pytest.mark.asyncio
@@ -295,7 +295,7 @@ async def test_connect_ignores_pin_differences(tmp_path) -> None:
             local, name="node1", url="http://node1", client=client
         )
         diff = await diff_remote(local, name="node1", client=client)
-    assert [rec.name for rec in result.pulled] == ["tiny"]
+    assert [rec.name for rec in result.pulled] == ["Tiny"]
     assert local.list_remotes()[0].name == "node1"
     assert any("2.2.1" in row and "2.2.2" in row for row in diff.extras_warnings)
 
@@ -337,8 +337,8 @@ async def test_reconnect_accepts_extras_the_first_connect_would_refuse(
             local, name="node1", url="http://node1", client=client
         )
     names = {rec.name for rec in result.pulled}
-    assert "tiny" in names
-    assert "uses_torch" in names
+    assert "Tiny" in names
+    assert "UsesTorch" in names
     assert local.get_remote("node1") is not None
 
 

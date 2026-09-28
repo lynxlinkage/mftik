@@ -53,7 +53,7 @@ class Node_:
             return httpx.Response(
                 200,
                 json={
-                    "name": "tiny",
+                    "name": "Tiny",
                     "type": "Tiny",
                     "digest": "sha256:abc",
                     "requires_mftik": "0.1.0",
@@ -79,12 +79,12 @@ def test_rm_sends_private_by_default(monkeypatch, capsys) -> None:
     fake = Node_()
     _install(monkeypatch, fake)
 
-    assert main(["rm", "tiny"]) == 0
+    assert main(["rm", "Tiny"]) == 0
     out = capsys.readouterr().out
-    assert "removed tiny type=Tiny origin=private" in out
+    assert "removed Tiny type=Tiny origin=private" in out
     assert "sha256:abc" in out
 
-    assert fake.paths == ["/registry/v1/strategies/tiny"]
+    assert fake.paths == ["/registry/v1/strategies/Tiny"]
     assert fake.queries == [{"origin": ["private"]}]
 
 
@@ -92,7 +92,7 @@ def test_rm_sends_the_origin_it_was_given(monkeypatch, capsys) -> None:
     fake = Node_()
     _install(monkeypatch, fake)
 
-    assert main(["rm", "tiny", "--origin", "public"]) == 0
+    assert main(["rm", "Tiny", "--origin", "public"]) == 0
     assert "origin=public" in capsys.readouterr().out
     assert fake.queries == [{"origin": ["public"]}]
 
@@ -104,7 +104,7 @@ def test_rm_exits_one_when_sts_did_not_reload(monkeypatch, capsys) -> None:
     )
     _install(monkeypatch, fake)
 
-    assert main(["rm", "tiny"]) == EXIT_ERROR
+    assert main(["rm", "Tiny"]) == EXIT_ERROR
     err = capsys.readouterr().err
     assert "did not reload" in err
     assert "Traceback" not in err
@@ -119,7 +119,7 @@ def test_rm_exits_one_when_sts_still_answers(monkeypatch, capsys) -> None:
     )
     _install(monkeypatch, fake)
 
-    assert main(["rm", "tiny"]) == EXIT_ERROR
+    assert main(["rm", "Tiny"]) == EXIT_ERROR
     assert "private::Tiny" in capsys.readouterr().err
 
 
@@ -135,7 +135,7 @@ def test_rm_exits_one_when_a_session_is_still_running_it(
     )
     _install(monkeypatch, fake)
 
-    assert main(["rm", "tiny"]) == EXIT_ERROR
+    assert main(["rm", "Tiny"]) == EXIT_ERROR
     err = capsys.readouterr().err
     assert "sts-7" in err
     assert "Traceback" not in err
@@ -145,5 +145,5 @@ def test_rm_exits_one_when_the_tree_is_missing(monkeypatch, capsys) -> None:
     fake = Node_(status=404, detail="no private strategy named 'tiny'")
     _install(monkeypatch, fake)
 
-    assert main(["rm", "tiny"]) == EXIT_ERROR
+    assert main(["rm", "Tiny"]) == EXIT_ERROR
     assert "tiny" in capsys.readouterr().err

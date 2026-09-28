@@ -207,10 +207,11 @@ class StsSession:
         self.session_id = session_id
         self.broker = broker
         self.created_by = created_by
-        #: Qualified registry key. Distinct from :attr:`strategy_name`.
-        #: Named ``type`` on the instance so it matches ``sts_sessions.type``
-        #: and :class:`SessionView`; the constructor argument is
-        #: ``strategy_type`` so it does not shadow the builtin.
+        #: Qualified registry key (``CrossArb``, ``private::Tiny``). Named
+        #: ``type`` on the instance so it matches ``sts_sessions.type`` and
+        #: :class:`SessionView`; the constructor argument is ``strategy_type``
+        #: so it does not shadow the builtin. ``bind`` copies it onto the
+        #: strategy, which otherwise only knows its class.
         self.type = strategy_type
         self.strategy = strategy
         if td is not None:
@@ -344,7 +345,7 @@ class StsSession:
 
     @property
     def strategy_name(self) -> str:
-        return self.strategy.name
+        return self.strategy.registry_key
 
     async def _publish_log(
         self, message: str, *, source: str = "sts", level: str = "info"

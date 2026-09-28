@@ -10,8 +10,12 @@ from typing import Any
 from mftik.registry.errors import MissingRemoteExtras, RegistryError
 
 PROTOCOL = "mftik.registry"
-PROTOCOL_VERSION = 2
-PROTOCOL_MIN = 2
+#: 3: a published strategy's ``name`` is its class name, the same string as
+#: ``type``, and the directory it lives in. A node still speaking 2 addresses
+#: trees by the old short name and would treat ``Tiny`` as a different
+#: strategy from ``tiny``. ``check_handshake`` refuses that mix.
+PROTOCOL_VERSION = 3
+PROTOCOL_MIN = 3
 
 
 def _installed_version() -> str:

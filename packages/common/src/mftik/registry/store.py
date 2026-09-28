@@ -14,7 +14,7 @@ from mftik.registry.digest import digest_files
 from mftik.registry.errors import RegistryConflict, RegistryError
 from mftik.registry.files import TEMPLATE_NAME, normalize_files, read_tree
 from mftik.registry.gate import check_files
-from mftik.registry.inspect import check_name, inspect_files, pick_class
+from mftik.registry.inspect import check_name, check_type, inspect_files, pick_class
 from mftik.registry.qualify import (
     OWN_ORIGINS,
     PRIVATE_ORIGIN,
@@ -35,7 +35,10 @@ class AddedStrategy:
     deploy template; it is not part of the digest.
     """
 
+    #: Class name. The directory this tree is stored under, and the same
+    #: string as :attr:`type`.
     name: str
+    #: Class name. With :attr:`origin`, the qualified registry key.
     type: str
     digest: str
     requires_mftik: str
@@ -119,14 +122,22 @@ class RegistryStore:
                     + describe_missing(missing, present_extras)
                 )
         digest = digest_files(normalised)
-        dest = self._dest(origin, inspected.name)
-        if dest.exists() and not replace:
+        type_name = chosen.type
+        root = self._origin_root(origin)
+        hit = _casefold_entry(root, type_name)
+        if hit is not None and hit != type_name:
             raise RegistryConflict(
-                f"strategy {inspected.name!r} is already in the {_where(origin)}"
+                f"strategy {type_name!r} collides with directory {hit!r} "
+                f"in the {_where(origin)}"
             )
+        if hit == type_name and not replace:
+            raise RegistryConflict(
+                f"strategy {type_name!r} is already in the {_where(origin)}"
+            )
+        dest = self._dest(origin, type_name)
         self._commit(dest, normalised)
         return AddedStrategy(
-            name=inspected.name,
+            name=type_name,
             type=chosen.type,
             digest=digest,
             requires_mftik=requires,
@@ -150,7 +161,7 @@ class RegistryStore:
                 f"{origin!r} is a pulled copy — disconnect the remote instead "
                 f"of deleting one of its strategies"
             )
-        check_name(name)
+        check_type(name)
         dest = self._dest(origin, name)
         rec = self._read_tree(dest, origin=origin) if dest.is_dir() else None
         if rec is None:
@@ -275,6 +286,13 @@ class RegistryStore:
         }
         return remote
 
+    def _origin_root(self, origin: str) -> Path:
+        if origin == PUBLIC_ORIGIN:
+            return self.public_dir
+        if origin == PRIVATE_ORIGIN:
+            return self.private_dir
+        return self.pulled_dir / origin
+
     def _dest(self, origin: str, name: str) -> Path:
         if origin == PUBLIC_ORIGIN:
             return self.public_dir / name
@@ -308,6 +326,14 @@ class RegistryStore:
             if dest.exists():
                 shutil.rmtree(dest)
             tmp.rename(dest)
+            # A replace that lands in the same mtime bucket would otherwise
+            # keep serving the digest from before the write.
+            resolved = str(dest.resolve())
+            self._tree_cache = {
+                key: val
+                for key, val in self._tree_cache.items()
+                if key[0] != resolved
+            }
         except Exception:
             if tmp.exists():
                 shutil.rmtree(tmp, ignore_errors=True)
@@ -315,7 +341,7 @@ class RegistryStore:
 
 
     def _read_tree(self, dest: Path, *, origin: str) -> AddedStrategy | None:
-        """Scan a tree. Directory name is identity; class ``name`` must match."""
+        """Scan a tree. The directory name is the class name."""
         try:
             resolved = str(dest.resolve())
         except OSError:
@@ -366,7 +392,11 @@ def _scan_tree(dest: Path, *, origin: str) -> AddedStrategy | None:
     try:
         normalised = normalize_files(files)
         chosen = pick_class(check_files(normalised))
-        if chosen.name != dest.name:
+        # A directory left under the old short name, or renamed ahead of this
+        # build, is not a strategy this process can see. Returning nothing —
+        # rather than the class — is what makes starting the wrong build
+        # against the wrong directories look like an empty registry.
+        if chosen.type != dest.name:
             return None
         digest = digest_files(normalised)
     except RegistryError:
@@ -381,6 +411,24 @@ def _scan_tree(dest: Path, *, origin: str) -> AddedStrategy | None:
         path=str(dest),
         origin=origin,
     )
+
+
+def _casefold_entry(root: Path, type_name: str) -> str | None:
+    """The real directory name that casefolds to ``type_name``, if one exists.
+
+    ``Path.exists`` is the wrong question on a case-insensitive volume:
+    ``tiny`` being present makes ``Path("Tiny").exists()`` true, and two
+    class names that differ only by case would silently share one directory.
+    """
+    if not root.is_dir():
+        return None
+    folded = type_name.casefold()
+    for entry in os.listdir(root):
+        if entry.startswith(".") or not (root / entry).is_dir():
+            continue
+        if entry.casefold() == folded:
+            return entry
+    return None
 
 
 def _check_origin(origin: str) -> None:

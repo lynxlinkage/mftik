@@ -109,16 +109,15 @@ async def test_default_strategy_is_noop(broker: Broker) -> None:
         StsCreateSessionRequest(
             session_id="noop-1",
             created_by=1,
-            strategy="noop",
+            strategy="NoopStrategy",
             td={"paper": TdAccountRef(api_id=1)},
         )
     )
-    assert result.strategy == "noop"
+    assert result.strategy == "NoopStrategy"
     session = manager.get(result.session_id)
     assert session is not None
-    assert session.strategy.name == "noop"
-    assert resolve("noop").name == "noop"
-    assert resolve("NoopStrategy").name == "noop"
+    assert session.strategy.registry_key == "NoopStrategy"
+    assert resolve("NoopStrategy").registry_key == "NoopStrategy"
     await manager.close_all()
 
 
@@ -158,7 +157,7 @@ async def test_strategy_can_reach_the_symbol_plane(broker: Broker) -> None:
     manager = SessionManager(broker, heartbeat_interval=0.1)
     result = await manager.create_session(
         StsCreateSessionRequest(
-            session_id="sym-1", created_by=1, strategy="recording"
+            session_id="sym-1", created_by=1, strategy="RecordingStrategy"
         )
     )
     session = manager.get(result.session_id)

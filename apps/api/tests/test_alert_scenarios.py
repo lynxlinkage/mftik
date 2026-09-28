@@ -108,7 +108,6 @@ async def _put_session(scope, session_id: str, type_: str | None) -> None:
         await StsSessionRepository(db).create_live(
             session_id=session_id,
             created_by=1,
-            strategy="tiny",
             type=type_,
         )
 

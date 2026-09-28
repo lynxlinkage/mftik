@@ -33,13 +33,16 @@ from mftik.protocol import (
     StsSessionControlResult,
     Topics,
 )
+from mftik.registry import RegistryStore
 from mftik.strategy import Strategy
 from mftik_db.models import Base
+from mftik_db.models.session import SessionStatus, StsSessionRow
 from mftik_db.models.user import User
 from mftik_db.repositories import StsSessionRepository
 from mftik_db.session import build_engine
 from mftik_sts.app import run_rpc
-from mftik_sts.runtime_env import IncompatibleEnvironment
+from mftik_sts.impl import _REGISTRY
+from mftik_sts.runtime_env import IncompatibleEnvironment, refresh, reset_for_tests
 from mftik_sts.session import SessionManager
 from mftik_sts.session import manager as manager_mod
 from mftik_sts.spawn import (
@@ -932,7 +935,7 @@ async def test_list_uses_the_row_when_the_rebuild_slot_has_no_name() -> None:
     listed = await manager.list_sessions(
         ListSessionsRequest(domain="sts", status="interrupted")
     )
-    assert listed[0].strategy == "rebuildable"
+    assert listed[0].strategy == "Rebuildable"
     assert listed[0].type == "Rebuildable"
 
 
@@ -1117,3 +1120,99 @@ async def test_closing_the_lifeline_makes_the_worker_exit(
                 process.kill()
                 await process.wait()
     await engine.dispose()
+
+
+_PROBE = """\
+from mftik.strategy import Strategy
+
+class Probe(Strategy):
+    rebuildable = True
+"""
+
+
+async def test_a_worker_reports_the_qualified_key(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The child resolves ``private::Probe`` and the parent stores that name.
+
+    The row's old short name is not what comes back. The worker is a real
+    process: a stub that prints the key would not show that ``adopt`` bound it.
+    """
+    data = tmp_path / "data"
+    RegistryStore(data).add({"strategy.py": _PROBE})
+    url = f"sqlite+aiosqlite:///{tmp_path / 'sts.db'}"
+    engine = build_engine(url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as db:
+        db.add(User(id=1, email="owner-1@test.invalid"))
+        db.add(
+            StsSessionRow(
+                session_id="aa00c5",
+                created_by=1,
+                status=SessionStatus.INTERRUPTED.value,
+                type="private::Probe",
+                instance="sts",
+                restart="always",
+                finished_at=datetime.now(UTC),
+                td={},
+                md_ids=[],
+                st_paras={},
+                st_facts={},
+                rebuild_count=0,
+            )
+        )
+        await db.commit()
+
+    before = dict(_REGISTRY)
+    process = None
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("MFTIK_DATA", str(data))
+    try:
+        refresh(RegistryStore(data), data)
+    except Exception:
+        _REGISTRY.clear()
+        _REGISTRY.update(before)
+        await engine.dispose()
+        raise
+    try:
+        async with a_broker("sts-probe") as broker:
+            monkeypatch.setenv("BROKER_KEY_PREFIX", broker.config.key_prefix)
+            monkeypatch.setenv("NATS_URL", broker.config.nats_url)
+            manager = SessionManager(
+                broker,
+                spawner=SubprocessSpawner(),
+                instance="sts",
+            )
+            row = SimpleNamespace(
+                session_id="aa00c5",
+                created_by=1,
+                status="interrupted",
+                type="private::Probe",
+                strategy="pr130_probe",
+                instance="sts",
+                restart="always",
+                finished_at=datetime.now(UTC),
+                rebuild_count=0,
+                td={},
+                md_ids=[],
+                st_paras={},
+                st_facts={},
+            )
+            try:
+                assert await manager.rebuild_session("aa00c5", row=row) is True
+                slot = manager.get("aa00c5")
+                assert isinstance(slot, WorkerSlot)
+                assert slot.strategy_name == "private::Probe"
+                process = slot.process
+            finally:
+                await manager.close_all()
+                if process is not None and process.returncode is None:
+                    process.kill()
+                    await process.wait()
+    finally:
+        reset_for_tests()
+        _REGISTRY.clear()
+        _REGISTRY.update(before)
+        await engine.dispose()

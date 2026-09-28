@@ -153,7 +153,7 @@ async def diff_remote(
     remote = store.get_remote(name)
     if remote is None:
         raise RegistryError(f"unknown remote: {name}")
-    pulled = {rec.name: rec for rec in store.list_pulled_from(name)}
+    pulled = {rec.type: rec for rec in store.list_pulled_from(name)}
     own = client is None
     http = client or httpx.AsyncClient(timeout=_TIMEOUT)
     try:
@@ -163,11 +163,11 @@ async def diff_remote(
                 f"{remote.url}/registry/v1/strategies",
                 headers=_auth(remote.token),
             )
-            items = {row["name"]: row for row in _strategy_list(listed)}
+            items = {_row_key(row): row for row in _strategy_list(listed)}
         except (RegistryError, httpx.HTTPError) as exc:
             rows = tuple(
                 SyncRow(
-                    name=rec.name,
+                    name=rec.type,
                     type=rec.type,
                     local_digest=rec.digest,
                     remote_digest=None,
@@ -211,17 +211,18 @@ async def diff_remote(
             await http.aclose()
 
 
+def _row_key(row: dict[str, str]) -> str:
+    """Class name. Protocol 3 publishes it as both ``type`` and ``name``."""
+    return row.get("type") or row["name"]
+
+
 def _sync_row(
-    short: str,
+    type_name: str,
     local: AddedStrategy | None,
     remote: dict[str, str] | None,
 ) -> SyncRow:
     local_digest = local.digest if local is not None else None
     remote_digest = remote.get("digest") if remote is not None else None
-    type_name = (
-        (remote.get("type") if remote is not None else None)
-        or (local.type if local is not None else short)
-    )
     if local is None:
         status = "remote_only"
     elif remote is None:
@@ -231,7 +232,7 @@ def _sync_row(
     else:
         status = "diverged"
     return SyncRow(
-        name=short,
+        name=type_name,
         type=type_name,
         local_digest=local_digest,
         remote_digest=remote_digest,

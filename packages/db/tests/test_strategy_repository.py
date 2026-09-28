@@ -25,7 +25,7 @@ async def _session(
 ) -> None:
     sts = StsSessionRepository(db)
     await sts.create_live(
-        session_id=session_id, created_by=1, strategy=type, type=type
+        session_id=session_id, created_by=1, type=type
     )
     if status != SessionStatus.LIVE.value:
         await sts.mark_finished(session_id, status=status)

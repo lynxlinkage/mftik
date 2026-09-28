@@ -68,10 +68,10 @@ async def test_a_registry_key_reads_what_this_node_publishes(db) -> None:
     auth = {"Authorization": f"Bearer {peer}"}
     async with a_client(app) as client:
         listed = await client.get("/registry/v1/strategies", headers=auth)
-        detail = await client.get("/registry/v1/strategies/tiny", headers=auth)
+        detail = await client.get("/registry/v1/strategies/Tiny", headers=auth)
 
     assert peer.startswith("mftik_rk_")
-    assert [s["name"] for s in listed.json()["strategies"]] == ["tiny"]
+    assert [s["name"] for s in listed.json()["strategies"]] == ["Tiny"]
     assert "strategy.py" in detail.json()["contents"]
 
 

@@ -90,7 +90,6 @@ _STEPS = _build_steps()
 
 
 class NoopStrategy(Strategy):
-    name = "noop"
 
     def __init__(self) -> None:
         super().__init__()

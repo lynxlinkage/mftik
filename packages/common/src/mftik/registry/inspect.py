@@ -1,10 +1,12 @@
 """What a tree must be before it is a strategy.
 
 The import gate says whether the files are copyable. These rules say whether
-they name a strategy the registry can store: one subclass, a lowercase
-``name``, a Python identifier for the type. A shipped ``strategy.yml`` must
-parse. ``add`` and ``mftik check`` both run this, so a tree that one
-accepts the other cannot refuse for a different reason.
+they name a strategy the registry can store: one subclass, and a Python
+identifier for that class. The class name is the tree's identity — the
+directory it is stored under, and the second half of its qualified key.
+A ``name = "..."`` attribute on the class is ignored. A shipped
+``strategy.yml`` must parse. ``add`` and ``mftik check`` both run this, so a
+tree that one accepts the other cannot refuse for a different reason.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ class Inspected:
 
     files: dict[str, bytes]
     cls: StrategyClass
-    #: Set: :func:`inspect_files` refuses a subclass that omitted ``name``.
+    #: The class name. This is the directory key, same string as ``cls.type``.
     name: str
 
 
@@ -37,14 +39,8 @@ def inspect_files(files: Mapping[str, str | bytes]) -> Inspected:
     normalised = normalize_files(files)
     _check_template(normalised)
     chosen = pick_class(check_files(normalised))
-    name = chosen.name
-    if not name:
-        raise RegistryError(
-            f"{chosen.type} has no name — set class attribute name = \"...\""
-        )
-    check_name(name)
     check_type(chosen.type)
-    return Inspected(files=normalised, cls=chosen, name=name)
+    return Inspected(files=normalised, cls=chosen, name=chosen.type)
 
 
 def _check_template(files: Mapping[str, bytes]) -> None:
@@ -77,10 +73,10 @@ def pick_class(classes: list[StrategyClass]) -> StrategyClass:
 
 
 def check_name(name: str) -> None:
+    """Origin and remote names. A tree is identified with :func:`check_type`."""
     if not _NAME.match(name):
         raise RegistryError(
-            f"strategy name {name!r} must be lowercase "
-            f"[a-z][a-z0-9_]* (e.g. macd_dollar)"
+            f"name {name!r} must be lowercase [a-z][a-z0-9_]* (e.g. node1)"
         )
 
 
