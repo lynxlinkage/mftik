@@ -49,9 +49,14 @@ def test_a_later_revision_serves() -> None:
     assert describe_too_old(SchemaState("0041_something", _AFTER)) is None
 
 
-def test_a_missing_table_is_refused() -> None:
-    missing = describe_too_old(SchemaState("0033_option_strike", frozenset()))
-    assert missing is not None and "no sts_sessions table" in missing
+def test_a_database_with_no_sts_sessions_table_is_not_refused() -> None:
+    """Nothing has migrated it yet. Whatever does will do so at head.
+
+    STS starting before the migration step is a wait — its own reads fail
+    until that finishes — and refusing here would leave it down instead.
+    """
+    assert describe_too_old(SchemaState("0033_option_strike", frozenset())) is None
+    assert describe_too_old(SchemaState(None, frozenset())) is None
 
 
 async def _engine(tmp_path: Path, columns: str, revision: str | None) -> AsyncEngine:

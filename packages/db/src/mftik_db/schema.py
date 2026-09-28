@@ -38,7 +38,8 @@ class SchemaState:
     ``revision`` is null when there is no ``alembic_version`` table at all,
     which is what a schema built straight from the models looks like — the
     test suite, and nothing in production. ``sts_columns`` is empty when the
-    table itself is missing.
+    table itself is missing, which is a database the migrations have not run
+    against yet.
     """
 
     revision: str | None
@@ -64,10 +65,12 @@ def describe_too_old(state: SchemaState) -> str | None:
     reason.
     """
     if not state.sts_columns:
-        return (
-            "the database has no sts_sessions table. Run mftik-db-migrate "
-            f"up to {MIN_STS_REVISION} before starting STS."
-        )
+        # No table at all is a database nothing has migrated yet, not a
+        # revision that is behind — whatever creates it creates it at head,
+        # and every read until then fails on its own. Refusing here would
+        # turn a service that merely started before the migration step into
+        # a container that stays down.
+        return None
     at = (
         f"is at revision {state.revision}"
         if state.revision is not None
