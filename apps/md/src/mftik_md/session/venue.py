@@ -101,9 +101,10 @@ TOPIC_GREEKS = "greeks"
 KLINE_PREFIX = "kline_"
 
 OnUpdate = Callable[[str, UniversalTicker, UntypedEnvelope], Awaitable[None]]
-#: ``(feed, state, code, reason)`` — the pump task reached a terminal
-#: outcome that was not ``stop_feed``. The feed has already been popped.
-OnEnd = Callable[["Feed", str, str, str], Awaitable[None]]
+#: ``(session, feed, state, code, reason)`` — the pump task reached a
+#: terminal outcome that was not ``stop_feed``. The feed has already
+#: been popped from ``session``.
+OnEnd = Callable[["VenueSession", "Feed", str, str, str], Awaitable[None]]
 
 
 @dataclass
@@ -301,14 +302,16 @@ class VenueSession:
             outcome = ("down", "error", f"{type(exc).__name__}: {exc}")
         if outcome is None or not self.take_ended(feed):
             return
-        # Sibling pumps on the same socket end together. Yield once so
-        # they can pop themselves before a transport retire destroys
-        # the venue and cancels whoever is still in ``_feeds``.
+        # A sibling whose iterator has also ended is runnable now.
+        # Yield once so it can pop itself before this retire looks at
+        # ``feed_count``. Do not cancel it: a feed still in ``_feeds``
+        # is either healthy or blocked in ``on_update``, and cancelling
+        # it would skip the notify and leave its refcount behind.
         await asyncio.sleep(0)
         if feed.stop.is_set() or self._on_end is None:
             return
         try:
-            await self._on_end(feed, *outcome)
+            await self._on_end(self, feed, *outcome)
         except Exception:
             logger.exception(
                 "MD feed end notify failed topic=%s ticker=%s",

@@ -195,6 +195,15 @@ class SessionManager:
                 instance=self._instance,
             )
 
+        # Before the lease. A key that does not parse is a bad request,
+        # not a feed that ended: there is no ticker to put on ``FeedEnd``,
+        # and failing after the link is stored lets the STS retry succeed
+        # with the feed quietly missing.
+        parsed: list[tuple[str, str, UniversalTicker]] = []
+        for feed in request.subscriptions:
+            topic, ticker = Topics.parse_md_feed(feed)
+            parsed.append((feed, topic, ticker))
+
         link = StsLink(
             session_id=request.session_id,
             created_by=request.created_by,
@@ -225,16 +234,7 @@ class SessionManager:
         await self._prefetch_expiries(request.subscriptions)
         opened: set[UniversalTicker] = set()
         now = time.time()
-        for feed in request.subscriptions:
-            try:
-                topic, ticker = Topics.parse_md_feed(feed)
-            except ValueError:
-                logger.exception(
-                    "MD attach skipped unparseable feed session=%s feed=%s",
-                    request.session_id,
-                    feed,
-                )
-                continue
+        for feed, topic, ticker in parsed:
             listed = self._expiry_at.get(ticker)
             if ticker in self._expired or (
                 listed is not None and listed <= now
@@ -698,7 +698,10 @@ class SessionManager:
             ticker in self._expired
             or self._dispatcher.refcount(topic, ticker) == 0
         ):
-            if venue_sess.feed_count == 0:
+            if (
+                venue_sess.feed_count == 0
+                and self._venues.get(ticker.venue) is venue_sess
+            ):
                 self._destroy_venue(ticker.venue)
             return
         try:
@@ -945,13 +948,26 @@ class SessionManager:
         )
 
     async def _on_feed_end(
-        self, feed: Feed, state: str, code: str, reason: str
+        self,
+        session: VenueSession,
+        feed: Feed,
+        state: str,
+        code: str,
+        reason: str,
     ) -> None:
-        """Pump task finished on its own. Retire the key, then tell subscribers."""
+        """Pump task finished on its own. Retire the key, then tell subscribers.
+
+        Only this key. A sibling still in ``_feeds`` is left alone: it is
+        either a healthy feed on another socket of the same venue, or a
+        pump that has not left ``on_update`` yet. Cancelling it would
+        skip its notify and leave the refcount. The connector is dropped
+        only once this session itself has no feeds left, and only if it
+        is still the session mapped for the venue.
+        """
         targets = await self._retire_key(
             (feed.topic, feed.ticker),
             stop_pump=False,
-            destroy_venue=code == "transport",
+            owner=session,
         )
         if targets is None:
             return
@@ -974,9 +990,7 @@ class SessionManager:
         reason: str,
     ) -> None:
         """The first subscriber never got a pump. Drop everyone on the key."""
-        targets = await self._retire_key(
-            (topic, ticker), stop_pump=True, destroy_venue=False
-        )
+        targets = await self._retire_key((topic, ticker), stop_pump=True)
         if targets is None:
             return
         await self._emit_feed_end(
@@ -989,12 +1003,21 @@ class SessionManager:
         )
 
     def _drop_key_locked(
-        self, topic: str, ticker: UniversalTicker, *, cancel: bool
+        self,
+        topic: str,
+        ticker: UniversalTicker,
+        *,
+        cancel: bool,
+        owner: VenueSession | None = None,
     ) -> tuple[list[str], Feed | None]:
         """Clear one key. Caller holds ``_expiry_lock`` and must not await.
 
         Returns the sessions that held it, and the feed if one was still
         in ``_feeds`` (already asked to stop when ``cancel`` is set).
+
+        ``owner`` is the session the pump ran on. Releasing on whatever
+        is currently in ``_venues`` would cancel a feed a newer session
+        has already opened for the same key.
         """
         session_ids = list(self._dispatcher.subscribers(topic, ticker))
         for session_id in session_ids:
@@ -1002,7 +1025,7 @@ class SessionManager:
             link = self._links.get(session_id)
             if link is not None:
                 link.subscriptions.discard(Topics.md_feed(topic, ticker))
-        venue = self._venues.get(ticker.venue)
+        venue = owner if owner is not None else self._venues.get(ticker.venue)
         released = None
         if venue is not None:
             released = venue.release_feed(topic, ticker, cancel=cancel)
@@ -1013,8 +1036,8 @@ class SessionManager:
         key: FeedKey,
         *,
         stop_pump: bool,
-        destroy_venue: bool,
         only_if_unused: bool = False,
+        owner: VenueSession | None = None,
     ) -> list[str] | None:
         """Drop subscribers and the feed before any further await can subscribe.
 
@@ -1032,7 +1055,7 @@ class SessionManager:
             if only_if_unused and self._dispatcher.refcount(topic, ticker) > 0:
                 return None
             session_ids, released = self._drop_key_locked(
-                topic, ticker, cancel=stop_pump
+                topic, ticker, cancel=stop_pump, owner=owner
             )
         if (
             stop_pump
@@ -1043,8 +1066,13 @@ class SessionManager:
             await asyncio.gather(released.task, return_exceptions=True)
         await self._stamp_stopped(topic, ticker)
         self._disarm_if_idle(ticker)
-        venue = self._venues.get(ticker.venue)
-        if destroy_venue or (venue is not None and venue.feed_count == 0):
+        # Drop the connector only when the session that owned this key
+        # is idle, and only if a later subscribe has not already replaced
+        # it. A transport end does not take the venue down while another
+        # feed is still in ``_feeds``.
+        current = self._venues.get(ticker.venue)
+        idle = owner if owner is not None else current
+        if idle is not None and current is idle and idle.feed_count == 0:
             self._destroy_venue(ticker.venue)
         return session_ids
 
@@ -1124,7 +1152,7 @@ class SessionManager:
     async def _stop_feed_if_unused(self, key: FeedKey) -> None:
         topic, ticker = key
         retired = await self._retire_key(
-            key, stop_pump=True, destroy_venue=False, only_if_unused=True
+            key, stop_pump=True, only_if_unused=True
         )
         if retired is None:
             return

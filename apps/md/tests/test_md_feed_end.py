@@ -22,6 +22,7 @@ from mftik.protocol import (
 from mftik.symbols import SymbolNotFoundError
 from mftik_md.session import PaperPublicFactory, SessionManager
 from mftik_md.session.manager import StsLink
+from mftik_md.session.venue import VenueSession
 
 FAKE = UniversalTicker.parse("Fake_Spot_BTCUSDT")
 TICKER_FEED = Topics.md_feed("ticker", FAKE)
@@ -90,8 +91,44 @@ class EndTogether(_Connector):
 
 
 class Stay(_Connector):
+    def __init__(self) -> None:
+        self.closed = asyncio.Event()
+
+    async def close(self) -> None:
+        self.closed.set()
+
     def stream_ticker(self, ticker: UniversalTicker):
         return self._stay()
+
+    def stream_trades(self, ticker: UniversalTicker):
+        return self._stay()
+
+    async def _stay(self):
+        await asyncio.Event().wait()
+        if False:
+            yield None
+
+
+class OneEnds(_Connector):
+    """Ticker ends when ``release`` is set. Trades stays up."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def close(self) -> None:
+        self.closed.set()
+
+    def stream_ticker(self, ticker: UniversalTicker):
+        return self._end()
+
+    def stream_trades(self, ticker: UniversalTicker):
+        return self._stay()
+
+    async def _end(self):
+        await self.release.wait()
+        if False:
+            yield None
 
     async def _stay(self):
         await asyncio.Event().wait()
@@ -302,6 +339,91 @@ async def test_transport_notifies_each_feed_and_drops_the_venue(
 
     stop.set()
     await asyncio.gather(*hb, *collectors, return_exceptions=True)
+    await sessions.close_all()
+
+
+@pytest.mark.asyncio
+async def test_transport_leaves_a_live_sibling_and_its_refcount(
+    broker: Broker,
+) -> None:
+    public = OneEnds()
+    sessions = _sessions(Sequenced([public]), broker)
+    stop = asyncio.Event()
+    session_id = "sts-feed-sibling"
+    hb = asyncio.create_task(_lease(broker, session_id, stop))
+    events: list[FeedEnd] = []
+    collect = asyncio.create_task(_collect(broker, session_id, stop, events))
+    await asyncio.sleep(0.05)
+    await _attach(sessions, session_id, [TICKER_FEED, TRADE_FEED])
+    venue = sessions._venues["Fake"]  # noqa: SLF001
+    assert venue.feed_count == 2
+
+    public.release.set()
+    await _wait_until(lambda: len(events) == 1)
+    await asyncio.sleep(0.1)
+    assert events[0].topic == "ticker"
+    assert events[0].code == "transport"
+    assert sessions.feed_refcount(TICKER_FEED) == 0
+    assert sessions.feed_refcount(TRADE_FEED) == 1
+    assert sessions._venues["Fake"] is venue  # noqa: SLF001
+    assert venue.feed_count == 1
+    assert venue.has_feed("trade", FAKE)
+    assert not public.closed.is_set()
+
+    stop.set()
+    await asyncio.gather(hb, collect, return_exceptions=True)
+    await sessions.close_all()
+
+
+@pytest.mark.asyncio
+async def test_ended_pump_does_not_drop_a_newer_venue(broker: Broker) -> None:
+    ending = EndTogether()
+    replacement = Stay()
+    sessions = _sessions(Sequenced([ending, replacement]), broker)
+    stop = asyncio.Event()
+    session_id = "sts-feed-replaced"
+    hb = asyncio.create_task(_lease(broker, session_id, stop))
+    events: list[FeedEnd] = []
+    collect = asyncio.create_task(_collect(broker, session_id, stop, events))
+    await asyncio.sleep(0.05)
+    await _attach(sessions, session_id, [TICKER_FEED])
+    fresh = VenueSession(
+        "Fake",
+        replacement,
+        on_update=sessions._dispatcher.publish,  # noqa: SLF001
+        on_end=sessions._on_feed_end,  # noqa: SLF001
+    )
+    sessions._venues["Fake"] = fresh  # noqa: SLF001
+
+    ending.release.set()
+    await _wait_until(lambda: len(events) == 1)
+    await asyncio.sleep(0.05)
+    assert events[0].code == "transport"
+    assert sessions._venues["Fake"] is fresh  # noqa: SLF001
+    assert not replacement.closed.is_set()
+
+    stop.set()
+    await asyncio.gather(hb, collect, return_exceptions=True)
+    await sessions.close_all()
+
+
+@pytest.mark.asyncio
+async def test_unparseable_feed_fails_the_attach(broker: Broker) -> None:
+    sessions = _sessions(Sequenced([Stay()]), broker)
+    stop = asyncio.Event()
+    session_id = "sts-feed-bad"
+    hb = asyncio.create_task(_lease(broker, session_id, stop))
+    events: list[FeedEnd] = []
+    collect = asyncio.create_task(_collect(broker, session_id, stop, events))
+    await asyncio.sleep(0.05)
+    with pytest.raises(ValueError, match="invalid md feed key"):
+        await _attach(sessions, session_id, ["not-a-feed"])
+    await asyncio.sleep(0.05)
+    assert events == []
+    assert session_id not in sessions._links  # noqa: SLF001
+
+    stop.set()
+    await asyncio.gather(hb, collect, return_exceptions=True)
     await sessions.close_all()
 
 

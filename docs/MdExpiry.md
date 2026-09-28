@@ -52,9 +52,13 @@ does not notify.
 - `SymbolNotFoundError` — `down` / `symbol_not_found`. Other feeds
   on the same socket stay up.
 - The iterator ends and nobody called `stop_feed` — `down` /
-  `transport`. The socket gave up. MD drops that venue's connector
-  so the next subscribe builds a new one. Every feed on that socket
-  reports its own `transport`.
+  `transport`. The socket gave up. MD retires that key only. A feed
+  still running — another socket of the same venue, or a sibling
+  still inside its publish — is not cancelled and keeps its refcount.
+  When its iterator ends it reports its own `transport`. The connector
+  is dropped once that session has no feeds left, and only if a newer
+  session has not already replaced it. The next subscribe then builds
+  a new one.
 - Any other exception — `down` / `error`, with the exception type in
   `reason`.
 
