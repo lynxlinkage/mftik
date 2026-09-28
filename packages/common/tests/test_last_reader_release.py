@@ -184,9 +184,9 @@ async def test_teardown_clears_the_ledger_before_closing_streams(
     feed._ledger.clear = spy_clear  # type: ignore[method-assign]
     real_close = EventStream.close
 
-    def spy_close(self: EventStream[Any]) -> None:
+    def spy_close(self: EventStream[Any], reason: str | None = None) -> None:
         order.append("close")
-        real_close(self)
+        real_close(self, reason)
 
     monkeypatch.setattr(EventStream, "close", spy_close)
     async with feed:
@@ -396,9 +396,9 @@ async def test_fail_streams_clears_before_close_and_sends_nothing(
     ws._ledger.clear = spy_clear  # type: ignore[method-assign]
     real_close = EventStream.close
 
-    def spy_close(self: EventStream[Any]) -> None:
+    def spy_close(self: EventStream[Any], reason: str | None = None) -> None:
         order.append("close")
-        real_close(self)
+        real_close(self, reason)
 
     monkeypatch.setattr(EventStream, "close", spy_close)
     async with ws:

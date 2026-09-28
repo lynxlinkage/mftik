@@ -276,8 +276,9 @@ async def amain(session_id: str, role: str) -> bool:
                 )
                 _report({"ok": False, "error": str(exc)})
                 # A rebuild has already recorded its terminal status:
-                # failed when the attach was refused, interrupted when it
-                # never got an answer. ``close_all`` would stamp the
+                # failed when MD or TD answered with anything but
+                # unavailable/timeout, interrupted when the attach never
+                # got an answer. ``close_all`` would stamp the
                 # shutdown reason over it and reset ``finished_at``.
                 # Create still needs it: a start failure has popped the
                 # session, and anything left over should not stay live.

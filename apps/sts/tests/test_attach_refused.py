@@ -37,21 +37,17 @@ async def test_a_refused_attach_is_not_retried() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_generic_refusal_is_retried_until_the_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(manager_mod, "_ATTACH_BACKOFF_S", 0.01)
-    monkeypatch.setattr(manager_mod, "_ATTACH_BUDGET_S", 0.05)
+async def test_a_generic_refusal_is_not_retried() -> None:
     broker = _Broker("nope")
     sessions = SessionManager(broker)  # type: ignore[arg-type]
-    with pytest.raises(RuntimeError, match="rebuild could not attach"):
+    with pytest.raises(AttachRefused, match="nope"):
         await sessions._attach_with_retry(  # noqa: SLF001
-            what="md",
-            subject="md.attach",
+            what="td",
+            subject="td.attach",
             envelope=object(),
             error_type=MD_ERROR,
         )
-    assert broker.calls > 1
+    assert broker.calls == 1
 
 
 @pytest.mark.asyncio

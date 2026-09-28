@@ -351,10 +351,9 @@ async def test_a_live_session_is_not_rebuilt(broker: Broker) -> None:
 async def test_a_failed_attach_puts_the_session_back(
     broker: Broker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Half-attached is worse than interrupted: it heartbeats and looks alive
-    while blind to a feed or an account."""
-    # The real backoff is sized for a TD that is still starting; here every
-    # attempt is refused outright, so waiting it out only slows the suite.
+    """An error reply marks the session failed. Retrying would get the
+    same answer, and a half-attached session would heartbeat while blind."""
+    # Kept short so a regression that retries the refusal still finishes.
     monkeypatch.setattr(manager_mod, "_ATTACH_BUDGET_S", 0.02)
     monkeypatch.setattr(manager_mod, "_ATTACH_BACKOFF_S", 0.01)
     store = FakeStsStore()
@@ -371,7 +370,10 @@ async def test_a_failed_attach_puts_the_session_back(
         serving.cancel()
         await asyncio.gather(serving, return_exceptions=True)
 
-    assert store.rows["aa0005"].status == "interrupted"
+    row = store.rows["aa0005"]
+    assert row.status == "failed"
+    assert row.reason is not None
+    assert "not today" in row.reason
     assert manager.get("aa0005") is None
 
 
