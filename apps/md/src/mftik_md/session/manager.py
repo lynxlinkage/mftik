@@ -1005,6 +1005,7 @@ class SessionManager:
             err = _SymbolLookupError(str(exc))
             if not waiter.done():
                 waiter.set_exception(err)
+                waiter.add_done_callback(_sink_future_exception)
             raise err from exc
         else:
             # Inactive rows are included: a settled option is deactivated
