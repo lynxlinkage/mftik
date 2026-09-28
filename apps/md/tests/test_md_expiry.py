@@ -28,7 +28,9 @@ from mftik.protocol import (
     SymbolInfo,
     Topics,
 )
+from mftik.symbols import SymbolNotFoundError
 from mftik_md.session import PaperPublicFactory, SessionManager
+from mftik_md.session.manager import AttachError
 from mftik_md.session.venue import VenueSession
 
 TICKER = UniversalTicker.parse("Paper_Spot_BTCUSDT")
@@ -115,6 +117,55 @@ async def _attach(
             timeout=3.0,
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_symbol_not_found_fails_attach_and_a_later_one_can_expire(
+    broker: Broker, paper: PaperExchange
+) -> None:
+    class Later:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get(self, ticker: UniversalTicker, **_: object) -> SymbolInfo:
+            self.calls += 1
+            if self.calls == 1:
+                raise SymbolNotFoundError(str(ticker))
+            return _info(ticker, time.time() + 0.3)
+
+    symbols = Later()
+    sessions = SessionManager(
+        PaperPublicFactory(broker, paper),
+        broker,
+        lease_grace=2.0,
+        symbols=symbols,  # type: ignore[arg-type]
+    )
+    session_id = "sts-md-not-found"
+    stop = asyncio.Event()
+    hb_task = asyncio.create_task(_md_lease_publisher(broker, session_id, stop))
+    events: list[FeedEnd] = []
+
+    async def _collect() -> None:
+        async for env in broker.subscribe(Topics.md_session(session_id), stop=stop):
+            if env.type == MD_FEED_END:
+                events.append(FeedEnd.model_validate(env.payload))
+
+    collect_task = asyncio.create_task(_collect())
+    await asyncio.sleep(0.05)
+    with pytest.raises(AttachError, match="symbol not found") as raised:
+        await _attach(sessions, session_id, [ORDERBOOK])
+    assert raised.value.code == "VENUE_SYMBOL_NOT_FOUND"
+    assert session_id not in sessions._links  # noqa: SLF001
+    assert TICKER not in sessions._timeless  # noqa: SLF001
+    await _attach(sessions, session_id, [ORDERBOOK])
+    await _wait_until(lambda: len(events) == 1, timeout=3.0)
+    assert events[0].state == "expired"
+    assert events[0].code == "expired"
+    assert events[0].topic == "orderbook"
+
+    stop.set()
+    await asyncio.gather(hb_task, collect_task, return_exceptions=True)
+    await sessions.close_all()
 
 
 @pytest.mark.asyncio

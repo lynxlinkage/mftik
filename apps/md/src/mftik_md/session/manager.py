@@ -29,6 +29,7 @@ from mftik.protocol import (
     MdLeaseAck,
     MdSubscribe,
     MdUnsubscribe,
+    QueryCode,
     SessionInfo,
     Topics,
     UntypedEnvelope,
@@ -44,6 +45,40 @@ from mftik_md.tape import TapeRecorder
 from mftik_md.tape_store import TapeStore
 
 logger = logging.getLogger(__name__)
+
+
+class AttachError(Exception):
+    """Attach refused one of the requested feeds. Nothing was left open.
+
+    ``code`` is the specific refusal (``VENUE_SYMBOL_NOT_FOUND``,
+    ``MD_VENUE_UNSUPPORTED_READ``, …). The RPC handler sends it as the
+    error code so a deploy rolls back with that reason.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+def _sink_future_exception(fut: asyncio.Future[object]) -> None:
+    """Read a stored exception so asyncio does not log it as abandoned."""
+    if not fut.cancelled():
+        fut.exception()
+
+
+def _exc_reason(exc: BaseException) -> str:
+    """Exception text, with a venue code or label when the text omits it."""
+    detail = str(exc).strip() or type(exc).__name__
+    extra: list[str] = []
+    label = getattr(exc, "label", None)
+    if isinstance(label, str) and label and label not in detail:
+        extra.append(label)
+    code = getattr(exc, "code", None)
+    if code is not None and not isinstance(code, bool) and str(code) not in detail:
+        extra.append(f"code={code}")
+    if extra:
+        return f"{detail} ({', '.join(extra)})"
+    return detail
 
 PersistLive = Callable[..., Awaitable[Any]]
 MarkDone = Callable[..., Awaitable[Any]]
@@ -200,9 +235,12 @@ class SessionManager:
         # and failing after the link is stored lets the STS retry succeed
         # with the feed quietly missing.
         parsed: list[tuple[str, str, UniversalTicker]] = []
-        for feed in request.subscriptions:
-            topic, ticker = Topics.parse_md_feed(feed)
-            parsed.append((feed, topic, ticker))
+        try:
+            for feed in request.subscriptions:
+                topic, ticker = Topics.parse_md_feed(feed)
+                parsed.append((feed, topic, ticker))
+        except ValueError as exc:
+            raise AttachError("invalid_feed", str(exc)) from exc
 
         link = StsLink(
             session_id=request.session_id,
@@ -231,37 +269,47 @@ class SessionManager:
         self._links[request.session_id] = link
         self._dispatcher.register_link(link)
 
-        await self._prefetch_expiries(request.subscriptions)
+        missing = await self._prefetch_expiries(request.subscriptions)
+        if missing:
+            names = ", ".join(str(ticker) for ticker in sorted(missing, key=str))
+            await self.detach(
+                session_id=request.session_id, reason="symbol not found"
+            )
+            raise AttachError(
+                QueryCode.VENUE_SYMBOL_NOT_FOUND.name,
+                f"symbol not found: {names}",
+            )
         opened: set[UniversalTicker] = set()
         now = time.time()
-        for feed, topic, ticker in parsed:
-            listed = self._expiry_at.get(ticker)
-            if ticker in self._expired or (
-                listed is not None and listed <= now
-            ):
-                if ticker not in self._expired and listed is not None:
-                    await self._expire_ticker(ticker, listed)
-                expiry = self._expiry_at[ticker]
-                await self._emit_feed_end(
-                    [request.session_id],
-                    ticker,
-                    topic=topic,
-                    state="expired",
-                    code="expired",
-                    reason=f"instrument expired at {expiry}",
-                    expiry=expiry,
+        try:
+            for feed, topic, ticker in parsed:
+                listed = self._expiry_at.get(ticker)
+                if ticker in self._expired or (
+                    listed is not None and listed <= now
+                ):
+                    if ticker not in self._expired and listed is not None:
+                        await self._expire_ticker(ticker, listed)
+                    expiry = self._expiry_at[ticker]
+                    await self._emit_feed_end(
+                        [request.session_id],
+                        ticker,
+                        topic=topic,
+                        state="expired",
+                        code="expired",
+                        reason=f"instrument expired at {expiry}",
+                        expiry=expiry,
+                    )
+                    continue
+                await self._subscribe_feed(
+                    link, feed, arm=False, emit_failure=False
                 )
-                continue
-            try:
-                await self._subscribe_feed(link, feed, arm=False)
-            except Exception:
-                logger.exception(
-                    "MD attach feed failed session=%s feed=%s",
-                    request.session_id,
-                    feed,
-                )
-            if feed in link.subscriptions:
-                opened.add(ticker)
+                if feed in link.subscriptions:
+                    opened.add(ticker)
+        except AttachError:
+            await self.detach(
+                session_id=request.session_id, reason="attach refused"
+            )
+            raise
         for ticker in opened:
             self._schedule_arm(ticker)
 
@@ -577,11 +625,27 @@ class SessionManager:
             )
 
     async def _subscribe_feed(
-        self, link: StsLink, feed: str, *, arm: bool = True
+        self,
+        link: StsLink,
+        feed: str,
+        *,
+        arm: bool = True,
+        emit_failure: bool = True,
     ) -> None:
         topic, ticker = Topics.parse_md_feed(feed)
         if arm:
-            listed = await self._try_resolve(ticker)
+            try:
+                listed = await self._try_resolve(ticker)
+            except SymbolNotFoundError as exc:
+                await self._emit_feed_end(
+                    [link.session_id],
+                    ticker,
+                    topic=topic,
+                    state="down",
+                    code="symbol_not_found",
+                    reason=_exc_reason(exc),
+                )
+                return
             if self._links.get(link.session_id) is not link:
                 return
             if listed is not None and listed <= time.time():
@@ -625,25 +689,32 @@ class SessionManager:
             return
         try:
             await self._open_subscribed(
-                link, feed, topic, ticker, first=first, old_rc=old_rc, new_rc=new_rc
+                link,
+                feed,
+                topic,
+                ticker,
+                first=first,
+                old_rc=old_rc,
+                new_rc=new_rc,
+                emit_failure=emit_failure,
             )
+        except AttachError:
+            raise
         except Exception as exc:
             logger.exception(
                 "MD subscribe failed session=%s feed=%s",
                 link.session_id,
                 feed,
             )
-            venue = self._venues.get(ticker.venue)
-            live = venue is not None and venue.has_feed(topic, ticker)
-            if not live and self._dispatcher.refcount(topic, ticker) > 0:
-                await self._fail_open(
-                    topic,
-                    ticker,
-                    state="down",
-                    code="error",
-                    reason=f"{type(exc).__name__}: {exc}",
-                )
-            return
+            await self._refuse(
+                topic,
+                ticker,
+                QueryCode.MD_INTERNAL.name,
+                _exc_reason(exc),
+                emit=emit_failure,
+                state="down",
+                feed_code="error",
+            )
         if arm and feed in link.subscriptions:
             self._schedule_arm(ticker)
 
@@ -657,12 +728,16 @@ class SessionManager:
         first: bool,
         old_rc: int,
         new_rc: int,
+        emit_failure: bool = True,
     ) -> None:
         """Finish a subscribe that already holds a refcount.
 
         Connect and ``_open`` failures retire every subscriber of the
-        key — another session may have joined during the awaits — and
-        tell each of them. They do not propagate to attach.
+        key — another session may have joined during the awaits.
+        Runtime subscribe tells each of them. Attach does not: it
+        raises :class:`AttachError` and the caller rolls the session
+        back, so a deploy does not stay live on a feed that never
+        opened.
         """
         await publish_md_log(
             self._broker,
@@ -686,12 +761,14 @@ class SessionManager:
             logger.exception(
                 "MD venue connect failed venue=%s", ticker.venue
             )
-            await self._fail_open(
+            await self._refuse(
                 topic,
                 ticker,
+                QueryCode.MD_VENUE_NOT_CONNECTED.name,
+                _exc_reason(exc),
+                emit=emit_failure,
                 state="down",
-                code="connect",
-                reason=f"{type(exc).__name__}: {exc}",
+                feed_code="connect",
             )
             return
         if (
@@ -707,15 +784,41 @@ class SessionManager:
         try:
             await venue_sess.ensure_feed(topic, ticker)
         except Exception as exc:
-            logger.exception(
-                "MD feed rejected topic=%s ticker=%s", topic, ticker
-            )
-            await self._fail_open(
+            if isinstance(exc, ValueError):
+                logger.warning(
+                    "MD feed rejected topic=%s ticker=%s: %s",
+                    topic,
+                    ticker,
+                    exc,
+                )
+                code = QueryCode.MD_VENUE_UNSUPPORTED_READ.name
+                feed_code = "unsupported"
+                state = "rejected"
+            elif isinstance(exc, SymbolNotFoundError):
+                logger.warning(
+                    "MD feed symbol not found topic=%s ticker=%s: %s",
+                    topic,
+                    ticker,
+                    exc,
+                )
+                code = QueryCode.VENUE_SYMBOL_NOT_FOUND.name
+                feed_code = "symbol_not_found"
+                state = "down"
+            else:
+                logger.exception(
+                    "MD feed rejected topic=%s ticker=%s", topic, ticker
+                )
+                code = QueryCode.VENUE_REJECTED.name
+                feed_code = "unsupported"
+                state = "rejected"
+            await self._refuse(
                 topic,
                 ticker,
-                state="rejected",
-                code="unsupported",
-                reason=str(exc),
+                code,
+                _exc_reason(exc),
+                emit=emit_failure,
+                state=state,
+                feed_code=feed_code,
             )
             return
         if (
@@ -762,9 +865,17 @@ class SessionManager:
             await self._stop_feed_if_unused((topic, ticker))
         self._disarm_if_idle(ticker)
 
-    async def _prefetch_expiries(self, feeds: Sequence[str]) -> None:
+    async def _prefetch_expiries(
+        self, feeds: Sequence[str]
+    ) -> set[UniversalTicker]:
+        """Resolve listed expiries. Returns tickers the plane does not know.
+
+        A miss is not cached. The next subscribe asks again, so an
+        instrument that lists later can still arm an expiry watch.
+        """
+        missing: set[UniversalTicker] = set()
         if self._symbols is None:
-            return
+            return missing
         seen: list[UniversalTicker] = []
         for feed in feeds:
             try:
@@ -774,18 +885,21 @@ class SessionManager:
             if ticker not in seen:
                 seen.append(ticker)
         if not seen:
-            return
+            return missing
         results = await asyncio.gather(
             *(self._resolve_expiry(ticker) for ticker in seen),
             return_exceptions=True,
         )
         for ticker, result in zip(seen, results, strict=True):
-            if isinstance(result, Exception):
+            if isinstance(result, SymbolNotFoundError):
+                missing.add(ticker)
+            elif isinstance(result, Exception):
                 logger.warning(
                     "MD symbol lookup failed ticker=%s: %s",
                     ticker,
                     result,
                 )
+        return missing
 
     async def _try_resolve(self, ticker: UniversalTicker) -> float | None:
         if self._symbols is None or ticker in self._timeless:
@@ -818,11 +932,13 @@ class SessionManager:
             return await waiter
         try:
             info = await self._symbols.get(ticker, include_inactive=True)
-        except SymbolNotFoundError:
-            self._timeless.add(ticker)
+        except SymbolNotFoundError as exc:
+            # Not timeless. A later subscribe has to be able to arm the
+            # watch once the instrument exists.
             if not waiter.done():
-                waiter.set_result(None)
-            return None
+                waiter.set_exception(exc)
+                waiter.add_done_callback(_sink_future_exception)
+            raise
         except Exception as exc:
             err = _SymbolLookupError(str(exc))
             if not waiter.done():
@@ -885,7 +1001,7 @@ class SessionManager:
                 return self._expiry_at[ticker]
             try:
                 return await self._resolve_expiry(ticker)
-            except _SymbolLookupError:
+            except (_SymbolLookupError, SymbolNotFoundError):
                 logger.warning(
                     "MD symbol lookup failed ticker=%s; retry in %.1fs",
                     ticker,
@@ -979,6 +1095,34 @@ class SessionManager:
             code=code,
             reason=reason,
         )
+
+    async def _refuse(
+        self,
+        topic: str,
+        ticker: UniversalTicker,
+        code: str,
+        reason: str,
+        *,
+        emit: bool,
+        state: str,
+        feed_code: str,
+    ) -> None:
+        """Drop a key that never started pumping.
+
+        Runtime subscribe tells the holders. Attach raises instead, so
+        the RPC fails and the deploy rolls back.
+        """
+        if emit:
+            await self._fail_open(
+                topic,
+                ticker,
+                state=state,
+                code=feed_code,
+                reason=reason,
+            )
+            return
+        await self._retire_key((topic, ticker), stop_pump=True)
+        raise AttachError(code, reason)
 
     async def _fail_open(
         self,

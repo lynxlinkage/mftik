@@ -34,14 +34,21 @@ One print per `(session, topic)`. A session that held `ticker` and
 `greeks` does not hear about `ticker`. MD publishes only to a
 session whose lease is still up.
 
-`down` means this attempt is over and a later subscribe may rebuild
-the pump. `rejected` and `expired` mean subscribing again gets the
-same answer.
+`down` means this attempt is over. `rejected` and `expired` mean
+subscribing again gets the same answer. `reason` carries the venue's
+own words, and its code when the exception has one.
 
-A rebuilt STS re-attaches the feeds saved on its md record, including
-ones that already ended. `down` is supposed to be tried again.
-`rejected` and `symbol_not_found` are notified again on that
-rebuild. The saved feed list is not edited here.
+A feed that cannot be opened fails the attach RPC. The code is the
+specific refusal (`VENUE_SYMBOL_NOT_FOUND`,
+`MD_VENUE_UNSUPPORTED_READ`, `MD_VENUE_NOT_CONNECTED`,
+`invalid_feed`, …) and the deploy rolls back. `md.feed.end` is only
+for a feed that did open and later ended.
+
+A rebuilt STS re-attaches the feeds saved on its md record. If MD
+refuses that attach, the session is marked `failed` with the error
+and is not retried. A timeout, MD not answering yet, stays
+`interrupted` so the next boot tries again. The saved feed list is
+not edited here.
 
 ## When a pump ends
 
@@ -52,15 +59,16 @@ does not notify.
 - `SymbolNotFoundError` — `down` / `symbol_not_found`. Other feeds
   on the same socket stay up.
 - The iterator ends and nobody called `stop_feed` — `down` /
-  `transport`. The socket gave up. MD retires that key only. A feed
-  still running — another socket of the same venue, or a sibling
-  still inside its publish — is not cancelled and keeps its refcount.
-  When its iterator ends it reports its own `transport`. The connector
-  is dropped once that session has no feeds left, and only if a newer
-  session has not already replaced it. The next subscribe then builds
-  a new one.
-- Any other exception — `down` / `error`, with the exception type in
-  `reason`.
+  `transport`. That socket gave up. MD retires each feed whose
+  iterator ended, and only those. Another socket on the same
+  connector keeps running, and so does a sibling still inside its
+  publish. The connector stays. A later subscribe of a retired topic
+  opens a fresh pump on it. The connector is dropped only once that
+  session has no feeds left, and only if a newer session has not
+  already replaced it.
+- Any other exception — `down` / `error`. `reason` is the exception
+  text, plus a venue code or label when the text does not already
+  contain it.
 
 Before the notify, MD clears that key's refcount and removes the
 `Feed`, in one locked section with no `await`. A subscribe that
@@ -69,14 +77,24 @@ included in the notify and cleared with the others.
 
 ## When the subscribe never starts
 
-- `_open` refuses the topic — `rejected` / `unsupported`. Every
-  session that joined the key while connect was in flight is told,
-  and the refcount is cleared. This used to leave a zombie refcount.
-- Venue `connect()` fails — `down` / `connect`, same fan-out.
-  Attach still succeeds. `MdAttachResult.subscriptions` lists only
-  the feeds that opened. The rest are notified before the reply.
+Attach is all or nothing. Any of these fails the RPC, detaches the
+session, and does not publish `md.feed.end`. A feed already opened
+earlier in the same attach is stopped with the rest.
+
+- The feed key does not parse — `invalid_feed`, before the lease.
+- The symbol plane has no such instrument — `VENUE_SYMBOL_NOT_FOUND`.
+  The miss is not cached, so a later subscribe asks again and can
+  still arm an expiry watch.
+- `_open` refuses the topic — `MD_VENUE_UNSUPPORTED_READ`.
+- Venue `connect()` fails — `MD_VENUE_NOT_CONNECTED`.
+
+A runtime `md.subscribe` has no RPC reply to fail, so the same
+refusals still publish `md.feed.end` to the sessions that joined
+the key, and the refcount is cleared.
+
 - Listed time already past — `expired` / `expired`, and only to the
-  session that asked. It never entered the refcount.
+  session that asked. It never entered the refcount. Attach still
+  succeeds for the other feeds.
 
 ## When the instrument expires
 
@@ -128,9 +146,9 @@ attach after the tombstone, runtime sub/unsub order, detach during
 subscribe, inactive settled row.
 
 `apps/md/tests/test_md_feed_end.py` — symbol miss, transport,
-stop without a print, subscribe during notify, unsupported topic
-with a second waiter, connect failure, attach that keeps the
-feeds which opened.
+two sockets on one connector, stop without a print, subscribe
+during notify, unsupported topic with a second waiter, connect
+failure, attach that fails when one feed cannot open.
 
 `apps/sts/tests/test_md_events.py` — `md.feed.end` reaches
 `on_feed_end`.

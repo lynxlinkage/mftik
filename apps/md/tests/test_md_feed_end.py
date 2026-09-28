@@ -13,6 +13,7 @@ from mftik.exchange.models import BookLevel, FeedEnd, OrderBook
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_FEED_END,
+    MD_ORDERBOOK,
     STS_LEASE_HEARTBEAT,
     Envelope,
     LeaseHeartbeat,
@@ -21,7 +22,7 @@ from mftik.protocol import (
 )
 from mftik.symbols import SymbolNotFoundError
 from mftik_md.session import PaperPublicFactory, SessionManager
-from mftik_md.session.manager import StsLink
+from mftik_md.session.manager import AttachError, StsLink
 from mftik_md.session.venue import VenueSession
 
 FAKE = UniversalTicker.parse("Fake_Spot_BTCUSDT")
@@ -416,8 +417,9 @@ async def test_unparseable_feed_fails_the_attach(broker: Broker) -> None:
     events: list[FeedEnd] = []
     collect = asyncio.create_task(_collect(broker, session_id, stop, events))
     await asyncio.sleep(0.05)
-    with pytest.raises(ValueError, match="invalid md feed key"):
+    with pytest.raises(AttachError, match="invalid md feed key") as raised:
         await _attach(sessions, session_id, ["not-a-feed"])
+    assert raised.value.code == "invalid_feed"
     await asyncio.sleep(0.05)
     assert events == []
     assert session_id not in sessions._links  # noqa: SLF001
@@ -584,7 +586,7 @@ async def test_connect_failure_notifies_every_waiter(broker: Broker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_attach_keeps_feeds_that_opened(
+async def test_attach_fails_when_a_feed_cannot_open(
     broker: Broker, paper: PaperExchange
 ) -> None:
     sessions = SessionManager(
@@ -596,14 +598,130 @@ async def test_attach_keeps_feeds_that_opened(
     events: list[FeedEnd] = []
     collect = asyncio.create_task(_collect(broker, session_id, stop, events))
     await asyncio.sleep(0.05)
-    result = await _attach(sessions, session_id, [PAPER_GREEKS, PAPER_BOOK])
-    await _wait_until(lambda: len(events) == 1)
-    assert result.subscriptions == [PAPER_BOOK]
-    assert events[0].topic == "greeks"
-    assert events[0].state == "rejected"
-    assert events[0].code == "unsupported"
+    with pytest.raises(AttachError, match="does not publish") as raised:
+        await _attach(sessions, session_id, [PAPER_BOOK, PAPER_GREEKS])
+    assert raised.value.code == "MD_VENUE_UNSUPPORTED_READ"
+    await asyncio.sleep(0.05)
+    assert events == []
+    assert session_id not in sessions._links  # noqa: SLF001
     assert sessions.feed_refcount(PAPER_GREEKS) == 0
-    assert sessions.feed_refcount(PAPER_BOOK) == 1
+    assert sessions.feed_refcount(PAPER_BOOK) == 0
+    assert "Paper" not in sessions._venues  # noqa: SLF001
+
+    stop.set()
+    await asyncio.gather(hb, collect, return_exceptions=True)
+    await sessions.close_all()
+
+
+class TwoSockets(_Connector):
+    """Ticker and trades share one socket. The book is another."""
+
+    def __init__(self) -> None:
+        self.market_release = asyncio.Event()
+        self.more_books: asyncio.Queue[OrderBook | None] = asyncio.Queue()
+        self.ticker_opens = 0
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def stream_ticker(self, ticker: UniversalTicker):
+        self.ticker_opens += 1
+        return self._market(self.ticker_opens)
+
+    def stream_trades(self, ticker: UniversalTicker):
+        return self._market(1)
+
+    def stream_order_book(self, ticker: UniversalTicker):
+        return self._books(ticker)
+
+    async def _market(self, generation: int):
+        if generation == 1:
+            await self.market_release.wait()
+            return
+        await asyncio.Event().wait()
+        if False:
+            yield None
+
+    async def _books(self, ticker: UniversalTicker):
+        yield OrderBook(
+            universal_ticker=str(ticker),
+            bids=[BookLevel(price=Decimal("1"), qty=Decimal("1"))],
+            asks=[BookLevel(price=Decimal("2"), qty=Decimal("1"))],
+        )
+        while True:
+            item = await self.more_books.get()
+            if item is None:
+                return
+            yield item
+
+
+class Sticky:
+    """Every create returns the same connector."""
+
+    def __init__(self, client: TwoSockets) -> None:
+        self.client = client
+        self.built: list[str] = []
+
+    async def create(self, venue: str) -> TwoSockets:
+        self.built.append(venue)
+        return self.client
+
+
+@pytest.mark.asyncio
+async def test_one_socket_ending_leaves_the_other_up(broker: Broker) -> None:
+    client = TwoSockets()
+    factory = Sticky(client)
+    sessions = _sessions(factory, broker)
+    stop = asyncio.Event()
+    session_id = "sts-feed-sockets"
+    hb = asyncio.create_task(_lease(broker, session_id, stop))
+    events: list[FeedEnd] = []
+    books = 0
+
+    async def _collect_all() -> None:
+        nonlocal books
+        async for env in broker.subscribe(
+            Topics.md_session(session_id), stop=stop
+        ):
+            if env.type == MD_FEED_END:
+                events.append(FeedEnd.model_validate(env.payload))
+            elif env.type == MD_ORDERBOOK:
+                books += 1
+
+    collect = asyncio.create_task(_collect_all())
+    await asyncio.sleep(0.05)
+    await _attach(sessions, session_id, [TICKER_FEED, TRADE_FEED, BOOK_FEED])
+    await _wait_until(lambda: books >= 1)
+    venue = sessions._venues["Fake"]  # noqa: SLF001
+    client.market_release.set()
+    await _wait_until(lambda: len(events) == 2)
+    assert {event.topic for event in events} == {"ticker", "trade"}
+    for event in events:
+        assert event.state == "down"
+        assert event.code == "transport"
+    assert sessions.feed_refcount(BOOK_FEED) == 1
+    assert sessions.feed_refcount(TICKER_FEED) == 0
+    assert sessions._venues["Fake"] is venue  # noqa: SLF001
+    assert venue.feed_count == 1
+    assert not client.closed
+
+    await client.more_books.put(
+        OrderBook(
+            universal_ticker=str(FAKE),
+            bids=[BookLevel(price=Decimal("3"), qty=Decimal("1"))],
+            asks=[BookLevel(price=Decimal("4"), qty=Decimal("1"))],
+        )
+    )
+    await _wait_until(lambda: books >= 2)
+    await _attach_feed(sessions, session_id, TICKER_FEED)
+    await _wait_until(lambda: client.ticker_opens == 2)
+    await asyncio.sleep(0.05)
+    assert len(events) == 2
+    assert factory.built == ["Fake"]
+    assert sessions.feed_refcount(TICKER_FEED) == 1
+    assert venue.feed_count == 2
+    assert venue.has_feed("ticker", FAKE)
 
     stop.set()
     await asyncio.gather(hb, collect, return_exceptions=True)

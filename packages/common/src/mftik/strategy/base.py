@@ -110,10 +110,10 @@ class Strategy:
         (``topic.UniversalTicker``; kline carries its interval in the topic,
         e.g. ``paper.kline_1m.BTCUSDT``).
         on_feed_end — not a subscribed topic. MD fires it once per
-        (session, topic) when that subscription reaches a terminal
-        outcome: the pump died, the venue never connected, the topic
-        is unsupported, or the instrument reached its listed expiry.
-        One ticker with two topics is two calls.
+        (session, topic) when a feed that did open later ends: the
+        pump died, the socket gave up, or the instrument reached its
+        listed expiry. One ticker with two topics is two calls. A
+        feed that cannot be opened fails the attach instead.
 
     Market-data queries — request-reply on ``md.fetch`` (wired):
         self.mds.fetch_klines(ticker, interval, limit=...)
@@ -497,15 +497,16 @@ class Strategy:
         sentence. ``end.expiry`` is set only when the code is
         ``expired``.
 
-        ``down`` means this attempt is over and a later subscribe may
-        rebuild the pump. ``rejected`` and ``expired`` mean
-        subscribing again gets the same answer. Detach and an
-        explicit unsubscribe do not arrive here. A rebuilt session
-        re-attaches its saved feeds, so ``rejected`` and
-        ``symbol_not_found`` are notified again after a restart.
+        ``down`` means this attempt is over. ``rejected`` and
+        ``expired`` mean subscribing again gets the same answer.
+        Detach and an explicit unsubscribe do not arrive here.
+        A feed that cannot be opened at attach fails the attach
+        instead of arriving here. ``reason`` carries the venue's
+        own words, including its code when it sent one.
         """
         await self.log(
             f"{end.topic} {end.state}/{end.code}: {end.reason}",
+            level="warning",
         )
 
     # --- query answers -----------------------------------------------------

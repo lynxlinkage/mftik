@@ -536,7 +536,8 @@ class FeedEnd(InstrumentScoped):
     ``(session, topic)`` on ``md.{session_id}``, and only to a session
     whose lease is still up and that actually held — or just asked
     for — that topic. A session subscribed to two topics on one ticker
-    receives two prints.
+    receives two prints. A feed that cannot be opened at attach fails
+    that RPC instead of arriving here.
 
     ``state`` / ``code``:
 
@@ -544,13 +545,16 @@ class FeedEnd(InstrumentScoped):
       failed. Subscribing the same key again is allowed and fails the
       same way until the instrument exists.
     * ``down`` / ``transport`` — the source iterator ended on its own
-      (the socket gave up after retries). Other feeds on that venue
-      stay up. The connector is dropped once the session has no feeds
-      left, and a later subscribe then opens a new one.
+      (the socket gave up after retries). Only the feeds on that
+      socket are retired. Other sockets on the same connector keep
+      running, and a later subscribe of a retired topic opens a fresh
+      pump on it. The connector is dropped once the session has no
+      feeds left.
     * ``down`` / ``connect`` — the venue client never connected. Same
       recovery as transport.
     * ``down`` / ``error`` — the pump raised something else.
-      ``reason`` names the exception.
+      ``reason`` is the exception text, plus a venue code when the
+      text does not already carry one.
     * ``expired`` / ``expired`` — listed settlement. ``expiry`` is
       that time. A later subscribe is refused and notified again.
     * ``rejected`` / ``unsupported`` — this venue does not publish

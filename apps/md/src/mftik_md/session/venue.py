@@ -28,6 +28,21 @@ from mftik.symbols import SymbolNotFoundError
 logger = logging.getLogger(__name__)
 
 
+def _exc_reason(exc: BaseException) -> str:
+    """The venue's own words, plus a code or label when the text omits them."""
+    detail = str(exc).strip() or type(exc).__name__
+    extra: list[str] = []
+    label = getattr(exc, "label", None)
+    if isinstance(label, str) and label and label not in detail:
+        extra.append(label)
+    code = getattr(exc, "code", None)
+    if code is not None and not isinstance(code, bool) and str(code) not in detail:
+        extra.append(f"code={code}")
+    if extra:
+        return f"{detail} ({', '.join(extra)})"
+    return detail
+
+
 class MarketDataConnector(Protocol):
     """What MD needs of a venue, stated by MD rather than by the venue.
 
@@ -290,16 +305,12 @@ class VenueSession:
                 feed.ticker,
                 exc,
             )
-            outcome = (
-                "down",
-                "symbol_not_found",
-                str(exc) or "symbol not found",
-            )
+            outcome = ("down", "symbol_not_found", _exc_reason(exc))
         except Exception as exc:
             if feed.stop.is_set():
                 return
             logger.exception("MD %s pump failed ticker=%s", feed.topic, feed.ticker)
-            outcome = ("down", "error", f"{type(exc).__name__}: {exc}")
+            outcome = ("down", "error", _exc_reason(exc))
         if outcome is None or not self.take_ended(feed):
             return
         # A sibling whose iterator has also ended is runnable now.

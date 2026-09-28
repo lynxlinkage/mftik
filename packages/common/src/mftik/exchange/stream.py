@@ -43,10 +43,17 @@ class EventStream(AsyncIterator[T]):
         if self._closed:
             return
         self._closed = True
-        try:
-            self._queue.put_nowait(_STOP)
-        except asyncio.QueueFull:
-            pass
+        # A full queue used to drop the stop marker, so a backlogged reader
+        # never saw the end. Make a slot, then put it.
+        while True:
+            try:
+                self._queue.put_nowait(_STOP)
+                break
+            except asyncio.QueueFull:
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    continue
         if self._on_close is not None:
             self._on_close(self)
 

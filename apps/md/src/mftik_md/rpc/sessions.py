@@ -23,6 +23,8 @@ from mftik.protocol import (
     RpcErrorEnvelope,
 )
 
+from mftik_md.session.manager import AttachError
+
 if TYPE_CHECKING:
     from mftik_md.session import SessionManager
 
@@ -48,6 +50,12 @@ async def handle_session_attach(
         result = await sessions.attach(payload)
     except TimeoutError as exc:
         await _error(req, "timeout", str(exc))
+        return
+    except AttachError as exc:
+        logger.warning(
+            "md.session.attach refused code=%s: %s", exc.code, exc
+        )
+        await _error(req, exc.code, str(exc))
         return
     except Exception as exc:
         logger.exception("md.session.attach failed")

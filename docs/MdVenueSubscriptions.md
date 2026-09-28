@@ -939,10 +939,11 @@ the method.
   `Ticker`.
 - **A dead pump that never restarts.** Shipped as `md.feed.end` /
   `on_feed_end` (`docs/MdExpiry.md`). The pump drops its `Feed`, clears
-  the refcount, and tells the sessions that held that topic. The venue
-  connector is dropped once that session has no feeds left, so the next
-  subscribe opens a new one. A feed that is still running is not
-  cancelled. MD does not restart the pump itself.
+  the refcount, and tells the sessions that held that topic. Only the
+  feeds on the socket that gave up are retired. Other sockets on the
+  same connector keep running, and a later subscribe of a retired
+  topic opens a fresh pump on it. The connector is dropped once that
+  session has no feeds left. MD does not restart the pump itself.
 - **Per-identity metrics or a dashboard of the wire ledger.** `held()` is
   enough to answer "why is `@bookTicker` still up" from a REPL.
 - **Cross-socket sharing.** Two sockets to the same host are two ledgers.
