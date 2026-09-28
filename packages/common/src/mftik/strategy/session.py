@@ -32,7 +32,7 @@ class SessionView(Protocol):
     session_id: str
     #: Qualified registry key (``CrossArb``, ``private::Tiny``). Null when
     #: the deploy never recorded one. The kind id Alert matches on — not
-    #: ``session_id`` and not the short ``Strategy.name``.
+    #: ``session_id``. Copied onto the strategy at bind.
     type: str | None
     broker: Broker
     symbols: SymbolClient

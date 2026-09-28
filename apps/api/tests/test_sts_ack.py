@@ -48,7 +48,7 @@ async def a_session(
                 finished_at=START + timedelta(minutes=10),
                 status=status,
                 reason=reason,
-                strategy="twap",
+                type="TwapStrategy",
                 td={},
                 md_ids=[],
                 st_paras={},

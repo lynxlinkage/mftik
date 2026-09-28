@@ -42,7 +42,7 @@ def test_a_tree_without_config_is_ok(tmp_path: Path, capsys) -> None:
 
     assert main(["check", str(dest)]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("ok  tiny  (Tiny)")
+    assert out.startswith("ok  Tiny")
     # Silence about the config would read as "the config is fine". There was none.
     assert "no strategy.yml" in out
     assert "parameters were not" in out
@@ -55,7 +55,7 @@ def test_a_tree_with_yml_runs_on_initialized(tmp_path: Path, capsys) -> None:
 
     assert main(["check", str(dest), str(cfg)]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("ok  tiny  (Tiny)")
+    assert out.startswith("ok  Tiny")
     assert "accepted by on_initialized" in out
     # The digest is what a push sends and what the node stores it under, so
     # it is worth being able to eyeball against `mftik registry ls`.
@@ -118,28 +118,28 @@ def test_declared_third_party_import_is_ok(tmp_path: Path, capsys) -> None:
     )
 
     assert main(["check", str(dest)]) == 0
-    assert "tiny" in capsys.readouterr().out
+    assert "ok  Tiny" in capsys.readouterr().out
 
 
-def test_uppercase_name_is_refused(tmp_path: Path, capsys) -> None:
-    dest = _tree(
-        tmp_path,
-        "from mftik.strategy import Strategy\n"
-        "class Tiny(Strategy):\n    name = \"Tiny\"\n",
-    )
-
-    assert main(["check", str(dest)]) == EXIT_ERROR
-    assert "lowercase" in capsys.readouterr().err
-
-
-def test_missing_name_is_refused(tmp_path: Path, capsys) -> None:
+def test_a_class_name_is_enough(tmp_path: Path, capsys) -> None:
+    """``name = "tiny"`` is not an identity. ``Tiny`` is."""
     dest = _tree(
         tmp_path,
         "from mftik.strategy import Strategy\nclass Tiny(Strategy):\n    pass\n",
     )
 
+    assert main(["check", str(dest)]) == 0
+    assert capsys.readouterr().out.startswith("ok  Tiny")
+
+
+def test_a_non_ascii_class_name_is_refused(tmp_path: Path, capsys) -> None:
+    dest = _tree(
+        tmp_path,
+        "from mftik.strategy import Strategy\nclass Café(Strategy):\n    pass\n",
+    )
+
     assert main(["check", str(dest)]) == EXIT_ERROR
-    assert "has no name" in capsys.readouterr().err
+    assert "Python identifier" in capsys.readouterr().err
 
 
 def test_bad_yaml_is_refused(tmp_path: Path, capsys) -> None:

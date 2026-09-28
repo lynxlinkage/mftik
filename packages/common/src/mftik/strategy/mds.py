@@ -233,7 +233,7 @@ class StrategyMds:
                     **fields,
                 ),
                 type=msg_type,
-                source=f"strategy.{session.strategy.name}",
+                source=f"strategy.{session.strategy.registry_key}",
                 session_id=session.session_id,
             ),
         )

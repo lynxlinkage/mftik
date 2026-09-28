@@ -163,6 +163,24 @@ LoadSession = Callable[[str], Awaitable[Any]]
 StrategyFactory = Callable[[str | None], Strategy]
 
 
+def _row_key(row: Any) -> str | None:
+    """Qualified type when the row has one; the old short name only otherwise."""
+    return getattr(row, "type", None) or getattr(row, "strategy", None)
+
+
+#: Why a row that names no strategy is refused rather than defaulted.
+#: ``resolve(None)`` builds :data:`mftik_sts.impl.DEFAULT_STRATEGY`, and a
+#: session restored onto a strategy nobody deployed would place orders of its
+#: own against that session's accounts. A row reads this way when it was
+#: written before ``0034_strategy_type_key`` — the short name it carries is in
+#: a column this build does not select — so the fix is the migration, not a
+#: guess here.
+_NO_TYPE_REASON = (
+    "the row names no strategy type. It predates "
+    "0034_strategy_type_key, or that migration could not name it"
+)
+
+
 class SessionManager:
     """Owns STS sessions. Each binds exactly one Strategy (1-1)."""
 
@@ -373,8 +391,9 @@ class SessionManager:
         if request.session_id in self._sessions:
             raise KeyError(f"sts session already exists: {request.session_id}")
 
-        ensure_deployable(request.type or request.strategy)
-        strategy = self._strategy_factory(request.strategy)
+        key = request.type or request.strategy
+        ensure_deployable(key)
+        strategy = self._strategy_factory(key)
         session = StsSession(
             session_id=request.session_id,
             broker=self._broker,
@@ -387,7 +406,7 @@ class SessionManager:
             st_paras=dict(request.st_paras),
             heartbeat_interval=self._heartbeat_interval,
             on_exit=self._on_session_exit,
-            strategy_type=request.type,
+            strategy_type=key,
         )
         # Register before start so Strategy.exit() during on_start/on_ready works.
         # Also before persist: the reaper treats "names me and not in
@@ -401,8 +420,7 @@ class SessionManager:
             await self._persist_live(
                 session_id=request.session_id,
                 created_by=request.created_by,
-                strategy=strategy.name,
-                type=request.type,
+                type=key,
                 yaml_text=request.yaml_text,
                 td=dump_td(dict(request.td)),
                 md_ids=dict(request.md),
@@ -425,10 +443,10 @@ class SessionManager:
             await self._publish_status(
                 request.session_id,
                 status=SessionStatus.FAILED.value,
-                strategy=strategy.name,
+                strategy=key,
                 created_by=request.created_by,
                 reason=reason,
-                type=request.type,
+                type=key,
             )
             raise
 
@@ -444,9 +462,9 @@ class SessionManager:
             await self._publish_status(
                 request.session_id,
                 status=SessionStatus.LIVE.value,
-                strategy=strategy.name,
+                strategy=key,
                 created_by=request.created_by,
-                type=request.type,
+                type=key,
             )
         if session_exited:
             status = (
@@ -462,25 +480,25 @@ class SessionManager:
                 "STS session ended during start id=%s strategy=%s status=%s "
                 "reason=%s",
                 request.session_id,
-                strategy.name,
+                key,
                 status,
                 session.exit_reason,
             )
             return StsCreateSessionResult(
                 session_id=request.session_id,
-                strategy=strategy.name,
+                strategy=key,
                 status=status,
                 reason=session.exit_reason,
             )
         logger.info(
             "STS session created id=%s strategy=%s td=%s",
             request.session_id,
-            strategy.name,
+            key,
             list(request.td),
         )
         return StsCreateSessionResult(
             session_id=request.session_id,
-            strategy=strategy.name,
+            strategy=key,
         )
 
     async def _create_via_worker(
@@ -496,16 +514,18 @@ class SessionManager:
         """
         if self._holds(request.session_id):
             raise KeyError(f"sts session already exists: {request.session_id}")
-        ensure_deployable(request.type or request.strategy)
+        key = request.type or request.strategy
+        ensure_deployable(key)
         # Constructed here so an unknown strategy fails before a process
         # exists. ``__init__`` therefore runs in the parent as well as the
-        # worker; a fault in it can still take this process down.
-        strategy = self._strategy_factory(request.strategy)
+        # worker; a fault in it can still take this process down. The
+        # instance is the worker's to keep.
+        self._strategy_factory(key)
         slot = WorkerSlot(
             session_id=request.session_id,
             role="create",
-            strategy_name=strategy.name,
-            type=request.type,
+            strategy_name=key,
+            type=key,
             created_by=request.created_by,
         )
         self._workers[request.session_id] = slot
@@ -515,8 +535,7 @@ class SessionManager:
                 await self._persist_live(
                     session_id=request.session_id,
                     created_by=request.created_by,
-                    strategy=strategy.name,
-                    type=request.type,
+                    type=key,
                     yaml_text=request.yaml_text,
                     td=dump_td(dict(request.td)),
                     md_ids=dict(request.md),
@@ -567,7 +586,7 @@ class SessionManager:
             self._arm_watcher(slot)
             return StsCreateSessionResult(
                 session_id=request.session_id,
-                strategy=slot.strategy_name or strategy.name,
+                strategy=slot.strategy_name or key,
                 status=str(parsed.get("status") or SessionStatus.LIVE.value),
                 reason=(
                     str(parsed["reason"])
@@ -821,12 +840,12 @@ class SessionManager:
                                 if live is not None
                                 else None
                             )
-                            or getattr(row, "strategy", None)
+                            or _row_key(row)
                         ),
                         reason=getattr(row, "reason", None),
                         type=(
                             (live.type if live is not None else None)
-                            or getattr(row, "type", None)
+                            or _row_key(row)
                         ),
                     )
                 )
@@ -1021,17 +1040,17 @@ class SessionManager:
             await self._publish_status(
                 session_id,
                 status=SessionStatus.INTERRUPTED.value,
-                strategy=getattr(row, "strategy", None),
+                strategy=_row_key(row),
                 reason=reason,
                 created_by=getattr(row, "created_by", None),
-                type=getattr(row, "type", None),
+                type=_row_key(row),
             )
             self._orphan_strikes.pop(session_id, None)
             reaped.append(session_id)
             logger.warning(
                 "STS reaped orphaned session id=%s strategy=%s",
                 session_id,
-                getattr(row, "strategy", None),
+                _row_key(row),
             )
         return reaped
 
@@ -1124,8 +1143,8 @@ class SessionManager:
         """
         if slot is None:
             return
-        slot.strategy_name = getattr(row, "strategy", None)
-        slot.type = getattr(row, "type", None)
+        slot.strategy_name = _row_key(row)
+        slot.type = _row_key(row)
         created_by = getattr(row, "created_by", None)
         if created_by is not None:
             slot.created_by = int(created_by)
@@ -1215,11 +1234,18 @@ class SessionManager:
                 session_id,
             )
             return False
-        try:
-            ensure_deployable(
-                getattr(row, "type", None) or getattr(row, "strategy", None)
+        key = _row_key(row)
+        if key is None:
+            # Before the factory, not after: it answers ``None`` with the
+            # default strategy, and "not rebuildable" is then reported
+            # against a class this session never ran.
+            logger.warning(
+                "STS not rebuilding session=%s: %s", session_id, _NO_TYPE_REASON
             )
-            strategy = self._strategy_factory(getattr(row, "strategy", None))
+            return False
+        try:
+            ensure_deployable(key)
+            strategy = self._strategy_factory(key)
         except IncompatibleEnvironment as exc:
             logger.warning(
                 "STS not rebuilding session=%s: incompatible environment "
@@ -1247,7 +1273,7 @@ class SessionManager:
                 "STS not rebuilding session=%s: no strategy named %r in "
                 "this build",
                 session_id,
-                getattr(row, "strategy", None),
+                key,
             )
             return False
         except Exception:
@@ -1257,7 +1283,7 @@ class SessionManager:
                 "STS cannot rebuild session=%s: strategy %r would not "
                 "build",
                 session_id,
-                getattr(row, "strategy", None),
+                key,
             )
             return False
         if not strategy.rebuildable:
@@ -1267,7 +1293,7 @@ class SessionManager:
             logger.warning(
                 "STS not rebuilding session=%s: %s does not support it",
                 session_id,
-                strategy.name,
+                strategy.registry_key,
             )
             return False
         if self._bump_rebuild_count is not None:
@@ -1291,7 +1317,7 @@ class SessionManager:
         logger.info(
             "STS rebuilt session=%s strategy=%s",
             session_id,
-            getattr(row, "strategy", None),
+            key,
         )
         return True
 
@@ -1344,8 +1370,8 @@ class SessionManager:
             )
             return False
         slot.started = True
-        slot.strategy_name = str(parsed.get("strategy") or strategy.name)
-        slot.type = getattr(row, "type", None)
+        slot.strategy_name = str(parsed.get("strategy") or _row_key(row) or "")
+        slot.type = _row_key(row)
         slot.created_by = int(getattr(row, "created_by", 0) or 0)
         self._arm_watcher(slot)
         self._watch_rebuild_settle(session_id, slot)
@@ -1366,7 +1392,15 @@ class SessionManager:
         row = await self._find_interrupted(session_id)
         if row is None:
             raise RuntimeError(f"no interrupted session {session_id}")
-        strategy = self._strategy_factory(getattr(row, "strategy", None))
+        key = _row_key(row)
+        if key is None:
+            # The parent refuses this row too. Said again here because the
+            # worker is also reached by a rebuild the parent never planned —
+            # and because defaulting is the one thing that must not happen.
+            raise RuntimeError(
+                f"cannot rebuild session {session_id}: {_NO_TYPE_REASON}"
+            )
+        strategy = self._strategy_factory(key)
         try:
             await self._rebuild_one(row, strategy)
         except Exception:
@@ -1374,7 +1408,7 @@ class SessionManager:
             raise
         return StsCreateSessionResult(
             session_id=session_id,
-            strategy=strategy.name,
+            strategy=strategy.registry_key,
         )
 
     async def _unwind_failed_rebuild(self, session_id: str) -> None:
@@ -1525,7 +1559,7 @@ class SessionManager:
             heartbeat_interval=self._heartbeat_interval,
             on_exit=self._on_session_exit,
             remember=self._remember_fact,
-            strategy_type=getattr(row, "type", None),
+            strategy_type=_row_key(row),
         )
         self._sessions[session_id] = session
         self._serve_control(session_id)

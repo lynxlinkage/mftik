@@ -1,12 +1,11 @@
 """Strategy implementations loaded by the STS runtime.
 
-Renaming one of these is a migration. Both spellings registered below are
-stored in the database — ``sts_sessions.strategy`` keeps the short ``name``
-and ``strategies.type`` keeps the class name — so a rename that touches only
-this file leaves rows naming a strategy nothing will answer to again, and the
-rebuild scan can do nothing with them but skip them. See
-``0020_macd_dollar_rename``, which is the one that had to be written after the
-fact.
+A bundled strategy is registered under its class name (``NoopStrategy``).
+A registry tree is registered under its qualified key (``private::Tiny``).
+Rows written before that was the only key may still carry a short name in
+``type`` null and a ``strategy`` attribute on the in-memory row; the rebuild
+scan maps the bundled ones. Renaming a class is a migration — see
+``0034_strategy_type_key``.
 """
 
 from __future__ import annotations
@@ -26,14 +25,13 @@ from mftik_sts.impl.oco import OneCancelOther
 from mftik_sts.impl.tape_keeper import TapeKeeper
 from mftik_sts.impl.twap import TwapStrategy
 
-# Keys: short ``name`` (e.g. noop) and class ``__name__`` (e.g. NoopStrategy).
+# Keys: class ``__name__`` for bundled strategies, qualified type for the rest.
 _REGISTRY: dict[str, type[Strategy]] = {}
-DEFAULT_STRATEGY = NoopStrategy.name
+DEFAULT_STRATEGY = NoopStrategy.__name__
 
 
 def register(cls: type[Strategy]) -> type[Strategy]:
-    """Register a bundled strategy class by ``name`` and ``__name__``."""
-    _REGISTRY[cls.name] = cls
+    """Register a bundled strategy class by its class name."""
     _REGISTRY[cls.__name__] = cls
     return cls
 
@@ -41,8 +39,8 @@ def register(cls: type[Strategy]) -> type[Strategy]:
 def register_qualified(cls: type[Strategy], key: str) -> type[Strategy]:
     """Register a registry tree under a qualified type key only.
 
-    Bundled strategies keep the short keys. A pulled copy of the same class
-    must not also claim ``HelloStrategy``, or the second origin would vanish.
+    The short class name is not also registered. A pulled copy of the same
+    class must not claim ``Tiny``, or the second origin would vanish.
     """
     _REGISTRY[key] = cls
     return cls
@@ -105,16 +103,6 @@ def resolve_class(name: str | None) -> type[Strategy]:
     return cls
 
 
-def known_strategies() -> list[str]:
-    """Return distinct short names (prefer ``Strategy.name`` over class name)."""
-    return sorted({cls.name for cls in _REGISTRY.values()})
-
-
-def known_strategy_types() -> list[str]:
-    """Return distinct class type names for strategy.yml ``sts.type``."""
-    return sorted({cls.__name__ for cls in _REGISTRY.values()})
-
-
 def load_local_registry(store: RegistryStore | None = None) -> list[str]:
     """Import ``local/`` and ``pulled/`` trees under qualified type keys.
 
@@ -156,13 +144,12 @@ def load_local_registry(store: RegistryStore | None = None) -> list[str]:
                 rec.type,
             )
             continue
-        if cls.name in _BUILTIN_KEYS or cls.__name__ in _BUILTIN_KEYS:
+        if cls.__name__ in _BUILTIN_KEYS:
             logger.error(
-                "skipped %s strategy %s: name %r / type %r collides with "
+                "skipped %s strategy %s: type %r collides with "
                 "a bundled strategy",
                 rec.origin,
                 rec.name,
-                cls.name,
                 cls.__name__,
             )
             continue

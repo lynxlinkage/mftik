@@ -179,7 +179,7 @@ async def test_connect_presents_the_key_and_pulls(tmp_path: Path) -> None:
             client=client,
         )
 
-    assert [rec.name for rec in result.pulled] == ["tiny"]
+    assert [rec.name for rec in result.pulled] == ["Tiny"]
     assert mine.get_remote("node1").token == "mftik_rk_secret"
     # /info without, everything else with.
     assert ("/registry/v1/info", None) in seen

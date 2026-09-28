@@ -33,7 +33,7 @@ def _ledger(broker: Broker, *api_ids: int) -> StrategyLedger:
         broker=broker,
         td_api_ids=list(api_ids),
         session_id="sts-1",
-        strategy=SimpleNamespace(name="test"),
+        strategy=SimpleNamespace(name="test", registry_key="test"),
     )
     ledger.bind(SimpleNamespace(session=session))
     return ledger

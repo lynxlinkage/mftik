@@ -134,17 +134,17 @@ def test_the_scaffold_passes_its_own_check(tmp_path: Path, a_node, capsys) -> No
     assert "accepted by on_initialized" in capsys.readouterr().out
 
 
-def test_the_directory_name_becomes_a_legal_strategy_name(
+def test_the_directory_name_becomes_the_class_name(
     tmp_path: Path, a_node
 ) -> None:
-    """The registry wants [a-z][a-z0-9_]*; a directory is not asked to be one."""
+    """The class name is the registry key. A directory is not asked to be one."""
     a_node(Node_())
     root = tmp_path / "My-First Strategy"
 
     assert main(["init", str(root)]) == 0
 
     source = (root / "strategy.py").read_text()
-    assert 'name = "my_first_strategy"' in source
+    assert "name =" not in source
     assert "class MyFirstStrategy(Strategy):" in source
 
 
@@ -154,7 +154,9 @@ def test_the_name_can_be_given(tmp_path: Path, a_node) -> None:
 
     main(["init", str(root), "--name", "macd_dollar"])
 
-    assert 'name = "macd_dollar"' in (root / "strategy.py").read_text()
+    source = (root / "strategy.py").read_text()
+    assert "class MacdDollar(Strategy):" in source
+    assert "name =" not in source
 
 
 def test_btcusdt_is_preferred_so_a_first_run_is_legible(

@@ -108,7 +108,7 @@ async def status_replay() -> list[str]:
             StsSessionStatus(
                 session_id=row.session_id,
                 status=row.status,
-                strategy=row.strategy,
+                strategy=row.type,
                 reason=row.reason,
                 created_by=row.created_by,
                 finished_at=_epoch(row.finished_at),

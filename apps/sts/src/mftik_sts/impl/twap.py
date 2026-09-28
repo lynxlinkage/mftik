@@ -91,8 +91,6 @@ def _refusal_reason(code: int | str, reason: str) -> str:
 
 
 class TwapStrategy(Strategy):
-    name = "twap"
-
     def __init__(self) -> None:
         super().__init__()
         self._tick_token: TimerToken | None = None

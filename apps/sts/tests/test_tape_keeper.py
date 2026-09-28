@@ -92,7 +92,7 @@ def test_report_interval_must_be_positive() -> None:
 
 
 def test_it_is_registered_and_catalogued() -> None:
-    assert isinstance(resolve("tape_keeper"), TapeKeeper)
+    assert isinstance(resolve("TapeKeeper"), TapeKeeper)
     assert resolve_class("TapeKeeper") is TapeKeeper
     template = strategy_catalog.get_template("TapeKeeper")
     assert template is not None

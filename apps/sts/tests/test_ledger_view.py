@@ -46,7 +46,7 @@ def _ledger(broker: Broker, *api_ids: int) -> StrategyLedger:
         td_api_ids=list(api_ids),
         td_sole=td_sole,
         session_id="s-ledger",
-        strategy=SimpleNamespace(name="quiet"),
+        strategy=SimpleNamespace(name="quiet", registry_key="quiet"),
     )
     ledger.bind(SimpleNamespace(session=session))
     return ledger

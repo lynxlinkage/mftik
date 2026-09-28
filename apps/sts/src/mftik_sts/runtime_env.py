@@ -115,11 +115,15 @@ def ensure_deployable(
 
 
 def _record_for(store: RegistryStore, type_name: str):
+    """The tree a qualified key names, or None.
+
+    One lookup, because there is one way to name a tree. An unqualified
+    class name is not a second way: only bundled strategies answer to one,
+    and those returned above. A tree matched on its bare class name here
+    would have its extras checked and then fail to resolve anyway.
+    """
     for rec in store.list_all():
         if qualify(rec.origin, rec.type) == type_name:
-            return rec
-    for rec in store.list_all():
-        if rec.type == type_name or rec.name == type_name:
             return rec
     return None
 

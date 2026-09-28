@@ -89,7 +89,7 @@ async def test_the_lifecycle_is_announced_as_snapshots(broker: Broker) -> None:
     for e in events:
         assert "paused" not in e["payload"]
         assert e["payload"]["session_id"] == "st-1"
-        assert e["payload"]["strategy"] == "idle_status"
+        assert e["payload"]["strategy"] == "private::Tiny"
         assert e["payload"]["type"] == "private::Tiny"
         assert e["payload"]["created_by"] == 9
         assert e["session_id"] == "st-1"

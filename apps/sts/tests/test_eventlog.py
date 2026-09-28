@@ -315,7 +315,7 @@ async def test_session_records_lifecycle_and_market_data(
     assert md[0]["source"] == "md"
 
     start = _events(records, "lifecycle")[0]
-    assert start["strategy"] == "eventlog_probe"
+    assert start["strategy"] == "ProbeStrategy"
     assert start["md"] == ["ticker.Paper_Spot_BTCUSDT"]
 
 

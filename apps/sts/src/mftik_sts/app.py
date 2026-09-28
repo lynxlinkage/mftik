@@ -22,6 +22,7 @@ from mftik import (
 from mftik.broker import Broker
 from mftik.protocol import STS_SESSION_CREATE
 from mftik.strategy.artifacts import get_store
+from mftik_db.schema import SchemaTooOld, require_sts_schema
 
 from mftik_sts import db as sts_db
 from mftik_sts.rpc import dispatch
@@ -206,7 +207,86 @@ async def _rebuild_on_boot(sessions: SessionManager) -> None:
         logger.info("STS found no interrupted sessions to rebuild")
 
 
+#: How long boot waits for the database to say it has run the migrations this
+#: build needs, before giving up and exiting.
+#:
+#: Bounded, and then fatal. The compose stack starts STS beside Postgres and
+#: the one-shot migration step without ordering them, so "not listening yet",
+#: "no tables yet" and "one revision short" are all states a cold start sees
+#: for its first seconds — each of which becomes the right answer on its own,
+#: given a moment. None of them is a reason to serve: the rebuild scan reads
+#: every interrupted row once, at boot, and a scan that ran against the old
+#: schema is not repeated when the migration lands.
+#:
+#: Wide enough for Postgres to pass its healthcheck (up to ~50s in that
+#: stack) and for a cold database to run the whole migration history behind
+#: it. ``STS_SCHEMA_WAIT_S`` widens it for a node where that takes longer.
+SCHEMA_WAIT_S = 180.0
+SCHEMA_WAIT_ENV = "STS_SCHEMA_WAIT_S"
+_SCHEMA_RETRY_S = 1.0
+_SCHEMA_RETRY_MAX_S = 15.0
+
+
+def _schema_wait_s() -> float:
+    raw = os.getenv(SCHEMA_WAIT_ENV, "").strip()
+    if not raw:
+        return SCHEMA_WAIT_S
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "ignoring %s=%r — not a number, using %.0fs",
+            SCHEMA_WAIT_ENV,
+            raw,
+            SCHEMA_WAIT_S,
+        )
+        return SCHEMA_WAIT_S
+
+
+async def schema_is_current(budget_s: float | None = None) -> bool:
+    """Wait for a database this build may serve. False means do not start.
+
+    The deploy this build belongs to has an order, and this is the step that
+    catches it being run out of it: a session row written before
+    ``0034_strategy_type_key`` keeps its strategy's short name in a column
+    this build does not read, so every one of them reads as a row naming no
+    strategy. Refusing to start is the only answer that leaves those rows for
+    the migration to fix.
+
+    Every wait is logged with what is wrong, so an operator who ran the steps
+    in the wrong order reads the reason in the first second rather than at
+    the end of the window. Returning False rather than raising: the caller
+    turns it into an exit code, and a traceback would say less than the line
+    already logged.
+    """
+    budget = _schema_wait_s() if budget_s is None else budget_s
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    delay = _SCHEMA_RETRY_S
+    while True:
+        try:
+            await require_sts_schema()
+            return True
+        except SchemaTooOld as exc:
+            problem = str(exc)
+        except Exception as exc:
+            problem = f"the database could not be read: {exc}"
+        left = deadline - loop.time()
+        if left <= 0:
+            logger.error(
+                "STS will not start: %s (waited %.0fs)", problem, budget
+            )
+            return False
+        logger.warning(
+            "STS is waiting for the database: %s (%.0fs left)", problem, left
+        )
+        await asyncio.sleep(min(delay, left))
+        delay = min(delay * 2, _SCHEMA_RETRY_MAX_S)
+
+
 async def amain() -> bool:
+    if not await schema_is_current():
+        return False
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

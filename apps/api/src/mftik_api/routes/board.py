@@ -162,7 +162,7 @@ def _summary(
     nothing_to_settle = not instruments and fills == 0
     return BoardSession(
         session_id=row.session_id,
-        strategy=row.strategy,
+        strategy=row.type,
         status=row.status,
         reason=row.reason,
         created_at=created,

@@ -32,7 +32,7 @@ from mftik.protocol import (
     Topics,
 )
 from mftik.strategy import Strategy
-from mftik_sts.impl import register
+from mftik_sts.impl import _REGISTRY, register, register_qualified, resolve
 from mftik_sts.session import SessionManager
 
 
@@ -855,5 +855,163 @@ async def test_an_unpinned_row_whose_derivation_is_not_unique_stays_interrupted(
     try:
         assert await manager.rebuild_interrupted() == []
         assert store.rows["aa001b"].status == "interrupted"
+    finally:
+        await manager.close_all()
+
+
+class Probe(Strategy):
+    """Registered only as ``private::Probe``. The short name is not a key."""
+
+    rebuildable = True
+
+
+class Held(Strategy):
+    """Bundled-style registration: the class name is the only key."""
+
+    rebuildable = True
+
+
+def _qualified_manager(broker: Broker, store: FakeStsStore) -> SessionManager:
+    return SessionManager(
+        broker,
+        heartbeat_interval=0.05,
+        strategy_factory=resolve,
+        persist_live=store.persist_live,
+        mark_done=store.mark_finished,
+        mark_live=store.mark_live,
+        list_db_sessions=store.list_sessions,
+        load_session=lambda session_id: _load(store, session_id),
+        bump_rebuild_count=store.bump_rebuild_count,
+        reset_rebuild_count=store.reset_rebuild_count,
+    )
+
+
+async def _load(store: FakeStsStore, session_id: str):
+    return store.rows.get(session_id)
+
+
+@pytest.mark.asyncio
+async def test_a_private_strategy_rebuilds_by_its_qualified_key(
+    broker: Broker,
+) -> None:
+    """The row's short name is not registered. ``type`` is the key that is."""
+    before = dict(_REGISTRY)
+    register_qualified(Probe, "private::Probe")
+    store = FakeStsStore()
+    store.seed("aa00c1", strategy="pr130_probe", type="private::Probe")
+    manager = _qualified_manager(broker, store)
+    try:
+        assert await manager.rebuild_interrupted() == ["aa00c1"]
+        session = manager.get("aa00c1")
+        assert session is not None
+        assert session.strategy_name == "private::Probe"
+        assert session.strategy.registry_key == "private::Probe"
+        assert session.type == "private::Probe"
+    finally:
+        await manager.close_all()
+        _REGISTRY.clear()
+        _REGISTRY.update(before)
+
+
+@pytest.mark.asyncio
+async def test_adopt_interrupted_uses_the_qualified_key(broker: Broker) -> None:
+    before = dict(_REGISTRY)
+    register_qualified(Probe, "private::Probe")
+    store = FakeStsStore()
+    store.seed("aa00c2", strategy="pr130_probe", type="private::Probe")
+    manager = _qualified_manager(broker, store)
+    try:
+        result = await manager.adopt_interrupted("aa00c2")
+        assert result.strategy == "private::Probe"
+        session = manager.get("aa00c2")
+        assert session is not None
+        assert session.strategy.registry_key == "private::Probe"
+    finally:
+        await manager.close_all()
+        _REGISTRY.clear()
+        _REGISTRY.update(before)
+
+
+@pytest.mark.asyncio
+async def test_type_null_bundled_row_uses_the_strategy_column(
+    broker: Broker,
+) -> None:
+    """``type`` null falls back to the old column. The class name still resolves.
+
+    A short name such as ``chase`` does not: it is not registered, and the
+    migration is what rewrites live rows onto the class name before this
+    process starts.
+    """
+    before = dict(_REGISTRY)
+    register(Held)
+    store = FakeStsStore()
+    store.seed("aa00c3", strategy="Held", type=None)
+    store.seed("aa00c4", strategy="chase", type=None)
+    manager = _qualified_manager(broker, store)
+    try:
+        assert await manager.rebuild_interrupted() == ["aa00c3"]
+        session = manager.get("aa00c3")
+        assert session is not None
+        assert session.strategy_name == "Held"
+        assert store.rows["aa00c4"].status == "interrupted"
+        assert store.rows["aa00c4"].rebuild_count == 0
+    finally:
+        await manager.close_all()
+        _REGISTRY.clear()
+        _REGISTRY.update(before)
+
+
+@pytest.mark.asyncio
+async def test_a_row_naming_no_strategy_is_refused_not_defaulted(
+    broker: Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Both columns null. ``resolve(None)`` would build the default strategy.
+
+    That is the shape of every live row written before
+    ``0034_strategy_type_key``: the short name it carries is in a column this
+    build does not select. Restoring it as NoopStrategy would put a strategy
+    nobody deployed in front of the session's accounts.
+    """
+    store = FakeStsStore()
+    store.seed("aa00c5", strategy=None, type=None)
+    built: list[str | None] = []
+
+    def factory(name: str | None) -> Strategy:
+        built.append(name)
+        return Probe()
+
+    manager = SessionManager(
+        broker,
+        heartbeat_interval=0.05,
+        strategy_factory=factory,
+        mark_done=store.mark_finished,
+        mark_live=store.mark_live,
+        list_db_sessions=store.list_sessions,
+        load_session=lambda session_id: _load(store, session_id),
+        bump_rebuild_count=store.bump_rebuild_count,
+    )
+    try:
+        with caplog.at_level(logging.WARNING, logger="mftik_sts.session.manager"):
+            assert await manager.rebuild_interrupted() == []
+        assert built == []
+        assert manager.get("aa00c5") is None
+        assert store.rows["aa00c5"].status == "interrupted"
+        assert store.rows["aa00c5"].rebuild_count == 0
+        assert "names no strategy type" in caplog.text
+    finally:
+        await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_adopt_refuses_a_row_naming_no_strategy(broker: Broker) -> None:
+    """The worker says the same thing, and does not start a session either."""
+    store = FakeStsStore()
+    store.seed("aa00c6", strategy=None, type=None)
+    manager = _qualified_manager(broker, store)
+    try:
+        with pytest.raises(RuntimeError, match="names no strategy type"):
+            await manager.adopt_interrupted("aa00c6")
+        assert manager.get("aa00c6") is None
+        assert store.rows["aa00c6"].status == "interrupted"
     finally:
         await manager.close_all()

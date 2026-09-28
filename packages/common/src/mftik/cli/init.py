@@ -49,8 +49,6 @@ from mftik.strategy import Strategy
 
 
 class {cls}(Strategy):
-    name = "{name}"
-
     @classmethod
     def on_initialized(cls, params: Any) -> dict[str, Any]:
         """Validate ``sts:`` before the session starts.
@@ -117,7 +115,7 @@ def init(args: argparse.Namespace) -> int:
 
     root.mkdir(parents=True, exist_ok=True)
     strategy_py.write_text(
-        _STRATEGY_PY.format(title=cls, cls=cls, name=name), encoding="utf-8"
+        _STRATEGY_PY.format(title=cls, cls=cls), encoding="utf-8"
     )
     strategy_yml.write_text(
         _STRATEGY_YML.format(td=_quoted(account), md=_quoted(feed)),
