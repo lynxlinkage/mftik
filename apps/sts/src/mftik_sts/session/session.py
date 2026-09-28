@@ -12,7 +12,7 @@ from mftik.exchange.models import (
     AggTrade,
     Balance,
     BestQuote,
-    Expiry,
+    FeedEnd,
     Fill,
     FundingRate,
     Greeks,
@@ -31,7 +31,7 @@ from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_BESTQUOTE_RESULT,
-    MD_EXPIRY,
+    MD_FEED_END,
     MD_FUNDING_HISTORY_RESULT,
     MD_FUNDING_RATE,
     MD_GREEKS,
@@ -103,7 +103,7 @@ ExitHandler = Callable[[str, str, bool], Awaitable[None]]
 RememberHandler = Callable[[str, str, str], Awaitable[None]]
 
 #: MD message type → (strategy hook, payload model). Feed topics plus
-#: control events MD publishes on ``md.{session_id}`` (``md.expiry``);
+#: control events MD publishes on ``md.{session_id}`` (``md.feed.end``);
 #: anything else on that stream is logged and dropped.
 MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     MD_TICKER: ("on_ticker", Ticker),
@@ -116,7 +116,7 @@ MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     MD_FUNDING_RATE: ("on_funding_rate", FundingRate),
     MD_OPEN_INTEREST: ("on_open_interest", OpenInterest),
     MD_GREEKS: ("on_greeks", Greeks),
-    MD_EXPIRY: ("on_expiry", Expiry),
+    MD_FEED_END: ("on_feed_end", FeedEnd),
 }
 
 #: Query result type → (strategy hook, payload model). Separate from

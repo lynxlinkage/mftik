@@ -745,15 +745,15 @@ class GateFuturesWebSocket:
             if self._closing:
                 return
             if not self.reconnect:
-                logger.warning("gate.futures connection lost: %s", reason)
-                self._fail_streams()
+                text = f"gate.futures connection lost: {reason}"
+                logger.warning("%s", text)
+                self._fail_streams(text)
                 return
             retries += 1
             if 0 <= self.max_retries < retries:
-                logger.error(
-                    "gate.futures giving up after %s reconnect attempts", retries
-                )
-                self._fail_streams()
+                text = f"gate.futures giving up after {retries} reconnect attempts"
+                logger.error("%s", text)
+                self._fail_streams(text)
                 return
             delay = min(
                 self.retry_backoff * (2 ** (retries - 1)), self.max_retry_backoff
@@ -864,13 +864,13 @@ class GateFuturesWebSocket:
         await self._ledger.acquire(keys, send)
         logger.info("gate.futures resubscribed %s identities", len(keys))
 
-    def _fail_streams(self) -> None:
+    def _fail_streams(self, reason: str | None = None) -> None:
         self._releaser.cancel()
         self._connected = False
         self._logged_in = False
         self._ledger.clear()
         for sub in list(self._subs):
-            sub.stream.close()
+            sub.stream.close(None if sub.private else reason)
         self._subs.clear()
         self._releaser.cancel()
 

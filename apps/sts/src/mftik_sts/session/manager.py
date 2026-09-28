@@ -63,6 +63,15 @@ from mftik_sts.spawn import (
 
 logger = logging.getLogger(__name__)
 
+
+class AttachRefused(RuntimeError):
+    """The domain answered and will not open this attach.
+
+    Any error reply other than ``unavailable`` or ``timeout``. Those
+    two mean the domain is not up yet, so they are retried; giving up
+    on them leaves the session interrupted for the next boot.
+    """
+
 #: Why a session in ``interrupted`` stopped. A constant because it is the
 #: same event for every session in the process, not a per-session diagnosis.
 #: How long a shutdown waits for control loops to notice they were asked to
@@ -1590,10 +1599,20 @@ class SessionManager:
                 await self._attach_md(session_id, created_by, md)
             for api_id in td_api_ids:
                 await self._attach_td(session_id, created_by, api_id)
+        except AttachRefused as exc:
+            # The domain is up and refused the feeds. Retrying the
+            # rebuild would fail the same way.
+            await self.close(
+                session_id,
+                status=SessionStatus.FAILED.value,
+                reason=f"rebuild failed to attach: {exc}",
+            )
+            raise
         except Exception:
             # A session with half its attaches is worse than one still marked
             # interrupted: it heartbeats and looks alive while blind to a feed
-            # or an account. Put it back for the next boot to try.
+            # or an account. Put it back for the next boot to try. This is
+            # the timeout path: MD or TD never answered inside the budget.
             await self.close(
                 session_id,
                 status=SessionStatus.INTERRUPTED.value,
@@ -1745,6 +1764,12 @@ class SessionManager:
                     return reply
                 err = RpcError.model_validate(reply.payload)
                 last = RuntimeError(f"{err.code}: {err.message}")
+                # The domain is up and refused. Retrying the rebuild
+                # would fail the same way, including a TD ``attach_failed``.
+                # ``unavailable`` and ``timeout`` stay in the loop: that
+                # is the domain not answering yet.
+                if err.code not in {"unavailable", "timeout"}:
+                    raise AttachRefused(str(last))
             left = deadline - asyncio.get_running_loop().time()
             logger.warning(
                 "STS rebuild attach %s failed (attempt %d, %.0fs left): %s",

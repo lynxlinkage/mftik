@@ -529,25 +529,50 @@ class Greeks(InstrumentScoped):
     ts: float = Field(default_factory=_ts)
 
 
-class Expiry(InstrumentScoped):
-    """Listed instrument reached settlement. MD dropped every feed on it.
+class FeedEnd(InstrumentScoped):
+    """One feed subscription reached a terminal outcome.
 
     Not a subscribed topic and not listed in ``md_ids``. One print per
-    instrument **per MD process**, to every session that held a feed
-    on this ticker (or asked for one after it had already settled),
-    then those feeds stay down — a later attach or ``md.subscribe``
-    is refused and notified rather than reopened. A new MD process
-    looks the listed time up again and will not reopen a settled
-    book; the rebuilt session may be notified once more.
-    ``topics`` names the product keys that were cut (``ticker``,
-    ``greeks``, ``kline_1h``, …). ``expiry`` is the listed settlement
-    time from the symbol plane.
+    ``(session, topic)`` on ``md.{session_id}``, and only to a session
+    whose lease is still up and that actually held — or just asked
+    for — that topic. A session subscribed to two topics on one ticker
+    receives two prints. A feed that cannot be opened at attach fails
+    that RPC instead of arriving here.
 
-    Spot and perpetual books have no expiry and never produce this.
+    ``state`` / ``code``:
+
+    * ``down`` / ``symbol_not_found`` — the pump's symbol resolve
+      failed. Subscribing the same key again is allowed and fails the
+      same way until the instrument exists.
+    * ``down`` / ``transport`` — the source iterator ended on its own
+      (the socket gave up after retries). ``reason`` is the socket's
+      own text when it has one, otherwise ``source ended``. Only the
+      feeds on that socket are retired. Other sockets on the same
+      connector keep running, and a later subscribe of a retired
+      topic opens a fresh pump on it. The connector is dropped once
+      the session has no feeds left.
+    * ``down`` / ``connect`` — the venue client never connected. Same
+      recovery as transport.
+    * ``down`` / ``error`` — the pump raised something else.
+      ``reason`` is the exception text, plus a venue code when the
+      text does not already carry one.
+    * ``expired`` / ``expired`` — listed settlement. ``expiry`` is
+      that time. A later subscribe is refused and notified again.
+    * ``rejected`` / ``unsupported`` — this venue does not publish
+      the topic. Subscribing again gets the same answer.
+
+    ``down`` means this attempt is over and a new subscribe may
+    rebuild the pump. ``rejected`` and ``expired`` mean subscribing
+    again gets the same answer. ``stop_feed`` and detach produce no
+    print. A rebuilt STS re-attaches the feeds it had, so a
+    ``rejected`` or ``symbol_not_found`` feed is notified again.
     """
 
-    expiry: float
-    topics: list[str]
+    topic: str
+    state: str
+    code: str
+    reason: str
+    expiry: float | None = None
     ts: float = Field(default_factory=_ts)
 
 
@@ -698,8 +723,7 @@ class PlaceOrderRequest(InstrumentScoped):
         # adapter discover it as a rejection.
         if self.tif is TimeInForce.POST_ONLY and self.type is not OrderType.LIMIT:
             raise ValueError(
-                f"{TimeInForce.POST_ONLY} requires a limit order, "
-                f"got {self.type}"
+                f"{TimeInForce.POST_ONLY} requires a limit order, got {self.type}"
             )
         if self.qty is not None and self.qty <= 0:
             raise ValueError(f"qty must be positive, got {self.qty}")

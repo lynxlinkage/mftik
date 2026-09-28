@@ -386,7 +386,9 @@ async def _merge(**streams: EventStream[Any]) -> AsyncIterator[tuple[str, Any]]:
 
     Needed because the ticker is assembled from two of Binance's feeds. On
     dapi they share one socket; reading them in sequence would still block
-    the quote behind the stats.
+    the quote behind the stats. A stream that closes with a reason ends
+    the whole feed with that reason, rather than leaving it running on
+    the subscription that is still up.
     """
     pending: dict[asyncio.Task[Any], tuple[str, EventStream[Any]]] = {}
     try:

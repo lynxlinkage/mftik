@@ -50,8 +50,8 @@ V2 and V3 did not contradict the constants this doc assumed for identity.
 
 Dated futures and options carry `SymbolInfo.expiry`. MD drops every
 feed on that ticker at the listed time and notifies STS with
-`md.expiry` → `on_expiry`. That is not a subscribed topic; see
-`docs/MdExpiry.md`.
+`md.feed.end` (`state=expired`) → `on_feed_end`, one print per topic.
+That is not a subscribed topic; see `docs/MdExpiry.md`.
 
 A live place/cancel pass was **not** run in this environment (no test
 key). Public instruments / tickers were probed against

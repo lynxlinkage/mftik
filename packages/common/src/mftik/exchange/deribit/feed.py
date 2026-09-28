@@ -377,10 +377,13 @@ class DeribitPublicStream(DeribitSocket):
         ]
         if not doomed:
             return False
+        names = ", ".join(
+            channel for sub in doomed for channel in sub.channels
+        )
         logger.warning(
             "%s dropping %s: a frame exceeded the websocket size limit",
             self.name,
-            ", ".join(channel for sub in doomed for channel in sub.channels),
+            names,
         )
         gone = {id(sub) for sub in doomed}
         self._subs = [sub for sub in self._subs if id(sub) not in gone]
@@ -389,7 +392,11 @@ class DeribitPublicStream(DeribitSocket):
             if key not in live:
                 self._books.pop(key, None)
         for sub in doomed:
-            sub.stream.close()
+            channels = ", ".join(sub.channels)
+            sub.stream.close(
+                f"{self.name} dropping {channels}: "
+                "a frame exceeded the websocket size limit"
+            )
         return True
 
     async def _restore(self) -> None:
@@ -426,8 +433,9 @@ class DeribitPublicStream(DeribitSocket):
     def _teardown(self) -> None:
         self._releaser.cancel()
         self._ledger.clear()
+        reason = getattr(self, "_end_reason", None)
         for sub in list(self._subs):
-            sub.stream.close()
+            sub.stream.close(reason)
         self._subs.clear()
         self._books.clear()
         self._releaser.cancel()

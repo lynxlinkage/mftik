@@ -1522,10 +1522,10 @@ MD_LIQUIDATION = "md.liquidation"
 MD_FUNDING_RATE = "md.funding_rate"
 MD_OPEN_INTEREST = "md.open_interest"
 MD_GREEKS = "md.greeks"
-#: Instrument reached its listed expiry. Not a subscribed topic — MD
-#: publishes one on ``md.{session_id}`` after dropping every feed on
-#: that ticker, and will not reopen them.
-MD_EXPIRY = "md.expiry"
+#: A feed subscription reached a terminal outcome. Not a subscribed
+#: topic — MD publishes one per ``(session, topic)`` on
+#: ``md.{session_id}`` for the sessions that held that topic.
+MD_FEED_END = "md.feed.end"
 MD_SUBSCRIBE = "md.subscribe"
 MD_UNSUBSCRIBE = "md.unsubscribe"
 MD_DETACH = "md.detach"

@@ -23,6 +23,7 @@ from mftik.exchange.deribit.protocol import (
 from mftik.exchange.deribit.public import DeribitPublicClient, venue_interval
 from mftik.exchange.deribit.rest import DeribitPublicRest
 from mftik.exchange.intervals import InvalidIntervalError
+from mftik.exchange.stream import SourceEnded
 from mftik.exchange.tickers import Category, UniversalTicker
 
 SPOT = UniversalTicker.parse("Deribit_Spot_BTCUSDC")
@@ -577,7 +578,7 @@ async def test_an_oversized_full_book_is_dropped_and_other_feeds_stay(
         )
         update = await asyncio.wait_for(tickers.__anext__(), 2)
         assert update.instrument_name == "ETH_USDC"
-        with pytest.raises(StopAsyncIteration):
+        with pytest.raises(SourceEnded, match="websocket size limit"):
             await asyncio.wait_for(books.__anext__(), 0.5)
         seen = deribit_public.connections
         await asyncio.sleep(0.25)

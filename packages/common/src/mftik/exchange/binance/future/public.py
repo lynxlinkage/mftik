@@ -423,7 +423,9 @@ async def _merge(**streams: EventStream[Any]) -> AsyncIterator[tuple[str, Any]]:
 
     Ends when every stream has, and cancels the reads still outstanding on the
     way out — including when the consumer stops early, which is how MD ends a
-    feed.
+    feed. A stream that closes with a reason (one of the two sockets gave
+    up) ends the whole feed with that reason, rather than leaving it
+    running on the socket that is still up.
     """
     pending: dict[asyncio.Task[Any], tuple[str, EventStream[Any]]] = {}
     try:
