@@ -44,9 +44,10 @@ specific refusal (`VENUE_SYMBOL_NOT_FOUND`,
 `invalid_feed`, …) and the deploy rolls back. `md.feed.end` is only
 for a feed that did open and later ended.
 
-A rebuilt STS re-attaches the feeds saved on its md record. If MD
-refuses that attach, the session is marked `failed` with the error
-and is not retried. A timeout, MD not answering yet, stays
+A rebuilt STS re-attaches the feeds saved on its md record. A refusal
+that will not change — symbol not found, unsupported topic, venue
+rejected, or a feed key that does not parse — marks the session
+`failed` and is not retried. A timeout, or any other error, stays
 `interrupted` so the next boot tries again. The saved feed list is
 not edited here.
 

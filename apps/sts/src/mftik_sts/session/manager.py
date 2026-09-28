@@ -26,6 +26,7 @@ from mftik.protocol import (
     MdAttachRequest,
     MdAttachRequestEnvelope,
     MdAttachResult,
+    QueryCode,
     RpcError,
     RpcErrorEnvelope,
     SessionInfo,
@@ -65,11 +66,24 @@ logger = logging.getLogger(__name__)
 
 
 class AttachRefused(RuntimeError):
-    """The domain answered and will not open this attach.
+    """MD refused an attach that retrying will not change.
 
-    A timeout is not this. MD or TD not being up yet is retried, and
-    giving up on that leaves the session interrupted for the next boot.
+    A missing symbol, an unsupported topic, a venue rejection, or a
+    feed key that does not parse. A timeout, a domain that is not up,
+    and any other error reply are retried; giving up on those leaves
+    the session interrupted for the next boot.
     """
+
+
+# Names, not numbers: the RPC error code is ``QueryCode.name``.
+_ATTACH_REFUSED = frozenset(
+    {
+        QueryCode.VENUE_SYMBOL_NOT_FOUND.name,
+        QueryCode.MD_VENUE_UNSUPPORTED_READ.name,
+        QueryCode.VENUE_REJECTED.name,
+        "invalid_feed",
+    }
+)
 
 #: Why a session in ``interrupted`` stopped. A constant because it is the
 #: same event for every session in the process, not a per-session diagnosis.
@@ -1729,10 +1743,11 @@ class SessionManager:
                     return reply
                 err = RpcError.model_validate(reply.payload)
                 last = RuntimeError(f"{err.code}: {err.message}")
-                # MD is up and refused the feeds. Retrying cannot open
-                # a symbol that is not there. Timeouts stay in the loop
-                # above: that is MD not answering yet.
-                if err.code not in {"unavailable", "timeout"}:
+                # A refusal that will not change. Anything else, including
+                # a domain that answered ``nope`` while it was still
+                # starting, stays in the loop and leaves the session
+                # interrupted when the budget runs out.
+                if err.code in _ATTACH_REFUSED:
                     raise AttachRefused(str(last))
             left = deadline - asyncio.get_running_loop().time()
             logger.warning(
