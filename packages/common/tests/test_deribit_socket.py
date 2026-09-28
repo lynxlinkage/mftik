@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
+import pytest
 from deribit_stub import API_KEY, API_SECRET, FakeDeribit
 from mftik.exchange.deribit import channels as ch
+from mftik.exchange.deribit import socket as deribit_socket
 from mftik.exchange.deribit.account import DeribitPrivateStream
 from mftik.exchange.deribit.feed import DeribitPublicStream
 from mftik.exchange.deribit.protocol import DeribitResponse, DeribitWsError
-from mftik.exchange.deribit.socket import DEFAULT_HEARTBEAT
+from mftik.exchange.deribit.socket import DEFAULT_HEARTBEAT, DEFAULT_MAX_SIZE
+from websockets.exceptions import ConnectionClosed
+from websockets.frames import Close, CloseCode
 
 
 def test_a_reply_correlates_on_id() -> None:
@@ -66,9 +71,7 @@ async def test_private_auth_verifies_the_ws_signature(deribit: FakeDeribit) -> N
 async def test_a_test_request_is_answered_with_public_test(
     deribit_public: FakeDeribit,
 ) -> None:
-    feed = DeribitPublicStream(
-        deribit_public.url, ping_interval=0, heartbeat=15
-    )
+    feed = DeribitPublicStream(deribit_public.url, ping_interval=0, heartbeat=15)
     async with feed:
         await asyncio.sleep(0.05)
         await deribit_public.heartbeat("test_request")
@@ -80,9 +83,7 @@ async def test_a_test_request_is_answered_with_public_test(
 async def test_subscribe_replies_correlate_on_id(
     deribit_public: FakeDeribit,
 ) -> None:
-    feed = DeribitPublicStream(
-        deribit_public.url, ping_interval=0, heartbeat=0
-    )
+    feed = DeribitPublicStream(deribit_public.url, ping_interval=0, heartbeat=0)
     async with feed:
         trades = await feed.subscribe_trades("BTC_USDC")
         quotes = await feed.subscribe_best_quote("BTC_USDC")
@@ -178,12 +179,72 @@ async def test_the_watchdog_probes_an_idle_socket_instead_of_dropping_it(
     ``stats.last_frame_at`` is zero until the first frame lands, so an
     absolute silence check fails a healthy connection on its first tick.
     """
-    feed = DeribitPublicStream(
-        deribit_public.url, ping_interval=0.3, heartbeat=0
-    )
+    feed = DeribitPublicStream(deribit_public.url, ping_interval=0.3, heartbeat=0)
     async with feed:
         await asyncio.sleep(0.9)
         assert feed.connected
         assert deribit_public.connections == 1
     assert deribit_public.frames_for(ch.PUBLIC_TEST)
     assert feed.stats.pings >= 1
+
+
+class _Recorder:
+    def __init__(self) -> None:
+        self.kwargs: dict[str, Any] = {}
+
+    async def __call__(self, url: str, **kwargs: Any) -> object:
+        self.kwargs = kwargs
+        return object()
+
+
+async def test_the_socket_caps_incoming_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _Recorder()
+    monkeypatch.setattr(deribit_socket, "connect", recorder)
+    socket = deribit_socket.DeribitSocket("ws://x")
+    await socket._open()  # noqa: SLF001
+    assert recorder.kwargs["max_size"] == DEFAULT_MAX_SIZE
+    assert recorder.kwargs["max_size"] == 8 * 1024 * 1024
+
+
+def test_a_1009_close_is_an_oversize_frame() -> None:
+    too_big = ConnectionClosed(
+        None, Close(CloseCode.MESSAGE_TOO_BIG, "frame exceeds limit of 1048576 bytes")
+    )
+    normal = ConnectionClosed(Close(1000, "bye"), None)
+    assert deribit_socket._frame_too_big(too_big)  # noqa: SLF001
+    assert not deribit_socket._frame_too_big(normal)  # noqa: SLF001
+
+
+async def test_repeated_oversize_frames_give_up(
+    deribit_public: FakeDeribit,
+) -> None:
+    """A frame that is refused on every socket must stop, not reset retries.
+
+    ``_restore`` succeeds before the snapshot arrives, so a reset there
+    never counts the 1009 and the shared socket reconnects forever.
+    """
+    deribit_public.opening_frame = "x" * 2048
+    feed = DeribitPublicStream(
+        deribit_public.url,
+        ping_interval=0,
+        heartbeat=0,
+        max_size=64,
+        max_retries=2,
+        retry_backoff=0.01,
+        max_retry_backoff=0.05,
+    )
+    async with feed:
+        for _ in range(100):
+            if not feed.connected and deribit_public.connections >= 3:
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError(
+                f"connections={deribit_public.connections} connected={feed.connected}"
+            )
+        seen = deribit_public.connections
+        await asyncio.sleep(0.3)
+        assert deribit_public.connections == seen
+        assert not feed.connected

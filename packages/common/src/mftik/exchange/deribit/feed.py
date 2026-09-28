@@ -4,10 +4,13 @@ Public data only. Spot and linear perps share the connection; the
 channel carries ``instrument_name``. :class:`DeribitPublicClient` opens
 it on first use.
 
-**The order book is a fold.** The first frame (or a frame with no
-``prev_change_id``) is a snapshot. Later frames are incremental and
-must chain ``prev_change_id`` onto the last ``change_id``. A gap marks
-the book stale and resubscribes; it does not invent levels.
+**The order book is a fold.** The default channel is
+``book.{instrument}.none.20.100ms``: every frame is a snapshot of the
+top 20 levels and carries no ``prev_change_id``, so it replaces the
+book. ``depth=None`` selects the unbounded
+``book.{instrument}.{interval}`` channel — one full snapshot, then
+increments that must chain ``prev_change_id``. A gap on that channel
+marks the book stale and resubscribes; it does not invent levels.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from mftik.exchange.deribit.models import (
 from mftik.exchange.deribit.protocol import DeribitResponse, rpc_frame
 from mftik.exchange.deribit.socket import (
     DEFAULT_HEARTBEAT,
+    DEFAULT_MAX_SIZE,
     DEFAULT_PING_INTERVAL,
     DeribitSocket,
 )
@@ -164,6 +168,7 @@ class DeribitPublicStream(DeribitSocket):
         ping_interval: float = DEFAULT_PING_INTERVAL,
         heartbeat: int = DEFAULT_HEARTBEAT,
         release_linger: float = 2.0,
+        max_size: int | None = DEFAULT_MAX_SIZE,
     ) -> None:
         super().__init__(
             url,
@@ -174,6 +179,7 @@ class DeribitPublicStream(DeribitSocket):
             max_retry_backoff=max_retry_backoff,
             ping_interval=ping_interval,
             heartbeat=heartbeat,
+            max_size=max_size,
         )
         self._subs: list[_Sub] = []
         self._books: dict[str, DeribitBook] = {}
@@ -218,9 +224,17 @@ class DeribitPublicStream(DeribitSocket):
             lambda _resp, row: row,
         )
 
-    async def subscribe_order_book(self, instrument: str):
+    async def subscribe_order_book(
+        self, instrument: str, *, depth: int | None = ch.DEFAULT_BOOK_DEPTH
+    ):
+        """Top ``depth`` levels. ``depth=None`` is the unbounded book.
+
+        The unbounded snapshot is what closed this socket with 1009 on
+        BTC_USDC. A later 1009 drops that subscription so the rest of
+        the feeds stay up.
+        """
         self._ensure_connected()
-        channel = ch.book(instrument)
+        channel = ch.book(instrument, depth=depth)
         await self._ledger.acquire([channel], self._send_subscribe)
         stream: EventStream[DeribitBookSnapshot] = EventStream(on_close=self._drop)
         book = self._books.setdefault(channel, DeribitBook(instrument))
@@ -347,6 +361,36 @@ class DeribitPublicStream(DeribitSocket):
 
     def _wanted(self) -> list[str]:
         return first_seen(channel for sub in self._subs for channel in sub.channels)
+
+    def _drop_oversize_subscriptions(self) -> bool:
+        """Close readers of an unbounded book and forget those channels.
+
+        The stream is removed before ``close`` so :meth:`_drop` does
+        not enqueue an unsubscribe onto a socket that is already down.
+        :meth:`_restore` clears the ledger and resubscribes whatever
+        readers are still attached.
+        """
+        doomed = [
+            sub
+            for sub in self._subs
+            if any(ch.unbounded_book(channel) for channel in sub.channels)
+        ]
+        if not doomed:
+            return False
+        logger.warning(
+            "%s dropping %s: a frame exceeded the websocket size limit",
+            self.name,
+            ", ".join(channel for sub in doomed for channel in sub.channels),
+        )
+        gone = {id(sub) for sub in doomed}
+        self._subs = [sub for sub in self._subs if id(sub) not in gone]
+        live = {key for sub in self._subs if sub.folder for key in sub.index}
+        for key in list(self._books):
+            if key not in live:
+                self._books.pop(key, None)
+        for sub in doomed:
+            sub.stream.close()
+        return True
 
     async def _restore(self) -> None:
         channels = self._wanted()
