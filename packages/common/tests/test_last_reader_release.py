@@ -234,6 +234,52 @@ async def test_a_failed_resync_subscribe_reconnects_the_reader(
         assert [level.price for level in book.bids] == [Decimal("3")]
 
 
+async def test_a_batch_resubscribe_during_the_linger_keeps_the_shared_key(
+    bybit_public: FakeBybit,
+) -> None:
+    """Closing A and then subscribing A with B must not drop A.
+
+    B's ack is what ``subscribe_raw`` waits on, and the ``_Sub`` for A
+    is appended only after that. The linger can fire in between.
+    """
+    topic_a = "publicTrade.BTCUSDT"
+    topic_b = "publicTrade.ETHUSDT"
+    async with _bybit(bybit_public, release_linger=0.05) as feed:
+        first = await feed.subscribe_raw(topic_a)
+        first.close()
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        original = feed.request
+
+        async def request(frame, req_id, *, op="", timeout=None):
+            if op == "subscribe":
+                entered.set()
+                await gate.wait()
+            return await original(frame, req_id, op=op, timeout=timeout)
+
+        feed.request = request  # type: ignore[method-assign]
+        pending = asyncio.create_task(feed.subscribe_raw(topic_a, topic_b))
+        await entered.wait()
+        await asyncio.sleep(0.15)
+        unsubscribed = [
+            topic
+            for frame in bybit_public.frames_for("unsubscribe")
+            for topic in (frame.get("args") or [])
+        ]
+        assert topic_a not in unsubscribed
+        assert topic_a in feed._ledger.held()
+        gate.set()
+        stream = await pending
+        await asyncio.sleep(0.15)
+        assert topic_a not in [
+            topic
+            for frame in bybit_public.frames_for("unsubscribe")
+            for topic in (frame.get("args") or [])
+        ]
+        await bybit_public.push(topic_a, [TRADE_ROW])
+        assert (await asyncio.wait_for(anext(stream), timeout=2))["i"] == "trade-1"
+
+
 async def test_an_already_subscribed_resync_keeps_the_socket(
     bybit_public: FakeBybit,
 ) -> None:

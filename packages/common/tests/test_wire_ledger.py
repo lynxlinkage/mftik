@@ -12,7 +12,9 @@ import asyncio
 import threading
 
 import pytest
+from mftik.exchange.errors import ExchangeNotConnectedError
 from mftik.exchange.wire import (
+    IdleReleaser,
     ReleaseOutcome,
     WireLedger,
     classify_release,
@@ -236,6 +238,14 @@ def test_a_timeout_message_is_unknown_and_a_venue_error_is_rejected() -> None:
         classify_release(RuntimeError("no reply within 10s")) is ReleaseOutcome.UNKNOWN
     )
     assert classify_release(RuntimeError("unknown stream")) is ReleaseOutcome.REJECTED
+    assert (
+        classify_release(ExchangeNotConnectedError("bybit is not connected"))
+        is ReleaseOutcome.UNKNOWN
+    )
+    assert (
+        classify_release(RuntimeError("socket not ready within 10s"))
+        is ReleaseOutcome.UNKNOWN
+    )
 
 
 async def test_release_of_the_last_reader_drops_the_key() -> None:
@@ -535,6 +545,121 @@ def test_a_second_cycle_waits_on_the_one_already_running() -> None:
     thread.join(1)
     assert not thread.is_alive()
     assert errors == []
+
+
+async def test_an_acquire_in_flight_keeps_a_held_key_and_retries_it() -> None:
+    """A batch subscribe attaches its reader only after the ack.
+
+    The key that was already held is not in ``_inflight``, but the new
+    reader is not in ``_subs`` yet either. Releasing it now drops data
+    the reader is about to need. Deferring and retrying unsubscribes it
+    if that subscribe then fails to attach anyone.
+    """
+    ledger: WireLedger[str] = WireLedger()
+    unsubscribed: list[list[str]] = []
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def subscribe_ok(keys: list[str]) -> None:
+        del keys
+
+    async def subscribe_blocked(keys: list[str]) -> None:
+        del keys
+        started.set()
+        await gate.wait()
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        unsubscribed.append(list(keys))
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    await ledger.acquire(["a"], subscribe_ok)
+    acquiring = asyncio.create_task(ledger.acquire(["a", "b"], subscribe_blocked))
+    await started.wait()
+    releaser = IdleReleaser(
+        ledger,
+        unsubscribe,
+        lambda _key: False,
+        linger=0.05,
+        reconcile_interval=60,
+    )
+    try:
+        releaser.enqueue(["a"])
+        await asyncio.sleep(0.12)
+        assert unsubscribed == []
+        assert "a" in ledger.held()
+        gate.set()
+        await acquiring
+        await releaser.drained()
+        assert unsubscribed == [["a"]]
+        assert "a" not in ledger.held()
+    finally:
+        releaser.cancel()
+
+
+async def test_each_idle_key_waits_out_its_own_linger() -> None:
+    ledger: WireLedger[str] = WireLedger()
+    sent: list[list[str]] = []
+
+    async def subscribe(keys: list[str]) -> None:
+        del keys
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        sent.append(list(keys))
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    await ledger.acquire(["a", "b"], subscribe)
+    releaser = IdleReleaser(
+        ledger,
+        unsubscribe,
+        lambda _key: False,
+        linger=0.3,
+        reconcile_interval=60,
+    )
+    try:
+        releaser.enqueue(["a"])
+        await asyncio.sleep(0.15)
+        releaser.enqueue(["b"])
+        await asyncio.sleep(0.2)
+        assert sent == [["a"]]
+        assert "b" in ledger.held()
+        await releaser.drained()
+        assert sent == [["a"], ["b"]]
+    finally:
+        releaser.cancel()
+
+
+async def test_reconcile_retries_a_rejected_unsubscribe() -> None:
+    ledger: WireLedger[str] = WireLedger()
+    sent: list[list[str]] = []
+
+    async def subscribe(keys: list[str]) -> None:
+        del keys
+
+    async def unsubscribe(keys: list[str]) -> dict[str, ReleaseOutcome]:
+        sent.append(list(keys))
+        if len(sent) == 1:
+            return {key: ReleaseOutcome.REJECTED for key in keys}
+        return {key: ReleaseOutcome.ACKED for key in keys}
+
+    await ledger.acquire(["a"], subscribe)
+    releaser = IdleReleaser(
+        ledger,
+        unsubscribe,
+        lambda _key: False,
+        linger=60,
+        reconcile_interval=0.05,
+    )
+    try:
+        releaser.enqueue(["a"])
+        releaser.claim(["a"])
+        for _ in range(40):
+            if len(sent) >= 2:
+                break
+            await asyncio.sleep(0.02)
+        assert sent == [["a"], ["a"]]
+        assert "a" not in ledger.held()
+    finally:
+        releaser.cancel()
 
 
 async def test_discard_forgets_an_explicit_unsubscribe() -> None:

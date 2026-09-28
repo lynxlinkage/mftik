@@ -12,8 +12,8 @@ nothing is subscribed.
 
 `docs/MdVenueSubscriptions.md` is why two product pumps can share one
 venue socket. This page is the control event that retires the
-instrument. Last-reader unsubscribe (MDS-6) and ATM / strike-roll
-are not this.
+instrument. Last-reader unsubscribe already lives on the public
+socket (MDS-6). ATM / strike-roll are not this.
 
 ## The shape
 
@@ -61,7 +61,8 @@ an extra field on the attach result.
 
 ## What this is not
 
-- Not a venue `UNSUBSCRIBE` of an idle live book. That is MDS-6.
+- Not a venue `UNSUBSCRIBE` of an idle live book. The public socket
+  already does that after the last reader leaves (MDS-6).
 - Not a way to subscribe ATM and roll the strike. That is a later
   architecture.
 - Not tape. Warm-up still only has `trade` / `aggtrade`.

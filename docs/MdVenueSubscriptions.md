@@ -547,9 +547,9 @@ one-line changes an unaware refactor would make. Route it through
 snapshot arrives, so the gapped book stays dead — silently, because the
 subscribe "succeeded". Call `discard` on the way out and a co-reader's
 identity is marked free, so the next `acquire` for it sends a duplicate
-frame and, once MDS-6 exists, a last-consumer close could unsubscribe a
-topic somebody else is reading. Today the code is correct only because it
-happens to call `self.request` directly.
+frame and a last-reader close unsubscribes a topic a co-reader still
+holds. Today the code is correct only because it happens to call
+`self.request` directly.
 
 **Solution.** Keep the direct-`request` path and state why in the docstring.
 Assert the ledger is untouched across a resync: `held()` before equals
@@ -609,8 +609,8 @@ MDS-1 it is worse, because each one now calls `WireLedger.discard` and so
 also hands back an identity a surviving reader depends on.
 
 Neither defect is reachable from MD today — the detach path never calls
-these methods (see MDS-5) — but both are reachable from the public API, and
-both have to be safe before MDS-6 can exist.
+these methods (see MDS-5) — but both are reachable from the public API.
+MDS-6 depends on both of them, and both are in the tree.
 
 **Solution.** Re-key Gate to the payload item: one ledger key per
 `(channel, item)`, so overlapping calls share the item they have in common
@@ -797,25 +797,34 @@ and reopens the order stream around a reconnect, so those sockets leave
 the venue subscription up. Paper has no wire subscribe.
 
 **Behavior.** `_drop` stays synchronous. Idle keys are the closed sub's
-index minus every key still present on any `_Sub`, and they go into a
-pending set that one task drains. The task waits `RELEASE_LINGER` (2s),
-then calls `release` once. Keys that arrive during the wait join that
-drain, so a burst of closes is one frame on venues that take a list.
+index minus every key still present on any `_Sub`. Each key waits
+`RELEASE_LINGER` (2s) from the moment it was closed. Keys whose
+deadlines fall together go out in one `release`, so a burst of closes
+in one turn is still one frame on venues that take a list. A key closed
+while another key is already waiting gets its own 2s.
 `still_wanted` runs again under the ledger lock at send time, so a
-reattach inside the linger sends nothing. Gate structured channels
-(order book, candlesticks) are one frame per identity inside that call,
-and each frame has its own outcome. A private Gate close enqueues
-nothing; `still_wanted` still counts a private `_Sub`.
+reattach inside the linger sends nothing. An `acquire` that has not
+returned yet counts too: the new `_Sub` is appended only after the ack,
+and a key in that call — including one that was already held — is left
+alone. The release reports it deferred and tries again after another
+linger. Gate structured channels (order book, candlesticks) are one
+frame per identity inside that call, and each frame has its own
+outcome. A private Gate close enqueues nothing; `still_wanted` still
+counts a private `_Sub`.
 
-`release` takes only keys that are held, not in flight, not in a book
-resync cycle, and not still wanted. It moves them to releasing and asks
-the socket for a per-key outcome. An explicit venue rejection puts the
-key back in `held`, so the next `acquire` does not send `SUBSCRIBE`. A
-timeout or a connection error leaves the key not held, so the next
-`acquire` does send it. Bybit's "already subscribed" reply on that
-follow-up counts as success. `acquire` that finds any requested key
-releasing waits and reserves nothing, then starts the whole call over.
-`clear()` drops releasing state with the generation.
+`release` takes only keys that are held, not in flight, not being
+attached by an `acquire`, not in a book resync cycle, and not still
+wanted. It moves them to releasing and asks the socket for a per-key
+outcome. An explicit venue rejection puts the key back in `held`, so
+the next `acquire` does not send `SUBSCRIBE`. A timeout, a dropped
+connection, "not connected", or Deribit's "socket not ready" leaves
+the key not held, so the next `acquire` does send it. Bybit's "already
+subscribed" reply on that follow-up counts as success. Every
+`RECONCILE_INTERVAL` (30s) the socket releases held keys that are not
+still inside their linger and not wanted, so a rejected unsubscribe is
+retried. `acquire` that finds any requested key releasing waits and
+reserves nothing, then starts the whole call over. `clear()` drops
+releasing state with the generation.
 
 Book resync on Bybit, OKX, and Deribit holds the key in a cycle so
 `release` cannot unsubscribe between the two frames. A successful resync

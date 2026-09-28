@@ -22,6 +22,8 @@ from collections.abc import Awaitable, Callable, Hashable, Iterable, Mapping, Se
 from contextlib import asynccontextmanager
 from typing import Generic, TypeVar
 
+from mftik.exchange.errors import ExchangeNotConnectedError
+
 logger = logging.getLogger(__name__)
 
 K = TypeVar("K", bound=Hashable)
@@ -31,6 +33,11 @@ K = TypeVar("K", bound=Hashable)
 #: restarting — finds the key still held and sends nothing. Tests inject a
 #: shorter value.
 RELEASE_LINGER = 2.0
+
+#: How often a socket retries held keys nobody is reading. A rejected
+#: unsubscribe stays held; this is the pass that tries it again. Keys
+#: still inside their linger are left for the flusher.
+RECONCILE_INTERVAL = 30.0
 
 #: How many times a book resync retries ``SUBSCRIBE`` after the unsubscribe
 #: has landed, before it gives up and reconnects the socket.
@@ -50,6 +57,8 @@ class ReleaseOutcome(enum.Enum):
     ACKED = "acked"
     REJECTED = "rejected"
     UNKNOWN = "unknown"
+    #: A subscribe is still attaching a reader. Try again after the linger.
+    DEFERRED = "deferred"
 
 
 class ResyncResult(enum.Enum):
@@ -71,14 +80,22 @@ def classify_release(exc: BaseException) -> ReleaseOutcome:
     be gone, and treating it as held would leave the next reader silent.
     ``CancelledError`` is not a venue answer; callers re-raise it themselves.
     """
-    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+    if isinstance(
+        exc, (TimeoutError, ConnectionError, OSError, ExchangeNotConnectedError)
+    ):
         return ReleaseOutcome.UNKNOWN
     if type(exc).__module__.startswith("websockets") and type(exc).__name__.startswith(
         "Connection"
     ):
         return ReleaseOutcome.UNKNOWN
     text = str(exc).lower()
-    if "no reply" in text or "no ack" in text or "timed out" in text:
+    if (
+        "no reply" in text
+        or "no ack" in text
+        or "timed out" in text
+        or "not connected" in text
+        or "socket not ready" in text
+    ):
         return ReleaseOutcome.UNKNOWN
     return ReleaseOutcome.REJECTED
 
@@ -166,6 +183,10 @@ class WireLedger(Generic[K]):
         self._inflight: dict[K, asyncio.Future[None]] = {}
         self._releasing: dict[K, asyncio.Future[ReleaseOutcome]] = {}
         self._cycling: dict[K, asyncio.Future[None]] = {}
+        #: Keys named by an ``acquire`` that has not returned. The
+        #: caller's ``_Sub`` does not exist yet, including for a key
+        #: that was already held and so is not in ``_inflight``.
+        self._acquiring: dict[K, int] = {}
         self._lock = asyncio.Lock()
         #: Bumped by :meth:`clear`. A leader that acks after a clear
         #: must not write its keys back onto ``_held``.
@@ -195,6 +216,7 @@ class WireLedger(Generic[K]):
         self._releasing = {}
         cycling = self._cycling
         self._cycling = {}
+        self._acquiring = {}
         for fut in cycling.values():
             if not fut.done():
                 fut.set_exception(ConnectionError("socket cleared"))
@@ -237,6 +259,20 @@ class WireLedger(Generic[K]):
             to_send.append(key)
         return waiters, to_send
 
+    def _mark_acquiring(self, keys: Sequence[K]) -> None:
+        """Caller holds the lock."""
+        for key in keys:
+            self._acquiring[key] = self._acquiring.get(key, 0) + 1
+
+    def _unmark_acquiring(self, keys: Sequence[K]) -> None:
+        """Caller holds the lock."""
+        for key in keys:
+            count = self._acquiring.get(key, 0) - 1
+            if count <= 0:
+                self._acquiring.pop(key, None)
+            else:
+                self._acquiring[key] = count
+
     async def acquire(
         self,
         keys: Sequence[K],
@@ -255,6 +291,10 @@ class WireLedger(Generic[K]):
         over: reserving a sibling first could deadlock against the
         release, and a key the release dropped has to be subscribed
         again rather than treated as held.
+
+        Every key in the call is marked acquiring until this returns.
+        The caller's ``_Sub`` is appended only after that, so a release
+        in the window would otherwise drop a key the new reader needs.
         """
         keys = first_seen(keys)
         if not keys:
@@ -267,10 +307,25 @@ class WireLedger(Generic[K]):
                 ]
                 if not blocking:
                     generation = self._generation
+                    self._mark_acquiring(keys)
                     waiters, to_send = self._reserve_locked(keys)
                     break
             await asyncio.gather(*blocking)
 
+        try:
+            await self._finish_acquire(send, generation, waiters, to_send)
+        finally:
+            async with self._lock:
+                if generation == self._generation:
+                    self._unmark_acquiring(keys)
+
+    async def _finish_acquire(
+        self,
+        send: Callable[[Sequence[K]], Awaitable[None]],
+        generation: int,
+        waiters: list[asyncio.Future[None]],
+        to_send: list[K],
+    ) -> None:
         if to_send:
             try:
                 await send(to_send)
@@ -345,7 +400,10 @@ class WireLedger(Generic[K]):
         ``still_wanted`` is called under the lock, immediately before a
         key is taken, and must not await or touch this ledger. A key a
         reader reclaimed during the linger is left held and no frame
-        goes out for it.
+        goes out for it. A key an ``acquire`` is still attaching is
+        :attr:`ReleaseOutcome.DEFERRED`: the ``_Sub`` is not visible
+        yet, and dropping it would leave that reader silent. The caller
+        retries it.
 
         ``send`` reports one outcome per key it attempted. A raise
         before that report means the batch is unknown: those keys are
@@ -368,13 +426,13 @@ class WireLedger(Generic[K]):
                 if existing is not None:
                     joined[key] = existing
                     continue
-                if (
-                    key not in self._held
-                    or key in self._cycling
-                    or key in self._inflight
-                ):
-                    if key not in self._held:
-                        results[key] = ReleaseOutcome.ACKED
+                if key not in self._held:
+                    results[key] = ReleaseOutcome.ACKED
+                    continue
+                if key in self._cycling:
+                    continue
+                if key in self._acquiring or key in self._inflight:
+                    results[key] = ReleaseOutcome.DEFERRED
                     continue
                 if still_wanted(key):
                     continue
@@ -513,12 +571,16 @@ async def resync_channel[T: Hashable](
 
 
 class IdleReleaser(Generic[K]):
-    """One linger, then one ``release``, for idle keys on a single socket.
+    """Per-key linger, then one ``release`` of whatever is due.
 
-    ``_drop`` only enqueues. A burst of closes during the linger drains
-    as one batch, and a reader that comes back before the sleep ends is
-    still wanted when ``release`` checks, so no frame goes out. The task
-    is stored here; :meth:`cancel` from teardown drops it.
+    ``_drop`` only enqueues. Each key waits ``linger`` from the moment
+    it was closed, so a key that arrives near the end of someone else's
+    wait is not unsubscribed immediately. Keys whose deadlines fall
+    together go out in one frame. A reader that comes back before the
+    deadline is still wanted when ``release`` checks, so no frame goes
+    out for it. A key deferred because a subscribe is still attaching
+    is put back with a fresh linger. The tasks are stored here;
+    :meth:`cancel` from teardown drops them.
     """
 
     def __init__(
@@ -528,27 +590,33 @@ class IdleReleaser(Generic[K]):
         still_wanted: Callable[[K], bool],
         *,
         linger: float = RELEASE_LINGER,
+        reconcile_interval: float = RECONCILE_INTERVAL,
     ) -> None:
         self._ledger = ledger
         self._send = send
         self._still_wanted = still_wanted
         self.linger = linger
-        self._pending: set[K] = set()
+        self.reconcile_interval = reconcile_interval
+        #: key → loop time at which it may be released.
+        self._pending: dict[K, float] = {}
         self._task: asyncio.Task[None] | None = None
+        self._reconcile: asyncio.Task[None] | None = None
 
     def enqueue(self, keys: Iterable[K]) -> None:
+        deadline = asyncio.get_running_loop().time() + self.linger
         added = False
         for key in keys:
             if key not in self._pending:
-                self._pending.add(key)
+                self._pending[key] = deadline
                 added = True
         if added:
             self._arm()
+            self._arm_reconcile()
 
     def claim(self, keys: Iterable[K]) -> None:
         """Pull keys out of the linger so an explicit unsubscribe can send now."""
         for key in keys:
-            self._pending.discard(key)
+            self._pending.pop(key, None)
 
     def cancel(self) -> None:
         """Drop a queued release. Safe to call from synchronous teardown."""
@@ -557,6 +625,10 @@ class IdleReleaser(Generic[K]):
         self._task = None
         if task is not None and not task.done():
             task.cancel()
+        reconcile = self._reconcile
+        self._reconcile = None
+        if reconcile is not None and not reconcile.done():
+            reconcile.cancel()
 
     async def drained(self) -> None:
         """Wait until the current flush, and any it re-arms, has finished."""
@@ -574,19 +646,51 @@ class IdleReleaser(Generic[K]):
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run(), name="wire-release")
 
+    def _arm_reconcile(self) -> None:
+        if self._reconcile is None or self._reconcile.done():
+            self._reconcile = asyncio.create_task(
+                self._reconcile_loop(), name="wire-reconcile"
+            )
+
+    def _defer(self, keys: Iterable[K]) -> None:
+        """Give keys whose subscribe has not finished another full linger."""
+        deadline = asyncio.get_running_loop().time() + self.linger
+        for key in keys:
+            if key not in self._pending:
+                self._pending[key] = deadline
+
     async def _run(self) -> None:
         try:
-            await asyncio.sleep(self.linger)
-            keys = list(self._pending)
-            self._pending.clear()
-            if not keys:
-                return
-            try:
-                await self._ledger.release(keys, self._send, self._still_wanted)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("idle wire release failed")
+            while self._pending:
+                loop = asyncio.get_running_loop()
+                now = loop.time()
+                # Keys closed in one turn land a fraction apart. Take
+                # them together so a burst is still one frame.
+                ready = [
+                    key
+                    for key, due in self._pending.items()
+                    if due <= now + 0.001
+                ]
+                if not ready:
+                    delay = min(self._pending.values()) - now
+                    await asyncio.sleep(delay if delay > 0 else 0)
+                    continue
+                for key in ready:
+                    del self._pending[key]
+                try:
+                    outcomes = await self._ledger.release(
+                        ready, self._send, self._still_wanted
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("idle wire release failed")
+                    continue
+                self._defer(
+                    key
+                    for key, outcome in outcomes.items()
+                    if outcome is ReleaseOutcome.DEFERRED
+                )
         except asyncio.CancelledError:
             raise
         finally:
@@ -595,8 +699,32 @@ class IdleReleaser(Generic[K]):
             if self._pending and self._task is None:
                 self._arm()
 
+    async def _reconcile_loop(self) -> None:
+        """Retry held keys the linger already gave up on.
+
+        A rejected unsubscribe stays held and is not put back on the
+        linger. Keys still waiting out their own linger are left in
+        ``_pending``.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self.reconcile_interval)
+                pending = set(self._pending)
+                keys = [key for key in self._ledger.held() if key not in pending]
+                if not keys:
+                    continue
+                try:
+                    await self._ledger.release(keys, self._send, self._still_wanted)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("wire reconcile failed")
+        except asyncio.CancelledError:
+            raise
+
 
 __all__ = [
+    "RECONCILE_INTERVAL",
     "RELEASE_LINGER",
     "RESYNC_SUBSCRIBE_ATTEMPTS",
     "IdleReleaser",
