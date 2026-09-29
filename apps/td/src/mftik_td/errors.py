@@ -497,18 +497,19 @@ BITGET = VenueErrors(
         # pacing
         40034: RejectCode.VENUE_RATE_LIMITED,
         429: RejectCode.VENUE_RATE_LIMITED,
-        # request / order
         40015: RejectCode.VENUE_INVALID_PARAM,
         40016: RejectCode.VENUE_INVALID_PARAM,
         40017: RejectCode.VENUE_INVALID_PARAM,
-        43001: RejectCode.VENUE_ORDER_NOT_FOUND,  # order does not exist
-        22001: RejectCode.VENUE_ORDER_NOT_FOUND,  # no order to cancel
-        43012: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # insufficient balance
-        43011: RejectCode.VENUE_INVALID_PARAM,  # parameter out of spec
-        # 40762 is "greater than the max open size". Bitget also raises
-        # it when the balance is what capped that size, so it is not one
-        # RejectCode. Left unmapped rather than guessed.
+        # A UTA v3 place and cancel returned these. The classic 430xx
+        # table names the same refusals with different numbers.
+        40808: RejectCode.VENUE_INVALID_PARAM,  # size scale
+        25202: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # insufficient balance
+        25203: RejectCode.VENUE_INSUFFICIENT_BALANCE,  # insufficient margin
+        25204: RejectCode.VENUE_ORDER_NOT_FOUND,  # order does not exist
         45110: RejectCode.VENUE_BELOW_MINIMUM,  # under the min USDT amount
+        # 40762 is "greater than the max open size", and Bitget also
+        # raises it when the balance is what capped that size. Not seen
+        # on this account. Left unmapped rather than guessed.
     },
 )
 

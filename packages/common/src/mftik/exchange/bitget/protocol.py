@@ -180,9 +180,9 @@ def private_url(*, demo: bool = False) -> str:
 RET_OK = "00000"
 WS_RET_OK = "0"
 
-#: "The order does not exist" (43001) and "No order to cancel" (22001).
-#: ``43012`` is insufficient balance, not a missing order.
-NOT_FOUND_CODES = frozenset({43001, 22001})
+#: UTA v3 cancel of an unknown order answers ``25204``. ``25202`` is
+#: insufficient balance.
+NOT_FOUND_CODES = frozenset({25204})
 
 #: The credential itself is the problem, including a Classic key on v3.
 AUTH_CODES = frozenset({40006, 40009, 40014, 40018, 40085})
