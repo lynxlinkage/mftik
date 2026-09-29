@@ -33,6 +33,12 @@ RESULT_FD_ENV = "MFTIK_STS_RESULT_FD"
 #: the window between fork and ``prctl``.
 LIFELINE_FD_ENV = "MFTIK_STS_LIFELINE_FD"
 
+#: Write end of the beat pipe. The worker writes one byte per lease
+#: interval. The parent holds the read end. A loop blocked in a sync
+#: call stops writing, which is how a conditional kill tells a wedged
+#: worker from one that is still running.
+BEAT_FD_ENV = "MFTIK_STS_BEAT_FD"
+
 #: How long ``close_all`` waits after SIGTERM before SIGKILL. Shorter than
 #: ``ON_STOP_TIMEOUT_S`` and shorter than Docker's default grace. A strategy
 #: whose ``on_stop`` uses the whole ten seconds is still cut off; the wait
@@ -68,6 +74,13 @@ class WorkerSlot:
     #: Parent's write end. Closed when the slot is dropped. The worker
     #: blocks in a read of the other end and treats EOF as parent death.
     lifeline_fd: int | None = None
+    #: Parent's read end of the beat pipe, until the reader task owns it.
+    beat_fd: int | None = None
+    beat_task: asyncio.Task[None] | None = None
+    #: ``loop.time()`` of the last beat byte, and of ``started`` becoming
+    #: true. Both monotonic. A conditional kill needs the gap between them.
+    last_beat: float | None = None
+    started_at: float | None = None
     watcher: asyncio.Task[None] | None = None
     #: Bumped when this object is the one a settle timer is watching.
     #: Identity of the slot itself is the comparison; this exists so a
@@ -93,6 +106,24 @@ class SessionSpawner(Protocol):
         request_json: bytes | None,
     ) -> SpawnedWorker:
         """Start a worker. ``request_json`` is the create body, or None."""
+
+
+def write_parent_beat() -> None:
+    """One byte on the beat pipe. A blocked loop does not reach this.
+
+    No-op outside a worker: the fd is set only in that process. The
+    write is non-blocking so a parent that is not reading cannot stall
+    the heartbeat loop.
+    """
+    raw = os.environ.get(BEAT_FD_ENV, "").strip()
+    if not raw:
+        return
+    try:
+        fd = int(raw)
+        os.set_blocking(fd, False)
+        os.write(fd, b"\n")
+    except (BlockingIOError, OSError):
+        return
 
 
 def parse_worker_result(line: str | None) -> dict[str, Any] | None:
@@ -124,12 +155,15 @@ class _PipeWorker:
         process: asyncio.subprocess.Process,
         read_fd: int,
         lifeline: int,
+        beat: int,
     ) -> None:
         self.process = process
         self._read_fd = read_fd
         #: Parent's write end of the lifeline. Left open for the life of
         #: the worker. Closing it is how the worker learns the parent died.
         self.lifeline = lifeline
+        #: Parent's read end of the beat pipe.
+        self.beat = beat
 
     async def read_result(self) -> str | None:
         # On the loop, not in a thread: a worker stuck in on_start would hold
@@ -164,12 +198,15 @@ class SubprocessSpawner:
     ) -> SpawnedWorker:
         read_fd, write_fd = os.pipe()
         life_read, life_write = os.pipe()
+        beat_read, beat_write = os.pipe()
         os.set_inheritable(write_fd, True)
         os.set_inheritable(life_read, True)
+        os.set_inheritable(beat_write, True)
         env = os.environ.copy()
         env[PARENT_PID_ENV] = str(os.getpid())
         env[RESULT_FD_ENV] = str(write_fd)
         env[LIFELINE_FD_ENV] = str(life_read)
+        env[BEAT_FD_ENV] = str(beat_write)
         env["MFTIK_DB_POOL_SIZE"] = "1"
         try:
             process = await asyncio.create_subprocess_exec(
@@ -181,16 +218,17 @@ class SubprocessSpawner:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=None,
                 stderr=None,
-                pass_fds=(write_fd, life_read),
+                pass_fds=(write_fd, life_read, beat_write),
                 env=env,
                 start_new_session=True,
             )
         except Exception:
-            for fd in (read_fd, write_fd, life_read, life_write):
+            for fd in (read_fd, write_fd, life_read, life_write, beat_read, beat_write):
                 os.close(fd)
             raise
         os.close(write_fd)
         os.close(life_read)
+        os.close(beat_write)
         stdin = process.stdin
         if stdin is not None:
             try:
@@ -200,4 +238,4 @@ class SubprocessSpawner:
             except (BrokenPipeError, ConnectionResetError):
                 pass
             stdin.close()
-        return _PipeWorker(process, read_fd, life_write)
+        return _PipeWorker(process, read_fd, life_write, beat_read)

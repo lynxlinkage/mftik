@@ -88,6 +88,8 @@ from mftik.strategy.eventlog import EventLog
 from mftik.symbols import SymbolClient
 from pydantic import BaseModel
 
+from mftik_sts.spawn import write_parent_beat
+
 logger = logging.getLogger(__name__)
 
 #: ``(session_id, reason, failed)`` — the manager tears the session down and
@@ -735,6 +737,10 @@ class StsSession:
     async def _lease_heartbeat_loop(self) -> None:
         """Publish fencing heartbeats on sts.td.* and/or sts.md.*."""
         while not self._stop.is_set():
+            # The parent times this byte. A loop blocked before the next
+            # iteration stops writing, which is the silence a conditional
+            # kill is allowed to act on. No fd outside a worker: no-op.
+            write_parent_beat()
             self._token += 1
             hb = LeaseHeartbeat(
                 session_id=self.session_id,

@@ -336,6 +336,14 @@ class StsSessionControlRequest(BaseModel):
     session_id: str
     #: Why a fail is being recorded. Ignored by stop.
     reason: str | None = None
+    #: Wall-clock deadline for a force-stop. The supervisor drops the
+    #: kill once this has passed, so a request the API already gave up
+    #: on does not land after the caller was told it failed.
+    deadline: float | None = None
+    #: Kill only a started worker whose beat has been silent. Set when
+    #: the stop was never delivered (nobody subscribed), not when a
+    #: subscriber held the request and did not answer.
+    only_if_silent: bool = False
 
 
 class StsSessionControlResult(BaseModel):

@@ -48,12 +48,14 @@ from mftik_sts.runtime_env import IncompatibleEnvironment, refresh, reset_for_te
 from mftik_sts.session import SessionManager
 from mftik_sts.session import manager as manager_mod
 from mftik_sts.spawn import (
+    BEAT_FD_ENV,
     LIFELINE_FD_ENV,
     PARENT_PID_ENV,
     START_FAIL_REASON,
     SubprocessSpawner,
     WorkerSlot,
     _PipeWorker,
+    write_parent_beat,
 )
 from mftik_sts.worker import arm_parent_death, set_pdeathsig
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -619,6 +621,7 @@ async def test_spawner_execs_a_worker_in_its_own_session(
         assert await spawned.read_result() is None
     finally:
         os.close(spawned.lifeline)
+        os.close(spawned.beat)
 
     kwargs = captured["kwargs"]
     assert kwargs["start_new_session"] is True
@@ -635,7 +638,8 @@ async def test_spawner_execs_a_worker_in_its_own_session(
     assert env["MFTIK_DB_POOL_SIZE"] == "1"
     assert env[PARENT_PID_ENV] == str(os.getpid())
     assert env[LIFELINE_FD_ENV] == str(kwargs["pass_fds"][1])
-    assert len(kwargs["pass_fds"]) == 2
+    assert env[BEAT_FD_ENV] == str(kwargs["pass_fds"][2])
+    assert len(kwargs["pass_fds"]) == 3
     assert captured["stdin"] == b'{"session_id":"aa0001"}'
     assert captured["closed"] is True
 
@@ -646,7 +650,7 @@ async def test_a_cancelled_result_read_lets_go_of_the_pipe() -> None:
     A read in a thread would keep the fd until the worker wrote or died.
     """
     read_fd, write_fd = os.pipe()
-    worker = _PipeWorker(None, read_fd, -1)  # type: ignore[arg-type]
+    worker = _PipeWorker(None, read_fd, -1, -1)  # type: ignore[arg-type]
     task = asyncio.create_task(worker.read_result())
     await asyncio.sleep(0.05)
     task.cancel()
@@ -661,7 +665,7 @@ async def test_a_cancelled_result_read_lets_go_of_the_pipe() -> None:
 
 async def test_the_result_line_arrives_while_the_worker_keeps_the_pipe() -> None:
     read_fd, write_fd = os.pipe()
-    worker = _PipeWorker(None, read_fd, -1)  # type: ignore[arg-type]
+    worker = _PipeWorker(None, read_fd, -1, -1)  # type: ignore[arg-type]
     try:
         os.write(write_fd, b'{"ok": true}\n')
         line = await asyncio.wait_for(worker.read_result(), timeout=2.0)
@@ -1341,6 +1345,143 @@ async def test_escalate_stop_keeps_a_row_the_worker_already_wrote() -> None:
     assert result.reason == "operator_stop"
     assert store["s1"].status == "done"
     assert store["s1"].reason == "operator_stop"
+
+
+async def test_a_conditional_kill_spares_a_worker_that_is_still_beating() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    manager._workers["s1"].last_beat = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(manager_mod.WorkerNotStuck):
+            await manager.escalate_stop("s1", only_if_silent=True)
+        assert process.signals == []
+        assert store["s1"].status == "live"
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await manager.close_all()
+
+
+async def test_a_conditional_kill_spares_a_worker_still_in_on_start() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process, started=False)
+    try:
+        with pytest.raises(manager_mod.WorkerNotStuck):
+            await manager.escalate_stop("s1", only_if_silent=True)
+        assert process.signals == []
+        assert store["s1"].status == "live"
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await manager.close_all()
+
+
+async def test_a_conditional_kill_takes_a_started_worker_whose_beat_went_quiet(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING")
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    process.pid = 4242
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    slot = manager._workers["s1"]
+    slot.last_beat = asyncio.get_running_loop().time() - manager_mod.BEAT_SILENCE_S - 1
+    published: list[str] = []
+
+    async def publish(_topic: object, envelope: Any) -> None:
+        message = getattr(envelope.payload, "message", None)
+        if message:
+            published.append(message)
+
+    manager._broker.publish = publish  # type: ignore[method-assign]
+    try:
+        result = await manager.escalate_stop("s1", only_if_silent=True)
+    finally:
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+    assert manager_mod.KILL_LOG_MESSAGE in published
+    assert "session=s1" in caplog.text
+    assert "pid=4242" in caplog.text
+
+
+async def test_a_stale_force_stop_does_not_kill() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    try:
+        with pytest.raises(manager_mod.ForceStopExpired):
+            await manager.escalate_stop("s1", deadline=time.time() - 1)
+        assert process.signals == []
+        assert store["s1"].status == "live"
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await manager.close_all()
+
+
+async def test_a_kill_whose_row_write_fails_is_not_reported_as_failed() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    attempts = 0
+
+    async def mark(session_id: str, *, status: str, reason: str | None) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("db down")
+
+    manager._mark_done = mark
+    try:
+        with pytest.raises(RuntimeError, match="did not land"):
+            await manager.escalate_stop("s1")
+        assert attempts == manager_mod.MARK_KILL_ATTEMPTS
+        assert process.signals == [signal.SIGKILL]
+        assert store["s1"].status == "live"
+    finally:
+        await manager.close_all()
+
+
+def test_a_worker_beat_is_one_byte_the_parent_can_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setenv(BEAT_FD_ENV, str(write_fd))
+    try:
+        write_parent_beat()
+        os.set_blocking(read_fd, False)
+        assert os.read(read_fd, 8) == b"\n"
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+async def test_the_beat_reader_records_when_the_worker_last_wrote() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    manager = _manager(FakeSpawner(), store, load=True)
+    read_fd, write_fd = os.pipe()
+    slot = WorkerSlot(session_id="s1", role="create", beat_fd=read_fd)
+    manager._workers["s1"] = slot
+    manager._arm_beat_reader(slot)
+    try:
+        os.write(write_fd, b"\n")
+        for _ in range(50):
+            if slot.last_beat is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert slot.last_beat is not None
+    finally:
+        os.close(write_fd)
+        await manager.close_all()
 
 
 async def test_escalating_during_start_is_not_rewritten_as_a_deploy_failure() -> None:
