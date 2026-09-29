@@ -448,15 +448,19 @@ class StsRegistrySyncRequest(BaseModel):
 
     trees: list[StsRegistryTreeOp] = Field(default_factory=list)
     reload: bool = True
+    #: Qualified keys upserted by earlier batches of this sync. The rescan
+    #: on the last batch explains these too, so a tree that rode in an
+    #: earlier batch and failed to import is not reported as absent.
+    explain: list[str] = Field(default_factory=list)
 
 
 class StsRegistrySyncResult(BaseModel):
     """STS → API: keys this process answers to, and why an upsert is absent.
 
     ``skipped`` is qualified key → reason, and only for trees this request
-    tried to upsert. The reason is one of ``not present on this registry
-    disk``, ``import error: …``, ``name collision with a bundled strategy``,
-    or ``digest mismatch``.
+    tried to upsert or listed in ``explain``. The reason is one of ``not
+    present on this registry disk``, ``import error: …``, ``write error: …``,
+    ``name collision with a bundled strategy``, or ``digest mismatch``.
     """
 
     model_config = ConfigDict(frozen=True)

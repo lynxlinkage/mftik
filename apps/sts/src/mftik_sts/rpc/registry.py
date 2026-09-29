@@ -87,6 +87,9 @@ def _apply_ops(store: RegistryStore, request: StsRegistrySyncRequest) -> dict[st
         except RegistryError as exc:
             skipped[key] = f"import error: {exc}"
             continue
+        except OSError as exc:
+            skipped[key] = f"write error: {exc}"
+            continue
         if op.digest and added.digest != op.digest:
             _delete_tree(
                 store,
@@ -136,10 +139,12 @@ def apply_sync(
     skipped = _apply_ops(store, request)
     if request.reload:
         loaded, stamp = refresh(store, data_dir=store.data_dir)
-        for op in request.trees:
-            if op.op != "upsert":
-                continue
-            key = qualify(op.origin, op.name)
+        upserted = [
+            qualify(op.origin, op.name)
+            for op in request.trees
+            if op.op == "upsert"
+        ]
+        for key in [*request.explain, *upserted]:
             if key in loaded or key in skipped:
                 continue
             skipped[key] = explain_skip(store, key)

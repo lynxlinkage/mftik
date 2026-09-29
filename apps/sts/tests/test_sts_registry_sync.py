@@ -145,3 +145,20 @@ def test_sync_uses_the_process_data_dir(
     assert "private::Tiny" in result.loaded
     assert (tmp_path / "registry" / "private" / "Tiny" / "strategy.py").is_file()
     assert (other.data_dir / "registry" / "private" / "Tiny").is_dir()
+
+
+def test_last_batch_explains_an_earlier_batchs_import_error(tmp_path: Path) -> None:
+    """A tree that rode in a non-reload batch still gets its import error."""
+    store = RegistryStore(tmp_path)
+    first = apply_sync(
+        store,
+        StsRegistrySyncRequest(
+            trees=[_upsert("private", "Tiny", _BAD)], reload=False
+        ),
+    )
+    assert first.skipped == {}
+    last = apply_sync(
+        store, StsRegistrySyncRequest(trees=[], explain=["private::Tiny"])
+    )
+    assert last.skipped["private::Tiny"].startswith("import error:")
+    assert "boom" in last.skipped["private::Tiny"]

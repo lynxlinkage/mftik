@@ -367,11 +367,25 @@ async def sync_registry(
     replies: list[FanoutReply[Any]] = []
     for index, batch in enumerate(batches):
         last = index == len(batches) - 1
+        # The rescan runs on the last batch only, so it is the only place
+        # that can say why an earlier batch's upsert did not load.
+        earlier = (
+            [
+                qualify(op.origin, op.name)
+                for prior in batches[:index]
+                for op in prior
+                if op.op == "upsert"
+            ]
+            if last
+            else []
+        )
         replies = await fanout(
             broker,
-            make_envelope=lambda batch=batch, last=last: (
+            make_envelope=lambda batch=batch, last=last, earlier=earlier: (
                 StsRegistrySyncRequestEnvelope.wrap(
-                    StsRegistrySyncRequest(trees=list(batch), reload=last),
+                    StsRegistrySyncRequest(
+                        trees=list(batch), reload=last, explain=earlier
+                    ),
                     type=STS_REGISTRY_SYNC,
                     source="api",
                 )
@@ -381,7 +395,11 @@ async def sync_registry(
         )
         _loaded_by, skipped = _per_target(replies)
         for label, reasons in skipped.items():
-            merged.setdefault(label, {}).update(reasons)
+            # The first reason wins: an earlier batch's write failure is more
+            # specific than the last batch's rescan finding nothing there.
+            into = merged.setdefault(label, {})
+            for key, reason in reasons.items():
+                into.setdefault(key, reason)
         error = format_errors(replies)
         if error is not None or not _census_ok(replies):
             return StsFanoutResult(
@@ -401,6 +419,10 @@ async def sync_registry(
     )
 
 
+#: ``sts.registry.loaded`` is an in-memory read; a live STS answers at once.
+REGISTRY_CENSUS_TIMEOUT_S = 1.5
+
+
 async def registry_availability(
     broker: Broker,
 ) -> dict[str, frozenset[str]] | None:
@@ -417,6 +439,9 @@ async def registry_availability(
             source="api",
         ),
         result_type=StsRegistryLoadedResult,
+        # Every picker load waits on this. A dead STS should not add the
+        # full default RPC timeout to each page.
+        timeout=REGISTRY_CENSUS_TIMEOUT_S,
     )
     answered = [
         reply
