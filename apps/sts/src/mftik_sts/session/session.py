@@ -46,6 +46,7 @@ from mftik.protocol import (
     MD_SESSION_DETACH,
     MD_TICKER,
     MD_TRADE,
+    ON_STOP_TIMEOUT_S,
     STS_LEASE_HEARTBEAT,
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
@@ -87,13 +88,9 @@ from mftik.strategy.eventlog import EventLog
 from mftik.symbols import SymbolClient
 from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
+from mftik_sts.spawn import write_parent_beat
 
-#: How long a strategy's ``on_stop`` may take before the session detaches
-#: without it. Generous enough for a couple of order cancels, each of which is
-#: an ack round-trip; short enough that a wedged strategy cannot hold a trading
-#: attach open behind it.
-ON_STOP_TIMEOUT_S = 10.0
+logger = logging.getLogger(__name__)
 
 #: ``(session_id, reason, failed)`` — the manager tears the session down and
 #: records the terminal status.
@@ -740,6 +737,10 @@ class StsSession:
     async def _lease_heartbeat_loop(self) -> None:
         """Publish fencing heartbeats on sts.td.* and/or sts.md.*."""
         while not self._stop.is_set():
+            # The parent times this byte. A loop blocked before the next
+            # iteration stops writing, which is the silence a conditional
+            # kill is allowed to act on. No fd outside a worker: no-op.
+            write_parent_beat()
             self._token += 1
             hb = LeaseHeartbeat(
                 session_id=self.session_id,

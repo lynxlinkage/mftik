@@ -6,17 +6,22 @@ import asyncio
 import base64
 import logging
 import re
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from mftik.broker import Broker
 from mftik.environment import NodeEnv
 from mftik.protocol import (
     DEFAULT_STRATEGY_TYPE,
+    STOP_CONTROL_TIMEOUT_S,
+    STOP_FORCE_RPC_TIMEOUT_S,
     STS_EVENTLOG_INFO,
     STS_EVENTLOG_READ,
+    STS_SESSION_FORCE_STOP,
     STS_SESSION_LIST,
     STS_SESSION_STATUS,
     STS_SESSION_STOP,
@@ -813,6 +818,11 @@ async def _control(
             detail=f"no active sts session: {session_id} is {row.status}",
         )
 
+    # Stop waits out ``on_stop`` and the rest of ``close``. Fail and the
+    # other control calls are not that walk, and keep the short timeout.
+    timeout = (
+        STOP_CONTROL_TIMEOUT_S if type_name == STS_SESSION_STOP else 10.0
+    )
     try:
         result = await request_domain(
             broker,
@@ -824,14 +834,36 @@ async def _control(
                 session_id=session_id,
             ),
             result_type=StsSessionControlResult,
-            timeout=10.0,
+            timeout=timeout,
         )
     except DomainRpcError as exc:
-        if exc.code == "timeout":
+        # A full wait means the worker was subscribed and did not answer:
+        # kill it. No responders means the stop was never delivered. Ask
+        # the supervisor anyway, but only kill a started worker whose
+        # beat has gone silent — a worker still starting, or still
+        # beating, is not stuck, and the caller gets the 502 to retry.
+        if (
+            exc.code == "timeout"
+            and type_name == STS_SESSION_STOP
+            and not exc.no_responders
+        ):
+            result = await _force_stop_after_timeout(
+                broker, session_id, only_if_silent=False
+            )
+        elif (
+            exc.code == "timeout"
+            and type_name == STS_SESSION_STOP
+            and exc.no_responders
+        ):
+            result = await _force_stop_after_timeout(
+                broker, session_id, only_if_silent=True
+            )
+        elif exc.code == "timeout":
             # The row says live and nobody answered for it. That is the
             # orphan case — the STS holding it died without closing the row —
             # and it is a different problem from "no such session", so it gets
             # a different code and a sentence that says where to look.
+            # Stop does not land here: an unanswered stop is escalated above.
             raise HTTPException(
                 status_code=502,
                 detail=(
@@ -840,8 +872,9 @@ async def _control(
                     f"closes rows like this"
                 ),
             ) from exc
-        code = 404 if exc.code == "not_found" else 502
-        raise HTTPException(status_code=code, detail=exc.message) from exc
+        else:
+            code = 404 if exc.code == "not_found" else 502
+            raise HTTPException(status_code=code, detail=exc.message) from exc
 
     await record_audit(
         user_id=owner,
@@ -850,3 +883,176 @@ async def _control(
         principal=principal,
     )
     return StsControlResponse.model_validate(result.model_dump())
+
+
+async def _load_sts_row(session_id: str) -> StsSessionRow | None:
+    async with session_scope() as db:
+        return await StsSessionRepository(db).get_by_session_id(session_id)
+
+
+def _control_from_row(row: StsSessionRow) -> StsSessionControlResult:
+    return StsSessionControlResult(
+        session_id=row.session_id,
+        status=row.status,
+        strategy=row.type,
+        reason=row.reason,
+    )
+
+
+def _stop_not_delivered(session_id: str) -> str:
+    return (
+        f"stop was not delivered to {session_id}; nobody is "
+        f"subscribed on its control subject"
+    )
+
+
+async def _force_stop_targets(row: StsSessionRow) -> list[str]:
+    """Who might hold this worker.
+
+    A name on the row is that STS alone. Null is not derived from the
+    TD region: draining that STS, adding a second one, or editing the
+    region would send the kill nowhere, or to the wrong process.
+    Every declared STS is asked, disabled included. Only the holder
+    answers with anything but ``not_found``.
+    """
+    if row.instance:
+        return [row.instance]
+    async with session_scope() as db:
+        rows = await InstanceRepository(db).list_all(
+            domain=SessionDomain.STS.value
+        )
+    return [item.name for item in rows]
+
+
+async def _ask_force_stop(
+    broker: Broker,
+    owner: str,
+    session_id: str,
+    *,
+    only_if_silent: bool,
+) -> StsSessionControlResult:
+    return await request_domain(
+        broker,
+        Topics.sts(owner),
+        StsSessionControlRequestEnvelope.wrap(
+            StsSessionControlRequest(
+                session_id=session_id,
+                deadline=time.time() + STOP_FORCE_RPC_TIMEOUT_S,
+                only_if_silent=only_if_silent,
+            ),
+            type=STS_SESSION_FORCE_STOP,
+            source="api",
+            session_id=session_id,
+        ),
+        result_type=StsSessionControlResult,
+        timeout=STOP_FORCE_RPC_TIMEOUT_S,
+    )
+
+
+async def _force_stop_after_timeout(
+    broker: Broker, session_id: str, *, only_if_silent: bool
+) -> StsSessionControlResult:
+    """The worker did not answer stop. Ask the supervisor to kill it.
+
+    Re-read first. The reply can lose the race with ``close`` finishing,
+    and killing a session that already wrote its row would replace that
+    reason.
+    """
+    row = await _load_sts_row(session_id)
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail=f"unknown sts session: {session_id}"
+        )
+    if row.status in SessionStatus.terminal():
+        return _control_from_row(row)
+
+    targets = await _force_stop_targets(row)
+    if not targets:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"stop was not answered for {session_id}, and the row "
+                f"is not pinned to one STS"
+            ),
+        )
+
+    async def one(owner: str) -> StsSessionControlResult | DomainRpcError:
+        try:
+            return await _ask_force_stop(
+                broker,
+                owner,
+                session_id,
+                only_if_silent=only_if_silent,
+            )
+        except DomainRpcError as exc:
+            return exc
+
+    replies = await asyncio.gather(*(one(owner) for owner in targets))
+    return await _finish_force_stop(session_id, targets, list(replies))
+
+
+async def _finish_force_stop(
+    session_id: str,
+    targets: list[str],
+    replies: list[StsSessionControlResult | DomainRpcError],
+) -> StsSessionControlResult:
+    """One holder's answer. The others are ``not_found``."""
+    results = [item for item in replies if isinstance(item, StsSessionControlResult)]
+    if results:
+        for result in results:
+            if result.status in SessionStatus.terminal():
+                return result
+        return results[0]
+    errors = [item for item in replies if isinstance(item, DomainRpcError)]
+    if any(exc.code == "not_stuck" for exc in errors):
+        raise HTTPException(
+            status_code=502, detail=_stop_not_delivered(session_id)
+        )
+    if any(exc.code == "expired" for exc in errors):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"the force-stop for {session_id} arrived after its "
+                f"deadline and was not applied"
+            ),
+        )
+    if any(exc.code == "timeout" for exc in errors):
+        owner = targets[0] if len(targets) == 1 else "an STS"
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"the STS instance {owner!r} did not kill {session_id} "
+                f"after stop went unanswered"
+            ),
+        )
+    if errors and all(exc.code == "not_found" for exc in errors):
+        label = targets[0] if len(targets) == 1 else "any STS"
+        return await _stop_when_supervisor_has_no_worker(session_id, label)
+    message = errors[0].message if errors else "force-stop failed"
+    raise HTTPException(status_code=502, detail=message)
+
+
+async def _stop_when_supervisor_has_no_worker(
+    session_id: str, owner: str
+) -> StsSessionControlResult:
+    """``force_stop`` was ``not_found``. The row may have finished since.
+
+    Still live means this STS has no process to signal: the session is
+    in-process, so a blocked loop took the whole STS with it, or this
+    instance is not the one holding the worker. That is not "unknown
+    session" — the row exists and was live when stop was asked.
+    """
+    row = await _load_sts_row(session_id)
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail=f"unknown sts session: {session_id}"
+        )
+    if row.status in SessionStatus.terminal():
+        return _control_from_row(row)
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            f"session {session_id} is still live and {owner} has no "
+            f"worker to kill"
+        ),
+    )

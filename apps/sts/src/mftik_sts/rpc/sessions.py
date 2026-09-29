@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from mftik.broker import IncomingRequest
@@ -11,6 +10,7 @@ from mftik.protocol import (
     STS_ERROR,
     STS_SESSION_CREATE,
     STS_SESSION_FAIL,
+    STS_SESSION_FORCE_STOP,
     STS_SESSION_LIST,
     STS_SESSION_STOP,
     ListSessionsRequest,
@@ -21,18 +21,16 @@ from mftik.protocol import (
     StsCreateSessionRequest,
     StsCreateSessionResultEnvelope,
     StsSessionControlRequest,
-    StsSessionControlResult,
     StsSessionControlResultEnvelope,
 )
 
 from mftik_sts.runtime_env import IncompatibleEnvironment
+from mftik_sts.session.manager import ForceStopExpired, WorkerNotStuck
 
 if TYPE_CHECKING:
     from mftik_sts.session import SessionManager
 
 logger = logging.getLogger(__name__)
-
-ControlFn = Callable[[str], Awaitable[StsSessionControlResult]]
 
 
 async def handle_session_create(
@@ -105,6 +103,19 @@ async def handle_session_stop(
     await _control(req, sessions=sessions, action="stop", reply_type=STS_SESSION_STOP)
 
 
+async def handle_session_force_stop(
+    req: IncomingRequest,
+    *,
+    sessions: SessionManager | None = None,
+) -> None:
+    await _control(
+        req,
+        sessions=sessions,
+        action="force_stop",
+        reply_type=STS_SESSION_FORCE_STOP,
+    )
+
+
 async def handle_session_fail(
     req: IncomingRequest,
     *,
@@ -156,17 +167,34 @@ async def _control(
         await _error(req, "invalid_payload", str(exc))
         return
 
-    fn: ControlFn | None = {
-        "stop": sessions.stop_session,
-    }.get(action)
-    if fn is None:
-        await _error(req, "unknown_action", action)
-        return
-
     try:
-        result = await fn(payload.session_id)
+        if action == "stop":
+            result = await sessions.stop_session(payload.session_id)
+        elif action == "force_stop":
+            result = await sessions.escalate_stop(
+                payload.session_id,
+                deadline=payload.deadline,
+                only_if_silent=payload.only_if_silent,
+            )
+        else:
+            await _error(req, "unknown_action", action)
+            return
     except KeyError as exc:
         await _error(req, "not_found", str(exc))
+        return
+    except WorkerNotStuck:
+        await _error(
+            req,
+            "not_stuck",
+            "worker is still starting or its heartbeat is fresh",
+        )
+        return
+    except ForceStopExpired:
+        await _error(
+            req,
+            "expired",
+            "force-stop arrived after its deadline",
+        )
         return
     except Exception as exc:
         logger.exception("sts.session.%s failed", action)

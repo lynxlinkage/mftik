@@ -9,6 +9,7 @@ from mftik.broker.config import BrokerConfig
 from mftik.broker.errors import (
     BrokerError,
     BrokerNotConnectedError,
+    NoRespondersError,
     RequestTimeoutError,
 )
 from mftik.broker.link import LeasedSessionLink
@@ -22,6 +23,7 @@ __all__ = [
     "BrokerError",
     "BrokerNotConnectedError",
     "BrokerTransport",
+    "NoRespondersError",
     "IncomingRequest",
     "LeasedSessionLink",
     "RequestTimeoutError",

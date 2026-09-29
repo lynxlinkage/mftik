@@ -20,7 +20,9 @@ import pytest
 from broker_harness import a_broker
 from mftik.protocol import (
     STS_ERROR,
+    STS_REASON_STOP_TIMED_OUT,
     STS_SESSION_CREATE,
+    STS_SESSION_FORCE_STOP,
     STS_SESSION_LIST,
     STS_SESSION_STOP,
     ListSessionsRequest,
@@ -46,12 +48,14 @@ from mftik_sts.runtime_env import IncompatibleEnvironment, refresh, reset_for_te
 from mftik_sts.session import SessionManager
 from mftik_sts.session import manager as manager_mod
 from mftik_sts.spawn import (
+    BEAT_FD_ENV,
     LIFELINE_FD_ENV,
     PARENT_PID_ENV,
     START_FAIL_REASON,
     SubprocessSpawner,
     WorkerSlot,
     _PipeWorker,
+    write_parent_beat,
 )
 from mftik_sts.worker import arm_parent_death, set_pdeathsig
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -98,6 +102,22 @@ class StubbornProcess(FakeProcess):
 
     def send_signal(self, sig: int) -> None:
         self.signals.append(sig)
+
+
+class _UnreapedKill(StubbornProcess):
+    """SIGKILL is recorded. The process stays until ``release`` is set."""
+
+    def __init__(self, release: asyncio.Event) -> None:
+        super().__init__()
+        self._release = release
+
+    def kill(self) -> None:
+        self.signals.append(signal.SIGKILL)
+
+    async def wait(self) -> int:
+        await self._release.wait()
+        self.returncode = -signal.SIGKILL
+        return int(self.returncode)
 
 
 class FakeSpawned:
@@ -601,6 +621,7 @@ async def test_spawner_execs_a_worker_in_its_own_session(
         assert await spawned.read_result() is None
     finally:
         os.close(spawned.lifeline)
+        os.close(spawned.beat)
 
     kwargs = captured["kwargs"]
     assert kwargs["start_new_session"] is True
@@ -617,7 +638,8 @@ async def test_spawner_execs_a_worker_in_its_own_session(
     assert env["MFTIK_DB_POOL_SIZE"] == "1"
     assert env[PARENT_PID_ENV] == str(os.getpid())
     assert env[LIFELINE_FD_ENV] == str(kwargs["pass_fds"][1])
-    assert len(kwargs["pass_fds"]) == 2
+    assert env[BEAT_FD_ENV] == str(kwargs["pass_fds"][2])
+    assert len(kwargs["pass_fds"]) == 3
     assert captured["stdin"] == b'{"session_id":"aa0001"}'
     assert captured["closed"] is True
 
@@ -628,7 +650,7 @@ async def test_a_cancelled_result_read_lets_go_of_the_pipe() -> None:
     A read in a thread would keep the fd until the worker wrote or died.
     """
     read_fd, write_fd = os.pipe()
-    worker = _PipeWorker(None, read_fd, -1)  # type: ignore[arg-type]
+    worker = _PipeWorker(None, read_fd, -1, -1)  # type: ignore[arg-type]
     task = asyncio.create_task(worker.read_result())
     await asyncio.sleep(0.05)
     task.cancel()
@@ -643,7 +665,7 @@ async def test_a_cancelled_result_read_lets_go_of_the_pipe() -> None:
 
 async def test_the_result_line_arrives_while_the_worker_keeps_the_pipe() -> None:
     read_fd, write_fd = os.pipe()
-    worker = _PipeWorker(None, read_fd, -1)  # type: ignore[arg-type]
+    worker = _PipeWorker(None, read_fd, -1, -1)  # type: ignore[arg-type]
     try:
         os.write(write_fd, b'{"ok": true}\n')
         line = await asyncio.wait_for(worker.read_result(), timeout=2.0)
@@ -1216,3 +1238,385 @@ async def test_a_worker_reports_the_qualified_key(
         _REGISTRY.clear()
         _REGISTRY.update(before)
         await engine.dispose()
+
+
+def _hold(
+    manager: SessionManager,
+    store: dict[str, SimpleNamespace],
+    process: FakeProcess,
+    *,
+    started: bool = True,
+    session_id: str = "s1",
+) -> WorkerSlot:
+    store[session_id] = SimpleNamespace(
+        status="live", reason=None, session_id=session_id
+    )
+    slot = WorkerSlot(
+        session_id=session_id,
+        role="create",
+        started=started,
+        strategy_name="rebuildable",
+        type="Rebuildable",
+        created_by=1,
+        process=process,
+    )
+    manager._workers[session_id] = slot
+    if started:
+        manager._arm_watcher(slot)
+    return slot
+
+
+async def test_escalate_stop_kills_a_worker_that_did_not_answer() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, rebuild=True, load=True)
+    _hold(manager, store, process)
+    try:
+        result = await manager.escalate_stop("s1")
+    finally:
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+    assert store["s1"].status == "failed"
+    assert store["s1"].reason == STS_REASON_STOP_TIMED_OUT
+    assert "s1" not in manager._workers
+    assert not manager._rebuild_tasks
+
+
+async def test_escalate_stop_kills_a_worker_still_in_on_start() -> None:
+    """Not started yet is still a process. A sync ``on_start`` is the same stall."""
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, rebuild=True, load=True)
+    _hold(manager, store, process, started=False)
+    try:
+        result = await manager.escalate_stop("s1")
+    finally:
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+    assert store["s1"].status == "failed"
+    assert not manager._rebuild_tasks
+
+
+async def test_a_second_force_stop_waits_instead_of_signalling_again() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    release = asyncio.Event()
+    process = _UnreapedKill(release)
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    first = asyncio.create_task(manager.escalate_stop("s1"))
+    try:
+        while signal.SIGKILL not in process.signals:
+            await asyncio.sleep(0)
+        second = asyncio.create_task(manager.escalate_stop("s1"))
+        assert process.signals == [signal.SIGKILL]
+        release.set()
+        result = await first
+        again = await second
+    finally:
+        release.set()
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert again.status == result.status == "failed"
+    assert again.reason == result.reason == STS_REASON_STOP_TIMED_OUT
+
+
+async def test_escalate_stop_keeps_a_row_the_worker_already_wrote() -> None:
+    """The queued stop finished as the kill arrived. Do not replace that row."""
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    store["s1"].status = "done"
+    store["s1"].reason = "operator_stop"
+    try:
+        result = await manager.escalate_stop("s1")
+    finally:
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert result.status == "done"
+    assert result.reason == "operator_stop"
+    assert store["s1"].status == "done"
+    assert store["s1"].reason == "operator_stop"
+
+
+async def test_a_conditional_kill_spares_a_worker_that_is_still_beating() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    manager._workers["s1"].last_beat = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(manager_mod.WorkerNotStuck):
+            await manager.escalate_stop("s1", only_if_silent=True)
+        assert process.signals == []
+        assert store["s1"].status == "live"
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await manager.close_all()
+
+
+async def test_a_conditional_kill_spares_a_worker_still_in_on_start() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process, started=False)
+    try:
+        with pytest.raises(manager_mod.WorkerNotStuck):
+            await manager.escalate_stop("s1", only_if_silent=True)
+        assert process.signals == []
+        assert store["s1"].status == "live"
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await manager.close_all()
+
+
+async def test_a_conditional_kill_takes_a_started_worker_whose_beat_went_quiet(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING")
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    process.pid = 4242
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    slot = manager._workers["s1"]
+    slot.last_beat = asyncio.get_running_loop().time() - manager_mod.BEAT_SILENCE_S - 1
+    published: list[str] = []
+
+    async def publish(_topic: object, envelope: Any) -> None:
+        message = getattr(envelope.payload, "message", None)
+        if message:
+            published.append(message)
+
+    manager._broker.publish = publish  # type: ignore[method-assign]
+    try:
+        result = await manager.escalate_stop("s1", only_if_silent=True)
+    finally:
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+    assert manager_mod.KILL_LOG_MESSAGE in published
+    assert "session=s1" in caplog.text
+    assert "pid=4242" in caplog.text
+
+
+async def test_a_refused_force_stop_does_not_block_a_later_kill() -> None:
+    """The spawn-window refusal is not the answer for the rest of the session."""
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    manager._workers["s1"].last_beat = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(manager_mod.WorkerNotStuck):
+            await manager.escalate_stop("s1", only_if_silent=True)
+        assert process.signals == []
+        result = await manager.escalate_stop("s1")
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+    assert store["s1"].status == "failed"
+
+
+async def test_an_expired_force_stop_does_not_block_a_later_kill() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    try:
+        with pytest.raises(manager_mod.ForceStopExpired):
+            await manager.escalate_stop("s1", deadline=time.time() - 1)
+        assert process.signals == []
+        result = await manager.escalate_stop("s1", deadline=time.time() + 30)
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+
+
+async def test_a_stale_force_stop_does_not_kill() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    try:
+        with pytest.raises(manager_mod.ForceStopExpired):
+            await manager.escalate_stop("s1", deadline=time.time() - 1)
+        assert process.signals == []
+        assert store["s1"].status == "live"
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await manager.close_all()
+
+
+async def test_a_kill_whose_row_write_fails_is_not_reported_as_failed() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    attempts = 0
+
+    async def mark(session_id: str, *, status: str, reason: str | None) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("db down")
+
+    manager._mark_done = mark
+    try:
+        with pytest.raises(RuntimeError, match="did not land"):
+            await manager.escalate_stop("s1")
+        assert attempts == manager_mod.MARK_KILL_ATTEMPTS
+        assert process.signals == [signal.SIGKILL]
+        assert store["s1"].status == "live"
+    finally:
+        await manager.close_all()
+
+
+def test_a_worker_beat_is_one_byte_the_parent_can_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setenv(BEAT_FD_ENV, str(write_fd))
+    try:
+        write_parent_beat()
+        os.set_blocking(read_fd, False)
+        assert os.read(read_fd, 8) == b"\n"
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+async def test_the_beat_reader_records_when_the_worker_last_wrote() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    manager = _manager(FakeSpawner(), store, load=True)
+    read_fd, write_fd = os.pipe()
+    slot = WorkerSlot(session_id="s1", role="create", beat_fd=read_fd)
+    manager._workers["s1"] = slot
+    manager._arm_beat_reader(slot)
+    try:
+        os.write(write_fd, b"\n")
+        for _ in range(50):
+            if slot.last_beat is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert slot.last_beat is not None
+    finally:
+        os.close(write_fd)
+        await manager.close_all()
+
+
+async def test_escalating_during_start_is_not_rewritten_as_a_deploy_failure() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    gate = asyncio.Event()
+    process = StubbornProcess()
+    spawner = FakeSpawner(line=None, process=process, gate=gate)
+    manager = _manager(spawner, store, load=True)
+    create = asyncio.create_task(manager.create_session(_request()))
+    try:
+        while (
+            "s1" not in store
+            or manager._workers.get("s1") is None
+            or manager._workers["s1"].process is None
+        ):
+            await asyncio.sleep(0)
+        assert manager._workers["s1"].started is False
+        result = await manager.escalate_stop("s1")
+        gate.set()
+        with pytest.raises(RuntimeError, match=START_FAIL_REASON):
+            await create
+    finally:
+        gate.set()
+        await manager.close_all()
+        await asyncio.gather(create, return_exceptions=True)
+
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+    assert store["s1"].status == "failed"
+    assert store["s1"].reason == STS_REASON_STOP_TIMED_OUT
+
+
+async def test_force_stop_does_not_block_list_on_the_instance_subject() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    release = asyncio.Event()
+    process = _UnreapedKill(release)
+    async with a_broker("sts-force-stop") as broker:
+        manager = _manager(FakeSpawner(), store, load=True)
+        # The list walk reads ``_sessions`` only. A worker slot must not
+        # be what makes this request slow — the serve loop would, if
+        # force-stop were awaited inline.
+        manager._broker = broker
+        _hold(manager, store, process)
+        stop = asyncio.Event()
+        rpc = asyncio.create_task(
+            run_rpc(broker, manager, stop, subject=Topics.sts("sts"))
+        )
+        force: asyncio.Task[Any] | None = None
+        try:
+            await asyncio.sleep(0.05)
+            force = asyncio.create_task(
+                broker.request(
+                    Topics.sts("sts"),
+                    StsSessionControlRequestEnvelope.wrap(
+                        StsSessionControlRequest(session_id="s1"),
+                        type=STS_SESSION_FORCE_STOP,
+                        source="api",
+                        session_id="s1",
+                    ),
+                    timeout=2,
+                )
+            )
+            for _ in range(50):
+                if signal.SIGKILL in process.signals:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("force-stop was not served")
+            assert not force.done()
+            started = time.perf_counter()
+            listed = await broker.request(
+                Topics.sts("sts"),
+                ListSessionsRequestEnvelope.wrap(
+                    ListSessionsRequest(domain="sts"),
+                    type=STS_SESSION_LIST,
+                    source="api",
+                ),
+                timeout=2,
+            )
+            # The kill has not been reaped yet. A serve loop that awaited
+            # force-stop would still be inside that wait.
+            assert time.perf_counter() - started < 0.4
+            assert listed.type == STS_SESSION_LIST
+            release.set()
+            reply = await force
+            killed = StsSessionControlResult.model_validate(reply.payload)
+            assert killed.status == "failed"
+            assert killed.reason == STS_REASON_STOP_TIMED_OUT
+        finally:
+            release.set()
+            if force is not None and not force.done():
+                force.cancel()
+            stop.set()
+            await asyncio.wait_for(rpc, timeout=2)
+            await manager.close_all()

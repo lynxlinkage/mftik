@@ -146,6 +146,13 @@ mftik logs <session>        a session's log; -f tails the live stream
 mftik stop <session>        stop a live session
 ```
 
+`stop` asks the worker to run `on_stop` and finish as `done` with reason
+`operator_stop`. If the worker does not answer, the supervisor kills that
+process. The row is then `failed` with reason `stop timed out; worker killed`,
+and `on_stop` does not run, so resting orders are not cancelled — cancel them
+on TD, or flatten. TD and MD still drop the attaches when the session's lease
+goes quiet: MD after 3 seconds, TD after 5.
+
 `check` does not talk to a node. It runs four layers and stops at the first
 refusal: the import gate (stdlib, the SDK, files in the tree, and names
 declared in ``requires`` — a two-pass scan so a helper can import what a

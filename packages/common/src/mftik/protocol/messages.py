@@ -336,6 +336,14 @@ class StsSessionControlRequest(BaseModel):
     session_id: str
     #: Why a fail is being recorded. Ignored by stop.
     reason: str | None = None
+    #: Wall-clock deadline for a force-stop. The supervisor drops the
+    #: kill once this has passed, so a request the API already gave up
+    #: on does not land after the caller was told it failed.
+    deadline: float | None = None
+    #: Kill only a started worker whose beat has been silent. Set when
+    #: the stop was never delivered (nobody subscribed), not when a
+    #: subscriber held the request and did not answer.
+    only_if_silent: bool = False
 
 
 class StsSessionControlResult(BaseModel):
@@ -1476,6 +1484,10 @@ STS_ERROR = "sts.error"
 STS_SESSION_CREATE = "sts.session.create"
 STS_SESSION_LIST = "sts.session.list"
 STS_SESSION_STOP = "sts.session.stop"
+#: Parent-only. The API sends this after ``sts.session.stop`` on the
+#: worker's control subject goes unanswered. The worker does not serve it:
+#: a blocked loop is the reason the first call timed out.
+STS_SESSION_FORCE_STOP = "sts.session.force_stop"
 STS_SESSION_FAIL = "sts.session.fail"
 STS_SESSION_STATUS = "sts.session.status"
 STS_EVENTLOG_INFO = "sts.eventlog.info"
@@ -1497,6 +1509,30 @@ STS_ARTIFACT_DELETE = "sts.artifact.delete"
 #: — both of which are ``done``. The frontend compares against this exact
 #: string, so changing it changes the wire contract.
 STS_REASON_OPERATOR_STOP = "operator_stop"
+
+#: ``reason`` on a session the supervisor killed because stop was not
+#: answered. ``failed``, not ``interrupted``: an interrupted row is rebuilt,
+#: and this one was stopped on purpose. ``on_stop`` did not run, so resting
+#: orders are still the caller's to cancel.
+STS_REASON_STOP_TIMED_OUT = "stop timed out; worker killed"
+
+#: How long ``on_stop`` may run before the session detaches without it.
+#: Generous enough for a couple of order cancels, each an ack round-trip;
+#: short enough that a wedged strategy cannot hold a trading attach open.
+ON_STOP_TIMEOUT_S = 10.0
+
+#: How long the API waits for a stop reply. Longer than ``ON_STOP_TIMEOUT_S``
+#: by the rest of ``close``: detaches, task cancellation, the event log,
+#: the row write, and the status publish. A strategy that uses its whole
+#: ``on_stop`` budget must still be able to answer before anyone concludes
+#: the worker is stuck.
+STOP_CONTROL_TIMEOUT_S = ON_STOP_TIMEOUT_S + 5.0
+
+#: How long the API waits for the supervisor's force-stop, after the control
+#: wait above. The supervisor SIGKILLs and then waits for the watcher to
+#: write the row. This covers that write, not another ``on_stop``.
+STOP_FORCE_RPC_TIMEOUT_S = 5.0
+
 STS_LEASE_HEARTBEAT = "sts.lease.heartbeat"
 STS_HEARTBEAT = STS_LEASE_HEARTBEAT  # alias for older names
 STS_RECON = "sts.recon"

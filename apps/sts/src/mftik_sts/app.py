@@ -20,7 +20,7 @@ from mftik import (
     serve_health,
 )
 from mftik.broker import Broker
-from mftik.protocol import STS_SESSION_CREATE
+from mftik.protocol import STS_SESSION_CREATE, STS_SESSION_FORCE_STOP
 from mftik.strategy.artifacts import get_store
 from mftik_db.schema import SchemaTooOld, require_sts_schema
 
@@ -83,13 +83,14 @@ async def run_rpc(
     while not stop.is_set():
         try:
             async for req in broker.serve(subject, stop=stop):
-                # Create waits on the worker's result line. Awaiting it
-                # here would hold every other RPC on this subject — list,
-                # artifacts — for as long as ``on_start`` cares to run.
-                # The API's own timeout is unchanged. If that timeout
+                # Create waits on the worker's result line. Force-stop waits
+                # out the kill and the row write. Awaiting either here would
+                # hold every other RPC on this subject — list, artifacts,
+                # another session's stop — for that whole time.
+                # The API's own timeout is unchanged. If a create timeout
                 # already fired and the worker later reports success, the
                 # session stays live and the deploy has not attached it.
-                # This process does not kill the worker and does not mark
+                # This process does not kill that worker and does not mark
                 # the row failed.
                 if req.envelope.type == STS_SESSION_CREATE:
                     task = asyncio.create_task(
@@ -97,6 +98,13 @@ async def run_rpc(
                         name="sts-rpc-create",
                     )
                     sessions.track_create(task)
+                    continue
+                if req.envelope.type == STS_SESSION_FORCE_STOP:
+                    task = asyncio.create_task(
+                        _dispatch_request(req, sessions),
+                        name="sts-rpc-force-stop",
+                    )
+                    sessions.track_escalation(task)
                     continue
                 await _dispatch_request(req, sessions)
         except asyncio.CancelledError:
