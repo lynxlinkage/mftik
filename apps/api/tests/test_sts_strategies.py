@@ -9,14 +9,25 @@ later ``WHERE type IS NOT NULL`` from bringing that back silently.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from db_harness import a_database, an_owner
 from fastapi import HTTPException
-from mftik.protocol import ANY_INSTANCE
+from mftik.protocol import (
+    ANY_INSTANCE,
+    STOP_CONTROL_TIMEOUT_S,
+    STOP_FORCE_RPC_TIMEOUT_S,
+    STS_REASON_STOP_TIMED_OUT,
+    STS_SESSION_FORCE_STOP,
+    STS_SESSION_STOP,
+    StsSessionControlResult,
+    Topics,
+)
+from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.routes import sts as sts_routes
 from mftik_db.models.session import SessionStatus
-from mftik_db.repositories import StsSessionRepository
+from mftik_db.repositories import InstanceRepository, StsSessionRepository
 
 
 @pytest.fixture
@@ -232,3 +243,191 @@ async def test_stopping_a_session_that_never_existed_is_a_404(db) -> None:
 
     assert caught.value.status_code == 404
     assert "unknown sts session" in str(caught.value.detail)
+
+
+def _scripted_stop(monkeypatch: pytest.MonkeyPatch, steps: list[Any]) -> list[tuple]:
+    """Each step is a result or a ``DomainRpcError`` the next RPC raises."""
+    seen: list[tuple] = []
+
+    async def request_domain(
+        broker: object,
+        subject: str,
+        envelope: Any,
+        *,
+        result_type: type,
+        timeout: float = 5.0,
+        **_kwargs: object,
+    ) -> Any:
+        seen.append((subject, envelope.type, timeout))
+        step = steps.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+    monkeypatch.setattr(sts_routes, "request_domain", request_domain)
+
+    async def _audit(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(sts_routes, "record_audit", _audit)
+    return seen
+
+
+async def test_an_unanswered_stop_kills_the_worker(db, monkeypatch) -> None:
+    async with db() as session:
+        await StsSessionRepository(session).create_live(
+            session_id="s-stuck",
+            created_by=1,
+            type="NoopStrategy",
+            instance="sts-a",
+        )
+    seen = _scripted_stop(
+        monkeypatch,
+        [
+            DomainRpcError("timeout", "timed out"),
+            StsSessionControlResult(
+                session_id="s-stuck",
+                status="failed",
+                strategy="NoopStrategy",
+                reason=STS_REASON_STOP_TIMED_OUT,
+            ),
+        ],
+    )
+
+    result = await sts_routes.stop_session("s-stuck", broker=None)  # type: ignore[arg-type]
+
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+    assert seen == [
+        (Topics.sts_control("s-stuck"), STS_SESSION_STOP, STOP_CONTROL_TIMEOUT_S),
+        (Topics.sts("sts-a"), STS_SESSION_FORCE_STOP, STOP_FORCE_RPC_TIMEOUT_S),
+    ]
+
+
+async def test_a_stop_that_finishes_as_the_wait_expires_is_not_killed(
+    db, monkeypatch
+) -> None:
+    """The control reply lost the race. The row is already terminal."""
+    async with db() as session:
+        await StsSessionRepository(session).create_live(
+            session_id="s-late",
+            created_by=1,
+            type="NoopStrategy",
+            instance="sts-a",
+        )
+
+    async def request_domain(
+        broker: object,
+        subject: str,
+        envelope: Any,
+        *,
+        result_type: type,
+        timeout: float = 5.0,
+        **_kwargs: object,
+    ) -> Any:
+        assert envelope.type == STS_SESSION_STOP
+        async with db() as session:
+            await StsSessionRepository(session).mark_finished(
+                "s-late",
+                status=SessionStatus.DONE.value,
+                reason="operator_stop",
+            )
+        raise DomainRpcError("timeout", "late")
+
+    monkeypatch.setattr(sts_routes, "request_domain", request_domain)
+
+    async def _audit(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(sts_routes, "record_audit", _audit)
+
+    result = await sts_routes.stop_session("s-late", broker=None)  # type: ignore[arg-type]
+
+    assert result.status == "done"
+    assert result.reason == "operator_stop"
+
+
+async def test_force_stop_not_found_on_a_live_row_is_not_an_unknown_session(
+    db, monkeypatch
+) -> None:
+    async with db() as session:
+        await StsSessionRepository(session).create_live(
+            session_id="s-inplace",
+            created_by=1,
+            instance="sts-a",
+        )
+    _scripted_stop(
+        monkeypatch,
+        [
+            DomainRpcError("timeout", "timed out"),
+            DomainRpcError("not_found", "no active sts session s-inplace"),
+        ],
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await sts_routes.stop_session("s-inplace", broker=None)  # type: ignore[arg-type]
+
+    assert caught.value.status_code == 502
+    assert "no worker to kill" in str(caught.value.detail)
+    assert "unknown sts session" not in str(caught.value.detail)
+    assert "orphan reaper" not in str(caught.value.detail)
+
+
+async def test_an_unpinned_stop_is_sent_to_the_derived_sts(
+    db, monkeypatch
+) -> None:
+    async with db() as session:
+        await StsSessionRepository(session).create_live(
+            session_id="s-free",
+            created_by=1,
+            type="NoopStrategy",
+            td={"main": {"api_id": 9}},
+        )
+    asked: list[list[int]] = []
+
+    async def derived(self: object, api_ids: list[int]) -> str:
+        asked.append(list(api_ids))
+        return "sts-jp"
+
+    monkeypatch.setattr(InstanceRepository, "derived_sts", derived)
+    seen = _scripted_stop(
+        monkeypatch,
+        [
+            DomainRpcError("timeout", "timed out"),
+            StsSessionControlResult(
+                session_id="s-free",
+                status="failed",
+                strategy="NoopStrategy",
+                reason=STS_REASON_STOP_TIMED_OUT,
+            ),
+        ],
+    )
+
+    result = await sts_routes.stop_session("s-free", broker=None)  # type: ignore[arg-type]
+
+    assert result.status == "failed"
+    assert asked == [[9]]
+    assert seen[1][0] == Topics.sts("sts-jp")
+
+
+async def test_an_unpinned_stop_with_no_unique_sts_stays_a_502(
+    db, monkeypatch
+) -> None:
+    async with db() as session:
+        await StsSessionRepository(session).create_live(
+            session_id="s-nowhere",
+            created_by=1,
+        )
+
+    async def derived(self: object, api_ids: list[int]) -> None:
+        return None
+
+    monkeypatch.setattr(InstanceRepository, "derived_sts", derived)
+    _scripted_stop(monkeypatch, [DomainRpcError("timeout", "timed out")])
+
+    with pytest.raises(HTTPException) as caught:
+        await sts_routes.stop_session("s-nowhere", broker=None)  # type: ignore[arg-type]
+
+    assert caught.value.status_code == 502
+    assert "not pinned to one STS" in str(caught.value.detail)
+    assert "orphan reaper" not in str(caught.value.detail)

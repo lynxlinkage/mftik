@@ -11,6 +11,7 @@ from mftik.protocol import (
     STS_ERROR,
     STS_SESSION_CREATE,
     STS_SESSION_FAIL,
+    STS_SESSION_FORCE_STOP,
     STS_SESSION_LIST,
     STS_SESSION_STOP,
     ListSessionsRequest,
@@ -105,6 +106,19 @@ async def handle_session_stop(
     await _control(req, sessions=sessions, action="stop", reply_type=STS_SESSION_STOP)
 
 
+async def handle_session_force_stop(
+    req: IncomingRequest,
+    *,
+    sessions: SessionManager | None = None,
+) -> None:
+    await _control(
+        req,
+        sessions=sessions,
+        action="force_stop",
+        reply_type=STS_SESSION_FORCE_STOP,
+    )
+
+
 async def handle_session_fail(
     req: IncomingRequest,
     *,
@@ -158,6 +172,7 @@ async def _control(
 
     fn: ControlFn | None = {
         "stop": sessions.stop_session,
+        "force_stop": sessions.escalate_stop,
     }.get(action)
     if fn is None:
         await _error(req, "unknown_action", action)

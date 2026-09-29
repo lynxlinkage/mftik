@@ -27,6 +27,8 @@
 	let error = $state<string | null>(null);
 	let loading = $state(true);
 	let busy = $state(false);
+	// Not `busy`: ack sets that too, and the label is only for this wait.
+	let stopping = $state(false);
 	let showYaml = $state(false);
 	let copied = $state(false);
 	let download = $state<{ domain: 'td' | 'md'; streamId: string } | null>(null);
@@ -126,6 +128,7 @@
 	async function stop() {
 		if (session === null) return;
 		busy = true;
+		stopping = true;
 		error = null;
 		try {
 			await api.stopSts(session.session_id);
@@ -134,6 +137,7 @@
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			busy = false;
+			stopping = false;
 		}
 	}
 
@@ -228,7 +232,9 @@
 		</dl>
 		<div class="actions">
 			{#if session.status === 'live'}
-				<button type="button" class="danger" disabled={busy} onclick={stop}>Stop</button>
+				<button type="button" class="danger" disabled={busy} onclick={stop}>
+					{stopping ? 'Stopping…' : 'Stop'}
+				</button>
 			{/if}
 			{#if session.status === 'failed' || session.status === 'interrupted'}
 				<button type="button" class="secondary" disabled={busy} onclick={ack}>Ack</button>

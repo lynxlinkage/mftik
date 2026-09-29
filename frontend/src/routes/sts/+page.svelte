@@ -51,6 +51,9 @@
 	let pristineYaml = $state(defaultStrategyYml());
 	let error = $state<string | null>(null);
 	let busy = $state(false);
+	// Not `busy`: deploy sets that too, and every Stop button would read
+	// "Stopping…" for the whole of a deploy.
+	let stoppingId = $state<string | null>(null);
 	let loading = $state(true);
 
 	// The strategy.yml of a past deploy: the submitted document, or a rebuild
@@ -322,6 +325,7 @@
 
 	async function stop(s: StrategyRow) {
 		busy = true;
+		stoppingId = s.session_id;
 		error = null;
 		try {
 			await api.stopSts(s.session_id);
@@ -330,6 +334,7 @@
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			busy = false;
+			stoppingId = null;
 		}
 	}
 
@@ -611,7 +616,7 @@
 							<div class="actions">
 								{#if s.status === 'live'}
 									<button type="button" class="danger" disabled={busy} onclick={() => stop(s)}>
-										Stop
+										{stoppingId === s.session_id ? 'Stopping…' : 'Stop'}
 									</button>
 								{/if}
 								{#if s.status === 'failed' || s.status === 'interrupted'}

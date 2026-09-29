@@ -46,6 +46,7 @@ from mftik.protocol import (
     MD_SESSION_DETACH,
     MD_TICKER,
     MD_TRADE,
+    ON_STOP_TIMEOUT_S,
     STS_LEASE_HEARTBEAT,
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
@@ -88,12 +89,6 @@ from mftik.symbols import SymbolClient
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
-
-#: How long a strategy's ``on_stop`` may take before the session detaches
-#: without it. Generous enough for a couple of order cancels, each of which is
-#: an ack round-trip; short enough that a wedged strategy cannot hold a trading
-#: attach open behind it.
-ON_STOP_TIMEOUT_S = 10.0
 
 #: ``(session_id, reason, failed)`` — the manager tears the session down and
 #: records the terminal status.

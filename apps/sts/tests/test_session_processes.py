@@ -19,8 +19,11 @@ from typing import Any
 import pytest
 from broker_harness import a_broker
 from mftik.protocol import (
+    STOP_FORCE_RPC_TIMEOUT_S,
     STS_ERROR,
+    STS_REASON_STOP_TIMED_OUT,
     STS_SESSION_CREATE,
+    STS_SESSION_FORCE_STOP,
     STS_SESSION_LIST,
     STS_SESSION_STOP,
     ListSessionsRequest,
@@ -49,6 +52,7 @@ from mftik_sts.spawn import (
     LIFELINE_FD_ENV,
     PARENT_PID_ENV,
     START_FAIL_REASON,
+    STOP_ESCALATION_GRACE_S,
     SubprocessSpawner,
     WorkerSlot,
     _PipeWorker,
@@ -1216,3 +1220,234 @@ async def test_a_worker_reports_the_qualified_key(
         _REGISTRY.clear()
         _REGISTRY.update(before)
         await engine.dispose()
+
+
+def test_force_stop_timeout_covers_the_grace() -> None:
+    """The API's second wait is the grace plus the row write, not another 2s guess."""
+    assert STOP_FORCE_RPC_TIMEOUT_S >= STOP_ESCALATION_GRACE_S + 3
+
+
+def _hold(
+    manager: SessionManager,
+    store: dict[str, SimpleNamespace],
+    process: FakeProcess,
+    *,
+    started: bool = True,
+    session_id: str = "s1",
+) -> WorkerSlot:
+    store[session_id] = SimpleNamespace(
+        status="live", reason=None, session_id=session_id
+    )
+    slot = WorkerSlot(
+        session_id=session_id,
+        role="create",
+        started=started,
+        strategy_name="rebuildable",
+        type="Rebuildable",
+        created_by=1,
+        process=process,
+    )
+    manager._workers[session_id] = slot
+    if started:
+        manager._arm_watcher(slot)
+    return slot
+
+
+async def test_escalate_stop_kills_a_worker_that_ignores_sigterm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager_mod, "STOP_ESCALATION_GRACE_S", 0.05)
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, rebuild=True, load=True)
+    _hold(manager, store, process)
+    try:
+        result = await manager.escalate_stop("s1")
+    finally:
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGTERM, signal.SIGKILL]
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+    assert store["s1"].status == "failed"
+    assert store["s1"].reason == STS_REASON_STOP_TIMED_OUT
+    assert "s1" not in manager._workers
+    assert not manager._rebuild_tasks
+
+
+async def test_escalate_stop_kills_a_worker_still_in_on_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not started yet is still a process. A sync ``on_start`` is the same stall."""
+    monkeypatch.setattr(manager_mod, "STOP_ESCALATION_GRACE_S", 0.05)
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, rebuild=True, load=True)
+    _hold(manager, store, process, started=False)
+    try:
+        result = await manager.escalate_stop("s1")
+    finally:
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGTERM, signal.SIGKILL]
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+    assert store["s1"].status == "failed"
+    assert not manager._rebuild_tasks
+
+
+async def test_a_second_force_stop_waits_instead_of_signalling_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager_mod, "STOP_ESCALATION_GRACE_S", 0.3)
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    first = asyncio.create_task(manager.escalate_stop("s1"))
+    try:
+        while signal.SIGTERM not in process.signals:
+            await asyncio.sleep(0)
+        second = asyncio.create_task(manager.escalate_stop("s1"))
+        result = await first
+        again = await second
+    finally:
+        await manager.close_all()
+
+    assert process.signals.count(signal.SIGTERM) == 1
+    assert process.signals.count(signal.SIGKILL) == 1
+    assert again.status == result.status == "failed"
+    assert again.reason == result.reason == STS_REASON_STOP_TIMED_OUT
+
+
+class _FinishesOnTerm(FakeProcess):
+    """SIGTERM is the worker finishing the queued stop and exiting 0."""
+
+    def __init__(self, store: dict[str, SimpleNamespace], session_id: str) -> None:
+        super().__init__()
+        self._store = store
+        self._session_id = session_id
+
+    def send_signal(self, sig: int) -> None:
+        self.signals.append(sig)
+        row = self._store[self._session_id]
+        row.status = "done"
+        row.reason = "operator_stop"
+        self.returncode = 0
+        self._exit.set()
+
+
+async def test_escalate_stop_keeps_a_row_the_worker_wrote_during_grace() -> None:
+    """The stop landed as the grace started. Killing must not replace it."""
+    store: dict[str, SimpleNamespace] = {}
+    manager = _manager(FakeSpawner(), store, load=True)
+    process = _FinishesOnTerm(store, "s1")
+    _hold(manager, store, process)
+    try:
+        result = await manager.escalate_stop("s1")
+    finally:
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGTERM]
+    assert result.status == "done"
+    assert result.reason == "operator_stop"
+    assert store["s1"].status == "done"
+    assert store["s1"].reason == "operator_stop"
+
+
+async def test_escalating_during_start_is_not_rewritten_as_a_deploy_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager_mod, "STOP_ESCALATION_GRACE_S", 0.05)
+    store: dict[str, SimpleNamespace] = {}
+    gate = asyncio.Event()
+    process = StubbornProcess()
+    spawner = FakeSpawner(line=None, process=process, gate=gate)
+    manager = _manager(spawner, store, load=True)
+    create = asyncio.create_task(manager.create_session(_request()))
+    try:
+        while (
+            "s1" not in store
+            or manager._workers.get("s1") is None
+            or manager._workers["s1"].process is None
+        ):
+            await asyncio.sleep(0)
+        assert manager._workers["s1"].started is False
+        result = await manager.escalate_stop("s1")
+        gate.set()
+        with pytest.raises(RuntimeError, match=START_FAIL_REASON):
+            await create
+    finally:
+        gate.set()
+        await manager.close_all()
+        await asyncio.gather(create, return_exceptions=True)
+
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+    assert store["s1"].status == "failed"
+    assert store["s1"].reason == STS_REASON_STOP_TIMED_OUT
+
+
+async def test_force_stop_does_not_block_list_on_the_instance_subject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager_mod, "STOP_ESCALATION_GRACE_S", 0.8)
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    async with a_broker("sts-force-stop") as broker:
+        manager = _manager(FakeSpawner(), store, load=True)
+        # The list walk reads ``_sessions`` only. A worker slot must not
+        # be what makes this request slow — the serve loop would, if
+        # force-stop were awaited inline.
+        manager._broker = broker
+        _hold(manager, store, process)
+        stop = asyncio.Event()
+        rpc = asyncio.create_task(
+            run_rpc(broker, manager, stop, subject=Topics.sts("sts"))
+        )
+        force: asyncio.Task[Any] | None = None
+        try:
+            await asyncio.sleep(0.05)
+            force = asyncio.create_task(
+                broker.request(
+                    Topics.sts("sts"),
+                    StsSessionControlRequestEnvelope.wrap(
+                        StsSessionControlRequest(session_id="s1"),
+                        type=STS_SESSION_FORCE_STOP,
+                        source="api",
+                        session_id="s1",
+                    ),
+                    timeout=2,
+                )
+            )
+            for _ in range(50):
+                if signal.SIGTERM in process.signals:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("force-stop was not served")
+            assert not force.done()
+            started = time.perf_counter()
+            listed = await broker.request(
+                Topics.sts("sts"),
+                ListSessionsRequestEnvelope.wrap(
+                    ListSessionsRequest(domain="sts"),
+                    type=STS_SESSION_LIST,
+                    source="api",
+                ),
+                timeout=2,
+            )
+            # The grace is 0.8s and has barely started. A serve loop that
+            # awaited force-stop would still be inside it.
+            assert time.perf_counter() - started < 0.4
+            assert listed.type == STS_SESSION_LIST
+            reply = await force
+            killed = StsSessionControlResult.model_validate(reply.payload)
+            assert killed.status == "failed"
+            assert killed.reason == STS_REASON_STOP_TIMED_OUT
+        finally:
+            if force is not None and not force.done():
+                force.cancel()
+            stop.set()
+            await asyncio.wait_for(rpc, timeout=2)
+            await manager.close_all()

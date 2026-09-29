@@ -19,6 +19,7 @@ from mftik.protocol import (
     MD_SESSION_ATTACH,
     STS_ERROR,
     STS_REASON_OPERATOR_STOP,
+    STS_REASON_STOP_TIMED_OUT,
     STS_SESSION_STATUS,
     TD_ERROR,
     TD_SESSION_ATTACH,
@@ -55,6 +56,7 @@ from mftik_sts.runtime_env import IncompatibleEnvironment, ensure_deployable
 from mftik_sts.session.session import StsSession
 from mftik_sts.spawn import (
     START_FAIL_REASON,
+    STOP_ESCALATION_GRACE_S,
     WORKER_STOP_WAIT_S,
     SessionSpawner,
     WorkerSlot,
@@ -291,6 +293,17 @@ class SessionManager:
         #: Create RPCs waiting on a result line. They are not the serve
         #: loop: a worker stuck in ``on_start`` must not stop list.
         self._create_tasks: set[asyncio.Task[Any]] = set()
+        #: Force-stop RPCs in SIGTERM grace. Same reason as creates: the
+        #: instance subject serves one request at a time, and this wait
+        #: must not hold list or another session's stop.
+        self._escalation_tasks: set[asyncio.Task[Any]] = set()
+        #: session id → the result of the escalation already running.
+        #: Survives the slot leaving ``_workers``, until that result is set,
+        #: so a second force-stop waits instead of signalling again or
+        #: answering ``not_found``.
+        self._stop_escalations: dict[
+            str, asyncio.Future[StsSessionControlResult]
+        ] = {}
         #: Processes that failed before ``started`` and still need ``wait``.
         #: A worker that exits without a watcher is a zombie until something
         #: collects it.
@@ -648,6 +661,10 @@ class SessionManager:
         reason: str,
     ) -> None:
         """A worker that never reported a result line. Not a rebuild candidate."""
+        if slot.stop_escalated:
+            # ``escalate_stop`` owns the row. A start-failure reason here
+            # would replace ``stop timed out; worker killed``.
+            return
         if slot.started or slot.abandoned:
             return
         self._drop_unstarted(slot)
@@ -726,6 +743,17 @@ class SessionManager:
             return
         self._workers.pop(slot.session_id, None)
         self._release_lifeline(slot)
+        if slot.stop_escalated:
+            # Exit 0: the worker wrote the row during the grace (the queued
+            # stop ran, or SIGTERM was handled). Leave it. Anything still
+            # live was killed, and it is not a rebuild.
+            if (
+                not self._closing
+                and not self._shutting_down
+                and await self._row_is_live(slot.session_id)
+            ):
+                await self._mark_stop_killed(slot)
+            return
         if code == 0:
             # The worker returned from its last ``close`` before exiting, so
             # the row already has the strategy's reason. Rewriting it here,
@@ -791,6 +819,11 @@ class SessionManager:
         """Hold a create RPC so shutdown can cancel it."""
         self._create_tasks.add(task)
         task.add_done_callback(self._create_tasks.discard)
+
+    def track_escalation(self, task: asyncio.Task[Any]) -> None:
+        """Hold a force-stop RPC so shutdown can cancel it."""
+        self._escalation_tasks.add(task)
+        task.add_done_callback(self._escalation_tasks.discard)
 
     async def _row_is_live(self, session_id: str) -> bool:
         """Whether this one row is still ``live``.
@@ -898,6 +931,154 @@ class SessionManager:
             status=SessionStatus.DONE.value,
             strategy=strategy,
             reason=STS_REASON_OPERATOR_STOP,
+        )
+
+    async def escalate_stop(self, session_id: str) -> StsSessionControlResult:
+        """Kill a worker whose control subject did not answer stop.
+
+        The slot may still be in ``on_start``: a sync call there is the
+        same stuck loop, and it has a process whether or not it has
+        reported success. No slot means this process has nothing to
+        signal — in-process mode, or a session held somewhere else.
+        """
+        inflight = self._stop_escalations.get(session_id)
+        if inflight is not None:
+            return await inflight
+        slot = self._workers.get(session_id)
+        if slot is not None and slot.escalation is not None:
+            return await slot.escalation
+        if slot is None or slot.process is None:
+            raise KeyError(f"no active sts session {session_id}")
+
+        future: asyncio.Future[StsSessionControlResult] = (
+            asyncio.get_running_loop().create_future()
+        )
+        slot.escalation = future
+        self._stop_escalations[session_id] = future
+        try:
+            result = await self._run_escalation(slot)
+        except asyncio.CancelledError:
+            # Shutdown cancelled this task. ``_stop_workers`` owns the row
+            # from here; writing the kill reason would replace it.
+            if not future.done():
+                future.cancel()
+            raise
+        except Exception as exc:
+            if not future.done():
+                future.set_exception(exc)
+            raise
+        else:
+            if not future.done():
+                future.set_result(result)
+            return result
+        finally:
+            if self._stop_escalations.get(session_id) is future:
+                self._stop_escalations.pop(session_id, None)
+
+    async def _run_escalation(self, slot: WorkerSlot) -> StsSessionControlResult:
+        """SIGTERM, a short grace, then SIGKILL. The row is written after."""
+        slot.stop_escalated = True
+        process = slot.process
+        if process is None:
+            raise KeyError(f"no active sts session {slot.session_id}")
+        if process.returncode is None:
+            try:
+                process.send_signal(signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        if process.returncode is None:
+            try:
+                await asyncio.wait_for(
+                    process.wait(), timeout=STOP_ESCALATION_GRACE_S
+                )
+            except TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+        watcher = slot.watcher
+        if watcher is not None:
+            # The watcher is the row writer. Waiting on ``process.wait``
+            # alone replies before ``failed`` is stored.
+            if not watcher.done():
+                await watcher
+        else:
+            # Unstarted: nothing is watching the exit. ``on_start`` has
+            # not armed one, and the create path must not record this as
+            # a deploy failure once the flag is set.
+            if (
+                not self._closing
+                and not self._shutting_down
+                and await self._row_is_live(slot.session_id)
+            ):
+                await self._mark_stop_killed(slot)
+            if not slot.abandoned:
+                self._drop_unstarted(slot)
+        return await self._escalation_result(slot)
+
+    async def _mark_stop_killed(self, slot: WorkerSlot) -> None:
+        """Write ``failed`` for a worker that never closed its own row.
+
+        Skipped once shutdown has started. ``close_all`` writes its own
+        reason first and then signals; this must not land on top of it.
+        """
+        if self._closing or self._shutting_down:
+            return
+        if self._mark_done is not None:
+            try:
+                await self._mark_done(
+                    slot.session_id,
+                    status=SessionStatus.FAILED.value,
+                    reason=STS_REASON_STOP_TIMED_OUT,
+                )
+            except Exception:
+                logger.exception(
+                    "STS failed to mark a killed worker session=%s",
+                    slot.session_id,
+                )
+                return
+        await self._publish_status(
+            slot.session_id,
+            status=SessionStatus.FAILED.value,
+            strategy=slot.strategy_name,
+            reason=STS_REASON_STOP_TIMED_OUT,
+            created_by=slot.created_by,
+            type=slot.type,
+        )
+
+    async def _escalation_result(
+        self, slot: WorkerSlot
+    ) -> StsSessionControlResult:
+        """The row as it stands after the process is gone.
+
+        Exit 0 during the grace means the worker wrote it — often
+        ``done`` / ``operator_stop`` — and ``_on_worker_exit`` does not
+        rewrite a zero exit. Anything still ``live`` was killed, and the
+        watcher (or ``_mark_stop_killed``) has already stored that.
+        """
+        row = None
+        if self._load_session is not None:
+            try:
+                row = await self._load_session(slot.session_id)
+            except Exception:
+                logger.exception(
+                    "STS could not read the row after killing session=%s",
+                    slot.session_id,
+                )
+        status = getattr(row, "status", None) if row is not None else None
+        if not status or status == SessionStatus.LIVE.value:
+            return StsSessionControlResult(
+                session_id=slot.session_id,
+                status=SessionStatus.FAILED.value,
+                strategy=slot.strategy_name,
+                reason=STS_REASON_STOP_TIMED_OUT,
+            )
+        return StsSessionControlResult(
+            session_id=slot.session_id,
+            status=str(status),
+            strategy=slot.strategy_name,
+            reason=getattr(row, "reason", None),
         )
 
     async def fail_session(
@@ -1800,13 +1981,16 @@ class SessionManager:
         settle = self._drain_tracked(self._settle_tasks)
         rebuilds = self._drain_tracked(self._rebuild_tasks)
         creates = self._drain_tracked(self._create_tasks)
-        for task in (*settle, *rebuilds, *creates):
+        escalations = self._drain_tracked(self._escalation_tasks)
+        for task in (*settle, *rebuilds, *creates, *escalations):
             task.cancel()
         if settle:
             await asyncio.gather(*settle, return_exceptions=True)
         await self._stop_workers()
-        if rebuilds or creates:
-            await asyncio.gather(*rebuilds, *creates, return_exceptions=True)
+        if rebuilds or creates or escalations:
+            await asyncio.gather(
+                *rebuilds, *creates, *escalations, return_exceptions=True
+            )
         if self._reaps:
             await asyncio.wait(list(self._reaps), timeout=WORKER_STOP_WAIT_S)
         await self._close_in_process()
