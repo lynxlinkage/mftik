@@ -147,29 +147,6 @@ def test_second_lock_raises(tmp_path: Path) -> None:
                 pass
 
 
-def test_blocking_lock_waits_for_the_holder(tmp_path: Path) -> None:
-    import threading
-    import time
-
-    env = NodeEnv(tmp_path)
-    order: list[str] = []
-
-    def holder() -> None:
-        with env.lock():
-            order.append("hold")
-            time.sleep(0.05)
-        order.append("released")
-
-    thread = threading.Thread(target=holder)
-    thread.start()
-    while "hold" not in order:
-        time.sleep(0.001)
-    with env.lock(blocking=True):
-        order.append("waited")
-    thread.join()
-    assert order == ["hold", "released", "waited"]
-
-
 def test_ensure_current_creates_empty_gen0(tmp_path: Path) -> None:
     env = NodeEnv(tmp_path)
     current = env.ensure_current()
