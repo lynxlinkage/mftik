@@ -39,14 +39,6 @@ LIFELINE_FD_ENV = "MFTIK_STS_LIFELINE_FD"
 #: is how long a fast detach gets, not a promise that cleanup finished.
 WORKER_STOP_WAIT_S = 8.0
 
-#: How long a stop escalation waits after SIGTERM before SIGKILL. Shorter
-#: than ``WORKER_STOP_WAIT_S``: the control subject already waited out
-#: ``on_stop`` (and the margin after it), so this grace is only for a loop
-#: that can still notice the signal. A loop blocked in a sync call will not,
-#: and SIGKILL is what ends it. The API's force-stop timeout is this plus
-#: slack (``STOP_FORCE_RPC_TIMEOUT_S``); a test keeps the two from drifting.
-STOP_ESCALATION_GRACE_S = 2.0
-
 
 @dataclass
 class WorkerSlot:
@@ -66,7 +58,7 @@ class WorkerSlot:
     type: str | None = None
     created_by: int | None = None
     process: Any = None
-    #: Set before the escalation signals. The exit watcher writes
+    #: Set before the escalation kills. The exit watcher writes
     #: ``failed`` instead of ``interrupted`` and does not rebuild.
     stop_escalated: bool = False
     #: The in-flight ``escalate_stop`` result. A second force-stop awaits

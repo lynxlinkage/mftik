@@ -1521,9 +1521,8 @@ ON_STOP_TIMEOUT_S = 10.0
 STOP_CONTROL_TIMEOUT_S = ON_STOP_TIMEOUT_S + 5.0
 
 #: How long the API waits for the supervisor's force-stop, after the control
-#: wait above. ``STOP_ESCALATION_GRACE_S`` in the STS spawner is 2s; this is
-#: that grace plus the watcher writing the row. A test locks the two
-#: together, because this package cannot import the spawner.
+#: wait above. The supervisor SIGKILLs and then waits for the watcher to
+#: write the row. This covers that write, not another ``on_stop``.
 STOP_FORCE_RPC_TIMEOUT_S = 5.0
 
 STS_LEASE_HEARTBEAT = "sts.lease.heartbeat"

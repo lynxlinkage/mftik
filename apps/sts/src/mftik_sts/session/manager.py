@@ -56,7 +56,6 @@ from mftik_sts.runtime_env import IncompatibleEnvironment, ensure_deployable
 from mftik_sts.session.session import StsSession
 from mftik_sts.spawn import (
     START_FAIL_REASON,
-    STOP_ESCALATION_GRACE_S,
     WORKER_STOP_WAIT_S,
     SessionSpawner,
     WorkerSlot,
@@ -293,9 +292,9 @@ class SessionManager:
         #: Create RPCs waiting on a result line. They are not the serve
         #: loop: a worker stuck in ``on_start`` must not stop list.
         self._create_tasks: set[asyncio.Task[Any]] = set()
-        #: Force-stop RPCs in SIGTERM grace. Same reason as creates: the
-        #: instance subject serves one request at a time, and this wait
-        #: must not hold list or another session's stop.
+        #: Force-stop RPCs waiting on the kill and the row write. Same reason
+        #: as creates: the instance subject serves one request at a time,
+        #: and this wait must not hold list or another session's stop.
         self._escalation_tasks: set[asyncio.Task[Any]] = set()
         #: session id → the result of the escalation already running.
         #: Survives the slot leaving ``_workers``, until that result is set,
@@ -744,9 +743,9 @@ class SessionManager:
         self._workers.pop(slot.session_id, None)
         self._release_lifeline(slot)
         if slot.stop_escalated:
-            # Exit 0: the worker wrote the row during the grace (the queued
-            # stop ran, or SIGTERM was handled). Leave it. Anything still
-            # live was killed, and it is not a rebuild.
+            # A live row was SIGKILLed and is not a rebuild. A row that is
+            # already terminal — the queued stop finished as the kill
+            # arrived — stays as the worker wrote it.
             if (
                 not self._closing
                 and not self._shutting_down
@@ -976,27 +975,23 @@ class SessionManager:
                 self._stop_escalations.pop(session_id, None)
 
     async def _run_escalation(self, slot: WorkerSlot) -> StsSessionControlResult:
-        """SIGTERM, a short grace, then SIGKILL. The row is written after."""
+        """SIGKILL, then the row. No SIGTERM first.
+
+        The control subject already waited out ``on_stop``. A loop that
+        could still run a signal handler would have answered that stop.
+        SIGTERM on one that only looks busy runs the worker's shutdown
+        path, which writes ``interrupted`` and is then rebuilt.
+        """
         slot.stop_escalated = True
         process = slot.process
         if process is None:
             raise KeyError(f"no active sts session {slot.session_id}")
         if process.returncode is None:
             try:
-                process.send_signal(signal.SIGTERM)
+                process.kill()
             except ProcessLookupError:
                 pass
-        if process.returncode is None:
-            try:
-                await asyncio.wait_for(
-                    process.wait(), timeout=STOP_ESCALATION_GRACE_S
-                )
-            except TimeoutError:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                await process.wait()
+            await process.wait()
         watcher = slot.watcher
         if watcher is not None:
             # The watcher is the row writer. Waiting on ``process.wait``
@@ -1052,10 +1047,10 @@ class SessionManager:
     ) -> StsSessionControlResult:
         """The row as it stands after the process is gone.
 
-        Exit 0 during the grace means the worker wrote it — often
-        ``done`` / ``operator_stop`` — and ``_on_worker_exit`` does not
-        rewrite a zero exit. Anything still ``live`` was killed, and the
-        watcher (or ``_mark_stop_killed``) has already stored that.
+        A row the worker already closed — often ``done`` /
+        ``operator_stop``, when the queued stop finished as the kill
+        arrived — is left alone. Anything still ``live`` was killed, and
+        the watcher (or ``_mark_stop_killed``) has already stored that.
         """
         row = None
         if self._load_session is not None:

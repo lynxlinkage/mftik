@@ -84,9 +84,9 @@ async def run_rpc(
         try:
             async for req in broker.serve(subject, stop=stop):
                 # Create waits on the worker's result line. Force-stop waits
-                # out a SIGTERM grace and then a kill. Awaiting either here
-                # would hold every other RPC on this subject — list,
-                # artifacts, another session's stop — for that whole time.
+                # out the kill and the row write. Awaiting either here would
+                # hold every other RPC on this subject — list, artifacts,
+                # another session's stop — for that whole time.
                 # The API's own timeout is unchanged. If a create timeout
                 # already fired and the worker later reports success, the
                 # session stays live and the deploy has not attached it.
