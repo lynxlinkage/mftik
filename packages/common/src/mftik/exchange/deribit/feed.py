@@ -283,9 +283,12 @@ class DeribitPublicStream(DeribitSocket):
         now discards the key and drops the connection, so ``_restore``
         resubscribes every reader still attached. An explicit
         unsubscribe rejection leaves the key held: Deribit is still
-        sending the channel.
+        sending the channel. A lost reply fails with the socket it was
+        sent on; closing whatever ``_conn`` is by then would drop the
+        connection the read loop has already restored.
         """
         instrument = book.instrument
+        started = self._conn
 
         async def unsubscribe() -> None:
             unsub, req_id = rpc_frame(
@@ -297,13 +300,18 @@ class DeribitPublicStream(DeribitSocket):
                 fresh.resyncing = True
                 self._books[channel] = fresh
 
+        async def drop_started() -> None:
+            if self._conn is not started:
+                return
+            await self.drop_connection()
+
         result = await resync_channel(
             self._ledger,
             channel,
             still_wanted=self._still_wanted,
             unsubscribe=unsubscribe,
             subscribe=lambda: self._send_subscribe([channel]),
-            drop_connection=self.drop_connection,
+            drop_connection=drop_started,
         )
         current = self._books.get(channel)
         if result is ResyncResult.STILL_HELD and current is not None:

@@ -267,6 +267,10 @@ class DeribitSocket:
             raise DeribitWsError(None, f"no reply within {wait}s", op=op) from exc
         finally:
             self._pending.pop(req_id, None)
+            # ``send`` can raise on the same drop that already failed the
+            # future. Retrieving it here keeps that exception from being
+            # logged when the future is collected.
+            _retrieve(pending.future)
         resp.raise_for_error(op=op)
         return resp
 
@@ -324,6 +328,12 @@ class DeribitSocket:
                 reason = exc
             finally:
                 self._set_pumping(False)
+                # A reply that died with this socket must not sit until
+                # ``ack_timeout``. A book resync treats that timeout as an
+                # unsubscribe failure and would close the socket the next
+                # lap has already restored.
+                if not self._closing:
+                    self._fail_pending()
             if self._closing:
                 return
             if not self.reconnect:
@@ -362,6 +372,15 @@ class DeribitSocket:
                 await self._restore()
             except Exception:
                 logger.exception("%s reconnect failed", self.name)
+                # ``_open`` has already replaced ``_conn``. Leaving that
+                # socket up makes the next ``_pump`` read a connection
+                # that never authenticated, never enabled the heartbeat,
+                # and never resubscribed — and nothing else closes it, so
+                # this loop never tries again.
+                conn = self._conn
+                if conn is not None:
+                    with contextlib.suppress(Exception):
+                        await conn.close()
                 continue
             finally:
                 _SETUP.reset(token)
@@ -460,6 +479,13 @@ class DeribitSocket:
         with contextlib.suppress(Exception):
             await self._send_test()
 
+    def _fail_pending(self) -> None:
+        """Fail every request still waiting on a socket that just died."""
+        for pending in self._pending.values():
+            if pending.future.done():
+                continue
+            pending.future.set_exception(ConnectionClosed(None, None))
+
     def _fail(self, reason: str | None = None) -> None:
         self._end_reason = reason
         self._connected = False
@@ -504,6 +530,13 @@ class DeribitSocket:
 
     def _teardown(self) -> None:
         """Close every stream reading this socket."""
+
+
+def _retrieve(future: asyncio.Future[Any]) -> None:
+    """Read a future's exception so a lost waiter does not log it later."""
+    if future.cancelled() or not future.done():
+        return
+    future.exception()
 
 
 def _frame_too_big(reason: object) -> bool:
