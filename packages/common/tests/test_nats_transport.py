@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable
 import pytest
 from broker_harness import a_broker, inject_raw_request
 from mftik.broker import Broker, BrokerConfig
-from mftik.broker.errors import RequestTimeoutError
+from mftik.broker.errors import NoRespondersError, RequestTimeoutError
 from mftik.broker.transport.nats import (
     _NO_RESPONDERS_CEILING_S,
     NatsTransport,
@@ -83,10 +83,33 @@ async def test_a_request_to_nobody_fails_at_once_rather_than_waiting(
     broker: Broker,
 ) -> None:
     started = asyncio.get_running_loop().time()
-    with pytest.raises(RequestTimeoutError):
+    with pytest.raises(NoRespondersError):
         await broker.request("nobody.here", _envelope(), timeout=5.0)
     spent = asyncio.get_running_loop().time() - started
     assert spent < _NO_RESPONDERS_CEILING_S * 2
+
+
+@pytest.mark.asyncio
+async def test_a_subscriber_that_does_not_answer_is_a_full_timeout(
+    broker: Broker,
+) -> None:
+    """Held by a subscriber, so this is not "nobody was there"."""
+    stop = asyncio.Event()
+
+    async def hang() -> None:
+        async for _req in broker.serve("stuck.worker", stop=stop):
+            await stop.wait()
+
+    task = asyncio.create_task(hang())
+    await asyncio.sleep(0.05)
+    try:
+        with pytest.raises(RequestTimeoutError) as caught:
+            await broker.request("stuck.worker", _envelope(), timeout=0.3)
+        assert not isinstance(caught.value, NoRespondersError)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

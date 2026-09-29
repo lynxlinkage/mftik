@@ -25,7 +25,11 @@ from nats.aio.client import Client as NatsClient
 from nats.aio.msg import Msg
 
 from mftik.broker.config import BrokerConfig
-from mftik.broker.errors import BrokerNotConnectedError, RequestTimeoutError
+from mftik.broker.errors import (
+    BrokerNotConnectedError,
+    NoRespondersError,
+    RequestTimeoutError,
+)
 from mftik.broker.transport.base import BrokerTransport, redacted_url
 
 logger = logging.getLogger(__name__)
@@ -236,12 +240,19 @@ class NatsTransport(BrokerTransport):
         timeout: float,
         reask: float,
     ) -> str:
-        """One core request, re-asked while nobody is on the subject."""
+        """One core request, re-asked while nobody is on the subject.
+
+        No responders raises :class:`NoRespondersError` once the re-ask
+        budget is spent, which is shorter than ``timeout``. A subject that
+        has a subscriber and does not answer raises
+        :class:`RequestTimeoutError` at ``timeout``.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         give_up_asking = loop.time() + reask
         subject_name = self._rpc_subject(subject)
         payload = raw.encode()
+        no_responders = False
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -251,13 +262,19 @@ class NatsTransport(BrokerTransport):
                     subject_name, payload, timeout=remaining
                 )
             except nats.errors.NoRespondersError:
+                no_responders = True
                 if loop.time() + _NO_RESPONDERS_GRACE_S >= give_up_asking:
                     break
                 await asyncio.sleep(_NO_RESPONDERS_GRACE_S)
                 continue
             except (nats.errors.TimeoutError, TimeoutError):
+                # A subscriber held the request. That is a full timeout,
+                # even if an earlier attempt found nobody.
+                no_responders = False
                 break
             return msg.data.decode()
+        if no_responders:
+            raise NoRespondersError(subject, request_id, timeout) from None
         raise RequestTimeoutError(subject, request_id, timeout) from None
 
     async def probe(

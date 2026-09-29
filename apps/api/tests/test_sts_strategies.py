@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from db_harness import a_database, an_owner
 from fastapi import HTTPException
+from mftik.broker.errors import NoRespondersError
 from mftik.protocol import (
     ANY_INSTANCE,
     STOP_CONTROL_TIMEOUT_S,
@@ -24,7 +25,7 @@ from mftik.protocol import (
     StsSessionControlResult,
     Topics,
 )
-from mftik_api.broker_rpc import DomainRpcError
+from mftik_api.broker_rpc import DomainRpcError, request_domain
 from mftik_api.routes import sts as sts_routes
 from mftik_db.models.session import SessionStatus
 from mftik_db.repositories import InstanceRepository, StsSessionRepository
@@ -302,6 +303,51 @@ async def test_an_unanswered_stop_kills_the_worker(db, monkeypatch) -> None:
         (Topics.sts_control("s-stuck"), STS_SESSION_STOP, STOP_CONTROL_TIMEOUT_S),
         (Topics.sts("sts-a"), STS_SESSION_FORCE_STOP, STOP_FORCE_RPC_TIMEOUT_S),
     ]
+
+
+async def test_no_responders_is_a_timeout_stop_can_tell_from_a_stuck_worker() -> None:
+    class _Broker:
+        async def request(self, *_args: object, **_kwargs: object) -> object:
+            raise NoRespondersError("sts.control.s", "req", 15.0)
+
+    with pytest.raises(DomainRpcError) as caught:
+        await request_domain(
+            _Broker(),  # type: ignore[arg-type]
+            "sts.control.s",
+            object(),
+            result_type=StsSessionControlResult,
+        )
+
+    assert caught.value.code == "timeout"
+    assert caught.value.no_responders is True
+
+
+async def test_a_stop_nobody_heard_is_not_a_kill(db, monkeypatch) -> None:
+    """No subscriber is not a stuck worker. The stop was never delivered."""
+    async with db() as session:
+        await StsSessionRepository(session).create_live(
+            session_id="s-starting",
+            created_by=1,
+            instance="sts-a",
+        )
+    seen = _scripted_stop(
+        monkeypatch,
+        [DomainRpcError("timeout", "nobody subscribed", no_responders=True)],
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await sts_routes.stop_session("s-starting", broker=None)  # type: ignore[arg-type]
+
+    assert caught.value.status_code == 502
+    assert "not delivered" in str(caught.value.detail)
+    assert "orphan reaper" not in str(caught.value.detail)
+    assert seen == [
+        (Topics.sts_control("s-starting"), STS_SESSION_STOP, STOP_CONTROL_TIMEOUT_S),
+    ]
+    async with db() as session:
+        row = await StsSessionRepository(session).get_by_session_id("s-starting")
+    assert row is not None
+    assert row.status == "live"
 
 
 async def test_a_stop_that_finishes_as_the_wait_expires_is_not_killed(

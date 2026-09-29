@@ -836,8 +836,28 @@ async def _control(
             timeout=timeout,
         )
     except DomainRpcError as exc:
-        if exc.code == "timeout" and type_name == STS_SESSION_STOP:
+        # A full wait means the worker was subscribed and did not answer:
+        # kill it. No responders means the stop was never delivered — the
+        # worker is still subscribing, or the subject is briefly empty —
+        # and killing it would skip ``on_stop`` on a healthy session.
+        if (
+            exc.code == "timeout"
+            and type_name == STS_SESSION_STOP
+            and not exc.no_responders
+        ):
             result = await _force_stop_after_timeout(broker, session_id)
+        elif (
+            exc.code == "timeout"
+            and type_name == STS_SESSION_STOP
+            and exc.no_responders
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"stop was not delivered to {session_id}; nobody is "
+                    f"subscribed on its control subject"
+                ),
+            ) from exc
         elif exc.code == "timeout":
             # The row says live and nobody answered for it. That is the
             # orphan case — the STS holding it died without closing the row —
