@@ -378,6 +378,17 @@ def test_raise_for_error_uses_the_requested_method_when_the_reply_omits_it() -> 
         raise AssertionError("expected DeribitWsError")
 
 
+def test_not_found_is_a_missing_order_not_a_short_balance() -> None:
+    assert p.DeribitError(10004, "order_not_found").not_found
+    assert p.DeribitError(11044, "not_open_order").not_found
+    assert not p.DeribitError(10009, "not_enough_funds").not_found
+    assert not p.DeribitError(10003, "order_overlap").not_found
+    assert not p.DeribitError(10010, "already_closed").not_found
+    assert 10000 in p.AUTH_CODES
+    assert 10010 not in p.AUTH_CODES
+    assert 10003 not in p.AUTH_CODES
+
+
 def test_raise_for_error_without_op_stays_bare_when_the_reply_has_no_method() -> None:
     resp = p.DeribitResponse(
         {

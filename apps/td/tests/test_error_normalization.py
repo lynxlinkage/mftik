@@ -747,9 +747,11 @@ def _okx_refusal(source: str) -> str:
     [
         (40085, RejectCode.VENUE_AUTH_FAILED),
         (40009, RejectCode.VENUE_AUTH_FAILED),
-        (43001, RejectCode.VENUE_ORDER_NOT_FOUND),
-        (43011, RejectCode.VENUE_INSUFFICIENT_BALANCE),
-        (40762, RejectCode.VENUE_BELOW_MINIMUM),
+        (25204, RejectCode.VENUE_ORDER_NOT_FOUND),
+        (25202, RejectCode.VENUE_INSUFFICIENT_BALANCE),
+        (25203, RejectCode.VENUE_INSUFFICIENT_BALANCE),
+        (40808, RejectCode.VENUE_INVALID_PARAM),
+        (45110, RejectCode.VENUE_BELOW_MINIMUM),
     ],
 )
 def test_bitget_codes_normalize(code: int, expected: RejectCode) -> None:
@@ -758,6 +760,13 @@ def test_bitget_codes_normalize(code: int, expected: RejectCode) -> None:
 
 def test_an_unmapped_bitget_code_passes_through_as_itself() -> None:
     assert normalize(BitgetWsError(49999, "new one"), venue="Bitget") == 49999
+    # Classic table. A UTA place did not return these.
+    classic_balance = BitgetWsError(43012, "Insufficient balance")
+    classic_missing = BitgetWsError(43001, "The order does not exist")
+    assert normalize(classic_balance, venue="Bitget") == 43012
+    assert normalize(classic_missing, venue="Bitget") == 43001
+    # Max open size, and also an empty balance. Not one RejectCode.
+    assert normalize(BitgetWsError(40762, "max open size"), venue="Bitget") == 40762
 
 
 def test_a_bitget_rest_refusal_normalizes_like_a_socket_one() -> None:
@@ -836,8 +845,10 @@ def _bitget_refusal(source: str) -> str:
     ("code", "expected"),
     [
         (10000, RejectCode.VENUE_AUTH_FAILED),
-        (10004, RejectCode.VENUE_INSUFFICIENT_BALANCE),
-        (10009, RejectCode.VENUE_ORDER_NOT_FOUND),
+        (10009, RejectCode.VENUE_INSUFFICIENT_BALANCE),
+        (10004, RejectCode.VENUE_ORDER_NOT_FOUND),
+        (10010, RejectCode.VENUE_ORDER_ALREADY_CLOSED),
+        (10003, RejectCode.VENUE_REJECTED),
         (10028, RejectCode.VENUE_RATE_LIMITED),
         (11050, RejectCode.VENUE_INVALID_PARAM),
         (11060, RejectCode.VENUE_INVALID_PARAM),

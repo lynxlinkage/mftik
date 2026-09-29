@@ -160,10 +160,15 @@ async def test_the_factory_builds_a_bitget_reader() -> None:
     [
         (40015, QueryCode.VENUE_INVALID_PARAM),
         (40034, QueryCode.VENUE_RATE_LIMITED),
-        (45110, QueryCode.VENUE_SYMBOL_NOT_FOUND),
     ],
 )
 def test_a_known_bitget_code_becomes_a_query_code(
     code: int, expected: QueryCode
 ) -> None:
     assert normalize(BitgetRestError(code, "nope"), venue="Bitget") is expected
+
+
+def test_bitget_min_notional_is_not_a_missing_symbol() -> None:
+    """45110 is under the minimum USDT amount. QueryCode has no
+    below-minimum, so the native code stays."""
+    assert normalize(BitgetRestError(45110, "nope"), venue="Bitget") == 45110

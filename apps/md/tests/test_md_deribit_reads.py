@@ -293,7 +293,6 @@ async def test_the_factory_builds_a_deribit_reader() -> None:
     [
         (11050, QueryCode.VENUE_INVALID_PARAM),
         (10028, QueryCode.VENUE_RATE_LIMITED),
-        (10009, QueryCode.VENUE_SYMBOL_NOT_FOUND),
         (11060, QueryCode.VENUE_INVALID_PARAM),
     ],
 )
@@ -301,3 +300,10 @@ def test_a_known_deribit_code_becomes_a_query_code(
     code: int, expected: QueryCode
 ) -> None:
     assert normalize(DeribitRestError(code, "nope"), venue="Deribit") is expected
+
+
+@pytest.mark.parametrize("code", [10009, 10003, 10004, 11044])
+def test_a_deribit_funds_or_order_code_stays_native(code: int) -> None:
+    """A public read has no funds and no order. Calling one of these a
+    missing symbol would drop a feed."""
+    assert normalize(DeribitRestError(code, "nope"), venue="Deribit") == code
