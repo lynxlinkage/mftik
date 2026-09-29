@@ -1085,6 +1085,15 @@ class SessionManager:
             if not future.done():
                 future.cancel()
             raise
+        except (WorkerNotStuck, ForceStopExpired) as exc:
+            # A refusal is not a kill. Concurrent waiters still see it;
+            # a later force-stop must be able to try again.
+            if slot.escalation is future:
+                slot.escalation = None
+            if not future.done():
+                future.set_exception(exc)
+                future.exception()
+            raise
         except Exception as exc:
             if not future.done():
                 future.set_exception(exc)

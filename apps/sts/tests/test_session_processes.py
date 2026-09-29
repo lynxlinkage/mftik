@@ -1412,6 +1412,49 @@ async def test_a_conditional_kill_takes_a_started_worker_whose_beat_went_quiet(
     assert "pid=4242" in caplog.text
 
 
+async def test_a_refused_force_stop_does_not_block_a_later_kill() -> None:
+    """The spawn-window refusal is not the answer for the rest of the session."""
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    manager._workers["s1"].last_beat = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(manager_mod.WorkerNotStuck):
+            await manager.escalate_stop("s1", only_if_silent=True)
+        assert process.signals == []
+        result = await manager.escalate_stop("s1")
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+    assert store["s1"].status == "failed"
+
+
+async def test_an_expired_force_stop_does_not_block_a_later_kill() -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    _hold(manager, store, process)
+    try:
+        with pytest.raises(manager_mod.ForceStopExpired):
+            await manager.escalate_stop("s1", deadline=time.time() - 1)
+        assert process.signals == []
+        result = await manager.escalate_stop("s1", deadline=time.time() + 30)
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert result.status == "failed"
+    assert result.reason == STS_REASON_STOP_TIMED_OUT
+
+
 async def test_a_stale_force_stop_does_not_kill() -> None:
     store: dict[str, SimpleNamespace] = {}
     process = StubbornProcess()

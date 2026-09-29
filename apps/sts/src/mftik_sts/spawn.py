@@ -68,8 +68,10 @@ class WorkerSlot:
     #: ``failed`` instead of ``interrupted`` and does not rebuild.
     stop_escalated: bool = False
     #: The in-flight ``escalate_stop`` result. A second force-stop awaits
-    #: this instead of signalling again. Kept after the slot leaves
-    #: ``_workers`` only for as long as the manager also holds it.
+    #: this instead of signalling again. A refusal (not stuck, or past
+    #: the deadline) clears it, so a later stop can try again. Kept after
+    #: the slot leaves ``_workers`` only for as long as the manager also
+    #: holds it.
     escalation: asyncio.Future[Any] | None = None
     #: Parent's write end. Closed when the slot is dropped. The worker
     #: blocks in a read of the other end and treats EOF as parent death.
