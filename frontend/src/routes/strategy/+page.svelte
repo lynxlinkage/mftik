@@ -411,8 +411,16 @@
 	{#if selected}
 		<p class="type-note">
 			<code>{selected.type}</code> · {selected.description}
+			{#if selected.instances?.length}
+				· {selected.instances.join(', ')}
+			{/if}
 			{#if dirty}<span class="edited">edited</span>{/if}
 		</p>
+		{#if selected.instances && instance && !selected.instances.includes(instance)}
+			<p class="type-note env-gap">
+				Not loaded on {instance}. Deploy on this instance will fail.
+			</p>
+		{/if}
 		{#if selected.env_ok === false && selected.requires?.length}
 			<p class="type-note env-gap">
 				Needs {selected.requires.join(', ')} — this node does not have them yet. Deploy

@@ -1,0 +1,147 @@
+"""Copy a strategy tree onto an STS registry that is not the API's disk."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from mftik.protocol import StsRegistrySyncRequest, StsRegistryTreeOp
+from mftik.registry import RegistryStore
+from mftik_sts.impl import _REGISTRY
+from mftik_sts.rpc.registry import SKIP_COLLISION, SKIP_DIGEST, apply_sync
+from mftik_sts.runtime_env import reset_for_tests
+
+_TINY = """\
+from mftik.strategy import Strategy
+
+class Tiny(Strategy):
+    name = "tiny"
+"""
+
+_BAD = """\
+from mftik.strategy import Strategy
+
+class Tiny(Strategy):
+    name = "tiny"
+
+raise RuntimeError("boom")
+"""
+
+_COLLIDE = """\
+from mftik.strategy import Strategy
+
+class NoopStrategy(Strategy):
+    name = "noop"
+"""
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry():
+    before = dict(_REGISTRY)
+    yield
+    _REGISTRY.clear()
+    _REGISTRY.update(before)
+    reset_for_tests()
+
+
+def _upsert(
+    origin: str, name: str, source: str, digest: str = ""
+) -> StsRegistryTreeOp:
+    return StsRegistryTreeOp(
+        op="upsert",
+        origin=origin,
+        name=name,
+        digest=digest,
+        files={"strategy.py": source},
+    )
+
+
+def test_upsert_lands_on_this_stores_disk_and_loads(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    result = apply_sync(
+        store, StsRegistrySyncRequest(trees=[_upsert("private", "Tiny", _TINY)])
+    )
+    assert "private::Tiny" in result.loaded
+    written = tmp_path / "registry" / "private" / "Tiny" / "strategy.py"
+    assert written.read_text() == _TINY
+    assert result.skipped == {}
+
+
+def test_delete_removes_the_tree_from_this_disk(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    apply_sync(
+        store, StsRegistrySyncRequest(trees=[_upsert("private", "Tiny", _TINY)])
+    )
+    result = apply_sync(
+        store,
+        StsRegistrySyncRequest(
+            trees=[StsRegistryTreeOp(op="delete", origin="private", name="Tiny")]
+        ),
+    )
+    assert "private::Tiny" not in result.loaded
+    assert not (tmp_path / "registry" / "private" / "Tiny").exists()
+
+
+def test_delete_of_a_pulled_copy_uses_discard(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    apply_sync(
+        store, StsRegistrySyncRequest(trees=[_upsert("node1", "Tiny", _TINY)])
+    )
+    assert (tmp_path / "registry" / "pulled" / "node1" / "Tiny").is_dir()
+    apply_sync(
+        store,
+        StsRegistrySyncRequest(
+            trees=[StsRegistryTreeOp(op="delete", origin="node1", name="Tiny")]
+        ),
+    )
+    assert not (tmp_path / "registry" / "pulled" / "node1" / "Tiny").exists()
+
+
+def test_a_broken_import_is_skipped_with_the_error(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    result = apply_sync(
+        store, StsRegistrySyncRequest(trees=[_upsert("private", "Tiny", _BAD)])
+    )
+    assert "private::Tiny" not in result.loaded
+    assert result.skipped["private::Tiny"].startswith("import error:")
+    assert "boom" in result.skipped["private::Tiny"]
+
+
+def test_a_bundled_name_is_a_collision(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    result = apply_sync(
+        store,
+        StsRegistrySyncRequest(trees=[_upsert("private", "NoopStrategy", _COLLIDE)]),
+    )
+    assert "private::NoopStrategy" not in result.loaded
+    assert result.skipped["private::NoopStrategy"] == SKIP_COLLISION
+
+
+def test_a_digest_mismatch_is_not_left_on_disk(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    result = apply_sync(
+        store,
+        StsRegistrySyncRequest(
+            trees=[_upsert("private", "Tiny", _TINY, digest="sha256:not-the-tree")]
+        ),
+    )
+    assert result.skipped["private::Tiny"] == SKIP_DIGEST
+    assert "private::Tiny" not in result.loaded
+    assert not (tmp_path / "registry" / "private" / "Tiny").exists()
+
+
+def test_sync_uses_the_process_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The handler's store is ``MFTIK_DATA``, not whoever called the API."""
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    other = RegistryStore(tmp_path / "api-only")
+    other.add({"strategy.py": _TINY})
+    store = RegistryStore.from_env()
+    result = apply_sync(
+        store, StsRegistrySyncRequest(trees=[_upsert("private", "Tiny", _TINY)])
+    )
+    assert store.data_dir == tmp_path
+    assert "private::Tiny" in result.loaded
+    assert (tmp_path / "registry" / "private" / "Tiny" / "strategy.py").is_file()
+    assert (other.data_dir / "registry" / "private" / "Tiny").is_dir()

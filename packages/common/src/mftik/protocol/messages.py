@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from decimal import ROUND_FLOOR, Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -415,6 +415,73 @@ class StsRegistryReloadResult(BaseModel):
 
     loaded: list[str] = Field(default_factory=list)
     generation: int = 0
+
+
+class StsRegistryTreeOp(BaseModel):
+    """One tree to write or remove on an STS registry disk.
+
+    ``upsert`` carries the files and the digest the API just committed.
+    ``delete`` names the tree; ``files`` and ``digest`` are unused. The
+    directory the API wrote is not this process's volume, so the files have
+    to travel with the request.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    op: Literal["upsert", "delete"]
+    origin: str
+    name: str
+    digest: str = ""
+    files: dict[str, str] = Field(default_factory=dict)
+
+
+class StsRegistrySyncRequest(BaseModel):
+    """API → STS: write these trees onto this process's registry, then rescan.
+
+    A reload that only re-scans keeps answering ``unknown_strategy`` for a
+    tree that exists only on the API's disk. ``reload`` is false on every
+    batch but the last, so a multi-batch sync does not import a half-applied
+    set.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    trees: list[StsRegistryTreeOp] = Field(default_factory=list)
+    reload: bool = True
+
+
+class StsRegistrySyncResult(BaseModel):
+    """STS → API: keys this process answers to, and why an upsert is absent.
+
+    ``skipped`` is qualified key → reason, and only for trees this request
+    tried to upsert. The reason is one of ``not present on this registry
+    disk``, ``import error: …``, ``name collision with a bundled strategy``,
+    or ``digest mismatch``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    loaded: list[str] = Field(default_factory=list)
+    generation: int = 0
+    skipped: dict[str, str] = Field(default_factory=dict)
+
+
+class StsRegistryLoadedRequest(BaseModel):
+    """API → STS: which keys this process can deploy right now.
+
+    Read-only. It does not re-scan and does not import. ``GET /sts/types``
+    asks this so a type that no STS has registered is not offered.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+
+class StsRegistryLoadedResult(BaseModel):
+    """STS → API: the in-memory registry, bundled names included."""
+
+    model_config = ConfigDict(frozen=True)
+
+    loaded: list[str] = Field(default_factory=list)
 
 
 class StsRegistryGenerationRequest(BaseModel):
@@ -1313,6 +1380,10 @@ StsSessionControlResultEnvelope = Envelope[StsSessionControlResult]
 StsSessionStatusEnvelope = Envelope[StsSessionStatus]
 StsRegistryReloadRequestEnvelope = Envelope[StsRegistryReloadRequest]
 StsRegistryReloadResultEnvelope = Envelope[StsRegistryReloadResult]
+StsRegistrySyncRequestEnvelope = Envelope[StsRegistrySyncRequest]
+StsRegistrySyncResultEnvelope = Envelope[StsRegistrySyncResult]
+StsRegistryLoadedRequestEnvelope = Envelope[StsRegistryLoadedRequest]
+StsRegistryLoadedResultEnvelope = Envelope[StsRegistryLoadedResult]
 StsRegistryGenerationRequestEnvelope = Envelope[StsRegistryGenerationRequest]
 StsRegistryGenerationResultEnvelope = Envelope[StsRegistryGenerationResult]
 StsEnvSyncRequestEnvelope = Envelope[StsEnvSyncRequest]
@@ -1492,6 +1563,8 @@ STS_SESSION_FAIL = "sts.session.fail"
 STS_SESSION_STATUS = "sts.session.status"
 STS_EVENTLOG_INFO = "sts.eventlog.info"
 STS_REGISTRY_RELOAD = "sts.registry.reload"
+STS_REGISTRY_SYNC = "sts.registry.sync"
+STS_REGISTRY_LOADED = "sts.registry.loaded"
 STS_REGISTRY_GENERATION = "sts.registry.generation"
 STS_ENV_SYNC = "sts.env.sync"
 STS_EVENTLOG_READ = "sts.eventlog.read"

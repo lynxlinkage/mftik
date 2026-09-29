@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
-from fanout_harness import patch_authoritative_anycast
+from fanout_harness import UnansweredBroker, patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.envapply import ApplyFailed, ApplySpec
 from mftik.environment import EnvStamp, NodeEnv
@@ -210,7 +210,7 @@ async def test_s1_bare_node_stdlib_tree(data_dir: Path) -> None:
     assert dest.is_file()
     info = await registry_info(principal=_OWNER)
     assert info.extras == {}
-    listed = await list_strategy_types(store=store)
+    listed = await list_strategy_types(store=store, broker=UnansweredBroker())
     assert "private::Tiny" in listed.types
     assert "NoopStrategy" in listed.types
     await deploy(
@@ -418,7 +418,7 @@ async def test_s5_sklearn_dist_is_what_the_installer_sees(data_dir: Path) -> Non
         )
     assert seen[0]["sklearn"].requirement() == "scikit-learn==1.6.1"
     store.add({"strategy.py": _SKLEARN}, applied_extras={"sklearn": "1.6.1"})
-    listed = await list_strategy_types(store=store)
+    listed = await list_strategy_types(store=store, broker=UnansweredBroker())
     row = next(t for t in listed.templates if t.type == "private::UsesSklearn")
     assert row.env_ok is True
 
@@ -469,7 +469,7 @@ async def test_s6_already_connected_can_pull_a_heavier_tree(data_dir: Path) -> N
         )
     names = {rec.name for rec in result.pulled}
     assert names == {"UsesNumpy", "UsesTorch"}
-    listed = await list_strategy_types(store=store)
+    listed = await list_strategy_types(store=store, broker=UnansweredBroker())
     types = {t.type for t in listed.templates}
     assert "peer::UsesNumpy" in types
     assert "peer::UsesTorch" in types
@@ -525,7 +525,7 @@ async def test_s7_delete_extra_breaks_deploy(data_dir: Path) -> None:
     )
     assert "numpy" not in NodeEnv(data_dir).read_stamp().packages
     assert [row.name for row in out.broken] == ["UsesNumpy"]
-    listed = await list_strategy_types(store=store)
+    listed = await list_strategy_types(store=store, broker=UnansweredBroker())
     row = next(t for t in listed.templates if t.type == "private::UsesNumpy")
     assert row.env_ok is False
 
@@ -636,7 +636,8 @@ async def test_s11_loaded_still_means_sts_imported_it(data_dir: Path) -> None:
     )
     assert skipped.loaded is False
     assert skipped.load_error is not None
-    assert "did not load" in skipped.load_error or "STS" in skipped.load_error
+    assert "registry disk" in skipped.load_error
+    assert "import error or name collision" not in skipped.load_error
 
 
 async def test_s12_crash_mid_apply_leaves_previous_generation(data_dir: Path) -> None:

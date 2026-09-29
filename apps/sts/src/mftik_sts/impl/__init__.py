@@ -36,6 +36,15 @@ def register(cls: type[Strategy]) -> type[Strategy]:
     return cls
 
 
+def registered_keys() -> list[str]:
+    """Keys this process can deploy right now, bundled names included.
+
+    The in-memory registry, not a fresh scan. Listing types asks this so a
+    page load does not re-import every tree.
+    """
+    return sorted(_REGISTRY)
+
+
 def register_qualified(cls: type[Strategy], key: str) -> type[Strategy]:
     """Register a registry tree under a qualified type key only.
 

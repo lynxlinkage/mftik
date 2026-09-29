@@ -174,6 +174,23 @@ class RegistryStore:
         self._tree_cache.pop(key, None)
         return rec
 
+    def discard(self, name: str, *, origin: str) -> None:
+        """Remove one tree of any origin. A missing tree is success.
+
+        ``remove`` stays own-only, so an HTTP delete cannot punch a hole in
+        a peer mirror one strategy at a time. Sync uses this for a pulled
+        copy: the remote record lives on the API, and this volume may not
+        have ``remotes.toml`` at all.
+        """
+        _check_origin(origin)
+        check_type(name)
+        dest = self._dest(origin, name)
+        if not dest.is_dir():
+            return
+        key = (str(dest.resolve()), origin)
+        shutil.rmtree(dest)
+        self._tree_cache.pop(key, None)
+
     def list_public(self) -> list[AddedStrategy]:
         """Trees this node publishes. Peers pull from here."""
         return self._list_dir(self.public_dir, origin=PUBLIC_ORIGIN)

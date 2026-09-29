@@ -777,7 +777,8 @@ the removal, not the next time somebody opens the picker.
 
 Each write **is** apply (ENV-4) then `sts.env.sync` to every
 enabled STS, analogue of `POST /registry/v1/add` reporting
-`loaded` (that path still fans out `sts.registry.reload`).
+`loaded` (that path fans out `sts.registry.sync`, which writes
+the tree onto each STS disk and then re-scans).
 There is no `POST /environment/apply`. Failure before commit:
 previous stamp, generation unchanged, 4xx/5xx with installer
 stderr. Sync failure after a successful commit: 200 with a

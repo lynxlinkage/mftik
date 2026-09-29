@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mftik.protocol import Topics
+from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.sts_fanout import StsTarget
 
 
@@ -11,3 +12,10 @@ def patch_authoritative_anycast(monkeypatch) -> None:  # noqa: ANN001
         return [StsTarget(name="sts", subject=Topics.STS, authoritative=True)]
 
     monkeypatch.setattr("mftik_api.sts_fanout.list_targets", _one)
+
+
+class UnansweredBroker:
+    """No STS answers, so ``/sts/types`` keeps the API store's listing."""
+
+    async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+        raise DomainRpcError("timeout", "no reply from sts")

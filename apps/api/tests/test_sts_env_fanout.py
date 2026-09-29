@@ -15,22 +15,27 @@ from mftik.environment import EnvStamp, NodeEnv, PackageRecord
 from mftik.protocol import (
     STS_ENV_SYNC,
     STS_REGISTRY_GENERATION,
-    STS_REGISTRY_RELOAD,
+    STS_REGISTRY_LOADED,
+    STS_REGISTRY_SYNC,
     StsEnvPackagePin,
     StsEnvSyncResult,
     StsEnvSyncResultEnvelope,
     StsRegistryGenerationResult,
     StsRegistryGenerationResultEnvelope,
-    StsRegistryReloadResult,
-    StsRegistryReloadResultEnvelope,
+    StsRegistryLoadedResult,
+    StsRegistryLoadedResultEnvelope,
+    StsRegistrySyncRequest,
+    StsRegistrySyncResult,
+    StsRegistrySyncResultEnvelope,
     Topics,
 )
-from mftik.registry import RegistryStore
+from mftik.registry import RegistryStore, qualify
 from mftik_api.auth.principal import Principal
 from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.routes import environment as environment_routes
 from mftik_api.routes.environment import get_environment, put_environment
 from mftik_api.routes.registry import add_strategy
+from mftik_api.routes.sts import list_strategy_types
 from mftik_api.schemas import EnvironmentPutBody, EnvPackageIn, RegistryAddBody
 from mftik_api.sts_fanout import CENSUS_ERROR, extras_match, list_targets
 
@@ -129,14 +134,14 @@ class TwoStsReload:
         self.subjects: list[str] = []
 
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
-        assert envelope.type == STS_REGISTRY_RELOAD
+        assert envelope.type == STS_REGISTRY_SYNC
         self.subjects.append(subject)
         name = _name_of(subject)
         if name in self.silent:
             raise DomainRpcError("timeout", f"{name} did not answer")
-        return StsRegistryReloadResultEnvelope.wrap(
-            StsRegistryReloadResult(loaded=list(self.loaded_by.get(name, []))),
-            type=STS_REGISTRY_RELOAD,
+        return StsRegistrySyncResultEnvelope.wrap(
+            StsRegistrySyncResult(loaded=list(self.loaded_by.get(name, []))),
+            type=STS_REGISTRY_SYNC,
             source="sts",
         )
 
@@ -279,7 +284,9 @@ async def test_registry_add_loaded_only_when_both_list_the_key(
         broker=one_missing,
     )
     assert added2.loaded is False
-    assert "did not load it" in (added2.load_error or "")
+    assert TWO in (added2.load_error or "")
+    assert "registry disk" in (added2.load_error or "")
+    assert "import error or name collision" not in (added2.load_error or "")
 
 
 async def test_list_targets_drops_disabled(two_sts) -> None:
@@ -356,6 +363,170 @@ def test_extras_match_uses_pins_not_generation() -> None:
     assert extras_match(0, {}, stamp) is False
     drifted = {"numpy": StsEnvPackagePin(version="2.0", dist="numpy")}
     assert extras_match(5, drifted, stamp) is False
+
+
+class SplitDiskBroker:
+    """Two registries that do not share a directory. Sync writes into each."""
+
+    def __init__(
+        self,
+        stores: dict[str, RegistryStore],
+        *,
+        refuse: set[str] | None = None,
+    ) -> None:
+        self.stores = stores
+        self.refuse = refuse or set()
+        self.subjects: list[str] = []
+
+    async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+        assert envelope.type == STS_REGISTRY_SYNC
+        self.subjects.append(subject)
+        name = _name_of(subject)
+        request = StsRegistrySyncRequest.model_validate(envelope.payload)
+        store = self.stores[name]
+        skipped: dict[str, str] = {}
+        if name in self.refuse:
+            for op in request.trees:
+                if op.op == "upsert":
+                    skipped[qualify(op.origin, op.name)] = (
+                        "not present on this registry disk"
+                    )
+        else:
+            for op in request.trees:
+                if op.op == "delete":
+                    store.discard(op.name, origin=op.origin)
+                else:
+                    store.add(op.files, replace=True, origin=op.origin)
+        loaded = (
+            []
+            if not request.reload
+            else [qualify(rec.origin, rec.type) for rec in store.list_all()]
+        )
+        return StsRegistrySyncResultEnvelope.wrap(
+            StsRegistrySyncResult(loaded=loaded, skipped=skipped),
+            type=STS_REGISTRY_SYNC,
+            source="sts",
+        )
+
+
+_OTHER = """\
+from mftik.strategy import Strategy
+
+class Other(Strategy):
+    name = "other"
+"""
+
+
+async def test_push_copies_the_tree_onto_both_sts_disks(
+    two_sts, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The API store and each STS store are different directories."""
+    api = RegistryStore(tmp_path / "api")
+    disks = {
+        ONE: RegistryStore(tmp_path / "one"),
+        TWO: RegistryStore(tmp_path / "two"),
+    }
+    broker = SplitDiskBroker(disks)
+    added = await add_strategy(
+        RegistryAddBody(files={"strategy.py": _TINY}),
+        store=api,
+        broker=broker,
+    )
+    assert added.loaded is True
+    assert set(broker.subjects) == {Topics.sts(ONE), Topics.sts(TWO)}
+    for disk in disks.values():
+        written = disk.data_dir / "registry" / "private" / "Tiny" / "strategy.py"
+        assert written.read_text() == _TINY
+        assert [qualify(r.origin, r.type) for r in disk.list_private()] == [
+            "private::Tiny"
+        ]
+
+    from contextlib import asynccontextmanager
+
+    from mftik_api.routes import registry as registry_routes
+    from mftik_api.routes.registry import delete_strategy
+
+    class _NoLive:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        async def list_live_for_origin(self, origin: str) -> list[object]:
+            return []
+
+    @asynccontextmanager
+    async def _scope():
+        yield object()
+
+    monkeypatch.setattr(registry_routes, "session_scope", _scope)
+    monkeypatch.setattr(registry_routes, "StsSessionRepository", _NoLive)
+    removed = await delete_strategy(
+        "Tiny", store=api, broker=broker, origin="private"
+    )
+    assert removed.unloaded is True
+    for disk in disks.values():
+        assert not (disk.data_dir / "registry" / "private" / "Tiny").exists()
+
+
+async def test_push_names_the_sts_whose_disk_did_not_receive_the_tree(
+    two_sts, tmp_path: Path
+) -> None:
+    api = RegistryStore(tmp_path / "api")
+    disks = {
+        ONE: RegistryStore(tmp_path / "one"),
+        TWO: RegistryStore(tmp_path / "two"),
+    }
+    broker = SplitDiskBroker(disks, refuse={TWO})
+    added = await add_strategy(
+        RegistryAddBody(files={"strategy.py": _TINY}),
+        store=api,
+        broker=broker,
+    )
+    assert added.loaded is False
+    assert added.load_error is not None
+    assert TWO in added.load_error
+    assert "registry disk" in added.load_error
+    assert "import error or name collision" not in added.load_error
+    assert (
+        disks[ONE].data_dir / "registry" / "private" / "Tiny" / "strategy.py"
+    ).is_file()
+    assert not (
+        disks[TWO].data_dir / "registry" / "private" / "Tiny"
+    ).exists()
+
+
+class LoadedCensus:
+    """Answers ``sts.registry.loaded`` from a canned per-instance set."""
+
+    def __init__(self, loaded_by: dict[str, list[str]]) -> None:
+        self.loaded_by = loaded_by
+
+    async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+        assert envelope.type == STS_REGISTRY_LOADED
+        name = _name_of(subject)
+        return StsRegistryLoadedResultEnvelope.wrap(
+            StsRegistryLoadedResult(loaded=list(self.loaded_by.get(name, []))),
+            type=STS_REGISTRY_LOADED,
+            source="sts",
+        )
+
+
+async def test_types_offer_a_private_strategy_only_where_an_sts_loaded_it(
+    two_sts, tmp_path: Path
+) -> None:
+    store = RegistryStore(tmp_path)
+    store.add({"strategy.py": _TINY})
+    store.add({"strategy.py": _OTHER})
+    listed = await list_strategy_types(
+        store=store,
+        broker=LoadedCensus({ONE: ["private::Tiny"], TWO: []}),
+    )
+    assert "private::Tiny" in listed.types
+    assert "private::Other" not in listed.types
+    assert "NoopStrategy" in listed.types
+    tiny = next(t for t in listed.templates if t.type == "private::Tiny")
+    assert tiny.instances == [ONE]
+    noop = next(t for t in listed.templates if t.type == "NoopStrategy")
+    assert noop.instances is None
 
 
 def test_extras_match_dead_overlay_is_not_in_sync() -> None:

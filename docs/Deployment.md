@@ -196,7 +196,11 @@ Before this, the registry lived at `.../<member>/work/registry`, which the OCI
 driver bind-mounts and which survives a version roll — but not a member
 rename, and not a set delete, both of which are "recreate". The first apply
 with the volume comes up empty; copy `work/registry` and `work/eventlog` into
-it on each machine before deploying anything that names a strategy.
+it on each machine before deploying anything that names a strategy that was
+never synced. A push, delete, or remote connect also copies the changed trees
+to each STS over `sts.registry.sync`, so a host that does not share the API
+volume still receives them. Copying `work/registry` by hand is only how a
+fresh volume gets trees that have not been synced yet.
 
 ## Where a process may write
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from mftik.broker import Broker
@@ -29,7 +29,9 @@ from mftik.environment import EnvStamp
 from mftik.protocol import (
     STS_ENV_SYNC,
     STS_REGISTRY_GENERATION,
+    STS_REGISTRY_LOADED,
     STS_REGISTRY_RELOAD,
+    STS_REGISTRY_SYNC,
     StsEnvPackagePin,
     StsEnvSyncRequest,
     StsEnvSyncRequestEnvelope,
@@ -37,11 +39,19 @@ from mftik.protocol import (
     StsRegistryGenerationRequest,
     StsRegistryGenerationRequestEnvelope,
     StsRegistryGenerationResult,
+    StsRegistryLoadedRequest,
+    StsRegistryLoadedRequestEnvelope,
+    StsRegistryLoadedResult,
     StsRegistryReloadRequest,
     StsRegistryReloadRequestEnvelope,
     StsRegistryReloadResult,
+    StsRegistrySyncRequest,
+    StsRegistrySyncRequestEnvelope,
+    StsRegistrySyncResult,
+    StsRegistryTreeOp,
     Topics,
 )
+from mftik.registry import qualify
 from mftik_db.models.session import SessionDomain
 from mftik_db.repositories import InstanceRepository
 from mftik_db.session import session_scope
@@ -79,13 +89,37 @@ class FanoutReply[T]:
     error: str | None
 
 
+#: One JSON envelope must fit under NATS' default ``max_payload`` of 1 MiB.
+#: A tree past this is refused with a named limit, not sent in pieces.
+REGISTRY_SYNC_BUDGET = 700 * 1024
+
+
+class RegistryPayloadTooLarge(Exception):
+    """One tree cannot ride in a single broker message."""
+
+    def __init__(self, key: str, nbytes: int) -> None:
+        self.key = key
+        self.nbytes = nbytes
+        super().__init__(
+            f"{key} is {nbytes} bytes, over the {REGISTRY_SYNC_BUDGET} byte "
+            "broker payload limit"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class StsFanoutResult:
-    """Intersection of loaded keys, whether every process matches the stamp."""
+    """Intersection of loaded keys, whether every process matches the stamp.
+
+    ``loaded_by`` and ``skipped`` are per instance. ``loaded`` stays the
+    intersection: a push is deployable only when every STS has the key.
+    ``skipped`` is label → qualified key → why that upsert is absent.
+    """
 
     loaded: frozenset[str]
     in_sync: bool
     error: str | None
+    loaded_by: dict[str, frozenset[str]] = field(default_factory=dict)
+    skipped: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def pins_of_stamp(stamp: EnvStamp) -> dict[str, tuple[str, str]]:
@@ -219,6 +253,48 @@ def _intersect_loaded(
     return frozenset(loaded or ())
 
 
+def _per_target(
+    replies: list[FanoutReply[Any]],
+) -> tuple[dict[str, frozenset[str]], dict[str, dict[str, str]]]:
+    loaded_by: dict[str, frozenset[str]] = {}
+    skipped: dict[str, dict[str, str]] = {}
+    for reply in replies:
+        if reply.result is None:
+            continue
+        loaded_by[reply.target.label] = frozenset(reply.result.loaded)
+        raw = getattr(reply.result, "skipped", None)
+        if raw:
+            skipped[reply.target.label] = dict(raw)
+    return loaded_by, skipped
+
+
+def sync_batches(ops: list[StsRegistryTreeOp]) -> list[list[StsRegistryTreeOp]]:
+    """Split ops so each envelope stays under :data:`REGISTRY_SYNC_BUDGET`.
+
+    An empty op list is one empty batch: the caller still wants a rescan.
+    A single tree over the budget raises :class:`RegistryPayloadTooLarge`
+    rather than being sliced — the broker limit is reported as itself.
+    """
+    if not ops:
+        return [[]]
+    batches: list[list[StsRegistryTreeOp]] = []
+    current: list[StsRegistryTreeOp] = []
+    current_size = 2
+    for op in ops:
+        size = len(op.model_dump_json().encode())
+        if size > REGISTRY_SYNC_BUDGET:
+            raise RegistryPayloadTooLarge(qualify(op.origin, op.name), size)
+        if current and current_size + size + 1 > REGISTRY_SYNC_BUDGET:
+            batches.append(current)
+            current = []
+            current_size = 2
+        current.append(op)
+        current_size += size + 1
+    if current:
+        batches.append(current)
+    return batches
+
+
 async def reload_sts(broker: Broker) -> StsFanoutResult:
     """``sts.registry.reload`` on every enabled STS.
 
@@ -262,11 +338,96 @@ def _finish(
         return StsFanoutResult(
             loaded=frozenset(), in_sync=False, error=CENSUS_ERROR
         )
+    loaded_by, skipped = _per_target(replies)
     return StsFanoutResult(
         loaded=_intersect_loaded(replies),
         in_sync=in_sync,
         error=None,
+        loaded_by=loaded_by,
+        skipped=skipped,
     )
+
+
+async def sync_registry(
+    broker: Broker, ops: list[StsRegistryTreeOp]
+) -> StsFanoutResult:
+    """Copy ``ops`` onto every enabled STS, then rescan on the last batch.
+
+    Skipped reasons accumulate across batches. Loaded keys are whatever the
+    last batch's rescan reported. A tree over the broker budget fails the
+    fan-out before any RPC, with ``broker payload limit`` in the error.
+    """
+    try:
+        batches = sync_batches(ops)
+    except RegistryPayloadTooLarge as exc:
+        return StsFanoutResult(
+            loaded=frozenset(), in_sync=False, error=str(exc)
+        )
+    merged: dict[str, dict[str, str]] = {}
+    replies: list[FanoutReply[Any]] = []
+    for index, batch in enumerate(batches):
+        last = index == len(batches) - 1
+        replies = await fanout(
+            broker,
+            make_envelope=lambda batch=batch, last=last: (
+                StsRegistrySyncRequestEnvelope.wrap(
+                    StsRegistrySyncRequest(trees=list(batch), reload=last),
+                    type=STS_REGISTRY_SYNC,
+                    source="api",
+                )
+            ),
+            result_type=StsRegistrySyncResult,
+            timeout=30.0,
+        )
+        _loaded_by, skipped = _per_target(replies)
+        for label, reasons in skipped.items():
+            merged.setdefault(label, {}).update(reasons)
+        error = format_errors(replies)
+        if error is not None or not _census_ok(replies):
+            return StsFanoutResult(
+                loaded=frozenset(),
+                in_sync=False,
+                error=error or CENSUS_ERROR,
+                loaded_by=_loaded_by,
+                skipped=merged,
+            )
+    loaded_by, _skipped = _per_target(replies)
+    return StsFanoutResult(
+        loaded=_intersect_loaded(replies),
+        in_sync=True,
+        error=None,
+        loaded_by=loaded_by,
+        skipped=merged,
+    )
+
+
+async def registry_availability(
+    broker: Broker,
+) -> dict[str, frozenset[str]] | None:
+    """Label → keys that process has loaded. None when nobody answered.
+
+    A non-authoritative anycast answer is treated as unknown: the label
+    would be ``sts``, which is not an instance name the picker can match.
+    """
+    replies = await fanout(
+        broker,
+        make_envelope=lambda: StsRegistryLoadedRequestEnvelope.wrap(
+            StsRegistryLoadedRequest(),
+            type=STS_REGISTRY_LOADED,
+            source="api",
+        ),
+        result_type=StsRegistryLoadedResult,
+    )
+    answered = [
+        reply
+        for reply in replies
+        if reply.result is not None and reply.target.authoritative
+    ]
+    if not answered:
+        return None
+    return {
+        reply.target.label: frozenset(reply.result.loaded) for reply in answered
+    }
 
 
 async def sync_sts(
