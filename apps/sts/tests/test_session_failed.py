@@ -134,6 +134,31 @@ class SlowStart(Strategy):
         self.events.append("on_stop")
 
 
+class FailThenRaise(Strategy):
+    """Calls ``fail`` and raises before the exit task gets a turn."""
+
+    name = "fail_then_raise"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tasks: list[asyncio.Task[object]] = []
+
+    async def on_start(self) -> None:
+        assert self.session is not None
+        self.tasks = list(self.session._tasks)
+        self.fail("bad config")
+        raise RuntimeError("boom")
+
+
+class RaisesTimeout(Strategy):
+    """``on_start`` raises ``TimeoutError``. That is not the start budget."""
+
+    name = "raises_timeout"
+
+    async def on_start(self) -> None:
+        raise TimeoutError("feed slow")
+
+
 @pytest.fixture
 async def broker() -> Broker:
     async with a_broker() as client:
@@ -219,6 +244,44 @@ async def test_a_slow_on_start_is_abandoned_and_its_lease_stops(
         task for task in instances[0].tasks if task.get_name().endswith("-lease")
     )
     assert lease.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_start_that_fails_then_raises_still_closes(broker: Broker) -> None:
+    """The scheduled ``close`` writes the row and stops the lease."""
+    store = FakeStsStore()
+    manager, instances = _manager(broker, store, FailThenRaise)
+    with pytest.raises(RuntimeError, match="boom"):
+        await manager.create_session(
+            StsCreateSessionRequest(
+                session_id="fr-1", created_by=1, strategy="fail_then_raise"
+            )
+        )
+    row = await _until_closed(manager, store, "fr-1")
+    assert row.status == "failed"
+    assert row.reason == "bad config"
+    lease = next(
+        task for task in instances[0].tasks if task.get_name().endswith("-lease")
+    )
+    assert lease.done()
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_from_on_start_is_not_the_deadline(broker: Broker) -> None:
+    """A ``TimeoutError`` the strategy raised is a start failure."""
+    store = FakeStsStore()
+    manager, _instances = _manager(broker, store, RaisesTimeout)
+    with pytest.raises(TimeoutError, match="feed slow"):
+        await manager.create_session(
+            StsCreateSessionRequest(
+                session_id="to-1", created_by=1, strategy="raises_timeout"
+            )
+        )
+    row = store.rows["to-1"]
+    assert row.status == "failed"
+    assert row.reason is not None
+    assert row.reason.startswith("start failed:")
+    assert "feed slow" in row.reason
 
 
 @pytest.mark.asyncio

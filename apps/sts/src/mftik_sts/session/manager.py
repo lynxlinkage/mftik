@@ -551,11 +551,18 @@ class SessionManager:
                 restart=request.restart,
                 instance=request.instance,
             )
+        # ``expired()`` tells the budget apart from a ``TimeoutError`` the
+        # strategy's own ``on_start`` raised, which is an ordinary failure.
+        clock = asyncio.timeout(_start_remaining(started, budget))
         try:
-            await asyncio.wait_for(
-                session.start(), timeout=_start_remaining(started, budget)
-            )
-        except TimeoutError:
+            async with clock:
+                await session.start()
+        except TimeoutError as exc:
+            if not clock.expired():
+                await self._abandon_in_process_start(
+                    session, request, key, error=exc, budget=budget
+                )
+                raise
             await self._abandon_in_process_start(session, request, key, budget=budget)
             raise StartDeadlineExceeded(
                 _deadline_reason(budget, session.on_start_began)
@@ -629,13 +636,15 @@ class SessionManager:
         created would otherwise keep publishing. A strategy that already
         asked to exit owns its row; this does not overwrite it.
         """
-        already_exiting = session.exit_requested
-        if not already_exiting:
-            await session.abandon_start()
+        if session.exit_requested:
+            # ``request_exit`` already scheduled ``close``, which pops the
+            # session, stops it and writes the strategy's reason. Popping
+            # here first would make that ``close`` a no-op: the row would
+            # stay ``live`` and the lease task would keep running.
+            return
+        await session.abandon_start()
         self._sessions.pop(request.session_id, None)
         self._stop_serving_control(request.session_id)
-        if already_exiting:
-            return
         if self._load_session is not None and not await self._row_is_live(
             request.session_id
         ):
@@ -2069,6 +2078,16 @@ class SessionManager:
             await session.stop()
         except Exception:
             logger.exception("STS rebuild unwind failed to stop session=%s", session_id)
+
+    async def drain_exit_requests(self) -> None:
+        """Let a ``fail`` or ``exit`` that already ran finish its ``close``.
+
+        ``close`` pops the session and writes the strategy's reason. A
+        shutdown that runs first marks the row ``interrupted``, and that
+        ``close`` then finds nothing left to stop.
+        """
+        if any(session.exit_requested for session in self._sessions.values()):
+            await self.wait_until_quiet()
 
     async def wait_until_quiet(self) -> None:
         """Block until the last ``close`` has returned and control loops are done.

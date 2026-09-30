@@ -442,7 +442,7 @@ class StsSession:
         cancel. Skipping it also stays inside the create budget: ``on_stop``
         may use the whole ``ON_STOP_TIMEOUT_S``.
 
-        ``wait_for`` around ``start`` returns only once cancellation of
+        The timeout around ``start`` returns only once cancellation of
         that task finishes. A strategy that catches ``CancelledError``, or
         shields an await, holds the deadline open until that await ends.
         A blocking call in ``on_start`` is not cancelled at all. In-process
