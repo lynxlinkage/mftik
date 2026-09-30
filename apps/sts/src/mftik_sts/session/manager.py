@@ -23,6 +23,7 @@ from mftik.protocol import (
     STS_REASON_OPERATOR_STOP,
     STS_REASON_STOP_TIMED_OUT,
     STS_SESSION_STATUS,
+    STS_START_DEADLINE_S,
     TD_ERROR,
     TD_SESSION_ATTACH,
     ListSessionsRequest,
@@ -47,6 +48,7 @@ from mftik.protocol import (
     md_feeds_of,
     md_instances_of,
     publish_sts_log,
+    start_deadline_reason,
     td_api_ids_of,
 )
 from mftik.strategy import Strategy
@@ -89,6 +91,30 @@ class WorkerNotStuck(Exception):
         super().__init__(session_id)
 
 
+class StartDeadlineExceeded(Exception):
+    """``on_start`` / ``on_ready`` did not finish inside the create budget."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _start_remaining(started: float) -> float:
+    """Seconds left in the create budget, never negative.
+
+    ``started`` is ``loop.time()`` at the top of ``create_session``, so
+    the row write and the fork already count. A remaining of zero means
+    the budget was spent before the worker could report, and the wait
+    fails at once.
+    """
+    now = asyncio.get_running_loop().time()
+    return max(0.0, started + STS_START_DEADLINE_S - now)
+
+
+def _start_deadline_reason() -> str:
+    return start_deadline_reason(STS_START_DEADLINE_S)
+
+
 class ForceStopExpired(Exception):
     """The force-stop arrived after the caller's deadline."""
 
@@ -104,6 +130,7 @@ class AttachRefused(RuntimeError):
     two mean the domain is not up yet, so they are retried; giving up
     on them leaves the session interrupted for the next boot.
     """
+
 
 #: Why a session in ``interrupted`` stopped. A constant because it is the
 #: same event for every session in the process, not a per-session diagnosis.
@@ -167,6 +194,7 @@ _REBUILD_SCAN_LIMIT = 1000
 #: before it is interrupted. Covers the window between persist and the
 #: session landing in ``_sessions`` on a peer, and a broker blip.
 _ORPHAN_STRIKES = 2
+
 
 def _age_seconds(finished_at: Any, now: datetime) -> float | None:
     """Seconds since a session ended, or None when that cannot be told.
@@ -332,9 +360,7 @@ class SessionManager:
         #: Survives the slot leaving ``_workers``, until that result is set,
         #: so a second force-stop waits instead of signalling again or
         #: answering ``not_found``.
-        self._stop_escalations: dict[
-            str, asyncio.Future[StsSessionControlResult]
-        ] = {}
+        self._stop_escalations: dict[str, asyncio.Future[StsSessionControlResult]] = {}
         #: Processes that failed before ``started`` and still need ``wait``.
         #: A worker that exits without a watcher is a zombie until something
         #: collects it.
@@ -377,9 +403,7 @@ class SessionManager:
         try:
             await self._remember(session_id, key, value)
         except Exception:
-            logger.exception(
-                "STS remember failed session=%s key=%s", session_id, key
-            )
+            logger.exception("STS remember failed session=%s key=%s", session_id, key)
 
     async def _publish_status(
         self,
@@ -434,12 +458,15 @@ class SessionManager:
     async def create_session(
         self, request: StsCreateSessionRequest
     ) -> StsCreateSessionResult:
+        # The budget starts here, not at ``read_result``. The row write and
+        # the fork both count against the API's create timeout.
+        started = asyncio.get_running_loop().time()
         if self._spawner is not None:
-            return await self._create_via_worker(request)
-        return await self._create_in_process(request)
+            return await self._create_via_worker(request, started)
+        return await self._create_in_process(request, started)
 
     async def _create_in_process(
-        self, request: StsCreateSessionRequest
+        self, request: StsCreateSessionRequest, started: float
     ) -> StsCreateSessionResult:
         if request.session_id in self._sessions:
             raise KeyError(f"sts session already exists: {request.session_id}")
@@ -482,25 +509,12 @@ class SessionManager:
                 instance=request.instance,
             )
         try:
-            await session.start()
+            await asyncio.wait_for(session.start(), timeout=_start_remaining(started))
+        except TimeoutError:
+            await self._abandon_in_process_start(session, request, key)
+            raise StartDeadlineExceeded(_start_deadline_reason()) from None
         except Exception as exc:
-            self._sessions.pop(request.session_id, None)
-            self._stop_serving_control(request.session_id)
-            reason = f"start failed: {exc}"
-            if self._mark_done is not None:
-                await self._mark_done(
-                    request.session_id,
-                    status=SessionStatus.FAILED.value,
-                    reason=reason,
-                )
-            await self._publish_status(
-                request.session_id,
-                status=SessionStatus.FAILED.value,
-                strategy=key,
-                created_by=request.created_by,
-                reason=reason,
-                type=key,
-            )
+            await self._abandon_in_process_start(session, request, key, error=exc)
             raise
 
         # A strategy that ended inside on_start / on_ready is already gone and
@@ -530,8 +544,7 @@ class SessionManager:
             # has to happen. The caller is being told what it created, which
             # is a session that is already over.
             logger.warning(
-                "STS session ended during start id=%s strategy=%s status=%s "
-                "reason=%s",
+                "STS session ended during start id=%s strategy=%s status=%s reason=%s",
                 request.session_id,
                 key,
                 status,
@@ -554,8 +567,49 @@ class SessionManager:
             strategy=key,
         )
 
+    async def _abandon_in_process_start(
+        self,
+        session: StsSession,
+        request: StsCreateSessionRequest,
+        key: str,
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        """End a start that raised or ran past the deadline.
+
+        ``on_stop`` does not run. The lease and feed tasks ``start`` already
+        created would otherwise keep publishing. A strategy that already
+        asked to exit owns its row; this does not overwrite it.
+        """
+        already_exiting = session.exit_requested
+        if not already_exiting:
+            await session.abandon_start()
+        self._sessions.pop(request.session_id, None)
+        self._stop_serving_control(request.session_id)
+        if already_exiting:
+            return
+        if self._load_session is not None and not await self._row_is_live(
+            request.session_id
+        ):
+            return
+        reason = _start_deadline_reason() if error is None else f"start failed: {error}"
+        if self._mark_done is not None:
+            await self._mark_done(
+                request.session_id,
+                status=SessionStatus.FAILED.value,
+                reason=reason,
+            )
+        await self._publish_status(
+            request.session_id,
+            status=SessionStatus.FAILED.value,
+            strategy=key,
+            created_by=request.created_by,
+            reason=reason,
+            type=key,
+        )
+
     async def _create_via_worker(
-        self, request: StsCreateSessionRequest
+        self, request: StsCreateSessionRequest, started: float
     ) -> StsCreateSessionResult:
         """Persist the row here, then let a worker run the session.
 
@@ -609,7 +663,17 @@ class SessionManager:
             if self._closing:
                 await self._fail_unstarted(slot, request, START_FAIL_REASON)
                 raise RuntimeError(START_FAIL_REASON)
-            parsed = parse_worker_result(await spawned.read_result())
+            try:
+                line = await asyncio.wait_for(
+                    spawned.read_result(), timeout=_start_remaining(started)
+                )
+            except TimeoutError:
+                # Set before the abort so the handler below does not replace
+                # the deadline reason with "worker exited during start".
+                reported = True
+                await self._abort_unstarted(slot, request)
+                raise StartDeadlineExceeded(_start_deadline_reason()) from None
+            parsed = parse_worker_result(line)
             if parsed is None:
                 # No line at all: the worker never said it had written the
                 # row. This path is the one that marks ``failed``.
@@ -633,18 +697,14 @@ class SessionManager:
                 raise RuntimeError(detail)
             slot.started = True
             slot.started_at = asyncio.get_running_loop().time()
-            slot.strategy_name = (
-                str(parsed.get("strategy") or "") or slot.strategy_name
-            )
+            slot.strategy_name = str(parsed.get("strategy") or "") or slot.strategy_name
             self._arm_watcher(slot)
             return StsCreateSessionResult(
                 session_id=request.session_id,
                 strategy=slot.strategy_name or key,
                 status=str(parsed.get("status") or SessionStatus.LIVE.value),
                 reason=(
-                    str(parsed["reason"])
-                    if parsed.get("reason") is not None
-                    else None
+                    str(parsed["reason"]) if parsed.get("reason") is not None else None
                 ),
             )
         except asyncio.CancelledError:
@@ -675,6 +735,39 @@ class SessionManager:
         self._release_beat(slot)
         self._reap_failed(slot.process)
 
+    async def _abort_unstarted(
+        self, slot: WorkerSlot, request: StsCreateSessionRequest
+    ) -> None:
+        """SIGKILL a worker that did not report inside the create budget.
+
+        TD is attached only after create returns live, so a strategy still
+        in ``on_start`` has no resting orders for ``on_stop`` to cancel.
+        SIGTERM would wait ``WORKER_STOP_WAIT_S``, which does not fit in
+        the slack before the API's own timeout.
+
+        The flag is claimed before any await. A force-stop that already
+        owns the kill keeps its reason. The slot is dropped before the
+        row write, so a force-stop that arrives during the write finds
+        nothing and answers ``not_found`` instead of a half-torn-down slot.
+        """
+        if slot.started or slot.abandoned or slot.stop_escalated:
+            return
+        slot.stop_escalated = True
+        slot.kill_reason = _start_deadline_reason()
+        process = slot.process
+        if process is not None and process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+        self._drop_unstarted(slot)
+        if self._load_session is not None and not await self._row_is_live(
+            slot.session_id
+        ):
+            return
+        await self._write_failed(slot, request, _start_deadline_reason())
+
     def _take_spawn(self, slot: WorkerSlot, spawned: Any) -> None:
         """Record the process and start reading its beat pipe."""
         slot.process = spawned.process
@@ -703,9 +796,7 @@ class SessionManager:
                 fileobj,
             )
         except Exception:
-            logger.exception(
-                "STS beat pipe failed session=%s", slot.session_id
-            )
+            logger.exception("STS beat pipe failed session=%s", slot.session_id)
             fileobj.close()
             return
         try:
@@ -783,8 +874,7 @@ class SessionManager:
             # exits without a result line. That row says what happened;
             # ``failed`` here would replace it with a deploy failure.
             logger.info(
-                "STS worker exited before reporting, row already final "
-                "session=%s",
+                "STS worker exited before reporting, row already final session=%s",
                 slot.session_id,
             )
             return
@@ -840,9 +930,7 @@ class SessionManager:
         try:
             code = await process.wait()
         except Exception:
-            logger.exception(
-                "STS worker wait failed session=%s", slot.session_id
-            )
+            logger.exception("STS worker wait failed session=%s", slot.session_id)
             return
         if not slot.started or slot.abandoned or self._shutting_down:
             return
@@ -893,11 +981,7 @@ class SessionManager:
             created_by=slot.created_by,
             type=slot.type,
         )
-        if (
-            not self._rebuild_on_worker_exit
-            or self._shutting_down
-            or self._closing
-        ):
+        if not self._rebuild_on_worker_exit or self._shutting_down or self._closing:
             return
         self._schedule_rebuild(slot.session_id)
 
@@ -950,13 +1034,10 @@ class SessionManager:
             )
             return False
         return (
-            row is not None
-            and getattr(row, "status", None) == SessionStatus.LIVE.value
+            row is not None and getattr(row, "status", None) == SessionStatus.LIVE.value
         )
 
-    async def list_sessions(
-        self, request: ListSessionsRequest
-    ) -> list[SessionInfo]:
+    async def list_sessions(self, request: ListSessionsRequest) -> list[SessionInfo]:
         if request.domain not in (None, SessionDomain.STS.value, "sts"):
             return []
 
@@ -994,8 +1075,7 @@ class SessionManager:
                         ),
                         reason=getattr(row, "reason", None),
                         type=(
-                            (live.type if live is not None else None)
-                            or _row_key(row)
+                            (live.type if live is not None else None) or _row_key(row)
                         ),
                     )
                 )
@@ -1047,6 +1127,7 @@ class SessionManager:
         *,
         deadline: float | None = None,
         only_if_silent: bool = False,
+        abort_start: bool = False,
     ) -> StsSessionControlResult:
         """Kill a worker whose control subject did not answer stop.
 
@@ -1077,7 +1158,10 @@ class SessionManager:
         self._stop_escalations[session_id] = future
         try:
             result = await self._run_escalation(
-                slot, deadline=deadline, only_if_silent=only_if_silent
+                slot,
+                deadline=deadline,
+                only_if_silent=only_if_silent,
+                abort_start=abort_start,
             )
         except asyncio.CancelledError:
             # Shutdown cancelled this task. ``_stop_workers`` owns the row
@@ -1116,6 +1200,7 @@ class SessionManager:
         *,
         deadline: float | None,
         only_if_silent: bool,
+        abort_start: bool = False,
     ) -> StsSessionControlResult:
         """SIGKILL, then the row. No SIGTERM first.
 
@@ -1123,16 +1208,29 @@ class SessionManager:
         the stop that was delivered. SIGTERM runs the worker's shutdown
         path, which writes ``interrupted`` and is then rebuilt. A stop
         that was never delivered only kills when the beat has gone silent.
+
+        ``abort_start`` is the create-timeout kill. The row reason is the
+        start deadline, not a stop that went unanswered. TD is still
+        unattached — attach runs only after create returns live — so
+        skipping ``on_stop`` leaves no resting order.
         """
         process = slot.process
         if process is None:
             raise KeyError(f"no active sts session {slot.session_id}")
+        if slot.stop_escalated or slot.abandoned:
+            # The create deadline, or an earlier kill, already owns the
+            # reason. Writing here would replace it.
+            if self._load_session is None or await self._row_is_live(slot.session_id):
+                raise KeyError(f"no active sts session {slot.session_id}")
+            return await self._escalation_result(slot)
         if deadline is not None and time.time() >= deadline:
             raise ForceStopExpired(slot.session_id)
         if only_if_silent and process.returncode is None:
             if not slot.started or not self._beat_is_silent(slot):
                 raise WorkerNotStuck(slot.session_id)
         slot.stop_escalated = True
+        if abort_start:
+            slot.kill_reason = _start_deadline_reason()
         killed = False
         if process.returncode is None:
             try:
@@ -1181,9 +1279,7 @@ class SessionManager:
                 type=slot.type,
             )
         except Exception:
-            logger.exception(
-                "STS kill log failed session=%s", slot.session_id
-            )
+            logger.exception("STS kill log failed session=%s", slot.session_id)
 
     async def _mark_stop_killed(self, slot: WorkerSlot) -> bool:
         """Write ``failed`` for a worker that never closed its own row.
@@ -1197,12 +1293,13 @@ class SessionManager:
             return False
         if self._mark_done is None:
             return False
+        reason = slot.kill_reason or STS_REASON_STOP_TIMED_OUT
         for attempt in range(MARK_KILL_ATTEMPTS):
             try:
                 await self._mark_done(
                     slot.session_id,
                     status=SessionStatus.FAILED.value,
-                    reason=STS_REASON_STOP_TIMED_OUT,
+                    reason=reason,
                 )
                 break
             except Exception:
@@ -1217,15 +1314,13 @@ class SessionManager:
             slot.session_id,
             status=SessionStatus.FAILED.value,
             strategy=slot.strategy_name,
-            reason=STS_REASON_STOP_TIMED_OUT,
+            reason=reason,
             created_by=slot.created_by,
             type=slot.type,
         )
         return True
 
-    async def _escalation_result(
-        self, slot: WorkerSlot
-    ) -> StsSessionControlResult:
+    async def _escalation_result(self, slot: WorkerSlot) -> StsSessionControlResult:
         """The row as it stands after the process is gone.
 
         A row the worker already closed — often ``done`` /
@@ -1263,9 +1358,7 @@ class SessionManager:
         if session is None:
             raise KeyError(f"no active sts session {session_id}")
         strategy = session.strategy_name
-        await self.close(
-            session_id, status=SessionStatus.FAILED.value, reason=reason
-        )
+        await self.close(session_id, status=SessionStatus.FAILED.value, reason=reason)
         return StsSessionControlResult(
             session_id=session_id,
             status=SessionStatus.FAILED.value,
@@ -1461,9 +1554,7 @@ class SessionManager:
                 rebuilt.append(session_id)
         return rebuilt
 
-    async def rebuild_session(
-        self, session_id: str, *, row: Any | None = None
-    ) -> bool:
+    async def rebuild_session(self, session_id: str, *, row: Any | None = None) -> bool:
         """Restore one interrupted session, and only that one.
 
         The claim happens before the first await. A boot scan and a
@@ -1537,9 +1628,7 @@ class SessionManager:
                 limit=_REBUILD_SCAN_LIMIT,
             )
         except Exception:
-            logger.exception(
-                "STS could not load interrupted session=%s", session_id
-            )
+            logger.exception("STS could not load interrupted session=%s", session_id)
             return None
         for row in rows:
             if getattr(row, "session_id", None) == session_id:
@@ -1612,8 +1701,7 @@ class SessionManager:
             strategy = self._strategy_factory(key)
         except IncompatibleEnvironment as exc:
             logger.warning(
-                "STS not rebuilding session=%s: incompatible environment "
-                "(%s)",
+                "STS not rebuilding session=%s: incompatible environment (%s)",
                 session_id,
                 exc,
             )
@@ -1634,8 +1722,7 @@ class SessionManager:
             # a row that will never resolve teaches the operator to skip
             # the tracebacks.
             logger.warning(
-                "STS not rebuilding session=%s: no strategy named %r in "
-                "this build",
+                "STS not rebuilding session=%s: no strategy named %r in this build",
                 session_id,
                 key,
             )
@@ -1644,8 +1731,7 @@ class SessionManager:
             # Anything else is the class failing to construct, which is a
             # fault and keeps its traceback.
             logger.exception(
-                "STS cannot rebuild session=%s: strategy %r would not "
-                "build",
+                "STS cannot rebuild session=%s: strategy %r would not build",
                 session_id,
                 key,
             )
@@ -1664,9 +1750,7 @@ class SessionManager:
             try:
                 await self._bump_rebuild_count(session_id)
             except Exception:
-                logger.exception(
-                    "STS rebuild count bump failed session=%s", session_id
-                )
+                logger.exception("STS rebuild count bump failed session=%s", session_id)
         if slot is not None:
             return await self._spawn_rebuild(row, strategy, slot)
         try:
@@ -1799,9 +1883,7 @@ class SessionManager:
         try:
             await session.stop()
         except Exception:
-            logger.exception(
-                "STS rebuild unwind failed to stop session=%s", session_id
-            )
+            logger.exception("STS rebuild unwind failed to stop session=%s", session_id)
 
     async def wait_until_quiet(self) -> None:
         """Block until the last ``close`` has returned and control loops are done.
@@ -1863,13 +1945,10 @@ class SessionManager:
             # Nothing to recover here: the count stays where it was, which
             # costs this session one of its future attempts rather than
             # anything it is doing now.
-            logger.exception(
-                "STS rebuild count reset failed session=%s", session_id
-            )
+            logger.exception("STS rebuild count reset failed session=%s", session_id)
             return
         logger.info(
-            "STS rebuild settled session=%s — attempt count cleared after "
-            "%.0fs",
+            "STS rebuild settled session=%s — attempt count cleared after %.0fs",
             session_id,
             self._rebuild_settle_s,
         )
@@ -1933,8 +2012,7 @@ class SessionManager:
         # the strategy restored — including on_recon_done, which is where a
         # strategy has to know these orders are its own.
         remembered = {
-            str(k): str(v)
-            for k, v in (getattr(row, "st_facts", None) or {}).items()
+            str(k): str(v) for k, v in (getattr(row, "st_facts", None) or {}).items()
         }
         await strategy.on_rebuild(remembered)
 
@@ -2005,9 +2083,7 @@ class SessionManager:
             reply = await self._attach_with_retry(
                 what=f"md instance={instance} feeds={feeds}",
                 subject=(
-                    Topics.MD
-                    if instance == ANY_INSTANCE
-                    else Topics.md(instance)
+                    Topics.MD if instance == ANY_INSTANCE else Topics.md(instance)
                 ),
                 envelope=MdAttachRequestEnvelope.wrap(
                     MdAttachRequest(
@@ -2028,9 +2104,8 @@ class SessionManager:
                     result = MdAttachResult.model_validate(reply.payload)
                 except Exception:
                     result = None
-                owner = (
-                    (result.instance if result is not None else "")
-                    or ("" if instance == ANY_INSTANCE else instance)
+                owner = (result.instance if result is not None else "") or (
+                    "" if instance == ANY_INSTANCE else instance
                 )
                 if owner:
                     session.note_md_owner(
@@ -2065,9 +2140,7 @@ class SessionManager:
             return SessionDomain.TD.value
         return name
 
-    async def _attach_td(
-        self, session_id: str, created_by: int, api_id: int
-    ) -> None:
+    async def _attach_td(self, session_id: str, created_by: int, api_id: int) -> None:
         instance = await self._td_instance(api_id)
         await self._attach_with_retry(
             what=f"td api_id={api_id} instance={instance}",
@@ -2170,9 +2243,7 @@ class SessionManager:
             await asyncio.wait(list(self._reaps), timeout=WORKER_STOP_WAIT_S)
         await self._close_in_process()
 
-    def _drain_tracked(
-        self, tasks: set[asyncio.Task[Any]]
-    ) -> list[asyncio.Task[Any]]:
+    def _drain_tracked(self, tasks: set[asyncio.Task[Any]]) -> list[asyncio.Task[Any]]:
         pending = [task for task in list(tasks) if not task.done()]
         tasks.clear()
         return pending
@@ -2364,9 +2435,7 @@ class SessionManager:
         self._retiring.add(task)
         task.add_done_callback(self._retiring.discard)
 
-    async def _control_loop(
-        self, session_id: str, stop: asyncio.Event
-    ) -> None:
+    async def _control_loop(self, session_id: str, stop: asyncio.Event) -> None:
         # Imported here, not at module scope: the rpc package imports this
         # module for typing only, and a runtime import the other way keeps the
         # dependency one-directional.
@@ -2385,9 +2454,7 @@ class SessionManager:
                                 RpcErrorEnvelope.wrap(
                                     RpcError(
                                         code="unknown_type",
-                                        message=(
-                                            f"unknown type: {req.envelope.type}"
-                                        ),
+                                        message=(f"unknown type: {req.envelope.type}"),
                                     ),
                                     type=STS_ERROR,
                                     source="sts",

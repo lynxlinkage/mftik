@@ -429,6 +429,32 @@ class StsSession:
             self.md_ids,
         )
 
+    async def abandon_start(self) -> None:
+        """Drop a start that did not finish. ``on_stop`` does not run.
+
+        Accounts are attached only after create returns live, so a strategy
+        still in ``on_start`` has no resting orders for ``on_stop`` to
+        cancel. Skipping it also stays inside the create budget: ``on_stop``
+        may use the whole ``ON_STOP_TIMEOUT_S``.
+
+        ``wait_for`` around ``start`` returns only once cancellation of
+        that task finishes. A strategy that catches ``CancelledError``, or
+        shields an await, holds the deadline open until that await ends.
+        A blocking call in ``on_start`` is not cancelled at all. In-process
+        mode is the dev and test path; a worker is killed instead.
+        """
+        self._destroyed = True
+        self._exit_requested = True
+        self.strategy.timer.close()
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+        self._started = False
+        await self.event_log.close()
+
     async def remember(self, key: str, value: str) -> None:
         """Persist one fact for this session — see ``Strategy.remember``."""
         if self._remember is None:
@@ -472,9 +498,7 @@ class StsSession:
                 name=f"sts-{self.session_id}-exit",
             )
         else:
-            asyncio.create_task(
-                self.stop(), name=f"sts-{self.session_id}-exit-stop"
-            )
+            asyncio.create_task(self.stop(), name=f"sts-{self.session_id}-exit-stop")
 
     def _fail_from_infrastructure(self, what: str) -> None:
         """End the session as ``failed`` after a pump or lease loop died.
@@ -533,9 +557,7 @@ class StsSession:
         self._on_stop_task = asyncio.create_task(
             self.strategy.on_stop(), name=f"sts-{self.session_id}-on-stop"
         )
-        done, _ = await asyncio.wait(
-            {self._on_stop_task}, timeout=ON_STOP_TIMEOUT_S
-        )
+        done, _ = await asyncio.wait({self._on_stop_task}, timeout=ON_STOP_TIMEOUT_S)
         if not done:
             self.event_log.record(
                 "lifecycle",
@@ -553,7 +575,8 @@ class StsSession:
         exc = self._on_stop_task.exception()
         if exc is not None:
             logger.error(
-                "strategy on_stop failed session=%s", self.session_id,
+                "strategy on_stop failed session=%s",
+                self.session_id,
                 exc_info=exc,
             )
 
@@ -586,9 +609,7 @@ class StsSession:
                 what=f"td api_id={api_id}",
                 subject=Topics.td(await self._detach_instance(api_id)),
                 envelope=TdDetachRequestEnvelope.wrap(
-                    TdDetachRequest(
-                        session_id=self.session_id, api_id=api_id
-                    ),
+                    TdDetachRequest(session_id=self.session_id, api_id=api_id),
                     type=TD_SESSION_DETACH,
                     source="sts",
                     session_id=self.session_id,
@@ -601,9 +622,7 @@ class StsSession:
                 self._post_detach(
                     what=f"md instance={instance}",
                     subject=(
-                        Topics.MD
-                        if instance == ANY_INSTANCE
-                        else Topics.md(instance)
+                        Topics.MD if instance == ANY_INSTANCE else Topics.md(instance)
                     ),
                     envelope=MdDetachRequestEnvelope.wrap(
                         MdDetachRequest(session_id=self.session_id),
@@ -638,25 +657,21 @@ class StsSession:
             )
             return "td"
 
-    async def _post_detach(
-        self, *, what: str, subject: str, envelope: Any
-    ) -> None:
+    async def _post_detach(self, *, what: str, subject: str, envelope: Any) -> None:
         """Ask for one detach. A failure here is logged, not waited on."""
-        self.event_log.record(
-            "detach", envelope.type, dir="out", what=what
-        )
+        self.event_log.record("detach", envelope.type, dir="out", what=what)
         try:
-            await self.broker.request(
-                subject, envelope, timeout=DETACH_TIMEOUT_S
-            )
+            await self.broker.request(subject, envelope, timeout=DETACH_TIMEOUT_S)
         except RequestTimeoutError as exc:
             self.event_log.record(
-                "detach", "detach_unanswered", dir="self", what=what,
+                "detach",
+                "detach_unanswered",
+                dir="self",
+                what=what,
                 error=repr(exc),
             )
             logger.warning(
-                "STS detach %s session=%s had no responder — the lease will "
-                "expire it",
+                "STS detach %s session=%s had no responder — the lease will expire it",
                 what,
                 self.session_id,
             )
@@ -666,7 +681,10 @@ class StsSession:
             # take a write is a problem in its own right, not because the
             # attach is now stuck.
             self.event_log.record(
-                "detach", "detach_request_failed", dir="self", what=what,
+                "detach",
+                "detach_request_failed",
+                dir="self",
+                what=what,
                 error=repr(exc),
             )
             logger.warning(
@@ -680,9 +698,7 @@ class StsSession:
         try:
             await self._publish_log(f"detach sent {what}")
         except Exception:
-            logger.exception(
-                "STS detach log failed session=%s", self.session_id
-            )
+            logger.exception("STS detach log failed session=%s", self.session_id)
 
     def _heartbeat_overslept(self) -> bool:
         """The last heartbeat wait returned late enough to be a stall."""
@@ -794,9 +810,7 @@ class StsSession:
                     f"for {grace:.0f}s",
                     level="error",
                 )
-                self._fail_from_infrastructure(
-                    f"md feed from {', '.join(stale_md)}"
-                )
+                self._fail_from_infrastructure(f"md feed from {', '.join(stale_md)}")
                 return
             stale_td = self._stale_keys(self._td_acks, grace)
             if stale_td:
@@ -811,9 +825,7 @@ class StsSession:
                     f"for {grace:.0f}s",
                     level="error",
                 )
-                self._fail_from_infrastructure(
-                    f"td from {', '.join(names)}"
-                )
+                self._fail_from_infrastructure(f"td from {', '.join(names)}")
                 return
 
             wait_started = asyncio.get_running_loop().time()
@@ -842,9 +854,7 @@ class StsSession:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception(
-                "STS md session pump failed session=%s", self.session_id
-            )
+            logger.exception("STS md session pump failed session=%s", self.session_id)
             self._fail_from_infrastructure("md feed")
 
     async def _pump_fetch_replies(self) -> None:
@@ -867,9 +877,7 @@ class StsSession:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception(
-                "STS md fetch pump failed session=%s", self.session_id
-            )
+            logger.exception("STS md fetch pump failed session=%s", self.session_id)
 
     async def _on_fetch_result(self, env: UntypedEnvelope) -> None:
         """Hand one query answer to the hook that asked for it."""
@@ -923,9 +931,7 @@ class StsSession:
         for feed in self.md.get(ANY_INSTANCE, []):
             self.md_owners.setdefault(feed, instance)
         if first and self._md_acks:
-            self.event_log.record(
-                "lease", "md_ack_armed", dir="self", what=instance
-            )
+            self.event_log.record("lease", "md_ack_armed", dir="self", what=instance)
         if self._md_lease_logged:
             return
         self._md_lease_logged = True
@@ -1008,9 +1014,7 @@ class StsSession:
         if not seen:
             return []
         now = asyncio.get_running_loop().time()
-        return sorted(
-            key for key, at in seen.items() if now - at > grace
-        )
+        return sorted(key for key, at in seen.items() if now - at > grace)
 
     async def _on_market_data(self, env: UntypedEnvelope) -> None:
         self._refresh_md_ack_from_print(env)
@@ -1128,9 +1132,7 @@ class StsSession:
                 getattr(payload, "client_order_id", None),
             )
         elif name == "on_cancel_reject":
-            self.strategy.oms.note_gone(
-                getattr(payload, "client_order_id", None)
-            )
+            self.strategy.oms.note_gone(getattr(payload, "client_order_id", None))
         try:
             await handler(api_id, payload)
         except Exception as exc:
@@ -1165,9 +1167,7 @@ class StsSession:
         first = api_id not in self._td_acks
         self._td_acks[api_id] = asyncio.get_running_loop().time()
         if first:
-            self.event_log.record(
-                "lease", "td_ack_armed", dir="self", api_id=api_id
-            )
+            self.event_log.record("lease", "td_ack_armed", dir="self", api_id=api_id)
         # First ACK means TD session is established → Strategy sends Recon.
         if api_id in self._recon_sent:
             return
@@ -1221,9 +1221,7 @@ class StsSession:
 
     # --- event log ---------------------------------------------------------
 
-    def _record_in(
-        self, kind: str, env: UntypedEnvelope, **fields: Any
-    ) -> None:
+    def _record_in(self, kind: str, env: UntypedEnvelope, **fields: Any) -> None:
         """Log one inbound envelope, as it arrived.
 
         ``sent_ts`` is the sender's stamp and ``ts`` is ours, so the wire

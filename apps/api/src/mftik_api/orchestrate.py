@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
 from typing import Any
 
 from mftik.broker import Broker
@@ -12,8 +13,11 @@ from mftik.protocol import (
     ANY_INSTANCE,
     MD_SESSION_ATTACH,
     MD_SESSION_DETACH,
+    STOP_FORCE_RPC_TIMEOUT_S,
+    STS_CREATE_RPC_TIMEOUT_S,
     STS_SESSION_CREATE,
     STS_SESSION_FAIL,
+    STS_SESSION_FORCE_STOP,
     TD_SESSION_ATTACH,
     Envelope,
     HealthCheck,
@@ -38,6 +42,7 @@ from mftik.protocol import (
     md_instances_of,
     publish_md_log,
     publish_sts_log,
+    start_deadline_reason,
     td_api_ids_of,
 )
 from mftik_db.models.session import SessionDomain, SessionStatus
@@ -105,9 +110,7 @@ async def deploy_strategy(
         target = await _sts_target(instance, td)
         await _check_sts_instance(broker, target)
     except DomainRpcError as exc:
-        await sts_log(
-            f"STS instance check failed: {exc.message}", level="error"
-        )
+        await sts_log(f"STS instance check failed: {exc.message}", level="error")
         raise
 
     try:
@@ -132,12 +135,14 @@ async def deploy_strategy(
                 session_id=session_id,
             ),
             result_type=StsCreateSessionResult,
-            timeout=10.0,
+            timeout=STS_CREATE_RPC_TIMEOUT_S,
         )
         await sts_log(f"STS created strategy={sts.strategy}")
     except DomainRpcError as exc:
         await sts_log(f"STS create failed: {exc.message}", level="error")
-        raise
+        if exc.code == "timeout":
+            exc = await _abort_timed_out_create(broker, session_id, target, exc)
+        raise exc
 
     if sts.status != SessionStatus.LIVE.value:
         # The strategy read its configuration and refused it. Stop here rather
@@ -151,9 +156,7 @@ async def deploy_strategy(
             session_id,
             reason,
         )
-        await sts_log(
-            f"strategy refused this configuration: {reason}", level="error"
-        )
+        await sts_log(f"strategy refused this configuration: {reason}", level="error")
         raise DomainRpcError("strategy_refused", reason)
 
     # Resolved before anything is asked to do anything (PI-2). Two checks,
@@ -182,9 +185,7 @@ async def deploy_strategy(
                     venue,
                     f"attach starting sts={session_id} feeds={feeds}",
                     source="api",
-                    instance=(
-                        None if instance == ANY_INSTANCE else instance
-                    ),
+                    instance=(None if instance == ANY_INSTANCE else instance),
                 )
             md_result = await request_domain(
                 broker,
@@ -208,9 +209,7 @@ async def deploy_strategy(
                 attached_md = {"subscriptions": [], "refcounts": {}}
             attached_md["subscriptions"].extend(md_result.subscriptions)
             attached_md["refcounts"].update(md_result.refcounts)
-            await sts_log(
-                f"MD attached {where} feeds={md_result.subscriptions}"
-            )
+            await sts_log(f"MD attached {where} feeds={md_result.subscriptions}")
             for venue in _md_venues(md_result.subscriptions):
                 await publish_md_log(
                     broker,
@@ -220,16 +219,13 @@ async def deploy_strategy(
                         f"feeds={md_result.subscriptions}"
                     ),
                     source="api",
-                    instance=(
-                        None if instance == ANY_INSTANCE else instance
-                    ),
+                    instance=(None if instance == ANY_INSTANCE else instance),
                 )
 
         for name, ref in td.items():
             instance = await _td_instance(ref.api_id)
             await sts_log(
-                f"TD attach starting {name} api_id={ref.api_id} "
-                f"instance={instance}"
+                f"TD attach starting {name} api_id={ref.api_id} instance={instance}"
             )
             result = await request_domain(
                 broker,
@@ -268,9 +264,7 @@ async def deploy_strategy(
             logger.exception(
                 "MD/TD attach failed — rolling back STS session=%s", session_id
             )
-        await sts_log(
-            f"attach failed — rolling back STS: {exc}", level="error"
-        )
+        await sts_log(f"attach failed — rolling back STS: {exc}", level="error")
         # New with the fan-out: an attach that fails on the third instance
         # leaves two live, and failing STS alone would leave them pumping
         # feeds for a session that no longer exists until a reaper noticed —
@@ -284,9 +278,7 @@ async def deploy_strategy(
                 # process holding it is the only one that can fail it.
                 Topics.sts_control(session_id),
                 StsSessionControlRequestEnvelope.wrap(
-                    StsSessionControlRequest(
-                        session_id=session_id, reason=fail_reason
-                    ),
+                    StsSessionControlRequest(session_id=session_id, reason=fail_reason),
                     type=STS_SESSION_FAIL,
                     source="api",
                     session_id=session_id,
@@ -319,9 +311,73 @@ async def deploy_strategy(
     }
 
 
-async def _check_md_instances(
-    broker: Broker, md: dict[str, list[str]]
-) -> None:
+async def _load_sts_row(session_id: str) -> Any:
+    async with session_scope() as db:
+        return await StsSessionRepository(db).get_by_session_id(session_id)
+
+
+async def _abort_timed_out_create(
+    broker: Broker,
+    session_id: str,
+    target: str,
+    exc: DomainRpcError,
+) -> DomainRpcError:
+    """Force-stop a worker whose create reply missed the API timeout.
+
+    Only the process-per-session supervisor can do this. In-process mode
+    keeps no worker slot, so force-stop answers ``not_found`` and a
+    blocking ``on_start`` stays on that loop. A parent that is itself
+    wedged will not answer either. What this catches is a reply that lost
+    the slack after the start deadline: the worker may already be live,
+    and leaving it that way would skip the MD attach.
+
+    Sent to ``target``, the instance this deploy already resolved. A null
+    ``instance`` on the row is not a reason to ask every STS. TD is
+    attached only after a live create, so the kill does not leave a
+    resting order.
+    """
+    row = await _load_sts_row(session_id)
+    if row is not None and row.status in SessionStatus.terminal():
+        return DomainRpcError(
+            "start_deadline",
+            row.reason or start_deadline_reason(),
+        )
+    if row is None:
+        return exc
+    try:
+        await request_domain(
+            broker,
+            Topics.sts(target),
+            StsSessionControlRequestEnvelope.wrap(
+                StsSessionControlRequest(
+                    session_id=session_id,
+                    deadline=time.time() + STOP_FORCE_RPC_TIMEOUT_S,
+                    only_if_silent=False,
+                    abort_start=True,
+                ),
+                type=STS_SESSION_FORCE_STOP,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=StsSessionControlResult,
+            timeout=STOP_FORCE_RPC_TIMEOUT_S,
+        )
+    except DomainRpcError:
+        logger.warning(
+            "create timeout force-stop failed session=%s",
+            session_id,
+            exc_info=True,
+        )
+    row = await _load_sts_row(session_id)
+    if row is not None and row.status in SessionStatus.terminal():
+        return DomainRpcError(
+            "start_deadline",
+            row.reason or start_deadline_reason(),
+        )
+    return exc
+
+
+async def _check_md_instances(broker: Broker, md: dict[str, list[str]]) -> None:
     """Every named MD instance must be declared *and* answering.
 
     Before any attach, and this is PI-2. Failing at attach time instead hands
@@ -336,8 +392,7 @@ async def _check_md_instances(
     async with session_scope() as db:
         repo = InstanceRepository(db)
         declared = {
-            row.name: row
-            for row in await repo.list_all(domain=SessionDomain.MD.value)
+            row.name: row for row in await repo.list_all(domain=SessionDomain.MD.value)
         }
 
     for name in named:
@@ -362,9 +417,7 @@ async def _check_md_instances(
             )
 
 
-async def _sts_target(
-    instance: str | None, td: dict[str, TdAccountRef]
-) -> str:
+async def _sts_target(instance: str | None, td: dict[str, TdAccountRef]) -> str:
     """Which STS subject an unnamed create is sent to.
 
     A named deploy keeps the name. An unnamed one is derived from the
@@ -386,9 +439,7 @@ async def _sts_target(
     return derived
 
 
-async def _check_sts_instance(
-    broker: Broker, instance: str | None
-) -> None:
+async def _check_sts_instance(broker: Broker, instance: str | None) -> None:
     """Same two checks as MD's, on the plane that runs the strategy.
 
     Every create has a name by the time it reaches here — either the
@@ -436,9 +487,7 @@ async def _answers(
     except RequestTimeoutError:
         return False
     except Exception:
-        logger.exception(
-            "%s instance probe failed instance=%s", domain, instance
-        )
+        logger.exception("%s instance probe failed instance=%s", domain, instance)
         return False
     return True
 
@@ -455,9 +504,7 @@ async def _detach_md(
             await broker.request(
                 Topics.MD if instance == ANY_INSTANCE else Topics.md(instance),
                 MdDetachRequestEnvelope.wrap(
-                    MdDetachRequest(
-                        session_id=session_id, reason="deploy_rollback"
-                    ),
+                    MdDetachRequest(session_id=session_id, reason="deploy_rollback"),
                     type=MD_SESSION_DETACH,
                     source="api",
                     session_id=session_id,
@@ -515,9 +562,7 @@ async def _td_instance(api_id: int) -> str:
     async with session_scope() as db:
         name = await ApiRepository(db).instance_name(api_id)
     if name is None:
-        raise DomainRpcError(
-            "unknown_api", f"no credential with api_id={api_id}"
-        )
+        raise DomainRpcError("unknown_api", f"no credential with api_id={api_id}")
     return name
 
 

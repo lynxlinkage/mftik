@@ -87,11 +87,14 @@ async def run_rpc(
                 # out the kill and the row write. Awaiting either here would
                 # hold every other RPC on this subject — list, artifacts,
                 # another session's stop — for that whole time.
-                # The API's own timeout is unchanged. If a create timeout
-                # already fired and the worker later reports success, the
-                # session stays live and the deploy has not attached it.
-                # This process does not kill that worker and does not mark
-                # the row failed.
+                # Create enforces a start deadline shorter than the API's
+                # timeout and, past it, kills the worker and replies with
+                # the failure. A result line inside the deadline is still
+                # success. That reply can reach the API after the API has
+                # already timed out: the slack between the two budgets is
+                # smaller than it was, and it does not close. This task
+                # does not kill a worker that already reported success.
+                # The API's create-timeout force-stop is what ends it.
                 if req.envelope.type == STS_SESSION_CREATE:
                     task = asyncio.create_task(
                         _dispatch_request(req, sessions),

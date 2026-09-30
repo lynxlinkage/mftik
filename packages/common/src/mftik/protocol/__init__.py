@@ -63,6 +63,7 @@ from mftik.protocol.messages import (
     STS_ARTIFACT_DELETE,
     STS_ARTIFACT_LIST,
     STS_ARTIFACT_READ,
+    STS_CREATE_RPC_TIMEOUT_S,
     STS_DETACH,
     STS_ENSURE_LEVERAGE,
     STS_ENV_SYNC,
@@ -85,6 +86,7 @@ from mftik.protocol.messages import (
     STS_SESSION_LIST,
     STS_SESSION_STATUS,
     STS_SESSION_STOP,
+    STS_START_DEADLINE_S,
     SYM_ERROR,
     SYM_HEALTH,
     SYM_LIST,
@@ -292,6 +294,7 @@ from mftik.protocol.messages import (
     TdOmsViewRequest,
     TdOmsViewRequestEnvelope,
     probe_is_stale,
+    start_deadline_reason,
 )
 
 # Only the enums are re-exported: ``is_td_internal``, ``is_retryable`` and
@@ -421,8 +424,11 @@ __all__ = [
     "STS_RECON",
     "STS_SESSION_CREATE",
     "STS_SESSION_LIST",
+    "STS_CREATE_RPC_TIMEOUT_S",
     "STS_REASON_OPERATOR_STOP",
     "STS_REASON_STOP_TIMED_OUT",
+    "STS_START_DEADLINE_S",
+    "start_deadline_reason",
     "STS_EVENTLOG_INFO",
     "STS_ENV_SYNC",
     "STS_REGISTRY_GENERATION",

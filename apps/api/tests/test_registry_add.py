@@ -89,9 +89,7 @@ class ReloadingBroker:
         self.subjects.append(subject)
         loaded = self._loaded
         if loaded is None:
-            loaded = [
-                qualify(rec.origin, rec.type) for rec in self._store.list_all()
-            ]
+            loaded = [qualify(rec.origin, rec.type) for rec in self._store.list_all()]
         return StsRegistryReloadResultEnvelope.wrap(
             StsRegistryReloadResult(loaded=loaded),
             type=STS_REGISTRY_RELOAD,
@@ -280,6 +278,38 @@ async def test_incompatible_environment_deploy_is_409(
         )
     assert caught.value.status_code == 409
     assert "numpy" in str(caught.value.detail)
+
+
+async def test_start_deadline_deploy_is_504(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(registry_routes, "_applied_extras", lambda: {"numpy": "1.0"})
+    store = RegistryStore(tmp_path)
+    await add_strategy(
+        RegistryAddBody(files={"strategy.py": _NUMPY}),
+        store=store,
+        broker=_broker(store),
+    )
+
+    class Boom:
+        async def publish_log(self, *args: object, **kwargs: object) -> int:
+            return 1
+
+        async def publish(self, *args: object, **kwargs: object) -> int:
+            return 1
+
+        async def request(self, *args: object, **kwargs: object) -> None:
+            raise DomainRpcError("start_deadline", "on_start exceeded 8s")
+
+    with pytest.raises(HTTPException) as caught:
+        await deploy(
+            "private::Tiny",
+            body=StrategyDeployBody(yaml="sts: {}\n"),
+            broker=Boom(),  # type: ignore[arg-type]
+            store=store,
+        )
+    assert caught.value.status_code == 504
+    assert "on_start exceeded 8s" in str(caught.value.detail)
 
 
 async def test_unknown_strategy_deploy_is_still_404(tmp_path: Path) -> None:

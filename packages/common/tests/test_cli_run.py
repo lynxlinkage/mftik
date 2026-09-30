@@ -140,9 +140,7 @@ def test_no_push_skips_add(tmp_path: Path, monkeypatch, capsys) -> None:
     assert "running private::Tiny session=sess-1" in capsys.readouterr().out
 
 
-def test_loaded_false_does_not_deploy(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
+def test_loaded_false_does_not_deploy(tmp_path: Path, monkeypatch, capsys) -> None:
     fake = Node_(loaded=False, load_error="STS did not load it as 'private::Tiny'")
     followed = _install(monkeypatch, fake)
 
@@ -152,9 +150,7 @@ def test_loaded_false_does_not_deploy(
     assert "private::Tiny" in capsys.readouterr().err
 
 
-def test_no_follow_does_not_open_a_socket(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
+def test_no_follow_does_not_open_a_socket(tmp_path: Path, monkeypatch, capsys) -> None:
     fake = Node_()
     followed = _install(monkeypatch, fake)
 
@@ -322,6 +318,20 @@ def test_a_session_that_ended_during_deploy_is_not_followed(
     assert "session is failed" in capsys.readouterr().out
 
 
+def test_create_budget_leaves_room_to_kill_the_worker() -> None:
+    from mftik.cli.run import _HTTP_SLACK_S
+    from mftik.protocol import (
+        STOP_FORCE_RPC_TIMEOUT_S,
+        STS_CREATE_RPC_TIMEOUT_S,
+        STS_START_DEADLINE_S,
+    )
+
+    assert STS_CREATE_RPC_TIMEOUT_S >= STS_START_DEADLINE_S + 1.5
+    # A timed-out create may spend another force-stop wait. That fits in
+    # the HTTP slack because the failed create never starts the attaches.
+    assert _HTTP_SLACK_S >= STOP_FORCE_RPC_TIMEOUT_S
+
+
 def test_deploy_http_timeout_with_no_attaches() -> None:
     assert deploy_http_timeout(StrategySpec()) == 20.0
 
@@ -334,9 +344,7 @@ class _FailingDeploy(Node_):
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.startswith("/sts/deploy/"):
             self.paths.append(request.url.path)
-            return httpx.Response(
-                500, json={"detail": "Internal Server Error"}
-            )
+            return httpx.Response(500, json={"detail": "Internal Server Error"})
         return super().__call__(request)
 
 
@@ -344,9 +352,7 @@ class _FailingPush(Node_):
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.url.path == "/registry/v1/add":
             self.paths.append(request.url.path)
-            return httpx.Response(
-                500, json={"detail": "Internal Server Error"}
-            )
+            return httpx.Response(500, json={"detail": "Internal Server Error"})
         return super().__call__(request)
 
 

@@ -67,6 +67,10 @@ class WorkerSlot:
     #: Set before the escalation kills. The exit watcher writes
     #: ``failed`` instead of ``interrupted`` and does not rebuild.
     stop_escalated: bool = False
+    #: Row reason for this kill. Unset means a stop that went unanswered.
+    #: A create-timeout kill sets the start-deadline sentence so the row
+    #: does not say the operator's stop timed out.
+    kill_reason: str | None = None
     #: The in-flight ``escalate_stop`` result. A second force-stop awaits
     #: this instead of signalling again. A refusal (not stuck, or past
     #: the deadline) clears it, so a later stop can try again. Kept after

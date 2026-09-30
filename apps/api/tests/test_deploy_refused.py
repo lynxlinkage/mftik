@@ -9,17 +9,25 @@ that timeout instead of the sentence the strategy wrote.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
+from mftik.broker.errors import RequestTimeoutError
 from mftik.protocol import (
     MD_SESSION_ATTACH,
+    STS_ERROR,
     STS_SESSION_CREATE,
     STS_SESSION_FAIL,
+    STS_SESSION_FORCE_STOP,
     STS_SESSION_STOP,
+    RpcError,
+    RpcErrorEnvelope,
     StsCreateSessionResult,
     StsCreateSessionResultEnvelope,
     StsSessionControlResult,
     StsSessionControlResultEnvelope,
     TdAccountRef,
+    Topics,
 )
 from mftik_api import orchestrate
 from mftik_api.broker_rpc import DomainRpcError
@@ -109,9 +117,7 @@ async def test_an_early_natural_end_is_reported_the_same_way() -> None:
     broker = FakeBroker(status="done", reason="work_done")
 
     with pytest.raises(DomainRpcError) as caught:
-        await deploy_strategy(
-            broker, strategy_id="noop", td={}, md=[], created_by=1
-        )
+        await deploy_strategy(broker, strategy_id="noop", td={}, md=[], created_by=1)
 
     assert caught.value.code == "strategy_refused"
     assert caught.value.message == "work_done"
@@ -122,9 +128,7 @@ async def test_a_terminal_status_with_no_reason_still_says_something() -> None:
     broker = FakeBroker(status="failed", reason=None)
 
     with pytest.raises(DomainRpcError) as caught:
-        await deploy_strategy(
-            broker, strategy_id="noop", td={}, md=[], created_by=1
-        )
+        await deploy_strategy(broker, strategy_id="noop", td={}, md=[], created_by=1)
 
     assert "failed" in caught.value.message
 
@@ -183,3 +187,129 @@ async def test_attach_failure_fails_the_session_not_stops_it() -> None:
     assert caught.value.code == "attach_failed"
     assert STS_SESSION_FAIL in broker.types
     assert STS_SESSION_STOP not in broker.types
+
+
+class _LoggingBroker:
+    def __init__(self) -> None:
+        self.types: list[str] = []
+        self.subjects: list[str] = []
+        self.payloads: list[object] = []
+
+    async def publish_log(self, topic, envelope, **_kwargs):  # noqa: ANN001
+        return 1
+
+    async def publish(self, topic, envelope):  # noqa: ANN001
+        return 1
+
+
+async def test_a_start_deadline_does_not_attach() -> None:
+    class Broker(_LoggingBroker):
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            self.types.append(envelope.type)
+            self.subjects.append(subject)
+            return RpcErrorEnvelope.wrap(
+                RpcError(code="start_deadline", message="on_start exceeded 8s"),
+                type=STS_ERROR,
+                source="sts",
+                session_id=envelope.session_id,
+            )
+
+    broker = Broker()
+    with pytest.raises(DomainRpcError) as caught:
+        await deploy_strategy(
+            broker,
+            strategy_id="noop",
+            td={},
+            md=["orderbook.Paper_Spot_BTCUSDT"],
+            created_by=1,
+        )
+
+    assert caught.value.code == "start_deadline"
+    assert caught.value.message == "on_start exceeded 8s"
+    assert broker.types == [STS_SESSION_CREATE]
+    assert MD_SESSION_ATTACH not in broker.types
+
+
+async def test_a_create_timeout_kills_that_sts_and_reports_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = SimpleNamespace(status="live", reason=None)
+
+    async def load(session_id: str) -> SimpleNamespace:
+        return row
+
+    monkeypatch.setattr(orchestrate, "_load_sts_row", load)
+
+    class Broker(_LoggingBroker):
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            self.types.append(envelope.type)
+            self.subjects.append(subject)
+            self.payloads.append(envelope.payload)
+            if envelope.type == STS_SESSION_CREATE:
+                raise RequestTimeoutError("sts.sts", "req-1", 10.0)
+            if envelope.type == STS_SESSION_FORCE_STOP:
+                row.status = "failed"
+                row.reason = "on_start exceeded 8s"
+                return StsSessionControlResultEnvelope.wrap(
+                    StsSessionControlResult(
+                        session_id=envelope.payload.session_id,
+                        status="failed",
+                        reason=row.reason,
+                    ),
+                    type=STS_SESSION_FORCE_STOP,
+                    source="sts",
+                    session_id=envelope.payload.session_id,
+                )
+            raise AssertionError(envelope.type)
+
+    broker = Broker()
+    with pytest.raises(DomainRpcError) as caught:
+        await deploy_strategy(
+            broker,
+            strategy_id="noop",
+            td={},
+            md=["orderbook.Paper_Spot_BTCUSDT"],
+            created_by=1,
+        )
+
+    assert caught.value.code == "start_deadline"
+    assert caught.value.message == "on_start exceeded 8s"
+    assert MD_SESSION_ATTACH not in broker.types
+    assert broker.types == [STS_SESSION_CREATE, STS_SESSION_FORCE_STOP]
+    assert broker.subjects[1] == Topics.sts("sts")
+    payload = broker.payloads[1]
+    assert payload.abort_start is True
+    assert payload.only_if_silent is False
+
+
+async def test_a_create_timeout_with_no_worker_stays_a_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-process mode has nothing to kill. The row stays live."""
+    row = SimpleNamespace(status="live", reason=None)
+
+    async def load(session_id: str) -> SimpleNamespace:
+        return row
+
+    monkeypatch.setattr(orchestrate, "_load_sts_row", load)
+
+    class Broker(_LoggingBroker):
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            self.types.append(envelope.type)
+            if envelope.type == STS_SESSION_CREATE:
+                raise RequestTimeoutError("sts.sts", "req-1", 10.0)
+            return RpcErrorEnvelope.wrap(
+                RpcError(code="not_found", message="no worker"),
+                type=STS_ERROR,
+                source="sts",
+                session_id=envelope.session_id,
+            )
+
+    broker = Broker()
+    with pytest.raises(DomainRpcError) as caught:
+        await deploy_strategy(broker, strategy_id="noop", td={}, md=[], created_by=1)
+
+    assert caught.value.code == "timeout"
+    assert row.status == "live"
+    assert STS_SESSION_FORCE_STOP in broker.types
+    assert MD_SESSION_ATTACH not in broker.types

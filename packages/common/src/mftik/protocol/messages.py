@@ -110,9 +110,7 @@ class HealthStatus(BaseModel):
 PROBE_MAX_AGE_SECONDS = 10.0
 
 
-def probe_is_stale(
-    envelope: Any, *, max_age: float = PROBE_MAX_AGE_SECONDS
-) -> bool:
+def probe_is_stale(envelope: Any, *, max_age: float = PROBE_MAX_AGE_SECONDS) -> bool:
     """Whether this probe is too old to be worth answering.
 
     Wall-clock, because the two sides are different processes and may be
@@ -249,6 +247,7 @@ class StsCreateSessionRequest(BaseModel):
     @classmethod
     def _md_shape(cls, value: Any) -> dict[str, list[str]]:
         return load_md(value)
+
     st_paras: dict[str, Any] = Field(default_factory=dict)
     #: ``always`` | ``never`` — see ``StrategySpec.restart``.
     restart: str = "always"
@@ -344,6 +343,10 @@ class StsSessionControlRequest(BaseModel):
     #: the stop was never delivered (nobody subscribed), not when a
     #: subscriber held the request and did not answer.
     only_if_silent: bool = False
+    #: The create RPC already timed out. Kill the worker and record the
+    #: start-deadline reason, not a stop timeout. In-process mode has no
+    #: worker slot and answers ``not_found``.
+    abort_start: bool = False
 
 
 class StsSessionControlResult(BaseModel):
@@ -1532,6 +1535,28 @@ STOP_CONTROL_TIMEOUT_S = ON_STOP_TIMEOUT_S + 5.0
 #: wait above. The supervisor SIGKILLs and then waits for the watcher to
 #: write the row. This covers that write, not another ``on_stop``.
 STOP_FORCE_RPC_TIMEOUT_S = 5.0
+
+#: How long ``create_session`` may run before the worker is killed.
+#: Counted from the moment that call starts, so the row write, the fork,
+#: and the worker's import and database connect all come out of it. A cold
+#: import of the worker is well under a second on an idle machine and longer
+#: when the host is busy, so ``on_start`` does not receive the whole budget.
+#: Stays at least 1.5s under :data:`STS_CREATE_RPC_TIMEOUT_S` so the kill and
+#: the failed-row write can still answer before the API gives up.
+STS_START_DEADLINE_S = 8.0
+
+#: How long the API waits for ``sts.session.create``. A failed create may
+#: then spend another :data:`STOP_FORCE_RPC_TIMEOUT_S` killing the worker.
+#: That extra wait sits in the CLI's HTTP slack: a create that fails does
+#: not go on to attach.
+STS_CREATE_RPC_TIMEOUT_S = 10.0
+
+
+def start_deadline_reason(seconds: float | None = None) -> str:
+    """Row reason when ``on_start`` did not finish inside the create budget."""
+    limit = STS_START_DEADLINE_S if seconds is None else seconds
+    return f"on_start exceeded {limit:g}s"
+
 
 STS_LEASE_HEARTBEAT = "sts.lease.heartbeat"
 STS_HEARTBEAT = STS_LEASE_HEARTBEAT  # alias for older names

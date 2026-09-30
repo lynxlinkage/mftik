@@ -277,6 +277,164 @@ async def test_eof_before_a_result_line_fails_and_does_not_rebuild(
     await manager.close_all()
 
 
+async def test_a_start_past_the_deadline_kills_the_worker_and_does_not_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager_mod, "STS_START_DEADLINE_S", 0.05)
+    store: dict[str, SimpleNamespace] = {}
+    gate = asyncio.Event()
+    process = StubbornProcess()
+    spawner = FakeSpawner(line=_ok_line(), process=process, gate=gate)
+    manager = _manager(spawner, store, rebuild=True, load=True)
+    try:
+        with pytest.raises(
+            manager_mod.StartDeadlineExceeded, match="on_start exceeded 0.05"
+        ):
+            await manager.create_session(_request())
+    finally:
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert store["s1"].status == "failed"
+    assert store["s1"].reason == "on_start exceeded 0.05s"
+    assert "s1" not in manager._workers
+    # No watcher is armed until the result line, and ``_on_worker_exit``
+    # returns before a rebuild when the slot never started. The kill must
+    # not grow one.
+    assert not manager._rebuild_tasks
+
+
+async def test_a_result_inside_the_start_deadline_is_not_killed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager_mod, "STS_START_DEADLINE_S", 0.5)
+    store: dict[str, SimpleNamespace] = {}
+    gate = asyncio.Event()
+    process = FakeProcess()
+    spawner = FakeSpawner(line=_ok_line(), process=process, gate=gate)
+
+    async def _open() -> None:
+        await asyncio.sleep(0.02)
+        gate.set()
+
+    opener = asyncio.create_task(_open())
+    manager = _manager(spawner, store, load=True)
+    try:
+        result = await manager.create_session(_request())
+        assert result.status == "live"
+        assert signal.SIGKILL not in process.signals
+    finally:
+        await opener
+        await manager.close_all()
+
+
+async def test_the_start_deadline_includes_the_row_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``persist_live`` counts. The wait is what the budget has left."""
+    monkeypatch.setattr(manager_mod, "STS_START_DEADLINE_S", 0.05)
+    store: dict[str, SimpleNamespace] = {}
+    gate = asyncio.Event()
+    process = StubbornProcess()
+    spawner = FakeSpawner(line=_ok_line(), process=process, gate=gate)
+    timeouts: list[float | None] = []
+    slept = 0.0
+    orig_wait = manager_mod.asyncio.wait_for
+
+    async def _wait(awaitable: Any, timeout: float | None = None) -> Any:
+        timeouts.append(timeout)
+        return await orig_wait(awaitable, timeout)
+
+    monkeypatch.setattr(manager_mod.asyncio, "wait_for", _wait)
+
+    async def persist(**kwargs: Any) -> SimpleNamespace:
+        nonlocal slept
+        begin = asyncio.get_running_loop().time()
+        await asyncio.sleep(0.03)
+        slept = asyncio.get_running_loop().time() - begin
+        row = SimpleNamespace(status="live", reason=None, **kwargs)
+        store[kwargs["session_id"]] = row
+        return row
+
+    async def mark(session_id: str, *, status: str, reason: str | None) -> None:
+        row = store[session_id]
+        row.status = status
+        row.reason = reason
+
+    async def load_session(session_id: str) -> SimpleNamespace | None:
+        return store.get(session_id)
+
+    manager = SessionManager(
+        _Broker(),  # type: ignore[arg-type]
+        persist_live=persist,
+        mark_done=mark,
+        load_session=load_session,
+        spawner=spawner,  # type: ignore[arg-type]
+        strategy_factory=lambda _name: Rebuildable(),
+        instance="sts",
+    )
+    try:
+        with pytest.raises(manager_mod.StartDeadlineExceeded):
+            await manager.create_session(_request())
+    finally:
+        await manager.close_all()
+
+    assert timeouts
+    assert timeouts[0] is not None
+    assert timeouts[0] < 0.05
+    assert timeouts[0] <= 0.05 - slept + 0.015
+
+
+async def test_deadline_and_abort_start_write_one_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whichever kill claims the slot first is the only writer.
+
+    The reason is the start deadline in both cases, not a stop timeout.
+    """
+    monkeypatch.setattr(manager_mod, "STS_START_DEADLINE_S", 0.05)
+    store: dict[str, SimpleNamespace] = {}
+    reasons: list[str | None] = []
+    release = asyncio.Event()
+    process = _UnreapedKill(release)
+    gate = asyncio.Event()
+    spawner = FakeSpawner(line=_ok_line(), process=process, gate=gate)
+    entered = asyncio.Event()
+    orig_spawn = spawner.spawn
+
+    async def spawn(**kwargs: Any) -> FakeSpawned:
+        spawned = await orig_spawn(**kwargs)
+        entered.set()
+        return spawned
+
+    spawner.spawn = spawn  # type: ignore[method-assign]
+    manager = _manager(spawner, store, rebuild=True, load=True)
+
+    async def mark(session_id: str, *, status: str, reason: str | None) -> None:
+        reasons.append(reason)
+        row = store[session_id]
+        row.status = status
+        row.reason = reason
+
+    manager._mark_done = mark  # type: ignore[method-assign]
+    create = asyncio.create_task(manager.create_session(_request()))
+    try:
+        await entered.wait()
+        escalate = asyncio.create_task(manager.escalate_stop("s1", abort_start=True))
+        while signal.SIGKILL not in process.signals:
+            await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(create, escalate, return_exceptions=True)
+        assert reasons == ["on_start exceeded 0.05s"]
+        assert store["s1"].status == "failed"
+        assert store["s1"].reason == "on_start exceeded 0.05s"
+        assert "s1" not in manager._workers
+        assert not manager._rebuild_tasks
+    finally:
+        release.set()
+        await manager.close_all()
+
+
 async def test_a_stop_during_start_keeps_the_row_the_worker_wrote() -> None:
     """Stopped while in on_start: the worker wrote ``done`` and left no line.
 
@@ -609,9 +767,7 @@ async def test_spawner_execs_a_worker_in_its_own_session(
         captured["kwargs"] = kwargs
         return _Proc()
 
-    monkeypatch.setattr(
-        "mftik_sts.spawn.asyncio.create_subprocess_exec", fake_exec
-    )
+    monkeypatch.setattr("mftik_sts.spawn.asyncio.create_subprocess_exec", fake_exec)
     spawned = await SubprocessSpawner().spawn(
         session_id="aa0001",
         role="create",
@@ -715,9 +871,7 @@ def test_linux_arms_pdeathsig(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self) -> None:
             self.prctl = _Prctl()
 
-    monkeypatch.setattr(
-        "mftik_sts.worker.ctypes.CDLL", lambda *_a, **_k: _Lib()
-    )
+    monkeypatch.setattr("mftik_sts.worker.ctypes.CDLL", lambda *_a, **_k: _Lib())
     set_pdeathsig(signal.SIGTERM)
     assert calls
     assert calls[0][0] == 1

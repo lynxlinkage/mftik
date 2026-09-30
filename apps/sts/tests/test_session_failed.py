@@ -27,6 +27,7 @@ from mftik.protocol import (
 from mftik.strategy import Strategy
 from mftik_sts.impl import register
 from mftik_sts.session import SessionManager
+from mftik_sts.session import manager as manager_mod
 
 
 @dataclass
@@ -83,9 +84,7 @@ class FakeStsStore:
         created_by: int | None = None,
     ) -> list[SimpleNamespace]:
         return [
-            row
-            for row in self.rows.values()
-            if status is None or row.status == status
+            row for row in self.rows.values() if status is None or row.status == status
         ]
 
 
@@ -113,6 +112,26 @@ class ExitingStrategy(Strategy):
 
     async def on_ready(self) -> None:
         self.exit("work_done")
+
+
+class SlowStart(Strategy):
+    """Sleeps through ``on_start``. The deadline must abandon it."""
+
+    name = "slow_start"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[str] = []
+        self.tasks: list[asyncio.Task[object]] = []
+
+    async def on_start(self) -> None:
+        self.events.append("on_start")
+        assert self.session is not None
+        self.tasks = list(self.session._tasks)
+        await asyncio.sleep(5)
+
+    async def on_stop(self) -> None:
+        self.events.append("on_stop")
 
 
 @pytest.fixture
@@ -151,11 +170,7 @@ async def _until_closed(
     """
     for _ in range(100):
         row = store.rows.get(session_id)
-        if (
-            manager.get(session_id) is None
-            and row is not None
-            and row.status != "live"
-        ):
+        if manager.get(session_id) is None and row is not None and row.status != "live":
             return row
         await asyncio.sleep(0.02)
     raise AssertionError(f"session {session_id} never reached a terminal status")
@@ -168,9 +183,7 @@ async def test_strategy_fail_marks_the_session_failed_with_its_reason(
     store = FakeStsStore()
     manager, instances = _manager(broker, store, FailingStrategy)
     await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="f-1", created_by=1, strategy="failing"
-        )
+        StsCreateSessionRequest(session_id="f-1", created_by=1, strategy="failing")
     )
     row = await _until_closed(manager, store, "f-1")
     assert row.status == "failed"
@@ -178,6 +191,33 @@ async def test_strategy_fail_marks_the_session_failed_with_its_reason(
     assert row.finished_at is not None
     # Teardown is the same as a natural exit — on_stop still runs.
     assert "on_stop" in instances[0].events
+
+
+@pytest.mark.asyncio
+async def test_a_slow_on_start_is_abandoned_and_its_lease_stops(
+    broker: Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(manager_mod, "STS_START_DEADLINE_S", 0.05)
+    store = FakeStsStore()
+    manager, instances = _manager(broker, store, SlowStart)
+    with pytest.raises(
+        manager_mod.StartDeadlineExceeded, match="on_start exceeded 0.05"
+    ):
+        await manager.create_session(
+            StsCreateSessionRequest(
+                session_id="slow-1", created_by=1, strategy="slow_start"
+            )
+        )
+
+    assert manager.get("slow-1") is None
+    row = store.rows["slow-1"]
+    assert row.status == "failed"
+    assert row.reason == "on_start exceeded 0.05s"
+    assert "on_stop" not in instances[0].events
+    lease = next(
+        task for task in instances[0].tasks if task.get_name().endswith("-lease")
+    )
+    assert lease.cancelled()
 
 
 @pytest.mark.asyncio
@@ -190,9 +230,7 @@ async def test_a_natural_exit_keeps_the_reason_it_gave(broker: Broker) -> None:
     store = FakeStsStore()
     manager, _ = _manager(broker, store, ExitingStrategy)
     await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="e-1", created_by=1, strategy="exiting"
-        )
+        StsCreateSessionRequest(session_id="e-1", created_by=1, strategy="exiting")
     )
     row = await _until_closed(manager, store, "e-1")
     assert row.status == "done"
@@ -212,9 +250,7 @@ async def test_an_operator_stop_is_done_and_says_so(broker: Broker) -> None:
     register(Idle)
     manager._strategy_factory = lambda name: Idle()  # noqa: SLF001
     await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="s-1", created_by=1, strategy="idle_stop"
-        )
+        StsCreateSessionRequest(session_id="s-1", created_by=1, strategy="idle_stop")
     )
     result = await manager.stop_session("s-1")
 
@@ -235,9 +271,7 @@ async def test_a_rollback_fail_is_failed_not_stopped(broker: Broker) -> None:
     register(Idle)
     manager._strategy_factory = lambda name: Idle()  # noqa: SLF001
     await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="s-fail", created_by=1, strategy="idle_fail"
-        )
+        StsCreateSessionRequest(session_id="s-fail", created_by=1, strategy="idle_fail")
     )
     result = await manager.fail_session(
         "s-fail", reason="attach failed — rolled back during deploy"
@@ -345,9 +379,7 @@ async def test_list_sessions_reports_the_reason(broker: Broker) -> None:
     store = FakeStsStore()
     manager, _ = _manager(broker, store, FailingStrategy)
     await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="f-2", created_by=1, strategy="failing"
-        )
+        StsCreateSessionRequest(session_id="f-2", created_by=1, strategy="failing")
     )
     await _until_closed(manager, store, "f-2")
 
@@ -380,9 +412,7 @@ async def test_shutdown_records_the_row_before_the_slow_teardown(
     store = FakeStsStore()
     manager, _ = _manager(broker, store, SlowStop)
     await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="kill-1", created_by=1, strategy="slow_stop"
-        )
+        StsCreateSessionRequest(session_id="kill-1", created_by=1, strategy="slow_stop")
     )
 
     # Shut down, then give up on it the way SIGKILL would.
@@ -470,9 +500,7 @@ async def test_remember_reaches_the_store(broker: Broker) -> None:
         remember_fact=remember,
     )
     await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="mem-1", created_by=1, strategy="anchoring"
-        )
+        StsCreateSessionRequest(session_id="mem-1", created_by=1, strategy="anchoring")
     )
 
     assert facts == [("mem-1", "ref_start", "50000")]
@@ -530,9 +558,7 @@ async def test_create_says_the_session_is_already_over(broker: Broker) -> None:
     manager, _ = _manager(broker, store, FailingStrategy)
 
     result = await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="f-fast", created_by=1, strategy="failing"
-        )
+        StsCreateSessionRequest(session_id="f-fast", created_by=1, strategy="failing")
     )
 
     # Answered from the reply itself — no waiting on the teardown task.
@@ -548,9 +574,7 @@ async def test_create_reports_a_natural_end_as_done(broker: Broker) -> None:
     manager, _ = _manager(broker, store, ExitingStrategy)
 
     result = await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="e-fast", created_by=1, strategy="exiting"
-        )
+        StsCreateSessionRequest(session_id="e-fast", created_by=1, strategy="exiting")
     )
 
     assert result.status == "done"
@@ -568,9 +592,7 @@ async def test_create_of_a_healthy_session_still_says_live(
 
     manager, _ = _manager(broker, store, Idle)
     result = await manager.create_session(
-        StsCreateSessionRequest(
-            session_id="ok-1", created_by=1, strategy="idle_create"
-        )
+        StsCreateSessionRequest(session_id="ok-1", created_by=1, strategy="idle_create")
     )
 
     assert result.status == "live"

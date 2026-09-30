@@ -29,6 +29,7 @@ from mftik.cli.exits import EXIT_INTERRUPTED
 from mftik.cli.push import push_tree, report_push
 from mftik.cli.sessions import follow_logs
 from mftik.cli.tree import inspect_tree, read_yaml, require_tree
+from mftik.protocol import STS_CREATE_RPC_TIMEOUT_S
 from mftik.protocol.strategy_yml import (
     StrategySpec,
     StrategyYamlError,
@@ -42,10 +43,14 @@ from mftik.registry.qualify import PRIVATE_ORIGIN, qualify
 _LIVE = "live"
 
 #: The API's own budgets. Waiting less than these is how a live session
-#: becomes an HTTP timeout on this side. Create is 10s; each attach RPC
+#: becomes an HTTP timeout on this side. Create is
+#: ``STS_CREATE_RPC_TIMEOUT_S``. A create that times out may spend another
+#: ``STOP_FORCE_RPC_TIMEOUT_S`` killing the worker before it answers; a
+#: failed create does not attach, so that extra wait fits in
+#: ``_HTTP_SLACK_S`` rather than in the per-attach budget. Each attach RPC
 #: is the deploy body's timeout plus 5s; a short slack after that is
 #: the HTTP hop, not another RPC.
-_STS_CREATE_S = 10.0
+_STS_CREATE_S = STS_CREATE_RPC_TIMEOUT_S
 _ATTACH_RPC_SLACK_S = 5.0
 _DEFAULT_ATTACH_S = 30.0
 _HTTP_SLACK_S = 10.0
@@ -91,9 +96,7 @@ def run(args: argparse.Namespace) -> int:
             report_push(push_tree(client, root))
 
         try:
-            deployed = client.post(
-                f"/sts/deploy/{key}", json_body={"yaml": yaml_text}
-            )
+            deployed = client.post(f"/sts/deploy/{key}", json_body={"yaml": yaml_text})
         except KeyboardInterrupt:
             # The POST is in flight. STS may already have created the
             # session; this side will never hear the id.

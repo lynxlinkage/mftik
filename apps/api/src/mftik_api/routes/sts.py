@@ -723,7 +723,12 @@ async def deploy(
         )
     except DomainRpcError as exc:
         code = 404 if exc.code in {"unknown_strategy", "not_found"} else 502
-        if exc.code == "timeout":
+        if exc.code == "timeout" or exc.code == "start_deadline":
+            # A slow ``on_start`` can succeed on retry, so this stays a
+            # timeout rather than a 400. ``start_deadline`` puts the reason
+            # in the detail; a bare timeout is the case where the row was
+            # still live after the force-stop. 400 stays a refusal that
+            # retrying cannot change.
             code = 504
         if exc.code == "incompatible_environment":
             code = 409

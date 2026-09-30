@@ -25,7 +25,11 @@ from mftik.protocol import (
 )
 
 from mftik_sts.runtime_env import IncompatibleEnvironment
-from mftik_sts.session.manager import ForceStopExpired, WorkerNotStuck
+from mftik_sts.session.manager import (
+    ForceStopExpired,
+    StartDeadlineExceeded,
+    WorkerNotStuck,
+)
 
 if TYPE_CHECKING:
     from mftik_sts.session import SessionManager
@@ -53,6 +57,9 @@ async def handle_session_create(
         return
     except KeyError as exc:
         await _error(req, "unknown_strategy", str(exc))
+        return
+    except StartDeadlineExceeded as exc:
+        await _error(req, "start_deadline", str(exc))
         return
     except Exception as exc:
         logger.exception("sts.session.create failed")
@@ -175,6 +182,7 @@ async def _control(
                 payload.session_id,
                 deadline=payload.deadline,
                 only_if_silent=payload.only_if_silent,
+                abort_start=payload.abort_start,
             )
         else:
             await _error(req, "unknown_action", action)
