@@ -36,6 +36,14 @@ RESTART_ALWAYS = "always"
 RESTART_NEVER = "never"
 RESTART_MODES = frozenset({RESTART_ALWAYS, RESTART_NEVER})
 
+#: How long a create may run before the worker is killed. Counted from
+#: the start of ``create_session``, so the row write, the fork, and the
+#: worker's import all come out of it. ``on_start`` does not receive the
+#: whole number; the failure reason says how long that hook itself ran.
+START_TIMEOUT_DEFAULT_S = 8.0
+START_TIMEOUT_MIN_S = 1.0
+START_TIMEOUT_MAX_S = 300.0
+
 #: YAML's merge key. Under ``td:`` it is refused rather than expanded — see
 #: :func:`_refuse_collapsing_td_keys`.
 _MERGE_KEY = "<<"
@@ -189,6 +197,10 @@ class StrategySpec(BaseModel):
     #: and would rather continue. Set ``never`` for a one-shot that would be
     #: wrong to resume.
     restart: str = "always"
+    #: Create budget in seconds. The API waits two seconds past this, and
+    #: the CLI's HTTP timeout follows. Omitted means
+    #: :data:`START_TIMEOUT_DEFAULT_S`.
+    start_timeout: float = START_TIMEOUT_DEFAULT_S
     #: Flat config for whichever strategy is being deployed. Its keys are the
     #: strategy's own; validation happens in that class's ``on_initialized``.
     sts: dict[str, Any] = Field(default_factory=dict)
@@ -204,6 +216,24 @@ class StrategySpec(BaseModel):
                 f"restart must be one of {sorted(RESTART_MODES)}, got {value!r}"
             )
         return mode
+
+    @field_validator("start_timeout", mode="before")
+    @classmethod
+    def _start_timeout(cls, value: Any) -> float:
+        if value is None:
+            return START_TIMEOUT_DEFAULT_S
+        # ``bool`` is an ``int``. ``start_timeout: true`` must not become 1s.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"start_timeout must be a number of seconds, got {value!r}"
+            )
+        seconds = float(value)
+        if seconds < START_TIMEOUT_MIN_S or seconds > START_TIMEOUT_MAX_S:
+            raise ValueError(
+                f"start_timeout must be between {START_TIMEOUT_MIN_S:g}s and "
+                f"{START_TIMEOUT_MAX_S:g}s, got {value!r}"
+            )
+        return seconds
 
     @field_validator("sts", mode="before")
     @classmethod

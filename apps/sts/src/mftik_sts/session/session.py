@@ -88,7 +88,7 @@ from mftik.strategy.eventlog import EventLog
 from mftik.symbols import SymbolClient
 from pydantic import BaseModel
 
-from mftik_sts.spawn import write_parent_beat
+from mftik_sts.spawn import note_on_start, write_parent_beat
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +281,9 @@ class StsSession:
         self._md_lease_logged = False
         self._on_stop_task: asyncio.Task[Any] | None = None
         self._recon_sent: set[int] = set()
+        #: Loop time when ``on_start`` began. None until then, including a
+        #: deadline that fired during the event-log open that precedes it.
+        self.on_start_began: float | None = None
 
     @property
     def td_api_ids(self) -> list[int]:
@@ -414,6 +417,8 @@ class StsSession:
         # takes the session down with it, and the log should show which of the
         # two it was standing in when that happened.
         self.event_log.record("lifecycle", "on_start", dir="self")
+        self.on_start_began = asyncio.get_running_loop().time()
+        note_on_start()
         await self.strategy.on_start()
         self.event_log.record("lifecycle", "on_ready", dir="self")
         await self.strategy.on_ready()

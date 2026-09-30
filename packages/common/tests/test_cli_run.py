@@ -336,6 +336,10 @@ def test_deploy_http_timeout_with_no_attaches() -> None:
     assert deploy_http_timeout(StrategySpec()) == 20.0
 
 
+def test_deploy_http_timeout_follows_start_timeout() -> None:
+    assert deploy_http_timeout(StrategySpec(start_timeout=30)) == 42.0
+
+
 def test_deploy_http_timeout_with_one_feed() -> None:
     assert deploy_http_timeout(StrategySpec(td={"paper": {}})) == 55.0
 
@@ -384,6 +388,62 @@ def test_run_prints_missing_extras_and_does_not_invent_a_session(
     assert "unknown_strategy" not in err
     assert "may already be live" not in err
     assert "Traceback" not in err
+
+
+def test_a_start_deadline_says_retry_is_safe(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    class Deadline(Node_):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path.startswith("/sts/deploy/"):
+                self.paths.append(request.url.path)
+                return httpx.Response(
+                    504,
+                    json={
+                        "detail": (
+                            "start_deadline: create exceeded 8s; on_start ran 4.2s"
+                        )
+                    },
+                )
+            return super().__call__(request)
+
+    _install(monkeypatch, Deadline())
+    dest = _tree(tmp_path)
+
+    assert main(["run", str(dest), "--no-follow"]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "start_deadline" in err
+    assert "failed: create exceeded 8s; on_start ran 4.2s — safe to retry" in err
+    assert "may already be live" not in err
+    assert "mftik ps" not in err
+
+
+def test_a_timeout_names_the_session_to_stop(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    class TimedOut(Node_):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path.startswith("/sts/deploy/"):
+                self.paths.append(request.url.path)
+                return httpx.Response(
+                    504,
+                    json={
+                        "detail": (
+                            "timeout: request timed out; session abc123 may "
+                            "still be live — stop it with: mftik stop abc123"
+                        )
+                    },
+                )
+            return super().__call__(request)
+
+    _install(monkeypatch, TimedOut())
+    dest = _tree(tmp_path)
+
+    assert main(["run", str(dest), "--no-follow"]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "mftik stop abc123" in err
+    assert "mftik ps" in err
+    assert "Do not run again" in err
 
 
 def test_a_failed_deploy_names_the_route_and_says_to_check_ps(

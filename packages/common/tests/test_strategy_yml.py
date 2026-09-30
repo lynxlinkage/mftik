@@ -326,6 +326,23 @@ def test_restart_never_is_kept() -> None:
     assert spec.restart == "never"
 
 
+def test_start_timeout_defaults_to_eight_seconds() -> None:
+    spec = parse_strategy_yml("td: {}\nmd: []\nsts: {}\n")
+    assert spec.start_timeout == 8.0
+
+
+def test_start_timeout_is_kept() -> None:
+    spec = parse_strategy_yml("td: {}\nmd: []\nstart_timeout: 30\nsts: {}\n")
+    assert spec.start_timeout == 30.0
+
+
+def test_start_timeout_out_of_range_is_refused() -> None:
+    with pytest.raises(StrategyYamlError, match="start_timeout"):
+        parse_strategy_yml("td: {}\nmd: []\nstart_timeout: 0\nsts: {}\n")
+    with pytest.raises(StrategyYamlError, match="start_timeout"):
+        parse_strategy_yml("td: {}\nmd: []\nstart_timeout: true\nsts: {}\n")
+
+
 def test_an_unknown_restart_mode_is_refused() -> None:
     """Silently treating a typo as `always` would resume a run that asked not
     to be, which is the one direction this must not fail in."""

@@ -29,7 +29,7 @@ from mftik.cli.exits import EXIT_INTERRUPTED
 from mftik.cli.push import push_tree, report_push
 from mftik.cli.sessions import follow_logs
 from mftik.cli.tree import inspect_tree, read_yaml, require_tree
-from mftik.protocol import STS_CREATE_RPC_TIMEOUT_S
+from mftik.protocol import STOP_FORCE_RPC_TIMEOUT_S, create_rpc_timeout
 from mftik.protocol.strategy_yml import (
     StrategySpec,
     StrategyYamlError,
@@ -43,14 +43,13 @@ from mftik.registry.qualify import PRIVATE_ORIGIN, qualify
 _LIVE = "live"
 
 #: The API's own budgets. Waiting less than these is how a live session
-#: becomes an HTTP timeout on this side. Create is
-#: ``STS_CREATE_RPC_TIMEOUT_S``. A create that times out may spend another
-#: ``STOP_FORCE_RPC_TIMEOUT_S`` killing the worker before it answers; a
-#: failed create does not attach, so that extra wait fits in
-#: ``_HTTP_SLACK_S`` rather than in the per-attach budget. Each attach RPC
-#: is the deploy body's timeout plus 5s; a short slack after that is
+#: becomes an HTTP timeout on this side. Create is the document's
+#: ``start_timeout`` plus the API's slack. A create that times out may
+#: spend another ``STOP_FORCE_RPC_TIMEOUT_S`` killing the worker before
+#: it answers; a failed create does not attach, so that extra wait fits
+#: in ``_HTTP_SLACK_S`` rather than in the per-attach budget. Each attach
+#: RPC is the deploy body's timeout plus 5s; a short slack after that is
 #: the HTTP hop, not another RPC.
-_STS_CREATE_S = STS_CREATE_RPC_TIMEOUT_S
 _ATTACH_RPC_SLACK_S = 5.0
 _DEFAULT_ATTACH_S = 30.0
 _HTTP_SLACK_S = 10.0
@@ -64,9 +63,15 @@ def deploy_http_timeout(
     Create, then one MD attach **per named instance**, then one TD attach per
     account. A document that splits its feeds across two MDs waits for two
     attaches, and a timeout sized for one would give up on the second.
+    ``start_timeout`` widens the create wait with the API's.
     """
     n = len(spec.md) + len(spec.td)
-    return _STS_CREATE_S + n * (attach_s + _ATTACH_RPC_SLACK_S) + _HTTP_SLACK_S
+    slack = max(_HTTP_SLACK_S, STOP_FORCE_RPC_TIMEOUT_S)
+    return (
+        create_rpc_timeout(spec.start_timeout)
+        + n * (attach_s + _ATTACH_RPC_SLACK_S)
+        + slack
+    )
 
 
 def _deploy_may_be_live(exc: BaseException) -> str:
@@ -75,6 +80,25 @@ def _deploy_may_be_live(exc: BaseException) -> str:
         "A session may already be live — check with: mftik ps\n"
         "Do not run again until you know."
     )
+
+
+def _is_start_deadline(exc: BaseException) -> bool:
+    return "start_deadline" in str(exc)
+
+
+def _start_deadline_advice(exc: BaseException) -> str:
+    """A deadline kill already wrote ``failed``. Retrying is safe.
+
+    The other 504s are the ones where the worker may still be running.
+    This one is not, and telling the operator to hunt for it makes them
+    leave a failed deploy alone.
+    """
+    text = str(exc)
+    reason = text
+    marker = "start_deadline:"
+    if marker in text:
+        reason = text.split(marker, 1)[1].strip().splitlines()[0].strip()
+    return f"{text}\nfailed: {reason} — safe to retry"
 
 
 def run(args: argparse.Namespace) -> int:
@@ -112,6 +136,8 @@ def run(args: argparse.Namespace) -> int:
             # be live turns an environment problem into a hunt for a ghost.
             if is_environment_refusal(exc):
                 raise
+            if _is_start_deadline(exc):
+                raise CliError(_start_deadline_advice(exc)) from exc
             raise CliError(_deploy_may_be_live(exc)) from exc
         session_id = deployed["session_id"]
         status = str(deployed.get("status") or _LIVE)

@@ -9,6 +9,7 @@ that timeout instead of the sentence the strategy wrote.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -47,9 +48,13 @@ def _named_sts_without_a_database(monkeypatch) -> None:
     async def _mint() -> str:
         return "aabb01"
 
+    async def _no_row(_session_id: str) -> None:
+        return None
+
     monkeypatch.setattr(orchestrate, "_sts_target", _target)
     monkeypatch.setattr(orchestrate, "_check_sts_instance", _ok)
     monkeypatch.setattr(orchestrate, "mint_session_id", _mint)
+    monkeypatch.setattr(orchestrate, "_load_sts_row", _no_row)
 
 
 REFUSAL = (
@@ -280,6 +285,7 @@ async def test_a_create_timeout_kills_that_sts_and_reports_the_deadline(
     payload = broker.payloads[1]
     assert payload.abort_start is True
     assert payload.only_if_silent is False
+    assert payload.deadline is None
 
 
 async def test_a_create_timeout_with_no_worker_stays_a_timeout(
@@ -292,6 +298,7 @@ async def test_a_create_timeout_with_no_worker_stays_a_timeout(
         return row
 
     monkeypatch.setattr(orchestrate, "_load_sts_row", load)
+    monkeypatch.setattr(orchestrate, "_ABORT_ROW_POLL_S", 0.0)
 
     class Broker(_LoggingBroker):
         async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
@@ -310,6 +317,172 @@ async def test_a_create_timeout_with_no_worker_stays_a_timeout(
         await deploy_strategy(broker, strategy_id="noop", td={}, md=[], created_by=1)
 
     assert caught.value.code == "timeout"
+    assert "mftik stop aabb01" in caught.value.message
     assert row.status == "live"
     assert STS_SESSION_FORCE_STOP in broker.types
     assert MD_SESSION_ATTACH not in broker.types
+    orchestrate.cancel_create_followups()
+
+
+async def test_a_not_found_abort_reports_the_deadline_once_the_row_lands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The STS is still writing ``failed`` when force-stop answers."""
+    row = SimpleNamespace(status="live", reason=None)
+    loads = 0
+
+    async def load(_session_id: str) -> SimpleNamespace:
+        nonlocal loads
+        loads += 1
+        if loads >= 3:
+            row.status = "failed"
+            row.reason = "create exceeded 8s; on_start ran 4.2s"
+        return row
+
+    monkeypatch.setattr(orchestrate, "_load_sts_row", load)
+
+    class Broker(_LoggingBroker):
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            self.types.append(envelope.type)
+            if envelope.type == STS_SESSION_CREATE:
+                raise RequestTimeoutError("sts.sts", "req-1", 10.0)
+            return RpcErrorEnvelope.wrap(
+                RpcError(code="not_found", message="no active sts session"),
+                type=STS_ERROR,
+                source="sts",
+                session_id=envelope.session_id,
+            )
+
+    with pytest.raises(DomainRpcError) as caught:
+        await deploy_strategy(Broker(), strategy_id="noop", td={}, md=[], created_by=1)
+
+    assert caught.value.code == "start_deadline"
+    assert caught.value.message == "create exceeded 8s; on_start ran 4.2s"
+
+
+async def test_a_lost_abort_names_the_session_and_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = SimpleNamespace(status="live", reason=None)
+    monkeypatch.setattr(orchestrate, "_ABORT_ROW_POLL_S", 0.0)
+    monkeypatch.setattr(orchestrate, "_ABORT_RETRY_INTERVAL_S", 0.01)
+
+    async def load(_session_id: str) -> SimpleNamespace:
+        return row
+
+    monkeypatch.setattr(orchestrate, "_load_sts_row", load)
+    attempts = 0
+
+    class Broker(_LoggingBroker):
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            nonlocal attempts
+            self.types.append(envelope.type)
+            if envelope.type == STS_SESSION_CREATE:
+                raise RequestTimeoutError("sts.sts", "req-1", 10.0)
+            attempts += 1
+            if attempts == 1:
+                raise RequestTimeoutError("sts.sts", "req-2", 5.0)
+            row.status = "failed"
+            row.reason = "create exceeded 8s; on_start had not started"
+            return StsSessionControlResultEnvelope.wrap(
+                StsSessionControlResult(
+                    session_id=envelope.payload.session_id,
+                    status="failed",
+                    reason=row.reason,
+                ),
+                type=STS_SESSION_FORCE_STOP,
+                source="sts",
+                session_id=envelope.payload.session_id,
+            )
+
+    try:
+        with pytest.raises(DomainRpcError) as caught:
+            await deploy_strategy(
+                Broker(), strategy_id="noop", td={}, md=[], created_by=1
+            )
+        assert caught.value.code == "timeout"
+        assert "mftik stop aabb01" in caught.value.message
+        for _ in range(50):
+            if row.status == "failed":
+                break
+            await asyncio.sleep(0.02)
+        assert row.status == "failed"
+    finally:
+        orchestrate.cancel_create_followups()
+
+
+async def test_start_deadline_marks_a_still_live_row_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = SimpleNamespace(status="live", reason=None)
+
+    async def load(_session_id: str) -> SimpleNamespace:
+        return row
+
+    async def mark(session_id: str, reason: str) -> bool:
+        row.status = "failed"
+        row.reason = reason
+        return True
+
+    monkeypatch.setattr(orchestrate, "_load_sts_row", load)
+    monkeypatch.setattr(orchestrate, "_mark_start_failed", mark)
+
+    class Broker(_LoggingBroker):
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            self.types.append(envelope.type)
+            return RpcErrorEnvelope.wrap(
+                RpcError(
+                    code="start_deadline",
+                    message="create exceeded 8s; on_start ran 4.2s",
+                ),
+                type=STS_ERROR,
+                source="sts",
+                session_id=envelope.session_id,
+            )
+
+    broker = Broker()
+    with pytest.raises(DomainRpcError) as caught:
+        await deploy_strategy(broker, strategy_id="noop", td={}, md=[], created_by=1)
+
+    assert caught.value.code == "start_deadline"
+    assert row.status == "failed"
+    assert row.reason == "create exceeded 8s; on_start ran 4.2s"
+    assert MD_SESSION_ATTACH not in broker.types
+
+
+async def test_a_kill_whose_row_write_failed_is_marked_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The supervisor killed the worker and then could not write the row."""
+    row = SimpleNamespace(status="live", reason=None)
+
+    async def load(_session_id: str) -> SimpleNamespace:
+        return row
+
+    async def mark(_session_id: str, reason: str) -> bool:
+        row.status = "failed"
+        row.reason = reason
+        return True
+
+    monkeypatch.setattr(orchestrate, "_load_sts_row", load)
+    monkeypatch.setattr(orchestrate, "_mark_start_failed", mark)
+    monkeypatch.setattr(orchestrate, "_ABORT_ROW_POLL_S", 0.0)
+
+    class Broker(_LoggingBroker):
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            self.types.append(envelope.type)
+            if envelope.type == STS_SESSION_CREATE:
+                raise RequestTimeoutError("sts.sts", "req-1", 10.0)
+            return RpcErrorEnvelope.wrap(
+                RpcError(code="force_stop_failed", message="stop kill did not land"),
+                type=STS_ERROR,
+                source="sts",
+                session_id=envelope.session_id,
+            )
+
+    with pytest.raises(DomainRpcError) as caught:
+        await deploy_strategy(Broker(), strategy_id="noop", td={}, md=[], created_by=1)
+
+    assert caught.value.code == "start_deadline"
+    assert row.status == "failed"
+    assert "create exceeded" in (row.reason or "")

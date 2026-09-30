@@ -55,6 +55,7 @@ from mftik_sts.spawn import (
     SubprocessSpawner,
     WorkerSlot,
     _PipeWorker,
+    kill_worker,
     write_parent_beat,
 )
 from mftik_sts.worker import arm_parent_death, set_pdeathsig
@@ -288,7 +289,7 @@ async def test_a_start_past_the_deadline_kills_the_worker_and_does_not_rebuild(
     manager = _manager(spawner, store, rebuild=True, load=True)
     try:
         with pytest.raises(
-            manager_mod.StartDeadlineExceeded, match="on_start exceeded 0.05"
+            manager_mod.StartDeadlineExceeded, match="create exceeded 0.05s"
         ):
             await manager.create_session(_request())
     finally:
@@ -296,7 +297,7 @@ async def test_a_start_past_the_deadline_kills_the_worker_and_does_not_rebuild(
 
     assert process.signals == [signal.SIGKILL]
     assert store["s1"].status == "failed"
-    assert store["s1"].reason == "on_start exceeded 0.05s"
+    assert store["s1"].reason == "create exceeded 0.05s; on_start had not started"
     assert "s1" not in manager._workers
     # No watcher is armed until the result line, and ``_on_worker_exit``
     # returns before a rebuild when the slot never started. The kill must
@@ -425,9 +426,9 @@ async def test_deadline_and_abort_start_write_one_reason(
             await asyncio.sleep(0)
         release.set()
         await asyncio.gather(create, escalate, return_exceptions=True)
-        assert reasons == ["on_start exceeded 0.05s"]
+        assert reasons == ["create exceeded 0.05s; on_start had not started"]
         assert store["s1"].status == "failed"
-        assert store["s1"].reason == "on_start exceeded 0.05s"
+        assert store["s1"].reason == "create exceeded 0.05s; on_start had not started"
         assert "s1" not in manager._workers
         assert not manager._rebuild_tasks
     finally:
@@ -1774,3 +1775,232 @@ async def test_force_stop_does_not_block_list_on_the_instance_subject() -> None:
             stop.set()
             await asyncio.wait_for(rpc, timeout=2)
             await manager.close_all()
+
+
+async def test_abort_start_kills_after_its_deadline() -> None:
+    """A late abort is the create the API already called a failure."""
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    slot = _hold(manager, store, process)
+    slot.start_budget_s = 8.0
+    slot.result_reader = SimpleNamespace(
+        on_start_at=asyncio.get_running_loop().time() - 4.2
+    )
+    try:
+        result = await manager.escalate_stop(
+            "s1", deadline=time.time() - 5, abort_start=True
+        )
+    finally:
+        await manager.close_all()
+
+    assert process.signals == [signal.SIGKILL]
+    assert result.status == "failed"
+    assert result.reason is not None
+    assert result.reason.startswith("create exceeded 8s; on_start ran 4.")
+    assert store["s1"].reason == result.reason
+    assert store["s1"].status == "failed"
+
+
+async def test_a_missed_deadline_write_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager_mod, "STS_START_DEADLINE_S", 0.05)
+    monkeypatch.setattr(manager_mod, "FAILED_WRITE_BACKOFF_S", 0.01)
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    spawner = FakeSpawner(line=_ok_line(), process=process, gate=asyncio.Event())
+    manager = _manager(spawner, store, load=True)
+    attempts = 0
+
+    async def mark(session_id: str, *, status: str, reason: str | None) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 4:
+            raise RuntimeError("db down")
+        row = store[session_id]
+        row.status = status
+        row.reason = reason
+
+    manager._mark_done = mark  # type: ignore[method-assign]
+    try:
+        with pytest.raises(manager_mod.StartDeadlineExceeded):
+            await manager.create_session(_request())
+        for _ in range(50):
+            if store["s1"].status == "failed":
+                break
+            await asyncio.sleep(0.02)
+        assert store["s1"].status == "failed"
+        assert store["s1"].reason == "create exceeded 0.05s; on_start had not started"
+        assert attempts >= 4
+    finally:
+        await manager.close_all()
+
+
+async def test_the_reaper_fails_a_deadline_kill_whose_write_missed() -> None:
+    """A lost ``failed`` write must not become an ``interrupted`` rebuild."""
+    store: dict[str, SimpleNamespace] = {}
+    manager = _manager(FakeSpawner(), store, load=True)
+    store["s1"] = SimpleNamespace(
+        status="live", reason=None, session_id="s1", instance="sts"
+    )
+
+    async def down(session_id: str, *, status: str, reason: str | None) -> None:
+        raise RuntimeError("db down")
+
+    manager._mark_done = down  # type: ignore[method-assign]
+
+    async def listed(**kwargs: object) -> list[SimpleNamespace]:
+        status = kwargs.get("status")
+        return [row for row in store.values() if row.status == status]
+
+    manager._list_db_sessions = listed  # type: ignore[method-assign]
+    slot = WorkerSlot(
+        session_id="s1",
+        role="create",
+        strategy_name="rebuildable",
+        type="Rebuildable",
+        created_by=1,
+        start_budget_s=0.05,
+    )
+    reason = "create exceeded 0.05s; on_start had not started"
+    try:
+        await manager._write_failed(slot, _request(), reason)
+        assert "s1" in manager._unwritten_failures
+        for task in list(manager._failure_retries):
+            task.cancel()
+        await asyncio.sleep(0)
+
+        async def reap_mark(
+            session_id: str, *, status: str, reason: str | None
+        ) -> None:
+            row = store[session_id]
+            row.status = status
+            row.reason = reason
+
+        manager._mark_done = reap_mark  # type: ignore[method-assign]
+        assert await manager.reap_orphans() == []
+        assert await manager.reap_orphans() == ["s1"]
+        assert store["s1"].status == "failed"
+        assert store["s1"].reason == reason
+        assert await manager.rebuild_session("s1") is False
+    finally:
+        await manager.close_all()
+
+
+async def test_the_on_start_mark_is_not_the_result_line() -> None:
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b'{"phase":"on_start"}\n{"ok": true, "strategy": "t"}\n')
+    os.close(write_fd)
+    life_r, life_w = os.pipe()
+    beat_r, beat_w = os.pipe()
+    os.close(life_r)
+    os.close(beat_w)
+    worker = _PipeWorker(FakeProcess(), read_fd, life_w, beat_r)
+    try:
+        line = await worker.read_result()
+    finally:
+        os.close(life_w)
+        os.close(beat_r)
+    assert line is not None
+    assert json.loads(line)["ok"] is True
+    assert worker.on_start_at is not None
+
+
+def test_kill_worker_takes_children_in_the_session() -> None:
+    import subprocess
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, time\n"
+            "subprocess.Popen(['sleep', '30'])\n"
+            "time.sleep(30)\n",
+        ],
+        start_new_session=True,
+    )
+    child = 0
+    try:
+        for _ in range(50):
+            kids = _child_pids(proc.pid)
+            if kids:
+                child = kids[0]
+                break
+            time.sleep(0.02)
+        assert child
+        kill_worker(proc)
+        proc.wait(timeout=2)
+        for _ in range(50):
+            if not _proc_alive(child):
+                break
+            time.sleep(0.02)
+        assert not _proc_alive(child)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def _child_pids(pid: int) -> list[int]:
+    kids: list[int] = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", encoding="utf-8") as handle:
+                stat = handle.read()
+        except OSError:
+            continue
+        rparen = stat.rfind(")")
+        parts = stat[rparen + 2 :].split()
+        if len(parts) > 1 and int(parts[1]) == pid:
+            kids.append(int(entry))
+    return kids
+
+
+def _proc_alive(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+            stat = handle.read()
+    except OSError:
+        return False
+    rparen = stat.rfind(")")
+    state = stat[rparen + 2 :].split()[0]
+    return state not in {"Z", "X"}
+
+
+async def test_start_timeout_is_the_create_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    spawner = FakeSpawner(line=_ok_line(), process=process, gate=asyncio.Event())
+    timeouts: list[float | None] = []
+    orig_wait = manager_mod.asyncio.wait_for
+
+    async def _wait(awaitable: Any, timeout: float | None = None) -> Any:
+        timeouts.append(timeout)
+        return await orig_wait(awaitable, timeout)
+
+    monkeypatch.setattr(manager_mod.asyncio, "wait_for", _wait)
+    manager = _manager(spawner, store, load=True)
+    request = StsCreateSessionRequest(
+        session_id="s1",
+        created_by=1,
+        strategy="rebuildable",
+        type="Rebuildable",
+        start_timeout=1.0,
+    )
+    try:
+        with pytest.raises(
+            manager_mod.StartDeadlineExceeded, match="create exceeded 1s"
+        ):
+            await manager.create_session(request)
+    finally:
+        await manager.close_all()
+
+    assert timeouts[0] is not None
+    assert timeouts[0] <= 1.0
+    assert timeouts[0] > 0.5
+    assert store["s1"].reason == "create exceeded 1s; on_start had not started"

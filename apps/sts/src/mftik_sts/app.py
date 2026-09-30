@@ -90,11 +90,11 @@ async def run_rpc(
                 # Create enforces a start deadline shorter than the API's
                 # timeout and, past it, kills the worker and replies with
                 # the failure. A result line inside the deadline is still
-                # success. That reply can reach the API after the API has
-                # already timed out: the slack between the two budgets is
-                # smaller than it was, and it does not close. This task
-                # does not kill a worker that already reported success.
-                # The API's create-timeout force-stop is what ends it.
+                # success. That reply can sit in the broker after the API
+                # has given up. The API's abort has no wall-clock deadline
+                # and is retried until the row is terminal, so a worker
+                # that already reported success does not stay up with no
+                # MD attached.
                 if req.envelope.type == STS_SESSION_CREATE:
                     task = asyncio.create_task(
                         _dispatch_request(req, sessions),

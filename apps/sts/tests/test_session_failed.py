@@ -201,7 +201,7 @@ async def test_a_slow_on_start_is_abandoned_and_its_lease_stops(
     store = FakeStsStore()
     manager, instances = _manager(broker, store, SlowStart)
     with pytest.raises(
-        manager_mod.StartDeadlineExceeded, match="on_start exceeded 0.05"
+        manager_mod.StartDeadlineExceeded, match="create exceeded 0.05s"
     ):
         await manager.create_session(
             StsCreateSessionRequest(
@@ -212,7 +212,8 @@ async def test_a_slow_on_start_is_abandoned_and_its_lease_stops(
     assert manager.get("slow-1") is None
     row = store.rows["slow-1"]
     assert row.status == "failed"
-    assert row.reason == "on_start exceeded 0.05s"
+    assert row.reason is not None
+    assert row.reason.startswith("create exceeded 0.05s; on_start ran ")
     assert "on_stop" not in instances[0].events
     lease = next(
         task for task in instances[0].tasks if task.get_name().endswith("-lease")

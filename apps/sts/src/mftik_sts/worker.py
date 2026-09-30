@@ -50,9 +50,9 @@ def set_pdeathsig(signum: int) -> None:
 
     A no-op on every other platform. The signal is not a substitute for
     the parent-pid check: if the parent is already gone, there is nobody
-    for the kernel to deliver it to. In a container the parent is PID 1,
-    and PID 1 dying SIGKILLs the whole namespace, so this is not delivered
-    there either — the same as STS itself dying today.
+    for the kernel to deliver it to. ``tini`` is PID 1, so this worker's
+    parent is STS and the signal arrives when STS dies. It is not
+    inherited by a grandchild the worker started.
     """
     if sys.platform != "linux":
         return
@@ -73,9 +73,9 @@ def set_pdeathsig(signum: int) -> None:
 def arm_parent_death() -> None:
     """Exit unless this process was spawned by the pid in the environment.
 
-    Compared to that pid, never to 1. Under compose the parent *is* PID 1,
-    and ``getppid() == 1`` is the ordinary case. Treating it as "orphaned"
-    would exit every worker at start.
+    Compared to that pid, never to 1. ``tini`` is PID 1 and STS is the
+    parent, so ``getppid() == 1`` means this worker was reparented after
+    STS died. At start the parent is still alive, and that pid is not 1.
     """
     raw = os.environ.get(PARENT_PID_ENV, "").strip()
     if not raw:

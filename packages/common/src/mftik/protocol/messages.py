@@ -23,7 +23,13 @@ from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol.envelope import Envelope
 from mftik.protocol.query_codes import QueryCode
 from mftik.protocol.reject_codes import RejectCode
-from mftik.protocol.strategy_yml import TdAccountRef, load_md
+from mftik.protocol.strategy_yml import (
+    START_TIMEOUT_DEFAULT_S,
+    START_TIMEOUT_MAX_S,
+    START_TIMEOUT_MIN_S,
+    TdAccountRef,
+    load_md,
+)
 
 
 class Heartbeat(BaseModel):
@@ -256,6 +262,12 @@ class StsCreateSessionRequest(BaseModel):
     type: str | None = None
     #: The submitted ``strategy.yml``. Same upgrade window as ``type``.
     yaml_text: str | None = None
+    #: Seconds ``create_session`` may spend before the worker is killed.
+    #:
+    #: None keeps :data:`STS_START_DEADLINE_S`. An API from before this
+    #: field existed still starts with that budget, and a document that
+    #: sets ``start_timeout`` is what widens it.
+    start_timeout: float | None = None
     #: Which STS the deploy *asked for*, not which one took it.
     #:
     #: The distinction is the whole point. If the row recorded where a session
@@ -264,6 +276,18 @@ class StsCreateSessionRequest(BaseModel):
     #: rebuild, despite nobody ever having asked for it to run there. Null
     #: means the deploy did not care, and anyone may rebuild it.
     instance: str | None = None
+
+    @field_validator("start_timeout")
+    @classmethod
+    def _start_timeout(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        if value < START_TIMEOUT_MIN_S or value > START_TIMEOUT_MAX_S:
+            raise ValueError(
+                f"start_timeout must be between {START_TIMEOUT_MIN_S:g}s and "
+                f"{START_TIMEOUT_MAX_S:g}s"
+            )
+        return value
 
 
 class StsCreateSessionResult(BaseModel):
@@ -338,6 +362,11 @@ class StsSessionControlRequest(BaseModel):
     #: Wall-clock deadline for a force-stop. The supervisor drops the
     #: kill once this has passed, so a request the API already gave up
     #: on does not land after the caller was told it failed.
+    #:
+    #: ``abort_start`` leaves this unset. That kill is the create the API
+    #: already reported as failed, and a broker blip can deliver it after
+    #: any deadline this process could have put on it. Dropping the kill
+    #: then is how that create stays live with no MD attached.
     deadline: float | None = None
     #: Kill only a started worker whose beat has been silent. Set when
     #: the stop was never delivered (nobody subscribed), not when a
@@ -1536,26 +1565,52 @@ STOP_CONTROL_TIMEOUT_S = ON_STOP_TIMEOUT_S + 5.0
 #: write the row. This covers that write, not another ``on_stop``.
 STOP_FORCE_RPC_TIMEOUT_S = 5.0
 
-#: How long ``create_session`` may run before the worker is killed.
-#: Counted from the moment that call starts, so the row write, the fork,
-#: and the worker's import and database connect all come out of it. A cold
-#: import of the worker is well under a second on an idle machine and longer
-#: when the host is busy, so ``on_start`` does not receive the whole budget.
-#: Stays at least 1.5s under :data:`STS_CREATE_RPC_TIMEOUT_S` so the kill and
-#: the failed-row write can still answer before the API gives up.
-STS_START_DEADLINE_S = 8.0
+#: Default create budget when a document does not set ``start_timeout``.
+#: Counted from the moment ``create_session`` starts, so the row write, the
+#: fork, and the worker's import all come out of it. A cold import is well
+#: under a second on an idle machine and several seconds when the host is
+#: busy, so ``on_start`` does not receive the whole budget. The failure
+#: reason says how long that hook itself ran.
+STS_START_DEADLINE_S = START_TIMEOUT_DEFAULT_S
 
-#: How long the API waits for ``sts.session.create``. A failed create may
-#: then spend another :data:`STOP_FORCE_RPC_TIMEOUT_S` killing the worker.
-#: That extra wait sits in the CLI's HTTP slack: a create that fails does
-#: not go on to attach.
-STS_CREATE_RPC_TIMEOUT_S = 10.0
+#: Slack between the create budget and the API's wait for the create RPC.
+#: Long enough for the kill and the failed-row write to answer before the
+#: API gives up. At least 1.5s; two seconds is what the default pair uses.
+STS_CREATE_RPC_SLACK_S = 2.0
 
 
-def start_deadline_reason(seconds: float | None = None) -> str:
-    """Row reason when ``on_start`` did not finish inside the create budget."""
+def create_rpc_timeout(start_timeout: float | None = None) -> float:
+    """How long the API waits for ``sts.session.create``.
+
+    ``start_timeout`` is the document's create budget. None uses
+    :data:`STS_START_DEADLINE_S`. A create that still times out may spend
+    another :data:`STOP_FORCE_RPC_TIMEOUT_S` on ``abort_start``; that wait
+    sits in the CLI's HTTP slack, because a failed create does not attach.
+    """
+    budget = STS_START_DEADLINE_S if start_timeout is None else float(start_timeout)
+    return budget + STS_CREATE_RPC_SLACK_S
+
+
+#: The wait for a document that did not set ``start_timeout``.
+STS_CREATE_RPC_TIMEOUT_S = create_rpc_timeout()
+
+
+def start_deadline_reason(
+    seconds: float | None = None,
+    *,
+    on_start_s: float | None = None,
+) -> str:
+    """Row reason when create did not finish inside its budget.
+
+    ``seconds`` is the budget. ``on_start_s`` is how long that hook had
+    been running when the budget ran out. None means the worker was still
+    in spawn or import, so the sentence does not blame ``on_start`` for
+    time it never received.
+    """
     limit = STS_START_DEADLINE_S if seconds is None else seconds
-    return f"on_start exceeded {limit:g}s"
+    if on_start_s is None:
+        return f"create exceeded {limit:g}s; on_start had not started"
+    return f"create exceeded {limit:g}s; on_start ran {on_start_s:.1f}s"
 
 
 STS_LEASE_HEARTBEAT = "sts.lease.heartbeat"

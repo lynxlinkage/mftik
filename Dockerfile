@@ -11,6 +11,13 @@
 # The venv is on PATH, so the commands above are the literal `command:` values.
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
+# PID 1 has to reap grandchildren. An STS worker is a session leader, and
+# a child it starts in ``on_start`` is reparented here when the worker is
+# killed. Without an init those exits stay zombies.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
+
 # What links the GHCR package back to this repo. Without it the package is
 # owned by the org and connected to nothing, and the Actions token of the repo
 # that built it cannot push a second version.
@@ -47,4 +54,5 @@ RUN python -c "from importlib.metadata import version; import os; \
 
 EXPOSE 8000
 
+ENTRYPOINT ["tini", "--"]
 CMD ["mftik-api"]

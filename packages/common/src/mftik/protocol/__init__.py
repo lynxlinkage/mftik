@@ -293,6 +293,7 @@ from mftik.protocol.messages import (
     TdOmsOrderRequestEnvelope,
     TdOmsViewRequest,
     TdOmsViewRequestEnvelope,
+    create_rpc_timeout,
     probe_is_stale,
     start_deadline_reason,
 )
@@ -425,6 +426,7 @@ __all__ = [
     "STS_SESSION_CREATE",
     "STS_SESSION_LIST",
     "STS_CREATE_RPC_TIMEOUT_S",
+    "create_rpc_timeout",
     "STS_REASON_OPERATOR_STOP",
     "STS_REASON_STOP_TIMED_OUT",
     "STS_START_DEADLINE_S",

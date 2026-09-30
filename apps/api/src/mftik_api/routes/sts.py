@@ -716,6 +716,7 @@ async def deploy(
             st_paras=dict(spec.sts),
             created_by=created_by,
             timeout=body.timeout,
+            start_timeout=spec.start_timeout,
             restart=spec.restart,
             strategy_type=strategy_type,
             yaml_text=body.yaml,

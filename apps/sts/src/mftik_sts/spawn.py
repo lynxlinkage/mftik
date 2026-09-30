@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -19,8 +20,9 @@ from typing import Any, Protocol
 #: or a deploy the API already rejected comes back on its own.
 START_FAIL_REASON = "worker exited during start"
 
-#: Passed to the worker so it can tell its parent from PID 1. In a container
-#: the parent *is* PID 1, and ``getppid() == 1`` is the normal case.
+#: Passed to the worker so it can tell STS from PID 1. ``tini`` is PID 1
+#: in the image; this process is the worker's parent. After it dies,
+#: ``getppid()`` is 1 and no longer matches.
 PARENT_PID_ENV = "MFTIK_STS_PARENT_PID"
 
 #: Write end of the result pipe. One JSON line, then the worker closes it.
@@ -67,6 +69,15 @@ class WorkerSlot:
     #: Set before the escalation kills. The exit watcher writes
     #: ``failed`` instead of ``interrupted`` and does not rebuild.
     stop_escalated: bool = False
+    #: Create budget for this slot. Zero means the module default, which
+    #: is what a rebuild slot and an old request both use.
+    start_budget_s: float = 0.0
+    #: When the parent read the worker's ``on_start`` mark, on this loop's
+    #: clock. None means the mark never arrived.
+    on_start_at: float | None = None
+    #: The object ``read_result`` is filling. The deadline kill reads
+    #: ``on_start_at`` off it while that read is still in progress.
+    result_reader: Any = None
     #: Row reason for this kill. Unset means a stop that went unanswered.
     #: A create-timeout kill sets the start-deadline sentence so the row
     #: does not say the operator's stop timed out.
@@ -112,6 +123,46 @@ class SessionSpawner(Protocol):
         request_json: bytes | None,
     ) -> SpawnedWorker:
         """Start a worker. ``request_json`` is the create body, or None."""
+
+
+def note_on_start() -> None:
+    """Tell the parent that ``on_start`` is beginning.
+
+    One JSON line on the result pipe, which stays open for the result
+    that follows. The parent times ``on_start`` from when it reads this.
+    A no-op outside a worker: the fd is set only in that process.
+    """
+    raw = os.environ.get(RESULT_FD_ENV, "").strip()
+    if not raw:
+        return
+    try:
+        os.write(int(raw), b'{"phase":"on_start"}\n')
+    except OSError:
+        return
+
+
+def kill_worker(process: Any) -> None:
+    """SIGKILL the worker and the children it started.
+
+    ``start_new_session`` makes the worker a session leader, so its pid
+    is the process group. ``Process.kill`` signals only that pid. A
+    child started in ``on_start`` would survive, be reparented to pid 1,
+    and stay a zombie in a container whose main process does not reap.
+    The image runs under ``tini``, which reaps what this already killed.
+    """
+    pid = getattr(process, "pid", None)
+    if isinstance(pid, int) and pid > 0:
+        try:
+            # Only a session leader. ``killpg`` of some other pid signals
+            # that pid's group, which may be this process.
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
 
 
 def write_parent_beat() -> None:
@@ -170,11 +221,16 @@ class _PipeWorker:
         self.lifeline = lifeline
         #: Parent's read end of the beat pipe.
         self.beat = beat
+        #: When the ``on_start`` mark was read. None until then.
+        self.on_start_at: float | None = None
 
     async def read_result(self) -> str | None:
         # On the loop, not in a thread: a worker stuck in on_start would hold
         # a default-executor thread for as long as it stays stuck, and a
         # cancelled create could not let go of it until the pipe closed.
+        # The first line may be the ``on_start`` mark. The result is the
+        # line after it; the mark stays on this object so a deadline kill
+        # can say how long the hook ran.
         loop = asyncio.get_running_loop()
         reader = asyncio.StreamReader()
         transport, _ = await loop.connect_read_pipe(
@@ -182,10 +238,18 @@ class _PipeWorker:
             os.fdopen(self._read_fd, "rb", buffering=0),
         )
         try:
-            line = await reader.readline()
+            while True:
+                line = await reader.readline()
+                if not line:
+                    return None
+                text = line.decode()
+                parsed = parse_worker_result(text)
+                if parsed is not None and parsed.get("phase") == "on_start":
+                    self.on_start_at = loop.time()
+                    continue
+                return text
         finally:
             transport.close()
-        return line.decode() or None
 
 
 class SubprocessSpawner:

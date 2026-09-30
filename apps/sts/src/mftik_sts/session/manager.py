@@ -63,6 +63,7 @@ from mftik_sts.spawn import (
     WORKER_STOP_WAIT_S,
     SessionSpawner,
     WorkerSlot,
+    kill_worker,
     parse_worker_result,
 )
 
@@ -78,6 +79,17 @@ BEAT_SILENCE_S = LEASE_HEARTBEAT_INTERVAL_S * LEASE_MISS_LIMIT
 #: the operator killed. Reporting ``failed`` without the write is the
 #: same lie.
 MARK_KILL_ATTEMPTS = 3
+
+#: How long a missed start-failure write keeps being retried. The reaper's
+#: first write is two scans apart, and a row it calls ``interrupted`` is a
+#: rebuild candidate. This stays inside that window, so a database blip
+#: during the deadline kill does not come back as a live session.
+FAILED_WRITE_BUDGET_S = 90.0
+FAILED_WRITE_BACKOFF_S = 0.5
+
+#: How long an ``abort_start`` that arrived while the deadline kill owns
+#: the slot waits for that kill's row write before answering ``not_found``.
+ABORT_ROW_WAIT_S = 1.0
 
 #: Session log line for ``/logs/sts/{id}``. ``on_stop`` did not run.
 KILL_LOG_MESSAGE = "stop unanswered — worker killed; on_stop did not run"
@@ -99,7 +111,19 @@ class StartDeadlineExceeded(Exception):
         super().__init__(reason)
 
 
-def _start_remaining(started: float) -> float:
+def _budget_s(request: StsCreateSessionRequest) -> float:
+    """The create budget for this request.
+
+    None is the module default, which a test shrinks by patching
+    :data:`STS_START_DEADLINE_S`. A document's ``start_timeout`` replaces
+    it for that deploy only.
+    """
+    if request.start_timeout is None:
+        return STS_START_DEADLINE_S
+    return float(request.start_timeout)
+
+
+def _start_remaining(started: float, budget: float) -> float:
     """Seconds left in the create budget, never negative.
 
     ``started`` is ``loop.time()`` at the top of ``create_session``, so
@@ -108,11 +132,24 @@ def _start_remaining(started: float) -> float:
     fails at once.
     """
     now = asyncio.get_running_loop().time()
-    return max(0.0, started + STS_START_DEADLINE_S - now)
+    return max(0.0, started + budget - now)
 
 
-def _start_deadline_reason() -> str:
-    return start_deadline_reason(STS_START_DEADLINE_S)
+def _deadline_reason(budget: float, began: float | None) -> str:
+    """What the row says. ``began`` is when ``on_start`` was seen."""
+    ran = None
+    if began is not None:
+        ran = max(0.0, asyncio.get_running_loop().time() - began)
+    return start_deadline_reason(budget, on_start_s=ran)
+
+
+def _slot_on_start_at(slot: WorkerSlot) -> float | None:
+    reader = slot.result_reader
+    if reader is not None:
+        at = getattr(reader, "on_start_at", None)
+        if isinstance(at, (int, float)):
+            return float(at)
+    return slot.on_start_at
 
 
 class ForceStopExpired(Exception):
@@ -365,6 +402,11 @@ class SessionManager:
         #: A worker that exits without a watcher is a zombie until something
         #: collects it.
         self._reaps: set[asyncio.Task[None]] = set()
+        #: Start-deadline kills whose ``failed`` write has not landed.
+        #: The reaper marks these ``failed`` rather than ``interrupted``,
+        #: so a missed write cannot become a rebuild.
+        self._unwritten_failures: dict[str, str] = {}
+        self._failure_retries: set[asyncio.Task[None]] = set()
 
     @property
     def instance(self) -> str:
@@ -493,6 +535,7 @@ class SessionManager:
         # ``_sessions``" as an orphan, and strikes only cover a short window.
         self._sessions[request.session_id] = session
         self._serve_control(request.session_id)
+        budget = _budget_s(request)
         # Persist before start, not after: a strategy that ends inside
         # on_start / on_ready reaches close() before start() returns, and a
         # row written afterwards would resurrect it as live forever.
@@ -509,10 +552,14 @@ class SessionManager:
                 instance=request.instance,
             )
         try:
-            await asyncio.wait_for(session.start(), timeout=_start_remaining(started))
+            await asyncio.wait_for(
+                session.start(), timeout=_start_remaining(started, budget)
+            )
         except TimeoutError:
-            await self._abandon_in_process_start(session, request, key)
-            raise StartDeadlineExceeded(_start_deadline_reason()) from None
+            await self._abandon_in_process_start(session, request, key, budget=budget)
+            raise StartDeadlineExceeded(
+                _deadline_reason(budget, session.on_start_began)
+            ) from None
         except Exception as exc:
             await self._abandon_in_process_start(session, request, key, error=exc)
             raise
@@ -574,6 +621,7 @@ class SessionManager:
         key: str,
         *,
         error: BaseException | None = None,
+        budget: float | None = None,
     ) -> None:
         """End a start that raised or ran past the deadline.
 
@@ -592,21 +640,19 @@ class SessionManager:
             request.session_id
         ):
             return
-        reason = _start_deadline_reason() if error is None else f"start failed: {error}"
-        if self._mark_done is not None:
-            await self._mark_done(
-                request.session_id,
-                status=SessionStatus.FAILED.value,
-                reason=reason,
-            )
-        await self._publish_status(
-            request.session_id,
-            status=SessionStatus.FAILED.value,
-            strategy=key,
-            created_by=request.created_by,
-            reason=reason,
+        if error is None:
+            limit = STS_START_DEADLINE_S if budget is None else budget
+            reason = _deadline_reason(limit, session.on_start_began)
+        else:
+            reason = f"start failed: {error}"
+        slot = WorkerSlot(
+            session_id=request.session_id,
+            role="create",
+            strategy_name=key,
             type=key,
+            created_by=request.created_by,
         )
+        await self._write_failed(slot, request, reason)
 
     async def _create_via_worker(
         self, request: StsCreateSessionRequest, started: float
@@ -628,12 +674,14 @@ class SessionManager:
         # worker; a fault in it can still take this process down. The
         # instance is the worker's to keep.
         self._strategy_factory(key)
+        budget = _budget_s(request)
         slot = WorkerSlot(
             session_id=request.session_id,
             role="create",
             strategy_name=key,
             type=key,
             created_by=request.created_by,
+            start_budget_s=budget,
         )
         self._workers[request.session_id] = slot
         reported = False
@@ -665,14 +713,16 @@ class SessionManager:
                 raise RuntimeError(START_FAIL_REASON)
             try:
                 line = await asyncio.wait_for(
-                    spawned.read_result(), timeout=_start_remaining(started)
+                    spawned.read_result(),
+                    timeout=_start_remaining(started, budget),
                 )
             except TimeoutError:
                 # Set before the abort so the handler below does not replace
                 # the deadline reason with "worker exited during start".
                 reported = True
-                await self._abort_unstarted(slot, request)
-                raise StartDeadlineExceeded(_start_deadline_reason()) from None
+                reason = _deadline_reason(budget, _slot_on_start_at(slot))
+                await self._abort_unstarted(slot, request, reason)
+                raise StartDeadlineExceeded(reason) from None
             parsed = parse_worker_result(line)
             if parsed is None:
                 # No line at all: the worker never said it had written the
@@ -736,7 +786,10 @@ class SessionManager:
         self._reap_failed(slot.process)
 
     async def _abort_unstarted(
-        self, slot: WorkerSlot, request: StsCreateSessionRequest
+        self,
+        slot: WorkerSlot,
+        request: StsCreateSessionRequest,
+        reason: str | None = None,
     ) -> None:
         """SIGKILL a worker that did not report inside the create budget.
 
@@ -753,24 +806,25 @@ class SessionManager:
         if slot.started or slot.abandoned or slot.stop_escalated:
             return
         slot.stop_escalated = True
-        slot.kill_reason = _start_deadline_reason()
+        slot.kill_reason = reason or _deadline_reason(
+            slot.start_budget_s or STS_START_DEADLINE_S,
+            _slot_on_start_at(slot),
+        )
         process = slot.process
         if process is not None and process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
+            kill_worker(process)
             await process.wait()
         self._drop_unstarted(slot)
         if self._load_session is not None and not await self._row_is_live(
             slot.session_id
         ):
             return
-        await self._write_failed(slot, request, _start_deadline_reason())
+        await self._write_failed(slot, request, slot.kill_reason)
 
     def _take_spawn(self, slot: WorkerSlot, spawned: Any) -> None:
         """Record the process and start reading its beat pipe."""
         slot.process = spawned.process
+        slot.result_reader = spawned
         slot.lifeline_fd = getattr(spawned, "lifeline", None)
         slot.beat_fd = getattr(spawned, "beat", None)
         self._arm_beat_reader(slot)
@@ -886,26 +940,115 @@ class SessionManager:
         request: StsCreateSessionRequest,
         reason: str,
     ) -> None:
-        if self._mark_done is not None:
+        """Mark the row ``failed``. A miss is retried, not announced.
+
+        Publishing ``failed`` without the write is how the reaper later
+        calls the same row ``interrupted`` and a restart rebuilds it.
+        The quick attempts match a kill's row write. What they cannot
+        cover is a database that stays down for seconds, so the rest of
+        the budget runs in the background and the reaper, if it gets
+        there first, writes this reason instead of ``interrupted``.
+        """
+        if self._mark_done is None:
+            await self._publish_failed(slot, reason)
+            return
+        if await self._mark_failed_attempts(
+            slot.session_id, reason, attempts=MARK_KILL_ATTEMPTS
+        ):
+            await self._publish_failed(slot, reason)
+            return
+        self._remember_unwritten(slot, reason)
+
+    async def _mark_failed_attempts(
+        self, session_id: str, reason: str, *, attempts: int
+    ) -> bool:
+        if self._mark_done is None or attempts < 1:
+            return False
+        for attempt in range(attempts):
             try:
                 await self._mark_done(
-                    slot.session_id,
+                    session_id,
                     status=SessionStatus.FAILED.value,
                     reason=reason,
                 )
+                return True
             except Exception:
                 logger.exception(
-                    "STS failed to mark a start failure session=%s",
-                    slot.session_id,
+                    "STS failed to mark a start failure session=%s attempt=%s",
+                    session_id,
+                    attempt + 1,
                 )
+        return False
+
+    def _remember_unwritten(self, slot: WorkerSlot, reason: str) -> None:
+        self._unwritten_failures[slot.session_id] = reason
+        if any(
+            not task.done() and task.get_name() == f"sts-fail-write-{slot.session_id}"
+            for task in self._failure_retries
+        ):
+            return
+        task = asyncio.create_task(
+            self._retry_failed_write(slot, reason),
+            name=f"sts-fail-write-{slot.session_id}",
+        )
+        self._failure_retries.add(task)
+        task.add_done_callback(self._failure_retries.discard)
+
+    async def _publish_failed(self, slot: WorkerSlot, reason: str) -> None:
         await self._publish_status(
             slot.session_id,
             status=SessionStatus.FAILED.value,
             strategy=slot.strategy_name,
-            created_by=request.created_by,
+            created_by=slot.created_by,
             reason=reason,
-            type=request.type,
+            type=slot.type,
         )
+
+    async def _retry_failed_write(self, slot: WorkerSlot, reason: str) -> None:
+        delay = FAILED_WRITE_BACKOFF_S
+        started = asyncio.get_running_loop().time()
+        while True:
+            if self._closing or self._shutting_down:
+                return
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                raise
+            if self._closing or self._shutting_down:
+                return
+            if await self._failure_already_written(slot.session_id):
+                self._unwritten_failures.pop(slot.session_id, None)
+                return
+            if await self._mark_failed_attempts(slot.session_id, reason, attempts=1):
+                self._unwritten_failures.pop(slot.session_id, None)
+                await self._publish_failed(slot, reason)
+                return
+            if asyncio.get_running_loop().time() - started >= FAILED_WRITE_BUDGET_S:
+                logger.error(
+                    "STS gave up marking a start failure session=%s",
+                    slot.session_id,
+                )
+                return
+            delay = min(delay * 2, 5.0)
+
+    async def _failure_already_written(self, session_id: str) -> bool:
+        """True when the row is already terminal. A read error is not.
+
+        ``_row_is_live`` treats a database error as "not live", which
+        would stop this retry during the outage it exists to outlast.
+        """
+        if self._load_session is None:
+            return False
+        try:
+            row = await self._load_session(session_id)
+        except Exception:
+            logger.exception(
+                "STS could not read a start failure session=%s", session_id
+            )
+            return False
+        if row is None:
+            return True
+        return getattr(row, "status", None) != SessionStatus.LIVE.value
 
     def _arm_watcher(self, slot: WorkerSlot) -> None:
         task = asyncio.create_task(
@@ -1036,6 +1179,20 @@ class SessionManager:
         return (
             row is not None and getattr(row, "status", None) == SessionStatus.LIVE.value
         )
+
+    async def _wait_until_row_settles(self, session_id: str) -> None:
+        """Give an in-flight deadline kill a moment to write the row.
+
+        The slot is already flagged. The write is the part that is still
+        running, and ``not_found`` before it lands is a timeout to the API.
+        """
+        if self._load_session is None:
+            return
+        deadline = asyncio.get_running_loop().time() + ABORT_ROW_WAIT_S
+        while await self._row_is_live(session_id):
+            if asyncio.get_running_loop().time() >= deadline:
+                return
+            await asyncio.sleep(0.02)
 
     async def list_sessions(self, request: ListSessionsRequest) -> list[SessionInfo]:
         if request.domain not in (None, SessionDomain.STS.value, "sts"):
@@ -1219,25 +1376,32 @@ class SessionManager:
             raise KeyError(f"no active sts session {slot.session_id}")
         if slot.stop_escalated or slot.abandoned:
             # The create deadline, or an earlier kill, already owns the
-            # reason. Writing here would replace it.
+            # reason. Writing here would replace it. ``abort_start`` waits
+            # out that write: answering ``not_found`` while the row is
+            # still ``live`` is how the API reports a timeout for a create
+            # that is about to be ``start_deadline``.
+            if abort_start:
+                await self._wait_until_row_settles(slot.session_id)
             if self._load_session is None or await self._row_is_live(slot.session_id):
                 raise KeyError(f"no active sts session {slot.session_id}")
             return await self._escalation_result(slot)
-        if deadline is not None and time.time() >= deadline:
+        # ``abort_start`` has no wall-clock deadline. The API has already
+        # told the caller this create failed, and the message may arrive
+        # after any deadline it could have carried. Dropping it leaves the
+        # worker live with no MD attached.
+        if not abort_start and deadline is not None and time.time() >= deadline:
             raise ForceStopExpired(slot.session_id)
         if only_if_silent and process.returncode is None:
             if not slot.started or not self._beat_is_silent(slot):
                 raise WorkerNotStuck(slot.session_id)
         slot.stop_escalated = True
         if abort_start:
-            slot.kill_reason = _start_deadline_reason()
+            budget = slot.start_budget_s or STS_START_DEADLINE_S
+            slot.kill_reason = _deadline_reason(budget, _slot_on_start_at(slot))
         killed = False
         if process.returncode is None:
-            try:
-                process.kill()
-                killed = True
-            except ProcessLookupError:
-                pass
+            kill_worker(process)
+            killed = True
             await process.wait()
         if killed:
             await self._note_kill(slot, process)
@@ -1309,6 +1473,12 @@ class SessionManager:
                     attempt + 1,
                 )
                 if attempt + 1 == MARK_KILL_ATTEMPTS:
+                    # A start-deadline kill whose write missed is not an
+                    # orphan the reaper should rebuild. Remember the reason
+                    # and keep trying; the reaper uses it if it gets there
+                    # first.
+                    if slot.kill_reason:
+                        self._remember_unwritten(slot, reason)
                     return False
         await self._publish_status(
             slot.session_id,
@@ -1484,19 +1654,30 @@ class SessionManager:
             # strategy and it did not choose to stop — the same category as a
             # shutdown, which is what makes the rebuild candidate set exactly
             # `status = interrupted` rather than a reason-string match.
-            reason = "process died: no session heartbeat"
+            #
+            # A start-deadline kill whose row write missed is the exception.
+            # That deploy already failed. Calling it interrupted is how a
+            # restart runs ``on_start`` again, this time with MD attached.
+            pending = self._unwritten_failures.get(session_id)
+            if pending is not None:
+                status = SessionStatus.FAILED.value
+                reason = pending
+            else:
+                status = SessionStatus.INTERRUPTED.value
+                reason = "process died: no session heartbeat"
             try:
                 await self._mark_done(
                     session_id,
-                    status=SessionStatus.INTERRUPTED.value,
+                    status=status,
                     reason=reason,
                 )
             except Exception:
                 logger.exception("STS orphan reap failed session=%s", session_id)
                 continue
+            self._unwritten_failures.pop(session_id, None)
             await self._publish_status(
                 session_id,
-                status=SessionStatus.INTERRUPTED.value,
+                status=status,
                 strategy=_row_key(row),
                 reason=reason,
                 created_by=getattr(row, "created_by", None),
@@ -1565,6 +1746,10 @@ class SessionManager:
         its worker slot, which is a different hold.
         """
         if self._closing or self._holds(session_id):
+            return False
+        if session_id in self._unwritten_failures:
+            # The deadline kill did not land on the row. Rebuilding it
+            # would run the strategy the API already failed.
             return False
         slot: WorkerSlot | None = None
         if self._spawner is not None:
@@ -2222,6 +2407,8 @@ class SessionManager:
         """
         self._shutting_down = True
         self._closing = True
+        for task in list(self._failure_retries):
+            task.cancel()
         # Cancel before the first await. Create and rebuild are not awaited
         # yet: their ``read_result`` sits in a thread, and that thread
         # unblocks when the worker is signalled below. Awaiting them first
@@ -2292,10 +2479,7 @@ class SessionManager:
         for slot in list(self._workers.values()):
             process = slot.process
             if process is not None and process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
+                kill_worker(process)
         still = [
             task
             for task in (
@@ -2337,10 +2521,7 @@ class SessionManager:
             try:
                 await asyncio.wait_for(process.wait(), timeout=WORKER_STOP_WAIT_S)
             except TimeoutError:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
+                kill_worker(process)
                 await process.wait()
 
         task = asyncio.create_task(_reap(), name="sts-worker-reap")
