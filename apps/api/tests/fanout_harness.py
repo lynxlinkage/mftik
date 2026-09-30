@@ -1,4 +1,8 @@
-"""Single-STS anycast for tests that do not stand up the instances table."""
+"""One authoritative target for tests that do not stand up the instances table.
+
+Production ``list_targets`` unicasts even a single declared row. This double
+keeps those tests off the database; the subject it uses is not that address.
+"""
 
 from __future__ import annotations
 

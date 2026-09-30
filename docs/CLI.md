@@ -277,18 +277,21 @@ STS imports the registry into a running process. The API writes to it from a
 different one. Everything below follows from that.
 
 **A push has to reach the process, not just the disk.** `POST /registry/v1/add`
-sends `sts.registry.sync` to every declared STS (the shared `sts` subject
-when only one is declared). The request carries the tree's files and digest;
-each STS writes them onto its own registry and then re-scans. `loaded` says
-whether **every** instance came back able to resolve the strategy. An
-unreadable or empty instance list is not a census: `loaded` stays false even
-if the anycast subject answered. Three outcomes, and the client should say
-which:
+sends `sts.registry.sync` to every enabled STS, on `sts.{name}` even when
+only one is declared. The shared `sts` subject is only the fallback when no
+instance is declared or the table cannot be read, and that answer is not a
+census. The request carries the tree's files and digest; each STS writes
+them onto its own registry and then re-scans. `loaded` says whether
+**every** instance came back able to resolve the strategy. An unreadable or
+empty instance list is not a census: `loaded` stays false even if the
+anycast subject answered. An STS that misses the push asks the API for the
+current store when it next starts, and so does enabling or declaring one.
+Three outcomes, and the client should say which:
 
 | `loaded` | `load_error` | What happened |
 |---|---|---|
 | true | — | stored, copied onto every STS, and deployable |
-| false | "STS did not reload…" | stored on the API; at least one STS did not answer, or the instance list is missing. The sentence names that instance. Deployable after those restart |
+| false | "STS did not reload…" | stored on the API; at least one STS did not answer, or the instance list is missing. The sentence names that instance. That STS copies the store when it next starts |
 | false | "sts-tw: not present on its registry disk" or "sts-tw: import error: …" / "name collision…" | stored; that instance answered and does not have the tree. The sentence says which instance and why |
 
 Only the first means `run` can proceed.

@@ -6,6 +6,7 @@
 		defaultStrategyYml,
 		formatTs,
 		shortId,
+		type ApiCredential,
 		type Instance,
 		type StrategyRow,
 		type StrategyTemplate,
@@ -15,6 +16,7 @@
 	import Pager from '$lib/components/Pager.svelte';
 	import StrategyPicker from '$lib/components/StrategyPicker.svelte';
 	import StsInstancePicker from '$lib/components/StsInstancePicker.svelte';
+	import { derivedStsName } from '$lib/derivedSts';
 	import {
 		connectStsStatus,
 		type StatusConnection,
@@ -44,6 +46,8 @@
 	// Declared STS rows only. A name nothing declared is one the deploy
 	// would refuse, so offering it here would be offering a 400.
 	let instances = $state<Instance[]>([]);
+	let planes = $state<Instance[]>([]);
+	let accounts = $state<ApiCredential[]>([]);
 	// Empty is anycast (PI-5). Not `sts`: pinning is a choice, not a default.
 	let instance = $state('');
 	// Tracks whether the editor still holds the selected type's template
@@ -105,6 +109,7 @@
 		templates.find((t) => t.type === selectedType) ?? null
 	);
 	const dirty = $derived(yamlText !== pristineYaml);
+	const deployOn = $derived(instance || derivedStsName(yamlText, accounts, planes) || '');
 
 	/** Newest deploy whose type is still on the picker; else the catalogue default. */
 	function pickType(
@@ -137,11 +142,12 @@
 			// epoch guard or the outer catch before it awaits this, and a bare
 			// rejection would surface as an unhandled rejection.
 			const instancesP = withTypes
-				? api.instances('sts').then(
+				? api.instances().then(
 						(listed) => ({ listed, err: null }),
 						(err: unknown) => ({ listed: null, err })
 					)
 				: null;
+			const accountsP = withTypes ? api.apis().catch(() => ({ apis: [] })) : null;
 			let offset = Math.max(0, (myPage - 1) * PAGE_SIZE);
 			let list = await api.strategies({
 				status: TAB_STATUS[myTab],
@@ -163,11 +169,17 @@
 			strategies = list.strategies;
 			total = list.total ?? 0;
 			maxOffset = list.max_offset;
+			if (accountsP) {
+				const creds = await accountsP;
+				if (epoch !== listEpoch) return;
+				accounts = creds.apis;
+			}
 			if (instancesP) {
 				const { listed, err } = await instancesP;
 				if (epoch !== listEpoch) return;
 				if (listed) {
-					instances = listed.instances;
+					planes = listed.instances;
+					instances = planes.filter((row) => row.domain === 'sts');
 				} else {
 					// Keep the previous list and pin. Treating a 500 or a
 					// dropped session as "nothing declared" would hide the
@@ -503,9 +515,9 @@
 			{/if}
 			{#if dirty}<span class="edited">edited</span>{/if}
 		</p>
-		{#if selected.instances && instance && !selected.instances.includes(instance)}
+		{#if selected.instances && deployOn && !selected.instances.includes(deployOn)}
 			<p class="type-note env-gap">
-				Not loaded on {instance}. Deploy on this instance will fail.
+				Not loaded on {deployOn}. Deploy on this instance will fail.
 			</p>
 		{/if}
 		{#if selected.env_ok === false && selected.requires?.length}

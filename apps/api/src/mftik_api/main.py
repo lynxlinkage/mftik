@@ -13,6 +13,7 @@ from mftik_api.alert_match import run_alert_match
 from mftik_api.auth import AuthMiddleware, auth_router
 from mftik_api.backfill_cron import run_backfill_cron
 from mftik_api.log_persist import run_log_persist
+from mftik_api.registry_catchup import serve_registry_catchup
 from mftik_api.routes import (
     alerts_router,
     apis_router,
@@ -79,13 +80,18 @@ async def lifespan(app: FastAPI):
     match_task = asyncio.create_task(run_alert_match(match_stop))
     backfill_stop = asyncio.Event()
     backfill_task = asyncio.create_task(run_backfill_cron(backfill_stop))
+    catchup_stop = asyncio.Event()
+    catchup_task = asyncio.create_task(
+        serve_registry_catchup(broker, catchup_stop)
+    )
     try:
         yield
     finally:
         persist_stop.set()
         match_stop.set()
         backfill_stop.set()
-        for task in (persist_task, match_task, backfill_task):
+        catchup_stop.set()
+        for task in (persist_task, match_task, backfill_task, catchup_task):
             try:
                 await asyncio.wait_for(task, timeout=10)
             except (TimeoutError, asyncio.CancelledError):

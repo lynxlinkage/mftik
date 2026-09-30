@@ -402,6 +402,41 @@ def test_bad_strategy_yml_is_refused(tmp_path) -> None:
         store.add({"strategy.py": _TINY, TEMPLATE_NAME: "td: [\n"})
 
 
+def test_two_writers_leave_one_complete_tree(tmp_path) -> None:
+    """Pid-1 containers used to share ``.tmp-{name}-1`` and delete each other."""
+    import threading
+
+    store = RegistryStore(tmp_path)
+    first = _TINY + "\n# a\n"
+    second = _TINY + "\n# b\n"
+    store.add({"strategy.py": first})
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def write(body: str) -> None:
+        try:
+            barrier.wait(timeout=5)
+            for _ in range(40):
+                store.add({"strategy.py": body}, replace=True)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=write, args=(body,)) for body in (first, second)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+    assert errors == []
+    text = (tmp_path / "registry" / "private" / "Tiny" / "strategy.py").read_text()
+    assert text in {first, second}
+    private = tmp_path / "registry" / "private"
+    assert list(private.glob(".tmp-*")) == []
+    assert list(private.glob(".old-*")) == []
+
+
 def test_yml_mtime_invalidates_the_tree_cache(tmp_path) -> None:
     store = RegistryStore(tmp_path)
     store.add({"strategy.py": _TINY})

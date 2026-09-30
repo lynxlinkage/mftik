@@ -16,6 +16,7 @@
 	import Pager from '$lib/components/Pager.svelte';
 	import StrategyPicker from '$lib/components/StrategyPicker.svelte';
 	import StsInstancePicker from '$lib/components/StsInstancePicker.svelte';
+	import { derivedStsName } from '$lib/derivedSts';
 	import {
 		connectStsStatus,
 		type StatusConnection,
@@ -48,6 +49,9 @@
 	// Declared STS rows only. A name nothing declared is one the deploy
 	// would refuse, so offering it here would be offering a 400.
 	let instances = $state<Instance[]>([]);
+	// TD and STS rows, so an unpinned deploy can be warned about the STS its
+	// accounts derive to. The picker still only offers STS.
+	let planes = $state<Instance[]>([]);
 	// Empty is anycast (PI-5). Not `sts`: pinning is a choice, not a default.
 	let instance = $state('');
 	let error = $state<string | null>(null);
@@ -74,6 +78,9 @@
 	const lineCount = $derived(Math.max(12, yamlText.split('\n').length + 2));
 	const selected = $derived(templates.find((t) => t.type === selectedType) ?? null);
 	const dirty = $derived(yamlText !== pristineYaml);
+	// A pin wins. Otherwise the API sends the deploy to the one enabled STS
+	// in the TD accounts' region, and that is the instance the warning is about.
+	const deployOn = $derived(instance || derivedStsName(yamlText, accounts, planes) || '');
 
 	function statusesOf(which: Tab): Set<string> {
 		return new Set(TAB_STATUS[which].split(','));
@@ -134,7 +141,7 @@
 			// epoch guard or the outer catch before it awaits this, and a bare
 			// rejection would surface as an unhandled rejection.
 			const instancesP = withTypes
-				? api.instances('sts').then(
+				? api.instances().then(
 						(listed) => ({ listed, err: null }),
 						(err: unknown) => ({ listed: null, err })
 					)
@@ -169,7 +176,8 @@
 				const { listed, err } = await instancesP;
 				if (epoch !== listEpoch) return;
 				if (listed) {
-					instances = listed.instances;
+					planes = listed.instances;
+					instances = planes.filter((row) => row.domain === 'sts');
 				} else {
 					// Keep the previous list and pin. Treating a 500 or a
 					// dropped session as "nothing declared" would hide the
@@ -416,9 +424,9 @@
 			{/if}
 			{#if dirty}<span class="edited">edited</span>{/if}
 		</p>
-		{#if selected.instances && instance && !selected.instances.includes(instance)}
+		{#if selected.instances && deployOn && !selected.instances.includes(deployOn)}
 			<p class="type-note env-gap">
-				Not loaded on {instance}. Deploy on this instance will fail.
+				Not loaded on {deployOn}. Deploy on this instance will fail.
 			</p>
 		{/if}
 		{#if selected.env_ok === false && selected.requires?.length}

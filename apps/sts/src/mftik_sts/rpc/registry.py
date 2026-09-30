@@ -12,7 +12,6 @@ on ``sys.path``, and ``load_local_registry`` decides what to skip.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mftik.broker import IncomingRequest
@@ -35,17 +34,11 @@ from mftik.protocol import (
     StsRegistrySyncResultEnvelope,
     StsRegistryTreeOp,
 )
-from mftik.registry import (
-    RegistryError,
-    RegistryStore,
-    load_class,
-    qualify,
-    split_qualified,
-)
+from mftik.registry import RegistryError, RegistryStore, qualify
+from mftik.registry.errors import RegistryDigestMismatch
 from mftik.registry.qualify import OWN_ORIGINS
-from mftik.strategy import Strategy
 
-from mftik_sts.impl import _BUILTIN_KEYS, registered_keys
+from mftik_sts.impl import registered_keys, registry_skips
 from mftik_sts.rpc.env import current_packages
 from mftik_sts.runtime_env import current_stamp, overlay_is_live, refresh
 
@@ -70,32 +63,61 @@ def _delete_tree(store: RegistryStore, op: StsRegistryTreeOp) -> None:
     store.discard(op.name, origin=op.origin)
 
 
+def _prune_to(store: RegistryStore, retain: set[str]) -> None:
+    """Delete registry trees the manifest does not name.
+
+    A missed delete leaves a ghost that every boot reloads. The retain list
+    is the API store; anything else on this disk is that ghost.
+    """
+    for rec in store.list_all():
+        key = qualify(rec.origin, rec.name)
+        if key in retain:
+            continue
+        try:
+            store.discard(rec.name, origin=rec.origin)
+        except RegistryError as exc:
+            logger.warning("registry prune refused %s: %s", key, exc)
+
+
 def _apply_ops(store: RegistryStore, request: StsRegistrySyncRequest) -> dict[str, str]:
     """Write the batch. A tree that cannot be written is skipped, not fatal.
 
-    One broken upsert must not discard the rest of the batch, and must not
-    look like "the disk is missing" — the caller needs the import error.
+    One broken upsert or delete must not discard the rest of the batch.
+    A digest that does not match is refused before the previous tree is
+    replaced. A tree already at ``op.digest`` is left untouched so two
+    processes sharing a volume do not rewrite the same bytes.
     """
     skipped: dict[str, str] = {}
     for op in request.trees:
         key = qualify(op.origin, op.name)
         if op.op == "delete":
-            _delete_tree(store, op)
+            try:
+                _delete_tree(store, op)
+            except RegistryError as exc:
+                skipped[key] = f"refused: {exc}"
             continue
+        if op.digest:
+            existing = _find(store, op.origin, op.name)
+            if existing is not None and existing.digest == op.digest:
+                continue
         try:
-            added = store.add(op.files, replace=True, origin=op.origin)
+            store.add(
+                op.files,
+                replace=True,
+                origin=op.origin,
+                expect_digest=op.digest or None,
+            )
+        except RegistryDigestMismatch:
+            skipped[key] = SKIP_DIGEST
+            continue
         except RegistryError as exc:
-            skipped[key] = f"import error: {exc}"
+            skipped[key] = f"refused: {exc}"
             continue
         except OSError as exc:
             skipped[key] = f"write error: {exc}"
             continue
-        if op.digest and added.digest != op.digest:
-            _delete_tree(
-                store,
-                StsRegistryTreeOp(op="delete", origin=op.origin, name=op.name),
-            )
-            skipped[key] = SKIP_DIGEST
+    if request.retain is not None:
+        _prune_to(store, set(request.retain))
     return skipped
 
 
@@ -107,29 +129,14 @@ def _find(store: RegistryStore, origin: str, name: str):
 
 
 def explain_skip(store: RegistryStore, key: str) -> str:
-    """Why ``key`` is on the request and not in the scan's loaded list."""
-    split = split_qualified(key)
-    if split is None:
-        return SKIP_ABSENT
-    origin, name = split
-    rec = _find(store, origin, name)
-    if rec is None:
-        return SKIP_ABSENT
-    try:
-        cls = load_class(
-            Path(rec.path),
-            type_name=rec.type,
-            source=rec.origin,
-            name=rec.name,
-            digest=rec.digest,
-        )
-    except Exception as exc:
-        return f"import error: {exc}"
-    if not isinstance(cls, type) or not issubclass(cls, Strategy):
-        return f"import error: {rec.type} is not a Strategy"
-    if cls.__name__ in _BUILTIN_KEYS:
-        return SKIP_COLLISION
-    return SKIP_ABSENT
+    """Why ``key`` is on the request and not in the scan's loaded list.
+
+    The scan already imported the tree and recorded why it skipped. Importing
+    again would run broken top-level code a second time. ``store`` is the
+    disk that scan walked; a key it did not mention is simply not there.
+    """
+    del store
+    return registry_skips().get(key, SKIP_ABSENT)
 
 
 def apply_sync(

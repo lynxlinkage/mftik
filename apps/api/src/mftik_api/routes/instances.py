@@ -8,7 +8,7 @@ wherever the compose file lives. See ``docs/Instances.md``.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from mftik.instance import validate_instance_name
 from mftik_db.models.instance import Instance
 from mftik_db.models.session import SessionDomain
@@ -60,6 +60,7 @@ async def list_instances(domain: str | None = None) -> InstanceListResponse:
 @router.post("", response_model=InstanceOut, status_code=201)
 async def create_instance(
     body: InstanceCreateBody,
+    request: Request,
     owner: OwnerId = DEFAULT_USER_ID,
     principal: PrincipalDep = ANONYMOUS,
 ) -> InstanceOut:
@@ -98,6 +99,12 @@ async def create_instance(
         result=f"id={result.id} name={result.name} domain={result.domain}",
         principal=principal,
     )
+    _schedule_catchup(
+        request,
+        domain=result.domain,
+        name=result.name,
+        enabled=result.enabled,
+    )
     return result
 
 
@@ -105,6 +112,7 @@ async def create_instance(
 async def update_instance(
     instance_id: int,
     body: InstanceUpdateBody,
+    request: Request,
     owner: OwnerId = DEFAULT_USER_ID,
     principal: PrincipalDep = ANONYMOUS,
 ) -> InstanceOut:
@@ -117,6 +125,7 @@ async def update_instance(
             raise HTTPException(
                 status_code=404, detail=f"unknown instance: {instance_id}"
             )
+        was_enabled = row.enabled
         # Empty string is how the UI clears the label. ``update`` treats
         # ``None`` as "leave it", so folding here — the same ``or None``
         # POST uses — is what actually writes SQL NULL.
@@ -134,7 +143,32 @@ async def update_instance(
         ),
         principal=principal,
     )
+    if result.enabled and not was_enabled:
+        _schedule_catchup(
+            request,
+            domain=result.domain,
+            name=result.name,
+            enabled=True,
+        )
     return result
+
+
+def _schedule_catchup(
+    request: Request, *, domain: str, name: str, enabled: bool
+) -> None:
+    """Copy the API store onto an STS that was just declared or re-enabled.
+
+    No broker means a test app, or a process that is not the serving API.
+    A down STS logs and returns; its own boot asks again.
+    """
+    if domain != SessionDomain.STS.value or not enabled:
+        return
+    broker = getattr(request.app.state, "broker", None)
+    if broker is None:
+        return
+    from mftik_api.registry_catchup import schedule_reconcile
+
+    schedule_reconcile(broker, name)
 
 
 @router.delete("/{instance_id}", response_model=InstanceDeleteResponse)

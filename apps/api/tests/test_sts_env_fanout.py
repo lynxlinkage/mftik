@@ -27,6 +27,7 @@ from mftik.protocol import (
     StsRegistrySyncRequest,
     StsRegistrySyncResult,
     StsRegistrySyncResultEnvelope,
+    StsRegistryTreeOp,
     Topics,
 )
 from mftik.registry import RegistryStore, qualify
@@ -37,7 +38,13 @@ from mftik_api.routes.environment import get_environment, put_environment
 from mftik_api.routes.registry import add_strategy
 from mftik_api.routes.sts import list_strategy_types
 from mftik_api.schemas import EnvironmentPutBody, EnvPackageIn, RegistryAddBody
-from mftik_api.sts_fanout import CENSUS_ERROR, extras_match, list_targets
+from mftik_api.sts_fanout import (
+    CENSUS_ERROR,
+    extras_match,
+    list_targets,
+    plan_sync,
+    reconcile_instance,
+)
 
 ONE = "sts"
 TWO = "sts-2"
@@ -219,11 +226,13 @@ async def test_two_sts_apply_hits_unicast_not_anycast(two_sts, env_dir: Path) ->
     assert broker.sync_calls == 2
 
 
-async def test_one_sts_apply_stays_anycast(one_sts, env_dir: Path) -> None:
+async def test_one_sts_apply_is_unicast(one_sts, env_dir: Path) -> None:
+    """A disabled process still on the shared subject must not take the write."""
     broker = TwoStsEnv()
     out = await _put(broker)
     assert out.loaded is True
-    assert broker.subjects == [Topics.STS]
+    assert broker.subjects == [Topics.sts(ONE)]
+    assert Topics.STS not in broker.subjects
     assert broker.sync_calls == 1
 
 
@@ -299,7 +308,8 @@ async def test_list_targets_drops_disabled(two_sts) -> None:
         await repo.update(row, enabled=False)
 
     targets = await list_targets()
-    assert [t.subject for t in targets] == [Topics.STS]
+    assert [t.subject for t in targets] == [Topics.sts(ONE)]
+    assert targets[0].name == ONE
     assert targets[0].authoritative is True
 
 
@@ -544,3 +554,64 @@ def test_extras_match_dead_overlay_is_not_in_sync() -> None:
     )
     assert extras_match(0, {}, empty, overlay_live=True) is True
     assert extras_match(0, {}, empty, overlay_live=False) is True
+
+
+def test_plan_sync_keeps_the_small_op_when_one_tree_is_oversized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mftik_api import sts_fanout
+
+    monkeypatch.setattr(sts_fanout, "REGISTRY_SYNC_BUDGET", 80)
+    ops = [
+        StsRegistryTreeOp(
+            op="upsert",
+            origin="private",
+            name="Big",
+            files={"strategy.py": "x" * 400},
+        ),
+        StsRegistryTreeOp(op="delete", origin="private", name="Tiny"),
+    ]
+    plan = plan_sync(ops)
+    assert [key for key, _size in plan.oversized] == ["private::Big"]
+    shipped = [op.name for batch in plan.batches for op in batch]
+    assert shipped == ["Tiny"]
+
+
+async def test_reconcile_does_not_prune_when_the_api_store_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path / "absent"))
+
+    class _Broker:
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            raise AssertionError(f"synced {subject}")
+
+    result = await reconcile_instance(_Broker(), "sts-a")
+    assert result.in_sync is False
+    assert result.error is not None
+    assert "missing" in result.error
+
+
+async def test_reconcile_sends_the_store_and_the_retain_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    seen: list[StsRegistrySyncRequest] = []
+
+    class _Broker:
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            assert subject == Topics.sts("sts-a")
+            request = StsRegistrySyncRequest.model_validate(envelope.payload)
+            seen.append(request)
+            return StsRegistrySyncResultEnvelope.wrap(
+                StsRegistrySyncResult(loaded=["private::Tiny"]),
+                type=STS_REGISTRY_SYNC,
+                source="sts",
+            )
+
+    result = await reconcile_instance(_Broker(), "sts-a")
+    assert result.error is None
+    assert result.loaded == frozenset({"private::Tiny"})
+    assert seen[-1].retain == ["private::Tiny"]
+    assert any(op.op == "upsert" and op.name == "Tiny" for op in seen[-1].trees)

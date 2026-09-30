@@ -482,9 +482,10 @@ async def test_disconnect_does_not_treat_node10_as_node1(
     assert store.get_remote("node1") is None
 
 
-async def test_an_oversized_tree_names_the_broker_limit(
+async def test_an_oversized_tree_still_rescans_a_shared_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The file is already on the disk the STS scans. Do not skip the rescan."""
     from mftik_api import sts_fanout
 
     monkeypatch.setattr(sts_fanout, "REGISTRY_SYNC_BUDGET", 40)
@@ -495,12 +496,56 @@ async def test_an_oversized_tree_names_the_broker_limit(
         store=store,
         broker=broker,
     )
+    assert out.loaded is True
+    assert broker.calls >= 1
+    assert (tmp_path / "registry" / "private" / "Tiny" / "strategy.py").is_file()
+
+
+async def test_an_oversized_tree_on_a_split_disk_names_the_encoded_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mftik_api import sts_fanout
+
+    monkeypatch.setattr(sts_fanout, "REGISTRY_SYNC_BUDGET", 40)
+    store = RegistryStore(tmp_path)
+    broker = _broker(store, loaded=[])
+    out = await add_strategy(
+        RegistryAddBody(files={"strategy.py": _TINY}),
+        store=store,
+        broker=broker,
+    )
     assert out.loaded is False
     assert out.load_error is not None
+    assert "encoded size" in out.load_error
     assert "broker payload limit" in out.load_error
     assert "import error or name collision" not in out.load_error
-    assert broker.calls == 0
-    assert (tmp_path / "registry" / "private" / "Tiny" / "strategy.py").is_file()
+    assert broker.calls >= 1
+
+
+async def test_a_write_refusal_is_not_loaded_because_the_old_key_remains(
+    tmp_path: Path,
+) -> None:
+    store = RegistryStore(tmp_path)
+
+    class _Broker:
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            del subject, envelope, timeout
+            return StsRegistrySyncResultEnvelope.wrap(
+                StsRegistrySyncResult(
+                    loaded=["private::Tiny"],
+                    skipped={"private::Tiny": "write error: read-only"},
+                ),
+                type=STS_REGISTRY_SYNC,
+                source="sts",
+            )
+
+    out = await add_strategy(
+        RegistryAddBody(files={"strategy.py": _TINY}),
+        store=store,
+        broker=_Broker(),
+    )
+    assert out.loaded is False
+    assert "write error" in (out.load_error or "")
 
 
 async def test_unknown_remote_is_404(tmp_path: Path) -> None:

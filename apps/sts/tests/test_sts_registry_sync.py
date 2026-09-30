@@ -34,6 +34,13 @@ class NoopStrategy(Strategy):
     name = "noop"
 """
 
+_OTHER = """\
+from mftik.strategy import Strategy
+
+class Other(Strategy):
+    name = "other"
+"""
+
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
@@ -128,6 +135,113 @@ def test_a_digest_mismatch_is_not_left_on_disk(tmp_path: Path) -> None:
     assert result.skipped["private::Tiny"] == SKIP_DIGEST
     assert "private::Tiny" not in result.loaded
     assert not (tmp_path / "registry" / "private" / "Tiny").exists()
+
+
+_V2 = """\
+from mftik.strategy import Strategy
+
+class Tiny(Strategy):
+    name = "tiny-v2"
+"""
+
+
+def test_a_digest_mismatch_keeps_the_previous_tree(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    apply_sync(
+        store, StsRegistrySyncRequest(trees=[_upsert("private", "Tiny", _TINY)])
+    )
+    result = apply_sync(
+        store,
+        StsRegistrySyncRequest(
+            trees=[_upsert("private", "Tiny", _V2, digest="sha256:not-the-tree")]
+        ),
+    )
+    assert result.skipped["private::Tiny"] == SKIP_DIGEST
+    written = tmp_path / "registry" / "private" / "Tiny" / "strategy.py"
+    assert written.read_text() == _TINY
+    assert "private::Tiny" in result.loaded
+
+
+def test_a_matching_digest_is_not_rewritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RegistryStore(tmp_path)
+    apply_sync(
+        store, StsRegistrySyncRequest(trees=[_upsert("private", "Tiny", _TINY)])
+    )
+    digest = store.get_private("Tiny").digest
+
+    def _refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("rewritten")
+
+    monkeypatch.setattr(store, "add", _refuse)
+    result = apply_sync(
+        store,
+        StsRegistrySyncRequest(
+            trees=[_upsert("private", "Tiny", _TINY, digest=digest)]
+        ),
+    )
+    assert result.skipped == {}
+    assert "private::Tiny" in result.loaded
+
+
+def test_a_path_refusal_is_not_called_an_import_error(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    result = apply_sync(
+        store,
+        StsRegistrySyncRequest(
+            trees=[
+                StsRegistryTreeOp(
+                    op="upsert",
+                    origin="private",
+                    name="Tiny",
+                    files={"../evil.py": "x = 1\n"},
+                )
+            ]
+        ),
+    )
+    reason = result.skipped["private::Tiny"]
+    assert reason.startswith("refused:")
+    assert ".." in reason
+    assert not reason.startswith("import error:")
+
+
+def test_a_malformed_delete_does_not_drop_the_rest_of_the_batch(
+    tmp_path: Path,
+) -> None:
+    store = RegistryStore(tmp_path)
+    result = apply_sync(
+        store,
+        StsRegistrySyncRequest(
+            trees=[
+                StsRegistryTreeOp(op="delete", origin="node1", name="not-a-type"),
+                _upsert("private", "Tiny", _TINY),
+            ]
+        ),
+    )
+    assert "private::Tiny" in result.loaded
+    assert result.skipped["node1::not-a-type"].startswith("refused:")
+
+
+def test_retain_deletes_a_tree_the_manifest_omits(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path)
+    apply_sync(
+        store,
+        StsRegistrySyncRequest(
+            trees=[
+                _upsert("private", "Tiny", _TINY),
+                _upsert("private", "Other", _OTHER),
+            ]
+        ),
+    )
+    result = apply_sync(
+        store,
+        StsRegistrySyncRequest(trees=[], retain=["private::Tiny"]),
+    )
+    assert "private::Tiny" in result.loaded
+    assert "private::Other" not in result.loaded
+    assert not (tmp_path / "registry" / "private" / "Other").exists()
+    assert (tmp_path / "registry" / "private" / "Tiny").is_dir()
 
 
 def test_sync_uses_the_process_data_dir(

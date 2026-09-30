@@ -87,17 +87,22 @@ _ABSENT_NAMED = "not present on its registry disk"
 
 
 def _missing_on(fanout: StsFanoutResult, key: str) -> str:
-    """Per-instance reason ``key`` is not in the loaded intersection.
+    """Per-instance reason ``key`` did not take this write.
 
+    A skip wins over ``loaded``. The rescan can still list the previous
+    class when the new bytes were refused, and that is not "deployable".
     STS says "this registry disk" because it is speaking about itself. Once
     the instance name is in front of the clause, "its" is the sentence.
     """
     parts: list[str] = []
-    for label, keys in fanout.loaded_by.items():
-        if key in keys:
+    labels = list(fanout.loaded_by) + [
+        label for label in fanout.skipped if label not in fanout.loaded_by
+    ]
+    for label in labels:
+        reason = fanout.skipped.get(label, {}).get(key)
+        if reason is None and key in fanout.loaded_by.get(label, ()):
             continue
-        reason = fanout.skipped.get(label, {}).get(key, _ABSENT_NAMED)
-        if reason == _ABSENT_ON_STS:
+        if reason is None or reason == _ABSENT_ON_STS:
             reason = _ABSENT_NAMED
         parts.append(f"{label}: {reason}")
     if not parts:
@@ -226,7 +231,7 @@ async def add_strategy(
             load_error=_sync_failure(
                 fanout,
                 stored="the strategy was stored",
-                restart="It will be picked up when STS next restarts.",
+                restart="It will be copied when that STS next starts.",
             ),
         )
     if key in fanout.loaded:
@@ -297,7 +302,7 @@ async def delete_strategy(
             fanout,
             stored="the strategy was deleted",
             restart=(
-                f"It will go on answering to {key!r} until it restarts."
+                "It will be removed from that STS when the process next starts."
             ),
         )
     else:
@@ -316,7 +321,8 @@ async def delete_strategy(
             )
             error = (
                 f"the strategy was deleted, but {', '.join(still)} still "
-                f"answers to {key!r}. Restart STS."
+                f"answers to {key!r}. It will be removed when that STS "
+                f"next starts."
             )
         else:
             error = None
@@ -443,7 +449,7 @@ async def connect(
         load_error = _sync_failure(
             fanout,
             stored="the strategies were pulled",
-            restart="They become deployable when it restarts.",
+            restart="They are copied when that STS next starts.",
         )
     else:
         missing = sorted(pulled_keys - fanout.loaded)
@@ -476,7 +482,7 @@ async def disconnect_remote(
     Then deletes those trees on every STS. Unlike the other three, this one
     has nothing useful to put in the response: the remote is gone from this
     node either way, and a sync that could not be delivered leaves stale
-    keys that the next restart clears. It goes to the log instead.
+    keys until that STS next starts and catches up. It goes to the log.
     """
     if store.get_remote(name) is None:
         raise HTTPException(status_code=404, detail=f"unknown remote: {name}")
@@ -507,8 +513,8 @@ async def disconnect_remote(
     rpc_error = fanout.error
     if rpc_error is not None:
         logger.warning(
-            "disconnected %s but STS did not reload (%s); it will go on "
-            "resolving that remote's strategies until it restarts",
+            "disconnected %s but STS did not reload (%s); that STS drops "
+            "the remote's strategies when it next starts",
             name,
             rpc_error,
         )

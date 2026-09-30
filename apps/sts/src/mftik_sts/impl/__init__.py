@@ -90,6 +90,14 @@ register(MacdDollarBars)
 #: ``resolve``, so ``load_local_registry`` refuses rather than overwrite.
 _BUILTIN_KEYS: frozenset[str] = frozenset(_REGISTRY)
 logger = logging.getLogger(__name__)
+#: Why the last scan skipped a key. ``explain_skip`` reads this instead of
+#: importing the tree a second time.
+_SKIPPED: dict[str, str] = {}
+
+
+def registry_skips() -> dict[str, str]:
+    """Qualified key → reason, from the most recent :func:`load_local_registry`."""
+    return dict(_SKIPPED)
 
 
 def resolve(name: str | None) -> Strategy:
@@ -126,8 +134,10 @@ def load_local_registry(store: RegistryStore | None = None) -> list[str]:
     the only safe answer — swapping a live strategy's class underneath it
     would leave its state bound to methods that no longer match.
     """
+    global _SKIPPED
     store = store or RegistryStore.from_env()
     loaded: list[str] = []
+    skipped: dict[str, str] = {}
     for rec in store.list_all():
         key = qualify(rec.origin, rec.type)
         try:
@@ -140,27 +150,36 @@ def load_local_registry(store: RegistryStore | None = None) -> list[str]:
                 # in sys.modules, and a re-pushed strategy runs its old code.
                 digest=rec.digest,
             )
-        except Exception:
-            logger.exception(
-                "skipped %s strategy %s at %s", rec.origin, rec.name, rec.path
+        except Exception as exc:
+            # Expected: a broken tree stays on disk and is skipped. A
+            # traceback on every rescan buries the line that names it.
+            logger.warning(
+                "skipped %s strategy %s at %s: %s",
+                rec.origin,
+                rec.name,
+                rec.path,
+                exc,
             )
+            skipped[key] = f"import error: {exc}"
             continue
         if not isinstance(cls, type) or not issubclass(cls, Strategy):
-            logger.error(
+            logger.warning(
                 "skipped %s strategy %s: %s is not a Strategy",
                 rec.origin,
                 rec.name,
                 rec.type,
             )
+            skipped[key] = f"import error: {rec.type} is not a Strategy"
             continue
         if cls.__name__ in _BUILTIN_KEYS:
-            logger.error(
+            logger.warning(
                 "skipped %s strategy %s: type %r collides with "
                 "a bundled strategy",
                 rec.origin,
                 rec.name,
                 cls.__name__,
             )
+            skipped[key] = "name collision with a bundled strategy"
             continue
         register_qualified(cls, key)
         loaded.append(key)
@@ -177,4 +196,5 @@ def load_local_registry(store: RegistryStore | None = None) -> list[str]:
     # answering to it would deploy the last version that happened to parse.
     for key in _forget_missing(set(loaded)):
         logger.info("unregistered %s: no longer in the registry", key)
+    _SKIPPED = skipped
     return loaded

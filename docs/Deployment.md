@@ -199,8 +199,11 @@ with the volume comes up empty; copy `work/registry` and `work/eventlog` into
 it on each machine before deploying anything that names a strategy that was
 never synced. A push, delete, or remote connect also copies the changed trees
 to each STS over `sts.registry.sync`, so a host that does not share the API
-volume still receives them. Copying `work/registry` by hand is only how a
-fresh volume gets trees that have not been synced yet.
+volume still receives them. An STS that was down for that copy asks the API
+to reconcile its disk when it starts, and declaring or re-enabling an STS
+does the same, including deletes for trees the API no longer has. Copying
+`work/registry` by hand is only how a fresh volume gets trees that have not
+been synced yet and are too large to ride in one broker message.
 
 ## Where a process may write
 

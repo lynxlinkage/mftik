@@ -2,6 +2,7 @@
 
 from mftik.protocol.envelope import Envelope, UntypedEnvelope
 from mftik.protocol.messages import (
+    API_REGISTRY_CATCHUP,
     LEASE_HEARTBEAT_INTERVAL_S,
     LEASE_MISS_LIMIT,
     MD_AGG_TRADE,
@@ -112,6 +113,10 @@ from mftik.protocol.messages import (
     TD_SESSION_ATTACH,
     TD_SESSION_DETACH,
     TD_SESSION_LIST,
+    ApiRegistryCatchupRequest,
+    ApiRegistryCatchupRequestEnvelope,
+    ApiRegistryCatchupResult,
+    ApiRegistryCatchupResultEnvelope,
     CancelReject,
     CancelRejectEnvelope,
     CreateSessionRequest,
@@ -436,6 +441,7 @@ __all__ = [
     "STS_REASON_STOP_TIMED_OUT",
     "STS_EVENTLOG_INFO",
     "STS_ENV_SYNC",
+    "API_REGISTRY_CATCHUP",
     "STS_REGISTRY_GENERATION",
     "STS_REGISTRY_LOADED",
     "STS_REGISTRY_RELOAD",
@@ -631,6 +637,10 @@ __all__ = [
     "StsEnvSyncRequestEnvelope",
     "StsEnvSyncResult",
     "StsEnvSyncResultEnvelope",
+    "ApiRegistryCatchupRequest",
+    "ApiRegistryCatchupRequestEnvelope",
+    "ApiRegistryCatchupResult",
+    "ApiRegistryCatchupResultEnvelope",
     "StsRegistryGenerationRequest",
     "StsRegistryGenerationRequestEnvelope",
     "StsRegistryGenerationResult",

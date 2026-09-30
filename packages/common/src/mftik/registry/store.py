@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import tomllib
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from mftik.registry.digest import digest_files
-from mftik.registry.errors import RegistryConflict, RegistryError
+from mftik.registry.errors import (
+    RegistryConflict,
+    RegistryDigestMismatch,
+    RegistryError,
+)
 from mftik.registry.files import TEMPLATE_NAME, normalize_files, read_tree
 from mftik.registry.gate import check_files
 from mftik.registry.inspect import check_name, check_type, inspect_files, pick_class
@@ -89,6 +95,7 @@ class RegistryStore:
         origin: str = PRIVATE_ORIGIN,
         applied_extras: Mapping[str, str] | None = None,
         present_extras: Mapping[str, str] | None = None,
+        expect_digest: str | None = None,
     ) -> AddedStrategy:
         """Validate, hash, and copy ``.py`` files and optional ``strategy.yml``.
 
@@ -122,6 +129,12 @@ class RegistryStore:
                     + describe_missing(missing, present_extras)
                 )
         digest = digest_files(normalised)
+        if expect_digest and digest != expect_digest:
+            # Before any rename. A mismatch must not replace a tree that
+            # already loads, and must not leave the rejected bytes behind.
+            raise RegistryDigestMismatch(
+                f"digest mismatch: tree is {digest}, request said {expect_digest}"
+            )
         type_name = chosen.type
         root = self._origin_root(origin)
         hit = _casefold_entry(root, type_name)
@@ -135,7 +148,7 @@ class RegistryStore:
                 f"strategy {type_name!r} is already in the {_where(origin)}"
             )
         dest = self._dest(origin, type_name)
-        self._commit(dest, normalised)
+        self._commit(dest, normalised, expect_digest=expect_digest or None)
         return AddedStrategy(
             name=type_name,
             type=chosen.type,
@@ -329,32 +342,87 @@ class RegistryStore:
                 out.append(rec)
         return out
 
-    def _commit(self, dest: Path, files: Mapping[str, bytes]) -> None:
+    def _commit(
+        self,
+        dest: Path,
+        files: Mapping[str, bytes],
+        *,
+        expect_digest: str | None = None,
+    ) -> None:
+        """Replace ``dest`` by renaming a private temp directory onto it.
+
+        The temp name is unique, not ``pid``. Two STS containers on one
+        volume are both pid 1, and a shared ``.tmp-{name}-1`` lets one
+        writer delete the other's half-written tree — and then delete
+        ``dest`` itself. The previous tree is renamed aside and put back
+        if the swap fails, so a crash between the two renames does not
+        leave the key with no directory. ``expect_digest`` is checked on
+        the temp directory before that swap. A rename that loses to the
+        other writer is retried; a digest mismatch is not.
+        """
+        last: OSError | None = None
+        for _attempt in range(8):
+            try:
+                self._commit_once(dest, files, expect_digest=expect_digest)
+                return
+            except RegistryDigestMismatch:
+                raise
+            except OSError as exc:
+                last = exc
+        assert last is not None
+        raise last
+
+    def _commit_once(
+        self,
+        dest: Path,
+        files: Mapping[str, bytes],
+        *,
+        expect_digest: str | None,
+    ) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.parent / f".tmp-{dest.name}-{os.getpid()}"
-        if tmp.exists():
-            shutil.rmtree(tmp)
+        token = uuid.uuid4().hex
+        tmp = dest.parent / f".tmp-{dest.name}-{token}"
+        old = dest.parent / f".old-{dest.name}-{token}"
         tmp.mkdir()
         try:
             for path, body in files.items():
                 target = tmp / path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(body)
+            if expect_digest and _digest_written(tmp) != expect_digest:
+                raise RegistryDigestMismatch(
+                    f"digest mismatch: wrote {dest.name}, "
+                    f"request said {expect_digest}"
+                )
             if dest.exists():
-                shutil.rmtree(dest)
+                dest.rename(old)
             tmp.rename(dest)
-            # A replace that lands in the same mtime bucket would otherwise
-            # keep serving the digest from before the write.
-            resolved = str(dest.resolve())
-            self._tree_cache = {
-                key: val
-                for key, val in self._tree_cache.items()
-                if key[0] != resolved
-            }
+            if old.exists():
+                shutil.rmtree(old, ignore_errors=True)
+            self._drop_cache(dest)
         except Exception:
             if tmp.exists():
                 shutil.rmtree(tmp, ignore_errors=True)
+            if old.exists():
+                if not dest.exists():
+                    with contextlib.suppress(OSError):
+                        old.rename(dest)
+                else:
+                    shutil.rmtree(old, ignore_errors=True)
             raise
+
+    def _drop_cache(self, dest: Path) -> None:
+        # A replace that lands in the same mtime bucket would otherwise
+        # keep serving the digest from before the write.
+        try:
+            resolved = str(dest.resolve())
+        except OSError:
+            return
+        self._tree_cache = {
+            key: val
+            for key, val in self._tree_cache.items()
+            if key[0] != resolved
+        }
 
 
     def _read_tree(self, dest: Path, *, origin: str) -> AddedStrategy | None:
@@ -374,6 +442,16 @@ class RegistryStore:
         if stamp is not None:
             self._tree_cache[key] = (stamp, rec)
         return rec
+
+
+def _digest_written(root: Path) -> str:
+    """Digest of the ``.py`` files actually on disk under ``root``."""
+    files: dict[str, bytes] = {}
+    for py in root.rglob("*.py"):
+        if "__pycache__" in py.parts:
+            continue
+        files[py.relative_to(root).as_posix()] = py.read_bytes()
+    return digest_files(files)
 
 
 def _tree_stamp(dest: Path) -> tuple[int, int] | None:

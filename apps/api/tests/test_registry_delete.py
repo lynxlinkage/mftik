@@ -154,7 +154,7 @@ async def test_add_says_so_when_sts_did_not_answer(tmp_path: Path) -> None:
     assert out.name == "Tiny"
     assert out.loaded is False
     assert "no reply from sts" in out.load_error
-    assert "restarts" in out.load_error
+    assert "next starts" in out.load_error
     # The add itself stands.
     assert [r.name for r in store.list_private()] == ["Tiny"]
 

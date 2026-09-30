@@ -4,6 +4,7 @@ from mftik.registry.digest import DIGEST_PREFIX, digest_files
 from mftik.registry.errors import (
     MissingRemoteExtras,
     RegistryConflict,
+    RegistryDigestMismatch,
     RegistryError,
 )
 from mftik.registry.files import normalize_files, read_tree
@@ -46,6 +47,7 @@ __all__ = [
     "qualify",
     "read_tree",
     "RegistryConflict",
+    "RegistryDigestMismatch",
     "RegistryError",
     "RegistryStore",
     "Remote",
