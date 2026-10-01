@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from broker_harness import a_broker
+from broker_harness import session_loop
 from mftik.broker import (
     Broker,
     IncomingRequest,
@@ -15,14 +15,9 @@ from mftik.protocol import (
     UntypedEnvelope,
 )
 
-
-@pytest.fixture
-async def broker() -> Broker:
-    async with a_broker() as client:
-        yield client
+pytestmark = session_loop
 
 
-@pytest.mark.asyncio
 async def test_pubsub_roundtrip(broker: Broker) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -54,7 +49,6 @@ async def test_pubsub_roundtrip(broker: Broker) -> None:
     assert got.id == sent.id
 
 
-@pytest.mark.asyncio
 async def test_publish_log_is_live_fan_out(broker: Broker) -> None:
     """Late replay left the broker. ``publish_log`` is ``publish``."""
     topic = "log.sts.late"
@@ -84,7 +78,6 @@ async def test_publish_log_is_live_fan_out(broker: Broker) -> None:
     assert got.payload == {"level": "info", "message": "live"}
 
 
-@pytest.mark.asyncio
 async def test_request_reply(broker: Broker) -> None:
     stop = asyncio.Event()
 
@@ -121,7 +114,6 @@ async def test_request_reply(broker: Broker) -> None:
     }
 
 
-@pytest.mark.asyncio
 async def test_request_timeout(broker: Broker) -> None:
     with pytest.raises(RequestTimeoutError):
         await broker.request(
@@ -131,7 +123,6 @@ async def test_request_timeout(broker: Broker) -> None:
         )
 
 
-@pytest.mark.asyncio
 async def test_serve_handler(broker: Broker) -> None:
     stop = asyncio.Event()
 
@@ -158,7 +149,6 @@ async def test_serve_handler(broker: Broker) -> None:
     assert response.payload == {"pong": True}
 
 
-@pytest.mark.asyncio
 async def test_psubscribe_receives_channel_and_envelope(broker: Broker) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
