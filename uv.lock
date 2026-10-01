@@ -659,7 +659,6 @@ version = "0.1.0"
 source = { editable = "apps/md" }
 dependencies = [
     { name = "mftik" },
-    { name = "mftik-db" },
     { name = "redis" },
     { name = "uvloop" },
 ]
@@ -667,7 +666,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "mftik", editable = "packages/common" },
-    { name = "mftik-db", editable = "packages/db" },
     { name = "redis", specifier = ">=5" },
     { name = "uvloop", specifier = ">=0.21" },
 ]
