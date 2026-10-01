@@ -162,7 +162,6 @@ class StsSession:
         md_ids: list[str] | None = None,
         md: dict[str, list[str]] | None = None,
         st_paras: dict[str, Any] | None = None,
-        heartbeat_interval: float = 1.0,
         symbols: SymbolClient | None = None,
         on_exit: ExitHandler | None = None,
         event_log: EventLog | None = None,
@@ -201,7 +200,6 @@ class StsSession:
         #: not change.
         self.md_ids = md_feeds_of(self.md)
         self.st_paras = dict(st_paras or {})
-        self.heartbeat_interval = heartbeat_interval
         #: Symbol plane reads. Strategies round their own prices and sizes,
         #: so they need tick/step/notional at hand — TD does not check.
         self.symbols = symbols or SymbolClient(broker)

@@ -3,8 +3,6 @@
 from mftik.protocol.envelope import Envelope, UntypedEnvelope
 from mftik.protocol.messages import (
     API_REGISTRY_CATCHUP,
-    LEASE_HEARTBEAT_INTERVAL_S,
-    LEASE_MISS_LIMIT,
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
     MD_BESTQUOTE_RESULT,
@@ -381,8 +379,6 @@ __all__ = [
     "MD_SESSION_LIST",
     "MD_TAPE_TAIL",
     "MD_SUBSCRIBE",
-    "LEASE_HEARTBEAT_INTERVAL_S",
-    "LEASE_MISS_LIMIT",
     "PROBE_MAX_AGE_SECONDS",
     "probe_is_stale",
     "MD_TICKER",

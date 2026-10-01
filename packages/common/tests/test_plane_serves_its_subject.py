@@ -47,8 +47,9 @@ def _run_rpc(plane: str):
     """Each plane's loop, callable as ``(broker, stop, subject=…)``.
 
     The planes that still take a session manager are handed ``None``. TD no
-    longer has one (RM-06), so it is called without it — the adapters are what
-    lets one test cover loops whose signatures are mid-migration.
+    longer has one (RM-06) and nor does STS (RM-04), so they are called
+    without it — the adapters are what lets one test cover loops whose
+    signatures are mid-migration.
     """
     if plane == "td":
         from mftik_td import app
@@ -68,10 +69,7 @@ def _run_rpc(plane: str):
     from mftik_sts import app
 
     return lambda broker, stop, *, subject: app.run_rpc(
-        broker,
-        None,  # type: ignore[arg-type]
-        stop,
-        subject=subject,
+        broker, stop, subject=subject
     )
 
 

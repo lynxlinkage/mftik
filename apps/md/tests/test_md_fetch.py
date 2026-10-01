@@ -583,7 +583,6 @@ async def test_a_strategy_with_no_market_data_gets_its_candles(
         created_by=1,
         strategy=strategy,
         md_ids=[],
-        heartbeat_interval=0.1,
     )
     await sts.start()
     await asyncio.sleep(0.05)

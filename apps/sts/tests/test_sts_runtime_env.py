@@ -7,7 +7,6 @@ import logging
 import shutil
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from broker_harness import a_broker
@@ -316,7 +315,7 @@ async def test_reload_rpc_returns_the_generation_it_now_believes(
 
     async def serve() -> None:
         async for req in broker.serve(Topics.STS, stop=stop):
-            await dispatch(req, sessions=SimpleNamespace())
+            await dispatch(req)
 
     task = asyncio.create_task(serve())
     try:
@@ -350,7 +349,7 @@ async def test_sync_rpc_installs_then_returns_the_generation(
 
     async def serve() -> None:
         async for req in broker.serve(Topics.STS, stop=stop):
-            await dispatch(req, sessions=SimpleNamespace())
+            await dispatch(req)
 
     task = asyncio.create_task(serve())
     try:
@@ -403,7 +402,7 @@ async def test_generation_rpc_is_read_only(
 
     async def serve() -> None:
         async for req in broker.serve(Topics.STS, stop=stop):
-            await dispatch(req, sessions=SimpleNamespace())
+            await dispatch(req)
 
     task = asyncio.create_task(serve())
     try:

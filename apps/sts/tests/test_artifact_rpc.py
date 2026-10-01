@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from broker_harness import a_broker
@@ -53,11 +52,10 @@ async def serving(broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv(DIR_ENV, str(tmp_path))
     reset_store()
     stop = asyncio.Event()
-    sessions = SimpleNamespace(get=lambda _sid: None, instance="sts-jp")
 
     async def serve() -> None:
         async for req in broker.serve(Topics.sts("sts-jp"), stop=stop):
-            await dispatch(req, sessions=sessions)
+            await dispatch(req, instance="sts-jp")
 
     task = asyncio.create_task(serve())
     await asyncio.sleep(0.02)

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING
 
 from mftik.broker import IncomingRequest
 from mftik.protocol import (
@@ -42,9 +41,6 @@ from mftik.registry.qualify import OWN_ORIGINS
 from mftik_sts.impl import registered_keys, registry_skips
 from mftik_sts.rpc.env import current_packages
 from mftik_sts.runtime_env import current_stamp, overlay_is_live, refresh
-
-if TYPE_CHECKING:
-    from mftik_sts.session import SessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -221,9 +217,9 @@ def apply_sync(
 async def handle_registry_sync(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     request = StsRegistrySyncRequest.model_validate(req.envelope.payload)
     try:
         # Same constraint as reload: the scan imports modules and mutates
@@ -259,9 +255,9 @@ async def handle_registry_sync(
 async def handle_registry_loaded(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     await req.reply(
         StsRegistryLoadedResultEnvelope.wrap(
             StsRegistryLoadedResult(loaded=registered_keys()),
@@ -275,9 +271,9 @@ async def handle_registry_loaded(
 async def handle_registry_reload(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     try:
         # Synchronous, and deliberately not moved to a thread. It imports
         # Python modules, which mutates ``sys.modules`` — running that
@@ -314,9 +310,9 @@ async def handle_registry_reload(
 async def handle_registry_generation(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     stamp = current_stamp()
     await req.reply(
         StsRegistryGenerationResultEnvelope.wrap(

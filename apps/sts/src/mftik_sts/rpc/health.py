@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from mftik.broker import IncomingRequest
 from mftik.protocol import STS_HEALTH, HealthStatus, HealthStatusEnvelope
-
-if TYPE_CHECKING:
-    from mftik_sts.session import SessionManager
 
 
 async def handle_health(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     await req.reply(
         HealthStatusEnvelope.wrap(
             HealthStatus(status="ok", service="sts"),
