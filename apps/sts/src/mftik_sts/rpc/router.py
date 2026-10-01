@@ -23,11 +23,11 @@ from mftik.protocol import (
     STS_REGISTRY_LOADED,
     STS_REGISTRY_RELOAD,
     STS_REGISTRY_SYNC,
-    STS_SESSION_CREATE,
+    STS_SESSION_END,
     STS_SESSION_FAIL,
     STS_SESSION_FORCE_STOP,
     STS_SESSION_LIST,
-    STS_SESSION_STOP,
+    STS_SESSION_START,
     RpcError,
     RpcErrorEnvelope,
 )
@@ -78,11 +78,11 @@ _HANDLERS: dict[str, Handler] = {
     STS_REGISTRY_LOADED: handle_registry_loaded,
     STS_REGISTRY_RELOAD: handle_registry_reload,
     STS_REGISTRY_SYNC: handle_registry_sync,
-    STS_SESSION_CREATE: handle_session_create,
+    STS_SESSION_START: handle_session_create,
     STS_SESSION_LIST: handle_session_list,
     STS_SESSION_FAIL: handle_session_fail,
     STS_SESSION_FORCE_STOP: handle_session_force_stop,
-    STS_SESSION_STOP: handle_session_stop,
+    STS_SESSION_END: handle_session_stop,
 }
 
 

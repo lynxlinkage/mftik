@@ -25,7 +25,7 @@ async def handle_session_create(
     *,
     instance: str | None = None,
 ) -> None:
-    """``sts.session.create`` — becomes ``sts.session.start`` in IF-04."""
+    """``sts.session.start`` — the handler is IF-04. The wire type is IF-01."""
     del req, instance
     raise NotImplementedError(_IF)
 
@@ -45,7 +45,7 @@ async def handle_session_stop(
     *,
     instance: str | None = None,
 ) -> None:
-    """``sts.session.stop`` — becomes ``sts.session.end`` in IF-04."""
+    """``sts.session.end`` — the handler is IF-04. The wire type is IF-01."""
     del req, instance
     raise NotImplementedError(_IF)
 
