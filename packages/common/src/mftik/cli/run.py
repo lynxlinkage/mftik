@@ -29,11 +29,7 @@ from mftik.cli.exits import EXIT_INTERRUPTED
 from mftik.cli.push import push_tree, report_push
 from mftik.cli.sessions import follow_logs
 from mftik.cli.tree import inspect_tree, read_yaml, require_tree
-from mftik.protocol.strategy_yml import (
-    StrategySpec,
-    StrategyYamlError,
-    parse_strategy_yml,
-)
+from mftik.protocol.strategy_yml import StrategyYamlError, parse_strategy_yml
 from mftik.registry.qualify import PRIVATE_ORIGIN, qualify
 
 #: What a deploy answers when the session is up. Anything else means the
@@ -41,27 +37,11 @@ from mftik.registry.qualify import PRIVATE_ORIGIN, qualify
 #: there is no live log to attach to.
 _LIVE = "live"
 
-#: The API's own budgets. Waiting less than these is how a live session
-#: becomes an HTTP timeout on this side. Create is 10s; each attach RPC
-#: is the deploy body's timeout plus 5s; a short slack after that is
-#: the HTTP hop, not another RPC.
-_STS_CREATE_S = 10.0
-_ATTACH_RPC_SLACK_S = 5.0
-_DEFAULT_ATTACH_S = 30.0
-_HTTP_SLACK_S = 10.0
-
-
-def deploy_http_timeout(
-    spec: StrategySpec, *, attach_s: float = _DEFAULT_ATTACH_S
-) -> float:
-    """Long enough to hear the API's own answer, not just 30s.
-
-    Create, then one MD attach **per named instance**, then one TD attach per
-    account. A document that splits its feeds across two MDs waits for two
-    attaches, and a timeout sized for one would give up on the second.
-    """
-    n = len(spec.md) + len(spec.td)
-    return _STS_CREATE_S + n * (attach_s + _ATTACH_RPC_SLACK_S) + _HTTP_SLACK_S
+#: How long to wait for the deploy's own answer. A fixed value because the
+#: deploy no longer starts the session inside the request (F12), so this is
+#: one HTTP hop rather than a budget estimated from the document. IF-15 (#193)
+#: settles the final value along with ``--wait`` / ``--no-wait``.
+_DEPLOY_HTTP_TIMEOUT_S = 30.0
 
 
 def _deploy_may_be_live(exc: BaseException) -> str:
@@ -80,12 +60,12 @@ def run(args: argparse.Namespace) -> int:
     # but only after the tree has been copied into its registry — and a push
     # that lands for a deploy that cannot is a confusing half-step.
     try:
-        spec = parse_strategy_yml(yaml_text)
+        parse_strategy_yml(yaml_text)
     except StrategyYamlError as exc:
         raise CliError(str(exc)) from exc
 
     key = qualify(PRIVATE_ORIGIN, inspected.cls.type)
-    _, client = connected(args.profile, timeout=deploy_http_timeout(spec))
+    _, client = connected(args.profile, timeout=_DEPLOY_HTTP_TIMEOUT_S)
     with client:
         if not args.no_push:
             report_push(push_tree(client, root))
