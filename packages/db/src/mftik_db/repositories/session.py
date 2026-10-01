@@ -213,8 +213,6 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
             md_ids=md_ids if md_ids is not None else [],
             st_paras=dict(st_paras or {}),
             restart=restart,
-            rebuild_count=0,
-            st_facts={},
             status=SessionStatus.LIVE.value,
         )
         return await self.add(row)
@@ -247,7 +245,7 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         )
 
     async def mark_live(self, session_id: str) -> StsSessionRow | None:
-        """Put a terminal session back to ``live`` — the rebuild path.
+        """Put a terminal session back to ``live``.
 
         Clears ``finished_at`` and ``reason`` along with the status: a session
         that is running again has no end and no reason for one, and leaving
@@ -259,52 +257,6 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         row.status = SessionStatus.LIVE.value
         row.finished_at = None
         row.reason = None
-        await self.session.flush()
-        return row
-
-    async def bump_rebuild_count(self, session_id: str) -> int:
-        """Count one rebuild attempt and return the new total.
-
-        Written before the attempt, not after: a rebuild that takes the
-        process down with it has to count, because that is precisely the loop
-        the cap exists to break.
-        """
-        row = await self.get_by_session_id(session_id)
-        if row is None:
-            return 0
-        row.rebuild_count = int(row.rebuild_count or 0) + 1
-        await self.session.flush()
-        return row.rebuild_count
-
-    async def reset_rebuild_count(self, session_id: str) -> StsSessionRow | None:
-        """Forget the attempts behind a rebuild that turned out to work.
-
-        The cap counts attempts so a strategy that takes the process down with
-        it is not restored into the same crash forever. A session that came
-        back and then ran is not that: it has answered the question the count
-        was asking, and leaving the total standing would retire a healthy
-        session on some later restart it had nothing to do with.
-        """
-        row = await self.get_by_session_id(session_id)
-        if row is None:
-            return None
-        row.rebuild_count = 0
-        await self.session.flush()
-        return row
-
-    async def remember(
-        self, session_id: str, key: str, value: str
-    ) -> StsSessionRow | None:
-        """Record one fact a strategy established while running.
-
-        Reassigns the dict rather than mutating it: a plain JSON column does
-        not track in-place changes, so an update written through the existing
-        object would be silently dropped.
-        """
-        row = await self.get_by_session_id(session_id)
-        if row is None:
-            return None
-        row.st_facts = {**(row.st_facts or {}), key: value}
         await self.session.flush()
         return row
 

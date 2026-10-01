@@ -142,31 +142,8 @@ async def test_mark_live_undoes_the_ending(db) -> None:
     assert row.reason is None
 
 
-async def test_remember_accumulates_facts(db) -> None:
-    repo = StsSessionRepository(db)
-    await _live(repo, "s-facts")
-
-    await repo.remember("s-facts", "ref_start", "50000")
-    await repo.remember("s-facts", "started_ms", "1785000000000")
-    await repo.remember("s-facts", "ref_start", "50001")
-
-    # Read it back from the database, not from the object we just wrote
-    # through: a plain JSON column does not track in-place mutation, so an
-    # implementation that updated the dict in place would pass any assertion
-    # made against the live instance and still persist nothing.
-    db.expire_all()
-    row = await repo.get_by_session_id("s-facts")
-    assert row is not None
-    assert row.st_facts == {"ref_start": "50001", "started_ms": "1785000000000"}
-
-
-async def test_remembering_for_an_unknown_session_is_a_no_op(db) -> None:
-    repo = StsSessionRepository(db)
-    assert await repo.remember("nope", "k", "v") is None
-
-
 async def test_td_attach_survives_a_detach_and_reattach(db) -> None:
-    """Rebuilding a session re-attaches the same (session_id, api_id) pair.
+    """A re-attach reuses the same (session_id, api_id) pair.
 
     The pair is unique and a detach only marks the row done, so the second
     attach has to revive that row rather than insert beside it.
@@ -196,49 +173,6 @@ async def test_md_attach_survives_a_detach_and_reattach(db) -> None:
     assert again.id == first.id
     assert again.status == SessionStatus.LIVE.value
     assert again.finished_at is None
-
-
-async def test_rebuild_count_accumulates(db) -> None:
-    repo = StsSessionRepository(db)
-    await _live(repo, "s-count")
-
-    assert await repo.bump_rebuild_count("s-count") == 1
-    assert await repo.bump_rebuild_count("s-count") == 2
-
-    db.expire_all()
-    row = await repo.get_by_session_id("s-count")
-    assert row is not None
-    assert row.rebuild_count == 2
-    # Deploys say whether they want to come back; the default is that they do.
-    assert row.restart == "always"
-
-
-async def test_rebuild_count_can_be_forgiven(db) -> None:
-    """A rebuild that turned out to work has answered what the count asked.
-
-    Leaving the total standing would retire a healthy session on some later
-    restart it had nothing to do with.
-    """
-    repo = StsSessionRepository(db)
-    await _live(repo, "s-forgive")
-    await repo.bump_rebuild_count("s-forgive")
-    await repo.bump_rebuild_count("s-forgive")
-
-    row = await repo.reset_rebuild_count("s-forgive")
-    assert row is not None
-    assert row.rebuild_count == 0
-
-    db.expire_all()
-    again = await repo.get_by_session_id("s-forgive")
-    assert again is not None
-    assert again.rebuild_count == 0
-    # Only the count is forgiven — the row is otherwise untouched.
-    assert again.status == SessionStatus.LIVE.value
-
-
-async def test_resetting_an_unknown_session_is_not_an_error(db) -> None:
-    repo = StsSessionRepository(db)
-    assert await repo.reset_rebuild_count("s-nobody") is None
 
 
 async def test_mark_ack_keeps_the_reason_and_the_end(db) -> None:

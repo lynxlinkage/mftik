@@ -16,13 +16,7 @@ been running. The window a warm-up needs is exactly the one before that.
 the session attaches to no account and ``submit_order`` has nowhere to go. Not
 a rule anybody has to remember — there is no account, so there is no order.
 
-**Rebuild.** Safe, and uniquely so. ``rebuildable`` is off by default because a
-restored strategy that does not know it was away will trade alongside orders it
-left resting (see :class:`~mftik.strategy.Strategy`). This one holds no
-position, no resting order and no venue state of any kind: coming back is
-indistinguishable from starting, which is why it can say yes.
-
-Its own restart *is* visible where it matters — MD stamps both edges of the
+**Its own restart** *is* visible where it matters — MD stamps both edges of the
 break into the tape's coverage, so a strategy warming up afterwards is told how
 long the feed was unheld rather than reading across the hole as if it were not
 there. A restart that got to run its shutdown leaves a hole with a measured
@@ -44,8 +38,6 @@ DEFAULT_REPORT_INTERVAL_MS = 300_000
 
 class TapeKeeper(Strategy):
     """Subscribes to feeds and holds them, so MD keeps recording their tape."""
-
-    rebuildable = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -87,14 +79,6 @@ class TapeKeeper(Strategy):
         self._report_token.register(
             self.timer.now_ms() + interval, interval, self._report
         )
-
-    async def on_rebuild(self, remembered: dict[str, str]) -> None:
-        """Nothing to restore — see the module docstring.
-
-        Deliberately empty rather than absent: an empty override here is a
-        statement that the question was asked and the answer is genuinely
-        nothing, which is not what an inherited no-op would mean.
-        """
 
     async def on_stop(self) -> None:
         if self._report_token is not None:

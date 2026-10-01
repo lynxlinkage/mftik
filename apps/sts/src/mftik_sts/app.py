@@ -51,11 +51,6 @@ logger = logging.getLogger(SOURCE)
 RPC_RESTART_DELAY_SECONDS = 1.0
 
 
-#: Mirrors the manager's own default; kept here so the env override has
-#: something to fall back to without importing a private name.
-_DEFAULT_REBUILD_MAX_AGE_S = 1800.0
-
-
 async def _dispatch_request(req: Any, sessions: SessionManager) -> None:
     try:
         await dispatch(req, sessions=sessions)
@@ -127,43 +122,6 @@ async def run_rpc(
                 continue
 
 
-def _rebuild_enabled() -> bool:
-    """Whether to restore interrupted sessions on boot.
-
-    Off by default. Restoring a session puts a strategy back in front of a
-    live account. The scan only restores classes that set
-    ``rebuildable`` — a strategy that does not know it was away would treat
-    recon as a clean account and place beside the orders it left resting.
-    Opt in per deployment with ``STS_REBUILD_ON_BOOT=1``.
-    """
-    return os.getenv("STS_REBUILD_ON_BOOT", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
-
-
-def _rebuild_max_age_s() -> float:
-    """How stale an interrupted session may be and still be restored.
-
-    Sized for a restart, where the gap is seconds to minutes. Widen it with
-    ``STS_REBUILD_MAX_AGE_S`` if a deploy routinely takes longer than the
-    default; do not widen it to cover sessions nobody meant to resume.
-    """
-    raw = os.getenv("STS_REBUILD_MAX_AGE_S", "").strip()
-    if not raw:
-        return _DEFAULT_REBUILD_MAX_AGE_S
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning(
-            "ignoring STS_REBUILD_MAX_AGE_S=%r — not a number, using %.0fs",
-            raw,
-            _DEFAULT_REBUILD_MAX_AGE_S,
-        )
-        return _DEFAULT_REBUILD_MAX_AGE_S
-
-
 #: How often to look for sessions this instance owns and does not hold.
 #: Well under the window someone would spend wondering why a strategy is
 #: not doing anything, and far enough above two reap scans that a row
@@ -204,18 +162,6 @@ async def reap_loop(
             continue
 
 
-async def _rebuild_on_boot(sessions: SessionManager) -> None:
-    try:
-        rebuilt = await sessions.rebuild_interrupted()
-    except Exception:
-        logger.exception("STS rebuild on boot failed")
-        return
-    if rebuilt:
-        logger.warning("STS rebuilt %d interrupted session(s)", len(rebuilt))
-    else:
-        logger.info("STS found no interrupted sessions to rebuild")
-
-
 #: How long boot waits for the database to say it has run the migrations this
 #: build needs, before giving up and exiting.
 #:
@@ -223,9 +169,8 @@ async def _rebuild_on_boot(sessions: SessionManager) -> None:
 #: the one-shot migration step without ordering them, so "not listening yet",
 #: "no tables yet" and "one revision short" are all states a cold start sees
 #: for its first seconds — each of which becomes the right answer on its own,
-#: given a moment. None of them is a reason to serve: the rebuild scan reads
-#: every interrupted row once, at boot, and a scan that ran against the old
-#: schema is not repeated when the migration lands.
+#: given a moment. None of them is a reason to serve: a session created
+#: against the old schema is not written again when the migration lands.
 #:
 #: Wide enough for Postgres to pass its healthcheck (up to ~50s in that
 #: stack) and for a cold database to run the whole migration history behind
@@ -329,16 +274,11 @@ async def amain() -> bool:
             mark_done=sts_db.mark_session_finished,
             list_db_sessions=sts_db.list_sessions,
             load_session=sts_db.load_session,
-            remember_fact=sts_db.remember_fact,
             mark_live=sts_db.mark_session_live,
-            bump_rebuild_count=sts_db.bump_rebuild_count,
-            reset_rebuild_count=sts_db.reset_rebuild_count,
-            rebuild_max_age_s=_rebuild_max_age_s(),
             td_instance=sts_db.td_instance,
             derive_sts=sts_db.derived_sts,
             instance=INSTANCE,
             spawner=SubprocessSpawner(),
-            rebuild_on_worker_exit=_rebuild_enabled(),
         )
         logger.info("STS started instance=%s", INSTANCE)
         subjects = control_subjects(SOURCE, INSTANCE, ROLE)
@@ -382,20 +322,6 @@ async def amain() -> bool:
                 catch_up_until_matched(broker, INSTANCE, stop),
                 name="sts-registry-catchup",
             )
-        if _rebuild_enabled():
-            # A task, not awaited: rebuilding waits on TD and MD, which may
-            # not be up yet, and RPC service must not be held up behind it.
-            rebuild_task: asyncio.Task[Any] | None = asyncio.create_task(
-                _rebuild_on_boot(sessions), name="sts-rebuild"
-            )
-        else:
-            rebuild_task = None
-            logger.info(
-                "STS rebuild on boot disabled (set STS_REBUILD_ON_BOOT=1)"
-            )
-        logger.info(
-            "STS rebuild window is %.0fs", _rebuild_max_age_s()
-        )
         try:
             clean = await run_until_stopped(
                 stop,
@@ -408,8 +334,6 @@ async def amain() -> bool:
         finally:
             stop.set()
             tasks = [*rpc_tasks, hb_task, reaper_task, health_task]
-            if rebuild_task is not None:
-                tasks.append(rebuild_task)
             if catchup_task is not None:
                 tasks.append(catchup_task)
             for task in tasks:

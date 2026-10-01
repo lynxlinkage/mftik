@@ -192,8 +192,6 @@ async def _start(
                 f"worker session id {session_id} does not match the request"
             )
         return await sessions.create_session(request)
-    if role == "rebuild":
-        return await sessions.adopt_interrupted(session_id)
     raise RuntimeError(f"unknown worker role {role}")
 
 
@@ -247,10 +245,7 @@ async def amain(session_id: str, role: str) -> bool:
                     mark_done=sts_db.mark_session_finished,
                     list_db_sessions=sts_db.list_sessions,
                     load_session=sts_db.load_session,
-                    remember_fact=sts_db.remember_fact,
                     mark_live=sts_db.mark_session_live,
-                    bump_rebuild_count=sts_db.bump_rebuild_count,
-                    reset_rebuild_count=sts_db.reset_rebuild_count,
                     td_instance=sts_db.td_instance,
                     derive_sts=sts_db.derived_sts,
                     instance=instance_name("sts"),
@@ -275,14 +270,9 @@ async def amain(session_id: str, role: str) -> bool:
                     role,
                 )
                 _report({"ok": False, "error": str(exc)})
-                # A rebuild has already recorded its terminal status:
-                # failed when MD or TD answered with anything but
-                # unavailable/timeout, interrupted when the attach never
-                # got an answer. ``close_all`` would stamp the
-                # shutdown reason over it and reset ``finished_at``.
-                # Create still needs it: a start failure has popped the
-                # session, and anything left over should not stay live.
-                if sessions is not None and role != "rebuild":
+                # A start failure has popped the session, and anything left
+                # over should not stay live.
+                if sessions is not None:
                     await sessions.close_all()
                 return False
             assert sessions is not None
@@ -297,7 +287,7 @@ async def amain(session_id: str, role: str) -> bool:
 def main(argv: list[str] | None = None) -> None:
     configure_logging("sts")
     args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) != 2 or args[1] not in {"create", "rebuild"}:
+    if len(args) != 2 or args[1] != "create":
         raise SystemExit(2)
     arm_parent_death()
     if not uvloop.run(amain(args[0], args[1])):

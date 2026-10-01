@@ -212,8 +212,6 @@ services:
     environment:
       <<: *env
       MFTIK_DATA: /var/lib/mftik
-      # Interrupted sessions come back when the stack restarts.
-      STS_REBUILD_ON_BOOT: "1"
       # One jsonl per session: every event it was handed and every call it
       # made. A named volume, because the moment the log is worth reading is
       # usually the moment the container went away.

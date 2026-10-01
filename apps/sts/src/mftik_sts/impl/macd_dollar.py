@@ -103,11 +103,6 @@ holding of the base asset belongs to whoever put it there. The strategy starts
 flat, counts its own fills, and never sends ``reduce_only`` — TD refuses a spot
 order carrying it, which is the correct answer to asking for a guarantee spot
 cannot give.
-
-**Rebuild.** Off. The position is real and recon would report it, but reasoning
-about a restored position against an indicator rebuilt from a different stretch
-of tape is a decision this strategy has not been given. See
-:meth:`~mftik.strategy.Strategy.on_rebuild`.
 """
 
 from __future__ import annotations
@@ -263,8 +258,6 @@ class _BarBuilder:
 
 class MacdDollarBars(Strategy):
     """MACD on dollar bars. Long only, IOC through the touch."""
-
-    rebuildable = False
 
     def __init__(self) -> None:
         super().__init__()

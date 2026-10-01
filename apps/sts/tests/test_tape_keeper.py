@@ -81,11 +81,6 @@ async def test_it_counts_prints_and_places_nothing() -> None:
     assert strat._prints == 1
 
 
-def test_it_is_rebuildable() -> None:
-    """The one strategy for which coming back really is starting."""
-    assert TapeKeeper.rebuildable is True
-
-
 def test_report_interval_must_be_positive() -> None:
     with pytest.raises(ValueError, match="must be positive"):
         TapeKeeper.on_initialized({"report_interval_ms": 0})

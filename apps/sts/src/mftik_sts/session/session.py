@@ -96,9 +96,6 @@ logger = logging.getLogger(__name__)
 #: records the terminal status.
 ExitHandler = Callable[[str, str, bool], Awaitable[None]]
 
-#: ``(session_id, key, value)`` — persist one fact for a later rebuild.
-RememberHandler = Callable[[str, str, str], Awaitable[None]]
-
 #: MD message type → (strategy hook, payload model). Feed topics plus
 #: control events MD publishes on ``md.{session_id}`` (``md.feed.end``);
 #: anything else on that stream is logged and dropped.
@@ -195,7 +192,6 @@ class StsSession:
         heartbeat_interval: float = 1.0,
         symbols: SymbolClient | None = None,
         on_exit: ExitHandler | None = None,
-        remember: RememberHandler | None = None,
         event_log: EventLog | None = None,
         strategy_type: str | None = None,
         td_instance: TdInstanceLookup | None = None,
@@ -240,7 +236,6 @@ class StsSession:
         #: so they need tick/step/notional at hand — TD does not check.
         self.symbols = symbols or SymbolClient(broker)
         self._on_exit = on_exit
-        self._remember = remember
         #: Audit trail of every event this session was handed and every call it
         #: made. Off unless ``STS_EVENTLOG_DIR`` is set — see
         #: :mod:`mftik.strategy.eventlog`. Built before ``bind`` so oms / mds / tape
@@ -428,13 +423,6 @@ class StsSession:
             self.td_api_ids,
             self.md_ids,
         )
-
-    async def remember(self, key: str, value: str) -> None:
-        """Persist one fact for this session — see ``Strategy.remember``."""
-        if self._remember is None:
-            return
-        self.event_log.record("remember", key, dir="out", value=value)
-        await self._remember(self.session_id, key, value)
 
     def request_exit(
         self, reason: str = "strategy_exit", *, failed: bool = False

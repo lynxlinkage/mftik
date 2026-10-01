@@ -12,7 +12,6 @@ import os
 import signal
 import sys
 import time
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -35,16 +34,12 @@ from mftik.protocol import (
     StsSessionControlResult,
     Topics,
 )
-from mftik.registry import RegistryStore
 from mftik.strategy import Strategy
 from mftik_db.models import Base
-from mftik_db.models.session import SessionStatus, StsSessionRow
 from mftik_db.models.user import User
 from mftik_db.repositories import StsSessionRepository
 from mftik_db.session import build_engine
 from mftik_sts.app import run_rpc
-from mftik_sts.impl import _REGISTRY
-from mftik_sts.runtime_env import IncompatibleEnvironment, refresh, reset_for_tests
 from mftik_sts.session import SessionManager
 from mftik_sts.session import manager as manager_mod
 from mftik_sts.spawn import (
@@ -61,9 +56,8 @@ from mftik_sts.worker import arm_parent_death, set_pdeathsig
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
-class Rebuildable(Strategy):
-    name = "rebuildable"
-    rebuildable = True
+class Spawnable(Strategy):
+    name = "spawnable"
 
 
 class _Broker:
@@ -180,8 +174,8 @@ def _request(session_id: str = "s1") -> StsCreateSessionRequest:
     return StsCreateSessionRequest(
         session_id=session_id,
         created_by=1,
-        strategy="rebuildable",
-        type="Rebuildable",
+        strategy="spawnable",
+        type="Spawnable",
     )
 
 
@@ -189,7 +183,6 @@ def _manager(
     spawner: FakeSpawner,
     store: dict[str, SimpleNamespace],
     *,
-    rebuild: bool = False,
     load: bool = False,
 ) -> SessionManager:
     async def persist(**kwargs: Any) -> SimpleNamespace:
@@ -211,15 +204,14 @@ def _manager(
         mark_done=mark,
         load_session=load_session if load else None,
         spawner=spawner,  # type: ignore[arg-type]
-        strategy_factory=lambda _name: Rebuildable(),
-        rebuild_on_worker_exit=rebuild,
+        strategy_factory=lambda _name: Spawnable(),
         instance="sts",
     )
 
 
 def _ok_line() -> str:
     return json.dumps(
-        {"ok": True, "strategy": "rebuildable", "status": "live", "reason": None}
+        {"ok": True, "strategy": "spawnable", "status": "live", "reason": None}
     )
 
 
@@ -240,13 +232,13 @@ async def test_slot_is_claimed_before_the_row_is_written() -> None:
         persist_live=persist,
         mark_done=lambda *a, **k: _done(),
         spawner=spawner,  # type: ignore[arg-type]
-        strategy_factory=lambda _name: Rebuildable(),
+        strategy_factory=lambda _name: Spawnable(),
         instance="sts",
     )
     try:
         result = await manager.create_session(_request())
         assert seen == [True, False]
-        assert result.strategy == "rebuildable"
+        assert result.strategy == "spawnable"
         assert manager._workers["s1"].started is True
         body = json.loads(spawner.calls[0]["request_json"])
         assert body["session_id"] == "s1"
@@ -260,12 +252,12 @@ async def _done() -> None:
 
 
 @pytest.mark.parametrize("load", [False, True])
-async def test_eof_before_a_result_line_fails_and_does_not_rebuild(
+async def test_eof_before_a_result_line_fails_the_row(
     load: bool,
 ) -> None:
     store: dict[str, SimpleNamespace] = {}
     spawner = FakeSpawner(line=None)
-    manager = _manager(spawner, store, rebuild=True, load=load)
+    manager = _manager(spawner, store, load=load)
     with pytest.raises(RuntimeError, match=START_FAIL_REASON):
         await manager.create_session(_request())
     await asyncio.sleep(0.05)
@@ -311,7 +303,7 @@ async def test_a_failed_result_line_is_not_rebuilt() -> None:
         process=FakeProcess(returncode=1),
         gate=gate,
     )
-    manager = _manager(spawner, store, rebuild=True, load=True)
+    manager = _manager(spawner, store, load=True)
     create = asyncio.create_task(manager.create_session(_request()))
     while "s1" not in store:
         await asyncio.sleep(0)
@@ -335,8 +327,8 @@ async def test_an_error_line_fails_a_row_the_worker_left_live() -> None:
 
     The parent already persisted ``live``. The error line is the worker
     saying it never got as far as ``start()``, so the row is still
-    ``live`` and nothing is running it. Leaving it there makes stop 502
-    and, after the reaper, a rebuild of a deploy that was rejected.
+    ``live`` and nothing is running it. Leaving it there makes stop 502 and
+    leaves a deploy that was rejected looking like one that is running.
     """
     store: dict[str, SimpleNamespace] = {}
     spawner = FakeSpawner(
@@ -348,7 +340,7 @@ async def test_an_error_line_fails_a_row_the_worker_left_live() -> None:
         ),
         process=FakeProcess(returncode=1),
     )
-    manager = _manager(spawner, store, rebuild=True, load=True)
+    manager = _manager(spawner, store, load=True)
     with pytest.raises(RuntimeError, match="report_interval_ms must be positive"):
         await manager.create_session(_request())
     await asyncio.sleep(0.05)
@@ -398,174 +390,6 @@ async def test_quiet_waits_until_the_control_loop_has_retired() -> None:
     assert not waiter.done()
     release.set()
     await waiter
-
-
-async def test_the_same_id_is_spawned_once_when_rebuilds_overlap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The slot is claimed before the first await, so the second caller bows out."""
-    monkeypatch.setattr(manager_mod, "ensure_deployable", lambda *_a, **_k: None)
-    release = asyncio.Event()
-    listed = asyncio.Event()
-    row = SimpleNamespace(
-        session_id="aa0001",
-        created_by=1,
-        strategy="rebuildable",
-        type="Rebuildable",
-        instance="sts",
-        restart="always",
-        rebuild_count=0,
-        finished_at=datetime.now(UTC),
-        st_facts={},
-        st_paras={},
-        td={},
-        md_ids=[],
-    )
-    spawner = FakeSpawner(line=_ok_line(), process=FakeProcess())
-
-    async def list_sessions(**_kwargs: Any) -> list[SimpleNamespace]:
-        listed.set()
-        await release.wait()
-        return [row]
-
-    async def bump(_session_id: str) -> int:
-        row.rebuild_count += 1
-        return row.rebuild_count
-
-    manager = SessionManager(
-        _Broker(),  # type: ignore[arg-type]
-        list_db_sessions=list_sessions,
-        bump_rebuild_count=bump,
-        spawner=spawner,  # type: ignore[arg-type]
-        strategy_factory=lambda _name: Rebuildable(),
-        instance="sts",
-    )
-    first = asyncio.create_task(manager.rebuild_session("aa0001"))
-    await listed.wait()
-    assert await manager.rebuild_session("aa0001") is False
-    release.set()
-    assert await first is True
-    assert len(spawner.calls) == 1
-    assert spawner.calls[0]["role"] == "rebuild"
-    assert spawner.calls[0]["request_json"] is None
-    assert manager._workers["aa0001"].started is True
-    assert manager._workers["aa0001"].strategy_name == "rebuildable"
-    await manager.close_all()
-
-
-async def test_a_rebuild_that_never_reports_is_not_failed_or_retried(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No success line leaves the row interrupted. The next scan may retry.
-
-    ``close_all`` afterwards does not see the slot, so it does not stamp
-    the shutdown reason or move ``finished_at``.
-    """
-    monkeypatch.setattr(manager_mod, "ensure_deployable", lambda *_a, **_k: None)
-    row = SimpleNamespace(
-        session_id="aa0001",
-        created_by=1,
-        strategy="rebuildable",
-        type="Rebuildable",
-        instance="sts",
-        restart="always",
-        rebuild_count=0,
-        status="interrupted",
-        finished_at=datetime.now(UTC),
-        st_facts={},
-        st_paras={},
-        td={},
-        md_ids=[],
-    )
-    marked: list[str] = []
-    spawner = FakeSpawner(line=None)
-
-    async def list_sessions(**_kwargs: Any) -> list[SimpleNamespace]:
-        return [row]
-
-    async def bump(_session_id: str) -> int:
-        row.rebuild_count += 1
-        return row.rebuild_count
-
-    async def mark(_session_id: str, *, status: str, reason: str | None) -> None:
-        marked.append(status)
-        row.status = status
-        row.reason = reason
-
-    manager = SessionManager(
-        _Broker(),  # type: ignore[arg-type]
-        list_db_sessions=list_sessions,
-        bump_rebuild_count=bump,
-        mark_done=mark,
-        spawner=spawner,  # type: ignore[arg-type]
-        strategy_factory=lambda _name: Rebuildable(),
-        rebuild_on_worker_exit=True,
-        instance="sts",
-    )
-    try:
-        finished_at = row.finished_at
-        assert await manager.rebuild_session("aa0001") is False
-        await asyncio.sleep(0.05)
-        assert marked == []
-        assert row.status == "interrupted"
-        assert row.finished_at == finished_at
-        assert row.rebuild_count == 1
-        assert "aa0001" not in manager._workers
-        assert len(spawner.calls) == 1
-        await manager.close_all()
-        assert marked == []
-        assert row.status == "interrupted"
-        assert row.finished_at == finished_at
-    finally:
-        await manager.close_all()
-
-
-async def test_rebuild_session_bumps_only_the_id_it_was_given(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rows = {
-        "aa0001": SimpleNamespace(
-            session_id="aa0001",
-            strategy="bad",
-            type="bad",
-            instance="sts",
-            restart="always",
-            rebuild_count=0,
-            finished_at=datetime.now(UTC),
-        ),
-        "aa0002": SimpleNamespace(
-            session_id="aa0002",
-            strategy="also-bad",
-            type="also-bad",
-            instance="sts",
-            restart="always",
-            rebuild_count=0,
-            finished_at=datetime.now(UTC),
-        ),
-    }
-
-    def ensure(type_name: str | None, _store: object = None) -> None:
-        raise IncompatibleEnvironment(type_name or "", ("numpy",))
-
-    monkeypatch.setattr(manager_mod, "ensure_deployable", ensure)
-
-    async def list_sessions(**_kwargs: Any) -> list[SimpleNamespace]:
-        return [rows["aa0001"]]
-
-    async def bump(session_id: str) -> int:
-        rows[session_id].rebuild_count += 1
-        return rows[session_id].rebuild_count
-
-    manager = SessionManager(
-        _Broker(),  # type: ignore[arg-type]
-        list_db_sessions=list_sessions,
-        bump_rebuild_count=bump,
-        strategy_factory=lambda _name: Rebuildable(),
-        instance="sts",
-    )
-    assert await manager.rebuild_session("aa0001") is False
-    assert rows["aa0001"].rebuild_count == 1
-    assert rows["aa0002"].rebuild_count == 0
 
 
 async def test_close_all_sends_sigterm_and_does_not_wait_out_on_stop(
@@ -813,7 +637,7 @@ async def test_list_answers_while_create_waits_for_its_result() -> None:
             persist_live=persist,
             mark_done=mark,
             spawner=spawner,  # type: ignore[arg-type]
-            strategy_factory=lambda _name: Rebuildable(),
+            strategy_factory=lambda _name: Spawnable(),
             instance="sts",
         )
         stop = asyncio.Event()
@@ -866,59 +690,6 @@ async def test_list_answers_while_create_waits_for_its_result() -> None:
             await manager.close_all()
 
 
-async def test_close_all_while_rebuild_is_paused_does_not_spawn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A rebuild parked on a read has no process yet. Shutdown must not spawn."""
-    monkeypatch.setattr(manager_mod, "ensure_deployable", lambda *_a, **_k: None)
-    release = asyncio.Event()
-    listed = asyncio.Event()
-    row = SimpleNamespace(
-        session_id="aa0001",
-        created_by=1,
-        strategy="rebuildable",
-        type="Rebuildable",
-        instance="sts",
-        restart="always",
-        rebuild_count=0,
-        finished_at=datetime.now(UTC),
-        st_facts={},
-        st_paras={},
-        td={},
-        md_ids=[],
-    )
-    spawner = FakeSpawner(line=_ok_line(), process=FakeProcess())
-
-    async def list_sessions(**_kwargs: Any) -> list[SimpleNamespace]:
-        listed.set()
-        await release.wait()
-        return [row]
-
-    async def bump(_session_id: str) -> int:
-        row.rebuild_count += 1
-        return row.rebuild_count
-
-    manager = SessionManager(
-        _Broker(),  # type: ignore[arg-type]
-        list_db_sessions=list_sessions,
-        bump_rebuild_count=bump,
-        spawner=spawner,  # type: ignore[arg-type]
-        strategy_factory=lambda _name: Rebuildable(),
-        instance="sts",
-    )
-    task = asyncio.create_task(manager.rebuild_session("aa0001"))
-    try:
-        await listed.wait()
-        await manager.close_all()
-        release.set()
-        assert await task is False
-        assert spawner.calls == []
-    finally:
-        release.set()
-        await asyncio.gather(task, return_exceptions=True)
-        await manager.close_all()
-
-
 async def test_a_dead_worker_is_judged_from_its_own_row() -> None:
     seen: list[str] = []
 
@@ -934,15 +705,15 @@ async def test_a_dead_worker_is_judged_from_its_own_row() -> None:
     assert seen == ["aa0001"]
 
 
-async def test_list_uses_the_row_when_the_rebuild_slot_has_no_name() -> None:
+async def test_list_uses_the_row_when_the_slot_has_no_name() -> None:
     row = SimpleNamespace(
         session_id="aa0001",
         created_by=1,
         created_at=None,
         finished_at=None,
         status="interrupted",
-        strategy="rebuildable",
-        type="Rebuildable",
+        strategy="spawnable",
+        type="Spawnable",
         reason=None,
     )
 
@@ -953,12 +724,12 @@ async def test_list_uses_the_row_when_the_rebuild_slot_has_no_name() -> None:
         _Broker(),  # type: ignore[arg-type]
         list_db_sessions=list_sessions,
     )
-    manager._workers["aa0001"] = WorkerSlot(session_id="aa0001", role="rebuild")
+    manager._workers["aa0001"] = WorkerSlot(session_id="aa0001", role="create")
     listed = await manager.list_sessions(
         ListSessionsRequest(domain="sts", status="interrupted")
     )
-    assert listed[0].strategy == "Rebuildable"
-    assert listed[0].type == "Rebuildable"
+    assert listed[0].strategy == "Spawnable"
+    assert listed[0].type == "Spawnable"
 
 
 async def test_a_real_worker_answers_stop_on_its_control_subject(
@@ -1144,102 +915,6 @@ async def test_closing_the_lifeline_makes_the_worker_exit(
     await engine.dispose()
 
 
-_PROBE = """\
-from mftik.strategy import Strategy
-
-class Probe(Strategy):
-    rebuildable = True
-"""
-
-
-async def test_a_worker_reports_the_qualified_key(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The child resolves ``private::Probe`` and the parent stores that name.
-
-    The row's old short name is not what comes back. The worker is a real
-    process: a stub that prints the key would not show that ``adopt`` bound it.
-    """
-    data = tmp_path / "data"
-    RegistryStore(data).add({"strategy.py": _PROBE})
-    url = f"sqlite+aiosqlite:///{tmp_path / 'sts.db'}"
-    engine = build_engine(url)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-    async with maker() as db:
-        db.add(User(id=1, email="owner-1@test.invalid"))
-        db.add(
-            StsSessionRow(
-                session_id="aa00c5",
-                created_by=1,
-                status=SessionStatus.INTERRUPTED.value,
-                type="private::Probe",
-                instance="sts",
-                restart="always",
-                finished_at=datetime.now(UTC),
-                td={},
-                md_ids=[],
-                st_paras={},
-                st_facts={},
-                rebuild_count=0,
-            )
-        )
-        await db.commit()
-
-    before = dict(_REGISTRY)
-    process = None
-    monkeypatch.setenv("DATABASE_URL", url)
-    monkeypatch.setenv("MFTIK_DATA", str(data))
-    try:
-        refresh(RegistryStore(data), data)
-    except Exception:
-        _REGISTRY.clear()
-        _REGISTRY.update(before)
-        await engine.dispose()
-        raise
-    try:
-        async with a_broker("sts-probe") as broker:
-            monkeypatch.setenv("BROKER_KEY_PREFIX", broker.config.key_prefix)
-            monkeypatch.setenv("NATS_URL", broker.config.nats_url)
-            manager = SessionManager(
-                broker,
-                spawner=SubprocessSpawner(),
-                instance="sts",
-            )
-            row = SimpleNamespace(
-                session_id="aa00c5",
-                created_by=1,
-                status="interrupted",
-                type="private::Probe",
-                strategy="pr130_probe",
-                instance="sts",
-                restart="always",
-                finished_at=datetime.now(UTC),
-                rebuild_count=0,
-                td={},
-                md_ids=[],
-                st_paras={},
-                st_facts={},
-            )
-            try:
-                assert await manager.rebuild_session("aa00c5", row=row) is True
-                slot = manager.get("aa00c5")
-                assert isinstance(slot, WorkerSlot)
-                assert slot.strategy_name == "private::Probe"
-                process = slot.process
-            finally:
-                await manager.close_all()
-                if process is not None and process.returncode is None:
-                    process.kill()
-                    await process.wait()
-    finally:
-        reset_for_tests()
-        _REGISTRY.clear()
-        _REGISTRY.update(before)
-        await engine.dispose()
-
-
 def _hold(
     manager: SessionManager,
     store: dict[str, SimpleNamespace],
@@ -1255,8 +930,8 @@ def _hold(
         session_id=session_id,
         role="create",
         started=started,
-        strategy_name="rebuildable",
-        type="Rebuildable",
+        strategy_name="spawnable",
+        type="Spawnable",
         created_by=1,
         process=process,
     )
@@ -1269,7 +944,7 @@ def _hold(
 async def test_escalate_stop_kills_a_worker_that_did_not_answer() -> None:
     store: dict[str, SimpleNamespace] = {}
     process = StubbornProcess()
-    manager = _manager(FakeSpawner(), store, rebuild=True, load=True)
+    manager = _manager(FakeSpawner(), store, load=True)
     _hold(manager, store, process)
     try:
         result = await manager.escalate_stop("s1")
@@ -1282,14 +957,13 @@ async def test_escalate_stop_kills_a_worker_that_did_not_answer() -> None:
     assert store["s1"].status == "failed"
     assert store["s1"].reason == STS_REASON_STOP_TIMED_OUT
     assert "s1" not in manager._workers
-    assert not manager._rebuild_tasks
 
 
 async def test_escalate_stop_kills_a_worker_still_in_on_start() -> None:
     """Not started yet is still a process. A sync ``on_start`` is the same stall."""
     store: dict[str, SimpleNamespace] = {}
     process = StubbornProcess()
-    manager = _manager(FakeSpawner(), store, rebuild=True, load=True)
+    manager = _manager(FakeSpawner(), store, load=True)
     _hold(manager, store, process, started=False)
     try:
         result = await manager.escalate_stop("s1")
@@ -1300,7 +974,6 @@ async def test_escalate_stop_kills_a_worker_still_in_on_start() -> None:
     assert result.status == "failed"
     assert result.reason == STS_REASON_STOP_TIMED_OUT
     assert store["s1"].status == "failed"
-    assert not manager._rebuild_tasks
 
 
 async def test_a_second_force_stop_waits_instead_of_signalling_again() -> None:

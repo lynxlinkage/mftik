@@ -45,19 +45,10 @@ async def persist_live_session(
 
 
 async def mark_session_live(session_id: str) -> StsSessionRow | None:
-    """Put a session back to ``live`` — used when rebuilding one."""
+    """Put a terminal session back to ``live``."""
     async with session_scope() as db:
         repo = StsSessionRepository(db)
         return await repo.mark_live(session_id)
-
-
-async def remember_fact(
-    session_id: str, key: str, value: str
-) -> StsSessionRow | None:
-    """Persist one fact a strategy cannot re-derive after a restart."""
-    async with session_scope() as db:
-        repo = StsSessionRepository(db)
-        return await repo.remember(session_id, key, value)
 
 
 async def mark_session_finished(
@@ -97,18 +88,6 @@ async def list_sessions(
         )
 
 
-async def bump_rebuild_count(session_id: str) -> int:
-    async with session_scope() as db:
-        repo = StsSessionRepository(db)
-        return await repo.bump_rebuild_count(session_id)
-
-
-async def reset_rebuild_count(session_id: str) -> StsSessionRow | None:
-    async with session_scope() as db:
-        repo = StsSessionRepository(db)
-        return await repo.reset_rebuild_count(session_id)
-
-
 async def derived_sts(api_ids: list[int]) -> str | None:
     """The unique enabled STS in the region these credentials share."""
     async with session_scope() as db:
@@ -120,9 +99,8 @@ async def td_instance(api_id: int) -> str | None:
 
     STS resolves it here rather than reading a name recorded in the session
     document. A credential can be moved between instances, and a copy taken at
-    deploy time would send a rebuild — days later, after a restart — to the
-    instance that used to be allowed to use it. ``apis.instance_id`` is the
-    only thing that knows.
+    deploy time would send an attach to the instance that used to be allowed
+    to use it. ``apis.instance_id`` is the only thing that knows.
     """
     async with session_scope() as db:
         return await ApiRepository(db).instance_name(api_id)

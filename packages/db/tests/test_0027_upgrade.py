@@ -170,11 +170,11 @@ async def test_the_old_column_is_gone_and_the_new_one_is_there(
 async def test_cross_arb_gets_its_account_names_from_the_mapping(
     migrated,
 ) -> None:
-    """Without this a session live across the upgrade cannot rebuild.
+    """``CrossArb.on_initialized`` now requires the two names.
 
-    ``CrossArb.on_initialized`` now requires the two names, and it runs on the
-    rebuild path — so a row whose ``st_paras`` predates them fails there, not
-    here, where nothing is left to explain what went wrong.
+    A row whose ``st_paras`` predates them would fail wherever the strategy is
+    next constructed, not here, where nothing is left to explain what went
+    wrong.
     """
     table = await migrated(
         [
