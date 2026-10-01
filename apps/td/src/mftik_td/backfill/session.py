@@ -1,10 +1,10 @@
 """Serves ``td.backfill`` for as long as the process lives.
 
-Deliberately unlike the trading sessions next to it. Those hold a fencing lease
-because an account is leased to a strategy and two of them disagreeing about
-who owns it matters. A history read is owned by nobody: any TD can load the
-credential and ask, the answer is the same whoever asked, and the writes it
-produces are idempotent — so this session needs no attach, no heartbeat and no
+Deliberately unlike the trading sessions next to it. Those are held by one
+process at a time, because an account is traded by one strategy and two of them
+disagreeing about who owns it matters. A history read is owned by nobody: any
+TD can load the credential and ask, the answer is the same whoever asked, and
+the writes it produces are idempotent — so this session needs no owner and no
 expiry. It is up whenever the process is, and it will answer for an ``api_id``
 this process has never traded.
 
