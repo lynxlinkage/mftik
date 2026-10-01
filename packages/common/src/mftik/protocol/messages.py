@@ -820,15 +820,6 @@ class StsSessionStatus(BaseModel):
     type: str | None = None
 
 
-#: How often STS publishes a fencing heartbeat. Peers that have not heard
-#: one yet use this so attach-before-first-hb still has a timeout.
-LEASE_HEARTBEAT_INTERVAL_S = 1.0
-
-#: Missed intervals before a fenced link is dead. One drop is a lost core
-#: message; three is the fuse. 1 Hz → ~3s.
-LEASE_MISS_LIMIT = 3
-
-
 class MdAttachRequest(BaseModel):
     """API → MD: attach STS session with market-data subscriptions."""
 
