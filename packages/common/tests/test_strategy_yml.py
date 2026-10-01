@@ -24,6 +24,7 @@ from mftik.protocol import (
     RESTART_ON_FAILURE,
     OptionChainSelect,
     RollingFutureSelect,
+    StrategySpec,
     StrategyYamlError,
     TdAccountRef,
     TdSettings,
@@ -956,6 +957,15 @@ def test_an_entry_is_still_refused_when_it_is_not_a_feed_key() -> None:
     """The plain-string form has not changed, and neither has its refusal."""
     with pytest.raises(StrategyYamlError, match="topic.UniversalTicker"):
         parse_strategy_yml("md:\n  - feed: not-a-feed\n")
+
+
+def test_the_normalized_form_reads_back_into_the_same_spec() -> None:
+    """``md_select`` is refused in a *document* and accepted as a field, because
+    the second is what a parsed spec dumps to — a row, a payload, a round trip
+    through JSON. A union that could not read its own dump back would be a spec
+    that only exists for as long as the process that parsed it."""
+    spec = parse_strategy_yml(PLAN_6_4)
+    assert StrategySpec.model_validate(spec.model_dump()) == spec
 
 
 def test_the_lifted_fields_are_not_document_keys() -> None:

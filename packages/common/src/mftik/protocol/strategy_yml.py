@@ -1,4 +1,32 @@
-"""strategy.yml — deployment document for TD + MD + STS."""
+"""strategy.yml — deployment document for TD + MD + STS.
+
+Where a strategy runs, how it is configured, and what the platform does with the
+run. Not *which* strategy — that is chosen at deploy time (see below).
+
+    td:                            # account name -> per-account settings
+      paper trader:
+    md:                            # instance name -> what that MD serves
+      md-jp:
+        - ticker.Deribit_Perp_BTCUSD          # a feed
+        - feed: trade.Deribit_Perp_BTCUSD     # a feed, delivered its own way
+          delivery: latest                    # latest | kline | all
+        - select: btc_chain                   # a set MD derives and re-derives
+          kind: option_chain                  # option_chain | rolling_future
+          ...
+    restart: on_failure            # never (default) | on_failure
+    max_restarts: 5                # inside restart_window_s, then it fails
+    restart_window_s: 600
+    start_timeout_s: 60            # on_start alone, at most 3600
+    ready_timeout_s: 30            # the readiness conditions, after on_start
+    limits:                        # RLIMIT_DATA and the offload pool sizes
+      memory_mb: 2048
+    sts:                           # the strategy's own parameters
+      gap_bps: 10
+
+Everything but ``td``, ``md`` and ``sts`` has a default, so a document that says
+none of it still describes a complete deployment. The defaults are the plan's
+(F11, F12, F33, §4.7, §5.5, §6.4) and are named as constants below.
+"""
 
 from __future__ import annotations
 
@@ -352,7 +380,7 @@ class Limits(BaseModel):
         return _whole(value, low=1)
 
 
-class ExpirySelect(BaseModel):
+class ChainExpiries(BaseModel):
     """``expiries:`` — which expiries an option chain covers."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -365,7 +393,7 @@ class ExpirySelect(BaseModel):
     min_tte_s: int = Field(default=0, ge=0)
 
 
-class StrikeSelect(BaseModel):
+class ChainStrikes(BaseModel):
     """``strikes:`` — how wide around the money, per expiry."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -376,7 +404,7 @@ class StrikeSelect(BaseModel):
     atm: int = Field(ge=0)
 
 
-class Recenter(BaseModel):
+class ChainRecenter(BaseModel):
     """``recenter:`` — when the chain is allowed to follow the reference price.
 
     Without this a chain re-centres on every tick that crosses a strike
@@ -414,12 +442,12 @@ class OptionChainSelect(BaseModel):
     #: selector, so the document does not list it among its own feeds and the
     #: strategy does not receive it unless it asks for it separately.
     ref: str
-    expiries: ExpirySelect
-    strikes: StrikeSelect
+    expiries: ChainExpiries
+    strikes: ChainStrikes
     sides: tuple[str, ...] = OPTION_SIDES
     #: Which topics to carry for each selected instrument.
     topics: tuple[str, ...]
-    recenter: Recenter = Recenter()
+    recenter: ChainRecenter = Field(default_factory=ChainRecenter)
 
 
 class RollingFutureSelect(BaseModel):
@@ -755,10 +783,12 @@ def _lift_md_entries(raw: dict[str, Any]) -> dict[str, Any]:
     delivery: dict[str, str] = {}
     named: dict[str, str] = {}
     for instance, entries in lists.items():
+        # A plain list named no instance, so neither does a refusal about it.
+        held = "md" if isinstance(value, list) else f"md[{instance.strip()!r}]"
         kept: list[Any] = []
         found: list[Any] = []
         for position, entry in enumerate(entries, start=1):
-            where = f"md[{instance.strip()!r}] entry {position}"
+            where = f"{held} entry {position}"
             if not isinstance(entry, dict):
                 kept.append(entry)
                 continue
@@ -772,10 +802,10 @@ def _lift_md_entries(raw: dict[str, Any]) -> dict[str, Any]:
                 if select.name in named:
                     raise StrategyYamlError(
                         f"{where}: select {select.name!r} is already declared "
-                        f"under md[{named[select.name]!r}]; a name is what the "
+                        f"under {named[select.name]}; a name is what the "
                         f"strategy looks one up by, so it names one set"
                     )
-                named[select.name] = instance
+                named[select.name] = held
                 found.append(select)
                 continue
             if _FEED_KEY not in entry:
@@ -871,7 +901,7 @@ def _parse_select(entry: dict[Any, Any], where: str) -> MdSelect:
     recenter = _sub_mapping(entry, "recenter", at, _RECENTER_KEYS, required=False)
     return OptionChainSelect(
         ref=_select_ref(_required(entry, "ref", at), at),
-        expiries=ExpirySelect(
+        expiries=ChainExpiries(
             nearest=_whole(
                 _required(expiries, "nearest", f"{at}: expiries"),
                 low=1,
@@ -881,7 +911,7 @@ def _parse_select(entry: dict[Any, Any], where: str) -> MdSelect:
                 expiries.get("min_tte", 0), where=f"{at}: expiries.min_tte"
             ),
         ),
-        strikes=StrikeSelect(
+        strikes=ChainStrikes(
             atm=_whole(
                 _required(strikes, "atm", f"{at}: strikes"),
                 low=0,
@@ -889,7 +919,7 @@ def _parse_select(entry: dict[Any, Any], where: str) -> MdSelect:
             )
         ),
         sides=_sides(entry.get("sides"), at),
-        recenter=Recenter(
+        recenter=ChainRecenter(
             strikes=_whole(
                 recenter.get("strikes", 1), low=1, where=f"{at}: recenter.strikes"
             ),
