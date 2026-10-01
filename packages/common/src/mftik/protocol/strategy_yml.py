@@ -38,7 +38,7 @@ RESTART_MODES = frozenset({RESTART_NEVER})
 #: What ``mftik check`` prints for a document that still says
 #: ``restart: always``. The parser prefixes the field name, so the line reads
 #: back as the value the author wrote.
-_RESTART_ALWAYS_HINT = (
+_OLD_RESTART_HINT = (
     "always is gone. It meant rebuild — resuming a run that was cut short "
     "with the state it had, which nothing does any more. Delete the line: "
     "never is the only mode and the default."
@@ -205,7 +205,7 @@ class StrategySpec(BaseModel):
             return RESTART_NEVER
         mode = str(value).strip().lower()
         if mode == "always":
-            raise ValueError(_RESTART_ALWAYS_HINT)
+            raise ValueError(_OLD_RESTART_HINT)
         if mode not in RESTART_MODES:
             raise ValueError(
                 f"restart must be one of {sorted(RESTART_MODES)}, got {value!r}"
