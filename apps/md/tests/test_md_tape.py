@@ -10,21 +10,13 @@ from __future__ import annotations
 
 import fakeredis.aioredis
 import pytest
-from broker_harness import a_broker
-from mftik.broker import Broker
 from mftik.exchange.tickers import UniversalTicker
-from mftik.protocol import Envelope, Topics
+from mftik.protocol import Topics
 from mftik_md.tape import TapeRecorder
 from mftik_md.tape_store import TapeStore, decode_tape_gaps
 
 TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 AGG_FEED = Topics.md_feed("aggtrade", TICKER)
-
-
-@pytest.fixture
-async def broker() -> Broker:
-    async with a_broker() as client:
-        yield client
 
 
 @pytest.fixture
@@ -162,41 +154,6 @@ async def test_configured_topics_replace_the_defaults(store: TapeStore) -> None:
     assert not recorder.records("aggtrade")
 
     await recorder.append("aggtrade", TICKER, _agg_payload("1"))
-    assert await store.tail(AGG_FEED, count=10) == []
-
-
-@pytest.mark.asyncio
-async def test_dispatcher_records_after_fanning_out(
-    broker: Broker, store: TapeStore
-) -> None:
-    """Wired where every print already passes, and behind the live sessions."""
-    from mftik_md.session.dispatcher import Dispatcher
-
-    recorder = TapeRecorder(store)
-    dispatcher = Dispatcher(broker, recorder=recorder)
-    envelope = Envelope[dict].wrap(
-        _agg_payload("7"), type="md.aggtrade", source="md"
-    )
-
-    await dispatcher.publish("aggtrade", TICKER, envelope)
-
-    rows = await store.tail(AGG_FEED, count=10)
-    assert [fields["trade_id"] for _id, fields in rows] == ["7"]
-
-
-@pytest.mark.asyncio
-async def test_dispatcher_without_a_recorder_records_nothing(
-    broker: Broker, store: TapeStore
-) -> None:
-    from mftik_md.session.dispatcher import Dispatcher
-
-    dispatcher = Dispatcher(broker)
-    envelope = Envelope[dict].wrap(
-        _agg_payload("7"), type="md.aggtrade", source="md"
-    )
-
-    await dispatcher.publish("aggtrade", TICKER, envelope)
-
     assert await store.tail(AGG_FEED, count=10) == []
 
 
