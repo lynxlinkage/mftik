@@ -127,9 +127,8 @@ class StsSessionRow(Base):
     #: STS restart. A property of the deploy, not of the strategy class or of
     #: whoever configured the process.
     restart: Mapped[str] = mapped_column(String(8), default="always")
-    #: How many times a rebuild has been attempted. Counted before the attempt
-    #: rather than after it, so a rebuild that takes the process down with it
-    #: still counts — that is the loop the cap exists to break.
+    #: Dead since RM-01 removed rebuild. The column waits for B10-01's
+    #: migration to drop it.
     rebuild_count: Mapped[int] = mapped_column(Integer, default=0)
     #: Account name → ``{api_id, settings}``. The attach list the UI still
     #: calls ``td_api_ids`` is derived from this.
@@ -147,10 +146,8 @@ class StsSessionRow(Base):
         JSON, default=dict
     )
     st_paras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    #: What ``Strategy.remember()`` wrote — facts established while running
-    #: that cannot be re-derived from ``st_paras`` or from TD reconciliation,
-    #: like the price a chase anchored its slippage guard on. Kept apart from
-    #: ``st_paras`` so configuration and runtime facts do not blur together.
+    #: Dead since RM-01 removed rebuild: nothing writes a fact here any more.
+    #: The column waits for B10-01's migration to drop it.
     st_facts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     creator = relationship("User", back_populates="sts_sessions")

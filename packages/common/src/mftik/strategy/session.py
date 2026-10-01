@@ -60,7 +60,3 @@ class SessionView(Protocol):
     ) -> None:
         """End this session — ``done``, or ``failed`` with ``reason`` kept."""
         ...
-
-    async def remember(self, key: str, value: str) -> None:
-        """Persist one fact for a rebuilt session to have back."""
-        ...

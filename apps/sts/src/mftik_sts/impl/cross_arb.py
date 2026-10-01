@@ -34,10 +34,6 @@ would answer a fill of that leg. Either shortfall skips the leg — it does not
 fail the session. A hedge IOC that still cannot fund at fill time is logged
 and not retried.
 
-**Rebuild.** Equivalent to a fresh start with the same config and cid slot:
-no facts are restored, leftover owned quote orders from recon are cancelled,
-and quoting begins again once both ledgers are live. Missed fills while STS
-was away are not hunted — same as a redeploy.
 """
 
 from __future__ import annotations
@@ -192,9 +188,6 @@ def _defer_cancel(leg: _OpenLeg, now: float) -> None:
 
 
 class CrossArb(Strategy):
-    #: Restorable as a clean restart — see :meth:`on_rebuild`.
-    rebuildable = True
-
     def __init__(self) -> None:
         super().__init__()
         self._quote_ticker: UniversalTicker | None = None
@@ -205,7 +198,8 @@ class CrossArb(Strategy):
         #: api_ids that have delivered recon — need both before placing.
         self._recon: set[int] = set()
         self._armed = False
-        #: True between :meth:`on_rebuild` and the first full arm.
+        #: True until the first full arm. Nothing sets it now that rebuild is
+        #: gone — see RM-01 / B5-08.
         self._restoring = False
         #: side → resting quote leg
         self._open: dict[Side, _OpenLeg] = {}
@@ -320,26 +314,6 @@ class CrossArb(Strategy):
     async def on_ready(self) -> None:
         await self.log("CrossArb ready — waiting for both TD recons to arm")
 
-    async def on_rebuild(self, remembered: dict[str, str]) -> None:
-        """STS restarted this session. Treat it as a clean start.
-
-        Nothing in ``remembered`` is needed — config lives in ``st_paras`` and
-        quoting state is rebuilt from the next hedge touch. Leftover quote
-        orders are cancelled when quote-account recon lands.
-        """
-        self._restoring = True
-        self._open.clear()
-        self._hedged.clear()
-        self._filled.clear()
-        self._hedge_quote = None
-        self._recon.clear()
-        self._armed = False
-        self.oms.clear_inflight()
-        await self.log(
-            "CrossArb restoring as a restart — will cancel leftovers on "
-            "recon, then quote again"
-        )
-
     async def on_stop(self) -> None:
         self._stopping = True
         api_id = self._quote_api_id()
@@ -376,8 +350,8 @@ class CrossArb(Strategy):
             f"({len(self._recon)}/2)"
         )
 
-        # Rebuild path: drop anything this session left resting on the quote
-        # book before arming, so the next place is a true restart.
+        # Drop anything this session left resting on the quote book before
+        # arming, so the next place is a true restart.
         if self._restoring and msg.api_id == quote_id:
             await self._cancel_recon_leftovers(msg)
 

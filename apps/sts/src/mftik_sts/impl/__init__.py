@@ -3,9 +3,8 @@
 A bundled strategy is registered under its class name (``NoopStrategy``).
 A registry tree is registered under its qualified key (``private::Tiny``).
 Rows written before that was the only key may still carry a short name in
-``type`` null and a ``strategy`` attribute on the in-memory row; the rebuild
-scan maps the bundled ones. Renaming a class is a migration — see
-``0034_strategy_type_key``.
+``type`` null and a ``strategy`` attribute on the in-memory row. Renaming a
+class is a migration — see ``0034_strategy_type_key``.
 """
 
 from __future__ import annotations
