@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.27（2026-10-01）**。§12 的待決事項已全部定案（F1 到 F38）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.28（2026-10-01）**。§12 的待決事項已全部定案（F1 到 F38）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
 > **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。
+>
+> **v0.28（B0-02，#155）：** 附錄 C 填入在 `ubuntu-latest` 上量到的結果。量測同時更正了兩件事，記在 C.6：F30 的 120 秒不能直接和基線的 428 秒相比，以及 §9.3 與 F16 對策略實作測試裡「真的 sleep」的描述不準（sleep 在 `chase.py` 而不是在測試裡）。兩者的結論都仍然成立。
 >
 > **v0.27（B0-05，#158）：** 附錄 A、B 定稿。附錄 A 從「依 import 整檔分類」改成逐案例，RM 的測試刪除量從 566 修正為 401；附錄 B 補上原本漏列的四個檔案與各票票號，並列出容易誤刪、實際上要保留的模組。每張 RM 票補上了 `檔案:函式` 的呼叫端清單與「B0-05 補正」。查核中確認 §5.4、§8.1、§8.2 和附錄 A、B 上的每一個符號都存在於 `a0cbfb2`。
 >
@@ -1363,4 +1365,471 @@ B0-05 實測出兩個 F16 的例外，RM 不可能完全不動這批測試：
 
 ## 附錄 C：B0 量測結果
 
-（待填）
+> **B0-02（#155）的量測。** Run：[Baseline test durations #36869973075](https://github.com/lynxlinkage/mftik/actions/runs/36869973075)（job `measure`，commit `cbb3f78`）。同一個 commit 的正式 CI：[Tests #36869972954](https://github.com/lynxlinkage/mftik/actions/runs/36869972954)，綠。
+>
+> 機器是 GitHub Actions `ubuntu-latest`：4 vCPU、16 GB、Python 3.12.3、NATS 2.11-alpine、Postgres 16-alpine、uvloop。量的是 `just test`（`uv run --all-packages pytest packages apps -q`）那一步 —— F30 下預算的就是這一步 —— 不含 `uv sync`、服務啟動、lint、contract 與 migration 檢查。
+>
+> 量測的代碼是 `refactor/process-planes`，與計畫的基準 commit `main` @ `a0cbfb2` 只差文件。原始資料（`junit.xml`、`durations.txt`、每個測試的成因拆解 `probe.json`、彙整好的 `report.md`）在那個 run 的 `baseline-durations` artifact 裡。
+
+### C.1 總量
+
+| 項目 | 數字 |
+|---|---|
+| `just test` 的 wall time | **428 秒** |
+| 同一份代碼的其他觀測 | 398、412、418 秒（`measure` job 的同一步）；421、422、435 秒（`tests.yml` 的 `Test` step）。區間 398–435 秒 |
+| F30 的預算 | 120 秒。現況是 **3.3 到 3.6 倍** |
+| 測試數（參數化展開後） | 4,244，其中 4 個 skip、0 個失敗 |
+| 測試模組數 | 281 |
+| 每個測試耗時加總 | 411.3 秒（junit 的 `testsuite time` 是 423.4 秒，差額是 session 級的收集與 fixture） |
+| 單一測試耗時中位數 | 3 毫秒 |
+| ≥ 0.5 秒的測試 | 157 個，合計 212.6 秒（52%） |
+| < 50 毫秒的測試 | 3,119 個，合計 18.9 秒（4.6%） |
+| 最慢的 50 個 | 合計 140.7 秒（34%） |
+| 整個 `Tests` job 的 wall time | 517 秒（含服務啟動、`uv sync`、lint、contract、migration，以及下面那一趟） |
+| 第二趟（只有 `packages`，`MFTIK_TEST_LOOP=asyncio`） | 66 秒 |
+
+**耗時集中在三個平面的 session 測試上。** 依套件分：
+
+| 套件 | 測試數 | 秒 | 占比 |
+|---|---|---|---|
+| `apps/api` | 743 | 119.9 | 29.1% |
+| `apps/td` | 429 | 112.8 | 27.4% |
+| `apps/sts` | 586 | 70.9 | 17.2% |
+| `packages/common` | 1891 | 36.4 | 8.9% |
+| `packages/db` | 237 | 29.5 | 7.2% |
+| `apps/md` | 235 | 27.6 | 6.7% |
+| `apps/sym` | 117 | 13.5 | 3.3% |
+| `apps/paper` | 6 | 0.6 | 0.2% |
+
+**`database_url` 的參數化是最大的單一成本。** 同樣 437 個測試，跑 Postgres 要 148.7 秒，跑 sqlite 只要 31.8 秒 —— 多出來的 117 秒是整套的 28%：
+
+| `database_url` | 測試數 | 秒 | 占比 |
+|---|---|---|---|
+| `postgres` | 437 | 148.7 | 36.1% |
+| `sqlite` | 437 | 31.8 | 7.7% |
+| 沒有這個參數 | 3,370 | 230.8 | 56.1% |
+
+這和 §9.1 規則 6（Postgres 方言只在 integration tier 跑）指的是同一件事，現在有數字：把 Postgres 那一趟移出 `just test`，`just test` 直接少 149 秒。
+
+### C.2 時間花在哪裡
+
+第二趟（加了量測外掛的那一趟，390.8 秒）把每個測試的時間記到會真的 block 的那幾種呼叫上。桶子之間互斥，各自上限是該測試自己的耗時：
+
+| 成因 | 秒 | 占比 |
+|---|---|---|
+| 其餘（CPU 與沒被歸類的等待） | 203.7 | 52.1% |
+| 真的 sleep（在測試自己的 task 上） | 69.4 | 17.8% |
+| NATS 的 no-responders re-ask 迴圈（`transport/nats.py:268`） | 55.2 | 14.1% |
+| `asyncpg.connect` | 46.8 | 12.0% |
+| NATS 其他（`connect`、`request`、`publish`、`subscribe`） | 9.8 | 2.5% |
+| 子進程 | 5.2 | 1.3% |
+| `wait_for` 逾時（在測試自己的 task 上） | 0.8 | 0.2% |
+
+三個讀這張表時必須知道的事：
+
+1. **「其餘」203.7 秒裡有 60 秒是一個測試。** `test_td_orphan_reaper.py::test_a_revived_lease_loop_clears_the_strikes` 把 `link.tasks` 換成 `asyncio.create_task(asyncio.sleep(60))`（`test_td_orphan_reaper.py:211`），然後在 `link.stop.set()` 之後 `gather` 它。`stop` 不會取消一個裸的 `asyncio.sleep(60)`，所以這個測試整整等 60 秒 —— 一個測試就是整套的 15%。這是這次量測最大的單一發現。扣掉它，「其餘」是 143 秒（37%），內容是 4,244 個測試各自幾十毫秒的實際工作：建 FastAPI app、建 sqlite schema、pydantic 驗證、paper 引擎撮合。
+2. **`asyncpg.connect` 的 46.8 秒只是連線。** `db_harness` 用 `NullPool`（`db_harness.py:127` 的註解寫明原因：pytest-asyncio 給每個測試自己的 loop，池裡的連線會屬於已經關掉的 loop），所以每個 session 一條新連線，整套開了 2,409 條，平均 19.4 毫秒。每個測試的 `TRUNCATE ... RESTART IDENTITY CASCADE` 與查詢本身落在「其餘」裡。C.1 的 149 秒才是 Postgres 的全部帳。
+3. **背景 loop 的 sleep 不算在裡面。** 整套有 703 秒的 sleep 發生在背景 task 上（NATS client 的 ping timer 220 秒、paper 引擎的 tick 118 秒、TD 的 pending sweep 兩個各 85 秒、`LeasedSessionLink` 的 watchdog 39 秒），它們和測試並行、不占 wall time。把它們加進來會得到「sleep 總和是 wall time 的兩倍」這種沒有意義的數字；外掛因此只認在測試自己那個 task 的 frame 鏈上的等待。
+
+### C.3 慢是不是 NATS 造成的（F31 的前提）
+
+**不是連線，但是 NATS 的往返模式。** 分開講三件事：
+
+1. **開連線幾乎不花時間。** 整套開了 602 條 NATS 連線（NATS 自己的 `/varz` 報 `total_connections = 606`；多出的四條不是測試開的，`conftest.py` 的 reachability 探測算其中一條），合計 **0.8 秒，平均 1.3 毫秒**。B2-03（#176）要做的「每個 xdist worker 共用一條連線」省下的就是這 0.8 秒 —— 占整套 0.2%。**F31 裡「共用連線」這一條不能用效能當理由**；它真正的價值是 §9.2 寫的那個（連線數可用 `/connz` 驗證、訂閱不互相干擾），不是省時間。
+2. **傳輸本身也不花時間。** `Client.publish`／`subscribe`／`flush`／`close` 共 9,771 次，合計 0.3 秒。NATS 送到的訊息數是 `in_msgs = 7338`、`out_msgs = 1706`。
+3. **貴的是「打到沒人服務的 subject」。** `Client.request` 1,644 次合計 13.0 秒，而 broker 自己的 re-ask 迴圈（`transport/nats.py:268`，`_NO_RESPONDERS_GRACE_S = 0.05`）另外睡掉 **55.2 秒**。兩者相加 **71.3 秒，整套的 18.2%**，而且幾乎全部來自兩個固定模式：
+   - **TD 的每一次 detach。** `SessionManager.detach`（`apps/td/src/mftik_td/session/manager.py:600`）會 `request_backfill` 到 `Topics.td_backfill(instance)`，`REQUEST_TIMEOUT_S = 3.0`，re-ask 預算是 `min(max(timeout * 0.5, 0.1), 1.0) = 1.0` 秒。測試裡沒有人服務那個 subject，所以**每一次 detach 固定付掉 0.95 秒**。`test_detach_rpc` 的三個測試、`test_td_orphan_reaper` 的兩個、`test_cid_ownership` 的兩個都是這樣，`test_session_create::test_attach_refcount_same_api` 和 `test_session_oms::test_attach_refcount_destroy` 做兩次 detach，就付兩次。
+   - **STS 的每一次 `stop()`。** `_publish_detaches` 的 detach RPC，`DETACH_TIMEOUT_S = 1.5`（`apps/sts/src/mftik_sts/session/session.py:177`），re-ask 預算 0.75 秒。對端是 subscriber 但不回答時（`test_eventlog` 的三個 tape 測試）就等滿 1.5 秒；對端完全不在時付 0.70 秒。`test_md_ack_watchdog`、`test_td_ack_watchdog`、`test_private_events`、`test_sts_session`、`test_detach_is_not_awaited` 全部都有這 0.70 秒。
+   
+   有 117 個測試碰到這個迴圈。它不是 NATS 慢，是測試只立起 RPC 的一端；**F31 的「行為測試直接呼叫 handler、不走傳輸」正好會把這 71 秒整批拿掉** —— 理由和 F31 原本寫的不同，但結論一致。不過 RM 已經先拿掉大部分：按定稿的附錄 A，這 55.2 秒裡有 47.3 秒隨 RM 刪的測試一起走，剩 7.9 秒分布在44 個測試上，所以這是 F31 的佐證，不是 B2-05 的優先順序依據。
+
+**對照：** 同一套測試裡，Postgres 參數化要 149 秒（C.1）、真的 sleep 要 69 秒（C.2）。所以要回答「慢是不是 NATS 造成的」：NATS 占 18%，排在 Postgres 之後；而 NATS 那 18% 裡有 98% 是對端不存在的 request，不是連線也不是傳輸延遲。
+
+### C.4 最慢的 50 個測試
+
+「秒」是不加量測外掛那一趟的 junit 數字；「依據」裡的秒數來自加了外掛的那一趟。主因是讀過測試之後標的，不是從名字猜的；標的規則是：
+
+- **真的 sleep** —— 擋住測試前進的 wall-clock sleep，不管寫在測試裡還是在被測的 production code 裡；
+- **lease 心跳** —— 等待長度由 lease／ack 的 interval 或 grace 決定；
+- **NATS 往返** —— 時間花在 broker 的 `request`／`probe` 上，含 re-ask 迴圈與 caller 的 timeout；
+- **子進程**、**Postgres**、**其他**。
+
+| # | 測試 | 秒 | 主因 | 依據（量到的數字與程式位置） |
+|---|---|---|---|---|
+| 1 | `test_td_orphan_reaper.py::test_a_revived_lease_loop_clears_the_strikes` | 61.02 | 真的 sleep | 測試把 `link.tasks` 換成 `asyncio.create_task(asyncio.sleep(60))`（`test_td_orphan_reaper.py:211`），然後 `link.stop.set()` 之後 `gather` 它。`stop` 不會取消那個 sleep，所以整整等 60 秒。一個測試就是整套的 15%。 |
+| 2 | `test_broker_probe.py::test_probing_a_dead_instance_does_not_pile_up` | 4.25 | NATS 往返 | `DEAD_PROBES = 64` 次 probe 打在沒人服務的 subject 上，每次在 re-ask 迴圈裡睡掉 `_NO_RESPONDERS_FLOOR_S = 0.1` 的預算（量到 3.2 s），加測試自己的 `sleep(1.0)`（`test_broker_probe.py:93`）。 |
+| 3 | `test_md_detach_disconnect.py::test_detach_returns_before_the_venue_is_disconnected` | 3.11 | 真的 sleep | `_make_venue_slow_to_close` 用 `asyncio.sleep(SLOW_CLOSE_S)` 當作關不掉的 venue，`SLOW_CLOSE_S = 3.0`（`test_md_detach_disconnect.py:32`、`:98`）。 |
+| 4 | `test_md_detach_disconnect.py::test_shutdown_waits_for_the_disconnects_it_started` | 3.10 | 真的 sleep | 同上，`SLOW_CLOSE_S = 3.0`。 |
+| 5 | `test_md_detach_disconnect.py::test_a_closing_venue_does_not_block_the_next_attach` | 3.10 | 真的 sleep | 同上，`SLOW_CLOSE_S = 3.0`。 |
+| 6 | `test_chase.py::test_the_sweep_gives_up_rather_than_looping_forever` | 3.06 | 真的 sleep | `chase.py:883` 的 `IOC_SLICE_PAUSE_S = 0.25` × `IOC_MAX_SLICES = 10` = 2.5 s，加 `chase.py:778` 的 `CANCEL_POLL_S` 輪詢 0.55 s。時鐘是注入的，這兩個 sleep 不是。 |
+| 7 | `test_session_create.py::test_lease_expiry_marks_done_and_destroys` | 2.56 | lease 心跳 | 停掉心跳後等 `lease_grace = 2.0` 到期，用 `sleep(0.1)` 輪詢最多 40 次（`test_session_create.py:201`）。 |
+| 8 | `test_detach_refcount.py::test_stop_one_sts_drops_td_refcount` | 2.18 | NATS 往返 | 1.95 s 在 `Client.request`、1.90 s 在 re-ask 迴圈：STS `stop()` 的 detach RPC 與 TD detach 觸發的 `request_backfill`，兩個對端在這個測試裡都沒立起來。 |
+| 9 | `test_session_oms.py::test_attach_refcount_destroy` | 2.13 | NATS 往返 | 兩次 TD detach，各觸發 `manager.py:600` 的 `request_backfill`（`REQUEST_TIMEOUT_S = 3.0`）打到沒人服務的 `td.backfill`，各耗掉 1.0 s 的 re-ask 預算。 |
+| 10 | `test_session_create.py::test_attach_refcount_same_api` | 2.13 | NATS 往返 | 同上，兩次 detach 共 1.90 s 在 re-ask 迴圈。 |
+| 11 | `test_session_processes.py::test_a_real_worker_answers_stop_on_its_control_subject` | 2.08 | 子進程 | `SubprocessSpawner` 真的 spawn 一個 worker；1.13 s 在 `create_subprocess_*` 與 `Process.wait`，0.74 s 在等那個進程回 RPC。 |
+| 12 | `test_order_rpc.py::test_state_is_cleared_when_the_session_dies` | 2.04 | NATS 往返 | 1.91 s 全在 re-ask 迴圈：兩個 request 打到沒人服務的 subject，各一個 1.0 s 的預算。 |
+| 13 | `test_md_ack_watchdog.py::test_overrunning_every_beat_still_notices_a_quiet_peer` | 2.04 | lease 心跳 | 每個 beat 用 `time.sleep(HEARTBEAT_LATE_S + heartbeat_interval)` 擋住 loop（`test_md_ack_watchdog.py:433`），再用 `sleep(0.02)` 輪詢到 ack grace 過期。 |
+| 14 | `test_binance_spot_client.py::test_unsubscribe_in_the_reconnect_gap_closes_locally` | 2.01 | 真的 sleep | `retry_backoff=2.0`，socket 的重連退避真的睡 2 秒（`binance/socket.py:333`）；測試用 `sleep(0.05)` × 80 等它（`test_binance_spot_client.py:185`）。 |
+| 15 | `test_session_processes.py::test_closing_the_lifeline_makes_the_worker_exit` | 1.85 | 子進程 | spawn 一個真的 worker 再關掉 lifeline；0.86 s 在子進程 spawn 與 wait。 |
+| 16 | `test_md_ack_watchdog.py::test_a_live_print_stream_never_trips_the_watchdog` | 1.74 | lease 心跳 | `sleep(GRACE * 4)`，`GRACE = 0.25` 就是 `md_ack_grace`（`test_md_ack_watchdog.py:270`）；另有 0.70 s 是 `stop()` 的 detach re-ask。 |
+| 17 | `test_td_ack_watchdog.py::test_a_live_td_never_trips_the_watchdog` | 1.73 | lease 心跳 | `sleep(GRACE * 4)`，加 `stop()` 的 detach re-ask 0.70 s。 |
+| 18 | `test_md_ack_watchdog.py::test_a_live_feed_never_trips_the_watchdog` | 1.73 | lease 心跳 | `sleep(GRACE * 4)`，加 `stop()` 的 detach re-ask 0.70 s。 |
+| 19 | `test_td_instance_routing.py::test_the_sweep_posts_each_account_to_its_own_queue[postgres]` | 1.72 | 真的 sleep | `backfill_cron.py:120` 的 `ACCOUNT_PAUSE_S = 0.5`，兩個帳號 1.0 s，加測試自己 `sleep(0.2)` × 2。 |
+| 20 | `test_backfill_executor.py::test_a_backwards_walk_still_makes_progress_across_runs[postgres]` | 1.67 | Postgres | 42 次 `asyncpg.connect`，0.73 s。`db_harness` 用 `NullPool`，每個 session 一條新連線。 |
+| 21 | `test_session_processes.py::test_a_worker_reports_the_qualified_key` | 1.59 | 子進程 | 0.62 s 在子進程，其餘是 sqlite 建 schema 與 registry 寫檔。 |
+| 22 | `test_cid_ownership.py::test_detached_owner_is_reported_as_detached` | 1.57 | NATS 往返 | 0.95 s 在 re-ask 迴圈（detach 的 `request_backfill`），加測試自己的 `sleep(0.2)` × 2。 |
+| 23 | `test_eventlog.py::test_a_capped_tape_read_says_it_was_capped` | 1.56 | NATS 往返 | 1.50 s 在 `Client.request`：`sts.stop()` 的 `_publish_detaches` 把 detach 送給只服務 tape 的那個 MD subject，有 subscriber 但不回答，等滿 `DETACH_TIMEOUT_S = 1.5`。 |
+| 24 | `test_eventlog.py::test_tape_read_records_the_prints_not_just_the_coverage` | 1.56 | NATS 往返 | 同上，1.50 s 等滿 `DETACH_TIMEOUT_S`。 |
+| 25 | `test_eventlog.py::test_a_spanned_gap_is_written_to_the_log` | 1.56 | NATS 往返 | 同上，1.51 s 等滿 `DETACH_TIMEOUT_S`。 |
+| 26 | `test_md_ack_watchdog.py::test_prints_do_not_arm_the_watchdog` | 1.47 | lease 心跳 | `sleep(GRACE * 3)` 等 ack grace 過，加 `stop()` 的 detach re-ask 0.70 s。 |
+| 27 | `test_md_ack_watchdog.py::test_a_session_that_never_heard_an_md_is_not_failed` | 1.46 | lease 心跳 | `sleep(GRACE * 3)`（`test_md_ack_watchdog.py:167`），加 detach re-ask 0.70 s。 |
+| 28 | `test_td_ack_watchdog.py::test_a_session_that_never_heard_a_td_is_not_failed` | 1.46 | lease 心跳 | `sleep(GRACE * 3)`（`test_td_ack_watchdog.py:103`），加 detach re-ask 0.70 s。 |
+| 29 | `test_td_instance_routing.py::test_the_sweep_posts_each_account_to_its_own_queue[sqlite]` | 1.46 | 真的 sleep | 和第 19 名同一個測試的 sqlite 版：`ACCOUNT_PAUSE_S` 1.0 s 加測試自己 0.4 s。兩個版本只差 0.26 s，所以這題和 DB 無關。 |
+| 30 | `test_cid_ownership.py::test_detach_keeps_owner_for_provenance` | 1.37 | NATS 往返 | 0.95 s 在 re-ask 迴圈（一次 detach 的 `request_backfill`），加 `sleep(0.2)`。 |
+| 31 | `test_chase.py::test_the_sweep_takes_one_level_at_a_time` | 1.25 | 真的 sleep | `IOC_SLICE_PAUSE_S` × 4 個 slice = 1.0 s，加 `CANCEL_POLL_S` 輪詢 0.25 s。 |
+| 32 | `test_td_instance_routing.py::test_a_jp_credential_never_reaches_the_us_queue[postgres]` | 1.17 | 真的 sleep | `ACCOUNT_PAUSE_S = 0.5` 加測試自己 0.4 s。 |
+| 33 | `test_detach_is_not_awaited.py::test_the_heartbeat_stops_which_is_what_ends_the_attach` | 1.11 | NATS 往返 | 0.70 s 在 re-ask 迴圈（STS detach RPC，`DETACH_TIMEOUT_S = 1.5` 的 re-ask 預算 0.75 s），加測試自己 0.4 s 的 sleep。 |
+| 34 | `test_alert_scenarios.py::test_s3_short_name_is_not_a_source[postgres]` | 1.10 | Postgres | 同一個測試在 sqlite 上 0.11 s、在 Postgres 上 1.10 s。時間在每個測試的 `TRUNCATE ... RESTART IDENTITY CASCADE` 與 `asyncpg.connect`。 |
+| 35 | `test_detach_rpc.py::test_a_detach_does_not_need_its_own_lease_loop` | 1.07 | NATS 往返 | 一次 TD detach → `request_backfill` 打到沒人服務的 `td.backfill`，0.95 s 在 re-ask 迴圈、0.97 s 在 `Client.request`。 |
+| 36 | `test_td_orphan_reaper.py::test_a_link_whose_lease_loop_died_is_detached` | 1.02 | NATS 往返 | reap 之後的 detach 一樣付一次完整的 re-ask 預算，0.95 s。 |
+| 37 | `test_dist_version.py::test_unset_is_not_a_release` | 1.02 | 子進程 | `subprocess.run(['uv', 'build', '--package', 'mftik', ...])`（`test_dist_version.py:33`），1.00 s 全在那個進程裡。 |
+| 38 | `test_detach_rpc.py::test_a_detach_request_closes_the_attach_and_answers` | 1.02 | NATS 往返 | 一次 detach 的 `request_backfill`，0.95 s re-ask。 |
+| 39 | `test_td_orphan_reaper.py::test_a_running_strategy_keeps_its_link` | 1.02 | NATS 往返 | teardown 的 detach 付一次 re-ask 預算，0.95 s。 |
+| 40 | `test_detach_rpc.py::test_detaching_twice_is_not_an_error` | 1.02 | NATS 往返 | 一次 detach 的 `request_backfill`，0.95 s re-ask。第二次 detach 已經沒有 link，不會再送。 |
+| 41 | `test_dist_version.py::test_the_tag_is_the_wheel_version` | 1.01 | 子進程 | 另一次 `uv build`，1.00 s 全在那個進程裡。 |
+| 42 | `test_broker_is_the_only_transport.py::test_no_domain_talks_to_a_store_directly` | 1.00 | 其他 | 量不到任何等待：這題讀遍所有 `src` 樹的檔案做 AST 檢查，1.00 s 全是 CPU。 |
+| 43 | `test_nats_transport.py::test_a_request_to_nobody_fails_at_once_rather_than_waiting` | 0.97 | NATS 往返 | 這題量的就是 re-ask 行為本身：0.95 s 全在 `transport/nats.py:268`。 |
+| 44 | `test_ledger_view.py::test_td_down_fails_closed` | 0.97 | NATS 往返 | TD 不在，ledger 的 request 耗掉完整的 re-ask 預算 0.95 s。 |
+| 45 | `test_sts_session.py::test_sts_session_lives_independently` | 0.96 | NATS 往返 | 0.70 s 在 re-ask 迴圈（`stop()` 的 detach），加 0.25 s 測試 sleep。 |
+| 46 | `test_td_instance_routing.py::test_a_jp_credential_never_reaches_the_us_queue[sqlite]` | 0.95 | 真的 sleep | 和第 32 名同一個測試的 sqlite 版：`ACCOUNT_PAUSE_S = 0.5` 加測試自己 0.4 s。 |
+| 47 | `test_auth_oauth.py::test_a_callback_we_did_not_start_is_refused[postgres-never-issued]` | 0.94 | Postgres | 同一個測試在 sqlite 上 0.09 s、在 Postgres 上 0.94 s。 |
+| 48 | `test_deribit_reconnect.py::test_a_resync_from_the_old_socket_does_not_drop_the_new_one` | 0.94 | 真的 sleep | `sleep(0.6)` 加 `sleep(0.3)`（`test_deribit_reconnect.py:252`、`:259`）。 |
+| 49 | `test_private_events.py::test_order_and_cancel_reject_paths` | 0.92 | NATS 往返 | 0.70 s 在 re-ask 迴圈（`stop()` 的 detach），加 0.10 s 測試 sleep。 |
+| 50 | `test_alert_scenarios.py::test_s2_session_id_is_not_a_source[postgres]` | 0.92 | Postgres | 同一個測試在 sqlite 上 0.10 s、在 Postgres 上 0.92 s。 |
+
+**按主因彙總：**
+
+| 主因 | 測試數 | 秒 |
+|---|---|---|
+| 真的 sleep | 12 | 82.9（扣掉第 1 名那個 60 秒的，是 21.9） |
+| NATS 往返 | 20 | 30.4 |
+| lease 心跳 | 8 | 14.2 |
+| 子進程 | 5 | 7.5 |
+| Postgres | 4 | 4.6 |
+| 其他 | 1 | 1.0 |
+
+### C.5 每個測試模組的耗時
+
+281 個模組，依耗時排序。「秒」是每個模組底下所有測試（參數化展開後）的耗時加總，占比以 411.3 秒為分母。
+
+| 模組 | 測試數 | 秒 | 占比 |
+|---|---|---|---|
+| `apps/td/tests/test_td_orphan_reaper.py` | 6 | 63.07 | 15.3% |
+| `apps/sym/tests/test_plane.py` | 61 | 13.35 | 3.2% |
+| `apps/td/tests/test_backfill_executor.py` | 50 | 13.31 | 3.2% |
+| `apps/api/tests/test_board_route.py` | 70 | 12.65 | 3.1% |
+| `apps/sts/tests/test_eventlog.py` | 22 | 12.51 | 3.0% |
+| `apps/api/tests/test_auth_registry_keys.py` | 40 | 11.83 | 2.9% |
+| `apps/api/tests/test_alert_scenarios.py` | 28 | 10.74 | 2.6% |
+| `apps/api/tests/test_auth_oauth.py` | 32 | 10.68 | 2.6% |
+| `apps/sts/tests/test_md_ack_watchdog.py` | 10 | 10.29 | 2.5% |
+| `apps/md/tests/test_md_detach_disconnect.py` | 3 | 9.32 | 2.3% |
+| `apps/sts/tests/test_mds_query.py` | 17 | 8.70 | 2.1% |
+| `packages/db/tests/test_history_repository.py` | 54 | 8.01 | 1.9% |
+| `packages/db/tests/test_sts_session_repository.py` | 54 | 7.69 | 1.9% |
+| `apps/td/tests/test_order_rpc.py` | 46 | 7.69 | 1.9% |
+| `apps/api/tests/test_instances_route.py` | 46 | 6.71 | 1.6% |
+| `apps/api/tests/test_auth_keys.py` | 26 | 6.26 | 1.5% |
+| `apps/sts/tests/test_session_processes.py` | 42 | 6.24 | 1.5% |
+| `apps/sts/tests/test_chase.py` | 56 | 5.97 | 1.5% |
+| `apps/td/tests/test_session_create.py` | 9 | 5.93 | 1.4% |
+| `apps/api/tests/test_td_instance_routing.py` | 8 | 5.81 | 1.4% |
+| `apps/api/tests/test_auth_setup.py` | 22 | 5.65 | 1.4% |
+| `apps/api/tests/test_sts_strategies.py` | 39 | 5.51 | 1.3% |
+| `apps/md/tests/test_md_expiry.py` | 12 | 5.27 | 1.3% |
+| `packages/common/tests/test_broker_probe.py` | 8 | 4.91 | 1.2% |
+| `apps/td/tests/test_cid_ownership.py` | 5 | 4.72 | 1.1% |
+| `apps/api/tests/test_sts_env_fanout.py` | 30 | 4.67 | 1.1% |
+| `apps/td/tests/test_history_writer.py` | 32 | 4.50 | 1.1% |
+| `apps/api/tests/test_auth_google.py` | 15 | 4.47 | 1.1% |
+| `apps/api/tests/test_backfill_cron.py` | 14 | 4.47 | 1.1% |
+| `packages/db/tests/test_symbol_repository.py` | 28 | 4.21 | 1.0% |
+| `apps/api/tests/test_md_instance_deploy.py` | 24 | 3.78 | 0.9% |
+| `apps/api/tests/test_list_offset_cap.py` | 24 | 3.67 | 0.9% |
+| `apps/md/tests/test_md_fetch.py` | 29 | 3.54 | 0.9% |
+| `apps/api/tests/test_auth_cli_flow.py` | 14 | 3.54 | 0.9% |
+| `apps/sts/tests/test_td_ack_watchdog.py` | 3 | 3.50 | 0.9% |
+| `apps/api/tests/test_alerts_route.py` | 20 | 3.33 | 0.8% |
+| `apps/td/tests/test_detach_rpc.py` | 4 | 3.16 | 0.8% |
+| `apps/md/tests/test_md_feed_end.py` | 13 | 2.81 | 0.7% |
+| `apps/sts/tests/test_private_events.py` | 3 | 2.75 | 0.7% |
+| `packages/common/tests/test_nats_transport.py` | 16 | 2.63 | 0.6% |
+| `apps/api/tests/test_auth_gate.py` | 17 | 2.61 | 0.6% |
+| `packages/common/tests/test_deribit_reconnect.py` | 6 | 2.60 | 0.6% |
+| `apps/sts/tests/test_sts_session.py` | 3 | 2.55 | 0.6% |
+| `apps/sts/tests/test_rebuild.py` | 33 | 2.46 | 0.6% |
+| `packages/common/tests/test_binance_spot_client.py` | 33 | 2.42 | 0.6% |
+| `apps/api/tests/test_board_ws.py` | 19 | 2.25 | 0.5% |
+| `apps/api/tests/test_audit_identity.py` | 6 | 2.23 | 0.5% |
+| `apps/md/tests/test_md_session.py` | 5 | 2.19 | 0.5% |
+| `apps/td/tests/test_session_oms.py` | 3 | 2.19 | 0.5% |
+| `apps/sts/tests/test_detach_refcount.py` | 1 | 2.18 | 0.5% |
+| `apps/td/tests/test_history_wiring.py` | 9 | 2.13 | 0.5% |
+| `apps/sts/tests/test_detach_is_not_awaited.py` | 4 | 2.04 | 0.5% |
+| `packages/common/tests/test_dist_version.py` | 2 | 2.03 | 0.5% |
+| `packages/db/tests/test_0027_upgrade.py` | 12 | 1.93 | 0.5% |
+| `apps/api/tests/test_stats_instances.py` | 10 | 1.79 | 0.4% |
+| `apps/md/tests/test_md_role_subjects.py` | 3 | 1.72 | 0.4% |
+| `apps/api/tests/test_eventlog_across_instances.py` | 10 | 1.70 | 0.4% |
+| `apps/td/tests/test_recon_snapshot.py` | 5 | 1.68 | 0.4% |
+| `apps/sts/tests/test_md_events.py` | 2 | 1.56 | 0.4% |
+| `packages/common/tests/test_wire_ledger.py` | 28 | 1.55 | 0.4% |
+| `packages/db/tests/test_derived_sts.py` | 12 | 1.54 | 0.4% |
+| `packages/db/tests/test_alert_repository.py` | 14 | 1.50 | 0.4% |
+| `packages/common/tests/test_deribit_socket.py` | 13 | 1.47 | 0.4% |
+| `apps/td/tests/test_backfill_triggers.py` | 9 | 1.24 | 0.3% |
+| `packages/common/tests/test_broker.py` | 8 | 1.23 | 0.3% |
+| `packages/common/tests/test_bybit_public.py` | 44 | 1.19 | 0.3% |
+| `apps/sts/tests/test_stop_ordering.py` | 4 | 1.12 | 0.3% |
+| `packages/db/tests/test_0031_upgrade.py` | 8 | 1.11 | 0.3% |
+| `packages/common/tests/test_deribit_public.py` | 27 | 1.10 | 0.3% |
+| `apps/api/tests/test_registry_add.py` | 25 | 1.07 | 0.3% |
+| `packages/common/tests/test_broker_is_the_only_transport.py` | 2 | 1.06 | 0.3% |
+| `packages/db/tests/test_session_log_repository.py` | 6 | 1.05 | 0.3% |
+| `apps/sts/tests/test_tape_read.py` | 19 | 1.04 | 0.3% |
+| `apps/api/tests/test_apis_create.py` | 6 | 1.00 | 0.2% |
+| `apps/sts/tests/test_ledger_view.py` | 7 | 1.00 | 0.2% |
+| `apps/td/tests/test_lease_resilience.py` | 4 | 0.99 | 0.2% |
+| `packages/common/tests/test_last_reader_release.py` | 20 | 0.98 | 0.2% |
+| `apps/td/tests/test_stream_rejects.py` | 7 | 0.95 | 0.2% |
+| `apps/sts/tests/test_timer.py` | 7 | 0.85 | 0.2% |
+| `apps/api/tests/test_sts_ack.py` | 6 | 0.83 | 0.2% |
+| `packages/common/tests/test_binance_future_client.py` | 17 | 0.82 | 0.2% |
+| `apps/sts/tests/test_recon_oms.py` | 1 | 0.82 | 0.2% |
+| `packages/common/tests/test_binance_delivery_client.py` | 16 | 0.82 | 0.2% |
+| `packages/db/tests/test_api_repository.py` | 6 | 0.81 | 0.2% |
+| `apps/api/tests/test_td_sessions_route.py` | 6 | 0.79 | 0.2% |
+| `apps/sts/tests/test_environment_rebuild.py` | 5 | 0.75 | 0.2% |
+| `apps/sts/tests/test_strategy_lifecycle.py` | 6 | 0.74 | 0.2% |
+| `apps/api/tests/test_audits_list.py` | 4 | 0.74 | 0.2% |
+| `apps/sts/tests/test_sts_incompatible_environment.py` | 5 | 0.74 | 0.2% |
+| `packages/common/tests/test_binance_delivery_public.py` | 12 | 0.73 | 0.2% |
+| `packages/db/tests/test_0029_upgrade.py` | 6 | 0.69 | 0.2% |
+| `packages/common/tests/test_gate_spot_client.py` | 26 | 0.65 | 0.2% |
+| `packages/common/tests/test_binance_future_public.py` | 11 | 0.64 | 0.2% |
+| `apps/md/tests/test_md_lease_resilience.py` | 2 | 0.62 | 0.2% |
+| `packages/common/tests/test_listed.py` | 1 | 0.60 | 0.1% |
+| `apps/md/tests/test_md_two_instances.py` | 6 | 0.57 | 0.1% |
+| `packages/common/tests/test_binance_delivery_private.py` | 24 | 0.53 | 0.1% |
+| `apps/sts/tests/test_session_control_addressing.py` | 5 | 0.53 | 0.1% |
+| `apps/paper/tests/test_paper_book_feed.py` | 4 | 0.52 | 0.1% |
+| `packages/common/tests/test_broker_serve_survives.py` | 2 | 0.51 | 0.1% |
+| `packages/common/tests/test_binance_future_feed.py` | 11 | 0.50 | 0.1% |
+| `packages/common/tests/test_plane_serves_its_subject.py` | 6 | 0.47 | 0.1% |
+| `packages/common/tests/test_binance_future_private.py` | 28 | 0.45 | 0.1% |
+| `apps/sts/tests/test_oms_wait_cids.py` | 11 | 0.45 | 0.1% |
+| `packages/common/tests/test_bybit_private.py` | 28 | 0.45 | 0.1% |
+| `apps/md/tests/test_md_orphan_reaper.py` | 9 | 0.44 | 0.1% |
+| `apps/md/tests/test_md_shared_venue_topics.py` | 12 | 0.44 | 0.1% |
+| `apps/td/tests/test_leverage_rpc.py` | 4 | 0.43 | 0.1% |
+| `packages/common/tests/test_binance_spot_public.py` | 15 | 0.41 | 0.1% |
+| `packages/db/tests/test_0030_upgrade.py` | 6 | 0.39 | 0.1% |
+| `packages/common/tests/test_bybit_private_stream.py` | 17 | 0.36 | 0.1% |
+| `packages/common/tests/test_cli_run.py` | 18 | 0.36 | 0.1% |
+| `apps/sts/tests/test_session_failed.py` | 15 | 0.36 | 0.1% |
+| `packages/db/tests/test_audit_repository.py` | 2 | 0.28 | 0.1% |
+| `packages/common/tests/test_gate_spot_private.py` | 35 | 0.28 | 0.1% |
+| `apps/sts/tests/test_status_events.py` | 5 | 0.27 | 0.1% |
+| `packages/common/tests/test_gate_future_public.py` | 7 | 0.27 | 0.1% |
+| `packages/common/tests/test_binance_delivery_feed.py` | 4 | 0.27 | 0.1% |
+| `apps/td/tests/test_account_ownership.py` | 3 | 0.26 | 0.1% |
+| `apps/md/tests/test_md_venue_feeds.py` | 22 | 0.26 | 0.1% |
+| `packages/common/tests/test_paper_exchange.py` | 23 | 0.26 | 0.1% |
+| `packages/db/tests/test_strategy_repository.py` | 2 | 0.26 | 0.1% |
+| `packages/common/tests/test_binance_spot_private.py` | 27 | 0.26 | 0.1% |
+| `apps/sts/tests/test_eventlog_rpc.py` | 8 | 0.24 | 0.1% |
+| `apps/sts/tests/test_sts_runtime_env.py` | 16 | 0.22 | 0.1% |
+| `packages/common/tests/test_okx_public.py` | 10 | 0.22 | 0.1% |
+| `packages/common/tests/test_bitget_public.py` | 8 | 0.22 | 0.1% |
+| `apps/api/tests/test_environment_api.py` | 32 | 0.20 | 0.0% |
+| `apps/api/tests/test_environment_flow.py` | 19 | 0.20 | 0.0% |
+| `packages/common/tests/test_cli_node.py` | 18 | 0.20 | 0.0% |
+| `packages/common/tests/test_cli_alert.py` | 25 | 0.18 | 0.0% |
+| `apps/api/tests/test_alert_flush.py` | 13 | 0.17 | 0.0% |
+| `packages/common/tests/test_cli_env.py` | 22 | 0.17 | 0.0% |
+| `packages/common/tests/test_boot_probe.py` | 3 | 0.16 | 0.0% |
+| `packages/common/tests/test_registry_store.py` | 35 | 0.16 | 0.0% |
+| `packages/common/tests/test_cli_client.py` | 25 | 0.16 | 0.0% |
+| `packages/common/tests/test_gate_spot_public.py` | 23 | 0.16 | 0.0% |
+| `apps/sts/tests/test_boot_schema_guard.py` | 6 | 0.15 | 0.0% |
+| `apps/td/tests/test_backfill_session.py` | 7 | 0.14 | 0.0% |
+| `apps/api/tests/test_eventlog_route.py` | 6 | 0.14 | 0.0% |
+| `packages/common/tests/test_cli_check.py` | 18 | 0.14 | 0.0% |
+| `apps/sym/tests/test_sources.py` | 56 | 0.13 | 0.0% |
+| `packages/common/tests/test_gate_future_client.py` | 7 | 0.13 | 0.0% |
+| `apps/sts/tests/test_artifact_rpc.py` | 3 | 0.12 | 0.0% |
+| `apps/md/tests/test_md_tape_rpc.py` | 2 | 0.12 | 0.0% |
+| `packages/common/tests/test_deribit_socket_race.py` | 2 | 0.12 | 0.0% |
+| `apps/paper/tests/test_paper_rpc.py` | 2 | 0.12 | 0.0% |
+| `apps/sts/tests/test_ledger_leverage.py` | 4 | 0.11 | 0.0% |
+| `apps/api/tests/test_log_persist.py` | 8 | 0.11 | 0.0% |
+| `apps/td/tests/test_td_rpc.py` | 2 | 0.11 | 0.0% |
+| `apps/sts/tests/test_rpc_loop_survives.py` | 2 | 0.11 | 0.0% |
+| `packages/common/tests/test_paper_remote_public.py` | 1 | 0.10 | 0.0% |
+| `apps/td/tests/test_connector_capabilities.py` | 6 | 0.09 | 0.0% |
+| `apps/td/tests/test_backfill_reader.py` | 38 | 0.09 | 0.0% |
+| `packages/common/tests/test_cli_init.py` | 11 | 0.09 | 0.0% |
+| `packages/common/tests/test_cli_push.py` | 9 | 0.08 | 0.0% |
+| `apps/sts/tests/test_macd_dollar.py` | 39 | 0.08 | 0.0% |
+| `apps/sts/tests/test_oco.py` | 53 | 0.08 | 0.0% |
+| `packages/common/tests/test_deribit_private.py` | 20 | 0.08 | 0.0% |
+| `apps/td/tests/test_venue_factory.py` | 17 | 0.08 | 0.0% |
+| `packages/common/tests/test_artifacts.py` | 22 | 0.07 | 0.0% |
+| `packages/common/tests/test_cli_app.py` | 11 | 0.07 | 0.0% |
+| `apps/sts/tests/test_sts_cid.py` | 4 | 0.07 | 0.0% |
+| `packages/common/tests/test_registry_migrate.py` | 22 | 0.07 | 0.0% |
+| `packages/common/tests/test_bitget_private_stream.py` | 2 | 0.07 | 0.0% |
+| `apps/sts/tests/test_cross_arb.py` | 40 | 0.07 | 0.0% |
+| `packages/common/tests/test_registry_sync.py` | 11 | 0.06 | 0.0% |
+| `apps/sts/tests/test_sts_registry_sync.py` | 14 | 0.06 | 0.0% |
+| `apps/sts/tests/test_attach_refused.py` | 3 | 0.06 | 0.0% |
+| `packages/common/tests/test_bybit_trade.py` | 8 | 0.05 | 0.0% |
+| `packages/common/tests/test_runtime_supervision.py` | 3 | 0.05 | 0.0% |
+| `apps/md/tests/test_md_tape.py` | 10 | 0.05 | 0.0% |
+| `packages/common/tests/test_envapply.py` | 20 | 0.05 | 0.0% |
+| `apps/md/tests/test_md_venue_factory.py` | 13 | 0.05 | 0.0% |
+| `packages/common/tests/test_okx_feed.py` | 7 | 0.05 | 0.0% |
+| `apps/api/tests/test_registry_delete.py` | 11 | 0.05 | 0.0% |
+| `packages/common/tests/test_cli_artifact.py` | 6 | 0.05 | 0.0% |
+| `packages/common/tests/test_strategy_yml.py` | 35 | 0.04 | 0.0% |
+| `packages/common/tests/test_environment.py` | 26 | 0.04 | 0.0% |
+| `apps/api/tests/test_environment_import.py` | 9 | 0.04 | 0.0% |
+| `packages/common/tests/test_cli_rm.py` | 6 | 0.04 | 0.0% |
+| `apps/sts/tests/test_twap.py` | 23 | 0.04 | 0.0% |
+| `packages/common/tests/test_deribit_setup_context.py` | 2 | 0.04 | 0.0% |
+| `packages/common/tests/test_cli_connect.py` | 19 | 0.04 | 0.0% |
+| `packages/common/tests/test_bybit_rest.py` | 15 | 0.04 | 0.0% |
+| `packages/common/tests/test_binance_delivery_rest.py` | 12 | 0.04 | 0.0% |
+| `apps/md/tests/test_md_binance_reads.py` | 18 | 0.04 | 0.0% |
+| `packages/common/tests/test_cli_sessions.py` | 5 | 0.03 | 0.0% |
+| `packages/common/tests/test_bitget_private.py` | 16 | 0.03 | 0.0% |
+| `packages/common/tests/test_okx_rest.py` | 11 | 0.03 | 0.0% |
+| `packages/db/tests/test_0034_strategy_type_key.py` | 3 | 0.03 | 0.0% |
+| `apps/md/tests/test_md_bybit_reads.py` | 13 | 0.03 | 0.0% |
+| `apps/api/tests/test_alert_match.py` | 8 | 0.03 | 0.0% |
+| `apps/api/tests/test_logs_route.py` | 10 | 0.03 | 0.0% |
+| `apps/md/tests/test_md_okx_reads.py` | 14 | 0.03 | 0.0% |
+| `apps/sts/tests/test_sts_registry_load.py` | 7 | 0.03 | 0.0% |
+| `apps/td/tests/test_session_leverage.py` | 8 | 0.02 | 0.0% |
+| `packages/common/tests/test_cli_config.py` | 23 | 0.02 | 0.0% |
+| `apps/md/tests/test_md_deribit_reads.py` | 17 | 0.02 | 0.0% |
+| `packages/common/tests/test_registry_remotes.py` | 9 | 0.02 | 0.0% |
+| `packages/common/tests/test_binance_spot_rest.py` | 13 | 0.02 | 0.0% |
+| `apps/api/tests/test_sym_routes.py` | 9 | 0.02 | 0.0% |
+| `packages/common/tests/test_gate_future_private.py` | 6 | 0.02 | 0.0% |
+| `apps/sts/tests/test_orphan_reaper.py` | 6 | 0.02 | 0.0% |
+| `apps/md/tests/test_md_binance_future_reads.py` | 10 | 0.02 | 0.0% |
+| `apps/sts/tests/test_sts_registry_reload.py` | 6 | 0.02 | 0.0% |
+| `packages/db/tests/test_schema_revision.py` | 7 | 0.02 | 0.0% |
+| `apps/api/tests/test_artifact_route.py` | 5 | 0.02 | 0.0% |
+| `packages/common/tests/test_okx_private.py` | 9 | 0.02 | 0.0% |
+| `apps/api/tests/test_alert_eval.py` | 9 | 0.02 | 0.0% |
+| `apps/sts/tests/test_oms_view.py` | 4 | 0.02 | 0.0% |
+| `apps/md/tests/test_md_binance_delivery_reads.py` | 8 | 0.02 | 0.0% |
+| `apps/sts/tests/test_noop_strategy.py` | 19 | 0.02 | 0.0% |
+| `apps/sts/tests/test_strategy_catalog.py` | 19 | 0.02 | 0.0% |
+| `packages/common/tests/test_registry_load_reload.py` | 6 | 0.02 | 0.0% |
+| `apps/td/tests/test_error_normalization.py` | 143 | 0.02 | 0.0% |
+| `packages/common/tests/test_registry_remove.py` | 6 | 0.02 | 0.0% |
+| `apps/api/tests/test_apis_venue.py` | 8 | 0.02 | 0.0% |
+| `packages/common/tests/test_registry_load.py` | 5 | 0.02 | 0.0% |
+| `apps/api/tests/test_apis_rename.py` | 5 | 0.01 | 0.0% |
+| `packages/common/tests/test_binance_future_rest.py` | 7 | 0.01 | 0.0% |
+| `apps/md/tests/test_md_bitget_reads.py` | 9 | 0.01 | 0.0% |
+| `apps/md/tests/test_md_gate_future_reads.py` | 5 | 0.01 | 0.0% |
+| `packages/common/tests/test_socket_close_timeout.py` | 4 | 0.01 | 0.0% |
+| `apps/api/tests/test_orchestrate_log_type.py` | 4 | 0.01 | 0.0% |
+| `apps/sts/tests/test_tape_keeper.py` | 6 | 0.01 | 0.0% |
+| `packages/common/tests/test_instance_name.py` | 25 | 0.01 | 0.0% |
+| `apps/api/tests/test_deploy_refused.py` | 4 | 0.01 | 0.0% |
+| `packages/common/tests/test_bybit_models.py` | 48 | 0.01 | 0.0% |
+| `packages/common/tests/test_bybit_protocol.py` | 24 | 0.01 | 0.0% |
+| `packages/common/tests/test_gate_future_rest.py` | 3 | 0.01 | 0.0% |
+| `packages/common/tests/test_binance_future_streams.py` | 20 | 0.01 | 0.0% |
+| `packages/common/tests/test_binance_spot_protocol.py` | 30 | 0.01 | 0.0% |
+| `packages/common/tests/test_gate_spot_models.py` | 32 | 0.01 | 0.0% |
+| `packages/common/tests/test_registry_files.py` | 10 | 0.01 | 0.0% |
+| `packages/common/tests/test_strategy_oms_inflight.py` | 10 | 0.01 | 0.0% |
+| `apps/sts/tests/test_strategy_log_type.py` | 3 | 0.01 | 0.0% |
+| `packages/common/tests/test_registry_gate.py` | 25 | 0.01 | 0.0% |
+| `apps/api/tests/test_sts_strategy_yaml.py` | 3 | 0.00 | 0.0% |
+| `packages/common/tests/test_binance_delivery_listing.py` | 8 | 0.00 | 0.0% |
+| `packages/common/tests/test_binance_spot_models.py` | 54 | 0.00 | 0.0% |
+| `packages/common/tests/test_deribit_protocol.py` | 17 | 0.00 | 0.0% |
+| `packages/common/tests/test_gate_future_models.py` | 16 | 0.00 | 0.0% |
+| `packages/common/tests/test_okx_private_stream.py` | 1 | 0.00 | 0.0% |
+| `packages/common/tests/test_query_codes.py` | 36 | 0.00 | 0.0% |
+| `packages/db/tests/test_0027_sts_td_mapping.py` | 5 | 0.00 | 0.0% |
+| `packages/db/tests/test_engine_pool.py` | 5 | 0.00 | 0.0% |
+| `apps/td/tests/test_ledger.py` | 12 | 0.00 | 0.0% |
+| `packages/common/tests/test_event_stream.py` | 3 | 0.00 | 0.0% |
+| `packages/common/tests/test_okx_models.py` | 43 | 0.00 | 0.0% |
+| `packages/common/tests/test_registry_protocol.py` | 8 | 0.00 | 0.0% |
+| `packages/common/tests/test_session_log.py` | 3 | 0.00 | 0.0% |
+| `packages/common/tests/test_binance_future_models.py` | 27 | 0.00 | 0.0% |
+| `packages/common/tests/test_binance_merged_feed.py` | 2 | 0.00 | 0.0% |
+| `packages/common/tests/test_order_check.py` | 14 | 0.00 | 0.0% |
+| `packages/common/tests/test_registry_qualify.py` | 3 | 0.00 | 0.0% |
+| `packages/common/tests/test_venues.py` | 30 | 0.00 | 0.0% |
+| `apps/api/tests/test_decimals.py` | 15 | 0.00 | 0.0% |
+| `apps/api/tests/test_stats_status_coverage.py` | 4 | 0.00 | 0.0% |
+| `apps/sts/tests/test_client_order_id.py` | 12 | 0.00 | 0.0% |
+| `packages/common/tests/test_bitget_models.py` | 5 | 0.00 | 0.0% |
+| `packages/common/tests/test_bitget_protocol.py` | 12 | 0.00 | 0.0% |
+| `packages/common/tests/test_bitget_socket.py` | 4 | 0.00 | 0.0% |
+| `packages/common/tests/test_instance_role.py` | 15 | 0.00 | 0.0% |
+| `packages/common/tests/test_okx_protocol.py` | 16 | 0.00 | 0.0% |
+| `packages/common/tests/test_order_status.py` | 30 | 0.00 | 0.0% |
+| `packages/common/tests/test_reservations.py` | 17 | 0.00 | 0.0% |
+| `packages/common/tests/test_strategy_public_api.py` | 3 | 0.00 | 0.0% |
+| `packages/common/tests/test_symbol_rounding.py` | 14 | 0.00 | 0.0% |
+| `packages/common/tests/test_symbols.py` | 41 | 0.00 | 0.0% |
+| `packages/db/tests/test_models.py` | 7 | 0.00 | 0.0% |
+| `apps/sts/tests/test_legacy_strategy_paths.py` | 3 | 0.00 | 0.0% |
+| `packages/common/tests/test_binance_delivery_streams.py` | 6 | 0.00 | 0.0% |
+| `packages/common/tests/test_envelope.py` | 6 | 0.00 | 0.0% |
+| `packages/common/tests/test_envimport.py` | 10 | 0.00 | 0.0% |
+| `packages/common/tests/test_instrument_identity.py` | 14 | 0.00 | 0.0% |
+| `packages/common/tests/test_intervals.py` | 34 | 0.00 | 0.0% |
+| `packages/common/tests/test_redacted_url.py` | 10 | 0.00 | 0.0% |
+| `packages/common/tests/test_registry_digest.py` | 3 | 0.00 | 0.0% |
+| `packages/common/tests/test_tickers.py` | 35 | 0.00 | 0.0% |
+| `packages/common/tests/test_topic_patterns.py` | 5 | 0.00 | 0.0% |
+
+### C.6 這份量測對計畫的修正
+
+1. **F30 的 120 秒不是拿來跟基線的 428 秒比的 —— 而且按定稿的附錄 A 算，預算比看起來寬。** F30 說的是「`just test`（unit 加 component，`pytest -n auto`）」那一步。現況沒有 tier、沒有 `pytest-xdist`，428 秒是「單進程、三個 tier 混在一起、每個 DB 測試再跑一趟 Postgres」的數字。把附錄 A（B0-05 定稿）套到這次的量測上：
+
+   | 步驟 | 秒 |
+   |---|---|
+   | 基線 | 411.3 |
+   | 減去整檔刪除的 42 個模組 | −156.6 |
+   | 減去部分刪除的 10 個模組裡會刪掉的案例 | −23.1 |
+   | **RM 之後**（3,816 個測試） | **231.8** |
+   | 其中 `database_url=postgres` 那一趟 | 144.0 |
+   | **把 Postgres 移到 integration tier 之後**（§9.1 規則 6） | **87.8** |
+
+   部分刪除的十個模組裡，附錄 A 指名了案例的照名字算；只有 `test_oms_wait_cids`（0.45 秒）依案例數比例估，誤差不到 0.3 秒。RM 幾乎不碰 Postgres 那一趟（148.7 秒裡留下 144.0 秒），因為那些是 repository 與 API 路由測試，不是 session 測試。
+
+   **結論：預算可行，但關鍵的那一步不是平行化，是把 Postgres 那一趟移出 `just test` —— 只做這一件，RM 之後就已經在 120 秒以內，還沒用到 xdist。** B2-04（#177）的順序應該是先拆 tier、再平行化。
+2. **§9.3 說策略實作測試「真的 sleep 只有一處（`test_chase` 的 0.2 秒）」，F16 說「幾乎沒有真的 sleep」—— 這個描述不準。** 測試本體確實只有一處 `asyncio.sleep(0.2)`（`test_chase.py:565`），但被測的 `chase.py` 自己有兩處真的 sleep：`IOC_SLICE_PAUSE_S = 0.25`（`chase.py:883`，量到 4.5 秒）和 `CANCEL_POLL_S = 0.05`（`chase.py:778`，量到 1.3 秒）。`test_chase.py` 一個模組 5.97 秒，是七個策略模組 6.3 秒裡的 95%。**F16 的結論（不威脅兩分鐘預算）成立 —— 236 個參數化後的測試合計 6.3 秒，1.5% —— 但理由要改成「真的 sleep 在 `chase.py` 裡，不在測試裡」**。這對 B2-02（#175）有實際影響：那個「unit tier 攔截 `asyncio.sleep(x > 0)`」的 conftest 會攔在 `chase.py` 上，不是攔在測試上，所以這批測試遷到 `FakeClock` 必須動 `chase.py`。
+3. **§9.3 的兩個靜態計數，一個差 8、一個吻合。** 「測試裡有 424 處 `asyncio.sleep(>0)`」：我在同一份代碼上數到 432 處（459 處 `asyncio.sleep(...)` 減 27 處 `asyncio.sleep(0)`）。「用到 NATS 的測試 75 個檔案、650 個測試函數」：靜態 grep 是 75 個檔案、649 個 `def test_`，和 B0-05 複查過的數字一致；執行時真正開過連線的是 **73 個檔案、601 個測試**（參數化後），NATS 自己報 606 條連線。差額是幾個 import 了 `a_broker` 但該案例沒用到的檔案。兩個數字都不影響任何結論。
+
+### C.7 量測方法，以及那個一次性 job 的去向
+
+量測用兩趟，都在同一個 job 裡、服務與指令和 `tests.yml` 的 `pytest` job 完全一致：
+
+1. **不加外掛的一趟**，`pytest packages apps -q --durations=0 --junitxml`。C.1、C.4 的「秒」、C.5 的模組表都出自這一趟 —— 量的是現況，不是被外掛影響過的現況。
+2. **加一個 pytest 外掛的一趟**（`scripts/pytest_cost_probe.py`，在 `cbb3f78` 上），把每個測試的時間記到 NATS client、真的 sleep、子進程、`asyncpg.connect` 各桶，並記下每個等待的呼叫位置 —— 只認在測試自己那個 task 的 frame 鏈上的等待，背景 loop 另記。C.2、C.3、C.4 的「依據」出自這一趟。外掛的額外成本可以從兩趟的 junit `testsuite time` 看出來：423.4 對 395.0 秒，也就是加了外掛反而略快 —— 第二趟的 Postgres 是暖的，`[postgres]` 的測試在第二趟普遍快上一截。
+
+**這個 job 量完就移除，不留在 PR 裡。** 三個理由：它要把整套測試跑兩趟，留著等於任何會觸發它的 PR 的 CI 時間翻倍；永久版的耗時閘門是 B2-04（#177）的範圍，兩個並存只會各自漂移；而 run 與 artifact 都是永久的，harness 本身也留在那個 PR 的 commit 歷史裡（`cbb3f78`），要重量一次把那三個檔案挑回來就行。它存在的期間靠 `paths` filter 只對動到 harness 自己的 PR 生效，所以從來沒有拖慢過正常 CI。
