@@ -37,6 +37,9 @@ ignore = ["UP046"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "integration: real subprocesses; outside the unit budget once tiers land (§9.1)",
+]
 testpaths = ["packages", "apps"]
 pythonpath = [
     # The venue stand-in servers (`gate_stub`, `binance_stub`) live beside the
