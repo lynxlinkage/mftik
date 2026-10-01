@@ -75,7 +75,7 @@ from mftik.protocol import (
     publish_sts_log,
     td_api_ids_of,
 )
-from mftik.strategy import Strategy
+from mftik.strategy import Ready, Strategy
 from mftik.strategy.eventlog import EventLog
 from mftik.symbols import SymbolClient
 from pydantic import BaseModel
@@ -353,7 +353,10 @@ class StsSession:
         self.event_log.record("lifecycle", "on_start", dir="self")
         await self.strategy.on_start()
         self.event_log.record("lifecycle", "on_ready", dir="self")
-        await self.strategy.on_ready()
+        # Nothing is waited on before this, so nothing can be missing yet. The
+        # ingress that computes readiness, and the report that can be non-empty,
+        # arrive with the session worker (IF-05).
+        await self.strategy.on_ready(Ready())
         await self._publish_log(
             f"session started strategy={self.strategy_name} "
             f"td={self.td_api_ids} md={self.md_ids}"

@@ -9,7 +9,6 @@ vanish from the page, with nothing anywhere remembering it should be there.
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 from auth_harness import a_client
@@ -140,13 +139,13 @@ async def test_probes_run_concurrently_so_the_page_costs_one_timeout(
     threshold is the kind of test that fails on a loaded machine for no reason.
     """
     broker = _Answering(up={}, delay=0.06)
-    started = time.monotonic()
     async with a_client(_app(broker)) as client:
         await client.get("/stats")
-    elapsed = time.monotonic() - started
 
+    # The overlap is the proof. A wall-clock bound here also timed app startup
+    # and the DB round trips, and failed on a loaded CI runner (B2-02 replaces
+    # real sleeps in this tier with FakeClock).
     assert broker.peak == 2, "both probes were in flight at once"
-    assert elapsed < 0.12, "two 60ms probes did not run back to back"
 
 
 async def test_session_counts_belong_to_the_instance_that_ran_them(db) -> None:

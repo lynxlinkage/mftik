@@ -48,7 +48,7 @@ from mftik.protocol import (
     Topics,
 )
 from mftik.protocol.reject_codes import describe
-from mftik.strategy import Strategy
+from mftik.strategy import Ready, Strategy
 from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S
 from mftik.strategy.timer import TimerToken
 
@@ -150,7 +150,7 @@ class NoopStrategy(Strategy):
         self._tick_token = self.timer.token()
         self._arm_timer()
 
-    async def on_ready(self) -> None:
+    async def on_ready(self, ready: Ready) -> None:
         await self.log("NoopStrategy ready — waiting for the first order book")
 
     async def on_stop(self) -> None:

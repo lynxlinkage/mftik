@@ -106,6 +106,12 @@ class RejectCode(IntEnum):
     #: before anything is reserved: sending it would size the order wrong
     #: or be rejected by the venue for a parameter it does not have.
     TD_UNSUPPORTED_ORDER_SHAPE = 115
+    #: The account is ``unavailable`` — its worker is restarting, changing
+    #: incarnation, or has gone silent for ten seconds (F14, §5.6). Refused in
+    #: the SDK without a round trip, because there is nothing on the other end
+    #: to refuse it. ``degraded`` is not this: an account whose confirmations
+    #: are merely late still takes orders.
+    TD_UNAVAILABLE = 116
 
     # --- 2xx: the venue said no, in a way we recognise ---------------------
 

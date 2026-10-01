@@ -200,8 +200,29 @@ class StrategyOms:
             self._cid_factory = ClientOrderIdFactory(session.session_id)
         return self._cid_factory.next()
 
-    async def view(self, api_id: int | None = None) -> OmsView:
-        """Read TD's live book for ``api_id`` over ``td.account``."""
+    async def view(
+        self, api_id: int | None = None, *, settled: bool = False
+    ) -> OmsView:
+        """Read TD's live book for ``api_id`` over ``td.account``.
+
+        ``settled=True`` waits for the book to come clean before it answers: an
+        order whose venue outcome is UNKNOWN is chased, and the read parks until
+        it resolves. That is what a strategy needing certainty about what it
+        holds asks for (F13) — it replaces the ``send_recon`` /
+        ``on_recon_done`` round trip, which is gone. A clean book answers
+        immediately, so the wait costs nothing when there is nothing to wait
+        for.
+
+        The default is the book as it stands, UNKNOWN included, which is the
+        right read for anything on a hot path.
+
+        ``settled=True`` raises :class:`NotImplementedError` until IF-11 serves
+        it; TD already has the waiting logic
+        (:func:`mftik_td.session.settled.view_when_settled`) and nothing calls
+        it yet.
+        """
+        if settled:
+            raise NotImplementedError("IF-06")
         resolved = self._resolve(api_id)
         log = session_log(self._strategy)
         if resolved is None:

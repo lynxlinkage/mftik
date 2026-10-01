@@ -76,7 +76,7 @@ from mftik.protocol import (
     Topics,
 )
 from mftik.protocol.reject_codes import describe, is_normalized
-from mftik.strategy import Strategy
+from mftik.strategy import Ready, Strategy
 from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S
 from mftik.strategy.timer import TimerToken
 
@@ -305,7 +305,7 @@ class ChaseOrder(Strategy):
             self._on_recon_timeout,
         )
 
-    async def on_ready(self) -> None:
+    async def on_ready(self, ready: Ready) -> None:
         await self.log("ChaseOrder ready — waiting for TD recon to arm")
 
     def _elapsed_s(self) -> str:

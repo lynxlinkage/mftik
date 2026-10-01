@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from mftik.exchange.models import (
@@ -20,7 +21,7 @@ from mftik.exchange.models import (
     Ticker,
     Trade,
 )
-from mftik.exchange.oms import Position
+from mftik.exchange.oms import OmsView, Position
 from mftik.protocol import (
     CancelReject,
     MdBestQuoteResult,
@@ -33,14 +34,20 @@ from mftik.protocol import (
     publish_sts_log,
 )
 from mftik.strategy.artifacts import StrategyArtifacts
+from mftik.strategy.budget import HookSlow
 from mftik.strategy.client_order_id import VERSION, session_id_of, version_of
 from mftik.strategy.ledger import StrategyLedger
+from mftik.strategy.md import FeedState, StrategyMd
 from mftik.strategy.mds import StrategyMds
+from mftik.strategy.offload import OffloadPool
 from mftik.strategy.oms import StrategyOms
+from mftik.strategy.ready import Ready
 from mftik.strategy.session import SessionView
 from mftik.strategy.symbols import StrategySymbols
 from mftik.strategy.tape import StrategyTape
+from mftik.strategy.td import AccountState, StrategyTd
 from mftik.strategy.timer import Timer
+from mftik.strategy.universe import UniverseChange
 
 
 class Strategy:
@@ -49,10 +56,47 @@ class Strategy:
     Session ↔ Strategy is 1-1. Override hooks as needed.
 
     Process control (wired):
-        on_start, on_ready, on_stop
+        on_start, on_ready(ready), on_stop
         exit() — natural end → session stop → on_stop → status "done"
         fail(reason) — same teardown, but status "failed" and reason is
         persisted for the UI
+        ``on_start`` may be long and may be synchronous, and it may not trade:
+        TD has not been subscribed and nothing has reconciled, so order entry
+        will raise :class:`~mftik.strategy.errors.NotReady` there (the gate
+        itself lands with the session worker — IF-06 defines the exception).
+        ``on_ready`` fires once, and fires even when a feed is missing — what
+        is missing is in ``ready.missing_feeds`` and what to do about it is the
+        strategy's call. See :mod:`mftik.strategy.ready`.
+
+    Heavy computation (interface only — IF-06, lands in B5-03):
+        await self.offload(func, *args) — run it off the strategy loop so
+        fills, timers and on_stop keep being served while it runs
+        await self.offload(func, *args, isolate=True) — in a child process,
+        for pure-Python work or anything with a memory risk
+        pool = await self.offload_pool(init=..., init_args=...) then
+        await pool.call(func, *args) — a child process with state loaded once
+        See :mod:`mftik.strategy.offload`. This replaces the old breathe /
+        slice_deadline pacing: hand over the whole computation rather than
+        cutting it into slices.
+
+    Availability, not content (interface only — IF-06, lands in B5-05):
+        on_md_update(feed, state, reason) — "live" | "down"
+        on_td_update(api_id, state, reason) — "ready" | "degraded" |
+        "unavailable"
+        self.md.state(feed) / self.td.state(api_id) — ask at any moment
+        Losing a feed or an account does not fail the session; the platform
+        notifies and the strategy decides. An ``unavailable`` account refuses
+        submits locally. These are not market-data or order events: prices
+        arrive on on_ticker and friends, orders on on_order_update.
+
+    Selector universes (interface only — IF-06, lands in B9):
+        on_universe_change(name, change) — change.added / removed / epoch, and
+        change.current for a rolling future
+        self.md.universe(name) / self.md.current(name)
+        A ``select:`` block in strategy.yml names a shape — the two nearest
+        expiries, the front quarterly — and the platform derives the members.
+        A contract sends nothing before its ``added`` and nothing after its
+        ``removed``.
 
     TD recon (wired):
         on_recon_done
@@ -61,6 +105,15 @@ class Strategy:
         them, so this is a view: available() is free minus TD's pre-locks.
         Contract strategies also call ledger.ensure_leverage(ticker) so TD
         caches per-symbol leverage for perp pre-locks (notional / leverage).
+
+    Gaps in the event stream (interface only — IF-06, lands in B5-05):
+        on_resync(api_id, cause, view) — the platform reconciled because the
+        stream may have a hole in it (NATS reconnected, or the account worker
+        rebuilt its book from the venue). ``view`` is the settled book; correct
+        whatever was accumulated from events against it.
+        await self.oms.view(settled=True) — the same convergence on demand,
+        for a strategy that needs UNKNOWN orders resolved before it acts.
+        Strategies do not reconcile themselves: there is no send_recon.
 
     Order entry — request-reply on ``td.order.{api_id}`` (wired):
         submit_order / cancel_order return True once TD acks the request.
@@ -174,6 +227,17 @@ class Strategy:
         self.oms = StrategyOms()
         #: On-demand market-data reads — history the feeds do not carry.
         self.mds = StrategyMds()
+        #: Whether the feeds are live, and which contracts a ``select:`` block
+        #: chose. Not market data, and not ``self.mds``: that one asks a venue
+        #: a question, this one asks the platform about the subscriptions this
+        #: session holds.
+        self.md = StrategyMd()
+        #: Whether an account can trade right now. What it holds is
+        #: :attr:`oms` and :attr:`ledger`.
+        self.td = StrategyTd()
+        #: How often a hook has blocked the strategy loop past the warning
+        #: line (F15). Written by the platform, read by the status progress.
+        self.hook_slow = HookSlow()
         #: Read-only balances from TD's ledger (available / free / prelock).
         self.ledger = StrategyLedger()
         #: Recorded trade history from MD, for warming up on what this session
@@ -204,6 +268,8 @@ class Strategy:
             self.registry_key = qualified
         self.oms.bind(self)
         self.mds.bind(self)
+        self.md.bind(self)
+        self.td.bind(self)
         self.ledger.bind(self)
         self.tape.bind(self)
         self.artifacts.bind(self)
@@ -274,16 +340,90 @@ class Strategy:
     async def on_start(self) -> None:
         """Called when the session starts strategy infrastructure."""
 
-    async def on_ready(self) -> None:
-        """Called after start when the session is ready to run."""
+    async def on_ready(self, ready: Ready) -> None:
+        """Called once, when everything the session declared is ready (F12).
+
+        Order entry opens here: by this point every account has reconciled, so
+        ``self.oms`` and ``self.ledger`` describe what is actually held, and a
+        submit before this raises :class:`~mftik.strategy.errors.NotReady`.
+
+        It fires even when market data did not all arrive. TD is a hard
+        condition and a session whose accounts did not reconcile fails instead
+        of reaching here; MD is a soft one, and whatever is still missing is in
+        ``ready.missing_feeds`` for the strategy to judge — wait, trade the legs
+        it has, or :meth:`fail`. See :class:`mftik.strategy.ready.Ready`.
+
+        A restarted session arrives here with positions it did not open (R3):
+        ``restart: on_failure`` cleans up resting orders, not exposure.
+        """
 
     async def on_stop(self) -> None:
         """Called when the session is shutting down."""
+
+    # --- availability (F14, §5.6) -------------------------------------------
+    #
+    # Connectivity, not content. A feed going down does not fail the session and
+    # an account going away does not either: the platform forwards what MD and
+    # TD say about themselves, and what to do about it is the strategy's.
+
+    async def on_md_update(
+        self, feed: str, state: FeedState, reason: str
+    ) -> None:
+        """Handle a feed becoming ``"live"`` or ``"down"``.
+
+        ``reason`` is a sentence — the venue dropped the socket, the connection
+        worker changed incarnation, the session's own broker reconnected.
+
+        There is no gap notification (F23). A strategy that needs to know what
+        it missed records the ``down`` and works it out from the ``live`` that
+        follows; on an ``all`` feed, ``event.seq`` is the other half of that.
+
+        A composite feed is ``down`` when any of its atoms is, and ``live`` only
+        when all of them are back (F19). Terminal endings are not here —
+        expiry and delisting arrive as :meth:`on_feed_end`.
+        """
+
+    async def on_td_update(
+        self, api_id: int, state: AccountState, reason: str
+    ) -> None:
+        """Handle an account becoming ``"ready"``, ``"degraded"`` or
+        ``"unavailable"``.
+
+        ``degraded`` means orders can still be sent but confirmations will be
+        late — submits are not refused, because a strategy that has to flatten
+        is better served by a slow answer than by none. ``unavailable`` means
+        submits and cancels are refused locally and never sent.
+
+        An account coming back from ``unavailable`` because its worker was
+        replaced arrives as :meth:`on_resync` first, then ``ready``.
+        """
 
     # --- TD recon ----------------------------------------------------------
 
     async def on_recon_done(self, msg: ReconDone) -> None:
         """Handle reconciliation-complete from TD. OMS is in ``self.oms``."""
+
+    async def on_resync(self, api_id: int, cause: str, view: OmsView) -> None:
+        """Handle a book that had to be rebuilt, or a stream that may have a
+        hole in it (F13).
+
+        Only ever after :meth:`on_ready`, and only from the platform — a
+        strategy does not ask for this. Two causes:
+
+        ``"reconnect"``
+            The session's own broker connection dropped. Fills and order
+            updates published while it was gone were not retained.
+        ``"account_reset"``
+            The TD account worker changed incarnation and rebuilt its book from
+            the venue.
+
+        ``view`` is the settled book. Anything the strategy accumulated from
+        events should be corrected against it rather than trusted: a chase that
+        missed a fill will otherwise re-send an order for size it already has.
+
+        TD's own reconcile after a venue reconnect does not arrive here. Its
+        findings reach the strategy as ordinary order updates.
+        """
 
     # --- private events (td.{api_id}.global) --------------------------------
     #
@@ -457,6 +597,25 @@ class Strategy:
             level="warning",
         )
 
+    async def on_universe_change(self, name: str, change: UniverseChange) -> None:
+        """Handle a ``select:`` block's membership moving (F33).
+
+        ``name`` is the ``select:`` name from ``strategy.yml`` (``btc_chain``).
+        ``change.added`` and ``change.removed`` are the contracts that joined
+        and left, ``change.epoch`` orders one change against the next, and
+        ``change.current`` is a rolling future's front contract — a roll comes
+        through here too, not through a hook of its own.
+
+        A contract in ``added`` is already subscribed when this is called, and a
+        contract in ``removed`` sends nothing after it returns, including
+        anything already queued (I-SEL1). So a strategy can key its own state on
+        this hook without a window where an event arrives for a contract it has
+        not set up, or for one it has torn down.
+
+        The old contract of a roll stays in the universe until it expires, and
+        arrives in ``removed`` after an :meth:`on_feed_end`.
+        """
+
     # --- query answers -----------------------------------------------------
     #
     # One hook per kind of query, each firing once per ``mds.fetch_*`` call and
@@ -532,6 +691,65 @@ class Strategy:
         ``open_interest`` is None only on failure; an ``ok`` result with
         ``qty`` of zero is a real print.
         """
+
+    # --- heavy computation (F9, §5.5) ---------------------------------------
+
+    async def offload(
+        self, func: Callable[..., Any], /, *args: Any, isolate: bool = False
+    ) -> Any:
+        """Run ``func(*args)`` off the strategy loop and return its result.
+
+        For anything that would otherwise occupy the loop long enough to matter
+        to the strategy itself — a fit, an inference, folding a tape. While it
+        runs the loop is free, so fills, timers and a stop still get served, and
+        a hook that awaits this is not counted as blocked (F15).
+
+        ``isolate=False`` (default) uses a thread, which suits work that
+        releases the GIL — numpy, torch — and needs no pickling. It cannot be
+        interrupted: at teardown the await is cancelled and the thread runs on.
+
+        ``isolate=True`` uses a child process, which suits pure-Python work, C
+        extensions that hold the GIL, and anything that might exhaust memory.
+        ``func`` and ``args`` have to be picklable and ``func`` has to be
+        importable at module level, and the child is killable. It raises
+        :class:`~mftik.strategy.errors.OffloadWorkerLost` if the child dies.
+
+        ``func`` must not call the SDK. Pass what it needs and return what it
+        produced; in thread mode it must not mutate the strategy either, which
+        is still running its own loop alongside. Parallelism comes from
+        ``limits.offload_threads`` / ``limits.offload_processes``.
+
+        Raises :class:`NotImplementedError` until B5-03.
+        """
+        raise NotImplementedError("IF-06")
+
+    async def offload_pool(
+        self,
+        *,
+        init: Callable[..., Any] | None = None,
+        init_args: tuple[Any, ...] = (),
+        workers: int = 1,
+    ) -> OffloadPool:
+        """A process pool that keeps what ``init`` loaded, between calls.
+
+        ``init(*init_args)`` runs once in each worker and its return value is
+        handed to every :meth:`~mftik.strategy.offload.OffloadPool.call` as the
+        first argument — so a model is loaded once in the child rather than
+        pickled on every call::
+
+            self.ml = await self.offload_pool(init=load_model, init_args=(p,))
+            signal = await self.ml.call(predict, features)
+
+        ``workers`` is how many child processes to run.
+
+        Usable from ``on_start``, which is where a warm-up of this kind belongs.
+        The workers are part of the session's process tree: counted against its
+        memory at admission, killed with it, and rebuilt — ``init`` and all — if
+        one is lost.
+
+        Raises :class:`NotImplementedError` until B5-03.
+        """
+        raise NotImplementedError("IF-06")
 
     # --- helpers -----------------------------------------------------------
 
