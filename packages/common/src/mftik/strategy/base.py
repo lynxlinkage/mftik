@@ -22,18 +22,14 @@ from mftik.exchange.models import (
 )
 from mftik.exchange.oms import Position
 from mftik.protocol import (
-    STS_RECON,
     CancelReject,
-    Envelope,
     MdBestQuoteResult,
     MdFundingHistoryResult,
     MdKlinesResult,
     MdOpenInterestResult,
     MdOrderBookResult,
     OrderReject,
-    Recon,
     ReconDone,
-    Topics,
     publish_sts_log,
 )
 from mftik.strategy.artifacts import StrategyArtifacts
@@ -59,7 +55,7 @@ class Strategy:
         persisted for the UI
 
     TD recon (wired):
-        send_recon (auto on first lease ACK), on_recon_done
+        on_recon_done
         self.oms — read OMS snapshots from ``td.oms.{api_id}``
         self.ledger — read balances from ``td.ledger.{api_id}``; TD owns
         them, so this is a view: available() is free minus TD's pre-locks.
@@ -285,25 +281,6 @@ class Strategy:
         """Called when the session is shutting down."""
 
     # --- TD recon ----------------------------------------------------------
-
-    async def send_recon(self, api_id: int) -> None:
-        """Ask TD for an async OMS snapshot for ``api_id``.
-
-        TD answers with :meth:`on_recon_done` from its current book when clean,
-        or after it has settled any UNKNOWN orders. This does not ask TD to
-        hit the venue on behalf of the strategy.
-        """
-        if self.session is None:
-            raise RuntimeError("strategy is not bound to a session")
-        await self.session.broker.publish(
-            Topics.sts_td_session(self.session.session_id),
-            Envelope[Recon].wrap(
-                Recon(session_id=self.session.session_id, api_id=api_id),
-                type=STS_RECON,
-                source=f"strategy.{self.registry_key}",
-                session_id=self.session.session_id,
-            ),
-        )
 
     async def on_recon_done(self, msg: ReconDone) -> None:
         """Handle reconciliation-complete from TD. OMS is in ``self.oms``."""
