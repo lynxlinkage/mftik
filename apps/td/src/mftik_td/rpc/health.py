@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from mftik.broker import IncomingRequest
 from mftik.protocol import (
     TD_HEALTH,
@@ -11,17 +9,9 @@ from mftik.protocol import (
     HealthStatusEnvelope,
 )
 
-if TYPE_CHECKING:
-    from mftik_td.session import SessionManager
 
-
-async def handle_health(
-    req: IncomingRequest,
-    *,
-    sessions: SessionManager | None = None,
-) -> None:
+async def handle_health(req: IncomingRequest) -> None:
     """Reply to ``td.health`` with a simple ok status."""
-    del sessions  # unused for health
     await req.reply(
         HealthStatusEnvelope.wrap(
             HealthStatus(status="ok", service="td"),

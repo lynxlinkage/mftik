@@ -220,7 +220,7 @@ class VenueSessionFactory:
         if venue is venues.BINANCE:
             # ``api_secret`` is the Ed25519 private key, not a shared secret.
             # It is parsed here, at construction, so a malformed credential
-            # fails the attach rather than the first order.
+            # fails the session build rather than the first order.
             private = BinanceSpotPrivateClient(
                 api_key=row.api_key,
                 api_secret=row.api_secret,
