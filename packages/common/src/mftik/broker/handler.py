@@ -57,7 +57,10 @@ anything, which is why there is no class to instantiate.
 
 This is the layer §3.4 names ``mftik.broker.handler``. Converting each plane's
 RPC onto it is the B tickets' work; ``serve_health`` (:mod:`mftik.health`) is
-the one conversion IF-02 did, as the worked example.
+the one conversion IF-02 did, as the worked example. F40 keeps registry,
+extras, artifacts and event-log reads on the STS controller, so those RPCs
+come through here with the rest. IF-16 owns the registry and env handler
+signatures; this module does not define them.
 """
 
 from __future__ import annotations
@@ -94,6 +97,12 @@ class Handler(Protocol):
     and so is a callable object holding the state its answers come from — which
     is what every converted RPC will be, since the state is what makes the
     answer interesting.
+
+    Not :meth:`mftik.broker.Broker.serve_handler`. That callable is handed an
+    :class:`~mftik.broker.IncomingRequest` and writes the reply itself, which
+    is the mixing this layer takes apart. It stays for now: the API's registry
+    catch-up still calls it. §5.7 moves ``api.registry.catchup`` onto the STS
+    controller (F40); that handler's signature is IF-16, not this module.
     """
 
     async def __call__(self, message: UntypedEnvelope) -> Reply | None:

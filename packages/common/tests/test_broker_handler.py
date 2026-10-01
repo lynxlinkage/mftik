@@ -152,6 +152,51 @@ async def test_serve_sends_back_what_the_handler_returned(broker: Broker) -> Non
     assert seen[0].type == "demo"
 
 
+async def test_serve_answers_one_message_at_a_time(broker: Broker) -> None:
+    """H3. The next message waits until this one has been answered.
+
+    A handler that must not hold the subject starts its own task and returns.
+    This layer does not add concurrency on top of that.
+    """
+    stop = asyncio.Event()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    order: list[str] = []
+
+    async def handle(message: UntypedEnvelope) -> Reply | None:
+        n = message.payload["n"]
+        order.append(f"start {n}")
+        if n == 1:
+            started.set()
+            await release.wait()
+        order.append(f"end {n}")
+        return an_answer(n)
+
+    task = asyncio.create_task(serve(broker, SUBJECT, handle, stop=stop))
+    await asyncio.sleep(0.05)
+    try:
+        first = asyncio.create_task(
+            broker.request(SUBJECT, a_request(1), timeout=2)
+        )
+        await asyncio.wait_for(started.wait(), timeout=2)
+        second = asyncio.create_task(
+            broker.request(SUBJECT, a_request(2), timeout=2)
+        )
+        # Long enough for the second request to reach the subscription. If
+        # ``serve`` pulled it concurrently, ``order`` would already name it.
+        await asyncio.sleep(0.05)
+        assert order == ["start 1"]
+        release.set()
+        assert (await first).payload == {"n": 1}
+        assert (await second).payload == {"n": 2}
+    finally:
+        release.set()
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    assert order == ["start 1", "end 1", "start 2", "end 2"]
+
+
 async def test_a_handler_returning_none_sends_nothing(broker: Broker) -> None:
     """The requester times out, which is what "no answer" looks like (H2)."""
     stop = asyncio.Event()
@@ -367,8 +412,14 @@ LAYER = ROOT / "packages" / "common" / "src" / "mftik" / "broker"
 
 #: Where the scan looks: the three planes being rewritten, plus the shared
 #: library. ``apps/sym`` and ``apps/paper`` are outside the refactor (§5 to §7
-#: are STS, MD and TD), so their loops are left where they are and are not
-#: claimed by any ticket here.
+#: are STS, MD and TD), so their loops are left where they are.
+#:
+#: The API is outside too. ``api.registry.catchup`` is served there today, and
+#: §5.7 moves it onto the STS controller (F40); that handler's signature is
+#: IF-16, not this ticket. Registry, extras, artifacts and event-log reads
+#: already live under ``apps/sts`` and stay in the scan: F40 assigns them to
+#: that controller, so this contract does not leave their owner open and does
+#: not define their signatures.
 TREES = (
     ROOT / "packages" / "common" / "src",
     ROOT / "apps" / "sts" / "src",
@@ -376,27 +427,16 @@ TREES = (
     ROOT / "apps" / "td" / "src",
 )
 
-#: Not claimed, because where these belong in the new architecture is still
-#: open: who is authoritative for the strategy registry, and where the
-#: operator's artifact write path lives. Whatever answers those decides whether
-#: these two are converted or deleted, so this contract says nothing about
-#: them.
-UNDECIDED = (
-    ROOT / "apps" / "sts" / "src" / "mftik_sts" / "rpc" / "artifacts.py",
-    ROOT / "apps" / "sts" / "src" / "mftik_sts" / "rpc" / "registry.py",
-)
-
 #: A floor, so a glob that finds nothing passes for the wrong reason.
 MIN_FILES_SCANNED = 100
 
 
 def _sources() -> list[Path]:
-    undecided = {path.resolve() for path in UNDECIDED}
     return [
         path
         for tree in TREES
         for path in sorted(tree.rglob("*.py"))
-        if LAYER not in path.parents and path.resolve() not in undecided
+        if LAYER not in path.parents
     ]
 
 
@@ -443,8 +483,10 @@ def test_the_scan_reaches_the_tree() -> None:
     reason=(
         "B4-02 / B4-05 / B4-07 convert the three planes' request-reply onto "
         "this layer, and B6-05 / B7-05 take the backfill and fetch loops with "
-        "them; today each one hand-rolls the loop and replies through the "
-        "request handle"
+        "them. F40 keeps registry, extras, artifacts and event-log reads on "
+        "the STS controller: IF-16 defines the registry and env signatures, "
+        "and B5-11 keeps the artifact and event-log handlers there. Today "
+        "each one hand-rolls the loop or replies through the request handle"
     ),
 )
 def test_the_three_planes_answer_through_this_layer() -> None:
@@ -455,6 +497,12 @@ def test_the_three_planes_answer_through_this_layer() -> None:
     instead of returning an answer. Both are why 250 tests go through NATS to
     assert something that is a function of one message (§9.3), and both go away
     as each plane is converted.
+
+    F40 keeps registry, extras, ``sts.artifact.*`` and event-log reads on the
+    STS controller, so those modules are in this list too: they still take
+    :class:`~mftik.broker.IncomingRequest`. IF-16 owns the registry and env
+    signatures; B5-11 keeps the artifact and event-log handlers on the
+    controller. This scan does not define either.
 
     Listed by file and line so the failure reads as the worklist it is.
     """
