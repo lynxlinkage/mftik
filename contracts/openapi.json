@@ -1820,7 +1820,7 @@
           "sts"
         ],
         "summary": "Deploy",
-        "description": "Deploy ``strategy_type`` with the td / md / sts document in ``body``.\n\nThe type is in the path rather than the document because it decides what\n``sts:`` is allowed to contain \u2014 keeping them together let a user edit one\ninto disagreement with the other.",
+        "description": "Placeholder until IF-13 (#191) puts the asynchronous start here.\n\nThe synchronous deploy \u2014 create, then MD attach, then TD attach, rolled\nback on failure \u2014 was deleted with RM-08 (#171). Nothing validates the\ndocument any more, because nothing downstream of the validation exists\nyet; 501 rather than a partial success is the honest answer.",
         "operationId": "deploy_sts_deploy__strategy_type__post",
         "parameters": [
           {

@@ -28,9 +28,7 @@ from mftik.protocol import (
     ListSessionsRequest,
     ListSessionsRequestEnvelope,
     ListSessionsResult,
-    StrategySpec,
     StrategyTemplate,
-    StrategyYamlError,
     StsEventLogChunk,
     StsEventLogInfo,
     StsEventLogInfoRequest,
@@ -43,20 +41,16 @@ from mftik.protocol import (
     StsSessionControlResult,
     StsSessionStatus,
     StsSessionStatusEnvelope,
-    TdAccountRef,
-    TdSettings,
     Topics,
     all_templates,
     attached_api_ids,
     default_template,
     get_template,
     md_feeds_of,
-    parse_strategy_yml,
 )
 from mftik.registry import AddedStrategy, RegistryStore, qualify
 from mftik_db.models.session import SessionDomain, SessionStatus, StsSessionRow
 from mftik_db.repositories import (
-    AccountRepository,
     InstanceRepository,
     StsSessionRepository,
 )
@@ -66,7 +60,6 @@ from mftik_api.audit_util import record_audit
 from mftik_api.auth import ANONYMOUS, OwnerId, Principal, PrincipalDep
 from mftik_api.broker_rpc import DomainRpcError, request_domain
 from mftik_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
-from mftik_api.orchestrate import deploy_strategy
 from mftik_api.paging import ListOffset
 from mftik_api.schemas import (
     DeployResponse,
@@ -80,7 +73,6 @@ from mftik_api.schemas import (
     StrategyTypesResponse,
     StrategyYamlResponse,
     StsControlResponse,
-    TdAttachOut,
 )
 from mftik_api.sts_fanout import registry_availability
 
@@ -714,110 +706,18 @@ async def deploy(
     owner: OwnerId = DEFAULT_USER_ID,
     principal: PrincipalDep = ANONYMOUS,
 ) -> DeployResponse:
-    """Deploy ``strategy_type`` with the td / md / sts document in ``body``.
+    """Placeholder until IF-13 (#191) puts the asynchronous start here.
 
-    The type is in the path rather than the document because it decides what
-    ``sts:`` is allowed to contain — keeping them together let a user edit one
-    into disagreement with the other.
+    The synchronous deploy — create, then MD attach, then TD attach, rolled
+    back on failure — was deleted with RM-08 (#171). Nothing validates the
+    document any more, because nothing downstream of the validation exists
+    yet; 501 rather than a partial success is the honest answer.
     """
-    if _deployable_template(strategy_type, store) is None:
-        known = ", ".join(t.type for t in _deployable_templates(store))
-        raise HTTPException(
-            status_code=404,
-            detail=f"unknown strategy type: {strategy_type}; known: {known}",
-        )
-    try:
-        spec = parse_strategy_yml(body.yaml)
-    except StrategyYamlError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    created_by = body.created_by if body.created_by is not None else owner
-    _refuse_sts_accounts_missing_from_td(spec)
-    td = await _resolve_td(spec.td)
-    try:
-        result = await deploy_strategy(
-            broker,
-            strategy_id=strategy_type,
-            td=td,
-            md=dict(spec.md),
-            st_paras=dict(spec.sts),
-            created_by=created_by,
-            timeout=body.timeout,
-            restart=spec.restart,
-            strategy_type=strategy_type,
-            yaml_text=body.yaml,
-            instance=body.instance,
-        )
-    except DomainRpcError as exc:
-        code = 404 if exc.code in {"unknown_strategy", "not_found"} else 502
-        if exc.code == "timeout":
-            code = 504
-        if exc.code == "incompatible_environment":
-            code = 409
-        if exc.code == "strategy_refused":
-            # The document is wrong, not the platform. Nothing upstream failed
-            # and retrying will do the same thing, which is what separates this
-            # from the 502 and 504 beside it.
-            code = 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
-
-    session_id = result["session_id"]
-    await record_audit(
-        user_id=created_by,
-        operation="sts.deploy",
-        result=(
-            f"session_id={session_id} type={strategy_type} "
-            f"td_names={list(spec.td)} "
-            f"td={[a['api_id'] for a in result['td']]} md={result['md']}"
-        ),
-        principal=principal,
+    del strategy_type, body, broker, store, owner, principal
+    raise HTTPException(
+        status_code=501,
+        detail="deploy is not implemented — waiting for IF-13 (#191)",
     )
-    return DeployResponse(
-        session_id=session_id,
-        type=strategy_type,
-        config=dict(spec.sts),
-        td=[TdAttachOut(**a) for a in result["td"]],
-        md=result["md"],
-        status=result["status"],
-    )
-
-
-def _refuse_sts_accounts_missing_from_td(spec: StrategySpec) -> None:
-    """Refuse ``quote_account`` / ``hedge_account`` that are not td keys.
-
-    Deploy holds both mappings. A name that is not under ``td:`` is a
-    document error (400), the same class as a bad YAML — not a missing
-    account row (404).
-    """
-    for field in ("quote_account", "hedge_account"):
-        name = spec.sts.get(field)
-        if not isinstance(name, str) or not name.strip():
-            continue
-        if name.strip() not in spec.td:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{field} {name!r} is not a key under td",
-            )
-
-
-async def _resolve_td(
-    accounts: dict[str, TdSettings],
-) -> dict[str, TdAccountRef]:
-    """Map strategy.yml account names → resolved attaches."""
-    if not accounts:
-        return {}
-    async with session_scope() as db:
-        repo = AccountRepository(db)
-        out: dict[str, TdAccountRef] = {}
-        for name, settings in accounts.items():
-            account = await repo.get_by_name(name)
-            if account is None or account.api is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"unknown td account name: {name!r}",
-                )
-            out[name] = TdAccountRef(api_id=account.api_id, settings=settings)
-        return out
 
 
 async def _control(
