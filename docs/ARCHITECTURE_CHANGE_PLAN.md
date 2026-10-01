@@ -1435,7 +1435,7 @@ B0-05 實測出兩個 F16 的例外，RM 不可能完全不動這批測試：
 
 **不是連線，但是 NATS 的往返模式。** 分開講三件事：
 
-1. **開連線幾乎不花時間。** 整套開了 602 條 NATS 連線（NATS 自己的 `/varz` 報 `total_connections = 606`，多出的四條是 `conftest.py` 的 reachability 探測），合計 **0.8 秒，平均 1.3 毫秒**。B2-03（#176）要做的「每個 xdist worker 共用一條連線」省下的就是這 0.8 秒 —— 占整套 0.2%。**F31 裡「共用連線」這一條不能用效能當理由**；它真正的價值是 §9.2 寫的那個（連線數可用 `/connz` 驗證、訂閱不互相干擾），不是省時間。
+1. **開連線幾乎不花時間。** 整套開了 602 條 NATS 連線（NATS 自己的 `/varz` 報 `total_connections = 606`；多出的四條不是測試開的，`conftest.py` 的 reachability 探測算其中一條），合計 **0.8 秒，平均 1.3 毫秒**。B2-03（#176）要做的「每個 xdist worker 共用一條連線」省下的就是這 0.8 秒 —— 占整套 0.2%。**F31 裡「共用連線」這一條不能用效能當理由**；它真正的價值是 §9.2 寫的那個（連線數可用 `/connz` 驗證、訂閱不互相干擾），不是省時間。
 2. **傳輸本身也不花時間。** `Client.publish`／`subscribe`／`flush`／`close` 共 9,771 次，合計 0.3 秒。NATS 送到的訊息數是 `in_msgs = 7338`、`out_msgs = 1706`。
 3. **貴的是「打到沒人服務的 subject」。** `Client.request` 1,644 次合計 13.0 秒，而 broker 自己的 re-ask 迴圈（`transport/nats.py:268`，`_NO_RESPONDERS_GRACE_S = 0.05`）另外睡掉 **55.2 秒**。兩者相加 **71.3 秒，整套的 18.2%**，而且幾乎全部來自兩個固定模式：
    - **TD 的每一次 detach。** `SessionManager.detach`（`apps/td/src/mftik_td/session/manager.py:600`）會 `request_backfill` 到 `Topics.td_backfill(instance)`，`REQUEST_TIMEOUT_S = 3.0`，re-ask 預算是 `min(max(timeout * 0.5, 0.1), 1.0) = 1.0` 秒。測試裡沒有人服務那個 subject，所以**每一次 detach 固定付掉 0.95 秒**。`test_detach_rpc` 的三個測試、`test_td_orphan_reaper` 的兩個、`test_cid_ownership` 的兩個都是這樣，`test_session_create::test_attach_refcount_same_api` 和 `test_session_oms::test_attach_refcount_destroy` 做兩次 detach，就付兩次。
