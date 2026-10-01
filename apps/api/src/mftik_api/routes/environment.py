@@ -35,13 +35,6 @@ from mftik.environment import (
     provided_imports,
     resolved_dists,
 )
-from mftik.protocol import (
-    STS_SESSION_LIST,
-    ListSessionsRequest,
-    ListSessionsRequestEnvelope,
-    ListSessionsResult,
-    Topics,
-)
 from mftik.registry import RegistryStore
 from mftik.registry.errors import RegistryError
 from mftik.registry.sync import fetch_handshake
@@ -50,7 +43,6 @@ from starlette.concurrency import run_in_threadpool
 from mftik_api.audit_util import record_audit
 from mftik_api.auth import ANONYMOUS, OwnerId, PrincipalDep
 from mftik_api.auth.principal import Principal
-from mftik_api.broker_rpc import DomainRpcError, request_domain
 from mftik_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
 from mftik_api.schemas import (
     BrokenTreeOut,
@@ -159,39 +151,21 @@ def _view(
     )
 
 
-async def _live_session_ids(broker: BrokerDep) -> list[str]:
-    result = await request_domain(
-        broker,
-        Topics.STS,
-        ListSessionsRequestEnvelope.wrap(
-            ListSessionsRequest(domain="sts", status="live"),
-            type=STS_SESSION_LIST,
-            source="api",
-        ),
-        result_type=ListSessionsResult,
-    )
-    return [row.session_id for row in result.sessions]
-
-
 async def _require_no_live_sessions(broker: BrokerDep) -> None:
-    try:
-        live = await _live_session_ids(broker)
-    except DomainRpcError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "cannot change extras: STS did not answer the session list "
-                f"({exc.message}). Refusing so a live session is not assumed absent."
-            ),
-        ) from exc
-    if live:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "cannot change extras: live sessions are running. "
-                f"Stop these first: {', '.join(live)}"
-            ),
-        )
+    """Refuse a disruptive extras change while a session is running.
+
+    Nothing to refuse until IF-04 (#182). This used to ask STS for its live
+    sessions over ``sts.session.list``; RM-04 (#167) deleted the session
+    manager that answered, and with it every way for this node to be running
+    a strategy. The list it would get back is empty by construction, so the
+    guard passes rather than sending an RPC nobody serves.
+
+    Deliberately not re-pointed at ``sts_sessions``. A row left at ``live``
+    by the crash that RM-04 also removed the reaper for would block every
+    extras change with nothing able to clear it. B4-02 gives the question an
+    owner that can answer it.
+    """
+    del broker
 
 
 def _broken_trees(store: RegistryStore, removed: str) -> list[BrokenTreeOut]:

@@ -1601,6 +1601,7 @@
           "sts"
         ],
         "summary": "List Sessions",
+        "description": "Placeholder until IF-04 (#182) gives STS sessions to list again.\n\nRM-04 (#167) deleted STS's session manager, so ``sts.session.list`` now\nreaches a handler that raises \u2014 the request goes unanswered and the wait\nturns into a 502 that reads as a broken plane rather than as a route\nwith nothing behind it. ``GET /sts/strategies`` still answers: it reads\n``sts_sessions`` and does not ask a process.",
         "operationId": "list_sessions_sts_sessions_get",
         "parameters": [
           {
@@ -1651,6 +1652,7 @@
           "sts"
         ],
         "summary": "Stop Session",
+        "description": "Placeholder until IF-04 (#182) defines ``sts.session.end``.\n\nRM-04 (#167) deleted the worker a stop was addressed to, and with it the\nescalation that killed one that would not answer. There is no process\nleft to stop, so nothing is sent.",
         "operationId": "stop_session_sts_sessions__session_id__stop_post",
         "parameters": [
           {

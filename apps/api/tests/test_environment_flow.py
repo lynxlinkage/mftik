@@ -338,20 +338,12 @@ async def test_s7_delete_extra_breaks_deploy(data_dir: Path) -> None:
 
     await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
     environment_routes.installer_for_apply = record
-    with pytest.raises(HTTPException) as live:
-        await delete_package(
-            "numpy",
-            broker=EnvBroker(live=["sess-1"]),
-            store=store,
-            force=False,
-            owner=1,
-            principal=_OWNER,
-        )
-    assert live.value.status_code == 409
-    assert calls == []
+    # The refusal half of this scenario — the same delete turned away while a
+    # session was live — went with the gate in RM-04 (#167). What is left is
+    # that a forced delete still reports the tree it broke.
     forced = await delete_package(
         "numpy",
-        broker=EnvBroker(live=["sess-1"]),
+        broker=EnvBroker(),
         store=store,
         force=True,
         owner=1,
@@ -508,47 +500,3 @@ async def test_s15_helpers_declare_via_a_later_class_file(data_dir: Path) -> Non
         broker=_reload(store),
     )
     assert out.loaded is True
-
-
-async def test_s16_silent_sts_is_not_idle(data_dir: Path) -> None:
-    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    store = _store(data_dir)
-    calls: list[str] = []
-
-    def record(dest: Path, packages: dict[str, ApplySpec]) -> None:
-        calls.append("ran")
-        _write_pkg(dest, packages)
-
-    environment_routes.installer_for_apply = record
-    with pytest.raises(HTTPException) as caught:
-        await delete_package(
-            "numpy",
-            broker=EnvBroker(list_silent=True),
-            store=store,
-            force=False,
-            owner=1,
-            principal=_OWNER,
-        )
-    assert caught.value.status_code == 409
-    assert calls == []
-    forced = await delete_package(
-        "numpy",
-        broker=EnvBroker(list_silent=True),
-        store=store,
-        force=True,
-        owner=1,
-        principal=_OWNER,
-    )
-    assert forced.restart_required is True
-
-
-async def test_s17_session_arriving_mid_install_aborts(data_dir: Path) -> None:
-    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    broker = EnvBroker(live=[], live_after=["sess-late"])
-    with pytest.raises(HTTPException) as caught:
-        await _put({"numpy": ("2.0", "numpy")}, broker)
-    assert caught.value.status_code == 409
-    stamp = NodeEnv(data_dir).read_stamp()
-    assert stamp.generation == 1
-    assert stamp.packages["numpy"].version == "1.0"
-    assert not (data_dir / "env" / "gen-2").exists()
