@@ -631,7 +631,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 - **驗收（每張相同）：** 該 venue 現有的每個 product topic 都改由 atom 提供；book 的 fold 和缺口 resync 搬進 `decode` / reconciler；capacity 的實測值寫進 adapter。
 - **B7-02a 另外：** 修掉原 #151：`DeribitSocket._read_loop` 的 `retries` 只在剛斷掉的那條連線收過 frame 時才歸零，連續幾次 setup 失敗後，之後一次普通斷線就可能耗盡 `max_retries`。改成 setup 成功、且之後收到 frame 就歸零；回歸測試涵蓋 `_open` 失敗和 `_on_open` / `_restore` 失敗兩條路徑。
-- **依賴：** B7-01
+- **依賴：** B7-01、IF-10
 - **決策：** F19、F21
 
 ### B7-03 STS 端的通用 join 與組合型 feed 的狀態（#235）
