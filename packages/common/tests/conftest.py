@@ -7,6 +7,12 @@ from binance_delivery_stub import FakeBinanceDeliveryApi, FakeBinanceDeliveryUse
 from binance_future_stub import FakeBinanceFutureApi, FakeBinanceFutureUser
 from binance_stub import FakeBinanceApi, FakeBinanceStream, keypair
 from bitget_stub import FakeBitget
+
+# Registered by being named here. ``broker_harness`` is an ordinary module,
+# so pytest would not otherwise see these fixtures. A test module that
+# defines its own ``broker`` fixture still uses that one.
+from broker_harness import broker as broker
+from broker_harness import nats_connection as nats_connection
 from bybit_stub import FakeBybit
 from deribit_stub import FakeDeribit
 from gate_future_stub import FakeGateFutures
