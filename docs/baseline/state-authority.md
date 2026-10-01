@@ -2,7 +2,7 @@
 
 > **基準：** `main` @ `a0cbfb2`（`ARCHITECTURE_CHANGE_PLAN.md` 的基準 commit）。B0-01 的 `arch/baseline` tag 還沒打，所以本文一律以 commit hash 稱呼基準。
 >
-> `refactor/process-planes` 相對 `a0cbfb2` 只多了文件檔，`apps/` 和 `packages/` 完全沒有差異，所以本文引用的行號在兩個 ref 上都成立。
+> `refactor/process-planes` 相對 `a0cbfb2` 只動了 `docs/` 和 `README.md`（`git diff --name-only a0cbfb2 refactor/process-planes`），`apps/` 和 `packages/` 完全沒有差異，所以本文引用的行號在兩個 ref 上都成立。
 >
 > 「§」指 `ARCHITECTURE_CHANGE_PLAN.md` 的章節，「F」指同一份文件的決策編號。協定層的對照見 `docs/baseline/protocol.md`（B0-03）。
 
