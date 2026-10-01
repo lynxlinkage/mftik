@@ -740,6 +740,8 @@ class Strategy:
             self.ml = await self.offload_pool(init=load_model, init_args=(p,))
             signal = await self.ml.call(predict, features)
 
+        ``workers`` is how many child processes to run.
+
         Usable from ``on_start``, which is where a warm-up of this kind belongs.
         The workers are part of the session's process tree: counted against its
         memory at admission, killed with it, and rebuilt — ``init`` and all — if
