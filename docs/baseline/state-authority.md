@@ -94,33 +94,109 @@ session worker 是單一 event loop，沒有 ingress thread 和 strategy thread 
 
 ## 8. §3.3 沒有列、現況有的狀態
 
-TODO
+這些狀態在現況存在、§3.3 沒有對應的列。列在這裡是為了讓「§3.3 的表涵蓋了全部狀態嗎」這個問題有答案；其中幾項沒有任何票負責，一併記在 §12。
+
+| 狀態 | 權威 | 存放 | 讀取者 | 收斂 |
+|---|---|---|---|---|
+| 策略代碼（registry） | **API**。`RegistryStore` 是檔案系統上的樹（`packages/common/src/mftik/registry/store.py:1`、`RegistryStore.from_env` 在 `:87`，根目錄 env 是 `MFTIK_DATA`，`:32`），API 的 push / delete 寫它，再 fan-out 到每個 STS（`apps/api/src/mftik_api/sts_fanout.py`） | 檔案。API 一份、每個 STS 平面各一份副本 | STS 平面（`ensure_deployable`）、session worker（import 策略） | **STS 開機時向 API 要差額**：`catch_up_until_matched` 一直重試到 API 回報這個磁碟已經一致（`apps/sts/src/mftik_sts/registry_catchup.py:26`–`:40`），由 `app.py:379`–`:384` 啟動 |
+| STS 進程認定自己有哪些 extras | **STS 平面進程**，開機和每次 registry reload 時讀一次並留在記憶體（`apps/sts/src/mftik_sts/runtime_env.py:1`–`:19`，刻意不每次重開 `applied.json`） | 磁碟上的 stamp，加上進程記憶體的那一份 | `ensure_deployable`、`/info`、`sts.env.sync` | `refresh()` 重算；deploy 時用這份記憶體副本判斷環境相不相容 |
+| wire 層的訂閱帳本 | **每條 socket 的 `WireLedger`**（`packages/common/src/mftik/exchange/wire.py:178`） | venue connector 的記憶體 | socket 自己 | 重連時 `clear()` 後由 adapter `_restore` 重放。§3.3 把 observed 歸給「連線 worker 的 reconciler」，現況多了這一層獨立於 MD 的帳本（§1.1 有提到，但 §3.3 沒有列） |
+| session 的 log 歷史 | **API**（`apps/api/src/mftik_api/log_persist.py`，訂閱 `log.*.*` 寫表） | Postgres `session_logs`（`packages/db/src/mftik_db/models/session_log.py:14`） | API 的 logs / ws / alert 比對 | 表本身是權威；平面重啟不影響 |
+| 稽核、alert、auth、instance 宣告、使用者、帳號命名 | **API** | Postgres `audits`、`alert_*`、`auth_*`、`instances`、`users`、`accounts`。`instances` 的初始列由 alembic migration 寫（`packages/db/src/mftik_db/migrations/versions/0031_plane_instances.py`） | API、前端 | DB 是權威 |
 
 ## 9. 重啟恢復（逐一查證）
 
-### 9.1 STS 平面進程正常重啟
+上面的表每一列只有一格寫收斂。這一節把「一個進程重啟時實際發生什麼」整條走完，因為差異大多在這裡。
 
-TODO
+### 9.1 STS 平面進程正常重啟（部署滾動）
+
+**停止**（`SessionManager.close_all`，`manager.py:2141`）：
+
+1. 取消 settle / rebuild / create / escalation 的背景 task。
+2. `_stop_workers`（`manager.py:2180`）：**先把每個已啟動 worker 的 row 預先寫成 `interrupted`**（`:2197`），理由在 `:2189`–`:2192`——teardown 可能撐不過 SIGKILL 的期限，先寫錯一次比留下一個永遠 `live` 的 row 好。然後 SIGTERM 全部 worker，等 `WORKER_STOP_WAIT_S = 8.0` 秒（`spawn.py:46`），逾時 SIGKILL（`:2221`–`:2227`），最後關掉 lifeline pipe。
+3. `_close_in_process`（`manager.py:2279`）對平面自己持有的 in-process session 做同一件事。
+
+**worker 那一側**：收到 SIGTERM → `stop.set()`（`worker.py:230`–`:234`）→ `hold_until_quiet` 轉去跑 worker 自己的 `close_all` → `_close_in_process` **同樣把 row 寫成 `interrupted`**（`manager.py:2308`）。所以一次正常 shutdown 裡，同一個 row 被平面和 worker 各寫一次。這是 §2 那張表說「三個進程都寫 status」最直接的證據。
+
+**開機**（`apps/sts/src/mftik_sts/app.py:amain`，`:296`）：
+
+1. `schema_is_current()` 等 DB schema 到位（`:297`）。
+2. 建 `SessionManager`，帶 `SubprocessSpawner()` 和 `rebuild_on_worker_exit=_rebuild_enabled()`（`:340`–`:341`）。
+3. 起 RPC、heartbeat、`reap_loop`（60 秒一輪，`:368`）、health，以及 registry catch-up（`:379`–`:384`）。
+4. `STS_REBUILD_ON_BOOT=1` 時，背景跑 `_rebuild_on_boot` → `rebuild_interrupted()`（`:389`、`:207`）；不 await，所以 RPC 不會被擋住。
+
+**rebuild 的候選是 `status = interrupted`，只有這個值**（`manager.py:1423`–`:1432`，掃描有上限 `_REBUILD_SCAN_LIMIT`，截斷時會發警告）。每個候選要過六道閘（`_rebuild_claimed`，`manager.py:1549`）：
+
+| 閘 | 條件 | 位置 |
+|---|---|---|
+| 年齡 | 距 `created_at` 不超過 `STS_REBUILD_MAX_AGE_S`，預設 1800 秒 | `manager.py:1553`–`:1564`、`app.py:146`–`:164` |
+| placement | row 指名這個 instance，或由 TD region 推導到它 | `manager.py:1566`–`:1575`、`_placement_is_mine` 在 `:1877` |
+| restart | row 的 `restart == "always"` | `manager.py:1576`–`:1583` |
+| 次數 | `rebuild_count < _REBUILD_MAX_ATTEMPTS = 3` | `manager.py:1585`–`:1591`、`:149` |
+| id 版本 | `session_id` 是 v1 的六位 hex | `manager.py:1593`–`:1600` |
+| 策略 | 策略存在、`ensure_deployable` 通過、`strategy.rebuildable` 為真 | `manager.py:1610`–`:1662` |
+
+過關就先 `bump_rebuild_count`（寫在嘗試**之前**，理由在 `repositories/session.py:265`–`:271`），再 spawn 一個 `role="rebuild"` 的 worker（`manager.py:1688`）。worker 裡 `adopt_interrupted` → `_rebuild_one`（`manager.py:1899`）：建新的 `StsSession` → `on_rebuild(st_facts)` → `mark_live` → `session.start()`（**重跑 `on_start`**）→ attach MD、再逐個 attach TD。attach 被拒 → `failed`（不再重試）；attach 逾時 → 退回 `interrupted` 等下次開機（`manager.py:1958`–`:1976`）。成功後 300 秒（`_REBUILD_SETTLE_S`，`:159`）還活著，就 `reset_rebuild_count`。
+
+**恢復回來的只有**：row 上的設定（`td`、`md_ids`、`st_paras`、`type`、`created_by`）和 `st_facts`。**沒有恢復的**：策略物件的欄位、`Timer` 的 task、`StrategyOms` 的 inflight / done 集合與 cid 計數器（`bind` 會清掉，`oms.py:132`–`:138`）、`EventLog._seq`、MD / TD 的 ack 時鐘。交易所那一側靠 recon 取回。
 
 ### 9.2 STS 平面進程被強制殺掉
 
-TODO
+兩種結果，差別在 worker 有沒有跟著死：
+
+- **只有平面死、worker 活著**：worker 由 lifeline EOF（`spawn.py:29`–`:34`、`worker.py:152`）或 `PDEATHSIG`（`worker.py:73`–`:92`）察覺，自己 graceful stop 並寫自己的 row。
+- **worker 跟著一起死**（整個 cgroup 被殺，這是生產上的情形，見 `docs/Deployment.md` 的「重啟 agent 會殺掉所有東西」）：row 停在 `live`，沒有人寫它。由新進程的 `reap_orphans` 連續兩輪（`_ORPHAN_STRIKES = 2`，約 60–120 秒）都沒看到本機持有它，才改成 `interrupted`（`manager.py:1390`–`:1400`）——註解明寫為什麼是 `interrupted` 而不是 `failed`：這樣 rebuild 的候選集合才剛好等於 `status = interrupted`。之後走 §9.1 的 rebuild。
 
 ### 9.3 session worker 自己死掉
 
-TODO
+`_on_worker_exit`（`manager.py:827`）：
+
+- exit code 0 → **什麼都不做**。worker 已經自己寫了終態 row，平面重寫會蓋掉策略留下的 reason（`:865`–`:871`）。
+- 非 0，而且 row 還是 `live` → 寫 `interrupted` + 發 `status.sts`（`:874`–`:895`），然後在 `rebuild_on_worker_exit` 開著時立刻 `_schedule_rebuild`。
+- 先被 force-stop 升級過（`stop_escalated`）→ 寫 `failed`，不 rebuild（`:854`–`:864`）。
+
+**這條路沒有任何 backoff**：`_schedule_rebuild` 直接建 task 跑 `rebuild_session`（`manager.py:904`–`:924`）。這是 §6 那張表說 cid 的不撞號和 R2 的前提不同的原因。
 
 ### 9.4 MD 平面重啟
 
-TODO
+1. 記憶體全丟：`_links`、`Dispatcher._subs`、`_venues`、`_expiry_tasks`、`WireLedger`。
+2. **沒有任何東西從 `md_sessions` 重建**。`reap_orphans` 的註解把這點寫得很清楚：「nothing rebuilds from one — STS re-attaching on rebuild is what writes the row live again」（`apps/md/.../session/manager.py:544`–`:547`）。
+3. 實際發生的事是 **STS 端把 session 殺掉**：MD 的 `md.lease.ack` 一停，STS 的 heartbeat loop 在 `heartbeat_interval * PEER_MISS_LIMIT` = 3 秒（`LEASE_HEARTBEAT_INTERVAL_S = 1.0`、`LEASE_MISS_LIMIT = 3`，`packages/common/src/mftik/protocol/messages.py:825`、`:829`）內呼叫 `_fail_from_infrastructure("md feed from …")`（`session.py:785`–`:799`），session 變成 **`failed`**。
+4. `failed` 不在 rebuild 的候選集合裡（§9.1），worker 也是 exit 0（它自己寫完了 row），所以 `_on_worker_exit` 也不會排 rebuild。**結論：MD 重啟會讓所有附著的 session 死掉，而且不會自動回來，要人工重新 deploy。**
+5. 新的 MD 上，`reap_orphans` 把名下還是 `live` 的 `md_sessions` row 收掉。
+6. tape：乾淨停止時 `_stamp_stopped` 寫下 `stopped_ms`，下一次 `mark_recording` 把洞的長度寫進 `gaps`；被強制殺掉沒有 `stopped_ms`，只能把 `continuous_since_ms` 重設，洞量不出來（`tape_store.py:181`–`:220`）。Redis 裡已經寫下的 print 不受影響。
 
-### 9.5 TD 平面重啟
+### 9.5 TD 平面重啟（OMS 在重啟後長什麼樣）
 
-TODO
+**丟掉的**：`_accounts`、每個 `Session`、`Oms`、`Ledger`、`cid_owner`、`_leverage` 快取。OMS 和 ledger **都沒有落地**（`publish_oms`、`write_ledger` 是空實作，`session.py:503`、`:1139`），所以沒有快照可讀。
+
+**誰察覺**：和 §9.4 一樣，STS 在 3 秒內把 session 判 `failed`（`session.py:801`–`:816`），不會自動回來。
+
+**誰重新接上**：沒有人自動接。`_accounts` 只在 `attach` 時建立（`manager.py:217`–`:250`），所以要等下一次 deploy（或某個 STS rebuild 的 `_attach_td`）。TD 還會先擋住 attach，直到它看到那個 session 的 lease heartbeat（`manager.py:279`–`:291`）。
+
+**第一次 attach 之後 OMS 的內容**（`Session.start()` → `reconcile()`，`session.py:327`）：
+
+| 項目 | 重啟後 |
+|---|---|
+| 交易所上還掛著的單 | **有**。`fetch_open_orders` 拉回來，`apply_reconcile` 整批替換 `_orders`，只留 `status.is_open()` 的（`oms/oms.py:67`–`:87`） |
+| 餘額、部位 | **有**。同一次 recon 的 `fetch_balances` /（有的話）`fetch_positions` |
+| 終態的單 | **沒有**，而且本來就不該有——open orders 不含它們，OMS 也只存 open |
+| `cid_owner`（哪一張單屬於哪個 session） | **空的**。註解明寫 recon 撿回來的單沒有 entry，所以別的 session 來撤它不會被擋（`manager.py:144`–`:148`）。策略那一側要自己用 `Strategy.owns()` 解 cid 裡的 session 欄位（`strategy/base.py:298`–`:317`） |
+| ledger 的預扣（`_prelocked`、`_by_cid`） | **空的**。`apply_venue_many` 只更新 venue 的總額，不動預扣（`oms/ledger.py:91`）。所以重啟後 `available()` 會比重啟前寬鬆，因為預扣不見了 |
+| `_pending_since` / `_unknown_since` / `_cancel_since` 這些 watchdog 的計時 | **歸零**。`reconcile()` 自己也會清掉它們（`session.py:454`–`:459`） |
+| `HistoryWriter` 佇列裡還沒 flush 的 order / fill | **遺失**。正常停止會 drain 加 flush（`history.py:185`–`:207`），強制殺掉就掉了，靠 backfill 補（`history.py:185`–`:190`） |
+
+**`chase_unknown` 在重啟後幫不上忙。** 它是 `_chase_loop` 每 `PENDING_SWEEP_INTERVAL_S = 1.0` 秒跑一次（`session.py:383`–`:399`、`:58`）：對每張 UNKNOWN 先用 `fetch_order_by_client_order_id` 單張查（`resolve_unknown`，`session.py:814`，venue 不支援就留著等 recon，`:836`–`:844`）；最老的一張超過 `UNKNOWN_FORCE_RECON_S = 10` 秒還沒解決就強制一次 `reconcile()`（逾時上限 `UNKNOWN_FORCE_RECON_TIMEOUT_S = 15`，之後每 `UNKNOWN_FORCE_RECON_INTERVAL_S = 60` 秒再試；`session.py:63`、`:74`、`:78`、`:976`–`:985`）。關鍵是**它只認得這個 incarnation 自己標成 UNKNOWN 的單**——重啟後 OMS 是空的，上一個 incarnation 留下的 UNKNOWN 沒有任何記錄，所以它們只會以 open order 的身分出現在第一次 recon 裡，或者根本不出現（已成交、已撤、或仍然查不到）。
+
+同樣的限制也在 `reconcile()` 的補救路徑上：recon 前是 UNKNOWN、recon 後不在 open orders 裡的單，會補發一筆 CANCELED（或 `_unknown_if_missing` 記下的狀態）的終態事件（`session.py:439`–`:443`、`:463`–`:473`、`_announce_recon_settled` 在 `:477`）。但 `was_unknown` 是從**當下的 OMS** 讀的，所以重啟後那一份是空的，這個補救對跨重啟的 UNKNOWN 不生效。
+
+**策略那一側只會收到一次 recon 快照**：第一次收到 TD 的 lease ack 時，平台自動幫策略發一次 `sts.recon`（`session.py:1171`–`:1176` → `strategy/base.py:355`–`:372`），TD 用 `_handle_recon` 回一份當下的書（`manager.py:796`，**不為了這個 attach 去跟交易所 recon**），策略在 `on_recon_done` 收到。**沒有 `td.account.reset`、沒有 `on_resync`**，所以策略無法分辨「我是新 deploy」和「TD 重啟過，書被重建了」。
 
 ### 9.6 API、NATS、Redis 重啟
 
-TODO
+- **API**：session 不在 API 上，deploy 是一次性的 RPC。重啟只影響正在進行的 deploy（`deploy_strategy` 中斷，它的回滾也跟著消失），以及 `backfill_cron` 的排程重新起算。`registry` 在磁碟上。
+- **NATS**：沒有 JetStream（見 `docs/Deployment.md` 的 NATS 一節），所有訊息都是 at-most-once。重啟期間只要 lease ack 斷超過 3 秒，所有 session 都會走 §9.4 / §9.5 的路被判 `failed`。
+- **Redis**：只有 MD 連它（`apps/md/src/mftik_md/app.py:171`；`STS 從來沒有 REDIS_URL`）。`appendonly yes` 加 `appendfsync everysec`（`deployment/redis/redis.conf:22`–`:23`），所以最多掉約一秒的 print。重啟**不會**在 coverage 上留下任何記錄——`gaps` 只有 MD 那一側的 start / stop 會寫。
 
 ## 10. 生產部署上這些狀態落在哪
 
