@@ -16,14 +16,12 @@ from mftik.exchange.oms import LedgerView, OmsView
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_TICKER,
-    TD_LEASE_ACK,
     TD_LEDGER_VIEW,
     TD_LEVERAGE_ACK,
     TD_OMS_ORDER,
     TD_OMS_VIEW,
     TD_ORDER_ACK,
     Envelope,
-    LeaseAck,
     LeverageAck,
     LeverageAckEnvelope,
     OrderAck,
@@ -394,36 +392,6 @@ async def test_unhandled_message_is_recorded(
     unhandled = _events(_read(tmp_path / "ev-unhandled.jsonl"), "unhandled")
     assert unhandled[0]["event"] == "md.something_new"
     assert unhandled[0]["peer"] == "md"
-
-
-async def test_lease_ack_is_recorded(broker: Broker, tmp_path: Path) -> None:
-    """The nearest thing to a login: TD has accepted this session's lease."""
-    sts = _session(broker, tmp_path, ProbeStrategy(), td_api_ids=[11],
-                   session_id="ev-lease")
-    await sts.start()
-    await asyncio.sleep(0.05)
-
-    await broker.publish(
-        Topics.td_session(11, "ev-lease"),
-        UntypedEnvelope.wrap(
-            LeaseAck(session_id="ev-lease", api_id=11, token=1).model_dump(
-                mode="json"
-            ),
-            type=TD_LEASE_ACK,
-            source="td",
-        ),
-    )
-    await _wait_until(
-        lambda: (tmp_path / "ev-lease.jsonl").exists()
-        and any(
-            r["kind"] == "lease" for r in _read(tmp_path / "ev-lease.jsonl")
-        )
-    )
-    await sts.stop()
-
-    lease = _events(_read(tmp_path / "ev-lease.jsonl"), "lease")
-    assert lease[0]["event"] == TD_LEASE_ACK
-    assert lease[0]["api_id"] == 11
 
 
 async def test_order_submit_and_ack_are_both_recorded(

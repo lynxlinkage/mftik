@@ -1188,19 +1188,6 @@ class MdOpenInterestResult(MdFetchResult):
     open_interest: OpenInterest | None = None
 
 
-class Recon(BaseModel):
-    """STS → TD: request an async OMS snapshot for ``api_id``.
-
-    TD answers from its current book when clean, or after settling UNKNOWN
-    orders. This is not a request to hit the venue on the strategy's behalf.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    api_id: int
-
-
 class ReconDone(BaseModel):
     """TD → STS: book snapshot ready (OMS also on ``td.oms.{api_id}``)."""
 
@@ -1443,7 +1430,6 @@ ListSessionsRequestEnvelope = Envelope[ListSessionsRequest]
 ListSessionsResultEnvelope = Envelope[ListSessionsResult]
 LeaseHeartbeatEnvelope = Envelope[LeaseHeartbeat]
 LeaseAckEnvelope = Envelope[LeaseAck]
-ReconEnvelope = Envelope[Recon]
 ReconDoneEnvelope = Envelope[ReconDone]
 StsDetachEnvelope = Envelope[StsDetach]
 OrderSubmitEnvelope = Envelope[OrderSubmit]
@@ -1646,7 +1632,6 @@ STOP_FORCE_RPC_TIMEOUT_S = 5.0
 
 STS_LEASE_HEARTBEAT = "sts.lease.heartbeat"
 STS_HEARTBEAT = STS_LEASE_HEARTBEAT  # alias for older names
-STS_RECON = "sts.recon"
 STS_DETACH = "sts.detach"
 STS_ORDER_SUBMIT = "sts.order.submit"
 STS_ORDER_CANCEL = "sts.order.cancel"
