@@ -84,7 +84,7 @@ from mftik.protocol import (
     Topics,
 )
 from mftik.protocol.reject_codes import describe
-from mftik.strategy import Strategy
+from mftik.strategy import Ready, Strategy
 from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S
 from mftik.strategy.timer import TimerToken
 
@@ -267,7 +267,7 @@ class OneCancelOther(Strategy):
             self._on_arm_timeout,
         )
 
-    async def on_ready(self) -> None:
+    async def on_ready(self, ready: Ready) -> None:
         await self.log("OneCancelOther ready — waiting for TD recon")
 
     async def _adopt(self, api_id: int, msg: ReconDone) -> bool:

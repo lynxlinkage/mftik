@@ -62,7 +62,7 @@ from mftik.protocol import (
     SymbolInfo,
 )
 from mftik.protocol.reject_codes import describe
-from mftik.strategy import Strategy
+from mftik.strategy import Ready, Strategy
 from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S
 
 BPS = Decimal("10000")
@@ -311,7 +311,7 @@ class CrossArb(Strategy):
             f"td_quote={self._quote_api_id()} td_hedge={self._hedge_api_id()}"
         )
 
-    async def on_ready(self) -> None:
+    async def on_ready(self, ready: Ready) -> None:
         await self.log("CrossArb ready — waiting for both TD recons to arm")
 
     async def on_stop(self) -> None:

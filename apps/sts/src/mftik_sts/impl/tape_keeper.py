@@ -28,7 +28,7 @@ from __future__ import annotations
 from typing import Any
 
 from mftik.exchange.models import AggTrade, Trade
-from mftik.strategy import Strategy
+from mftik.strategy import Ready, Strategy
 
 #: How often to report that the feeds are still being held. Long: this exists
 #: so an operator scanning logs can tell "holding, quiet" from "died an hour
@@ -71,7 +71,7 @@ class TapeKeeper(Strategy):
             return
         await self.log(f"holding {len(feeds)} feed(s) for recording: {feeds}")
 
-    async def on_ready(self) -> None:
+    async def on_ready(self, ready: Ready) -> None:
         interval = int(
             self.paras.get("report_interval_ms", DEFAULT_REPORT_INTERVAL_MS)
         )

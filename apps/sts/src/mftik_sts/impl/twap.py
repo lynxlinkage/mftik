@@ -40,7 +40,7 @@ from mftik.protocol import (
     Topics,
 )
 from mftik.protocol.reject_codes import describe, is_normalized
-from mftik.strategy import Strategy
+from mftik.strategy import Ready, Strategy
 from mftik.strategy.timer import TimerToken
 
 _TERMINAL = frozenset({OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED})
@@ -168,7 +168,7 @@ class TwapStrategy(Strategy):
         )
         self._tick_token = self.timer.token()
 
-    async def on_ready(self) -> None:
+    async def on_ready(self, ready: Ready) -> None:
         await self.log("TwapStrategy ready — waiting for first best_quote and TD recon")
 
     async def on_stop(self) -> None:
