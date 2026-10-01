@@ -8,15 +8,15 @@ from mftik.broker import IncomingRequest
 from mftik.protocol import MD_HEALTH, HealthStatus, HealthStatusEnvelope
 
 if TYPE_CHECKING:
-    from mftik_md.session import SessionManager
+    from mftik_md.tape_store import TapeStore
 
 
 async def handle_health(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    store: TapeStore | None = None,
 ) -> None:
-    del sessions
+    del store
     await req.reply(
         HealthStatusEnvelope.wrap(
             HealthStatus(status="ok", service="md"),

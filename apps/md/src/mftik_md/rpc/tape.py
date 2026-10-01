@@ -20,7 +20,6 @@ from mftik.protocol import (
 from mftik_md.tape_store import decode_tape_gaps
 
 if TYPE_CHECKING:
-    from mftik_md.session import SessionManager
     from mftik_md.tape_store import TapeStore
 
 logger = logging.getLogger(__name__)
@@ -43,7 +42,6 @@ def _int_or_none(raw: str | None) -> int | None:
 async def handle_tape_tail(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
     store: TapeStore | None = None,
     chunk: int = TAPE_RPC_CHUNK,
 ) -> None:
@@ -59,8 +57,6 @@ async def handle_tape_tail(
         await _error(req, "invalid_payload", str(exc))
         return
 
-    if store is None and sessions is not None:
-        store = sessions.tape_store
     if store is None:
         await req.reply(_empty_chunk(payload.feed))
         return
