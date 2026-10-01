@@ -18,7 +18,14 @@ import traceback
 
 from mftik.cli.client import CliError
 from mftik.cli.tree import cfg_path, inspect_tree, require_tree
-from mftik.protocol.strategy_yml import StrategyYamlError, parse_strategy_yml
+from mftik.protocol.strategy_yml import (
+    RESTART_NEVER,
+    Limits,
+    StrategySpec,
+    StrategyYamlError,
+    md_selects_of,
+    parse_strategy_yml,
+)
 from mftik.registry.digest import digest_files
 from mftik.registry.load import load_class
 
@@ -74,6 +81,8 @@ def check(args: argparse.Namespace) -> int:
         print(f"    requires {', '.join(requires)}")
     if spec is not None:
         print(f"    config {document} accepted by on_initialized")
+        for line in _policy(spec):
+            print(f"    {line}")
     else:
         # Silence here would read as "the config is fine", and there was none.
         print(
@@ -83,6 +92,50 @@ def check(args: argparse.Namespace) -> int:
     if getattr(args, "against", None):
         return _against_node(args, requires)
     return 0
+
+
+def _policy(spec: StrategySpec) -> list[str]:
+    """Read back what the document asked the platform for.
+
+    Everything here has a default, so the lines are the same whether the author
+    wrote them or not — which is the point. A ``start_timeout_s`` left out is
+    still a deadline somebody's ``on_start`` will be killed at, and the number
+    is worth seeing before the deploy rather than in the failure reason.
+    """
+    restart = f"restart {spec.restart}"
+    if spec.restart != RESTART_NEVER:
+        restart += (
+            f" (at most {spec.max_restarts} in {spec.restart_window_s}s, "
+            f"each a fresh on_start)"
+        )
+    lines = [
+        restart,
+        f"start_timeout_s {spec.start_timeout_s}, "
+        f"ready_timeout_s {spec.ready_timeout_s}",
+        f"limits {_limits(spec.limits)}",
+    ]
+    for select in md_selects_of(spec.md_select):
+        lines.append(
+            f"select {select.name} ({select.kind}) "
+            f"{select.venue} {select.underlying}, "
+            f"topics {', '.join(select.topics)}"
+        )
+    for feed, mode in sorted(spec.md_delivery.items()):
+        lines.append(f"delivery {feed} → {mode}")
+    return lines
+
+
+def _limits(limits: Limits) -> str:
+    said = [
+        f"offload_threads {limits.offload_threads}",
+        f"offload_processes {limits.offload_processes}",
+    ]
+    for name in ("memory_mb", "offload_memory_mb"):
+        value = getattr(limits, name)
+        # Unset is not the same as a number: no RLIMIT_DATA at all, which is
+        # what a reader of this line needs to be able to tell.
+        said.append(f"{name} {value if value is not None else 'unset'}")
+    return ", ".join(said)
 
 
 def _against_node(args: argparse.Namespace, requires: tuple[str, ...]) -> int:
