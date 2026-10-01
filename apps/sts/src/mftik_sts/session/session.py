@@ -34,6 +34,7 @@ from mftik.protocol import (
     MD_FUNDING_HISTORY_RESULT,
     MD_FUNDING_RATE,
     MD_GREEKS,
+    MD_INTENT_DELETE,
     MD_KLINE,
     MD_KLINES_RESULT,
     MD_LIQUIDATION,
@@ -41,31 +42,31 @@ from mftik.protocol import (
     MD_OPEN_INTEREST_RESULT,
     MD_ORDERBOOK,
     MD_ORDERBOOK_RESULT,
-    MD_SESSION_DETACH,
     MD_TICKER,
     MD_TRADE,
     ON_STOP_TIMEOUT_S,
     TD_BALANCE_UPDATE,
     TD_CANCEL_REJECT,
     TD_FILL,
+    TD_INTENT_DELETE,
     TD_ORDER_REJECT,
     TD_ORDER_UPDATE,
     TD_POSITION_UPDATE,
     TD_RECON_DONE,
-    TD_SESSION_DETACH,
     CancelReject,
+    IntentOwner,
     MdBestQuoteResult,
-    MdDetachRequest,
-    MdDetachRequestEnvelope,
     MdFundingHistoryResult,
+    MdIntentDelete,
+    MdIntentDeleteEnvelope,
     MdKlinesResult,
     MdOpenInterestResult,
     MdOrderBookResult,
     OrderReject,
     ReconDone,
     TdAccountRef,
-    TdDetachRequest,
-    TdDetachRequestEnvelope,
+    TdIntentDelete,
+    TdIntentDeleteEnvelope,
     Topics,
     UntypedEnvelope,
     load_md,
@@ -499,15 +500,21 @@ class StsSession:
         to save MD three — and an ERROR when it timed out, for a teardown that
         was about to happen anyway.
         """
+        # This path is the leftover session object (B4-03 replaces it). It
+        # does not know which STS instance it is running on, so the owner
+        # carries an empty instance. Nothing production calls it.
+        owner = IntentOwner(sts_instance="", session_id=self.session_id)
         posts = [
             self._post_detach(
                 what=f"td api_id={api_id}",
                 subject=Topics.td(await self._detach_instance(api_id)),
-                envelope=TdDetachRequestEnvelope.wrap(
-                    TdDetachRequest(
-                        session_id=self.session_id, api_id=api_id
+                envelope=TdIntentDeleteEnvelope.wrap(
+                    TdIntentDelete(
+                        session_id=self.session_id,
+                        api_ids=[api_id],
+                        owner=owner,
                     ),
-                    type=TD_SESSION_DETACH,
+                    type=TD_INTENT_DELETE,
                     source="sts",
                     session_id=self.session_id,
                 ),
@@ -523,9 +530,12 @@ class StsSession:
                         if instance == ANY_INSTANCE
                         else Topics.md(instance)
                     ),
-                    envelope=MdDetachRequestEnvelope.wrap(
-                        MdDetachRequest(session_id=self.session_id),
-                        type=MD_SESSION_DETACH,
+                    envelope=MdIntentDeleteEnvelope.wrap(
+                        MdIntentDelete(
+                            session_id=self.session_id,
+                            owner=owner,
+                        ),
+                        type=MD_INTENT_DELETE,
                         source="sts",
                         session_id=self.session_id,
                     ),

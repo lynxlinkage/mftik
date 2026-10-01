@@ -1,6 +1,29 @@
 """Stream and channel name helpers for the MFTIK broker protocol."""
 
+from __future__ import annotations
+
+import hashlib
+
 from mftik.exchange.tickers import UniversalTicker
+
+
+def atom_hash(atom_id: str) -> str:
+    """Stable subject token for an ``atom_id`` (§6.1).
+
+    SHA-256 of the UTF-8 ``atom_id``, hex. One NATS token: hex contains
+    no ``.``. The same ``atom_id`` hashes the same in every process,
+    which is what lets a session subscribe without asking MD which
+    subject an atom landed on. MD still keeps the hash-to-atom table;
+    the hash is not truncated, so two ``atom_id`` strings do not share
+    a subject.
+
+    ``atom_id`` is ``venue:endpoint:channel``
+    (:class:`mftik.exchange.atoms.Atom`). The channel is why this exists:
+    it is the venue's own subscribe parameter and it contains ``.``.
+    """
+    if not atom_id:
+        raise ValueError("atom_id is empty")
+    return hashlib.sha256(atom_id.encode("utf-8")).hexdigest()
 
 
 class Topics:
@@ -165,23 +188,33 @@ class Topics:
     def sts_control(session_id: str) -> str:
         """Request-reply subject for acting on **one** running session.
 
-        Per session for the same reason :meth:`td_order` is per account, and
-        the failure it fixes is the same shape. Stop and fail are answered from
-        the receiving process's own in-memory sessions, so on the shared
-        ``sts`` subject a second STS could take a stop for a session it does
-        not hold and answer ``not_found`` — a row that stays live and that
-        nobody can end. ``serve`` is a competing consumer; one subject per
-        session makes the holder the only consumer there is.
+        ``sts.ctl.{session_id}`` (§3.1, §5.1). The previous spelling was
+        ``sts.control.{session_id}``. Stop, fail and status are answered
+        by the session worker, so on the shared ``sts`` subject a second
+        STS could take a stop for a session it does not hold and answer
+        ``not_found``. ``serve`` is a competing consumer; one subject per
+        session makes the worker the only consumer there is.
 
-        Better than recording where a session landed and addressing that,
-        because it cannot go stale: whichever process rebuilds a session starts
-        serving this, and one that dies stops. Nothing has to be kept in step.
-
-        Only while the session is live. A request for one that has ended waits
-        in the list — so callers check the row before sending, and answer from
-        the table when the table already knows.
+        Only while the session is live. A request for one that has ended
+        waits in the list — callers check the row before sending, and
+        answer from the table when the table already knows.
         """
-        return f"sts.control.{session_id}"
+        return f"sts.ctl.{session_id}"
+
+    @staticmethod
+    def sts_status(session_id: str) -> str:
+        """Per-session status snapshots (§3.3, §5.2).
+
+        ``sts.status.{session_id}``. The aggregate :meth:`status_sts`
+        channel stays, because the UI socket already subscribes to every
+        session on one subject. This is the v2 progress channel.
+        """
+        return f"sts.status.{session_id}"
+
+    @staticmethod
+    def sts_status_pattern() -> str:
+        """Every :meth:`sts_status` channel."""
+        return "sts.status.*"
 
     @staticmethod
     def sts_td_session(session_id: str) -> str:
@@ -195,8 +228,83 @@ class Topics:
 
     @staticmethod
     def md_session(session_id: str) -> str:
-        """MD → STS per-session channel (lease ACK + market data)."""
+        """MD → STS per-session channel.
+
+        Kept as a subject-name generator. Market data moved to
+        :meth:`md_atom`; nothing in the new protocol publishes here.
+        """
         return f"md.{session_id}"
+
+    @staticmethod
+    def md_atom(venue: str, digest: str) -> str:
+        """``md.a.{venue}.{hash}`` (§6.1, §8.3).
+
+        ``digest`` is :func:`atom_hash` of an ``atom_id``. Both arguments
+        are one subject token. A ``.`` in either would split the subject,
+        which is the reason the channel is hashed in the first place.
+        """
+        if not venue or "." in venue or not digest or "." in digest:
+            raise ValueError(
+                "md.a subject tokens must be non-empty and contain no '.': "
+                f"venue={venue!r} hash={digest!r}"
+            )
+        return f"md.a.{venue}.{digest}"
+
+    @staticmethod
+    def md_atom_pattern() -> str:
+        """Every :meth:`md_atom` subject."""
+        return "md.a.*.*"
+
+    @staticmethod
+    def atom_subject(atom_id: str) -> str:
+        """Subject one atom is published on.
+
+        The venue is the ``atom_id``'s first segment
+        (``venue:endpoint:channel``,
+        :class:`mftik.exchange.atoms.Atom`). The whole id is hashed,
+        because the channel contains ``.`` (§6.1).
+        """
+        venue, separator, rest = atom_id.partition(":")
+        if not separator or not venue or not rest or "." in venue:
+            raise ValueError(
+                f"invalid atom_id {atom_id!r}; expected venue:endpoint:channel"
+            )
+        return Topics.md_atom(venue, atom_hash(atom_id))
+
+    @staticmethod
+    def md_worker(instance: str, worker_id: str) -> str:
+        """``md.w.{instance}.{worker_id}`` (§5.6).
+
+        The plan marks the shape provisional; this is that spelling.
+        ``worker_id`` is one subject token (``md/conn/Deribit/public/0``
+        uses slashes, not dots).
+        """
+        if (
+            not instance
+            or "." in instance
+            or not worker_id
+            or "." in worker_id
+        ):
+            raise ValueError(
+                "md.w subject tokens must be non-empty and contain no '.': "
+                f"instance={instance!r} worker_id={worker_id!r}"
+            )
+        return f"md.w.{instance}.{worker_id}"
+
+    @staticmethod
+    def md_worker_pattern() -> str:
+        """Every :meth:`md_worker` subject."""
+        return "md.w.*.*"
+
+    @staticmethod
+    def md_universe(session_id: str) -> str:
+        """``md.universe.{session_id}`` — selector changes (§6.4, §8.3)."""
+        return f"md.universe.{session_id}"
+
+    @staticmethod
+    def md_universe_pattern() -> str:
+        """Every :meth:`md_universe` subject."""
+        return "md.universe.*"
 
     @staticmethod
     def md_fetch() -> str:
@@ -242,6 +350,39 @@ class Topics:
         STS's rebuild attach retries on a budget.
         """
         return f"td.order.{api_id}"
+
+    @staticmethod
+    def td_account_state(api_id: int) -> str:
+        """``td.account.state.{api_id}`` (§5.6, §7.1).
+
+        The account worker's availability broadcast. Not :meth:`td_account`,
+        which is the request-reply subject for ledger and OMS reads.
+        """
+        return f"td.account.state.{api_id}"
+
+    @staticmethod
+    def td_account_state_pattern() -> str:
+        """Every :meth:`td_account_state` subject."""
+        return "td.account.state.*"
+
+    @staticmethod
+    def procman_report(plane: str, instance: str) -> str:
+        """``procman.report.{plane}.{instance}`` (§8.2).
+
+        The Supervisor's liveness report. Not stored. A reader that sees
+        the publication stop reclaims nothing (F32).
+        """
+        if not plane or "." in plane or not instance or "." in instance:
+            raise ValueError(
+                "procman.report tokens must be non-empty and contain no '.': "
+                f"plane={plane!r} instance={instance!r}"
+            )
+        return f"procman.report.{plane}.{instance}"
+
+    @staticmethod
+    def procman_report_pattern() -> str:
+        """Every :meth:`procman_report` subject."""
+        return "procman.report.*.*"
 
     @staticmethod
     def td_account(api_id: int) -> str:

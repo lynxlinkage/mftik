@@ -1,5 +1,15 @@
 """Generic message envelope — the wire wrapper for all broker messages.
 
+Every envelope carries ``pv`` (:data:`~mftik.protocol.version.PROTOCOL_VERSION`).
+That integer is the only state this package is the authority for (§3.3):
+a code constant, compared by every receiver before the payload is parsed.
+A different ``pv`` is refused with ``protocol_mismatch`` and is not
+interpreted (F26). :func:`mftik.protocol.version.reject_if_pv_mismatch`
+is that check. It is not applied inside :meth:`Envelope.from_json` —
+parsing the payload of a message whose version you have not accepted is
+the thing F26 forbids, so the receiver calls the check on the raw frame
+first.
+
 Usage::
 
     env = Envelope[Heartbeat].wrap(
@@ -19,17 +29,28 @@ from typing import Any, Generic, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from mftik.protocol.version import PROTOCOL_VERSION
+
 PayloadT = TypeVar("PayloadT")
 
 
 class Envelope(BaseModel, Generic[PayloadT]):
-    """Typed wire envelope: metadata + payload of type ``PayloadT``."""
+    """Typed wire envelope: metadata + payload of type ``PayloadT``.
+
+    ``pv`` defaults to the version this process speaks, so a sender that
+    goes through :meth:`wrap` stamps the current protocol without naming
+    it. A receiver does not trust that default: a frame that omitted
+    ``pv`` would gain it on the way through ``model_validate``, which is
+    why the mismatch check reads the raw JSON.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     type: str
     source: str
+    #: Protocol version (F26). See :data:`mftik.protocol.version.PROTOCOL_VERSION`.
+    pv: int = PROTOCOL_VERSION
     session_id: str | None = None
     reply_to: str | None = None
     ts: float = Field(default_factory=time.time)

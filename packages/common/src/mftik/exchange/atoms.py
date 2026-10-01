@@ -61,8 +61,9 @@ this module is only the vocabulary it speaks.
   consumer already made live either gets a replay or is documented silent.
   Composing a feed out of several atoms is :attr:`AtomPlan.projector`, and it
   happens on the STS ingress rather than in MD.
-* **A6 — the atom's subject is not here.** ``md.a.{venue}.{hash}`` and the
-  stable hash of an ``atom_id`` belong to the protocol (IF-01). This module
+* **A6 — the atom's subject is not here.** ``md.a.{venue}.{hash}`` is
+  :meth:`mftik.protocol.Topics.md_atom`, and the stable hash of an
+  ``atom_id`` is :func:`mftik.protocol.atom_hash` (IF-01). This module
   owns the identity that gets hashed and nothing about the wire it travels on.
 
 Null data until B7: every venue's implementation raises
