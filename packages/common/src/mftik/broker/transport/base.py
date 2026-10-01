@@ -3,12 +3,10 @@
 :class:`~mftik.broker.client.Broker` is the vocabulary a plane may speak.
 The seam sits at *serialized envelopes*, not at store primitives. Strings,
 not models, cross it. The families below are named for what a caller
-wants: fan-out, request-reply, and the plumbing a fenced session link
-sits on.
+wants: fan-out and request-reply.
 
-What stays above this line is envelope encoding,
-:class:`~mftik.broker.request.IncomingRequest` and
-:class:`~mftik.broker.link.LeasedSessionLink`.
+What stays above this line is envelope encoding and
+:class:`~mftik.broker.request.IncomingRequest`.
 """
 
 from __future__ import annotations
