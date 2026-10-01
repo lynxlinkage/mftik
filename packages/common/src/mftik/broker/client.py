@@ -8,7 +8,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
 from mftik.broker.config import BrokerConfig
-from mftik.broker.link import LeasedSessionLink
 from mftik.broker.request import IncomingRequest
 from mftik.broker.transport import build as build_transport
 from mftik.broker.transport.base import BrokerTransport
@@ -29,8 +28,8 @@ class Broker:
     """Async IPC client — the whole of what a plane may say.
 
     Six processes, none of which import each other, and this is what they
-    share. Fan-out is best effort, a request nobody serves fails at once,
-    and a session link expires after three missed heartbeats.
+    share. Fan-out is best effort, and a request nobody serves fails at
+    once.
 
     The store underneath is a :class:`~mftik.broker.transport.base.BrokerTransport`
     from :func:`mftik.broker.transport.build`. Nothing above this class may
@@ -128,10 +127,6 @@ class Broker:
             raise ValueError("psubscribe requires at least one pattern")
         async for topic, raw in self._transport.psubscribe(pattern_list, stop=stop):
             yield topic, UntypedEnvelope.from_json(raw)
-
-    def leased_link(self, **kwargs: Any) -> LeasedSessionLink:
-        """A fenced session link. See :class:`LeasedSessionLink`."""
-        return LeasedSessionLink(self, **kwargs)
 
     async def request(
         self,

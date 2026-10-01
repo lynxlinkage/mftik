@@ -829,48 +829,6 @@ LEASE_HEARTBEAT_INTERVAL_S = 1.0
 LEASE_MISS_LIMIT = 3
 
 
-class LeaseHeartbeat(BaseModel):
-    """STS fencing lease heartbeat on ``sts.td.*`` / ``sts.md.*``."""
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    token: int
-    #: Seconds between heartbeats. A peer that has armed on this message
-    #: counts :data:`LEASE_MISS_LIMIT` of these, not a separate grace.
-    interval: float = LEASE_HEARTBEAT_INTERVAL_S
-
-
-class LeaseAck(BaseModel):
-    """TD → STS fencing lease ACK on ``td.{api_id}.{session_id}``."""
-
-    model_config = ConfigDict(frozen=True)
-
-    api_id: int
-    session_id: str
-    token: int
-
-
-class MdLeaseAck(BaseModel):
-    """MD → STS fencing lease ACK on ``md.{session_id}``.
-
-    Names its sender because a session's feeds may be split across MD
-    instances, and every one of them acknowledges on the same channel. Without
-    it STS could tell that *somebody* was still there but not that one of them
-    had stopped — which is the case that matters, since a session receiving
-    half its feeds keeps trading on the half it still gets.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    token: int
-    #: Which MD sent this. Optional so an MD that has not been upgraded yet
-    #: still acknowledges; it is then tracked under the plane name, which is
-    #: what a single-process node calls itself anyway.
-    instance: str | None = None
-
-
 class MdAttachRequest(BaseModel):
     """API → MD: attach STS session with market-data subscriptions."""
 
@@ -890,10 +848,9 @@ class MdAttachResult(BaseModel):
     session_id: str
     subscriptions: list[str] = Field(default_factory=list)
     refcounts: dict[str, int] = Field(default_factory=dict)
-    #: Which MD answered. A warm-up read in ``on_start`` cannot wait for
-    #: the first :class:`MdLeaseAck`, so the attach result is what the
-    #: session routes ``md.tape.tail`` on. Empty only on a mixed-version
-    #: reply that predates the field — treat that as unroutable.
+    #: Which MD answered. The attach result is what the session routes
+    #: ``md.tape.tail`` on. Empty only on a mixed-version reply that
+    #: predates the field — treat that as unroutable.
     instance: str = ""
 
 
@@ -1428,8 +1385,6 @@ StsArtifactDeleteRequestEnvelope = Envelope[StsArtifactDeleteRequest]
 StsArtifactAckEnvelope = Envelope[StsArtifactAck]
 ListSessionsRequestEnvelope = Envelope[ListSessionsRequest]
 ListSessionsResultEnvelope = Envelope[ListSessionsResult]
-LeaseHeartbeatEnvelope = Envelope[LeaseHeartbeat]
-LeaseAckEnvelope = Envelope[LeaseAck]
 ReconDoneEnvelope = Envelope[ReconDone]
 StsDetachEnvelope = Envelope[StsDetach]
 OrderSubmitEnvelope = Envelope[OrderSubmit]
@@ -1442,7 +1397,6 @@ TdOmsViewRequestEnvelope = Envelope[TdOmsViewRequest]
 TdOmsOrderRequestEnvelope = Envelope[TdOmsOrderRequest]
 OrderRejectEnvelope = Envelope[OrderReject]
 CancelRejectEnvelope = Envelope[CancelReject]
-MdLeaseAckEnvelope = Envelope[MdLeaseAck]
 MdAttachRequestEnvelope = Envelope[MdAttachRequest]
 MdAttachResultEnvelope = Envelope[MdAttachResult]
 MdDetachRequestEnvelope = Envelope[MdDetachRequest]
@@ -1471,7 +1425,6 @@ TD_ERROR = "td.error"
 TD_SESSION_ATTACH = "td.session.attach"
 TD_SESSION_DETACH = "td.session.detach"
 TD_SESSION_LIST = "td.session.list"
-TD_LEASE_ACK = "td.lease.ack"
 TD_RECON_DONE = "td.recon.done"
 TD_OMS_VIEW = "td.oms.view"
 TD_OMS_ORDER = "td.oms.order"
@@ -1630,8 +1583,6 @@ STOP_CONTROL_TIMEOUT_S = ON_STOP_TIMEOUT_S + 5.0
 #: write the row. This covers that write, not another ``on_stop``.
 STOP_FORCE_RPC_TIMEOUT_S = 5.0
 
-STS_LEASE_HEARTBEAT = "sts.lease.heartbeat"
-STS_HEARTBEAT = STS_LEASE_HEARTBEAT  # alias for older names
 STS_DETACH = "sts.detach"
 STS_ORDER_SUBMIT = "sts.order.submit"
 STS_ORDER_CANCEL = "sts.order.cancel"
@@ -1643,7 +1594,6 @@ MD_SESSION_ATTACH = "md.session.attach"
 MD_SESSION_DETACH = "md.session.detach"
 MD_SESSION_LIST = "md.session.list"
 MD_TAPE_TAIL = "md.tape.tail"
-MD_LEASE_ACK = "md.lease.ack"
 MD_ORDERBOOK = "md.orderbook"
 MD_TICKER = "md.ticker"
 MD_TRADE = "md.trade"
