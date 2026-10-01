@@ -47,8 +47,13 @@ NATS_BUCKETS = ("nats_connect", "nats_request", "nats_other")
 #: `_NO_RESPONDERS_GRACE_S` and asks again until its share of the caller's
 #: timeout is spent, and that sleep is *outside* `Client.request` — so it lands
 #: in `sleep`, not in any `nats_*` bucket, and a NATS total without it is
-#: wrong. Matched by call site rather than by bucket.
+#: wrong. Matched on the tail of the call site, which the probe reports
+#: relative to the repository root.
 REASK_SITE = "broker/transport/nats.py:268"
+
+
+def is_reask(site: str) -> bool:
+    return site.endswith(REASK_SITE)
 
 
 def parse_junit(path: Path) -> list[dict[str, Any]]:
@@ -100,7 +105,7 @@ def probe_index(path: Path) -> dict[str, dict[str, Any]]:
 def reask_seconds(record: dict[str, Any]) -> float:
     """How long this test spent in the broker's no-responders re-ask loop."""
     return sum(
-        sec for _, site, sec in record.get("wait_sites", []) if site == REASK_SITE
+        sec for _, site, sec in record.get("wait_sites", []) if is_reask(site)
     )
 
 
@@ -111,7 +116,7 @@ def dominant(record: dict[str, Any], total: float) -> str:
     own_reask = sum(
         sec
         for bucket, site, sec in record.get("wait_sites", [])
-        if site == REASK_SITE and bucket == "sleep"
+        if is_reask(site) and bucket == "sleep"
     )
     candidates = {
         # Minus the re-ask loop, which is a sleep but is NATS's bill.
