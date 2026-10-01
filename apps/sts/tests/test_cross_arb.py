@@ -14,7 +14,6 @@ from mftik.exchange.models import (
     Side,
     TimeInForce,
 )
-from mftik.exchange.oms import OmsView
 from mftik.exchange.tickers import InvalidTickerError, UniversalTicker
 from mftik.protocol import (
     CancelReject,
@@ -858,42 +857,3 @@ async def test_refused_cancel_is_paced_not_retried_every_tick() -> None:
     strat._open[Side.SELL].retry_cancel_at = 0.0
     await strat.on_best_quote(_hedge_quote("49000", "49000"))
     assert strat.oms.cancelled == [cid, cid]
-
-
-# --- rebuild ---------------------------------------------------------------
-
-
-async def test_rebuild_is_a_clean_restart() -> None:
-    assert CrossArb.rebuildable is True
-    strat = await _armed(side=["sell"])
-    await strat.on_best_quote(_hedge_quote("50000", "50000"))
-    assert strat._open
-
-    leftover = _update(
-        "old-cid", OrderStatus.NEW, side=Side.SELL, price="50050"
-    )
-    await strat.on_rebuild({})
-    assert strat._restoring
-    assert not strat._armed
-    assert strat._open == {}
-    assert strat._hedge_quote is None
-
-    await strat.on_recon_done(
-        ReconDone(
-            session_id="s",
-            api_id=QUOTE_API,
-            oms=OmsView(orders={"old-cid": leftover}),
-        )
-    )
-    assert "old-cid" in strat.oms.cancelled
-
-    await strat.on_recon_done(ReconDone(session_id="s", api_id=HEDGE_API))
-    assert strat._armed
-    assert not strat._restoring
-
-    await strat.on_best_quote(_hedge_quote("50000", "50000"))
-    fresh = [r for r in strat.oms.submitted if r["api_id"] == QUOTE_API]
-    # One from before rebuild, one after the clean restart.
-    assert len(fresh) == 2
-    assert fresh[-1]["cid"] != "old-cid"
-    assert fresh[-1]["tif"] is TimeInForce.POST_ONLY

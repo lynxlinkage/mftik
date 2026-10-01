@@ -850,7 +850,13 @@ def _leg_order(
 
 
 async def _restore(strat: OneCancelOther, *orders: Order) -> None:
-    await strat.on_rebuild({})
+    """Drive the adoption path: recon reports a pair this session already owns.
+
+    ``_restoring`` is set by hand. It used to be the rebuild hook that set it;
+    what these cases are about is taking back two legs left at the venue, not
+    how the session came to be running again.
+    """
+    strat._restoring = True
     await strat.on_start()
     await strat.on_recon_done(
         ReconDone(
