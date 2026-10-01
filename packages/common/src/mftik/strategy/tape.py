@@ -83,6 +83,7 @@ LOG_CHUNK = 1_000
 #: tolerable, and anything before one is dropped.
 DEFAULT_MAX_GAP_MS = 30_000
 
+
 class TapeFeedNotAttached(LookupError):
     """This session never attached the feed, so it has no MD to ask."""
 
