@@ -116,6 +116,9 @@ class StrategyHarness:
         self.session_id = session_id
         self.strategy_type = strategy_type or type(strategy).__name__
         #: Account name → ``api_id``, as ``td:`` in ``strategy.yml`` resolves.
+        #: Named for :class:`~mftik.strategy.session.SessionView`, which this
+        #: stands in for — so ``harness.td`` is the deployment and
+        #: ``strategy.td`` is the availability accessor. Same for ``md``.
         self.td = dict(td or {})
         #: Feed keys this session believes it subscribed.
         self.md = list(md or [])

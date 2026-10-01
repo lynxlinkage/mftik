@@ -11,6 +11,20 @@ The names re-exported here are the ones a strategy spells out: the base class
 and the types its own annotations mention. The accessor classes stay reachable
 at their module paths (``mftik.strategy.oms`` and so on) — a strategy is handed
 an instance, so naming the class is the rarer case.
+
+**This layer is the authority for nothing (§3.3).** Every answer it hands a
+strategy has a single writer somewhere else — the OMS and the ledger are the TD
+account worker's memory, feed state is the MD connection worker's, a selector's
+universe and epoch are the MD controller's, the session's phase and its event
+log are the STS session worker's — and the SDK reads or is told, never decides.
+That is why the accessors return snapshots rather than something to fold into a
+private mirror: two pictures of one account is how a strategy ends up trading
+against a book nobody has.
+
+The exception is the strategy's own state, which lives in the strategy object
+and is not persisted anywhere (F10). A session that is restarted begins again
+from ``on_start`` with nothing carried over, so a strategy that has to know what
+it holds asks :attr:`~Strategy.oms` rather than remembering.
 """
 
 from mftik.strategy.base import Strategy

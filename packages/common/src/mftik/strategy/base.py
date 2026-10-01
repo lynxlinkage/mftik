@@ -62,7 +62,8 @@ class Strategy:
         persisted for the UI
         ``on_start`` may be long and may be synchronous, and it may not trade:
         TD has not been subscribed and nothing has reconciled, so order entry
-        raises :class:`~mftik.strategy.errors.NotReady` until ``on_ready``.
+        will raise :class:`~mftik.strategy.errors.NotReady` there (the gate
+        itself lands with the session worker — IF-06 defines the exception).
         ``on_ready`` fires once, and fires even when a feed is missing — what
         is missing is in ``ready.missing_feeds`` and what to do about it is the
         strategy's call. See :mod:`mftik.strategy.ready`.
