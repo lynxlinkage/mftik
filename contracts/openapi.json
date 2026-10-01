@@ -2154,6 +2154,7 @@
           "md"
         ],
         "summary": "List Sessions",
+        "description": "Placeholder until IF-09 (#187) gives MD a desired set to list again.\n\nRM-05 (#168) deleted MD's session RPCs, so ``md.session.list`` comes back\nas ``unknown_type`` \u2014 a 502 that reads as a broken plane rather than as a\nroute with nothing behind it.",
         "operationId": "list_sessions_md_sessions_get",
         "parameters": [
           {
