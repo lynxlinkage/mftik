@@ -8,7 +8,7 @@
 
 ## 1. 盤點方法與用詞
 
-**表的形狀和 §3.3 一樣**，六節（控制面、進程層、MD、TD、STS session、版本）、同樣的列、同樣的四個欄位，另加第五欄「和 §3.3 的差異與負責的票」。這樣兩張表可以並排著讀。
+**表的形狀和 §3.3 一樣**，六節（控制面、進程層、MD、TD、STS session、版本）、同樣的列、同樣的五個欄位，另加第六欄「和 §3.3 的差異與負責的票」。這樣兩張表可以並排著讀。
 
 - **列的順序和 §3.3 完全相同**，連現況不存在的狀態也保留成一列，權威那格寫「不存在」。
 - **差異欄寫「—」** 表示這一列和 §3.3 的目標一致，不需要任何票。
@@ -200,16 +200,73 @@ session worker 是單一 event loop，沒有 ingress thread 和 strategy thread 
 
 ## 10. 生產部署上這些狀態落在哪
 
-TODO
+機器、plane set、volume、NATS、Redis、secret 的位置一律見 `docs/Deployment.md`（B1-02 已依現況重寫），這裡不重複。只記下**會讓上面的表在生產上讀起來不一樣**的幾點：
+
+1. **生產跑的代碼比本文的基準舊。** 平面是 `v0.12.0`，落後當時的 `main` 21 個 commit（`docs/Deployment.md` 的「現況」一節）。這 21 個 commit 裡和狀態權威有關的是 force-stop 升級成 SIGKILL 的那幾個（#149、#150）和 registry 同步（#152）。本文描述的是 `a0cbfb2`，不是線上那一版。
+2. **tape 在生產上只錄 `aggtrade`。** `MD_TAPE_TOPICS=aggtrade`（`deployment/sets/planes.json:81`），代碼預設是 `("aggtrade", "trade")`（`apps/md/src/mftik_md/tape.py:41`）。`MD_TAPE_MAXLEN=150000`（`:83`）、`MD_TAPE_RETENTION_S=7200`（`:82`），都比代碼預設的 500,000 小。
+3. **只有 MD 有 `REDIS_URL`。** `planes.json` 裡只有 md 這個 set 帶它（`planes.json:80`），STS 完全沒有，所以「STS 不開 Redis」在部署上也成立，不只是代碼約定。
+4. **STS 的 event log 和 artifacts 落在同一個 volume 上。** `STS_EVENTLOG_DIR=/var/lib/mftik/eventlog`、`STS_ARTIFACT_DIR=/var/lib/mftik/artifacts`、`MFTIK_DATA=/var/lib/mftik/registry` 都掛在 `mftik-data`（`planes.json:56`–`:59`，volumeMounts 在 `:50`–`:52`）。所以 §6 說「檔案留在 volume 上」在生產成立；平面重啟不會掉。
+5. **`STS_REBUILD_ON_BOOT=1` 是開著的**（`planes.json:57`），所以 §9.1 的 rebuild 路徑在生產上是活的。
+6. **所有平面共用同一組 DB 連線 secret**（`planes.json` 的 `commonEnv`，值是 Strategon 的 secret 參照）。這一點對 B5-09（#218，「session worker 不持有任何 DB 連線」）有影響：現況 session worker 是 `exec` 出來的子進程，環境整份繼承，而且 `SubprocessSpawner` 還特別把 `MFTIK_DB_POOL_SIZE` 設成 1（`apps/sts/src/mftik_sts/spawn.py:212`）——也就是說它本來就預期 worker 會開 DB 連線。
 
 ## 11. 計畫與代碼不符之處
 
-TODO
+1. **`client_order_id` 的版位少了一個 `ver` nibble。** §3.3 的 STS session 那一列寫 `session24 | ts_sec28 | seq8`，§5.3 的 R2 也寫 `session(24) | ts_sec(28) | seq(8)`，加起來 60 bit。代碼的 v1 版位是 **`ver4 | session24 | ts_sec28 | seq8`**，剛好 64 bit，而且 `ver` 的範圍刻意停在 7（`ver >= 8` 會把 uint64 的符號位點亮，任何 int64 解析都會壞）；`packages/common/src/mftik/strategy/client_order_id.py:1`–`:27`、`pack` 在 `:91`。建議兩處都補上 `ver4`。
+
+2. **R2 的不撞號論證在現況不成立，新架構要靠新加的 backoff 才成立。** R2 說「backoff 至少 1 秒 … 舊的最後一張單和新的第一張單一定落在不同秒，所以不會撞號」。這在 §3.3 的目標下沒問題，但它被寫在「現況的 cid 序號」那一列的收斂欄裡，讀起來像是現況的性質。現況**沒有**這個 backoff：worker 非 0 退出時 `_schedule_rebuild` 立刻排 rebuild（`apps/sts/.../session/manager.py:904`–`:924`），代碼裡唯一的防撞是 seq 繞回時推進秒數（`client_order_id.py:163`–`:168`）。實務上新 worker 要跑 `on_start` 和 attach，幾乎一定超過一秒，但那是運氣不是保證。
+
+3. **§3.3 的開場說「每一種狀態只有一個權威：只有它能寫」，但表自己有兩列列了多個寫入者。** MD intent 那一列的權威是「API（start）、STS controller（自癒時重新 put）、session worker（執行期間的 subscribe）」，TD intent 那一列是「API、STS controller」。這和同一節的開場互相矛盾。本文的理解是那兩列想說的是「寫入都走同一條 level-triggered 的 put，權威是那張表」，但字面上和開場不一致，而 B0-04 的工作正是拿「有幾個寫入者」當度量，所以值得改掉。
+
+4. **§3.3 說 `cash_flows` 由 TD 帳號 worker 寫，現況完全沒有寫入路徑。** `CashFlowRepository.bulk_insert_ignore` 存在（`packages/db/src/mftik_db/repositories/history.py:416`），但生產代碼沒有任何呼叫端，只有測試在用。所以這不是「現況和目標不同」，而是「這張表從來沒被填過」。沒有票負責開始寫它，見 §12。
+
+5. **`md.subscribe` 在 §3.3 被算進 MD intent 的寫入者，但它沒有生產發送者。** `docs/baseline/protocol.md` 4.3 已經查證過這件事（`MdSubscribe` 的 docstring 自己就說沒有人送）。影響到 §3.3 的是：「session worker（執行期間的 subscribe，經 `md.intent.patch`）」這個寫入者在現況不存在，所以 `md.intent.patch` 是新增能力，不是現有行為搬家。
+
+6. **§3.3 的 feed / 帳號失聯那兩列寫「只通知，不回收」，現況是「直接讓 session 死」。** 這是方向性的差異而不是計畫寫錯，但差距比「通知的實作還沒做」大得多：現況 MD 或 TD 一方安靜 3 秒，session 就 `failed`，而 `failed` 不是 rebuild 的候選，所以沒有自動復原的路徑（§9.4、§9.5）。P7 寫「不以訊號消失推論狀態，唯一例外是失聯通知」；現況正好是反過來的——三個 reaper 和兩個 watchdog 全都在從訊號缺席推論狀態。
 
 ## 12. 沒有票涵蓋的差異
 
-TODO
+以下差異在 `REFACTOR_TICKETS.md` 裡找不到負責的票。本文不編新票，只列出來。
+
+1. **`cash_flows` 從來沒有寫入路徑。** §3.3 把它和 `orders`、`fills`、`backfill_cursors` 並列成 TD 帳號 worker 寫的東西。B6-05（#223）只說把 `backfill/` 搬進常駐層，沒有說要開始寫 `cash_flows`；B10-01（#249）的 migration 範圍也沒提它。要嘛補一張票開始寫，要嘛把 §3.3 的這一欄改掉。
+
+2. **策略代碼 registry 的權威與開機 catch-up（§8 第 1 列）。** API 是權威、每個 STS 磁碟是副本、開機時向 API 要差額（`apps/sts/src/mftik_sts/registry_catchup.py`）。§3.3 完全沒有這一列，`protocol.md` 5.3 第 1 項也已經記下 registry 的五個型別在計畫裡沒有去向。worker 進程化之後「哪一份磁碟上的代碼跑著哪一個 session」會和 `WorkerSpec.code_ref`（B3-07，#200）重疊，但沒有票把 registry 這一層接進去。
+
+3. **artifacts 有兩個寫入者（§6）。** 策略在 worker 裡寫，operator / API 經平面的 RPC 寫。§3.3 只列了「session worker」。B5-07（#216）說把 artifacts 搬到新 worker，但沒有說平面那條上傳路徑之後掛在哪裡（新架構的平面 controller 不再持有 session）。
+
+4. **`sts_sessions.legacy_strategy` 沒有任何應用寫入者。** 只有 migration `0034_strategy_type_key` 寫過它（model 的註解自己寫「nothing resolves a strategy from this … no new row ever writes it」，`packages/db/src/mftik_db/models/session.py:102`–`:111`），B10-01（#249）的 drop 清單是 `st_facts` 和 `rebuild_count` 改名，沒有包含它。
+
+5. **API 自有的控制面狀態（§8 後兩列）不在 §3.3 的範圍內。** `session_logs`、`audits`、`alert_*`、`auth_*`、`instances`、`users`、`accounts` 的權威都是 API，重構不碰它們。這不是遺漏，但 §3.3 沒有說自己只涵蓋 session 生命週期相關的狀態，容易被讀成全集。
 
 ## 13. 重現這份盤點
 
-TODO
+```sh
+git -C . diff --stat a0cbfb2 refactor/process-planes   # 只有 docs 有差
+
+# sts_sessions 的所有寫入點（repository 方法往外反查）
+rg -n 'create_live|mark_finished|mark_live|mark_ack|remember\(|bump_rebuild_count|reset_rebuild_count' \
+  --glob '!**/tests/**' --glob '!test_*' apps packages
+
+# 哪些進程接線了 DB 寫入函式
+rg -n 'persist_live|mark_done|mark_live|remember_fact|list_db_sessions' \
+  apps/sts/src/mftik_sts/app.py apps/sts/src/mftik_sts/worker.py
+
+# 各平面的 reaper 與它的週期
+rg -n 'reap_orphans|_ORPHAN_STRIKES|REAP_INTERVAL_SECONDS' --glob '!**/tests/**' apps
+
+# 落地與不落地：TD 的 OMS / ledger 快照
+rg -n 'async def publish_oms|async def write_ledger' -A 4 apps/td/src/mftik_td/session/session.py
+
+# recon 與 UNKNOWN 的路徑
+rg -n 'async def reconcile|async def chase_unknown|async def resolve_unknown|apply_reconcile' \
+  apps/td/src/mftik_td/session/session.py apps/td/src/mftik_td/oms/oms.py
+
+# cid 版位與序號重置
+rg -n 'class ClientOrderIdFactory' -A 35 packages/common/src/mftik/strategy/client_order_id.py
+
+# tape 的 key、coverage 欄位與 Redis 設定
+rg -n '_stream_key|_coverage_key|TAPE_MAX_GAPS|mark_recording' apps/md/src/mftik_md/tape_store.py
+rg -n 'appendonly|appendfsync|maxmemory' deployment/redis/redis.conf
+
+# envelope 有沒有版本欄位
+rg -n 'class Envelope' -A 15 packages/common/src/mftik/protocol/envelope.py
+```

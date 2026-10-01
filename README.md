@@ -66,7 +66,7 @@ just lint            # ruff
 | [`docs/REFACTOR_TICKETS.md`](docs/REFACTOR_TICKETS.md) | 上面那份計畫拆出來的工作票，每張對應一個 issue |
 | [`docs/Deployment.md`](docs/Deployment.md) | 部署：Strategon plane sets、site 與 NATS gateway、secret、上線與回滾。B1-02（#161）會依現況重寫 |
 
-重構的盤點結果在 `docs/baseline/`：[`closed-branches.md`](docs/baseline/closed-branches.md) 記下重構開始前被刪掉的分支的 head。B0 還會在這裡補上 protocol 與狀態權威的盤點。
+重構的盤點結果在 `docs/baseline/`：[`closed-branches.md`](docs/baseline/closed-branches.md) 記下重構開始前被刪掉的分支的 head，[`protocol.md`](docs/baseline/protocol.md) 是現行協定的盤點（B0-03，#156），[`state-authority.md`](docs/baseline/state-authority.md) 是現況的狀態權威表（B0-04，#157）。
 
 下面是舊模型的設計紀錄，都是英文寫的。B1-01（#160）會把它們整批移到 `docs/archive/`，並加一份 `INDEX.md` 記錄封存日期和取代它的文件；在那之前它們還在 `docs/` 根目錄。**內容描述的是重構前的架構，和計畫衝突時以計畫為準。**
 
