@@ -1347,7 +1347,7 @@ RM-01 到 RM-09 全部合併之後，RM-10 逐檔比對了上面每一列。**42
 1. **`test_order_rpc`：留 1 個，不是 4 個。** 附錄 A 把 `test_a_malformed_ticker_is_left_to_the_instrument_check`、`test_a_gate_market_buy_sized_in_base_is_unsupported_shape`、`test_reduce_only_passes_on_a_contract_ticker` 算成「不經 manager」，但它們測的是 `manager.py` 的模組層函式 `_wrong_instrument`、`_place_order_request`、`_refusal_code`、`_reduce_only_unsupported`，而 RM-06 的補正明文把這四個列進刪除範圍。**補正勝過附錄 A**，三個案例隨代碼走，由 B6-02（#220）重新實作時補回。留下的是 `test_no_td_serving_times_out`。
 2. **`test_eventlog` 留 21 個、`test_oms_wait_cids` 留 11 個，附錄 A 分別列了刪 15 個和 3 個。** 那些案例直接建構 `StsSession`，而 `StsSession` 依 RM-04 的「留下」保留到 B4-03（#203），所以它們仍然綠。RM-04 因此留下它們；`test_eventlog` 只刪了 `test_lease_ack_is_recorded`（隨 RM-07 的 lease ack 走）。B5-02（#211）與 B6-08（#226）改寫時一起處理。
 3. **`test_environment_flow` 刪 5 個，附錄 A 列 3 個。** 多出來的 `test_s16_silent_sts_is_not_idle`、`test_s17_session_arriving_mid_install_aborts` 測的是 `_require_no_live_sessions` 會向 STS 問 live session；RM-08 之後那個守衛是 no-op，主題不存在。
-4. **附錄 A 沒有列、但主題已經不存在而被一起刪掉的：** `apps/api/tests/test_sts_strategies.py` 的 9 個 stop / force-stop 路由案例（RM-04）、`apps/api/tests/test_environment_api.py` 的 5 個 live-session 守衛案例（RM-08）、`apps/sts/tests/test_eventlog_rpc.py:test_info_flags_a_session_still_running`（`live` 旗標自 RM-04 起恆為 false）。
+4. **附錄 A 沒有列、但主題已經不存在而被一起刪掉的：** `apps/api/tests/test_sts_strategies.py` 的 9 個 stop / force-stop 路由案例（RM-04）、`apps/api/tests/test_environment_api.py` 的 5 個 live-session 守衛案例（RM-08）、`apps/sts/tests/test_eventlog_rpc.py:test_info_flags_a_session_still_running`（`live` 旗標自 RM-04 起恆為 false）。另外 `packages/db/tests/test_sts_session_repository.py` 少了 10 個（54 → 44）：那些是 RM-01 範圍裡的 `remember` / `rebuild_count` 案例，只是這張表沒有 `packages/db/tests` 這一節。
 5. **`test_strategy_yml` 多一個案例。** RM-09 把 `test_restart_defaults_to_always` 改成 `test_restart_defaults_to_never`，並加上 `test_the_old_always_is_refused_and_says_what_to_write`（票面驗收要求的錯誤訊息）。
 
 RM 之後實際剩下的測試數與耗時見 C.8；平面上還剩哪些模組見 `docs/baseline/remaining.md`。
@@ -1911,7 +1911,11 @@ C.6 把定稿的附錄 A 套在基線的量測上，算出 RM 之後是 3,816 �
 
 兩個差額都有解釋，而且都不影響 C.6 的結論：
 
-1. **測試數少 40 個**：RM 的各票在附錄 A 之外還刪了幾批主題已經不存在的案例 —— `apps/api/tests/test_sts_strategies.py` 的 9 個 stop 路由案例（參數化後 18 個，隨 RM-04 的 force-stop 升級一起走）、`apps/api/tests/test_environment_api.py` 的 5 個 live-session 守衛案例（RM-08 之後守衛是 no-op）、`apps/sts/tests/test_eventlog_rpc.py:test_info_flags_a_session_still_running`（`live` 旗標恆為 false），以及 RM-06 依補正多刪的 3 個 `test_order_rpc` 案例。附錄 A 沒有列它們，但它們測的都是 RM 刪掉的東西。詳見 `docs/baseline/remaining.md`。
+1. **測試數少 40 個，全部出在「部分刪除」那一欄。** C.6 的 3,816 = 4,244 − 355（整檔）− 73（部分）；整檔那 355 個一個不差，部分刪除實際是 113 個而不是 73 個。多出來的 40 個有兩個來源，而且都不是漏算：
+   - **RM 在附錄 A 之外刪掉的、主題已經不存在的案例**：`apps/api/tests/test_sts_strategies.py` 的 9 個 stop / force-stop 路由案例（參數化後 18 個，隨 RM-04 走）、`apps/api/tests/test_environment_api.py` 的 5 個 live-session 守衛案例（RM-08 之後守衛是 no-op）、`apps/sts/tests/test_eventlog_rpc.py:test_info_flags_a_session_still_running`（`live` 旗標恆為 false）、`packages/db/tests/test_sts_session_repository.py` 的 10 個 `remember` / `rebuild_count` 案例（在 RM-01 的範圍裡，但附錄 A 的表沒有 `packages/db/tests` 這一節）、RM-06 依補正多刪的 3 個 `test_order_rpc` 案例、RM-08 多刪的 2 個 `test_environment_flow` 案例。
+   - **反方向的 18 個**：RM-04 留下 `test_eventlog` 的 14 個與 `test_oms_wait_cids` 的 3 個 `StsSession` 案例（附錄 A 列的是刪除），RM-09 在 `test_strategy_yml` 多加 1 個。
+   - 剩下的差額是**附錄 A 數的是測試函式、C.5 數的是參數化展開後的測試**，指名刪除的案例裡有一批帶 `database_url` 參數。
+   附錄 A 已加一節逐項記錄這些差異；`docs/baseline/remaining.md` 有同一份清單加上去向。
 2. **秒數多 24 秒**：**不是 RM 留下來的東西變慢，是 RM 沒碰的模組在這台 runner 上跑得比基線那一趟慢**（+16.6 秒），加上部分刪除的模組身上也帶著同樣的漂移。最明顯的三個都和 session 機制無關：`test_backfill_executor.py` 13.31 → 17.59、`test_auth_registry_keys.py` 11.83 → 15.22、`test_plane.py` 13.35 → 15.29，合計就占了 +9.6 秒。`[postgres]` 那一趟 437 → 407 個測試卻從 148.7 秒變 156.9 秒，是同一件事。C.1 記下過同一份代碼在 398–435 秒之間擺動，這個幅度和那個區間同一個數量級。
 
 **C.6 的結論成立，而且數字更好看了。** 把 Postgres 那一趟（156.9 秒）移出 `just test`（§9.1 規則 6），剩下 **98.9 秒**，已經在 F30 的 120 秒預算以內，還沒用到 `pytest-xdist`。B2-04（#177）先拆 tier、再平行化的順序不變。
