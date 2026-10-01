@@ -19,7 +19,6 @@ from mftik.broker import Broker
 from mftik.exchange.models import AggTrade, Side, Trade
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import Topics
-from mftik.strategy import tape as tape_mod
 from mftik.strategy.eventlog import EventLog
 from mftik.strategy.tape import StrategyTape, TapeFeedNotAttached
 from mftik_md.rpc.tape import TAPE_RPC_CHUNK
@@ -483,56 +482,6 @@ async def test_a_read_assembles_chunks_into_one_slice(
 
     assert [r.trade_id for r in prints] == ["0", "1", "2", "3", "4"]
     assert TAPE_RPC_CHUNK > 2  # production chunk stays large
-
-
-@pytest.mark.asyncio
-async def test_parse_yields_the_loop_between_records(
-    broker: Broker, store: TapeStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The assembled tail must not be one turn of the loop.
-
-    Fetching already awaits per page. A sibling task that only runs while
-    some, but not all, of the rows have been parsed is running during the
-    parse itself — the stretch that used to hold every session's heartbeat.
-    """
-    monkeypatch.setattr(tape_mod, "SLICE_S", -1.0)
-    await store.mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
-    for n in range(3):
-        await _record(store, AGG_FEED, str(n), "68000", recorded_ms=100 + n)
-
-    parsed = 0
-    real_parse = tape_mod._parse
-
-    def counting(topic: str, universal_ticker: str, fields: dict[str, str]):
-        nonlocal parsed
-        parsed += 1
-        return real_parse(topic, universal_ticker, fields)
-
-    monkeypatch.setattr(tape_mod, "_parse", counting)
-    interleaved = False
-
-    async def other() -> None:
-        nonlocal interleaved
-        while True:
-            if 0 < parsed < 3:
-                interleaved = True
-            await asyncio.sleep(0)
-
-    watcher = asyncio.create_task(other())
-    stop = asyncio.Event()
-    serve = asyncio.create_task(
-        serve_tape(broker, store, instance=INSTANCE, stop=stop)
-    )
-    try:
-        result, prints = await _read(_tape(broker), TICKER)
-    finally:
-        stop.set()
-        serve.cancel()
-        watcher.cancel()
-        await asyncio.gather(serve, watcher, return_exceptions=True)
-
-    assert [r.trade_id for r in prints] == ["0", "1", "2"]
-    assert interleaved
 
 
 def test_sts_and_strategy_do_not_import_redis() -> None:

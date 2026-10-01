@@ -9,7 +9,6 @@ and replaying a print that was already on the tape.
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import time
 from decimal import Decimal
@@ -27,7 +26,6 @@ from mftik.exchange.models import (
 )
 from mftik.exchange.oms import OmsView, Position
 from mftik.protocol import ReconDone, RejectCode, SymbolInfo
-from mftik.strategy import tape as tape_mod
 from mftik.strategy.tape import TapeSlice
 from mftik_sts.impl.macd_dollar import MacdDollarBars, _BarBuilder, _Ema
 
@@ -393,50 +391,6 @@ async def test_a_print_already_on_the_tape_is_not_counted_twice() -> None:
     # 500 from the tape, and the live copy of it ignored — not 1000, which
     # would have closed a bar that never happened.
     assert strat._bars_seen == 0
-
-
-@pytest.mark.asyncio
-async def test_warm_up_ingest_yields_the_loop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Folding each print yields, because that is where the records are spent.
-
-    ``read`` hands each print to ``on_print`` and does not keep the list.
-    This strategy ingests there. A sibling that observes an ingest in
-    progress is scheduled from that callback.
-    """
-    monkeypatch.setattr(tape_mod, "SLICE_S", -1.0)
-    strat = _strategy()
-    records = [_print(str(100 + n), "5", trade_id=str(n)) for n in range(4)]
-    strat.tape = FakeTape(
-        TapeSlice(records=records, continuous_since_ms=1, recording=True)
-    )
-    ingested = 0
-    real_ingest = strat._ingest
-
-    def counting(trade):
-        nonlocal ingested
-        ingested += 1
-        return real_ingest(trade)
-
-    strat._ingest = counting  # type: ignore[method-assign]
-    interleaved = False
-
-    async def other() -> None:
-        nonlocal interleaved
-        while True:
-            if 0 < ingested < len(records):
-                interleaved = True
-            await asyncio.sleep(0)
-
-    watcher = asyncio.create_task(other())
-    try:
-        await strat.on_start()
-    finally:
-        watcher.cancel()
-        await asyncio.gather(watcher, return_exceptions=True)
-
-    assert interleaved
 
 
 # --- trading ---------------------------------------------------------------

@@ -45,47 +45,6 @@ directory — nothing else. The node runs the source you send it rather than an
 environment you built, so a third-party import would be a module that is not
 there. `mftik check` tells you before you push.
 
-## Hand the loop back while you compute
-
-Your hooks are coroutines on the session's own loop, and the heartbeat task
-that watches for MD's acknowledgements is another task on the same loop. A
-hook that does not await keeps that task from running, and once an
-acknowledgement has gone unseen for `LEASE_HEARTBEAT_INTERVAL_S` ×
-`LEASE_MISS_LIMIT` the session fails itself with `md feed from {instance}
-stopped: session can no longer run` — `{instance}` being the name of the MD
-holding the feed, `md` by default. That window is about 3 seconds, measured
-from the last acknowledgement rather than from where you stopped awaiting, so
-stay well under it.
-
-`self.tape.read` hands back up to 200,000 prints, which is well past that, so
-work through them in slices, breathing between records:
-
-```python
-from mftik.strategy import Strategy, breathe, slice_deadline
-
-
-class MyStrategy(Strategy):
-    async def on_start(self) -> None:
-        tape = await self.tape.read(self.paras["ticker"], topic="aggtrade")
-        deadline = slice_deadline()
-        for print_ in tape.records:
-            deadline = await breathe(deadline)
-            self._fold(print_)
-```
-
-`slice_deadline()` says when the current slice is spent. `breathe(deadline)`
-returns without suspending while that slice still has time and yields only
-once it does not, so the cost per record is a clock read rather than a
-reschedule. Keep what it returns and pass it back in — that is the next
-deadline.
-
-The same pair belongs around any other long stretch of computation in a hook.
-A `read(..., on_print=...)` callback is the exception: the read breathes
-before every record, and that clock check counts whatever your previous
-callback spent — so an ordinary callback, which may be a plain sync function,
-needs nothing added. If one call of it is long, make the callback `async` and
-breathe inside it.
-
 ## The client
 
 ```bash
