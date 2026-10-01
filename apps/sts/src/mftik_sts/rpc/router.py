@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING
 
 from mftik.broker import IncomingRequest
 from mftik.protocol import (
@@ -59,9 +58,6 @@ from mftik_sts.rpc.sessions import (
     handle_session_stop,
 )
 
-if TYPE_CHECKING:
-    from mftik_sts.session import SessionManager
-
 logger = logging.getLogger(__name__)
 
 Handler = Callable[..., Awaitable[None]]
@@ -93,8 +89,14 @@ _HANDLERS: dict[str, Handler] = {
 async def dispatch(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
+    """Route one request. ``instance`` is which STS this process is.
+
+    It used to arrive as the session manager, which the handlers read an
+    instance name off. RM-04 deleted that manager, and the name is the only
+    thing any remaining handler wanted from it.
+    """
     handler = _HANDLERS.get(req.envelope.type)
     if handler is None:
         logger.warning(
@@ -114,4 +116,4 @@ async def dispatch(
             )
         )
         return
-    await handler(req, sessions=sessions)
+    await handler(req, instance=instance)

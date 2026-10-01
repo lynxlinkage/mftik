@@ -255,7 +255,6 @@ async def test_td_fan_out_wakes_wait_cids(broker: Broker) -> None:
             created_by=1,
             strategy=strategy,
             td_api_ids=[7],
-            heartbeat_interval=0.1,
         )
 
         async def publish_new() -> None:
@@ -298,7 +297,6 @@ async def test_a_raising_hook_still_wakes_wait_cids(broker: Broker) -> None:
             created_by=1,
             strategy=strategy,
             td_api_ids=[7],
-            heartbeat_interval=0.1,
         )
 
         async def publish_new() -> None:
@@ -334,7 +332,6 @@ async def test_an_order_reject_clears_a_pending_cid(broker: Broker) -> None:
             created_by=1,
             strategy=strategy,
             td_api_ids=[7],
-            heartbeat_interval=0.1,
         )
 
         async def reject() -> None:

@@ -12,7 +12,6 @@ import asyncio
 import base64
 import gzip
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from broker_harness import a_broker
@@ -42,20 +41,20 @@ async def broker() -> Broker:
 
 @pytest.fixture
 async def sts_rpc(broker: Broker):
-    """A running STS RPC server, with a stub session manager."""
+    """A running STS RPC server.
+
+    ``instance`` is part of the interface: a part says whose disk it is on,
+    so a read of it can be addressed there.
+    """
     stop = asyncio.Event()
-    live: dict[str, object] = {}
-    # ``instance`` is part of the interface now: a part says whose disk
-    # it is on, so a read of it can be addressed there.
-    sessions = SimpleNamespace(get=live.get, instance="sts")
 
     async def serve() -> None:
         async for req in broker.serve(Topics.STS, stop=stop):
-            await dispatch(req, sessions=sessions)
+            await dispatch(req, instance="sts")
 
     task = asyncio.create_task(serve())
     await asyncio.sleep(0.02)
-    yield live
+    yield
     stop.set()
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
@@ -140,18 +139,6 @@ async def test_info_separates_off_from_absent(
     assert absent.enabled is True
     assert absent.available is False
     assert absent.parts == []
-
-
-async def test_info_flags_a_session_still_running(
-    broker: Broker, sts_rpc, tmp_path: Path, monkeypatch
-) -> None:
-    """A download of a live session is a prefix, and should say so."""
-    monkeypatch.setenv(DIR_ENV, str(tmp_path))
-    _write_parts(tmp_path, "s1")
-    sts_rpc["s1"] = object()
-
-    info = StsEventLogInfo.model_validate((await _info(broker, "s1")).payload)
-    assert info.live is True
 
 
 async def test_read_returns_the_bytes_gzipped(

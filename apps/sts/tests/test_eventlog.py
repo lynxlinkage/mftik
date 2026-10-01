@@ -273,7 +273,6 @@ def _session(
         broker=broker,
         created_by=1,
         strategy=strategy,
-        heartbeat_interval=0.1,
         event_log=EventLog(session_id, directory=tmp_path),
         **kwargs,
     )

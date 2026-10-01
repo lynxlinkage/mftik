@@ -1,4 +1,9 @@
-"""STS process bootstrap — RPC, independent sessions, heartbeat."""
+"""STS process bootstrap — RPC, registry, heartbeat.
+
+No sessions. RM-04 deleted the per-session subprocess and the manager that
+owned it, so this process serves health, registry, env and artifacts, and
+answers the session types with ``NotImplementedError("IF-04")``.
+"""
 
 from __future__ import annotations
 
@@ -20,16 +25,13 @@ from mftik import (
     serve_health,
 )
 from mftik.broker import Broker
-from mftik.protocol import STS_SESSION_CREATE, STS_SESSION_FORCE_STOP, Topics
+from mftik.protocol import Topics
 from mftik.strategy.artifacts import get_store
 from mftik_db.schema import SchemaTooOld, require_sts_schema
 
-from mftik_sts import db as sts_db
 from mftik_sts.registry_catchup import catch_up_until_matched
 from mftik_sts.rpc import dispatch
 from mftik_sts.runtime_env import extras_names, refresh
-from mftik_sts.session import SessionManager
-from mftik_sts.spawn import SubprocessSpawner
 
 SOURCE = "sts"
 #: Which STS this process is. ``MFTIK_INSTANCE``, defaulting to the
@@ -51,9 +53,9 @@ logger = logging.getLogger(SOURCE)
 RPC_RESTART_DELAY_SECONDS = 1.0
 
 
-async def _dispatch_request(req: Any, sessions: SessionManager) -> None:
+async def _dispatch_request(req: Any, *, instance: str | None = None) -> None:
     try:
-        await dispatch(req, sessions=sessions)
+        await dispatch(req, instance=instance)
     except Exception:
         logger.exception(
             "STS RPC handler failed type=%s id=%s",
@@ -64,10 +66,10 @@ async def _dispatch_request(req: Any, sessions: SessionManager) -> None:
 
 async def run_rpc(
     broker: Broker,
-    sessions: SessionManager,
     stop: asyncio.Event,
     *,
     subject: str,
+    instance: str | None = None,
 ) -> None:
     """Serve STS request-reply on ``subject`` until ``stop``.
 
@@ -79,30 +81,7 @@ async def run_rpc(
     while not stop.is_set():
         try:
             async for req in broker.serve(subject, stop=stop):
-                # Create waits on the worker's result line. Force-stop waits
-                # out the kill and the row write. Awaiting either here would
-                # hold every other RPC on this subject — list, artifacts,
-                # another session's stop — for that whole time.
-                # The API's own timeout is unchanged. If a create timeout
-                # already fired and the worker later reports success, the
-                # session stays live and the deploy has not attached it.
-                # This process does not kill that worker and does not mark
-                # the row failed.
-                if req.envelope.type == STS_SESSION_CREATE:
-                    task = asyncio.create_task(
-                        _dispatch_request(req, sessions),
-                        name="sts-rpc-create",
-                    )
-                    sessions.track_create(task)
-                    continue
-                if req.envelope.type == STS_SESSION_FORCE_STOP:
-                    task = asyncio.create_task(
-                        _dispatch_request(req, sessions),
-                        name="sts-rpc-force-stop",
-                    )
-                    sessions.track_escalation(task)
-                    continue
-                await _dispatch_request(req, sessions)
+                await _dispatch_request(req, instance=instance)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -122,32 +101,23 @@ async def run_rpc(
                 continue
 
 
-#: How often to look for sessions this instance owns and does not hold.
-#: Well under the window someone would spend wondering why a strategy is
-#: not doing anything, and far enough above two reap scans that a row
-#: between persist and ``_sessions`` is not closed on the first look.
-REAP_INTERVAL_SECONDS = 60.0
+#: How often to clear abandoned artifact uploads. Slow on purpose: a part
+#: file costs disk and nothing else, and the scan reads a directory.
+SWEEP_INTERVAL_SECONDS = 60.0
 
 
-async def reap_loop(
-    sessions: SessionManager,
+async def sweep_loop(
     stop: asyncio.Event,
     *,
-    interval: float = REAP_INTERVAL_SECONDS,
+    interval: float = SWEEP_INTERVAL_SECONDS,
 ) -> None:
-    """Scan for orphaned sessions on boot, then on a slow interval.
+    """Clear artifact uploads nobody committed, on boot and on an interval.
 
-    On boot because a crash is most often noticed by whatever replaces the
-    process; on an interval because a crash with no restart still leaves rows
-    claiming to be running, and nobody should have to restart STS to find out.
+    This used to share a loop with the orphan reaper, which RM-04 deleted
+    along with the session manager it scanned. The artifact store is this
+    plane's own disk and still needs sweeping.
     """
     while not stop.is_set():
-        try:
-            reaped = await sessions.reap_orphans()
-            if reaped:
-                logger.warning("STS reaped %d orphaned session(s)", len(reaped))
-        except Exception:
-            logger.exception("STS orphan reaper failed")
         try:
             # An upload nobody committed — the API died, the laptop closed —
             # leaves a part file. Hidden from listings, and not an object.
@@ -268,18 +238,6 @@ async def amain() -> bool:
                 stamp.generation,
                 ", ".join(sorted(extras_names())) or "(none)",
             )
-        sessions = SessionManager(
-            broker,
-            persist_live=sts_db.persist_live_session,
-            mark_done=sts_db.mark_session_finished,
-            list_db_sessions=sts_db.list_sessions,
-            load_session=sts_db.load_session,
-            mark_live=sts_db.mark_session_live,
-            td_instance=sts_db.td_instance,
-            derive_sts=sts_db.derived_sts,
-            instance=INSTANCE,
-            spawner=SubprocessSpawner(),
-        )
         logger.info("STS started instance=%s", INSTANCE)
         subjects = control_subjects(SOURCE, INSTANCE, ROLE)
         if not subjects:
@@ -290,7 +248,7 @@ async def amain() -> bool:
             )
         rpc_tasks = [
             asyncio.create_task(
-                run_rpc(broker, sessions, stop, subject=subject),
+                run_rpc(broker, stop, subject=subject, instance=INSTANCE),
                 name=f"sts-rpc-{subject}",
             )
             for subject in subjects
@@ -304,8 +262,8 @@ async def amain() -> bool:
             ),
             name="sts-sys-heartbeat",
         )
-        reaper_task = asyncio.create_task(
-            reap_loop(sessions, stop), name="sts-reaper"
+        sweep_task = asyncio.create_task(
+            sweep_loop(stop), name="sts-artifact-sweep"
         )
         health_task = asyncio.create_task(
             serve_health(
@@ -327,19 +285,18 @@ async def amain() -> bool:
                 stop,
                 *rpc_tasks,
                 hb_task,
-                reaper_task,
+                sweep_task,
                 health_task,
                 logger=logger,
             )
         finally:
             stop.set()
-            tasks = [*rpc_tasks, hb_task, reaper_task, health_task]
+            tasks = [*rpc_tasks, hb_task, sweep_task, health_task]
             if catchup_task is not None:
                 tasks.append(catchup_task)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await sessions.close_all()
     logger.info("STS stopped")
     return clean
 
@@ -351,8 +308,7 @@ def main() -> None:
     # tells anyone reading ``docker ps`` that STS did not just stop.
     #
     # ``uvloop.run`` rather than ``asyncio.run`` — docs/EventLoop.md has the
-    # measurements. This loop serves the instance. Each live session is a
-    # worker process with a loop of its own. It builds that loop for this
-    # call alone and leaves the global policy untouched.
+    # measurements. This loop serves the instance. It builds that loop for
+    # this call alone and leaves the global policy untouched.
     if not uvloop.run(amain()):
         raise SystemExit(1)
