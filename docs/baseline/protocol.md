@@ -90,7 +90,7 @@
 | `Topics.CMD_MARKET_DATA`（`topics.py:93`） | `cmd.market_data` | 同上 | **刪除** |
 | `Topics.log_session`（`topics.py:115`） | `log.sts.{session_id}` | `log_sts` 的 deprecated alias，只有 `packages/common/tests/test_envelope.py:73` 引用 | **刪除**（subject 本身由 `log_sts` 保留） |
 
-`Topics.md_feed`、`parse_md_feed`、`normalize_md_feed` 不是 subject，是 feed key 的組裝與解析（`topics.py:300`、`:313`、`:329`），有大量呼叫端，保留；B7 之後 key 改成 `atom_id`（F20）。
+`Topics.md_feed`、`parse_md_feed`、`normalize_md_feed` 不是 subject，是 feed key 的組裝與解析（`topics.py:301`、`:314`、`:330`），有大量呼叫端，保留；B7 之後 key 改成 `atom_id`（F20）。
 
 ---
 
@@ -102,7 +102,7 @@
 
 | 型別 | subject | 發送者 | 接收者 | 去向 |
 |---|---|---|---|---|
-| `sts.health` | `sts.{instance}` | `mftik/health.py:145`（`refuse_if_serving` 開機自檢）、API `routes/stats.py:56`、`orchestrate.py:432`（這兩者走 `health.*`） | `rpc/health.py:14` | 保留（§8.3） |
+| `sts.health` | `sts.{instance}`（開機自檢）與 `health.sts.{instance}`（dashboard 與 deploy 前檢查） | `mftik/health.py:145`（`refuse_if_serving`，打具名 control subject）；API `routes/stats.py:56`、`orchestrate.py:432`（打 `health.*`） | `rpc/health.py:14`（control subject）；`mftik/health.py:81`（`health.*`，回覆型別由 `:60` 的 f-string 組出） | 保留（§8.3） |
 | `sts.error` | 回覆 | `rpc/router.py:111`、`rpc/sessions.py:218`、`rpc/registry.py:238`／`:296`、`rpc/env.py:145`／`:156`、`rpc/eventlog.py:209`、`rpc/artifacts.py:340`、`session/manager.py:2392` | API `broker_rpc.py:19`／`:53`（`_DEFAULT_ERROR_TYPES`） | 保留（**無依據**；F26 的 `protocol_mismatch` 需要一個錯誤型別） |
 | `sts.session.create` | `sts.{instance}` | API `orchestrate.py:130` | `rpc/sessions.py:36` | **改名**為 `sts.session.start`，語意從同步等 `on_start` 變成非同步 accept（§8.3 第 1 列、§8.1） |
 | `sts.session.list` | `sts`（anycast，**不是**具名 subject） | API `routes/sts.py:357`（subject 在 `:354`）、`routes/environment.py:168`（subject 在 `:165`） | `rpc/sessions.py:71` | 保留（§5.1「服務 `sts.{instance}`：start、end、list、artifacts、env」。注意 §5.1 把 list 歸給具名 subject，代碼走的是 anycast——以單一 instance 的部署而言兩者等價，多 instance 時 anycast 只會拿到其中一台的清單） |
@@ -110,8 +110,8 @@
 | `sts.session.force_stop` | `sts.{instance}` | API `routes/sts.py:970` | `rpc/sessions.py:106` | **刪除**（§5.2、§8.2 推論：強制停止改由 Supervisor 直接 SIGKILL worker，不再是一個協定訊息） |
 | `sts.session.fail` | `sts.control.{session_id}` | API `orchestrate.py:290`（attach 回滾）、`orchestrate.py:494`（`_fail_sts`） | `rpc/sessions.py:119` | 保留（§3.1「服務 `sts.ctl.{session_id}`（stop、fail、status）」），subject 改名 |
 | `sts.session.status` | `status.sts` | STS `session/manager.py:415`；API `routes/sts.py:451`、`ws.py:117`（後者是給晚到 socket 的 replay，沒上線） | API `ws.py:297` | 保留（§8.3 第 1 列把它列在「之後」欄，但它**現在就存在**；見 5.4 第 1 項） |
-| `sts.eventlog.info` | `sts.{instance}` | API `routes/sts.py:626` | `rpc/eventlog.py:62` | 保留（**無依據**；§11 B5 只說 event log 搬到新 worker） |
-| `sts.eventlog.read` | `sts.{instance}` | API `routes/sts.py:675` | `rpc/eventlog.py:110` | 保留（同上） |
+| `sts.eventlog.info` | `sts.{instance}` 或 `sts`（`routes/sts.py:623` 依有沒有指名 instance 二選一） | API `routes/sts.py:626` | `rpc/eventlog.py:62` | 保留（**無依據**；§11 B5 只說 event log 搬到新 worker） |
+| `sts.eventlog.read` | `sts.{instance}` 或 `sts`（`routes/sts.py:664`） | API `routes/sts.py:675` | `rpc/eventlog.py:110` | 保留（同上） |
 | `sts.artifact.list` | `sts.{instance}` | API `routes/artifacts.py:155` | `rpc/artifacts.py:69` | 保留（§5.1「artifacts」） |
 | `sts.artifact.read` | `sts.{instance}` | API `routes/artifacts.py:463` | `rpc/artifacts.py:112` | 保留（同上） |
 | `sts.artifact.begin` | `sts.{instance}` | API `routes/artifacts.py:278` | `rpc/artifacts.py:153` | 保留（同上） |
@@ -145,7 +145,7 @@ TD 的 `rpc/router.py:32`–`:36` 只掛三個型別（health、attach、detach�
 
 | 型別 | subject | 發送者 | 接收者 | 去向 |
 |---|---|---|---|---|
-| `td.health` | `td.{instance}` | `mftik/health.py:145`；API `routes/stats.py:56`、`orchestrate.py:432`（走 `health.*`） | `rpc/health.py:18` | 保留（§8.3） |
+| `td.health` | `td.{instance}`（開機自檢）與 `health.td.{instance}` | `mftik/health.py:145`（`refuse_if_serving`）；API `routes/stats.py:56`、`orchestrate.py:432`（走 `health.*`） | `rpc/health.py:18`；`mftik/health.py:81` | 保留（§8.3） |
 | `td.error` | 回覆 | `rpc/router.py:58`、`rpc/sessions.py:127` | API `broker_rpc.py:19`；STS `session/manager.py:2086`（`error_type`） | 保留（**無依據**） |
 | `td.session.attach` | `td.{instance}` | API `orchestrate.py:244`；STS `session/manager.py:2082` | `rpc/sessions.py:32` | **改名**為 `td.intent.put`，並帶 owner（§8.3 第 3 列、§8.1 步驟 3） |
 | `td.session.detach` | `td.{instance}` | STS `session/session.py:592` | `rpc/sessions.py:71` | **改名**為 `td.intent.delete`（§8.3 第 3 列、§8.1 End 步驟 2） |
@@ -170,7 +170,7 @@ TD 的 `rpc/router.py:32`–`:36` 只掛三個型別（health、attach、detach�
 
 | 型別 | subject | 發送者 | 接收者 | 去向 |
 |---|---|---|---|---|
-| `md.health` | `md.{instance}` | `mftik/health.py:145`；API `routes/stats.py:56`、`orchestrate.py:432` | `rpc/health.py:14` | 保留（§8.3） |
+| `md.health` | `md.{instance}`（開機自檢）與 `health.md.{instance}` | `mftik/health.py:145`（`refuse_if_serving`）；API `routes/stats.py:56`、`orchestrate.py:432` | `rpc/health.py:14`；`mftik/health.py:81` | 保留（§8.3） |
 | `md.error` | 回覆 | `rpc/router.py:63`、`rpc/sessions.py:147`、`rpc/tape.py:113` | API `broker_rpc.py:19`；STS `session/manager.py:2023` | 保留（**無依據**） |
 | `md.session.attach` | `md` 或 `md.{instance}` | API `orchestrate.py:199`；STS `session/manager.py:2019` | `rpc/sessions.py:34` | **改名**為 `md.intent.put`，帶 owner（§8.3 第 2 列、§8.1 步驟 4） |
 | `md.session.detach` | 同上 | API `orchestrate.py:461`（回滾）；STS `session/session.py:610` | `rpc/sessions.py:75` | **改名**為 `md.intent.delete`（§8.3 第 2 列） |
@@ -208,7 +208,7 @@ TD 的 `rpc/router.py:32`–`:36` 只掛三個型別（health、attach、detach�
 | 型別 | subject | 發送者 | 接收者 | 去向 |
 |---|---|---|---|---|
 | `sym.health` | — | **沒有** | **沒有**（`sym/rpc.py:128` 的 `_HANDLERS` 沒有這一項；SYM 不在 `INSTANCED_PLANES`，`mftik/instance.py:54`，所以沒有 `serve_health`） | **刪除**（見 4.1） |
-| `sym.error` | 回覆 | `sym/rpc.py:122` | API `routes/sym.py:30`；`symbols/client.py` | 保留 |
+| `sym.error` | 回覆 | `sym/rpc.py:122` | API `routes/sym.py:30`；`symbols/client.py:292`（後者只比對 `.error` 後綴，見 4.4） | 保留 |
 | `sym.list` | `sym` | API `routes/sym.py:116`；`symbols/client.py:236`／`:256` | `sym/rpc.py:129` | 保留 |
 | `sym.venues` | `sym` | API `routes/sym.py:45`；`symbols/client.py:158` | `sym/rpc.py:130` | 保留 |
 | `sym.refresh` | `sym` | `symbols/client.py:163`（**只有 SDK，API 沒有對應路由**） | `sym/rpc.py:131` | 保留 |
@@ -242,7 +242,7 @@ TD 的 `rpc/router.py:32`–`:36` 只掛三個型別（health、attach、detach�
 
 | 型別字串 | subject | 發送者 | 接收者 | 去向 |
 |---|---|---|---|---|
-| `"log"` | `log.sts.*`、`log.td.*`、`log.md.*` | `protocol/session_log.py:37`／`:60`／`:89`；API `ws.py:81`（replay）、`ws.py:191`（welcome）、`ws.py:213`（socket 回寫） | API `ws.py:162`、`log_persist.py`、`alert_match.py` | 保留，建議補上常數 |
+| `"log"` | `log.sts.*`、`log.td.*`、`log.md.*` | `protocol/session_log.py:37`／`:60`／`:89`；API `ws.py:81`（replay）、`ws.py:191`（welcome）、`ws.py:213`（socket 回寫） | API `ws.py:162`、`log_persist.py:144`、`alert_match.py:509` | 保留，建議補上常數 |
 | `"heartbeat"` | `sys.heartbeat` | `mftik/broker/client.py:234` | **無** | **刪除**（見 4.2） |
 | `"td.global.keepalive"` | `td.{api_id}.global` | TD `session/manager.py:679` | **無 handler**。STS `session/session.py:1090` 的 `TD_GLOBAL_HANDLERS.get()` 找不到，落到 `_on_message` 只記 event log | **刪除**（**無依據**；註解 `session/manager.py:669` 自己說它已經不再刷新任何 KV claim） |
 
