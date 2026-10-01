@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from broker_harness import a_broker
 from mftik.protocol import (
+    CREATE_REPLY_LOST_REASON,
     STS_ERROR,
     STS_REASON_STOP_TIMED_OUT,
     STS_SESSION_CREATE,
@@ -1796,10 +1797,75 @@ async def test_abort_start_kills_after_its_deadline() -> None:
 
     assert process.signals == [signal.SIGKILL]
     assert result.status == "failed"
+    assert result.reason == CREATE_REPLY_LOST_REASON
+    assert "on_start" not in result.reason
+    assert store["s1"].reason == result.reason
+    assert store["s1"].status == "failed"
+
+
+async def test_an_unstarted_abort_reports_how_long_on_start_ran() -> None:
+    """A worker still inside ``on_start`` keeps the measured deadline reason."""
+    store: dict[str, SimpleNamespace] = {}
+    process = StubbornProcess()
+    manager = _manager(FakeSpawner(), store, load=True)
+    slot = _hold(manager, store, process, started=False)
+    slot.start_budget_s = 8.0
+    slot.result_reader = SimpleNamespace(
+        on_start_at=asyncio.get_running_loop().time() - 4.2
+    )
+    try:
+        result = await manager.escalate_stop(
+            "s1", deadline=time.time() - 5, abort_start=True
+        )
+    finally:
+        await manager.close_all()
+
+    assert result.status == "failed"
     assert result.reason is not None
     assert result.reason.startswith("create exceeded 8s; on_start ran 4.")
     assert store["s1"].reason == result.reason
-    assert store["s1"].status == "failed"
+
+
+async def test_a_deadline_kill_retries_when_the_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A database outage during the kill is not "the row already ended"."""
+    monkeypatch.setattr(manager_mod, "STS_START_DEADLINE_S", 0.05)
+    monkeypatch.setattr(manager_mod, "FAILED_WRITE_BACKOFF_S", 0.01)
+    store: dict[str, SimpleNamespace] = {}
+    gate = asyncio.Event()
+    process = StubbornProcess()
+    spawner = FakeSpawner(line=_ok_line(), process=process, gate=gate)
+    manager = _manager(spawner, store, load=True)
+    down = True
+
+    async def load_session(session_id: str) -> SimpleNamespace | None:
+        if down:
+            raise RuntimeError("db down")
+        return store.get(session_id)
+
+    async def mark(session_id: str, *, status: str, reason: str | None) -> None:
+        if down:
+            raise RuntimeError("db down")
+        row = store[session_id]
+        row.status = status
+        row.reason = reason
+
+    manager._load_session = load_session  # type: ignore[method-assign]
+    manager._mark_done = mark  # type: ignore[method-assign]
+    try:
+        with pytest.raises(manager_mod.StartDeadlineExceeded):
+            await manager.create_session(_request())
+        assert store["s1"].status == "live"
+        down = False
+        for _ in range(50):
+            if store["s1"].status == "failed":
+                break
+            await asyncio.sleep(0.02)
+        assert store["s1"].status == "failed"
+        assert store["s1"].reason == "create exceeded 0.05s; on_start had not started"
+    finally:
+        await manager.close_all()
 
 
 async def test_a_missed_deadline_write_is_retried(

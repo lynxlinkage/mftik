@@ -15,6 +15,7 @@ from mftik.broker import Broker
 from mftik.broker.errors import RequestTimeoutError
 from mftik.protocol import (
     ANY_INSTANCE,
+    CREATE_REPLY_LOST_REASON,
     LEASE_HEARTBEAT_INTERVAL_S,
     LEASE_MISS_LIMIT,
     MD_ERROR,
@@ -93,6 +94,13 @@ ABORT_ROW_WAIT_S = 1.0
 
 #: Session log line for ``/logs/sts/{id}``. ``on_stop`` did not run.
 KILL_LOG_MESSAGE = "stop unanswered — worker killed; on_stop did not run"
+
+#: What :meth:`SessionManager._row_view` returns. ``unread`` is a failed
+#: read, not a terminal row.
+_VIEW_LIVE = "live"
+_VIEW_TERMINAL = "terminal"
+_VIEW_UNREAD = "unread"
+_VIEW_ABSENT = "absent"
 
 
 class WorkerNotStuck(Exception):
@@ -645,9 +653,7 @@ class SessionManager:
         await session.abandon_start()
         self._sessions.pop(request.session_id, None)
         self._stop_serving_control(request.session_id)
-        if self._load_session is not None and not await self._row_is_live(
-            request.session_id
-        ):
+        if await self._row_view(request.session_id) == _VIEW_TERMINAL:
             return
         if error is None:
             limit = STS_START_DEADLINE_S if budget is None else budget
@@ -751,7 +757,7 @@ class SessionManager:
                 if error:
                     detail = f"{START_FAIL_REASON}: {error}"
                 self._drop_unstarted(slot)
-                if await self._row_is_live(slot.session_id):
+                if await self._row_view(slot.session_id) in {_VIEW_LIVE, _VIEW_UNREAD}:
                     await self._write_failed(slot, request, detail)
                 raise RuntimeError(detail)
             slot.started = True
@@ -824,9 +830,10 @@ class SessionManager:
             kill_worker(process)
             await process.wait()
         self._drop_unstarted(slot)
-        if self._load_session is not None and not await self._row_is_live(
-            slot.session_id
-        ):
+        # A failed read is not "already terminal". Skipping the write here
+        # leaves the row ``live``, and the reaper then marks it
+        # ``interrupted`` for a rebuild.
+        if await self._row_view(slot.session_id) == _VIEW_TERMINAL:
             return
         await self._write_failed(slot, request, slot.kill_reason)
 
@@ -929,9 +936,7 @@ class SessionManager:
         if slot.started or slot.abandoned:
             return
         self._drop_unstarted(slot)
-        if self._load_session is not None and not await self._row_is_live(
-            slot.session_id
-        ):
+        if await self._row_view(slot.session_id) == _VIEW_TERMINAL:
             # The worker ended the session itself before it could report —
             # an operator stop while it sat in on_start writes ``done`` and
             # exits without a result line. That row says what happened;
@@ -1098,7 +1103,9 @@ class SessionManager:
             if (
                 not self._closing
                 and not self._shutting_down
-                and await self._row_is_live(slot.session_id)
+                and (
+                    await self._row_view(slot.session_id) in {_VIEW_LIVE, _VIEW_UNREAD}
+                )
             ):
                 await self._mark_stop_killed(slot)
             return
@@ -1169,14 +1176,17 @@ class SessionManager:
         self._escalation_tasks.add(task)
         task.add_done_callback(self._escalation_tasks.discard)
 
-    async def _row_is_live(self, session_id: str) -> bool:
-        """Whether this one row is still ``live``.
+    async def _row_view(self, session_id: str) -> str:
+        """``live``, ``terminal``, ``unread``, or ``absent``.
 
-        ``list_sessions`` pages the fleet, newest first, and would treat a
-        live session past that page as already gone.
+        ``unread`` is a failed read. It is not evidence the row already
+        ended. A start-failure write that treats it as terminal is how a
+        deadline kill stays ``live`` until the reaper calls it
+        ``interrupted`` and a restart rebuilds it. ``absent`` means this
+        process has no loader.
         """
         if self._load_session is None:
-            return False
+            return _VIEW_ABSENT
         try:
             row = await self._load_session(session_id)
         except Exception:
@@ -1184,10 +1194,20 @@ class SessionManager:
                 "STS could not tell whether session=%s is still live",
                 session_id,
             )
-            return False
-        return (
-            row is not None and getattr(row, "status", None) == SessionStatus.LIVE.value
-        )
+            return _VIEW_UNREAD
+        if row is not None and getattr(row, "status", None) == SessionStatus.LIVE.value:
+            return _VIEW_LIVE
+        return _VIEW_TERMINAL
+
+    async def _row_is_live(self, session_id: str) -> bool:
+        """Whether a successful read says this one row is still ``live``.
+
+        ``list_sessions`` pages the fleet, newest first, and would treat a
+        live session past that page as already gone. A failed read is not
+        live here. Callers that must not skip a ``failed`` write on that
+        uncertainty use :meth:`_row_view` instead.
+        """
+        return await self._row_view(session_id) == _VIEW_LIVE
 
     async def _wait_until_row_settles(self, session_id: str) -> None:
         """Give an in-flight deadline kill a moment to write the row.
@@ -1375,10 +1395,12 @@ class SessionManager:
         path, which writes ``interrupted`` and is then rebuilt. A stop
         that was never delivered only kills when the beat has gone silent.
 
-        ``abort_start`` is the create-timeout kill. The row reason is the
-        start deadline, not a stop that went unanswered. TD is still
-        unattached — attach runs only after create returns live — so
-        skipping ``on_stop`` leaves no resting order.
+        ``abort_start`` is the create-timeout kill. A worker still in
+        ``on_start`` records the start deadline. One that already reported
+        success records that the reply did not arrive: the budget was met,
+        and blaming ``on_start`` for the wait points at ``start_timeout``.
+        TD is still unattached — attach runs only after create returns
+        live — so skipping ``on_stop`` leaves no resting order.
         """
         process = slot.process
         if process is None:
@@ -1391,7 +1413,10 @@ class SessionManager:
             # that is about to be ``start_deadline``.
             if abort_start:
                 await self._wait_until_row_settles(slot.session_id)
-            if self._load_session is None or await self._row_is_live(slot.session_id):
+            # ``unread`` is not terminal. Answering with whatever the last
+            # read guessed would skip the failed write the deadline kill
+            # is still retrying.
+            if await self._row_view(slot.session_id) != _VIEW_TERMINAL:
                 raise KeyError(f"no active sts session {slot.session_id}")
             return await self._escalation_result(slot)
         # ``abort_start`` has no wall-clock deadline. The API has already
@@ -1405,8 +1430,11 @@ class SessionManager:
                 raise WorkerNotStuck(slot.session_id)
         slot.stop_escalated = True
         if abort_start:
-            budget = slot.start_budget_s or STS_START_DEADLINE_S
-            slot.kill_reason = _deadline_reason(budget, _slot_on_start_at(slot))
+            if slot.started:
+                slot.kill_reason = CREATE_REPLY_LOST_REASON
+            else:
+                budget = slot.start_budget_s or STS_START_DEADLINE_S
+                slot.kill_reason = _deadline_reason(budget, _slot_on_start_at(slot))
         killed = False
         if process.returncode is None:
             kill_worker(process)
@@ -1427,7 +1455,9 @@ class SessionManager:
             if (
                 not self._closing
                 and not self._shutting_down
-                and await self._row_is_live(slot.session_id)
+                and (
+                    await self._row_view(slot.session_id) in {_VIEW_LIVE, _VIEW_UNREAD}
+                )
             ):
                 await self._mark_stop_killed(slot)
             if not slot.abandoned:

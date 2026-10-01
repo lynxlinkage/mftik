@@ -51,10 +51,15 @@ def _named_sts_without_a_database(monkeypatch) -> None:
     async def _no_row(_session_id: str) -> None:
         return None
 
+    async def _no_abort(*_args: object, **_kwargs: object) -> None:
+        return None
+
     monkeypatch.setattr(orchestrate, "_sts_target", _target)
     monkeypatch.setattr(orchestrate, "_check_sts_instance", _ok)
     monkeypatch.setattr(orchestrate, "mint_session_id", _mint)
     monkeypatch.setattr(orchestrate, "_load_sts_row", _no_row)
+    monkeypatch.setattr(orchestrate, "_remember_pending_abort", _no_abort)
+    monkeypatch.setattr(orchestrate, "_forget_pending_abort", _no_abort)
 
 
 REFUSAL = (
@@ -486,3 +491,126 @@ async def test_a_kill_whose_row_write_failed_is_marked_failed(
     assert caught.value.code == "start_deadline"
     assert row.status == "failed"
     assert "create exceeded" in (row.reason or "")
+
+
+async def test_a_start_deadline_retries_when_the_row_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed read is not "there is no row to fix"."""
+    row = SimpleNamespace(status="live", reason=None)
+    reads = 0
+
+    async def load(_session_id: str) -> SimpleNamespace:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("db down")
+        return row
+
+    async def mark(_session_id: str, reason: str) -> bool:
+        row.status = "failed"
+        row.reason = reason
+        return True
+
+    monkeypatch.setattr(orchestrate, "_load_sts_row", load)
+    monkeypatch.setattr(orchestrate, "_mark_start_failed", mark)
+    monkeypatch.setattr(orchestrate, "_FAILED_ROW_BACKOFF_S", 0.01)
+
+    class Broker(_LoggingBroker):
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            self.types.append(envelope.type)
+            return RpcErrorEnvelope.wrap(
+                RpcError(
+                    code="start_deadline",
+                    message="create exceeded 8s; on_start ran 4.2s",
+                ),
+                type=STS_ERROR,
+                source="sts",
+                session_id=envelope.session_id,
+            )
+
+    try:
+        with pytest.raises(DomainRpcError) as caught:
+            await deploy_strategy(
+                Broker(), strategy_id="noop", td={}, md=[], created_by=1
+            )
+        assert caught.value.code == "start_deadline"
+        assert row.status == "live"
+        for _ in range(50):
+            if row.status == "failed":
+                break
+            await asyncio.sleep(0.02)
+        assert row.status == "failed"
+        assert row.reason == "create exceeded 8s; on_start ran 4.2s"
+    finally:
+        orchestrate.cancel_create_followups()
+
+
+async def test_a_pending_abort_is_resumed_after_the_process_restarts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry is on the row. Cancelling this process does not drop it."""
+    row = SimpleNamespace(status="live", reason=None)
+    pending: dict[str, str] = {}
+    monkeypatch.setattr(orchestrate, "_ABORT_ROW_POLL_S", 0.0)
+    monkeypatch.setattr(orchestrate, "_ABORT_RETRY_INTERVAL_S", 60.0)
+
+    async def load(_session_id: str) -> SimpleNamespace:
+        return row
+
+    async def remember(session_id: str, target: str) -> None:
+        pending[session_id] = target
+
+    async def forget(session_id: str) -> None:
+        pending.pop(session_id, None)
+
+    async def listed() -> list[tuple[str, str]]:
+        return list(pending.items())
+
+    monkeypatch.setattr(orchestrate, "_load_sts_row", load)
+    monkeypatch.setattr(orchestrate, "_remember_pending_abort", remember)
+    monkeypatch.setattr(orchestrate, "_forget_pending_abort", forget)
+    monkeypatch.setattr(orchestrate, "_list_pending_aborts", listed)
+    attempts = 0
+
+    class Broker(_LoggingBroker):
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            nonlocal attempts
+            self.types.append(envelope.type)
+            if envelope.type == STS_SESSION_CREATE:
+                raise RequestTimeoutError("sts.sts", "req-1", 10.0)
+            attempts += 1
+            if attempts == 1:
+                raise RequestTimeoutError("sts.sts", "req-2", 5.0)
+            row.status = "failed"
+            row.reason = "create reply lost or late; session stopped before attach"
+            return StsSessionControlResultEnvelope.wrap(
+                StsSessionControlResult(
+                    session_id=envelope.payload.session_id,
+                    status="failed",
+                    reason=row.reason,
+                ),
+                type=STS_SESSION_FORCE_STOP,
+                source="sts",
+                session_id=envelope.payload.session_id,
+            )
+
+    try:
+        with pytest.raises(DomainRpcError) as caught:
+            await deploy_strategy(
+                Broker(), strategy_id="noop", td={}, md=[], created_by=1
+            )
+        assert caught.value.code == "timeout"
+        assert pending == {"aabb01": "sts"}
+        orchestrate.cancel_create_followups()
+        assert pending == {"aabb01": "sts"}
+        monkeypatch.setattr(orchestrate, "_ABORT_RETRY_INTERVAL_S", 0.01)
+        await orchestrate.resume_pending_aborts(Broker())
+        for _ in range(50):
+            if row.status == "failed":
+                break
+            await asyncio.sleep(0.02)
+        assert row.status == "failed"
+        assert "aabb01" not in pending
+    finally:
+        orchestrate.cancel_create_followups()

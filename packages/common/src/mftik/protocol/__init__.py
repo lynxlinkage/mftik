@@ -2,6 +2,7 @@
 
 from mftik.protocol.envelope import Envelope, UntypedEnvelope
 from mftik.protocol.messages import (
+    CREATE_REPLY_LOST_REASON,
     LEASE_HEARTBEAT_INTERVAL_S,
     LEASE_MISS_LIMIT,
     MD_AGG_TRADE,
@@ -426,6 +427,7 @@ __all__ = [
     "STS_SESSION_CREATE",
     "STS_SESSION_LIST",
     "STS_CREATE_RPC_TIMEOUT_S",
+    "CREATE_REPLY_LOST_REASON",
     "create_rpc_timeout",
     "STS_REASON_OPERATOR_STOP",
     "STS_REASON_STOP_TIMED_OUT",

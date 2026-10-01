@@ -11,11 +11,12 @@ while the database and the one-shot migration step come up, and all of them
 become the right answer on their own. The caller retries until one does or
 until it runs out of patience — see ``mftik_sts.app.schema_is_current``.
 
-``0034_strategy_type_key`` is the floor for STS because it is the migration
-that made ``sts_sessions.type`` the only strategy identity. Before it, a row
-written by an older build keeps its short name in the dropped ``strategy``
-column, which the current ORM model does not select: every such session reads
-as a row that names no strategy at all.
+``0035_sts_abort_target`` is the floor for STS. The ORM selects that column
+on every session read, so a database that does not have it fails the query
+instead of serving. ``0034_strategy_type_key`` is still checked on its own:
+before it, a row keeps its short name in the dropped ``strategy`` column,
+which this model does not select, and every such session reads as naming no
+strategy at all.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from mftik_db.session import get_engine
 
 #: The oldest schema STS may serve. Named, not numbered, because this is the
 #: string ``alembic upgrade`` takes.
-MIN_STS_REVISION = "0034_strategy_type_key"
+MIN_STS_REVISION = "0035_sts_abort_target"
 
 
 class SchemaTooOld(RuntimeError):
@@ -94,6 +95,14 @@ def describe_too_old(state: SchemaState) -> str | None:
             "session written before that migration would read as naming no "
             "strategy. Stop the old STS and API, run mftik-db-migrate "
             f"{MIN_STS_REVISION}, then start this build."
+        )
+    if "abort_target" not in state.sts_columns:
+        return (
+            f"the database {at} has no sts_sessions.abort_target column, so "
+            f"{MIN_STS_REVISION} has not run. This build selects that column "
+            "on every session read, and stores a create abort there so a "
+            "restart can still kill a session the API already reported as "
+            "failed. Run mftik-db-migrate before starting STS."
         )
     floor = _ordinal(MIN_STS_REVISION)
     here = _ordinal(state.revision)

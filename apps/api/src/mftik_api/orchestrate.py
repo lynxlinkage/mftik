@@ -418,6 +418,45 @@ async def _poll_terminal(session_id: str) -> Any:
     return row
 
 
+async def _remember_pending_abort(session_id: str, target: str) -> None:
+    """Persist the abort so it outlives this process."""
+    try:
+        async with session_scope() as db:
+            await StsSessionRepository(db).set_abort_target(session_id, target)
+    except Exception:
+        logger.exception("could not record a create abort session=%s", session_id)
+
+
+async def _forget_pending_abort(session_id: str) -> None:
+    try:
+        async with session_scope() as db:
+            await StsSessionRepository(db).clear_abort_target(session_id)
+    except Exception:
+        logger.exception("could not clear a create abort session=%s", session_id)
+
+
+async def _list_pending_aborts() -> list[tuple[str, str]]:
+    async with session_scope() as db:
+        return await StsSessionRepository(db).list_pending_aborts()
+
+
+async def resume_pending_aborts(broker: Broker) -> None:
+    """Continue create aborts a previous process did not finish.
+
+    The retry loop is not in memory after a restart. The session id and
+    the STS it has to reach are on the row. A live session with no MD
+    attached is the create the last process already reported as failed.
+    """
+    try:
+        pending = await _list_pending_aborts()
+    except Exception:
+        logger.exception("could not list create aborts")
+        return
+    for session_id, target in pending:
+        logger.warning("resuming create abort session=%s target=%s", session_id, target)
+        _schedule_abort_retry(broker, session_id, target)
+
+
 def _schedule_abort_retry(broker: Broker, session_id: str, target: str) -> None:
     task = asyncio.create_task(
         _retry_abort(broker, session_id, target),
@@ -447,6 +486,7 @@ async def _retry_abort(broker: Broker, session_id: str, target: str) -> None:
             logger.exception("create abort could not read session=%s", session_id)
             row = None
         if _row_is_terminal(row):
+            await _forget_pending_abort(session_id)
             return
         err = await _send_abort(broker, session_id, target)
         if err is None or err.code == "not_found":
@@ -456,12 +496,14 @@ async def _retry_abort(broker: Broker, session_id: str, target: str) -> None:
                 logger.exception("create abort could not read session=%s", session_id)
                 row = None
             if _row_is_terminal(row) or (err is not None and err.code == "not_found"):
+                await _forget_pending_abort(session_id)
                 return
         if asyncio.get_running_loop().time() - started >= _ABORT_RETRY_BUDGET_S:
             logger.error(
                 "create abort gave up session=%s; it may still be live",
                 session_id,
             )
+            await _forget_pending_abort(session_id)
             return
         logger.warning("create abort retrying session=%s", session_id)
 
@@ -477,12 +519,19 @@ async def _ensure_start_failed(session_id: str, reason: str) -> None:
     try:
         row = await _load_sts_row(session_id)
     except Exception:
+        # The same outage that hid the row is why the STS write missed.
+        # Stopping here leaves it ``live`` for the reaper to rebuild.
         logger.exception("could not read a start-deadline row session=%s", session_id)
+        _schedule_failed_row(session_id, reason)
         return
     if row is None or _row_is_terminal(row):
         return
     if await _mark_start_failed(session_id, reason):
         return
+    _schedule_failed_row(session_id, reason)
+
+
+def _schedule_failed_row(session_id: str, reason: str) -> None:
     task = asyncio.create_task(
         _retry_failed_row(session_id, reason),
         name=f"start-failed-{session_id}",
@@ -575,6 +624,9 @@ async def _abort_timed_out_create(
             "create timeout force-stop has not landed session=%s",
             session_id,
         )
+        # On the row before the task. A restart during the sleep still
+        # finds the session and sends ``abort_start`` again.
+        await _remember_pending_abort(session_id, target)
         _schedule_abort_retry(broker, session_id, target)
     elif err.code != "not_found":
         logger.warning(

@@ -1613,6 +1613,13 @@ def start_deadline_reason(
     return f"create exceeded {limit:g}s; on_start ran {on_start_s:.1f}s"
 
 
+#: ``abort_start`` killed a worker that had already reported success.
+#: The budget did not run out inside ``on_start``. The reply did not reach
+#: the API in time, so nothing was attached. Measuring ``on_start`` out to
+#: the moment of the kill blames ``start_timeout`` for a broker delay.
+CREATE_REPLY_LOST_REASON = "create reply lost or late; session stopped before attach"
+
+
 STS_LEASE_HEARTBEAT = "sts.lease.heartbeat"
 STS_HEARTBEAT = STS_LEASE_HEARTBEAT  # alias for older names
 STS_RECON = "sts.recon"

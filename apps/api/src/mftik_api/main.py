@@ -13,6 +13,7 @@ from mftik_api.alert_match import run_alert_match
 from mftik_api.auth import AuthMiddleware, auth_router
 from mftik_api.backfill_cron import run_backfill_cron
 from mftik_api.log_persist import run_log_persist
+from mftik_api.orchestrate import resume_pending_aborts
 from mftik_api.routes import (
     alerts_router,
     apis_router,
@@ -72,6 +73,7 @@ async def lifespan(app: FastAPI):
     await broker.connect()
     app.state.broker = broker
     logger.info("API broker connected")
+    await resume_pending_aborts(broker)
 
     persist_stop = asyncio.Event()
     persist_task = asyncio.create_task(run_log_persist(persist_stop))

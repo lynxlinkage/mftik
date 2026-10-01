@@ -237,14 +237,14 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         row.status = status
         row.reason = reason[:256] if reason else None
         row.finished_at = datetime.now(UTC)
+        # A finished create no longer needs the API to abort it.
+        row.abort_target = None
         await self.session.flush()
         return row
 
     async def mark_done(self, session_id: str) -> StsSessionRow | None:
         """Natural end — see :meth:`mark_finished` for the failed path."""
-        return await self.mark_finished(
-            session_id, status=SessionStatus.DONE.value
-        )
+        return await self.mark_finished(session_id, status=SessionStatus.DONE.value)
 
     async def mark_live(self, session_id: str) -> StsSessionRow | None:
         """Put a terminal session back to ``live`` — the rebuild path.
@@ -308,17 +308,45 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         await self.session.flush()
         return row
 
-    async def mark_failed(
-        self, session_id: str, reason: str
-    ) -> StsSessionRow | None:
+    async def mark_failed(self, session_id: str, reason: str) -> StsSessionRow | None:
         """Terminal end that was not a natural one."""
         return await self.mark_finished(
             session_id, status=SessionStatus.FAILED.value, reason=reason
         )
 
-    _ACKABLE = frozenset(
-        {SessionStatus.FAILED.value, SessionStatus.INTERRUPTED.value}
-    )
+    async def set_abort_target(self, session_id: str, target: str) -> None:
+        """Remember which STS still has to kill a create the API gave up on.
+
+        A live row only. Writing it onto a session that already ended would
+        make the next boot abort something that is already over.
+        """
+        row = await self.get_by_session_id(session_id)
+        if row is None or row.status != SessionStatus.LIVE.value:
+            return
+        row.abort_target = target
+        await self.session.flush()
+
+    async def clear_abort_target(self, session_id: str) -> None:
+        row = await self.get_by_session_id(session_id)
+        if row is None or row.abort_target is None:
+            return
+        row.abort_target = None
+        await self.session.flush()
+
+    async def list_pending_aborts(self) -> list[tuple[str, str]]:
+        """Live sessions whose create abort did not finish in the last process."""
+        stmt = select(StsSessionRow.session_id, StsSessionRow.abort_target).where(
+            StsSessionRow.status == SessionStatus.LIVE.value,
+            StsSessionRow.abort_target.is_not(None),
+        )
+        result = await self.session.execute(stmt)
+        return [
+            (session_id, target)
+            for session_id, target in result.all()
+            if target is not None
+        ]
+
+    _ACKABLE = frozenset({SessionStatus.FAILED.value, SessionStatus.INTERRUPTED.value})
 
     async def mark_ack(self, session_id: str) -> StsSessionRow | None:
         """Operator acknowledgement of a failed or interrupted session.
@@ -365,9 +393,7 @@ class TdSessionRepository(_SessionListMixin[TdSessionRow]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, TdSessionRow)
 
-    async def get_live(
-        self, *, session_id: str, api_id: int
-    ) -> TdSessionRow | None:
+    async def get_live(self, *, session_id: str, api_id: int) -> TdSessionRow | None:
         result = await self.session.execute(
             select(TdSessionRow).where(
                 TdSessionRow.session_id == session_id,
@@ -533,9 +559,7 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
     async def mark_done(
         self, *, instance: str, venue: str, session_id: str
     ) -> MdSessionRow | None:
-        row = await self.get_live(
-            instance=instance, venue=venue, session_id=session_id
-        )
+        row = await self.get_live(instance=instance, venue=venue, session_id=session_id)
         if row is None:
             return None
         row.status = SessionStatus.DONE.value

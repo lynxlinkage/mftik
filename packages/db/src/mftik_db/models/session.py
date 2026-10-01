@@ -106,9 +106,7 @@ class StsSessionRow(Base):
     #: drop the column that held it and leave those sessions labelled with
     #: nothing at all — a deploy is not a reason for history to forget what
     #: ran. Null everywhere else, which is everywhere that ``type`` answers.
-    legacy_strategy: Mapped[str | None] = mapped_column(
-        String(128), nullable=True
-    )
+    legacy_strategy: Mapped[str | None] = mapped_column(String(128), nullable=True)
     #: The strategy.yml exactly as submitted — the only record of what a
     #: person wrote, comments and all. Null for deploys that never got that
     #: far.
@@ -120,9 +118,12 @@ class StsSessionRow(Base):
     #: nobody runs stays ``interrupted`` and waits for a person rather than
     #: silently moving. A plain string, not a foreign key: this is history, and
     #: retiring an instance must not break the record of what it did.
-    instance: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, index=True
-    )
+    instance: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    #: Which STS a timed-out create still has to abort. Set by the API when
+    #: the create reply missed its wait, cleared once the row is terminal
+    #: or the abort is finished. A restart reads it back: the retry loop
+    #: itself does not survive the process. Null on every other row.
+    abort_target: Mapped[str | None] = mapped_column(String(64), nullable=True)
     #: ``always`` | ``never`` — whether this run asked to be restored after an
     #: STS restart. A property of the deploy, not of the strategy class or of
     #: whoever configured the process.
@@ -143,9 +144,7 @@ class StsSessionRow(Base):
     #: and the readers take either. The column keeps its name: it is what the
     #: board and the API still call this field, and renaming a JSON column
     #: costs a migration to say nothing new.
-    md_ids: Mapped[dict[str, Any] | list[Any]] = mapped_column(
-        JSON, default=dict
-    )
+    md_ids: Mapped[dict[str, Any] | list[Any]] = mapped_column(JSON, default=dict)
     st_paras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     #: What ``Strategy.remember()`` wrote — facts established while running
     #: that cannot be re-derived from ``st_paras`` or from TD reconciliation,
@@ -222,9 +221,7 @@ class MdSessionRow(Base):
     #: it is history, it records the name as it was at the time, and retiring
     #: an instance must not break the rows describing what it did — the same
     #: reason :attr:`venue` is a string.
-    instance: Mapped[str] = mapped_column(
-        String(64), default="md", index=True
-    )
+    instance: Mapped[str] = mapped_column(String(64), default="md", index=True)
     venue: Mapped[str] = mapped_column(String(64), index=True)
     session_id: Mapped[str] = mapped_column(String(64), index=True)
     created_by: Mapped[int] = mapped_column(

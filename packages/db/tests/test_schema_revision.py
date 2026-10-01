@@ -23,12 +23,12 @@ from mftik_db.schema import (
 from mftik_db.session import build_engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-_AFTER = frozenset({"session_id", "status", "type"})
-_BEFORE = _AFTER | {"strategy"}
+_AFTER = frozenset({"session_id", "status", "type", "abort_target"})
+_BEFORE = frozenset({"session_id", "status", "type", "strategy"})
 
 
 def test_the_dropped_column_is_what_says_the_migration_ran() -> None:
-    assert describe_too_old(SchemaState("0034_strategy_type_key", _AFTER)) is None
+    assert describe_too_old(SchemaState("0035_sts_abort_target", _AFTER)) is None
     too_old = describe_too_old(SchemaState("0033_option_strike", _BEFORE))
     assert too_old is not None
     assert "0033_option_strike" in too_old
@@ -38,6 +38,17 @@ def test_the_dropped_column_is_what_says_the_migration_ran() -> None:
 def test_a_schema_built_from_the_models_serves() -> None:
     """No ``alembic_version`` at all. That is the test suite, not a node."""
     assert describe_too_old(SchemaState(None, _AFTER)) is None
+
+
+def test_a_database_without_abort_target_is_refused() -> None:
+    missing = describe_too_old(
+        SchemaState(
+            "0034_strategy_type_key",
+            frozenset({"session_id", "status", "type"}),
+        )
+    )
+    assert missing is not None
+    assert "abort_target" in missing
 
 
 def test_a_revision_behind_the_floor_is_refused_on_its_number() -> None:
@@ -99,7 +110,8 @@ async def test_a_pre_0034_database_refuses_to_serve_sts(tmp_path: Path) -> None:
 async def test_a_migrated_database_serves(tmp_path: Path) -> None:
     engine = await _engine(
         tmp_path,
-        "session_id VARCHAR(64) PRIMARY KEY, type VARCHAR(128)",
+        "session_id VARCHAR(64) PRIMARY KEY, type VARCHAR(128), "
+        "abort_target VARCHAR(64)",
         MIN_STS_REVISION,
     )
     try:
