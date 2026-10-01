@@ -968,7 +968,7 @@ def _select_name(value: Any, where: str) -> str:
 
 
 def _select_venue(value: Any, at: str) -> str:
-    """The venue the listings come from, checked against the registry.
+    """The venue the listings come from, checked against the venue registry.
 
     A typo here would otherwise surface as an empty universe after the deploy
     had already started — a selector that derives nothing looks exactly like a
