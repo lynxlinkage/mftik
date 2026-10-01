@@ -64,29 +64,33 @@
 
 ## 5. TD
 
+現況一個 `api_id` 一個 `Session` 物件（`apps/td/src/mftik_td/session/session.py:Session`），全部住在同一個 TD 平面進程裡；沒有帳號 worker，也沒有「常駐層 / 交易層」的分界——`Session` 在第一次 attach 時整個建起來，refcount 歸零時整個銷毀。
+
 | 狀態 | 權威 | 存放 | 讀取者 | 收斂 | 和 §3.3 的差異與負責的票 |
 |---|---|---|---|---|---|
-| 交易所上的掛單、部位、餘額（最終真相） | TODO | TODO | TODO | TODO | TODO |
-| OMS、ledger（預扣、available） | TODO | TODO | TODO | TODO | TODO |
-| 交易層開或關 | TODO | TODO | TODO | TODO | TODO |
-| 帳號狀態 ready / degraded / unavailable | TODO | TODO | TODO | TODO | TODO |
-| 訂單歷史、成交、資金流水 | TODO | TODO | TODO | TODO | TODO |
+| 交易所上的掛單、部位、餘額（最終真相） | **交易所** | — | TD 的 `reconcile()`（`session.py:413`）：`fetch_open_orders` + `fetch_balances` +（有的話）`fetch_positions` | — | **—** |
+| OMS、ledger（預扣、available） | **TD 平面進程**裡那個 `api_id` 的 `Session`。`self.oms` 在 `session.py:160`（類別 `apps/td/src/mftik_td/oms/oms.py:31`），`self.ledger` 在 `session.py:166`（類別 `oms/ledger.py:42`） | 只在記憶體。`publish_oms` 和 `write_ledger` 都是空實作（`session.py:503`–`:505`、`:1139`–`:1141`），所以**沒有任何快照落地**。ledger 的內容是 `_venue`（交易所回報的 free）、`_prelocked`（每個資產的預扣總額）、`_by_cid`（哪一張 cid 扣了多少），`available()` 是 free 減 prelock（`oms/ledger.py:53`–`:73`） | 策略經 `td.account.{api_id}` 的 `td.oms.view` / `td.ledger.view` RPC 讀（`packages/common/src/mftik/strategy/oms.py:203`），**SDK 不保留本地鏡像**；帳號事件走 `td.{api_id}.global` | `Session.start()` 一定先跑一次 `reconcile()`（`session.py:327`），私有 socket 重連時再跑一次（`_on_venue_reconnect`，`:401`）。`apply_reconcile` **整批替換** OMS 的三個 dict，只留 `status.is_open()` 的單（`oms/oms.py:67`–`:87`）。預扣**不受 recon 影響**，理由寫在 `session.py:450`–`:453` | 權威的位置和 F13 一致（記憶體），差別是它在平面進程裡而不是帳號 worker 裡，而且**重啟後沒有 `td.account.reset`、策略收不到 `on_resync`**，見 §9.5 → RM-06（#169）、IF-11（#189）、B4-05（#205）、B6-02（#220）、B6-06（#224） |
+| 交易層開或關 | **TD 平面進程**，用 refcount 而不是 desired / observed 兩層。`attach` 第一次建 `TradingAccount` 並 `trading.start()`（`manager.py:217`–`:250`），`detach` 到 refcount 0 時 `_destroy_account`（`manager.py:517`、`:628`） | TD 進程記憶體 | `TradingAccount.refcount`（`manager.py:158`） | 沒有 desired 可以 fail-static：進程重啟後 `_accounts` 是空的，要等下一次 attach 才會有帳號（§9.5） | 目標是 controller 推 desired、worker 保留最後一份（P5），而且常駐層對啟用帳號常駐（F35） → RM-06（#169）、IF-11（#189）、IF-12（#190）、B6-01（#219） |
+| 帳號狀態 ready / degraded / unavailable | **不存在。** 沒有 `td.account.state.{api_id}` 這個 subject，也沒有 `on_td_update`。最接近的是 `td.global.keepalive`（`manager.py:666`、`:679`），但它**沒有任何 handler**（見 `docs/baseline/protocol.md` 3.7）；策略唯一會察覺 TD 的方式是 `td.lease.ack` 停了，而那條路直接讓 session `failed`（`apps/sts/.../session/session.py:801`–`:816`） | — | — | — | 整件事是新增 → IF-01（#179）、IF-06（#184）、B5-05（#214）、B6-06（#224） |
+| 訂單歷史、成交、資金流水 | **TD 平面進程**，兩條路寫同兩張表：live stream 經 `HistoryWriter`（`apps/td/src/mftik_td/history.py:136`，`record_order` 在 `:211`、`record_fill` 在 `:230`），backfill 經 `BackfillExecutor._persist`（`apps/td/src/mftik_td/backfill/executor.py:347`）與 `_persist_fills`（`:364`）。`session_id` 只有送單那一刻寫得進去，理由在 `session.py:507`–`:521` | Postgres `orders`、`fills`、`backfill_cursors`（`packages/db/src/mftik_db/models/history.py:98`、`:158`、`:263`）。**`cash_flows` 有表、有 repository，但整個生產代碼沒有任何寫入路徑**（`repositories/history.py:416` 的 `bulk_insert_ignore` 只有測試在用） | API（board、PnL、`backfill_cron`） | `HistoryWriter` 是有界佇列，滿了丟（`history.py:236`）；正常停止會 drain 加一次 flush（`history.py:185`–`:207`），被強制殺掉就掉在佇列裡，靠 backfill 補（`history.py:185`–`:190` 的註解） | 權威一致。差別只有「資金流水」這一欄在現況是空的 → **沒有票**，見 §12 |
 
 ## 6. STS session
 
+session worker 是單一 event loop，沒有 ingress thread 和 strategy thread 的分工（F8 是新增的），所以 §3.3 裡寫「session worker 的 ingress」的那幾列，現況都只是「session worker」。
+
 | 狀態 | 權威 | 存放 | 讀取者 | 收斂 | 和 §3.3 的差異與負責的票 |
 |---|---|---|---|---|---|
-| 策略內部狀態 | TODO | TODO | TODO | TODO | TODO |
-| `client_order_id` 序號 | TODO | TODO | TODO | TODO | TODO |
-| event log | TODO | TODO | TODO | TODO | TODO |
-| artifacts | TODO | TODO | TODO | TODO | TODO |
-| hook 進度、offload 進度、交付的丟棄計數 | TODO | TODO | TODO | TODO | TODO |
+| 策略內部狀態 | **STS session worker**，但**有一部分落地**：`Strategy.remember(key, value)` 把字串寫進 `sts_sessions.st_facts`（`packages/common/src/mftik/strategy/base.py:Strategy.remember` → `apps/sts/.../session/session.py:StsSession.remember`，`:432` → `apps/sts/src/mftik_sts/db.py:remember_fact`，`:54` → `packages/db/src/mftik_db/repositories/session.py:remember`，`:295`） | 記憶體，加上 `sts_sessions.st_facts`（`models/session.py:154`）。生產上有 `chase` 在用它記 `started_ms` 和滑價錨定價 | 策略自己；rebuild 時由 `_rebuild_one` 讀回來餵給 `on_rebuild`（`manager.py:1935`–`:1939`） | rebuild 時**不是**從 `on_start` 全新開始：先 `strategy.on_rebuild(st_facts)`，再 `mark_live`、`session.start()`（`manager.py:1938`–`:1951`）。交易所那一側的真相靠 recon 取回，不從 DB | §3.3 和 F10 要求「記憶體，不落地」「重新掛起時從 `on_start` 全新開始」；現況有 `st_facts` 與 `on_rebuild` → RM-01（#164）刪寫入路徑、B10-01（#249）drop 欄位 |
+| `client_order_id` 序號 | **STS session worker**。`StrategyOms._next_client_order_id` 第一次用到時才建 `ClientOrderIdFactory`（`packages/common/src/mftik/strategy/oms.py:197`–`:201`），`bind` 會把它設回 `None`（`oms.py:132`–`:136`） | 記憶體。**版位是 `ver4 \| session24 \| ts_sec28 \| seq8`**，packed 成 uint64、上線走十進位字串（`packages/common/src/mftik/strategy/client_order_id.py:1`–`:27`、`pack` 在 `:91`） | TD（`cid_owner`、`Strategy.owns`，`strategy/base.py:298`–`:317`） | **序號每個 incarnation 都從 0 重新開始**（`client_order_id.py:152`–`:153`），沒有任何東西記住上一個 incarnation 用到哪。唯一的防撞是 `ts_sec` 桶：seq 低 8 bit 繞回時把秒數往前推（`client_order_id.py:163`–`:168`）。跨 session 的唯一性來自 session 欄位，不是 seq（docstring `:144`–`:146`） | 權威位置一致。差異在跨 incarnation 的不撞號保證：§5.3 的 R2 靠「重啟 backoff 至少 1 秒」推出新舊兩張單一定落在不同秒，**現況沒有這個 backoff**——`_schedule_rebuild` 收到 worker 非 0 退出就立刻排 rebuild（`manager.py:904`–`:924`）。另外 R2 和 §3.3 寫的版位少了 `ver` 這個 nibble，見 §11 → B4-03（#203） |
+| event log | **STS session worker**（不是 ingress，沒有 ingress）。`EventLog.record` 在 worker 的 event loop 上入佇列，`_drain` 是 asyncio task，真正寫檔在 `asyncio.to_thread`（`packages/common/src/mftik/strategy/eventlog.py:207`、`:322`） | 檔案 `{STS_EVENTLOG_DIR}/{session_id}.jsonl`（`eventlog.py:55`、`:143`）。佇列大小 `STS_EVENTLOG_QUEUE`、輪替 `STS_EVENTLOG_MAX_BYTES` / `STS_EVENTLOG_BACKUPS`（`eventlog.py:58`、`:61`–`:62`）。沒設 `STS_EVENTLOG_DIR` 就整個關掉 | 事後分析；API 經 `sts.eventlog.info` / `sts.eventlog.read` 向平面要（`apps/sts/src/mftik_sts/rpc/eventlog.py`） | 檔案留在 volume 上，新進程**append 同一個檔**，但 `_seq` 從 0 重新起算（`eventlog.py:152`），所以同一個檔裡會出現重複的 seq | 權威一致，差別是沒有 ingress thread、也沒有 `delivered` / `superseded` / `dropped` 的交付標記 → IF-05（#183）、B5-01（#210）、B5-02（#211） |
+| artifacts | **兩個進程都寫。** 策略在 session worker 裡直接寫磁碟（`packages/common/src/mftik/strategy/artifacts.py:675`–`:742` 的 `StrategyArtifacts`）；operator / API 上傳走平面的 RPC（`apps/sts/src/mftik_sts/rpc/artifacts.py` 的 begin / chunk / commit） | 檔案，根目錄 `STS_ARTIFACT_DIR`（`artifacts.py:36`–`:37`）。session 私有的 key 放在 `sessions/{session_id}/`，不出現在 operator 的目錄（`artifacts.py:42`–`:44`） | 策略（本地磁碟）、API（經平面 RPC） | 檔案留在 volume 上；只有程序內的 digest 快取是冷的（`artifacts.py:149`）。平面的 `reap_loop` 會清掉過期的 `.part`（`apps/sts/src/mftik_sts/app.py:196`–`:198`） | 權威多了一個（平面也寫），但那是 operator 上傳的路徑，不是策略狀態 → **沒有票改這一列**，見 §12 |
+| hook 進度、offload 進度、交付的丟棄計數 | **不存在。** `status.sts` 的 payload 只有 `session_id`、`status`、`strategy`、`reason`、`created_by`、`finished_at`、`type`（`manager.py:403`–`:412`），全是生命週期終態，沒有任何進度欄位。最接近的是策略自己呼叫 `log()` 寫人看的 log | — | — | — | 整件事是新增（`offload` 本身也還不存在） → IF-05（#183）、B4-02（#202）、B5-03（#212）、B5-04（#213） |
 
 ## 7. 版本
 
 | 狀態 | 權威 | 存放 | 讀取者 | 收斂 | 和 §3.3 的差異與負責的票 |
 |---|---|---|---|---|---|
-| 協定版本 `pv` | TODO | TODO | TODO | TODO | TODO |
+| 協定版本 `pv` | **不存在。** `Envelope` 沒有版本欄位（`packages/common/src/mftik/protocol/envelope.py:25`–`:36`），也沒有 `protocol_mismatch` 這個 reject code。收件端多半連 `type` 都不比對，直接拿 payload 去 validate（見 `docs/baseline/protocol.md` 4.4） | — | — | 現況的跨版本策略是「所有平面一起換同一個 tag」。`MFTIK_DIST_VERSION` 只用來組套件版號（`packages/common/hatch_version.py:7`），執行期沒有人比對它 | 新增 → IF-01（#179）、B4-01（#201） |
 
 ## 8. §3.3 沒有列、現況有的狀態
 
