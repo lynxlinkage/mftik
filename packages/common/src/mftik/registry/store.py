@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import contextlib
+import ctypes
+import errno
 import json
 import os
 import shutil
@@ -330,6 +331,10 @@ class RegistryStore:
             return self.private_dir / name
         return self.pulled_dir / origin / name
 
+    def has_tree(self, name: str, *, origin: str) -> bool:
+        """Whether that strategy directory is on disk right now."""
+        return self._dest(origin, name).is_dir()
+
     def _list_dir(self, root: Path, *, origin: str) -> list[AddedStrategy]:
         if not root.is_dir():
             return []
@@ -349,16 +354,19 @@ class RegistryStore:
         *,
         expect_digest: str | None = None,
     ) -> None:
-        """Replace ``dest`` by renaming a private temp directory onto it.
+        """Replace ``dest`` by publishing a private temp directory.
 
         The temp name is unique, not ``pid``. Two STS containers on one
         volume are both pid 1, and a shared ``.tmp-{name}-1`` lets one
         writer delete the other's half-written tree — and then delete
-        ``dest`` itself. The previous tree is renamed aside and put back
-        if the swap fails, so a crash between the two renames does not
-        leave the key with no directory. ``expect_digest`` is checked on
-        the temp directory before that swap. A rename that loses to the
-        other writer is retried; a digest mismatch is not.
+        ``dest`` itself. A replace swaps the two directories, so ``dest``
+        is never missing and a peer rescanning this disk still sees a
+        complete tree. Kernels without that swap fall back to renaming
+        the old tree aside and putting it back if the publish fails; a
+        restore that loses the race deletes the aside instead of leaving
+        ``.old-*`` behind. ``expect_digest`` is checked on the temp
+        directory before the publish. A rename that loses to the other
+        writer is retried; a digest mismatch is not.
         """
         last: OSError | None = None
         for _attempt in range(8):
@@ -382,7 +390,6 @@ class RegistryStore:
         dest.parent.mkdir(parents=True, exist_ok=True)
         token = uuid.uuid4().hex
         tmp = dest.parent / f".tmp-{dest.name}-{token}"
-        old = dest.parent / f".old-{dest.name}-{token}"
         tmp.mkdir()
         try:
             for path, body in files.items():
@@ -394,21 +401,11 @@ class RegistryStore:
                     f"digest mismatch: wrote {dest.name}, "
                     f"request said {expect_digest}"
                 )
-            if dest.exists():
-                dest.rename(old)
-            tmp.rename(dest)
-            if old.exists():
-                shutil.rmtree(old, ignore_errors=True)
+            _install(tmp, dest)
             self._drop_cache(dest)
         except Exception:
             if tmp.exists():
-                shutil.rmtree(tmp, ignore_errors=True)
-            if old.exists():
-                if not dest.exists():
-                    with contextlib.suppress(OSError):
-                        old.rename(dest)
-                else:
-                    shutil.rmtree(old, ignore_errors=True)
+                _remove_tree(tmp)
             raise
 
     def _drop_cache(self, dest: Path) -> None:
@@ -442,6 +439,134 @@ class RegistryStore:
         if stamp is not None:
             self._tree_cache[key] = (stamp, rec)
         return rec
+
+
+#: ``renameat2`` flag. Swaps two existing paths with no moment where the
+#: destination name is absent.
+_RENAME_EXCHANGE = 2
+_AT_FDCWD = -100
+
+_renameat2_fn = None
+
+
+def _renameat2(src: bytes, dst: bytes, flags: int) -> None:
+    """``renameat2(AT_FDCWD, src, AT_FDCWD, dst, flags)``.
+
+    Raises ``OSError`` with ``ENOSYS`` when this libc has no such call.
+    """
+    global _renameat2_fn
+    if _renameat2_fn is None:
+        lib = ctypes.CDLL(None, use_errno=True)
+        fn = getattr(lib, "renameat2", None)
+        if fn is None:
+            _renameat2_fn = False
+        else:
+            fn.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            fn.restype = ctypes.c_int
+            _renameat2_fn = fn
+    if not _renameat2_fn:
+        raise OSError(errno.ENOSYS, "renameat2 is not available")
+    rc = _renameat2_fn(_AT_FDCWD, src, _AT_FDCWD, dst, flags)
+    if rc != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err), src, None, dst)
+
+
+def _try_exchange(src: Path, dst: Path) -> bool:
+    """Swap ``src`` and ``dst``. False when this kernel cannot, or ``dst`` is gone.
+
+    A successful swap leaves the previous tree at ``src``. ``dst`` names one
+    complete tree or the other for the whole call.
+    """
+    try:
+        _renameat2(os.fsencode(src), os.fsencode(dst), _RENAME_EXCHANGE)
+    except OSError as exc:
+        if exc.errno in {
+            errno.ENOSYS,
+            errno.ENOTSUP,
+            errno.EINVAL,
+            errno.ENOENT,
+            errno.EOPNOTSUPP,
+        }:
+            return False
+        raise
+    return True
+
+
+def _install(tmp: Path, dest: Path) -> None:
+    """Publish ``tmp`` as ``dest``. ``tmp`` is consumed.
+
+    A replace exchanges the directories. The two-rename fallback is only
+    for a kernel that cannot swap, and it is the path that can leave
+    ``dest`` missing for an instant.
+    """
+    if dest.exists() and _try_exchange(tmp, dest):
+        _remove_tree(tmp)
+        return
+    if not dest.exists():
+        try:
+            os.rename(tmp, dest)
+            return
+        except OSError:
+            if not dest.exists():
+                raise
+            if _try_exchange(tmp, dest):
+                _remove_tree(tmp)
+                return
+    _install_via_aside(tmp, dest)
+
+
+def _install_via_aside(tmp: Path, dest: Path) -> None:
+    """Rename ``dest`` aside, then ``tmp`` onto it.
+
+    If the second rename loses, put the aside back. If that restore loses
+    too — the other writer already published — delete the aside. Leaving
+    it is how ``.old-*`` directories accumulate under concurrent replace.
+    """
+    old = dest.parent / f".old-{dest.name}-{uuid.uuid4().hex}"
+    try:
+        if dest.exists():
+            dest.rename(old)
+        os.rename(tmp, dest)
+    except OSError:
+        if tmp.exists():
+            _remove_tree(tmp)
+        _restore_or_drop(old, dest)
+        raise
+    if old.exists():
+        _remove_tree(old)
+
+
+def _restore_or_drop(old: Path, dest: Path) -> None:
+    """Put ``old`` back at ``dest``, or delete it once ``dest`` is live."""
+    if not old.exists():
+        return
+    for _ in range(8):
+        if not old.exists():
+            return
+        if dest.exists():
+            _remove_tree(old)
+            return
+        try:
+            old.rename(dest)
+            return
+        except OSError:
+            continue
+    _remove_tree(old)
+
+
+def _remove_tree(path: Path) -> None:
+    """Delete ``path``. A peer's rename can make one attempt fail."""
+    for _ in range(8):
+        if not path.exists():
+            return
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _digest_written(root: Path) -> str:

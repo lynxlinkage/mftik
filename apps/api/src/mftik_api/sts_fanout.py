@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -409,10 +410,19 @@ def _finish(
     )
 
 
-#: Serialises registry copies. A reconcile's prune list is a snapshot of
-#: the API store; a push that lands in the middle of that snapshot would
-#: be deleted again when the prune arrives.
+#: Serialises a store mutation with the reconcile that snapshots it.
+#: ``store.add`` used to finish before this lock was taken. A reconcile
+#: that had already read ``retain`` then pruned the new tree, and on a
+#: shared volume that prune is the API's own disk. An oversized tree is
+#: not in the following sync payload, so nothing writes it back.
 _registry_lock = asyncio.Lock()
+
+
+@asynccontextmanager
+async def registry_mutation():
+    """Hold :data:`_registry_lock` across a disk write and its sync."""
+    async with _registry_lock:
+        yield
 
 
 def registry_manifest() -> tuple[list[StsRegistryTreeOp], list[str]]:
@@ -459,6 +469,22 @@ async def sync_registry(
         return await _sync_unlocked(
             broker, ops, retain=retain, targets=targets
         )
+
+
+async def sync_registry_locked(
+    broker: Broker,
+    ops: list[StsRegistryTreeOp],
+    *,
+    retain: list[str] | None = None,
+    targets: list[StsTarget] | None = None,
+) -> StsFanoutResult:
+    """:func:`sync_registry` while the caller holds :func:`registry_mutation`."""
+    if not _registry_lock.locked():
+        raise RuntimeError(
+            "sync_registry_locked requires registry_mutation; "
+            "the write and the sync have to be one critical section"
+        )
+    return await _sync_unlocked(broker, ops, retain=retain, targets=targets)
 
 
 async def reconcile_instance(broker: Broker, name: str) -> StsFanoutResult:

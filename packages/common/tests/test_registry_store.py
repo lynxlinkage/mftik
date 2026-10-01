@@ -402,16 +402,25 @@ def test_bad_strategy_yml_is_refused(tmp_path) -> None:
         store.add({"strategy.py": _TINY, TEMPLATE_NAME: "td: [\n"})
 
 
-def test_two_writers_leave_one_complete_tree(tmp_path) -> None:
-    """Pid-1 containers used to share ``.tmp-{name}-1`` and delete each other."""
+def _contend(tmp_path: Path, *, require_present: bool = True) -> None:
+    """Two writers replace one tree and leave one complete copy."""
     import threading
 
     store = RegistryStore(tmp_path)
     first = _TINY + "\n# a\n"
     second = _TINY + "\n# b\n"
     store.add({"strategy.py": first})
+    root = tmp_path / "registry" / "private" / "Tiny"
     barrier = threading.Barrier(2)
     errors: list[BaseException] = []
+    gaps: list[str] = []
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.is_set():
+            if not root.is_dir():
+                gaps.append("missing")
+                return
 
     def write(body: str) -> None:
         try:
@@ -421,6 +430,8 @@ def test_two_writers_leave_one_complete_tree(tmp_path) -> None:
         except BaseException as exc:
             errors.append(exc)
 
+    watcher = threading.Thread(target=watch)
+    watcher.start()
     threads = [
         threading.Thread(target=write, args=(body,)) for body in (first, second)
     ]
@@ -429,12 +440,57 @@ def test_two_writers_leave_one_complete_tree(tmp_path) -> None:
     for thread in threads:
         thread.join(timeout=30)
         assert not thread.is_alive()
+    stop.set()
+    watcher.join(timeout=5)
     assert errors == []
-    text = (tmp_path / "registry" / "private" / "Tiny" / "strategy.py").read_text()
+    if require_present:
+        assert gaps == []
+    text = (root / "strategy.py").read_text()
     assert text in {first, second}
     private = tmp_path / "registry" / "private"
     assert list(private.glob(".tmp-*")) == []
     assert list(private.glob(".old-*")) == []
+
+
+def test_two_writers_leave_one_complete_tree(tmp_path: Path) -> None:
+    """Pid-1 containers used to share ``.tmp-{name}-1`` and delete each other."""
+    _contend(tmp_path)
+
+
+def test_replace_exchanges_so_the_live_directory_stays(tmp_path: Path) -> None:
+    """``renameat2(RENAME_EXCHANGE)`` is what keeps the name present."""
+    from mftik.registry import store as store_mod
+
+    seen: list[bool] = []
+    real = store_mod._try_exchange
+
+    def wrapped(src: Path, dst: Path) -> bool:
+        ok = real(src, dst)
+        seen.append(ok)
+        return ok
+
+    store = RegistryStore(tmp_path)
+    store.add({"strategy.py": _TINY})
+    store_mod._try_exchange = wrapped
+    try:
+        store.add({"strategy.py": _TINY + "\n# b\n"}, replace=True)
+    finally:
+        store_mod._try_exchange = real
+    assert seen == [True]
+    root = tmp_path / "registry" / "private" / "Tiny"
+    assert root.is_dir()
+    assert (root / "strategy.py").read_text().endswith("# b\n")
+
+
+def test_two_writers_without_exchange_drop_the_aside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost restore used to leave ``.old-*`` behind and fail this race."""
+    monkeypatch.setattr(
+        "mftik.registry.store._try_exchange", lambda _src, _dst: False
+    )
+    # The aside path does hide the directory. What it must not do is leak it.
+    _contend(tmp_path, require_present=False)
 
 
 def test_yml_mtime_invalidates_the_tree_cache(tmp_path) -> None:

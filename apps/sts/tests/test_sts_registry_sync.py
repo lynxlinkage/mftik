@@ -162,6 +162,43 @@ def test_a_digest_mismatch_keeps_the_previous_tree(tmp_path: Path) -> None:
     assert "private::Tiny" in result.loaded
 
 
+def test_a_rescan_retries_when_the_tree_was_missing_for_the_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A peer mid-publish used to make this rescan unregister the type."""
+    from mftik_sts.rpc import registry as registry_rpc
+
+    store = RegistryStore(tmp_path)
+    added = store.add({"strategy.py": _TINY})
+    dest = tmp_path / "registry" / "private" / "Tiny"
+    aside = tmp_path / "registry" / "private" / ".hidden-Tiny"
+    calls = {"n": 0}
+    real = registry_rpc.refresh
+
+    def hiding(store: RegistryStore | None = None, data_dir: Path | None = None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            dest.rename(aside)
+            try:
+                return real(store, data_dir=data_dir)
+            finally:
+                aside.rename(dest)
+        return real(store, data_dir=data_dir)
+
+    monkeypatch.setattr(registry_rpc, "refresh", hiding)
+    result = apply_sync(
+        store,
+        StsRegistrySyncRequest(
+            trees=[_upsert("private", "Tiny", _TINY, digest=added.digest)],
+            reload=True,
+        ),
+    )
+    assert calls["n"] >= 2
+    assert "private::Tiny" in result.loaded
+    assert "private::Tiny" not in result.skipped
+    assert dest.is_dir()
+
+
 def test_a_matching_digest_is_not_rewritten(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

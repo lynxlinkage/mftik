@@ -12,6 +12,7 @@ on ``sys.path``, and ``load_local_registry`` decides what to skip.
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from mftik.broker import IncomingRequest
@@ -34,7 +35,7 @@ from mftik.protocol import (
     StsRegistrySyncResultEnvelope,
     StsRegistryTreeOp,
 )
-from mftik.registry import RegistryError, RegistryStore, qualify
+from mftik.registry import RegistryError, RegistryStore, qualify, split_qualified
 from mftik.registry.errors import RegistryDigestMismatch
 from mftik.registry.qualify import OWN_ORIGINS
 
@@ -50,6 +51,14 @@ logger = logging.getLogger(__name__)
 SKIP_ABSENT = "not present on this registry disk"
 SKIP_COLLISION = "name collision with a bundled strategy"
 SKIP_DIGEST = "digest mismatch"
+
+#: How many extra scans to spend when an upsert's directory is missing.
+#: Two STS on one disk used to rename the live tree aside before the new
+#: one was in place, and the peer's rescan landed in that gap and
+#: unregistered the type. The swap no longer opens the gap; this covers
+#: a kernel that still publishes with two renames.
+_RESCAN_GAP_TRIES = 5
+_RESCAN_GAP_S = 0.004
 
 
 def _delete_tree(store: RegistryStore, op: StsRegistryTreeOp) -> None:
@@ -128,6 +137,49 @@ def _find(store: RegistryStore, origin: str, name: str):
     return None
 
 
+def _dir_missing(store: RegistryStore, key: str) -> bool:
+    split = split_qualified(key)
+    if split is None:
+        return False
+    origin, name = split
+    return not store.has_tree(name, origin=origin)
+
+
+def _scan_may_be_stale(store: RegistryStore, key: str) -> bool:
+    """True when another look might load ``key``.
+
+    A missing directory is the publish gap. A directory that is present
+    but was not loaded and was not recorded as an import failure appeared
+    after the scan started. An import error is stable and is not retried.
+    """
+    if split_qualified(key) is None:
+        return False
+    if _dir_missing(store, key):
+        return True
+    return key not in registry_skips()
+
+
+def _refresh_for_sync(
+    store: RegistryStore, wanted: list[str], skipped: dict[str, str]
+) -> tuple[list[str], object]:
+    """Rescan, and repeat while an upsert's directory is in the publish gap."""
+    loaded, stamp = refresh(store, data_dir=store.data_dir)
+    for _ in range(_RESCAN_GAP_TRIES):
+        pending = [
+            key
+            for key in wanted
+            if key not in loaded
+            and key not in skipped
+            and _scan_may_be_stale(store, key)
+        ]
+        if not pending:
+            break
+        if any(_dir_missing(store, key) for key in pending):
+            time.sleep(_RESCAN_GAP_S)
+        loaded, stamp = refresh(store, data_dir=store.data_dir)
+    return loaded, stamp
+
+
 def explain_skip(store: RegistryStore, key: str) -> str:
     """Why ``key`` is on the request and not in the scan's loaded list.
 
@@ -145,13 +197,14 @@ def apply_sync(
     """Write ``request`` onto ``store`` and, on the last batch, rescan it."""
     skipped = _apply_ops(store, request)
     if request.reload:
-        loaded, stamp = refresh(store, data_dir=store.data_dir)
         upserted = [
             qualify(op.origin, op.name)
             for op in request.trees
             if op.op == "upsert"
         ]
-        for key in [*request.explain, *upserted]:
+        wanted = [*request.explain, *upserted]
+        loaded, stamp = _refresh_for_sync(store, wanted, skipped)
+        for key in wanted:
             if key in loaded or key in skipped:
                 continue
             skipped[key] = explain_skip(store, key)

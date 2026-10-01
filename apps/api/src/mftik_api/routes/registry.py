@@ -46,7 +46,11 @@ from mftik_api.schemas import (
     RegistryStrategyOut,
     RegistrySyncRow,
 )
-from mftik_api.sts_fanout import StsFanoutResult, sync_registry
+from mftik_api.sts_fanout import (
+    StsFanoutResult,
+    registry_mutation,
+    sync_registry_locked,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -207,23 +211,27 @@ async def add_strategy(
     that would invite a retry of a write that already happened. ``load_error``
     names the instance that does not have the tree, and why.
     """
-    try:
-        added = store.add(
-            body.files,
-            replace=body.replace,
-            origin=body.origin,
-            applied_extras=_applied_extras(),
-            present_extras=_present_extras(),
-        )
-    except RegistryConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except RegistryError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # The write and the sync share the lock reconcile uses to snapshot
+    # ``retain``. An oversized tree is not in that sync's payload, so a
+    # prune that raced the write would delete it from a shared disk.
+    async with registry_mutation():
+        try:
+            added = store.add(
+                body.files,
+                replace=body.replace,
+                origin=body.origin,
+                applied_extras=_applied_extras(),
+                present_extras=_present_extras(),
+            )
+        except RegistryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RegistryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    key = qualify(added.origin, added.type)
-    fanout = await sync_registry(
-        broker, [_upsert(added, store.read_contents(added))]
-    )
+        key = qualify(added.origin, added.type)
+        fanout = await sync_registry_locked(
+            broker, [_upsert(added, store.read_contents(added))]
+        )
     if fanout.error is not None:
         return RegistryAddOut(
             **_strategy_out(added).model_dump(),
@@ -291,12 +299,15 @@ async def delete_strategy(
             ),
         )
 
-    try:
-        removed = store.remove(name, origin=origin)
-    except RegistryError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    async with registry_mutation():
+        try:
+            removed = store.remove(name, origin=origin)
+        except RegistryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    fanout = await sync_registry(broker, [_delete_op(origin, removed.name)])
+        fanout = await sync_registry_locked(
+            broker, [_delete_op(origin, removed.name)]
+        )
     if fanout.error is not None:
         error = _sync_failure(
             fanout,
@@ -417,33 +428,37 @@ async def connect(
     STS can now resolve — not necessarily all of them, since a pulled tree
     can collide with a bundled name or fail to import here.
     """
-    try:
-        result = await connect_remote(
-            store, name=body.name, url=body.url, token=body.token
-        )
-    except MissingRemoteExtras as exc:
-        # Structured, because the caller's next move depends on which names
-        # and whether each is absent or merely unapproved. A client that had
-        # to read this out of the sentence would break the first time the
-        # sentence changed — which is exactly what happened.
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": exc.code,
-                "message": str(exc),
-                "missing": exc.rows(),
-            },
-        ) from exc
-    except RegistryError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=502, detail=f"cannot reach remote: {exc}"
-        ) from exc
+    # Includes the peer HTTP. The trees land in this same section, and a
+    # reconcile must not snapshot ``retain`` between those writes.
+    async with registry_mutation():
+        try:
+            result = await connect_remote(
+                store, name=body.name, url=body.url, token=body.token
+            )
+        except MissingRemoteExtras as exc:
+            # Structured, because the caller's next move depends on which names
+            # and whether each is absent or merely unapproved. A client that had
+            # to read this out of the sentence would break the first time the
+            # sentence changed — which is exactly what happened.
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": exc.code,
+                    "message": str(exc),
+                    "missing": exc.rows(),
+                },
+            ) from exc
+        except RegistryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"cannot reach remote: {exc}"
+            ) from exc
 
-    fanout = await sync_registry(
-        broker, [_upsert(rec, store.read_contents(rec)) for rec in result.pulled]
-    )
+        fanout = await sync_registry_locked(
+            broker,
+            [_upsert(rec, store.read_contents(rec)) for rec in result.pulled],
+        )
     pulled_keys = {qualify(rec.origin, rec.type) for rec in result.pulled}
     if fanout.error is not None:
         load_error = _sync_failure(
@@ -505,11 +520,12 @@ async def disconnect_remote(
                 f"strategies. Stop these first: {listed}"
             ),
         )
-    pulled = list(store.list_pulled_from(name))
-    remote = store.drop_remote(name)
-    fanout = await sync_registry(
-        broker, [_delete_op(name, rec.name) for rec in pulled]
-    )
+    async with registry_mutation():
+        pulled = list(store.list_pulled_from(name))
+        remote = store.drop_remote(name)
+        fanout = await sync_registry_locked(
+            broker, [_delete_op(name, rec.name) for rec in pulled]
+        )
     rpc_error = fanout.error
     if rpc_error is not None:
         logger.warning(

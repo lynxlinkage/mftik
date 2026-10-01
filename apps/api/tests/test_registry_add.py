@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from fanout_harness import UnansweredBroker, patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.protocol import (
     STS_REGISTRY_SYNC,
+    StsRegistrySyncRequest,
     StsRegistrySyncResult,
     StsRegistrySyncResultEnvelope,
 )
@@ -30,6 +32,7 @@ from mftik_api.routes.registry import (
 )
 from mftik_api.routes.sts import deploy, list_strategy_types, strategy_type_template
 from mftik_api.schemas import RegistryAddBody, StrategyDeployBody
+from mftik_api.sts_fanout import reconcile_instance
 from mftik_db.repositories import StsSessionRepository
 
 _TINY = """\
@@ -499,6 +502,69 @@ async def test_an_oversized_tree_still_rescans_a_shared_disk(
     assert out.loaded is True
     assert broker.calls >= 1
     assert (tmp_path / "registry" / "private" / "Tiny" / "strategy.py").is_file()
+
+
+async def test_a_reconcile_cannot_prune_an_oversized_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The push's write used to land inside a retain list that omitted it.
+
+    On a shared disk the prune deletes the API's own copy, and an oversized
+    tree has no bytes in the following sync to put it back.
+    """
+    from mftik_api import sts_fanout
+
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    monkeypatch.setattr(sts_fanout, "REGISTRY_SYNC_BUDGET", 40)
+    store = RegistryStore(tmp_path)
+    store.registry_dir.mkdir(parents=True)
+    tree = tmp_path / "registry" / "private" / "Tiny"
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    pruned: list[str] = []
+
+    class Broker:
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            request = StsRegistrySyncRequest.model_validate(envelope.payload)
+            if request.retain is not None:
+                entered.set()
+                await release.wait()
+                retain = set(request.retain)
+                for rec in list(store.list_all()):
+                    key = qualify(rec.origin, rec.name)
+                    if key not in retain:
+                        store.discard(rec.name, origin=rec.origin)
+                        pruned.append(key)
+            loaded = [qualify(rec.origin, rec.type) for rec in store.list_all()]
+            return StsRegistrySyncResultEnvelope.wrap(
+                StsRegistrySyncResult(loaded=loaded),
+                type=STS_REGISTRY_SYNC,
+                source="sts",
+            )
+
+    broker = Broker()
+    reconcile_task = asyncio.create_task(reconcile_instance(broker, "sts"))
+    await entered.wait()
+    add_task = asyncio.create_task(
+        add_strategy(
+            RegistryAddBody(files={"strategy.py": _TINY}),
+            store=store,
+            broker=broker,
+        )
+    )
+    for _ in range(40):
+        if tree.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert not tree.exists()
+    release.set()
+    reconcile = await reconcile_task
+    added = await add_task
+    assert reconcile.error is None
+    assert pruned == []
+    assert tree.is_dir()
+    assert (tree / "strategy.py").read_text() == _TINY
+    assert added.loaded is True
 
 
 async def test_an_oversized_tree_on_a_split_disk_names_the_encoded_size(
