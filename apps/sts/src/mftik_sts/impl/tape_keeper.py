@@ -1,10 +1,10 @@
 """Holds MD feeds open so their tape keeps recording. Places no orders.
 
-MD pumps a feed while its refcount is above zero and stops the moment the last
-subscriber goes (``mftik_md.session.manager._stop_feed_if_unused``). Recording
-follows the pump, so a tape only exists while somebody is subscribed — and the
-strategy that will want the history is, by definition, not running yet. This is
-the somebody.
+MD pumps a feed while somebody is subscribed to it and stops the moment the
+last subscriber goes. Recording follows the pump, so a tape only exists while
+somebody is subscribed — and the strategy that will want the history is, by
+definition, not running yet. This is the somebody. B8-05 (#242) replaces it
+with a standing subscription and retires this strategy.
 
 It subscribes and does nothing else. That is the whole design: every line it
 does not have is a line that cannot stop the recording.

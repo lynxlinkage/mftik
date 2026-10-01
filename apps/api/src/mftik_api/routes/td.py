@@ -2,10 +2,9 @@
 
 It used to go through the broker: the API sent `td.session.list` on the plane's
 shared subject, some TD process picked it up, ran one query and sent the rows
-back. That process holds no state this answer needs — `SessionManager.list_sessions`
-consulted `td_sessions` and nothing else — so the round trip bought a
-dependency on a plane being up in order to read a table the API is already
-connected to.
+back. That process held no state this answer needs — the handler consulted
+`td_sessions` and nothing else — so the round trip bought a dependency on a
+plane being up in order to read a table the API is already connected to.
 
 Removing it is what lets TD stop serving an anycast subject at all: every other
 thing that reaches TD carries an `api_id`, and an `api_id` resolves to the one

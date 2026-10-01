@@ -1,11 +1,10 @@
 """/td/sessions answers from the database, with no TD process anywhere.
 
 It used to be an RPC on TD's shared subject, and the process that answered it
-held no state the answer needed — `SessionManager.list_sessions` read
-`td_sessions` and nothing else. Removing that round trip is what lets TD stop
-serving an anycast subject at all: everything else that reaches TD carries an
-`api_id`, and an `api_id` names the one instance allowed to use that
-credential.
+held no state the answer needed — the handler read `td_sessions` and nothing
+else. Removing that round trip is what lets TD stop serving an anycast subject
+at all: everything else that reaches TD carries an `api_id`, and an `api_id`
+names the one instance allowed to use that credential.
 
 The app under test has no `state.broker`, which is the assertion: if this route
 still needed a plane, it could not be built this way.
