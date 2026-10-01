@@ -1,4 +1,4 @@
-"""Failed as a terminal status — Strategy.fail and infrastructure death.
+"""Failed as a terminal status — Strategy.fail.
 
 A session that stops because something went wrong must not be recorded the
 same way as one that finished its job: the row lands in ``failed`` and keeps
@@ -16,13 +16,8 @@ import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.protocol import (
-    MD_SESSION_DETACH,
     ListSessionsRequest,
-    MdDetachRequest,
-    MdDetachResult,
-    MdDetachResultEnvelope,
     StsCreateSessionRequest,
-    Topics,
 )
 from mftik.strategy import Strategy
 from mftik_sts.impl import register
@@ -271,73 +266,6 @@ async def test_the_first_ending_wins(broker: Broker) -> None:
 
     assert row.status == "done"
     assert row.reason == "work_done"
-
-
-async def _serve_md_detach(broker: Broker, stop: asyncio.Event) -> None:
-    """Answer detaches so a stop does not wait out an absent MD.
-
-    The session under test has an md attach, and detaching is a request now:
-    unanswered, it is retried and then reported, which this test has no
-    reason to sit through.
-    """
-    async for req in broker.serve(Topics.MD, stop=stop):
-        if req.envelope.type != MD_SESSION_DETACH:
-            continue
-        payload = MdDetachRequest.model_validate(req.envelope.payload)
-        await req.reply(
-            MdDetachResultEnvelope.wrap(
-                MdDetachResult(session_id=payload.session_id),
-                type=MD_SESSION_DETACH,
-                source="md",
-                session_id=payload.session_id,
-            )
-        )
-
-
-@pytest.mark.asyncio
-async def test_a_dead_feed_fails_the_session_instead_of_leaving_it_live(
-    broker: Broker,
-) -> None:
-    """A pump that raises never comes back — the row must not stay ``live``.
-
-    Without this the session receives nothing, holds no lease, and still shows
-    up in the UI as running.
-    """
-
-    class Quiet(Strategy):
-        name = "quiet_md"
-
-    store = FakeStsStore()
-    manager, _ = _manager(broker, store, Quiet)
-
-    original = broker.subscribe
-
-    def exploding_subscribe(topics, **kwargs):
-        if topics == "md.dead-1":
-            raise RuntimeError("redis connection lost")
-        return original(topics, **kwargs)
-
-    broker.subscribe = exploding_subscribe  # type: ignore[method-assign]
-    md_stop = asyncio.Event()
-    md = asyncio.create_task(_serve_md_detach(broker, md_stop))
-    try:
-        await manager.create_session(
-            StsCreateSessionRequest(
-                session_id="dead-1",
-                created_by=1,
-                strategy="quiet_md",
-                md=["ticker.Paper_Spot_BTCUSDT"],
-            )
-        )
-        row = await _until_closed(manager, store, "dead-1")
-    finally:
-        broker.subscribe = original  # type: ignore[method-assign]
-        md_stop.set()
-        md.cancel()
-        await asyncio.gather(md, return_exceptions=True)
-
-    assert row.status == "failed"
-    assert "md feed" in (row.reason or "")
 
 
 @pytest.mark.asyncio

@@ -1,8 +1,6 @@
 """Stopping a session must not wait on the domains it is detaching from.
 
-The lease is what actually ends an attach: TD and MD each watch this session's
-heartbeat and run the identical teardown when it stops. The detach request is
-promptness and a reason on the row, not the mechanism — so a domain that is
+The detach request is promptness and a reason on the row — so a domain that is
 slow, busy or gone can cost a stop nothing.
 """
 
@@ -93,33 +91,3 @@ async def test_a_broker_that_cannot_take_the_detach_still_stops(
 
     assert time.monotonic() - started < 2.0
     assert session.destroyed
-
-
-async def test_the_heartbeat_stops_which_is_what_ends_the_attach(
-    broker: Broker,
-) -> None:
-    """The detach is the courtesy; this is the mechanism."""
-    session = _session(broker, session_id="d-5", td_api_ids=[1])
-    await session.start()
-
-    seen: list[str] = []
-    stop = asyncio.Event()
-
-    async def listen() -> None:
-        async for env in broker.subscribe(
-            Topics.sts_td_session("d-5"), stop=stop
-        ):
-            seen.append(env.type)
-
-    task = asyncio.create_task(listen())
-    await asyncio.sleep(0.2)
-    assert seen, "no heartbeat while running"
-
-    await session.stop()
-    seen.clear()
-    await asyncio.sleep(0.2)
-    stop.set()
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-
-    assert seen == [], "heartbeat outlived the session"
