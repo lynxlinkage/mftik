@@ -57,7 +57,7 @@
 | F37 | cancel-on-disconnect 預設關閉、逐帳號開啟；只用倒數計時型機制，當作 TD worker 的死人開關；不用 Deribit COD 和 Bybit DCP | §7.1 |
 | F38 | intent 兼任歷史：session 結束時 intent 列不刪、改記 `released_at`；`md_sessions` / `td_sessions` 從 B10 起停寫、保留唯讀；前端 MD/TD 頁改成顯示 worker 與 intent | §8.4；前端資料來自 procman 回報和 worker 狀態廣播 |
 | F39 | 「worker 跑哪一份代碼」分成三個軸：平台 release（`code_ref`）、策略樹 `strategy_digest`、extras `env_generation`。策略樹與 extras 的目錄權威維持在 API；session 在 start 時釘住 `(strategy_digest, env_generation)`，重新掛起沿用；Supervisor 記錄 worker 實際跑的版本；STS 磁碟副本改以 digest 定址，被釘住的版本不被覆蓋或回收；STS controller 不 import 策略代碼 | §3.3、§5.7；IF-16（#275）、B5-10（#276） |
-| F40 | STS controller 服務 operator 對主機磁碟的所有路徑：registry 副本、extras、artifact 的 list / read / 上傳 / 刪除、event log 讀取、未完成上傳的清理；不另開 files worker。策略仍在自己的 worker 裡直接讀寫 artifact | §5.7；B5-11（#277） |
+| F40 | STS controller 服務 operator 對主機磁碟的所有路徑：registry 副本、extras、artifact 的 list / read / 上傳 / 刪除、event log 讀取、未完成上傳的清理；不另開 files worker。策略仍在自己的 worker 裡直接讀寫 artifact，而且可以寫任何 key（全域寫入，刻意保留） | §5.7；B5-11（#277） |
 
 ## 0. 摘要
 
@@ -877,7 +877,7 @@ self.td.state(api_id)
   - 不另開 files worker：那會多一種 kind、一份 RSS、一個需要人工換版的進程（F24），換到的只是 controller 滾動時傳輸不中斷。controller 滾動是秒級，上傳本來就要能重試。
   - handler 的檔案 I/O 已經都在 `asyncio.to_thread` 裡，不佔 controller 的 loop。
 - **要補的一件事：** 上傳 token 現在只存在記憶體（`ArtifactStore._uploads`），controller 一滾動，進行中的上傳在下一個 chunk 就會收到 `ArtifactUploadError`。改成由磁碟上的 `.{name}.{token}.part` 找回 token（`_token_of` 已經會解析），controller 重啟後可以接著傳。
-- **artifact 的權威是主機上的 artifact volume。** 兩條寫入路徑共用同一套 `ArtifactStore`（part 檔加 rename，原子替換）：operator 經 controller，策略在自己的 worker 裡直接寫（B5-07）。語意維持現況：operator 動不到 `sessions/`；策略可以寫任何 key，包括覆蓋 operator 上傳的 key。
+- **artifact 的權威是主機上的 artifact volume。** 兩條寫入路徑共用同一套 `ArtifactStore`（part 檔加 rename，原子替換）：operator 經 controller，策略在自己的 worker 裡直接寫（B5-07）。語意維持現況：operator 動不到 `sessions/`；策略可以寫任何 key，包括覆蓋 operator 上傳的 key。這是刻意的：策略保留全域寫入，不限制在 `sessions/{session_id}/`。
 - event log 的寫入者是 session worker 的 ingress（§5.3），controller 只讀。
 
 ---
