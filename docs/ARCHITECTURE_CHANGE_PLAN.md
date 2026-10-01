@@ -1830,6 +1830,6 @@ B0-05 實測出兩個 F16 的例外，RM 不可能完全不動這批測試：
 量測用兩趟，都在同一個 job 裡、服務與指令和 `tests.yml` 的 `pytest` job 完全一致：
 
 1. **不加外掛的一趟**，`pytest packages apps -q --durations=0 --junitxml`。C.1、C.4 的「秒」、C.5 的模組表都出自這一趟 —— 量的是現況，不是被外掛影響過的現況。
-2. **加一個 pytest 外掛的一趟**（`scripts/pytest_cost_probe.py`，在 `cbb3f78` 上），把每個測試的時間記到 NATS client、真的 sleep、子進程、`asyncpg.connect` 各桶，並記下每個等待的呼叫位置 —— 只認在測試自己那個 task 的 frame 鏈上的等待，背景 loop 另記。C.2、C.3、C.4 的「依據」出自這一趟。外掛的額外成本可以從兩趟的總和看出來：411.3 對 395.0 秒，也就是加了外掛反而略快 —— 第二趟的 Postgres 是暖的。
+2. **加一個 pytest 外掛的一趟**（`scripts/pytest_cost_probe.py`，在 `cbb3f78` 上），把每個測試的時間記到 NATS client、真的 sleep、子進程、`asyncpg.connect` 各桶，並記下每個等待的呼叫位置 —— 只認在測試自己那個 task 的 frame 鏈上的等待，背景 loop 另記。C.2、C.3、C.4 的「依據」出自這一趟。外掛的額外成本可以從兩趟的 junit `testsuite time` 看出來：423.4 對 395.0 秒，也就是加了外掛反而略快 —— 第二趟的 Postgres 是暖的，`[postgres]` 的測試在第二趟普遍快上一截。
 
 **這個 job 量完就移除，不留在 PR 裡。** 三個理由：它要把整套測試跑兩趟，留著等於任何會觸發它的 PR 的 CI 時間翻倍；永久版的耗時閘門是 B2-04（#177）的範圍，兩個並存只會各自漂移；而 run 與 artifact 都是永久的，harness 本身也留在那個 PR 的 commit 歷史裡（`cbb3f78`），要重量一次把那三個檔案挑回來就行。它存在的期間靠 `paths` filter 只對動到 harness 自己的 PR 生效，所以從來沒有拖慢過正常 CI。
