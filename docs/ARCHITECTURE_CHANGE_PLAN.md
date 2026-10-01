@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.25（2026-10-01）**。§12 的待決事項已全部定案（F1 到 F38）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.26（2026-10-01）**。§12 的待決事項已全部定案（F1 到 F38）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
-> **基準：** `main` @ `a0cbfb2`，重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。§1 的「現況」是在 `fix/sts-start-deadline` @ `8ddfc23` 查證的；它和 `a0cbfb2` 的差異只有 PR #153 的 start deadline 修正（被 F12 取代，PR 已關閉）和 main 上的 registry 同步，不影響 §1 的結論。README 與 `docs/` 已經過時，不作為依據。
+> **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。
+>
+> **v0.26 更正：** v0.25 以前的版本，誤用了 PR #153（`fix/sts-start-deadline` @ `8ddfc23`，未合併、已關閉）的代碼當作現況。PR #153 加入的 8 秒 / 300 秒啟動期限、`start_deadline` kill、abort 重試與 `abort_target` 欄位，都不在 main 上；相關敘述、刪除清單和 migration 已依 main 改正，行數和測試數也已重算。`deployment/nats/nats.conf` 被 `.gitignore` 排除，不在 repo 裡，§5.3 引用的是本機那份。
 
 ### 已定案
 
@@ -43,7 +45,7 @@
 | F33 | selector：`md:` 新增 `select:`（`option_chain`、`rolling_future`），由 MD orchestrator 以純函數推導；策略只用 `on_universe_change`；暫不做 pin；不加 `required` | §6.4 |
 | F34 | TD 帳號 worker 以帳號（`api_id`）為單位，一個進程持有該帳號所有私有連線 | §7.1 |
 | F35 | 帳號 worker 對每個啟用帳號常駐，維持溫熱的 HTTP 連線池；refcount（intent）只開關交易層（私有 websocket、OMS、recon），不 linger；backfill 是帳號 worker 用連線池處理的一次性 request，不另開 job worker | §7.1、§7.2 |
-| F36 | 帳號的 at-most-one 不用 DB lease：同 instance 由 Supervisor 以 PID 確認，跨 instance 靠 `api_id` → instance 的靜態綁定；`st_facts`、`abort_target` 在 B10 drop | §7.1、§8.4 |
+| F36 | 帳號的 at-most-one 不用 DB lease：同 instance 由 Supervisor 以 PID 確認，跨 instance 靠 `api_id` → instance 的靜態綁定；`st_facts` 在 B10 drop | §7.1、§8.4 |
 | F37 | cancel-on-disconnect 預設關閉、逐帳號開啟；只用倒數計時型機制，當作 TD worker 的死人開關；不用 Deribit COD 和 Bybit DCP | §7.1 |
 | F38 | intent 兼任歷史：session 結束時 intent 列不刪、改記 `released_at`；`md_sessions` / `td_sessions` 從 B10 起停寫、保留唯讀；前端 MD/TD 頁改成顯示 worker 與 intent | §8.4；前端資料來自 procman 回報和 worker 狀態廣播 |
 
@@ -84,23 +86,23 @@
 | MD | wire ledger 藏在各 adapter 的 socket 內，MD 刻意不碰 venue 詞彙（MdVenueSubscriptions I6） | — | `exchange/wire.py` |
 | MD | 到期處理是每個 ticker 一個 sleep task。訂閱只在 attach 時推導一次 | — | `_expiry_tasks`、`_subscribe_feed` |
 | TD | 單一進程。每個 `api_id` 一個 `Session`（OMS 和 ledger 都在記憶體），由 STS link 做 refcount | TD 進程。TD 滾動會 reap 該 instance 名下所有 session | `mftik_td/session/manager.py`（1,711 行） |
-| API | `deploy_strategy` 依序執行：STS create（`on_start`、`on_ready` 在這一步就跑完）→ MD attach → TD attach，失敗就回滾。另有 abort 重試（120s）、failed-row 重試、pending abort 持久化 | — | `mftik_api/orchestrate.py`（859 行） |
+| API | `deploy_strategy` 依序執行：STS create（`on_start`、`on_ready` 在這一步就跑完）→ MD attach → TD attach，失敗就以 `_detach_md`、`_fail_sts` 回滾。create 的 RPC timeout 寫死 10 秒 | — | `mftik_api/orchestrate.py`（538 行） |
 
 ### 1.2 長時間 hook（Deribit、ML）出問題的結構性原因
 
 以下是我從代碼讀出的根因，請對照你的分析修正。
 
 1. **活性和進度共用同一個訊號。** STS session 的 `_lease_heartbeat_loop` 和策略 hook 跑在同一個 event loop 上。ack 連續 1s × 3 次沒看到（`LEASE_HEARTBEAT_INTERVAL_S=1.0`、`LEASE_MISS_LIMIT=3`），session 就會自我 fail。MD 和 TD 那端的 lease 也用同一個時間窗。CPU-bound 的 hook（模型載入、推論、期權鏈全量重算）只要佔住 loop 約 3 秒，session 就會被判死。`breathe` / `slice_deadline` 是為了不讓策略餓死 heartbeat 而存在的補丁，問題本身並沒有解決。
-2. **啟動有硬上限。** `start_timeout` 預設 8s、上限 300s，超過就由 deadline kill。API 端則同步等待 create 回覆。長 `on_start` 在每次 rebuild 時都要重新付一次這個成本。
+2. **啟動沒有上限，但 API 只等 10 秒。** STS 的 create 要等 `on_start`、`on_ready` 跑完才回覆，STS 端沒有任何 deadline；API 的 create RPC 寫死 10 秒（`orchestrate.py`），CLI 的 `deploy_http_timeout` 也以 10 秒（`_STS_CREATE_S`）估算。`on_start` 超過 10 秒時 deploy 回 504，但 session 照樣起來（#132）。長 `on_start` 在每次 rebuild 時都要重新付一次這個成本。
 3. **生命週期綁在平面進程上。** 任何一次部署都等於所有 session 中斷再 rebuild。rebuild 還要求策略自己支援 `rebuildable`。
 4. **MD 單一 socket 承載所有訂閱。** 期權鏈的量級是一條鏈幾十到幾百個 channel。這個量級下，解碼的 CPU 負擔和重連風暴（V15）都集中在同一個 loop 上。
 
 ### 1.3 測試現況
 
-- 共約 3,380 個測試：`packages/common` 1,646、`apps/sts` 558、`apps/api` 438、`apps/td` 302、`apps/md` 211、`packages/db` 138、`apps/sym` 84、`apps/paper` 6。
-- 直接依賴 session 機制（三個平面的 `SessionManager`，以及 `orchestrate`）的約 590 個。策略實作測試（chase、oco、macd_dollar、cross_arb、twap、noop、tape_keeper）224 個，帶有 rebuild 語意。
+- 共 3,377 個測試函數（靜態計數，參數化展開前）：`packages/common` 1,642、`apps/sts` 557、`apps/api` 438、`apps/td` 302、`apps/md` 211、`packages/db` 137、`apps/sym` 84、`apps/paper` 6。
+- 直接依賴 session 機制（三個平面的 `SessionManager`，以及 `orchestrate`）的 566 個。策略實作測試（chase、oco、macd_dollar、cross_arb、twap、noop、tape_keeper）224 個，帶有 rebuild 語意。
 - `pytest_sessionstart` 強制要求真的 NATS server（「the broker has no fake」）。DB 測試以 sqlite 參數化，CI 再加跑 Postgres。
-- 測試裡有超過 400 處 `asyncio.sleep(>0)`，約 300 處 ≥1s 的 `timeout=`，`test_session_processes.py` 會 spawn 真的子進程。
+- 測試裡有 424 處 `asyncio.sleep(>0)`、329 處 ≥1s 的 `timeout=`，`test_session_processes.py` 會 spawn 真的子進程。
 - **各測試模組的實際耗時還沒量過**，這是 B0 的工作。
 
 ---
@@ -259,7 +261,7 @@
 | TD 帳號 worker | `mftik_td.account` | 常駐層（HTTP 連線池、backfill）、交易層（私有連線、OMS、ledger、recon）、`cancel_session`、死人開關 | `session/manager.py` 的 lease 與 refcount、`session/session.py` 的生命週期部分 |
 | TD controller | `mftik_td.controller` | `desired_accounts`、intent → 交易層開關、drain-replace | `session/manager.py` |
 | API | `mftik_api.orchestrate` | `start` / `end`、intent repository | `deploy_strategy` 與補償邏輯 |
-| DB | `mftik_db` | SessionSpec / Status 欄位、`md_intents`、`td_intents`、`md_standing_subscriptions`、selector 狀態 | `st_facts`、`abort_target`；`md_sessions` / `td_sessions` 的寫入 |
+| DB | `mftik_db` | SessionSpec / Status 欄位、`md_intents`、`td_intents`、`md_standing_subscriptions`、selector 狀態 | `st_facts`；`md_sessions` / `td_sessions` 的寫入 |
 
 ---
 
@@ -554,7 +556,7 @@ TD 帳號 worker 對每個啟用帳號常駐（F35），所以 TD 平面固定�
     | `start_timeout_s` | 只算 `on_start` | 60 / 3600 秒 | kill，failed（初始化失敗，不重啟） |
     | `ready_timeout_s` | 從 `on_start` 結束算起 | 30 秒 | TD 沒就緒 → failed；只有 MD 沒到齊 → 照樣呼叫 `on_ready`，附缺少的 feed 清單 |
 
-  - 刪除 `create_rpc_timeout`、`deploy_http_timeout`、`start_deadline` 相關處理，以及 `START_TIMEOUT_DEFAULT_S` 原本的 8 秒和 300 秒上限。
+  - 刪除 API 寫死的 10 秒 create timeout（隨 `deploy_strategy` 一起刪除），以及 CLI 的 `deploy_http_timeout` 和它的預算常數（`_STS_CREATE_S` 等）。
 
 **crash 之後（F10）**
 
@@ -594,7 +596,7 @@ TD 帳號 worker 對每個啟用帳號常駐（F35），所以 TD 平面固定�
 1. **NATS socket 沒人讀。**
    - core NATS 的 fire-and-forget 指的是投遞語意：不 ack、不重送、publisher 不等 subscriber。server 仍然得把每則訊息寫進每個 subscriber 的 TCP 連線。
    - loop 被佔住時沒人讀 socket，以期權鏈的流量，雙方的 kernel buffer 幾秒內就滿。
-   - NATS 2.11 對每條連線設了上限：寫入阻塞超過 `write_deadline`（預設 10 秒），或積壓超過 `max_pending`（預設 64 MB），server 就以 slow consumer 為由**切斷整條連線**。`deployment/nats/nats.conf` 沒有覆寫這兩個值。
+   - NATS 2.11 對每條連線設了上限：寫入阻塞超過 `write_deadline`（預設 10 秒），或積壓超過 `max_pending`（預設 64 MB），server 就以 slow consumer 為由**切斷整條連線**。本機的 `deployment/nats/nats.conf` 沒有覆寫這兩個值（這個檔案被 `.gitignore` 排除，不在 repo 裡）。
    - 斷線期間發佈的訊息不會重送，成交回報也會一起遺失。
 2. **假 timeout。** uvloop 每一輪先跑到期的 timer，才 poll I/O。所以等 ack 的 timer 會比已經到達 socket 的回覆先觸發。
 3. **恢復後交付的是過期資料。**
@@ -699,7 +701,7 @@ TD 訂閱延後到 `on_start` 之後的原因：帳號事件是整個帳號的�
 | Strategy API | `Strategy.rebuildable`、`on_rebuild`、`remember()`（F10）；`chase` 寫入和讀回 `started_ms`、滑價錨定價的兩段改為只存在記憶體 |
 | Worker 的 DB 存取 | `persist_live`、`mark_done`、`mark_live`、`remember_fact`、`bump_rebuild_count`、`reset_rebuild_count`、`load_session`、`list_db_sessions`、`td_instance`、`derive_sts` 等傳給 worker 端 `SessionManager` 的 DB 函式全部移除；session row 改由 Supervisor 寫（F10） |
 | strategy.yml | `restart` 的舊值 `always` / `never`（rebuild 語意）。改為 `never`（預設）/ `on_failure`，另加 `max_restarts`、`restart_window_s`（F11） |
-| DB | `st_facts`、`abort_target` 刪除（F36）；`rebuild_count` 改名為 `restart_count`；`restart` 欄位保留，改存新語意（F11） |
+| DB | `st_facts` 刪除（F36）；`rebuild_count` 改名為 `restart_count`；`restart` 欄位保留，改存新語意（F11） |
 | 與父進程綁定 | `LIFELINE_FD_ENV`、`arm_parent_death`、`_watch_lifeline`、`MFTIK_STS_PARENT_PID`（pdeathsig 改指向 shim） |
 | Manager | `reap_orphans`（由 reattach 對帳取代）、雙模式 `SessionManager`（`_create_in_process`，worker 與 parent 共用同一個類別） |
 | Recon API（F13） | `Strategy.send_recon`、`on_recon_done`、`STS_RECON`、`StsSession._recon_sent` 與 `_on_lease_ack` 裡的自動 recon；TD 的 `_handle_recon` 改成平台內部 recon 和 `view(settled=True)` 共用 |
@@ -1003,7 +1005,7 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 2. `md.intent.delete`、`td.intent.delete`，冪等。
 3. 兜底：MD/TD orchestrator 會依 §8.2 的規則回收 intent。session 自己 `exit` 或 `fail` 時不經過 API，靠的就是這條路徑。
 
-啟動失敗的回滾直接走 End。因此以下補償邏輯全部刪除：`_abort_timed_out_create`、`_retry_abort`、`resume_pending_aborts`、`_ensure_start_failed`、failed-row 重試、`abort_target` 欄位。
+啟動失敗的回滾直接走 End。因此 `deploy_strategy` 的同步流程和它的回滾（`_detach_md`、`_fail_sts`）一起刪除，API 寫死的 10 秒 create timeout（#132 的成因）也隨之消失。驗證步驟（`_sts_target`、`_check_sts_instance`、`_check_md_instances`、`_td_instance`）留給新的 start 重用。
 
 ### 8.2 續約（lease）的取捨
 
@@ -1052,7 +1054,7 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 
 - **`sts_sessions` 改成 SessionSpec / Status：**
   - 新增 `generation`、`observed_generation`、`worker_incarnation`、`conditions JSON`。
-  - `rebuild_count` 改名為 `restart_count`，`restart` 保留並改存新語意（F11）；刪除 `st_facts`、`abort_target`（F36）。
+  - `rebuild_count` 改名為 `restart_count`，`restart` 保留並改存新語意（F11）；刪除 `st_facts`（F36）。
 - **新增表：**
   - `md_intents(session_id, instance, feeds, atoms, generation, created_at, released_at)`
   - `md_standing_subscriptions`
@@ -1094,10 +1096,10 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 
 ### 9.3 移除與保留
 
-- **RM 刪除：** 直接依賴三個平面 session 機制，或依賴 `orchestrate` 的測試，約 590 個。初版清單見附錄 A，依 import 自動分類，B0 之後定稿。
+- **RM 刪除：** 直接依賴三個平面 session 機制，或依賴 `orchestrate` 的測試，566 個。初版清單見附錄 A，依 import 自動分類，B0 之後定稿。
 - **策略實作測試（224 個，F16）：** 保留到 B5，再改寫到 `StrategyHarness` 上。B2 到 B5 之間策略代碼不會變，沒有必要提早拿掉這張安全網。這批測試不依賴 NATS，真的 sleep 只有一處（`test_chase` 的 0.2 秒），放在 unit tier 不會威脅預算。7 個檔案裡有 6 個、約 50 行引用了 F9、F10、F13 要刪的 API（rebuild、`remember`、`on_recon_done`、`send_recon`、`breathe`），這部分在 B5 隨 API 一起改寫或刪除。
 - **其他測試**（venue adapter、registry、CLI、db、auth 等）保留，但依 B0 量出的耗時重新分 tier。
-- **用到 NATS 的測試（靜態計數，參數化展開前）：** 75 個檔案、665 個測試函數。其中 53 個檔案、498 個在 RM 刪除清單裡；剩下 22 個檔案、167 個。這 167 個裡，broker 本身的語意測試約 40 個，留作連線測試；其餘約 130 個（`test_plane`、`test_backfill_executor`、`test_tape_read`、`test_ledger_view` 等）是透過 NATS 測行為，依 F31 改寫成直接呼叫 handler。§9.3 之前寫的「約 900 個」是錯的。
+- **用到 NATS 的測試（靜態計數，參數化展開前）：** 75 個檔案、650 個測試函數。其中 53 個檔案、483 個在 RM 刪除清單裡；剩下 22 個檔案、167 個。這 167 個裡，broker 本身的語意測試 38 個，留作連線測試；其餘 129 個（`test_plane`、`test_backfill_executor`、`test_tape_read`、`test_ledger_view` 等）是透過 NATS 測行為，依 F31 改寫成直接呼叫 handler。§9.3 之前寫的「約 900 個」是錯的。
 
 ---
 
@@ -1217,7 +1219,7 @@ v0.1 的 D2（worker 代碼版本）和 D3（procd 粒度）已經由 F6 解決�
 
 ## 附錄 A：RM 測試刪除清單（初版，依 import 自動分類，B0 後定稿）
 
-**`apps/sts/tests`（248）**：
+**`apps/sts/tests`（233）**：
 `test_attach_refused`、`test_boot_schema_guard`、`test_detach_is_not_awaited`、`test_detach_refcount`、`test_environment_rebuild`、`test_eventlog`、`test_md_ack_watchdog`、`test_md_events`、`test_mds_query`、`test_oms_wait_cids`、`test_orphan_reaper`、`test_private_events`、`test_rebuild`、`test_recon_oms`、`test_rpc_loop_survives`、`test_session_control_addressing`、`test_session_failed`、`test_session_processes`、`test_status_events`、`test_stop_ordering`、`test_strategy_lifecycle`、`test_sts_cid`、`test_sts_incompatible_environment`、`test_sts_runtime_env`、`test_sts_session`、`test_td_ack_watchdog`
 
 **`apps/md/tests`（125）**：
@@ -1226,7 +1228,7 @@ v0.1 的 D2（worker 代碼版本）和 D3（procd 粒度）已經由 F6 解決�
 **`apps/td/tests`（139）**：
 `test_account_ownership`、`test_backfill_triggers`、`test_cid_ownership`、`test_connector_capabilities`、`test_detach_rpc`、`test_history_wiring`、`test_lease_resilience`、`test_leverage_rpc`、`test_order_rpc`、`test_recon_snapshot`、`test_session_create`、`test_session_leverage`、`test_session_oms`、`test_stream_rejects`、`test_td_orphan_reaper`、`test_venue_factory`
 
-**`apps/api/tests`（75）**：
+**`apps/api/tests`（69）**：
 `test_deploy_refused`、`test_environment_flow`、`test_md_instance_deploy`、`test_orchestrate_log_type`、`test_registry_add`、`test_td_instance_routing`、`test_td_sessions_route`
 
 **`packages/common/tests`**：
@@ -1239,11 +1241,11 @@ v0.1 的 D2（worker 代碼版本）和 D3（procd 粒度）已經由 F6 解決�
 
 | 檔案 | 現在 | 去向 |
 |---|---|---|
-| `apps/sts/src/mftik_sts/session/manager.py` | 2,715 行 | 拆成 controller 的 orchestrator（預估少於 600 行）和 worker 端；rebuild、reaper、雙模式全部刪除 |
-| `apps/sts/src/mftik_sts/spawn.py`、`worker.py` | 623 行 | 由 procman 取代；worker 只剩 session 執行 |
+| `apps/sts/src/mftik_sts/session/manager.py` | 2,418 行 | 拆成 controller 的 orchestrator（預估少於 600 行）和 worker 端；rebuild、reaper、雙模式全部刪除 |
+| `apps/sts/src/mftik_sts/spawn.py`、`worker.py` | 551 行 | 由 procman 取代；worker 只剩 session 執行 |
 | `apps/md/src/mftik_md/session/*` | 約 2,200 行 | 由 orchestrator、連線 worker、reconciler 重寫 |
 | `apps/td/src/mftik_td/session/manager.py` | 1,711 行 | 拆成 TD orchestrator 和帳號 worker；lease、reaper 刪除 |
-| `apps/api/src/mftik_api/orchestrate.py` | 859 行 | 只剩 start/end，預估少於 250 行 |
+| `apps/api/src/mftik_api/orchestrate.py` | 538 行 | 只剩 start/end，預估少於 250 行 |
 | `packages/common/src/mftik/exchange/wire.py` 和各 adapter socket 的訂閱管理 | — | 搬進連線 worker 的 reconciler |
 
 ## 附錄 C：B0 量測結果

@@ -1,6 +1,6 @@
 # REFACTOR_TICKETS — 平面進程化重構的工作票
 
-> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.25。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
+> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.26。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
 >
 > 每張票都有描述、範圍、驗收、依賴。驗收寫成別人能檢查的事：測試名稱、grep 結果、量測數字、文件章節。
 
@@ -110,7 +110,7 @@ B1（獨立）                       ├─▶ B6 ──────────
 
 ### B1-02 依現況重寫 `Deployment.md`（#161）
 
-- **描述：** F28。以 `deployment/sets/*.json`、`deployment/nats/nats.conf` 和 Strategon 現在的實際行為為準。
+- **描述：** F28。以 `deployment/sets/*.json`、本機的 `deployment/nats/nats.conf`（被 `.gitignore` 排除，不在 repo 裡；Deployment.md 要寫明它在哪、怎麼產生）和 Strategon 現在的實際行為為準。
 - **驗收：** 涵蓋 plane sets（成員、機器、env、volume；`limits.memoryBytes` 目前沒有生效）、OCI 與 `captureStdio`、每個 site 一台 NATS 加 gateway、secret 的位置、部署與回滾指令。每一節都能對應到 repo 裡的檔案。
 - **依賴：** B0-06
 
@@ -206,16 +206,17 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 - **依賴：** RM-02、RM-05、RM-06
 - **決策：** §8.2
 
-### RM-08 API：刪除同步 deploy 與補償邏輯（#171）
+### RM-08 API：刪除同步 deploy 與它的回滾（#171）
 
-- **範圍：** `apps/api/src/mftik_api/orchestrate.py` 的 `deploy_strategy`、`cancel_create_followups`、`_abort_timed_out_create`、`_send_abort`、`_poll_terminal`、`_remember_pending_abort`、`_forget_pending_abort`、`_list_pending_aborts`、`resume_pending_aborts`、`_schedule_abort_retry`、`_retry_abort`、`_ensure_start_failed`、`_schedule_failed_row`、`_mark_start_failed`、`_retry_failed_row`；`main.py` 啟動時對 `resume_pending_aborts` 的呼叫；`abort_target` 的寫入。`routes/sts.py` 的 deploy 路由改成回 501，等 IF-13。測試：附錄 A 的 API 清單。
+- **範圍：** `apps/api/src/mftik_api/orchestrate.py` 的 `deploy_strategy`（同步執行 create → MD attach → TD attach，create 的 RPC timeout 寫死 10 秒，也就是 #132 的成因），以及它失敗時的回滾 `_detach_md`、`_fail_sts`。`routes/sts.py` 的 deploy 路由改成回 501，等 IF-13。測試：附錄 A 的 API 清單。
+- **留下（IF-13 重用）：** `mint_session_id`、`_sts_target`、`_check_sts_instance`、`_check_md_instances`、`_answers`、`_td_instance`、`_md_venues`。這些是 §8.1 第 1 步的驗證。
 - **驗收：** 共同驗收；API 其他路由（auth、alerts、artifacts、registry、board、logs）照常運作。
 - **依賴：** B0-05
 - **決策：** F12、§8.1
 
 ### RM-09 刪除 strategy.yml 與 CLI 的舊欄位（#172）
 
-- **範圍：** `protocol/strategy_yml.py` 的 `RESTART_ALWAYS` 和 `START_TIMEOUT_DEFAULT_S` 的 8 / 300 秒；`create_rpc_timeout`（`protocol/messages.py`、`cli/run.py`）；`deploy_http_timeout`（`cli/run.py`）。新欄位在 IF-07 加。
+- **範圍：** `protocol/strategy_yml.py` 的 `RESTART_ALWAYS`（rebuild 語意的 `restart: always`，也是 `StrategySpec.restart` 的預設值）；`cli/run.py` 的 `deploy_http_timeout` 和它的預算常數 `_STS_CREATE_S`、`_ATTACH_RPC_SLACK_S`、`_DEFAULT_ATTACH_S`、`_HTTP_SLACK_S`。新欄位在 IF-07 加。
 - **驗收：** 共同驗收；`mftik check` 遇到含舊欄位的文件時，給出明確的錯誤訊息，並告訴使用者新寫法。
 - **依賴：** RM-08
 - **決策：** F11、F12
@@ -261,7 +262,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 ### B2-05 處理剩下借 NATS 測行為的測試（#178）
 
-- **描述：** RM 之後還剩約 130 個借 NATS 測行為的測試（`test_plane`、`test_backfill_executor`、`test_tape_read`、`test_ledger_view` 等）。之後會重寫的模組，先標成 integration；不在重構範圍、拆開需要改模組本身的（例如 SYM 的 `test_plane`），也先標成 integration。
+- **描述：** RM 之後還剩 129 個借 NATS 測行為的測試（`test_plane`、`test_backfill_executor`、`test_tape_read`、`test_ledger_view` 等）。之後會重寫的模組，先標成 integration；不在重構範圍、拆開需要改模組本身的（例如 SYM 的 `test_plane`），也先標成 integration。
 - **驗收：** 每個測試都有 tier；`just test` 裡沒有借 NATS 測行為的測試；每個標成 integration 的測試，都註明之後由哪張票改寫。
 - **依賴：** B2-04
 - **決策：** F31
@@ -725,7 +726,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 ### B10-01 DB migration（刪除部分）（#249）
 
-- **範圍：** `rebuild_count` 改名為 `restart_count`；drop `st_facts`、`abort_target`；`md_sessions`、`td_sessions` 停寫。
+- **範圍：** `rebuild_count` 改名為 `restart_count`；drop `st_facts`；`md_sessions`、`td_sessions` 停寫。
 - **驗收：** migration 在 Postgres 的正式資料快照上演練過一次；models 與 migration 一致。
 - **依賴：** IF-14、B5-09
 - **決策：** F11、F36、F38
