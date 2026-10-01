@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.28（2026-10-01）**。§12 的待決事項已全部定案（F1 到 F38）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.29（2026-10-01）**。§12 的待決事項已全部定案（F1 到 F38）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
-> **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。
+> **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。**RM 清場已完成**，所以描述現況的章節（§1、§5 到 §8、附錄 A、B）說的是 `a0cbfb2`，不是分支上的代碼；清場後還剩什麼見 `docs/baseline/remaining.md`（RM-10，#173）。
+>
+> **v0.29（RM-10，#173）：** 附錄 C 加上 C.8，填入清場後在 GitHub Actions 上量到的實數（3,776 個測試、255.8 秒），C.5 的模組表加上「RM 之後」兩欄。附錄 A 加上一節，記錄 RM 落地時和清單不同的五處。新增 `docs/baseline/remaining.md`。
 >
 > **v0.28（B0-02，#155）：** 附錄 C 填入在 `ubuntu-latest` 上量到的結果。量測同時更正了兩件事，記在 C.6：F30 的 120 秒不能直接和基線的 428 秒相比，以及 §9.3 與 F16 對策略實作測試裡「真的 sleep」的描述不準（sleep 在 `chase.py` 而不是在測試裡）。兩者的結論都仍然成立。
 >
@@ -1338,6 +1340,18 @@ B0-05 實測出兩個 F16 的例外，RM 不可能完全不動這批測試：
 - **rebuild API：17 個案例**用到 `on_rebuild` / `rebuildable` / `remember`（`test_oco` 9 個經 `_restore`、`test_chase` 6 個、`test_cross_arb` 1 個、`test_tape_keeper` 1 個）。`test_oco` 那 9 個的主題是接回留在交易所的兩腳，不是 rebuild，要改寫而不是刪。
 - `test_macd_dollar:test_warm_up_ingest_yields_the_loop` 是唯一會被 RM-03 弄紅的策略案例（monkeypatch `SLICE_S`），隨 RM-03 刪。
 
+### RM 落地之後和這份清單的差異（RM-10，#173 查核）
+
+RM-01 到 RM-09 全部合併之後，RM-10 逐檔比對了上面每一列。**42 個整檔刪除的模組一個不剩，部分刪除與「移出」的每一列都符合**，除了下面五處。本節記錄事實，**不是要補刪測試**：
+
+1. **`test_order_rpc`：留 1 個，不是 4 個。** 附錄 A 把 `test_a_malformed_ticker_is_left_to_the_instrument_check`、`test_a_gate_market_buy_sized_in_base_is_unsupported_shape`、`test_reduce_only_passes_on_a_contract_ticker` 算成「不經 manager」，但它們測的是 `manager.py` 的模組層函式 `_wrong_instrument`、`_place_order_request`、`_refusal_code`、`_reduce_only_unsupported`，而 RM-06 的補正明文把這四個列進刪除範圍。**補正勝過附錄 A**，三個案例隨代碼走，由 B6-02（#220）重新實作時補回。留下的是 `test_no_td_serving_times_out`。
+2. **`test_eventlog` 留 21 個、`test_oms_wait_cids` 留 11 個，附錄 A 分別列了刪 15 個和 3 個。** 那些案例直接建構 `StsSession`，而 `StsSession` 依 RM-04 的「留下」保留到 B4-03（#203），所以它們仍然綠。RM-04 因此留下它們；`test_eventlog` 只刪了 `test_lease_ack_is_recorded`（隨 RM-07 的 lease ack 走）。B5-02（#211）與 B6-08（#226）改寫時一起處理。
+3. **`test_environment_flow` 刪 5 個，附錄 A 列 3 個。** 多出來的 `test_s16_silent_sts_is_not_idle`、`test_s17_session_arriving_mid_install_aborts` 測的是 `_require_no_live_sessions` 會向 STS 問 live session；RM-08 之後那個守衛是 no-op，主題不存在。
+4. **附錄 A 沒有列、但主題已經不存在而被一起刪掉的：** `apps/api/tests/test_sts_strategies.py` 的 9 個 stop / force-stop 路由案例（RM-04）、`apps/api/tests/test_environment_api.py` 的 5 個 live-session 守衛案例（RM-08）、`apps/sts/tests/test_eventlog_rpc.py:test_info_flags_a_session_still_running`（`live` 旗標自 RM-04 起恆為 false）。另外 `packages/db/tests/test_sts_session_repository.py` 少了 10 個（54 → 44）：那些是 RM-01 範圍裡的 `remember` / `rebuild_count` 案例，只是這張表沒有 `packages/db/tests` 這一節。
+5. **`test_strategy_yml` 多一個案例。** RM-09 把 `test_restart_defaults_to_always` 改成 `test_restart_defaults_to_never`，並加上 `test_the_old_always_is_refused_and_says_what_to_write`（票面驗收要求的錯誤訊息）。
+
+RM 之後實際剩下的測試數與耗時見 C.8；平面上還剩哪些模組見 `docs/baseline/remaining.md`。
+
 ## 附錄 B：預計刪除的主要代碼（B0-05 定稿）
 
 行數是 `main` @ `a0cbfb2` 上 `wc -l` 的實測值，初版列的每一個數字都查核無誤。定稿補上了原本漏掉的四個檔案，以及負責的票號。
@@ -1522,289 +1536,291 @@ B0-05 實測出兩個 F16 的例外，RM 不可能完全不動這批測試：
 
 281 個模組，依耗時排序。「秒」是每個模組底下所有測試（參數化展開後）的耗時加總，占比以 411.3 秒為分母。
 
-| 模組 | 測試數 | 秒 | 占比 |
-|---|---|---|---|
-| `apps/td/tests/test_td_orphan_reaper.py` | 6 | 63.07 | 15.3% |
-| `apps/sym/tests/test_plane.py` | 61 | 13.35 | 3.2% |
-| `apps/td/tests/test_backfill_executor.py` | 50 | 13.31 | 3.2% |
-| `apps/api/tests/test_board_route.py` | 70 | 12.65 | 3.1% |
-| `apps/sts/tests/test_eventlog.py` | 22 | 12.51 | 3.0% |
-| `apps/api/tests/test_auth_registry_keys.py` | 40 | 11.83 | 2.9% |
-| `apps/api/tests/test_alert_scenarios.py` | 28 | 10.74 | 2.6% |
-| `apps/api/tests/test_auth_oauth.py` | 32 | 10.68 | 2.6% |
-| `apps/sts/tests/test_md_ack_watchdog.py` | 10 | 10.29 | 2.5% |
-| `apps/md/tests/test_md_detach_disconnect.py` | 3 | 9.32 | 2.3% |
-| `apps/sts/tests/test_mds_query.py` | 17 | 8.70 | 2.1% |
-| `packages/db/tests/test_history_repository.py` | 54 | 8.01 | 1.9% |
-| `packages/db/tests/test_sts_session_repository.py` | 54 | 7.69 | 1.9% |
-| `apps/td/tests/test_order_rpc.py` | 46 | 7.69 | 1.9% |
-| `apps/api/tests/test_instances_route.py` | 46 | 6.71 | 1.6% |
-| `apps/api/tests/test_auth_keys.py` | 26 | 6.26 | 1.5% |
-| `apps/sts/tests/test_session_processes.py` | 42 | 6.24 | 1.5% |
-| `apps/sts/tests/test_chase.py` | 56 | 5.97 | 1.5% |
-| `apps/td/tests/test_session_create.py` | 9 | 5.93 | 1.4% |
-| `apps/api/tests/test_td_instance_routing.py` | 8 | 5.81 | 1.4% |
-| `apps/api/tests/test_auth_setup.py` | 22 | 5.65 | 1.4% |
-| `apps/api/tests/test_sts_strategies.py` | 39 | 5.51 | 1.3% |
-| `apps/md/tests/test_md_expiry.py` | 12 | 5.27 | 1.3% |
-| `packages/common/tests/test_broker_probe.py` | 8 | 4.91 | 1.2% |
-| `apps/td/tests/test_cid_ownership.py` | 5 | 4.72 | 1.1% |
-| `apps/api/tests/test_sts_env_fanout.py` | 30 | 4.67 | 1.1% |
-| `apps/td/tests/test_history_writer.py` | 32 | 4.50 | 1.1% |
-| `apps/api/tests/test_auth_google.py` | 15 | 4.47 | 1.1% |
-| `apps/api/tests/test_backfill_cron.py` | 14 | 4.47 | 1.1% |
-| `packages/db/tests/test_symbol_repository.py` | 28 | 4.21 | 1.0% |
-| `apps/api/tests/test_md_instance_deploy.py` | 24 | 3.78 | 0.9% |
-| `apps/api/tests/test_list_offset_cap.py` | 24 | 3.67 | 0.9% |
-| `apps/md/tests/test_md_fetch.py` | 29 | 3.54 | 0.9% |
-| `apps/api/tests/test_auth_cli_flow.py` | 14 | 3.54 | 0.9% |
-| `apps/sts/tests/test_td_ack_watchdog.py` | 3 | 3.50 | 0.9% |
-| `apps/api/tests/test_alerts_route.py` | 20 | 3.33 | 0.8% |
-| `apps/td/tests/test_detach_rpc.py` | 4 | 3.16 | 0.8% |
-| `apps/md/tests/test_md_feed_end.py` | 13 | 2.81 | 0.7% |
-| `apps/sts/tests/test_private_events.py` | 3 | 2.75 | 0.7% |
-| `packages/common/tests/test_nats_transport.py` | 16 | 2.63 | 0.6% |
-| `apps/api/tests/test_auth_gate.py` | 17 | 2.61 | 0.6% |
-| `packages/common/tests/test_deribit_reconnect.py` | 6 | 2.60 | 0.6% |
-| `apps/sts/tests/test_sts_session.py` | 3 | 2.55 | 0.6% |
-| `apps/sts/tests/test_rebuild.py` | 33 | 2.46 | 0.6% |
-| `packages/common/tests/test_binance_spot_client.py` | 33 | 2.42 | 0.6% |
-| `apps/api/tests/test_board_ws.py` | 19 | 2.25 | 0.5% |
-| `apps/api/tests/test_audit_identity.py` | 6 | 2.23 | 0.5% |
-| `apps/md/tests/test_md_session.py` | 5 | 2.19 | 0.5% |
-| `apps/td/tests/test_session_oms.py` | 3 | 2.19 | 0.5% |
-| `apps/sts/tests/test_detach_refcount.py` | 1 | 2.18 | 0.5% |
-| `apps/td/tests/test_history_wiring.py` | 9 | 2.13 | 0.5% |
-| `apps/sts/tests/test_detach_is_not_awaited.py` | 4 | 2.04 | 0.5% |
-| `packages/common/tests/test_dist_version.py` | 2 | 2.03 | 0.5% |
-| `packages/db/tests/test_0027_upgrade.py` | 12 | 1.93 | 0.5% |
-| `apps/api/tests/test_stats_instances.py` | 10 | 1.79 | 0.4% |
-| `apps/md/tests/test_md_role_subjects.py` | 3 | 1.72 | 0.4% |
-| `apps/api/tests/test_eventlog_across_instances.py` | 10 | 1.70 | 0.4% |
-| `apps/td/tests/test_recon_snapshot.py` | 5 | 1.68 | 0.4% |
-| `apps/sts/tests/test_md_events.py` | 2 | 1.56 | 0.4% |
-| `packages/common/tests/test_wire_ledger.py` | 28 | 1.55 | 0.4% |
-| `packages/db/tests/test_derived_sts.py` | 12 | 1.54 | 0.4% |
-| `packages/db/tests/test_alert_repository.py` | 14 | 1.50 | 0.4% |
-| `packages/common/tests/test_deribit_socket.py` | 13 | 1.47 | 0.4% |
-| `apps/td/tests/test_backfill_triggers.py` | 9 | 1.24 | 0.3% |
-| `packages/common/tests/test_broker.py` | 8 | 1.23 | 0.3% |
-| `packages/common/tests/test_bybit_public.py` | 44 | 1.19 | 0.3% |
-| `apps/sts/tests/test_stop_ordering.py` | 4 | 1.12 | 0.3% |
-| `packages/db/tests/test_0031_upgrade.py` | 8 | 1.11 | 0.3% |
-| `packages/common/tests/test_deribit_public.py` | 27 | 1.10 | 0.3% |
-| `apps/api/tests/test_registry_add.py` | 25 | 1.07 | 0.3% |
-| `packages/common/tests/test_broker_is_the_only_transport.py` | 2 | 1.06 | 0.3% |
-| `packages/db/tests/test_session_log_repository.py` | 6 | 1.05 | 0.3% |
-| `apps/sts/tests/test_tape_read.py` | 19 | 1.04 | 0.3% |
-| `apps/api/tests/test_apis_create.py` | 6 | 1.00 | 0.2% |
-| `apps/sts/tests/test_ledger_view.py` | 7 | 1.00 | 0.2% |
-| `apps/td/tests/test_lease_resilience.py` | 4 | 0.99 | 0.2% |
-| `packages/common/tests/test_last_reader_release.py` | 20 | 0.98 | 0.2% |
-| `apps/td/tests/test_stream_rejects.py` | 7 | 0.95 | 0.2% |
-| `apps/sts/tests/test_timer.py` | 7 | 0.85 | 0.2% |
-| `apps/api/tests/test_sts_ack.py` | 6 | 0.83 | 0.2% |
-| `packages/common/tests/test_binance_future_client.py` | 17 | 0.82 | 0.2% |
-| `apps/sts/tests/test_recon_oms.py` | 1 | 0.82 | 0.2% |
-| `packages/common/tests/test_binance_delivery_client.py` | 16 | 0.82 | 0.2% |
-| `packages/db/tests/test_api_repository.py` | 6 | 0.81 | 0.2% |
-| `apps/api/tests/test_td_sessions_route.py` | 6 | 0.79 | 0.2% |
-| `apps/sts/tests/test_environment_rebuild.py` | 5 | 0.75 | 0.2% |
-| `apps/sts/tests/test_strategy_lifecycle.py` | 6 | 0.74 | 0.2% |
-| `apps/api/tests/test_audits_list.py` | 4 | 0.74 | 0.2% |
-| `apps/sts/tests/test_sts_incompatible_environment.py` | 5 | 0.74 | 0.2% |
-| `packages/common/tests/test_binance_delivery_public.py` | 12 | 0.73 | 0.2% |
-| `packages/db/tests/test_0029_upgrade.py` | 6 | 0.69 | 0.2% |
-| `packages/common/tests/test_gate_spot_client.py` | 26 | 0.65 | 0.2% |
-| `packages/common/tests/test_binance_future_public.py` | 11 | 0.64 | 0.2% |
-| `apps/md/tests/test_md_lease_resilience.py` | 2 | 0.62 | 0.2% |
-| `packages/common/tests/test_listed.py` | 1 | 0.60 | 0.1% |
-| `apps/md/tests/test_md_two_instances.py` | 6 | 0.57 | 0.1% |
-| `packages/common/tests/test_binance_delivery_private.py` | 24 | 0.53 | 0.1% |
-| `apps/sts/tests/test_session_control_addressing.py` | 5 | 0.53 | 0.1% |
-| `apps/paper/tests/test_paper_book_feed.py` | 4 | 0.52 | 0.1% |
-| `packages/common/tests/test_broker_serve_survives.py` | 2 | 0.51 | 0.1% |
-| `packages/common/tests/test_binance_future_feed.py` | 11 | 0.50 | 0.1% |
-| `packages/common/tests/test_plane_serves_its_subject.py` | 6 | 0.47 | 0.1% |
-| `packages/common/tests/test_binance_future_private.py` | 28 | 0.45 | 0.1% |
-| `apps/sts/tests/test_oms_wait_cids.py` | 11 | 0.45 | 0.1% |
-| `packages/common/tests/test_bybit_private.py` | 28 | 0.45 | 0.1% |
-| `apps/md/tests/test_md_orphan_reaper.py` | 9 | 0.44 | 0.1% |
-| `apps/md/tests/test_md_shared_venue_topics.py` | 12 | 0.44 | 0.1% |
-| `apps/td/tests/test_leverage_rpc.py` | 4 | 0.43 | 0.1% |
-| `packages/common/tests/test_binance_spot_public.py` | 15 | 0.41 | 0.1% |
-| `packages/db/tests/test_0030_upgrade.py` | 6 | 0.39 | 0.1% |
-| `packages/common/tests/test_bybit_private_stream.py` | 17 | 0.36 | 0.1% |
-| `packages/common/tests/test_cli_run.py` | 18 | 0.36 | 0.1% |
-| `apps/sts/tests/test_session_failed.py` | 15 | 0.36 | 0.1% |
-| `packages/db/tests/test_audit_repository.py` | 2 | 0.28 | 0.1% |
-| `packages/common/tests/test_gate_spot_private.py` | 35 | 0.28 | 0.1% |
-| `apps/sts/tests/test_status_events.py` | 5 | 0.27 | 0.1% |
-| `packages/common/tests/test_gate_future_public.py` | 7 | 0.27 | 0.1% |
-| `packages/common/tests/test_binance_delivery_feed.py` | 4 | 0.27 | 0.1% |
-| `apps/td/tests/test_account_ownership.py` | 3 | 0.26 | 0.1% |
-| `apps/md/tests/test_md_venue_feeds.py` | 22 | 0.26 | 0.1% |
-| `packages/common/tests/test_paper_exchange.py` | 23 | 0.26 | 0.1% |
-| `packages/db/tests/test_strategy_repository.py` | 2 | 0.26 | 0.1% |
-| `packages/common/tests/test_binance_spot_private.py` | 27 | 0.26 | 0.1% |
-| `apps/sts/tests/test_eventlog_rpc.py` | 8 | 0.24 | 0.1% |
-| `apps/sts/tests/test_sts_runtime_env.py` | 16 | 0.22 | 0.1% |
-| `packages/common/tests/test_okx_public.py` | 10 | 0.22 | 0.1% |
-| `packages/common/tests/test_bitget_public.py` | 8 | 0.22 | 0.1% |
-| `apps/api/tests/test_environment_api.py` | 32 | 0.20 | 0.0% |
-| `apps/api/tests/test_environment_flow.py` | 19 | 0.20 | 0.0% |
-| `packages/common/tests/test_cli_node.py` | 18 | 0.20 | 0.0% |
-| `packages/common/tests/test_cli_alert.py` | 25 | 0.18 | 0.0% |
-| `apps/api/tests/test_alert_flush.py` | 13 | 0.17 | 0.0% |
-| `packages/common/tests/test_cli_env.py` | 22 | 0.17 | 0.0% |
-| `packages/common/tests/test_boot_probe.py` | 3 | 0.16 | 0.0% |
-| `packages/common/tests/test_registry_store.py` | 35 | 0.16 | 0.0% |
-| `packages/common/tests/test_cli_client.py` | 25 | 0.16 | 0.0% |
-| `packages/common/tests/test_gate_spot_public.py` | 23 | 0.16 | 0.0% |
-| `apps/sts/tests/test_boot_schema_guard.py` | 6 | 0.15 | 0.0% |
-| `apps/td/tests/test_backfill_session.py` | 7 | 0.14 | 0.0% |
-| `apps/api/tests/test_eventlog_route.py` | 6 | 0.14 | 0.0% |
-| `packages/common/tests/test_cli_check.py` | 18 | 0.14 | 0.0% |
-| `apps/sym/tests/test_sources.py` | 56 | 0.13 | 0.0% |
-| `packages/common/tests/test_gate_future_client.py` | 7 | 0.13 | 0.0% |
-| `apps/sts/tests/test_artifact_rpc.py` | 3 | 0.12 | 0.0% |
-| `apps/md/tests/test_md_tape_rpc.py` | 2 | 0.12 | 0.0% |
-| `packages/common/tests/test_deribit_socket_race.py` | 2 | 0.12 | 0.0% |
-| `apps/paper/tests/test_paper_rpc.py` | 2 | 0.12 | 0.0% |
-| `apps/sts/tests/test_ledger_leverage.py` | 4 | 0.11 | 0.0% |
-| `apps/api/tests/test_log_persist.py` | 8 | 0.11 | 0.0% |
-| `apps/td/tests/test_td_rpc.py` | 2 | 0.11 | 0.0% |
-| `apps/sts/tests/test_rpc_loop_survives.py` | 2 | 0.11 | 0.0% |
-| `packages/common/tests/test_paper_remote_public.py` | 1 | 0.10 | 0.0% |
-| `apps/td/tests/test_connector_capabilities.py` | 6 | 0.09 | 0.0% |
-| `apps/td/tests/test_backfill_reader.py` | 38 | 0.09 | 0.0% |
-| `packages/common/tests/test_cli_init.py` | 11 | 0.09 | 0.0% |
-| `packages/common/tests/test_cli_push.py` | 9 | 0.08 | 0.0% |
-| `apps/sts/tests/test_macd_dollar.py` | 39 | 0.08 | 0.0% |
-| `apps/sts/tests/test_oco.py` | 53 | 0.08 | 0.0% |
-| `packages/common/tests/test_deribit_private.py` | 20 | 0.08 | 0.0% |
-| `apps/td/tests/test_venue_factory.py` | 17 | 0.08 | 0.0% |
-| `packages/common/tests/test_artifacts.py` | 22 | 0.07 | 0.0% |
-| `packages/common/tests/test_cli_app.py` | 11 | 0.07 | 0.0% |
-| `apps/sts/tests/test_sts_cid.py` | 4 | 0.07 | 0.0% |
-| `packages/common/tests/test_registry_migrate.py` | 22 | 0.07 | 0.0% |
-| `packages/common/tests/test_bitget_private_stream.py` | 2 | 0.07 | 0.0% |
-| `apps/sts/tests/test_cross_arb.py` | 40 | 0.07 | 0.0% |
-| `packages/common/tests/test_registry_sync.py` | 11 | 0.06 | 0.0% |
-| `apps/sts/tests/test_sts_registry_sync.py` | 14 | 0.06 | 0.0% |
-| `apps/sts/tests/test_attach_refused.py` | 3 | 0.06 | 0.0% |
-| `packages/common/tests/test_bybit_trade.py` | 8 | 0.05 | 0.0% |
-| `packages/common/tests/test_runtime_supervision.py` | 3 | 0.05 | 0.0% |
-| `apps/md/tests/test_md_tape.py` | 10 | 0.05 | 0.0% |
-| `packages/common/tests/test_envapply.py` | 20 | 0.05 | 0.0% |
-| `apps/md/tests/test_md_venue_factory.py` | 13 | 0.05 | 0.0% |
-| `packages/common/tests/test_okx_feed.py` | 7 | 0.05 | 0.0% |
-| `apps/api/tests/test_registry_delete.py` | 11 | 0.05 | 0.0% |
-| `packages/common/tests/test_cli_artifact.py` | 6 | 0.05 | 0.0% |
-| `packages/common/tests/test_strategy_yml.py` | 35 | 0.04 | 0.0% |
-| `packages/common/tests/test_environment.py` | 26 | 0.04 | 0.0% |
-| `apps/api/tests/test_environment_import.py` | 9 | 0.04 | 0.0% |
-| `packages/common/tests/test_cli_rm.py` | 6 | 0.04 | 0.0% |
-| `apps/sts/tests/test_twap.py` | 23 | 0.04 | 0.0% |
-| `packages/common/tests/test_deribit_setup_context.py` | 2 | 0.04 | 0.0% |
-| `packages/common/tests/test_cli_connect.py` | 19 | 0.04 | 0.0% |
-| `packages/common/tests/test_bybit_rest.py` | 15 | 0.04 | 0.0% |
-| `packages/common/tests/test_binance_delivery_rest.py` | 12 | 0.04 | 0.0% |
-| `apps/md/tests/test_md_binance_reads.py` | 18 | 0.04 | 0.0% |
-| `packages/common/tests/test_cli_sessions.py` | 5 | 0.03 | 0.0% |
-| `packages/common/tests/test_bitget_private.py` | 16 | 0.03 | 0.0% |
-| `packages/common/tests/test_okx_rest.py` | 11 | 0.03 | 0.0% |
-| `packages/db/tests/test_0034_strategy_type_key.py` | 3 | 0.03 | 0.0% |
-| `apps/md/tests/test_md_bybit_reads.py` | 13 | 0.03 | 0.0% |
-| `apps/api/tests/test_alert_match.py` | 8 | 0.03 | 0.0% |
-| `apps/api/tests/test_logs_route.py` | 10 | 0.03 | 0.0% |
-| `apps/md/tests/test_md_okx_reads.py` | 14 | 0.03 | 0.0% |
-| `apps/sts/tests/test_sts_registry_load.py` | 7 | 0.03 | 0.0% |
-| `apps/td/tests/test_session_leverage.py` | 8 | 0.02 | 0.0% |
-| `packages/common/tests/test_cli_config.py` | 23 | 0.02 | 0.0% |
-| `apps/md/tests/test_md_deribit_reads.py` | 17 | 0.02 | 0.0% |
-| `packages/common/tests/test_registry_remotes.py` | 9 | 0.02 | 0.0% |
-| `packages/common/tests/test_binance_spot_rest.py` | 13 | 0.02 | 0.0% |
-| `apps/api/tests/test_sym_routes.py` | 9 | 0.02 | 0.0% |
-| `packages/common/tests/test_gate_future_private.py` | 6 | 0.02 | 0.0% |
-| `apps/sts/tests/test_orphan_reaper.py` | 6 | 0.02 | 0.0% |
-| `apps/md/tests/test_md_binance_future_reads.py` | 10 | 0.02 | 0.0% |
-| `apps/sts/tests/test_sts_registry_reload.py` | 6 | 0.02 | 0.0% |
-| `packages/db/tests/test_schema_revision.py` | 7 | 0.02 | 0.0% |
-| `apps/api/tests/test_artifact_route.py` | 5 | 0.02 | 0.0% |
-| `packages/common/tests/test_okx_private.py` | 9 | 0.02 | 0.0% |
-| `apps/api/tests/test_alert_eval.py` | 9 | 0.02 | 0.0% |
-| `apps/sts/tests/test_oms_view.py` | 4 | 0.02 | 0.0% |
-| `apps/md/tests/test_md_binance_delivery_reads.py` | 8 | 0.02 | 0.0% |
-| `apps/sts/tests/test_noop_strategy.py` | 19 | 0.02 | 0.0% |
-| `apps/sts/tests/test_strategy_catalog.py` | 19 | 0.02 | 0.0% |
-| `packages/common/tests/test_registry_load_reload.py` | 6 | 0.02 | 0.0% |
-| `apps/td/tests/test_error_normalization.py` | 143 | 0.02 | 0.0% |
-| `packages/common/tests/test_registry_remove.py` | 6 | 0.02 | 0.0% |
-| `apps/api/tests/test_apis_venue.py` | 8 | 0.02 | 0.0% |
-| `packages/common/tests/test_registry_load.py` | 5 | 0.02 | 0.0% |
-| `apps/api/tests/test_apis_rename.py` | 5 | 0.01 | 0.0% |
-| `packages/common/tests/test_binance_future_rest.py` | 7 | 0.01 | 0.0% |
-| `apps/md/tests/test_md_bitget_reads.py` | 9 | 0.01 | 0.0% |
-| `apps/md/tests/test_md_gate_future_reads.py` | 5 | 0.01 | 0.0% |
-| `packages/common/tests/test_socket_close_timeout.py` | 4 | 0.01 | 0.0% |
-| `apps/api/tests/test_orchestrate_log_type.py` | 4 | 0.01 | 0.0% |
-| `apps/sts/tests/test_tape_keeper.py` | 6 | 0.01 | 0.0% |
-| `packages/common/tests/test_instance_name.py` | 25 | 0.01 | 0.0% |
-| `apps/api/tests/test_deploy_refused.py` | 4 | 0.01 | 0.0% |
-| `packages/common/tests/test_bybit_models.py` | 48 | 0.01 | 0.0% |
-| `packages/common/tests/test_bybit_protocol.py` | 24 | 0.01 | 0.0% |
-| `packages/common/tests/test_gate_future_rest.py` | 3 | 0.01 | 0.0% |
-| `packages/common/tests/test_binance_future_streams.py` | 20 | 0.01 | 0.0% |
-| `packages/common/tests/test_binance_spot_protocol.py` | 30 | 0.01 | 0.0% |
-| `packages/common/tests/test_gate_spot_models.py` | 32 | 0.01 | 0.0% |
-| `packages/common/tests/test_registry_files.py` | 10 | 0.01 | 0.0% |
-| `packages/common/tests/test_strategy_oms_inflight.py` | 10 | 0.01 | 0.0% |
-| `apps/sts/tests/test_strategy_log_type.py` | 3 | 0.01 | 0.0% |
-| `packages/common/tests/test_registry_gate.py` | 25 | 0.01 | 0.0% |
-| `apps/api/tests/test_sts_strategy_yaml.py` | 3 | 0.00 | 0.0% |
-| `packages/common/tests/test_binance_delivery_listing.py` | 8 | 0.00 | 0.0% |
-| `packages/common/tests/test_binance_spot_models.py` | 54 | 0.00 | 0.0% |
-| `packages/common/tests/test_deribit_protocol.py` | 17 | 0.00 | 0.0% |
-| `packages/common/tests/test_gate_future_models.py` | 16 | 0.00 | 0.0% |
-| `packages/common/tests/test_okx_private_stream.py` | 1 | 0.00 | 0.0% |
-| `packages/common/tests/test_query_codes.py` | 36 | 0.00 | 0.0% |
-| `packages/db/tests/test_0027_sts_td_mapping.py` | 5 | 0.00 | 0.0% |
-| `packages/db/tests/test_engine_pool.py` | 5 | 0.00 | 0.0% |
-| `apps/td/tests/test_ledger.py` | 12 | 0.00 | 0.0% |
-| `packages/common/tests/test_event_stream.py` | 3 | 0.00 | 0.0% |
-| `packages/common/tests/test_okx_models.py` | 43 | 0.00 | 0.0% |
-| `packages/common/tests/test_registry_protocol.py` | 8 | 0.00 | 0.0% |
-| `packages/common/tests/test_session_log.py` | 3 | 0.00 | 0.0% |
-| `packages/common/tests/test_binance_future_models.py` | 27 | 0.00 | 0.0% |
-| `packages/common/tests/test_binance_merged_feed.py` | 2 | 0.00 | 0.0% |
-| `packages/common/tests/test_order_check.py` | 14 | 0.00 | 0.0% |
-| `packages/common/tests/test_registry_qualify.py` | 3 | 0.00 | 0.0% |
-| `packages/common/tests/test_venues.py` | 30 | 0.00 | 0.0% |
-| `apps/api/tests/test_decimals.py` | 15 | 0.00 | 0.0% |
-| `apps/api/tests/test_stats_status_coverage.py` | 4 | 0.00 | 0.0% |
-| `apps/sts/tests/test_client_order_id.py` | 12 | 0.00 | 0.0% |
-| `packages/common/tests/test_bitget_models.py` | 5 | 0.00 | 0.0% |
-| `packages/common/tests/test_bitget_protocol.py` | 12 | 0.00 | 0.0% |
-| `packages/common/tests/test_bitget_socket.py` | 4 | 0.00 | 0.0% |
-| `packages/common/tests/test_instance_role.py` | 15 | 0.00 | 0.0% |
-| `packages/common/tests/test_okx_protocol.py` | 16 | 0.00 | 0.0% |
-| `packages/common/tests/test_order_status.py` | 30 | 0.00 | 0.0% |
-| `packages/common/tests/test_reservations.py` | 17 | 0.00 | 0.0% |
-| `packages/common/tests/test_strategy_public_api.py` | 3 | 0.00 | 0.0% |
-| `packages/common/tests/test_symbol_rounding.py` | 14 | 0.00 | 0.0% |
-| `packages/common/tests/test_symbols.py` | 41 | 0.00 | 0.0% |
-| `packages/db/tests/test_models.py` | 7 | 0.00 | 0.0% |
-| `apps/sts/tests/test_legacy_strategy_paths.py` | 3 | 0.00 | 0.0% |
-| `packages/common/tests/test_binance_delivery_streams.py` | 6 | 0.00 | 0.0% |
-| `packages/common/tests/test_envelope.py` | 6 | 0.00 | 0.0% |
-| `packages/common/tests/test_envimport.py` | 10 | 0.00 | 0.0% |
-| `packages/common/tests/test_instrument_identity.py` | 14 | 0.00 | 0.0% |
-| `packages/common/tests/test_intervals.py` | 34 | 0.00 | 0.0% |
-| `packages/common/tests/test_redacted_url.py` | 10 | 0.00 | 0.0% |
-| `packages/common/tests/test_registry_digest.py` | 3 | 0.00 | 0.0% |
-| `packages/common/tests/test_tickers.py` | 35 | 0.00 | 0.0% |
-| `packages/common/tests/test_topic_patterns.py` | 5 | 0.00 | 0.0% |
+**「RM 之後」兩欄是 RM-10（#173）在清場完成後量的同一份數字**，來源見 C.8；`—` 表示那個模組整檔刪除。沒有任何新模組出現，所以這張表的列和基線一一對應。
+
+| 模組 | 測試數 | 秒 | 占比 | RM 之後 測試數 | RM 之後 秒 |
+|---|---|---|---|---|---|
+| `apps/td/tests/test_td_orphan_reaper.py` | 6 | 63.07 | 15.3% | — | — |
+| `apps/sym/tests/test_plane.py` | 61 | 13.35 | 3.2% | 61 | 15.29 |
+| `apps/td/tests/test_backfill_executor.py` | 50 | 13.31 | 3.2% | 50 | 17.59 |
+| `apps/api/tests/test_board_route.py` | 70 | 12.65 | 3.1% | 70 | 12.99 |
+| `apps/sts/tests/test_eventlog.py` | 22 | 12.51 | 3.0% | 21 | 11.77 |
+| `apps/api/tests/test_auth_registry_keys.py` | 40 | 11.83 | 2.9% | 40 | 15.22 |
+| `apps/api/tests/test_alert_scenarios.py` | 28 | 10.74 | 2.6% | 28 | 11.16 |
+| `apps/api/tests/test_auth_oauth.py` | 32 | 10.68 | 2.6% | 32 | 9.57 |
+| `apps/sts/tests/test_md_ack_watchdog.py` | 10 | 10.29 | 2.5% | — | — |
+| `apps/md/tests/test_md_detach_disconnect.py` | 3 | 9.32 | 2.3% | — | — |
+| `apps/sts/tests/test_mds_query.py` | 17 | 8.70 | 2.1% | — | — |
+| `packages/db/tests/test_history_repository.py` | 54 | 8.01 | 1.9% | 54 | 8.37 |
+| `packages/db/tests/test_sts_session_repository.py` | 54 | 7.69 | 1.9% | 44 | 6.58 |
+| `apps/td/tests/test_order_rpc.py` | 46 | 7.69 | 1.9% | 1 | 0.11 |
+| `apps/api/tests/test_instances_route.py` | 46 | 6.71 | 1.6% | 46 | 7.53 |
+| `apps/api/tests/test_auth_keys.py` | 26 | 6.26 | 1.5% | 26 | 7.20 |
+| `apps/sts/tests/test_session_processes.py` | 42 | 6.24 | 1.5% | — | — |
+| `apps/sts/tests/test_chase.py` | 56 | 5.97 | 1.5% | 50 | 5.96 |
+| `apps/td/tests/test_session_create.py` | 9 | 5.93 | 1.4% | — | — |
+| `apps/api/tests/test_td_instance_routing.py` | 8 | 5.81 | 1.4% | 8 | 6.13 |
+| `apps/api/tests/test_auth_setup.py` | 22 | 5.65 | 1.4% | 22 | 7.33 |
+| `apps/api/tests/test_sts_strategies.py` | 39 | 5.51 | 1.3% | 21 | 3.05 |
+| `apps/md/tests/test_md_expiry.py` | 12 | 5.27 | 1.3% | — | — |
+| `packages/common/tests/test_broker_probe.py` | 8 | 4.91 | 1.2% | 8 | 4.93 |
+| `apps/td/tests/test_cid_ownership.py` | 5 | 4.72 | 1.1% | — | — |
+| `apps/api/tests/test_sts_env_fanout.py` | 30 | 4.67 | 1.1% | 30 | 4.03 |
+| `apps/td/tests/test_history_writer.py` | 32 | 4.50 | 1.1% | 32 | 5.66 |
+| `apps/api/tests/test_auth_google.py` | 15 | 4.47 | 1.1% | 15 | 4.69 |
+| `apps/api/tests/test_backfill_cron.py` | 14 | 4.47 | 1.1% | 14 | 4.50 |
+| `packages/db/tests/test_symbol_repository.py` | 28 | 4.21 | 1.0% | 28 | 3.79 |
+| `apps/api/tests/test_md_instance_deploy.py` | 24 | 3.78 | 0.9% | — | — |
+| `apps/api/tests/test_list_offset_cap.py` | 24 | 3.67 | 0.9% | 24 | 3.75 |
+| `apps/md/tests/test_md_fetch.py` | 29 | 3.54 | 0.9% | 29 | 3.56 |
+| `apps/api/tests/test_auth_cli_flow.py` | 14 | 3.54 | 0.9% | 14 | 3.80 |
+| `apps/sts/tests/test_td_ack_watchdog.py` | 3 | 3.50 | 0.9% | — | — |
+| `apps/api/tests/test_alerts_route.py` | 20 | 3.33 | 0.8% | 20 | 3.31 |
+| `apps/td/tests/test_detach_rpc.py` | 4 | 3.16 | 0.8% | — | — |
+| `apps/md/tests/test_md_feed_end.py` | 13 | 2.81 | 0.7% | — | — |
+| `apps/sts/tests/test_private_events.py` | 3 | 2.75 | 0.7% | — | — |
+| `packages/common/tests/test_nats_transport.py` | 16 | 2.63 | 0.6% | 16 | 2.62 |
+| `apps/api/tests/test_auth_gate.py` | 17 | 2.61 | 0.6% | 17 | 3.05 |
+| `packages/common/tests/test_deribit_reconnect.py` | 6 | 2.60 | 0.6% | 6 | 2.58 |
+| `apps/sts/tests/test_sts_session.py` | 3 | 2.55 | 0.6% | — | — |
+| `apps/sts/tests/test_rebuild.py` | 33 | 2.46 | 0.6% | — | — |
+| `packages/common/tests/test_binance_spot_client.py` | 33 | 2.42 | 0.6% | 33 | 2.42 |
+| `apps/api/tests/test_board_ws.py` | 19 | 2.25 | 0.5% | 19 | 2.43 |
+| `apps/api/tests/test_audit_identity.py` | 6 | 2.23 | 0.5% | 6 | 2.22 |
+| `apps/md/tests/test_md_session.py` | 5 | 2.19 | 0.5% | — | — |
+| `apps/td/tests/test_session_oms.py` | 3 | 2.19 | 0.5% | 2 | 0.06 |
+| `apps/sts/tests/test_detach_refcount.py` | 1 | 2.18 | 0.5% | — | — |
+| `apps/td/tests/test_history_wiring.py` | 9 | 2.13 | 0.5% | — | — |
+| `apps/sts/tests/test_detach_is_not_awaited.py` | 4 | 2.04 | 0.5% | — | — |
+| `packages/common/tests/test_dist_version.py` | 2 | 2.03 | 0.5% | 2 | 2.12 |
+| `packages/db/tests/test_0027_upgrade.py` | 12 | 1.93 | 0.5% | 12 | 2.52 |
+| `apps/api/tests/test_stats_instances.py` | 10 | 1.79 | 0.4% | 10 | 1.61 |
+| `apps/md/tests/test_md_role_subjects.py` | 3 | 1.72 | 0.4% | 3 | 1.72 |
+| `apps/api/tests/test_eventlog_across_instances.py` | 10 | 1.70 | 0.4% | 10 | 1.28 |
+| `apps/td/tests/test_recon_snapshot.py` | 5 | 1.68 | 0.4% | — | — |
+| `apps/sts/tests/test_md_events.py` | 2 | 1.56 | 0.4% | — | — |
+| `packages/common/tests/test_wire_ledger.py` | 28 | 1.55 | 0.4% | 28 | 1.54 |
+| `packages/db/tests/test_derived_sts.py` | 12 | 1.54 | 0.4% | 12 | 1.63 |
+| `packages/db/tests/test_alert_repository.py` | 14 | 1.50 | 0.4% | 14 | 1.96 |
+| `packages/common/tests/test_deribit_socket.py` | 13 | 1.47 | 0.4% | 13 | 1.47 |
+| `apps/td/tests/test_backfill_triggers.py` | 9 | 1.24 | 0.3% | 7 | 0.84 |
+| `packages/common/tests/test_broker.py` | 8 | 1.23 | 0.3% | 6 | 0.33 |
+| `packages/common/tests/test_bybit_public.py` | 44 | 1.19 | 0.3% | 44 | 1.18 |
+| `apps/sts/tests/test_stop_ordering.py` | 4 | 1.12 | 0.3% | — | — |
+| `packages/db/tests/test_0031_upgrade.py` | 8 | 1.11 | 0.3% | 8 | 1.23 |
+| `packages/common/tests/test_deribit_public.py` | 27 | 1.10 | 0.3% | 27 | 1.10 |
+| `apps/api/tests/test_registry_add.py` | 25 | 1.07 | 0.3% | 22 | 1.14 |
+| `packages/common/tests/test_broker_is_the_only_transport.py` | 2 | 1.06 | 0.3% | 2 | 0.83 |
+| `packages/db/tests/test_session_log_repository.py` | 6 | 1.05 | 0.3% | 6 | 0.75 |
+| `apps/sts/tests/test_tape_read.py` | 19 | 1.04 | 0.3% | 18 | 1.00 |
+| `apps/api/tests/test_apis_create.py` | 6 | 1.00 | 0.2% | 6 | 0.99 |
+| `apps/sts/tests/test_ledger_view.py` | 7 | 1.00 | 0.2% | 7 | 1.00 |
+| `apps/td/tests/test_lease_resilience.py` | 4 | 0.99 | 0.2% | — | — |
+| `packages/common/tests/test_last_reader_release.py` | 20 | 0.98 | 0.2% | 20 | 0.98 |
+| `apps/td/tests/test_stream_rejects.py` | 7 | 0.95 | 0.2% | — | — |
+| `apps/sts/tests/test_timer.py` | 7 | 0.85 | 0.2% | 7 | 0.85 |
+| `apps/api/tests/test_sts_ack.py` | 6 | 0.83 | 0.2% | 6 | 0.82 |
+| `packages/common/tests/test_binance_future_client.py` | 17 | 0.82 | 0.2% | 17 | 0.82 |
+| `apps/sts/tests/test_recon_oms.py` | 1 | 0.82 | 0.2% | — | — |
+| `packages/common/tests/test_binance_delivery_client.py` | 16 | 0.82 | 0.2% | 16 | 0.82 |
+| `packages/db/tests/test_api_repository.py` | 6 | 0.81 | 0.2% | 6 | 0.89 |
+| `apps/api/tests/test_td_sessions_route.py` | 6 | 0.79 | 0.2% | 6 | 1.20 |
+| `apps/sts/tests/test_environment_rebuild.py` | 5 | 0.75 | 0.2% | — | — |
+| `apps/sts/tests/test_strategy_lifecycle.py` | 6 | 0.74 | 0.2% | — | — |
+| `apps/api/tests/test_audits_list.py` | 4 | 0.74 | 0.2% | 4 | 0.80 |
+| `apps/sts/tests/test_sts_incompatible_environment.py` | 5 | 0.74 | 0.2% | — | — |
+| `packages/common/tests/test_binance_delivery_public.py` | 12 | 0.73 | 0.2% | 12 | 0.75 |
+| `packages/db/tests/test_0029_upgrade.py` | 6 | 0.69 | 0.2% | 6 | 0.93 |
+| `packages/common/tests/test_gate_spot_client.py` | 26 | 0.65 | 0.2% | 26 | 0.65 |
+| `packages/common/tests/test_binance_future_public.py` | 11 | 0.64 | 0.2% | 11 | 0.64 |
+| `apps/md/tests/test_md_lease_resilience.py` | 2 | 0.62 | 0.2% | — | — |
+| `packages/common/tests/test_listed.py` | 1 | 0.60 | 0.1% | 1 | 0.60 |
+| `apps/md/tests/test_md_two_instances.py` | 6 | 0.57 | 0.1% | — | — |
+| `packages/common/tests/test_binance_delivery_private.py` | 24 | 0.53 | 0.1% | 24 | 0.53 |
+| `apps/sts/tests/test_session_control_addressing.py` | 5 | 0.53 | 0.1% | — | — |
+| `apps/paper/tests/test_paper_book_feed.py` | 4 | 0.52 | 0.1% | 4 | 0.52 |
+| `packages/common/tests/test_broker_serve_survives.py` | 2 | 0.51 | 0.1% | 2 | 0.51 |
+| `packages/common/tests/test_binance_future_feed.py` | 11 | 0.50 | 0.1% | 11 | 0.50 |
+| `packages/common/tests/test_plane_serves_its_subject.py` | 6 | 0.47 | 0.1% | 6 | 0.48 |
+| `packages/common/tests/test_binance_future_private.py` | 28 | 0.45 | 0.1% | 28 | 0.63 |
+| `apps/sts/tests/test_oms_wait_cids.py` | 11 | 0.45 | 0.1% | 11 | 0.45 |
+| `packages/common/tests/test_bybit_private.py` | 28 | 0.45 | 0.1% | 28 | 0.45 |
+| `apps/md/tests/test_md_orphan_reaper.py` | 9 | 0.44 | 0.1% | — | — |
+| `apps/md/tests/test_md_shared_venue_topics.py` | 12 | 0.44 | 0.1% | — | — |
+| `apps/td/tests/test_leverage_rpc.py` | 4 | 0.43 | 0.1% | — | — |
+| `packages/common/tests/test_binance_spot_public.py` | 15 | 0.41 | 0.1% | 15 | 0.41 |
+| `packages/db/tests/test_0030_upgrade.py` | 6 | 0.39 | 0.1% | 6 | 0.69 |
+| `packages/common/tests/test_bybit_private_stream.py` | 17 | 0.36 | 0.1% | 17 | 0.36 |
+| `packages/common/tests/test_cli_run.py` | 18 | 0.36 | 0.1% | 16 | 0.13 |
+| `apps/sts/tests/test_session_failed.py` | 15 | 0.36 | 0.1% | — | — |
+| `packages/db/tests/test_audit_repository.py` | 2 | 0.28 | 0.1% | 2 | 0.29 |
+| `packages/common/tests/test_gate_spot_private.py` | 35 | 0.28 | 0.1% | 35 | 0.28 |
+| `apps/sts/tests/test_status_events.py` | 5 | 0.27 | 0.1% | — | — |
+| `packages/common/tests/test_gate_future_public.py` | 7 | 0.27 | 0.1% | 7 | 0.28 |
+| `packages/common/tests/test_binance_delivery_feed.py` | 4 | 0.27 | 0.1% | 4 | 0.27 |
+| `apps/td/tests/test_account_ownership.py` | 3 | 0.26 | 0.1% | 1 | 0.06 |
+| `apps/md/tests/test_md_venue_feeds.py` | 22 | 0.26 | 0.1% | — | — |
+| `packages/common/tests/test_paper_exchange.py` | 23 | 0.26 | 0.1% | 23 | 0.26 |
+| `packages/db/tests/test_strategy_repository.py` | 2 | 0.26 | 0.1% | 2 | 0.26 |
+| `packages/common/tests/test_binance_spot_private.py` | 27 | 0.26 | 0.1% | 27 | 0.26 |
+| `apps/sts/tests/test_eventlog_rpc.py` | 8 | 0.24 | 0.1% | 7 | 0.22 |
+| `apps/sts/tests/test_sts_runtime_env.py` | 16 | 0.22 | 0.1% | 16 | 0.24 |
+| `packages/common/tests/test_okx_public.py` | 10 | 0.22 | 0.1% | 10 | 0.22 |
+| `packages/common/tests/test_bitget_public.py` | 8 | 0.22 | 0.1% | 8 | 0.22 |
+| `apps/api/tests/test_environment_api.py` | 32 | 0.20 | 0.0% | 27 | 0.18 |
+| `apps/api/tests/test_environment_flow.py` | 19 | 0.20 | 0.0% | 14 | 0.10 |
+| `packages/common/tests/test_cli_node.py` | 18 | 0.20 | 0.0% | 18 | 0.21 |
+| `packages/common/tests/test_cli_alert.py` | 25 | 0.18 | 0.0% | 25 | 0.18 |
+| `apps/api/tests/test_alert_flush.py` | 13 | 0.17 | 0.0% | 13 | 0.17 |
+| `packages/common/tests/test_cli_env.py` | 22 | 0.17 | 0.0% | 22 | 0.17 |
+| `packages/common/tests/test_boot_probe.py` | 3 | 0.16 | 0.0% | 3 | 0.17 |
+| `packages/common/tests/test_registry_store.py` | 35 | 0.16 | 0.0% | 35 | 0.16 |
+| `packages/common/tests/test_cli_client.py` | 25 | 0.16 | 0.0% | 25 | 0.36 |
+| `packages/common/tests/test_gate_spot_public.py` | 23 | 0.16 | 0.0% | 23 | 0.16 |
+| `apps/sts/tests/test_boot_schema_guard.py` | 6 | 0.15 | 0.0% | 6 | 0.15 |
+| `apps/td/tests/test_backfill_session.py` | 7 | 0.14 | 0.0% | 7 | 0.15 |
+| `apps/api/tests/test_eventlog_route.py` | 6 | 0.14 | 0.0% | 6 | 0.15 |
+| `packages/common/tests/test_cli_check.py` | 18 | 0.14 | 0.0% | 18 | 0.14 |
+| `apps/sym/tests/test_sources.py` | 56 | 0.13 | 0.0% | 56 | 0.14 |
+| `packages/common/tests/test_gate_future_client.py` | 7 | 0.13 | 0.0% | 7 | 0.13 |
+| `apps/sts/tests/test_artifact_rpc.py` | 3 | 0.12 | 0.0% | 3 | 0.10 |
+| `apps/md/tests/test_md_tape_rpc.py` | 2 | 0.12 | 0.0% | 2 | 0.12 |
+| `packages/common/tests/test_deribit_socket_race.py` | 2 | 0.12 | 0.0% | 2 | 0.12 |
+| `apps/paper/tests/test_paper_rpc.py` | 2 | 0.12 | 0.0% | 2 | 0.12 |
+| `apps/sts/tests/test_ledger_leverage.py` | 4 | 0.11 | 0.0% | 4 | 0.12 |
+| `apps/api/tests/test_log_persist.py` | 8 | 0.11 | 0.0% | 8 | 0.11 |
+| `apps/td/tests/test_td_rpc.py` | 2 | 0.11 | 0.0% | 2 | 0.11 |
+| `apps/sts/tests/test_rpc_loop_survives.py` | 2 | 0.11 | 0.0% | 2 | 0.11 |
+| `packages/common/tests/test_paper_remote_public.py` | 1 | 0.10 | 0.0% | 1 | 0.10 |
+| `apps/td/tests/test_connector_capabilities.py` | 6 | 0.09 | 0.0% | 6 | 0.09 |
+| `apps/td/tests/test_backfill_reader.py` | 38 | 0.09 | 0.0% | 38 | 0.08 |
+| `packages/common/tests/test_cli_init.py` | 11 | 0.09 | 0.0% | 11 | 0.10 |
+| `packages/common/tests/test_cli_push.py` | 9 | 0.08 | 0.0% | 9 | 0.08 |
+| `apps/sts/tests/test_macd_dollar.py` | 39 | 0.08 | 0.0% | 38 | 0.07 |
+| `apps/sts/tests/test_oco.py` | 53 | 0.08 | 0.0% | 53 | 0.11 |
+| `packages/common/tests/test_deribit_private.py` | 20 | 0.08 | 0.0% | 20 | 0.08 |
+| `apps/td/tests/test_venue_factory.py` | 17 | 0.08 | 0.0% | 17 | 0.08 |
+| `packages/common/tests/test_artifacts.py` | 22 | 0.07 | 0.0% | 22 | 0.08 |
+| `packages/common/tests/test_cli_app.py` | 11 | 0.07 | 0.0% | 11 | 0.07 |
+| `apps/sts/tests/test_sts_cid.py` | 4 | 0.07 | 0.0% | — | — |
+| `packages/common/tests/test_registry_migrate.py` | 22 | 0.07 | 0.0% | 22 | 0.07 |
+| `packages/common/tests/test_bitget_private_stream.py` | 2 | 0.07 | 0.0% | 2 | 0.07 |
+| `apps/sts/tests/test_cross_arb.py` | 40 | 0.07 | 0.0% | 39 | 0.07 |
+| `packages/common/tests/test_registry_sync.py` | 11 | 0.06 | 0.0% | 11 | 0.06 |
+| `apps/sts/tests/test_sts_registry_sync.py` | 14 | 0.06 | 0.0% | 14 | 0.06 |
+| `apps/sts/tests/test_attach_refused.py` | 3 | 0.06 | 0.0% | — | — |
+| `packages/common/tests/test_bybit_trade.py` | 8 | 0.05 | 0.0% | 8 | 0.05 |
+| `packages/common/tests/test_runtime_supervision.py` | 3 | 0.05 | 0.0% | 3 | 0.06 |
+| `apps/md/tests/test_md_tape.py` | 10 | 0.05 | 0.0% | 8 | 0.42 |
+| `packages/common/tests/test_envapply.py` | 20 | 0.05 | 0.0% | 20 | 0.05 |
+| `apps/md/tests/test_md_venue_factory.py` | 13 | 0.05 | 0.0% | — | — |
+| `packages/common/tests/test_okx_feed.py` | 7 | 0.05 | 0.0% | 7 | 0.05 |
+| `apps/api/tests/test_registry_delete.py` | 11 | 0.05 | 0.0% | 11 | 0.05 |
+| `packages/common/tests/test_cli_artifact.py` | 6 | 0.05 | 0.0% | 6 | 0.05 |
+| `packages/common/tests/test_strategy_yml.py` | 35 | 0.04 | 0.0% | 36 | 0.05 |
+| `packages/common/tests/test_environment.py` | 26 | 0.04 | 0.0% | 26 | 0.05 |
+| `apps/api/tests/test_environment_import.py` | 9 | 0.04 | 0.0% | 9 | 0.05 |
+| `packages/common/tests/test_cli_rm.py` | 6 | 0.04 | 0.0% | 6 | 0.04 |
+| `apps/sts/tests/test_twap.py` | 23 | 0.04 | 0.0% | 23 | 0.04 |
+| `packages/common/tests/test_deribit_setup_context.py` | 2 | 0.04 | 0.0% | 2 | 0.04 |
+| `packages/common/tests/test_cli_connect.py` | 19 | 0.04 | 0.0% | 19 | 0.04 |
+| `packages/common/tests/test_bybit_rest.py` | 15 | 0.04 | 0.0% | 15 | 0.04 |
+| `packages/common/tests/test_binance_delivery_rest.py` | 12 | 0.04 | 0.0% | 12 | 0.03 |
+| `apps/md/tests/test_md_binance_reads.py` | 18 | 0.04 | 0.0% | 18 | 0.03 |
+| `packages/common/tests/test_cli_sessions.py` | 5 | 0.03 | 0.0% | 5 | 0.04 |
+| `packages/common/tests/test_bitget_private.py` | 16 | 0.03 | 0.0% | 16 | 0.04 |
+| `packages/common/tests/test_okx_rest.py` | 11 | 0.03 | 0.0% | 11 | 0.03 |
+| `packages/db/tests/test_0034_strategy_type_key.py` | 3 | 0.03 | 0.0% | 3 | 0.02 |
+| `apps/md/tests/test_md_bybit_reads.py` | 13 | 0.03 | 0.0% | 13 | 0.03 |
+| `apps/api/tests/test_alert_match.py` | 8 | 0.03 | 0.0% | 8 | 0.03 |
+| `apps/api/tests/test_logs_route.py` | 10 | 0.03 | 0.0% | 10 | 0.03 |
+| `apps/md/tests/test_md_okx_reads.py` | 14 | 0.03 | 0.0% | 14 | 0.03 |
+| `apps/sts/tests/test_sts_registry_load.py` | 7 | 0.03 | 0.0% | 7 | 0.03 |
+| `apps/td/tests/test_session_leverage.py` | 8 | 0.02 | 0.0% | 8 | 0.03 |
+| `packages/common/tests/test_cli_config.py` | 23 | 0.02 | 0.0% | 23 | 0.02 |
+| `apps/md/tests/test_md_deribit_reads.py` | 17 | 0.02 | 0.0% | 17 | 0.03 |
+| `packages/common/tests/test_registry_remotes.py` | 9 | 0.02 | 0.0% | 9 | 0.02 |
+| `packages/common/tests/test_binance_spot_rest.py` | 13 | 0.02 | 0.0% | 13 | 0.03 |
+| `apps/api/tests/test_sym_routes.py` | 9 | 0.02 | 0.0% | 9 | 0.02 |
+| `packages/common/tests/test_gate_future_private.py` | 6 | 0.02 | 0.0% | 6 | 0.02 |
+| `apps/sts/tests/test_orphan_reaper.py` | 6 | 0.02 | 0.0% | — | — |
+| `apps/md/tests/test_md_binance_future_reads.py` | 10 | 0.02 | 0.0% | 10 | 0.02 |
+| `apps/sts/tests/test_sts_registry_reload.py` | 6 | 0.02 | 0.0% | 6 | 0.02 |
+| `packages/db/tests/test_schema_revision.py` | 7 | 0.02 | 0.0% | 7 | 0.02 |
+| `apps/api/tests/test_artifact_route.py` | 5 | 0.02 | 0.0% | 5 | 0.02 |
+| `packages/common/tests/test_okx_private.py` | 9 | 0.02 | 0.0% | 9 | 0.02 |
+| `apps/api/tests/test_alert_eval.py` | 9 | 0.02 | 0.0% | 9 | 0.02 |
+| `apps/sts/tests/test_oms_view.py` | 4 | 0.02 | 0.0% | 4 | 0.02 |
+| `apps/md/tests/test_md_binance_delivery_reads.py` | 8 | 0.02 | 0.0% | 8 | 0.02 |
+| `apps/sts/tests/test_noop_strategy.py` | 19 | 0.02 | 0.0% | 19 | 0.03 |
+| `apps/sts/tests/test_strategy_catalog.py` | 19 | 0.02 | 0.0% | 19 | 0.02 |
+| `packages/common/tests/test_registry_load_reload.py` | 6 | 0.02 | 0.0% | 6 | 0.02 |
+| `apps/td/tests/test_error_normalization.py` | 143 | 0.02 | 0.0% | 143 | 0.02 |
+| `packages/common/tests/test_registry_remove.py` | 6 | 0.02 | 0.0% | 6 | 0.01 |
+| `apps/api/tests/test_apis_venue.py` | 8 | 0.02 | 0.0% | 8 | 0.02 |
+| `packages/common/tests/test_registry_load.py` | 5 | 0.02 | 0.0% | 5 | 0.02 |
+| `apps/api/tests/test_apis_rename.py` | 5 | 0.01 | 0.0% | 5 | 0.01 |
+| `packages/common/tests/test_binance_future_rest.py` | 7 | 0.01 | 0.0% | 7 | 0.02 |
+| `apps/md/tests/test_md_bitget_reads.py` | 9 | 0.01 | 0.0% | 9 | 0.02 |
+| `apps/md/tests/test_md_gate_future_reads.py` | 5 | 0.01 | 0.0% | 5 | 0.01 |
+| `packages/common/tests/test_socket_close_timeout.py` | 4 | 0.01 | 0.0% | 4 | 0.01 |
+| `apps/api/tests/test_orchestrate_log_type.py` | 4 | 0.01 | 0.0% | 1 | 0.00 |
+| `apps/sts/tests/test_tape_keeper.py` | 6 | 0.01 | 0.0% | 5 | 0.01 |
+| `packages/common/tests/test_instance_name.py` | 25 | 0.01 | 0.0% | 25 | 0.01 |
+| `apps/api/tests/test_deploy_refused.py` | 4 | 0.01 | 0.0% | — | — |
+| `packages/common/tests/test_bybit_models.py` | 48 | 0.01 | 0.0% | 48 | 0.01 |
+| `packages/common/tests/test_bybit_protocol.py` | 24 | 0.01 | 0.0% | 24 | 0.00 |
+| `packages/common/tests/test_gate_future_rest.py` | 3 | 0.01 | 0.0% | 3 | 0.01 |
+| `packages/common/tests/test_binance_future_streams.py` | 20 | 0.01 | 0.0% | 20 | 0.01 |
+| `packages/common/tests/test_binance_spot_protocol.py` | 30 | 0.01 | 0.0% | 30 | 0.01 |
+| `packages/common/tests/test_gate_spot_models.py` | 32 | 0.01 | 0.0% | 32 | 0.01 |
+| `packages/common/tests/test_registry_files.py` | 10 | 0.01 | 0.0% | 10 | 0.01 |
+| `packages/common/tests/test_strategy_oms_inflight.py` | 10 | 0.01 | 0.0% | 10 | 0.00 |
+| `apps/sts/tests/test_strategy_log_type.py` | 3 | 0.01 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_registry_gate.py` | 25 | 0.01 | 0.0% | 25 | 0.00 |
+| `apps/api/tests/test_sts_strategy_yaml.py` | 3 | 0.00 | 0.0% | 3 | 0.01 |
+| `packages/common/tests/test_binance_delivery_listing.py` | 8 | 0.00 | 0.0% | 8 | 0.01 |
+| `packages/common/tests/test_binance_spot_models.py` | 54 | 0.00 | 0.0% | 54 | 0.00 |
+| `packages/common/tests/test_deribit_protocol.py` | 17 | 0.00 | 0.0% | 17 | 0.01 |
+| `packages/common/tests/test_gate_future_models.py` | 16 | 0.00 | 0.0% | 16 | 0.00 |
+| `packages/common/tests/test_okx_private_stream.py` | 1 | 0.00 | 0.0% | 1 | 0.00 |
+| `packages/common/tests/test_query_codes.py` | 36 | 0.00 | 0.0% | 36 | 0.00 |
+| `packages/db/tests/test_0027_sts_td_mapping.py` | 5 | 0.00 | 0.0% | 5 | 0.01 |
+| `packages/db/tests/test_engine_pool.py` | 5 | 0.00 | 0.0% | 5 | 0.00 |
+| `apps/td/tests/test_ledger.py` | 12 | 0.00 | 0.0% | 12 | 0.00 |
+| `packages/common/tests/test_event_stream.py` | 3 | 0.00 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_okx_models.py` | 43 | 0.00 | 0.0% | 43 | 0.00 |
+| `packages/common/tests/test_registry_protocol.py` | 8 | 0.00 | 0.0% | 8 | 0.00 |
+| `packages/common/tests/test_session_log.py` | 3 | 0.00 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_binance_future_models.py` | 27 | 0.00 | 0.0% | 27 | 0.00 |
+| `packages/common/tests/test_binance_merged_feed.py` | 2 | 0.00 | 0.0% | 2 | 0.00 |
+| `packages/common/tests/test_order_check.py` | 14 | 0.00 | 0.0% | 14 | 0.00 |
+| `packages/common/tests/test_registry_qualify.py` | 3 | 0.00 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_venues.py` | 30 | 0.00 | 0.0% | 30 | 0.00 |
+| `apps/api/tests/test_decimals.py` | 15 | 0.00 | 0.0% | 15 | 0.01 |
+| `apps/api/tests/test_stats_status_coverage.py` | 4 | 0.00 | 0.0% | 4 | 0.00 |
+| `apps/sts/tests/test_client_order_id.py` | 12 | 0.00 | 0.0% | 12 | 0.00 |
+| `packages/common/tests/test_bitget_models.py` | 5 | 0.00 | 0.0% | 5 | 0.00 |
+| `packages/common/tests/test_bitget_protocol.py` | 12 | 0.00 | 0.0% | 12 | 0.00 |
+| `packages/common/tests/test_bitget_socket.py` | 4 | 0.00 | 0.0% | 4 | 0.00 |
+| `packages/common/tests/test_instance_role.py` | 15 | 0.00 | 0.0% | 15 | 0.00 |
+| `packages/common/tests/test_okx_protocol.py` | 16 | 0.00 | 0.0% | 16 | 0.00 |
+| `packages/common/tests/test_order_status.py` | 30 | 0.00 | 0.0% | 30 | 0.00 |
+| `packages/common/tests/test_reservations.py` | 17 | 0.00 | 0.0% | 17 | 0.00 |
+| `packages/common/tests/test_strategy_public_api.py` | 3 | 0.00 | 0.0% | 1 | 0.00 |
+| `packages/common/tests/test_symbol_rounding.py` | 14 | 0.00 | 0.0% | 14 | 0.00 |
+| `packages/common/tests/test_symbols.py` | 41 | 0.00 | 0.0% | 41 | 0.00 |
+| `packages/db/tests/test_models.py` | 7 | 0.00 | 0.0% | 7 | 0.00 |
+| `apps/sts/tests/test_legacy_strategy_paths.py` | 3 | 0.00 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_binance_delivery_streams.py` | 6 | 0.00 | 0.0% | 6 | 0.00 |
+| `packages/common/tests/test_envelope.py` | 6 | 0.00 | 0.0% | 6 | 0.00 |
+| `packages/common/tests/test_envimport.py` | 10 | 0.00 | 0.0% | 10 | 0.00 |
+| `packages/common/tests/test_instrument_identity.py` | 14 | 0.00 | 0.0% | 14 | 0.00 |
+| `packages/common/tests/test_intervals.py` | 34 | 0.00 | 0.0% | 34 | 0.00 |
+| `packages/common/tests/test_redacted_url.py` | 10 | 0.00 | 0.0% | 10 | 0.00 |
+| `packages/common/tests/test_registry_digest.py` | 3 | 0.00 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_tickers.py` | 35 | 0.00 | 0.0% | 35 | 0.00 |
+| `packages/common/tests/test_topic_patterns.py` | 5 | 0.00 | 0.0% | 5 | 0.00 |
 
 ### C.6 這份量測對計畫的修正
 
@@ -1821,6 +1837,8 @@ B0-05 實測出兩個 F16 的例外，RM 不可能完全不動這批測試：
 
    部分刪除的十個模組裡，附錄 A 指名了案例的照名字算；只有 `test_oms_wait_cids`（0.45 秒）依案例數比例估，誤差不到 0.3 秒。RM 幾乎不碰 Postgres 那一趟（148.7 秒裡留下 144.0 秒），因為那些是 repository 與 API 路由測試，不是 session 測試。
 
+   **這一欄是預估；RM-10（#173）量到的實數是 3,776 個測試、255.8 秒，對帳見 C.8.2。** 結論沒變，而且把 Postgres 移出 `just test` 之後實測剩 98.9 秒。
+
    **結論：預算可行，但關鍵的那一步不是平行化，是把 Postgres 那一趟移出 `just test` —— 只做這一件，RM 之後就已經在 120 秒以內，還沒用到 xdist。** B2-04（#177）的順序應該是先拆 tier、再平行化。
 2. **§9.3 說策略實作測試「真的 sleep 只有一處（`test_chase` 的 0.2 秒）」，F16 說「幾乎沒有真的 sleep」—— 這個描述不準。** 測試本體確實只有一處 `asyncio.sleep(0.2)`（`test_chase.py:565`），但被測的 `chase.py` 自己有兩處真的 sleep：`IOC_SLICE_PAUSE_S = 0.25`（`chase.py:883`，量到 4.5 秒）和 `CANCEL_POLL_S = 0.05`（`chase.py:778`，量到 1.3 秒）。`test_chase.py` 一個模組 5.97 秒，是七個策略模組 6.3 秒裡的 95%。**F16 的結論（不威脅兩分鐘預算）成立 —— 236 個參數化後的測試合計 6.3 秒，1.5% —— 但理由要改成「真的 sleep 在 `chase.py` 裡，不在測試裡」**。這對 B2-02（#175）有實際影響：那個「unit tier 攔截 `asyncio.sleep(x > 0)`」的 conftest 會攔在 `chase.py` 上，不是攔在測試上，所以這批測試遷到 `FakeClock` 必須動 `chase.py`。
 3. **§9.3 的兩個靜態計數，一個差 8、一個吻合。** 「測試裡有 424 處 `asyncio.sleep(>0)`」：我在同一份代碼上數到 432 處（459 處 `asyncio.sleep(...)` 減 27 處 `asyncio.sleep(0)`）。「用到 NATS 的測試 75 個檔案、650 個測試函數」：靜態 grep 是 75 個檔案、649 個 `def test_`，和 B0-05 複查過的數字一致；執行時真正開過連線的是 **73 個檔案、601 個測試**（參數化後），NATS 自己報 606 條連線。差額是幾個 import 了 `a_broker` 但該案例沒用到的檔案。兩個數字都不影響任何結論。
@@ -1833,3 +1851,95 @@ B0-05 實測出兩個 F16 的例外，RM 不可能完全不動這批測試：
 2. **加一個 pytest 外掛的一趟**（`scripts/pytest_cost_probe.py`，在 `cbb3f78` 上），把每個測試的時間記到 NATS client、真的 sleep、子進程、`asyncpg.connect` 各桶，並記下每個等待的呼叫位置 —— 只認在測試自己那個 task 的 frame 鏈上的等待，背景 loop 另記。C.2、C.3、C.4 的「依據」出自這一趟。外掛的額外成本可以從兩趟的 junit `testsuite time` 看出來：423.4 對 395.0 秒，也就是加了外掛反而略快 —— 第二趟的 Postgres 是暖的，`[postgres]` 的測試在第二趟普遍快上一截。
 
 **這個 job 量完就移除，不留在 PR 裡。** 三個理由：它要把整套測試跑兩趟，留著等於任何會觸發它的 PR 的 CI 時間翻倍；永久版的耗時閘門是 B2-04（#177）的範圍，兩個並存只會各自漂移；而 run 與 artifact 都是永久的，harness 本身也留在那個 PR 的 commit 歷史裡（`cbb3f78`），要重量一次把那三個檔案挑回來就行。它存在的期間靠 `paths` filter 只對動到 harness 自己的 PR 生效，所以從來沒有拖慢過正常 CI。
+
+### C.8 RM 之後的量測（RM-10，#173）
+
+> **Run：** [Tests #36936410395](https://github.com/lynxlinkage/mftik/actions/runs/36936410395)（job `pytest`，commit `7b7921d`，PR #271），綠。量的是 `tests.yml` 的 `Test` step —— 和 C.1 一樣是 `pytest packages apps -q`，只是暫時加了 `--durations=0 --durations-min=0 --junitxml`，量完就從 workflow 移除（和 C.7 的 `measure` job 同一個理由）。機器、服務版本、Python 版本和 C.1 相同。
+>
+> `7b7921d` 的 `apps/` 和 `packages/` 與 RM-09 合併後的 `refactor/process-planes`（`c42f823`）完全相同（`git diff c42f823 7b7921d -- apps packages` 是空的），唯一的差別就是上面那一行旗標。所以這些數字量的是清場後的基線本身，不含 RM-10 自己的文件改動。
+>
+> **原始資料**是那個 run 的 `rm-durations` artifact 裡的 `junit.xml`；C.5 的「RM 之後」兩欄也出自它。
+
+#### C.8.1 總量
+
+| 項目 | 基線（C.1） | RM 之後 |
+|---|---|---|
+| `just test` 的 wall time | 428 秒 | **266 秒** |
+| 測試數（參數化展開後） | 4,244（4 skip） | **3,776**（4 skip、0 失敗） |
+| 測試模組數 | 281 | **239** |
+| 每個測試耗時加總 | 411.3 秒 | **255.8 秒** |
+| junit 的 `testsuite time` | 423.4 秒 | 266.0 秒 |
+| 單一測試耗時中位數 | 3 毫秒 | 3 毫秒 |
+| ≥ 0.5 秒的測試 | 157 個，212.6 秒（52%） | 113 個，94.6 秒（37%） |
+| < 50 毫秒的測試 | 3,119 個，18.9 秒（4.6%） | 2,898 個，16.5 秒（6.5%） |
+| 最慢的 50 個 | 140.7 秒（34%） | 56.6 秒（22%） |
+| 整個 `Tests` job 的 wall time | 517 秒 | 382 秒 |
+| 第二趟（只有 `packages`，`MFTIK_TEST_LOOP=asyncio`） | 66 秒 | 76 秒（2,109 passed、4 skip） |
+
+依套件分：
+
+| 套件 | 基線 測試數 | 基線 秒 | RM 之後 測試數 | RM 之後 秒 | 占比 |
+|---|---|---|---|---|---|
+| `apps/api` | 743 | 119.9 | 681 | 120.8 | 47.2% |
+| `packages/common` | 1,891 | 36.4 | 1,886 | 35.6 | 13.9% |
+| `packages/db` | 237 | 29.5 | 227 | 30.0 | 11.7% |
+| `apps/td` | 429 | 112.8 | 326 | 24.9 | 9.7% |
+| `apps/sts` | 586 | 70.9 | 397 | 22.5 | 8.8% |
+| `apps/sym` | 117 | 13.5 | 117 | 15.4 | 6.0% |
+| `apps/md` | 235 | 27.6 | 136 | 6.0 | 2.4% |
+| `apps/paper` | 6 | 0.6 | 6 | 0.6 | 0.2% |
+
+`database_url` 的參數化：
+
+| `database_url` | 基線 測試數 | 基線 秒 | RM 之後 測試數 | RM 之後 秒 | 占比 |
+|---|---|---|---|---|---|
+| `postgres` | 437 | 148.7 | 407 | 156.9 | 61.4% |
+| `sqlite` | 437 | 31.8 | 407 | 30.1 | 11.8% |
+| 沒有這個參數 | 3,370 | 230.8 | 2,962 | 68.8 | 26.9% |
+
+#### C.8.2 和 C.6 第 1 點的預估對照
+
+C.6 把定稿的附錄 A 套在基線的量測上，算出 RM 之後是 3,816 個測試、231.8 秒。實測是 **3,776 個、255.8 秒**。逐項對帳（秒數都用 C.5 兩欄相減）：
+
+| 步驟 | 測試數 | 秒 |
+|---|---|---|
+| 基線 | 4,244 | 411.3 |
+| 42 個整檔刪除的模組 | −355 | −156.6 |
+| 22 個部分刪除的模組（扣掉它們自己的漂移） | −113 | −15.5 |
+| 217 個 RM 沒碰的模組，在這台 runner 上的漂移 | 0 | **+16.6** |
+| **實測** | **3,776** | **255.8** |
+
+兩個差額都有解釋，而且都不影響 C.6 的結論：
+
+1. **測試數少 40 個，全部出在「部分刪除」那一欄。** C.6 的 3,816 = 4,244 − 355（整檔）− 73（部分）；整檔那 355 個一個不差，部分刪除實際是 113 個而不是 73 個。多出來的 40 個有兩個來源，而且都不是漏算：
+   - **RM 在附錄 A 之外刪掉的、主題已經不存在的案例**：`apps/api/tests/test_sts_strategies.py` 的 9 個 stop / force-stop 路由案例（參數化後 18 個，隨 RM-04 走）、`apps/api/tests/test_environment_api.py` 的 5 個 live-session 守衛案例（RM-08 之後守衛是 no-op）、`apps/sts/tests/test_eventlog_rpc.py:test_info_flags_a_session_still_running`（`live` 旗標恆為 false）、`packages/db/tests/test_sts_session_repository.py` 的 10 個 `remember` / `rebuild_count` 案例（在 RM-01 的範圍裡，但附錄 A 的表沒有 `packages/db/tests` 這一節）、RM-06 依補正多刪的 3 個 `test_order_rpc` 案例、RM-08 多刪的 2 個 `test_environment_flow` 案例。
+   - **反方向的 18 個**：RM-04 留下 `test_eventlog` 的 14 個與 `test_oms_wait_cids` 的 3 個 `StsSession` 案例（附錄 A 列的是刪除），RM-09 在 `test_strategy_yml` 多加 1 個。
+   - 剩下的差額是**附錄 A 數的是測試函式、C.5 數的是參數化展開後的測試**，指名刪除的案例裡有一批帶 `database_url` 參數。
+   附錄 A 已加一節逐項記錄這些差異；`docs/baseline/remaining.md` 有同一份清單加上去向。
+2. **秒數多 24 秒**：**不是 RM 留下來的東西變慢，是 RM 沒碰的模組在這台 runner 上跑得比基線那一趟慢**（+16.6 秒），加上部分刪除的模組身上也帶著同樣的漂移。最明顯的三個都和 session 機制無關：`test_backfill_executor.py` 13.31 → 17.59、`test_auth_registry_keys.py` 11.83 → 15.22、`test_plane.py` 13.35 → 15.29，合計就占了 +9.6 秒。`[postgres]` 那一趟 437 → 407 個測試卻從 148.7 秒變 156.9 秒，是同一件事。C.1 記下過同一份代碼在 398–435 秒之間擺動，這個幅度和那個區間同一個數量級。
+
+**C.6 的結論成立，而且數字更好看了。** 把 Postgres 那一趟（156.9 秒）移出 `just test`（§9.1 規則 6），剩下 **98.9 秒**，已經在 F30 的 120 秒預算以內，還沒用到 `pytest-xdist`。B2-04（#177）先拆 tier、再平行化的順序不變。
+
+#### C.8.3 最慢的測試現在長什麼樣
+
+C.4 第 1 名那個 61 秒的 `test_td_orphan_reaper.py::test_a_revived_lease_loop_clears_the_strikes`（基線整套的 15%）隨 RM-06 消失。現在最慢的 15 個：
+
+| # | 測試 | 秒 |
+|---|---|---|
+| 1 | `test_broker_probe.py::test_probing_a_dead_instance_does_not_pile_up` | 4.26 |
+| 2 | `test_chase.py::test_the_sweep_gives_up_rather_than_looping_forever` | 3.06 |
+| 3 | `test_binance_spot_client.py::test_unsubscribe_in_the_reconnect_gap_closes_locally` | 2.01 |
+| 4 | `test_backfill_executor.py::test_a_backwards_walk_still_makes_progress_across_runs[postgres]` | 1.83 |
+| 5 | `test_td_instance_routing.py::test_the_sweep_posts_each_account_to_its_own_queue[postgres]` | 1.73 |
+| 6 | `test_eventlog.py::test_tape_read_records_the_prints_not_just_the_coverage` | 1.57 |
+| 7 | `test_eventlog.py::test_a_spanned_gap_is_written_to_the_log` | 1.56 |
+| 8 | `test_eventlog.py::test_a_capped_tape_read_says_it_was_capped` | 1.56 |
+| 9 | `test_backfill_executor.py::test_a_capped_walk_resumes_where_it_stopped[postgres]` | 1.48 |
+| 10 | `test_td_instance_routing.py::test_the_sweep_posts_each_account_to_its_own_queue[sqlite]` | 1.45 |
+| 11 | `test_auth_registry_keys.py::test_a_registry_key_reads_what_this_node_publishes[postgres]` | 1.26 |
+| 12 | `test_chase.py::test_the_sweep_takes_one_level_at_a_time` | 1.26 |
+| 13 | `test_td_instance_routing.py::test_a_jp_credential_never_reaches_the_us_queue[postgres]` | 1.19 |
+| 14 | `test_dist_version.py::test_unset_is_not_a_release` | 1.07 |
+| 15 | `test_dist_version.py::test_the_tag_is_the_wheel_version` | 1.05 |
+
+**C.4 的四個主因有兩個整批消失。** lease 心跳（基線 8 個測試、14.2 秒）在 RM-02、RM-06、RM-07 之後一個都不剩；子進程那一類只剩 `test_dist_version` 的兩次 `uv build`（`SubprocessSpawner` 隨 RM-04 走）。剩下最慢的仍然是「真的 sleep」（`chase.py` 自己的 `IOC_SLICE_PAUSE_S` 與 `CANCEL_POLL_S`，C.6 第 2 點已記）、「打到沒人服務的 subject」（`test_broker_probe` 量的就是這個行為本身）和 Postgres。這三類分別是 B2-02（#175）、F31 / B2-05（#178）和 §9.1 規則 6 的範圍。
