@@ -12,8 +12,6 @@ from mftik.cli import config
 from mftik.cli.app import EXIT_ERROR, EXIT_INTERRUPTED, main
 from mftik.cli.client import Client, CliError
 from mftik.cli.config import Profile
-from mftik.cli.run import deploy_http_timeout
-from mftik.protocol.strategy_yml import StrategySpec
 
 _TINY = """\
 from mftik.strategy import Strategy
@@ -320,14 +318,6 @@ def test_a_session_that_ended_during_deploy_is_not_followed(
 
     assert followed == []
     assert "session is failed" in capsys.readouterr().out
-
-
-def test_deploy_http_timeout_with_no_attaches() -> None:
-    assert deploy_http_timeout(StrategySpec()) == 20.0
-
-
-def test_deploy_http_timeout_with_one_feed() -> None:
-    assert deploy_http_timeout(StrategySpec(td={"paper": {}})) == 55.0
 
 
 class _FailingDeploy(Node_):

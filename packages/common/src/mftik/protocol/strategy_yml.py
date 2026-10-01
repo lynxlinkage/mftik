@@ -31,10 +31,18 @@ from mftik.protocol.topics import Topics
 #: templates.
 
 
-#: Resume this run after an STS restart, or leave it ended.
-RESTART_ALWAYS = "always"
+#: What becomes of this run after the process under it ends.
 RESTART_NEVER = "never"
-RESTART_MODES = frozenset({RESTART_ALWAYS, RESTART_NEVER})
+RESTART_MODES = frozenset({RESTART_NEVER})
+
+#: What ``mftik check`` prints for a document that still says
+#: ``restart: always``. The parser prefixes the field name, so the line reads
+#: back as the value the author wrote.
+_RESTART_ALWAYS_HINT = (
+    "always is gone. It meant rebuild — resuming a run that was cut short "
+    "with the state it had, which nothing does any more. Delete the line: "
+    "never is the only mode and the default."
+)
 
 #: YAML's merge key. Under ``td:`` it is refused rather than expanded — see
 #: :func:`_refuse_collapsing_td_keys`.
@@ -182,13 +190,10 @@ class StrategySpec(BaseModel):
 
     td: dict[str, TdSettings] = Field(default_factory=dict)
     md: dict[str, list[str]] = Field(default_factory=dict)
-    #: Whether this run wants to be restored if STS restarts under it.
-    #: ``always`` by default: two gates already stand in front of a rebuild —
-    #: the operator has to enable it and the strategy class has to support it
-    #: — so a deploy that reaches this question is one whose run was cut short
-    #: and would rather continue. Set ``never`` for a one-shot that would be
-    #: wrong to resume.
-    restart: str = "always"
+    #: What becomes of this run after the process under it ends. ``never`` is
+    #: the only mode: resuming with the state a cut-short run held is gone,
+    #: and nothing has taken its place yet.
+    restart: str = RESTART_NEVER
     #: Flat config for whichever strategy is being deployed. Its keys are the
     #: strategy's own; validation happens in that class's ``on_initialized``.
     sts: dict[str, Any] = Field(default_factory=dict)
@@ -197,8 +202,10 @@ class StrategySpec(BaseModel):
     @classmethod
     def _restart_mode(cls, value: Any) -> str:
         if value is None:
-            return RESTART_ALWAYS
+            return RESTART_NEVER
         mode = str(value).strip().lower()
+        if mode == "always":
+            raise ValueError(_RESTART_ALWAYS_HINT)
         if mode not in RESTART_MODES:
             raise ValueError(
                 f"restart must be one of {sorted(RESTART_MODES)}, got {value!r}"

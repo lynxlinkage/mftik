@@ -332,7 +332,6 @@ from mftik.protocol.strategy_catalog import (
 )
 from mftik.protocol.strategy_yml import (
     ANY_INSTANCE,
-    RESTART_ALWAYS,
     RESTART_NEVER,
     StrategySpec,
     StrategyYamlError,
@@ -454,7 +453,6 @@ __all__ = [
     "ON_STOP_TIMEOUT_S",
     "STOP_CONTROL_TIMEOUT_S",
     "STOP_FORCE_RPC_TIMEOUT_S",
-    "RESTART_ALWAYS",
     "RESTART_NEVER",
     "TD_BACKFILL",
     "TD_BACKFILL_RESULT",

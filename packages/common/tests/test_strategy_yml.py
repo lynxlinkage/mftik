@@ -312,13 +312,11 @@ sts: [1, 2]
         )
 
 
-def test_restart_defaults_to_always() -> None:
-    """Two gates already stand in front of a rebuild — the operator enabling
-    it and the strategy class supporting it. A deploy that reaches this
-    question is one whose run was cut short and would rather continue.
-    """
+def test_restart_defaults_to_never() -> None:
+    """Nothing resumes a cut-short run with the state it held, so a document
+    that says nothing about this gets the only mode there is."""
     spec = parse_strategy_yml("td: {}\nmd: []\nsts: {}\n")
-    assert spec.restart == "always"
+    assert spec.restart == "never"
 
 
 def test_restart_never_is_kept() -> None:
@@ -326,9 +324,22 @@ def test_restart_never_is_kept() -> None:
     assert spec.restart == "never"
 
 
+def test_the_old_always_is_refused_and_says_what_to_write() -> None:
+    """A document written for rebuild is still on somebody's disk. Refusing it
+    as an unknown mode would read as a typo; what happened is that the mode it
+    names was removed, and the line is now the thing to delete."""
+    with pytest.raises(StrategyYamlError) as caught:
+        parse_strategy_yml("td: {}\nmd: []\nrestart: always\nsts: {}\n")
+
+    message = str(caught.value)
+    assert message.startswith("restart: always is gone.")
+    assert "Delete the line" in message
+    assert "never is the only mode and the default" in message
+
+
 def test_an_unknown_restart_mode_is_refused() -> None:
-    """Silently treating a typo as `always` would resume a run that asked not
-    to be, which is the one direction this must not fail in."""
+    """Silently treating a typo as a mode would run a deploy under a policy
+    nobody asked for, which is the one direction this must not fail in."""
     with pytest.raises(StrategyYamlError, match="restart must be one of"):
         parse_strategy_yml("td: {}\nmd: []\nrestart: maybe\nsts: {}\n")
 
