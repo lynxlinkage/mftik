@@ -43,6 +43,13 @@ BUCKETS = (
 )
 NATS_BUCKETS = ("nats_connect", "nats_request", "nats_other")
 
+#: The broker's own re-ask loop. A request to a subject nobody serves sleeps
+#: `_NO_RESPONDERS_GRACE_S` and asks again until its share of the caller's
+#: timeout is spent, and that sleep is *outside* `Client.request` — so it lands
+#: in `sleep`, not in any `nats_*` bucket, and a NATS total without it is
+#: wrong. Matched by call site rather than by bucket.
+REASK_SITE = "broker/transport/nats.py:268"
+
 
 def parse_junit(path: Path) -> list[dict[str, Any]]:
     root = ET.parse(path).getroot()
@@ -90,12 +97,25 @@ def probe_index(path: Path) -> dict[str, dict[str, Any]]:
     return {record["nodeid"]: record for record in data["tests"]}
 
 
+def reask_seconds(record: dict[str, Any]) -> float:
+    """How long this test spent in the broker's no-responders re-ask loop."""
+    return sum(
+        sec for _, site, sec in record.get("wait_sites", []) if site == REASK_SITE
+    )
+
+
 def dominant(record: dict[str, Any], total: float) -> str:
     """The bucket that accounts for most of a test, or ``other``."""
     seconds = record.get("seconds", {})
-    nats = sum(seconds.get(k, 0.0) for k in NATS_BUCKETS)
+    nats = sum(seconds.get(k, 0.0) for k in NATS_BUCKETS) + reask_seconds(record)
+    own_reask = sum(
+        sec
+        for bucket, site, sec in record.get("wait_sites", [])
+        if site == REASK_SITE and bucket == "sleep"
+    )
     candidates = {
-        "sleep": seconds.get("sleep", 0.0),
+        # Minus the re-ask loop, which is a sleep but is NATS's bill.
+        "sleep": seconds.get("sleep", 0.0) - own_reask,
         "timeout": seconds.get("timeout", 0.0),
         "nats": nats,
         "subprocess": seconds.get("subprocess", 0.0),
@@ -189,11 +209,13 @@ def main() -> None:
                 f"{seconds.get('sleep', 0.0):.2f}",
                 f"{seconds.get('timeout', 0.0):.2f}",
                 f"{nats:.2f}",
+                f"{reask_seconds(record):.2f}",
                 f"{seconds.get('subprocess', 0.0):.2f}",
                 f"{seconds.get('pg_connect', 0.0):.2f}",
                 dominant(record, record.get("total") or test["time"]),
                 "; ".join(
-                    f"{bucket} {site} {sec:.2f}s" for bucket, site, sec in sites
+                    f"{bucket} {site} {sec:.2f}s"
+                    for bucket, site, sec in sites[:6]
                 )
                 or "—",
             ]
@@ -207,6 +229,7 @@ def main() -> None:
                 "sleep",
                 "timeout",
                 "nats",
+                "re-ask",
                 "subproc",
                 "pg conn",
                 "proposed",
@@ -237,12 +260,33 @@ def main() -> None:
         ]
         for bucket in BUCKETS
     ]
+    reask = sum(reask_seconds(record) for record in probe.values())
+    reask_bounded = sum(
+        min(reask_seconds(record), record.get("total", 0.0))
+        for record in probe.values()
+    )
     nats_total = sum(bucket_totals.get(k, 0.0) for k in NATS_BUCKETS)
     rows.append(
         [
-            "**nats, all three**",
-            f"{nats_total:.1f}",
-            f"{100 * nats_total / probe_total:.1f}%",
+            f"re-ask loop (`{REASK_SITE}`)",
+            f"{reask:.1f}",
+            f"{100 * reask / probe_total:.1f}%",
+            "",
+        ]
+    )
+    rows.append(
+        [
+            "re-ask loop, capped at each test's own time",
+            f"{reask_bounded:.1f}",
+            f"{100 * reask_bounded / probe_total:.1f}%",
+            "",
+        ]
+    )
+    rows.append(
+        [
+            "**nats, all three plus the re-ask loop**",
+            f"{nats_total + reask:.1f}",
+            f"{100 * (nats_total + reask) / probe_total:.1f}%",
             "",
         ]
     )

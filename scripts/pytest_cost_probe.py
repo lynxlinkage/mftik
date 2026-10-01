@@ -238,15 +238,19 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None):
             "phases": phases,
             "seconds": {k: round(v, 4) for k, v in _seconds.items() if v},
             "calls": dict(_calls),
-            # Four is enough to name a cause and short enough to read.
+            # Everything worth a tenth of the fastest tier's budget. A cap on
+            # the count hid the cause of whole families of tests: TD's detach
+            # re-asks a subject nobody serves for a second, and that was the
+            # fifth-largest wait behind four background loops.
             "wait_sites": sorted(
                 (
                     (bucket, site, round(sec, 4))
                     for (bucket, site), sec in _sites.items()
+                    if sec >= 0.005
                 ),
                 key=lambda row: row[2],
                 reverse=True,
-            )[:4],
+            )[:12],
         }
     )
 
