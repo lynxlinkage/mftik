@@ -1,10 +1,12 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.26（2026-10-01）**。§12 的待決事項已全部定案（F1 到 F38）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.27（2026-10-01）**。§12 的待決事項已全部定案（F1 到 F38）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
 > **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。
 >
-> **v0.26 更正：** v0.25 以前的版本，誤用了 PR #153（`fix/sts-start-deadline` @ `8ddfc23`，未合併、已關閉）的代碼當作現況。PR #153 加入的 8 秒 / 300 秒啟動期限、`start_deadline` kill、abort 重試與 `abort_target` 欄位，都不在 main 上；相關敘述、刪除清單和 migration 已依 main 改正，行數和測試數也已重算。`deployment/nats/nats.conf` 被 `.gitignore` 排除，不在 repo 裡，§5.3 引用的是本機那份。
+> **v0.27（B0-05，#158）：** 附錄 A、B 定稿。附錄 A 從「依 import 整檔分類」改成逐案例，RM 的測試刪除量從 566 修正為 401；附錄 B 補上原本漏列的四個檔案與各票票號，並列出容易誤刪、實際上要保留的模組。每張 RM 票補上了 `檔案:函式` 的呼叫端清單與「B0-05 補正」。查核中確認 §5.4、§8.1、§8.2 和附錄 A、B 上的每一個符號都存在於 `a0cbfb2`。
+>
+> **v0.26 更正：** v0.25 以前的版本，誤用了 PR #153（`fix/sts-start-deadline` @ `8ddfc23`，未合併、已關閉）的代碼當作現況。PR #153 加入的 8 秒 / 300 秒啟動期限、`start_deadline` kill、abort 重試與 `abort_target` 欄位，都不在 main 上；相關敘述、刪除清單和 migration 已依 main 改正，行數和測試數也已重算。`deployment/nats/nats.conf` 被 `.gitignore` 排除，不在 repo 裡，§5.3 引用的是本機那份。B0-05 複查確認：`_abort_timed_out_create`、`resume_pending_aborts`、`abort_target`、`START_TIMEOUT_DEFAULT_S`、`create_rpc_timeout` 這五個 #153-only 的名字在 `a0cbfb2` 上 grep 不到，也沒有出現在任何 RM 票的範圍裡。
 
 ### 已定案
 
@@ -100,7 +102,7 @@
 ### 1.3 測試現況
 
 - 共 3,377 個測試函數（靜態計數，參數化展開前）：`packages/common` 1,642、`apps/sts` 557、`apps/api` 438、`apps/td` 302、`apps/md` 211、`packages/db` 137、`apps/sym` 84、`apps/paper` 6。
-- 直接依賴 session 機制（三個平面的 `SessionManager`，以及 `orchestrate`）的 566 個。策略實作測試（chase、oco、macd_dollar、cross_arb、twap、noop、tape_keeper）224 個，帶有 rebuild 語意。
+- 依 import 分類、檔案裡有東西碰到 session 機制（三個平面的 `SessionManager`，以及 `orchestrate`）的 566 個；逐案例查核後真正依賴它的是 401 個（附錄 A）。策略實作測試（chase、oco、macd_dollar、cross_arb、twap、noop、tape_keeper）224 個，帶有 rebuild 語意。
 - `pytest_sessionstart` 強制要求真的 NATS server（「the broker has no fake」）。DB 測試以 sqlite 參數化，CI 再加跑 Postgres。
 - 測試裡有 424 處 `asyncio.sleep(>0)`、329 處 ≥1s 的 `timeout=`，`test_session_processes.py` 會 spawn 真的子進程。
 - **各測試模組的實際耗時還沒量過**，這是 B0 的工作。
@@ -1096,10 +1098,10 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 
 ### 9.3 移除與保留
 
-- **RM 刪除：** 直接依賴三個平面 session 機制，或依賴 `orchestrate` 的測試，566 個。初版清單見附錄 A，依 import 自動分類，B0 之後定稿。
+- **RM 刪除：** 直接依賴三個平面 session 機制，或依賴 `orchestrate` 的測試。依 import 自動分類時是 566 個（四個 app 目錄的檔案總和）；B0-05 逐案例查核後是 **401** 個，差額是那些被整檔算進去、但實際上測的是 RM 明文留下的模組的案例。定稿清單與每個檔案的刪／留見附錄 A。
 - **策略實作測試（224 個，F16）：** 保留到 B5，再改寫到 `StrategyHarness` 上。B2 到 B5 之間策略代碼不會變，沒有必要提早拿掉這張安全網。這批測試不依賴 NATS，真的 sleep 只有一處（`test_chase` 的 0.2 秒），放在 unit tier 不會威脅預算。7 個檔案裡有 6 個、約 50 行引用了 F9、F10、F13 要刪的 API（rebuild、`remember`、`on_recon_done`、`send_recon`、`breathe`），這部分在 B5 隨 API 一起改寫或刪除。
 - **其他測試**（venue adapter、registry、CLI、db、auth 等）保留，但依 B0 量出的耗時重新分 tier。
-- **用到 NATS 的測試（靜態計數，參數化展開前）：** 75 個檔案、650 個測試函數。其中 53 個檔案、483 個在 RM 刪除清單裡；剩下 22 個檔案、167 個。這 167 個裡，broker 本身的語意測試 38 個，留作連線測試；其餘 129 個（`test_plane`、`test_backfill_executor`、`test_tape_read`、`test_ledger_view` 等）是透過 NATS 測行為，依 F31 改寫成直接呼叫 handler。§9.3 之前寫的「約 900 個」是錯的。
+- **用到 NATS 的測試（靜態計數，參數化展開前）：** 75 個檔案、650 個測試函數。其中 53 個檔案、483 個在**初版**的 RM 刪除清單裡；剩下 22 個檔案、167 個。附錄 A 在 B0-05 定稿後，RM 實際刪掉的 NATS 測試少了 121 個，所以 RM 之後剩下 288 個：broker 本身的語意測試 38 個留作連線測試，其餘 250 個（`test_plane`、`test_backfill_executor`、`test_tape_read`、`test_ledger_view`、`test_md_fetch`、`test_venue_factory` 等）是透過 NATS 測行為，依 F31 改寫成直接呼叫 handler。§9.3 之前寫的「約 900 個」是錯的，「129 個」是依初版清單算的。
 
 ---
 
@@ -1149,7 +1151,7 @@ B1（獨立）                                               ├─▶ B6 TD ─
 
 | 批次 | 目標 | 範圍 | 完成條件 | 依賴決策 |
 |---|---|---|---|---|
-| **B0 基線** | 量測，凍結現況 | 以 `pytest --durations=0 --junitxml` 跑現行測試（NATS 加 sqlite）；從 `protocol/messages.py` 盤點 subject 和 RPC type；打 tag `arch/baseline` | 每個模組的耗時寫進附錄 C；附錄 A 定稿 | — |
+| **B0 基線** | 量測，凍結現況 | 以 `pytest --durations=0 --junitxml` 跑現行測試（NATS 加 sqlite）；從 `protocol/messages.py` 盤點 subject 和 RPC type；打 tag `arch/baseline` | 每個模組的耗時寫進附錄 C；附錄 A、B 已於 B0-05 定稿 | — |
 | **B1 文件** | 封存 `docs/` | §10 | `docs/` 根目錄只剩架構文件和依現況重寫的 `Deployment.md` | — |
 | **RM 清場** | 刪掉要重寫的代碼和它們的測試 | §5.4、§8.1、§8.2 列出的刪除項，以及附錄 A、B；還有呼叫端需要的地方，留下 IF 的 stub | 清單上的符號在 repo 裡 grep 不到；剩下的測試全綠；各平面能 import、能啟動到「沒有 session 機制」的狀態 | — |
 | **IF 介面** | 新抽象層只定義介面，回傳 null data | §3.4 的每一層：型別、函式簽名、寫明不變式的 docstring；附 `xfail(strict=True)` 的契約測試當作之後的驗收 | 每個介面都能 import、`ruff` 通過；契約測試以 xfail 存在；B3 以後的每張票都能指到對應的介面 | — |
@@ -1217,36 +1219,147 @@ v0.1 的 D2（worker 代碼版本）和 D3（procd 粒度）已經由 F6 解決�
 
 ---
 
-## 附錄 A：RM 測試刪除清單（初版，依 import 自動分類，B0 後定稿）
+## 附錄 A：RM 測試刪除清單（B0-05 定稿）
 
-**`apps/sts/tests`（233）**：
-`test_attach_refused`、`test_boot_schema_guard`、`test_detach_is_not_awaited`、`test_detach_refcount`、`test_environment_rebuild`、`test_eventlog`、`test_md_ack_watchdog`、`test_md_events`、`test_mds_query`、`test_oms_wait_cids`、`test_orphan_reaper`、`test_private_events`、`test_rebuild`、`test_recon_oms`、`test_rpc_loop_survives`、`test_session_control_addressing`、`test_session_failed`、`test_session_processes`、`test_status_events`、`test_stop_ordering`、`test_strategy_lifecycle`、`test_sts_cid`、`test_sts_incompatible_environment`、`test_sts_runtime_env`、`test_sts_session`、`test_td_ack_watchdog`
+**方法：** 以 `main` @ `a0cbfb2` 的 AST 計數測試函數（參數化展開前），再逐檔算出「有多少個測試會經由同檔的 helper 碰到 RM 要刪的符號」。初版清單是依 import 自動分類的，所以把整個檔案都算進去；定稿版改成逐案例，並把三種情況分開：
 
-**`apps/md/tests`（125）**：
-`test_md_detach_disconnect`、`test_md_expiry`、`test_md_feed_end`、`test_md_fetch`、`test_md_lease_resilience`、`test_md_orphan_reaper`、`test_md_session`、`test_md_shared_venue_topics`、`test_md_tape`、`test_md_two_instances`、`test_md_venue_factory`、`test_md_venue_feeds`
+- **整檔刪除**：檔案裡每個案例都依賴被刪的代碼。
+- **部分刪除**：只刪依賴被刪代碼的案例，其餘留在原檔（行為本身保留，改寫由後面的批次負責）。
+- **從清單移出**：沒有任何案例依賴被刪的代碼，而且測的正是 RM 明文「留下」的模組。初版把它們算進刪除清單是錯的。
 
-**`apps/td/tests`（139）**：
-`test_account_ownership`、`test_backfill_triggers`、`test_cid_ownership`、`test_connector_capabilities`、`test_detach_rpc`、`test_history_wiring`、`test_lease_resilience`、`test_leverage_rpc`、`test_order_rpc`、`test_recon_snapshot`、`test_session_create`、`test_session_leverage`、`test_session_oms`、`test_stream_rejects`、`test_td_orphan_reaper`、`test_venue_factory`
+**初版每個平面的總數都查核無誤**（sts 233、md 125、td 139、api 69、策略 224），錯的是組成。定稿後 RM 實際刪除 **401** 個（sts 194、md 88、td 94、api 25），不是初版的 566；另有 2 個（`test_plane_serves_its_subject`）必須改寫而不是刪除。§1.3 和 §9.3 的「566」指的是 sts + md + td + api 四個目錄的檔案總和（233+125+139+69 = 566），沒有算 `packages/common` 的 `test_plane_serves_its_subject`；連同它是 568。
 
-**`apps/api/tests`（69）**：
-`test_deploy_refused`、`test_environment_flow`、`test_md_instance_deploy`、`test_orchestrate_log_type`、`test_registry_add`、`test_td_instance_routing`、`test_td_sessions_route`
+### `apps/sts/tests`（清單 233 → RM 刪 194）
 
-**`packages/common/tests`**：
-`test_plane_serves_its_subject`。`test_wire_ledger`、`test_last_reader_release` 和 broker lease 相關的測試，隨 B4（lease）、B7（wire ledger）刪除代碼時一起刪。
+| 檔案 | 測試數 | RM 刪 | 處理 |
+|---|---|---|---|
+| `test_rebuild` | 33 | 33 | 整檔（RM-01） |
+| `test_session_processes` | 41 | 41 | 整檔（RM-04） |
+| `test_environment_rebuild` | 5 | 5 | 整檔（RM-01） |
+| `test_session_failed` | 15 | 15 | 整檔（RM-04） |
+| `test_orphan_reaper` | 6 | 6 | 整檔（RM-04） |
+| `test_sts_session` | 3 | 3 | 整檔（RM-04） |
+| `test_md_ack_watchdog` | 10 | 10 | 整檔（RM-02） |
+| `test_td_ack_watchdog` | 3 | 3 | 整檔（RM-02） |
+| `test_recon_oms` | 1 | 1 | 整檔（RM-02） |
+| `test_mds_query` | 17 | 17 | 整檔（RM-04）；`md.fetch` 的行為在 B5-07 重寫 |
+| `test_attach_refused` | 3 | 3 | 整檔（RM-04） |
+| `test_detach_is_not_awaited` | 4 | 4 | 整檔（RM-04） |
+| `test_detach_refcount` | 1 | 1 | 整檔（RM-04） |
+| `test_md_events` | 2 | 2 | 整檔（RM-04） |
+| `test_private_events` | 3 | 3 | 整檔（RM-04） |
+| `test_session_control_addressing` | 5 | 5 | 整檔（RM-04）；位址語意在 B4-02 重寫 |
+| `test_status_events` | 5 | 5 | 整檔（RM-04）；status 在 B4-02 重寫 |
+| `test_stop_ordering` | 4 | 4 | 整檔（RM-04） |
+| `test_strategy_lifecycle` | 6 | 6 | 整檔（RM-04） |
+| `test_sts_cid` | 4 | 4 | 整檔（RM-04）；R2 的不撞號在 B4-03 重寫 |
+| `test_sts_incompatible_environment` | 5 | 5 | 整檔（RM-04）；環境不相容的拒絕在 B4-02 重寫 |
+| `test_eventlog` | 22 | 15 | 部分：15 個經 `_session` / `_tape_session` 驅動 `StsSession`，隨 RM-04 刪；7 個直接測 writer，留到 B5-02 |
+| `test_oms_wait_cids` | 11 | 3 | 部分：3 個經 `StsSession`，隨 RM-04 刪；8 個直接測 `StrategyOms.wait_cids`，留到 B6-08 |
+| `test_boot_schema_guard` | 6 | 0 | **移出**：測 `app.schema_is_current` / `_schema_wait_s`，RM-04 留下 |
+| `test_rpc_loop_survives` | 2 | 0 | **移出**：測 `app.run_rpc`，RM-04 留下 |
+| `test_sts_runtime_env` | 16 | 0 | **移出**：測 `runtime_env.py` 與 `rpc/env.py`，RM-04 明文留下 |
 
-**策略實作（224，F16：RM 不刪，B5 改寫）**：
-`test_chase`、`test_cross_arb`、`test_macd_dollar`、`test_noop_strategy`、`test_oco`、`test_tape_keeper`、`test_twap`
+### `apps/md/tests`（清單 125 → RM 刪 88）
 
-## 附錄 B：預計刪除的主要代碼（初估）
+| 檔案 | 測試數 | RM 刪 | 處理 |
+|---|---|---|---|
+| `test_md_session` | 5 | 5 | 整檔（RM-05） |
+| `test_md_expiry` | 12 | 12 | 整檔（RM-05）；到期改由 B8-04 以 listing 驅動 |
+| `test_md_feed_end` | 13 | 13 | 整檔（RM-05）；`md.feed.end` 保留，B8-04 重寫 |
+| `test_md_lease_resilience` | 2 | 2 | 整檔（RM-05、RM-07） |
+| `test_md_orphan_reaper` | 9 | 9 | 整檔（RM-05） |
+| `test_md_detach_disconnect` | 3 | 3 | 整檔（RM-05） |
+| `test_md_two_instances` | 6 | 6 | 整檔（RM-05） |
+| `test_md_shared_venue_topics` | 12 | 12 | 整檔（RM-05）；共用 channel 的語意由 atom 定義取代（§6.1） |
+| `test_md_venue_feeds` | 11 | 11 | 整檔（RM-05）；topic → stream 的解析由 `atoms_for` 取代（IF-08） |
+| `test_md_venue_factory` | 13 | 13 | 整檔（RM-05）；connector 工廠在 B4-06 / B7-02 重建 |
+| `test_md_tape` | 10 | 2 | 部分：2 個測 `Dispatcher` 的錄製（`test_dispatcher_records_after_fanning_out`、`test_dispatcher_without_a_recorder_records_nothing`），隨 RM-05 刪；8 個測 `TapeRecorder` / `TapeStore`，RM-05 留下 |
+| `test_md_fetch` | 29 | 0 | **移出**：測 `mftik_md.fetch`，RM-05 明文留下 |
 
-| 檔案 | 現在 | 去向 |
-|---|---|---|
-| `apps/sts/src/mftik_sts/session/manager.py` | 2,418 行 | 拆成 controller 的 orchestrator（預估少於 600 行）和 worker 端；rebuild、reaper、雙模式全部刪除 |
-| `apps/sts/src/mftik_sts/spawn.py`、`worker.py` | 551 行 | 由 procman 取代；worker 只剩 session 執行 |
-| `apps/md/src/mftik_md/session/*` | 約 2,200 行 | 由 orchestrator、連線 worker、reconciler 重寫 |
-| `apps/td/src/mftik_td/session/manager.py` | 1,711 行 | 拆成 TD orchestrator 和帳號 worker；lease、reaper 刪除 |
-| `apps/api/src/mftik_api/orchestrate.py` | 538 行 | 只剩 start/end，預估少於 250 行 |
-| `packages/common/src/mftik/exchange/wire.py` 和各 adapter socket 的訂閱管理 | — | 搬進連線 worker 的 reconciler |
+### `apps/td/tests`（清單 139 → RM 刪 94）
+
+| 檔案 | 測試數 | RM 刪 | 處理 |
+|---|---|---|---|
+| `test_session_create` | 9 | 9 | 整檔（RM-06） |
+| `test_detach_rpc` | 4 | 4 | 整檔（RM-06） |
+| `test_lease_resilience` | 4 | 4 | 整檔（RM-06、RM-07） |
+| `test_td_orphan_reaper` | 6 | 6 | 整檔（RM-06） |
+| `test_recon_snapshot` | 5 | 5 | 整檔（RM-06）；`settled` 的等待在 B6-08 重寫 |
+| `test_history_wiring` | 5 | 5 | 整檔（RM-06） |
+| `test_cid_ownership` | 5 | 5 | 整檔（RM-06） |
+| `test_stream_rejects` | 5 | 5 | 整檔（RM-06）；拒絕碼在 B6-02 重寫 |
+| `test_leverage_rpc` | 4 | 4 | 整檔（RM-06） |
+| `test_order_rpc` | 46 | 42 | 部分：42 個經 `attached` 驅動 attach + `_serve_orders`；4 個（`test_no_td_serving_times_out`、`test_a_malformed_ticker_is_left_to_the_instrument_check`、`test_a_gate_market_buy_sized_in_base_is_unsupported_shape`、`test_reduce_only_passes_on_a_contract_ticker`）不經 manager，保留 |
+| `test_account_ownership` | 3 | 2 | 部分：`test_boot_probe_refuses_a_second_process_of_the_same_instance` 測 `refuse_if_serving`，F36 保留 |
+| `test_session_oms` | 3 | 1 | 部分：2 個測 `Session` 的 OMS callback 與 paper 金鑰隔離，RM-06 留下 |
+| `test_backfill_triggers` | 9 | 2 | 部分：7 個測 `backfill.trigger.request_backfill` 對 stub server，RM-06 留下 `backfill/` |
+| `test_connector_capabilities` | 6 | 0 | **移出**：測 `Session` 的 venue 能力旗標，RM-06 留下 |
+| `test_venue_factory` | 17 | 0 | **移出**：測 `session/factory.py`，B0-05 已把它列進 RM-06 的「留下」 |
+| `test_session_leverage` | 8 | 0 | **移出**：測 `Session` 的槓桿路徑，RM-06 留下 |
+
+### `apps/api/tests`（清單 69 → RM 刪 25）
+
+| 檔案 | 測試數 | RM 刪 | 處理 |
+|---|---|---|---|
+| `test_md_instance_deploy` | 12 | 12 | 整檔（RM-08） |
+| `test_deploy_refused` | 4 | 4 | 整檔（RM-08） |
+| `test_orchestrate_log_type` | 4 | 3 | 部分：`test_mint_session_id_retries_when_the_row_exists` 測留下的 `mint_session_id`，保留 |
+| `test_registry_add` | 23 | 3 | 部分：只有 `test_incompatible_environment_deploy_is_409`、`test_unknown_strategy_deploy_is_still_404`、`test_cross_arb_deploy_refuses_sts_account_not_in_td` 走 deploy 路由 |
+| `test_environment_flow` | 19 | 3 | 部分：只有 `test_s1_bare_node_stdlib_tree`、`test_s2_declare_then_apply_then_add`、`test_s6_already_connected_can_pull_a_heavier_tree` 走 deploy 路由 |
+| `test_td_instance_routing` | 4 | 0 | **移出**：用留下的 `_td_instance` 與 `backfill_cron.sweep` |
+| `test_td_sessions_route` | 3 | 0 | **移出**：只讀 `td_sessions`，F38 保留唯讀到 B10 |
+
+### `packages/common/tests`
+
+- `test_plane_serves_its_subject`（2）：啟動三個平面的 `app.amain`，所以 RM-04 / RM-05 / RM-06 改 `app.py` 時一定要跟著改。**改寫，不刪除**——「平面只在它被指派的 subject 上回答」這條行為保留（§8.3「instance subject 保留」）。
+- `test_strategy_public_api`：2 個 pacing helper 案例隨 RM-03 刪（見 RM-03 的補正）。
+- `test_cli_run`：2 個 `deploy_http_timeout` 案例隨 RM-09 刪。
+- `test_broker`（8）：2 個 leased link 案例隨 RM-07 刪，其餘 6 個留作連線測試。
+- `test_wire_ledger`（28）、`test_last_reader_release`（20）：不在 RM 範圍，隨 B4（lease）、B7（wire ledger）刪除代碼時一起處理。
+
+### 對「用到 NATS 的測試」的連帶修正
+
+§9.3 的三個數字（75 檔 650 個、其中 53 檔 483 個在刪除清單裡、剩 22 檔 167 個、broker 語意 38 個）以初版的整檔清單為前提，B0-05 重算後確認它們對初版而言都正確。附錄 A 定稿之後：
+
+- 整檔移出而且用到 NATS 的：`test_md_fetch`（29）、`test_sts_runtime_env`（16）、`test_venue_factory`（17）、`test_session_leverage`（8）、`test_connector_capabilities`（6）、`test_td_instance_routing`（4）、`test_rpc_loop_survives`（2）＝ 82 個。
+- 部分保留而且用到 NATS 的：`test_oms_wait_cids`（8）、`test_md_tape`（8）、`test_backfill_triggers`（7）、`test_eventlog`（7）、`test_order_rpc`（4）、`test_session_oms`（2）、`test_account_ownership`（1）＝ 37 個，再加 `test_plane_serves_its_subject`（2）。
+- 所以 RM 之後剩下的 NATS 測試是 **288 個**（不是 167），其中 broker 語意仍是 38 個，**借 NATS 測行為的是 250 個**（不是 129）。B2-05 的範圍要依這個數字重寫。
+
+### `apps/sts/tests` 的策略實作（224，F16：RM 不刪，B5-08 改寫）
+
+`test_chase`（54）、`test_cross_arb`（36）、`test_macd_dollar`（39）、`test_noop_strategy`（17）、`test_oco`（50）、`test_tape_keeper`（6）、`test_twap`（22）。
+
+B0-05 實測出兩個 F16 的例外，RM 不可能完全不動這批測試：
+
+- **`on_recon_done`：111 個案例**靠它驅動策略（`test_oco` 40、`test_cross_arb` 24、`test_macd_dollar` 21、`test_twap` 17、`test_chase` 9）。RM-02 因此只刪平台側的自動 recon，`Strategy.on_recon_done` 的 hook 與 6 支內建策略的實作留到 B5-08 一起改寫。
+- **rebuild API：17 個案例**用到 `on_rebuild` / `rebuildable` / `remember`（`test_oco` 9 個經 `_restore`、`test_chase` 6 個、`test_cross_arb` 1 個、`test_tape_keeper` 1 個）。`test_oco` 那 9 個的主題是接回留在交易所的兩腳，不是 rebuild，要改寫而不是刪。
+- `test_macd_dollar:test_warm_up_ingest_yields_the_loop` 是唯一會被 RM-03 弄紅的策略案例（monkeypatch `SLICE_S`），隨 RM-03 刪。
+
+## 附錄 B：預計刪除的主要代碼（B0-05 定稿）
+
+行數是 `main` @ `a0cbfb2` 上 `wc -l` 的實測值，初版列的每一個數字都查核無誤。定稿補上了原本漏掉的四個檔案，以及負責的票號。
+
+| 檔案 | 現在 | 票 | 去向 |
+|---|---|---|---|
+| `apps/sts/src/mftik_sts/session/manager.py` | 2,418 行 | RM-01、RM-04 | 拆成 controller 的 orchestrator（預估少於 600 行）和 worker 端；rebuild、reaper、雙模式全部刪除 |
+| `apps/sts/src/mftik_sts/spawn.py`（243）、`worker.py`（308） | 551 行 | RM-04 | 由 procman 取代；worker 只剩 session 執行 |
+| `apps/sts/src/mftik_sts/session/session.py` | 1,260 行 | RM-02 刪 lease 與自動 recon，其餘留到 B4-03 搬進 `session_worker` | 下單與事件分派搬進 ingress / strategy 兩條 thread |
+| `apps/sts/src/mftik_sts/rpc/sessions.py` | — | RM-04 | 改成占位（IF-04） |
+| `apps/md/src/mftik_md/session/*` | 2,182 行（`manager.py` 1,533、`venue.py` 336、`dispatcher.py` 161、`factory.py` 146、`__init__.py` 6） | RM-05 | 由 orchestrator、連線 worker、reconciler 重寫 |
+| `apps/md/src/mftik_md/rpc/sessions.py` | 151 行 | RM-05 | attach / detach / list 整組消失，改成 `md.intent.*`（IF-01、IF-09） |
+| `apps/td/src/mftik_td/session/manager.py` | 1,711 行 | RM-06 | 拆成 TD orchestrator 和帳號 worker；lease、reaper、attach / detach 刪除；下單與帳號 RPC 的 handler 由 IF-11 定介面、B6-02 / B6-08 重寫 |
+| `apps/td/src/mftik_td/rpc/sessions.py` | 131 行 | RM-06 | 同上，改成 `td.intent.*` |
+| `apps/api/src/mftik_api/orchestrate.py` | 538 行 | RM-08 | 只剩 start/end，預估少於 250 行 |
+| `packages/common/src/mftik/broker/link.py`（`LeasedSessionLink`） | — | RM-07 | 刪除，由 `procman.report.*` 與 intent owner GC 取代（§8.2） |
+| `packages/common/src/mftik/exchange/wire.py` | 768 行 | B7 | 搬進連線 worker 的 reconciler，連同各 adapter socket 的訂閱管理 |
+
+**不在刪除清單裡（B0-05 查核，容易誤刪）：**
+
+- `apps/td/src/mftik_td/session/factory.py`（329 行）和 `session/session.py`（1,440 行）是「`api_id` → venue client → `Session`」那一層，F35 的常駐層與交易層都要用，B4-05 搬移而不刪除。
+- `apps/md/src/mftik_md/fetch/*`、`tape.py`、`tape_store.py`、`rpc/tape.py` 保留（RM-05 的「留下」）。
+- `packages/db/src/mftik_db/repositories/session.py` 的 `mark_done` / `mark_live` / `list_sessions` / `get_by_session_id` / `create_live` / `mark_finished` / `count_by_instance` / `list_live_for_origin` 有大量 API 呼叫端（`routes/sts.py`、`routes/board.py`、`routes/stats.py`、`routes/td.py`、`routes/apis.py`、`routes/registry.py`、`ws.py`、`alert_match.py`），RM 只刪各平面 `db.py` 的包裝與接線。只有 `remember`、`bump_rebuild_count`、`reset_rebuild_count` 沒有其他呼叫端，由 RM-01 刪除。
+- `interrupted` 這個 session 狀態（§5.2 要刪）的讀取端在 `packages/db` 的 `SessionStatus`、API 的 `_ATTENTION` / `ack_session` / `get_stats` / `schemas.py`，以及前端 9 個檔案。RM 只刪寫入端；讀取端在 B10-01 與 B10-03。
 
 ## 附錄 C：B0 量測結果
 
