@@ -17,18 +17,14 @@ writing its aggregation twice and hoping the two agree. Pass ``on_print``
 and the read does not keep those objects. Omit it and the slice carries
 them, which is what existing callers read.
 
-A read hands back up to :data:`DEFAULT_LIMIT` prints, and working through
-that many of them is long enough to cost a session its market data. The
-read paces itself with :func:`slice_deadline` and :func:`breathe`; a loop
-over what it returns has to pace itself with the same two.
+A read hands back up to :data:`DEFAULT_LIMIT` prints and parses them in one
+stretch, without handing the loop back as it goes.
 """
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import logging
-import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -86,56 +82,6 @@ LOG_CHUNK = 1_000
 #: should pass its own. ``0`` restores the older, absolute behaviour: no gap is
 #: tolerable, and anything before one is dropped.
 DEFAULT_MAX_GAP_MS = 30_000
-
-#: How long a tape read may compute before returning to the loop.
-#:
-#: A session is one worker process on one loop, and the task watching its MD
-#: acknowledgements is on that loop. The heartbeat interval is 1s and the fuse
-#: is three missed intervals, so a warm-up that does not await stops that
-#: watch seeing the acks and fails its own session — the stall stays with the
-#: strategy that wrote it, but it still ends the session. A slice leaves most
-#: of that interval for the other tasks. ``time.perf_counter`` rather than the
-#: loop clock: on uvloop that clock steps in milliseconds.
-SLICE_S = 0.05
-
-
-def slice_deadline() -> float:
-    """When the current compute slice must return to the loop.
-
-    Opens a stretch of computation that :func:`breathe` then paces. Keep the
-    number it returns and hand it back on every call::
-
-        deadline = slice_deadline()
-        for record in tape.records:
-            deadline = await breathe(deadline)
-            self._fold(record)
-    """
-    return time.perf_counter() + SLICE_S
-
-
-async def breathe(deadline: float) -> float:
-    """Hand the loop back once ``deadline`` has passed. Returns the next one.
-
-    For a strategy chewing through something long enough to matter — the up
-    to :data:`DEFAULT_LIMIT` prints one :meth:`StrategyTape.read` can hand
-    over, a fit computed in ``on_start``. A hook that does not await stops
-    this session's heartbeat task reading MD's acknowledgements, and once
-    one has been unseen for ``LEASE_HEARTBEAT_INTERVAL_S`` ×
-    ``LEASE_MISS_LIMIT`` that task fails its own session with ``md feed
-    from {instance} stopped: session can no longer run``. That is ~3s, and
-    the clock starts at the last ack rather than at the stall, so stay well
-    under it.
-
-    Awaiting this does not, by itself, let another task run. While the
-    slice still has time the coroutine returns without suspending, and the
-    caller continues in the same turn. Only the ``sleep(0)`` yields — one
-    reschedule, not a timer — so a heartbeat waiting on this loop can
-    publish before the next slice.
-    """
-    if time.perf_counter() < deadline:
-        return deadline
-    await asyncio.sleep(0)
-    return slice_deadline()
 
 
 class TapeFeedNotAttached(LookupError):
@@ -289,15 +235,6 @@ class StrategyTape:
         is what a caller looping ``records`` is reading. History and the
         live hooks still see one :class:`~mftik.exchange.models.Trade`.
 
-        This yields to the loop as it parses, and the check it makes before
-        each record counts whatever the previous ``on_print`` call spent —
-        so an ordinary callback, sync or async, needs nothing added. Only a
-        single call long enough to matter on its own does: make that
-        callback ``async`` and :func:`breathe` inside it. A plain loop over
-        :attr:`TapeSlice.records` after this returns has no such pacing and
-        has to add it, or a warm-up big enough to be worth reading fails the
-        session for market data it stopped acknowledging.
-
         A feed this session never attached raises
         :class:`TapeFeedNotAttached`. An empty slice from the right MD is a
         normal answer: nothing has ever subscribed, recording is off, or
@@ -339,7 +276,6 @@ class StrategyTape:
         # A callback keeps what it wants. Without one, the slice is the
         # only place the prints go, and leaving it empty is a warm-up that
         # reads nothing and raises nothing.
-        deadline = slice_deadline()
         count = 0
         dropped = 0
         logged = 0
@@ -355,7 +291,6 @@ class StrategyTape:
         while oldest_first:
             page = oldest_first.popleft()
             for record_ms, fields in page:
-                deadline = await breathe(deadline)
                 # The record's stamp is the recorder's clock at append time,
                 # which is what the continuity mark is measured against. The
                 # venue's own ts rides on the record and is what the strategy
@@ -381,15 +316,13 @@ class StrategyTape:
                     pending.append(parsed)
                     logged += 1
                     if len(pending) >= LOG_CHUNK:
-                        deadline = await _flush_log(
-                            log, feed, pending, log_offset, deadline
-                        )
+                        await _flush_log(log, feed, pending, log_offset)
                         log_offset += len(pending)
                         pending = []
             del page
 
         if pending:
-            await _flush_log(log, feed, pending, log_offset, deadline)
+            await _flush_log(log, feed, pending, log_offset)
 
         # A gap the handed prints do not reach back to is not a hole in
         # them. This is also what keeps the list bounded over time: gaps
@@ -508,9 +441,8 @@ async def _flush_log(
     feed: str,
     records: list[Trade],
     offset: int,
-    deadline: float,
-) -> float:
-    """Queue one chunk of prints. Returns the slice deadline after yielding.
+) -> None:
+    """Queue one chunk of prints.
 
     The one record of a read whose answer cannot be inferred from anything
     else on disk. MD's tape is the only copy, it expires within hours, and a
@@ -524,7 +456,6 @@ async def _flush_log(
     the queue unserialized; dumping them here would put the warm-up back on
     the event loop. The chunk is not kept beside that queue.
     """
-    deadline = await breathe(deadline)
     log.record(
         "read",
         "tape.records",
@@ -534,7 +465,6 @@ async def _flush_log(
         count=len(records),
         payload=records,
     )
-    return deadline
 
 
 def _parse(
