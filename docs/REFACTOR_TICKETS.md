@@ -1,6 +1,6 @@
 # REFACTOR_TICKETS — 平面進程化重構的工作票
 
-> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.26。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
+> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.27。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
 >
 > 每張票都有描述、範圍、驗收、依賴。驗收寫成別人能檢查的事：測試名稱、grep 結果、量測數字、文件章節。
 
