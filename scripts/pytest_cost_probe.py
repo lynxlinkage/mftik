@@ -44,9 +44,15 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: Where a frame chain stops belonging to the task that is running. Under
+#: uvloop the chain ends on its own — the loop steps tasks from Cython, so
+#: there is no Python frame below the coroutine — but the suite can also be
+#: asked to run on the stdlib loop, where these appear.
+_TASK_EDGE = ("asyncio/tasks.py", "asyncio/events.py", "asyncio/base_events.py")
+
 _seconds: dict[str, float] = defaultdict(float)
 _calls: dict[str, int] = defaultdict(int)
-_sites: dict[str, float] = defaultdict(float)
+_sites: dict[tuple[str, str], float] = defaultdict(float)
 _records: list[dict[str, Any]] = []
 _phases: dict[str, dict[str, float]] = {}
 
@@ -57,31 +63,57 @@ def _reset() -> None:
     _sites.clear()
 
 
-def _charge(bucket: str, elapsed: float, site: str | None = None) -> None:
-    _seconds[bucket] += elapsed
-    _calls[bucket] += 1
+def _charge(
+    bucket: str, elapsed: float, site: str | None = None, suffix: str = ""
+) -> None:
+    _seconds[bucket + suffix] += elapsed
+    _calls[bucket + suffix] += 1
     if site is not None:
-        _sites[site] += elapsed
+        _sites[(bucket + suffix, site)] += elapsed
 
 
-def _caller_site() -> str:
-    """``path:lineno`` of the first frame outside this file.
-
-    The sleep that makes a test slow is often not in the test — it is in the
-    heartbeat loop or the reconnect backoff the test is waiting on, and the
-    difference is the whole point of the ticket's cause tags.
-    """
-    frame = sys._getframe(1)
-    while frame is not None and frame.f_code.co_filename == __file__:
-        frame = frame.f_back
-    if frame is None:
-        return "<unknown>"
-    path = Path(frame.f_code.co_filename)
+def _shown(filename: str, lineno: int) -> str:
+    path = Path(filename)
     try:
-        shown = path.relative_to(_REPO_ROOT)
+        shown: Path = path.relative_to(_REPO_ROOT)
     except ValueError:
         shown = Path(*path.parts[-2:])
-    return f"{shown}:{frame.f_lineno}"
+    return f"{shown}:{lineno}"
+
+
+def _survey() -> tuple[str, bool]:
+    """``(call site, is this the test's own task)`` for the caller.
+
+    Two different things wait: the test, and the loops running behind it. A
+    heartbeat task sleeping a second per beat and a test sleeping a second are
+    not the same cost — only the second one is time the suite could not have
+    spent otherwise — and summing them produced a "sleep" total twice the wall
+    time of the run.
+
+    So the walk stops at the edge of the running task and asks whether the
+    test function is one of its frames. Production code the test awaited counts
+    as the test; a helper the test started with ``create_task`` does not, even
+    when it lives in the same file.
+    """
+    frame = sys._getframe(1)
+    site = None
+    while frame is not None:
+        code = frame.f_code
+        filename = code.co_filename
+        if filename.endswith(_TASK_EDGE):
+            break
+        if filename != __file__:
+            if site is None:
+                site = _shown(filename, frame.f_lineno)
+            # The test function itself, not just any frame in its module: a
+            # heartbeat helper defined beside the test is still a background
+            # loop. Both the file and the function have to be named `test_*`.
+            if code.co_name.startswith("test_") and filename.rpartition("/")[
+                2
+            ].startswith("test_"):
+                return site, True
+        frame = frame.f_back
+    return site or "<unknown>", False
 
 
 def _wrap_async(owner: Any, name: str, bucket: str) -> None:
@@ -116,12 +148,17 @@ def _install() -> None:
         # that way; counting them would bury the waits that cost real time.
         if not delay or delay <= 0:
             return await real_sleep(delay, *args, **kwargs)
-        site = _caller_site()
+        site, on_test = _survey()
         start = time.perf_counter()
         try:
             return await real_sleep(delay, *args, **kwargs)
         finally:
-            _charge("sleep", time.perf_counter() - start, site=site)
+            _charge(
+                "sleep",
+                time.perf_counter() - start,
+                site=site,
+                suffix="" if on_test else "_bg",
+            )
 
     asyncio.sleep = measured_sleep
 
@@ -129,15 +166,23 @@ def _install() -> None:
 
     async def measured_wait_for(fut: Any, timeout: Any = None) -> Any:
         # Only a wait_for that *timed out* is time spent waiting rather than
-        # working, so only that case is charged. It is reported on its own and
-        # never added to a total: the coroutine inside may have been charged
-        # to another bucket already.
-        site = _caller_site()
+        # working, so only that case is charged. The lease heartbeat is one of
+        # these rather than a sleep: `session.py` beats by waiting on its stop
+        # event with the interval as the timeout.
+        #
+        # Reported on its own and never added to a total: the coroutine inside
+        # may have been charged to another bucket already.
+        site, on_test = _survey()
         start = time.perf_counter()
         try:
             return await real_wait_for(fut, timeout)
         except TimeoutError:
-            _charge("wait_timeout", time.perf_counter() - start, site=site)
+            _charge(
+                "timeout",
+                time.perf_counter() - start,
+                site=site,
+                suffix="" if on_test else "_bg",
+            )
             raise
 
     asyncio.wait_for = measured_wait_for
@@ -193,12 +238,15 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None):
             "phases": phases,
             "seconds": {k: round(v, 4) for k, v in _seconds.items() if v},
             "calls": dict(_calls),
-            # Three is enough to name a cause and short enough to read.
+            # Four is enough to name a cause and short enough to read.
             "wait_sites": sorted(
-                ((site, round(sec, 4)) for site, sec in _sites.items()),
-                key=lambda pair: pair[1],
+                (
+                    (bucket, site, round(sec, 4))
+                    for (bucket, site), sec in _sites.items()
+                ),
+                key=lambda row: row[2],
                 reverse=True,
-            )[:3],
+            )[:4],
         }
     )
 

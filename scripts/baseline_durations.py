@@ -35,9 +35,11 @@ BUCKETS = (
     "nats_request",
     "nats_other",
     "sleep",
+    "sleep_bg",
     "subprocess",
     "pg_connect",
-    "wait_timeout",
+    "timeout",
+    "timeout_bg",
 )
 NATS_BUCKETS = ("nats_connect", "nats_request", "nats_other")
 
@@ -94,6 +96,7 @@ def dominant(record: dict[str, Any], total: float) -> str:
     nats = sum(seconds.get(k, 0.0) for k in NATS_BUCKETS)
     candidates = {
         "sleep": seconds.get("sleep", 0.0),
+        "timeout": seconds.get("timeout", 0.0),
         "nats": nats,
         "subprocess": seconds.get("subprocess", 0.0),
         "postgres": seconds.get("pg_connect", 0.0),
@@ -184,12 +187,15 @@ def main() -> None:
                 test["nodeid"],
                 f"{test['time']:.2f}",
                 f"{seconds.get('sleep', 0.0):.2f}",
+                f"{seconds.get('timeout', 0.0):.2f}",
                 f"{nats:.2f}",
                 f"{seconds.get('subprocess', 0.0):.2f}",
                 f"{seconds.get('pg_connect', 0.0):.2f}",
-                f"{seconds.get('wait_timeout', 0.0):.2f}",
                 dominant(record, record.get("total") or test["time"]),
-                "; ".join(f"{site} {sec:.2f}s" for site, sec in sites) or "—",
+                "; ".join(
+                    f"{bucket} {site} {sec:.2f}s" for bucket, site, sec in sites
+                )
+                or "—",
             ]
         )
     print(
@@ -199,12 +205,12 @@ def main() -> None:
                 "test",
                 "s",
                 "sleep",
+                "timeout",
                 "nats",
                 "subproc",
                 "pg conn",
-                "timeout",
                 "proposed",
-                "top wait sites",
+                "top waits, own task and background",
             ],
         )
     )
@@ -261,21 +267,21 @@ def main() -> None:
         )
 
     print("\n## Worst wait call sites, suite-wide\n")
-    sites: dict[str, float] = defaultdict(float)
+    sites: dict[tuple[str, str], float] = defaultdict(float)
     for record in probe.values():
-        for site, value in record.get("wait_sites", []):
-            sites[site] += value
+        for bucket, site, value in record.get("wait_sites", []):
+            sites[(bucket, site)] += value
     print(
         table(
             [
-                [site, f"{value:.1f}"]
-                for site, value in sorted(
+                [bucket, site, f"{value:.1f}"]
+                for (bucket, site), value in sorted(
                     sites.items(), key=lambda kv: -kv[1]
                 )[:30]
             ],
             [
-                "call site of a `sleep` or a `wait_for` that timed out "
-                "(top three per test only)",
+                "bucket",
+                "call site (top four per test only)",
                 "seconds",
             ],
         )
