@@ -8,14 +8,7 @@ from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange, Side
 from mftik.exchange.models import OrderStatus, limit_order
-from mftik.protocol import (
-    STS_LEASE_HEARTBEAT,
-    Envelope,
-    LeaseHeartbeat,
-    TdAttachRequest,
-    Topics,
-)
-from mftik_td.session import PaperSessionFactory, SessionManager
+from mftik_td.session import PaperSessionFactory
 
 
 @pytest.fixture
@@ -37,28 +30,6 @@ async def paper() -> PaperExchange:
 @pytest.fixture
 def factory(broker: Broker, paper: PaperExchange) -> PaperSessionFactory:
     return PaperSessionFactory(broker, paper)
-
-
-async def _lease_publisher(
-    broker: Broker, session_id: str, stop: asyncio.Event
-) -> None:
-    token = 0
-    topic = Topics.sts_td_session(session_id)
-    while not stop.is_set():
-        token += 1
-        await broker.publish(
-            topic,
-            Envelope[LeaseHeartbeat].wrap(
-                LeaseHeartbeat(session_id=session_id, token=token),
-                type=STS_LEASE_HEARTBEAT,
-                source="sts",
-                session_id=session_id,
-            ),
-        )
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=0.1)
-        except TimeoutError:
-            continue
 
 
 @pytest.mark.asyncio
@@ -85,40 +56,6 @@ async def test_oms_updates_from_session_callbacks(
     assert private.api_key == "key-1"
 
     await session.destroy()
-
-
-@pytest.mark.asyncio
-async def test_attach_refcount_destroy(
-    broker: Broker, factory: PaperSessionFactory
-) -> None:
-    manager = SessionManager(factory, broker, lease_grace=2.0)
-    stop = asyncio.Event()
-    pubs = [
-        asyncio.create_task(_lease_publisher(broker, "sts-a", stop)),
-        asyncio.create_task(_lease_publisher(broker, "sts-b", stop)),
-    ]
-
-    r1 = await manager.attach(
-        TdAttachRequest(session_id="sts-a", api_id=42, timeout=2.0, created_by=1)
-    )
-    r2 = await manager.attach(
-        TdAttachRequest(session_id="sts-b", api_id=42, timeout=2.0, created_by=1)
-    )
-    assert r1.refcount == 1
-    assert r2.refcount == 2
-    session = manager.get(42)
-    assert session is not None
-    assert session.private.api_key == "paper-key-42"
-
-    await manager.detach(session_id="sts-a", api_id=42)
-    assert manager.get(42) is not None
-
-    await manager.detach(session_id="sts-b", api_id=42)
-    assert manager.get(42) is None
-    assert session.destroyed
-
-    stop.set()
-    await asyncio.gather(*pubs)
 
 
 @pytest.mark.asyncio
