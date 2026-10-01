@@ -890,7 +890,7 @@
           "registry"
         ],
         "summary": "Add Strategy",
-        "description": "Copy a strategy's files into this node's public or private registry.\n\nThen tell STS to re-read the registry, and say whether it worked. Writing\nthe files is only half of an add: STS imports the registry at boot, so\nuntil it re-scans, a deploy naming this strategy answers\n``unknown_strategy`` \u2014 and a *replace* is worse, because the deploy\nsucceeds and runs the code from before the edit.\n\nThe reload not working does not undo the add. The files are on disk and\nthe next STS restart will find them, so this answers 200 with ``loaded``\nfalse rather than a 5xx that would invite a retry of a write that already\nhappened.",
+        "description": "Copy a strategy's files into this node's public or private registry.\n\nThen send the same files to every enabled STS, which writes them onto\nits own registry and re-scans. The API disk and an STS disk are not the\nsame volume. Until that copy lands, a deploy naming this strategy\nanswers ``unknown_strategy`` \u2014 and a *replace* is worse, because the\ndeploy succeeds and runs the code from before the edit.\n\nA sync that does not land does not undo the add. The files are on the\nAPI disk, so this answers 200 with ``loaded`` false rather than a 5xx\nthat would invite a retry of a write that already happened. ``load_error``\nnames the instance that does not have the tree, and why.",
         "operationId": "add_strategy_registry_v1_add_post",
         "requestBody": {
           "content": {
@@ -951,7 +951,7 @@
           "registry"
         ],
         "summary": "Connect",
-        "description": "Name a peer, check protocol, and pull everything it publishes.\n\nThen reload, for the same reason ``add`` does: pulling writes trees into\nthe registry, and the process that runs them imported it at boot.\n``loaded`` is which of the pulled strategies STS can now resolve \u2014 not\nnecessarily all of them, since a pulled tree can collide with a bundled\nname or fail to import here.",
+        "description": "Name a peer, check protocol, and pull everything it publishes.\n\nThen copy each pulled tree onto every STS and rescan, for the same\nreason ``add`` does. ``loaded`` is which of the pulled strategies every\nSTS can now resolve \u2014 not necessarily all of them, since a pulled tree\ncan collide with a bundled name or fail to import here.",
         "operationId": "connect_registry_v1_remotes_post",
         "requestBody": {
           "content": {
@@ -1033,7 +1033,7 @@
           "registry"
         ],
         "summary": "Disconnect Remote",
-        "description": "Drop the named peer and the copy pulled from it.\n\nRefuses while any live STS session still uses a strategy pulled from\nthis peer \u2014 stop those sessions first.\n\nReloads afterwards so STS stops resolving what it just lost. Unlike the\nother three, this one has nothing useful to put in the response: the\nremote is gone from this node either way, and a reload that could not be\ndelivered leaves stale keys that the next restart clears. It goes to the\nlog instead.",
+        "description": "Drop the named peer and the copy pulled from it.\n\nRefuses while any live STS session still uses a strategy pulled from\nthis peer \u2014 stop those sessions first.\n\nThen deletes those trees on every STS. Unlike the other three, this one\nhas nothing useful to put in the response: the remote is gone from this\nnode either way, and a sync that could not be delivered leaves stale\nkeys until that STS next starts and catches up. It goes to the log.",
         "operationId": "disconnect_remote_registry_v1_remotes__name__delete",
         "parameters": [
           {
@@ -1376,7 +1376,7 @@
           "sts"
         ],
         "summary": "List Strategy Types",
-        "description": "Deployable strategies, with the template each one starts from.",
+        "description": "Deployable strategies, with the template each one starts from.\n\nA registry type is listed only when at least one enabled STS has it\nloaded, and ``instances`` says which. No answer from any STS leaves the\nAPI store's listing in place \u2014 a census miss is not \"nothing is\ndeployable\".",
         "operationId": "list_strategy_types_sts_types_get",
         "responses": {
           "200": {
@@ -7037,6 +7037,20 @@
             "type": "boolean",
             "title": "Env Ok",
             "default": true
+          },
+          "instances": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instances"
           }
         },
         "type": "object",

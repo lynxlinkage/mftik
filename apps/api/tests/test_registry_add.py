@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 from db_harness import a_database, an_owner
-from fanout_harness import patch_authoritative_anycast
+from fanout_harness import UnansweredBroker, patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.protocol import (
-    STS_REGISTRY_RELOAD,
-    StsRegistryReloadResult,
-    StsRegistryReloadResultEnvelope,
+    STS_REGISTRY_SYNC,
+    StsRegistrySyncRequest,
+    StsRegistrySyncResult,
+    StsRegistrySyncResultEnvelope,
 )
 from mftik.registry import RegistryStore, qualify
 from mftik_api import orchestrate
@@ -30,6 +32,7 @@ from mftik_api.routes.registry import (
 )
 from mftik_api.routes.sts import deploy, list_strategy_types, strategy_type_template
 from mftik_api.schemas import RegistryAddBody, StrategyDeployBody
+from mftik_api.sts_fanout import reconcile_instance
 from mftik_db.repositories import StsSessionRepository
 
 _TINY = """\
@@ -66,12 +69,12 @@ def _named_sts_without_a_database(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class ReloadingBroker:
-    """Stands in for the STS that answers ``sts.registry.reload``.
+    """Stands in for the STS that answers ``sts.registry.sync``.
 
     It reports back whatever qualified keys it is told to, so a test can say
     "STS loaded this" or "STS did not" without a strategy runtime. ``None``
     means STS answers with every key the store holds, which is what a healthy
-    one does.
+    shared-volume process does after the API has already written the tree.
     """
 
     def __init__(self, loaded: list[str] | None = None) -> None:
@@ -84,7 +87,7 @@ class ReloadingBroker:
         return self
 
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
-        assert envelope.type == STS_REGISTRY_RELOAD
+        assert envelope.type == STS_REGISTRY_SYNC
         self.calls += 1
         self.subjects.append(subject)
         loaded = self._loaded
@@ -92,9 +95,9 @@ class ReloadingBroker:
             loaded = [
                 qualify(rec.origin, rec.type) for rec in self._store.list_all()
             ]
-        return StsRegistryReloadResultEnvelope.wrap(
-            StsRegistryReloadResult(loaded=loaded),
-            type=STS_REGISTRY_RELOAD,
+        return StsRegistrySyncResultEnvelope.wrap(
+            StsRegistrySyncResult(loaded=loaded),
+            type=STS_REGISTRY_SYNC,
             source="sts",
         )
 
@@ -210,7 +213,7 @@ async def test_types_include_private_and_public(tmp_path: Path) -> None:
         broker=_broker(store),
     )
 
-    listed = await list_strategy_types(store=store)
+    listed = await list_strategy_types(store=store, broker=UnansweredBroker())
 
     assert "private::Tiny" in listed.types
     assert "public::Tiny" in listed.types
@@ -222,7 +225,9 @@ async def test_types_include_private_and_public(tmp_path: Path) -> None:
     noop = next(t for t in listed.templates if t.type == "NoopStrategy")
     assert noop.source == "bundled"
 
-    template = await strategy_type_template("public::Tiny", store=store)
+    template = await strategy_type_template(
+        "public::Tiny", store=store, broker=UnansweredBroker()
+    )
     assert template.type == "public::Tiny"
     assert template.yaml == "sts: {}\n"
 
@@ -238,7 +243,7 @@ async def test_picker_marks_a_tree_that_needs_extras(
         store=store,
         broker=_broker(store),
     )
-    listed = await list_strategy_types(store=store)
+    listed = await list_strategy_types(store=store, broker=UnansweredBroker())
     row = next(t for t in listed.templates if t.type == "private::Tiny")
     assert row.requires == ["numpy"]
     assert row.env_ok is False
@@ -338,10 +343,12 @@ async def test_add_keeps_strategy_yml_as_the_template(tmp_path: Path) -> None:
     written = tmp_path / "registry" / "private" / "Tiny" / "strategy.yml"
     assert written.read_text() == _YML
 
-    listed = await list_strategy_types(store=store)
+    listed = await list_strategy_types(store=store, broker=UnansweredBroker())
     tiny = next(t for t in listed.templates if t.type == "private::Tiny")
     assert tiny.yaml == _YML
-    template = await strategy_type_template("private::Tiny", store=store)
+    template = await strategy_type_template(
+        "private::Tiny", store=store, broker=UnansweredBroker()
+    )
     assert template.yaml == _YML
 
 
@@ -383,7 +390,7 @@ async def test_published_list_is_public_only(tmp_path: Path) -> None:
     assert detail.contents == {"strategy.py": _TINY}
     assert detail.origin == "public"
 
-    listed = await list_strategy_types(store=store)
+    listed = await list_strategy_types(store=store, broker=UnansweredBroker())
     assert "private::Tiny" in listed.types
     assert "public::Tiny" in listed.types
     assert "node1::Tiny" in listed.types
@@ -476,6 +483,135 @@ async def test_disconnect_does_not_treat_node10_as_node1(
     out = await disconnect_remote("node1", store=store, broker=_broker(store))
     assert out.name == "node1"
     assert store.get_remote("node1") is None
+
+
+async def test_an_oversized_tree_still_rescans_a_shared_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file is already on the disk the STS scans. Do not skip the rescan."""
+    from mftik_api import sts_fanout
+
+    monkeypatch.setattr(sts_fanout, "REGISTRY_SYNC_BUDGET", 40)
+    store = RegistryStore(tmp_path)
+    broker = _broker(store)
+    out = await add_strategy(
+        RegistryAddBody(files={"strategy.py": _TINY}),
+        store=store,
+        broker=broker,
+    )
+    assert out.loaded is True
+    assert broker.calls >= 1
+    assert (tmp_path / "registry" / "private" / "Tiny" / "strategy.py").is_file()
+
+
+async def test_a_reconcile_cannot_prune_an_oversized_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The push's write used to land inside a retain list that omitted it.
+
+    On a shared disk the prune deletes the API's own copy, and an oversized
+    tree has no bytes in the following sync to put it back.
+    """
+    from mftik_api import sts_fanout
+
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    monkeypatch.setattr(sts_fanout, "REGISTRY_SYNC_BUDGET", 40)
+    store = RegistryStore(tmp_path)
+    store.registry_dir.mkdir(parents=True)
+    tree = tmp_path / "registry" / "private" / "Tiny"
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    pruned: list[str] = []
+
+    class Broker:
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            request = StsRegistrySyncRequest.model_validate(envelope.payload)
+            if request.retain is not None:
+                entered.set()
+                await release.wait()
+                retain = set(request.retain)
+                for rec in list(store.list_all()):
+                    key = qualify(rec.origin, rec.name)
+                    if key not in retain:
+                        store.discard(rec.name, origin=rec.origin)
+                        pruned.append(key)
+            loaded = [qualify(rec.origin, rec.type) for rec in store.list_all()]
+            return StsRegistrySyncResultEnvelope.wrap(
+                StsRegistrySyncResult(loaded=loaded),
+                type=STS_REGISTRY_SYNC,
+                source="sts",
+            )
+
+    broker = Broker()
+    reconcile_task = asyncio.create_task(reconcile_instance(broker, "sts"))
+    await entered.wait()
+    add_task = asyncio.create_task(
+        add_strategy(
+            RegistryAddBody(files={"strategy.py": _TINY}),
+            store=store,
+            broker=broker,
+        )
+    )
+    for _ in range(40):
+        if tree.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert not tree.exists()
+    release.set()
+    reconcile = await reconcile_task
+    added = await add_task
+    assert reconcile.error is None
+    assert pruned == []
+    assert tree.is_dir()
+    assert (tree / "strategy.py").read_text() == _TINY
+    assert added.loaded is True
+
+
+async def test_an_oversized_tree_on_a_split_disk_names_the_encoded_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mftik_api import sts_fanout
+
+    monkeypatch.setattr(sts_fanout, "REGISTRY_SYNC_BUDGET", 40)
+    store = RegistryStore(tmp_path)
+    broker = _broker(store, loaded=[])
+    out = await add_strategy(
+        RegistryAddBody(files={"strategy.py": _TINY}),
+        store=store,
+        broker=broker,
+    )
+    assert out.loaded is False
+    assert out.load_error is not None
+    assert "encoded size" in out.load_error
+    assert "broker payload limit" in out.load_error
+    assert "import error or name collision" not in out.load_error
+    assert broker.calls >= 1
+
+
+async def test_a_write_refusal_is_not_loaded_because_the_old_key_remains(
+    tmp_path: Path,
+) -> None:
+    store = RegistryStore(tmp_path)
+
+    class _Broker:
+        async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+            del subject, envelope, timeout
+            return StsRegistrySyncResultEnvelope.wrap(
+                StsRegistrySyncResult(
+                    loaded=["private::Tiny"],
+                    skipped={"private::Tiny": "write error: read-only"},
+                ),
+                type=STS_REGISTRY_SYNC,
+                source="sts",
+            )
+
+    out = await add_strategy(
+        RegistryAddBody(files={"strategy.py": _TINY}),
+        store=store,
+        broker=_Broker(),
+    )
+    assert out.loaded is False
+    assert "write error" in (out.load_error or "")
 
 
 async def test_unknown_remote_is_404(tmp_path: Path) -> None:

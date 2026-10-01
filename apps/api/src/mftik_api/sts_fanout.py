@@ -6,13 +6,13 @@ keeps its in-memory stamp until restart. MD attach and the event-log
 listing already walk the ``instances`` table. This is that walk for the
 control plane that must reach *every* interpreter.
 
-One enabled STS stays on ``Topics.STS``. Two or more go to
-``sts.{name}`` concurrently. A timeout, RPC error, or a missing /
-unreadable instance list fails the whole fan-out: a write has already
-committed the stamp, and the caller reports ``restart_required`` rather
-than pretending every process saw it. Anycast is still sent so the
-process that answers can adopt the write; ``in_sync`` stays false until
-the census is authoritative.
+Every enabled STS is addressed by name (``sts.{name}``), including when
+only one is declared. A disabled process still subscribed to the shared
+``sts`` subject must not be able to take a write meant for the enabled
+instance. Anycast is only the non-authoritative fallback: no enabled
+rows, or a table we cannot read. A timeout, RPC error, or that fallback
+fails the whole fan-out: a write has already committed, and the caller
+reports the miss rather than pretending every process saw it.
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 from mftik.broker import Broker
@@ -29,7 +30,9 @@ from mftik.environment import EnvStamp
 from mftik.protocol import (
     STS_ENV_SYNC,
     STS_REGISTRY_GENERATION,
+    STS_REGISTRY_LOADED,
     STS_REGISTRY_RELOAD,
+    STS_REGISTRY_SYNC,
     StsEnvPackagePin,
     StsEnvSyncRequest,
     StsEnvSyncRequestEnvelope,
@@ -37,11 +40,19 @@ from mftik.protocol import (
     StsRegistryGenerationRequest,
     StsRegistryGenerationRequestEnvelope,
     StsRegistryGenerationResult,
+    StsRegistryLoadedRequest,
+    StsRegistryLoadedRequestEnvelope,
+    StsRegistryLoadedResult,
     StsRegistryReloadRequest,
     StsRegistryReloadRequestEnvelope,
     StsRegistryReloadResult,
+    StsRegistrySyncRequest,
+    StsRegistrySyncRequestEnvelope,
+    StsRegistrySyncResult,
+    StsRegistryTreeOp,
     Topics,
 )
+from mftik.registry import RegistryError, RegistryStore, qualify
 from mftik_db.models.session import SessionDomain
 from mftik_db.repositories import InstanceRepository
 from mftik_db.session import session_scope
@@ -79,13 +90,37 @@ class FanoutReply[T]:
     error: str | None
 
 
+#: One JSON envelope must fit under NATS' default ``max_payload`` of 1 MiB.
+#: A tree past this is refused with a named limit, not sent in pieces.
+REGISTRY_SYNC_BUDGET = 700 * 1024
+
+
+class RegistryPayloadTooLarge(Exception):
+    """One tree cannot ride in a single broker message."""
+
+    def __init__(self, key: str, nbytes: int) -> None:
+        self.key = key
+        self.nbytes = nbytes
+        super().__init__(
+            f"{key} encoded size is {nbytes} bytes, over the "
+            f"{REGISTRY_SYNC_BUDGET} byte broker payload limit"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class StsFanoutResult:
-    """Intersection of loaded keys, whether every process matches the stamp."""
+    """Intersection of loaded keys, whether every process matches the stamp.
+
+    ``loaded_by`` and ``skipped`` are per instance. ``loaded`` stays the
+    intersection: a push is deployable only when every STS has the key.
+    ``skipped`` is label → qualified key → why that upsert is absent.
+    """
 
     loaded: frozenset[str]
     in_sync: bool
     error: str | None
+    loaded_by: dict[str, frozenset[str]] = field(default_factory=dict)
+    skipped: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def pins_of_stamp(stamp: EnvStamp) -> dict[str, tuple[str, str]]:
@@ -136,11 +171,14 @@ def format_errors(replies: list[FanoutReply[Any]]) -> str | None:
 
 
 async def list_targets() -> list[StsTarget]:
-    """Enabled STS subjects. Anycast when there is not more than one.
+    """Enabled STS subjects, each by name.
 
     Zero enabled rows, or a table we cannot read, still send anycast so
     the process that answers can adopt the write — but the target is
     marked not authoritative, and the caller must not claim in-sync.
+    One enabled row is ``sts.{name}`` too. Anycast would let a disabled
+    process that is still subscribed to ``sts`` take the write, and the
+    reply would be labeled with the enabled instance.
     """
     try:
         async with session_scope() as db:
@@ -165,10 +203,6 @@ async def list_targets() -> list[StsTarget]:
         return [
             StsTarget(name=None, subject=Topics.STS, authoritative=False)
         ]
-    if len(enabled) == 1:
-        return [
-            StsTarget(name=enabled[0].name, subject=Topics.STS, authoritative=True)
-        ]
     return [
         StsTarget(name=row.name, subject=Topics.sts(row.name))
         for row in enabled
@@ -181,9 +215,15 @@ async def fanout[T: BaseModel](
     make_envelope: Callable[[], Any],
     result_type: type[T],
     timeout: float = 5.0,
+    targets: list[StsTarget] | None = None,
 ) -> list[FanoutReply[T]]:
-    """Send one fresh envelope per target. Reusing an id would collide replies."""
-    targets = await list_targets()
+    """Send one fresh envelope per target. Reusing an id would collide replies.
+
+    ``targets`` overrides the census. A reconcile of one instance that just
+    started must not wait on every other STS.
+    """
+    if targets is None:
+        targets = await list_targets()
 
     async def one(target: StsTarget) -> FanoutReply[T]:
         try:
@@ -217,6 +257,104 @@ def _intersect_loaded(
         keys = set(reply.result.loaded)
         loaded = keys if loaded is None else loaded & keys
     return frozenset(loaded or ())
+
+
+def _per_target(
+    replies: list[FanoutReply[Any]],
+) -> tuple[dict[str, frozenset[str]], dict[str, dict[str, str]]]:
+    loaded_by: dict[str, frozenset[str]] = {}
+    skipped: dict[str, dict[str, str]] = {}
+    for reply in replies:
+        if reply.result is None:
+            continue
+        loaded_by[reply.target.label] = frozenset(reply.result.loaded)
+        raw = getattr(reply.result, "skipped", None)
+        if raw:
+            skipped[reply.target.label] = dict(raw)
+    return loaded_by, skipped
+
+
+@dataclass(frozen=True, slots=True)
+class SyncPlan:
+    """Ops that fit in a message, and upserts that do not.
+
+    An oversized tree is not sliced and is not a reason to drop the rest.
+    The caller still sends a rescan so a shared disk can load it.
+    """
+
+    batches: list[list[StsRegistryTreeOp]]
+    oversized: list[tuple[str, int]]
+
+
+def sync_batches(ops: list[StsRegistryTreeOp]) -> list[list[StsRegistryTreeOp]]:
+    """Split ops so each envelope stays under :data:`REGISTRY_SYNC_BUDGET`.
+
+    An empty op list is one empty batch: the caller still wants a rescan.
+    Oversized upserts are omitted here; :func:`plan_sync` reports them.
+    """
+    return plan_sync(ops).batches
+
+
+def plan_sync(ops: list[StsRegistryTreeOp]) -> SyncPlan:
+    """Batch what fits. Name what does not, and still leave a rescan batch."""
+    oversized: list[tuple[str, int]] = []
+    shippable: list[StsRegistryTreeOp] = []
+    for op in ops:
+        if op.op == "upsert":
+            size = len(op.model_dump_json().encode())
+            if size > REGISTRY_SYNC_BUDGET:
+                oversized.append((qualify(op.origin, op.name), size))
+                continue
+        shippable.append(op)
+    if not shippable:
+        return SyncPlan(batches=[[]], oversized=oversized)
+    batches: list[list[StsRegistryTreeOp]] = []
+    current: list[StsRegistryTreeOp] = []
+    current_size = 2
+    for op in shippable:
+        size = len(op.model_dump_json().encode())
+        if current and current_size + size + 1 > REGISTRY_SYNC_BUDGET:
+            batches.append(current)
+            current = []
+            current_size = 2
+        current.append(op)
+        current_size += size + 1
+    if current:
+        batches.append(current)
+    return SyncPlan(batches=batches, oversized=oversized)
+
+
+_ABSENT_ON_DISK = "not present on this registry disk"
+
+
+def _note_oversized(
+    loaded_by: dict[str, frozenset[str]],
+    skipped: dict[str, dict[str, str]],
+    oversized: list[tuple[str, int]],
+) -> None:
+    """Say why a tree that could not be shipped is still absent.
+
+    A rescan that loaded it (the file was already on that disk) stays
+    loaded. An import error already recorded is more specific than the
+    size, and wins.
+    """
+    for key, nbytes in oversized:
+        reason = str(RegistryPayloadTooLarge(key, nbytes))
+        for label, keys in loaded_by.items():
+            current = skipped.get(label, {}).get(key)
+            if key in keys and current is None:
+                continue
+            if current is not None and current != _ABSENT_ON_DISK:
+                continue
+            skipped.setdefault(label, {})[key] = reason
+
+
+def _without_skipped(
+    loaded: frozenset[str], skipped: dict[str, dict[str, str]]
+) -> frozenset[str]:
+    """A key an STS skipped did not take this write, even if the old class remains."""
+    bad = {key for reasons in skipped.values() for key in reasons}
+    return frozenset(key for key in loaded if key not in bad)
 
 
 async def reload_sts(broker: Broker) -> StsFanoutResult:
@@ -262,11 +400,245 @@ def _finish(
         return StsFanoutResult(
             loaded=frozenset(), in_sync=False, error=CENSUS_ERROR
         )
+    loaded_by, skipped = _per_target(replies)
     return StsFanoutResult(
         loaded=_intersect_loaded(replies),
         in_sync=in_sync,
         error=None,
+        loaded_by=loaded_by,
+        skipped=skipped,
     )
+
+
+#: Serialises a store mutation with the reconcile that snapshots it.
+#: ``store.add`` used to finish before this lock was taken. A reconcile
+#: that had already read ``retain`` then pruned the new tree, and on a
+#: shared volume that prune is the API's own disk. An oversized tree is
+#: not in the following sync payload, so nothing writes it back.
+_registry_lock = asyncio.Lock()
+
+
+@asynccontextmanager
+async def registry_mutation():
+    """Hold :data:`_registry_lock` across a disk write and its sync."""
+    async with _registry_lock:
+        yield
+
+
+def registry_manifest() -> tuple[list[StsRegistryTreeOp], list[str]]:
+    """Every tree on the API disk, and the keys a reconcile must keep.
+
+    Raises when the registry directory is missing or a tree cannot be
+    read. The caller must not prune on that failure: an empty read and a
+    failed read are different, and only the first means the disk should
+    match nothing.
+    """
+    store = RegistryStore.from_env()
+    if not store.registry_dir.is_dir():
+        raise RegistryError(
+            "API registry directory is missing; refusing to prune STS disks"
+        )
+    records = store.list_all()
+    ops: list[StsRegistryTreeOp] = []
+    retain: list[str] = []
+    for rec in records:
+        key = qualify(rec.origin, rec.name)
+        retain.append(key)
+        files = store.read_contents(rec)
+        ops.append(
+            StsRegistryTreeOp(
+                op="upsert",
+                origin=rec.origin,
+                name=rec.name,
+                digest=rec.digest,
+                files=files,
+            )
+        )
+    return ops, retain
+
+
+async def sync_registry(
+    broker: Broker,
+    ops: list[StsRegistryTreeOp],
+    *,
+    retain: list[str] | None = None,
+    targets: list[StsTarget] | None = None,
+) -> StsFanoutResult:
+    """Copy ``ops`` onto every enabled STS, then rescan on the last batch."""
+    async with _registry_lock:
+        return await _sync_unlocked(
+            broker, ops, retain=retain, targets=targets
+        )
+
+
+async def sync_registry_locked(
+    broker: Broker,
+    ops: list[StsRegistryTreeOp],
+    *,
+    retain: list[str] | None = None,
+    targets: list[StsTarget] | None = None,
+) -> StsFanoutResult:
+    """:func:`sync_registry` while the caller holds :func:`registry_mutation`."""
+    if not _registry_lock.locked():
+        raise RuntimeError(
+            "sync_registry_locked requires registry_mutation; "
+            "the write and the sync have to be one critical section"
+        )
+    return await _sync_unlocked(broker, ops, retain=retain, targets=targets)
+
+
+async def reconcile_instance(broker: Broker, name: str) -> StsFanoutResult:
+    """Push the API store to ``name``, and delete trees the store lacks.
+
+    One instance, not the census. A process that just started, or a row
+    that was just enabled, is the only disk that can be behind.
+    """
+    async with _registry_lock:
+        try:
+            ops, retain = registry_manifest()
+        except Exception as exc:
+            logger.exception(
+                "registry reconcile refused to read the API store"
+            )
+            return StsFanoutResult(
+                loaded=frozenset(),
+                in_sync=False,
+                error=f"API registry could not be read: {exc}",
+            )
+        return await _sync_unlocked(
+            broker,
+            ops,
+            retain=retain,
+            targets=[
+                StsTarget(
+                    name=name,
+                    subject=Topics.sts(name),
+                    authoritative=True,
+                )
+            ],
+        )
+
+
+async def _sync_unlocked(
+    broker: Broker,
+    ops: list[StsRegistryTreeOp],
+    *,
+    retain: list[str] | None = None,
+    targets: list[StsTarget] | None = None,
+) -> StsFanoutResult:
+    """Copy ``ops``, then rescan. Caller holds :data:`_registry_lock`.
+
+    A tree over the broker budget is left out of the payload and still
+    gets a rescan, so a shared disk can load a file that is already
+    there. ``retain`` on the last batch deletes keys the API store does
+    not have. ``None`` does not prune.
+    """
+    plan = plan_sync(ops)
+    merged: dict[str, dict[str, str]] = {}
+    replies: list[FanoutReply[Any]] = []
+    batches = plan.batches
+    for index, batch in enumerate(batches):
+        last = index == len(batches) - 1
+        # The rescan runs on the last batch only, so it is the only place
+        # that can say why an earlier batch's upsert did not load.
+        earlier = (
+            [
+                qualify(op.origin, op.name)
+                for prior in batches[:index]
+                for op in prior
+                if op.op == "upsert"
+            ]
+            if last
+            else []
+        )
+        # ``retain`` may be an empty list, which means prune everything.
+        # A falsy check would turn that into "do not prune".
+        batch_retain = retain if last else None
+        def _envelope(
+            batch: list[StsRegistryTreeOp] = batch,
+            last: bool = last,
+            earlier: list[str] = earlier,
+            batch_retain: list[str] | None = batch_retain,
+        ) -> StsRegistrySyncRequestEnvelope:
+            return StsRegistrySyncRequestEnvelope.wrap(
+                StsRegistrySyncRequest(
+                    trees=list(batch),
+                    reload=last,
+                    explain=earlier,
+                    retain=batch_retain,
+                ),
+                type=STS_REGISTRY_SYNC,
+                source="api",
+            )
+
+        replies = await fanout(
+            broker,
+            make_envelope=_envelope,
+            result_type=StsRegistrySyncResult,
+            timeout=30.0,
+            targets=targets,
+        )
+        _loaded_by, skipped = _per_target(replies)
+        for label, reasons in skipped.items():
+            # The first reason wins: an earlier batch's write failure is more
+            # specific than the last batch's rescan finding nothing there.
+            into = merged.setdefault(label, {})
+            for key, reason in reasons.items():
+                into.setdefault(key, reason)
+        error = format_errors(replies)
+        if error is not None or not _census_ok(replies):
+            return StsFanoutResult(
+                loaded=frozenset(),
+                in_sync=False,
+                error=error or CENSUS_ERROR,
+                loaded_by=_loaded_by,
+                skipped=merged,
+            )
+    loaded_by, _skipped = _per_target(replies)
+    _note_oversized(loaded_by, merged, plan.oversized)
+    return StsFanoutResult(
+        loaded=_without_skipped(_intersect_loaded(replies), merged),
+        in_sync=True,
+        error=None,
+        loaded_by=loaded_by,
+        skipped=merged,
+    )
+
+
+#: ``sts.registry.loaded`` is an in-memory read; a live STS answers at once.
+REGISTRY_CENSUS_TIMEOUT_S = 1.5
+
+
+async def registry_availability(
+    broker: Broker,
+) -> dict[str, frozenset[str]] | None:
+    """Label → keys that process has loaded. None when nobody answered.
+
+    A non-authoritative anycast answer is treated as unknown: the label
+    would be ``sts``, which is not an instance name the picker can match.
+    """
+    replies = await fanout(
+        broker,
+        make_envelope=lambda: StsRegistryLoadedRequestEnvelope.wrap(
+            StsRegistryLoadedRequest(),
+            type=STS_REGISTRY_LOADED,
+            source="api",
+        ),
+        result_type=StsRegistryLoadedResult,
+        # Every picker load waits on this. A dead STS should not add the
+        # full default RPC timeout to each page.
+        timeout=REGISTRY_CENSUS_TIMEOUT_S,
+    )
+    answered = [
+        reply
+        for reply in replies
+        if reply.result is not None and reply.target.authoritative
+    ]
+    if not answered:
+        return None
+    return {
+        reply.target.label: frozenset(reply.result.loaded) for reply in answered
+    }
 
 
 async def sync_sts(

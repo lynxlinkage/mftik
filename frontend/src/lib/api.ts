@@ -143,6 +143,11 @@ export type StrategyTemplate = {
 	requires?: string[];
 	/** Whether this node's applied extras cover `requires`. */
 	env_ok?: boolean;
+	/**
+	 * STS instances that have this registry type loaded.
+	 * Absent for bundled strategies and when the census could not be read.
+	 */
+	instances?: string[] | null;
 };
 
 export type EnvPackage = {

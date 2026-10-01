@@ -12,6 +12,7 @@ import logging
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 from mftik.environment import NodeEnv, unapproved_present
+from mftik.protocol import StsRegistryTreeOp
 from mftik.registry import (
     AddedStrategy,
     MissingRemoteExtras,
@@ -45,11 +46,72 @@ from mftik_api.schemas import (
     RegistryStrategyOut,
     RegistrySyncRow,
 )
-from mftik_api.sts_fanout import reload_sts
+from mftik_api.sts_fanout import (
+    StsFanoutResult,
+    registry_mutation,
+    sync_registry_locked,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/registry/v1", tags=["registry"])
+
+
+def _upsert(rec: AddedStrategy, files: dict[str, str]) -> StsRegistryTreeOp:
+    return StsRegistryTreeOp(
+        op="upsert",
+        origin=rec.origin,
+        name=rec.name,
+        digest=rec.digest,
+        files=files,
+    )
+
+
+def _delete_op(origin: str, name: str) -> StsRegistryTreeOp:
+    return StsRegistryTreeOp(op="delete", origin=origin, name=name)
+
+
+def _sync_failure(fanout: StsFanoutResult, *, stored: str, restart: str) -> str:
+    """Sentence for a fan-out that did not complete.
+
+    ``stored`` is already true on the API disk (``the strategy was stored``).
+    A payload that cannot fit in one broker message says so; anything else
+    is a timeout or a census miss, which already names the instance.
+    """
+    if fanout.error is not None and "broker payload limit" in fanout.error:
+        return (
+            f"{stored}, but it exceeds the broker payload limit and was not "
+            f"sent to STS ({fanout.error})."
+        )
+    return f"{stored}, but STS did not reload ({fanout.error}). {restart}"
+
+
+_ABSENT_ON_STS = "not present on this registry disk"
+_ABSENT_NAMED = "not present on its registry disk"
+
+
+def _missing_on(fanout: StsFanoutResult, key: str) -> str:
+    """Per-instance reason ``key`` did not take this write.
+
+    A skip wins over ``loaded``. The rescan can still list the previous
+    class when the new bytes were refused, and that is not "deployable".
+    STS says "this registry disk" because it is speaking about itself. Once
+    the instance name is in front of the clause, "its" is the sentence.
+    """
+    parts: list[str] = []
+    labels = list(fanout.loaded_by) + [
+        label for label in fanout.skipped if label not in fanout.loaded_by
+    ]
+    for label in labels:
+        reason = fanout.skipped.get(label, {}).get(key)
+        if reason is None and key in fanout.loaded_by.get(label, ()):
+            continue
+        if reason is None or reason == _ABSENT_ON_STS:
+            reason = _ABSENT_NAMED
+        parts.append(f"{label}: {reason}")
+    if not parts:
+        return "not present on its registry disk"
+    return "; ".join(parts)
 
 
 def _strategy_out(added: AddedStrategy) -> RegistryStrategyOut:
@@ -138,54 +200,56 @@ async def add_strategy(
 ) -> RegistryAddOut:
     """Copy a strategy's files into this node's public or private registry.
 
-    Then tell STS to re-read the registry, and say whether it worked. Writing
-    the files is only half of an add: STS imports the registry at boot, so
-    until it re-scans, a deploy naming this strategy answers
-    ``unknown_strategy`` — and a *replace* is worse, because the deploy
-    succeeds and runs the code from before the edit.
+    Then send the same files to every enabled STS, which writes them onto
+    its own registry and re-scans. The API disk and an STS disk are not the
+    same volume. Until that copy lands, a deploy naming this strategy
+    answers ``unknown_strategy`` — and a *replace* is worse, because the
+    deploy succeeds and runs the code from before the edit.
 
-    The reload not working does not undo the add. The files are on disk and
-    the next STS restart will find them, so this answers 200 with ``loaded``
-    false rather than a 5xx that would invite a retry of a write that already
-    happened.
+    A sync that does not land does not undo the add. The files are on the
+    API disk, so this answers 200 with ``loaded`` false rather than a 5xx
+    that would invite a retry of a write that already happened. ``load_error``
+    names the instance that does not have the tree, and why.
     """
-    try:
-        added = store.add(
-            body.files,
-            replace=body.replace,
-            origin=body.origin,
-            applied_extras=_applied_extras(),
-            present_extras=_present_extras(),
-        )
-    except RegistryConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except RegistryError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # The write and the sync share the lock reconcile uses to snapshot
+    # ``retain``. An oversized tree is not in that sync's payload, so a
+    # prune that raced the write would delete it from a shared disk.
+    async with registry_mutation():
+        try:
+            added = store.add(
+                body.files,
+                replace=body.replace,
+                origin=body.origin,
+                applied_extras=_applied_extras(),
+                present_extras=_present_extras(),
+            )
+        except RegistryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RegistryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    key = qualify(added.origin, added.type)
-    fanout = await reload_sts(broker)
-    keys, rpc_error = fanout.loaded, fanout.error
-    if rpc_error is not None:
+        key = qualify(added.origin, added.type)
+        fanout = await sync_registry_locked(
+            broker, [_upsert(added, store.read_contents(added))]
+        )
+    if fanout.error is not None:
         return RegistryAddOut(
             **_strategy_out(added).model_dump(),
             loaded=False,
-            load_error=(
-                f"the strategy was stored, but STS did not reload ({rpc_error}). "
-                "It will be picked up when STS next restarts."
+            load_error=_sync_failure(
+                fanout,
+                stored="the strategy was stored",
+                restart="It will be copied when that STS next starts.",
             ),
         )
-    if key in keys:
+    if key in fanout.loaded:
         return RegistryAddOut(**_strategy_out(added).model_dump(), loaded=True)
-    # STS answered and did not list it, so the scan reached this tree and
-    # rejected it. Its own log has the reason; what is knowable here is that
-    # deploying will not work, which is the part the caller has to act on.
-    logger.warning("STS reloaded but did not register %s", key)
+    logger.warning("STS synced but did not register %s", key)
     return RegistryAddOut(
         **_strategy_out(added).model_dump(),
         loaded=False,
         load_error=(
-            f"the strategy was stored, but STS did not load it as {key!r} — "
-            "check the STS log for the import error or name collision."
+            f"the strategy was stored, but {_missing_on(fanout, key)}"
         ),
     )
 
@@ -235,29 +299,44 @@ async def delete_strategy(
             ),
         )
 
-    try:
-        removed = store.remove(name, origin=origin)
-    except RegistryError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    async with registry_mutation():
+        try:
+            removed = store.remove(name, origin=origin)
+        except RegistryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    fanout = await reload_sts(broker)
-    keys, rpc_error = fanout.loaded, fanout.error
-    if rpc_error is not None:
-        error = (
-            f"the strategy was deleted, but STS did not reload ({rpc_error}). "
-            f"It will go on answering to {key!r} until it restarts."
+        fanout = await sync_registry_locked(
+            broker, [_delete_op(origin, removed.name)]
         )
-    elif key in keys:
-        # The files are gone and STS still lists the key. Nothing here can do
-        # anything about that, and an operator who deleted a strategy needs to
-        # know it is still deployable.
-        logger.error("STS still answers to %s after it was deleted", key)
-        error = (
-            f"the strategy was deleted, but STS still answers to {key!r}. "
-            "Restart STS."
+    if fanout.error is not None:
+        error = _sync_failure(
+            fanout,
+            stored="the strategy was deleted",
+            restart=(
+                "It will be removed from that STS when the process next starts."
+            ),
         )
     else:
-        error = None
+        # Absent from every process that answered. The intersection would
+        # call this unloaded when only one STS had dropped the key.
+        still = [
+            label
+            for label, keys in fanout.loaded_by.items()
+            if key in keys
+        ]
+        if still:
+            logger.error(
+                "STS still answers to %s after it was deleted: %s",
+                key,
+                ", ".join(still),
+            )
+            error = (
+                f"the strategy was deleted, but {', '.join(still)} still "
+                f"answers to {key!r}. It will be removed when that STS "
+                f"next starts."
+            )
+        else:
+            error = None
     return RegistryRemovedOut(
         **_strategy_out(removed).model_dump(),
         unloaded=error is None,
@@ -344,52 +423,65 @@ async def connect(
 ) -> RegistryConnectOut:
     """Name a peer, check protocol, and pull everything it publishes.
 
-    Then reload, for the same reason ``add`` does: pulling writes trees into
-    the registry, and the process that runs them imported it at boot.
-    ``loaded`` is which of the pulled strategies STS can now resolve — not
-    necessarily all of them, since a pulled tree can collide with a bundled
-    name or fail to import here.
+    Then copy each pulled tree onto every STS and rescan, for the same
+    reason ``add`` does. ``loaded`` is which of the pulled strategies every
+    STS can now resolve — not necessarily all of them, since a pulled tree
+    can collide with a bundled name or fail to import here.
     """
-    try:
-        result = await connect_remote(
-            store, name=body.name, url=body.url, token=body.token
-        )
-    except MissingRemoteExtras as exc:
-        # Structured, because the caller's next move depends on which names
-        # and whether each is absent or merely unapproved. A client that had
-        # to read this out of the sentence would break the first time the
-        # sentence changed — which is exactly what happened.
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": exc.code,
-                "message": str(exc),
-                "missing": exc.rows(),
-            },
-        ) from exc
-    except RegistryError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=502, detail=f"cannot reach remote: {exc}"
-        ) from exc
+    # Includes the peer HTTP. The trees land in this same section, and a
+    # reconcile must not snapshot ``retain`` between those writes.
+    async with registry_mutation():
+        try:
+            result = await connect_remote(
+                store, name=body.name, url=body.url, token=body.token
+            )
+        except MissingRemoteExtras as exc:
+            # Structured, because the caller's next move depends on which names
+            # and whether each is absent or merely unapproved. A client that had
+            # to read this out of the sentence would break the first time the
+            # sentence changed — which is exactly what happened.
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": exc.code,
+                    "message": str(exc),
+                    "missing": exc.rows(),
+                },
+            ) from exc
+        except RegistryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"cannot reach remote: {exc}"
+            ) from exc
 
-    fanout = await reload_sts(broker)
-    keys, rpc_error = fanout.loaded, fanout.error
+        fanout = await sync_registry_locked(
+            broker,
+            [_upsert(rec, store.read_contents(rec)) for rec in result.pulled],
+        )
     pulled_keys = {qualify(rec.origin, rec.type) for rec in result.pulled}
+    if fanout.error is not None:
+        load_error = _sync_failure(
+            fanout,
+            stored="the strategies were pulled",
+            restart="They are copied when that STS next starts.",
+        )
+    else:
+        missing = sorted(pulled_keys - fanout.loaded)
+        load_error = (
+            None
+            if not missing
+            else "the strategies were pulled, but "
+            + "; ".join(
+                f"{key}: {_missing_on(fanout, key)}" for key in missing
+            )
+        )
     return RegistryConnectOut(
         name=result.name,
         url=result.url,
         pulled=[_strategy_out(rec) for rec in result.pulled],
-        loaded=sorted(pulled_keys & keys),
-        load_error=(
-            None
-            if rpc_error is None
-            else (
-                f"the strategies were pulled, but STS did not reload "
-                f"({rpc_error}). They become deployable when it restarts."
-            )
-        ),
+        loaded=sorted(pulled_keys & fanout.loaded),
+        load_error=load_error,
     )
 
 
@@ -402,11 +494,10 @@ async def disconnect_remote(
     Refuses while any live STS session still uses a strategy pulled from
     this peer — stop those sessions first.
 
-    Reloads afterwards so STS stops resolving what it just lost. Unlike the
-    other three, this one has nothing useful to put in the response: the
-    remote is gone from this node either way, and a reload that could not be
-    delivered leaves stale keys that the next restart clears. It goes to the
-    log instead.
+    Then deletes those trees on every STS. Unlike the other three, this one
+    has nothing useful to put in the response: the remote is gone from this
+    node either way, and a sync that could not be delivered leaves stale
+    keys until that STS next starts and catches up. It goes to the log.
     """
     if store.get_remote(name) is None:
         raise HTTPException(status_code=404, detail=f"unknown remote: {name}")
@@ -429,13 +520,17 @@ async def disconnect_remote(
                 f"strategies. Stop these first: {listed}"
             ),
         )
-    remote = store.drop_remote(name)
-    fanout = await reload_sts(broker)
+    async with registry_mutation():
+        pulled = list(store.list_pulled_from(name))
+        remote = store.drop_remote(name)
+        fanout = await sync_registry_locked(
+            broker, [_delete_op(name, rec.name) for rec in pulled]
+        )
     rpc_error = fanout.error
     if rpc_error is not None:
         logger.warning(
-            "disconnected %s but STS did not reload (%s); it will go on "
-            "resolving that remote's strategies until it restarts",
+            "disconnected %s but STS did not reload (%s); that STS drops "
+            "the remote's strategies when it next starts",
             name,
             rpc_error,
         )

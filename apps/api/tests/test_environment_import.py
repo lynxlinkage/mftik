@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
-from fanout_harness import patch_authoritative_anycast
+from fanout_harness import UnansweredBroker, patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.envapply import ApplyFailed, ApplySpec
 from mftik.environment import NodeEnv
@@ -156,7 +156,7 @@ async def test_sklearn_object_confirm_installs_the_pypi_dist(env_dir: Path) -> N
     assert stamp.packages["sklearn"].dist == "scikit-learn"
 
     store.add({"strategy.py": _SKLEARN}, applied_extras={"sklearn": "1.6.1"})
-    listed = await list_strategy_types(store=store)
+    listed = await list_strategy_types(store=store, broker=UnansweredBroker())
     row = next(t for t in listed.templates if t.type == "private::UsesSklearn")
     assert row.requires == ["sklearn"]
     assert row.env_ok is True

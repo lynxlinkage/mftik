@@ -17,9 +17,9 @@ import pytest
 from fanout_harness import patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.protocol import (
-    STS_REGISTRY_RELOAD,
-    StsRegistryReloadResult,
-    StsRegistryReloadResultEnvelope,
+    STS_REGISTRY_SYNC,
+    StsRegistrySyncResult,
+    StsRegistrySyncResultEnvelope,
 )
 from mftik.registry import RegistryStore, qualify
 from mftik_api.broker_rpc import DomainRpcError
@@ -48,13 +48,13 @@ class HealthyBroker:
         self.calls = 0
 
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
-        assert envelope.type == STS_REGISTRY_RELOAD
+        assert envelope.type == STS_REGISTRY_SYNC
         self.calls += 1
-        return StsRegistryReloadResultEnvelope.wrap(
-            StsRegistryReloadResult(
+        return StsRegistrySyncResultEnvelope.wrap(
+            StsRegistrySyncResult(
                 loaded=[qualify(r.origin, r.type) for r in self.store.list_all()]
             ),
-            type=STS_REGISTRY_RELOAD,
+            type=STS_REGISTRY_SYNC,
             source="sts",
         )
 
@@ -63,9 +63,10 @@ class SkippingBroker:
     """An STS that reloads and refuses the tree — a bad import, say."""
 
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
-        return StsRegistryReloadResultEnvelope.wrap(
-            StsRegistryReloadResult(loaded=[]),
-            type=STS_REGISTRY_RELOAD,
+        assert envelope.type == STS_REGISTRY_SYNC
+        return StsRegistrySyncResultEnvelope.wrap(
+            StsRegistrySyncResult(loaded=[]),
+            type=STS_REGISTRY_SYNC,
             source="sts",
         )
 
@@ -77,9 +78,10 @@ class StuckBroker:
         self.keys = keys
 
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
-        return StsRegistryReloadResultEnvelope.wrap(
-            StsRegistryReloadResult(loaded=self.keys),
-            type=STS_REGISTRY_RELOAD,
+        assert envelope.type == STS_REGISTRY_SYNC
+        return StsRegistrySyncResultEnvelope.wrap(
+            StsRegistrySyncResult(loaded=self.keys),
+            type=STS_REGISTRY_SYNC,
             source="sts",
         )
 
@@ -152,7 +154,7 @@ async def test_add_says_so_when_sts_did_not_answer(tmp_path: Path) -> None:
     assert out.name == "Tiny"
     assert out.loaded is False
     assert "no reply from sts" in out.load_error
-    assert "restarts" in out.load_error
+    assert "next starts" in out.load_error
     # The add itself stands.
     assert [r.name for r in store.list_private()] == ["Tiny"]
 
@@ -160,7 +162,7 @@ async def test_add_says_so_when_sts_did_not_answer(tmp_path: Path) -> None:
 async def test_add_says_so_when_sts_reloaded_and_skipped_it(
     tmp_path: Path,
 ) -> None:
-    """Stored, reloaded, and still not deployable — the confusing case."""
+    """Stored, and still not deployable — the answer names the disk, not an import."""
     store = RegistryStore(tmp_path)
 
     out = await add_strategy(
@@ -170,8 +172,9 @@ async def test_add_says_so_when_sts_reloaded_and_skipped_it(
     )
 
     assert out.loaded is False
-    assert "private::Tiny" in out.load_error
-    assert "STS log" in out.load_error
+    assert out.load_error is not None
+    assert "registry disk" in out.load_error
+    assert "import error or name collision" not in out.load_error
 
 
 # --- delete ----------------------------------------------------------------

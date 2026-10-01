@@ -18,6 +18,16 @@ class RegistryConflict(RegistryError):
     code = "registry_conflict"
 
 
+class RegistryDigestMismatch(RegistryError):
+    """The bytes just written do not hash to the digest the caller sent.
+
+    Raised before the previous tree is replaced, so a bad payload cannot
+    delete a copy that was already loading.
+    """
+
+    code = "digest_mismatch"
+
+
 class MissingRemoteExtras(RegistryError):
     """A new connect naming extras this node's stamp does not list.
 

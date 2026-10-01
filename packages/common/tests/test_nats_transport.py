@@ -83,10 +83,12 @@ async def test_a_request_to_nobody_fails_at_once_rather_than_waiting(
     broker: Broker,
 ) -> None:
     started = asyncio.get_running_loop().time()
-    with pytest.raises(NoRespondersError):
+    with pytest.raises(NoRespondersError) as caught:
         await broker.request("nobody.here", _envelope(), timeout=5.0)
     spent = asyncio.get_running_loop().time() - started
     assert spent < _NO_RESPONDERS_CEILING_S * 2
+    assert "did not answer (no responders)" in str(caught.value)
+    assert "timed out after" not in str(caught.value)
 
 
 @pytest.mark.asyncio

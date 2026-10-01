@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import json
 import os
 import shutil
 import tomllib
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from mftik.registry.digest import digest_files
-from mftik.registry.errors import RegistryConflict, RegistryError
+from mftik.registry.errors import (
+    RegistryConflict,
+    RegistryDigestMismatch,
+    RegistryError,
+)
 from mftik.registry.files import TEMPLATE_NAME, normalize_files, read_tree
 from mftik.registry.gate import check_files
 from mftik.registry.inspect import check_name, check_type, inspect_files, pick_class
@@ -89,6 +96,7 @@ class RegistryStore:
         origin: str = PRIVATE_ORIGIN,
         applied_extras: Mapping[str, str] | None = None,
         present_extras: Mapping[str, str] | None = None,
+        expect_digest: str | None = None,
     ) -> AddedStrategy:
         """Validate, hash, and copy ``.py`` files and optional ``strategy.yml``.
 
@@ -122,6 +130,12 @@ class RegistryStore:
                     + describe_missing(missing, present_extras)
                 )
         digest = digest_files(normalised)
+        if expect_digest and digest != expect_digest:
+            # Before any rename. A mismatch must not replace a tree that
+            # already loads, and must not leave the rejected bytes behind.
+            raise RegistryDigestMismatch(
+                f"digest mismatch: tree is {digest}, request said {expect_digest}"
+            )
         type_name = chosen.type
         root = self._origin_root(origin)
         hit = _casefold_entry(root, type_name)
@@ -135,7 +149,7 @@ class RegistryStore:
                 f"strategy {type_name!r} is already in the {_where(origin)}"
             )
         dest = self._dest(origin, type_name)
-        self._commit(dest, normalised)
+        self._commit(dest, normalised, expect_digest=expect_digest or None)
         return AddedStrategy(
             name=type_name,
             type=chosen.type,
@@ -173,6 +187,23 @@ class RegistryStore:
         shutil.rmtree(dest)
         self._tree_cache.pop(key, None)
         return rec
+
+    def discard(self, name: str, *, origin: str) -> None:
+        """Remove one tree of any origin. A missing tree is success.
+
+        ``remove`` stays own-only, so an HTTP delete cannot punch a hole in
+        a peer mirror one strategy at a time. Sync uses this for a pulled
+        copy: the remote record lives on the API, and this volume may not
+        have ``remotes.toml`` at all.
+        """
+        _check_origin(origin)
+        check_type(name)
+        dest = self._dest(origin, name)
+        if not dest.is_dir():
+            return
+        key = (str(dest.resolve()), origin)
+        shutil.rmtree(dest)
+        self._tree_cache.pop(key, None)
 
     def list_public(self) -> list[AddedStrategy]:
         """Trees this node publishes. Peers pull from here."""
@@ -300,6 +331,10 @@ class RegistryStore:
             return self.private_dir / name
         return self.pulled_dir / origin / name
 
+    def has_tree(self, name: str, *, origin: str) -> bool:
+        """Whether that strategy directory is on disk right now."""
+        return self._dest(origin, name).is_dir()
+
     def _list_dir(self, root: Path, *, origin: str) -> list[AddedStrategy]:
         if not root.is_dir():
             return []
@@ -312,32 +347,79 @@ class RegistryStore:
                 out.append(rec)
         return out
 
-    def _commit(self, dest: Path, files: Mapping[str, bytes]) -> None:
+    def _commit(
+        self,
+        dest: Path,
+        files: Mapping[str, bytes],
+        *,
+        expect_digest: str | None = None,
+    ) -> None:
+        """Replace ``dest`` by publishing a private temp directory.
+
+        The temp name is unique, not ``pid``. Two STS containers on one
+        volume are both pid 1, and a shared ``.tmp-{name}-1`` lets one
+        writer delete the other's half-written tree — and then delete
+        ``dest`` itself. A replace swaps the two directories, so ``dest``
+        is never missing and a peer rescanning this disk still sees a
+        complete tree. Kernels without that swap fall back to renaming
+        the old tree aside and putting it back if the publish fails; a
+        restore that loses the race deletes the aside instead of leaving
+        ``.old-*`` behind. ``expect_digest`` is checked on the temp
+        directory before the publish. A rename that loses to the other
+        writer is retried; a digest mismatch is not.
+        """
+        last: OSError | None = None
+        for _attempt in range(8):
+            try:
+                self._commit_once(dest, files, expect_digest=expect_digest)
+                return
+            except RegistryDigestMismatch:
+                raise
+            except OSError as exc:
+                last = exc
+        assert last is not None
+        raise last
+
+    def _commit_once(
+        self,
+        dest: Path,
+        files: Mapping[str, bytes],
+        *,
+        expect_digest: str | None,
+    ) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.parent / f".tmp-{dest.name}-{os.getpid()}"
-        if tmp.exists():
-            shutil.rmtree(tmp)
+        token = uuid.uuid4().hex
+        tmp = dest.parent / f".tmp-{dest.name}-{token}"
         tmp.mkdir()
         try:
             for path, body in files.items():
                 target = tmp / path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(body)
-            if dest.exists():
-                shutil.rmtree(dest)
-            tmp.rename(dest)
-            # A replace that lands in the same mtime bucket would otherwise
-            # keep serving the digest from before the write.
-            resolved = str(dest.resolve())
-            self._tree_cache = {
-                key: val
-                for key, val in self._tree_cache.items()
-                if key[0] != resolved
-            }
+            if expect_digest and _digest_written(tmp) != expect_digest:
+                raise RegistryDigestMismatch(
+                    f"digest mismatch: wrote {dest.name}, "
+                    f"request said {expect_digest}"
+                )
+            _install(tmp, dest)
+            self._drop_cache(dest)
         except Exception:
             if tmp.exists():
-                shutil.rmtree(tmp, ignore_errors=True)
+                _remove_tree(tmp)
             raise
+
+    def _drop_cache(self, dest: Path) -> None:
+        # A replace that lands in the same mtime bucket would otherwise
+        # keep serving the digest from before the write.
+        try:
+            resolved = str(dest.resolve())
+        except OSError:
+            return
+        self._tree_cache = {
+            key: val
+            for key, val in self._tree_cache.items()
+            if key[0] != resolved
+        }
 
 
     def _read_tree(self, dest: Path, *, origin: str) -> AddedStrategy | None:
@@ -357,6 +439,144 @@ class RegistryStore:
         if stamp is not None:
             self._tree_cache[key] = (stamp, rec)
         return rec
+
+
+#: ``renameat2`` flag. Swaps two existing paths with no moment where the
+#: destination name is absent.
+_RENAME_EXCHANGE = 2
+_AT_FDCWD = -100
+
+_renameat2_fn = None
+
+
+def _renameat2(src: bytes, dst: bytes, flags: int) -> None:
+    """``renameat2(AT_FDCWD, src, AT_FDCWD, dst, flags)``.
+
+    Raises ``OSError`` with ``ENOSYS`` when this libc has no such call.
+    """
+    global _renameat2_fn
+    if _renameat2_fn is None:
+        lib = ctypes.CDLL(None, use_errno=True)
+        fn = getattr(lib, "renameat2", None)
+        if fn is None:
+            _renameat2_fn = False
+        else:
+            fn.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            fn.restype = ctypes.c_int
+            _renameat2_fn = fn
+    if not _renameat2_fn:
+        raise OSError(errno.ENOSYS, "renameat2 is not available")
+    rc = _renameat2_fn(_AT_FDCWD, src, _AT_FDCWD, dst, flags)
+    if rc != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err), src, None, dst)
+
+
+def _try_exchange(src: Path, dst: Path) -> bool:
+    """Swap ``src`` and ``dst``. False when this kernel cannot, or ``dst`` is gone.
+
+    A successful swap leaves the previous tree at ``src``. ``dst`` names one
+    complete tree or the other for the whole call.
+    """
+    try:
+        _renameat2(os.fsencode(src), os.fsencode(dst), _RENAME_EXCHANGE)
+    except OSError as exc:
+        if exc.errno in {
+            errno.ENOSYS,
+            errno.ENOTSUP,
+            errno.EINVAL,
+            errno.ENOENT,
+            errno.EOPNOTSUPP,
+        }:
+            return False
+        raise
+    return True
+
+
+def _install(tmp: Path, dest: Path) -> None:
+    """Publish ``tmp`` as ``dest``. ``tmp`` is consumed.
+
+    A replace exchanges the directories. The two-rename fallback is only
+    for a kernel that cannot swap, and it is the path that can leave
+    ``dest`` missing for an instant.
+    """
+    if dest.exists() and _try_exchange(tmp, dest):
+        _remove_tree(tmp)
+        return
+    if not dest.exists():
+        try:
+            os.rename(tmp, dest)
+            return
+        except OSError:
+            if not dest.exists():
+                raise
+            if _try_exchange(tmp, dest):
+                _remove_tree(tmp)
+                return
+    _install_via_aside(tmp, dest)
+
+
+def _install_via_aside(tmp: Path, dest: Path) -> None:
+    """Rename ``dest`` aside, then ``tmp`` onto it.
+
+    If the second rename loses, put the aside back. If that restore loses
+    too — the other writer already published — delete the aside. Leaving
+    it is how ``.old-*`` directories accumulate under concurrent replace.
+    """
+    old = dest.parent / f".old-{dest.name}-{uuid.uuid4().hex}"
+    try:
+        if dest.exists():
+            dest.rename(old)
+        os.rename(tmp, dest)
+    except OSError:
+        if tmp.exists():
+            _remove_tree(tmp)
+        _restore_or_drop(old, dest)
+        raise
+    if old.exists():
+        _remove_tree(old)
+
+
+def _restore_or_drop(old: Path, dest: Path) -> None:
+    """Put ``old`` back at ``dest``, or delete it once ``dest`` is live."""
+    if not old.exists():
+        return
+    for _ in range(8):
+        if not old.exists():
+            return
+        if dest.exists():
+            _remove_tree(old)
+            return
+        try:
+            old.rename(dest)
+            return
+        except OSError:
+            continue
+    _remove_tree(old)
+
+
+def _remove_tree(path: Path) -> None:
+    """Delete ``path``. A peer's rename can make one attempt fail."""
+    for _ in range(8):
+        if not path.exists():
+            return
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _digest_written(root: Path) -> str:
+    """Digest of the ``.py`` files actually on disk under ``root``."""
+    files: dict[str, bytes] = {}
+    for py in root.rglob("*.py"):
+        if "__pycache__" in py.parts:
+            continue
+        files[py.relative_to(root).as_posix()] = py.read_bytes()
+    return digest_files(files)
 
 
 def _tree_stamp(dest: Path) -> tuple[int, int] | None:

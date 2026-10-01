@@ -108,6 +108,9 @@ class StrategyTemplateOut(BaseModel):
     source: Literal["bundled", "registry"] = "bundled"
     requires: list[str] = Field(default_factory=list)
     env_ok: bool = True
+    #: STS instances that have loaded this type. None for bundled strategies
+    #: and when no STS answered the census.
+    instances: list[str] | None = None
 
 
 class StrategyTypesResponse(BaseModel):
@@ -448,13 +451,14 @@ class RegistryAddOut(RegistryStrategyOut):
     every other response would invite being read as one.
     """
 
-    #: STS re-scanned and now answers to this strategy's qualified type. False
-    #: means the files are on disk and deploying them will not work yet —
-    #: either STS did not answer, or it answered and skipped this tree (a bad
-    #: import, or a name that collides with a bundled strategy). Its log says
-    #: which.
+    #: Every enabled STS wrote the tree and now answers to its qualified type.
+    #: False means the files are on the API disk and deploying them will not
+    #: work on at least one STS — it did not answer, or it answered and said
+    #: why this tree is absent (not on its disk, a bad import, a name
+    #: collision, a digest mismatch).
     loaded: bool = False
     #: Why ``loaded`` is false, in a sentence meant for whoever ran the push.
+    #: Names the instance when one STS is missing the tree.
     load_error: str | None = None
 
 

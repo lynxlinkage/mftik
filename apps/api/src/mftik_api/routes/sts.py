@@ -82,6 +82,7 @@ from mftik_api.schemas import (
     StsControlResponse,
     TdAttachOut,
 )
+from mftik_api.sts_fanout import registry_availability
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,7 @@ def _registry_template(
     rec: AddedStrategy,
     store: RegistryStore,
     applied: frozenset[str] | None = None,
+    instances: list[str] | None = None,
 ) -> StrategyTemplate:
     key = qualify(rec.origin, rec.type)
     requires = list(rec.requires)
@@ -146,10 +148,14 @@ def _registry_template(
         source="registry",
         requires=requires,
         env_ok=set(requires) <= applied,
+        instances=instances,
     )
 
 
-def _deployable_templates(store: RegistryStore) -> list[StrategyTemplate]:
+def _deployable_templates(
+    store: RegistryStore,
+    availability: dict[str, frozenset[str]] | None = None,
+) -> list[StrategyTemplate]:
     bundled = list(all_templates())
     bundled_types = {t.type for t in bundled}
     seen = set(bundled_types)
@@ -163,21 +169,32 @@ def _deployable_templates(store: RegistryStore) -> list[StrategyTemplate]:
         key = qualify(rec.origin, rec.type)
         if key in seen:
             continue
-        extra.append(_registry_template(rec, store, applied))
+        if availability is None:
+            instances = None
+        else:
+            instances = sorted(
+                label for label, keys in availability.items() if key in keys
+            )
+            # On disk at the API, loaded by nobody. Not a deployable type.
+            if not instances:
+                continue
+        extra.append(_registry_template(rec, store, applied, instances))
         seen.add(key)
     extra.sort(key=lambda t: t.type)
     return bundled + extra
 
 
 def _deployable_template(
-    strategy_type: str, store: RegistryStore
+    strategy_type: str,
+    store: RegistryStore,
+    availability: dict[str, frozenset[str]] | None = None,
 ) -> StrategyTemplate | None:
     template = get_template(strategy_type)
     if template is not None:
         return template
-    for rec in store.list_all():
-        if qualify(rec.origin, rec.type) == strategy_type:
-            return _registry_template(rec, store)
+    for candidate in _deployable_templates(store, availability):
+        if candidate.type == strategy_type:
+            return candidate
     return None
 
 
@@ -190,9 +207,16 @@ async def strategy_template() -> dict[str, str]:
 @router.get("/types", response_model=StrategyTypesResponse)
 async def list_strategy_types(
     store: RegistryStoreDep,
+    broker: BrokerDep,
 ) -> StrategyTypesResponse:
-    """Deployable strategies, with the template each one starts from."""
-    templates = _deployable_templates(store)
+    """Deployable strategies, with the template each one starts from.
+
+    A registry type is listed only when at least one enabled STS has it
+    loaded, and ``instances`` says which. No answer from any STS leaves the
+    API store's listing in place — a census miss is not "nothing is
+    deployable".
+    """
+    templates = _deployable_templates(store, await registry_availability(broker))
     return StrategyTypesResponse(
         types=[t.type for t in templates],
         templates=[
@@ -205,12 +229,15 @@ async def list_strategy_types(
 
 @router.get("/types/{strategy_type}/template", response_model=StrategyTemplateOut)
 async def strategy_type_template(
-    strategy_type: str, store: RegistryStoreDep
+    strategy_type: str, store: RegistryStoreDep, broker: BrokerDep
 ) -> StrategyTemplateOut:
     """The starting document for one strategy type."""
-    template = _deployable_template(strategy_type, store)
+    availability = await registry_availability(broker)
+    template = _deployable_template(strategy_type, store, availability)
     if template is None:
-        known = ", ".join(t.type for t in _deployable_templates(store))
+        known = ", ".join(
+            t.type for t in _deployable_templates(store, availability)
+        )
         raise HTTPException(
             status_code=404,
             detail=f"unknown strategy type: {strategy_type}; known: {known}",

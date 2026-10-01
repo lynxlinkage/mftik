@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from decimal import ROUND_FLOOR, Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -415,6 +415,106 @@ class StsRegistryReloadResult(BaseModel):
 
     loaded: list[str] = Field(default_factory=list)
     generation: int = 0
+
+
+class StsRegistryTreeOp(BaseModel):
+    """One tree to write or remove on an STS registry disk.
+
+    ``upsert`` carries the files and the digest the API just committed.
+    ``delete`` names the tree; ``files`` and ``digest`` are unused. The
+    directory the API wrote is not this process's volume, so the files have
+    to travel with the request.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    op: Literal["upsert", "delete"]
+    origin: str
+    name: str
+    digest: str = ""
+    files: dict[str, str] = Field(default_factory=dict)
+
+
+class StsRegistrySyncRequest(BaseModel):
+    """API → STS: write these trees onto this process's registry, then rescan.
+
+    A reload that only re-scans keeps answering ``unknown_strategy`` for a
+    tree that exists only on the API's disk. ``reload`` is false on every
+    batch but the last, so a multi-batch sync does not import a half-applied
+    set.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    trees: list[StsRegistryTreeOp] = Field(default_factory=list)
+    reload: bool = True
+    #: Qualified keys upserted by earlier batches of this sync. The rescan
+    #: on the last batch explains these too, so a tree that rode in an
+    #: earlier batch and failed to import is not reported as absent.
+    explain: list[str] = Field(default_factory=list)
+    #: Qualified keys that should remain after this batch. ``None`` does not
+    #: prune. A list — including an empty one — deletes every on-disk registry
+    #: tree whose key is absent from it. Only a reconcile sets this, and only
+    #: on its last batch, after the API has successfully read its own store.
+    retain: list[str] | None = None
+
+
+class StsRegistrySyncResult(BaseModel):
+    """STS → API: keys this process answers to, and why an upsert is absent.
+
+    ``skipped`` is qualified key → reason, and only for trees this request
+    tried to upsert or listed in ``explain``. The reason is one of ``not
+    present on this registry disk``, ``import error: …``, ``refused: …``,
+    ``write error: …``, ``name collision with a bundled strategy``, or
+    ``digest mismatch``. A key in ``skipped`` did not take this request's
+    bytes, even when ``loaded`` still names the class that was already there.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    loaded: list[str] = Field(default_factory=list)
+    generation: int = 0
+    skipped: dict[str, str] = Field(default_factory=dict)
+
+
+class ApiRegistryCatchupRequest(BaseModel):
+    """STS → API: make this process's registry disk match the API store.
+
+    Sent when the process starts, and retried until the API has pushed a
+    full ``sts.registry.sync`` (including deletes for trees the API no
+    longer has). The files travel on that sync; this reply is only an ack.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    instance: str
+
+
+class ApiRegistryCatchupResult(BaseModel):
+    """API → STS: whether the disk was brought in line with the store."""
+
+    model_config = ConfigDict(frozen=True)
+
+    ok: bool = False
+    error: str | None = None
+
+
+class StsRegistryLoadedRequest(BaseModel):
+    """API → STS: which keys this process can deploy right now.
+
+    Read-only. It does not re-scan and does not import. ``GET /sts/types``
+    asks this so a type that no STS has registered is not offered.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+
+class StsRegistryLoadedResult(BaseModel):
+    """STS → API: the in-memory registry, bundled names included."""
+
+    model_config = ConfigDict(frozen=True)
+
+    loaded: list[str] = Field(default_factory=list)
 
 
 class StsRegistryGenerationRequest(BaseModel):
@@ -1313,6 +1413,12 @@ StsSessionControlResultEnvelope = Envelope[StsSessionControlResult]
 StsSessionStatusEnvelope = Envelope[StsSessionStatus]
 StsRegistryReloadRequestEnvelope = Envelope[StsRegistryReloadRequest]
 StsRegistryReloadResultEnvelope = Envelope[StsRegistryReloadResult]
+StsRegistrySyncRequestEnvelope = Envelope[StsRegistrySyncRequest]
+StsRegistrySyncResultEnvelope = Envelope[StsRegistrySyncResult]
+ApiRegistryCatchupRequestEnvelope = Envelope[ApiRegistryCatchupRequest]
+ApiRegistryCatchupResultEnvelope = Envelope[ApiRegistryCatchupResult]
+StsRegistryLoadedRequestEnvelope = Envelope[StsRegistryLoadedRequest]
+StsRegistryLoadedResultEnvelope = Envelope[StsRegistryLoadedResult]
 StsRegistryGenerationRequestEnvelope = Envelope[StsRegistryGenerationRequest]
 StsRegistryGenerationResultEnvelope = Envelope[StsRegistryGenerationResult]
 StsEnvSyncRequestEnvelope = Envelope[StsEnvSyncRequest]
@@ -1492,6 +1598,11 @@ STS_SESSION_FAIL = "sts.session.fail"
 STS_SESSION_STATUS = "sts.session.status"
 STS_EVENTLOG_INFO = "sts.eventlog.info"
 STS_REGISTRY_RELOAD = "sts.registry.reload"
+STS_REGISTRY_SYNC = "sts.registry.sync"
+STS_REGISTRY_LOADED = "sts.registry.loaded"
+#: Subject the API serves, and the envelope type on it. An STS asks this
+#: when it starts so a sync it missed is not stuck until the next push.
+API_REGISTRY_CATCHUP = "api.registry.catchup"
 STS_REGISTRY_GENERATION = "sts.registry.generation"
 STS_ENV_SYNC = "sts.env.sync"
 STS_EVENTLOG_READ = "sts.eventlog.read"

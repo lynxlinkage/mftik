@@ -42,6 +42,11 @@ class StrategyTemplate(BaseModel):
     requires: list[str] = Field(default_factory=list)
     #: Whether this node's applied extras cover ``requires``.
     env_ok: bool = True
+    #: STS instance names that have this type loaded. None for a bundled
+    #: strategy (every STS has it) and when the instance census could not
+    #: be read. An empty list is not used: a registry type nobody loaded
+    #: is omitted from the listing instead.
+    instances: list[str] | None = None
 
 
 NOOP = StrategyTemplate(

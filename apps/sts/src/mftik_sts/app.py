@@ -20,11 +20,12 @@ from mftik import (
     serve_health,
 )
 from mftik.broker import Broker
-from mftik.protocol import STS_SESSION_CREATE, STS_SESSION_FORCE_STOP
+from mftik.protocol import STS_SESSION_CREATE, STS_SESSION_FORCE_STOP, Topics
 from mftik.strategy.artifacts import get_store
 from mftik_db.schema import SchemaTooOld, require_sts_schema
 
 from mftik_sts import db as sts_db
+from mftik_sts.registry_catchup import catch_up_until_matched
 from mftik_sts.rpc import dispatch
 from mftik_sts.runtime_env import extras_names, refresh
 from mftik_sts.session import SessionManager
@@ -372,6 +373,15 @@ async def amain() -> bool:
             ),
             name="sts-health",
         )
+        # Not one of the tasks run_until_stopped watches: this is meant
+        # to finish, once the API has pushed the store. A process that
+        # does not serve its own subject cannot receive that push.
+        catchup_task: asyncio.Task[Any] | None = None
+        if Topics.sts(INSTANCE) in subjects:
+            catchup_task = asyncio.create_task(
+                catch_up_until_matched(broker, INSTANCE, stop),
+                name="sts-registry-catchup",
+            )
         if _rebuild_enabled():
             # A task, not awaited: rebuilding waits on TD and MD, which may
             # not be up yet, and RPC service must not be held up behind it.
@@ -400,6 +410,8 @@ async def amain() -> bool:
             tasks = [*rpc_tasks, hb_task, reaper_task, health_task]
             if rebuild_task is not None:
                 tasks.append(rebuild_task)
+            if catchup_task is not None:
+                tasks.append(catchup_task)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

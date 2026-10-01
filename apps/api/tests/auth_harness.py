@@ -19,28 +19,46 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from mftik.protocol import (
-    STS_REGISTRY_RELOAD,
-    StsRegistryReloadResult,
-    StsRegistryReloadResultEnvelope,
+    STS_REGISTRY_SYNC,
+    StsRegistrySyncRequest,
+    StsRegistrySyncResult,
+    StsRegistrySyncResultEnvelope,
 )
-from mftik.registry import RegistryStore, qualify
+from mftik.registry import RegistryError, RegistryStore, qualify
+from mftik.registry.qualify import OWN_ORIGINS
 from mftik_api.auth import AuthMiddleware, auth_router
 from mftik_api.auth.deps import OwnerId
 from mftik_api.deps import DEFAULT_USER_ID
 
 
 class _ReloadOnlyBroker:
-    """Answers ``sts.registry.reload`` like a healthy STS, and nothing else."""
+    """Applies ``sts.registry.sync`` onto this process's store, and nothing else.
+
+    Auth tests share ``MFTIK_DATA`` with the API, which is the shared-volume
+    case: writing the same tree again is a no-op replace.
+    """
 
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
-        if envelope.type != STS_REGISTRY_RELOAD:
+        if envelope.type != STS_REGISTRY_SYNC:
             raise AssertionError(f"unexpected broker request: {envelope.type}")
+        request = StsRegistrySyncRequest.model_validate(envelope.payload)
         store = RegistryStore.from_env()
-        return StsRegistryReloadResultEnvelope.wrap(
-            StsRegistryReloadResult(
+        for op in request.trees:
+            if op.op == "delete":
+                try:
+                    if op.origin in OWN_ORIGINS:
+                        store.remove(op.name, origin=op.origin)
+                    else:
+                        store.discard(op.name, origin=op.origin)
+                except RegistryError:
+                    pass
+                continue
+            store.add(op.files, replace=True, origin=op.origin)
+        return StsRegistrySyncResultEnvelope.wrap(
+            StsRegistrySyncResult(
                 loaded=[qualify(r.origin, r.type) for r in store.list_all()]
             ),
-            type=STS_REGISTRY_RELOAD,
+            type=STS_REGISTRY_SYNC,
             source="sts",
         )
 

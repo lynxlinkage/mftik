@@ -1,8 +1,13 @@
-"""Single-STS anycast for tests that do not stand up the instances table."""
+"""One authoritative target for tests that do not stand up the instances table.
+
+Production ``list_targets`` unicasts even a single declared row. This double
+keeps those tests off the database; the subject it uses is not that address.
+"""
 
 from __future__ import annotations
 
 from mftik.protocol import Topics
+from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.sts_fanout import StsTarget
 
 
@@ -11,3 +16,10 @@ def patch_authoritative_anycast(monkeypatch) -> None:  # noqa: ANN001
         return [StsTarget(name="sts", subject=Topics.STS, authoritative=True)]
 
     monkeypatch.setattr("mftik_api.sts_fanout.list_targets", _one)
+
+
+class UnansweredBroker:
+    """No STS answers, so ``/sts/types`` keeps the API store's listing."""
+
+    async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+        raise DomainRpcError("timeout", "no reply from sts")
