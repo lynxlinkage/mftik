@@ -1,12 +1,12 @@
 # REFACTOR_TICKETS — 平面進程化重構的工作票
 
-> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.29。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
+> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.30。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
 >
 > 每張票都有描述、範圍、驗收、依賴。驗收寫成別人能檢查的事：測試名稱、grep 結果、量測數字、文件章節。
 
 ## 怎麼用這份文件
 
-**編號：** `<批次>-<序號>`。每張票都已開成 GitHub issue（#154 到 #253，label 為 `refactor` 和 `batch:<批次>`），標題後的括號是 issue 編號。批次依序是 B0、B1、RM、B2、IF、B3 到 B10（計畫 §11）。依賴只列直接依賴。
+**編號：** `<批次>-<序號>`。每張票都已開成 GitHub issue（#154 到 #253，以及後來加的 #275 到 #277，label 為 `refactor` 和 `batch:<批次>`），標題後的括號是 issue 編號。批次依序是 B0、B1、RM、B2、IF、B3 到 B10（計畫 §11）。依賴只列直接依賴。
 
 **RM（清場）的共同驗收：**
 
@@ -31,10 +31,10 @@
 | B1 文件 | 4 | 封存舊文件，重寫 Deployment，萃取 `ARCHITECTURE.md` |
 | RM 清場 | 10 | 刪掉要重寫的代碼和測試，留下「沒有 session 機制」的基線 |
 | B2 測試 | 5 | 測試標準、`FakeClock`、共用 NATS 連線、tier 與 CI 閘門 |
-| IF 介面 | 15 | 新抽象層只定義介面，回傳 null data，附 xfail 契約測試 |
+| IF 介面 | 16 | 新抽象層只定義介面，回傳 null data，附 xfail 契約測試 |
 | B3 procman | 7 | shim、Supervisor、reattach、報告、准入、Strategon 實機驗證 |
 | B4 骨架 | 9 | paper 上跑通 deploy → 下單 → 成交 → end |
-| B5 STS | 9 | 交付策略、event log、offload、hook 預算、失聯通知、crash 與重啟、策略測試改寫 |
+| B5 STS | 11 | 交付策略、event log、offload、hook 預算、失聯通知、crash 與重啟、策略測試改寫、策略樹版本釘住、主機磁碟的 operator 路徑 |
 | B6 TD | 8 | 常駐層、交易層、`cancel_session`、drain-replace、backfill、狀態廣播、cancel-on-disconnect |
 | B7 MD atom | 11 | atom 模型、各 venue adapter、通用 join、tape、fetch worker |
 | B8 MD 編排 | 7 | orchestrator、placement、reconciler、到期、常駐訂閱、手動 restart |
@@ -519,6 +519,28 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 - **依賴：** IF-01
 - **決策：** F12、F24、F27、F32
 
+### IF-16 STS 代碼身分與主機磁碟（#275）
+
+- **描述：** F39、F40（§5.7）。RM-10 留下的兩題：策略 registry 與代碼版本的權威，以及 operator 寫 artifact 的路徑歸誰。
+- **範圍：**
+  - `mftik_sts.hostdisk`：
+    - `TreeReplica`：`put(digest, files)`、name → digest 的索引、`path_of(digest)`、`gc(keep)`
+    - 版本釘住：從本 instance 非 terminal 的 SessionSpec 算出要保留的 digest 與 env generation
+    - `deployable(spec) -> Deployability`：digest 和 generation 在不在這台磁碟上、`requires` 和 extras 是否相符，不 import
+    - `probe(digest, env_generation) -> ProbeResult`：一次性子進程，import 後回報
+  - `WorkerSpec.labels` 的 key：`strategy_digest`、`env_generation`
+  - SessionSpec 的 `strategy_digest`、`env_generation` 欄位。IF-14 還沒合併就併進它的 migration，已經合併就另加一個只加不刪的 migration
+  - controller 上 `sts.registry.sync`、`sts.registry.reload`、`api.registry.catchup`、`sts.env.sync` 的 handler 簽名
+- **驗收：** 共同驗收；契約測試涵蓋：
+  - push 同名新版本之後，被釘住的舊 digest 仍然載入得到
+  - GC 不刪被釘住的 digest，也不刪被釘住的 env generation
+  - 重新掛起用 SessionSpec 釘住的 digest，不用索引裡的目前版本
+  - `requires_mftik` 和當下 release 不相容時，重新掛起記為 failed
+  - controller 進程的 `sys.modules` 裡沒有任何策略樹的模組
+  - 探測子進程 import 失敗時，以 `skipped` 帶原因回報
+- **依賴：** IF-03、IF-04、IF-14
+- **決策：** F39、F40
+
 ---
 
 ## B3 procman
@@ -684,6 +706,38 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 - **驗收：** session worker 進程沒有任何 DB 連線，以 driver 的連線計數或 `/proc/<pid>/net` 驗證。
 - **依賴：** B5-06
 - **決策：** F10
+
+### B5-10 策略樹與 extras 的版本釘住（#276）
+
+- **範圍：**
+  - STS 磁碟的 registry 副本改成以 digest 定址，取代 `RegistryStore` 在 STS 端的 `<origin>/<name>/` 原地替換。API 端的 store 不變
+  - API 的 start 從自己的 registry 與 env 解析 `(strategy_digest, env_generation)`，寫進 SessionSpec
+  - worker 依 digest 載入；controller 的可部署檢查不 import
+  - import 探測子進程取代平面進程內的 `load_local_registry` 與 `runtime_env.refresh`
+  - GC 與 env 的 `_prune_generations` 改成保留被釘住的版本
+  - `mftik workers --stale` 加上 digest 的比對
+  - B10 切換時，STS 磁碟的副本由開機 catch-up 依新布局重建，舊的 `<origin>/<name>/` 目錄刪除
+- **驗收：** IF-16 的契約測試轉綠；另外在 integration tier 驗證：
+  - session 跑著時 push 同名新版本：這個 session 的重新掛起仍跑舊 digest，新 session 跑新 digest，`mftik workers --stale` 列出前者
+  - env apply 之後，跑在舊 generation 上的 session 仍然能 lazy import
+  - controller 進程從頭到尾沒有 import 任何策略樹
+- **依賴：** IF-16、B3-07、B4-02、B4-03、B5-06
+- **決策：** F39
+
+### B5-11 STS controller 服務 operator 的主機磁碟路徑（#277）
+
+- **範圍：**
+  - `rpc/artifacts.py`、`rpc/eventlog.py` 在 B4-02 改寫 `app.py` 之後，仍由 controller 掛在 `sts.{instance}` 上服務
+  - `sweep_loop`（清理未 commit 的上傳）歸 controller
+  - 上傳 token 改成可由磁碟上的 `.{name}.{token}.part` 找回，controller 重啟後接得上
+  - event log 的讀取對上 B5-02 的檔案布局
+- **驗收：**
+  - 上傳途中滾動 controller，重啟後用同一個 token 能接著傳完
+  - session 跑在 worker 上時，artifact 的 list / read / delete 與 event log 讀取照常
+  - 策略在 worker 裡寫的 artifact，operator 經 controller 讀得到
+  - API 的 artifact 與 event log 路由不變，CI 的 contracts 檢查通過
+- **依賴：** B4-02、B5-02
+- **決策：** F40
 
 ---
 

@@ -229,9 +229,9 @@ session worker 是單一 event loop，沒有 ingress thread 和 strategy thread 
 
 1. **`cash_flows` 從來沒有寫入路徑。** §3.3 把它和 `orders`、`fills`、`backfill_cursors` 並列成 TD 帳號 worker 寫的東西。B6-05（#223）只說把 `backfill/` 搬進常駐層，沒有說要開始寫 `cash_flows`；B10-01（#249）的 migration 範圍也沒提它。要嘛補一張票開始寫，要嘛把 §3.3 的這一欄改掉。
 
-2. **策略代碼 registry 的權威與開機 catch-up（§8 第 1 列）。** API 是權威、每個 STS 磁碟是副本、開機時向 API 要差額（`apps/sts/src/mftik_sts/registry_catchup.py`）。§3.3 完全沒有這一列，`protocol.md` 5.3 第 1 項也已經記下 registry 的五個型別在計畫裡沒有去向。worker 進程化之後「哪一份磁碟上的代碼跑著哪一個 session」會和 `WorkerSpec.code_ref`（B3-07，#200）重疊，但沒有票把 registry 這一層接進去。
+2. **策略代碼 registry 的權威與開機 catch-up（§8 第 1 列）。** API 是權威、每個 STS 磁碟是副本、開機時向 API 要差額（`apps/sts/src/mftik_sts/registry_catchup.py`）。§3.3 完全沒有這一列，`protocol.md` 5.3 第 1 項也已經記下 registry 的五個型別在計畫裡沒有去向。worker 進程化之後「哪一份磁碟上的代碼跑著哪一個 session」會和 `WorkerSpec.code_ref`（B3-07，#200）重疊，但沒有票把 registry 這一層接進去。 **→ 已定案（v0.30）：** F39 / F40、計畫 §5.7；由 IF-16（#275）、B5-10（#276）、B5-11（#277）負責。
 
-3. **artifacts 有兩個寫入者（§6）。** 策略在 worker 裡寫，operator / API 經平面的 RPC 寫。§3.3 只列了「session worker」。B5-07（#216）說把 artifacts 搬到新 worker，但沒有說平面那條上傳路徑之後掛在哪裡（新架構的平面 controller 不再持有 session）。
+3. **artifacts 有兩個寫入者（§6）。** 策略在 worker 裡寫，operator / API 經平面的 RPC 寫。§3.3 只列了「session worker」。B5-07（#216）說把 artifacts 搬到新 worker，但沒有說平面那條上傳路徑之後掛在哪裡（新架構的平面 controller 不再持有 session）。 **→ 已定案（v0.30）：** F39 / F40、計畫 §5.7；由 IF-16（#275）、B5-10（#276）、B5-11（#277）負責。
 
 4. **`sts_sessions.legacy_strategy` 沒有任何應用寫入者。** 只有 migration `0034_strategy_type_key` 寫過它（model 的註解自己寫「nothing resolves a strategy from this … no new row ever writes it」，`packages/db/src/mftik_db/models/session.py:102`–`:111`），B10-01（#249）的 drop 清單是 `st_facts` 和 `rebuild_count` 改名，沒有包含它。
 

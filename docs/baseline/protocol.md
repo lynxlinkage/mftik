@@ -326,7 +326,7 @@ TD 的 `rpc/router.py:32`–`:36` 只掛三個型別（health、attach、detach�
 
 以下現行 subject／型別，在 `ARCHITECTURE_CHANGE_PLAN.md` v0.26 裡找不到任何一句話決定它的去向。本文給出建議，但 IF-01（#179）定型別時需要先確認：
 
-1. **registry 與 env 的同步鏈：** `sts.registry.reload`、`sts.registry.sync`、`sts.registry.loaded`、`sts.registry.generation`、`api.registry.catchup`。§5.1 只說 `sts.{instance}` 服務「env」，沒提 registry。這是五個型別、一個 API 端服務的 subject，而且 `api.registry.catchup` 是**整個系統唯一一個由平面呼叫 API 的 subject**，方向和其他所有 RPC 相反。建議：保留。
+1. **registry 與 env 的同步鏈：** `sts.registry.reload`、`sts.registry.sync`、`sts.registry.loaded`、`sts.registry.generation`、`api.registry.catchup`。§5.1 只說 `sts.{instance}` 服務「env」，沒提 registry。這是五個型別、一個 API 端服務的 subject，而且 `api.registry.catchup` 是**整個系統唯一一個由平面呼叫 API 的 subject**，方向和其他所有 RPC 相反。建議：保留。 **→ 已定案（計畫 v0.30，F39）：** 五個型別都保留，由 STS controller 服務；`sts.registry.reload` 改成重新掃描索引、不 import。由 IF-16（#275）、B5-10（#276）負責。
 2. **event log 的讀取：** `sts.eventlog.info`、`sts.eventlog.read`。§11 的 B5 只說「event log 搬到新 worker」，沒說協定。建議：保留。
 3. **`md.session.list`：** API 的 `/md/sessions` 靠它。§8.4 說 as-is 的 `md_sessions` 表從 B10 起停寫、只留唯讀，但沒說這個 RPC 怎麼辦。建議：改成對 `md_intents` 的查詢。
 4. **`sts.session.list`：** §5.1 寫了「list」，但沒說它的 payload（`ListSessionsRequest` / `SessionInfo`）要不要跟著 SessionSpec/Status 的新欄位（`generation`、`conditions`，§8.4）一起改。建議：保留並擴充欄位。

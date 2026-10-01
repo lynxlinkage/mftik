@@ -32,11 +32,11 @@ RM 的目標是「三個平面都還能啟動，只是沒有 session 機制」�
 | `rpc/sessions.py` | 70 | 全部是占位 → IF-04（#182） |
 | `rpc/health.py` | 22 | 保留不動。IF-02（#180）說要挑一個小 RPC 當 `serve(broker, subject, handler)` 的範例，這是它 |
 | `rpc/env.py` | 183 | 保留不動（RM-04 明文留下） |
-| `rpc/registry.py` | 328 | 保留不動 |
-| `rpc/artifacts.py` | 336 | 保留。B5-07（#216）搬的是**策略端**寫 artifact 的路徑；這裡是 operator / API 的上傳路徑，新架構的平面不再持有 session，它掛在哪裡還沒有票 → §10 第 3 項 |
+| `rpc/registry.py` | 328 | 保留。依 F39 由 controller 服務，只寫磁碟副本、不 import → B5-10（#276） |
+| `rpc/artifacts.py` | 336 | 保留。B5-07（#216）搬的是**策略端**寫 artifact 的路徑；這裡是 operator / API 的上傳路徑，新架構的平面不再持有 session，依 F40 由 controller 服務 → B5-11（#277） |
 | `rpc/eventlog.py` | 214 | 保留 → B5-02（#211）。`info` 回的 `live` 旗標自 RM-04 起恆為 false，要等 B4-02 有 worker status 才能答得出來（檔案裡已註明） |
 | `runtime_env.py` | 222 | 保留不動。`ensure_deployable`〔零呼叫端〕——它原本的三個呼叫點全在被刪掉的 `session/manager.py` 裡，現在只有 `test_sts_runtime_env.py`（16 個）在測。准入檢查要接回來的地方是 IF-04（#182）、B4-02（#202） |
-| `registry_catchup.py` | 58 | 保留不動 |
+| `registry_catchup.py` | 58 | 保留。依 F39 由 controller 服務，只寫磁碟副本、不 import → B5-10（#276） |
 | `session/session.py` | 882 | 〔生產死碼〕RM-04 刪掉 `apps/sts/src/mftik_sts/db.py` 和 manager 之後，`StsSession` 只剩測試會建構。整份搬進 ingress / strategy 兩條 thread → B4-03（#203） |
 | `session/__init__.py` | 7 | 同上 |
 | `impl/chase.py`、`cross_arb.py`、`macd_dollar.py`、`noop.py`、`oco.py`、`twap.py` | 974 / 879 / 969 / 403 / 804 / 529 | 保留 → B5-08（#217）。六支都還在 `on_recon_done` 才開始交易，RM-02 的補正把這一步和那 111 個策略測試一起移到 B5-08 |
@@ -157,8 +157,8 @@ RM 只刪各平面 `db.py` 的包裝與接線，repository 一律保留（大量
 ## 10. 沒有票涵蓋的事
 
 1. **TD `db.py:count_live_for_api` 沒有呼叫端。** RM-06 的 commit 說明把它和 `get_api` 一起列進「留下」，但只有 `get_api` 被接線。刪它很安全，不過它落在 RM-06 的範圍裡，本票選擇記下來而不是動手；B6-01（#219）或 IF-12（#190）把常駐層接起來時，會知道要嘛用它、要嘛刪它。
-2. **registry 的權威與開機補差額沒有對應的層。** `state-authority.md` §12 第 2 項已經記過。RM 之後更明顯了：`apps/api/src/mftik_api/sts_fanout.py`（721 行）和兩個 `registry_catchup.py` 是唯一橫跨 API 與 STS 的 session 外機制，而 §3.4 的新層表沒有它。
-3. **平面側的 artifact 上傳路徑在新架構掛哪裡。** `state-authority.md` §12 第 3 項。B5-07（#216）只說把策略端的 artifacts 搬進新 worker。
+2. **registry 的權威與開機補差額沒有對應的層。** `state-authority.md` §12 第 2 項已經記過。RM 之後更明顯了：`apps/api/src/mftik_api/sts_fanout.py`（721 行）和兩個 `registry_catchup.py` 是唯一橫跨 API 與 STS 的 session 外機制，而 §3.4 的新層表沒有它。 **→ 已定案（v0.30）：** F39 / F40、計畫 §5.7；由 IF-16（#275）、B5-10（#276）、B5-11（#277）負責。
+3. **平面側的 artifact 上傳路徑在新架構掛哪裡。** `state-authority.md` §12 第 3 項。B5-07（#216）只說把策略端的 artifacts 搬進新 worker。 **→ 已定案（v0.30）：** F39 / F40、計畫 §5.7；由 IF-16（#275）、B5-10（#276）、B5-11（#277）負責。
 4. **`md.session.attach` / `list` 與 `td.session.attach` / `detach` / `list` 的型別常數留在 protocol 裡，兩側都沒有實作。** IF-01（#179）的範圍是「B0-03 標成保留或改名的型別都對到新名字」，所以這幾個應該在那裡消失；本票只記下它們現在是沒有實作的常數。
 
 ## 11. 票面與代碼不符之處（RM 的處理）

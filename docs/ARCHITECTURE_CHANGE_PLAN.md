@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.29（2026-10-01）**。§12 的待決事項已全部定案（F1 到 F38）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.30（2026-10-02）**。§12 的待決事項已全部定案（F1 到 F40）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
 > **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。**RM 清場已完成**，所以描述現況的章節（§1、§5 到 §8、附錄 A、B）說的是 `a0cbfb2`，不是分支上的代碼；清場後還剩什麼見 `docs/baseline/remaining.md`（RM-10，#173）。
+>
+> **v0.30（RM-10 留下的兩題）：** 新增 F39、F40 與 §5.7：「worker 跑哪一份代碼」分成平台 release、策略樹 digest、extras generation 三個軸，session 在 start 時釘住後兩者；STS controller 服務 operator 對主機磁碟的所有路徑（registry、extras、artifacts、event log），不 import 策略代碼。§3.3、§3.4、§4.3、§4.6、§5.1、§8.4 隨之更新；新票 IF-16（#275）、B5-10（#276）、B5-11（#277）。
 >
 > **v0.29（RM-10，#173）：** 附錄 C 加上 C.8，填入清場後在 GitHub Actions 上量到的實數（3,776 個測試、255.8 秒），C.5 的模組表加上「RM 之後」兩欄。附錄 A 加上一節，記錄 RM 落地時和清單不同的五處。新增 `docs/baseline/remaining.md`。
 >
@@ -54,6 +56,8 @@
 | F36 | 帳號的 at-most-one 不用 DB lease：同 instance 由 Supervisor 以 PID 確認，跨 instance 靠 `api_id` → instance 的靜態綁定；`st_facts` 在 B10 drop | §7.1、§8.4 |
 | F37 | cancel-on-disconnect 預設關閉、逐帳號開啟；只用倒數計時型機制，當作 TD worker 的死人開關；不用 Deribit COD 和 Bybit DCP | §7.1 |
 | F38 | intent 兼任歷史：session 結束時 intent 列不刪、改記 `released_at`；`md_sessions` / `td_sessions` 從 B10 起停寫、保留唯讀；前端 MD/TD 頁改成顯示 worker 與 intent | §8.4；前端資料來自 procman 回報和 worker 狀態廣播 |
+| F39 | 「worker 跑哪一份代碼」分成三個軸：平台 release（`code_ref`）、策略樹 `strategy_digest`、extras `env_generation`。策略樹與 extras 的目錄權威維持在 API；session 在 start 時釘住 `(strategy_digest, env_generation)`，重新掛起沿用；Supervisor 記錄 worker 實際跑的版本；STS 磁碟副本改以 digest 定址，被釘住的版本不被覆蓋或回收；STS controller 不 import 策略代碼 | §3.3、§5.7；IF-16（#275）、B5-10（#276） |
+| F40 | STS controller 服務 operator 對主機磁碟的所有路徑：registry 副本、extras、artifact 的 list / read / 上傳 / 刪除、event log 讀取、未完成上傳的清理；不另開 files worker。策略仍在自己的 worker 裡直接讀寫 artifact | §5.7；B5-11（#277） |
 
 ## 0. 摘要
 
@@ -200,6 +204,9 @@
 | 常駐訂閱 | 設定檔 | Postgres `md_standing_subscriptions` | MD controller | — |
 | `api_id` → instance 綁定、帳號設定（例如 cancel-on-disconnect） | 使用者經 API | Postgres `apis` | TD controller | — |
 | listing：合約、到期、strike | SYM | Postgres `symbol_*` | MD controller（selector、到期）、TD | 每小時刷新 |
+| 策略樹目錄：有哪些 name、各自目前的 digest | API（push、delete、pull） | API 主機的 `MFTIK_DATA/registry` | STS controller（同步副本）、API 的 deploy 驗證 | — |
+| extras 目錄：目前的 generation 與 pins | API（env apply） | API 主機的 `MFTIK_DATA/env/applied.json` | STS controller（同步副本） | — |
+| session 釘住的代碼身分 `(strategy_digest, env_generation)` | API（start 時從上面兩列解析） | Postgres `sts_sessions`（Spec 欄位） | STS controller | session 生命週期內不變；重新掛起沿用（F39） |
 
 **進程層**
 
@@ -207,7 +214,7 @@
 |---|---|---|---|---|
 | worker 是否存在、exit code、signal | shim（親眼看到） | `${WORK_DIR}/run/<id>.sock`、`<id>.exit.json` | Supervisor | controller 重啟時 reattach 讀回 |
 | 每個 instance 存活中的 worker 集合 | Supervisor | `procman.report.{plane}.{instance}`（不落地） | MD/TD orchestrator（intent 回收） | 報告停止時不回收任何東西（F32） |
-| worker 的代碼版本 | Supervisor（`WorkerSpec.code_ref`） | `supervisor.json` | CLI（列出舊版 worker） | — |
+| worker 實際跑的代碼：`code_ref`、`strategy_digest`、`env_generation` | Supervisor（spawn 時記下；後兩者在 `WorkerSpec.labels`） | `supervisor.json`、`procman.report` | CLI（`mftik workers --stale`） | — |
 
 **MD**
 
@@ -237,9 +244,15 @@
 |---|---|---|---|---|
 | 策略內部狀態 | session worker | 記憶體，不落地（F10） | 策略 | 重新掛起時從 `on_start` 全新開始 |
 | `client_order_id` 序號 | session worker | 記憶體（`session24 \| ts_sec28 \| seq8`） | TD | R2 保證不撞號 |
-| event log | session worker 的 ingress | 檔案（`STS_EVENTLOG_DIR`） | 事後分析 | — |
-| artifacts | session worker | 檔案（`STS_ARTIFACT_DIR`） | 策略、API | — |
+| event log | session worker 的 ingress | 檔案（`STS_EVENTLOG_DIR`） | 事後分析；API 經 STS controller 讀（F40） | — |
 | hook 進度、offload 進度、交付的丟棄計數 | session worker 的 ingress | status progress（`sts.status.{session_id}`） | UI | — |
+
+**STS 主機磁碟（F39、F40）**
+
+| 狀態 | 權威 | 存放 | 讀取者 | 收斂 |
+|---|---|---|---|---|
+| 策略樹與 extras 的副本 | STS controller（只依 API 的 fan-out 與開機 catch-up 寫入） | STS volume 的 `registry/trees/<digest>/`、`env/gen-{N}` | session worker（載入）、controller（可部署檢查） | 開機向 API 補差額；被非 terminal session 釘住的版本不回收 |
+| artifacts | 主機上的 artifact volume。寫入路徑兩條，共用同一套 `ArtifactStore`（part 檔加 rename）：operator 經 STS controller，策略在自己的 worker 裡直接寫 | 檔案（`STS_ARTIFACT_DIR`） | 策略（本地磁碟）、API（經 STS controller） | 檔案留在 volume 上；未 commit 的上傳由 controller 清理 |
 
 **版本**
 
@@ -267,7 +280,8 @@
 | TD 帳號 worker | `mftik_td.account` | 常駐層（HTTP 連線池、backfill）、交易層（私有連線、OMS、ledger、recon）、`cancel_session`、死人開關 | `session/manager.py` 的 lease 與 refcount、`session/session.py` 的生命週期部分 |
 | TD controller | `mftik_td.controller` | `desired_accounts`、intent → 交易層開關、drain-replace | `session/manager.py` |
 | API | `mftik_api.orchestrate` | `start` / `end`、intent repository | `deploy_strategy` 與補償邏輯 |
-| DB | `mftik_db` | SessionSpec / Status 欄位、`md_intents`、`td_intents`、`md_standing_subscriptions`、selector 狀態 | `st_facts`；`md_sessions` / `td_sessions` 的寫入 |
+| STS 主機磁碟 | `mftik_sts.hostdisk` | 以 digest 定址的策略樹副本與索引、版本釘住與 GC、可部署檢查、import 探測子進程；controller 上 registry、env、artifact、event log 的 handler（§5.7） | `RegistryStore` 在 STS 端的原地替換、`runtime_env.py` 與 `load_local_registry` 在平面進程內的 import 與 reload |
+| DB | `mftik_db` | SessionSpec / Status 欄位（含 F39 的 `strategy_digest`、`env_generation`）、`md_intents`、`td_intents`、`md_standing_subscriptions`、selector 狀態 | `st_facts`；`md_sessions` / `td_sessions` 的寫入 |
 
 ---
 
@@ -319,7 +333,7 @@ class WorkerSpec:
     oom_score_adj: int           # 依 kind 分級（§4.7）
     rlimit_data_bytes: int | None  # 可選，由 shim 在 exec 前套用（§4.7）
     stop_grace_s: float
-    labels: dict[str, str]
+    labels: dict[str, str]       # STS session 帶 strategy_digest、env_generation（F39）；procman 不解讀
 ```
 
 狀態機沿用 prototype：
@@ -440,7 +454,7 @@ MD/TD 用 readiness 區分初始化失敗和運行中崩潰（prototype §4）�
 
 | 平面 | controller 滾動 | worker 代碼升級 |
 |---|---|---|
-| STS | 不影響（reattach） | 已在跑的 session 繼續用舊版，直到它結束；新 session 用新版 |
+| STS | 不影響（reattach） | 已在跑的 session 繼續用舊版，直到它結束；新 session 用新版。策略樹與 extras 也一樣：session 一直用 start 時釘住的 digest 與 generation，包括重新掛起（F39） |
 | MD | 不影響 | 已在跑的連線繼續用舊版，不遷移（F22）；新開的連線用新版。既有連線要換上新版時（例如 decode 的 bug fix），由人工對單一連線下 `restart`（F24），平台不會自動重啟舊版連線：斷線數秒，策略收到 `on_md_update` 的 down → live，tape 記錄空洞。**這取代了 `MdHandover.md` 的設計** |
 | TD | 不影響 | 換版後由人工逐帳號觸發 drain-replace（F27），平台不自動換版：新單一律以可重試的 `td_draining` 拒絕，等 in-flight ack 收齊後停止，以新 incarnation 啟動並 recon，再恢復收單。期間 session 的 `TdReady` 會短暫變成 false |
 
@@ -507,7 +521,7 @@ TD 帳號 worker 對每個啟用帳號常駐（F35），所以 TD 平面固定�
 
 - desired 來源是 `SessionSpec`（DB 列）。placement 很單純，就是本 instance。
 - 每個 session 有一個 reconcile：比較 desired phase 和 worker status，決定 create、stop、標記 terminal。
-- 服務 `sts.{instance}`：start、end、list、artifacts、env。session 層級的控制（stop、fail、status）由 worker 自己在 `sts.ctl.{session_id}` 服務，現在的 `Topics.sts_control` 已經是這個方向。
+- 服務 `sts.{instance}`：start、end、list，以及 operator 對主機磁碟的所有路徑：registry、env、artifacts、event log 讀取（§5.7，F40）。controller 不 import 策略代碼（F39）。session 層級的控制（stop、fail、status）由 worker 自己在 `sts.ctl.{session_id}` 服務，現在的 `Topics.sts_control` 已經是這個方向。
 - 執行期間的訂閱變更（策略呼叫 `self.md.subscribe`，以及 B9 的 selector 事件），由 worker 直接找 MD orchestrator，不經過 API。
 
 ### 5.2 Session 生命週期
@@ -824,6 +838,48 @@ self.td.state(api_id)
 - **conditions：** `MdReady`、`TdReady` 在 `on_ready` 之後繼續反映即時狀態，UI 和 board 看得到。每次狀態轉換都寫一條 warning log，Alert 管線可以直接比對。
 
 
+### 5.7 代碼身分與主機磁碟（F39、F40）
+
+每台 STS 主機的 `mftik-data` volume 上有四樣東西：策略樹（registry 副本）、extras overlay、artifacts、event log。現況由平面進程讀寫；新架構的平面 controller 不再持有 session，這一節定下每一樣歸誰。
+
+**代碼身分（F39）**
+
+「這個 worker 跑哪一份代碼」是三個獨立的軸，各有自己的權威：
+
+| 軸 | 識別 | 目錄（有哪些版本）的權威 | 在主機上的位置 | 什麼時候會變 |
+|---|---|---|---|---|
+| 平台 release | `WorkerSpec.code_ref` | Strategon release（F6） | release 的 rootfs | controller 換版 |
+| 策略樹 | `strategy_digest`（`.py` 檔的 digest，`mftik.registry.digest`） | API 的 registry store | STS volume 的 registry 副本 | push、delete、pull |
+| extras | `env_generation` | API 的 `env/applied.json` | STS volume 的 `env/gen-{N}` | env apply |
+
+- 內建策略（`mftik_sts.impl`）沒有 digest，代碼就是 release。
+- 三個軸描述的是同一個 worker 的不同部分，不是兩個來源描述同一件事。procman 只認 `code_ref`（P6）；STS orchestrator 把 `strategy_digest`、`env_generation` 寫進 `WorkerSpec.labels`。
+- **desired：** API 在 start 時從自己的 registry 與 env 解析出 `(strategy_digest, env_generation)`，寫進 SessionSpec。這一組在 session 的整個生命週期內不變，F11 的重新掛起也沿用，不讀「磁碟上現在的版本」。
+  - 重新掛起時的平台 release 是當下 controller 的版本，所以 spawn 前先檢查策略樹宣告的 `requires_mftik`；不相容就 failed 並發 alert。
+- **observed：** Supervisor 在 spawn 時記下三個軸，經 `procman.report` 回報。`mftik workers --stale` 列出跑舊 release 的 worker，也列出跑的 digest 已經不是目前版本的 session。
+- **STS 磁碟副本改成以 digest 定址：**
+  - 樹放在 `registry/trees/<digest>/`，name → digest 的索引另存。push 新版本只改索引，不覆蓋正在被使用的樹。現在的 `<origin>/<name>/` 是原地替換。
+  - GC 只刪「沒有被本 instance 任何非 terminal SessionSpec 釘住、也不是索引裡目前版本」的 digest。
+  - extras 的 `_prune_generations` 改成同一條規則。現在只留 current 和 previous，跑在更舊 generation 上的 worker 遇到 lazy import 會失敗，和 §4.5 舊 rootfs 被刪是同一類潛伏錯誤。
+  - API 的 registry store 只保留每個 name 的目前版本。STS 磁碟遺失時，被釘住的舊 digest 無法從 API 補回，這時重新掛起以 `strategy_unavailable` failed。
+- **STS controller 不 import 策略代碼。** 使用者代碼只在 session worker 裡執行。
+  - worker 在第 1 階段（§5.3）以 `load_class(trees/<digest>, digest=…)` 載入；失敗是初始化失敗（F12）。
+  - deploy 時的可部署檢查只看 digest 和 generation 在不在這台磁碟上、`requires` 和 extras 是否相符，不 import。
+  - push 之後「這棵樹在 STS X 上能不能 import」的回報（現在 `sts.registry.sync` 回覆裡的 `loaded` / `skipped`）保留，改由 controller 起一個一次性的探測子進程 import 後回報。探測子進程不是受管 worker，跑完即結束。
+- registry 與 extras 的 RPC（`sts.registry.sync`、`sts.env.sync`、開機的 `api.registry.catchup`）由 STS controller 服務。它們只寫磁碟副本，不碰執行中的 worker。`sts.registry.reload` 從「重新 import」改成「重新掃描索引」。
+
+**主機磁碟上的 operator 路徑（F40）**
+
+- STS controller 服務 operator 對主機磁碟的所有路徑：上面的 registry 與 extras，加上 `sts.artifact.*`（list、read、begin / chunk / commit / abort、delete）、event log 讀取，以及清理沒有 commit 的上傳（現在的 `sweep_loop`）。
+- 理由：
+  - 這些都是 API 對「某一台主機磁碟」的控制面操作，現在就以 `sts.{instance}` 逐台定址（`sts_fanout`）。新架構裡每台主機上一直在線、又屬於這台主機的只有 controller。
+  - 不經過交易資料面。P1 管的是行情、下單和回報，operator 上傳模型或下載 event log 不在其中。
+  - 不另開 files worker：那會多一種 kind、一份 RSS、一個需要人工換版的進程（F24），換到的只是 controller 滾動時傳輸不中斷。controller 滾動是秒級，上傳本來就要能重試。
+  - handler 的檔案 I/O 已經都在 `asyncio.to_thread` 裡，不佔 controller 的 loop。
+- **要補的一件事：** 上傳 token 現在只存在記憶體（`ArtifactStore._uploads`），controller 一滾動，進行中的上傳在下一個 chunk 就會收到 `ArtifactUploadError`。改成由磁碟上的 `.{name}.{token}.part` 找回 token（`_token_of` 已經會解析），controller 重啟後可以接著傳。
+- **artifact 的權威是主機上的 artifact volume。** 兩條寫入路徑共用同一套 `ArtifactStore`（part 檔加 rename，原子替換）：operator 經 controller，策略在自己的 worker 裡直接寫（B5-07）。語意維持現況：operator 動不到 `sessions/`；策略可以寫任何 key，包括覆蓋 operator 上傳的 key。
+- event log 的寫入者是 session worker 的 ingress（§5.3），controller 只讀。
+
 ---
 
 ## 6. MD
@@ -1059,7 +1115,7 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 ### 8.4 持久化
 
 - **`sts_sessions` 改成 SessionSpec / Status：**
-  - 新增 `generation`、`observed_generation`、`worker_incarnation`、`conditions JSON`。
+  - 新增 `generation`、`observed_generation`、`worker_incarnation`、`conditions JSON`，以及 start 時釘住的 `strategy_digest`、`env_generation`（F39）。
   - `rebuild_count` 改名為 `restart_count`，`restart` 保留並改存新語意（F11）；刪除 `st_facts`（F36）。
 - **新增表：**
   - `md_intents(session_id, instance, feeds, atoms, generation, created_at, released_at)`
