@@ -108,11 +108,11 @@ API 沒有被 RM 拆掉，只有四個路由改成 501 占位（`routes/sts.py` 
 |---|---|
 | `strategy/base.py`（572） | → IF-06（#184）。`Strategy.on_recon_done` 的 hook 定義**刻意留著**：RM-02 的補正算出 224 個策略實作測試裡有 111 個靠它驅動，所以 hook 和六支內建策略的實作一起留到 B5-08（#217）。`rebuildable`、`on_rebuild`、`remember`、`send_recon` 都已刪除 |
 | `strategy/oms.py`（712）、`ledger.py`（289）、`mds.py`（329）、`tape.py`（508）、`timer.py`（247）、`artifacts.py`（755）、`eventlog.py`（491）、`session.py`（62）、`symbols.py`（144）、`client_order_id.py`（172） | → IF-06（#184）、B5-01 到 B5-07。`tape.read(on_print=…)` 依 RM-03 的補正保留參數本身，只拿掉每筆讓出的 `breathe` / `slice_deadline` |
-| `protocol/messages.py`（1,831）、`topics.py`（351）、`__init__.py`（658） | → IF-01（#179）。lease 的六個型別已隨 RM-07 刪除；`md.session.attach` / `detach` / `list` 和 `td.session.attach` / `detach` / `list` 的**常數還在、兩側都沒有實作了**〔生產死碼〕，由 IF-01 換成 intent。`Topics.md_session` 保留成 subject 名稱產生器（`test_nats_transport`、`test_query_codes`、`scripts/loop_bench.py` 拿它當名字用），發佈端已隨 RM-05 消失 |
+| `protocol/messages.py`（1,831）、`topics.py`（351）、`__init__.py`（658） | → IF-01（#179）。lease 相關的 model、envelope 別名與 type 常數（含舊名 `STS_HEARTBEAT`）已隨 RM-07 刪除；`md.session.attach` / `detach` / `list` 和 `td.session.attach` / `detach` / `list` 的**常數還在、兩側都沒有實作了**〔生產死碼〕，由 IF-01 換成 intent。`Topics.md_session` 保留成 subject 名稱產生器（`test_nats_transport`、`test_query_codes`、`scripts/loop_bench.py` 拿它當名字用），發佈端已隨 RM-05 消失 |
 | `protocol/strategy_yml.py`（502） | → IF-07（#185）。RM-09 之後 `StrategySpec.restart` 的預設值是 `never`、`RESTART_MODES` 只有 `{never}`，`restart: always` 會得到指向新寫法的錯誤訊息。`on_failure`、`max_restarts`、`restart_window_s` 等新欄位由 IF-07 加 |
 | `protocol/envelope.py`（69）、`reject_codes.py`（198）、`query_codes.py`（166）、`session_log.py`（115）、`strategy_catalog.py`（273） | 保留；`pv` 欄位與 `protocol_mismatch` 由 IF-01（#179）加 |
 | `broker/client.py`（245）、`transport/nats.py`（363）、`transport/base.py`（144）、`request.py`、`errors.py`、`config.py` | 保留 → IF-02（#180）加 `mftik.broker.handler`。`link.py` 和 `Broker.leased_link` 已隨 RM-07 刪除 |
-| `exchange/`（約 47,000 行，八個 venue） | 保留 → IF-08（#186）每個 venue 加 `atoms.py`、B7-02a 到 B7-02g（#228–#234）實作。`exchange/wire.py`（768）搬進連線 worker 的 reconciler → B7 |
+| `exchange/`（40,856 行，八個 venue） | 保留 → IF-08（#186）每個 venue 加 `atoms.py`、B7-02a 到 B7-02g（#228–#234）實作。`exchange/wire.py`（768）搬進連線 worker 的 reconciler → B7 |
 | `registry/`、`symbols/`、`environment.py`、`envapply.py`、`envimport.py`、`instance.py`、`health.py`、`runtime.py` | 保留不動 |
 
 **還不存在的新層**：`mftik.clock`（B2-02，#175）、`mftik.broker.handler`（IF-02）、`mftik.procman`（IF-03，#181）。
