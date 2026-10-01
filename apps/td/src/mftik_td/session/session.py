@@ -136,10 +136,10 @@ class Session:
     """Shared exchange session keyed by API id.
 
     Lifecycle:
-    1. Created / started when first STS attaches (refcount 0→1).
-    2. Further STS sessions attach via lease; OMS publishes on ``td.oms.{api_id}``.
+    1. Created / started by whoever owns the account (B4-05).
+    2. OMS publishes on ``td.oms.{api_id}``.
     3. Private events fan out on ``td.{api_id}.global``.
-    4. Last detach destroys the trading session.
+    4. Destroyed when the owner lets the account go.
     """
 
     def __init__(
@@ -205,7 +205,7 @@ class Session:
         #: Single-flight background ``resolve_all_unknown`` (if any).
         self._resolve_all_task: asyncio.Task[None] | None = None
         #: Fired when the book has no UNKNOWN left (after resolve / recon).
-        #: SessionManager uses this to flush STS ``ReconDone`` waiters.
+        #: :func:`mftik_td.session.settled.view_when_settled` waits on it.
         self._on_book_settled: Callable[[], Awaitable[None]] | None = None
         #: How long UNKNOWN may linger before a forced venue recon.
         self.unknown_force_recon = UNKNOWN_FORCE_RECON_S
@@ -554,13 +554,13 @@ class Session:
         venue that already said no.
 
         The pre-lock comes back here too, and only here. Every other terminal
-        state releases through the manager's ``_on_order_settled``, which is
-        registered on the *venue stream* — and a submit the venue refused by
-        raising never reaches that stream. Left undone it is a standing leak:
-        the order is gone from the book while its reservation still counts
-        against ``available``, and nothing frees it until the session dies and
-        ``clear_state`` drops the ledger wholesale. A crossed post-only alone
-        earns one every time the book moves under a passive quote.
+        state releases from a callback on the *venue stream* — and a submit the
+        venue refused by raising never reaches that stream. Left undone it is a
+        standing leak: the order is gone from the book while its reservation
+        still counts against ``available``, and nothing frees it until the
+        session dies and ``clear_state`` drops the ledger wholesale. A crossed
+        post-only alone earns one every time the book moves under a passive
+        quote.
 
         Released before the caller announces the refusal, for the reason
         :meth:`reserve` writes the ledger before the ack goes out: a strategy

@@ -44,17 +44,35 @@ PLANES = [
 
 
 def _run_rpc(plane: str):
+    """Each plane's loop, callable as ``(broker, stop, subject=…)``.
+
+    The planes that still take a session manager are handed ``None``. TD no
+    longer has one (RM-06), so it is called without it — the adapters are what
+    lets one test cover loops whose signatures are mid-migration.
+    """
     if plane == "td":
         from mftik_td import app
 
-        return app.run_rpc
+        return lambda broker, stop, *, subject: app.run_rpc(
+            broker, stop, subject=subject
+        )
     if plane == "md":
         from mftik_md import app
 
-        return app.run_rpc
+        return lambda broker, stop, *, subject: app.run_rpc(
+            broker,
+            None,  # type: ignore[arg-type]
+            stop,
+            subject=subject,
+        )
     from mftik_sts import app
 
-    return app.run_rpc
+    return lambda broker, stop, *, subject: app.run_rpc(
+        broker,
+        None,  # type: ignore[arg-type]
+        stop,
+        subject=subject,
+    )
 
 
 @pytest.mark.asyncio
@@ -67,7 +85,7 @@ async def test_a_plane_answers_on_the_subject_it_was_given(
     async with a_broker(f"subj-{plane}") as broker:
         stop = asyncio.Event()
         task = asyncio.create_task(
-            _run_rpc(plane)(broker, None, stop, subject=subject)  # type: ignore[arg-type]
+            _run_rpc(plane)(broker, stop, subject=subject)
         )
         await asyncio.sleep(0.05)
         try:
@@ -100,12 +118,7 @@ async def test_a_plane_does_not_answer_on_a_subject_it_was_not_given(
     async with a_broker(f"subj-{plane}-neg") as broker:
         stop = asyncio.Event()
         task = asyncio.create_task(
-            _run_rpc(plane)(
-                broker,
-                None,  # type: ignore[arg-type]
-                stop,
-                subject=named(f"{plane}-jp-1"),
-            )
+            _run_rpc(plane)(broker, stop, subject=named(f"{plane}-jp-1"))
         )
         await asyncio.sleep(0.05)
         try:

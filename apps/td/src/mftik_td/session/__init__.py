@@ -5,13 +5,13 @@ from mftik_td.session.factory import (
     SessionFactory,
     VenueSessionFactory,
 )
-from mftik_td.session.manager import SessionManager
 from mftik_td.session.session import Session
+from mftik_td.session.settled import view_when_settled
 
 __all__ = [
     "PaperSessionFactory",
     "Session",
     "SessionFactory",
-    "SessionManager",
     "VenueSessionFactory",
+    "view_when_settled",
 ]

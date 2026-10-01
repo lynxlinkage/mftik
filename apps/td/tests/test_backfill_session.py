@@ -1,11 +1,11 @@
 """``td.backfill`` — accepted at once, walked out of band.
 
 The shape is the argument. Order entry is keyed by ``api_id`` because only the
-process holding the lease may place an order; a history read is owned by
+process holding the credential may place an order; a history read is owned by
 nobody, so this subject takes work from anyone and answers for accounts this
 process has never traded. What that buys is the case a keyed subject cannot
-serve at all: an account nobody is attached to any more, whose record is
-exactly the one nothing else will repair.
+serve at all: an account nobody is trading any more, whose record is exactly
+the one nothing else will repair.
 
 The reply is acceptance, not the walk. A walk is minutes of venue round
 trips; the cursor is the record of progress.

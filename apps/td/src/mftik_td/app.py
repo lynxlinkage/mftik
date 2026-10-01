@@ -1,4 +1,4 @@
-"""TD process bootstrap — RPC, venue session factory, heartbeat."""
+"""TD process bootstrap — RPC, backfill, heartbeat."""
 
 from __future__ import annotations
 
@@ -26,9 +26,7 @@ from mftik_td.backfill import (
     BackfillSession,
     HistoryReaderFactory,
 )
-from mftik_td.history import HistoryWriter
 from mftik_td.rpc import dispatch
-from mftik_td.session import SessionManager, VenueSessionFactory
 
 SOURCE = "td"
 #: Which TD this process is. ``MFTIK_INSTANCE``, defaulting to the
@@ -53,7 +51,6 @@ RPC_RESTART_DELAY_SECONDS = 1.0
 
 async def run_rpc(
     broker: Broker,
-    sessions: SessionManager,
     stop: asyncio.Event,
     *,
     subject: str,
@@ -69,7 +66,7 @@ async def run_rpc(
         try:
             async for req in broker.serve(subject, stop=stop):
                 try:
-                    await dispatch(req, sessions=sessions)
+                    await dispatch(req)
                 except Exception:
                     logger.exception(
                         "TD RPC handler failed type=%s id=%s",
@@ -80,9 +77,8 @@ async def run_rpc(
             raise
         except Exception:
             # Reaching here means something ``serve`` does not already handle,
-            # and the answer is still to serve. This coroutine returning is how
-            # TD ends up running sessions that nobody can list, pause or stop
-            # — the process alive, the subject silent, and no line anywhere
+            # and the answer is still to serve. This coroutine returning leaves
+            # the process alive, the subject silent, and no line anywhere
             # saying so.
             logger.exception(
                 "TD RPC serve loop failed subject=%s — restarting", subject
@@ -93,40 +89,6 @@ async def run_rpc(
                 )
             except TimeoutError:
                 continue
-
-
-#: How often to look for attaches this instance owns and does not hold.
-#: Well under the window someone would spend wondering why an api_id still
-#: reports a session nobody is running, and far enough above two reap
-#: scans that a row between persist and ``_accounts`` is not closed on
-#: the first look.
-REAP_INTERVAL_SECONDS = 60.0
-
-
-async def reap_loop(
-    sessions: SessionManager,
-    stop: asyncio.Event,
-    *,
-    interval: float = REAP_INTERVAL_SECONDS,
-) -> None:
-    """Scan for orphaned attaches on boot, then on a slow interval.
-
-    On boot because rows outlive the process that wrote them, and whatever
-    replaces it is the first thing in a position to notice; on an interval
-    because a lease loop can stop without the process doing so, and nobody
-    should have to restart TD to find out.
-    """
-    while not stop.is_set():
-        try:
-            closed = await sessions.reap_orphans()
-            if closed:
-                logger.warning("TD reaped %d orphaned attach(es)", len(closed))
-        except Exception:
-            logger.exception("TD orphan reaper failed")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=interval)
-        except TimeoutError:
-            continue
 
 
 async def amain() -> bool:
@@ -144,17 +106,10 @@ async def amain() -> bool:
         except InstanceAlreadyServing as exc:
             logger.error("%s", exc)
             return False
-        # Venue comes from the apis row: paper goes to the paper-engine
-        # container, Gate connects to the venue directly.
         # One symbol client for the process: its cache is what keeps symbol
         # resolution off the wire, and the backfill resolves the same tickers
         # the order path does.
         symbols = SymbolClient(broker)
-        factory = VenueSessionFactory(
-            broker, load_api=td_db.get_api, symbols=symbols
-        )
-        history = HistoryWriter()
-        await history.start()
         backfill = BackfillSession(
             broker,
             BackfillExecutor(
@@ -165,17 +120,7 @@ async def amain() -> bool:
             instance=INSTANCE,
         )
         await backfill.start()
-        sessions = SessionManager(
-            factory,
-            broker,
-            persist_live=td_db.persist_live_session,
-            mark_done=td_db.mark_session_done,
-            list_db_sessions=td_db.list_sessions,
-            history=history,
-            instance=INSTANCE,
-            td_instance=td_db.instance_name,
-        )
-        logger.info("TD started instance=%s (venue session factory)", INSTANCE)
+        logger.info("TD started instance=%s", INSTANCE)
         subjects = control_subjects(SOURCE, INSTANCE, ROLE)
         if not subjects:
             logger.warning(
@@ -185,7 +130,7 @@ async def amain() -> bool:
             )
         rpc_tasks = [
             asyncio.create_task(
-                run_rpc(broker, sessions, stop, subject=subject),
+                run_rpc(broker, stop, subject=subject),
                 name=f"td-rpc-{subject}",
             )
             for subject in subjects
@@ -199,18 +144,12 @@ async def amain() -> bool:
             ),
             name="td-heartbeat",
         )
-        reaper_task = asyncio.create_task(
-            reap_loop(sessions, stop), name="td-reaper"
-        )
         health_task = asyncio.create_task(
             serve_health(
                 broker,
                 domain=SOURCE,
                 instance=INSTANCE,
                 stop=stop,
-                # Which accounts this process holds right now. Read at reply
-                # time so it cannot go stale the way a registry payload would.
-                describe=lambda: {"api_ids": sessions.active_api_ids},
             ),
             name="td-health",
         )
@@ -219,18 +158,16 @@ async def amain() -> bool:
                 stop,
                 *rpc_tasks,
                 hb_task,
-                reaper_task,
                 health_task,
                 logger=logger,
             )
         finally:
             stop.set()
-            for task in (*rpc_tasks, hb_task, reaper_task, health_task):
+            for task in (*rpc_tasks, hb_task, health_task):
                 task.cancel()
             await asyncio.gather(
                 *rpc_tasks,
                 hb_task,
-                reaper_task,
                 health_task,
                 return_exceptions=True,
             )
@@ -238,10 +175,6 @@ async def amain() -> bool:
             # the subject would always fail, and a successor looking at the
             # cursors is strictly better than being told.
             await backfill.stop()
-            await sessions.close_all()
-            # After the sessions, so the last of their order updates is in the
-            # queue before it is drained.
-            await history.stop()
     logger.info("TD stopped")
     return clean
 
