@@ -6,11 +6,10 @@ F12), and six of the seven override it. A signature that no longer matches is
 not an import error: it is a ``TypeError`` at the one moment a session goes
 live, after the deploy was accepted and the feeds were opened.
 
-So this checks what the registry does at deploy time — resolve the key, build an
-instance — for every bundled strategy, and that each one's ``on_ready`` can be
-called the way the platform will call it. Registry trees on disk are not
-covered: they are source somebody else owns, and B5-08 is where the hook rewrite
-reaches them.
+So this checks the two things a deploy of a bundled strategy does — look the key
+up, build an instance — and that each one's ``on_ready`` can be called the way
+the platform will call it. Only the seven bundled in this package: nothing here
+reads anything from disk.
 """
 
 from __future__ import annotations

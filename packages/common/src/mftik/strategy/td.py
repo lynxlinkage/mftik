@@ -56,6 +56,15 @@ if TYPE_CHECKING:
 #: one means for order entry.
 AccountState = Literal["ready", "degraded", "unavailable"]
 
+#: Why the platform reconciled an account behind the strategy's back (F13).
+#: ``reconnect`` is the session's own broker connection having dropped, so
+#: events published while it was away are gone; ``account_reset`` is the
+#: account worker having rebuilt its book from the venue. Both are platform
+#: judgements — a strategy never asks for a resync, and TD's own reconcile
+#: after a *venue* reconnect is not one of these, because its findings arrive
+#: as ordinary order updates.
+ResyncCause = Literal["reconnect", "account_reset"]
+
 
 class StrategyTd:
     """Account availability, as a strategy reads it.
