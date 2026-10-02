@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from mftik.exchange.delivery_stamp import HasDelivery
 from mftik.exchange.models import (
     BestQuote,
     FundingRate,
@@ -1257,7 +1258,7 @@ class TdOmsOrderRequest(BaseModel):
     client_order_id: str
 
 
-class OrderReject(BaseModel):
+class OrderReject(HasDelivery, BaseModel):
     """TD → STS: submit rejected (publish on ``td.{api_id}.global``).
 
     ``error_code`` says who refused it and why in terms that hold across
@@ -1279,7 +1280,7 @@ class OrderReject(BaseModel):
     error_code: int | str = RejectCode.NONE
 
 
-class CancelReject(BaseModel):
+class CancelReject(HasDelivery, BaseModel):
     """TD → STS: cancel rejected (publish on ``td.{api_id}.global``).
 
     Same fields as :class:`OrderReject`, and the same rule: read

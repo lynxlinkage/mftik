@@ -8,7 +8,7 @@ here, and both should pass:
   ticket should not have to rediscover them.
 * The null. Operations a later ticket owns still raise
   ``NotImplementedError("IF-05")``. I1–I4 are real (B4-03). The queues
-  are B5-01. Hook classification is B5-04. The log file is B5-02.
+  are real (B5-01). Hook classification is B5-04. The log file is B5-02.
 
 An operation that starts returning a plausible answer has to come off
 the raise-list in this file in the same change that removes the
@@ -331,10 +331,8 @@ def test_operations_refuse_with_the_ticket_number() -> None:
     """
     ingress = Ingress(_spec(), capacity=2)
     runner = StrategyRunner(ingress, _strategy())
-    event = _ticker()
     calls = [
         lambda: runner.note_hook("on_ticker", 1.5),
-        lambda: ingress.delivery.accept(event),
         lambda: assess_hook("on_ticker", 1.5),
     ]
     for call in calls:

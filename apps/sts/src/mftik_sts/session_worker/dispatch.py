@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from mftik.exchange.models import (
@@ -56,10 +57,32 @@ from mftik.protocol import (
     UntypedEnvelope,
 )
 from mftik.strategy import Strategy
+from mftik.strategy.delivered import bind_delivery
 from mftik.strategy.eventlog import EventLog
 from pydantic import BaseModel
 
 from mftik_sts.session_worker.events import Inbound, StreamKind
+
+
+def _stamp(
+    payload: BaseModel,
+    delivery: Inbound | None,
+    clock: Callable[[], float] | None,
+) -> None:
+    """Bind ``seq``, ``recv_ts`` and ``age`` on the object the hook receives.
+
+    The older session shell does not pass ``delivery``. An unstamped
+    model answers ``None``, which is what that path has always done.
+    """
+    if delivery is None:
+        return
+    bind_delivery(
+        payload,
+        seq=delivery.seq,
+        recv_ts=delivery.recv_ts,
+        clock=clock if clock is not None else delivery.clock,
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +124,8 @@ async def dispatch_md(
     env: UntypedEnvelope,
     *,
     swallow: bool = True,
+    delivery: Inbound | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> None:
     """Hand one market-data envelope to its hook.
 
@@ -128,6 +153,7 @@ async def dispatch_md(
         )
         logger.exception("invalid md payload type=%s", env.type)
         return
+    _stamp(payload, delivery, clock)
     try:
         await getattr(strategy, name)(payload)
     except Exception as exc:
@@ -144,6 +170,8 @@ async def dispatch_td(
     env: UntypedEnvelope,
     *,
     swallow: bool = True,
+    delivery: Inbound | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> bool:
     """Hand one TD global envelope to its hook.
 
@@ -177,6 +205,7 @@ async def dispatch_td(
             "invalid td global payload api_id=%s type=%s", api_id, env.type
         )
         return True
+    _stamp(payload, delivery, clock)
     if name == "on_order_update":
         strategy.oms.note_order(payload)
     elif name == "on_order_reject":

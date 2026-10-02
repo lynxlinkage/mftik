@@ -498,8 +498,14 @@ def test_must_deliver_includes_availability_notices() -> None:
     assert StreamKind.RESYNC in MUST_DELIVER
 
 
-def test_notices_survive_a_full_temporary_buffer() -> None:
-    """Market data is the thing the temporary buffer drops. Notices stay."""
+def test_notices_survive_a_market_data_flood() -> None:
+    """Notices share the must-deliver queue. A latest book does not push one out.
+
+    Two notices fit in a queue of 2 beside any number of books on one
+    feed: the books conflate to the newest. Both notices come out
+    before that book. A third notice overflows that queue and fails
+    the session. It is not dropped, and it is not pulled.
+    """
     ingress = Ingress(
         StsCreateSessionRequest(session_id="abc123", created_by=1, strategy="noop"),
         capacity=2,
@@ -536,16 +542,20 @@ def test_notices_survive_a_full_temporary_buffer() -> None:
     ingress.offer(book("b"))
     ingress.offer(notice(StreamKind.MD_NOTICE, "md"))
     ingress.offer(notice(StreamKind.TD_NOTICE, "td"))
-    ingress.offer(notice(StreamKind.RESYNC, "resync"))
     ingress.offer(book("c"))
+    ingress.offer(notice(StreamKind.RESYNC, "resync"))
     pulled: list[str] = []
     while True:
         event = ingress.pull()
         if event is None:
             break
         pulled.append(event.event_id)
-    assert pulled == ["md", "td", "resync"]
-    assert reasons == []
+    assert pulled == ["md", "td", "c"]
+    assert "resync" not in pulled
+    assert reasons == ["resync_overflow"]
+    assert ingress.delivery.dropped == 0
+    assert ingress.delivery.mark("a") is not None
+    assert ingress.delivery.mark("resync") is None
     runner.finish()
     ingress.close()
 

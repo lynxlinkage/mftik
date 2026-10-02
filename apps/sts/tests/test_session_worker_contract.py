@@ -1,15 +1,13 @@
 """What the session worker will do, written down before it does it (IF-05).
 
-I1–I4 run. The rest are ``xfail(strict=True)``. The surface file is
-where the null answers are pinned, so a stub that starts returning a
-real queue fails there until this marker is taken off in the same
-change. ``strict`` is what makes the marker have to come off: an
-``xfail`` that passes is a failure.
+I1–I4 run. The delivery table runs (B5-01). The rest are
+``xfail(strict=True)``. The surface file is where the null answers are
+pinned, so a stub that starts returning a real answer fails there until
+this marker is taken off in the same change. ``strict`` is what makes
+the marker have to come off: an ``xfail`` that passes is a failure.
 
 The ticket that owns each remaining test is named in its ``reason``.
 
-* The delivery table, including a TD overflow that fails the session
-  — B5-01.
 * The log line carrying the same mark — B5-02.
 * Every row of the F15 table — B5-04.
 
@@ -52,7 +50,6 @@ from mftik_sts.session_worker import (
     refuse_strategy_signal_handler,
 )
 
-_B5_DELIVERY = "B5-01 applies the delivery table"
 _B5_LOG = "B5-02 writes delivered / superseded / dropped onto the event log"
 _B5_BUDGET = "B5-04 classifies hook time (F15)"
 
@@ -433,7 +430,6 @@ def test_the_ingress_publishes_the_hook_it_is_judging() -> None:
 # --- delivery --------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_B5_DELIVERY)
 @pytest.mark.parametrize("kind", LATEST, ids=lambda kind: kind.value)
 def test_latest_keeps_the_newest_body_and_does_not_count_a_drop(
     kind: StreamKind,
@@ -473,7 +469,6 @@ def test_latest_keeps_the_newest_body_and_does_not_count_a_drop(
     assert lane.take() is None
 
 
-@pytest.mark.xfail(strict=True, reason=_B5_DELIVERY)
 def test_latest_conflates_per_feed() -> None:
     """Two tickers do not share a slot. Only the feed that got a second
     print loses its first one."""
@@ -488,7 +483,6 @@ def test_latest_conflates_per_feed() -> None:
     assert {event.event_id for event in _drain(lane)} == {"a2", "b1"}
 
 
-@pytest.mark.xfail(strict=True, reason=_B5_DELIVERY)
 def test_kline_keeps_the_latest_per_bar_and_does_not_drop_a_closed_one() -> None:
     """The key is ``(feed, bar_open)``.
 
@@ -545,7 +539,6 @@ def test_kline_keeps_the_latest_per_bar_and_does_not_drop_a_closed_one() -> None
     assert close.seq == 3
 
 
-@pytest.mark.xfail(strict=True, reason=_B5_DELIVERY)
 @pytest.mark.parametrize("kind", MARKET_ALL, ids=lambda kind: kind.value)
 def test_all_drops_the_oldest_and_the_seq_hole_is_the_loss(kind: StreamKind) -> None:
     """``all``: a bounded queue per feed. Overflow drops the oldest,
@@ -582,7 +575,6 @@ def test_all_drops_the_oldest_and_the_seq_hole_is_the_loss(kind: StreamKind) -> 
     assert lane.mark("e4") is LogMark.DELIVERED
 
 
-@pytest.mark.xfail(strict=True, reason=_B5_DELIVERY)
 def test_an_all_queue_is_per_feed() -> None:
     """A full BTC queue does not drop the ETH print sitting next to it."""
     lane = Delivery(capacity=1)
@@ -598,7 +590,6 @@ def test_an_all_queue_is_per_feed() -> None:
     assert {event.event_id for event in _drain(lane)} == {"btc", "eth"}
 
 
-@pytest.mark.xfail(strict=True, reason=_B5_DELIVERY)
 def test_a_feed_override_to_all_does_not_conflate() -> None:
     """``delivery: all`` on a ticker feed replaces the ``latest`` default.
     Both prints are delivered, in arrival order, and neither is
@@ -612,7 +603,6 @@ def test_a_feed_override_to_all_does_not_conflate() -> None:
     assert lane.dropped == 0
 
 
-@pytest.mark.xfail(strict=True, reason=_B5_DELIVERY)
 @pytest.mark.parametrize("kind", MUST_DELIVER, ids=lambda kind: kind.value)
 def test_a_must_deliver_overflow_fails_the_session_and_drops_nothing(
     kind: StreamKind,

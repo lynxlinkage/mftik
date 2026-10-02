@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from mftik.exchange.delivery_stamp import HasDelivery
 from mftik.exchange.tickers import SEPARATOR, Category, UniversalTicker
 
 
@@ -207,7 +208,7 @@ _TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
 }
 
 
-class InstrumentScoped(BaseModel):
+class InstrumentScoped(HasDelivery, BaseModel):
     """Base for anything that is about one instrument — and says which.
 
     Market updates, order events and order *requests* alike: what they share
@@ -618,7 +619,7 @@ class OrderBook(InstrumentScoped):
     ts: float = Field(default_factory=_ts)
 
 
-class Balance(BaseModel):
+class Balance(HasDelivery, BaseModel):
     """One asset's balance, as the venue reports it plus what we reserved.
 
     ``free`` and ``locked`` are the venue's numbers. ``prelock`` is ours: funds

@@ -55,6 +55,7 @@ from mftik.protocol import (
     load_md,
     load_td,
     md_feeds_of,
+    parse_strategy_yml,
     publish_sts_log,
     td_api_ids_of,
 )
@@ -345,8 +346,42 @@ def _kind_of(env_type: str) -> StreamKind | None:
     return StreamKind.TD
 
 
+def delivery_overrides_of(request: StsCreateSessionRequest) -> dict[str, str]:
+    """The ``md_delivery`` map from the submitted ``strategy.yml``.
+
+    Empty when the request did not carry the document. Parsing stays
+    IF-07's. A must-deliver kind is not a feed, so the map cannot name
+    one.
+    """
+    if not request.yaml_text:
+        return {}
+    return dict(parse_strategy_yml(request.yaml_text).md_delivery)
+
+
+def drop_status(ingress: Ingress) -> tuple[int, dict[str, str]]:
+    """Total drops, and the per-feed counts for the status snapshot.
+
+    ``progress.dropped`` is the total. Per-feed counts ride in
+    ``conditions`` as ``dropped.<feed>`` because
+    :class:`~mftik.protocol.messages.StsStatusProgress` has one integer.
+    A feed that has not dropped is absent. Replacement is not a count.
+    """
+    total = ingress.delivery.dropped
+    fields = {
+        f"dropped.{feed}": str(count)
+        for feed, count in ingress.delivery.dropped_by_feed.items()
+        if count
+    }
+    return total, fields
+
+
 def _inbound(
-    raw: str, *, feed: str, kind: StreamKind, recv_ts: float
+    raw: str,
+    *,
+    feed: str,
+    kind: StreamKind,
+    recv_ts: float,
+    clock: Clock,
 ) -> Inbound | None:
     try:
         header = json.loads(raw)
@@ -360,6 +395,7 @@ def _inbound(
     seq = header.get("seq")
     if type(seq) is not int:
         seq = None
+    bar_open, closed = _kline_header(header, kind)
     return Inbound(
         kind=kind,
         feed=feed,
@@ -367,7 +403,33 @@ def _inbound(
         body=raw.encode(),
         event_id=event_id,
         seq=seq,
+        bar_open=bar_open,
+        closed=closed,
+        clock=clock.now,
     )
+
+
+def _kline_header(
+    header: dict[str, Any], kind: StreamKind
+) -> tuple[float | None, bool | None]:
+    """``open_time`` and ``closed`` from the envelope payload.
+
+    The ingress already parsed the JSON to read ``type`` and ``seq``.
+    These two keys are the conflation header. This does not build a
+    :class:`~mftik.exchange.models.Kline`.
+    """
+    if kind is not StreamKind.KLINE:
+        return None, None
+    payload = header.get("payload")
+    if not isinstance(payload, dict):
+        return None, None
+    opened = payload.get("open_time")
+    bar_open: float | None = None
+    if not isinstance(opened, bool) and isinstance(opened, int | float):
+        bar_open = float(opened)
+    closed_bit = payload.get("closed")
+    closed = closed_bit if type(closed_bit) is bool else None
+    return bar_open, closed
 
 
 async def amain(
@@ -383,10 +445,19 @@ async def amain(
     leaves the host's handlers alone.
     """
     clock = clock if clock is not None else SystemClock()
+    try:
+        overrides = delivery_overrides_of(request)
+    except Exception:
+        logger.exception(
+            "strategy.yml delivery overrides session=%s", request.session_id
+        )
+        return 1
     ingress = Ingress(
         request,
         capacity=capacity,
+        delivery_overrides=overrides,
         start_timeout_s=DEFAULT_START_TIMEOUT_S,
+        clock=clock,
     )
     ingress.start()
     progress = _Progress()
@@ -516,6 +587,8 @@ async def amain(
             feeds=feeds_box[0],
             availability=availability_box[0],
         )
+        dropped, drop_fields = drop_status(ingress)
+        conditions.update(drop_fields)
         snapshot = StsSessionStatus(
             session_id=request.session_id,
             status=status,
@@ -524,7 +597,9 @@ async def amain(
             created_by=request.created_by,
             type=request.type,
             conditions=conditions,
-            progress=StsStatusProgress(hook=hook, elapsed_s=elapsed, dropped=0),
+            progress=StsStatusProgress(
+                hook=hook, elapsed_s=elapsed, dropped=dropped
+            ),
         )
         envelope = Envelope[StsSessionStatus].wrap(
             snapshot,
@@ -596,6 +671,16 @@ async def amain(
                 word = "failed"
             else:
                 word = "starting"
+            conditions = _conditions(
+                status=word,
+                phase=phase,
+                clock=clock,
+                progress=progress,
+                feeds=feeds_box[0],
+                availability=availability_box[0],
+            )
+            dropped, drop_fields = drop_status(ingress)
+            conditions.update(drop_fields)
             snapshot = StsSessionStatus(
                 session_id=request.session_id,
                 status=word,
@@ -603,14 +688,8 @@ async def amain(
                 reason=reason,
                 created_by=request.created_by,
                 type=request.type,
-                conditions=_conditions(
-                    status=word,
-                    phase=phase,
-                    clock=clock,
-                    progress=progress,
-                    feeds=feeds_box[0],
-                    availability=availability_box[0],
-                ),
+                conditions=conditions,
+                progress=StsStatusProgress(dropped=dropped),
             )
             return Envelope[StsSessionStatus].wrap(
                 snapshot,
@@ -635,6 +714,7 @@ async def amain(
                 feed="rpc",
                 kind=StreamKind.RPC_REPLY,
                 recv_ts=clock.now(),
+                clock=clock,
             )
             if event is not None:
                 ingress.log_only(event)
@@ -688,6 +768,7 @@ async def amain(
             recv_ts=clock.now(),
             body=json.dumps(payload).encode(),
             event_id=uuid.uuid4().hex,
+            clock=clock.now,
         )
 
     def _emit(effects: list[Any]) -> None:
@@ -732,6 +813,7 @@ async def amain(
                     recv_ts=clock.now(),
                     body=json.dumps(payload).encode(),
                     event_id=uuid.uuid4().hex,
+                    clock=clock.now,
                 )
             )
         if effect.then_td is not None:
@@ -1121,7 +1203,9 @@ async def _run(
         kind = _kind_from_raw(raw)
         if kind is None:
             return
-        event = _inbound(raw, feed=feed, kind=kind, recv_ts=clock.now())
+        event = _inbound(
+            raw, feed=feed, kind=kind, recv_ts=clock.now(), clock=clock
+        )
         if event is not None:
             ingress.offer(event)
 
@@ -1181,6 +1265,7 @@ async def _run(
                 feed=f"td.{api_id}",
                 kind=StreamKind.TD,
                 recv_ts=clock.now(),
+                clock=clock,
             )
             if event is not None:
                 ingress.offer(event)
@@ -1288,7 +1373,7 @@ async def _run(
             wake.clear()
             continue
         try:
-            await _dispatch(strategy, session.event_log, event)
+            await _dispatch(strategy, session.event_log, event, clock=clock)
         except Exception as exc:
             progress.fail(f"strategy_exception: {exc}")
             logger.exception("strategy hook failed session=%s", request.session_id)
@@ -1342,7 +1427,9 @@ async def _stop(
             event = ingress.pull()
             if event is not None:
                 try:
-                    await _dispatch(strategy, session.event_log, event)
+                    await _dispatch(
+                        strategy, session.event_log, event, clock=clock
+                    )
                 except Exception:
                     logger.exception("dispatch during on_stop failed")
                 continue
@@ -1514,7 +1601,13 @@ async def _td_ready(
     return all(results)
 
 
-async def _dispatch(strategy: Strategy, event_log: EventLog, event: Inbound) -> None:
+async def _dispatch(
+    strategy: Strategy,
+    event_log: EventLog,
+    event: Inbound,
+    *,
+    clock: Clock,
+) -> None:
     if event.kind in (
         StreamKind.MD_NOTICE,
         StreamKind.TD_NOTICE,
@@ -1526,10 +1619,23 @@ async def _dispatch(strategy: Strategy, event_log: EventLog, event: Inbound) -> 
     if event.kind is StreamKind.TD:
         api_text = event.feed.split(".", 1)[1]
         await dispatch_td(
-            strategy, event_log, int(api_text), env, swallow=False
+            strategy,
+            event_log,
+            int(api_text),
+            env,
+            swallow=False,
+            delivery=event,
+            clock=clock.now,
         )
         return
-    await dispatch_md(strategy, event_log, env, swallow=False)
+    await dispatch_md(
+        strategy,
+        event_log,
+        env,
+        swallow=False,
+        delivery=event,
+        clock=clock.now,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

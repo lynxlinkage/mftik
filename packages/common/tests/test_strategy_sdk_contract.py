@@ -89,7 +89,13 @@ def _harness(strategy: Strategy | None = None) -> StrategyHarness:
 # --- F12: the lifecycle gate ----------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="B4-02 / B5-01 gate order entry on on_ready")
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "B5-08 StrategyHarness: the worker already gates order entry; "
+        "harness.start still raises IF-06"
+    ),
+)
 async def test_submitting_before_on_ready_raises_not_ready() -> None:
     """``on_start`` runs before any account has reconciled, so a strategy there
     does not know what it holds. The SDK refuses rather than send (F12)."""
@@ -102,7 +108,13 @@ async def test_submitting_before_on_ready_raises_not_ready() -> None:
     assert harness.submitted == ()
 
 
-@pytest.mark.xfail(strict=True, reason="B4-02 / B5-01 gate order entry on on_ready")
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "B5-08 StrategyHarness: the worker already allows order entry "
+        "from on_ready; harness.ready still raises IF-06"
+    ),
+)
 async def test_submitting_after_on_ready_is_allowed() -> None:
     harness = _harness()
     await harness.start()
@@ -113,7 +125,13 @@ async def test_submitting_after_on_ready_is_allowed() -> None:
     assert len(harness.submitted) == 1
 
 
-@pytest.mark.xfail(strict=True, reason="B5-01 reports the feeds that were late")
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "B5-08 StrategyHarness: the worker already passes "
+        "Ready.missing_feeds; harness.ready still raises IF-06"
+    ),
+)
 async def test_on_ready_names_the_feeds_that_did_not_arrive() -> None:
     """MD is a soft condition: the session starts anyway and says what is
     missing, because only the strategy can judge whether it can work (F12)."""
@@ -124,7 +142,13 @@ async def test_on_ready_names_the_feeds_that_did_not_arrive() -> None:
     assert strategy.ready_seen[0].missing_feeds == (FEED,)
 
 
-@pytest.mark.xfail(strict=True, reason="B5-01 calls on_ready exactly once")
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "B5-08 StrategyHarness: the worker already calls on_ready once; "
+        "harness.ready still raises IF-06"
+    ),
+)
 async def test_on_ready_fires_once() -> None:
     strategy = Recorder()
     harness = _harness(strategy)
