@@ -178,8 +178,8 @@ async def world(monkeypatch, database_url):
         yield database
 
 
-def test_end_subject_is_the_session_control_subject() -> None:
-    assert end_subject("abc") == Topics.sts_control("abc")
+def test_end_subject_is_the_owner_instance_subject() -> None:
+    assert end_subject("sts-jp") == Topics.sts("sts-jp")
 
 
 def test_deploy_route_accepts_with_202() -> None:
@@ -433,8 +433,8 @@ async def test_an_unclear_start_timeout_sends_end_before_the_deletes(
 ) -> None:
     """Somebody accepted ``sts.session.start`` and did not answer.
 
-    End goes to the session control subject. A failed end notify does
-    not skip the deletes or the failed row.
+    End goes to the STS instance the start was sent to. A failed end
+    notify does not skip the deletes or the failed row.
     """
     transport = ScriptedTransport()
     transport.fail_timeout.add(STS_SESSION_START)
@@ -453,7 +453,7 @@ async def test_an_unclear_start_timeout_sends_end_before_the_deletes(
         TD_INTENT_DELETE,
     ]
     session_id = json.loads(transport.sent[2][1])["payload"]["session_id"]
-    assert transport.sent[3][0] == end_subject(session_id)
+    assert transport.sent[3][0] == end_subject("sts-jp")
     async with world.scope() as db:
         row = await StsSessionRepository(db).get_by_session_id(session_id)
         assert row is not None
@@ -572,7 +572,7 @@ async def test_end_releases_after_the_session_accepts(world) -> None:
 
     kinds = [json.loads(raw)["type"] for _subject, raw, _timeout in transport.sent]
     assert kinds[-3:] == [STS_SESSION_END, MD_INTENT_DELETE, TD_INTENT_DELETE]
-    assert transport.sent[-3][0] == end_subject(result.session_id)
+    assert transport.sent[-3][0] == end_subject("sts-jp")
     assert transport.sent[-2][0] == Topics.md("md-jp")
     assert transport.sent[-1][0] == Topics.td("td-jp")
     assert json.loads(transport.sent[-2][1])["payload"]["reason"] == "operator stop"
@@ -604,7 +604,7 @@ async def test_a_failed_end_does_not_release(world) -> None:
         assert td is not None and td.released_at is None
 
 
-async def test_end_with_no_named_owner_releases_and_does_not_invent_a_subject(
+async def test_end_with_no_named_owner_does_not_send_or_release(
     world,
 ) -> None:
     transport = ScriptedTransport()
@@ -624,10 +624,11 @@ async def test_end_with_no_named_owner_releases_and_does_not_invent_a_subject(
             )
         )
 
-    await end("orphan", "gone", broker=_broker(transport))
+    with pytest.raises(DomainRpcError) as exc:
+        await end("orphan", "gone", broker=_broker(transport))
+    assert exc.value.code == "sts_unpinned_ambiguous"
 
-    kinds = [json.loads(raw)["type"] for _subject, raw, _timeout in transport.sent]
-    assert kinds == [STS_SESSION_END]
+    assert transport.sent == []
     async with world.scope() as db:
         md = await db.get(MdIntent, ("orphan", "md-jp"))
-        assert md is not None and md.released_at is not None
+        assert md is not None and md.released_at is None

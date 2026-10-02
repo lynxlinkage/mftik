@@ -1,11 +1,20 @@
-"""Dispatch API→STS control-plane requests by Envelope.type."""
+"""Dispatch API→STS control-plane requests by Envelope.type.
+
+Start, end, list and health are handlers: one decoded message in, one
+reply out (H1). Artifacts, registry, env, event-log, fail and force-stop
+still take :class:`~mftik.broker.IncomingRequest` and reply themselves.
+IF-16 and B5-11 own those. ``sts.ctl.{session_id}`` is not registered.
+"""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from mftik.broker import IncomingRequest
+from mftik.broker.handler import Handler as MessageHandler
+from mftik.broker.handler import Reply
 from mftik.protocol import (
     STS_ARTIFACT_ABORT,
     STS_ARTIFACT_BEGIN,
@@ -30,6 +39,7 @@ from mftik.protocol import (
     STS_SESSION_START,
     RpcError,
     RpcErrorEnvelope,
+    UntypedEnvelope,
 )
 
 from mftik_sts.rpc.artifacts import (
@@ -51,19 +61,25 @@ from mftik_sts.rpc.registry import (
     handle_registry_sync,
 )
 from mftik_sts.rpc.sessions import (
-    handle_session_create,
     handle_session_fail,
     handle_session_force_stop,
-    handle_session_list,
-    handle_session_stop,
 )
+
+if TYPE_CHECKING:
+    from mftik.broker import Broker
+
+    from mftik_sts.controller import StsOrchestrator
 
 logger = logging.getLogger(__name__)
 
 Handler = Callable[..., Awaitable[None]]
 
+#: Start, end and list. Served by the controller, not by :data:`_HANDLERS`.
+CONTROLLER_TYPES = frozenset(
+    {STS_SESSION_START, STS_SESSION_END, STS_SESSION_LIST}
+)
+
 _HANDLERS: dict[str, Handler] = {
-    STS_HEALTH: handle_health,
     STS_ARTIFACT_LIST: handle_artifact_list,
     STS_ARTIFACT_READ: handle_artifact_read,
     STS_ARTIFACT_BEGIN: handle_artifact_begin,
@@ -78,12 +94,93 @@ _HANDLERS: dict[str, Handler] = {
     STS_REGISTRY_LOADED: handle_registry_loaded,
     STS_REGISTRY_RELOAD: handle_registry_reload,
     STS_REGISTRY_SYNC: handle_registry_sync,
-    STS_SESSION_START: handle_session_create,
-    STS_SESSION_LIST: handle_session_list,
     STS_SESSION_FAIL: handle_session_fail,
     STS_SESSION_FORCE_STOP: handle_session_force_stop,
-    STS_SESSION_END: handle_session_stop,
 }
+
+
+def _accepted_session_id(reply: Reply | None) -> str | None:
+    """The session a ``starting`` accept named, or ``None``."""
+    if reply is None or reply.type != STS_SESSION_START:
+        return None
+    payload = reply.payload
+    status = getattr(payload, "status", None)
+    session_id = getattr(payload, "session_id", None)
+    if status != "starting" or not isinstance(session_id, str) or not session_id:
+        return None
+    return session_id
+
+
+def _not_ready(message: UntypedEnvelope) -> Reply:
+    return RpcErrorEnvelope.wrap(
+        RpcError(code="not_ready", message="STS controller is not bound"),
+        type=STS_ERROR,
+        source="sts",
+        session_id=message.session_id,
+    )
+
+
+def _unknown(message: UntypedEnvelope) -> Reply:
+    logger.warning("unknown sts rpc type=%s id=%s", message.type, message.id)
+    return RpcErrorEnvelope.wrap(
+        RpcError(code="unknown_type", message=f"unknown type: {message.type}"),
+        type=STS_ERROR,
+        source="sts",
+        session_id=message.session_id,
+    )
+
+
+def control_handler(
+    broker: Broker, orchestrator: StsOrchestrator | None
+) -> MessageHandler:
+    """Health, start, end, list, and the handlers that still reply themselves.
+
+    Health works when ``orchestrator`` is ``None``, so a probe during boot
+    does not need a supervisor. A legacy handler is handed an
+    :class:`~mftik.broker.IncomingRequest` and this function returns
+    ``None``, so :func:`mftik.broker.handler.serve` does not reply twice.
+    """
+    from mftik_sts.controller import end_handler, list_handler, start_handler
+
+    start = None if orchestrator is None else start_handler(orchestrator)
+    end = None if orchestrator is None else end_handler(orchestrator)
+    listing = None if orchestrator is None else list_handler(orchestrator)
+    instance = None if orchestrator is None else orchestrator.supervisor.instance
+
+    async def handle(message: UntypedEnvelope) -> Reply | None:
+        kind = message.type
+        if kind == STS_HEALTH:
+            return await handle_health(message)
+        if kind in CONTROLLER_TYPES and orchestrator is None:
+            return _not_ready(message)
+        if kind == STS_SESSION_START and start is not None and orchestrator is not None:
+            reply = await start(message)
+            session_id = _accepted_session_id(reply)
+            if session_id is not None:
+                # Spawn before the reply. A capacity refusal is this
+                # reply; the process is not left accepted. ``on_start``
+                # has not run. Until spawn is entered the session is on
+                # the report via extra_workers (B4-07).
+                refusal = await orchestrator.finish_start(session_id)
+                if refusal is not None:
+                    return RpcErrorEnvelope.wrap(
+                        RpcError(code=refusal.code, message=refusal.message),
+                        type=STS_ERROR,
+                        source="sts",
+                        session_id=message.session_id,
+                    )
+            return reply
+        if kind == STS_SESSION_END and end is not None:
+            return await end(message)
+        if kind == STS_SESSION_LIST and listing is not None:
+            return await listing(message)
+        legacy = _HANDLERS.get(kind)
+        if legacy is None:
+            return _unknown(message)
+        await legacy(IncomingRequest(broker, message), instance=instance)
+        return None
+
+    return handle
 
 
 async def dispatch(
@@ -97,6 +194,9 @@ async def dispatch(
     instance name off. RM-04 deleted that manager, and the name is the only
     thing any remaining handler wanted from it.
     """
+    if req.envelope.type == STS_HEALTH:
+        await req.reply(await handle_health(req.envelope))
+        return
     handler = _HANDLERS.get(req.envelope.type)
     if handler is None:
         logger.warning(

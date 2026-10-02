@@ -1,11 +1,15 @@
 """``sts.session.start`` / ``end`` / ``list`` as handlers (IF-02).
 
-Not registered on the running process. The router still answers those
-types with ``NotImplementedError("IF-04")``. B4-02 is what connects these
-callables to a subject.
-
 A handler's whole input is the decoded envelope and its whole output is
-the reply (H1). Each one raises until B4-02.
+the reply (H1). B4-02 serves all three on ``sts.{instance}`` (#298).
+``sts.ctl.{session_id}`` stays the worker's subject; nothing here
+registers on it.
+
+``start_handler`` records the session and does not spawn, so the
+contract tests stay free of a process. The router then awaits spawn
+before it sends that reply: ``CapacityExceeded`` is the start refusal,
+and until spawn is entered the session is on ``procman.report`` via
+``extra_workers`` (B4-07). ``on_start`` has not run (F12).
 
 Registry and env (IF-16, §5.7) are the same shape: a signature here, and
 ``NotImplementedError("IF-16")`` until B5-10. The running process still
@@ -19,14 +23,42 @@ from __future__ import annotations
 from mftik.broker import Broker
 from mftik.broker.handler import Handler, Reply
 from mftik.protocol import (
+    STS_ERROR,
+    STS_SESSION_END,
+    STS_SESSION_LIST,
+    STS_SESSION_START,
+    Envelope,
+    ListSessionsRequest,
+    RpcError,
+    RpcErrorEnvelope,
+    StsCreateSessionRequest,
+    StsSessionEndRequest,
     Topics,
     UntypedEnvelope,
 )
 from mftik.protocol.messages import ApiRegistryCatchupResult
+from pydantic import ValidationError
 
-from mftik_sts.controller._ticket import unimplemented
-from mftik_sts.controller.orchestrator import StsOrchestrator
+from mftik_sts.controller.orchestrator import CallError, StsOrchestrator
 from mftik_sts.hostdisk._ticket import unimplemented as unimplemented_disk
+
+
+def _invalid(message: UntypedEnvelope, exc: Exception) -> Reply:
+    return RpcErrorEnvelope.wrap(
+        RpcError(code="invalid_request", message=str(exc)),
+        type=STS_ERROR,
+        source="sts",
+        session_id=message.session_id,
+    )
+
+
+def _rejected(message: UntypedEnvelope, error: CallError) -> Reply:
+    return RpcErrorEnvelope.wrap(
+        RpcError(code=error.code, message=error.message),
+        type=STS_ERROR,
+        source="sts",
+        session_id=message.session_id,
+    )
 
 
 def start_handler(orchestrator: StsOrchestrator) -> Handler:
@@ -35,40 +67,56 @@ def start_handler(orchestrator: StsOrchestrator) -> Handler:
     The reply is an accept: :class:`~mftik.protocol.messages.StsCreateSessionResult`
     with ``status="starting"`` and the request's ``session_id``. ``on_start``
     has not run. Later progress is ``sts.session.status``, not a second
-    field on the reply.
+    field on the reply. This function does not spawn. The router awaits
+    :meth:`~mftik_sts.controller.StsOrchestrator.finish_start` before
+    sending the reply, so a capacity refusal replaces it.
 
-    Served on ``Topics.sts(instance)`` when B4-02 registers it. The subject
-    is not bound here.
+    Served on ``Topics.sts(instance)``. The subject is bound by the process,
+    not by this function.
     """
 
     async def handle(message: UntypedEnvelope) -> Reply | None:
-        # Held for B4-02. The stub does not read the orchestrator.
-        _ = (orchestrator, message)
-        unimplemented()
+        try:
+            request = StsCreateSessionRequest.model_validate(message.payload)
+        except ValidationError as exc:
+            return _invalid(message, exc)
+        outcome = await orchestrator.accept(request)
+        if isinstance(outcome, CallError):
+            return _rejected(message, outcome)
+        return Envelope.wrap(
+            outcome,
+            type=STS_SESSION_START,
+            source="sts",
+            session_id=message.session_id,
+        )
 
     return handle
 
 
 def end_handler(orchestrator: StsOrchestrator) -> Handler:
-    """``sts.session.end`` for this controller (§5.1).
+    """``sts.session.end`` on ``sts.{instance}`` (§5.1, #298).
 
-    The controller does not run ``on_stop``. The session worker does, on
-    ``sts.ctl.{session_id}`` (IF-05, §8.1). This callable is the
-    instance-level entry the ticket names. It takes
-    :class:`~mftik.protocol.v2.StsSessionEndRequest` and, once implemented,
-    replies with :class:`~mftik.protocol.v2.StsSessionEndResult`: a terminal
-    status, not an accept.
-
-    It is not bound to a subject. §5.1 says the controller serves end on
-    ``sts.{instance}``, together with start and list. The wire constant and
-    :class:`~mftik.protocol.v2.StsSessionEndRequest` say the API sends that
-    payload to the worker on ``sts.ctl.{session_id}``. Both sentences are
-    in the tree. This function does not choose between them.
+    The controller does not run ``on_stop``. It stops the worker through
+    the Supervisor (``SIGTERM``, bounded by ``stop_grace_s``); the worker
+    runs ``on_stop`` on that signal (B4-03). The reply is the terminal
+    status. An unknown session is an error reply, not an exception.
+    ``sts.ctl.{session_id}`` is not registered here.
     """
 
     async def handle(message: UntypedEnvelope) -> Reply | None:
-        _ = (orchestrator, message)
-        unimplemented()
+        try:
+            request = StsSessionEndRequest.model_validate(message.payload)
+        except ValidationError as exc:
+            return _invalid(message, exc)
+        outcome = await orchestrator.end_session(request)
+        if isinstance(outcome, CallError):
+            return _rejected(message, outcome)
+        return Envelope.wrap(
+            outcome,
+            type=STS_SESSION_END,
+            source="sts",
+            session_id=message.session_id,
+        )
 
     return handle
 
@@ -77,21 +125,30 @@ def list_handler(orchestrator: StsOrchestrator) -> Handler:
     """``sts.session.list`` on ``sts.{instance}`` (§5.1).
 
     The reply is :class:`~mftik.protocol.messages.ListSessionsResult`, the
-    sessions this instance's supervisor holds. Not the TD list. The request
-    type is :class:`~mftik.protocol.messages.ListSessionsRequest`.
+    sessions this controller holds. Not the TD list. The request type is
+    :class:`~mftik.protocol.messages.ListSessionsRequest`. ``status`` is
+    matched against the column word (``live``, ``done``, ``failed``).
     """
 
     async def handle(message: UntypedEnvelope) -> Reply | None:
-        _ = (orchestrator, message)
-        unimplemented()
+        try:
+            request = ListSessionsRequest.model_validate(message.payload)
+        except ValidationError as exc:
+            return _invalid(message, exc)
+        return Envelope.wrap(
+            orchestrator.list_sessions(request),
+            type=STS_SESSION_LIST,
+            source="sts",
+            session_id=message.session_id,
+        )
 
     return handle
 
 
 def control_subject(instance: str) -> str:
-    """``sts.{instance}``, the subject start and list are served on.
+    """``sts.{instance}``, where start, end and list are served (#298).
 
-    End is not implied. See :func:`end_handler`. Registry sync, registry
+    ``sts.ctl.{session_id}`` stays the worker's. Registry sync, registry
     reload, and env sync are the same subject once B5-10 registers them
     (§5.7). They are not registered here.
     """

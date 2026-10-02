@@ -235,13 +235,16 @@ class TdIntentDeleteResult(BaseModel):
 
 
 class StsSessionEndRequest(BaseModel):
-    """API → session worker: ``sts.session.end`` (§8.1).
+    """API → STS controller: ``sts.session.end`` (§8.1, #298).
 
-    Was ``sts.session.stop``. Served on ``sts.ctl.{session_id}`` by the
-    worker, not on the plane subject (§5.1). The worker runs ``on_stop``
-    and the status becomes terminal. ``reason`` is recorded on that
-    status; :data:`~mftik.protocol.messages.STS_REASON_OPERATOR_STOP` is
-    the sentinel the UI compares against.
+    Was ``sts.session.stop``. The controller serves it on
+    ``sts.{instance}``, next to start and list (B4-02). The controller
+    stops the worker through its Supervisor; the worker runs ``on_stop``
+    on that signal (B4-03). ``sts.ctl.{session_id}`` stays the worker's
+    subject and is not where this request is sent. ``reason`` is recorded
+    on the terminal status;
+    :data:`~mftik.protocol.messages.STS_REASON_OPERATOR_STOP` is the
+    sentinel the UI compares against.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -251,11 +254,11 @@ class StsSessionEndRequest(BaseModel):
 
 
 class StsSessionEndResult(BaseModel):
-    """Worker → API: the session has entered a terminal status.
+    """Controller → API: the session has entered a terminal status.
 
     ``status`` is that terminal value (``done`` or ``failed``). This
-    reply is not an accept-and-return: end waits until ``on_stop`` has
-    finished or been given up (§8.1).
+    reply is not an accept-and-return: end waits until the worker has
+    exited or the stop has been given up (§8.1).
     """
 
     model_config = ConfigDict(frozen=True)

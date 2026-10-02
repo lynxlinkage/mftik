@@ -1,13 +1,9 @@
 """What B4-02 and B5-06 have to make true of the STS controller.
 
-Every test here is ``xfail(strict=True)``. The stubs raise
-``NotImplementedError("IF-04")``, so the tests fail, and ``strict`` means
-the day the behaviour lands the suite goes red until the marker is removed.
-
 Start, end, list, and the reconcile that creates or stops a worker are
-B4-02. Crash class, F11, and R1–R4 are B5-06. R4's report membership is
-what keeps MD/TD from reclaiming intents during ``restarting``; the
-reclaim itself is B4-07.
+B4-02 and run. Crash class, F11, and R1–R4 are B5-06 and stay
+``xfail(strict=True)``. R4's report membership is what keeps MD/TD from
+reclaiming intents during ``restarting``; the reclaim itself is B4-07.
 """
 
 from __future__ import annotations
@@ -63,7 +59,6 @@ from mftik_sts.controller import (
     start_handler,
 )
 
-_B4 = "B4-02: STS controller start, end, and reconcile"
 _B5 = "B5-06: crash class, cleanup, and rehang"
 
 
@@ -428,7 +423,6 @@ def test_r4_restarting_retains_intents_with_no_pid() -> None:
 # --- reconcile: create / stop (B4-02) --------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 def test_reconcile_spawns_when_nothing_is_running(tmp_path: Path) -> None:
     """The first spawn is not a rehang. There is no exit record to wait for."""
     actions = _orch(tmp_path).reconcile(_spec(), SessionStatus())
@@ -438,7 +432,6 @@ def test_reconcile_spawns_when_nothing_is_running(tmp_path: Path) -> None:
     assert spawns[0].incarnation == FIRST_INCARNATION
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 def test_reconcile_is_idle_while_desired_matches_the_worker(tmp_path: Path) -> None:
     status = SessionStatus(
         phase=SessionPhase.RUNNING,
@@ -450,7 +443,6 @@ def test_reconcile_is_idle_while_desired_matches_the_worker(tmp_path: Path) -> N
     assert _orch(tmp_path).reconcile(_spec(), status) == ()
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 def test_reconcile_stops_when_desired_is_stopped(tmp_path: Path) -> None:
     status = SessionStatus(
         phase=SessionPhase.RUNNING,
@@ -466,7 +458,6 @@ def test_reconcile_stops_when_desired_is_stopped(tmp_path: Path) -> None:
     assert all(action.kind is not ActionKind.SPAWN for action in actions)
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 def test_reconcile_marks_done_when_the_stop_has_exited(tmp_path: Path) -> None:
     status = SessionStatus(
         phase=SessionPhase.STOPPING,
@@ -513,7 +504,6 @@ def test_reconcile_marks_restarting_before_the_next_spawn(tmp_path: Path) -> Non
 # --- start / end / list ----------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 async def test_start_accepts_with_status_starting(tmp_path: Path) -> None:
     """F12: the reply is an accept. ``on_start`` has not run."""
     request = StsCreateSessionRequest(
@@ -528,7 +518,6 @@ async def test_start_accepts_with_status_starting(tmp_path: Path) -> None:
     assert result.status == "starting"
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 async def test_end_of_a_started_session_is_terminal(tmp_path: Path) -> None:
     """End waits until the session is terminal. The controller does not run
     ``on_stop`` itself; the reply is still the terminal status (§8.1)."""
@@ -547,7 +536,6 @@ async def test_end_of_a_started_session_is_terminal(tmp_path: Path) -> None:
     assert result.status in {"done", "failed"}
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 async def test_list_includes_a_started_session(tmp_path: Path) -> None:
     orch = _orch(tmp_path)
     request = StsCreateSessionRequest(

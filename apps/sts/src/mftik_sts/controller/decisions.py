@@ -199,10 +199,14 @@ def retains_intents(phase: SessionPhase) -> bool:
     * ``done`` and ``failed`` do not. A failed session leaves the report
       and the backstop reclaims it. End's own ``intent.delete`` is the
       API's path (§8.1); this layer does not delete intents on a crash.
+    * ``stopping`` retains. B3-04 DECIDED 2 (Yi Te, #298):
+      :meth:`mftik.procman.Supervisor.report` lists ``STOPPING`` slots, so
+      a session whose worker is still in ``on_stop`` stays on
+      ``procman.report.sts.{instance}`` until the process exits. §8.1's
+      ``intent.delete`` after ``on_stop`` is what releases the intents.
 
-    ``stopping`` is not given a value here. §8.2's sentence is
-    desired-running, which stopping is not, and §8.1 keeps the intents
-    until ``on_stop`` has finished. Those two do not pick the same answer.
+    The body still raises. B5-06 fills it in. Publishing the report does
+    not filter phases, so a stopping worker stays listed either way.
     """
     SessionPhase(phase)
     unimplemented()

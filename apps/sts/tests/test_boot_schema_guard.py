@@ -123,6 +123,29 @@ async def test_the_window_is_configurable(
     assert app._schema_wait_s() == app.SCHEMA_WAIT_S
 
 
+def test_the_process_supervisor_takes_the_pin_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """B3-07: this plane passes the pin path; it does not read the env itself."""
+    pin = tmp_path / "pinned-releases"
+    seen: dict[str, object] = {}
+
+    class _Supervisor:
+        def __init__(self, work_dir, *, plane, instance, pin_path=None):
+            seen["work_dir"] = work_dir
+            seen["plane"] = plane
+            seen["instance"] = instance
+            seen["pin_path"] = pin_path
+
+    monkeypatch.setattr("mftik.procman.Supervisor", _Supervisor)
+    monkeypatch.setattr("mftik.procman.pinned_releases_path", lambda: pin)
+    app._open_supervisor()
+    assert seen["plane"] == "sts"
+    assert seen["instance"] == app.INSTANCE
+    assert seen["pin_path"] == pin
+    assert seen["work_dir"] == app._supervisor_work_dir("sts", app.INSTANCE)
+
+
 async def test_amain_returns_without_serving_anything(
     monkeypatch: pytest.MonkeyPatch
 ) -> None:

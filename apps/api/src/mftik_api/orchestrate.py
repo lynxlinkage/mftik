@@ -44,7 +44,8 @@ releases intents.
   It does not refcount.
 * **§8.1** End is ``sts.session.end``, then ``md.intent.delete`` and
   ``td.intent.delete``. The subject of the first call is
-  :func:`end_subject` and nowhere else (issue #298).
+  :func:`end_subject` — ``sts.{instance}`` for the owner instance
+  (B4-02, issue #298) — and nowhere else.
 * A reply is checked with :func:`mftik.protocol.reject_if_pv_mismatch`
   on the raw frame before it is parsed (F26, B4-01). ``Broker.request``
   parses first and does not (issue #282), so this module reads the
@@ -310,17 +311,15 @@ class _AcceptSent:
         self.start: bool = False
 
 
-def end_subject(session_id: str) -> str:
+def end_subject(instance: str) -> str:
     """Subject :func:`end` publishes :data:`STS_SESSION_END` on.
 
-    The session worker's control subject,
-    :meth:`~mftik.protocol.Topics.sts_control`. Issue #298 has not
-    decided whether the controller receives ``sts.session.end`` instead,
-    or whether ``stopping`` stays on the liveness report. Change this
-    function when that is decided. Nothing else in this module names
-    the subject.
+    The controller's subject, :meth:`~mftik.protocol.Topics.sts`, for
+    the STS instance that owns the session (B4-02, issue #298). The
+    worker's ``sts.ctl.{session_id}`` is not this. Nothing else in this
+    module names the subject.
     """
-    return Topics.sts_control(session_id)
+    return Topics.sts(instance)
 
 
 def _md_declarations(spec: StrategySpec) -> list[_MdDecl]:
@@ -614,10 +613,10 @@ async def _abandon_unaccepted(
 
     An unclear ``sts.session.start`` — timed out, and somebody was
     subscribed — may have created a worker. That case sends
-    ``sts.session.end`` on :func:`end_subject` of this session. A
-    ``no_responders`` miss and any definite refusal do not: nothing
-    accepted the start. Deletes go only to instances whose put was
-    sent, MD then TD, the same order as :func:`end`.
+    ``sts.session.end`` on :func:`end_subject` of the STS the start was
+    sent to. A ``no_responders`` miss and any definite refusal do not:
+    nothing accepted the start. Deletes go only to instances whose put
+    was sent, MD then TD, the same order as :func:`end`.
 
     The row is then ``failed`` and every intent is released. Neither
     is deleted.
@@ -630,7 +629,7 @@ async def _abandon_unaccepted(
     if unclear:
         await _best_effort_v2(
             broker,
-            end_subject(session_id),
+            end_subject(target),
             Envelope[StsSessionEndRequest].wrap(
                 StsSessionEndRequest(session_id=session_id, reason=reason),
                 type=STS_SESSION_END,
@@ -785,13 +784,47 @@ async def start(
     )
 
 
+async def _owner_instance(session_id: str) -> str:
+    """The STS instance :func:`end` addresses. Raises before any send.
+
+    The row's ``instance`` when the deploy named one, otherwise
+    :func:`_sts_target` on the row's accounts — the same derivation the
+    deletes already use. A missing row, or a row that still cannot name
+    an instance, raises and the caller does not release.
+    """
+    async with session_scope() as db:
+        row = await StsSessionRepository(db).get_by_session_id(session_id)
+        asked = None if row is None else row.instance
+        td_map = load_td(row.td) if row is not None else {}
+    if row is None:
+        raise DomainRpcError(
+            "not_found",
+            f"session {session_id} does not exist",
+        )
+    owner = asked
+    if owner is None and td_map:
+        owner = await _sts_target(None, td_map)
+    if owner is None:
+        raise DomainRpcError(
+            "sts_unpinned_ambiguous",
+            "this session does not name an STS instance and its accounts "
+            "do not derive to exactly one enabled STS",
+        )
+    return owner
+
+
 async def end(session_id: str, reason: str, *, broker: Broker) -> None:
     """Stop a session, then release its intents (§8.1).
 
-    The first call is :data:`STS_SESSION_END` on :func:`end_subject`.
-    Only a successful reply releases rows. Release sets ``released_at``
-    and does not delete (F38). The MD and TD deletes are the same fact
-    told to those planes; a notify that fails is not undone.
+    The first call is :data:`STS_SESSION_END` on :func:`end_subject` of
+    the owner instance: the row's ``instance`` when it is set, otherwise
+    :func:`_sts_target` on the row's accounts. That is computed before
+    the send. An owner that cannot be named raises
+    :class:`~mftik_api.broker_rpc.DomainRpcError` and does not send and
+    does not release. Only a successful reply releases rows. Release
+    sets ``released_at`` and does not delete (F38). The MD and TD
+    deletes are the same fact told to those planes; a notify that fails
+    is not undone.
 
     There is no spec column for desired ``stopped``. An ``end`` whose
     reply never comes is an error for the caller to retry. This
@@ -811,9 +844,10 @@ async def end(session_id: str, reason: str, *, broker: Broker) -> None:
     if not isinstance(reason, str):
         raise TypeError("reason must be a str")
 
+    owner_instance = await _owner_instance(session_id)
     await _request_v2(
         broker,
-        end_subject(session_id),
+        end_subject(owner_instance),
         Envelope[StsSessionEndRequest].wrap(
             StsSessionEndRequest(session_id=session_id, reason=reason),
             type=STS_SESSION_END,
