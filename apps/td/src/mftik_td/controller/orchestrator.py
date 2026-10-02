@@ -1,8 +1,14 @@
 """``TdOrchestrator`` — desired accounts, the trading bit, drain-replace.
 
-The running TD process does not construct this. B4-07 wires reconcile
-and the intent handler. B6-04 fills in drain-replace. B3-03 is the pid
-fence inside :meth:`mftik.procman.Supervisor.spawn`.
+The running TD process does not construct this and does not call
+:meth:`TdOrchestrator.reconcile`. Answering ``td.intent.put`` and
+``td.intent.delete`` does not need a supervisor or a restart intensity,
+and issue #286 has not chosen those numbers. The held intents live on
+:class:`~mftik_td.controller.TdIntentBook`. B6-04 fills in
+drain-replace. ``pid_gone`` is :func:`mftik.procman.previous_worker_gone`.
+``MARK_FAILED``, and ``NONE`` while the shim is still waiting, name
+``RELEASE`` for :meth:`mftik.procman.Supervisor.release_slot`. This
+package does not change :meth:`~mftik.procman.Supervisor.spawn`.
 """
 
 from __future__ import annotations
@@ -10,6 +16,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from mftik.procman import (
+    DesiredSlot,
+    ObservedWorker,
+    ReattachAction,
     RestartDecision,
     RestartIntensity,
     Supervisor,
@@ -18,12 +27,67 @@ from mftik.procman import (
 from mftik.protocol import TdIntentPut
 
 from mftik_td.controller._ticket import unimplemented
-from mftik_td.controller.decisions import plan_account_restart
+from mftik_td.controller.decisions import (
+    desired_accounts,
+    plan_account_restart,
+    release_named,
+    spawn_allowed,
+    td_reattach,
+    trading_pushes,
+)
 from mftik_td.controller.types import (
+    FIRST_INCARNATION,
     AccountView,
+    ActionKind,
     BoundAccount,
     OrchestratorAction,
 )
+
+
+def _worker_step(
+    api_id: int,
+    slot: DesiredSlot,
+    view: AccountView | None,
+) -> OrchestratorAction | None:
+    """The spawn, stop or release :func:`td_reattach` names for one account.
+
+    ``ADOPT`` names nothing. ``APPLY_RESTART`` names ``SPAWN`` only when
+    :func:`spawn_allowed` is true. The incarnation is
+    :data:`FIRST_INCARNATION` when the supervisor holds none, otherwise
+    the held one plus one. ``STOP_AND_RELEASE`` names ``STOP``.
+    ``MARK_FAILED`` names ``RELEASE``. ``NONE`` names ``RELEASE`` only
+    when the shim is still waiting. The release is
+    :meth:`mftik.procman.Supervisor.release_slot`.
+    """
+    if view is None:
+        observed = ObservedWorker.ABSENT
+        previous = False
+        pid_gone = True
+        incarnation = None
+        shim_waiting = False
+    else:
+        observed = view.observed
+        previous = view.incarnation is not None
+        pid_gone = view.pid_gone
+        incarnation = view.incarnation
+        shim_waiting = view.shim_waiting
+    cell = td_reattach(desired=slot, observed=observed)
+    if cell is ReattachAction.APPLY_RESTART and spawn_allowed(
+        previous=previous, pid_gone=pid_gone
+    ):
+        next_incarnation = (
+            FIRST_INCARNATION if incarnation is None else incarnation + 1
+        )
+        return OrchestratorAction(
+            kind=ActionKind.SPAWN,
+            api_id=api_id,
+            incarnation=next_incarnation,
+        )
+    if cell is ReattachAction.STOP_AND_RELEASE:
+        return OrchestratorAction(kind=ActionKind.STOP, api_id=api_id)
+    if release_named(cell, shim_waiting=shim_waiting):
+        return OrchestratorAction(kind=ActionKind.RELEASE, api_id=api_id)
+    return None
 
 
 def _views(views: object) -> Sequence[AccountView]:
@@ -50,8 +114,9 @@ class TdOrchestrator:
       reads them. The observed bit is the account worker's. When this
       controller is not publishing, the worker keeps the last bit (P5).
     * Whether the process exists, and the exit code and signal, are the
-      shim's. ``pid_gone`` on :class:`AccountView` is the supervisor's
-      reading of that. This layer does not open ``/proc``.
+      shim's. ``pid_gone`` on :class:`AccountView` is
+      :func:`mftik.procman.previous_worker_gone`. This layer does not
+      open ``/proc``.
     * ``code_ref`` is the platform release this controller was built
       with (§4.5). It is copied onto the worker spec. This layer does
       not carry ``strategy_digest`` or ``env_generation`` (F39, IF-16)
@@ -78,25 +143,39 @@ class TdOrchestrator:
        incarnation.
     4. ``APPLY_RESTART``, and the first spawn of an account the
        supervisor does not hold, name ``SPAWN`` only when
-       :func:`mftik_td.controller.spawn_allowed` is true (F36). The
+       :func:`mftik_td.controller.spawn_allowed` is true (F36).
+       ``pid_gone`` is :func:`mftik.procman.previous_worker_gone`. The
        action is applied with :meth:`~mftik.procman.Supervisor.spawn`,
        which is the fence that waits until the previous pid is gone.
-       The incarnation is :data:`~mftik_td.controller.FIRST_INCARNATION`
-       when the supervisor holds none, otherwise the held one plus one.
+       This layer does not change ``spawn``. The incarnation is
+       :data:`~mftik_td.controller.FIRST_INCARNATION` when the
+       supervisor holds none, otherwise the held one plus one.
     5. ``STOP_AND_RELEASE`` names ``STOP``, applied with
        :meth:`~mftik.procman.Supervisor.stop`. An account that is no
        longer desired, while its worker is still running, is this cell.
-    6. A failure the supervisor has classified is
+       Stop releases the shim itself once the worker is ``STOPPED``.
+    6. ``MARK_FAILED`` names ``RELEASE``, applied with
+       :meth:`~mftik.procman.Supervisor.release_slot`. The exit is
+       already on the observation and nothing is spawned. The TD cell
+       of the table is ``APPLY_RESTART``, not this one; the name is
+       here so the apply rule stays procman's.
+    7. ``NONE`` names ``RELEASE`` only when the shim is still waiting
+       after the worker exited (S3). The cell does not spawn or stop.
+       A shim that is already gone is not this case.
+    8. A failure the supervisor has classified is
        :meth:`account_restart`: :func:`mftik.procman.plan_restart` with
        ``restart="on_failure"`` and this orchestrator's intensity.
        There is no crash class (P6). The intensity is the caller's
        (issue #286).
-    7. After the recompute, trading-layer pushes come from
+    9. After the recompute, trading-layer pushes come from
        :func:`mftik_td.controller.trading_pushes` with ``publish`` true,
        one per desired account. :func:`mftik_td.controller.close_actions`
        is empty for both close modes, so a controller that is leaving
-       does not push the bit off (P5).
-    8. :meth:`drain_replace` is the operator entry for one account
+       does not push the bit off (P5). :meth:`Supervisor.start` returns
+       the observations and opens the report itself, unless ``close``
+       has already shut the gate. This layer does not call ``start``
+       or ``allow_reports``.
+    10. :meth:`drain_replace` is the operator entry for one account
        (F27). A release rolling forward does not call it.
     """
 
@@ -139,11 +218,16 @@ class TdOrchestrator:
 
         The actions come back with spawns only where
         :func:`mftik_td.controller.spawn_allowed` is true (F36), then
-        the trading pushes for the desired accounts. Empty is not an
-        answer this method returns today; it raises, so a caller cannot
-        mistake "not implemented" for "nothing to do".
+        a stop or a release for each account this instance no longer
+        wants, then the trading pushes for the desired accounts.
+        ``RELEASE`` is where :func:`mftik_td.controller.release_named`
+        is true. Empty is the answer when this instance has no accounts
+        and no views. A desired account, or a view, asks
+        :func:`mftik_td.controller.td_reattach`, which is procman's
+        table (B3-03).
 
-        Not implemented (IF-12). B4-07 fills this in.
+        B4-07 names the actions. It does not apply them, and the running
+        process does not call this.
         """
         if isinstance(accounts, str) or not isinstance(accounts, Sequence):
             raise TypeError("accounts must be a sequence of BoundAccount")
@@ -155,8 +239,34 @@ class TdOrchestrator:
         for intent in intents:
             if not isinstance(intent, TdIntentPut):
                 raise TypeError("intents must be a sequence of TdIntentPut")
-        _views(views)
-        unimplemented()
+        observed = _views(views)
+        wanted = desired_accounts(accounts, instance=self.supervisor.instance)
+        by_id = {view.api_id: view for view in observed}
+        wanted_ids = {account.api_id for account in wanted}
+        actions: list[OrchestratorAction] = []
+        for account in wanted:
+            step = _worker_step(
+                account.api_id, DesiredSlot.PRESENT, by_id.get(account.api_id)
+            )
+            if step is not None:
+                actions.append(step)
+        for view in observed:
+            if view.api_id in wanted_ids:
+                continue
+            step = _worker_step(view.api_id, DesiredSlot.ABSENT, view)
+            if step is not None:
+                actions.append(step)
+        for push in trading_pushes(
+            publish=True, accounts=wanted, intents=intents
+        ):
+            actions.append(
+                OrchestratorAction(
+                    kind=ActionKind.PUSH_TRADING,
+                    api_id=push.api_id,
+                    active=push.active,
+                )
+            )
+        return tuple(actions)
 
     def drain_replace(
         self,

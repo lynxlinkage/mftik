@@ -35,6 +35,9 @@ class ActionKind(StrEnum):
 
     SPAWN = "spawn"
     STOP = "stop"
+    #: Drop a held terminal slot with :meth:`mftik.procman.Supervisor.release_slot`.
+    #: ``MARK_FAILED``, and ``NONE`` while the shim is still waiting (S3).
+    RELEASE = "release"
     #: Deliver one account's trading-layer desired bit (F35, P2).
     PUSH_TRADING = "push_trading"
     #: Lengthen the dead-man's-switch countdown before a drain (F37).
@@ -121,11 +124,16 @@ class TradingDesired:
 class AccountView:
     """What the supervisor reports for one account worker.
 
-    ``observed`` is the §4.4 category from the supervisor's reattach
-    scan. ``pid_gone`` is that supervisor's observation that the
-    previous pid is no longer there (F36, B3-03). This layer does not
-    open ``/proc``. ``incarnation`` is the one the supervisor still
-    holds, or ``None`` when it holds none.
+    ``observed`` is the §4.4 category from
+    :meth:`mftik.procman.Supervisor.start`. ``pid_gone`` is
+    :func:`mftik.procman.previous_worker_gone` on the recorded start
+    ticks and the live ones (F36). This layer does not open ``/proc``;
+    :func:`mftik_td.controller.observation_view` stores that result.
+    ``shim_waiting`` is true when that observation's socket answered
+    and the worker has already exited: the shim is waiting for
+    ``release`` (S3). An exit file with a dead socket is not waiting.
+    ``incarnation`` is the one the supervisor still holds, or ``None``
+    when it holds none.
 
     The shim is the authority for whether the process exists and for
     the exit code and signal. The supervisor reads both and reports
@@ -136,6 +144,7 @@ class AccountView:
     observed: ObservedWorker
     pid_gone: bool
     incarnation: int | None = None
+    shim_waiting: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "api_id", positive_api_id(self.api_id))
@@ -147,6 +156,8 @@ class AccountView:
             ) from exc
         if not isinstance(self.pid_gone, bool):
             raise ValueError("pid_gone must be a bool")
+        if not isinstance(self.shim_waiting, bool):
+            raise ValueError("shim_waiting must be a bool")
         if self.incarnation is None:
             incarnation = None
         else:
@@ -164,8 +175,11 @@ class OrchestratorAction:
     ``SPAWN`` carries the incarnation to spawn and is applied with
     :meth:`mftik.procman.Supervisor.spawn`, which waits until the
     previous pid is gone (F36). ``STOP`` is
-    :meth:`~mftik.procman.Supervisor.stop`. ``PUSH_TRADING`` carries
-    ``active``. ``EXTEND_DEADMAN`` and ``DRAIN`` carry only ``api_id``.
+    :meth:`~mftik.procman.Supervisor.stop`. ``RELEASE`` is
+    :meth:`~mftik.procman.Supervisor.release_slot`: ``MARK_FAILED``,
+    and ``NONE`` while the shim is still waiting. ``PUSH_TRADING``
+    carries ``active``. ``EXTEND_DEADMAN`` and ``DRAIN`` carry only
+    ``api_id``.
     """
 
     kind: ActionKind

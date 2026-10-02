@@ -1,11 +1,12 @@
-"""The TD controller interface IF-12 defines, and that deciding raises.
+"""The TD controller interface IF-12 defines.
 
 The shape is real: an account binding, a trading bit, an action, and the
 worker spec procman is allowed to see (``restart`` is ``on_failure``).
-Choosing the account set, the trading level, a spawn, a drain, and
-answering intent put / delete raise ``NotImplementedError("IF-12")``.
+The account set, the trading level, the spawn gate, reconcile and
+intent put / delete answer (B4-07, B3-03). Drain-replace still raises
+``NotImplementedError("IF-12")``.
 
-What B4-07, B3 and B6-04 have to make true is in
+What B3 and B6-04 still have to make true is in
 ``test_td_controller_contract.py``, as xfail.
 """
 
@@ -21,17 +22,20 @@ from mftik.exchange.venues import UnknownVenueError
 from mftik.procman import (
     OOM_SCORE_ADJ,
     CloseMode,
-    DesiredSlot,
     ObservedWorker,
+    ReattachAction,
     RestartIntensity,
     Supervisor,
     WorkerPhase,
+    plan_restart,
 )
 from mftik.protocol import (
+    TD_ERROR,
     TD_INTENT_DELETE,
     TD_INTENT_PUT,
     Envelope,
     IntentOwner,
+    RpcError,
     TdIntentDelete,
     TdIntentPut,
 )
@@ -45,8 +49,10 @@ from mftik_td.controller import (
     ActionKind,
     BoundAccount,
     OrchestratorAction,
+    TdIntentBook,
     TdOrchestrator,
     TradingDesired,
+    account_pid_gone,
     account_worker_id,
     account_worker_spec,
     apply_delete,
@@ -55,7 +61,9 @@ from mftik_td.controller import (
     control_subject,
     desired_accounts,
     intent_handler,
+    observation_view,
     plan_account_restart,
+    release_named,
     spawn_allowed,
     td_reattach,
     trading_active,
@@ -162,6 +170,7 @@ def test_a_view_is_the_supervisors_observation() -> None:
     )
     assert view.observed is ObservedWorker.EXITED
     assert view.pid_gone is True
+    assert view.shim_waiting is False
     assert view.incarnation == 2
     absent = AccountView(
         api_id=7, observed="absent", pid_gone=True  # type: ignore[arg-type]
@@ -170,6 +179,13 @@ def test_a_view_is_the_supervisors_observation() -> None:
     assert absent.incarnation is None
     with pytest.raises(ValueError):
         AccountView(api_id=7, observed=ObservedWorker.RUNNING, pid_gone="no")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        AccountView(
+            api_id=7,
+            observed=ObservedWorker.EXITED,
+            pid_gone=True,
+            shim_waiting="yes",  # type: ignore[arg-type]
+        )
 
 
 def test_an_action_carries_only_what_its_kind_needs() -> None:
@@ -278,37 +294,38 @@ def test_the_controller_does_not_choose_restart_numbers() -> None:
             assert name != "RestartIntensity"
 
 
-def test_decisions_raise_if_12() -> None:
+def test_decisions_answer() -> None:
+    """B4-07. ``td_reattach`` is the procman table and stays in the contract."""
     account = _account()
     put = _put(7)
     delete = TdIntentDelete(
         session_id="abc123",
         owner=IntentOwner(sts_instance="sts", session_id="abc123"),
-        api_ids=[7],
+        api_ids=[],
     )
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        desired_accounts([account], instance="td")
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        apply_put((), put)
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        apply_delete((), delete)
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        trading_active(7, ())
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        trading_pushes(publish=False, accounts=(), intents=())
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        td_reattach(desired=DesiredSlot.PRESENT, observed=ObservedWorker.RUNNING)
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        spawn_allowed(previous=True, pid_gone=False)
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        plan_account_restart(
-            phase=WorkerPhase.CRASHED,
-            restarts_in_window=0,
-            intensity=_intensity(),
-            attempt=1,
-        )
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        close_actions(CloseMode.DETACH)
+    assert desired_accounts([account], instance="td") == (account,)
+    assert apply_put((), put) == (put,)
+    assert apply_delete((put,), delete) == ()
+    assert trading_active(7, ()) is False
+    assert trading_pushes(publish=False, accounts=(), intents=()) == ()
+    assert spawn_allowed(previous=True, pid_gone=False) is False
+    assert account_pid_gone(recorded_start_ticks=10, live_start_ticks=None) is True
+    assert release_named(ReattachAction.NONE, shim_waiting=True) is True
+    assert release_named(ReattachAction.ADOPT, shim_waiting=True) is False
+    intensity = _intensity()
+    assert plan_account_restart(
+        phase=WorkerPhase.CRASHED,
+        restarts_in_window=0,
+        intensity=intensity,
+        attempt=1,
+    ) == plan_restart(
+        phase=WorkerPhase.CRASHED,
+        restart="on_failure",
+        restarts_in_window=0,
+        intensity=intensity,
+        attempt=1,
+    )
+    assert close_actions(CloseMode.DETACH) == ()
 
 
 def test_a_bad_argument_is_refused_before_the_stub() -> None:
@@ -324,6 +341,17 @@ def test_a_bad_argument_is_refused_before_the_stub() -> None:
         td_reattach(desired="somewhere", observed=ObservedWorker.RUNNING)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         spawn_allowed(previous=1, pid_gone=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        account_pid_gone(recorded_start_ticks=-1, live_start_ticks=None)
+    with pytest.raises(TypeError):
+        release_named("none", shim_waiting=True)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        observation_view(
+            7,
+            object(),  # type: ignore[arg-type]
+            recorded_start_ticks=None,
+            live_start_ticks=None,
+        )
     with pytest.raises(ValueError):
         plan_account_restart(
             phase=WorkerPhase.CRASHED,
@@ -342,7 +370,10 @@ def test_a_bad_argument_is_refused_before_the_stub() -> None:
         close_actions("halt")  # type: ignore[arg-type]
 
 
-def test_reconcile_and_drain_raise_if_12_and_check_their_inputs(tmp_path: Path) -> None:
+def test_reconcile_of_another_instance_is_empty_and_drain_still_raises(
+    tmp_path: Path,
+) -> None:
+    """Another instance is not spawned here. Drain-replace is still B6-04."""
     orch = _orch(tmp_path)
     view = AccountView(
         api_id=7,
@@ -350,8 +381,7 @@ def test_reconcile_and_drain_raise_if_12_and_check_their_inputs(tmp_path: Path) 
         pid_gone=False,
         incarnation=1,
     )
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        orch.reconcile((_account(),), (_put(7),), (view,))
+    assert orch.reconcile((_account(instance="td-jp"),), (), ()) == ()
     with pytest.raises(TypeError):
         orch.reconcile(object(), (), ())  # type: ignore[arg-type]
     with pytest.raises(NotImplementedError, match="^IF-12$"):
@@ -363,10 +393,15 @@ def test_reconcile_and_drain_raise_if_12_and_check_their_inputs(tmp_path: Path) 
     )
     with pytest.raises(ValueError, match="does not match"):
         orch.drain_replace(_account(), other)
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        orch.account_restart(
-            phase=WorkerPhase.CRASHED, restarts_in_window=0, attempt=1
-        )
+    assert orch.account_restart(
+        phase=WorkerPhase.CRASHED, restarts_in_window=0, attempt=1
+    ) == plan_restart(
+        phase=WorkerPhase.CRASHED,
+        restart="on_failure",
+        restarts_in_window=0,
+        intensity=orch.intensity,
+        attempt=1,
+    )
     with pytest.raises(ValueError):
         orch.account_restart(
             phase=WorkerPhase.CRASHED, restarts_in_window=-1, attempt=1
@@ -380,33 +415,37 @@ def test_intent_types_and_the_subject() -> None:
         control_subject("TD")
 
 
-async def test_the_intent_handler_raises_if_12(tmp_path: Path) -> None:
+async def test_the_intent_handler_refuses_an_empty_payload() -> None:
     message = Envelope[dict[str, object]].wrap({}, type=TD_INTENT_PUT, source="api")
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        await intent_handler(_orch(tmp_path))(message)
+    reply = await intent_handler(TdIntentBook())(message)
+    assert reply is not None
+    assert reply.type == TD_ERROR
+    assert RpcError.model_validate(reply.payload).code == "invalid_payload"
 
 
-# walks the TD sources; over the 50 ms unit call cap
-@pytest.mark.component
-def test_the_td_process_does_not_import_the_controller() -> None:
-    """B4-07 wires it. The process that is running today must not."""
-    offenders: list[str] = []
-    for path in _ROOT.rglob("*.py"):
-        if "controller" in path.relative_to(_ROOT).parts:
-            continue
-        tree = ast.parse(path.read_text())
+def test_the_td_process_registers_the_intent_handler() -> None:
+    """B4-07 wires put and delete, and the report subscription, into the process."""
+    app = ast.parse((_ROOT / "app.py").read_text())
+    router = ast.parse((_ROOT / "rpc" / "router.py").read_text())
+
+    def _imported(tree: ast.AST) -> set[str]:
+        found: set[str] = set()
         for node in ast.walk(tree):
-            modules: list[str] = []
             if isinstance(node, ast.ImportFrom) and node.module:
-                modules.append(node.module)
+                found.add(node.module)
+                found.update(alias.name for alias in node.names)
             elif isinstance(node, ast.Import):
-                modules.extend(alias.name for alias in node.names)
-            for module in modules:
-                if module == "mftik_td.controller" or module.startswith(
-                    "mftik_td.controller."
-                ):
-                    offenders.append(f"{path.relative_to(_ROOT)}:{node.lineno}")
-    assert offenders == []
+                found.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.Name):
+                found.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                found.add(node.attr)
+        return found
+
+    assert "intent_handler" in _imported(router)
+    assert "mftik_td.controller" in _imported(router)
+    assert "watch_sts_reports" in _imported(app)
+    assert "intent_book" in _imported(app)
 
 
 def test_the_controller_does_not_import_the_worker_or_strategy_code() -> None:

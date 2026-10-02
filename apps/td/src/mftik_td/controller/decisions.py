@@ -1,4 +1,4 @@
-"""Decisions the TD orchestrator will make. Each one raises until a later ticket.
+"""Decisions the TD orchestrator makes. Drain-replace is not one of them.
 
 Procman owns the process table and the restart arithmetic (P6). This
 module does not restate either.
@@ -7,10 +7,13 @@ module does not restate either.
   ``plane="td"``. B3-03 implements that table. B4-07 makes this function
   call it.
 * :func:`spawn_allowed` is the gate in front of
-  :meth:`mftik.procman.Supervisor.spawn`. The supervisor's spawn is the
-  fence that waits for the pid (F36, B3-03). This function does not read
-  ``/proc``. Reconcile names a spawn only when the gate is open, so a
-  caller cannot start an incarnation early.
+  :meth:`mftik.procman.Supervisor.spawn`. ``pid_gone`` is
+  :func:`mftik.procman.previous_worker_gone` (F36). This function does
+  not read ``/proc`` and does not change ``spawn``. Reconcile names a
+  spawn only when the gate is open.
+* :func:`release_named` is the ``release_slot`` rule.
+  ``MARK_FAILED`` names a release. ``NONE`` names one only while the
+  shim is still waiting (S3).
 * :func:`plan_account_restart` is :func:`mftik.procman.plan_restart` with
   ``restart="on_failure"`` and the intensity the caller supplied.
   Restart-intensity numbers for MD and TD are not decided (issue #286).
@@ -31,17 +34,22 @@ from mftik.procman import (
     DesiredSlot,
     ObservedWorker,
     ReattachAction,
+    ReattachObservation,
     RestartDecision,
     RestartIntensity,
     WorkerPhase,
+    plan_restart,
+    previous_worker_gone,
+    reattach_action,
 )
 from mftik.protocol import TdIntentDelete, TdIntentPut
 
-from mftik_td.controller._ticket import unimplemented
 from mftik_td.controller.types import (
+    AccountView,
     BoundAccount,
     OrchestratorAction,
     TradingDesired,
+    account_worker_id,
     positive_api_id,
 )
 
@@ -90,13 +98,11 @@ def desired_accounts(
     An intent is not an argument: it does not add an account and it does
     not remove one. An account bound to another instance is absent (F36).
 
-    Not implemented (IF-12). B4-07 fills this in. Empty is not an answer
-    this function returns today; it raises, so a caller cannot mistake
-    "not implemented" for "no accounts".
+    B4-07. An empty result means this instance has no bound accounts.
     """
     validate_instance_name(instance)
-    _accounts(bound)
-    unimplemented()
+    accounts = _accounts(bound)
+    return tuple(account for account in accounts if account.instance == instance)
 
 
 def apply_put(
@@ -111,13 +117,23 @@ def apply_put(
     wholesale, including when the new set is empty. It does not add a
     count.
 
-    Not implemented (IF-12).
+    B4-07.
     """
-    _puts(held)
+    rows = _puts(held)
     if not isinstance(put, TdIntentPut):
         raise TypeError("put must be a TdIntentPut")
     _api_ids(put.api_ids)
-    unimplemented()
+    replaced = False
+    kept: list[TdIntentPut] = []
+    for row in rows:
+        if row.owner == put.owner:
+            kept.append(put)
+            replaced = True
+        else:
+            kept.append(row)
+    if not replaced:
+        kept.append(put)
+    return tuple(kept)
 
 
 def apply_delete(
@@ -131,13 +147,35 @@ def apply_delete(
     had. An owner that is already gone, or an account the owner does
     not hold, leaves ``held`` unchanged. Idempotent.
 
-    Not implemented (IF-12).
+    B4-07. An empty remainder stays as a row with no accounts: a put may
+    name an empty set, and this is that set. The owner is dropped only
+    when ``api_ids`` on the delete is empty.
     """
-    _puts(held)
+    rows = _puts(held)
     if not isinstance(delete, TdIntentDelete):
         raise TypeError("delete must be a TdIntentDelete")
     _api_ids(delete.api_ids)
-    unimplemented()
+    if not delete.api_ids:
+        kept = tuple(row for row in rows if row.owner != delete.owner)
+        if len(kept) == len(rows):
+            return tuple(rows)
+        return kept
+    drop = set(delete.api_ids)
+    changed = False
+    out: list[TdIntentPut] = []
+    for row in rows:
+        if row.owner != delete.owner:
+            out.append(row)
+            continue
+        remaining = [api_id for api_id in row.api_ids if api_id not in drop]
+        if remaining == list(row.api_ids):
+            out.append(row)
+            continue
+        changed = True
+        out.append(row.model_copy(update={"api_ids": remaining}))
+    if not changed:
+        return tuple(rows)
+    return tuple(out)
 
 
 def trading_active(api_id: int, intents: Sequence[TdIntentPut]) -> bool:
@@ -149,11 +187,11 @@ def trading_active(api_id: int, intents: Sequence[TdIntentPut]) -> bool:
     intent clearing makes it false (L2). The worker is what closes the
     private book.
 
-    Not implemented (IF-12).
+    B4-07.
     """
     positive_api_id(api_id)
-    _puts(intents)
-    unimplemented()
+    rows = _puts(intents)
+    return any(api_id in row.api_ids for row in rows)
 
 
 def trading_pushes(
@@ -173,12 +211,20 @@ def trading_pushes(
     inputs produce the same pushes. ``accounts`` is already the desired
     set; this function does not filter by instance.
 
-    Not implemented (IF-12). B4-07 fills this in.
+    B4-07.
     """
     _bool(publish, "publish")
-    _accounts(accounts)
-    _puts(intents)
-    unimplemented()
+    bound = _accounts(accounts)
+    rows = _puts(intents)
+    if not publish:
+        return ()
+    return tuple(
+        TradingDesired(
+            api_id=account.api_id,
+            active=any(account.api_id in row.api_ids for row in rows),
+        )
+        for account in bound
+    )
 
 
 def td_reattach(
@@ -188,16 +234,97 @@ def td_reattach(
 ) -> ReattachAction:
     """The TD cell of §4.4 (N2).
 
-    When B4-07 implements this, the body is
+    The body is
     ``reattach_action(plane="td", desired=desired, observed=observed)``
     and nothing else. Not a second table. B3-03 is what makes
     :func:`mftik.procman.reattach_action` answer.
-
-    Not implemented (IF-12).
     """
-    DesiredSlot(desired)
-    ObservedWorker(observed)
-    unimplemented()
+    return reattach_action(
+        plane="td",
+        desired=DesiredSlot(desired),
+        observed=ObservedWorker(observed),
+    )
+
+
+def account_pid_gone(
+    *,
+    recorded_start_ticks: int | None,
+    live_start_ticks: int | None,
+) -> bool:
+    """``AccountView.pid_gone`` (F36).
+
+    The body is :func:`mftik.procman.previous_worker_gone` and nothing
+    else. A live pid with no recorded start time stays "not gone",
+    because reuse cannot be ruled out. This does not read ``/proc``.
+    """
+    return previous_worker_gone(
+        recorded_start_ticks=recorded_start_ticks,
+        live_start_ticks=live_start_ticks,
+    )
+
+
+def _shim_waiting(observation: ReattachObservation) -> bool:
+    """True when the socket answered and the worker has already exited (S3)."""
+    status = observation.status
+    if status is None:
+        return False
+    return status.exit_code is not None or status.signal is not None
+
+
+def observation_view(
+    api_id: int,
+    observation: ReattachObservation,
+    *,
+    recorded_start_ticks: int | None,
+    live_start_ticks: int | None,
+) -> AccountView:
+    """One row of :meth:`mftik.procman.Supervisor.start` as an account view.
+
+    ``start`` returns the observations and opens the report itself.
+    This function does not call it, does not call ``allow_reports``,
+    and does not read ``/proc``. ``pid_gone`` is :func:`account_pid_gone`.
+    ``shim_waiting`` is the socket that is still up after the worker
+    exited. An exit file alone is not that: the socket did not answer.
+    """
+    if not isinstance(observation, ReattachObservation):
+        raise TypeError("observation must be a ReattachObservation")
+    worker_id = account_worker_id(api_id)
+    if observation.id != worker_id:
+        raise ValueError(f"observation {observation.id} is not {worker_id}")
+    return AccountView(
+        api_id=api_id,
+        observed=observation.observed,
+        pid_gone=account_pid_gone(
+            recorded_start_ticks=recorded_start_ticks,
+            live_start_ticks=live_start_ticks,
+        ),
+        incarnation=observation.incarnation,
+        shim_waiting=_shim_waiting(observation),
+    )
+
+
+def release_named(cell: ReattachAction, *, shim_waiting: bool) -> bool:
+    """Whether reconcile names ``RELEASE`` for this §4.4 cell.
+
+    Applied with :meth:`mftik.procman.Supervisor.release_slot`, not with
+    ``spawn``. ``MARK_FAILED`` always does: the exit is already on the
+    observation and nothing is spawned. ``NONE`` does when
+    ``shim_waiting`` is true. The table's ``NONE`` does not spawn or
+    stop, and a shim that has reaped its worker still waits for
+    ``release`` (S3). ``ADOPT``, ``APPLY_RESTART`` and
+    ``STOP_AND_RELEASE`` do not: spawn replaces a held slot, and stop
+    releases the shim when the worker reaches ``STOPPED``.
+
+    B4-07 names the action. It does not call ``release_slot``.
+    """
+    if not isinstance(cell, ReattachAction):
+        raise TypeError("cell must be a ReattachAction")
+    _bool(shim_waiting, "shim_waiting")
+    if cell is ReattachAction.MARK_FAILED:
+        return True
+    if cell is ReattachAction.NONE:
+        return shim_waiting
+    return False
 
 
 def spawn_allowed(*, previous: bool, pid_gone: bool) -> bool:
@@ -205,20 +332,22 @@ def spawn_allowed(*, previous: bool, pid_gone: bool) -> bool:
 
     ``previous`` is false when the supervisor holds no incarnation for
     this account. The first spawn does not wait. ``previous`` true
-    requires ``pid_gone``: the supervisor has seen the old pid leave.
-    A live pid means this returns false, and reconcile does not name
-    ``SPAWN``.
+    requires ``pid_gone``, which is :func:`account_pid_gone`: the
+    supervisor has seen the old pid leave. A live pid means this
+    returns false, and reconcile does not name ``SPAWN``.
 
     This is the gate in front of :meth:`mftik.procman.Supervisor.spawn`.
-    That call is the fence that waits (B3-03). This function does not
-    open ``/proc`` and it does not start a process. ``ADOPT`` does not
-    consult it: a running worker is not a new incarnation.
+    That call is the fence. This function does not open ``/proc``, does
+    not start a process, and does not change ``spawn``. ``ADOPT`` does
+    not consult it: a running worker is not a new incarnation.
 
-    Not implemented (IF-12).
+    B4-07.
     """
     _bool(previous, "previous")
     _bool(pid_gone, "pid_gone")
-    unimplemented()
+    if not previous:
+        return True
+    return pid_gone
 
 
 def plan_account_restart(
@@ -230,18 +359,18 @@ def plan_account_restart(
 ) -> RestartDecision:
     """Where an account-worker failure goes (K1, §4.3, §7.2).
 
-    When B3-02 has :func:`mftik.procman.plan_restart` and B4-07 wires
-    this, the body is that call with ``restart="on_failure"`` and this
-    ``intensity``. ``attempt`` starts at 1 and feeds the backoff curve
-    only. Crash class is not an argument: procman does not know why a
-    process died, and an account worker has no A/B/C (P6).
+    The body is :func:`mftik.procman.plan_restart` with
+    ``restart="on_failure"`` and this ``intensity``. ``attempt`` starts
+    at 1 and feeds the backoff curve only. Crash class is not an
+    argument: procman does not know why a process died, and an account
+    worker has no A/B/C (P6).
 
     ``intensity`` is the caller's. This function does not build one and
     does not substitute a default (issue #286).
 
-    Not implemented (IF-12).
+    B4-07. The numbers stay the caller's (issue #286).
     """
-    WorkerPhase(phase)
+    named = WorkerPhase(phase)
     if not isinstance(intensity, RestartIntensity):
         raise TypeError(
             "intensity must be a RestartIntensity; "
@@ -251,7 +380,13 @@ def plan_account_restart(
         raise ValueError("restarts_in_window must be an int >= 0")
     if type(attempt) is not int or attempt < 1:
         raise ValueError("attempt starts at 1")
-    unimplemented()
+    return plan_restart(
+        phase=named,
+        restart="on_failure",
+        restarts_in_window=restarts_in_window,
+        intensity=intensity,
+        attempt=attempt,
+    )
 
 
 def close_actions(mode: CloseMode) -> tuple[OrchestratorAction, ...]:
@@ -264,9 +399,7 @@ def close_actions(mode: CloseMode) -> tuple[OrchestratorAction, ...]:
     ``Supervisor.close``, not a trading-layer push and not a row of
     this tuple.
 
-    Not implemented (IF-12). Empty is not an answer this function
-    returns today; it raises, so a caller cannot mistake "not
-    implemented" for "no actions".
+    B4-07. Both modes are empty on purpose.
     """
     CloseMode(mode)
-    unimplemented()
+    return ()

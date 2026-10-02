@@ -1,17 +1,26 @@
 """TD controller: desired accounts, the trading-layer bit, drain-replace.
 
 This is the layer §3.4 names ``mftik_td.controller``. It replaces the
-lease and refcount half of ``session/manager.py``. The functions that
-would decide, spawn, or reply raise ``NotImplementedError("IF-12")``.
-What is real is the shape: the account binding, the trading bit, the
-action names, and the :class:`~mftik.procman.WorkerSpec` procman is
-allowed to see.
+lease and refcount half of ``session/manager.py``. The account set, the
+trading level, the spawn gate and the intent reply are real (B4-07).
+Drain-replace still raises ``NotImplementedError("IF-12")``.
+:func:`td_reattach` is procman's table (B3-03). ``pid_gone`` is
+:func:`~mftik.procman.previous_worker_gone`. ``MARK_FAILED``, and
+``NONE`` while a shim is still waiting, name ``RELEASE`` for
+:meth:`~mftik.procman.Supervisor.release_slot`. This package does not
+change :meth:`~mftik.procman.Supervisor.spawn`.
 
-Not wired into the TD process. B4-07 does that for reconcile and
-intents. B6-04 does drain-replace. The pid fence is
-:meth:`mftik.procman.Supervisor.spawn` (B3-03, F36). This package does
-not import strategy code and does not carry ``strategy_digest`` or
-``env_generation`` (F39, IF-16).
+The running process registers :func:`intent_handler` on
+``td.{instance}`` and subscribes to ``procman.report.sts.*``. It does
+not construct :class:`TdOrchestrator`: that needs a
+:class:`~mftik.procman.RestartIntensity`, and those numbers are not
+chosen (issue #286). Held intents are a :class:`TdIntentBook`. Nothing
+is delivered to an account worker from that book (P5). B6-04 does
+drain-replace. The pid fence is :func:`~mftik.procman.previous_worker_gone`
+on :class:`AccountView`, and :meth:`~mftik.procman.Supervisor.spawn`
+still enforces it (B3-03, F36). This package does not import strategy
+code and does not carry ``strategy_digest`` or ``env_generation``
+(F39, IF-16).
 
 **State authority (§3.3).**
 
@@ -23,8 +32,8 @@ not import strategy code and does not carry ``strategy_digest`` or
   controller. The observed bit belongs to the account worker. Controller
   silence leaves the worker's last bit in place (P5).
 * Worker existence, exit code, signal: the shim. This layer reads the
-  supervisor's report of them, including whether the previous pid is
-  gone.
+  supervisor's report of them. Whether the previous pid is gone is
+  :func:`~mftik.procman.previous_worker_gone`.
 * ``code_ref`` on the worker spec: the platform release of this
   controller (§4.5). Not a strategy digest.
 
@@ -40,11 +49,15 @@ not import strategy code and does not carry ``strategy_digest`` or
   See :func:`trading_active` and :func:`trading_pushes`.
 * **N1–N2** A new incarnation is named only after the supervisor
   reports the previous pid gone, or when there is no previous
-  incarnation (F36). The §4.4 cell is :func:`td_reattach`, which is
-  procman's :func:`~mftik.procman.reattach_action` for ``td``. The
-  spawn it names is :meth:`~mftik.procman.Supervisor.spawn`. This
-  package does not open ``/proc`` and does not keep a second table.
-  See :func:`spawn_allowed`.
+  incarnation (F36). That report is
+  :func:`~mftik.procman.previous_worker_gone`. The §4.4 cell is
+  :func:`td_reattach`, which is procman's
+  :func:`~mftik.procman.reattach_action` for ``td``. The spawn it
+  names is :meth:`~mftik.procman.Supervisor.spawn`. ``MARK_FAILED``
+  and a waiting shim on ``NONE`` name
+  :meth:`~mftik.procman.Supervisor.release_slot`. This package does
+  not open ``/proc`` and does not keep a second table.
+  See :func:`spawn_allowed` and :func:`release_named`.
 * **D1** :meth:`TdOrchestrator.drain_replace` is one account, asked for
   by an operator (F27). A release upgrade does not call it. While the
   pid is alive the actions extend the dead-man's switch, drain, and
@@ -61,17 +74,26 @@ drain-replace stay here (P6).
 
 from mftik_td.controller._ticket import TICKET
 from mftik_td.controller.decisions import (
+    account_pid_gone,
     apply_delete,
     apply_put,
     close_actions,
     desired_accounts,
+    observation_view,
     plan_account_restart,
+    release_named,
     spawn_allowed,
     td_reattach,
     trading_active,
     trading_pushes,
 )
-from mftik_td.controller.handlers import INTENT_TYPES, control_subject, intent_handler
+from mftik_td.controller.handlers import (
+    INTENT_TYPES,
+    TdIntentBook,
+    control_subject,
+    intent_book,
+    intent_handler,
+)
 from mftik_td.controller.orchestrator import TdOrchestrator
 from mftik_td.controller.types import (
     ACCOUNT_KIND,
@@ -94,8 +116,10 @@ __all__ = [
     "ActionKind",
     "BoundAccount",
     "OrchestratorAction",
+    "TdIntentBook",
     "TdOrchestrator",
     "TradingDesired",
+    "account_pid_gone",
     "account_worker_id",
     "account_worker_spec",
     "apply_delete",
@@ -103,8 +127,11 @@ __all__ = [
     "close_actions",
     "control_subject",
     "desired_accounts",
+    "intent_book",
     "intent_handler",
+    "observation_view",
     "plan_account_restart",
+    "release_named",
     "spawn_allowed",
     "td_reattach",
     "trading_active",

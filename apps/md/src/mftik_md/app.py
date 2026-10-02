@@ -19,11 +19,14 @@ from mftik import (
     serve_health,
 )
 from mftik.broker import Broker
+from mftik.broker.handler import serve
 from mftik.exchange import venues
+from mftik.intent_gc import watch_sts_reports
 from mftik.symbols import SymbolClient
 
 from mftik_md.fetch import FetchSession, VenueReaderFactory
-from mftik_md.rpc import dispatch
+from mftik_md.intents import MdIntentBook
+from mftik_md.rpc import control_handler
 from mftik_md.tape import (
     DEFAULT_MAXLEN,
     DEFAULT_RETENTION_S,
@@ -46,54 +49,25 @@ INSTANCE = instance_name(SOURCE)
 ROLE = instance_role(SOURCE)
 logger = logging.getLogger(SOURCE)
 
-#: How long a serve loop waits before rebuilding itself after an exception it
-#: did not expect. ``Broker.serve`` already survives what it knows how to
-#: survive, so this only paces the failures nothing has a name for yet.
-RPC_RESTART_DELAY_SECONDS = 1.0
-
-
-
 async def run_rpc(
     broker: Broker,
     store: TapeStore | None,
     stop: asyncio.Event,
     *,
     subject: str,
+    intents: MdIntentBook | None = None,
 ) -> None:
     """Serve MD request-reply on ``subject`` until ``stop``.
 
     One task per subject the role grants, rather than one loop over several:
     each is the same loop with a different name, and a failure in one is not a
-    reason to stop answering on the other.
+    reason to stop answering on the other. ``intents`` is the process's held
+    set. Omitted, this subject gets an empty book of its own — health probes
+    never read it. The running process passes one book into every subject.
     """
+    book = intents if intents is not None else MdIntentBook()
     logger.info("MD RPC listening on subject=%s", subject)
-    while not stop.is_set():
-        try:
-            async for req in broker.serve(subject, stop=stop):
-                try:
-                    await dispatch(req, store=store)
-                except Exception:
-                    logger.exception(
-                        "MD RPC handler failed type=%s id=%s",
-                        req.envelope.type,
-                        req.envelope.id,
-                    )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Reaching here means something ``serve`` does not already handle,
-            # and the answer is still to serve. This coroutine returning is how
-            # MD ends up answering nothing — the process alive, the subject
-            # silent, and no line anywhere saying so.
-            logger.exception(
-                "MD RPC serve loop failed subject=%s — restarting", subject
-            )
-            try:
-                await asyncio.wait_for(
-                    stop.wait(), timeout=RPC_RESTART_DELAY_SECONDS
-                )
-            except TimeoutError:
-                continue
+    await serve(broker, subject, control_handler(store, book), stop=stop)
 
 
 def _build_recorder() -> TapeRecorder | None:
@@ -190,13 +164,28 @@ async def amain() -> bool:
                 "has and takes nothing new",
                 ROLE.value,
             )
+        # One held set for every subject, including the pooled ``md``.
+        # A lower ``procman.report`` generation is a new STS publisher and
+        # resets that instance before the sample; see
+        # :func:`mftik.intent_gc.watch_sts_reports`.
+        intents = MdIntentBook()
         rpc_tasks = [
             asyncio.create_task(
-                run_rpc(broker, store, stop, subject=subject),
+                run_rpc(broker, store, stop, subject=subject, intents=intents),
                 name=f"md-rpc-{subject}",
             )
             for subject in subjects
         ]
+        gc_task = asyncio.create_task(
+            watch_sts_reports(
+                broker,
+                held=intents.owners,
+                release=intents.release_owners,
+                stop=stop,
+                states=intents.gc_states,
+            ),
+            name="md-intent-gc",
+        )
         hb_task = asyncio.create_task(
             broker.heartbeat_loop(
                 SOURCE,
@@ -223,13 +212,14 @@ async def amain() -> bool:
             clean = await run_until_stopped(
                 stop,
                 *rpc_tasks,
+                gc_task,
                 hb_task,
                 health_task,
                 logger=logger,
             )
         finally:
             stop.set()
-            tasks = [*rpc_tasks, hb_task, health_task]
+            tasks = [*rpc_tasks, gc_task, hb_task, health_task]
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
