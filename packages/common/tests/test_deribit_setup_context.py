@@ -25,6 +25,8 @@ def _flag(task: asyncio.Task[object] | None) -> bool:
 @pytest.mark.real_sleep(
     reason="the venue socket still sleeps on the wall clock"
 )
+# venue socket; over the 50 ms unit call cap
+@pytest.mark.component
 async def test_read_loop_tasks_do_not_inherit_the_setup_flag(
     deribit_public: FakeDeribit,
 ) -> None:

@@ -12,6 +12,10 @@ from mftik.exchange.gate.future import channels as ch
 from mftik.exchange.gate.future.client import GateFuturesWebSocket
 from mftik.exchange.gate.future.protocol import api_sign
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 
 async def _client(gate: FakeGateFutures, **kwargs: Any) -> GateFuturesWebSocket:
     return GateFuturesWebSocket(url=gate.url, ping_interval=0, **kwargs)  # type: ignore[attr-defined]

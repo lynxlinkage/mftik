@@ -13,6 +13,10 @@ from mftik.exchange.paper.remote_public import PaperRemotePublicClient
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import PAPER_ORDER_BOOK, Topics, UntypedEnvelope
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 
 def PAPER(symbol: str) -> UniversalTicker:
     """``BTCUSDT`` → ``Paper_Spot_BTCUSDT``; public reads are keyed by ticker."""

@@ -10,6 +10,10 @@ from mftik.broker import Broker
 from mftik.health import InstanceAlreadyServing, refuse_if_serving
 from mftik.protocol import HealthStatus, HealthStatusEnvelope, Topics
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:

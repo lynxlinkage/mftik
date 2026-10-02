@@ -79,6 +79,8 @@ async def _engine(tmp_path: Path, columns: str, revision: str | None) -> AsyncEn
     return engine
 
 
+# sqlite schema read; over the 50 ms unit call cap
+@pytest.mark.component
 async def test_a_pre_0034_database_refuses_to_serve_sts(tmp_path: Path) -> None:
     engine = await _engine(
         tmp_path,
@@ -96,6 +98,8 @@ async def test_a_pre_0034_database_refuses_to_serve_sts(tmp_path: Path) -> None:
         await engine.dispose()
 
 
+# sqlite schema read; over the 50 ms unit call cap
+@pytest.mark.component
 async def test_a_migrated_database_serves(tmp_path: Path) -> None:
     engine = await _engine(
         tmp_path,

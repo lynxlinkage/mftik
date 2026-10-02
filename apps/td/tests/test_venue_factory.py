@@ -30,6 +30,10 @@ from mftik.exchange.okx.private import OkxPrivateClient
 from mftik.exchange.tickers import Category
 from mftik_td.session import PaperSessionFactory, VenueSessionFactory
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 #: What a Binance credential's ``api_secret`` actually holds: an Ed25519
 #: private key, not a shared secret.
 ED25519_PEM = (

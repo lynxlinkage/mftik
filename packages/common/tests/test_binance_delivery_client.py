@@ -18,6 +18,10 @@ from mftik.exchange.binance.delivery.protocol import BinanceWsError
 from mftik.exchange.binance.delivery.user import BinanceDeliveryUserStream
 from mftik.exchange.errors import ExchangeError
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 
 def _api(stub: FakeBinanceDeliveryApi, pem: str | None = None) -> BinanceDeliveryWsApi:
     return BinanceDeliveryWsApi(

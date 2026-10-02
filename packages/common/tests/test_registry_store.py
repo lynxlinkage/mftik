@@ -452,6 +452,8 @@ def _contend(tmp_path: Path, *, require_present: bool = True) -> None:
     assert list(private.glob(".old-*")) == []
 
 
+# two writers, over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 def test_two_writers_leave_one_complete_tree(tmp_path: Path) -> None:
     """Pid-1 containers used to share ``.tmp-{name}-1`` and delete each other."""
     _contend(tmp_path)
@@ -482,6 +484,8 @@ def test_replace_exchanges_so_the_live_directory_stays(tmp_path: Path) -> None:
     assert (root / "strategy.py").read_text().endswith("# b\n")
 
 
+# two writers, over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 def test_two_writers_without_exchange_drop_the_aside(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

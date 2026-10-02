@@ -36,6 +36,10 @@ from mftik.exchange.models import (
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import Category, UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 PERP = UniversalTicker.parse("Deribit_Perp_BTCUSDC")
 INVERSE = UniversalTicker.parse("Deribit_Inverse_BTCUSD")
 DATED = UniversalTicker.parse("Deribit_Future_BTCUSD-260906")

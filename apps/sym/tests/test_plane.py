@@ -29,6 +29,10 @@ from mftik_sym.plane import SymbolPlane
 from mftik_sym.rpc import dispatch, handle_list
 from mftik_sym.sources.base import Instrument
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 VENUE = "Gate"
 
 

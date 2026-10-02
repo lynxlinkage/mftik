@@ -16,6 +16,10 @@ from mftik.exchange.bitget.rest import BitgetPublicRest
 from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.tickers import UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 SPOT = UniversalTicker.parse("Bitget_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Bitget_Perp_BTCUSDT")
 USDC = UniversalTicker.parse("Bitget_Perp_BTCUSDC")

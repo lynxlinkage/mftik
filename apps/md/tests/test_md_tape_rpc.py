@@ -19,6 +19,10 @@ from mftik.protocol import (
 from mftik_md.rpc.tape import TAPE_RPC_CHUNK, handle_tape_tail
 from mftik_md.tape_store import TapeStore
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 FEED = Topics.md_feed("aggtrade", TICKER)
 

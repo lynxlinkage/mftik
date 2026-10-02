@@ -10,6 +10,10 @@ from mftik.exchange import PaperExchange, Side
 from mftik.exchange.models import OrderStatus, limit_order
 from mftik_td.session import PaperSessionFactory
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:

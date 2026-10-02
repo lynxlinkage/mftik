@@ -5,7 +5,11 @@ from __future__ import annotations
 import subprocess
 import sys
 
+import pytest
 
+
+# subprocess import; unit and component forbid subprocesses
+@pytest.mark.integration
 def test_importing_symbols_does_not_cycle_through_exchange() -> None:
     """``from mftik.symbols import SymbolClient`` used to fail: listed.py
     imported tickers, which ran exchange/__init__, which imported listing,

@@ -147,6 +147,8 @@ async def test_connect_does_not_pull_private(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+# tree diff; over the 50 ms unit call cap
+@pytest.mark.component
 async def test_diff_marks_synced_diverged_and_remote_only(tmp_path) -> None:
     peer = RegistryStore(tmp_path / "peer")
     peer.add({"strategy.py": _TINY}, origin="public")

@@ -21,6 +21,10 @@ from mftik.exchange.wire import (
     first_seen,
 )
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 
 def test_first_seen_keeps_order_and_drops_duplicates() -> None:
     assert first_seen(["tickers.BTC", "order", "tickers.BTC", "wallet"]) == [
@@ -599,6 +603,8 @@ async def test_an_acquire_in_flight_keeps_a_held_key_and_retries_it() -> None:
         releaser.cancel()
 
 
+# linger is wall-clock; over the 500 ms component cap
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="WireLedger still sleeps on the wall clock"
 )
@@ -680,6 +686,8 @@ async def test_a_release_of_an_unacked_subscribe_is_deferred() -> None:
         releaser.cancel()
 
 
+# linger is wall-clock; over the 500 ms component cap
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="WireLedger still sleeps on the wall clock"
 )

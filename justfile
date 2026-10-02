@@ -9,10 +9,36 @@ sync:
     uv sync --all-packages
     cd frontend && npm install
 
-# Run all Python tests (sqlite only — fast, and what most changes need).
-# Needs the broker up: `just up nats`. There is no fake to fall back on.
+# Unit + component, in parallel (§9.1, F30). Integration and e2e are
+# `just test-int`. Postgres is not in this set. Needs the broker up:
+# `just up nats`. There is no fake to fall back on. On CI the recipe
+# fails when this step's wall time exceeds 120s — that clock does not
+# include `uv sync` or service startup. A unit or component call over
+# its cap warns on CI (the hook sees `CI`) and still fails locally.
 test:
-    uv run --all-packages pytest packages apps -q
+    #!/usr/bin/env bash
+    set -euo pipefail
+    start=$(date +%s.%N)
+    set +e
+    uv run --all-packages pytest packages apps -q -n auto -m "not integration and not e2e"
+    code=$?
+    set -e
+    wall=0
+    if [ -n "${CI:-}" ]; then
+      end=$(date +%s.%N)
+      elapsed=$(python3 -c "print(${end} - ${start})")
+      uv run --all-packages python scripts/check_wall_budget.py "$elapsed" || wall=$?
+    fi
+    if [ "$code" -ne 0 ]; then
+      exit "$code"
+    fi
+    exit "$wall"
+
+# Integration and e2e (§9.1). When TEST_POSTGRES_URL is set, the Postgres
+# dialect of the database tests is part of this set. Serial on purpose:
+# those tests share one database and truncate it between cases.
+test-int:
+    uv run --all-packages pytest packages apps -q -m "integration or e2e"
 
 # Run them again on Postgres too, which is what CI does and what production is.
 # sqlite ignores VARCHAR length and has no decimal type, so it cannot show you

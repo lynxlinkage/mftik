@@ -22,6 +22,10 @@ from mftik.exchange.models import (
 )
 from mftik.exchange.tickers import UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 NATIVE = "BTC-USDT"
 #: The instrument every order in this module is for.
 TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")

@@ -16,6 +16,10 @@ from mftik.exchange.okx.rest import OkxPublicRest
 from mftik.exchange.tickers import Category, UniversalTicker
 from okx_stub import FakeOkx
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 TICKER = UniversalTicker.parse("Okx_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Okx_Perp_BTCUSDT")
 NATIVE = "BTC-USDT"

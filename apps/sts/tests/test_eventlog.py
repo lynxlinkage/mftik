@@ -38,6 +38,10 @@ from mftik_md.tape_store import TapeStore
 from mftik_sts.session.session import StsSession
 from tape_rpc import serve_tape
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:

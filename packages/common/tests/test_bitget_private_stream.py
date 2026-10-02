@@ -10,6 +10,10 @@ from bitget_stub import API_KEY, API_SECRET, PASSPHRASE, FakeBitget
 from mftik.exchange.bitget.account import BitgetPrivateStream
 from mftik.exchange.bitget.channels import orders
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 
 async def _until(predicate, *, timeout: float = 2.0) -> None:
     loop = asyncio.get_running_loop()

@@ -32,6 +32,10 @@ from mftik.protocol import (
     Topics,
 )
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 #: The planes with a named subject, and how to ask each one whether it is
 #: listening. Health is the probe that needs no session manager — every other
 #: request type would fail on the ``None`` passed below for reasons that have

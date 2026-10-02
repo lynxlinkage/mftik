@@ -10,6 +10,10 @@ from binance_stub import FakeBinanceStream
 from mftik.exchange.binance.delivery import streams as st
 from mftik.exchange.binance.delivery.feed import BinanceDeliveryStream
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 
 def _feed(stub: FakeBinanceStream) -> BinanceDeliveryStream:
     return BinanceDeliveryStream(

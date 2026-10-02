@@ -18,6 +18,10 @@ from mftik.exchange.errors import ExchangeNotConnectedError
 from mftik.exchange.models import OrderStatus, Side
 from mftik.exchange.tickers import UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Bybit_Spot_BTCUSDT")
 

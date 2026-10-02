@@ -23,6 +23,8 @@ from mftik_db.schema import SchemaTooOld
 from mftik_sts import app
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 @pytest.mark.real_sleep(
     reason="STS schema check still sleeps on the wall clock"
 )
@@ -63,6 +65,8 @@ async def test_a_database_that_is_not_up_yet_is_waited_for(
     assert "connection refused" in caplog.text
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 @pytest.mark.real_sleep(
     reason="STS schema check still sleeps on the wall clock"
 )

@@ -12,6 +12,10 @@ from mftik.exchange.deribit.rest import DeribitPublicRest
 from mftik.exchange.tickers import UniversalTicker
 from test_deribit_public import BASE, FakeApi, StubSymbols, _wire
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 STRIKES = [60000 + 1000 * i for i in range(11)]
 TICKERS = [
     UniversalTicker.parse(f"Deribit_Option_BTCUSD-261030-{k}-C") for k in STRIKES

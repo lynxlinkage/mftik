@@ -15,7 +15,7 @@ from mftik.protocol import (
     UntypedEnvelope,
 )
 
-pytestmark = session_loop
+pytestmark = [session_loop, pytest.mark.component]
 
 
 @pytest.mark.real_sleep(

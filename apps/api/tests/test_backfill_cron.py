@@ -24,6 +24,10 @@ from mftik_db.models.api import Api
 from mftik_db.models.history import Attribution, Source
 from mftik_db.repositories import OrderRepository
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:

@@ -36,6 +36,9 @@ from mftik_sts.impl.cross_arb import (
     x_mid_bps,
 )
 
+# strategy driver; slow cases miss the 50 ms unit call cap
+pytestmark = pytest.mark.component
+
 QUOTE_TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")
 HEDGE_TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")
 

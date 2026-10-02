@@ -22,6 +22,10 @@ from mftik.exchange import PaperExchange
 from mftik.protocol import PAPER_ORDER_BOOK, Topics
 from mftik_paper.app import _pump_order_book, _tick_order_book, _watch
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:

@@ -27,6 +27,10 @@ from mftik.protocol import (
 )
 from mftik_sts import app as sts_app
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:

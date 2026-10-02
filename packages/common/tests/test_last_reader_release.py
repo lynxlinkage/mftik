@@ -36,6 +36,10 @@ from okx_stub import FakeOkx
 from test_binance_spot_client import AGG_TRADE
 from test_bybit_public import NATIVE, TRADE_ROW, _book
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 BTC = "btcusdt@aggTrade"
 ETH = "ethusdt@aggTrade"
 BNB = "bnbusdt@aggTrade"

@@ -9,36 +9,23 @@ on:
     branches: [main]
 
 jobs:
-  pytest:
+  # F30: unit + component. The 120s gate is the `just test` step only —
+  # not uv sync, not NATS coming up, not the stdlib-loop pass below.
+  # Postgres is the integration job (§9.1 rule 6).
+  unit:
     runs-on: ubuntu-latest
-    # Every database test runs twice: once on in-memory sqlite, once here.
-    # sqlite alone is not a stand-in — it has no decimal type and ignores
-    # VARCHAR length, so a column too small for what a venue sends looks fine.
-    # `conftest.py` fails the run outright if this service did not come up,
-    # rather than letting the suite quietly pass on sqlite only.
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: mftik
-          POSTGRES_PASSWORD: mftik
-          POSTGRES_DB: mftik_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U mftik -d mftik_test"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-    env:
-      TEST_POSTGRES_URL: postgresql+asyncpg://mftik:mftik@localhost:5432/mftik_test
-      DATABASE_URL_SYNC: postgresql+psycopg://mftik:mftik@localhost:5432/mftik_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
           python-version: "3.12"
+
+      - name: Install just
+        run: |
+          curl -sSfL -o /tmp/just.tar.gz \
+            https://github.com/casey/just/releases/download/1.42.4/just-1.42.4-x86_64-unknown-linux-musl.tar.gz
+          sudo tar -C /usr/local/bin -xzf /tmp/just.tar.gz just
 
       # The bus. Core NATS; no JetStream. `conftest.py` fails the run
       # if nothing is listening at all.
@@ -74,6 +61,80 @@ jobs:
           diff -u contracts/openapi.json /tmp/openapi.json \
             || { echo "contracts/openapi.json is stale — run: just openapi" >&2; exit 1; }
 
+      # On uvloop, because that is the loop all six processes run
+      # (docs/EventLoop.md) and `conftest.py` defaults the suite to it. A suite
+      # on a different loop from the node cannot see a loop-specific regression.
+      # `just test` is unit + component, `pytest -n auto`, and fails if the
+      # step's wall time exceeds 120s (F30).
+      - name: just test
+        run: just test
+
+      # `packages/common` ships to PyPI as `mftik`, and nothing a strategy
+      # author imports may need uvloop to work. Only `packages`, because that is
+      # the part with a life outside this repo; the five planes are only ever
+      # run from the image, on the loop above. Same tier filter as `just test`.
+      # Not part of the 120s budget — F30 counts the `just test` step alone.
+      # The call-phase hook is the same one `just test` uses. This step does
+      # not unset `CI` / `GITHUB_ACTIONS`, so a unit or component call over
+      # its cap warns here and does not fail the job. The 120s wall gate
+      # stays on `just test` only, and stays a hard failure.
+      - name: Test the published packages on the stdlib loop too
+        env:
+          MFTIK_TEST_LOOP: asyncio
+        run: uv run --all-packages pytest packages -q -n auto -m "not integration and not e2e"
+
+  # Integration and e2e, plus the Postgres dialect. Alembic lives here
+  # because it is the step that needs a real Postgres.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mftik
+          POSTGRES_PASSWORD: mftik
+          POSTGRES_DB: mftik_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mftik -d mftik_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql+asyncpg://mftik:mftik@localhost:5432/mftik_test
+      DATABASE_URL_SYNC: postgresql+psycopg://mftik:mftik@localhost:5432/mftik_test
+      MFTIK_REQUIRE_POSTGRES: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install just
+        run: |
+          curl -sSfL -o /tmp/just.tar.gz \
+            https://github.com/casey/just/releases/download/1.42.4/just-1.42.4-x86_64-unknown-linux-musl.tar.gz
+          sudo tar -C /usr/local/bin -xzf /tmp/just.tar.gz just
+
+      - name: Start NATS
+        run: |
+          docker run -d --name nats -p 4222:4222 -p 8222:8222 \
+            nats:2.11-alpine -m 8222
+          for _ in $(seq 30); do
+            if curl -sf http://localhost:8222/healthz > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::nats-server did not come up" >&2
+          docker logs nats >&2 || true
+          exit 1
+
+      - name: Sync
+        run: uv sync --all-packages
+
       # Before the tests, which build their schema from the models and would
       # leave a database no migration has ever touched. The suite proves the
       # models work; this proves a deploy would arrive at the same models.
@@ -82,17 +143,5 @@ jobs:
           uv run --all-packages alembic -c packages/db/alembic.ini upgrade head
           uv run --all-packages alembic -c packages/db/alembic.ini check
 
-      # On uvloop, because that is the loop all six processes run
-      # (docs/EventLoop.md) and `conftest.py` defaults the suite to it. A suite
-      # on a different loop from the node cannot see a loop-specific regression.
-      - name: Test
-        run: uv run --all-packages pytest packages apps -q
-
-      # `packages/common` ships to PyPI as `mftik`, and nothing a strategy
-      # author imports may need uvloop to work. Only `packages`, because that is
-      # the part with a life outside this repo; the five planes are only ever
-      # run from the image, on the loop above.
-      - name: Test the published packages on the stdlib loop too
-        env:
-          MFTIK_TEST_LOOP: asyncio
-        run: uv run --all-packages pytest packages -q
+      - name: just test-int
+        run: just test-int
