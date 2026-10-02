@@ -1,10 +1,9 @@
 """What the TD controller does (IF-12, B4-07).
 
-The account set, the trading level, the spawn gate, restart planning
-and reconcile answer. Reconcile uses procman's §4.4 table (B3-03).
-What is still ``xfail(strict=True)`` is drain-replace (B6-04).
-``strict`` is the point: that ticket cannot merge while the marker is
-still on it.
+The account set, the trading level, the spawn gate, restart planning,
+reconcile and drain-replace answer. Reconcile uses procman's §4.4
+table (B3-03). Drain-replace here is the pure plan (B6-04, F27).
+Waiting, stopping and the replacement spawn are the supervisor's.
 
 Nothing here starts a process or opens ``/proc``. The pid fence is the
 supervisor's observation on :class:`~mftik_td.controller.AccountView`,
