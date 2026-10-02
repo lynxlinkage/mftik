@@ -483,7 +483,7 @@ async def _persist_start(
             md_ids=dict(spec.md),
             st_paras=dict(spec.sts),
             restart=spec.restart,
-            instance=instance,
+            instance=target,
         )
         repo = IntentRepository(db)
         api_ids = td_api_ids_of(td)
@@ -765,9 +765,10 @@ async def start(
     until the checks pass.
 
     The spec row is :meth:`StsSessionRepository.create_live`. Its
-    ``instance`` is the name the deploy asked for, null when the deploy
-    named none. The owner on the intent messages is the STS the start
-    is sent to, which for an unnamed deploy is the derived target.
+    ``instance`` is the STS the start is sent to: the name the deploy
+    asked for, or the derived target when the deploy named none. That
+    name is also the owner on the intent messages. The start request
+    still carries the name the deploy asked for.
     ``strategy_digest`` and ``env_generation`` are columns on the row
     (IF-16). This function does not write them, and
     :class:`StsCreateSessionRequest` does not carry them. Pinning the
@@ -917,9 +918,9 @@ async def end(
     rule 3 (B3-04) reclaims an owner from the liveness report as the
     fallback.
 
-    An unnamed deploy leaves ``sts_sessions.instance`` null. The owner
-    used for the deletes is that column when it is set, and otherwise
-    :func:`_sts_target` on the row's accounts.
+    A create stores the resolved STS on the row. An older row can
+    still be null. The owner used for the deletes is that column when
+    it is set, and otherwise :func:`_sts_target` on the row's accounts.
     """
     if not isinstance(session_id, str) or not session_id:
         raise ValueError("session_id is required")
