@@ -380,16 +380,21 @@ async def test_on_failure_is_stored_and_sent(world) -> None:
     assert start_payload["restart"] == "on_failure"
 
 
-async def test_an_unnamed_deploy_stores_a_null_instance_and_addresses_the_derived_sts(
+async def test_an_unnamed_deploy_stores_the_derived_instance(
     world,
 ) -> None:
+    """The row records the STS the create was sent to.
+
+    The start request still carries the name the deploy asked for,
+    which is null. The intent owner is that same derived instance.
+    """
     transport = ScriptedTransport()
     result = await _accepted(world, transport, instance=None)
 
     async with world.scope() as db:
         row = await StsSessionRepository(db).get_by_session_id(result.session_id)
         assert row is not None
-        assert row.instance is None
+        assert row.instance == "sts-jp"
     assert transport.sent[2][0] == Topics.sts("sts-jp")
     start_payload = json.loads(transport.sent[2][1])["payload"]
     assert start_payload["instance"] is None

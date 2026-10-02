@@ -6,10 +6,11 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
-from mftik.protocol import IntentOwner, TdIntentPut
+from mftik.protocol import IntentOwner, TdIntentPut, load_td, td_api_ids_of
 from mftik_db.models.api import Api
 from mftik_db.repositories import (
     ApiRepository,
+    InstanceRepository,
     IntentRepository,
     StsSessionRepository,
     TdSessionRepository,
@@ -83,11 +84,16 @@ async def read_held_intents(
     """Unreleased ``td_intents`` for accounts bound to ``instance``.
 
     One :class:`~mftik.protocol.TdIntentPut` per session, ``api_ids`` in
-    row order. ``owner.sts_instance`` is ``sts_sessions.instance``. A
-    row whose session is missing or has no instance fails the read:
-    dropping it would look like "no intent" and the next push would
-    turn that account's trading layer off (P5). An empty result is a
-    successful read: this instance really has nothing unreleased.
+    row order. ``owner.sts_instance`` is ``sts_sessions.instance``. An
+    old row whose column is null or empty is named with
+    :meth:`~mftik_db.repositories.InstanceRepository.derived_sts` on
+    ``td_api_ids_of(load_td(record.td))``, the same derivation the API
+    uses. That name is not written back. A missing session, or a
+    derivation that is not exactly one instance, logs ``session_id``
+    and fails the read: dropping the row would look like "no intent"
+    and the next push would turn that account's trading layer off
+    (P5). An empty result is a successful read: this instance really
+    has nothing unreleased.
 
     ``scope`` defaults to :func:`mftik_db.session.session_scope`. A
     test passes its scratch database. This does not write.
@@ -105,9 +111,21 @@ async def read_held_intents(
             record = await sessions.get_by_session_id(session_id)
             name = None if record is None else record.instance
             if not isinstance(name, str) or name == "":
-                raise RuntimeError(
-                    f"td intent session_id={session_id} has no sts instance"
-                )
+                derived = None
+                if record is not None:
+                    derived = await InstanceRepository(db).derived_sts(
+                        td_api_ids_of(load_td(record.td))
+                    )
+                if isinstance(derived, str) and derived != "":
+                    name = derived
+                else:
+                    logger.error(
+                        "td intent session_id=%s has no sts instance",
+                        session_id,
+                    )
+                    raise RuntimeError(
+                        f"td intent session_id={session_id} has no sts instance"
+                    )
             puts.append(
                 TdIntentPut(
                     session_id=session_id,

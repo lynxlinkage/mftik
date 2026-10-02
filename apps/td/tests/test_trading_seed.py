@@ -8,6 +8,7 @@ empty book.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from mftik.protocol import IntentOwner, TdIntentPut
 from mftik_db.models.api import Api
 from mftik_db.models.intent import TdIntent
 from mftik_db.models.session import StsSessionRow
+from mftik_db.repositories import InstanceRepository
 from mftik_td import app
 from mftik_td.account import AccountWorker
 from mftik_td.controller import (
@@ -59,6 +61,21 @@ class _Broker:
         del subject, timeout
         self.sent.append(envelope.payload.active)
         return await self.worker.trading.handle(envelope)
+
+
+class _RoutedBroker:
+    """One in-process worker per account. Records ``(api_id, active)``."""
+
+    def __init__(self) -> None:
+        self.workers: dict[int, AccountWorker] = {}
+        self.sent: list[tuple[int, bool]] = []
+
+    async def request(self, subject: str, envelope, timeout: float):
+        del subject, timeout
+        api_id = envelope.payload.api_id
+        active = envelope.payload.active
+        self.sent.append((api_id, active))
+        return await self.workers[api_id].trading.handle(envelope)
 
 
 class _NoProcess:
@@ -170,6 +187,54 @@ async def _rows(
         )
         session.add(TdIntent(session_id="sess-live", api_id=other.id))
         return mine.id
+
+
+async def _null_owner_accounts(
+    scope,
+    *,
+    sts_names: tuple[str, ...],
+) -> tuple[int, int]:
+    """A null ``sts_sessions.instance`` on a regional TD, plus a second account.
+
+    Both accounts are bound to this TD. Only the first has an unreleased
+    intent. Every name in ``sts_names`` is an enabled STS in that region.
+    The session's ``td`` names the first account, which is what
+    ``derived_sts`` reads. Returns ``(trader_api_id, other_api_id)``.
+    """
+    async with scope() as session:
+        await an_owner(session)
+        home = await an_instance(session, name=INSTANCE, domain="td", region="lab")
+        for name in sts_names:
+            await an_instance(session, name=name, domain="sts", region="lab")
+        trader = Api(
+            owner_id=1,
+            venue="Bybit",
+            api_key="seed-trader",
+            api_secret="secret",
+            instance_id=home.id,
+        )
+        other = Api(
+            owner_id=1,
+            venue="Bybit",
+            api_key="seed-other",
+            api_secret="secret",
+            instance_id=home.id,
+        )
+        session.add_all((trader, other))
+        await session.flush()
+        session.add(
+            StsSessionRow(
+                session_id="sess-null",
+                created_by=1,
+                instance=None,
+                td={"trader": {"api_id": trader.id}},
+                md_ids={},
+                st_paras={},
+                st_facts={},
+            )
+        )
+        session.add(TdIntent(session_id="sess-null", api_id=trader.id))
+        return trader.id, other.id
 
 
 async def _live_worker(api_id: int) -> tuple[AccountWorker, _Session]:
@@ -386,6 +451,108 @@ async def test_a_seed_that_cannot_name_the_sts_instance_pushes_nothing(
     assert seeded is False
     assert book.rows() == ()
     await _apply(_orch(tmp_path), worker, book, api_id, publish=seeded, broker=broker)
+    assert broker.sent == []
+    assert worker.trading.active is True
+    assert session.destroyed is False
+
+
+@pytest.mark.component
+async def test_a_null_instance_seeds_the_derived_owner_and_pushes_others(
+    tmp_path: Path, scope
+) -> None:
+    """An old null row uses the same owner the API would have stored.
+
+    Seeding then publishes every account on this TD. The account with
+    the intent stays on; the other one is pushed off. The derived name
+    is not written back onto the row.
+    """
+    trader_id, other_id = await _null_owner_accounts(scope, sts_names=("sts-lab",))
+    trader, trader_session = await _live_worker(trader_id)
+    other, other_session = await _live_worker(other_id)
+    broker = _RoutedBroker()
+    broker.workers = {trader_id: trader, other_id: other}
+    book = TdIntentBook()
+
+    puts = await read_held_intents(INSTANCE, scope=scope)
+    async with scope() as db:
+        derived = await InstanceRepository(db).derived_sts([trader_id])
+    assert derived == "sts-lab"
+    assert len(puts) == 1
+    assert puts[0].owner.sts_instance == derived
+    assert list(puts[0].api_ids) == [trader_id]
+
+    seeded = await seed_intent_book(
+        book,
+        instance=INSTANCE,
+        read=lambda instance: read_held_intents(instance, scope=scope),
+    )
+    assert seeded is True
+    assert book.rows()[0].owner.sts_instance == "sts-lab"
+    async with scope() as db:
+        stored = await db.get(StsSessionRow, "sess-null")
+    assert stored is not None
+    assert stored.instance is None
+
+    accounts = (
+        BoundAccount(api_id=trader_id, venue="Bybit", instance=INSTANCE),
+        BoundAccount(api_id=other_id, venue="Bybit", instance=INSTANCE),
+    )
+    actions = _orch(tmp_path).reconcile(
+        accounts,
+        book.rows(),
+        (_view(trader_id), _view(other_id)),
+        publish=True,
+    )
+    await apply_reconcile(
+        _NoProcess(),
+        actions,
+        accounts,
+        code_ref="v1",
+        cancel_on_disconnect={},
+        broker=broker,
+    )
+    assert broker.sent == [(trader_id, True), (other_id, False)]
+    assert trader.trading.active is True
+    assert trader_session.destroyed is False
+    assert other.trading.active is False
+    assert other_session.destroyed is True
+
+
+@pytest.mark.component
+async def test_an_ambiguous_null_instance_still_refuses(
+    tmp_path: Path, scope, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two enabled STS in the region is not an owner. Nothing is pushed."""
+    trader_id, _other_id = await _null_owner_accounts(
+        scope, sts_names=("sts-a", "sts-b")
+    )
+    worker, session = await _live_worker(trader_id)
+    broker = _Broker(worker)
+    book = TdIntentBook()
+
+    with caplog.at_level(logging.ERROR, logger="mftik_td.db"):
+        seeded = await seed_intent_book(
+            book,
+            instance=INSTANCE,
+            read=lambda instance: read_held_intents(instance, scope=scope),
+        )
+    assert seeded is False
+    assert book.rows() == ()
+    assert any(
+        record.name == "mftik_td.db"
+        and record.levelno == logging.ERROR
+        and record.message == "td intent session_id=sess-null has no sts instance"
+        for record in caplog.records
+    )
+    async with scope() as db:
+        stored = await db.get(StsSessionRow, "sess-null")
+        derived = await InstanceRepository(db).derived_sts([trader_id])
+    assert derived is None
+    assert stored is not None
+    assert stored.instance is None
+    await _apply(
+        _orch(tmp_path), worker, book, trader_id, publish=seeded, broker=broker
+    )
     assert broker.sent == []
     assert worker.trading.active is True
     assert session.destroyed is False
