@@ -5,7 +5,8 @@ diagram, and the NDJSON frames round-trip. The shim is real as of
 B3-01. Classifying a death and planning a restart are real as of B3-02.
 The liveness report is real as of B3-04; its wire shape is
 :class:`mftik.protocol.v2.ProcmanReport`, not a second type in this
-package. Reattach, detach and stop are real as of B3-03.
+package. Reattach, detach and stop are real as of B3-03. Admission is
+real as of B3-05.
 """
 
 from __future__ import annotations
@@ -22,8 +23,14 @@ from mftik.procman import (
     OOM_SCORE_ADJ,
     PIPE_BUF,
     SHIM_OOM_SCORE_ADJ,
+    SHIM_VMRSS_BYTES,
     STATUS_FD_ENV,
     TRANSITIONS,
+    AdmissionBudget,
+    AdmissionDecision,
+    AdmissionReason,
+    AdmissionWorker,
+    CapacityExceeded,
     ExitRecord,
     InvalidTransition,
     InvalidWorkerId,
@@ -39,6 +46,7 @@ from mftik.procman import (
     WorkerHeartbeat,
     WorkerPhase,
     WorkerSpec,
+    decide_admission,
     decode_command,
     decode_exit,
     decode_heartbeat,
@@ -435,3 +443,23 @@ def test_the_package_does_not_spawn_with_asyncio() -> None:
             elif isinstance(node, ast.Name):
                 name = node.id
             assert name not in banned, f"{path.name} references {name}"
+
+
+def test_admission_names_are_exported() -> None:
+    """B3-05's names are on ``mftik.procman.__all__``."""
+    exported = {
+        "AdmissionBudget": AdmissionBudget,
+        "AdmissionDecision": AdmissionDecision,
+        "AdmissionReason": AdmissionReason,
+        "AdmissionWorker": AdmissionWorker,
+        "CapacityExceeded": CapacityExceeded,
+        "SHIM_VMRSS_BYTES": SHIM_VMRSS_BYTES,
+        "decide_admission": decide_admission,
+    }
+    for name, value in exported.items():
+        assert name in procman.__all__
+        assert getattr(procman, name) is value
+    assert CapacityExceeded.code == "capacity_exceeded"
+    text = " ".join((procman.__doc__ or "").split())
+    assert "Admission control is B3-05." not in text
+    assert "capacity_exceeded" in text

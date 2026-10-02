@@ -61,7 +61,13 @@ parent (F6).
 * **Spawn.** The intermediate process is ``subprocess.Popen``. It is not
   ``asyncio.create_subprocess_exec`` (§4.1): that transport kills the child
   when it is closed or collected. The shim applies ``oom_score_adj`` and
-  the optional ``RLIMIT_DATA`` (§4.7, F7). Admission control is B3-05.
+  the optional ``RLIMIT_DATA`` (§4.7, F7). Admission is real as of B3-05:
+  :meth:`Supervisor.spawn` refuses a new id with :class:`CapacityExceeded`
+  (``capacity_exceeded``) when the orchestrator's :class:`AdmissionBudget`
+  would be exceeded, and it does so before a shim is launched. The
+  orchestrator supplies ``max_workers`` and ``memory_budget_mb``. A restart
+  of an id this supervisor already holds, including a ``LOST`` slot, is
+  not refused. The count is the slots still held.
 
 Framing, path names, the transition table and :class:`WorkerSpec`
 validation are real. The shim — spawn, the socket, the exit record — is
@@ -69,11 +75,17 @@ real as of B3-01. Restart decisions and the live state machine (spawn,
 stop, status, heartbeat timeout) are real as of B3-02. The liveness
 report, its generation, and the worker-tree Pss are real as of B3-04.
 Reattach, ``supervisor.json`` and the F36 pid fence are real as of B3-03.
+Admission is real as of B3-05.
 """
 
 from mftik.procman._ticket import TICKET
 from mftik.procman.decisions import (
     BACKOFF_RATIO,
+    SHIM_VMRSS_BYTES,
+    AdmissionBudget,
+    AdmissionDecision,
+    AdmissionReason,
+    AdmissionWorker,
     DesiredSlot,
     FailureCause,
     ObservedWorker,
@@ -82,12 +94,14 @@ from mftik.procman.decisions import (
     RestartIntensity,
     classify_failure,
     count_restarts_in_window,
+    decide_admission,
     observe_heartbeat,
     plan_restart,
     previous_worker_gone,
     reattach_action,
 )
 from mftik.procman.errors import (
+    CapacityExceeded,
     InvalidTransition,
     InvalidWorkerId,
     InvalidWorkerSpec,
@@ -156,6 +170,10 @@ from mftik.procman.supervisor import (
 
 __all__ = [
     "ALIVE_PHASES",
+    "AdmissionBudget",
+    "AdmissionDecision",
+    "AdmissionReason",
+    "AdmissionWorker",
     "BACKOFF_RATIO",
     "CONTROLLER_OOM_SCORE_ADJ",
     "OOM_SCORE_ADJ",
@@ -164,9 +182,11 @@ __all__ = [
     "REPORT_PERIOD_S",
     "RESTART_MODES",
     "SHIM_OOM_SCORE_ADJ",
+    "SHIM_VMRSS_BYTES",
     "STATUS_FD_ENV",
     "TICKET",
     "TRANSITIONS",
+    "CapacityExceeded",
     "CloseMode",
     "DesiredSlot",
     "ExitRecord",
@@ -200,6 +220,7 @@ __all__ = [
     "WorkerStatus",
     "classify_failure",
     "count_restarts_in_window",
+    "decide_admission",
     "decode_command",
     "decode_exit",
     "decode_heartbeat",
