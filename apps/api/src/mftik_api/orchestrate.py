@@ -22,8 +22,9 @@ Neither one rolls a partial start back.
   ``released_at`` and does not delete (F38). Who writes that timestamp
   when an owner is reclaimed from a liveness report is not decided
   (§8.2 rule 3); this module does not.
-* ``strategy_digest`` and ``env_generation`` are not written here
-  (F39, IF-16).
+* ``strategy_digest`` and ``env_generation`` are columns (IF-16,
+  migration ``0036``). This module does not resolve or write them.
+  Pinning them at start is B5-10. ``create_live`` leaves both null.
 
 **Invariants.**
 
@@ -578,8 +579,10 @@ async def start(
     ``instance`` is the name the deploy asked for, null when the deploy
     named none. The owner on the intent messages is the STS the start
     is sent to, which for an unnamed deploy is the derived target.
-    ``strategy_digest`` and ``env_generation`` are not fields of the
-    row or the request (F39, IF-16).
+    ``strategy_digest`` and ``env_generation`` are columns on the row
+    (IF-16). This function does not write them, and
+    :class:`StsCreateSessionRequest` does not carry them. Pinning the
+    pair is B5-10.
 
     A plane that then refuses the accept leaves the rows in place
     (F12). This function does not release them and does not mark the

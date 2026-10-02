@@ -292,6 +292,8 @@ async def test_start_writes_the_spec_and_intents_then_asks_the_planes(
         assert row.instance == "sts-jp"
         assert row.type == "NoopStrategy"
         assert row.td["paper"]["api_id"] == 1
+        assert row.strategy_digest is None
+        assert row.env_generation is None
         md = await db.get(MdIntent, (result.session_id, "md-jp"))
         td = await db.get(TdIntent, (result.session_id, 1))
         assert md is not None and md.released_at is None
