@@ -260,6 +260,9 @@ async def test_429_is_recorded_and_matching_continues(
     assert len(runtime.pending_events(1)) == 1
 
 
+@pytest.mark.real_sleep(
+    reason="alert flush still sleeps on the wall clock"
+)
 async def test_timer_flushes_once(
     monkeypatch: pytest.MonkeyPatch, deliveries: list[dict[str, Any]]
 ) -> None:
@@ -288,6 +291,9 @@ async def test_timer_flushes_once(
     assert runtime.pending_events(1) == []
 
 
+@pytest.mark.real_sleep(
+    reason="alert flush still sleeps on the wall clock"
+)
 async def test_timer_flush_posts_when_webhook_suspends(
     monkeypatch: pytest.MonkeyPatch, deliveries: list[dict[str, Any]]
 ) -> None:

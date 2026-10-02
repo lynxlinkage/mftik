@@ -68,6 +68,9 @@ async def test_private_auth_verifies_the_ws_signature(deribit: FakeDeribit) -> N
     assert len(str(frame["params"]["timestamp"])) == 13
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_test_request_is_answered_with_public_test(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -80,6 +83,9 @@ async def test_a_test_request_is_answered_with_public_test(
     assert deribit_public.frames_for(ch.PUBLIC_TEST)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_subscribe_replies_correlate_on_id(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -171,6 +177,9 @@ async def test_a_summaries_refusal_names_the_rpc(deribit: FakeDeribit) -> None:
             raise AssertionError("expected DeribitWsError")
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_the_watchdog_probes_an_idle_socket_instead_of_dropping_it(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -217,6 +226,9 @@ def test_a_1009_close_is_an_oversize_frame() -> None:
     assert not deribit_socket._frame_too_big(normal)  # noqa: SLF001
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_repeated_oversize_frames_give_up(
     deribit_public: FakeDeribit,
 ) -> None:

@@ -194,6 +194,9 @@ async def test_a_venue_that_can_resolve_by_cid_is_asked(broker: Broker) -> None:
     assert connector.resolved == ["cid-1"]
 
 
+@pytest.mark.real_sleep(
+    reason="the TD session sweep still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_a_position_push_reaches_the_oms_and_the_wire(
     broker: Broker,
@@ -244,6 +247,9 @@ async def test_a_position_push_reaches_the_oms_and_the_wire(
         await session.destroy()
 
 
+@pytest.mark.real_sleep(
+    reason="the TD session sweep still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_a_closed_position_is_dropped_from_the_book(
     broker: Broker,

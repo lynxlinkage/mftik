@@ -54,6 +54,9 @@ async def _first_book(broker: Broker, symbol: str, timeout: float):  # noqa: ANN
     return task, stop
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_quiet_venue_still_publishes_its_book(
     broker: Broker, exchange: PaperExchange
 ) -> None:
@@ -77,6 +80,9 @@ async def test_a_quiet_venue_still_publishes_its_book(
     assert env.payload["bids"] and env.payload["asks"]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_change_reaches_redis(
     broker: Broker, exchange: PaperExchange
 ) -> None:
@@ -100,6 +106,9 @@ async def test_a_change_reaches_redis(
     assert env.payload["universal_ticker"].endswith("BTCUSDT")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_pump_survives_its_first_call(
     broker: Broker, exchange: PaperExchange
 ) -> None:

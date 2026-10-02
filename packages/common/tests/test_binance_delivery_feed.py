@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 
+import pytest
 from binance_stub import FakeBinanceStream
 from mftik.exchange.binance.delivery import streams as st
 from mftik.exchange.binance.delivery.feed import BinanceDeliveryStream
@@ -18,6 +19,9 @@ def _feed(stub: FakeBinanceStream) -> BinanceDeliveryStream:
     )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_every_md_topic_lands_on_the_same_socket(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -39,6 +43,9 @@ async def test_every_md_topic_lands_on_the_same_socket(
     }
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_push_reaches_the_stream_that_asked_for_it(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -86,6 +93,9 @@ async def test_a_push_reaches_the_stream_that_asked_for_it(
     assert trade.q == Decimal("2")
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_unsubscribing_drops_only_the_named_stream(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -100,6 +110,9 @@ async def test_unsubscribing_drops_only_the_named_stream(
         assert binance_stream.frames_for(st.UNSUBSCRIBE)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_two_consumers_share_one_venue_subscription(
     binance_stream: FakeBinanceStream,
 ) -> None:

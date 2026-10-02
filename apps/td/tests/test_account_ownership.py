@@ -27,6 +27,9 @@ async def broker() -> Broker:
         yield client
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_boot_probe_refuses_a_second_process_of_the_same_instance(
     broker: Broker,

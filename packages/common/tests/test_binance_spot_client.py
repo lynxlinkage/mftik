@@ -131,6 +131,9 @@ async def test_two_consumers_share_one_venue_subscription(
         assert (await asyncio.wait_for(anext(second), timeout=2.0)).s == "BTCUSDT"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_resubscribes_a_shared_stream_once(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -168,6 +171,9 @@ async def test_unsubscribe_raises_when_a_co_reader_still_holds_the_name(
         assert (await asyncio.wait_for(anext(second), timeout=2.0)).s == "BTCUSDT"
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_unsubscribe_in_the_reconnect_gap_closes_locally(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -191,6 +197,9 @@ async def test_unsubscribe_in_the_reconnect_gap_closes_locally(
         assert replayed.count("btcusdt@aggTrade") == 1
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_a_failed_unsubscribe_keeps_the_name_held(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -208,6 +217,9 @@ async def test_a_failed_unsubscribe_keeps_the_name_held(
         assert (await asyncio.wait_for(anext(again), timeout=2.0)).s == "BTCUSDT"
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_unsubscribe_closes_the_streams_reading_it(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -224,6 +236,9 @@ async def test_unsubscribe_closes_the_streams_reading_it(
     assert binance_stream.subscribed == set()
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_replays_every_live_subscription(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -250,6 +265,9 @@ async def test_reconnect_replays_every_live_subscription(
         assert (await asyncio.wait_for(anext(trades), timeout=2.0)).s == "BTCUSDT"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_fires_the_callback_so_the_owner_can_rebuild(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -534,6 +552,9 @@ async def test_the_user_stream_needs_a_logged_on_session(
             await api.subscribe_execution_reports()
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_logs_on_again_and_resubscribes_user_data(
     binance_api: FakeBinanceApi, binance_key
 ) -> None:
@@ -560,6 +581,9 @@ async def test_reconnect_logs_on_again_and_resubscribes_user_data(
         assert (await asyncio.wait_for(anext(reports), timeout=2.0)).s == "BTCUSDT"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_does_not_resubscribe_a_stream_nobody_reads(
     binance_api: FakeBinanceApi, binance_key
 ) -> None:

@@ -118,6 +118,9 @@ def test_futures_serves_no_one_second_candles_though_spot_does() -> None:
 # --- streams ---------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_a_ticker_pairs_the_stats_with_a_real_quote(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -154,6 +157,9 @@ async def test_a_ticker_pairs_the_stats_with_a_real_quote(
     assert (ticker.bid, ticker.ask) == (Decimal("39999"), Decimal("40001"))
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_tape_is_the_aggregated_one_because_there_is_no_other(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -179,6 +185,9 @@ async def test_the_tape_is_the_aggregated_one_because_there_is_no_other(
     assert future_market_stream.subscribed == {f"{NATIVE.lower()}@aggTrade"}
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_the_book_comes_off_the_public_socket_dated_by_binance(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -209,6 +218,9 @@ async def test_the_book_comes_off_the_public_socket_dated_by_binance(
     assert book.ts == 1672515782.0, "the venue's stamp, not arrival"
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_liquidations_are_reported_as_the_position_that_was_closed(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -246,6 +258,9 @@ async def test_liquidations_are_reported_as_the_position_that_was_closed(
     assert liquidation.qty == Decimal("0.014")
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_mark_price_yields_a_funding_rate_and_skips_a_print_without_one(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -296,6 +311,9 @@ async def test_a_dated_future_has_no_funding_rate_stream(
             )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_candles_answer_in_the_interval_that_was_asked_for(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -337,6 +355,9 @@ async def test_candles_answer_in_the_interval_that_was_asked_for(
     assert kline.closed
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_best_quotes_carry_the_resting_sizes(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,

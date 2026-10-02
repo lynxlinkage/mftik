@@ -27,6 +27,9 @@ def _feed(public: FakeBinanceStream, market: FakeBinanceStream) -> BinanceFuture
     )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_nothing_is_dialled_until_something_subscribes(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -42,6 +45,9 @@ async def test_nothing_is_dialled_until_something_subscribes(
         assert future_market_stream.connections == 0
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_book_goes_to_public_and_the_tape_to_market(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -65,6 +71,9 @@ async def test_the_book_goes_to_public_and_the_tape_to_market(
     }
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_push_reaches_the_stream_that_asked_for_it(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -144,6 +153,9 @@ BOOK_TICKER = {
 }
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_two_consumers_share_one_book_ticker_on_public_only(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -186,6 +198,9 @@ async def test_unsubscribe_of_a_group_that_was_never_opened_is_a_noop(
     assert future_market_stream.frames_for(st.UNSUBSCRIBE) == []
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_unsubscribing_goes_to_the_socket_that_carries_it(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -201,6 +216,9 @@ async def test_unsubscribing_goes_to_the_socket_that_carries_it(
         assert future_public_stream.subscribed == {"btcusdt@bookTicker"}
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_unsubscribe_across_groups_still_asks_after_one_fails(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -219,6 +237,9 @@ async def test_unsubscribe_across_groups_still_asks_after_one_fails(
             await asyncio.wait_for(anext(tape), timeout=2.0)
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_reconnect_replays_only_the_streams_that_socket_carried(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,

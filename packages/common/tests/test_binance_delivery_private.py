@@ -164,6 +164,9 @@ def _order(**overrides: Any) -> PlaceOrderRequest:
     return PlaceOrderRequest(**payload)
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_the_account_socket_opens_on_the_key_the_api_issued(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -194,6 +197,9 @@ async def test_a_failed_account_socket_takes_the_order_socket_down_with_it(
     assert not client.api.connected
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_post_only_is_a_time_in_force_here_not_an_order_type(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -208,6 +214,9 @@ async def test_post_only_is_a_time_in_force_here_not_an_order_type(
     assert params["timeInForce"] == "GTX"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_market_order_says_nothing_about_how_long_it_may_rest(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -222,6 +231,9 @@ async def test_a_market_order_says_nothing_about_how_long_it_may_rest(
     assert "timeInForce" not in params
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reduce_only_rides_on_the_request(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -234,6 +246,9 @@ async def test_reduce_only_rides_on_the_request(
     assert delivery_api.call(m.ORDER_PLACE)["params"]["reduceOnly"] is True
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_an_ordinary_order_says_nothing_about_reduce_only(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -246,6 +261,9 @@ async def test_an_ordinary_order_says_nothing_about_reduce_only(
     assert "reduceOnly" not in delivery_api.call(m.ORDER_PLACE)["params"]
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_quantity_is_contracts_unscaled(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -258,6 +276,9 @@ async def test_quantity_is_contracts_unscaled(
     assert delivery_api.call(m.ORDER_PLACE)["params"]["quantity"] == "1.5"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_param_that_shadows_a_request_field_is_dropped(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -286,6 +307,9 @@ async def test_open_orders_come_over_rest_because_there_is_no_method_for_them(
     assert rest.asked == [None], "the whole account, not one symbol"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_balances_report_what_is_still_committable(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -306,6 +330,9 @@ async def test_balances_report_what_is_still_committable(
     assert balances[0].locked == Decimal("0.5")
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_older_dapi_rows_spell_available_as_withdraw_available(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -325,6 +352,9 @@ async def test_older_dapi_rows_spell_available_as_withdraw_available(
     assert balances[0].locked == Decimal("0.75")
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_positions_are_reported_flat_ones_included(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -384,6 +414,9 @@ ORDER_UPDATE = {
 }
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_orders_and_fills_read_the_one_account_socket(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -408,6 +441,9 @@ async def test_orders_and_fills_read_the_one_account_socket(
     assert fill.fee_asset == "BTC"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_state_change_is_not_published_as_a_fill(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -429,6 +465,9 @@ async def test_a_state_change_is_not_published_as_a_fill(
         fill_pump.cancel()
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_balances_and_positions_come_off_one_account_update(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -481,6 +520,9 @@ async def test_there_is_still_no_leverage_read(
         assert not hasattr(client, "fetch_leverage")
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_dated_contract_does_not_sink_the_whole_position_read(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -520,6 +562,9 @@ async def test_a_dated_contract_is_dropped_from_the_open_order_listing(
     assert [o.order_id for o in orders] == ["22542179"]
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_dated_contract_does_not_tear_down_the_order_stream(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -550,6 +595,9 @@ async def test_a_dated_contract_does_not_tear_down_the_order_stream(
     assert order.universal_ticker == str(TICKER)
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_dated_future_order_reaches_the_wire(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -566,6 +614,9 @@ async def test_a_dated_future_order_reaches_the_wire(
     assert order.universal_ticker == str(DATED_TICKER)
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_dated_future_position_does_not_land_on_the_inverse(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,
@@ -597,6 +648,9 @@ async def test_a_dated_open_order_resolves_home(
     assert rest.asked == [None]
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_dated_future_stream_resolves_home(
     delivery_api: FakeBinanceDeliveryApi,
     delivery_user: FakeBinanceDeliveryUser,

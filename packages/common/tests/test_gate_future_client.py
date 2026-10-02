@@ -75,6 +75,9 @@ async def test_two_consumers_share_one_venue_subscription(
             assert row.contract == "BTC_USDT"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_replays_each_order_book_payload(
     gate_futures: FakeGateFutures,
 ) -> None:
@@ -112,6 +115,9 @@ async def test_unsubscribe_scoped_without_uid_is_refused(
             await ws.unsubscribe(ch.POSITIONS, [])
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_unsubscribe_one_contract_leaves_the_other(
     gate_futures: FakeGateFutures,
 ) -> None:

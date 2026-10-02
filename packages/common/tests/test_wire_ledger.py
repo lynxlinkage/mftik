@@ -547,6 +547,9 @@ def test_a_second_cycle_waits_on_the_one_already_running() -> None:
     assert errors == []
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_an_acquire_in_flight_keeps_a_held_key_and_retries_it() -> None:
     """A batch subscribe attaches its reader only after the ack.
 
@@ -596,6 +599,9 @@ async def test_an_acquire_in_flight_keeps_a_held_key_and_retries_it() -> None:
         releaser.cancel()
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_each_idle_key_waits_out_its_own_linger() -> None:
     ledger: WireLedger[str] = WireLedger()
     sent: list[list[str]] = []
@@ -628,6 +634,9 @@ async def test_each_idle_key_waits_out_its_own_linger() -> None:
         releaser.cancel()
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_a_release_of_an_unacked_subscribe_is_deferred() -> None:
     """A subscribe that has not acked is not held, and must not look done.
 
@@ -671,6 +680,9 @@ async def test_a_release_of_an_unacked_subscribe_is_deferred() -> None:
         releaser.cancel()
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_closing_again_restarts_the_linger() -> None:
     ledger: WireLedger[str] = WireLedger()
     sent: list[list[str]] = []
@@ -702,6 +714,9 @@ async def test_closing_again_restarts_the_linger() -> None:
         releaser.cancel()
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_reconcile_retries_a_rejected_unsubscribe() -> None:
     ledger: WireLedger[str] = WireLedger()
     sent: list[list[str]] = []
@@ -735,6 +750,9 @@ async def test_reconcile_retries_a_rejected_unsubscribe() -> None:
         releaser.cancel()
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_reconcile_leaves_a_key_that_was_never_unsubscribed() -> None:
     """A held key the flusher never attempted is not a failed unsubscribe."""
     ledger: WireLedger[str] = WireLedger()

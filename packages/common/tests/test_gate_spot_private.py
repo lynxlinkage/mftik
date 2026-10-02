@@ -499,6 +499,9 @@ async def test_venue_rejection_becomes_order_error(
             )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_streams_convert_to_shared_models(
     gate: FakeGate, rest_stub: FakeGateRest
 ) -> None:

@@ -25,6 +25,9 @@ async def broker() -> Broker:
         yield client
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_remote_public_fetch_and_stream(broker: Broker) -> None:
     from mftik_paper.rpc import dispatch

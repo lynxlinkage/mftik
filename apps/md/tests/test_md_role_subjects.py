@@ -82,6 +82,9 @@ async def _asks(broker: Broker, subject: str, *, timeout: float = 1.0) -> bool:
     return HealthStatus.model_validate(reply.payload).status == "ok"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_active_answers_its_own_name_and_the_shared_pool(
     broker: Broker,
@@ -94,6 +97,9 @@ async def test_active_answers_its_own_name_and_the_shared_pool(
         await _stop(stop, tasks)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_named_answers_its_own_name_and_leaves_the_pool_alone(
     broker: Broker,
@@ -116,6 +122,9 @@ async def test_named_answers_its_own_name_and_leaves_the_pool_alone(
         await _stop(stop, tasks)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_standby_answers_neither(broker: Broker) -> None:
     """Including its own name.

@@ -6,6 +6,7 @@ import asyncio
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from mftik.exchange.okx import channels as ch
 from mftik.exchange.okx.feed import OkxPublicStream
 from okx_stub import FakeOkx
@@ -76,6 +77,9 @@ async def test_two_consumers_share_one_venue_subscription(okx_public: FakeOkx) -
         assert (await asyncio.wait_for(second.__anext__(), 2)).last == Decimal("60000")
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_resubscribes_a_shared_channel_once(
     okx_public: FakeOkx,
 ) -> None:
@@ -112,6 +116,9 @@ async def test_a_second_folder_is_replayed_the_live_book(okx_public: FakeOkx) ->
     assert len(okx_public.frames_for("subscribe")) == 1
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_gap_on_a_shared_fold_resyncs_exactly_once(okx_public: FakeOkx) -> None:
     async with _feed(okx_public) as feed:
         first = await feed.subscribe_order_book(NATIVE)

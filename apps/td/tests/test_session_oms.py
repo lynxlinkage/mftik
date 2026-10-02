@@ -32,6 +32,9 @@ def factory(broker: Broker, paper: PaperExchange) -> PaperSessionFactory:
     return PaperSessionFactory(broker, paper)
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_oms_updates_from_session_callbacks(
     broker: Broker, factory: PaperSessionFactory
@@ -58,6 +61,9 @@ async def test_oms_updates_from_session_callbacks(
     await session.destroy()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_paper_factory_isolates_api_keys(
     broker: Broker, paper: PaperExchange

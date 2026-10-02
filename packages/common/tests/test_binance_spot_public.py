@@ -109,6 +109,9 @@ def test_a_malformed_interval_is_refused_by_the_canonical_parser() -> None:
 # --- streams ---------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_trades_arrive_canonical(
     binance_api: FakeBinanceApi, binance_stream: FakeBinanceStream
 ) -> None:
@@ -145,6 +148,9 @@ async def test_trades_arrive_canonical(
     assert binance_stream.frames_for(st.SUBSCRIBE)[0]["params"] == ["btc-usdt@trade"]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_agg_trades_keep_the_match_range(
     binance_api: FakeBinanceApi, binance_stream: FakeBinanceStream
 ) -> None:
@@ -170,6 +176,9 @@ async def test_agg_trades_keep_the_match_range(
     ]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_two_tapes_are_separate_subscriptions(
     binance_api: FakeBinanceApi, binance_stream: FakeBinanceStream
 ) -> None:
@@ -199,6 +208,9 @@ async def test_the_two_tapes_are_separate_subscriptions(
     assert not isinstance(matched, AggTrade)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_klines_are_subscribed_and_returned_in_our_own_spelling(
     binance_api: FakeBinanceApi, binance_stream: FakeBinanceStream
 ) -> None:
@@ -239,6 +251,9 @@ async def test_klines_are_subscribed_and_returned_in_our_own_spelling(
     assert kline.closed is True
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_order_book_pushes_are_named_by_their_stream(
     binance_api: FakeBinanceApi, binance_stream: FakeBinanceStream
 ) -> None:
@@ -259,6 +274,9 @@ async def test_order_book_pushes_are_named_by_their_stream(
     assert book.ts > 0, "Binance dates no book, so arrival is the timestamp"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_best_quote_carries_both_sizes(
     binance_api: FakeBinanceApi, binance_stream: FakeBinanceStream
 ) -> None:
@@ -286,6 +304,9 @@ async def test_best_quote_carries_both_sizes(
     assert quote.ts > 0
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_ticker_stream_is_canonical(
     binance_api: FakeBinanceApi, binance_stream: FakeBinanceStream
 ) -> None:

@@ -23,6 +23,9 @@ async def broker() -> Broker:
         yield client
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_td_health_reply(broker: Broker) -> None:
     stop = asyncio.Event()
@@ -54,6 +57,9 @@ async def test_td_health_reply(broker: Broker) -> None:
     assert status.service == "td"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_td_unknown_type_error(broker: Broker) -> None:
     stop = asyncio.Event()

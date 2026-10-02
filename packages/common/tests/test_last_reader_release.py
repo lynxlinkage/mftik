@@ -56,6 +56,9 @@ def _names(frames: list[dict[str, Any]]) -> list[str]:
 # --- linger and batching ---------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_a_burst_of_closes_is_one_unsubscribe(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -74,6 +77,9 @@ async def test_a_burst_of_closes_is_one_unsubscribe(
     assert set(frames[0]["params"]) == {BTC, ETH, BNB}
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_a_reopen_inside_the_linger_sends_nothing(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -104,6 +110,9 @@ async def test_one_of_two_readers_closing_sends_nothing(
         assert (await asyncio.wait_for(anext(second), timeout=2)).s == "BTCUSDT"
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_each_futures_socket_flushes_its_own_names(
     future_public_stream: FakeBinanceStream,
     future_market_stream: FakeBinanceStream,
@@ -127,6 +136,9 @@ async def test_each_futures_socket_flushes_its_own_names(
     assert len(future_market_stream.frames_for(fst.UNSUBSCRIBE)) == 1
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_a_timed_out_unsubscribe_lets_the_next_reader_subscribe(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -145,6 +157,9 @@ async def test_a_timed_out_unsubscribe_lets_the_next_reader_subscribe(
         assert (await asyncio.wait_for(anext(again), timeout=2)).s == "BTCUSDT"
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_reconnect_does_not_restore_a_released_channel(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -198,6 +213,9 @@ async def test_teardown_clears_the_ledger_before_closing_streams(
 # --- Bybit -----------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_already_subscribed_after_a_timed_out_unsubscribe_delivers(
     bybit_public: FakeBybit,
 ) -> None:
@@ -215,6 +233,9 @@ async def test_already_subscribed_after_a_timed_out_unsubscribe_delivers(
         assert (await asyncio.wait_for(anext(again), timeout=2)).trade_id == "trade-1"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_failed_resync_subscribe_reconnects_the_reader(
     bybit_public: FakeBybit,
 ) -> None:
@@ -240,6 +261,9 @@ async def test_a_failed_resync_subscribe_reconnects_the_reader(
         assert [level.price for level in book.bids] == [Decimal("3")]
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_a_batch_resubscribe_during_the_linger_keeps_the_shared_key(
     bybit_public: FakeBybit,
 ) -> None:
@@ -286,6 +310,9 @@ async def test_a_batch_resubscribe_during_the_linger_keeps_the_shared_key(
         assert (await asyncio.wait_for(anext(stream), timeout=2))["i"] == "trade-1"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_already_subscribed_resync_keeps_the_socket(
     bybit_public: FakeBybit,
 ) -> None:
@@ -319,6 +346,9 @@ async def test_an_already_subscribed_resync_keeps_the_socket(
 # --- Deribit ---------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_closing_some_tickers_releases_only_those(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -366,6 +396,9 @@ async def test_a_private_sub_blocks_release_of_the_same_key(gate: FakeGate) -> N
         assert (gch.TICKERS, ("BTC_USDT",)) in ws._ledger.held()
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_a_structured_batch_keeps_a_rejected_frame_held(gate: FakeGate) -> None:
     eth = (gch.ORDER_BOOK, ("ETH_USDT", "20", "1000ms"))
     btc = (gch.ORDER_BOOK, ("BTC_USDT", "20", "1000ms"))
@@ -408,6 +441,9 @@ async def test_fail_streams_clears_before_close_and_sends_nothing(
     assert gate.frames_for(gch.TRADES, gch.UNSUBSCRIBE) == []
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_reconcile_leaves_a_closed_private_sub(gate: FakeGate) -> None:
     """A public close arms reconcile. A private key left up stays up."""
     async with _gate(gate, release_linger=0) as ws:
@@ -441,6 +477,9 @@ def _bitget(stub: FakeBitget, **kwargs: Any) -> BitgetPublicStream:
     )
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_okx_book_close_sends_unsubscribe(okx_public: FakeOkx) -> None:
     arg = och.books("BTC-USDT")
     async with _okx(okx_public, release_linger=0) as feed:
@@ -452,6 +491,9 @@ async def test_okx_book_close_sends_unsubscribe(okx_public: FakeOkx) -> None:
         assert och.arg_key(arg) not in feed._ledger.held()
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_okx_book_without_args_stays_held(okx_public: FakeOkx) -> None:
     arg = och.books("BTC-USDT")
     async with _okx(okx_public, release_linger=0) as feed:
@@ -463,6 +505,9 @@ async def test_okx_book_without_args_stays_held(okx_public: FakeOkx) -> None:
         assert och.arg_key(arg) in feed._ledger.held()
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_bitget_book_close_sends_unsubscribe(bitget_public: FakeBitget) -> None:
     arg = bgch.books("spot", "BTCUSDT")
     async with _bitget(bitget_public, release_linger=0) as feed:
@@ -474,6 +519,9 @@ async def test_bitget_book_close_sends_unsubscribe(bitget_public: FakeBitget) ->
         assert bgch.arg_key(arg) not in feed._ledger.held()
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_bitget_book_without_args_stays_held(bitget_public: FakeBitget) -> None:
     arg = bgch.books("spot", "BTCUSDT")
     async with _bitget(bitget_public, release_linger=0) as feed:

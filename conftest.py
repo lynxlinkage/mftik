@@ -16,6 +16,11 @@ from collections.abc import Callable, Mapping
 import pytest
 from broker_harness import server_address, server_is_up
 from db_harness import POSTGRES_URL_ENV, dialect_urls
+from sleep_guard import arm, disarm, install
+
+# Before any test, including ones collected from a path that does not import
+# this module's helpers again. Idempotent if a plugin imports it twice.
+install()
 
 #: Which event loop the suite runs on: ``uvloop`` or ``asyncio``.
 #:
@@ -100,3 +105,21 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         metafunc.parametrize(
             "database_url", list(urls.values()), ids=list(urls), scope="function"
         )
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(
+    item: pytest.Item, nextitem: pytest.Item | None
+) -> object:
+    """Forbid ``asyncio.sleep(x > 0)`` in unit and component tests (§9.2).
+
+    integration and e2e are exempt. A unit or component test that still
+    needs the wall clock opts out with ``@pytest.mark.real_sleep(reason=...)``.
+    The markers themselves belong to B2-04; they are registered so this
+    guard can see them.
+    """
+    token = arm(item)
+    try:
+        return (yield)
+    finally:
+        disarm(token)

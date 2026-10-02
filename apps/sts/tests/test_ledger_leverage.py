@@ -70,6 +70,9 @@ async def _serve_once(
         return
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_ensure_leverage_caches_a_successful_ack(broker: Broker) -> None:
     ledger = _ledger(broker, 7)
     stop = asyncio.Event()
@@ -93,6 +96,9 @@ async def test_ensure_leverage_skips_rpc_on_cache_hit(broker: Broker) -> None:
     assert value == Decimal("12")
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_ensure_leverage_maps_a_refusal(broker: Broker) -> None:
     ledger = _ledger(broker, 7)
     stop = asyncio.Event()

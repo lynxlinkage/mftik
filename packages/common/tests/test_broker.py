@@ -18,6 +18,9 @@ from mftik.protocol import (
 pytestmark = session_loop
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_pubsub_roundtrip(broker: Broker) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -49,6 +52,9 @@ async def test_pubsub_roundtrip(broker: Broker) -> None:
     assert got.id == sent.id
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_publish_log_is_live_fan_out(broker: Broker) -> None:
     """Late replay left the broker. ``publish_log`` is ``publish``."""
     topic = "log.sts.late"
@@ -78,6 +84,9 @@ async def test_publish_log_is_live_fan_out(broker: Broker) -> None:
     assert got.payload == {"level": "info", "message": "live"}
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_request_reply(broker: Broker) -> None:
     stop = asyncio.Event()
 
@@ -114,6 +123,9 @@ async def test_request_reply(broker: Broker) -> None:
     }
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_request_timeout(broker: Broker) -> None:
     with pytest.raises(RequestTimeoutError):
         await broker.request(
@@ -123,6 +135,9 @@ async def test_request_timeout(broker: Broker) -> None:
         )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_serve_handler(broker: Broker) -> None:
     stop = asyncio.Event()
 
@@ -149,6 +164,9 @@ async def test_serve_handler(broker: Broker) -> None:
     assert response.payload == {"pong": True}
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_psubscribe_receives_channel_and_envelope(broker: Broker) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

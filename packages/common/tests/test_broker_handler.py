@@ -128,6 +128,9 @@ async def test_what_a_plane_says_about_itself_is_read_at_reply_time() -> None:
 # --- serve, over the bus ---------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_serve_sends_back_what_the_handler_returned(broker: Broker) -> None:
     seen: list[UntypedEnvelope] = []
     stop = asyncio.Event()
@@ -152,6 +155,9 @@ async def test_serve_sends_back_what_the_handler_returned(broker: Broker) -> Non
     assert seen[0].type == "demo"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_serve_answers_one_message_at_a_time(broker: Broker) -> None:
     """H3. The next message waits until this one has been answered.
 
@@ -197,6 +203,9 @@ async def test_serve_answers_one_message_at_a_time(broker: Broker) -> None:
     assert order == ["start 1", "end 1", "start 2", "end 2"]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_handler_returning_none_sends_nothing(broker: Broker) -> None:
     """The requester times out, which is what "no answer" looks like (H2)."""
     stop = asyncio.Event()
@@ -217,6 +226,9 @@ async def test_a_handler_returning_none_sends_nothing(broker: Broker) -> None:
         await asyncio.wait_for(task, timeout=5)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_handler_that_raises_costs_one_reply_not_the_subject(
     broker: Broker,
 ) -> None:
@@ -247,6 +259,9 @@ async def test_a_handler_that_raises_costs_one_reply_not_the_subject(
     assert reply.payload == {"n": 2}
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_handler_may_reject_by_returning_a_reject(broker: Broker) -> None:
     """The other half of H5: a refusal is a reply like any other."""
     stop = asyncio.Event()
@@ -269,6 +284,9 @@ async def test_a_handler_may_reject_by_returning_a_reject(broker: Broker) -> Non
     assert RpcError.model_validate(reply.payload).code == "unknown_type"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_unreadable_request_never_reaches_the_handler(
     broker: Broker,
 ) -> None:
@@ -297,6 +315,9 @@ async def test_an_unreadable_request_never_reaches_the_handler(
     assert [message.payload for message in seen] == [{"n": 7}]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_serve_rebuilds_itself_after_an_unexpected_failure(
     broker: Broker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -337,6 +358,9 @@ async def test_serve_rebuilds_itself_after_an_unexpected_failure(
     assert reply.payload == {"n": 3}
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_stop_ends_the_loop(broker: Broker) -> None:
     """The one thing that may end it, and it must actually end it (H4)."""
     stop = asyncio.Event()
@@ -357,6 +381,9 @@ async def test_stop_ends_the_loop(broker: Broker) -> None:
 # --- the conversion: the wire did not move ---------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_serve_health_still_answers_its_own_subject(broker: Broker) -> None:
     """``health.{domain}.{instance}``, the reply every dashboard row reads.
 

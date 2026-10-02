@@ -150,6 +150,9 @@ async def test_an_order_is_refused_while_the_socket_is_unauthenticated(
     assert not bybit.frames_for("order.create")
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_the_socket_reauthenticates_after_a_drop(bybit: FakeBybit) -> None:
     async with _trade(bybit, retry_backoff=0.01) as trade:
         await bybit.drop()
