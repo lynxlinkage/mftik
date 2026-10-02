@@ -3,7 +3,16 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from mftik_db.models.base import Base
@@ -62,6 +71,15 @@ class Api(Base):
             name="fk_apis_instance_id",
         ),
         index=True,
+    )
+    #: F37. Off unless an operator turns it on for this account. The user,
+    #: through the API, is the only writer; the TD controller reads it
+    #: (§3.3). It is the account worker's dead-man's switch — refresh a
+    #: countdown while the trading layer is up — and not "cancel when the
+    #: socket drops". Default false, including every row that predates the
+    #: column, so an account does not start cancelling because of a migration.
+    cancel_on_disconnect: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
     )
     passphrase: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

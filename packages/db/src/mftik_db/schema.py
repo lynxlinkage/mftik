@@ -11,11 +11,12 @@ while the database and the one-shot migration step come up, and all of them
 become the right answer on their own. The caller retries until one does or
 until it runs out of patience — see ``mftik_sts.app.schema_is_current``.
 
-``0034_strategy_type_key`` is the floor for STS because it is the migration
-that made ``sts_sessions.type`` the only strategy identity. Before it, a row
-written by an older build keeps its short name in the dropped ``strategy``
-column, which the current ORM model does not select: every such session reads
-as a row that names no strategy at all.
+Two revisions are load-bearing. ``0034_strategy_type_key`` made
+``sts_sessions.type`` the only strategy identity: before it, a row keeps its
+short name in the dropped ``strategy`` column, which this ORM does not
+select. ``0035_plane_schema`` is the floor (``MIN_STS_REVISION``). It adds
+the Spec/Status columns this ORM selects. A database still at 0034 has
+already dropped ``strategy`` and is still too old.
 """
 
 from __future__ import annotations
@@ -30,7 +31,10 @@ from mftik_db.session import get_engine
 
 #: The oldest schema STS may serve. Named, not numbered, because this is the
 #: string ``alembic upgrade`` takes.
-MIN_STS_REVISION = "0034_strategy_type_key"
+MIN_STS_REVISION = "0035_plane_schema"
+#: Named in the refusal that keys off the dropped ``strategy`` column. That
+#: column can still be present on a database that recorded no revision.
+_STRATEGY_IDENTITY_REVISION = "0034_strategy_type_key"
 
 
 class SchemaTooOld(RuntimeError):
@@ -63,12 +67,10 @@ def _ordinal(revision: str | None) -> int | None:
 def describe_too_old(state: SchemaState) -> str | None:
     """Why this schema is too old for STS, or None when it will serve.
 
-    The dropped column is the test rather than the revision number: dropping
-    ``sts_sessions.strategy`` is the whole of what 0034 changes about the
-    shape, so its absence is the one fact that cannot be true before 0034 and
-    false after it. The revision id is read to *name* what is on the database
-    in the refusal, and to catch a history that is behind for some other
-    reason.
+    The dropped ``strategy`` column is the test for 0034: its absence is the
+    one fact that cannot be true before that migration and false after it.
+    The revision ordinal is what catches a database that has passed 0034 and
+    still predates ``MIN_STS_REVISION``.
     """
     if not state.sts_columns:
         # A database nothing has migrated yet. On a cold start that is a
@@ -89,11 +91,12 @@ def describe_too_old(state: SchemaState) -> str | None:
     if "strategy" in state.sts_columns:
         return (
             f"the database {at} and still has the sts_sessions.strategy "
-            f"column, so {MIN_STS_REVISION} has not run. This build reads a "
-            "strategy's identity from sts_sessions.type alone, and every "
-            "session written before that migration would read as naming no "
-            "strategy. Stop the old STS and API, run mftik-db-migrate "
-            f"{MIN_STS_REVISION}, then start this build."
+            f"column, so {_STRATEGY_IDENTITY_REVISION} has not run. This "
+            "build reads a strategy's identity from sts_sessions.type alone, "
+            "and every session written before that migration would read as "
+            "naming no strategy. The columns this build selects start at "
+            f"{MIN_STS_REVISION}. Stop the old STS and API, run "
+            f"mftik-db-migrate {MIN_STS_REVISION}, then start this build."
         )
     floor = _ordinal(MIN_STS_REVISION)
     here = _ordinal(state.revision)

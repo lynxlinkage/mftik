@@ -171,11 +171,12 @@ async def schema_is_current(budget_s: float | None = None) -> bool:
     """Wait for a database this build may serve. False means do not start.
 
     The deploy this build belongs to has an order, and this is the step that
-    catches it being run out of it: a session row written before
+    catches it being run out of it. A session row written before
     ``0034_strategy_type_key`` keeps its strategy's short name in a column
     this build does not read, so every one of them reads as a row naming no
-    strategy. Refusing to start is the only answer that leaves those rows for
-    the migration to fix.
+    strategy. A database that has not reached ``MIN_STS_REVISION`` is also
+    missing Spec/Status columns this build selects. Refusing to start is the
+    only answer that leaves those rows for the migration to fix.
 
     Every wait is logged with what is wrong, so an operator who ran the steps
     in the wrong order reads the reason in the first second rather than at

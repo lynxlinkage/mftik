@@ -1,9 +1,8 @@
 """The boot-time read that refuses a schema older than the build.
 
-A process pointed at a database that has not run
-``0034_strategy_type_key`` does not fail on connect. It fails on the sessions
-it silently cannot name, which is why this is a question asked once at boot
-rather than left to the first query that needs the answer.
+A process pointed at a database below ``MIN_STS_REVISION`` does not fail on
+connect. It fails on the first row that needs a column the migration has
+not added yet, which is why this is a question asked once at boot.
 """
 
 from __future__ import annotations
@@ -28,11 +27,20 @@ _BEFORE = _AFTER | {"strategy"}
 
 
 def test_the_dropped_column_is_what_says_the_migration_ran() -> None:
-    assert describe_too_old(SchemaState("0034_strategy_type_key", _AFTER)) is None
+    assert describe_too_old(SchemaState(MIN_STS_REVISION, _AFTER)) is None
     too_old = describe_too_old(SchemaState("0033_option_strike", _BEFORE))
     assert too_old is not None
     assert "0033_option_strike" in too_old
+    assert "0034_strategy_type_key" in too_old
     assert MIN_STS_REVISION in too_old
+
+
+def test_0034_dropped_strategy_and_is_still_behind_spec_status() -> None:
+    """0034 is no longer enough: this build selects the 0035 columns."""
+    behind = describe_too_old(SchemaState("0034_strategy_type_key", _AFTER))
+    assert behind is not None
+    assert "below" in behind
+    assert MIN_STS_REVISION in behind
 
 
 def test_a_schema_built_from_the_models_serves() -> None:

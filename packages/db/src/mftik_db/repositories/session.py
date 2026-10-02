@@ -200,9 +200,15 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         td: dict[str, Any] | None = None,
         md_ids: list[str] | dict[str, list[str]] | None = None,
         st_paras: dict[str, Any] | None = None,
-        restart: str = "always",
+        restart: str = "never",
         instance: str | None = None,
     ) -> StsSessionRow:
+        """Insert a live session.
+
+        ``restart`` defaults to ``never`` (F11). The column also stores
+        ``on_failure``, and a historical ``always`` if a caller still
+        passes one.
+        """
         row = StsSessionRow(
             session_id=session_id,
             created_by=created_by,

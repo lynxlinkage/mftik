@@ -24,6 +24,10 @@ def test_metadata_includes_split_session_tables() -> None:
         "sts_sessions",
         "td_sessions",
         "md_sessions",
+        "md_intents",
+        "td_intents",
+        "md_standing_subscriptions",
+        "md_selector_state",
         "alert_sources",
         "alert_matchers",
         "alerts",
@@ -109,7 +113,23 @@ def test_session_row_columns() -> None:
         "td",
         "md_ids",
         "st_paras",
+        "generation",
+        "observed_generation",
+        "worker_incarnation",
+        "conditions",
+        "restart_count",
+        "rebuild_count",
+        "st_facts",
     } <= sts_cols
+    assert "strategy_digest" not in sts_cols
+    assert "env_generation" not in sts_cols
+    assert StsSessionRow.__table__.c.restart.type.length >= len("on_failure")
+    assert StsSessionRow.__table__.c.generation.default.arg == 1
+    assert StsSessionRow.__table__.c.restart_count.default.arg == 0
+    assert StsSessionRow.__table__.c.observed_generation.nullable
+    assert StsSessionRow.__table__.c.worker_incarnation.nullable
+    assert Api.__table__.c.cancel_on_disconnect.nullable is False
+    assert Api.__table__.c.cancel_on_disconnect.default.arg is False
 
     td_cols = set(TdSessionRow.__table__.c.keys())
     assert {
