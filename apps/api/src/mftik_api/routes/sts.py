@@ -6,7 +6,7 @@ import asyncio
 import base64
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -17,6 +17,7 @@ from mftik.protocol import (
     DEFAULT_STRATEGY_TYPE,
     STS_EVENTLOG_INFO,
     STS_EVENTLOG_READ,
+    STS_REASON_OPERATOR_STOP,
     STS_SESSION_STATUS,
     StrategySpec,
     StrategyTemplate,
@@ -50,7 +51,7 @@ from mftik_api.audit_util import record_audit
 from mftik_api.auth import ANONYMOUS, OwnerId, PrincipalDep
 from mftik_api.broker_rpc import DomainRpcError, request_domain
 from mftik_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
-from mftik_api.orchestrate import start
+from mftik_api.orchestrate import end, release_held_intents, start
 from mftik_api.paging import ListOffset
 from mftik_api.schemas import (
     DeployResponse,
@@ -254,6 +255,25 @@ async def list_strategies(
     )
 
 
+def session_phase(status: str | None, conditions: object) -> str | None:
+    """The v2 phase a poll reads (B4-08).
+
+    ``conditions["phase"]`` when the controller has written one. The
+    status column is ``live`` for every non-terminal phase, so it cannot
+    tell ``starting`` from ``running``. When ``conditions`` is null,
+    empty, or has no phase — the row the controller has not reported
+    yet — a ``live`` row is ``starting`` and a terminal row is the
+    column itself.
+    """
+    if isinstance(conditions, Mapping):
+        raw = conditions.get("phase")
+        if isinstance(raw, str) and raw:
+            return raw
+    if status == SessionStatus.LIVE.value:
+        return "starting"
+    return status
+
+
 def _strategy_out(row: StsSessionRow) -> StrategyOut:
     """Map a ``sts_sessions`` row to the list/detail shape.
 
@@ -266,6 +286,7 @@ def _strategy_out(row: StsSessionRow) -> StrategyOut:
     done that for ``td`` since it stopped being a list; ``md_feeds_of`` is the
     same job for ``md_ids``.
     """
+    conditions = row.conditions if isinstance(row.conditions, dict) else None
     return StrategyOut(
         type=row.type,
         config=dict(row.st_paras or {}),
@@ -274,6 +295,8 @@ def _strategy_out(row: StsSessionRow) -> StrategyOut:
         session_id=row.session_id,
         status=row.status,
         reason=row.reason,
+        phase=session_phase(row.status, conditions),
+        conditions=conditions,
         td_api_ids=attached_api_ids(row),
         md_ids=md_feeds_of(row.md_ids),
     )
@@ -352,19 +375,81 @@ async def stop_session(
     broker: BrokerDep,
     owner: OwnerId = DEFAULT_USER_ID,
     principal: PrincipalDep = ANONYMOUS,
+    reason: str | None = None,
 ) -> StsControlResponse:
-    """Placeholder until IF-04 (#182) defines ``sts.session.end``.
+    """Stop a session via :func:`mftik_api.orchestrate.end` (§8.1).
 
-    RM-04 (#167) deleted the worker a stop was addressed to, and with it the
-    escalation that killed one that would not answer. There is no process
-    left to stop, so nothing is sent.
+    A row whose column is already terminal (``done``, ``failed``,
+    ``ack``, ``interrupted``) answers 200 with that status and does not
+    send ``sts.session.end``. After a controller restart the controller
+    no longer holds it and would answer ``unknown_session``. Intents
+    still held on that row are released and their deletes are sent.
+
+    Otherwise :func:`~mftik_api.orchestrate.end` runs and the reply's
+    terminal status is this response. ``reason`` defaults to
+    :data:`STS_REASON_OPERATOR_STOP`.
+
+    ``not_found`` is 404. ``timeout`` is 503 and asks for a retry; the
+    intents stay held. ``unknown_session`` and ``sts_unpinned_ambiguous``
+    are 409. Anything else is 502.
     """
-    del session_id, broker, owner, principal
-    raise HTTPException(
-        status_code=501,
-        detail="stopping an sts session is not implemented — waiting for "
-        "IF-04 (#182)",
+    del owner, principal
+    reason_text = (
+        reason.strip()
+        if isinstance(reason, str) and reason.strip()
+        else STS_REASON_OPERATOR_STOP
     )
+    async with session_scope() as db:
+        row = await StsSessionRepository(db).get_by_session_id(session_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"session not found: {session_id}"
+            )
+        status = row.status
+        stored_reason = row.reason
+        strategy = row.type
+        terminal = status in SessionStatus.terminal()
+
+    if terminal:
+        try:
+            await release_held_intents(
+                session_id, stored_reason or reason_text, broker=broker
+            )
+        except DomainRpcError as exc:
+            raise _stop_http(exc) from exc
+        return StsControlResponse(
+            session_id=session_id,
+            status=status,
+            strategy=strategy,
+            reason=stored_reason,
+        )
+    try:
+        result = await end(session_id, reason_text, broker=broker)
+    except DomainRpcError as exc:
+        raise _stop_http(exc) from exc
+    return StsControlResponse(
+        session_id=result.session_id,
+        status=result.status,
+        strategy=strategy,
+        reason=reason_text,
+    )
+
+
+def _stop_http(exc: DomainRpcError) -> HTTPException:
+    """HTTP status for a stop that did not finish (§8.1, B4-08)."""
+    if exc.code == "not_found":
+        return HTTPException(status_code=404, detail=exc.message)
+    if exc.code == "timeout":
+        return HTTPException(
+            status_code=503,
+            detail=(
+                f"{exc.message}; the stop was not confirmed and intents "
+                "were not released — retry"
+            ),
+        )
+    if exc.code in {"unknown_session", "sts_unpinned_ambiguous"}:
+        return HTTPException(status_code=409, detail=exc.message)
+    return HTTPException(status_code=502, detail=exc.message)
 
 
 def _epoch(value: datetime | None) -> float | None:
@@ -751,14 +836,17 @@ def _deploy_status(exc: DomainRpcError) -> int:
     """HTTP status for a domain refusal during accept.
 
     The same mapping the synchronous deploy used. A miss is 504. An
-    unknown account or strategy is 404. Everything else, including a
-    protocol mismatch, is 502 — the plane answered, and the answer was
-    not an accept.
+    unknown account or strategy is 404. ``capacity_exceeded`` is 503:
+    the node is full now, and the same request may succeed later.
+    Everything else, including a protocol mismatch, is 502 — the plane
+    answered, and the answer was not an accept.
     """
     if exc.code in {"unknown_strategy", "not_found", "unknown_api"}:
         return 404
     if exc.code == "timeout":
         return 504
+    if exc.code == "capacity_exceeded":
+        return 503
     if exc.code == "incompatible_environment":
         return 409
     if exc.code == "strategy_refused":

@@ -10,27 +10,29 @@ keystroke that every other program treats as "end this". A second Ctrl-C, once
 the stop is already going out, leaves the session running and says so loudly —
 that is the escape hatch, and it is the one that has to be typed twice.
 
-``--no-follow`` never attaches, so it never stops anything either; it prints
-the session id and how to end it.
+``--no-follow`` never attaches, so it never stops anything either. With
+``--wait`` (the default) it still watches until the session is running,
+failed, or done, and prints that outcome. ``--no-wait`` wins over it: the
+id and how to stop it, then return. No watch and no tail.
 
-``--wait`` / ``--no-wait`` are the F12 surface (IF-15). Passing either one
-prints that it is not implemented and exits 1, and does not deploy. Leaving
-both off keeps the behaviour above, so a person can still start a session
-the way they do today. The plan's default is ``--wait``: watch status until
-``running`` or ``failed``, then tail. ``--no-wait`` prints the session id
-and returns. B4-08 makes that true and is what flips the default.
-:func:`run_wait_action` is that decision, and it raises
-``NotImplementedError("IF-15")`` until then.
+``--wait`` / ``--no-wait`` are the F12 surface (§5.2). ``--wait`` is the
+default. The deploy answers 202 with ``starting``; this command watches
+the session phase until :func:`run_wait_action` says to stop, then tails.
+``running`` follows the live log. ``failed`` prints the reason and the
+stored page and exits with an error, without opening the socket. ``done``
+prints the status and the stored page and exits 0. ``--no-wait`` prints
+the session id and returns.
 
 **State authority (§3.3): this command holds none.** Session status belongs
-to the STS controller's Supervisor. Once ``--wait`` exists, this command
-reads that status and then tails a log. It does not write the status, and
-it does not store ``strategy_digest`` or ``env_generation`` (F39, IF-16).
+to the STS controller's Supervisor. This command reads that status and then
+tails a log. It does not write the status, and it does not store
+``strategy_digest`` or ``env_generation`` (F39, IF-16).
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 from typing import Literal
 
 from mftik.cli.client import (
@@ -42,48 +44,115 @@ from mftik.cli.client import (
     is_environment_refusal,
 )
 from mftik.cli.exits import EXIT_ERROR, EXIT_INTERRUPTED
-from mftik.cli.output import fail
 from mftik.cli.push import push_tree, report_push
-from mftik.cli.sessions import follow_logs
+from mftik.cli.sessions import follow_logs, render_log_page
 from mftik.cli.tree import inspect_tree, read_yaml, require_tree
+from mftik.clock import Clock, FakeClock, SystemClock
 from mftik.protocol.strategy_yml import StrategyYamlError, parse_strategy_yml
 from mftik.registry.qualify import PRIVATE_ORIGIN, qualify
 
-#: What a deploy answers when the session is up. Anything else means the
-#: strategy refused its configuration or finished during ``on_start``, and
-#: there is no live log to attach to.
-_LIVE = "live"
-
-#: How long the deploy POST may take. IF-15 settles this as one ordinary
-#: HTTP hop, the same budget every other command uses. F12 makes deploy
-#: answer 202 once the session is accepted, so this is not a budget for
-#: ``on_start``. Watching until ``running`` or ``failed`` is ``--wait``,
-#: and that watch is not this timer (B4-08).
+#: How long the deploy POST may take. One ordinary HTTP hop, the same
+#: budget every other command uses. F12 makes deploy answer 202 once the
+#: session is accepted, so this is not a budget for ``on_start``.
+#: Watching until the phase settles is ``--wait``, and that watch is not
+#: this timer.
 _DEPLOY_HTTP_TIMEOUT_S = DEFAULT_TIMEOUT_S
 
+#: How often ``--wait`` polls ``GET /sts/sessions/{id}``. Provisional,
+#: pending Yi Te. The watch has no client-side deadline: ``on_start`` may
+#: run up to 3600s (F12), and the controller is what ends a start that
+#: hangs.
+_WAIT_POLL_S = 1.0
+
+#: Consecutive failed polls (unreachable or 5xx) before ``--wait`` gives
+#: up. Provisional, pending Yi Te. The count that adds up to
+#: :data:`~mftik.cli.client.DEFAULT_TIMEOUT_S` at :data:`_WAIT_POLL_S`.
+_WAIT_MAX_MISSES = round(DEFAULT_TIMEOUT_S / _WAIT_POLL_S)
+
 #: What :func:`run_wait_action` returns. ``wait`` means keep watching,
-#: ``tail`` means the session has reached ``running`` or ``failed``,
-#: ``return_id`` means ``--no-wait`` is done.
+#: ``tail`` means the phase has settled, ``return_id`` means ``--no-wait``
+#: is done.
 RunWaitStep = Literal["wait", "tail", "return_id"]
+
+#: What :func:`run_disposition` returns once the flags are applied.
+#: ``report`` prints the outcome and does not open the log socket.
+RunDisposition = Literal["watch", "tail", "report", "return_id"]
+
+_WAIT_PHASES = frozenset({"pending", "starting", "restarting", "stopping"})
+_TAIL_PHASES = frozenset({"running", "failed", "done"})
+
+#: The clock the watch sleeps on. Tests replace it with a
+#: :class:`~mftik.clock.FakeClock`. Production uses the process clock.
+_clock: Clock = SystemClock()
 
 
 def run_wait_action(status: str, *, wait: bool) -> RunWaitStep:
     """What ``mftik run`` does with one status snapshot (F12, §5.2).
 
-    * **W1.** ``wait`` true: ``running`` or ``failed`` → ``"tail"``.
-      ``pending``, ``starting`` and ``restarting`` → ``"wait"`` (keep
-      watching). The deploy's 202 is ``starting``; that is not the end
-      of the watch.
+    * **W1.** ``wait`` true: ``running``, ``failed`` and ``done`` →
+      ``"tail"``. ``pending``, ``starting``, ``restarting`` and
+      ``stopping`` → ``"wait"``. Any other word also → ``"wait"``: an
+      unknown phase keeps watching, and the command prints it once.
+      The deploy's 202 is ``starting``; that is not the end of the watch.
     * **W2.** ``wait`` false (``--no-wait``): ``"return_id"`` for every
       status. No tail.
     * **W3.** This is not the deploy POST's timer. That timer is
       :data:`_DEPLOY_HTTP_TIMEOUT_S`, one HTTP hop.
 
-    ``stopping`` and ``done`` are not decided here. Not implemented
-    (IF-15). B4-08 performs the watch.
+    ``stopping`` and ``done`` are DEFAULT 2 (pending Yi Te, #293). The
+    plan says the watch ends on ``running`` or ``failed`` and does not
+    name these two; this is the choice that ticket left open.
     """
-    del status, wait
-    raise NotImplementedError("IF-15")
+    if not wait:
+        return "return_id"
+    if status in _TAIL_PHASES:
+        return "tail"
+    # Known watch words and any unknown word both keep watching. The
+    # unknown word is printed once by the watch, not on every poll.
+    if status in _WAIT_PHASES:
+        return "wait"
+    return "wait"
+
+
+def run_disposition(
+    phase: str, *, wait: bool, no_follow: bool
+) -> RunDisposition:
+    """Flags applied to one snapshot (DEFAULT 3, pending Yi Te, #293).
+
+    ``--no-wait`` (``wait`` false) returns the id. ``--no-follow`` does
+    not change that. ``--wait`` with ``--no-follow`` still watches; a
+    settled ``running`` is reported rather than tailed. ``failed`` and
+    ``done`` are always reported from the stored log, not tailed.
+    """
+    step = run_wait_action(phase, wait=wait)
+    if step == "return_id":
+        return "return_id"
+    if step == "wait":
+        return "watch"
+    if no_follow or phase != "running":
+        return "report"
+    return "tail"
+
+
+def _sleep_sync(clock: Clock, seconds: float) -> None:
+    """Sleep ``seconds`` on ``clock`` from this synchronous command.
+
+    A :class:`~mftik.clock.FakeClock` is advanced by the sleep it was
+    asked for, so a test does not wait on the wall clock. The process
+    clock sleeps for real.
+    """
+    asyncio.run(_sleep_on(clock, seconds))
+
+
+async def _sleep_on(clock: Clock, seconds: float) -> None:
+    if isinstance(clock, FakeClock):
+        task = asyncio.create_task(clock.sleep(seconds))
+        await asyncio.sleep(0)
+        if not task.done():
+            clock.advance(seconds)
+        await task
+        return
+    await clock.sleep(seconds)
 
 
 def _deploy_may_be_live(exc: BaseException) -> str:
@@ -94,14 +163,148 @@ def _deploy_may_be_live(exc: BaseException) -> str:
     )
 
 
-def run(args: argparse.Namespace) -> int:
-    # ``None`` means neither flag was passed. Today's deploy-and-follow
-    # stays on that path. Either explicit flag is the IF-15 surface: it
-    # does not deploy, because the watch it names is B4-08's.
-    if getattr(args, "wait", None) is not None:
-        fail("run --wait / --no-wait is not implemented (IF-15)")
-        return EXIT_ERROR
+def _phase_of(body: object, fallback: str) -> str:
+    """Prefer the v2 ``phase`` field. The column word is the fallback.
 
+    A live row's ``status`` stays ``live`` for every non-terminal phase,
+    so reading it instead of ``phase`` would watch forever.
+    """
+    if isinstance(body, dict):
+        raw = body.get("phase")
+        if isinstance(raw, str) and raw:
+            return raw
+        status = body.get("status")
+        if isinstance(status, str) and status:
+            return status
+    return fallback
+
+
+def _condition_pairs(conditions: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(conditions, dict):
+        return ()
+    return tuple(
+        sorted(
+            (str(key), str(value))
+            for key, value in conditions.items()
+            if key != "phase"
+        )
+    )
+
+
+def _progress_line(phase: str, conditions: object) -> str:
+    pairs = _condition_pairs(conditions)
+    if not pairs:
+        return f"  {phase}"
+    detail = " ".join(f"{key}={value}" for key, value in pairs)
+    return f"  {phase}  {detail}"
+
+
+def _lost_contact(session_id: str) -> CliError:
+    return CliError(
+        f"lost contact while waiting for session {session_id}.\n"
+        "It may still be running.\n"
+        f"Stop it with: mftik stop {session_id}"
+    )
+
+
+def _watch(
+    client: Client, session_id: str, phase: str, body: dict
+) -> tuple[str, dict]:
+    """Poll until :func:`run_wait_action` says the phase has settled.
+
+    The deploy body is the first snapshot. ``running`` / ``failed`` /
+    ``done`` on that body return without a poll: a node that only
+    answers the deploy must still be followable. A 404 on the session
+    is an error at once. An unreachable node or a 5xx is retried; after
+    :data:`_WAIT_MAX_MISSES` consecutive misses the command stops and
+    says the session may still be running.
+    """
+    seen: tuple[str, tuple[tuple[str, str], ...]] | None = None
+    misses = 0
+    while True:
+        phase = _phase_of(body, phase)
+        conditions = body.get("conditions")
+        key = (phase, _condition_pairs(conditions))
+        if key != seen:
+            print(_progress_line(phase, conditions))
+            seen = key
+        if run_wait_action(phase, wait=True) == "tail":
+            return phase, body
+        _sleep_sync(_clock, _WAIT_POLL_S)
+        try:
+            nxt = client.get(f"/sts/sessions/{session_id}")
+        except NodeUnreachable:
+            misses += 1
+            if misses >= _WAIT_MAX_MISSES:
+                raise _lost_contact(session_id) from None
+            continue
+        except CliError as exc:
+            if exc.status == 404:
+                raise CliError(
+                    f"session {session_id} was not found while waiting",
+                    status=404,
+                ) from exc
+            if exc.status is not None and exc.status >= 500:
+                misses += 1
+                if misses >= _WAIT_MAX_MISSES:
+                    raise _lost_contact(session_id) from exc
+                continue
+            raise
+        if not isinstance(nxt, dict):
+            raise CliError(
+                f"session {session_id} did not answer with an object"
+            )
+        misses = 0
+        body = nxt
+
+
+def _report_settled(
+    client: Client, session_id: str, phase: str, snapshot: dict
+) -> int:
+    """Print a settled session that this command is not going to tail."""
+    if phase == "running":
+        print(f"  left running — stop it with: mftik stop {session_id}")
+        return 0
+    reason = snapshot.get("reason")
+    reason_text = reason.strip() if isinstance(reason, str) else ""
+    if phase == "failed":
+        if reason_text:
+            print(f"  session failed: {reason_text}")
+        else:
+            print("  session failed")
+    elif reason_text:
+        print(f"  session {phase}: {reason_text}")
+    else:
+        print(f"  session {phase}")
+    render_log_page(client.get(f"/logs/sts/{session_id}"))
+    if phase == "failed":
+        return EXIT_ERROR
+    return 0
+
+
+def _finish(
+    client: Client,
+    session_id: str,
+    phase: str,
+    snapshot: dict,
+    *,
+    no_follow: bool,
+) -> int:
+    action = run_disposition(phase, wait=True, no_follow=no_follow)
+    if action == "tail":
+        print("  ^C stops this session")
+        try:
+            follow_logs(client, session_id)
+        except KeyboardInterrupt:
+            return _stop_on_interrupt(client, session_id)
+        return 0
+    return _report_settled(client, session_id, phase, snapshot)
+
+
+def run(args: argparse.Namespace) -> int:
+    # ``False`` is ``--no-wait``. Anything else, including a caller that
+    # left the attribute unset, is ``--wait``: that is the default.
+    wait = getattr(args, "wait", True) is not False
     root = require_tree(args.path)
     inspected = inspect_tree(root)
     yaml_text = read_yaml(args.cfg, root)
@@ -139,26 +342,27 @@ def run(args: argparse.Namespace) -> int:
             if is_environment_refusal(exc):
                 raise
             raise CliError(_deploy_may_be_live(exc)) from exc
-        session_id = deployed["session_id"]
-        status = str(deployed.get("status") or _LIVE)
+        if not isinstance(deployed, dict) or not deployed.get("session_id"):
+            raise CliError("deploy did not return a session id")
+        session_id = str(deployed["session_id"])
+        status = _phase_of(deployed, "")
         print(f"running {key} session={session_id}")
 
-        if status != _LIVE:
-            # It started and stopped inside the deploy call. Attaching would
-            # hang on a socket for a session that has already gone.
-            print(f"  session is {status} — nothing to follow")
+        if not wait:
+            print(f"  stop it with: mftik stop {session_id}")
             return 0
 
-        if args.no_follow:
-            print(f"  left running — stop it with: mftik stop {session_id}")
-            return 0
-
-        print("  ^C stops this session")
         try:
-            follow_logs(client, session_id)
+            phase, snapshot = _watch(client, session_id, status, deployed)
         except KeyboardInterrupt:
             return _stop_on_interrupt(client, session_id)
-    return 0
+        return _finish(
+            client,
+            session_id,
+            phase,
+            snapshot,
+            no_follow=bool(args.no_follow),
+        )
 
 
 def _stop_on_interrupt(client: Client, session_id: str) -> int:
@@ -185,5 +389,6 @@ def _stop_on_interrupt(client: Client, session_id: str) -> int:
             f"could not stop {session_id}: {exc}\n"
             f"It may still be running — check with: mftik ps"
         ) from exc
-    print(f"stopped {session_id} status={out.get('status')}")
+    status = out.get("status") if isinstance(out, dict) else None
+    print(f"stopped {session_id} status={status}")
     return EXIT_INTERRUPTED

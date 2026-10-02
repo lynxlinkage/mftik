@@ -35,11 +35,13 @@ releases intents.
 * **F12** After the accept (HTTP 202), a failure is the supervisor's
   to record (§5.2). This module does not roll that back. A refusal
   before the accept is §8.1: the rollback of a start that was not
-  accepted. :func:`start` best-effort sends ``sts.session.end`` when
-  the start reply is an unclear timeout, best-effort deletes the
+  accepted.   :func:`start` best-effort sends ``sts.session.end`` when
+  the start reply is an unclear timeout or the accept is cancelled
+  while that call is in flight, best-effort deletes the
   intents it already put, then ``mark_failed`` and ``release``. The
   row stays. It is ``failed``, with a reason, so registry delete and
-  the board do not treat it as running.
+  the board do not treat it as running. A cancel is shielded so the
+  rollback itself is not cancelled, then raised again (#314).
 * **P-1** Intent puts are idempotent. The repository replaces the set.
   It does not refcount.
 * **§8.1** End is ``sts.session.end``, then ``md.intent.delete`` and
@@ -54,6 +56,7 @@ releases intents.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from collections.abc import Sequence
@@ -66,6 +69,7 @@ from mftik.protocol import (
     MD_ERROR,
     MD_INTENT_DELETE,
     MD_INTENT_PUT,
+    ON_STOP_TIMEOUT_S,
     STS_ERROR,
     STS_SESSION_END,
     STS_SESSION_START,
@@ -292,6 +296,15 @@ def _md_venues(feeds: list[str]) -> set[str]:
 #: fails at once; this bound is only the case where someone accepted
 #: the subject and did not answer.
 _ACCEPT_TIMEOUT_S = 5.0
+
+#: How long ``sts.session.end`` may take. The controller waits for the
+#: worker's ``on_stop`` and up to ``SESSION_STOP_GRACE_S`` before it
+#: replies, so :data:`_ACCEPT_TIMEOUT_S` alone times out a stop that
+#: succeeds on the controller. Provisional, pending Yi Te (#286).
+#: ``SESSION_STOP_GRACE_S`` is :data:`ON_STOP_TIMEOUT_S` today; B4-03
+#: may add a teardown margin, and this sum has to stay above that grace
+#: and under the CLI's 30s HTTP timeout.
+_END_TIMEOUT_S = ON_STOP_TIMEOUT_S + _ACCEPT_TIMEOUT_S
 
 _ERROR_TYPES = frozenset({STS_ERROR, TD_ERROR, MD_ERROR})
 
@@ -623,8 +636,12 @@ async def _abandon_unaccepted(
     """
     reason = _refused_reason(exc)
     owner = IntentOwner(sts_instance=target, session_id=session_id)
-    unclear = (
-        sent.start and exc.code == "timeout" and not exc.no_responders
+    # A timeout with a subscriber, or a cancel while the start was in
+    # flight, may already have created a worker. A miss and a definite
+    # refusal have not.
+    unclear = sent.start and (
+        exc.code == "cancelled"
+        or (exc.code == "timeout" and not exc.no_responders)
     )
     if unclear:
         await _best_effort_v2(
@@ -677,6 +694,51 @@ async def _abandon_unaccepted(
     async with session_scope() as db:
         await StsSessionRepository(db).mark_failed(session_id, reason)
         await IntentRepository(db).release(session_id)
+
+
+async def _abandon_recorded(
+    broker: Broker,
+    *,
+    session_id: str,
+    target: str,
+    sent: _AcceptSent,
+    exc: DomainRpcError,
+    shield: bool = False,
+) -> None:
+    """Run :func:`_abandon_unaccepted` and log if that record fails.
+
+    ``shield`` is the cancel path. The task is already cancelled, so a
+    bare await would raise again before the row was marked failed.
+    Uncancelling for the cleanup and restoring the request afterwards
+    is what lets the rollback finish and the cancel still propagate.
+    """
+    task = asyncio.current_task()
+    count = task.cancelling() if shield and task is not None else 0
+    if task is not None and count:
+        while task.cancelling():
+            task.uncancel()
+    try:
+        try:
+            rollback = _abandon_unaccepted(
+                broker,
+                session_id=session_id,
+                target=target,
+                sent=sent,
+                exc=exc,
+            )
+            if shield:
+                await asyncio.shield(rollback)
+            else:
+                await rollback
+        except Exception:
+            logger.exception(
+                "refused start was not fully recorded session=%s",
+                session_id,
+            )
+    finally:
+        if task is not None:
+            for _ in range(count):
+                task.cancel()
 
 
 async def start(
@@ -760,19 +822,29 @@ async def start(
             session_id,
             exc,
         )
-        try:
-            await _abandon_unaccepted(
-                broker,
-                session_id=session_id,
-                target=target,
-                sent=sent,
-                exc=exc,
-            )
-        except Exception:
-            logger.exception(
-                "refused start was not fully recorded session=%s",
-                session_id,
-            )
+        await _abandon_recorded(
+            broker,
+            session_id=session_id,
+            target=target,
+            sent=sent,
+            exc=exc,
+        )
+        raise
+    except asyncio.CancelledError:
+        # The client hung up before the accept reply (#314). The same
+        # rollback as a refusal, shielded so the cancel does not skip
+        # the failed row. The cancel is raised again.
+        await _abandon_recorded(
+            broker,
+            session_id=session_id,
+            target=target,
+            sent=sent,
+            exc=DomainRpcError(
+                "cancelled",
+                "accept cancelled before the reply",
+            ),
+            shield=True,
+        )
         raise
 
     return DeployResponse(
@@ -813,7 +885,9 @@ async def _owner_instance(session_id: str) -> str:
     return owner
 
 
-async def end(session_id: str, reason: str, *, broker: Broker) -> None:
+async def end(
+    session_id: str, reason: str, *, broker: Broker
+) -> StsSessionEndResult:
     """Stop a session, then release its intents (§8.1).
 
     The first call is :data:`STS_SESSION_END` on :func:`end_subject` of
@@ -826,9 +900,17 @@ async def end(session_id: str, reason: str, *, broker: Broker) -> None:
     deletes are the same fact told to those planes; a notify that fails
     is not undone.
 
+    The end request waits :data:`_END_TIMEOUT_S`, not the accept budget.
+    The controller does not reply until the worker has exited or the
+    stop grace has run out.
+
+    Returns the controller's :class:`StsSessionEndResult`. The terminal
+    status on that reply is what the stop route answers with.
+
     There is no spec column for desired ``stopped``. An ``end`` whose
     reply never comes is an error for the caller to retry. This
-    function does not add a column.
+    function does not add a column, and it does not write the derived
+    owner back onto the row (issue #328).
 
     A session that exits on its own does not pass through here. The
     B5 STS orchestrator writes ``released_at`` for that exit. §8.2
@@ -845,7 +927,7 @@ async def end(session_id: str, reason: str, *, broker: Broker) -> None:
         raise TypeError("reason must be a str")
 
     owner_instance = await _owner_instance(session_id)
-    await _request_v2(
+    result = await _request_v2(
         broker,
         end_subject(owner_instance),
         Envelope[StsSessionEndRequest].wrap(
@@ -855,7 +937,28 @@ async def end(session_id: str, reason: str, *, broker: Broker) -> None:
             session_id=session_id,
         ),
         result_type=StsSessionEndResult,
+        timeout=_END_TIMEOUT_S,
     )
+    await release_held_intents(session_id, reason, broker=broker)
+    return result
+
+
+async def release_held_intents(
+    session_id: str, reason: str, *, broker: Broker
+) -> None:
+    """Release intent rows and tell MD and TD. No ``sts.session.end``.
+
+    The stop route calls this for a row whose column is already
+    terminal. After a controller restart that process no longer holds
+    the session and would answer ``unknown_session``, so the end RPC
+    is not sent. Nothing is sent when no intent is still held.
+
+    The same sequence follows a successful :func:`end`.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id is required")
+    if not isinstance(reason, str):
+        raise TypeError("reason must be a str")
 
     async with session_scope() as db:
         row = await StsSessionRepository(db).get_by_session_id(session_id)
