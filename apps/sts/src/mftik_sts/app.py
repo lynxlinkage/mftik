@@ -283,8 +283,9 @@ async def amain() -> bool:
         from mftik_sts.hostdisk.sync import prepare_disk
 
         # Copy legacy ``<origin>/<name>/`` trees into the digest layout
-        # before RPC. Do not delete them here: a partial copy must leave
-        # the old directories, and catch-up is what decides that.
+        # before RPC. The old directories stay. They are the API store
+        # on a shared volume, and a null-digest session still rehangs
+        # from them. B10 removes them when the API moves its own store.
         if not await asyncio.to_thread(prepare_disk):
             logger.warning(
                 "STS legacy registry was not fully copied into the digest layout"

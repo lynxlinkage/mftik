@@ -6,17 +6,16 @@ rest of the index as loaded without opening it, so the API still sees
 the full set.
 
 Legacy ``<origin>/<name>/`` directories are copied into ``trees/``
-before the batch is applied, so a name that this batch rebinds still
-has its previous digest on disk. They are deleted only after a full
-``retain`` rebuild copied every legacy tree and every pinned digest
-resolves. A partial push, or one unreadable legacy tree, deletes none
-of them.
+and bound, then left in place. They are the API ``RegistryStore`` when
+``api`` and ``sts`` share ``MFTIK_DATA``, and a session whose
+``strategy_digest`` is still null rehangs by reading them. This module
+does not delete them. Removing them is the B10 cutover, when the API
+moves its own store.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
 from collections.abc import Collection
 from pathlib import Path
 
@@ -36,12 +35,7 @@ from mftik.registry.files import normalize_files, read_tree
 from mftik.registry.qualify import qualify
 
 from mftik_sts.hostdisk.probe import REASON_ABSENT, probe
-from mftik_sts.hostdisk.replica import (
-    INDEX_NAME,
-    TREES_DIRNAME,
-    TreeReplica,
-    require_digest,
-)
+from mftik_sts.hostdisk.replica import INDEX_NAME, TREES_DIRNAME, TreeReplica
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +57,7 @@ def adopt_legacy(replica: TreeReplica) -> bool:
     """Copy each legacy tree and bind its name. Leave the old directory.
 
     False when any candidate directory is not a strategy tree. The
-    caller must not delete legacy directories in that case, including
-    the ones this call did copy.
+    directory stays either way. Nothing in this process deletes it.
     """
     ok = True
     for origin, name, path in _legacy_trees(replica):
@@ -78,48 +71,31 @@ def adopt_legacy(replica: TreeReplica) -> bool:
     return ok
 
 
-def drop_legacy(replica: TreeReplica) -> tuple[Path, ...]:
-    """Delete legacy ``<origin>/<name>/`` directories and log each path.
-
-    Only a full rebuild that has already copied every legacy tree, and
-    whose pins all resolve, may call this. A shared ``MFTIK_DATA``
-    (the compose file mounts one volume for the API and STS) means
-    these directories are also the API store.
-    """
-    removed: list[Path] = []
-    for _origin, _name, path in _legacy_trees(replica):
-        shutil.rmtree(path)
-        logger.info("removed legacy registry directory %s", path)
-        removed.append(path)
-    return tuple(removed)
-
-
 def apply_registry_sync(
     request: StsRegistrySyncRequest,
     *,
     keep_digests: Collection[str],
     data_dir: str | Path | None = None,
 ) -> StsRegistrySyncResult:
-    """Adopt, apply, and on a full retain maybe drop the legacy layout.
+    """Adopt, apply the batch, and GC unpinned digest trees.
 
-    ``keep_digests`` is the pin set. GC keeps those and whatever the
-    index still names. ``reload`` false returns ``loaded=[]`` and does
-    not start a probe. ``reload`` true probes the keys this batch
-    upserted plus ``explain``; every other index key is listed in
-    ``loaded`` without an import.
+    Legacy ``<origin>/<name>/`` directories are not removed, including
+    on a full ``retain``. ``keep_digests`` is the pin set. GC keeps
+    those and whatever the index still names. ``reload`` false returns
+    ``loaded=[]`` and does not start a probe. ``reload`` true probes
+    the keys this batch upserted plus ``explain``; every other index
+    key is listed in ``loaded`` without an import.
     """
     if isinstance(keep_digests, str) or not isinstance(keep_digests, Collection):
         raise TypeError("keep_digests must be a collection of digests")
     replica = _replica(data_dir)
-    adopt_ok = adopt_legacy(replica)
+    adopt_legacy(replica)
     skipped = _apply_ops(replica, request)
     if request.retain is not None:
         retain = set(request.retain)
         for name in list(replica.names()):
             if name not in retain:
                 replica.unbind(name)
-        if adopt_ok and _pins_present(replica, keep_digests):
-            drop_legacy(replica)
     replica.gc(keep_digests)
     env = NodeEnv(replica.data_dir)
     generation = env.read_stamp().generation
@@ -261,17 +237,6 @@ def _upsert(
         skipped[key] = f"refused: {exc}"
     except OSError as exc:
         skipped[key] = f"write error: {exc}"
-
-
-def _pins_present(replica: TreeReplica, keep_digests: Collection[str]) -> bool:
-    for digest in keep_digests:
-        try:
-            require_digest(digest)
-        except ValueError:
-            return False
-        if replica.path_of(digest) is None:
-            return False
-    return True
 
 
 def _probe_wanted(

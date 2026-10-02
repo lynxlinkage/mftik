@@ -42,6 +42,11 @@ stay B5-11.
 * A rehang uses ``spec.strategy_digest``, not the index. An incompatible
   ``requires_mftik`` is failed and alerted. A missing pinned tree is
   ``strategy_unavailable``.
+* Legacy ``<origin>/<name>/`` directories are copied into the digest
+  layout and kept. A shared ``MFTIK_DATA`` means they are the API
+  ``RegistryStore``, and a session with a null ``strategy_digest``
+  still loads from them on rehang. Deleting them waits for the B10
+  cutover, when the API moves its own store.
 * ``api.registry.catchup`` is not a handler on this controller. The API
   serves that subject. The client signature is
   :func:`mftik_sts.controller.catch_up_registry`.

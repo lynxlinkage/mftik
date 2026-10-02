@@ -1,6 +1,7 @@
-"""Tree replica, pins, GC, and deployable. Component: ``tmp_path`` only.
+"""Tree replica, pins, GC, and deployable. Component: ``tmp_path``.
 
-The probe's real interpreter is ``test_hostdisk_probe.py``.
+One test also writes a scratch sqlite row. The probe's real interpreter
+is ``test_hostdisk_probe.py``.
 """
 
 from __future__ import annotations
@@ -255,25 +256,43 @@ def test_prepare_disk_copies_a_legacy_tree_and_leaves_it(tmp_path: Path) -> None
     assert replica.path_of(added.digest) is not None
 
 
-def test_a_full_retain_deletes_legacy_dirs_after_pins_resolve(tmp_path: Path) -> None:
-    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
-    key = qualify("private", added.type)
-    request = StsRegistrySyncRequest(
-        trees=[
-            StsRegistryTreeOp(
-                op="upsert",
-                origin="private",
-                name=added.type,
-                digest=added.digest,
-                files={"strategy.py": _TINY},
-            )
-        ],
-        reload=False,
-        retain=[key],
+def _class_source(class_name: str) -> str:
+    return (
+        "from mftik.strategy import Strategy\n"
+        f"class {class_name}(Strategy):\n"
+        "    pass\n"
     )
-    apply_registry_sync(request, keep_digests=frozenset(), data_dir=tmp_path)
-    assert not Path(added.path).exists()
-    assert TreeReplica(tmp_path).path_of(added.digest) is not None
+
+
+def test_a_full_retain_on_shared_data_keeps_the_api_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The name directories are the API store. A retain sync leaves them."""
+    from mftik_api.orchestrate import resolve_start_pins
+
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    store = RegistryStore(tmp_path)
+    public = store.add({"strategy.py": _class_source("PublicOne")}, origin="public")
+    private = store.add(
+        {"strategy.py": _class_source("PrivateOne")}, origin="private"
+    )
+    pulled = store.add({"strategy.py": _class_source("PulledOne")}, origin="peer")
+    added = (public, private, pulled)
+    keys = [qualify(rec.origin, rec.type) for rec in added]
+    apply_registry_sync(
+        StsRegistrySyncRequest(trees=[], reload=False, retain=keys),
+        keep_digests=frozenset(),
+        data_dir=tmp_path,
+    )
+    listed = {
+        (rec.origin, rec.type): rec.digest
+        for rec in RegistryStore(tmp_path).list_all()
+    }
+    for rec in added:
+        assert listed[(rec.origin, rec.type)] == rec.digest
+        assert Path(rec.path).is_dir()
+        digest, _generation = resolve_start_pins(qualify(rec.origin, rec.type))
+        assert digest == rec.digest
 
 
 def test_a_partial_sync_does_not_delete_legacy_dirs(tmp_path: Path) -> None:
@@ -294,7 +313,7 @@ def test_a_partial_sync_does_not_delete_legacy_dirs(tmp_path: Path) -> None:
     assert Path(added.path).is_dir()
 
 
-def test_an_unreadable_legacy_tree_blocks_every_deletion(tmp_path: Path) -> None:
+def test_an_unreadable_legacy_tree_is_left_in_place(tmp_path: Path) -> None:
     added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
     junk = tmp_path / "registry" / "private" / "Junk"
     junk.mkdir()
@@ -306,25 +325,60 @@ def test_an_unreadable_legacy_tree_blocks_every_deletion(tmp_path: Path) -> None
     assert junk.is_dir()
 
 
-def test_a_missing_pin_blocks_legacy_deletion(tmp_path: Path) -> None:
-    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
-    key = qualify("private", added.type)
-    missing = "sha256:" + "ab" * 32
-    request = StsRegistrySyncRequest(
-        trees=[
-            StsRegistryTreeOp(
-                op="upsert",
-                origin="private",
-                name=added.type,
-                digest=added.digest,
-                files={"strategy.py": _TINY},
+async def test_a_null_digest_session_rehangs_from_the_name_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live row with a null digest still loads by name after a retain sync."""
+    from types import SimpleNamespace
+
+    from db_harness import a_database, an_owner
+    from mftik.procman import Supervisor
+    from mftik_db.repositories.session import StsSessionRepository
+    from mftik_sts.controller import StsOrchestrator
+    from mftik_sts.controller.status import DbStatusStore
+    from mftik_sts.hostdisk.identity import STRATEGY_DIGEST_ENV
+    from mftik_sts.session_worker.process import load_strategy
+
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    monkeypatch.delenv(STRATEGY_DIGEST_ENV, raising=False)
+    added = RegistryStore(tmp_path).add({"strategy.py": _class_source("NameLoad")})
+    key = qualify(added.origin, added.type)
+    database_cm = a_database()
+    database = await database_cm.__aenter__()
+    try:
+        async with database.scope() as session:
+            await an_owner(session)
+            await StsSessionRepository(session).create_live(
+                session_id="abc123",
+                created_by=1,
+                type=key,
+                instance="sts",
+                strategy_digest=None,
+                env_generation=None,
             )
-        ],
-        reload=False,
-        retain=[key],
-    )
-    apply_registry_sync(
-        request, keep_digests=frozenset({missing}), data_dir=tmp_path
-    )
-    assert Path(added.path).is_dir()
-    assert TreeReplica(tmp_path).path_of(added.digest) is not None
+        orch = StsOrchestrator(
+            Supervisor(tmp_path / "work", plane="sts", instance="sts"),
+            store=DbStatusStore(database.scope),
+        )
+        digests, generations = await orch.code_pins()
+        assert digests == frozenset()
+        assert generations == frozenset()
+        apply_registry_sync(
+            StsRegistrySyncRequest(trees=[], reload=False, retain=[key]),
+            keep_digests=digests,
+            data_dir=tmp_path,
+        )
+        assert Path(added.path).is_dir()
+        spec = SessionSpec(
+            session_id="abc123",
+            instance="sts",
+            strategy=key,
+            strategy_digest=None,
+            env_generation=None,
+        )
+        assert await orch._code_guard(SimpleNamespace(spec=spec)) is None  # noqa: SLF001
+        assert STRATEGY_DIGEST_ENV not in orch._worker_env(spec)  # noqa: SLF001
+        loaded = load_strategy(key)
+        assert type(loaded).__name__ == "NameLoad"
+    finally:
+        await database_cm.__aexit__(None, None, None)
