@@ -615,6 +615,9 @@ class Supervisor:
         self.instance = validate_instance_name(instance)
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._slots: dict[str, _Slot] = {}
+        # Ids whose :meth:`spawn` has passed the slot check and not yet
+        # published the new slot. Held across the unlocked launch.
+        self._spawning: set[str] = set()
         self._lock = asyncio.Lock()
         self._driver: asyncio.Task[None] | None = None
         self._failure: BaseException | None = None
@@ -642,7 +645,8 @@ class Supervisor:
         Any other held terminal phase is a new incarnation: the old phase
         has no edge to ``STARTING``, so the new one enters through
         :attr:`~mftik.procman.Trigger.SPAWN`. ``LOST`` and a live phase are
-        refused.
+        refused. So is a second call for the same id while this one has
+        not returned: the id is reserved until the launch finishes or fails.
 
         The previous worker pid's ``/proc`` check is B3-03 (F36). This
         method does not do it.
@@ -654,6 +658,8 @@ class Supervisor:
                 f"supervisor plane {self.plane!r}"
             )
         async with self._lock:
+            if spec.id in self._spawning:
+                raise ProcmanError(f"{spec.id} is already being spawned")
             retiring = self._slots.get(spec.id)
             if retiring is not None:
                 if retiring.phase not in _REPLACEABLE:
@@ -677,31 +683,38 @@ class Supervisor:
             else:
                 must_retire = False
                 phase = transition(WorkerPhase.STOPPED, Trigger.SPAWN)
-        if must_retire:
-            await asyncio.to_thread(_wait_retired, retiring)
-        spawned = await asyncio.to_thread(spawn_shim, spec, work_dir=self.work_dir)
-        now = self._clock.monotonic()
-        slot = _Slot(
-            spec=spec,
-            phase=phase,
-            ready=False,
-            pid=None,
-            exit_code=None,
-            signal=None,
-            since_s=now,
-            beats=0,
-            beats_at_s=None,
-            term_sent=False,
-            kill_sent=False,
-            released=False,
-            shim_gone=False,
-            shim_pid=spawned.pid,
-            socket=spawned.socket,
-        )
-        async with self._lock:
-            self._slots[spec.id] = slot
-            self._ensure_driver_locked()
-        await self._ingest(slot)
+            self._spawning.add(spec.id)
+        try:
+            if must_retire:
+                await asyncio.to_thread(_wait_retired, retiring)
+            spawned = await asyncio.to_thread(
+                spawn_shim, spec, work_dir=self.work_dir
+            )
+            now = self._clock.monotonic()
+            slot = _Slot(
+                spec=spec,
+                phase=phase,
+                ready=False,
+                pid=None,
+                exit_code=None,
+                signal=None,
+                since_s=now,
+                beats=0,
+                beats_at_s=None,
+                term_sent=False,
+                kill_sent=False,
+                released=False,
+                shim_gone=False,
+                shim_pid=spawned.pid,
+                socket=spawned.socket,
+            )
+            async with self._lock:
+                self._slots[spec.id] = slot
+                self._ensure_driver_locked()
+            await self._ingest(slot)
+        finally:
+            async with self._lock:
+                self._spawning.discard(spec.id)
 
     async def stop(self, worker_id: str) -> None:
         """``SIGTERM`` the worker, then ``SIGKILL`` if it outlives ``stop_grace_s``.

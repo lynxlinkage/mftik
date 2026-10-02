@@ -12,6 +12,7 @@ import os
 import signal
 import socket
 import struct
+import subprocess
 import sys
 import textwrap
 import time
@@ -166,6 +167,32 @@ def test_the_backoff_curve_uses_the_named_ratio() -> None:
         for attempt in range(1, 5)
     ]
     assert delays == [1.0, 2.0, 4.0, 8.0]
+
+
+def test_a_huge_attempt_stays_a_finite_delay() -> None:
+    """``2.0 ** (attempt - 1)`` overflows a float. The delay stays finite.
+
+    A zero floor still does not grow. The ceiling is the float range,
+    not a policy cap.
+    """
+    huge = plan_restart(
+        phase=WorkerPhase.CRASHED,
+        restart="on_failure",
+        restarts_in_window=0,
+        intensity=_INTENSITY,
+        attempt=10_000,
+    )
+    assert huge.phase is WorkerPhase.BACKOFF
+    assert huge.delay_s == sys.float_info.max
+    zero = RestartIntensity(max_restarts=5, window_s=600, min_backoff_s=0)
+    stayed = plan_restart(
+        phase=WorkerPhase.CRASHED,
+        restart="on_failure",
+        restarts_in_window=0,
+        intensity=zero,
+        attempt=10_000,
+    )
+    assert stayed.delay_s == 0.0
 
 
 def test_a_zero_backoff_floor_does_not_grow() -> None:
@@ -459,6 +486,37 @@ async def test_spawn_refuses_an_incarnation_that_does_not_move_forward(
         await supervisor.spawn(spec)
 
 
+async def test_an_in_flight_spawn_reserves_the_worker_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The id is reserved before the lock is dropped, and dropped if launch fails."""
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    spec = _spec()
+    slot = _hold(supervisor, spec, WorkerPhase.FAILED)
+    supervisor._spawning.add(spec.id)
+
+    def fail_launch(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("spawn_shim ran")
+
+    monkeypatch.setattr("mftik.procman.supervisor.spawn_shim", fail_launch)
+    with pytest.raises(ProcmanError, match="already being spawned"):
+        await supervisor.spawn(_spec(incarnation=2))
+    assert supervisor._slots[spec.id] is slot
+    assert spec.id in supervisor._spawning
+
+    supervisor._spawning.clear()
+    supervisor._slots.clear()
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("launch failed")
+
+    monkeypatch.setattr("mftik.procman.supervisor.spawn_shim", boom)
+    with pytest.raises(OSError, match="launch failed"):
+        await supervisor.spawn(spec)
+    assert spec.id not in supervisor._spawning
+    assert supervisor._slots == {}
+
+
 async def test_record_restart_holds_the_slot_and_clears_rss(tmp_path: Path) -> None:
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
     spec = _spec()
@@ -600,6 +658,42 @@ def _kill_tree(pid: int) -> None:
     for child in _proc_children(pid):
         _kill_tree(child)
     _kill(pid)
+
+
+def _ps_family(work_dir: Path) -> tuple[set[int], set[int]]:
+    """Live shim pids whose command line names ``work_dir``, and their children.
+
+    ``ps`` is the source of the rows. A zombie is not a live process.
+    """
+    listing = subprocess.check_output(
+        ["ps", "-ww", "-eo", "pid=,ppid=,args="],
+        text=True,
+    )
+    rows: list[tuple[int, int, str]] = []
+    for line in listing.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 2:
+            continue
+        args = parts[2] if len(parts) == 3 else ""
+        rows.append((int(parts[0]), int(parts[1]), args))
+    marker = str(work_dir)
+    shims = {
+        pid
+        for pid, _ppid, args in rows
+        if marker in args and _pid_running(pid)
+    }
+    workers = {
+        pid
+        for pid, ppid, _args in rows
+        if ppid in shims and _pid_running(pid)
+    }
+    return shims, workers
+
+
+def _reap_workdir(work_dir: Path) -> None:
+    shims, _workers = _ps_family(work_dir)
+    for pid in shims:
+        _kill_tree(pid)
 
 
 def _peer(path: Path) -> int | None:
@@ -892,3 +986,31 @@ async def test_the_orchestrator_spawns_the_next_incarnation(tmp_path: Path) -> N
         assert _pid_running(status.pid)
     finally:
         await _cleanup(supervisor)
+
+
+@pytest.mark.integration
+async def test_two_concurrent_spawns_keep_one_shim_and_one_worker(
+    tmp_path: Path,
+) -> None:
+    """One id has one launch in flight. The other call is refused."""
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    spec = _spec(_argv(_SLEEP), start_timeout_s=30, hb_timeout_s=None)
+    try:
+        outcomes = await asyncio.gather(
+            supervisor.spawn(spec),
+            supervisor.spawn(spec),
+            return_exceptions=True,
+        )
+        assert outcomes.count(None) == 1
+        errors = [item for item in outcomes if isinstance(item, ProcmanError)]
+        assert len(errors) == 1
+        assert len(outcomes) == 2
+        status = await supervisor.status(spec.id)
+        assert status is not None
+        assert status.pid is not None
+        shims, workers = _ps_family(tmp_path)
+        assert shims == {_peer(socket_path(tmp_path, spec.id))}
+        assert workers == {status.pid}
+    finally:
+        await _cleanup(supervisor)
+        _reap_workdir(tmp_path)

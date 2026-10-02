@@ -22,6 +22,7 @@ for the next incarnation.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -154,8 +155,18 @@ def classify_failure(*, ready: bool, cause: FailureCause) -> WorkerPhase:
 
 
 def _backoff_delay_s(*, attempt: int, min_backoff_s: float) -> float:
-    """``min_backoff_s * BACKOFF_RATIO ** (attempt - 1)``, and at least the floor."""
-    delay = min_backoff_s * BACKOFF_RATIO ** (attempt - 1)
+    """``min_backoff_s * BACKOFF_RATIO ** (attempt - 1)``, and at least the floor.
+
+    A zero floor stays 0. An exponent that overflows a float returns the
+    largest finite float instead of raising. That ceiling is not a policy
+    cap: the curve still has none (issue #286).
+    """
+    if min_backoff_s == 0.0:
+        return 0.0
+    try:
+        delay = min_backoff_s * BACKOFF_RATIO ** (attempt - 1)
+    except OverflowError:
+        return sys.float_info.max
     if delay < min_backoff_s:
         return min_backoff_s
     return delay
