@@ -10,9 +10,11 @@ until the ticket that owns the behaviour implements it.
 session status, worker sets, intents, connection placement, or the
 trading layer. It reads, and it names an operator request:
 
-* worker rows come from the Supervisor's ``procman.report`` (and, once
-  B3-07 lands, the release pin). ``code_ref`` on those rows is the
-  platform release the worker was spawned from. This module does not
+* worker rows come from the Supervisor's ``procman.report``. B3-07
+  serves the latest report of every plane on ``GET /workers``; this
+  command prints that list. The S-2 pin file is not read here.
+  ``code_ref`` on those rows is the platform release the worker was
+  spawned from. This module does not
   carry ``strategy_digest`` or ``env_generation``; those axes are F39
   and belong to IF-16. B5-10 is what extends ``--stale`` to the digest.
 * an MD restart asks for one connection to come back in place. Placement
@@ -56,8 +58,9 @@ import argparse
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from mftik.cli.client import CliError, connected
 from mftik.cli.exits import EXIT_ERROR
-from mftik.cli.output import fail
+from mftik.cli.output import fail, table
 from mftik.protocol import ProcmanWorker
 
 __all__ = [
@@ -127,11 +130,17 @@ def select_workers(
 
     ``reported`` is what the Supervisor already published. This function
     does not read ``STRATEGON_RELEASE_VERSION`` and does not restart
-    anything. Not implemented (IF-15). B3-07 lists versions; B8-06 is
-    the ``--stale`` filter against the latest release.
+    anything. ``stale`` false lists every worker (B3-07). ``stale`` true
+    is B8-06 and still raises ``NotImplementedError("IF-15")``. When
+    that filter lands, ``latest`` has to be
+    :func:`mftik.procman.current_release` on both sides: Strategon
+    spells a release ``v0.9.5`` and the distribution spells it
+    ``0.9.5``.
     """
-    del reported, stale, latest
-    raise NotImplementedError("IF-15")
+    if stale:
+        del reported, latest
+        raise NotImplementedError("IF-15")
+    return list(reported)
 
 
 def md_restart(conn: str) -> MdRestart:
@@ -165,10 +174,99 @@ def intent_gc(instance: str) -> IntentGc:
     raise NotImplementedError("IF-15")
 
 
+def _age(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "-"
+    return f"{float(value):.1f}"
+
+
+def _worker_from_row(row: object) -> ProcmanWorker:
+    if not isinstance(row, dict):
+        raise CliError("/workers returned a row this client cannot read")
+    try:
+        return ProcmanWorker(
+            id=row["id"],
+            code_ref=row["code_ref"],
+            rss_bytes=row.get("rss_bytes"),
+            phase=row["phase"],
+            ready=row["ready"],
+            incarnation=row["incarnation"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CliError(
+            f"/workers returned a row this client cannot read: {exc}"
+        ) from exc
+
+
+def _rows(body: object) -> list[tuple[ProcmanWorker, dict[str, object]]]:
+    if not isinstance(body, dict) or not isinstance(body.get("workers"), list):
+        raise CliError("/workers did not return a worker list")
+    raw = body["workers"]
+    return [(_worker_from_row(row), row) for row in raw]
+
+
 def workers(args: argparse.Namespace) -> int:
-    """``mftik workers [--stale]``. Does not call :func:`select_workers` yet."""
-    del args
-    return _not_implemented("workers")
+    """``mftik workers [--stale]``.
+
+    Without ``--stale``, print every worker ``GET /workers`` returned,
+    in that order. :func:`select_workers` is called with ``stale=False``
+    and does not drop a row because of its release (O1). ``--stale`` is
+    B8-06 and still refuses. Listing does not restart anything (F24).
+    """
+    if args.stale:
+        fail(
+            "workers --stale is not implemented (IF-15); "
+            "B8-06 lists workers not on the latest release"
+        )
+        return EXIT_ERROR
+    _profile, client = connected(args.profile)
+    with client:
+        body = client.get("/workers")
+    parsed = _rows(body)
+    chosen = select_workers(
+        [worker for worker, _row in parsed], stale=False, latest=None
+    )
+    # ``select_workers`` returns the same objects it was given. The API
+    # row still carries plane, instance and age, which the worker does
+    # not.
+    extra = {id(worker): row for worker, row in parsed}
+    if not chosen:
+        print("no workers")
+        return 0
+    lines = []
+    for worker in chosen:
+        row = extra[id(worker)]
+        rss = worker.rss_bytes
+        lines.append(
+            (
+                str(row.get("plane") or ""),
+                str(row.get("instance") or ""),
+                worker.id,
+                str(worker.incarnation),
+                worker.phase,
+                "yes" if worker.ready else "no",
+                worker.code_ref,
+                "-" if rss is None else str(rss),
+                _age(row.get("age_s")),
+            )
+        )
+    print(
+        table(
+            (
+                "PLANE",
+                "INSTANCE",
+                "WORKER",
+                "INCARNATION",
+                "PHASE",
+                "READY",
+                "RELEASE",
+                "RSS",
+                "AGE",
+            ),
+            lines,
+        )
+    )
+    return 0
 
 
 def restart(args: argparse.Namespace) -> int:

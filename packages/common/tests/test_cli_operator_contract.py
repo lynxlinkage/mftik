@@ -1,10 +1,14 @@
 """What the operator CLI will do, written down before it does it (IF-15).
 
-Every test here is ``xfail(strict=True)``. It describes behaviour the plan
-settles (F12, F24, F27, F32) and fails today because the surface raises
-``NotImplementedError("IF-15")`` or, for the two ``mftik run`` invocations,
-refuses before it deploys. ``strict`` is the point: the ticket that
-implements one of these cannot merge while the marker is still on it.
+Each test that is still ahead of its ticket is ``xfail(strict=True)``.
+It describes behaviour the plan settles (F12, F24, F27, F32) and fails
+today because the surface raises ``NotImplementedError("IF-15")`` or,
+for the two ``mftik run`` invocations, refuses before it deploys.
+``strict`` is the point: the ticket that implements one of these cannot
+merge while the marker is still on it. The three ``select_workers``
+cases B3-07 owns (list every worker, an empty list, ``latest=None``
+without ``--stale``) are no longer marked. ``stale=True`` stays marked
+for B8-06.
 
 The decisions are pure. Nothing here names an HTTP route — IF-15 does not
 add API routes, and the B tickets that perform these commands choose how
@@ -192,7 +196,6 @@ def test_wait_tails_when_the_deploy_is_already_running(
 # --- F24: workers --stale, md restart --------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="B3-07 lists every worker's release")
 def test_workers_lists_every_reported_worker_in_order() -> None:
     """O1. Without ``--stale``, an old release is still listed."""
     reported = [
@@ -221,12 +224,10 @@ def test_stale_is_empty_when_every_worker_is_current() -> None:
     assert select_workers(reported, stale=True, latest="1.5.0") == []
 
 
-@pytest.mark.xfail(strict=True, reason="B3-07 lists every worker's release")
 def test_no_workers_lists_nothing() -> None:
     assert select_workers((), stale=False, latest="1.5.0") == []
 
 
-@pytest.mark.xfail(strict=True, reason="B3-07 lists every worker's release")
 def test_listing_does_not_need_the_latest_release() -> None:
     """O1. ``--stale`` is the only mode that reads the current release."""
     reported = [_worker("md/conn/a", "1.4.0")]

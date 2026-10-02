@@ -100,7 +100,10 @@ class WorkerSpec:
     stored as a tuple and a read-only mapping for that reason.
 
     ``code_ref`` is the release version of the controller that spawned the
-    worker (§4.5).
+    worker (§4.5). Planes pass :func:`mftik.procman.current_release`.
+    Strategon spells a release ``v0.9.5`` and the installed distribution
+    spells it ``0.9.5``. ``mftik workers --stale`` (B8-06) compares with
+    that function on both sides.
 
     ``labels`` are opaque strings. Procman copies them and does not read
     them (P6).

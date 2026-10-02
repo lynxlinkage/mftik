@@ -93,6 +93,11 @@ from mftik.procman.messages import (
     socket_path,
     supervisor_state_path,
 )
+from mftik.procman.release import (
+    current_release,
+    pinned_releases,
+    write_pinned_releases,
+)
 from mftik.procman.shim import ShimClient, SpawnedShim, spawn_shim
 from mftik.procman.spec import PLANES, Plane, WorkerSpec, validate_worker_id
 from mftik.procman.state import ALIVE_PHASES, Trigger, WorkerPhase, transition
@@ -1068,14 +1073,33 @@ async def _await_blocking(func: Any, *args: Any) -> None:
 
 
 def _write_state(
-    work_dir: Path, records: tuple[SupervisorRecord, ...] | list[SupervisorRecord]
+    work_dir: Path,
+    records: tuple[SupervisorRecord, ...] | list[SupervisorRecord],
+    pin_path: Path | None = None,
 ) -> None:
-    """Write ``supervisor.json`` via a temp file and ``rename``, like ``exit.json``.
+    """Write ``supervisor.json``, and the S-2 pin from the same records.
 
     The temp name is unique. ``close`` can cancel the driver while a write
     is inside ``asyncio.to_thread``, and that thread keeps running after
     the task has been cancelled. Two writers must not share one temp file.
+
+    ``pin_path`` is written first, from ``records`` and
+    :func:`~mftik.procman.current_release`, then the json. A failure of
+    the pin leaves the json as it was, so both still describe the previous
+    snapshot. A failure of the json after the pin has landed leaves the
+    pin naming a release the json does not yet: GC keeps a rootfs, which
+    is the safe direction. The next successful write puts them back on
+    one snapshot. ``pin_path is None`` writes only the json.
     """
+    snapshot = tuple(records)
+    if pin_path is not None:
+        write_pinned_releases(
+            pin_path,
+            pinned_releases(
+                current_release(),
+                ((row.spec.code_ref, row.phase) for row in snapshot),
+            ),
+        )
     path = supervisor_state_path(work_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, raw = tempfile.mkstemp(
@@ -1084,7 +1108,7 @@ def _write_state(
     tmp = Path(raw)
     try:
         with os.fdopen(fd, "wb") as handle:
-            handle.write(encode_supervisor_state(records))
+            handle.write(encode_supervisor_state(snapshot))
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
@@ -1194,12 +1218,19 @@ def _fence_pid(work_dir: Path, worker_id: str, retiring: _Slot | None) -> int | 
     return _live_socket_pid(work_dir, worker_id)
 
 
-def _merge_spawn_intent(work_dir: Path, spec: WorkerSpec, since_s: float) -> None:
+def _merge_spawn_intent(
+    work_dir: Path,
+    spec: WorkerSpec,
+    since_s: float,
+    pin_path: Path | None = None,
+) -> None:
     """Record ``spec`` before the shim exists.
 
     A controller that dies after this write and before ``spawn_shim``
     still leaves the id, the full spec and phase ``STARTING``. Pids are
-    null until the shim is observed. Other rows in the file stay.
+    null until the shim is observed. Other rows in the file stay. The
+    pin, when ``pin_path`` is set, is that same snapshot: the intent is
+    ``STARTING``, so its release is pinned before the process exists.
     """
     previous = load_supervisor_state(work_dir)
     others = tuple(row for row in previous if row.spec.id != spec.id)
@@ -1212,19 +1243,22 @@ def _merge_spawn_intent(work_dir: Path, spec: WorkerSpec, since_s: float) -> Non
         shim_start_ticks=None,
         since_s=since_s,
     )
-    _write_state(work_dir, (*others, intent))
+    _write_state(work_dir, (*others, intent), pin_path)
 
 
 def _write_slots(
     work_dir: Path,
     records: tuple[SupervisorRecord, ...],
     keep: tuple[str, ...],
+    pin_path: Path | None = None,
 ) -> None:
     """Write ``records``, retaining rows whose ids are still being spawned.
 
     ``keep`` is the ids :meth:`Supervisor.spawn` has reserved that are not
     in ``records`` yet. Their on-disk row is the spec written before
-    ``spawn_shim``. A snapshot that omitted them must not delete it.
+    ``spawn_shim``. A snapshot that omitted them must not delete it. The
+    pin is written from the merged snapshot, not from ``records`` alone,
+    so a release that is still in the json is still in the pin.
     """
     if keep:
         wanted = set(keep)
@@ -1236,7 +1270,7 @@ def _write_slots(
         records = tuple(
             sorted((*records, *retained), key=lambda row: row.spec.id)
         )
-    _write_state(work_dir, records)
+    _write_state(work_dir, records, pin_path)
 
 
 def _record_from_slot(slot: _Slot) -> SupervisorRecord:
@@ -1506,6 +1540,15 @@ class Supervisor:
     ``budget`` is the orchestrator's :class:`~mftik.procman.AdmissionBudget`,
     or ``None`` for no limit. This class does not read the environment and
     does not invent ``max_workers`` or ``memory_budget_mb`` (§4.7).
+
+    ``pin_path`` is the S-2 pin file, or ``None`` (the default) while
+    Strategon keeps a release by scanning ``/proc``. A plane passes
+    :func:`mftik.procman.pinned_releases_path`, which is a path only when
+    ``STRATEGON_RELEASE_VERSION`` is set. This class does not read that
+    variable. When ``pin_path`` is set, every write of ``supervisor.json``
+    rewrites the pin from the same slot snapshot:
+    :func:`~mftik.procman.current_release` plus the ``code_ref`` of every
+    held slot whose process may still be alive.
     """
 
     def __init__(
@@ -1517,6 +1560,7 @@ class Supervisor:
         clock: Clock | None = None,
         proc_root: Path | None = None,
         budget: AdmissionBudget | None = None,
+        pin_path: Path | None = None,
     ) -> None:
         if plane not in PLANES:
             raise ValueError(f"plane {plane!r} is not one of {', '.join(PLANES)}")
@@ -1531,6 +1575,7 @@ class Supervisor:
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._proc_root = Path("/proc") if proc_root is None else Path(proc_root)
         self._budget = budget
+        self._pin_path = None if pin_path is None else Path(pin_path)
         self._slots: dict[str, _Slot] = {}
         # Ids whose :meth:`spawn` has passed the slot check and not yet
         # published the new slot. Held across the unlocked launch.
@@ -2095,7 +2140,11 @@ class Supervisor:
         since_s = self._clock.monotonic()
         async with self._persist_lock:
             await _await_blocking(
-                _merge_spawn_intent, self.work_dir, spec, since_s
+                _merge_spawn_intent,
+                self.work_dir,
+                spec,
+                since_s,
+                self._pin_path,
             )
 
     async def _persist(self) -> None:
@@ -2115,7 +2164,9 @@ class Supervisor:
             # holds the temp file. An id reserved by :meth:`spawn` and not
             # yet in a slot keeps the row already on disk: that is the
             # spec written before ``spawn_shim``.
-            await _await_blocking(_write_slots, self.work_dir, records, keep)
+            await _await_blocking(
+                _write_slots, self.work_dir, records, keep, self._pin_path
+            )
 
     async def _stop_held_workers(self) -> None:
         async with self._lock:
