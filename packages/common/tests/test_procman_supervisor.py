@@ -547,8 +547,10 @@ time.sleep(30)
 """
 
 _IGNORE_TERM = """
-import signal, time
+import signal, sys, time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(sys.argv[1], "w") as handle:
+    handle.write("ignoring")
 time.sleep(30)
 """
 
@@ -803,13 +805,20 @@ async def test_stop_reaps_within_the_grace_and_releases(tmp_path: Path) -> None:
 @pytest.mark.integration
 async def test_stop_sigkills_when_the_grace_expires(tmp_path: Path) -> None:
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
-    spec = _spec(_argv(_IGNORE_TERM), start_timeout_s=30, stop_grace_s=0.4)
+    ignoring = tmp_path / "ignoring"
+    spec = _spec(
+        _argv(_IGNORE_TERM, str(ignoring)),
+        start_timeout_s=30,
+        stop_grace_s=0.4,
+    )
     try:
         await supervisor.spawn(spec)
         await _until(
             supervisor,
             spec.id,
-            lambda item: item is not None and item.pid is not None,
+            lambda item: item is not None
+            and item.pid is not None
+            and ignoring.exists(),
         )
         worker = (await supervisor.status(spec.id)).pid
         await supervisor.stop(spec.id)
