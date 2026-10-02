@@ -537,7 +537,7 @@ def _setup_workers(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--stale",
         action="store_true",
-        help="only workers whose release is not the latest",
+        help="only workers whose strategy digest is not the current tree",
     )
 
 

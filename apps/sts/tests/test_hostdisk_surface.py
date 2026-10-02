@@ -57,6 +57,30 @@ def _imports(path: Path) -> set[str]:
     return found
 
 
+def test_worker_env_names_match_the_hostdisk_constants() -> None:
+    from mftik_sts.hostdisk.identity import (
+        ENV_GENERATION_ENV,
+        STRATEGY_DIGEST_ENV,
+    )
+    from mftik_sts.pinned_strategy import (
+        ENV_GENERATION_ENV as pinned_generation,
+    )
+    from mftik_sts.pinned_strategy import (
+        STRATEGY_DIGEST_ENV as pinned_digest,
+    )
+    from mftik_sts.session_worker.process import (
+        ENV_GENERATION_ENV as worker_generation,
+    )
+    from mftik_sts.session_worker.process import (
+        STRATEGY_DIGEST_ENV as worker_digest,
+    )
+
+    assert worker_digest == pinned_digest == STRATEGY_DIGEST_ENV
+    assert worker_digest == "MFTIK_STRATEGY_DIGEST"
+    assert worker_generation == pinned_generation == ENV_GENERATION_ENV
+    assert worker_generation == "MFTIK_ENV_GENERATION"
+
+
 def test_ticket_id_is_if_16() -> None:
     assert TICKET == "IF-16"
     assert LABEL_STRATEGY_DIGEST == "strategy_digest"
@@ -65,13 +89,27 @@ def test_ticket_id_is_if_16() -> None:
 
 def test_release_accepts_a_numeric_minimum() -> None:
     """A tree that asks for 0.1.0 still runs on a later release. A tree
-    that asks for something this release is behind does not. A declaration
-    that is not dotted integers fails closed."""
+    that asks for something this release is behind does not. A final
+    release accepts a pre-release of the same numbers. A declaration
+    that is not a version fails closed. A source-tree ``0.0.0`` accepts
+    nothing unless the dev flag is on, and then it accepts any
+    requirement."""
     assert release_accepts("0.1.0", "0.1.0")
     assert release_accepts("0.1.0", "0.2.0")
+    assert release_accepts("0.2", "0.2.0")
+    assert release_accepts("0.1.0", "v0.2.0")
+    assert release_accepts("0.2.0rc1", "0.2.0")
+    assert release_accepts("0.2.0a1", "0.2.0b1")
+    assert not release_accepts("0.2.0b1", "0.2.0a1")
+    assert not release_accepts("0.2.0", "0.2.0rc1")
     assert not release_accepts("99.0.0", "0.1.0")
-    assert not release_accepts("0.2.0rc1", "0.2.0")
     assert not release_accepts("0.1.0", "latest")
+    assert not release_accepts("0.1.0", "1!0.2.0")
+    assert not release_accepts("0.0.0", "0.0.0", allow_dev=False)
+    assert not release_accepts("0.0.0", "v0.0.0", allow_dev=False)
+    assert not release_accepts("0.0.0", "0", allow_dev=False)
+    assert release_accepts("99.0.0", "0.0.0", allow_dev=True)
+    assert release_accepts("not-a-version", "0.0.0", allow_dev=True)
 
 
 def test_only_the_probe_child_imports_strategy_loading() -> None:
@@ -94,7 +132,8 @@ def test_only_the_probe_child_imports_strategy_loading() -> None:
 
 
 def test_the_running_router_still_owns_registry_and_env() -> None:
-    """IF-16 does not move the handlers that are already serving. B5-10 does."""
+    """``dispatch`` still calls the legacy importers. ``control_handler``
+    answers the digest replica and does not fall through to them."""
     assert _HANDLERS[STS_REGISTRY_SYNC] is handle_registry_sync
     assert _HANDLERS[STS_REGISTRY_RELOAD] is handle_registry_reload
     assert _HANDLERS[STS_ENV_SYNC] is handle_env_sync
@@ -112,7 +151,11 @@ def test_handler_signatures_are_handlers(tmp_path: Path) -> None:
         assert inspect.iscoroutinefunction(handler)
 
 
-async def test_registry_and_env_handlers_raise_if_16(tmp_path: Path) -> None:
+@pytest.mark.component
+async def test_registry_and_env_handlers_reply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
     orch = StsOrchestrator(Supervisor(tmp_path, plane="sts", instance="sts"))
     message = Envelope[dict].wrap({}, type=STS_REGISTRY_SYNC, source="api")
     for handler in (
@@ -120,13 +163,27 @@ async def test_registry_and_env_handlers_raise_if_16(tmp_path: Path) -> None:
         registry_reload_handler(orch),
         env_sync_handler(orch),
     ):
-        with pytest.raises(NotImplementedError, match="^IF-16$"):
-            await handler(message)
+        reply = await handler(message)
+        assert reply is not None
 
 
-async def test_catch_up_is_a_client_call_and_raises_if_16() -> None:
+async def test_catch_up_is_a_client_call() -> None:
     """``api.registry.catchup`` is not a controller handler. The signature
-    is the call the controller will make. It does not replace
+    is the call the controller makes. It does not replace
     ``registry_catchup.catch_up_until_matched``."""
-    with pytest.raises(NotImplementedError, match="^IF-16$"):
-        await catch_up_registry(object(), "sts")  # type: ignore[arg-type]
+
+    class _Reply:
+        payload = {"ok": True, "error": None}
+
+    class _Broker:
+        async def request(
+            self, subject: str, envelope: object, *, timeout: float
+        ) -> _Reply:
+            assert subject == "api.registry.catchup"
+            assert timeout == 60
+            assert envelope is not None
+            return _Reply()
+
+    result = await catch_up_registry(_Broker(), "sts")  # type: ignore[arg-type]
+    assert result.ok
+    assert result.error is None

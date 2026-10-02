@@ -51,9 +51,10 @@ def gc_env(env: NodeEnv, keep: Collection[int]) -> None:
 
     ``keep`` is the generations :func:`pinned_code` returned. The stamp's
     current generation is kept as well, the same rule as the registry
-    index (§5.7). The deletion is :meth:`NodeEnv._prune_generations`.
-    :meth:`NodeEnv.commit` still prunes to current and previous; changing
-    that call is B5-10.
+    index (§5.7). The deletion is :meth:`NodeEnv._prune_generations`,
+    which also keeps whatever ``pinned-generations.json`` names.
+    :meth:`NodeEnv.commit` prunes through that same method, so a
+    generation written into the pin file before the commit survives.
     """
     if isinstance(keep, str) or not isinstance(keep, Collection):
         raise TypeError("keep must be a collection of generations")

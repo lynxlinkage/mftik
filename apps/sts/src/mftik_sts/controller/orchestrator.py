@@ -2,9 +2,9 @@
 
 B4-02 wires create, stop, mark terminal, reattach, and the status
 snapshot. B5-06 fills the crash path: cleanup, the ``restarting`` write,
-the error line, and the rehang. Registry and env handler signatures are
-IF-16 and raise until B5-10. This module does not import strategy code
-(F39) and does not import the session worker.
+the error line, and the rehang. Registry and env handlers write the
+digest replica and do not import strategy code (F39). This module does
+not import the session worker.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import Protocol
 
 from mftik.broker import NoRespondersError, RequestTimeoutError
 from mftik.clock import Clock, SystemClock
+from mftik.environment import NodeEnv
 from mftik.procman import (
     ALIVE_PHASES,
     CapacityExceeded,
@@ -33,6 +34,7 @@ from mftik.procman import (
     current_release,
     decode_exit,
     exit_record_path,
+    load_supervisor_state,
     reattach_action,
 )
 from mftik.protocol import (
@@ -91,10 +93,21 @@ from mftik_sts.controller.types import (
     session_worker_id,
 )
 from mftik_sts.controller.worker import (
+    LABEL_ENV_GENERATION,
+    LABEL_STRATEGY_DIGEST,
     procman_start_timeout_s,
     session_worker_spec,
 )
 from mftik_sts.exit_codes import cause_for_exit
+from mftik_sts.hostdisk.checks import (
+    REASON_DIGEST_ABSENT,
+    REASON_STRATEGY_UNAVAILABLE,
+    deployable,
+    installed_release,
+    rehang_code,
+)
+from mftik_sts.hostdisk.identity import ENV_GENERATION_ENV, STRATEGY_DIGEST_ENV
+from mftik_sts.hostdisk.replica import TreeReplica, require_digest
 
 logger = logging.getLogger(__name__)
 
@@ -533,6 +546,14 @@ class StsOrchestrator:
         """
         try:
             spec = self._spec_from_request(request)
+            if self._store is not None:
+                stored = await self._store.load(request.session_id)
+                if stored is not None:
+                    spec = replace(
+                        spec,
+                        strategy_digest=stored.strategy_digest,
+                        env_generation=stored.env_generation,
+                    )
         except ValueError as exc:
             return CallError("invalid_request", str(exc))
         async with self._lock(spec.session_id):
@@ -730,6 +751,126 @@ class StsOrchestrator:
             lock = asyncio.Lock()
             self._locks[session_id] = lock
         return lock
+
+    async def code_pins(self) -> tuple[frozenset[str], frozenset[int]]:
+        """Digests and env generations this instance must keep (F39).
+
+        The union of non-terminal specs in memory, non-terminal
+        ``sts_sessions`` rows whose ``instance`` is null or this
+        supervisor's, and every slot in this instance's
+        ``supervisor.json``. A pin only one of those names is still
+        kept. Over-keeping is safe.
+        """
+        digests: set[str] = set()
+        generations: set[int] = set()
+
+        def add_pin(digest: str | None, generation: int | None) -> None:
+            if isinstance(digest, str) and digest:
+                try:
+                    require_digest(digest)
+                except ValueError:
+                    pass
+                else:
+                    digests.add(digest)
+            if type(generation) is int and generation >= 0:
+                generations.add(generation)
+
+        for held in self._sessions.values():
+            if _terminal(held.phase):
+                continue
+            add_pin(held.spec.strategy_digest, held.spec.env_generation)
+        list_pins = None
+        if self._store is not None:
+            list_pins = getattr(self._store, "list_code_pins", None)
+        if list_pins is not None:
+            instance = self.supervisor.instance
+            for pin in await list_pins():
+                if pin.instance is not None and pin.instance != instance:
+                    continue
+                add_pin(pin.strategy_digest, pin.env_generation)
+        try:
+            records = load_supervisor_state(self.supervisor.work_dir)
+        except ProcmanError:
+            records = ()
+        for record in records:
+            labels = record.spec.labels
+            raw_digest = labels.get(LABEL_STRATEGY_DIGEST)
+            raw_generation = labels.get(LABEL_ENV_GENERATION)
+            generation: int | None = None
+            if isinstance(raw_generation, str) and raw_generation.isdigit():
+                generation = int(raw_generation)
+            add_pin(raw_digest if isinstance(raw_digest, str) else None, generation)
+        return frozenset(digests), frozenset(generations)
+
+    async def _code_guard(self, held: _Held) -> CallError | None:
+        """Refuse a spawn whose pinned tree or generation is not runnable.
+
+        A built-in strategy (no digest) skips ``requires_mftik``. A
+        digest that exists only as a legacy name directory is copied
+        into ``trees/`` on a worker thread, under the same lock as
+        registry sync. That directory is not deleted and the index is
+        not rebound. A missing pinned tree stays ``alert=False`` and
+        still publishes the same error line a crash does, so the alert
+        pipeline can match it. This does not import the tree.
+        """
+        spec = held.spec
+        if spec.strategy_digest is None and spec.env_generation is None:
+            return None
+        replica = TreeReplica(NodeEnv.from_env().data_dir)
+        if spec.strategy_digest is not None:
+            # The pin may still be only a name directory (shared volume,
+            # or no sync yet). Copy it off this loop: the copy takes
+            # TREES_LOCK and reads the disk. Do not bind or delete.
+            from mftik_sts.hostdisk.sync import materialize_legacy_digest
+
+            await asyncio.to_thread(
+                materialize_legacy_digest, replica, spec.strategy_digest
+            )
+            code = rehang_code(
+                spec, replica=replica, release=installed_release()
+            )
+            if code.failed:
+                reason = code.reason or REASON_STRATEGY_UNAVAILABLE
+                await self._log_code_failure(held, reason)
+                held.refusal = CallError(reason, reason)
+                await self._fail(held, reason)
+                return held.refusal
+        verdict = deployable(spec, replica=replica, env=NodeEnv.from_env())
+        if verdict.ok:
+            return None
+        reason = verdict.reason or REASON_DIGEST_ABSENT
+        await self._log_code_failure(held, reason)
+        held.refusal = CallError(reason, reason)
+        await self._fail(held, reason)
+        return held.refusal
+
+    async def _log_code_failure(self, held: _Held, reason: str) -> None:
+        message = crash_log_message(
+            crash_class=None,
+            reason=reason,
+            incarnation=held.worker_incarnation,
+        )
+        if self._publish is None:
+            logger.error(
+                "STS code session=%s %s", held.spec.session_id, message
+            )
+            return
+        await publish_sts_log(
+            _LogBus(self._publish),
+            held.spec.session_id,
+            message,
+            source=CONTROLLER_LOG_SOURCE,
+            level="error",
+        )
+
+    def _worker_env(self, spec: SessionSpec) -> dict[str, str]:
+        """Forwarded environment plus the two pins, when the spec has them."""
+        env = forwarded_env()
+        if spec.strategy_digest is not None:
+            env[STRATEGY_DIGEST_ENV] = spec.strategy_digest
+        if spec.env_generation is not None:
+            env[ENV_GENERATION_ENV] = str(spec.env_generation)
+        return env
 
     def _release_name(self) -> str:
         """This process's release, resolved once. Tests inject ``code_ref``.
@@ -966,6 +1107,9 @@ class StsOrchestrator:
         ):
             await self._fail(held, "spawn_refused")
             return
+        refusal = await self._code_guard(held)
+        if refusal is not None:
+            return
         path = write_session_request(self.supervisor.work_dir, held.request)
         worker = session_worker_spec(
             held.spec,
@@ -975,7 +1119,7 @@ class StsOrchestrator:
             start_timeout_s=procman_start_timeout_s(held.spec),
             hb_timeout_s=SESSION_HB_TIMEOUT_S,
             stop_grace_s=SESSION_STOP_GRACE_S,
-            env=forwarded_env(),
+            env=self._worker_env(held.spec),
         )
         held.spawn_started = True
         try:

@@ -674,6 +674,9 @@ async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Stack:
     monkeypatch.setenv("BROKER_REQUEST_TIMEOUT", "2")
     monkeypatch.setenv("MFTIK_DATA", str(data))
     monkeypatch.setenv("MFTIK_AUTH_ENABLED", "0")
+    # Installed mftik is 0.0.0 in this tree. The spawn guard refuses
+    # the store's default requires_mftik unless this is set.
+    monkeypatch.setenv("MFTIK_DEV_RELEASE", "1")
     monkeypatch.setenv("PYTHONUNBUFFERED", "1")
     monkeypatch.delenv("MFTIK_STATUS_FD", raising=False)
     monkeypatch.delenv("PROCMAN_MAX_WORKERS", raising=False)
@@ -1016,6 +1019,7 @@ async def budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BROKER_KEY_PREFIX", prefix)
     monkeypatch.setenv("MFTIK_DATA", str(data))
     monkeypatch.setenv("MFTIK_AUTH_ENABLED", "0")
+    monkeypatch.setenv("MFTIK_DEV_RELEASE", "1")
     monkeypatch.setenv("PROCMAN_MEMORY_BUDGET_MB", "1")
     monkeypatch.delenv("PROCMAN_MAX_WORKERS", raising=False)
     await _reset_engine()

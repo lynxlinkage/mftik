@@ -77,7 +77,6 @@ def test_workers_help_lists_stale(capsys) -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        ["workers", "--stale"],
         ["md", "restart", "binance-um-1"],
         ["intents", "gc", "--instance", "sts-jp"],
     ],
@@ -247,6 +246,81 @@ def test_workers_prints_each_release_from_the_api(
     assert "td/account/7" in out
     assert "md-1" in out
     assert "RELEASE" in out
+
+
+def test_workers_stale_lists_a_digest_that_is_not_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Digest staleness is the JSON row. Release staleness is not this flag."""
+    _connect(tmp_path, monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/workers":
+            return httpx.Response(
+                200,
+                json={
+                    "workers": [
+                        {
+                            "plane": "sts",
+                            "instance": "sts",
+                            "id": "sts/session/old",
+                            "incarnation": 2,
+                            "phase": "running",
+                            "ready": True,
+                            "code_ref": "1.5.0",
+                            "rss_bytes": 10,
+                            "age_s": 1.0,
+                            "strategy_digest": "sha256:old",
+                            "current_digest": "sha256:new",
+                        },
+                        {
+                            "plane": "sts",
+                            "instance": "sts",
+                            "id": "sts/session/new",
+                            "incarnation": 1,
+                            "phase": "running",
+                            "ready": True,
+                            "code_ref": "1.0.0",
+                            "rss_bytes": 10,
+                            "age_s": 1.0,
+                            "strategy_digest": "sha256:new",
+                            "current_digest": "sha256:new",
+                        },
+                        {
+                            "plane": "sts",
+                            "instance": "sts",
+                            "id": "sts/session/gone",
+                            "incarnation": 1,
+                            "phase": "running",
+                            "ready": True,
+                            "code_ref": "1.5.0",
+                            "rss_bytes": None,
+                            "age_s": 1.0,
+                            "strategy_digest": "sha256:pinned",
+                        },
+                        {
+                            "plane": "md",
+                            "instance": "md-1",
+                            "id": "md/conn/a",
+                            "incarnation": 1,
+                            "phase": "running",
+                            "ready": True,
+                            "code_ref": "0.1.0",
+                            "rss_bytes": 1,
+                            "age_s": 1.0,
+                        },
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"detail": "nope"})
+
+    _stub_client(monkeypatch, handler)
+    assert main(["workers", "--stale"]) == 0
+    out = capsys.readouterr().out
+    assert "sts/session/old" in out
+    assert "sts/session/gone" in out
+    assert "sts/session/new" not in out
+    assert "md/conn/a" not in out
 
 
 def test_workers_with_nothing_reported_is_not_an_error(

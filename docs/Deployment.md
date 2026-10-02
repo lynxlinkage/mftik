@@ -111,6 +111,12 @@ API 的 push、delete 和 remote connect 會把改動的 tree 以 `sts.registry.
 每個 STS（`packages/common/src/mftik/protocol/messages.py:1601`、
 `apps/sts/src/mftik_sts/rpc/registry.py:221`），所以不共用 API volume 的主機也收得到。
 
+STS 開機與 `sts.registry.sync` 會把 `registry/{public,private,pulled/<remote>}/<name>/`
+複製進 `registry/trees/<digest>/`，然後把舊目錄留在原地。compose 的 `api` 和 `sts`
+共用 `mftik_data`（`/var/lib/mftik`）時，那些目錄就是 API 的 `RegistryStore`；digest
+仍是 null 的 session 重新掛起時也還是從它們載入。這一步不刪目錄。清掉舊布局是 B10
+切換的事，由 API 搬自己的 store 時一起處理。
+
 ### deployPolicy
 
 `planes.json:16`–`22`：`startsecs: 5`、`healthWindowSeconds: 90`、

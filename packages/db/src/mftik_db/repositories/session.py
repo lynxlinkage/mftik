@@ -202,12 +202,16 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         st_paras: dict[str, Any] | None = None,
         restart: str = "never",
         instance: str | None = None,
+        strategy_digest: str | None = None,
+        env_generation: int | None = None,
     ) -> StsSessionRow:
         """Insert a live session.
 
         ``restart`` defaults to ``never`` (F11). The column also stores
         ``on_failure``, and a historical ``always`` if a caller still
-        passes one.
+        passes one. ``strategy_digest`` and ``env_generation`` default
+        to null so a caller that has not resolved a pin leaves the
+        columns empty.
         """
         row = StsSessionRow(
             session_id=session_id,
@@ -220,8 +224,26 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
             st_paras=dict(st_paras or {}),
             restart=restart,
             status=SessionStatus.LIVE.value,
+            strategy_digest=strategy_digest,
+            env_generation=env_generation,
         )
         return await self.add(row)
+
+    async def list_nonterminal(self) -> Sequence[StsSessionRow]:
+        """Rows whose status is not :meth:`SessionStatus.terminal`.
+
+        ``done``, ``failed``, ``interrupted`` and ``ack`` are terminal.
+        ``live`` and any later non-terminal word stay. Order is
+        ``session_id``.
+        """
+        terminal = tuple(SessionStatus.terminal())
+        stmt = (
+            select(StsSessionRow)
+            .where(StsSessionRow.status.notin_(terminal))
+            .order_by(StsSessionRow.session_id)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
 
     async def mark_finished(
         self,

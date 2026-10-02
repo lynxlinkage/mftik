@@ -1,20 +1,25 @@
-"""Tree replica, pins, GC, and deployable. Component: ``tmp_path`` only.
+"""Tree replica, pins, GC, and deployable. Component: ``tmp_path``.
 
-The probe's real interpreter is ``test_hostdisk_probe.py``.
+One test also writes a scratch sqlite row. The probe's real interpreter
+is ``test_hostdisk_probe.py``.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import sysconfig
+import threading
 from pathlib import Path
 
 import pytest
 from mftik.environment import EnvStamp, NodeEnv
+from mftik.protocol import StsRegistrySyncRequest, StsRegistryTreeOp
 from mftik.registry.digest import digest_files
 from mftik.registry.errors import RegistryDigestMismatch
-from mftik.registry.files import normalize_files
+from mftik.registry.files import normalize_files, read_tree
+from mftik.registry.qualify import qualify
 from mftik.registry.store import RegistryStore
 from mftik_sts.controller import SessionSpec
 from mftik_sts.hostdisk import (
@@ -27,6 +32,13 @@ from mftik_sts.hostdisk import (
     gc_env,
     pinned_code,
     rehang_code,
+)
+from mftik_sts.hostdisk.checks import MFTIK_DEV_RELEASE
+from mftik_sts.hostdisk.replica import TREES_LOCK
+from mftik_sts.hostdisk.sync import (
+    apply_registry_sync,
+    materialize_legacy_digest,
+    prepare_disk,
 )
 
 pytestmark = pytest.mark.component
@@ -241,3 +253,331 @@ def test_deployable_checks_the_disk_and_does_not_import(tmp_path: Path) -> None:
     assert refused.ok is False
     assert refused.reason == "requires: numpy"
     assert _modules("_mftik_reg_") == before
+
+
+def test_materialize_copies_one_digest_and_does_not_bind(
+    tmp_path: Path,
+) -> None:
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    replica = TreeReplica(tmp_path)
+    assert replica.path_of(added.digest) is None
+    assert materialize_legacy_digest(replica, added.digest)
+    assert replica.path_of(added.digest) is not None
+    assert replica.current(qualify(added.origin, added.type)) is None
+    assert Path(added.path).is_dir()
+
+
+def test_put_leaves_a_matching_tree_and_replaces_a_partial_one(
+    tmp_path: Path,
+) -> None:
+    replica = TreeReplica(tmp_path)
+    digest = _put(replica, _TINY)
+    dest = replica.path_of(digest)
+    assert dest is not None
+    (dest / "note.txt").write_text("keep", encoding="utf-8")
+    replica.put(digest, {"strategy.py": _TINY})
+    assert (dest / "note.txt").read_text(encoding="utf-8") == "keep"
+
+    files = {"strategy.py": _TINY, "lib.py": "VALUE = 1\n"}
+    other = digest_files(normalize_files(files))
+    broken = replica.tree_path(other)
+    broken.mkdir(parents=True)
+    (broken / "strategy.py").write_text("broken\n", encoding="utf-8")
+    replica.put(other, files)
+    assert digest_files(normalize_files(read_tree(broken))) == other
+    assert (broken / "lib.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_a_tmp_deleted_mid_write_is_not_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A peer that removes the temp dir must not leave a partial tree.
+
+    ``gc`` deletes every dot-directory, and a second ``put`` used to
+    ``rmtree`` the shared ``.{digest}.tmp``. Either one, mid-write, lets
+    ``mkdir(parents=True)`` recreate the temp with only the files still
+    to come. That directory must not be renamed onto ``trees/<digest>``.
+    The name directory is still there, so a later materialize publishes
+    the whole tree.
+    """
+    added = RegistryStore(tmp_path).add(
+        {"strategy.py": _TINY, "lib.py": "VALUE = 1\n"}
+    )
+    replica = TreeReplica(tmp_path)
+    original = Path.write_bytes
+    struck = False
+
+    def write_bytes(self: Path, data: bytes) -> int:
+        nonlocal struck
+        written = original(self, data)
+        if struck:
+            return written
+        tmp = self.parent
+        while tmp != tmp.parent and not tmp.name.endswith(".tmp"):
+            tmp = tmp.parent
+        if not tmp.name.endswith(".tmp"):
+            return written
+        struck = True
+        gone = threading.Event()
+
+        def strike() -> None:
+            shutil.rmtree(tmp, ignore_errors=True)
+            gone.set()
+
+        threading.Thread(target=strike).start()
+        assert gone.wait(2)
+        return written
+
+    monkeypatch.setattr(Path, "write_bytes", write_bytes)
+    assert materialize_legacy_digest(replica, added.digest) is False
+    published = replica.trees_dir / added.digest
+    assert not published.exists()
+    leftovers = [
+        path.name
+        for path in replica.trees_dir.iterdir()
+        if path.name.endswith(".tmp") or not path.name.startswith(".")
+    ]
+    assert leftovers == []
+
+    monkeypatch.setattr(Path, "write_bytes", original)
+    assert materialize_legacy_digest(replica, added.digest) is True
+    assert digest_files(normalize_files(read_tree(published))) == added.digest
+    assert (published / "strategy.py").read_text(encoding="utf-8") == _TINY
+    assert (published / "lib.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert Path(added.path).is_dir()
+
+
+def test_gc_waits_while_put_holds_the_trees_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {"strategy.py": _TINY}
+    digest = digest_files(normalize_files(files))
+    replica = TreeReplica(tmp_path)
+    writing = threading.Event()
+    release = threading.Event()
+    at_gc = threading.Event()
+    errors: list[BaseException] = []
+    original = Path.write_bytes
+
+    def write_bytes(self: Path, data: bytes) -> int:
+        written = original(self, data)
+        if ".tmp" not in self.as_posix():
+            return written
+        writing.set()
+        assert release.wait(2)
+        return written
+
+    monkeypatch.setattr(Path, "write_bytes", write_bytes)
+
+    def run_put() -> None:
+        try:
+            replica.put(digest, files)
+        except BaseException as exc:
+            errors.append(exc)
+            release.set()
+
+    def run_gc() -> None:
+        assert writing.wait(2)
+        at_gc.set()
+        replica.gc(frozenset({digest}))
+
+    putter = threading.Thread(target=run_put)
+    cleaner = threading.Thread(target=run_gc)
+    putter.start()
+    assert writing.wait(2)
+    cleaner.start()
+    assert at_gc.wait(2)
+    try:
+        acquired = TREES_LOCK.acquire(timeout=0.05)
+        if acquired:
+            TREES_LOCK.release()
+        assert not acquired
+        assert cleaner.is_alive()
+        assert any(
+            path.name.endswith(".tmp") for path in replica.trees_dir.iterdir()
+        )
+        assert not (replica.trees_dir / digest).exists()
+    finally:
+        release.set()
+    putter.join(2)
+    cleaner.join(2)
+    assert errors == []
+    assert not putter.is_alive()
+    assert not cleaner.is_alive()
+    published = replica.path_of(digest)
+    assert published is not None
+    assert digest_files(normalize_files(read_tree(published))) == digest
+
+
+async def test_a_spawn_guard_copies_a_name_directory_before_it_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pin whose bytes are only in the API store is runnable, and stays there."""
+    from types import SimpleNamespace
+
+    from mftik.procman import Supervisor
+    from mftik_sts.controller import StsOrchestrator
+
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    monkeypatch.setenv(MFTIK_DEV_RELEASE, "1")
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    orch = StsOrchestrator(
+        Supervisor(tmp_path / "work", plane="sts", instance="sts")
+    )
+    spec = SessionSpec(
+        session_id="abc123",
+        instance="sts",
+        strategy=qualify(added.origin, added.type),
+        strategy_digest=added.digest,
+    )
+    assert await orch._code_guard(SimpleNamespace(spec=spec)) is None  # noqa: SLF001
+    assert TreeReplica(tmp_path).path_of(added.digest) is not None
+    assert Path(added.path).is_dir()
+    assert (
+        TreeReplica(tmp_path).current(qualify(added.origin, added.type)) is None
+    )
+
+
+def test_prepare_disk_copies_a_legacy_tree_and_leaves_it(tmp_path: Path) -> None:
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    assert prepare_disk(tmp_path)
+    replica = TreeReplica(tmp_path)
+    assert replica.current(qualify("private", added.type)) == added.digest
+    assert Path(added.path).is_dir()
+    assert replica.path_of(added.digest) is not None
+
+
+def _class_source(class_name: str) -> str:
+    return (
+        "from mftik.strategy import Strategy\n"
+        f"class {class_name}(Strategy):\n"
+        "    pass\n"
+    )
+
+
+def test_a_full_retain_on_shared_data_keeps_the_api_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The name directories are the API store. A retain sync leaves them."""
+    from mftik_api.orchestrate import resolve_start_pins
+
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    store = RegistryStore(tmp_path)
+    public = store.add({"strategy.py": _class_source("PublicOne")}, origin="public")
+    private = store.add(
+        {"strategy.py": _class_source("PrivateOne")}, origin="private"
+    )
+    pulled = store.add({"strategy.py": _class_source("PulledOne")}, origin="peer")
+    added = (public, private, pulled)
+    keys = [qualify(rec.origin, rec.type) for rec in added]
+    apply_registry_sync(
+        StsRegistrySyncRequest(trees=[], reload=False, retain=keys),
+        keep_digests=frozenset(),
+        data_dir=tmp_path,
+    )
+    listed = {
+        (rec.origin, rec.type): rec.digest
+        for rec in RegistryStore(tmp_path).list_all()
+    }
+    for rec in added:
+        assert listed[(rec.origin, rec.type)] == rec.digest
+        assert Path(rec.path).is_dir()
+        digest, _generation = resolve_start_pins(qualify(rec.origin, rec.type))
+        assert digest == rec.digest
+
+
+def test_a_partial_sync_does_not_delete_legacy_dirs(tmp_path: Path) -> None:
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    request = StsRegistrySyncRequest(
+        trees=[
+            StsRegistryTreeOp(
+                op="upsert",
+                origin="private",
+                name=added.type,
+                digest=added.digest,
+                files={"strategy.py": _TINY},
+            )
+        ],
+        reload=False,
+    )
+    apply_registry_sync(request, keep_digests=frozenset(), data_dir=tmp_path)
+    assert Path(added.path).is_dir()
+
+
+def test_an_unreadable_legacy_tree_is_left_in_place(tmp_path: Path) -> None:
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    junk = tmp_path / "registry" / "private" / "Junk"
+    junk.mkdir()
+    (junk / "readme.txt").write_text("not a strategy\n", encoding="utf-8")
+    key = qualify("private", added.type)
+    request = StsRegistrySyncRequest(trees=[], reload=False, retain=[key])
+    apply_registry_sync(request, keep_digests=frozenset(), data_dir=tmp_path)
+    assert Path(added.path).is_dir()
+    assert junk.is_dir()
+
+
+async def test_a_null_digest_session_rehangs_from_the_name_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live row with a null digest still loads by name after a retain sync."""
+    from types import SimpleNamespace
+
+    from db_harness import a_database, an_owner
+    from mftik.procman import Supervisor
+    from mftik_db.repositories.session import StsSessionRepository
+    from mftik_sts.controller import StsOrchestrator
+    from mftik_sts.controller.status import DbStatusStore
+    from mftik_sts.hostdisk.identity import STRATEGY_DIGEST_ENV
+    from mftik_sts.session_worker.process import load_strategy
+
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    monkeypatch.delenv(STRATEGY_DIGEST_ENV, raising=False)
+    added = RegistryStore(tmp_path).add({"strategy.py": _class_source("NameLoad")})
+    key = qualify(added.origin, added.type)
+    database_cm = a_database()
+    database = await database_cm.__aenter__()
+    try:
+        async with database.scope() as session:
+            await an_owner(session)
+            await StsSessionRepository(session).create_live(
+                session_id="abc123",
+                created_by=1,
+                type=key,
+                instance="sts",
+                strategy_digest=None,
+                env_generation=None,
+            )
+        orch = StsOrchestrator(
+            Supervisor(tmp_path / "work", plane="sts", instance="sts"),
+            store=DbStatusStore(database.scope),
+        )
+        digests, generations = await orch.code_pins()
+        assert digests == frozenset()
+        assert generations == frozenset()
+        apply_registry_sync(
+            StsRegistrySyncRequest(trees=[], reload=False, retain=[key]),
+            keep_digests=digests,
+            data_dir=tmp_path,
+        )
+        assert Path(added.path).is_dir()
+        spec = SessionSpec(
+            session_id="abc123",
+            instance="sts",
+            strategy=key,
+            strategy_digest=None,
+            env_generation=None,
+        )
+        assert await orch._code_guard(SimpleNamespace(spec=spec)) is None  # noqa: SLF001
+        assert STRATEGY_DIGEST_ENV not in orch._worker_env(spec)  # noqa: SLF001
+        before = {
+            name for name in sys.modules if name.startswith("_mftik_reg_")
+        }
+        try:
+            loaded = load_strategy(key)
+            assert type(loaded).__name__ == "NameLoad"
+        finally:
+            for name in list(sys.modules):
+                if name.startswith("_mftik_reg_") and name not in before:
+                    del sys.modules[name]
+    finally:
+        await database_cm.__aexit__(None, None, None)

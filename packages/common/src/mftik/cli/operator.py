@@ -14,9 +14,10 @@ trading layer. It reads, and it names an operator request:
   serves the latest report of every plane on ``GET /workers``; this
   command prints that list. The S-2 pin file is not read here.
   ``code_ref`` on those rows is the platform release the worker was
-  spawned from. This module does not
-  carry ``strategy_digest`` or ``env_generation``; those axes are F39
-  and belong to IF-16. B5-10 is what extends ``--stale`` to the digest.
+  spawned from. ``--stale`` also reads ``strategy_digest`` and
+  ``current_digest`` when the JSON row carries them (F39). It does
+  not filter on ``code_ref``; that comparison stays
+  :func:`select_workers` and still raises ``NotImplementedError("IF-15")``.
 * an MD restart asks for one connection to come back in place. Placement
   stays the MD controller's (F22); this command does not move an atom.
 * a TD drain names one account. Whether its trading layer is up is the
@@ -31,12 +32,11 @@ trading layer. It reads, and it names an operator request:
 * **O1 — ``workers`` without ``--stale`` lists every reported worker.**
   Order is the order the caller handed in. Nothing is dropped because
   of its release.
-* **O2 — ``--stale`` lists, and does not restart (F24).** A worker is
-  stale when its ``code_ref`` is not the latest release. The platform
-  does not restart old MD connections or TD accounts on its own; this
-  command only prints the ones a person might then restart, or leave
-  until they finish. ``latest is None`` is refused: a release that
-  could not be read is not "every worker is stale".
+* **O2 — ``--stale`` lists, and does not restart (F24).** The command
+  lists a worker whose ``strategy_digest`` is set and is not
+  ``current_digest`` (missing counts as not current). It does not
+  restart anything. A row with no digest is not listed: release
+  staleness is :func:`select_workers` and is still IF-15 (B8-06).
 * **O3 — ``md restart`` is one connection, in place (F24).** The result
   names that conn and no other. It is not a placement change.
 * **O4 — ``td drain`` is one account (F27).** The result names that
@@ -48,9 +48,11 @@ trading layer. It reads, and it names an operator request:
   it (F32).** A blank name is refused: it would not name a machine.
   The result does not cancel orders. Nothing here treats a missing
   ``procman.report`` as a reason to reclaim.
-* **O6 — code identity on this surface is ``code_ref`` only.** Comparing
-  a session's pinned strategy digest to the current tree is F39. This
-  module does not read it, store it, or decide it.
+* **O6 — release identity on :func:`select_workers` is ``code_ref``.**
+  ``workers --stale`` compares ``strategy_digest`` to ``current_digest``
+  on the JSON row. It does not call :func:`select_workers` with
+  ``stale=True``. The wire report may omit both digest keys; then
+  ``--stale`` lists nothing.
 """
 
 from __future__ import annotations
@@ -213,27 +215,42 @@ def _rows(body: object) -> list[tuple[ProcmanWorker, dict[str, object]]]:
     return [(_worker_from_row(row), row) for row in raw]
 
 
+def _digest_stale(row: dict[str, object]) -> bool:
+    """True when the row names a digest that is not the current tree.
+
+    A missing or empty ``strategy_digest`` is not stale: this is not
+    the release filter. A missing or empty ``current_digest`` means
+    the pinned digest is no longer current.
+    """
+    pinned = row.get("strategy_digest")
+    if not isinstance(pinned, str) or pinned == "":
+        return False
+    current = row.get("current_digest")
+    if not isinstance(current, str) or current == "":
+        return True
+    return pinned != current
+
+
 def workers(args: argparse.Namespace) -> int:
     """``mftik workers [--stale]``.
 
     Without ``--stale``, print every worker ``GET /workers`` returned,
     in that order. :func:`select_workers` is called with ``stale=False``
-    and does not drop a row because of its release (O1). ``--stale`` is
-    B8-06 and still refuses. Listing does not restart anything (F24).
+    and does not drop a row because of its release (O1). ``--stale``
+    lists rows :func:`_digest_stale` accepts and does not call
+    :func:`select_workers` with ``stale=True`` (that release filter is
+    still IF-15). Listing does not restart anything (F24).
     """
-    if args.stale:
-        fail(
-            "workers --stale is not implemented (IF-15); "
-            "B8-06 lists workers not on the latest release"
-        )
-        return EXIT_ERROR
     _profile, client = connected(args.profile)
     with client:
         body = client.get("/workers")
     parsed = _rows(body)
-    chosen = select_workers(
-        [worker for worker, _row in parsed], stale=False, latest=None
-    )
+    if args.stale:
+        chosen = [worker for worker, row in parsed if _digest_stale(row)]
+    else:
+        chosen = select_workers(
+            [worker for worker, _row in parsed], stale=False, latest=None
+        )
     # ``select_workers`` returns the same objects it was given. The API
     # row still carries plane, instance and age, which the worker does
     # not.

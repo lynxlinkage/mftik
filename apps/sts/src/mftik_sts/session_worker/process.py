@@ -303,12 +303,30 @@ class CrossThreadBroker:
         await self.publish(topic, envelope)
 
 
-def load_strategy(name: str | None) -> Strategy:
-    """Resolve ``name``, loading the local registry if it is not built in.
+#: Same strings as :mod:`mftik_sts.hostdisk.identity`. Inlined so this
+#: process does not import :mod:`mftik_sts.hostdisk`, whose package init
+#: loads the controller and, through it, :mod:`mftik_db` (B5-09).
+STRATEGY_DIGEST_ENV = "MFTIK_STRATEGY_DIGEST"
+ENV_GENERATION_ENV = "MFTIK_ENV_GENERATION"
 
-    The worker calls :func:`mftik_sts.impl.resolve`. It does not import
-    :mod:`mftik.registry` itself.
+
+def load_strategy(name: str | None) -> Strategy:
+    """Resolve ``name``.
+
+    When ``MFTIK_STRATEGY_DIGEST`` is set, load ``registry/trees/<digest>``
+    through :func:`mftik_sts.pinned_strategy.load_pinned`. That puts the
+    pinned generation's ``site-packages`` on ``sys.path`` and does not
+    call :func:`mftik_sts.runtime_env.refresh`. This module does not
+    import the registry itself. With no digest, fall back to
+    :func:`mftik_sts.impl.resolve` and
+    :func:`mftik_sts.impl.load_local_registry`, which is how a built-in
+    strategy and a tree planted only in the name layout still start.
     """
+    digest = os.environ.get(STRATEGY_DIGEST_ENV, "").strip()
+    if digest:
+        from mftik_sts.pinned_strategy import load_pinned
+
+        return load_pinned(digest)
     from mftik_sts.impl import load_local_registry, resolve
 
     try:

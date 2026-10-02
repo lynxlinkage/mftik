@@ -35,7 +35,6 @@ from mftik.strategy.artifacts import get_store
 from mftik_db.schema import SchemaTooOld, require_sts_schema
 
 from mftik_sts.registry_catchup import catch_up_until_matched
-from mftik_sts.runtime_env import extras_names, refresh
 
 SOURCE = "sts"
 #: Which STS this process is. ``MFTIK_INSTANCE``, defaulting to the
@@ -253,19 +252,6 @@ async def amain() -> bool:
         except InstanceAlreadyServing as exc:
             logger.error("%s", exc)
             return False
-        loaded, stamp = refresh()
-        if loaded:
-            logger.info(
-                "STS loaded %d registry strategy(ies): %s",
-                len(loaded),
-                ", ".join(loaded),
-            )
-        if stamp.generation:
-            logger.info(
-                "STS env generation=%s extras=%s",
-                stamp.generation,
-                ", ".join(sorted(extras_names())) or "(none)",
-            )
         logger.info("STS started instance=%s", INSTANCE)
         from mftik.clock import SystemClock
         from mftik.procman import CloseMode, publish_reports
@@ -294,6 +280,16 @@ async def amain() -> bool:
             bind_orchestrator(None)
             await supervisor.close(CloseMode.DETACH)
             return False
+        from mftik_sts.hostdisk.sync import prepare_disk
+
+        # Copy legacy ``<origin>/<name>/`` trees into the digest layout
+        # before RPC. The old directories stay. They are the API store
+        # on a shared volume, and a null-digest session still rehangs
+        # from them. B10 removes them when the API moves its own store.
+        if not await asyncio.to_thread(prepare_disk):
+            logger.warning(
+                "STS legacy registry was not fully copied into the digest layout"
+            )
         subjects = control_subjects(SOURCE, INSTANCE, ROLE)
         if not subjects:
             logger.warning(
