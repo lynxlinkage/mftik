@@ -1,12 +1,12 @@
 # REFACTOR_TICKETS — 平面進程化重構的工作票
 
-> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.32。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
+> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.33。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
 >
 > 每張票都有描述、範圍、驗收、依賴。驗收寫成別人能檢查的事：測試名稱、grep 結果、量測數字、文件章節。
 
 ## 怎麼用這份文件
 
-**編號：** `<批次>-<序號>`。每張票都已開成 GitHub issue（#154 到 #253，以及後來加的 #275 到 #277、#363，label 為 `refactor` 和 `batch:<批次>`），標題後的括號是 issue 編號。批次依序是 B0、B1、RM、B2、IF、B3 到 B10（計畫 §11）。依賴只列直接依賴。
+**編號：** `<批次>-<序號>`。每張票都已開成 GitHub issue（#154 到 #253，以及後來加的 #275 到 #277、#363、#365、#366、#367，label 為 `refactor` 和 `batch:<批次>`），標題後的括號是 issue 編號。批次依序是 B0、B1、RM、B2、IF、B3 到 B10（計畫 §11）。依賴只列直接依賴。
 
 **RM（清場）的共同驗收：**
 
@@ -32,10 +32,10 @@
 | RM 清場 | 10 | 刪掉要重寫的代碼和測試，留下「沒有 session 機制」的基線 |
 | B2 測試 | 5 | 測試標準、`FakeClock`、共用 NATS 連線、tier 與 CI 閘門 |
 | IF 介面 | 16 | 新抽象層只定義介面，回傳 null data，附 xfail 契約測試 |
-| B3 procman | 7 | shim、Supervisor、reattach、報告、准入、Strategon 實機驗證 |
+| B3 procman | 9 | shim、Supervisor、reattach、報告、准入、Strategon 實機驗證、不設 FATAL 的重啟策略、暫定數值定案 |
 | B4 骨架 | 10 | paper 上跑通 deploy → 下單 → 成交 → end；`pv` 的 deploy 比對與 transport 檢查 |
 | B5 STS | 11 | 交付策略、event log、offload、hook 預算、失聯通知、crash 與重啟、策略測試改寫、策略樹版本釘住、主機磁碟的 operator 路徑 |
-| B6 TD | 8 | 常駐層、交易層、`cancel_session`、drain-replace、backfill、狀態廣播、cancel-on-disconnect |
+| B6 TD | 9 | 常駐層、交易層、`cancel_session`、drain-replace、backfill、狀態廣播、cancel-on-disconnect、readiness 與進程內重試 |
 | B7 MD atom | 11 | atom 模型、各 venue adapter、通用 join、tape、fetch worker |
 | B8 MD 編排 | 7 | orchestrator、placement、reconciler、到期、常駐訂閱、手動 restart |
 | B9 Selector | 4 | option_chain、rolling_future、狀態持久化、`md.universe` |
@@ -587,6 +587,35 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 - **依賴：** B3-03、IF-15
 - **決策：** F24、F27
 
+### B3-08 procman：不設 FATAL 的重啟策略（#365）
+
+- **描述：** #286 的定案（F42）。MD 連線、TD 帳號、MD fetch worker 是共用基礎設施，crash 之後一直重試，不進 FATAL。
+- **範圍：**
+  - `RestartIntensity`：`max_restarts` 可以是 `None`（不進 FATAL）；新增 backoff 上限 `max_backoff_s`、jitter 比例、歸零條件 `stable_s`（連續 RUNNING 多久之後 `attempt` 歸零）、告警門檻 `alert_after`
+  - `plan_restart` 的等待時間：`min_backoff_s × 2^(attempt−1)`，截在 `max_backoff_s`，再乘上 `[1−jitter, 1+jitter]` 的亂數；亂數來源可注入，測試用固定值
+  - `attempt` 的計算由 procman 提供：依重啟紀錄和每個 incarnation 的 RUNNING 時長算出，不再由各 orchestrator 自己記
+  - `attempt` 到 `alert_after` 時寫一條 crash-loop 的 error log（帶 worker id、attempt、最後一次的 exit），歸零時寫一條解除的 warning log，Alert 管線直接比對
+  - 新增共用常數 `INFRA_RESTART`：1 秒、上限 60 秒、±20%、`stable_s` 600 秒、`alert_after` 5、`max_restarts=None`；MD fetch（`fetch_ctl.py`）與 TD 帳號（`mftik_td.controller.defaults`）改用它
+  - STS 維持 F11（`sts_restart_intensity` 不變）
+- **驗收：**
+  - 契約測試：`max_restarts=None` 時任何次數都不進 FATAL；等待時間單調不減且不超過上限乘上 `1+jitter`；連續 RUNNING 滿 `stable_s` 後下一次 crash 的等待回到 `min_backoff_s` 附近；告警在第 `alert_after` 次觸發一次、歸零時解除一次
+  - 現有 STS 的 F11 測試不變、全綠
+  - MD fetch 與 TD 帳號的 orchestrator 不再有自己的 restart 數字
+- **依賴：** B3-02
+- **決策：** F42
+
+### B3-09 暫定數值定案與整理（#366）
+
+- **描述：** #286 變成所有暫定數值的收容所，代碼裡有 56 個常數標著 `pending Yi Te (#286)`。除了 F42 改值的那幾個，其餘以現值為預設。
+- **範圍：**
+  - 拿掉 `apps/`、`packages/` 裡所有 `pending Yi Te` 與指向 #286 的「待決」標記；註解改成說明這個值的依據（量測、交易所文件、或「預設值，依量測調整」）
+  - 在計畫附錄 D 填一張表：常數名稱、值、位置、用途、依據
+  - F42 要改值的常數（重啟曲線、TD 帳號與 MD 連線的 heartbeat timeout）由 B3-08、B6-09、B8-02 改；這張票只記錄現值，不改值
+  - `scripts/` 或 CI 加一個檢查：`pending Yi Te` 不得出現在 `apps/`、`packages/`
+- **驗收：** `git grep -n "pending Yi Te"` 在 `apps/`、`packages/` 沒有結果；附錄 D 列出的常數和代碼一致；CI 檢查在加回標記時會失敗。
+- **依賴：** —
+- **決策：** F42
+
 ---
 
 ## B4 端到端骨架（只接 paper）
@@ -815,6 +844,22 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 - **依賴：** B6-02
 - **決策：** F13
 
+### B6-09 帳號 worker 的 readiness 與進程內重試（#367）
+
+- **描述：** F42。ready 只代表本地初始化完成；交易所連不上、API key 被拒都不是 FAILED。
+- **範圍：**
+  - `mftik_td.account.entry`：resident 的第一次 keepalive 與 `build_session` 失敗不再讓進程以 1 結束；worker 照樣 ready，經 `td.account.state.*` 報 `unavailable`，在進程內依 F42 的曲線重試（連線維持 60 秒後歸零）
+  - API key 被拒：報 `unavailable(auth_rejected)`，停止重試認證，直到人工 restart
+  - FAILED 只留給設定錯誤：`apis` 列不存在、venue 不認得、argv 不合法
+  - `ACCOUNT_HB_TIMEOUT_S` 改為 10 秒；TD 帳號的重啟改用 B3-08 的 `INFRA_RESTART`
+- **驗收：**
+  - integration：spawn 時交易所連不上，worker 仍然 ready、廣播 `unavailable`；交易所恢復後不經重啟回到 `ready`
+  - integration：key 被拒時只嘗試一次認證，廣播 `unavailable(auth_rejected)`，之後不再送認證請求
+  - `apis` 列不存在時記為 FAILED、不重啟
+  - event loop 卡 5 秒不會被 procman 殺掉；卡超過 10 秒才會
+- **依賴：** B3-08、B6-06
+- **決策：** F14、F42
+
 ---
 
 ## B7 MD atom
@@ -862,17 +907,20 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 ### B8-02 placement 與連線 worker 的生命週期（#239）
 
 - **驗收：** 容量不夠時才開新連線；atom 一旦放上去就不搬（F22）；連線上沒有 atom 時 worker 結束；controller 不對 `pv` 不同的連線 worker 推 desired，也不另開新 worker 承接它的 atom；`md.intent.put` 落在還有這種 worker 的 `(venue, endpoint)` 時，以 `protocol_mismatch` 拒絕，訊息列出要 `restart` 的 worker（F41）。
-- **依賴：** B8-01、B4-10
-- **決策：** F17、F22、F41
+- **readiness 與重啟（F42）：** 連線 worker 的 ready 只代表本地初始化完成，不等第一次連上交易所；連不上時照樣 ready，經 `md.w.*` 報 `down`。crash 重啟用 B3-08 的 `INFRA_RESTART`，heartbeat timeout 10 秒。驗收：spawn 時交易所連不上不會 FAILED，恢復後不經重啟開始發佈；event loop 卡 5 秒不會被殺。
+- **依賴：** B8-01、B4-10、B3-08
+- **決策：** F17、F22、F41、F42
 
 ### B8-03 reconciler 完整版（#240）
 
+- **範圍（重連節奏，F42）：** socket 斷線後在進程內重連，等待依 F42 的曲線（1 秒起、×2、上限 60 秒、±20% jitter），連線維持 60 秒後歸零。paper 連線 worker 的 `_RESUBSCRIBE_PAUSE_S`（0.05 秒）不沿用到真實 venue。
 - **範圍（`seq`，#288）：** `SeqClock` 改以 (atom, 連線 epoch) 起算：重連（epoch 推進）時每個 atom 歸零，單一 atom 的 resync 只歸零那個 atom。`conn.py` 的 C6、`conn_worker.py` 的模組 docstring 改成這個定義；paper 連線 worker 重連後也重新起算。
 - **驗收：**
   - generation 規則（F18）、連線 epoch、token bucket 限速、單一 atom 的 resync；重連後自動補齊。
   - 重連後該連線上每個 atom 的第一則 publication 是 `SEQ_ORIGIN`；resync 只讓那個 atom 重新起算，同一條連線上的其他 atom 照常連續；同一條連線上 `seq` 連續。三者都有契約測試。
+  - 連續斷線時，重連間隔依 F42 成長並帶 jitter；連線維持 60 秒後下一次斷線從 1 秒附近開始。
 - **依賴：** B8-02、B7-02a 到 B7-02g
-- **決策：** F18、F25
+- **決策：** F18、F25、F42
 
 ### B8-04 以 listing 驅動到期（#241）
 

@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.32（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F41）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.33（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F42）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
 > **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。**RM 清場已完成**，所以描述現況的章節（§1、§5 到 §8、附錄 A、B）說的是 `a0cbfb2`，不是分支上的代碼；清場後還剩什麼見 `docs/baseline/remaining.md`（RM-10，#173）。
+>
+> **v0.33（#286，MD / TD 的重啟與 readiness）：** 新增 F42：MD 連線、TD 帳號、MD fetch worker 不設 FATAL，改成有上限的 backoff 加 crash-loop 告警；ready 不包含交易所連線；TD 帳號與 MD 連線的 heartbeat timeout 改為 10 秒；其餘暫定數值以現值為預設，收進新的附錄 D。§4.3、§6.3 隨之更新；新票 B3-08（#365）、B3-09（#366）、B6-09（#367）。
 >
 > **v0.32（#288，per-atom `seq`）：** F25 的「重新起算」寫精確成以 (atom, 連線 epoch) 起算：重連、單一 atom 的 resync、換 incarnation 之後都從 1 開始；策略端只用 `seq != last + 1` 判斷不連續。`seq` 留在共用 envelope（optional），`owner` 不上線。§3.3、§5.3、§6.3 隨之更新；實作併入 B8-03（#240）。
 >
@@ -63,6 +65,7 @@
 | F39 | 「worker 跑哪一份代碼」分成三個軸：平台 release（`code_ref`）、策略樹 `strategy_digest`、extras `env_generation`。策略樹與 extras 的目錄權威維持在 API；session 在 start 時釘住 `(strategy_digest, env_generation)`，重新掛起沿用；Supervisor 記錄 worker 實際跑的版本；STS 磁碟副本改以 digest 定址，被釘住的版本不被覆蓋或回收；STS controller 不 import 策略代碼 | §3.3、§5.7；IF-16（#275）、B5-10（#276） |
 | F40 | STS controller 服務 operator 對主機磁碟的所有路徑：registry 副本、extras、artifact 的 list / read / 上傳 / 刪除、event log 讀取、未完成上傳的清理；不另開 files worker。策略仍在自己的 worker 裡直接讀寫 artifact，而且可以寫任何 key（全域寫入，刻意保留） | §5.7；B5-11（#277） |
 | F41 | `pv` 在兩個地方擋。**deploy 時：** API 把自己的 `pv` 和 session 會用到的 STS controller、MD / TD controller、TD 帳號 worker 比對，不符就以 `protocol_mismatch` 拒絕，不 spawn worker、不寫 intent；`WorkerSpec` 記下 worker 的 `pv`，經 `procman.report` 帶出；某個 `(venue, endpoint)` 上還有 `pv` 不同的 MD 連線 worker 時，MD controller 對落在那裡的 `md.intent.put` 以 `protocol_mismatch` 拒絕，不另開新 worker 承接。**執行中：** `pv` 改放 NATS header `Mftik-Pv`，由 transport 蓋上、在任何解碼之前檢查；header 缺少或不符的 frame 直接丟棄，記 log（依 subject 與 `pv` 限流）並計數，不回錯誤。request 收到不符的 reply 時，transport 對呼叫端拋出本地錯誤。envelope 的 `pv` 欄位刪除 | body 裡的 `pv` 有預設值，解碼之後就分不出「缺少」和「相符」，所以檢查只能在解碼之前，而所有訊息都會經過、又還沒解碼的地方只有 transport。丟棄而不回錯誤，`mftik.broker.handler` 的 H5、H6 不變，fan-out 也一併涵蓋。代價是送錯版本的 request 會 timeout、廣播只被計數，所以要靠 deploy 時的比對先擋（§4.6）。新 controller 推不到舊 `pv` 連線 worker 的 desired、也收不到它的狀態廣播，不知道它持有哪些 atom；另開新 worker 承接會讓同一個 atom 有兩個發佈者和兩個 tape writer（違反 F22、§6.3），所以整個 `(venue, endpoint)` 擋到人工 `restart`（F24）為止；B4-10（#363）、B8-02（#239） |
+| F42 | MD 連線、TD 帳號、MD fetch worker 不設 FATAL：crash 後第 n 次重啟前等 1 秒 × 2^(n−1)，上限 60 秒，±20% jitter；連續 RUNNING 滿 10 分鐘 n 才歸零；n 到 5 發 crash-loop 告警，歸零時解除。ready 只代表本地初始化完成（設定與憑證載入、NATS subject 答得到），不包含交易所連線：連不上由 F14 的狀態廣播回報，在進程內依同一條曲線重試（連線維持 60 秒後歸零）；FAILED 只留給設定錯誤；API key 被拒時照樣 ready，報 `unavailable(auth_rejected)`，不再重試認證。TD 帳號與 MD 連線的 heartbeat timeout 為 10 秒。STS 維持 F11。其餘暫定數值以現值為預設，列在附錄 D | 它們是共用基礎設施：FATAL 會讓所有依賴的 session 停到有人處理，TD 還會留下策略撤不掉的掛單（F37 預設關閉）；crash 重啟用的是當下 controller 的 release，修正版上線後會自己恢復。jitter 避免相關的 crash（同一個壞 frame 打在多條連線、同一個 bug 影響多個帳號）同步重連，撞上 per-IP 的連線速率限制。ready 若包含交易所連線，spawn 時遇到維護或網路抖動就會 FAILED 且永不重啟。10 秒和 F14 收件端的靜默判定一致，procman 不會比收件端先下手（§4.3）；B3-08（#365）、B3-09（#366）、B6-09（#367）、B8-02（#239）、B8-03（#240） |
 
 ## 0. 摘要
 
@@ -355,10 +358,12 @@ STOPPED ─▶ STARTING ─ready─▶ RUNNING ─SIGTERM─▶ STOPPING ─▶ 
 | kind | restart | heartbeat 判死 | 說明 |
 |---|---|---|---|
 | STS `session` | 依 deploy 的 `restart`：`never` → failed；`on_failure` → 平台清場後從 `on_start` 重新掛起（§5.2，F10） | 只看 ingress thread 的 beat（`hb_timeout_s` 只用來抓整個進程卡死）；hook 時間預算依 F15；ingress 與 session 同生共死（§5.3 I1 到 I4） | 不 rebuild：重新掛起不帶任何舊狀態（範圍 4、F3、F10） |
-| MD `conn` | `on_failure`：指數 backoff，加上 restart intensity | loop heartbeat 逾時 → kill → 重啟 | 重啟後由 reconciler 自動補回訂閱 |
+| MD `conn` | `on_failure`，不設 FATAL（F42）：第 n 次等 1 秒 × 2^(n−1)，上限 60 秒，±20% jitter；連續 RUNNING 滿 10 分鐘後 n 歸零；n 到 5 發 crash-loop 告警 | loop heartbeat 逾時（10 秒）→ kill → 重啟 | 重啟後由 reconciler 自動補回訂閱 |
 | TD `account` | `on_failure`：同上 | 同上 | Supervisor 確認舊 PID 消失後才啟動新 incarnation（§7.1，F36） |
 
-MD/TD 用 readiness 區分初始化失敗和運行中崩潰（prototype §4）：ready 之前死掉記為 FAILED，不重啟（通常是設定錯或帳號被拒）；ready 之後死掉記為 CRASHED，依策略重啟。
+MD/TD 用 readiness 區分初始化失敗和運行中崩潰（prototype §4）：ready 之前死掉記為 FAILED，不重啟；ready 之後死掉記為 CRASHED，依策略重啟。ready 只代表本地初始化完成：argv 與設定解析完、憑證載入、NATS subject 答得到（F42）。交易所連線不算在 ready 裡，所以 FAILED 只會是設定錯誤（例如 `apis` 列不存在、venue 不認得）。交易所連不上（維護、網路抖動）或 API key 被拒都不是 FAILED：worker 照樣 ready，經 F14 的狀態廣播報 `down` / `unavailable`，在進程內重試；key 被拒時報 `unavailable(auth_rejected)`，不再重試認證，避免帳號被鎖，等人工換 key 後 restart。
+
+MD fetch worker 也套用 F42。STS session 維持 F11（5 次／600 秒，最短 1 秒），因為 session 的 crash 多半是策略自己的 bug，放棄重啟正好把它隔離。
 
 ### 4.4 Detach / Reattach 協定
 
@@ -971,6 +976,7 @@ self.td.state(api_id)
   - observed 以交易所 ack 為準、以連線 epoch 為鍵，只有 worker 看得到。
   - 重連後的補訂，以及 book 出現缺口時的 resync（先退訂再重訂），都是對單一 atom 的 reconciler 動作，可以在本地完成。現在 Deribit、Bybit、OKX、Bitget 的 adapter 也是在 socket 裡做。
   - controller 重啟時訂閱不會抖動。
+- **重連節奏（F42）：** socket 斷線後在進程內重連，等待時間和 crash 重啟同一條曲線（1 秒起、×2、上限 60 秒、±20% jitter），連線維持 60 秒後歸零。交易所整體斷線時，同一台主機上的連線 worker 會同時重連，jitter 用來錯開它們。
 - **reconciler：** 比對 `desired(gen)` 和 `observed`。observed 以交易所 ack 為準，並以連線 epoch 為鍵，舊 epoch 晚到的 ack 一律丟棄。差異合併成批次，經 token bucket 限速後送出。重連後 observed 歸零，下一輪 diff 會自動補齊。每個 atom 回報 `pending`、`subscribed`、`first_msg_at`、`last_msg_at`、`error`。現行的 `WireLedger` 就是這個 observed set，可以搬過來繼續用。
 - **狀態廣播（F14）：** 連線 worker 單向廣播自己的狀態（incarnation、連線狀態、狀態版本號），狀態變化時立即發一次，平時每 2 秒一次；atom 的狀態變化另外以事件發出（§5.6）。
 - **解碼與發佈：** 每個 frame 只解碼一次，發佈到 atom subject，envelope 帶 per-atom 的 `seq`，以 (atom, 連線 epoch) 起算（F25）。`owner` 不上線：envelope 的 `source` 就是 worker_id，incarnation 在 `md.w.*` 的狀態廣播裡。需要錄的 atom（`trade`、`aggtrade`、`liquidation`，F20）append 到該區域的 Redis tape，key 改成 `atom_id`。
@@ -2040,3 +2046,7 @@ C.4 第 1 名那個 61 秒的 `test_td_orphan_reaper.py::test_a_revived_lease_lo
 | 15 | `test_dist_version.py::test_the_tag_is_the_wheel_version` | 1.05 |
 
 **C.4 的四個主因有兩個整批消失。** lease 心跳（基線 8 個測試、14.2 秒）在 RM-02、RM-06、RM-07 之後一個都不剩；子進程那一類只剩 `test_dist_version` 的兩次 `uv build`（`SubprocessSpawner` 隨 RM-04 走）。剩下最慢的仍然是「真的 sleep」（`chase.py` 自己的 `IOC_SLICE_PAUSE_S` 與 `CANCEL_POLL_S`，C.6 第 2 點已記）、「打到沒人服務的 subject」（`test_broker_probe` 量的就是這個行為本身）和 Postgres。這三類分別是 B2-02（#175）、F31 / B2-05（#178）和 §9.1 規則 6 的範圍。
+
+## 附錄 D：預設數值（F42，B3-09）
+
+#286 收容的暫定數值以現值為預設。B3-09（#366）把每個常數的名稱、值、位置、用途填進這裡，並拿掉代碼裡的 `pending Yi Te (#286)` 標記。之後要改值，以量測為依據，不再走決策流程。F42 改值的常數（重啟曲線、TD 帳號與 MD 連線的 heartbeat timeout）由 B3-08、B6-09、B8-02 改，也列在這張表。
