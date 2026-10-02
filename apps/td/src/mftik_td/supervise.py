@@ -158,7 +158,9 @@ async def account_views(supervisor, observations, accounts) -> tuple[AccountView
     later pass does not resurrect a worker ``status`` no longer holds.
     """
     recorded = {
-        record.id: record.worker_start_ticks
+        # SupervisorRecord keeps the id on the spec. ExitRecord is the
+        # type that has ``id`` itself.
+        record.spec.id: record.worker_start_ticks
         for record in load_supervisor_state(supervisor.work_dir)
     }
     views: dict[int, AccountView] = {}

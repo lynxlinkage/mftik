@@ -76,7 +76,7 @@ class B4Run(Strategy):
     async def on_ready(self, ready: object) -> None:
         del ready
         self._t0 = time.perf_counter()
-        api_id = self.oms.api_ids()[0]
+        api_id = self.oms.api_ids[0]
         ok = False
         while time.perf_counter() - self._t0 < 8:
             t_submit = time.perf_counter()
@@ -112,7 +112,7 @@ class B4Run(Strategy):
         if not flag.is_file() or self._traded:
             return
         self._traded = True
-        api_id = self.oms.api_ids()[0]
+        api_id = self.oms.api_ids[0]
         t0 = time.perf_counter()
         ok = await self.oms.submit_order(
             api_id,

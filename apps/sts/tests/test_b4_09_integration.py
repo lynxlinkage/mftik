@@ -106,7 +106,7 @@ class PathRun(Strategy):
     async def on_ready(self, ready: object) -> None:
         del ready
         self._t0 = time.perf_counter()
-        api_id = self.oms.api_ids()[0]
+        api_id = self.oms.api_ids[0]
         ok = False
         while time.perf_counter() - self._t0 < 8:
             ok = await self.oms.submit_order(
@@ -169,7 +169,7 @@ class RollRun(Strategy):
         if not flag.is_file() or self._traded:
             return
         self._traded = True
-        api_id = self.oms.api_ids()[0]
+        api_id = self.oms.api_ids[0]
         t0 = time.perf_counter()
         ok = await self.oms.submit_order(
             api_id,
@@ -419,9 +419,12 @@ class Stack:
         bind_orchestrator(self.sts_orch)
         await self.sts_orch.boot()
         self._serve_sts()
-        after = await self.sts.status(worker)
-        assert after is not None and after.pid == pid, self._sts_log(session_id)
-        assert after.phase is WorkerPhase.RUNNING
+        await _wait_adopted(
+            self.sts,
+            worker,
+            pid,
+            log_path(self.work / "sts", worker, "stderr"),
+        )
         async with session_scope() as db:
             row = await StsSessionRepository(db).get_by_session_id(session_id)
         assert row is not None and row.status == "live", row.reason if row else None
@@ -465,11 +468,12 @@ class Stack:
         )
         self._serve_td_report()
         self._start_reconcile()
-        after = await self.td.status(worker)
-        assert after is not None and after.pid == pid, _tail(
-            log_path(self.work / "td", worker, "stderr")
+        await _wait_adopted(
+            self.td,
+            worker,
+            pid,
+            log_path(self.work / "td", worker, "stderr"),
         )
-        assert after.phase is WorkerPhase.RUNNING
         assert len(_pids(b"mftik_td.account")) == 1
         return pid
 
@@ -488,10 +492,18 @@ class Stack:
         )
         await fetch.reconcile(observations)
         self._serve_md_report()
-        fetch_after = await self.md.status(FETCH_WORKER_ID)
-        conn_after = await self.md.status(conn)
-        assert fetch_after is not None and fetch_after.pid == fetch_before.pid
-        assert conn_after is not None and conn_after.pid == conn_before.pid
+        await _wait_adopted(
+            self.md,
+            FETCH_WORKER_ID,
+            fetch_before.pid,
+            log_path(self.work / "md", FETCH_WORKER_ID, "stderr"),
+        )
+        await _wait_adopted(
+            self.md,
+            conn,
+            conn_before.pid,
+            log_path(self.work / "md", conn, "stderr"),
+        )
         assert len(_pids(b"mftik_md.conn_worker")) == 1
         assert len(_pids(b"mftik_md.fetch")) == 1
         return fetch_before.pid, conn_before.pid
@@ -612,6 +624,24 @@ async def _publish_books(
             await asyncio.wait_for(stop.wait(), 0.2)
         except TimeoutError:
             continue
+
+
+async def _wait_adopted(
+    supervisor: Supervisor, worker_id: str, pid: int, log: Path
+) -> None:
+    """The reattached worker is the same pid and has reached running."""
+    deadline = time.monotonic() + 3
+    status = None
+    while time.monotonic() < deadline:
+        status = await supervisor.status(worker_id)
+        if (
+            status is not None
+            and status.pid == pid
+            and status.phase is WorkerPhase.RUNNING
+        ):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{worker_id} not adopted: {status}\n{_tail(log)}")
 
 
 async def _wait_ready(supervisor: Supervisor, worker_id: str, log: Path) -> None:
@@ -1097,7 +1127,6 @@ async def test_a_start_over_budget_is_refused(
     assert _pids(b"mftik_sts.session_worker") == []
 
     import socket
-    import subprocess
 
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -1125,16 +1154,30 @@ async def test_a_start_over_budget_is_refused(
         env["MFTIK_CONFIG"] = str(config)
         env["MFTIK_AUTH_ENABLED"] = "0"
         binary = Path(sys.executable).parent / "mftik"
-        completed = subprocess.run(
-            [str(binary), "run", "--no-push", "--no-wait", str(budget["tree"])],
-            check=False,
-            capture_output=True,
-            text=True,
+        # The API is this loop's uvicorn. A blocking subprocess would stall
+        # the refusal, and ``--no-wait`` would look like a hang.
+        proc = await asyncio.create_subprocess_exec(
+            str(binary),
+            "run",
+            "--no-push",
+            "--no-wait",
+            str(budget["tree"]),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
-            timeout=20,
         )
-        assert completed.returncode != 0, completed.stdout
-        assert "memory_budget_mb" in completed.stderr + completed.stdout
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=20
+            )
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+        stdout = stdout_b.decode()
+        stderr = stderr_b.decode()
+        assert proc.returncode != 0, stdout
+        assert "memory_budget_mb" in stderr + stdout
     finally:
         server.should_exit = True
         await task
