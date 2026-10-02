@@ -75,9 +75,14 @@ from mftik_sts.rpc.sessions import (
 
 _ROOT = Path(__file__).resolve().parents[1] / "src" / "mftik_sts" / "controller"
 
+#: Parsed once, at import. The call phase only walks the trees. Parsing
+#: the controller sources inside the test is enough to miss the 50 ms
+#: unit cap when the worker is busy.
+_PARSED = [ast.parse(path.read_text()) for path in sorted(_ROOT.glob("*.py"))]
+
 
 def _sources() -> list[ast.AST]:
-    return [ast.parse(path.read_text()) for path in sorted(_ROOT.glob("*.py"))]
+    return _PARSED
 
 
 def _orch(tmp_path: Path) -> StsOrchestrator:
