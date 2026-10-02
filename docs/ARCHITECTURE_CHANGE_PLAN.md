@@ -398,12 +398,26 @@ MD/TD 用 readiness 區分初始化失敗和運行中崩潰（prototype §4）�
 | 同一個 volume 同時只能被一個 running assignment 掛載 | `reconciler/volumes.go`（`volumeWriterConflictErr`） |
 | Strategon 停止時只對 process group 送信號，不用 `cgroup.kill` | `exec_linux.go`、`supervisor/stop.go` |
 | agent 的 systemd unit 沒有設 `KillMode`（預設 `control-group`），也沒有傳 `--cgroup-root`。所以 strategy 都在 agent 的 unit cgroup 裡，而 `install-agent.sh` 升級時會執行 `systemctl restart` | `deploy/install-agent.sh` |
-| 沒有 `--cgroup-root` 時，`setupCgroup` 直接回傳 -1。plane sets 裡的 `limits.memoryBytes`（768 MiB）**目前沒有生效**。就算設了 `--cgroup-root`，因為沒有啟用 `subtree_control`，上限很可能仍然寫不進去；`max_open_files` 也從未套用（追蹤於 strategon#61） | `exec_linux.go`、`deployment/sets/planes.json` |
+| 沒有 `--cgroup-root` 時，`setupCgroup` 直接回傳 -1。plane sets 裡的 `limits.memoryBytes`（768 MiB）**目前沒有生效**。障礙不是 `subtree_control`：cp 的 root `cgroup.subtree_control` 有開 `memory`。真正的障礙是 unit 沒有 `Delegate`，agent 的非 root 帳號無權在 unit cgroup 底下建立子 cgroup、寫入 `memory.max`。`max_open_files` 也從未套用（追蹤於 strategon#61） | `exec_linux.go`、`deployment/sets/planes.json` |
+
+**主機實測（B0-06，#159）：** 全部唯讀，mftik 都是 v0.12.0。cp 量了兩次：2026-10-01 20:22（UTC+8）還是 Strategon v0.3.0；當天 23:23 升級到 v0.4.0 後，10-03 再量一次。yite 在 10-01 23:21 升級到 v0.4.0，10-03 量一次。
+
+| 項目 | cp，v0.3.0（10-01） | cp，v0.4.0（10-03） | yite，v0.4.0（10-03） |
+|---|---|---|---|
+| `systemctl show strategon-agent` | `KillMode=control-group`、`Delegate=no`、`MemoryMax=infinity`，沒有 `--cgroup-root` | `KillMode=process`、`Delegate=yes`、`DelegateSubgroup=agent`、`--cgroup-root auto`；systemd 255 | 同 cp（v0.4.0） |
+| agent 重啟後的接管 | 10-01 14:20 重啟後，五個 assignment 全部 `adopt skipped ... not running`；STS session worker 全部以 `STS_REBUILD_ON_BOOT` 重建 | 23:23 升級時，新 unit 第一次安裝仍以舊的 `control-group` 重啟，五個全部 `adopt skipped`。之後沒有再重啟過 | 23:21 升級時同樣七個全部 `adopt skipped`；23:22 在新 unit 下再重啟一次，七個全部 `adopted strategy process` |
+| `/proc/<pid>/cgroup` | 全部是 `0::/system.slice/strategon-agent.service`，`memory.max = max`，沒有子 cgroup | 每個 slot 各自在 `…/strategon-agent.service/strategies/<slot>`；agent 在 `…/agent`；session worker 和 STS 平面同一個 slot | 同 cp（v0.4.0） |
+| `memory.max` | 沒有生效 | 平面 805306368（768 MiB）、NATS 512 MiB、Redis 2 GiB；`oom_kill` 全為 0。`sts-jp`（controller 加 4 個 worker）的 `memory.current` 貼著上限：anon 408 MB、可回收的 inactive file 約 380 MB，`memory.events` 的 `max` 11873 次，沒有 refault，PSI 為 0 | 平面 768 MiB、NATS 512 MiB、Redis 2 GiB；`oom_kill` 全為 0 |
+| `/proc/<pid>/status` 的 Uid | 全部是 agent 的 `User=`，彼此沒有 uid 隔離 | 同左（`strategon`，uid 997） | 同左 |
+| PID namespace | OCI 平面各自一個（payload 的 `NSpid` 在容器內是 6）；STS session worker 和 STS 平面在同一個；NATS、Redis 在 host 的 namespace | 相同；tee 是 1，payload 是 6，session worker 是 12、17、22、27 | 相同（payload 是 6 或 7）；當時沒有 session worker。兩台都沒有 plane 開 `oci_host_pid` |
+| RSS | sts 約 101 MB、td 約 108 MB、md 約 116 MB、每個 session worker 約 102 MB、redis 約 25 MB、nats 約 21 MB | sts 約 103 MB、td 約 111 MB、md 約 120 MB、每個 session worker 約 104 MB、redis 約 23 MB、nats 約 22 MB、每個 tee 約 9 MB | sts 約 103 MB、td 約 102 MB、md 約 117 MB、sym 約 215 MB、paper 約 72 MB、redis 約 14 MB、nats 約 22 MB、每個 tee 約 9 MB |
+| kernel | — | 6.8.0-134-generic | 7.0.0-31-generic |
+| agent 帳號能否讀 OCI payload 的 `/proc/<pid>/root`（S-2） | — | 可以：平面和 session worker 的 `(dev, inode)` 都和 `releases/v0.12.0/rootfs` 一致 | 可以，同左 |
 
 **推論：**
 
 - **OCI driver 底下由平面 spawn 出來的 shim / worker，在平面滾動時一定會被殺掉。** `setsid` 只能逃出 process group，逃不出 PID namespace。controller 退出後 tee 跟著退出，tee 是這個 namespace 的 init，它一死，kernel 就會 SIGKILL namespace 裡所有進程。v0.1 寫的「容器被換掉」不精確，真正的機制是 PID namespace。
-- **agent 升級本身就會殺掉所有 strategy。** 這和本重構無關，現在就存在：依 `install-agent.sh` 安裝的主機上，agent 用 `systemctl restart` 升級，而 `KillMode=control-group` 會殺掉 unit cgroup 裡的所有進程，包括 mftik 各平面、NATS、Redis。代碼註解說 strategy 能撐過 agent 的 self-update，但部署方式讓這個保證不成立。請在主機上用 `systemctl show strategon-agent -p KillMode` 和 `cat /proc/<plane pid>/cgroup` 確認。
+- **agent 升級本身就會殺掉所有 strategy。** 這和本重構無關，現在就存在：依 `install-agent.sh` 安裝的主機上，agent 用 `systemctl restart` 升級，而 `KillMode=control-group` 會殺掉 unit cgroup 裡的所有進程，包括 mftik 各平面、NATS、Redis。代碼註解說 strategy 能撐過 agent 的 self-update，但部署方式讓這個保證不成立。**兩台主機都實際發生過**（見上表），連升級到 v0.4.0 的那一次也一樣。換成 v0.4.0 的 unit（`KillMode=process`）之後，agent 重啟不再殺掉 strategy；這點在 yite 上驗證過，cp 升級後還沒有重啟過。
 - **就算拿掉 PID namespace，OCI 還有第二個問題。** worker 會留在舊版的 mount namespace 裡，而舊 rootfs 在兩次滾動後就被 GC 刪掉。worker 之後才需要的檔案（lazy import、`/etc/ssl/certs`、glibc 延遲 dlopen 的 `libgcc_s`）會失敗。這是潛伏錯誤，不會在部署當下出現。
 - **v0.1 建議的「runtime 和 controller 兩個 assignment 共用一個 volume」會被單一 writer 規則拒絕。**
 
@@ -433,22 +447,22 @@ MD/TD 用 readiness 區分初始化失敗和運行中崩潰（prototype §4）�
 
 **(A) 需要的 Strategon 改動：**
 
-以下三項都追蹤於 [strategon#60](https://github.com/BullionBear/strategon/issues/60)：
+以下三項都追蹤於 [strategon#60](https://github.com/BullionBear/strategon/issues/60)，已在 Strategon v0.4.0 完成（strategon#62），cp 和 yite 都已經安裝：
 
 - **S-1 `oci_host_pid` 選項。**
   - 新增 per-assignment 的 `oci_host_pid`，作法比照 `capture_stdio`，以 `agent_version >= 6` 為門檻。
   - OCI 的 cloneflags 去掉 `CLONE_NEWPID`。
   - oci-init 的 `/proc` 改成 recursive bind host 的 `/proc`。unprivileged user namespace 不能替 host 的 PID namespace 掛新的 procfs。
   - probe 一併更新。
-  - 需要在 cp 和 yite 的 kernel 上驗證。
-- **S-2 release GC 不刪仍在使用中的 rootfs。** GC 之前掃一次 `/proc/*/root`，以 `(dev, inode)` 比對各 release 的 rootfs 目錄，仍被任何進程當成 root 的 release 就保留。這解決上面「舊 rootfs 被刪」的潛伏錯誤。agent 能不能讀其他 user namespace 裡進程的 `/proc/<pid>/root`，需要驗證。讀不到的話改用 pin 檔：payload 在 work 目錄寫下仍需要的版本，GC 會尊重它；agent 另外以 `STRATEGON_RELEASE_VERSION` 告訴 payload 自己是哪一版。mftik 這端兩種情況都要能配合。
+  - 需要在 cp（6.8.0-134-generic）和 yite（7.0.0-31-generic）的 kernel 上驗證（B3-06）。
+- **S-2 release GC 不刪仍在使用中的 rootfs。** GC 之前掃一次 `/proc/*/root`，以 `(dev, inode)` 比對各 release 的 rootfs 目錄，仍被任何進程當成 root 的 release 就保留。這解決上面「舊 rootfs 被刪」的潛伏錯誤。v0.4.0 就是這樣做，沒有 pin 檔：deploy 時和 reconciler 每 60 秒各檢查一次。agent 帳號能讀其他 user namespace 裡進程的 `/proc/<pid>/root`，這點已在 cp 和 yite 上驗證（見上表），所以 mftik 這端不需要配合 pin 檔。
 - **S-3 agent 的 unit 加 `KillMode=process`。** 另一種做法是啟用 `--cgroup-root`，並把 strategy 的 cgroup 放在 unit 之外。不論選 A 還是 B 都需要這一項。
 
 **(A) 的 mftik 端：**
 
 - controller 直接 spawn shim，和 prototype 一樣。shim 和 worker 留在 spawn 它們的那一版 controller 的 mount namespace 裡，所以 `WorkerSpec.code_ref` 就是該 release 的版本號。
 - shim 由 host init（或最近的 subreaper）收養。Strategon 的 SIGTERM 和 SIGKILL 只送到 controller 的 process group，碰不到 shim。
-- **記憶體：** 只要 `--cgroup-root` 沒開，就沒有任何記憶體上限；開了之後，worker 和 controller 共用該 assignment 的 `memory.max`。在 strategon#61 讓上限真正生效之前，由 §4.7 的機制防護（F7）。
+- **記憶體：** 只要 `--cgroup-root` 沒開，就沒有任何記憶體上限；開了之後，worker 和 controller 共用該 assignment 的 `memory.max`。strategon#61 已在 v0.4.0 完成（strategon#63），兩台都已經生效：`sts-<site>` 的 768 MiB 要容納 controller 和所有 session worker。上限要用 anon 估，不能用 RSS 估：cp 的 `sts-jp` 在 controller 加 4 個 worker 時，anon 是 408 MB（每個進程約 80 MB），其餘是可回收的 page cache。這樣估計，扣掉 kernel 記憶體和 §4.7 的 shim 之後，大約放得下 7 個 session，第 8 個左右就會 OOM。§4.7 的重估要以此為起點。
 - **本機開發：** compose 的容器同樣有 PID namespace，重建容器一樣會殺掉 worker。所以開發和 integration 測試用純進程跑平面（`just planes`）。compose 只用在不需要驗證 reattach 的場景。
 
 **變體 (A')：** 如果要保留 PID 隔離，可以讓每個 slot 有一個常駐的 pause 進程持有 PID namespace，新版本以 `setns` 加入，也就是 K8s pod sandbox 的做法。代價是 Strategon 的改動明顯變大。
