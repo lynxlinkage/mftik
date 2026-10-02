@@ -31,7 +31,16 @@ from __future__ import annotations
 
 import logging
 
-from mftik.exchange.binance.rest import BinanceRestError, BinanceSignedRest
+import httpx
+
+from mftik.exchange.binance.rest import (
+    KEEPALIVE_EXPIRY_S,
+    KEEPALIVE_INTERVAL_S,
+    POOL_LIMITS,
+    BinanceRestError,
+    BinanceRestTransport,
+    BinanceSignedRest,
+)
 from mftik.exchange.binance.spot.models import (
     BinanceSpotHistoricalOrder,
     BinanceSpotMyTrade,
@@ -49,6 +58,30 @@ MAX_ROWS = 1000
 
 class BinanceSpotRestError(BinanceRestError):
     """A non-2xx answer from Binance's spot REST API."""
+
+
+#: Wire path of the public read. The interval and the pool limits live
+#: on :mod:`mftik.exchange.binance.rest` and cover all three Binance hosts.
+KEEPALIVE_PATH = "/api/v3/time"
+
+
+class BinanceSpotPublicRest(BinanceRestTransport):
+    """Unsigned spot reads. Trading does not use REST; this is the warm ping."""
+
+    default_base_url = BINANCE_SPOT_REST_URL
+    error_type = BinanceSpotRestError
+
+    async def server_time(self) -> float:
+        """``GET /api/v3/time`` — the venue clock, in seconds."""
+        row = await self._get(KEEPALIVE_PATH)
+        if not isinstance(row, dict) or row.get("serverTime") in (None, ""):
+            raise BinanceSpotRestError(200, None, "no serverTime")
+        return float(row["serverTime"]) / 1000.0
+
+
+async def keepalive(client: httpx.AsyncClient) -> None:
+    """One public server-time read. No order, no cancel, no key."""
+    await BinanceSpotPublicRest(client=client).server_time()
 
 
 class BinanceSpotRest(BinanceSignedRest):
@@ -142,7 +175,13 @@ class BinanceSpotRest(BinanceSignedRest):
 
 __all__ = [
     "API_PREFIX",
+    "KEEPALIVE_EXPIRY_S",
+    "KEEPALIVE_INTERVAL_S",
+    "KEEPALIVE_PATH",
     "MAX_ROWS",
+    "POOL_LIMITS",
+    "BinanceSpotPublicRest",
     "BinanceSpotRest",
     "BinanceSpotRestError",
+    "keepalive",
 ]

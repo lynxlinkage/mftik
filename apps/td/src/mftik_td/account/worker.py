@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mftik.clock import Clock
 from mftik.exchange.venues import require
 
 from mftik_td.account.broadcast import StateBroadcast
@@ -62,6 +63,7 @@ class AccountWorker:
         incarnation: int = 0,
         cancel_on_disconnect: bool = False,
         keepalive: Keepalive | None = None,
+        clock: Clock | None = None,
         oms: Oms | None = None,
         ledger: Ledger | None = None,
         private: TradingConnector | None = None,
@@ -79,6 +81,7 @@ class AccountWorker:
             venue=self.venue,
             keepalive=keepalive,
             connector=connector,
+            clock=clock,
         )
         self.trading = TradingLayer(
             self.resident,

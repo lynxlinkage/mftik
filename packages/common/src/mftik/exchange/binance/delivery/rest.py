@@ -16,6 +16,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+import httpx
+
 from mftik.exchange.binance.delivery.listing import to_listed
 from mftik.exchange.binance.delivery.models import (
     BinanceDeliveryDepth,
@@ -25,6 +27,9 @@ from mftik.exchange.binance.delivery.models import (
 from mftik.exchange.binance.delivery.protocol import BINANCE_DELIVERY_REST_URL
 from mftik.exchange.binance.models import kline_from_row, secs
 from mftik.exchange.binance.rest import (
+    KEEPALIVE_EXPIRY_S,
+    KEEPALIVE_INTERVAL_S,
+    POOL_LIMITS,
     BinanceRestError,
     BinanceRestTransport,
     BinanceSignedRest,
@@ -34,6 +39,10 @@ from mftik.exchange.tickers import UniversalTicker
 from mftik.symbols.listed import ListedInstrument
 
 API_PREFIX = "/dapi/v1"
+
+#: Wire path of the public read. Interval and pool limits are the shared
+#: Binance numbers in :mod:`mftik.exchange.binance.rest`.
+KEEPALIVE_PATH = f"{API_PREFIX}/time"
 
 #: Most candles ``/dapi/v1/klines`` returns in one call. Asking for more is a
 #: 400, not a truncated answer.
@@ -170,6 +179,18 @@ class BinanceDeliveryPublicRest(BinanceRestTransport):
             **fields,
         )
 
+    async def server_time(self) -> float:
+        """``GET /dapi/v1/time`` — the venue clock, in seconds."""
+        row = await self._get(KEEPALIVE_PATH)
+        if not isinstance(row, dict) or row.get("serverTime") in (None, ""):
+            raise BinanceDeliveryRestError(200, None, "no serverTime")
+        return float(row["serverTime"]) / 1000.0
+
+
+async def keepalive(client: httpx.AsyncClient) -> None:
+    """One public server-time read. No order, no cancel, no key."""
+    await BinanceDeliveryPublicRest(client=client).server_time()
+
 
 class BinanceDeliveryRest(BinanceSignedRest):
     """Signed reads dapi has nowhere else, or wants off a socket.
@@ -263,10 +284,15 @@ def _first(payload: Any) -> dict[str, Any]:
 
 __all__ = [
     "API_PREFIX",
+    "KEEPALIVE_EXPIRY_S",
+    "KEEPALIVE_INTERVAL_S",
+    "KEEPALIVE_PATH",
     "MAX_HISTORY",
     "MAX_KLINES",
     "MAX_ORDERS",
+    "POOL_LIMITS",
     "BinanceDeliveryPublicRest",
     "BinanceDeliveryRest",
     "BinanceDeliveryRestError",
+    "keepalive",
 ]
