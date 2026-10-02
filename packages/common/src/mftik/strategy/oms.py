@@ -605,17 +605,22 @@ class StrategyOms:
         TD's ``TD_NOT_CANCELABLE``, without the round-trip or the warn.
 
         Raises :class:`~mftik.strategy.errors.NotReady` on the same gate
-        as :meth:`submit_order`.
+        as :meth:`submit_order`. A bound session is checked before the
+        inflight short-circuit, so a cancel during ``on_start`` is
+        ``NotReady`` rather than a local refusal. An OMS with no session
+        still refuses an inflight cid locally: that path never reached TD.
         """
-        session = self._require_session()
-        _refuse_if_before_on_ready(session)
         cid = str(client_order_id)
+        bound = self._strategy.session if self._strategy is not None else None
+        if bound is not None:
+            _refuse_if_before_on_ready(bound)
         if cid in self._inflight:
             self._last_reason = (
                 "order is inflight; it cannot be cancelled from that state"
             )
             self._last_code = RejectCode.TD_NOT_CANCELABLE
             return False
+        session = bound if bound is not None else self._require_session()
         # Before the await: TD publishes PENDING_CANCEL before the ack, and
         # a concurrent cancel must see us. `_done` is the submit episode;
         # this cancel is a new one, so `_mark_inflight` would no-op.

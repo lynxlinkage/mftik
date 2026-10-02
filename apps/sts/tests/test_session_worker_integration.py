@@ -224,7 +224,7 @@ async def test_the_controller_spawns_the_worker_and_end_is_done(
     data = tmp_path / "data"
     key = _plant(data, _QUIET)
     marker = tmp_path / "stopped"
-    session_id = "quiet1"
+    session_id = "a10001"
     request = StsCreateSessionRequest(
         session_id=session_id,
         created_by=1,
@@ -334,7 +334,7 @@ async def test_sts_ctl_end_exits_zero_and_the_row_is_done(
     data = tmp_path / "data"
     key = _plant(data, _QUIET)
     marker = tmp_path / "stopped"
-    session_id = "quiet2"
+    session_id = "a10002"
     request = StsCreateSessionRequest(
         session_id=session_id,
         created_by=1,
@@ -540,7 +540,7 @@ async def test_a_long_hook_keeps_the_session_and_the_ack(
         monkeypatch,
         spin_s=3.5,
         wait_s=8.0,
-        session_id="hold35",
+        session_id="a10035",
     )
 
 
@@ -555,7 +555,7 @@ async def test_a_thirty_second_hook_keeps_the_session_and_the_ack(
         monkeypatch,
         spin_s=30.0,
         wait_s=45.0,
-        session_id="hold30",
+        session_id="a10030",
     )
     elapsed = time.monotonic() - started
     assert elapsed >= 30.0

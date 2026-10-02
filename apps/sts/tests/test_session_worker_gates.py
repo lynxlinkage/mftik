@@ -94,6 +94,14 @@ async def test_order_entry_before_on_ready_raises_not_ready() -> None:
             await strategy.oms.cancel_order(7, "cid")
 
 
+async def test_an_inflight_cancel_before_on_ready_is_not_ready() -> None:
+    """The gate sits in front of the local inflight refusal."""
+    strategy, _session = _bound("on_start")
+    strategy.oms._inflight.add("cid")
+    with pytest.raises(NotReady):
+        await strategy.oms.cancel_order(7, "cid")
+
+
 async def test_a_session_without_order_phase_is_not_gated() -> None:
     """The shell and the harness have no ``order_phase``. They stay ungated."""
     strategy, _session = _bound(None)
