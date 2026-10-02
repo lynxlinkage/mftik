@@ -366,6 +366,68 @@ class TdAccountState(BaseModel):
     reason: str = ""
 
 
+class TdAccountDrain(BaseModel):
+    """API → TD controller: drain-replace one account (F27, §4.6).
+
+    Sent on ``td.{instance}``. The controller resolves the account, drains
+    that worker, and replaces it. ``abort`` is not this message: giving up
+    is a result with ``ok`` false, and the old worker is still serving.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+
+
+class TdAccountDrainResult(BaseModel):
+    """TD controller → API: the drain-replace finished or was refused.
+
+    ``ok`` is true only when the new incarnation is up. ``incarnation`` is
+    that new one. ``ok`` false is a finished answer, not a hang: the reason
+    says the account is not on this instance, a drain is already running,
+    the worker did not finish draining, or the replacement could not be
+    started. A drain that times out does not stop the old worker.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    ok: bool
+    incarnation: int | None = None
+    reason: str = ""
+
+
+class TdTradingDrain(BaseModel):
+    """TD controller → account worker: drain in-flight calls (F27).
+
+    Sent on ``td.account.{api_id}``. The worker refuses new submits with
+    ``TD_DRAINING`` and waits for calls already inside the handler.
+    ``abort`` true clears that state and resumes service. The reply's
+    ``drained`` is false in that case. The operator request is
+    :class:`TdAccountDrain`, on the control subject, not this one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    abort: bool = False
+
+
+class TdTradingDrainResult(BaseModel):
+    """Account worker → TD controller: the drain finished or was aborted.
+
+    ``drained`` true means nothing is in flight and new submits and cancels
+    are refused. The controller may stop the process. ``drained`` false
+    means the wait expired, or the controller aborted, and the worker is
+    accepting again.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    drained: bool
+
+
 class TdAccountTrading(BaseModel):
     """TD controller → account worker: ``td.account.trading`` (F35, §7.2).
 
@@ -568,6 +630,10 @@ MdWorkerStateEnvelope = Envelope[MdWorkerState]
 MdAtomStateEnvelope = Envelope[MdAtomState]
 MdUniverseEventEnvelope = Envelope[MdUniverseEvent]
 TdAccountStateEnvelope = Envelope[TdAccountState]
+TdAccountDrainEnvelope = Envelope[TdAccountDrain]
+TdAccountDrainResultEnvelope = Envelope[TdAccountDrainResult]
+TdTradingDrainEnvelope = Envelope[TdTradingDrain]
+TdTradingDrainResultEnvelope = Envelope[TdTradingDrainResult]
 TdAccountTradingEnvelope = Envelope[TdAccountTrading]
 TdAccountResetEnvelope = Envelope[TdAccountReset]
 TdCancelSessionRequestEnvelope = Envelope[TdCancelSessionRequest]

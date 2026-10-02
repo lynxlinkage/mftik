@@ -48,6 +48,7 @@ from mftik_td.supervise import (
     account_views,
     apply_reconcile,
     load_accounts,
+    serve_account_drain,
 )
 
 SOURCE = "td"
@@ -81,19 +82,23 @@ async def run_rpc(
     stop: asyncio.Event,
     *,
     subject: str,
+    drain=None,
 ) -> None:
     """Serve TD request-reply on ``subject`` until ``stop``.
 
     One task per subject the role grants, rather than one loop over several:
     each is the same loop with a different name, and a failure in one is not a
-    reason to stop answering on the other.
+    reason to stop answering on the other. ``drain`` is the account
+    drain-replace callback. Without it that type is refused.
     """
     logger.info("TD RPC listening on subject=%s", subject)
 
     async def handle(message: UntypedEnvelope):
         # The broker and the instance are this process's. A delete that
         # leaves an account idle asks for a detach backfill through them.
-        return await dispatch(message, broker=broker, instance=INSTANCE)
+        return await dispatch(
+            message, broker=broker, instance=INSTANCE, drain=drain
+        )
 
     await serve(broker, subject, handle, stop=stop)
 
@@ -137,6 +142,9 @@ async def _reconcile_once(
         code_ref=orchestrator.code_ref,
         cancel_on_disconnect=flags,
         broker=broker,
+        held=orchestrator.draining,
+        gate=orchestrator.gate,
+        respect_held=True,
     )
 
 
@@ -246,9 +254,19 @@ async def amain() -> bool:
                     "has and takes nothing new",
                     ROLE.value,
                 )
+
+            async def _drain(message: UntypedEnvelope):
+                return await serve_account_drain(
+                    message,
+                    supervisor=supervisor,
+                    orchestrator=orchestrator,
+                    broker=broker,
+                    instance=INSTANCE,
+                )
+
             rpc_tasks = [
                 asyncio.create_task(
-                    run_rpc(broker, stop, subject=subject),
+                    run_rpc(broker, stop, subject=subject, drain=_drain),
                     name=f"td-rpc-{subject}",
                 )
                 for subject in subjects

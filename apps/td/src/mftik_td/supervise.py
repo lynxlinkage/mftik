@@ -19,10 +19,11 @@ pid fence stays the authority when a ``LOST`` pid is still alive.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 from mftik.exchange.venues import UnknownVenueError
 from mftik.procman import (
@@ -35,14 +36,24 @@ from mftik.procman import (
     load_supervisor_state,
 )
 from mftik.protocol import (
+    TD_ACCOUNT_DRAIN,
     TD_ACCOUNT_TRADING,
     TD_ERROR,
+    TD_TRADING_DRAIN,
     Envelope,
+    RpcError,
+    RpcErrorEnvelope,
+    TdAccountDrain,
+    TdAccountDrainResult,
     TdAccountTrading,
+    TdTradingDrain,
     Topics,
+    UntypedEnvelope,
 )
+from pydantic import ValidationError
 
-from mftik_td.controller.decisions import observation_view
+from mftik_td.controller import intent_book
+from mftik_td.controller.decisions import observation_view, trading_active
 from mftik_td.controller.defaults import (
     ACCOUNT_HB_TIMEOUT_S,
     ACCOUNT_MAX_RESTARTS,
@@ -51,6 +62,7 @@ from mftik_td.controller.defaults import (
     ACCOUNT_RESTART_WINDOW_S,
     ACCOUNT_START_TIMEOUT_S,
     ACCOUNT_STOP_GRACE_S,
+    DRAIN_TIMEOUT_S,
 )
 from mftik_td.controller.types import (
     AccountView,
@@ -63,6 +75,13 @@ from mftik_td.controller.worker import account_worker_spec
 from mftik_td.db import bindings_for_instance
 
 logger = logging.getLogger(__name__)
+
+#: How long one worker drain waits on the wire.
+#:
+#: Longer than :data:`DRAIN_TIMEOUT_S`, so a worker that gives up can
+#: reply ``drained`` false before this request times out. A timeout
+#: here is treated as not drained, and the worker is not stopped.
+DRAIN_RPC_TIMEOUT_S = DRAIN_TIMEOUT_S + 5.0
 
 #: How long one ``td.account.trading`` request waits.
 #:
@@ -192,8 +211,11 @@ async def apply_reconcile(
     code_ref: str,
     cancel_on_disconnect: Mapping[int, bool],
     broker=None,
-) -> None:
-    """Spawn, stop, release and push the trading bit.
+    held: set[int] | None = None,
+    gate: asyncio.Lock | None = None,
+    respect_held: bool = False,
+) -> dict[int, bool]:
+    """Spawn, stop, release, drain and push the trading bit.
 
     Every bound venue is spawned. ``SPAWN`` that raises
     :class:`~mftik.procman.CapacityExceeded` logs the account and
@@ -203,44 +225,409 @@ async def apply_reconcile(
     ``td.account.trading`` request. A timeout, a missing broker, or an
     ack that is not the desired bit is logged. None of those stop the
     pass. The next pass sends the bit again.
+
+    ``EXTEND_DEADMAN`` is logged and not applied. The countdown is
+    B6-07. ``DRAIN`` asks the worker to refuse new submits and wait.
+    The returned map is api_id → whether that drain finished. A
+    ``STOP`` for an api_id whose ``DRAIN`` in this same list did not
+    finish is not applied: the old worker keeps serving. A ``STOP``
+    with no ``DRAIN`` beside it is a normal reconcile stop.
+
+    When ``respect_held`` is set, an api_id in ``held`` is skipped.
+    The check and the supervisor call share ``gate``, so a replace
+    that marked the account under that lock is not spawned or stopped
+    by a pass that already computed its actions. The worker drain
+    itself does not hold the lock.
     """
     by_id = {account.api_id: account for account in accounts}
+    drained: dict[int, bool] = {}
     for action in actions:
-        if action.kind is ActionKind.PUSH_TRADING:
-            await _push_trading(broker, action)
-            continue
-        try:
-            if action.kind is ActionKind.SPAWN:
-                await _spawn(
-                    supervisor,
-                    action,
-                    by_id.get(action.api_id),
-                    code_ref=code_ref,
-                    cancel_on_disconnect=cancel_on_disconnect,
-                )
-            elif action.kind is ActionKind.STOP:
-                await supervisor.stop(account_worker_id(action.api_id))
-            elif action.kind is ActionKind.RELEASE:
-                await supervisor.release_slot(account_worker_id(action.api_id))
-            else:
-                logger.info(
-                    "TD not applying %s for api_id=%s",
-                    action.kind.value,
-                    action.api_id,
-                )
-        except CapacityExceeded as exc:
-            logger.warning(
-                "TD leaving api_id=%s unspawned code=%s",
-                action.api_id,
-                exc.code,
+        if action.kind is ActionKind.DRAIN:
+            if await _held(
+                action.api_id, held=held, gate=gate, respect_held=respect_held
+            ):
+                _log_skip(action)
+                continue
+            drained[action.api_id] = await _request_trading_drain(
+                broker, action.api_id
             )
-        except ProcmanError as exc:
-            logger.warning(
-                "TD %s failed api_id=%s: %s",
+            continue
+        if (
+            action.kind is ActionKind.STOP
+            and action.api_id in drained
+            and not drained[action.api_id]
+        ):
+            logger.info(
+                "TD not stopping api_id=%s; the drain did not finish",
+                action.api_id,
+            )
+            continue
+        if action.kind is ActionKind.EXTEND_DEADMAN:
+            if await _held(
+                action.api_id, held=held, gate=gate, respect_held=respect_held
+            ):
+                _log_skip(action)
+                continue
+            logger.info(
+                "TD extend deadman api_id=%s is a no-op; the countdown is B6-07",
+                action.api_id,
+            )
+            continue
+
+        async def _one(action: OrchestratorAction = action) -> None:
+            await _apply_one(
+                supervisor,
+                action,
+                by_id.get(action.api_id),
+                code_ref=code_ref,
+                cancel_on_disconnect=cancel_on_disconnect,
+                broker=broker,
+            )
+
+        if not await _guarded(
+            action.api_id,
+            held=held,
+            gate=gate,
+            respect_held=respect_held,
+            call=_one,
+        ):
+            _log_skip(action)
+    return drained
+
+
+def _log_skip(action: OrchestratorAction) -> None:
+    logger.info(
+        "TD skipping %s for api_id=%s; drain-replace in progress",
+        action.kind.value,
+        action.api_id,
+    )
+
+
+async def _held(
+    api_id: int,
+    *,
+    held: set[int] | None,
+    gate: asyncio.Lock | None,
+    respect_held: bool,
+) -> bool:
+    if not respect_held or held is None:
+        return False
+    if gate is None:
+        return api_id in held
+    async with gate:
+        return api_id in held
+
+
+async def _guarded(
+    api_id: int,
+    *,
+    held: set[int] | None,
+    gate: asyncio.Lock | None,
+    respect_held: bool,
+    call: Callable[[], Awaitable[None]],
+) -> bool:
+    """Run ``call`` unless this account is held. True when it ran.
+
+    The held check and ``call`` share ``gate``, so a replace cannot
+    stop or spawn the same account between the check and the call.
+    """
+    if gate is None:
+        if respect_held and held is not None and api_id in held:
+            return False
+        await call()
+        return True
+    async with gate:
+        if respect_held and held is not None and api_id in held:
+            return False
+        await call()
+        return True
+
+
+async def _apply_one(
+    supervisor,
+    action: OrchestratorAction,
+    account: BoundAccount | None,
+    *,
+    code_ref: str,
+    cancel_on_disconnect: Mapping[int, bool],
+    broker,
+) -> None:
+    if action.kind is ActionKind.PUSH_TRADING:
+        await _push_trading(broker, action)
+        return
+    try:
+        if action.kind is ActionKind.SPAWN:
+            await _spawn(
+                supervisor,
+                action,
+                account,
+                code_ref=code_ref,
+                cancel_on_disconnect=cancel_on_disconnect,
+            )
+        elif action.kind is ActionKind.STOP:
+            await supervisor.stop(account_worker_id(action.api_id))
+        elif action.kind is ActionKind.RELEASE:
+            await supervisor.release_slot(account_worker_id(action.api_id))
+        else:
+            logger.info(
+                "TD not applying %s for api_id=%s",
                 action.kind.value,
                 action.api_id,
-                exc,
             )
+    except CapacityExceeded as exc:
+        logger.warning(
+            "TD leaving api_id=%s unspawned code=%s",
+            action.api_id,
+            exc.code,
+        )
+    except ProcmanError as exc:
+        logger.warning(
+            "TD %s failed api_id=%s: %s",
+            action.kind.value,
+            action.api_id,
+            exc,
+        )
+
+
+async def _request_trading_drain(broker, api_id: int) -> bool:
+    """Ask the worker to drain. False means do not stop it."""
+    if broker is None:
+        logger.warning("TD drain api_id=%s not sent; no broker", api_id)
+        return False
+    subject = Topics.td_account(api_id)
+    try:
+        reply = await broker.request(
+            subject,
+            Envelope[TdTradingDrain].wrap(
+                TdTradingDrain(api_id=api_id),
+                type=TD_TRADING_DRAIN,
+                source="td",
+            ),
+            timeout=DRAIN_RPC_TIMEOUT_S,
+        )
+    except Exception:
+        logger.warning(
+            "TD drain api_id=%s failed; the worker is not stopped",
+            api_id,
+            exc_info=True,
+        )
+        return False
+    if getattr(reply, "type", None) == TD_ERROR:
+        logger.warning("TD drain api_id=%s refused", api_id)
+        return False
+    payload = getattr(reply, "payload", None)
+    if isinstance(payload, dict):
+        drained = payload.get("drained")
+    else:
+        drained = getattr(payload, "drained", None)
+    if type(drained) is not bool:
+        logger.warning("TD drain api_id=%s reply has no drained bit", api_id)
+        return False
+    return drained
+
+
+async def _abort_trading_drain(broker, api_id: int) -> None:
+    """Ask the worker to accept again. Best-effort after a failed stop."""
+    if broker is None:
+        return
+    subject = Topics.td_account(api_id)
+    try:
+        await broker.request(
+            subject,
+            Envelope[TdTradingDrain].wrap(
+                TdTradingDrain(api_id=api_id, abort=True),
+                type=TD_TRADING_DRAIN,
+                source="td",
+            ),
+            timeout=DRAIN_RPC_TIMEOUT_S,
+        )
+    except Exception:
+        logger.warning(
+            "TD could not resume api_id=%s after a drain it did not stop",
+            api_id,
+            exc_info=True,
+        )
+
+
+def _result(
+    api_id: int, *, ok: bool, incarnation: int | None = None, reason: str = ""
+) -> TdAccountDrainResult:
+    return TdAccountDrainResult(
+        api_id=api_id, ok=ok, incarnation=incarnation, reason=reason
+    )
+
+
+async def run_drain_replace(
+    supervisor,
+    orchestrator,
+    broker,
+    account: BoundAccount,
+    *,
+    cancel_on_disconnect: Mapping[int, bool],
+) -> TdAccountDrainResult:
+    """Drain one account and replace its worker (F27).
+
+    The marker is set before the worker is asked, and cleared when this
+    returns, including when the replace is refused. A second call for
+    the same account while the first is running returns
+    ``drain_in_progress`` and does not wait. The worker drain itself
+    does not hold :attr:`~mftik_td.controller.TdOrchestrator.gate`, so
+    other accounts' reconcile can proceed.
+
+    A drain that does not finish does not stop the worker. After a
+    finished drain, stop, then spawn ``incarnation + 1``, then push the
+    trading bit from the held intents. The new worker is not left
+    waiting for the next reconcile pass.
+    """
+    api_id = account.api_id
+    async with orchestrator.gate:
+        if not orchestrator.begin_drain(api_id):
+            return _result(api_id, ok=False, reason="drain_in_progress")
+    try:
+        return await _replace_held(
+            supervisor,
+            orchestrator,
+            broker,
+            account,
+            cancel_on_disconnect=cancel_on_disconnect,
+        )
+    finally:
+        async with orchestrator.gate:
+            orchestrator.end_drain(api_id)
+
+
+async def _replace_held(
+    supervisor,
+    orchestrator,
+    broker,
+    account: BoundAccount,
+    *,
+    cancel_on_disconnect: Mapping[int, bool],
+) -> TdAccountDrainResult:
+    api_id = account.api_id
+    worker_id = account_worker_id(api_id)
+    status = await supervisor.status(worker_id)
+    if status is None or status.phase not in (
+        WorkerPhase.STARTING,
+        WorkerPhase.RUNNING,
+    ):
+        return _result(api_id, ok=False, reason="not_running")
+    if not status.ready:
+        return _result(api_id, ok=False, reason="not_ready")
+    view = _status_view(api_id, status)
+    old_incarnation = status.spec.incarnation
+    phase1 = orchestrator.drain_replace(account, view)
+    drained = await apply_reconcile(
+        supervisor,
+        phase1,
+        (account,),
+        code_ref=orchestrator.code_ref,
+        cancel_on_disconnect=cancel_on_disconnect,
+        broker=broker,
+        gate=orchestrator.gate,
+        respect_held=False,
+    )
+    if not drained.get(api_id, False):
+        return _result(api_id, ok=False, reason="not_drained")
+    after = await supervisor.status(worker_id)
+    if after is not None:
+        await _abort_trading_drain(broker, api_id)
+        return _result(api_id, ok=False, reason="stop_failed")
+    logger.info(
+        "td ready api_id=%s incarnation=%s active=false process gone",
+        api_id,
+        old_incarnation,
+    )
+    gone = AccountView(
+        api_id=api_id,
+        observed=ObservedWorker.EXITED,
+        pid_gone=True,
+        incarnation=old_incarnation,
+    )
+    phase2 = orchestrator.drain_replace(account, gone)
+    spawns = [action for action in phase2 if action.kind is ActionKind.SPAWN]
+    if len(spawns) != 1:
+        return _result(api_id, ok=False, reason="spawn_refused")
+    expected = spawns[0].incarnation
+    await apply_reconcile(
+        supervisor,
+        phase2,
+        (account,),
+        code_ref=orchestrator.code_ref,
+        cancel_on_disconnect=cancel_on_disconnect,
+        broker=broker,
+        gate=orchestrator.gate,
+        respect_held=False,
+    )
+    # spawn returns when the shim is up. The worker is not listening
+    # yet. Pushing before ready is a request nobody answers, and the
+    # bit would wait for the next reconcile pass.
+    spawned = await _await_ready(supervisor, worker_id, expected)
+    if spawned is None or spawned.spec.incarnation != expected or not spawned.ready:
+        return _result(api_id, ok=False, reason="spawn_failed")
+    active = trading_active(api_id, intent_book().rows())
+    await apply_reconcile(
+        supervisor,
+        (
+            OrchestratorAction(
+                kind=ActionKind.PUSH_TRADING,
+                api_id=api_id,
+                active=active,
+            ),
+        ),
+        (account,),
+        code_ref=orchestrator.code_ref,
+        cancel_on_disconnect=cancel_on_disconnect,
+        broker=broker,
+        gate=orchestrator.gate,
+        respect_held=False,
+    )
+    return _result(api_id, ok=True, incarnation=expected)
+
+
+async def serve_account_drain(
+    message: UntypedEnvelope,
+    *,
+    supervisor,
+    orchestrator,
+    broker,
+    instance: str,
+) -> Envelope | RpcErrorEnvelope:
+    """One ``td.account.drain`` on this instance's control subject.
+
+    An account this instance does not bind is ``not_bound``. The caller
+    does not wait on a subject that nobody serves: that case is the
+    broker's no-responders error, before this function runs.
+    """
+    try:
+        request = TdAccountDrain.model_validate(message.payload or {})
+    except ValidationError as exc:
+        return RpcErrorEnvelope.wrap(
+            RpcError(code="invalid_payload", message=str(exc)),
+            type=TD_ERROR,
+            source="td",
+            session_id=message.session_id,
+        )
+    accounts, flags = await load_accounts(instance)
+    account = next(
+        (row for row in accounts if row.api_id == request.api_id), None
+    )
+    if account is None:
+        result = _result(request.api_id, ok=False, reason="not_bound")
+    else:
+        result = await run_drain_replace(
+            supervisor,
+            orchestrator,
+            broker,
+            account,
+            cancel_on_disconnect=flags,
+        )
+    return Envelope[TdAccountDrainResult].wrap(
+        result,
+        type=TD_ACCOUNT_DRAIN,
+        source="td",
+        session_id=message.session_id,
+    )
 
 
 async def _spawn(
@@ -330,6 +717,31 @@ def _observed_active(reply) -> bool | None:
     if type(value) is bool:
         return value
     return None
+
+
+async def _await_ready(
+    supervisor, worker_id: str, incarnation: int
+) -> WorkerStatus | None:
+    """The slot once this incarnation is ready, or the last view if it will not be.
+
+    A missing slot, a different incarnation, or a phase that is no
+    longer starting or running is returned at once. A live worker that
+    has not answered yet is polled until :data:`ACCOUNT_START_TIMEOUT_S`.
+    """
+    deadline = asyncio.get_running_loop().time() + ACCOUNT_START_TIMEOUT_S
+    while True:
+        status = await supervisor.status(worker_id)
+        if (
+            status is None
+            or status.spec.incarnation != incarnation
+            or status.phase not in (WorkerPhase.STARTING, WorkerPhase.RUNNING)
+        ):
+            return status
+        if status.ready:
+            return status
+        if asyncio.get_running_loop().time() >= deadline:
+            return status
+        await asyncio.sleep(0.05)
 
 
 def _status_view(api_id: int, status: WorkerStatus) -> AccountView:

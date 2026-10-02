@@ -104,6 +104,7 @@ class AccountWorker:
             session=session,
             clock=clock,
         )
+        self.trading.note_incarnation(self.incarnation)
         self.deadman: DeadMansSwitch = deadman_for(self.venue)
         self.broadcast = StateBroadcast(self.api_id, self.incarnation)
         self.orders = OrderHandler(self, clock=clock)

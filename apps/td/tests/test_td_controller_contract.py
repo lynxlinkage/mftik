@@ -54,8 +54,6 @@ from mftik_td.controller import (
     trading_pushes,
 )
 
-_DRAIN = "B6-04 drain-replaces one account (F27)"
-
 
 def _intensity() -> RestartIntensity:
     return RestartIntensity(max_restarts=2, window_s=30, min_backoff_s=0.5)
@@ -475,7 +473,6 @@ def test_account_restart_uses_the_callers_intensity(tmp_path: Path) -> None:
 # --- drain-replace (F27) ---------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_DRAIN)
 def test_drain_does_not_spawn_while_the_pid_is_alive(tmp_path: Path) -> None:
     """Extend, then drain, then stop. One account. The bit stays (D1, F36)."""
     view = _view(observed=ObservedWorker.RUNNING, pid_gone=False, incarnation=2)
@@ -488,7 +485,6 @@ def test_drain_does_not_spawn_while_the_pid_is_alive(tmp_path: Path) -> None:
     assert ActionKind.PUSH_TRADING not in kinds
 
 
-@pytest.mark.xfail(strict=True, reason=_DRAIN)
 def test_drain_spawns_the_next_incarnation_once_the_pid_is_gone(
     tmp_path: Path,
 ) -> None:

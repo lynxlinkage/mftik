@@ -261,7 +261,6 @@ def test_md_restart_names_that_connection_and_no_other() -> None:
 # --- F27: td drain ---------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="B6-04 drain-replaces one account")
 def test_td_drain_names_that_account_and_no_other() -> None:
     """O4. One api_id. Other accounts are not this command's (F27)."""
     assert td_drain(7) == TdDrain(api_id=7)

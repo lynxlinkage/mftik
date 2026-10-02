@@ -7,8 +7,9 @@ and calls
 :meth:`TdOrchestrator.reconcile`. :mod:`mftik_td.supervise` applies
 ``SPAWN``, ``STOP`` and ``RELEASE``, and delivers ``PUSH_TRADING`` as
 ``td.account.trading`` (B6-02). The held intents live on
-:class:`~mftik_td.controller.TdIntentBook`. B6-04 fills in
-drain-replace. ``pid_gone`` is :func:`mftik.procman.previous_worker_gone`.
+:class:`~mftik_td.controller.TdIntentBook`. Drain-replace is
+:meth:`TdOrchestrator.drain_replace`; :mod:`mftik_td.supervise` applies
+it. ``pid_gone`` is :func:`mftik.procman.previous_worker_gone`.
 ``MARK_FAILED``, and ``NONE`` while the shim is still waiting, name
 ``RELEASE`` for :meth:`mftik.procman.Supervisor.release_slot`. This
 package does not change :meth:`~mftik.procman.Supervisor.spawn`.
@@ -16,6 +17,7 @@ package does not change :meth:`~mftik.procman.Supervisor.spawn`.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 
 from mftik.procman import (
@@ -29,7 +31,6 @@ from mftik.procman import (
 )
 from mftik.protocol import TdIntentPut
 
-from mftik_td.controller._ticket import unimplemented
 from mftik_td.controller.decisions import (
     desired_accounts,
     plan_account_restart,
@@ -179,7 +180,10 @@ class TdOrchestrator:
        has already shut the gate. This layer does not call ``start``
        or ``allow_reports``.
     10. :meth:`drain_replace` is the operator entry for one account
-       (F27). A release rolling forward does not call it.
+       (F27). A release rolling forward does not call it. While an
+       account is in :attr:`draining`, this pass does not spawn, stop,
+       release or push it. The apply path re-checks that set under
+       :attr:`gate`.
     """
 
     def __init__(
@@ -203,6 +207,13 @@ class TdOrchestrator:
         self.supervisor = supervisor
         self.intensity = intensity
         self.code_ref = code_ref
+        #: Accounts whose drain-replace is in progress. Reconcile skips
+        #: them. Mutated only while :attr:`gate` is held.
+        self.draining: set[int] = set()
+        #: Serializes the marker with spawn, stop and the trading push.
+        #: Not held across the worker drain, which can take
+        #: :data:`~mftik_td.controller.defaults.DRAIN_TIMEOUT_S`.
+        self.gate = asyncio.Lock()
 
     def reconcile(
         self,
@@ -240,6 +251,12 @@ class TdOrchestrator:
         passes false until it has seeded the book from ``td_intents``.
         An empty book with ``publish`` true is a seeded book: there
         really is no unreleased intent, and the bit is false.
+
+        An account in :attr:`draining` is left out of spawn, stop,
+        release and the trading push. It stays in the desired set, so
+        the pass does not stop it as an account this instance no longer
+        wants. :mod:`mftik_td.supervise` checks the set again under
+        :attr:`gate` when it applies the actions.
         """
         if isinstance(accounts, str) or not isinstance(accounts, Sequence):
             raise TypeError("accounts must be a sequence of BoundAccount")
@@ -254,16 +271,22 @@ class TdOrchestrator:
         observed = _views(views)
         wanted = desired_accounts(accounts, instance=self.supervisor.instance)
         by_id = {view.api_id: view for view in observed}
+        held = set(self.draining)
         wanted_ids = {account.api_id for account in wanted}
+        # A held account is still wanted for this pass even if the
+        # binding read missed it: stopping it would race the replace.
+        protected = wanted_ids | held
         actions: list[OrchestratorAction] = []
         for account in wanted:
+            if account.api_id in held:
+                continue
             step = _worker_step(
                 account.api_id, DesiredSlot.PRESENT, by_id.get(account.api_id)
             )
             if step is not None:
                 actions.append(step)
         for view in observed:
-            if view.api_id in wanted_ids:
+            if view.api_id in protected:
                 continue
             step = _worker_step(view.api_id, DesiredSlot.ABSENT, view)
             if step is not None:
@@ -271,6 +294,8 @@ class TdOrchestrator:
         for push in trading_pushes(
             publish=publish, accounts=wanted, intents=intents
         ):
+            if push.api_id in held:
+                continue
             actions.append(
                 OrchestratorAction(
                     kind=ActionKind.PUSH_TRADING,
@@ -279,6 +304,21 @@ class TdOrchestrator:
                 )
             )
         return tuple(actions)
+
+    def begin_drain(self, api_id: int) -> bool:
+        """Mark ``api_id`` drain-replacing. False if one is already running.
+
+        The caller holds :attr:`gate`. :meth:`reconcile` skips the
+        account until :meth:`end_drain`.
+        """
+        if api_id in self.draining:
+            return False
+        self.draining.add(api_id)
+        return True
+
+    def end_drain(self, api_id: int) -> None:
+        """Drop the marker. The caller holds :attr:`gate`."""
+        self.draining.discard(api_id)
 
     def drain_replace(
         self,
@@ -304,10 +344,12 @@ class TdOrchestrator:
         not cleared: a drain is not a deactivate (F35).
 
         ``TdReady`` is false between the stop and the new incarnation's
-        recon, and true again after. That transition is the account
-        worker's broadcast (B6-04, B6-06).
+        recon, and true again after. The worker logs that. The broadcast
+        sessions see is B6-06, and the STS-side notice is B5-05.
 
-        Not implemented (IF-12). B6-04 fills this in.
+        Waiting for the drained reply, and stopping only then, is
+        :func:`mftik_td.supervise.apply_reconcile`. This method names
+        the steps. It does not talk to the worker.
         """
         if not isinstance(account, BoundAccount):
             raise TypeError("account must be a BoundAccount")
@@ -322,7 +364,28 @@ class TdOrchestrator:
             raise ValueError(
                 f"view api_id {view.api_id} does not match account {account.api_id}"
             )
-        unimplemented()
+        api_id = account.api_id
+        if not view.pid_gone:
+            return (
+                OrchestratorAction(kind=ActionKind.EXTEND_DEADMAN, api_id=api_id),
+                OrchestratorAction(kind=ActionKind.DRAIN, api_id=api_id),
+                OrchestratorAction(kind=ActionKind.STOP, api_id=api_id),
+            )
+        previous = view.incarnation is not None
+        if not spawn_allowed(previous=previous, pid_gone=view.pid_gone):
+            return ()
+        incarnation = (
+            FIRST_INCARNATION
+            if view.incarnation is None
+            else view.incarnation + 1
+        )
+        return (
+            OrchestratorAction(
+                kind=ActionKind.SPAWN,
+                api_id=api_id,
+                incarnation=incarnation,
+            ),
+        )
 
     def account_restart(
         self,

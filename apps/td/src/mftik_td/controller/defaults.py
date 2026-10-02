@@ -23,3 +23,9 @@ ACCOUNT_MAX_RESTARTS = 5
 ACCOUNT_RESTART_WINDOW_S = 60.0
 # provisional, pending Yi Te (#286)
 ACCOUNT_MIN_BACKOFF_S = 1.0
+# provisional, pending Yi Te (#286)
+#: How long a drain-replace waits for calls already inside the order
+#: handler. The same bound as ``WAIT_TIMEOUT_S`` on ``cancel_session``.
+#: A shorter wait would stop the worker under an order that is still
+#: being booked.
+DRAIN_TIMEOUT_S = 30.0

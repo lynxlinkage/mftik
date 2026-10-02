@@ -9,10 +9,12 @@ worker's (§7.1).
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
 from mftik.broker import Broker
 from mftik.broker.handler import Reply
 from mftik.protocol import (
+    TD_ACCOUNT_DRAIN,
     TD_ERROR,
     TD_HEALTH,
     RpcError,
@@ -31,13 +33,28 @@ async def dispatch(
     *,
     broker: Broker | None = None,
     instance: str | None = None,
+    drain: Callable[[UntypedEnvelope], Awaitable[Reply | None]] | None = None,
 ) -> Reply | None:
     """Route one control-plane message, or answer ``td.error``.
 
     ``broker`` and ``instance`` are how a delete that drops the last
     intent asks for a detach backfill. Callers that only want the book
-    updated leave them out.
+    updated leave them out. ``drain`` runs one account drain-replace.
+    Without it the type is refused, so a process that has not wired the
+    callback does not hang the caller.
     """
+    if message.type == TD_ACCOUNT_DRAIN:
+        if drain is None:
+            return RpcErrorEnvelope.wrap(
+                RpcError(
+                    code="not_implemented",
+                    message="td.account.drain is not wired",
+                ),
+                type=TD_ERROR,
+                source="td",
+                session_id=message.session_id,
+            )
+        return await drain(message)
     if message.type in INTENT_TYPES:
         return await intent_handler(
             intent_book(), broker=broker, instance=instance
