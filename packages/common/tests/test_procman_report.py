@@ -384,8 +384,7 @@ async def test_the_loop_stays_quiet_until_reconciled_and_stops_on_close(
         assert len(published) == 1
         assert calls == 1
         assert published[0].payload.workers == []
-        with pytest.raises(NotImplementedError):
-            await supervisor.close(CloseMode.STOP)
+        await supervisor.close(CloseMode.STOP)
         clock.advance(REPORT_PERIOD_S)
         await asyncio.sleep(0)
         assert len(published) == 1
