@@ -58,10 +58,13 @@ from mftik.procman import (
     encode_status,
     exit_record_path,
     exit_record_tmp_path,
+    heartbeat_loop,
     load_frame,
     socket_path,
+    status_fd,
     supervisor_state_path,
     transition,
+    write_heartbeat,
 )
 
 _CODE_REF = "the release version of the controller that spawned the worker (§4.5)"
@@ -110,6 +113,15 @@ def _spec(**overrides: object) -> WorkerSpec:
 def test_the_package_imports() -> None:
     assert procman.TICKET == "IF-03"
     assert procman.Supervisor is Supervisor
+
+
+def test_the_worker_heartbeat_helpers_are_exported() -> None:
+    """A worker tells its shim it is alive through these, not the supervisor."""
+    assert procman.heartbeat_loop is heartbeat_loop
+    assert procman.status_fd is status_fd
+    assert procman.write_heartbeat is write_heartbeat
+    for name in ("heartbeat_loop", "status_fd", "write_heartbeat"):
+        assert name in procman.__all__
 
 
 def test_worker_spec_fields_are_section_4_3() -> None:

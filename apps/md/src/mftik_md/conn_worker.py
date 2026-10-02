@@ -9,12 +9,14 @@ module is not started by the MD process (``app.py`` stays with B4-07
 and B7-05).
 
 The shim is told this process is up with
-:func:`mftik.procman.encode_heartbeat` on ``MFTIK_STATUS_FD``. That
-write lives here until B7-05's worker-side helper is on the base.
-``ready`` flips true after the paper client connects, and stays true.
-A process that dies still trying to connect is an init failure
-(``FAILED``, not restarted). A later drop of the paper stream is a
-reconnect inside this process, not a return to "not ready".
+:func:`mftik.procman.heartbeat_loop` on ``MFTIK_STATUS_FD``. ``ready``
+flips true after the paper client connects, and stays true. A missing
+read end (``EPIPE``) sets the process stop, so a shim that is already
+gone ends this process cleanly (S2). No status fd means this process
+was not launched by a shim: the beats are a no-op and a signal still
+stops it. A process that dies still trying to connect is an init
+failure (``FAILED``, not restarted). A later drop of the paper stream
+is a reconnect inside this process, not a return to "not ready".
 
 ``seq`` is :class:`~mftik_md.conn.SeqClock` on the worker. A reconnect
 inside this process does not replace the clock (C6). A new incarnation
@@ -29,9 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import errno
 import logging
-import os
 import signal
 import sys
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -44,7 +44,12 @@ from mftik.exchange.paper.atoms import PUBLIC, VENUE, parse_channel
 from mftik.exchange.paper.atoms import decode as paper_decode
 from mftik.exchange.paper.remote_public import PaperRemotePublicClient
 from mftik.exchange.tickers import UniversalTicker
-from mftik.procman import STATUS_FD_ENV, WorkerHeartbeat, encode_heartbeat
+from mftik.procman import (
+    WorkerHeartbeat,
+    heartbeat_loop,
+    status_fd,
+    write_heartbeat,
+)
 from mftik.runtime import configure_logging
 
 from mftik_md.conn import ConnError, ConnId, ConnWorker
@@ -53,7 +58,7 @@ logger = logging.getLogger("md.conn")
 
 #: How often the status pipe is refreshed. Not a product restart timer
 #: and not the B8-02 heartbeat budget: the shim counts beats, and a
-#: stuck loop is what a missed beat means (S6). Local until B7-05.
+#: stuck loop is what a missed beat means (S6). This worker's own pace.
 _BEAT_INTERVAL_S = 0.2
 
 #: Pause before subscribing the same fixed set again, so a dead stream
@@ -124,41 +129,50 @@ def _subscriptions(atoms: Sequence[Atom]) -> tuple[tuple[Atom, UniversalTicker],
     return tuple(subscribed)
 
 
-class _Heartbeat:
-    """Status-pipe beats for this process. No-op when the shim did not launch us."""
+class _Ready:
+    """False until the paper client connects, then true for this process."""
 
     def __init__(self) -> None:
-        raw = os.environ.get(STATUS_FD_ENV)
-        self._fd = int(raw) if raw else None
-        self.ready = False
+        self._ready = False
 
-    def set_ready(self, ready: bool) -> None:
-        self.ready = ready
-        self.write()
+    def __call__(self) -> bool:
+        return self._ready
 
-    def write(self) -> bool:
-        """One beat. ``False`` means the shim is gone (EPIPE, S2)."""
-        if self._fd is None:
-            return True
+    def connected(self, stop: asyncio.Event, fd: int | None) -> None:
+        """The client is up. A later drop does not clear this.
+
+        One beat goes out now, so the shim does not wait out the period.
+        ``EPIPE`` means that shim is already gone (S2): ``stop`` ends the
+        process. No fd means there is no shim to tell, and this process
+        keeps running until something else stops it.
+        """
+        self._ready = True
+        if fd is None:
+            return
         try:
-            os.write(
-                self._fd,
-                encode_heartbeat(WorkerHeartbeat(ready=self.ready)),
-            )
-        except BlockingIOError:
-            return True
-        except OSError as exc:
-            if exc.errno == errno.EPIPE:
-                return False
-            return True
-        return True
+            write_heartbeat(fd, WorkerHeartbeat(ready=True))
+        except BrokenPipeError:
+            stop.set()
 
-    async def run(self, stop: asyncio.Event, clock: Clock) -> None:
-        while not stop.is_set():
-            if not self.write():
-                stop.set()
-                return
-            await _wait(clock, stop, _BEAT_INTERVAL_S)
+
+async def _heartbeat(
+    clock: Clock,
+    stop: asyncio.Event,
+    ready: Callable[[], bool],
+    fd: int | None,
+) -> None:
+    """Periodic beats on the shim's status pipe.
+
+    :func:`mftik.procman.heartbeat_loop` drops a beat the pipe cannot
+    take and, on ``EPIPE``, sets ``stop``. That is the shim leaving.
+    """
+    await heartbeat_loop(
+        clock,
+        ready=ready,
+        period_s=_BEAT_INTERVAL_S,
+        stop=stop,
+        fd=fd,
+    )
 
 
 async def _wait(clock: Clock, stop: asyncio.Event, seconds: float) -> None:
@@ -316,9 +330,12 @@ async def _amain(argv: Sequence[str]) -> None:
         worker.incarnation,
         ",".join(atom.atom_id for atom in atoms),
     )
-    beat = _Heartbeat()
-    beat.set_ready(False)
-    beat_task = asyncio.create_task(beat.run(stop, clock), name="md-conn-heartbeat")
+    fd = status_fd()
+    ready = _Ready()
+    beat_task = asyncio.create_task(
+        _heartbeat(clock, stop, ready, fd),
+        name="md-conn-heartbeat",
+    )
     try:
         async with Broker() as broker:
             client = PaperRemotePublicClient(broker)
@@ -327,7 +344,7 @@ async def _amain(argv: Sequence[str]) -> None:
                 atoms,
                 stop,
                 clock=clock,
-                on_up=lambda: beat.set_ready(True),
+                on_up=lambda: ready.connected(stop, fd),
                 worker_id=worker.worker_id,
                 incarnation=worker.incarnation,
             )

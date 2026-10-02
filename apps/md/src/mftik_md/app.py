@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import signal
+from pathlib import Path
 
 import uvloop
 from mftik import (
@@ -20,11 +21,19 @@ from mftik import (
 )
 from mftik.broker import Broker
 from mftik.broker.handler import serve
+from mftik.clock import SystemClock
 from mftik.exchange import venues
 from mftik.intent_gc import watch_sts_reports
-from mftik.symbols import SymbolClient
+from mftik.procman import (
+    ProcmanError,
+    Supervisor,
+    current_release,
+    pinned_releases_path,
+    publish_reports,
+)
+from mftik.protocol import ProcmanReportEnvelope
 
-from mftik_md.fetch import FetchSession, VenueReaderFactory
+from mftik_md.fetch_ctl import FetchController, fetch_close_mode
 from mftik_md.intents import MdIntentBook
 from mftik_md.rpc import control_handler
 from mftik_md.tape import (
@@ -48,6 +57,27 @@ INSTANCE = instance_name(SOURCE)
 #: answering nothing.
 ROLE = instance_role(SOURCE)
 logger = logging.getLogger(SOURCE)
+
+
+def _work_dir() -> Path:
+    """``${WORK_DIR:-cwd}/md/<instance>``.
+
+    Strategon starts a payload with its work dir as cwd. The per-plane
+    subdirectory keeps two planes started from one directory from sharing
+    ``supervisor.json``.
+    """
+    root = Path(os.environ.get("WORK_DIR") or os.getcwd())
+    return root / SOURCE / INSTANCE
+
+
+def _code_ref() -> str:
+    """The release that spawned this process's workers (§4.5).
+
+    :func:`mftik.procman.current_release`: the Strategon tag when that
+    variable is set, otherwise the installed distribution version.
+    """
+    return current_release()
+
 
 async def run_rpc(
     broker: Broker,
@@ -146,84 +176,143 @@ async def amain() -> bool:
         store = recorder.store if recorder is not None else None
         if store is not None:
             await store.ping()
-        # Up for as long as the process is, and attached to nothing. A read
-        # is owned by nobody, so the fetch plane needs no lease and no
-        # subscription to answer — which is the whole point of it being
-        # separate from the feed sessions above.
-        fetch = FetchSession(broker, VenueReaderFactory(SymbolClient(broker)))
-        await fetch.start()
-        logger.info(
-            "MD started instance=%s (venue public factory: %s)",
-            INSTANCE,
-            venues.names(),
+        # The fetch worker is a separate process. This process supervises
+        # it and detaches on the way out, so a roll does not interrupt
+        # ``md.fetch``. Reads are not served here.
+        clock = SystemClock()
+        supervisor = Supervisor(
+            _work_dir(),
+            plane="md",
+            instance=INSTANCE,
+            clock=clock,
+            pin_path=pinned_releases_path(),
         )
-        subjects = control_subjects(SOURCE, INSTANCE, ROLE)
-        if not subjects:
-            logger.warning(
-                "MD is %s and serves no control subject — it holds what it "
-                "has and takes nothing new",
-                ROLE.value,
-            )
-        # One held set for every subject, including the pooled ``md``.
-        # A lower ``procman.report`` generation is a new STS publisher and
-        # resets that instance before the sample; see
-        # :func:`mftik.intent_gc.watch_sts_reports`.
-        intents = MdIntentBook()
-        rpc_tasks = [
-            asyncio.create_task(
-                run_rpc(broker, store, stop, subject=subject, intents=intents),
-                name=f"md-rpc-{subject}",
-            )
-            for subject in subjects
-        ]
-        gc_task = asyncio.create_task(
-            watch_sts_reports(
-                broker,
-                held=intents.owners,
-                release=intents.release_owners,
-                stop=stop,
-                states=intents.gc_states,
-            ),
-            name="md-intent-gc",
-        )
-        hb_task = asyncio.create_task(
-            broker.heartbeat_loop(
-                SOURCE,
-                interval=5.0,
-                stop=stop,
-                on_tick=lambda: logger.debug("heartbeat"),
-            ),
-            name="md-heartbeat",
-        )
-        health_task = asyncio.create_task(
-            serve_health(
-                broker,
-                domain=SOURCE,
-                instance=INSTANCE,
-                stop=stop,
-                # Which venues this MD can reach. A deploy naming a feed on a
-                # venue it cannot serve should fail at deploy rather than at
-                # subscribe, and this is where that answer comes from.
-                describe=lambda: {"venues": sorted(venues.names())},
-            ),
-            name="md-health",
-        )
+        report_task: asyncio.Task[None] | None = None
+        watch_task: asyncio.Task[None] | None = None
+        rpc_tasks: list[asyncio.Task[None]] = []
+        gc_task: asyncio.Task[None] | None = None
+        hb_task: asyncio.Task[None] | None = None
+        health_task: asyncio.Task[None] | None = None
         try:
-            clean = await run_until_stopped(
-                stop,
-                *rpc_tasks,
-                gc_task,
-                hb_task,
-                health_task,
-                logger=logger,
+            observations = await supervisor.start()
+            fetch = FetchController(
+                supervisor, clock=clock, code_ref=_code_ref()
             )
+            try:
+                await fetch.reconcile(observations)
+            except ProcmanError as exc:
+                # A refusal (including capacity_exceeded) is retried by
+                # the watch. No memory budget is configured.
+                logger.error("MD fetch worker was not started: %s", exc)
+
+            async def _publish_report(
+                subject: str, envelope: ProcmanReportEnvelope
+            ) -> None:
+                await broker.publish(subject, envelope)
+
+            report_task = asyncio.create_task(
+                publish_reports(
+                    supervisor,
+                    plane="md",
+                    instance=INSTANCE,
+                    publish=_publish_report,
+                    clock=clock,
+                ),
+                name="md-procman-report",
+            )
+            watch_task = asyncio.create_task(
+                fetch.watch(stop), name="md-fetch-watch"
+            )
+            logger.info(
+                "MD started instance=%s (venue public factory: %s)",
+                INSTANCE,
+                venues.names(),
+            )
+            subjects = control_subjects(SOURCE, INSTANCE, ROLE)
+            if not subjects:
+                logger.warning(
+                    "MD is %s and serves no control subject — it holds what it "
+                    "has and takes nothing new",
+                    ROLE.value,
+                )
+            # One held set for every subject, including the pooled ``md``.
+            # A lower ``procman.report`` generation is a new STS publisher and
+            # resets that instance before the sample; see
+            # :func:`mftik.intent_gc.watch_sts_reports`.
+            intents = MdIntentBook()
+            rpc_tasks = [
+                asyncio.create_task(
+                    run_rpc(
+                        broker, store, stop, subject=subject, intents=intents
+                    ),
+                    name=f"md-rpc-{subject}",
+                )
+                for subject in subjects
+            ]
+            gc_task = asyncio.create_task(
+                watch_sts_reports(
+                    broker,
+                    held=intents.owners,
+                    release=intents.release_owners,
+                    stop=stop,
+                    states=intents.gc_states,
+                ),
+                name="md-intent-gc",
+            )
+            hb_task = asyncio.create_task(
+                broker.heartbeat_loop(
+                    SOURCE,
+                    interval=5.0,
+                    stop=stop,
+                    on_tick=lambda: logger.debug("heartbeat"),
+                ),
+                name="md-heartbeat",
+            )
+            health_task = asyncio.create_task(
+                serve_health(
+                    broker,
+                    domain=SOURCE,
+                    instance=INSTANCE,
+                    stop=stop,
+                    # Which venues this MD can reach. A deploy naming a feed
+                    # on a venue it cannot serve should fail at deploy rather
+                    # than at subscribe, and this is where that answer comes
+                    # from.
+                    describe=lambda: {"venues": sorted(venues.names())},
+                ),
+                name="md-health",
+            )
+            try:
+                clean = await run_until_stopped(
+                    stop,
+                    *rpc_tasks,
+                    gc_task,
+                    hb_task,
+                    health_task,
+                    report_task,
+                    watch_task,
+                    logger=logger,
+                )
+            finally:
+                stop.set()
+                tasks = [
+                    task
+                    for task in (
+                        *rpc_tasks,
+                        gc_task,
+                        hb_task,
+                        health_task,
+                        report_task,
+                        watch_task,
+                    )
+                    if task is not None
+                ]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
         finally:
-            stop.set()
-            tasks = [*rpc_tasks, gc_task, hb_task, health_task]
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await fetch.stop()
+            # SIGTERM is a roll. The fetch worker keeps serving.
+            await supervisor.close(fetch_close_mode())
             if recorder is not None:
                 await recorder.aclose()
     logger.info("MD stopped")

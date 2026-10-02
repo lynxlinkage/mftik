@@ -123,14 +123,21 @@ def test_current_release_refuses_when_mftik_is_not_installed(
 
 
 def test_only_the_release_module_reads_the_environment() -> None:
-    """``STRATEGON_RELEASE_VERSION`` has one reader. Planes call the function."""
+    """``STRATEGON_RELEASE_VERSION`` has one reader. Planes call the function.
+
+    The worker heartbeat reads ``MFTIK_STATUS_FD`` (S6). That is a
+    different variable, and the only other ``os.environ`` in this package.
+    """
     root = Path(current_release.__code__.co_filename).resolve().parent
     hits = [
         path.name
         for path in sorted(root.rglob("*.py"))
         if "os.environ" in path.read_text()
     ]
-    assert hits == ["release.py"]
+    assert hits == ["heartbeat.py", "release.py"]
+    beat = (root / "heartbeat.py").read_text()
+    assert _ENV not in beat
+    assert "STATUS_FD_ENV" in beat
     assert _RELEASE_ENV == _ENV
 
 

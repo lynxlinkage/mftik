@@ -1,0 +1,4 @@
+from mftik_md.fetch.worker import main
+
+if __name__ == "__main__":
+    main()
