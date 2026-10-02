@@ -1,6 +1,6 @@
 # REFACTOR_TICKETS — 平面進程化重構的工作票
 
-> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.33。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
+> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.34。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
 >
 > 每張票都有描述、範圍、驗收、依賴。驗收寫成別人能檢查的事：測試名稱、grep 結果、量測數字、文件章節。
 
@@ -715,10 +715,16 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 ### B5-03 offload（#212）
 
-- **範圍：** thread 和 process 模式、`offload_pool`、子進程的 `PDEATHSIG`、`OffloadWorkerLost`、`limits.*`、event log 與 progress。
-- **驗收：** stop 時 process 模式的子進程被 terminate；子進程 OOM 時，session 收到 `OffloadWorkerLost` 而不會跟著死；從非策略 thread 呼叫 SDK 會被拒。
+- **範圍：**
+  - thread 和 process 模式、`offload_pool`、子進程的 `PDEATHSIG`、`OffloadWorkerLost`、`limits.*`、event log 與 progress
+  - 額度（F43，#279）：`limits.offload_processes` 是同時存在的子進程總上限；`offload_pool(workers=N)` 建立時預留 N 個，`isolate=True` 的 pool 第一次使用時拿剩下的額度（至少 1）；額度不夠拋出 `OffloadQuotaExceeded`。`DEFAULT_OFFLOAD_PROCESSES` 改為 0，validator 接受 0。IF-06 的 `offload_pool` docstring 寫明這個關係。`StrategyHarness` 套用同樣的限制
+  - 准入預留（F43）：實測一個 spawn 子進程的基準 Pss，寫進 §4.7；`WorkerSpec` 帶 session 的額外預留（P × 子進程估計值，有 `offload_memory_mb` 就用它），procman 准入把它加在 kind 的估計值上；子進程不算進 `max_workers`
+- **驗收：**
+  - stop 時 process 模式的子進程被 terminate；子進程 OOM 時，session 收到 `OffloadWorkerLost` 而不會跟著死；從非策略 thread 呼叫 SDK 會被拒
+  - `offload_processes: 0`（預設）時，`isolate=True` 與 `offload_pool` 都拋出 `OffloadQuotaExceeded`，訊息寫明要設的欄位；`offload_processes: 3` 時，`offload_pool(workers=2)` 之後 `isolate=True` 的 pool 是 1 個，再開 `offload_pool(workers=1)` 會拋錯；pool 掉了一個子進程重建時不重複扣額度
+  - 准入：同樣的記憶體預算下，`offload_processes: 2` 的 session 比沒宣告的多扣 2 × 子進程估計值；有設 `offload_memory_mb` 時用它；超過預算以 `capacity_exceeded` 拒絕
 - **依賴：** B4-03
-- **決策：** F9
+- **決策：** F9、F43
 
 ### B5-04 hook 時間預算（#213）
 

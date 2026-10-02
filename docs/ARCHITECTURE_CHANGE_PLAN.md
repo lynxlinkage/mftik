@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.33（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F42）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.34（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F43）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
 > **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。**RM 清場已完成**，所以描述現況的章節（§1、§5 到 §8、附錄 A、B）說的是 `a0cbfb2`，不是分支上的代碼；清場後還剩什麼見 `docs/baseline/remaining.md`（RM-10，#173）。
+>
+> **v0.34（#279，offload 子進程的額度）：** 新增 F43：`limits.offload_processes` 是 session 同時存在的 offload 子進程總上限，預設改為 0；`offload_pool` 建立時預留額度，`isolate=True` 拿剩下的，超額拋出 `OffloadQuotaExceeded`；准入在部署時為宣告的子進程預留記憶體。§4.7、§5.5 隨之更新；實作併入 B5-03（#212）。
 >
 > **v0.33（#286，MD / TD 的重啟與 readiness）：** 新增 F42：MD 連線、TD 帳號、MD fetch worker 不設 FATAL，改成有上限的 backoff 加 crash-loop 告警；ready 不包含交易所連線；TD 帳號與 MD 連線的 heartbeat timeout 改為 10 秒；其餘暫定數值以現值為預設，收進新的附錄 D。§4.3、§6.3 隨之更新；新票 B3-08（#365）、B3-09（#366）、B6-09（#367）。
 >
@@ -66,6 +68,7 @@
 | F40 | STS controller 服務 operator 對主機磁碟的所有路徑：registry 副本、extras、artifact 的 list / read / 上傳 / 刪除、event log 讀取、未完成上傳的清理；不另開 files worker。策略仍在自己的 worker 裡直接讀寫 artifact，而且可以寫任何 key（全域寫入，刻意保留） | §5.7；B5-11（#277） |
 | F41 | `pv` 在兩個地方擋。**deploy 時：** API 把自己的 `pv` 和 session 會用到的 STS controller、MD / TD controller、TD 帳號 worker 比對，不符就以 `protocol_mismatch` 拒絕，不 spawn worker、不寫 intent；`WorkerSpec` 記下 worker 的 `pv`，經 `procman.report` 帶出；某個 `(venue, endpoint)` 上還有 `pv` 不同的 MD 連線 worker 時，MD controller 對落在那裡的 `md.intent.put` 以 `protocol_mismatch` 拒絕，不另開新 worker 承接。**執行中：** `pv` 改放 NATS header `Mftik-Pv`，由 transport 蓋上、在任何解碼之前檢查；header 缺少或不符的 frame 直接丟棄，記 log（依 subject 與 `pv` 限流）並計數，不回錯誤。request 收到不符的 reply 時，transport 對呼叫端拋出本地錯誤。envelope 的 `pv` 欄位刪除 | body 裡的 `pv` 有預設值，解碼之後就分不出「缺少」和「相符」，所以檢查只能在解碼之前，而所有訊息都會經過、又還沒解碼的地方只有 transport。丟棄而不回錯誤，`mftik.broker.handler` 的 H5、H6 不變，fan-out 也一併涵蓋。代價是送錯版本的 request 會 timeout、廣播只被計數，所以要靠 deploy 時的比對先擋（§4.6）。新 controller 推不到舊 `pv` 連線 worker 的 desired、也收不到它的狀態廣播，不知道它持有哪些 atom；另開新 worker 承接會讓同一個 atom 有兩個發佈者和兩個 tape writer（違反 F22、§6.3），所以整個 `(venue, endpoint)` 擋到人工 `restart`（F24）為止；B4-10（#363）、B8-02（#239） |
 | F42 | MD 連線、TD 帳號、MD fetch worker 不設 FATAL：crash 後第 n 次重啟前等 1 秒 × 2^(n−1)，上限 60 秒，±20% jitter；連續 RUNNING 滿 10 分鐘 n 才歸零；n 到 5 發 crash-loop 告警，歸零時解除。ready 只代表本地初始化完成（設定與憑證載入、NATS subject 答得到），不包含交易所連線：連不上由 F14 的狀態廣播回報，在進程內依同一條曲線重試（連線維持 60 秒後歸零）；FAILED 只留給設定錯誤；API key 被拒時照樣 ready，報 `unavailable(auth_rejected)`，不再重試認證。TD 帳號與 MD 連線的 heartbeat timeout 為 10 秒。STS 維持 F11。其餘暫定數值以現值為預設，列在附錄 D | 它們是共用基礎設施：FATAL 會讓所有依賴的 session 停到有人處理，TD 還會留下策略撤不掉的掛單（F37 預設關閉）；crash 重啟用的是當下 controller 的 release，修正版上線後會自己恢復。jitter 避免相關的 crash（同一個壞 frame 打在多條連線、同一個 bug 影響多個帳號）同步重連，撞上 per-IP 的連線速率限制。ready 若包含交易所連線，spawn 時遇到維護或網路抖動就會 FAILED 且永不重啟。10 秒和 F14 收件端的靜默判定一致，procman 不會比收件端先下手（§4.3）；B3-08（#365）、B3-09（#366）、B6-09（#367）、B8-02（#239）、B8-03（#240） |
+| F43 | `limits.offload_processes` 是 session 同時存在的 offload 子進程總上限，預設 0（用 process 模式要宣告）。`offload_pool(workers=N)` 建立時預留 N 個；`isolate=True` 背後的 pool 在第一次使用時建立，拿剩下的額度，至少 1 個。額度不夠就在呼叫處拋出 `OffloadQuotaExceeded`，不默默縮小。准入在部署時預留 session 估計值加上 P × 子進程估計值（P 為 `offload_processes`；子進程估計值有設 `offload_memory_mb` 就用它，否則用實測的 spawn 子進程基準 Pss）；子進程不算進 `max_workers`。`offload_threads` 預設維持 2 | 一個寫在 strategy.yml 的數字界定整棵子進程樹，准入和 operator 在代碼跑起來之前就看得到上限；若 pool 不受 `limits` 管，子進程數由執行期代碼決定，准入無從得知。默默縮小會讓策略以為有 N 個 worker，延遲莫名變差。預設 1 會讓每個 session 多預留一個大多用不到的子進程（約 60 MiB，等於估計值翻倍）。`StrategyHarness` 套用同樣的限制，測試時就會撞到（§4.7、§5.5）；B5-03（#212） |
 
 ## 0. 摘要
 
@@ -531,6 +534,7 @@ TD 帳號 worker 對每個啟用帳號常駐（F35），所以 TD 平面固定�
 每個平面的 orchestrator 持有一份預算：`max_workers`，以及依 kind 估算的 `memory_budget_mb`，以 instance 的環境變數設定。
 
 - 預估值來自 Supervisor 回報的實際 RSS：開了 `oci_host_pid` 之後，controller 可以直接讀 worker 的 `/proc/<pid>/status`。
+- STS session 的部署估計另外加上 offload 子進程的預留：P × 子進程估計值，P 是 strategy.yml 的 `limits.offload_processes`，子進程估計值有設 `offload_memory_mb` 就用它（那是子進程的 `RLIMIT_DATA`，是真正的上界），否則用 B5-03 實測的 spawn 子進程基準 Pss。這份預留由 `WorkerSpec` 帶給准入，不改 kind 的估計表；子進程不算進 `max_workers`（F43）。
 - 超過預算時，start 直接以 `capacity_exceeded` 拒絕，不會先把 worker 開起來、再讓 OOM 收拾。
 - B4-09 起，三個平面在建立 Supervisor 時讀 `PROCMAN_MAX_WORKERS` 和 `PROCMAN_MEMORY_BUDGET_MB`。兩個都沒設、或是空白，就是沒有預算，行為和今天一樣。有設記憶體上限時，kind 的估計用上面那張表，shim 另加 B3-01 的常數。
 
@@ -808,7 +812,8 @@ y = await self.ml.call(predict, x)      # 在子進程執行 predict(state, x)�
 - offload 出去的函式不能呼叫 SDK，例如 `submit_order`、`log`。SDK 會檢查呼叫者所在的 thread，不在策略 thread 上就拒絕。
 - 輸入要明確傳入、結果要明確回傳。thread 模式下不要在函式裡改策略物件的狀態，因為策略的 loop 同時還在跑。
 - 例外照常傳回給 `await` 的呼叫端。
-- 平行度由 strategy.yml 設定：`limits.offload_threads`（預設 2）、`limits.offload_processes`（預設 1）。
+- 平行度由 strategy.yml 設定：`limits.offload_threads`（預設 2）、`limits.offload_processes`（預設 0，F43）。
+- `limits.offload_processes` 是這個 session 同時存在的 offload 子進程總上限（F43）。`offload_pool(workers=N)` 在建立時預留 N 個；`isolate=True` 背後的 pool 在第一次使用時建立，拿剩下的額度，至少 1 個。額度不夠就在呼叫處拋出 `OffloadQuotaExceeded`，訊息寫明要調高 `limits.offload_processes`；不會默默給比要求少的 worker。所以 pool 要在 `on_start` 裡、第一次用 `isolate=True` 之前建立；順序反了只會報錯，不會默默出錯。預設 0 表示沒有宣告就不能用 process 模式。
 
 **生命週期（對齊 §5.3 的階段）：**
 
@@ -823,7 +828,7 @@ y = await self.ml.call(predict, x)      # 在子進程執行 predict(state, x)�
 
 - ingress 的 progress 列出進行中的 offload：函式名稱、模式、已執行時間。例如「offload `predict`（process）已跑 41 秒」。
 - event log 記錄 `offload_start` / `offload_end`：函式名稱、模式、耗時、結果（ok / error / cancelled / lost）。參數只記大小，不記內容。
-- 准入控制（§4.7）計算 session 記憶體時，把 process 模式的子進程也算進去。Supervisor 讀取 worker 的整棵子進程樹。
+- 准入控制（§4.7）計算 session 記憶體時，把 process 模式的子進程也算進去：部署時依 `limits.offload_processes` 預留，執行中以 Supervisor 讀到的整棵子進程樹 Pss 為準（F43）。
 
 **取代既有用法：**
 
