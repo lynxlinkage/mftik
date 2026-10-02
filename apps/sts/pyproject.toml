@@ -29,4 +29,4 @@ packages = ["src/mftik_sts"]
 "src/mftik_sts" = "mftik_sts"
 
 [project.scripts]
-sts = "mftik_sts:main"
+sts = "mftik_sts.app:main"
