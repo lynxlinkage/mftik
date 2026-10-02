@@ -1,14 +1,10 @@
 """What B3 has to make true of procman, written before it exists.
 
-Every test here is ``xfail(strict=True)``. The stubs raise
-``NotImplementedError("IF-03")``, so the tests fail, and ``strict`` means
-the day the behaviour lands the suite goes red until the marker is removed.
-That is the point of an interface ticket's contract (IF 共同驗收 4).
-
-S1–S7 and ``close`` spawn real processes, so they are ``integration``.
-B3-01 turns S1–S7 green. B3-02 turns the failure classification, the
-backoff and the intensity green. B3-03 turns reattach and detach/stop
-green.
+S1–S7 spawn real processes and are ``integration``. B3-01 makes them
+pass. The rest of this file is still ``xfail(strict=True)``: B3-02 owns
+failure classification, backoff and intensity; B3-03 owns reattach and
+detach/stop. ``strict`` means a stub that starts passing fails the suite
+until its marker is removed.
 """
 
 from __future__ import annotations
@@ -207,7 +203,6 @@ time.sleep(30)
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(strict=True, reason="B3-01: S1 shim is the worker's only parent")
 def test_s1_shim_is_the_only_parent_and_reaps_descendants(tmp_path: Path) -> None:
     """S1: the shim parents the worker, init parents the shim, and an
     orphaned descendant is reparented to the shim rather than to init."""
@@ -229,7 +224,6 @@ def test_s1_shim_is_the_only_parent_and_reaps_descendants(tmp_path: Path) -> Non
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(strict=True, reason="B3-01: S2 worker stops when the shim dies")
 def test_s2_killing_the_shim_stops_the_worker_gracefully(tmp_path: Path) -> None:
     """S2: PDEATHSIG is SIGTERM (or the status pipe's EPIPE, whichever is
     first). The worker gets a chance to exit on its own; it is not SIGKILL."""
@@ -259,7 +253,6 @@ def test_s2_killing_the_shim_stops_the_worker_gracefully(tmp_path: Path) -> None
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(strict=True, reason="B3-01: S3 exit record survives until release")
 def test_s3_exit_record_is_durable_and_the_shim_waits_for_release(
     tmp_path: Path,
 ) -> None:
@@ -288,7 +281,6 @@ def test_s3_exit_record_is_durable_and_the_shim_waits_for_release(
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(strict=True, reason="B3-01: S4 stdio cannot stall the worker")
 def test_s4_a_full_stdout_does_not_stall_or_kill_the_worker(tmp_path: Path) -> None:
     """S4: nobody is reading the shim's log. A multi-megabyte write still
     finishes, and the worker is still running afterwards."""
@@ -304,7 +296,6 @@ def test_s4_a_full_stdout_does_not_stall_or_kill_the_worker(tmp_path: Path) -> N
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(strict=True, reason="B3-01: S5 status identifies the worker")
 def test_s5_status_reports_id_incarnation_and_the_socket_path(tmp_path: Path) -> None:
     spec = _spec(_argv(_CATCH_TERM, str(tmp_path / "caught"), str(tmp_path / "ready")))
     with _running(spec, tmp_path) as spawned:
@@ -317,7 +308,6 @@ def test_s5_status_reports_id_incarnation_and_the_socket_path(tmp_path: Path) ->
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(strict=True, reason="B3-01: S5 signal is killpg")
 def test_s5_signal_reaches_the_workers_process_group(tmp_path: Path) -> None:
     """S5: ``signal`` is ``killpg`` on the worker's group, so a child that
     stayed in the group receives it too."""
@@ -334,7 +324,6 @@ def test_s5_signal_reaches_the_workers_process_group(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(strict=True, reason="B3-01: S5 watch yields the current status")
 def test_s5_watch_yields_the_current_status_without_waiting_for_a_beat(
     tmp_path: Path,
 ) -> None:
@@ -357,7 +346,6 @@ def test_s5_watch_yields_the_current_status_without_waiting_for_a_beat(
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(strict=True, reason="B3-01: S6 the status pipe carries ready")
 def test_s6_a_heartbeat_makes_status_ready(tmp_path: Path) -> None:
     """S6, the channel: the shim puts ``MFTIK_STATUS_FD`` in the worker's
     environment, and a full snapshot on that pipe shows up on ``status``."""
@@ -369,7 +357,6 @@ def test_s6_a_heartbeat_makes_status_ready(tmp_path: Path) -> None:
         assert status.ready is True
 
 
-@pytest.mark.xfail(strict=True, reason="B3-01: S6 a dropped beat is not a delta")
 @pytest.mark.parametrize(
     ("previous", "ready", "expected"),
     [
@@ -391,7 +378,6 @@ def test_s6_a_heartbeat_replaces_ready_wholesale(
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(strict=True, reason="B3-01: S7 SIGTERM is forwarded, shim stays")
 def test_s7_sigterm_to_the_shim_is_forwarded_and_the_shim_stays(
     tmp_path: Path,
 ) -> None:

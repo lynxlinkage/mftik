@@ -1,12 +1,13 @@
-"""The procman interface IF-03 defines, and that deciding anything raises.
+"""The procman interface IF-03 defines, and what B3 still has to decide.
 
 Two things are pinned here. The shape is real: ``WorkerSpec`` is §4.3, the
 transition table is the diagram, the NDJSON frames round-trip, and the
-report payload has the fields §3.3 and §4.7 name. The behaviour is not.
-Spawning, signalling, classifying a death and publishing a report raise
-``NotImplementedError("IF-03")``.
+report payload has the fields §3.3 and §4.7 name. The shim is real as of
+B3-01. Classifying a death, planning a restart, reattaching and publishing
+a report still raise ``NotImplementedError("IF-03")``.
 
-What B3 has to make true is in ``test_procman_contract.py``, as xfail.
+What B3-02 and B3-03 have to make true is in ``test_procman_contract.py``,
+as xfail.
 """
 
 from __future__ import annotations
@@ -37,7 +38,6 @@ from mftik.procman import (
     ReleaseCommand,
     ReportedWorker,
     RestartIntensity,
-    ShimClient,
     ShimStatus,
     SignalCommand,
     StatusQuery,
@@ -63,13 +63,10 @@ from mftik.procman import (
     exit_record_path,
     exit_record_tmp_path,
     load_frame,
-    observe_heartbeat,
     plan_restart,
     reattach_action,
     report_subject,
-    shim_main,
     socket_path,
-    spawn_shim,
     supervisor_state_path,
     transition,
 )
@@ -449,7 +446,7 @@ async def test_stop_refuses_an_id_that_escapes_run(tmp_path: Path) -> None:
         await supervisor.stop("../outside")
 
 
-def test_decisions_and_the_shim_raise_the_ticket(tmp_path: Path) -> None:
+def test_decisions_raise_the_ticket() -> None:
     intensity = RestartIntensity(max_restarts=5, window_s=600, min_backoff_s=1)
     calls = (
         lambda: classify_failure(ready=True, cause=FailureCause.DEATH),
@@ -466,10 +463,6 @@ def test_decisions_and_the_shim_raise_the_ticket(tmp_path: Path) -> None:
             desired=DesiredSlot.PRESENT,
             observed=ObservedWorker.RUNNING,
         ),
-        lambda: observe_heartbeat(previous_ready=False, beat=None),
-        lambda: spawn_shim(_spec(), work_dir=tmp_path),
-        lambda: ShimClient(tmp_path / "run" / "x.sock").status(),
-        lambda: shim_main([]),
     )
     for call in calls:
         with pytest.raises(NotImplementedError, match=rf"^{TICKET}$"):

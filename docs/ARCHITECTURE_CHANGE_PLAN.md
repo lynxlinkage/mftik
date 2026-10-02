@@ -46,7 +46,7 @@
 | F26 | 跨版本只靠版號：每則 NATS 訊息帶 `pv`，格式一改就升版，不同 `pv` 一律以 `protocol_mismatch` 拒絕；不做版內相容，也不做 schema 比對 | 停止不依賴協定（SIGTERM），任何版本組合都停得掉。升版順序見 §4.6 |
 | F27 | TD 帳號 worker 換版後由人工逐帳號觸發 drain-replace，平台不自動換版 | 理由同 F24（§4.6） |
 | F28 | `docs/Deployment.md` 不封存，依現況重寫；venue 實測表（`Deribit`、`BitgetUta`）封存到 `docs/archive/` | B1 依現況重寫 Deployment，B10 依新架構更新（§10） |
-| F29 | shim 用 Python | 只用標準庫，不 import pydantic、nats 等第三方套件，以壓低每個 shim 的 RSS（prototype 約 10–15 MB），這部分算進 §4.7 的預算 |
+| F29 | shim 用 Python | 只用標準庫，不 import pydantic、nats 等第三方套件，以壓低每個 shim 的 RSS（實測見 §4.7），這部分算進 §4.7 的預算 |
 | F30 | 兩分鐘預算以 GitHub Actions 的 `ubuntu-latest` 為準 | 只算 `just test`（unit + component）那一步；integration 另開 job（§9.1） |
 | F31 | 測試照樣用 NATS，不引入 broker fake；連線和收到之後的行為分開測，每個 xdist worker 共用一條 NATS 連線 | handler 和傳輸分開寫，行為測試直接呼叫 handler（§9.2） |
 | F32 | 刪除 §8.2 的規則 4：STS controller 的報告整個停止時不回收任何東西，不從訊號缺席推論主機失聯 | 機器永久消失時由人工 `mftik intents gc --instance`（暫定）。P7 只剩 F14 的失聯通知這個只通知、不回收的例外 |
@@ -488,7 +488,7 @@ shim fork 出 worker 之後、`exec` 之前，由子進程寫自己的 `/proc/se
 
 MD 連線 worker 是一條 websocket 一個進程（F17），worker 數等於使用中的連線數。以每個 60–90 MB 估計（B4 實測），10 條連線就是 0.6–0.9 GB，已經超過現行整個 MD 平面的 768 MB，MD 的 `memory_budget_mb` 要依此設定。
 
-每個 worker 另外有一個 Python shim（F29），約 10–15 MB，也要算進各平面的預算。
+每個 worker 另外有一個 Python shim（F29），也要算進各平面的預算。B3-01 實測（Python 3.12.3，worker 執行 `time.sleep`、shim 阻塞在 `poll`，讀 `/proc/<pid>/status` 的 `VmRSS`）：負責 unix socket 的 shim 進程為 14648 kB（約 14.3 MiB）。同一次量測裡，為了在 shim 被 `SIGKILL` 之後仍能收屍並寫 `<id>.exit.json`（S2、S3）而留下的 subreaper 父進程，其 `VmRSS` 為 13260 kB；它自己被 init 收養。兩者的 `Pss`（`/proc/<pid>/smaps_rollup`）分別為 6370 kB 與 6088 kB，共享頁在 `VmRSS` 裡各算一次。Prototype 的約 10–15 MB 對到的是 shim 自己的 `VmRSS`。
 
 TD 帳號 worker 對每個啟用帳號常駐（F35），所以 TD 平面固定佔用「啟用帳號數 ×（worker 加 shim）」，和有沒有 session 無關。
 

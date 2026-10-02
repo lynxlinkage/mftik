@@ -57,8 +57,9 @@ NDJSON protocol and is not that parent (F6).
   the optional ``RLIMIT_DATA`` (§4.7, F7). Admission control is B3-05.
 
 Framing, path names, the transition table and :class:`WorkerSpec`
-validation are real. Every function that would spawn, signal, decide or
-publish raises ``NotImplementedError("IF-03")`` until B3.
+validation are real. The shim — spawn, the socket, the exit record — is
+real as of B3-01. Restart decisions, reattach and publishing a report
+still raise ``NotImplementedError("IF-03")``.
 """
 
 from mftik.procman._ticket import TICKET
@@ -105,6 +106,7 @@ from mftik.procman.messages import (
     exit_record_path,
     exit_record_tmp_path,
     load_frame,
+    log_path,
     run_dir,
     socket_path,
     supervisor_state_path,
@@ -196,6 +198,7 @@ __all__ = [
     "exit_record_path",
     "exit_record_tmp_path",
     "load_frame",
+    "log_path",
     "observe_heartbeat",
     "plan_restart",
     "reattach_action",
