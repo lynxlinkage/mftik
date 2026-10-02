@@ -479,6 +479,15 @@ class Strategy:
     # One hook per md feed topic. A session only receives what it subscribed
     # to in ``md_ids`` (``topic.UniversalTicker``). Session validates wire JSON
     # into the shared ``mftik.exchange.models`` shapes before the hook runs.
+    #
+    # The object the hook receives also answers ``recv_ts`` and ``age``
+    # (§5.3). ``recv_ts`` is when the ingress received the frame. ``age``
+    # is how many seconds that was, computed when the strategy reads it.
+    # MD objects also answer ``seq``: the connection worker's per-atom
+    # sequence from the envelope (F25). ``None`` means that frame carried
+    # no sequence. A hole on an ``all`` feed is a loss the strategy notices
+    # itself. A hole on ``latest`` is conflation, not a loss (F23). TD
+    # payloads answer ``seq`` with ``None``. Nothing here mints a sequence.
 
     async def on_ticker(self, ticker: Ticker) -> None:
         """Handle ticker updates from MD — 24h stats + top of book.

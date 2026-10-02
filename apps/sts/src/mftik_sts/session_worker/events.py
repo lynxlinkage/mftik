@@ -90,11 +90,11 @@ class LogMark(StrEnum):
 class Inbound:
     """One event the ingress has received and not yet decoded.
 
-    ``clock`` is read by :attr:`age`. It is a ``() -> float`` rather
-    than :mod:`mftik.clock`, which this branch does not have yet
-    (B2-02). The strategy thread binds one before a hook sees the
-    event. Until something does, :attr:`age` is ``None`` — unknown, not
-    zero. Zero would look like a print that just arrived.
+    ``clock`` is read by :attr:`age`. It is the ingress
+    :class:`~mftik.clock.Clock`'s ``now``, bound when the event is
+    built. ``age`` subtracts when it is read, which is on the strategy
+    thread. Until a clock is bound, :attr:`age` is ``None`` — unknown,
+    not zero. Zero would look like a print that just arrived.
     """
 
     kind: StreamKind

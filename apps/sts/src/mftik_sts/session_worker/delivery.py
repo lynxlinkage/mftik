@@ -26,26 +26,37 @@ must-deliver row. TD, ``feed_end``, RPC replies and availability
 notices stay ``all`` and fail on overflow no matter what string is
 passed.
 
-``capacity`` is the bound of one queue. The plan does not give a
-number, so the caller passes it and this module does not pick one.
-Whether the must-deliver kinds share one queue or each have their own
-is also not decided: every contract test overflows a single kind,
-which is the same either way.
+``capacity`` is the bound of one ``all`` feed queue and of the shared
+must-deliver queue. The plan does not give a number. Callers pass
+:data:`~mftik_sts.session_worker.limits.ALL_QUEUE_CAPACITY`, which is
+also :data:`~mftik_sts.session_worker.limits.MUST_DELIVER_CAPACITY`
+(provisional, #286). ``latest`` and ``kline`` do not use it: they
+conflate.
 
-Klines are handed to :meth:`Delivery.take` in increasing ``bar_open``.
-The plan doesn't say. A closed bar has to come out before the bar that
-opened after it, including when the later bar's bytes arrived first.
+Must-deliver kinds share one FIFO, so a fill and the RPC reply about
+the same order cannot swap, and a ``RESYNC`` stays ahead of the
+deferred ``ready`` offered after it. :meth:`Delivery.take` round-robins
+that queue with the market-data feeds, must-deliver first: slot 0 is
+the shared FIFO, then each feed in the order it was first seen. An
+empty slot is skipped. Inside one kline feed the smallest ``bar_open``
+comes out first, so a closed bar is delivered before a later bar whose
+bytes arrived earlier. Inside one ``all`` feed the order is arrival
+order.
 
-The lookup functions below are the table. They are pure and they are
-live. The queues that apply the table are not: :meth:`Delivery.accept`
-raises ``NotImplementedError("IF-05")`` until B5-01.
+The lookup functions below are the table. They are pure. The queues
+apply the table.
 """
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
+from collections import deque
 from collections.abc import Mapping
 from enum import StrEnum
 
+from mftik.clock import Clock
 from mftik.exchange.atoms import KLINE_PREFIX
 from mftik.protocol import (
     DELIVERY_ALL,
@@ -56,11 +67,14 @@ from mftik.protocol import (
 
 from mftik_sts.session_worker.errors import SessionFailed
 from mftik_sts.session_worker.events import Inbound, LogMark, LogRecord, StreamKind
+from mftik_sts.session_worker.limits import DROP_WARN_INTERVAL_S
+
+logger = logging.getLogger(__name__)
 
 #: Kinds that are ``all``, that ignore a delivery override, and that
 #: fail the session instead of dropping. Not feeds, so ``strategy.yml``
 #: has nowhere to write an override for them. Availability notices are
-#: in this set so the temporary buffer cannot drop one (B5-05).
+#: in this set so a market-data flood cannot drop one (B5-05).
 MUST_DELIVER = frozenset(
     {
         StreamKind.TD,
@@ -177,19 +191,23 @@ class Delivery:
 
     ``all`` queues are per feed, so one busy trade feed does not punch
     holes in another feed's ``seq``. ``latest`` is one slot per feed.
-    ``kline`` is one slot per ``(feed, bar_open)``.
+    ``kline`` is one slot per ``(feed, bar_open)``. Must-deliver kinds
+    share one FIFO of ``capacity``.
 
-    :meth:`accept` and the marks it would stamp raise
-    ``NotImplementedError("IF-05")``. :meth:`take` returns ``None``,
-    :meth:`mark` returns ``None``, :attr:`dropped` is ``0``. B5-01
-    fills the queues in. B5-02 persists :meth:`log_records`.
+    :meth:`log_records` stays empty. B5-02 persists the lines. The mark
+    :meth:`mark` returns is the in-memory disposition only.
 
-    **State this object holds, once it does anything (§3.3):** the
-    not-yet-delivered events, the drop count the ingress publishes on
+    **State this object holds (§3.3):** the not-yet-delivered events,
+    the per-feed drop counts the ingress publishes on
     ``sts.status.{session_id}``, and the in-memory disposition mark of
     each event. The file those marks are written to is the event log,
     also this layer's, written by the writer thread rather than by
     :meth:`accept`.
+
+    Not locked against itself beyond the lock below. :class:`Ingress`
+    calls :meth:`accept` and :meth:`take` from two threads and holds
+    its own lock across each call. Direct use from one thread, which
+    is what the contract tests do, does not need that.
     """
 
     def __init__(
@@ -197,6 +215,7 @@ class Delivery:
         *,
         capacity: int,
         overrides: Mapping[str, str] | None = None,
+        clock: Clock | None = None,
     ) -> None:
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
             raise ValueError(f"capacity must be an integer >= 1, got {capacity!r}")
@@ -211,6 +230,22 @@ class Delivery:
             )
         self.capacity = capacity
         self.overrides = overrides
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._must: deque[Inbound] = deque()
+        self._all: dict[str, deque[Inbound]] = {}
+        self._latest: dict[str, Inbound] = {}
+        self._kline: dict[tuple[str, float], Inbound] = {}
+        self._feeds: list[str] = []
+        self._modes: dict[str, str] = {}
+        self._rr = 0
+        self._marks: dict[str, LogMark] = {}
+        self._dropped = 0
+        self._dropped_by_feed: dict[str, int] = {}
+        self._warnings: list[str] = []
+        self._warned_at: dict[str, float] = {}
+        self._failed = False
+        self._fail_reason: str | None = None
 
     def mode_of(self, event: Inbound) -> str:
         """The mode ``event`` will be queued under, override included."""
@@ -223,14 +258,12 @@ class Delivery:
 
         A kline without :attr:`~Inbound.bar_open` is refused here, before
         any queue runs: the key is the header, and a missing header is
-        not an event this table can place. That check is live. The
-        queue is not.
+        not an event this table can place.
 
-        Raises :class:`SessionFailed` when a must-deliver queue is past
+        Raises :class:`SessionFailed` when the must-deliver queue is past
         ``capacity``. The event that did not fit is not marked
-        ``dropped``. Events already accepted stay accepted.
-
-        Raises :class:`NotImplementedError` until B5-01.
+        ``dropped``. Events already accepted stay accepted. A later
+        :meth:`accept` raises the same reason.
         """
         if not event.event_id:
             raise ValueError("event_id is required")
@@ -239,60 +272,198 @@ class Delivery:
                 "a kline event needs bar_open; it is the conflation key "
                 "and the ingress does not decode the body to find it"
             )
-        raise NotImplementedError("IF-05")
+        with self._lock:
+            self._accept(event)
 
     def take(self) -> Inbound | None:
         """The next event for the strategy thread to decode, or ``None``.
 
-        ``None`` is the empty queue. It is also what this stub always
-        returns. Taking an event marks it ``delivered``.
+        ``None`` is the empty queue. Taking an event marks it
+        ``delivered``. Must-deliver is slot 0 of the round-robin; each
+        market-data feed follows, in first-seen order.
         """
-        return None
+        with self._lock:
+            sources = 1 + len(self._feeds)
+            for _ in range(sources):
+                slot = self._rr % sources
+                self._rr = slot + 1
+                event = self._pop(slot)
+                if event is None:
+                    continue
+                self._marks[event.event_id] = LogMark.DELIVERED
+                return event
+            return None
 
     @property
     def dropped(self) -> int:
         """How many ``all``-feed events were dropped as the oldest.
 
-        The number ``sts.status`` progress publishes. A ``latest``
-        replacement is not a drop. A must-deliver overflow is not a
-        drop either — the session has failed, and the count stays.
+        The number ``sts.status`` progress publishes. A ``latest`` or
+        kline replacement is not a drop. A must-deliver overflow is not
+        a drop either — the session has failed, and the count stays.
         """
-        return 0
+        with self._lock:
+            return self._dropped
+
+    @property
+    def dropped_by_feed(self) -> dict[str, int]:
+        """Drop counts for ``all`` feeds that have dropped at least one.
+
+        A feed that has not dropped is absent. Replacement is not an
+        entry. The total of the values is :attr:`dropped`.
+        """
+        with self._lock:
+            return dict(self._dropped_by_feed)
 
     @property
     def failed(self) -> bool:
         """True once a must-deliver queue has overflowed."""
-        return False
+        with self._lock:
+            return self._failed
 
     @property
     def fail_reason(self) -> str | None:
         """The :class:`SessionFailed` reason, or ``None`` if it hasn't."""
-        return None
+        with self._lock:
+            return self._fail_reason
 
     def mark(self, event_id: str) -> LogMark | None:
         """The disposition of ``event_id``, or ``None`` if it has none yet.
 
         ``None`` means not accepted, or accepted and still waiting.
-        The stub has accepted nothing, so it is always ``None``.
         """
-        return None
+        with self._lock:
+            return self._marks.get(event_id)
 
     def warnings(self) -> tuple[str, ...]:
         """Warning lines written when an ``all`` feed dropped an event.
 
         Empty until something is dropped. One line per drop, not one
-        line per event that survived.
+        line per event that survived. The logger is rate-limited; this
+        tuple is not.
         """
-        return ()
+        with self._lock:
+            return tuple(self._warnings)
 
     def log_records(self) -> tuple[LogRecord, ...]:
         """Inbound lines queued for the writer, oldest first.
 
-        Empty until B5-02. :meth:`accept` logs at receive; the mark on
-        a line changes when the outcome is known. Nothing here writes
-        a file.
+        Empty until B5-02. :meth:`accept` is where the ingress logs at
+        receive; the mark on a line changes when the outcome is known.
+        Nothing here writes a file.
         """
         return ()
+
+    def _accept(self, event: Inbound) -> None:
+        if self._failed:
+            raise SessionFailed(self._fail_reason or "delivery_overflow")
+        if event.kind in MUST_DELIVER:
+            self._accept_must(event)
+            return
+        mode = self.mode_of(event)
+        if mode == DELIVERY_KLINE and event.bar_open is None:
+            raise ValueError(
+                "a kline event needs bar_open; it is the conflation key "
+                "and the ingress does not decode the body to find it"
+            )
+        self._remember_feed(event.feed, mode)
+        if mode == DELIVERY_ALL:
+            self._accept_all(event)
+        elif mode == DELIVERY_KLINE:
+            self._accept_kline(event)
+        else:
+            self._accept_latest(event)
+
+    def _remember_feed(self, feed: str, mode: str) -> None:
+        current = self._modes.get(feed)
+        if current is None:
+            self._feeds.append(feed)
+            self._modes[feed] = mode
+            return
+        if current != mode:
+            raise ValueError(
+                f"feed {feed} is already queued as {current}, not {mode}"
+            )
+
+    def _accept_must(self, event: Inbound) -> None:
+        if len(self._must) >= self.capacity:
+            reason = f"{event.kind.value}_overflow"
+            self._failed = True
+            self._fail_reason = reason
+            logger.error("must-deliver overflow kind=%s", event.kind.value)
+            raise SessionFailed(reason)
+        self._must.append(event)
+
+    def _accept_all(self, event: Inbound) -> None:
+        queue = self._all.setdefault(event.feed, deque())
+        if len(queue) >= self.capacity:
+            oldest = queue.popleft()
+            self._marks[oldest.event_id] = LogMark.DROPPED
+            self._dropped += 1
+            count = self._dropped_by_feed.get(event.feed, 0) + 1
+            self._dropped_by_feed[event.feed] = count
+            line = (
+                f"dropped oldest feed={event.feed} kind={event.kind.value} "
+                f"seq={oldest.seq} count={count}"
+            )
+            self._warnings.append(line)
+            self._warn_drop(event.feed, line)
+        queue.append(event)
+
+    def _accept_latest(self, event: Inbound) -> None:
+        previous = self._latest.get(event.feed)
+        if previous is not None:
+            self._marks[previous.event_id] = LogMark.SUPERSEDED
+        self._latest[event.feed] = event
+
+    def _accept_kline(self, event: Inbound) -> None:
+        assert event.bar_open is not None
+        key = (event.feed, event.bar_open)
+        previous = self._kline.get(key)
+        if previous is not None:
+            self._marks[previous.event_id] = LogMark.SUPERSEDED
+        self._kline[key] = event
+
+    def _pop(self, slot: int) -> Inbound | None:
+        if slot == 0:
+            if not self._must:
+                return None
+            return self._must.popleft()
+        feed = self._feeds[slot - 1]
+        mode = self._modes[feed]
+        if mode == DELIVERY_ALL:
+            queue = self._all.get(feed)
+            if not queue:
+                return None
+            return queue.popleft()
+        if mode == DELIVERY_KLINE:
+            return self._pop_kline(feed)
+        return self._latest.pop(feed, None)
+
+    def _pop_kline(self, feed: str) -> Inbound | None:
+        chosen: tuple[str, float] | None = None
+        for key in self._kline:
+            if key[0] != feed:
+                continue
+            if chosen is None or key[1] < chosen[1]:
+                chosen = key
+        if chosen is None:
+            return None
+        return self._kline.pop(chosen)
+
+    def _warn_drop(self, feed: str, line: str) -> None:
+        now = self._monotonic()
+        last = self._warned_at.get(feed)
+        if last is not None and now - last < DROP_WARN_INTERVAL_S:
+            return
+        self._warned_at[feed] = now
+        logger.warning("%s", line)
+
+    def _monotonic(self) -> float:
+        clock = self._clock
+        if clock is None:
+            return time.monotonic()
+        return clock.monotonic()
 
 
 __all__ = [

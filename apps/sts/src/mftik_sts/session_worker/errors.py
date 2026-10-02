@@ -1,8 +1,8 @@
 """Failures the session worker names.
 
-The lifecycle refusals are raised by the ingress and the runner. A
-must-deliver overflow still is not: that queue is B5-01, and
-:class:`SessionFailed` stays unused until then.
+The lifecycle refusals are raised by the ingress and the runner.
+:class:`SessionFailed` is raised by :meth:`Delivery.accept` when the
+shared must-deliver queue is past its capacity.
 """
 
 from __future__ import annotations

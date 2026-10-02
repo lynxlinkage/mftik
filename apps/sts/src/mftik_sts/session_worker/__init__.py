@@ -56,11 +56,11 @@ them, and nothing here spans a second session (I2).
 
 **Null until the ticket that builds it.** The table lookups (which
 mode a kind has, what an overflow does, the F15 numbers, the phase
-enum) are data and they are live. Every operation that moves a thread,
-a queue or a measurement raises ``NotImplementedError("IF-05")`` or
-returns ``None`` or an empty collection. B4-03 builds the threads and
-turns I1–I4 green. B5-01 builds the queues. B5-02 persists the log
-marks. B5-04 classifies hook time.
+enum) are data and they are live. The delivery queues are live
+(B5-01). B4-03 built the threads and turned I1–I4 green. B5-02
+persists the log marks. B5-04 classifies hook time. What those two
+still own raises ``NotImplementedError("IF-05")`` or returns an empty
+collection.
 
 **Not decided here.**
 
@@ -68,20 +68,12 @@ marks. B5-04 classifies hook time.
   :class:`~mftik.protocol.messages.StsCreateSessionRequest`, which IF-01
   already describes as the session spec and which deliberately has no
   digest fields.
-* §5.3 says the ``all`` queue is bounded and does not say how long.
-  ``capacity`` is an argument. It also groups TD, ``feed_end`` and RPC
-  replies on one row and does not say whether they share a queue.
-* F25 says the strategy reads ``event.seq`` and ``event.age``. IF-06's
-  hooks take the platform model (``Ticker`` and the rest), which has
-  neither field. Both live on :class:`Inbound`, the object the strategy
-  thread pulls and then decodes. How a hook parameter grows those
-  fields is B5-01's to settle with IF-06. This package does not change
-  the hook signatures and does not add the fields to the models.
 * The kline key is ``(feed, bar_open)``, and I4 says the ingress does
   not decode. :class:`Inbound.bar_open` is therefore a header the
   builder fills in, not something :class:`Delivery` parses out of
-  ``body``. Who stamps the header — MD, on the envelope, or a read that
-  is not a decode — is open.
+  ``body``. The process reads ``payload.open_time`` and
+  ``payload.closed`` from the envelope JSON it already parsed. A
+  separate header stamped by MD is not a second channel.
 """
 
 from mftik_sts.session_worker.budget import (

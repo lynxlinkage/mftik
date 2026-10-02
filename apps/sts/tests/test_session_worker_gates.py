@@ -1,7 +1,7 @@
 """Gates the session worker owns, without a socket.
 
 Order entry before ``on_ready``, the pending-table handoff, local feed
-resolution, the temporary buffer, and dispatch onto a hook. Time is a
+resolution, delivery through the ingress, and dispatch onto a hook. Time is a
 :class:`~mftik.clock.FakeClock` or a number the test passes in. Nothing
 here sleeps or opens NATS.
 """
@@ -9,8 +9,6 @@ here sleeps or opens NATS.
 from __future__ import annotations
 
 import asyncio
-import logging
-import re
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -87,9 +85,6 @@ def _offer_td_then_md(ingress: Ingress) -> None:
     ingress.offer(_td("fill"))
     for index in range(10):
         ingress.offer(_book(f"m{index}"))
-
-
-_MD_DROP = re.compile(r"md buffer dropped (\d+)")
 
 
 class _SeesBooks(Strategy):
@@ -236,38 +231,28 @@ def test_paper_orderbook_resolves_and_other_feeds_are_missing() -> None:
     assert atom.subject.startswith("md.a.Paper.")
 
 
-def test_a_held_td_event_is_pulled_after_md_is_trimmed(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Capacity 4. One TD then ten MD while delivery is held.
+def test_a_held_td_event_is_pulled_with_the_newest_book() -> None:
+    """Capacity 4. One TD then ten books on one feed, while delivery is held.
 
-    Advancing to RUNNING still pulls the TD. The trim drops the oldest
-    market-data events and logs that burst with a count. The session
-    does not fail.
+    Order books are ``latest``. The ten prints are one slot, the newest,
+    and none of them is a drop. Advancing to RUNNING pulls the TD first,
+    then that book. The session does not fail.
     """
     ingress, runner = _open(4)
     reasons: list[str] = []
     ingress.set_failure_callback(reasons.append)
-    with caplog.at_level(
-        logging.WARNING, logger="mftik_sts.session_worker.ingress"
-    ):
-        _offer_td_then_md(ingress)
+    _offer_td_then_md(ingress)
+    assert ingress.delivery.dropped == 0
+    assert ingress.delivery.mark("m0") is not None
     runner.end_on_ready()
     pulled = _drain(ingress)
-    assert [event.event_id for event in pulled] == ["fill", "m7", "m8", "m9"]
+    assert [event.event_id for event in pulled] == ["fill", "m9"]
     assert reasons == []
-    counts = [
-        int(match.group(1))
-        for record in caplog.records
-        if (match := _MD_DROP.search(record.message))
-    ]
-    assert counts
-    assert sum(counts) == 7
     runner.finish()
     ingress.close()
 
 
-def test_a_ready_td_event_is_pulled_after_md_is_trimmed() -> None:
+def test_a_ready_td_event_is_pulled_with_the_newest_book() -> None:
     """The same burst, offered straight into the running queue."""
     ingress, runner = _open(4)
     reasons: list[str] = []
@@ -275,14 +260,19 @@ def test_a_ready_td_event_is_pulled_after_md_is_trimmed() -> None:
     runner.end_on_ready()
     _offer_td_then_md(ingress)
     pulled = _drain(ingress)
-    assert [event.event_id for event in pulled] == ["fill", "m7", "m8", "m9"]
+    assert [event.event_id for event in pulled] == ["fill", "m9"]
+    assert ingress.delivery.dropped == 0
     assert reasons == []
     runner.finish()
     ingress.close()
 
 
 def test_td_only_overflow_fails_the_session() -> None:
-    """Nothing but TD, past capacity, fails instead of dropping a fill."""
+    """Nothing but TD, past capacity, fails instead of dropping a fill.
+
+    The event that did not fit was not accepted. The ones that did are
+    still pulled, in order.
+    """
     for held in (True, False):
         ingress, runner = _open(4)
         reasons: list[str] = []
@@ -296,13 +286,15 @@ def test_td_only_overflow_fails_the_session() -> None:
             runner.end_on_ready()
         pulled = _drain(ingress)
         assert [event.event_id for event in pulled] == [
-            f"t{index}" for index in range(5)
+            f"t{index}" for index in range(4)
         ]
+        assert ingress.delivery.mark("t4") is None
+        assert ingress.delivery.dropped == 0
         runner.finish()
         ingress.close()
 
 
-def test_the_temporary_buffer_drops_the_oldest() -> None:
+def test_latest_keeps_the_newest_book() -> None:
     ingress = Ingress(_spec(), capacity=1)
     ingress.start()
     runner = StrategyRunner(ingress, Strategy())
@@ -316,6 +308,8 @@ def test_the_temporary_buffer_drops_the_oldest() -> None:
     got = ingress.pull()
     assert got is not None
     assert got.event_id == "new"
+    assert ingress.delivery.mark("old") is not None
+    assert ingress.delivery.dropped == 0
     assert ingress.pull() is None
     runner.finish()
     ingress.close()
