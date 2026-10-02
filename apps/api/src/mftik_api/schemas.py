@@ -92,6 +92,14 @@ class StrategyOut(BaseModel):
     status: str | None = None
     #: Why a ``failed`` session ended. Null otherwise.
     reason: str | None = None
+    #: v2 phase (B4-08). ``conditions["phase"]`` when the controller has
+    #: written one. When that object is null or has no phase, ``starting``
+    #: for a ``live`` row and the status column for a terminal row. The
+    #: column stays ``live`` for every non-terminal phase.
+    phase: str | None = None
+    #: The controller's conditions object, phase included. Null when the
+    #: row has none. Empty when nothing has been reported yet.
+    conditions: dict[str, Any] | None = None
     #: Trading accounts this deploy attached. Empty when attach never ran.
     td_api_ids: list[int] = Field(default_factory=list)
     #: Market-data feeds this deploy attached (``topic.UniversalTicker``).

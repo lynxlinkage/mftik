@@ -9,9 +9,11 @@ import httpx
 import pytest
 from mftik.cli import client as client_module
 from mftik.cli import config
+from mftik.cli import run as run_module
 from mftik.cli.app import EXIT_ERROR, EXIT_INTERRUPTED, main
 from mftik.cli.client import Client, CliError
 from mftik.cli.config import Profile
+from mftik.clock import FakeClock, SystemClock
 
 _TINY = """\
 from mftik.strategy import Strategy
@@ -81,7 +83,7 @@ class Node_:
                     "config": {},
                     "td": [],
                     "md": [],
-                    "status": "live",
+                    "status": "running",
                 },
             )
         return httpx.Response(404, json={"detail": "nope"})
@@ -299,28 +301,48 @@ def test_no_follow_leaves_it_up_and_says_how_to_end_it(
     assert not any(p.endswith("/stop") for p in fake.paths)
 
 
-def test_a_session_that_ended_during_deploy_is_not_followed(
+def test_a_session_that_failed_during_deploy_prints_the_page(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    """Attaching would hang on a socket for a session that has already gone."""
+    """``failed`` on the 202 is settled. Print the reason and the stored
+    page, do not open the socket, exit non-zero."""
 
     class Refusing(Node_):
         def __call__(self, request: httpx.Request) -> httpx.Response:
-            response = super().__call__(request)
             if request.url.path.startswith("/sts/deploy/"):
-                body = json.loads(response.content)
-                body["status"] = "failed"
-                return httpx.Response(200, json=body)
-            return response
+                self.paths.append(request.url.path)
+                return httpx.Response(
+                    202,
+                    json={
+                        "session_id": "sess-1",
+                        "status": "failed",
+                        "reason": "on_start blew up",
+                    },
+                )
+            if request.url.path == "/logs/sts/sess-1":
+                self.paths.append(request.url.path)
+                return httpx.Response(
+                    200,
+                    json={
+                        "logs": [
+                            {"level": "error", "message": "on_start blew up"}
+                        ]
+                    },
+                )
+            return super().__call__(request)
 
     fake = Refusing()
     followed = _install(monkeypatch, fake)
     dest = _tree(tmp_path)
 
-    assert main(["run", str(dest)]) == 0
+    assert main(["run", str(dest), "--no-push"]) == EXIT_ERROR
 
     assert followed == []
-    assert "session is failed" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "session failed: on_start blew up" in out
+    assert "error  on_start blew up" in out
+    assert "nothing to follow" not in out
+    assert "/logs/sts/sess-1" in fake.paths
 
 
 class _FailingDeploy(Node_):
@@ -422,3 +444,250 @@ def test_ctrl_c_during_deploy_says_to_check_ps(
     assert "interrupted during deploy" in err
     assert "mftik ps" in err
     assert "Do not run again" in err
+
+
+def _use_clock(monkeypatch: pytest.MonkeyPatch, clock: FakeClock | SystemClock) -> None:
+    monkeypatch.setattr(run_module, "_clock", clock)
+
+
+class _Phases(Node_):
+    """Deploy answers ``starting``. Later GETs walk ``script``."""
+
+    def __init__(self, script: list[dict]) -> None:
+        super().__init__()
+        self.script = list(script)
+        self.gets = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/sts/deploy/private::Tiny":
+            self.paths.append(path)
+            return httpx.Response(
+                202,
+                json={"session_id": "sess-1", "status": "starting"},
+            )
+        if path == "/sts/sessions/sess-1":
+            self.paths.append(path)
+            self.gets += 1
+            body = self.script.pop(0) if self.script else {"phase": "running"}
+            return httpx.Response(200, json=body)
+        if path == "/logs/sts/sess-1":
+            self.paths.append(path)
+            return httpx.Response(
+                200,
+                json={
+                    "logs": [
+                        {"level": "info", "message": "newer"},
+                        {"level": "error", "message": "older"},
+                    ]
+                },
+            )
+        if path.endswith("/stop"):
+            self.paths.append(path)
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": "sess-1",
+                    "status": "done",
+                    "reason": "operator_stop",
+                },
+            )
+        return httpx.Response(404, json={"detail": "nope"})
+
+
+def test_wait_follows_once_the_phase_reaches_running(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """``starting`` → ``starting`` → ``running`` tails once. Sleep is the clock."""
+    clock = FakeClock()
+    _use_clock(monkeypatch, clock)
+    fake = _Phases(
+        [
+            {
+                "phase": "starting",
+                "status": "live",
+                "conditions": {"phase": "starting"},
+            },
+            {
+                "phase": "running",
+                "status": "live",
+                "conditions": {"phase": "running", "MdReady": "2/2"},
+            },
+        ]
+    )
+    followed = _install(monkeypatch, fake)
+
+    assert main(["run", str(_tree(tmp_path)), "--no-push"]) == 0
+
+    assert followed == ["sess-1"]
+    assert fake.gets == 2
+    assert clock.monotonic() == 2 * run_module._WAIT_POLL_S
+    out = capsys.readouterr().out
+    assert out.count("\n  starting\n") == 1
+    assert "  running  MdReady=2/2" in out
+    assert "^C stops this session" in out
+
+
+def test_a_failed_phase_prints_the_stored_page_and_does_not_open_the_socket(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    clock = FakeClock()
+    _use_clock(monkeypatch, clock)
+    fake = _Phases(
+        [
+            {
+                "phase": "failed",
+                "status": "failed",
+                "reason": "td not ready",
+                "conditions": {"phase": "failed"},
+            }
+        ]
+    )
+    followed = _install(monkeypatch, fake)
+
+    assert main(["run", str(_tree(tmp_path)), "--no-push"]) == EXIT_ERROR
+
+    assert followed == []
+    out = capsys.readouterr().out
+    assert "session failed: td not ready" in out
+    # Newest-first on the wire, oldest-first on the page.
+    assert out.index("error  older") < out.index("info  newer")
+    assert "/ws/" not in "".join(fake.paths)
+
+
+def test_a_done_phase_prints_the_status_and_the_stored_page(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    clock = FakeClock()
+    _use_clock(monkeypatch, clock)
+    fake = _Phases(
+        [
+            {
+                "phase": "done",
+                "status": "done",
+                "conditions": {"phase": "done"},
+            }
+        ]
+    )
+    followed = _install(monkeypatch, fake)
+
+    assert main(["run", str(_tree(tmp_path)), "--no-push"]) == 0
+
+    assert followed == []
+    out = capsys.readouterr().out
+    assert "session done" in out
+    assert "error  older" in out
+    assert clock.monotonic() == run_module._WAIT_POLL_S
+
+
+def test_no_follow_watches_then_prints_how_to_stop(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    clock = FakeClock()
+    _use_clock(monkeypatch, clock)
+    fake = _Phases(
+        [{"phase": "running", "status": "live", "conditions": {"phase": "running"}}]
+    )
+    followed = _install(monkeypatch, fake)
+
+    code = main(["run", str(_tree(tmp_path)), "--no-push", "--no-follow"])
+
+    assert code == 0
+    assert followed == []
+    out = capsys.readouterr().out
+    assert "left running" in out
+    assert "mftik stop sess-1" in out
+    assert "/logs/" not in "".join(fake.paths)
+
+
+def test_ctrl_c_during_the_watch_sends_one_stop(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    class _Interrupt(SystemClock):
+        async def sleep(self, seconds: float) -> None:
+            del seconds
+            raise KeyboardInterrupt
+
+    _use_clock(monkeypatch, _Interrupt())
+    fake = _Phases([])
+    followed = _install(monkeypatch, fake)
+
+    code = main(["run", str(_tree(tmp_path)), "--no-push"])
+
+    assert code == EXIT_INTERRUPTED
+    assert followed == []
+    assert fake.paths == [
+        "/sts/deploy/private::Tiny",
+        "/sts/sessions/sess-1/stop",
+    ]
+    assert "stopped sess-1" in capsys.readouterr().out
+
+
+def test_an_unknown_phase_is_printed_once_and_keeps_watching(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    clock = FakeClock()
+    _use_clock(monkeypatch, clock)
+    fake = _Phases(
+        [
+            {"phase": "sideways", "status": "live"},
+            {"phase": "sideways", "status": "live"},
+            {"phase": "running", "status": "live"},
+        ]
+    )
+    followed = _install(monkeypatch, fake)
+
+    assert main(["run", str(_tree(tmp_path)), "--no-push"]) == 0
+
+    assert followed == ["sess-1"]
+    assert capsys.readouterr().out.count("\n  sideways\n") == 1
+    assert clock.monotonic() == 3 * run_module._WAIT_POLL_S
+
+
+def test_a_missing_session_while_waiting_is_an_error_at_once(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    clock = FakeClock()
+    _use_clock(monkeypatch, clock)
+
+    class _Gone(_Phases):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/sts/sessions/sess-1":
+                self.paths.append(request.url.path)
+                self.gets += 1
+                return httpx.Response(404, json={"detail": "missing"})
+            return super().__call__(request)
+
+    fake = _Gone([])
+    _install(monkeypatch, fake)
+
+    assert main(["run", str(_tree(tmp_path)), "--no-push"]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "was not found" in err
+    assert fake.gets == 1
+    assert clock.monotonic() == run_module._WAIT_POLL_S
+
+
+def test_poll_misses_give_up_and_say_the_session_may_still_be_running(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    clock = FakeClock()
+    _use_clock(monkeypatch, clock)
+
+    class _Down(_Phases):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/sts/sessions/sess-1":
+                self.paths.append(request.url.path)
+                self.gets += 1
+                return httpx.Response(503, json={"detail": "busy"})
+            return super().__call__(request)
+
+    fake = _Down([])
+    _install(monkeypatch, fake)
+
+    assert main(["run", str(_tree(tmp_path)), "--no-push"]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "may still be running" in err
+    assert "mftik stop sess-1" in err
+    assert fake.gets == run_module._WAIT_MAX_MISSES
+    assert clock.monotonic() == run_module._WAIT_MAX_MISSES * run_module._WAIT_POLL_S

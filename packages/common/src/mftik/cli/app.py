@@ -501,11 +501,14 @@ def _setup_run(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-follow",
         action="store_true",
-        help="print the session id and exit, without tailing its log",
+        help=(
+            "do not tail the log. With --wait (the default), still watch "
+            "until running, failed, or done, then print the outcome. "
+            "--no-wait returns after the deploy"
+        ),
     )
-    # Neither flag is the default. A bare ``mftik run`` keeps today's
-    # deploy-and-follow; B4-08 is what makes ``--wait`` the default the
-    # plan describes (F12). Passing both is an error.
+    # ``--wait`` is the default (F12). ``--no-wait`` wins over
+    # ``--no-follow``. Passing both wait flags is an error.
     wait = parser.add_mutually_exclusive_group()
     wait.add_argument(
         "--wait",
@@ -513,8 +516,8 @@ def _setup_run(parser: argparse.ArgumentParser) -> None:
         action="store_const",
         const=True,
         help=(
-            "watch status until running or failed, then tail the log "
-            "(not implemented)"
+            "watch status until running, failed, or done, then tail the "
+            "log (the default)"
         ),
     )
     wait.add_argument(
@@ -523,11 +526,11 @@ def _setup_run(parser: argparse.ArgumentParser) -> None:
         action="store_const",
         const=False,
         help=(
-            "print the session id and return, without watching or tailing "
-            "(not implemented)"
+            "print the session id and how to stop it, and return, "
+            "without watching or tailing"
         ),
     )
-    parser.set_defaults(wait=None)
+    parser.set_defaults(wait=True)
 
 
 def _setup_workers(parser: argparse.ArgumentParser) -> None:

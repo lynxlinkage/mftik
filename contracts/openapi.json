@@ -1652,7 +1652,7 @@
           "sts"
         ],
         "summary": "Stop Session",
-        "description": "Placeholder until IF-04 (#182) defines ``sts.session.end``.\n\nRM-04 (#167) deleted the worker a stop was addressed to, and with it the\nescalation that killed one that would not answer. There is no process\nleft to stop, so nothing is sent.",
+        "description": "Stop a session via :func:`mftik_api.orchestrate.end` (\u00a78.1).\n\nA row whose column is already terminal (``done``, ``failed``,\n``ack``, ``interrupted``) answers 200 with that status and does not\nsend ``sts.session.end``. After a controller restart the controller\nno longer holds it and would answer ``unknown_session``. Intents\nstill held on that row are released and their deletes are sent.\n\nOtherwise :func:`~mftik_api.orchestrate.end` runs and the reply's\nterminal status is this response. ``reason`` defaults to\n:data:`STS_REASON_OPERATOR_STOP`.\n\n``not_found`` is 404. ``timeout`` is 503 and asks for a retry; the\nintents stay held. ``unknown_session`` and ``sts_unpinned_ambiguous``\nare 409. Anything else is 502.",
         "operationId": "stop_session_sts_sessions__session_id__stop_post",
         "parameters": [
           {
@@ -1662,6 +1662,22 @@
             "schema": {
               "type": "string",
               "title": "Session Id"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Reason"
             }
           }
         ],
@@ -7010,6 +7026,29 @@
               }
             ],
             "title": "Reason"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "conditions": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conditions"
           },
           "td_api_ids": {
             "items": {

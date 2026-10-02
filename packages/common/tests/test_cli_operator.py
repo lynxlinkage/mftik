@@ -1,11 +1,9 @@
 """IF-15's CLI surface, as it behaves today.
 
 The new commands parse and then refuse, except ``mftik workers`` without
-``--stale``, which lists each worker's release (B3-07). ``mftik run``
-grows ``--wait`` / ``--no-wait`` without taking them: passing either one
-refuses before a deploy, and passing neither keeps the command that
-already exists. ``mftik --help`` lists the new commands because they are
-rows in the same table the dispatch reads.
+``--stale``, which lists each worker's release (B3-07), and ``mftik run``,
+whose ``--wait`` is the default (B4-08). ``mftik --help`` lists the new
+commands because they are rows in the same table the dispatch reads.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ from mftik.cli.operator import (
     select_workers,
     td_drain,
 )
-from mftik.cli.run import _DEPLOY_HTTP_TIMEOUT_S, run_wait_action
+from mftik.cli.run import _DEPLOY_HTTP_TIMEOUT_S
 from mftik.protocol import ProcmanWorker
 
 # `main()` builds the whole CLI parser; that call does not fit 50 ms.
@@ -131,10 +129,10 @@ def test_missing_or_conflicting_arguments_are_an_argparse_error(
     assert caught.value.code == 2
 
 
-def test_run_without_the_new_flags_leaves_wait_unset() -> None:
-    """Bare ``mftik run`` is still today's command. B4-08 flips this."""
+def test_run_without_the_new_flags_defaults_to_wait() -> None:
+    """Bare ``mftik run`` watches (F12). B4-08 flipped the unset default."""
     args = build_parser().parse_args(["run", "some/path"])
-    assert args.wait is None
+    assert args.wait is True
     assert args.no_follow is False
 
 
@@ -144,25 +142,28 @@ def test_wait_flags_set_the_choice() -> None:
     assert parser.parse_args(["run", "p", "--no-wait"]).wait is False
 
 
-def test_wait_refuses_before_any_deploy(capsys) -> None:
-    """``--wait`` must not start a session on the way to saying it cannot."""
+def test_wait_looks_up_the_tree_instead_of_refusing(capsys) -> None:
+    """``--wait`` is implemented. A missing tree fails before any deploy."""
     assert main(["run", "does-not-exist", "--wait"]) == EXIT_ERROR
     captured = capsys.readouterr()
-    assert "not implemented (IF-15)" in captured.err
-    assert "directory" not in captured.err
+    assert "not implemented" not in captured.err
+    assert "does not exist" in captured.err
     assert captured.out == ""
 
 
-def test_no_wait_refuses_the_same_way(capsys) -> None:
+def test_no_wait_looks_up_the_tree_instead_of_refusing(capsys) -> None:
     assert main(["run", "does-not-exist", "--no-wait"]) == EXIT_ERROR
-    assert "not implemented (IF-15)" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "not implemented" not in err
+    assert "does not exist" in err
 
 
-def test_wait_with_no_follow_is_still_not_implemented(capsys) -> None:
-    """The plan does not say how these two flags combine. IF-15 does not pick."""
+def test_wait_with_no_follow_looks_up_the_tree(capsys) -> None:
+    """DEFAULT 3: the two flags combine. They do not refuse first."""
     assert main(["run", "does-not-exist", "--wait", "--no-follow"]) == EXIT_ERROR
     captured = capsys.readouterr()
-    assert "not implemented (IF-15)" in captured.err
+    assert "not implemented" not in captured.err
+    assert "does not exist" in captured.err
     assert captured.out == ""
 
 
@@ -281,5 +282,3 @@ def test_decisions_raise_not_implemented() -> None:
         td_drain(7)
     with pytest.raises(NotImplementedError, match="^IF-15$"):
         intent_gc("sts-jp")
-    with pytest.raises(NotImplementedError, match="^IF-15$"):
-        run_wait_action("starting", wait=True)

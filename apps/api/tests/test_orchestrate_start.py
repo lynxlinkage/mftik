@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -12,10 +13,14 @@ from fastapi import HTTPException
 from mftik.broker import Broker
 from mftik.broker.config import BrokerConfig
 from mftik.broker.errors import NoRespondersError, RequestTimeoutError
+from mftik.cli.client import DEFAULT_TIMEOUT_S
 from mftik.protocol import (
     MD_INTENT_DELETE,
     MD_INTENT_PUT,
+    ON_STOP_TIMEOUT_S,
     PROTOCOL_VERSION,
+    STS_ERROR,
+    STS_REASON_OPERATOR_STOP,
     STS_REGISTRY_SYNC,
     STS_SESSION_END,
     STS_SESSION_START,
@@ -42,6 +47,7 @@ from mftik_db.models.api import Api
 from mftik_db.models.intent import MdIntent, TdIntent
 from mftik_db.models.session import SessionStatus, StsSessionRow
 from mftik_db.repositories import IntentRepository, StsSessionRepository
+from mftik_sts.controller.defaults import SESSION_STOP_GRACE_S
 from sqlalchemy import select
 
 YAML = """\
@@ -76,6 +82,7 @@ class ScriptedTransport:
         self.sent: list[tuple[str, str, float]] = []
         self.fail_on: set[str] = set()
         self.fail_timeout: set[str] = set()
+        self.error_on: dict[str, tuple[str, str]] = {}
         self.replies_pv: int | None = PROTOCOL_VERSION
         self.probes = 0
 
@@ -99,6 +106,9 @@ class ScriptedTransport:
             raise NoRespondersError(subject, request_id, timeout)
         if body["type"] in self.fail_timeout:
             raise RequestTimeoutError(subject, request_id, timeout)
+        if body["type"] in self.error_on:
+            code, message = self.error_on[body["type"]]
+            return _error(body, code=code, message=message, pv=self.replies_pv)
         return _reply(body, pv=self.replies_pv)
 
     async def probe(
@@ -115,6 +125,21 @@ class ScriptedTransport:
         return Envelope.wrap(
             {"status": "ok"}, type="health", source="plane"
         ).to_json()
+
+
+def _error(body: dict, *, code: str, message: str, pv: int | None) -> str:
+    session_id = body["payload"]["session_id"]
+    envelope: dict = {
+        "id": "reply",
+        "type": STS_ERROR,
+        "source": "plane",
+        "session_id": session_id,
+        "ts": 0,
+        "payload": {"code": code, "message": message},
+    }
+    if pv is not None:
+        envelope["pv"] = pv
+    return json.dumps(envelope)
 
 
 def _reply(body: dict, *, pv: int | None) -> str:
@@ -170,6 +195,7 @@ async def world(monkeypatch, database_url):
             session.add(Account(name="paper", api_id=1, created_by=1))
             await session.commit()
         monkeypatch.setattr(orchestrate, "session_scope", database.scope)
+        monkeypatch.setattr(sts_routes, "session_scope", database.scope)
 
         async def _no_audit(**_kwargs: object) -> None:
             return None
@@ -192,13 +218,18 @@ def test_deploy_route_accepts_with_202() -> None:
     assert matches[0].status_code == 202
 
 
-async def test_stop_route_stays_unimplemented() -> None:
-    with pytest.raises(HTTPException) as exc:
-        await sts_routes.stop_session(
-            "abc",
-            SimpleNamespace(),  # type: ignore[arg-type]
-        )
-    assert exc.value.status_code == 501
+def test_end_timeout_covers_the_stop_grace_and_fits_the_cli() -> None:
+    """Provisional, pending Yi Te (#286).
+
+    ``SESSION_STOP_GRACE_S`` is ``ON_STOP_TIMEOUT_S`` today. B4-03 may
+    add a teardown margin; this fails if the end budget no longer
+    exceeds that grace, or no longer fits under the CLI's HTTP timeout.
+    """
+    assert orchestrate._END_TIMEOUT_S == (
+        ON_STOP_TIMEOUT_S + orchestrate._ACCEPT_TIMEOUT_S
+    )
+    assert orchestrate._END_TIMEOUT_S > SESSION_STOP_GRACE_S
+    assert orchestrate._END_TIMEOUT_S < DEFAULT_TIMEOUT_S
 
 
 def test_deploy_maps_domain_errors() -> None:
@@ -222,6 +253,10 @@ def test_deploy_maps_domain_errors() -> None:
     assert (
         sts_routes._deploy_status(DomainRpcError("protocol_mismatch", "x"))
         == 502
+    )
+    assert (
+        sts_routes._deploy_status(DomainRpcError("capacity_exceeded", "full"))
+        == 503
     )
 
 
@@ -366,7 +401,7 @@ def _kinds(transport: ScriptedTransport) -> list[str]:
     return [json.loads(raw)["type"] for _subject, raw, _timeout in transport.sent]
 
 
-async def test_a_failed_start_is_not_rolled_back(world) -> None:
+async def test_a_no_responders_start_is_failed_and_released(world) -> None:
     """No responders on start: the worker was not created, so no end.
 
     The puts were sent, so their deletes follow. The row stays, failed,
@@ -402,7 +437,7 @@ async def test_a_failed_start_is_not_rolled_back(world) -> None:
         assert td.released_at is not None
 
 
-async def test_a_reply_with_the_wrong_pv_is_not_an_accept_and_is_not_rolled_back(
+async def test_a_wrong_pv_reply_is_not_an_accept_and_is_rolled_back(
     world,
 ) -> None:
     """A definite refusal deletes only the put that was sent. No end."""
@@ -573,6 +608,8 @@ async def test_end_releases_after_the_session_accepts(world) -> None:
     kinds = [json.loads(raw)["type"] for _subject, raw, _timeout in transport.sent]
     assert kinds[-3:] == [STS_SESSION_END, MD_INTENT_DELETE, TD_INTENT_DELETE]
     assert transport.sent[-3][0] == end_subject("sts-jp")
+    assert transport.sent[-3][2] == orchestrate._END_TIMEOUT_S
+    assert transport.sent[-2][2] == orchestrate._ACCEPT_TIMEOUT_S
     assert transport.sent[-2][0] == Topics.md("md-jp")
     assert transport.sent[-1][0] == Topics.td("td-jp")
     assert json.loads(transport.sent[-2][1])["payload"]["reason"] == "operator stop"
@@ -632,3 +669,231 @@ async def test_end_with_no_named_owner_does_not_send_or_release(
     async with world.scope() as db:
         md = await db.get(MdIntent, ("orphan", "md-jp"))
         assert md is not None and md.released_at is None
+
+
+class _CancelOnStart(ScriptedTransport):
+    async def request(  # type: ignore[override]
+        self,
+        subject: str,
+        raw: str,
+        *,
+        request_id: str,
+        inbox: str | None,
+        timeout: float,
+    ) -> str:
+        body = json.loads(raw)
+        if body["type"] == STS_SESSION_START:
+            self.sent.append((subject, raw, timeout))
+            raise asyncio.CancelledError()
+        return await super().request(
+            subject,
+            raw,
+            request_id=request_id,
+            inbox=inbox,
+            timeout=timeout,
+        )
+
+
+async def test_a_cancelled_accept_is_rolled_back(world) -> None:
+    """The client hung up before the reply. The row does not stay live."""
+    transport = _CancelOnStart()
+    with pytest.raises(asyncio.CancelledError):
+        await _accepted(world, transport)
+
+    assert _kinds(transport) == [
+        TD_INTENT_PUT,
+        MD_INTENT_PUT,
+        STS_SESSION_START,
+        STS_SESSION_END,
+        MD_INTENT_DELETE,
+        TD_INTENT_DELETE,
+    ]
+    session_id = json.loads(transport.sent[2][1])["payload"]["session_id"]
+    async with world.scope() as db:
+        row = await StsSessionRepository(db).get_by_session_id(session_id)
+        assert row is not None
+        assert row.status == SessionStatus.FAILED.value
+        assert row.reason is not None
+        assert row.reason.startswith("start not accepted: cancelled: ")
+        md = await db.get(MdIntent, (session_id, "md-jp"))
+        td = await db.get(TdIntent, (session_id, 1))
+        assert md is not None and md.released_at is not None
+        assert td is not None and td.released_at is not None
+
+
+class _HangOnStart(ScriptedTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def request(  # type: ignore[override]
+        self,
+        subject: str,
+        raw: str,
+        *,
+        request_id: str,
+        inbox: str | None,
+        timeout: float,
+    ) -> str:
+        body = json.loads(raw)
+        if body["type"] == STS_SESSION_START:
+            self.sent.append((subject, raw, timeout))
+            self.started.set()
+            await asyncio.Event().wait()
+        return await super().request(
+            subject,
+            raw,
+            request_id=request_id,
+            inbox=inbox,
+            timeout=timeout,
+        )
+
+
+async def test_cancelling_the_accept_task_still_rolls_back(world) -> None:
+    transport = _HangOnStart()
+    task = asyncio.create_task(_accepted(world, transport))
+    await transport.started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert STS_SESSION_END in _kinds(transport)
+    session_id = json.loads(transport.sent[2][1])["payload"]["session_id"]
+    async with world.scope() as db:
+        row = await StsSessionRepository(db).get_by_session_id(session_id)
+        assert row is not None
+        assert row.status == SessionStatus.FAILED.value
+
+
+async def test_stop_of_a_missing_session_is_404(world) -> None:
+    with pytest.raises(HTTPException) as exc:
+        await sts_routes.stop_session(
+            "missing",
+            _broker(ScriptedTransport()),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_a_terminal_row_is_answered_without_a_send(world) -> None:
+    transport = ScriptedTransport()
+    result = await _accepted(world, transport)
+    async with world.scope() as db:
+        await StsSessionRepository(db).mark_done(result.session_id)
+        await IntentRepository(db).release(result.session_id)
+    transport.sent.clear()
+
+    out = await sts_routes.stop_session(
+        result.session_id,
+        _broker(transport),  # type: ignore[arg-type]
+    )
+
+    assert out.status == "done"
+    assert transport.sent == []
+
+
+async def test_a_terminal_row_with_intents_releases_without_end(world) -> None:
+    transport = ScriptedTransport()
+    result = await _accepted(world, transport)
+    async with world.scope() as db:
+        await StsSessionRepository(db).mark_failed(result.session_id, "boom")
+    transport.sent.clear()
+
+    out = await sts_routes.stop_session(
+        result.session_id,
+        _broker(transport),  # type: ignore[arg-type]
+    )
+
+    assert out.status == "failed"
+    assert out.reason == "boom"
+    assert STS_SESSION_END not in _kinds(transport)
+    assert _kinds(transport) == [MD_INTENT_DELETE, TD_INTENT_DELETE]
+    async with world.scope() as db:
+        md = await db.get(MdIntent, (result.session_id, "md-jp"))
+        td = await db.get(TdIntent, (result.session_id, 1))
+        assert md is not None and md.released_at is not None
+        assert td is not None and td.released_at is not None
+
+
+async def test_stop_timeout_is_503_and_does_not_release(world) -> None:
+    transport = ScriptedTransport()
+    result = await _accepted(world, transport)
+    transport.fail_timeout.add(STS_SESSION_END)
+    before = len(transport.sent)
+
+    with pytest.raises(HTTPException) as exc:
+        await sts_routes.stop_session(
+            result.session_id,
+            _broker(transport),  # type: ignore[arg-type]
+        )
+
+    assert exc.value.status_code == 503
+    assert "retry" in str(exc.value.detail)
+    assert _kinds(transport)[before:] == [STS_SESSION_END]
+    async with world.scope() as db:
+        md = await db.get(MdIntent, (result.session_id, "md-jp"))
+        td = await db.get(TdIntent, (result.session_id, 1))
+        assert md is not None and md.released_at is None
+        assert td is not None and td.released_at is None
+
+
+async def test_stop_returns_the_terminal_status_and_releases(world) -> None:
+    transport = ScriptedTransport()
+    result = await _accepted(world, transport)
+    before = len(transport.sent)
+
+    out = await sts_routes.stop_session(
+        result.session_id,
+        _broker(transport),  # type: ignore[arg-type]
+        reason="  ",
+    )
+
+    assert out.status == "done"
+    assert out.reason == STS_REASON_OPERATOR_STOP
+    assert out.strategy == "NoopStrategy"
+    end_call = transport.sent[before]
+    assert json.loads(end_call[1])["type"] == STS_SESSION_END
+    assert end_call[2] == orchestrate._END_TIMEOUT_S
+    assert (
+        json.loads(end_call[1])["payload"]["reason"] == STS_REASON_OPERATOR_STOP
+    )
+    async with world.scope() as db:
+        md = await db.get(MdIntent, (result.session_id, "md-jp"))
+        td = await db.get(TdIntent, (result.session_id, 1))
+        assert md is not None and md.released_at is not None
+        assert td is not None and td.released_at is not None
+
+
+async def test_stop_unknown_session_is_409_and_does_not_release(world) -> None:
+    transport = ScriptedTransport()
+    result = await _accepted(world, transport)
+    transport.error_on[STS_SESSION_END] = ("unknown_session", "not on this STS")
+
+    with pytest.raises(HTTPException) as exc:
+        await sts_routes.stop_session(
+            result.session_id,
+            _broker(transport),  # type: ignore[arg-type]
+        )
+
+    assert exc.value.status_code == 409
+    async with world.scope() as db:
+        md = await db.get(MdIntent, (result.session_id, "md-jp"))
+        assert md is not None and md.released_at is None
+
+
+async def test_stop_of_an_unnamed_session_with_no_owner_is_409(world) -> None:
+    transport = ScriptedTransport()
+    async with world.scope() as db:
+        await StsSessionRepository(db).create_live(
+            session_id="loose",
+            created_by=1,
+            type="NoopStrategy",
+            instance=None,
+            td={},
+        )
+    with pytest.raises(HTTPException) as exc:
+        await sts_routes.stop_session(
+            "loose",
+            _broker(transport),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 409
+    assert transport.sent == []

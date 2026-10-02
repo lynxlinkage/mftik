@@ -94,6 +94,25 @@ async def test_one_session_is_the_database_row(db) -> None:
     assert row.type == "NoopStrategy"
     assert row.td_api_ids == [2]
     assert row.md_ids == ["ticker.Paper_Spot_ETHUSDT"]
+    assert row.status == "live"
+    assert row.phase == "starting"
+    assert row.conditions == {}
+
+
+async def test_phase_comes_from_conditions(db) -> None:
+    async with db() as session:
+        repo = StsSessionRepository(session)
+        await repo.create_live(
+            session_id="s-ph", created_by=1, type="NoopStrategy"
+        )
+        row = await repo.get_by_session_id("s-ph")
+        assert row is not None
+        row.conditions = {"phase": "running", "MdReady": "2/2"}
+
+    out = await sts_routes.get_strategy("s-ph")
+    assert out.status == "live"
+    assert out.phase == "running"
+    assert out.conditions == {"phase": "running", "MdReady": "2/2"}
 
 
 async def test_a_missing_session_is_a_404(db) -> None:

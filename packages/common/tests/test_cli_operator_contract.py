@@ -17,9 +17,10 @@ they drive ``main``, because ``--wait`` / ``--no-wait`` are flags on a
 command that already deploys, and the deploy URL is the one ``run``
 already posts to.
 
-``stopping`` and ``done`` are absent on purpose. The plan says a ``--wait``
-ends on ``running`` or ``failed`` and does not say what a snapshot of
-``stopping`` or ``done`` means if ``running`` was never observed.
+``stopping`` and ``done`` are on the W1 table. The plan says a ``--wait``
+ends on ``running`` or ``failed`` and does not name those two; B4-08
+DEFAULT 2 (pending Yi Te, #293) treats ``stopping`` as keep watching
+and ``done`` as tail.
 """
 
 from __future__ import annotations
@@ -72,7 +73,6 @@ def _worker(worker_id: str, code_ref: str) -> ProcmanWorker:
 # --- F12: mftik run --wait / --no-wait ------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="B4-08 makes --wait the default of mftik run")
 def test_run_defaults_to_wait() -> None:
     """§5.2: a bare ``mftik run`` watches until running or failed, then tails.
 
@@ -84,23 +84,28 @@ def test_run_defaults_to_wait() -> None:
     assert build_parser().parse_args(["run", "some/path"]).wait is True
 
 
-@pytest.mark.xfail(strict=True, reason="B4-08 watches until running or failed")
 @pytest.mark.parametrize(
     ("status", "step"),
     [
         ("pending", "wait"),
         ("starting", "wait"),
         ("restarting", "wait"),
+        ("stopping", "wait"),
         ("running", "tail"),
         ("failed", "tail"),
+        ("done", "tail"),
     ],
 )
 def test_wait_tails_only_once_running_or_failed(status: str, step: str) -> None:
-    """W1. A 202 of ``starting`` is not the end of the watch (F12)."""
+    """W1. A 202 of ``starting`` is not the end of the watch (F12).
+
+    ``stopping`` and ``done`` are B4-08 DEFAULT 2 (pending Yi Te, #293).
+    The plan does not decide them; the docstring above used to say they
+    were absent on purpose.
+    """
     assert run_wait_action(status, wait=True) == step
 
 
-@pytest.mark.xfail(strict=True, reason="B4-08 --no-wait returns the session id")
 @pytest.mark.parametrize("status", ["starting", "running", "failed", "pending"])
 def test_no_wait_returns_the_id_for_every_status(status: str) -> None:
     """W2. ``--no-wait`` does not tail, whatever the snapshot says."""
@@ -157,7 +162,6 @@ def _tree(tmp_path: Path) -> Path:
     return dest
 
 
-@pytest.mark.xfail(strict=True, reason="B4-08 --no-wait returns the session id")
 def test_no_wait_prints_the_session_id_and_does_not_tail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, _connected: Path
 ) -> None:
@@ -176,7 +180,6 @@ def test_no_wait_prints_the_session_id_and_does_not_tail(
     assert fake.paths == ["/sts/deploy/private::Tiny"]
 
 
-@pytest.mark.xfail(strict=True, reason="B4-08 --wait tails once the session is running")
 def test_wait_tails_when_the_deploy_is_already_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, _connected: Path
 ) -> None:
