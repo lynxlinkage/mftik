@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.metadata
 import logging
 import os
 import signal
@@ -24,7 +23,13 @@ from mftik.broker import Broker
 from mftik.broker.handler import serve
 from mftik.clock import SystemClock
 from mftik.intent_gc import watch_sts_reports
-from mftik.procman import CloseMode, Supervisor, publish_reports
+from mftik.procman import (
+    CloseMode,
+    Supervisor,
+    current_release,
+    pinned_releases_path,
+    publish_reports,
+)
 from mftik.symbols import SymbolClient
 
 from mftik_td import db as td_db
@@ -65,7 +70,8 @@ def _work_dir() -> Path:
 
 
 def _code_ref() -> str:
-    return importlib.metadata.version("mftik")
+    """The release this process is. B3-07's :func:`current_release`."""
+    return current_release()
 
 
 async def run_rpc(
@@ -155,6 +161,9 @@ async def amain() -> bool:
             plane="td",
             instance=INSTANCE,
             budget=None,
+            # The pin file lives under the Strategon work dir, not under
+            # ``td/<instance>``. ``None`` while that variable is unset.
+            pin_path=pinned_releases_path(),
         )
         booted = False
         clean = False
