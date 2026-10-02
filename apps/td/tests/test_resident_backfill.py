@@ -211,27 +211,33 @@ async def test_backfill_holds_at_most_two_http_requests() -> None:
 
 
 async def test_a_reader_uses_the_given_client_and_does_not_close_it() -> None:
-    client = httpx.AsyncClient()
-    try:
-        factory = HistoryReaderFactory(symbols=None)  # type: ignore[arg-type]
-        reader = await factory.create(
-            "Bybit",
-            SimpleNamespace(api_key="k", api_secret="s", passphrase=None),
-            client=client,
-        )
-        assert reader.rest._client is client
-        assert reader.rest._owns_client is False
-        await reader.close()
-        assert client.is_closed is False
-        row = SimpleNamespace(api_key="k", api_secret="s", passphrase=None)
-        for venue in ("Paper", "Deribit", "Bitget"):
-            try:
-                await factory.create(venue, row)
-            except NoHistoryReaderError:
-                continue
-            raise AssertionError(f"{venue} should have no history reader")
-    finally:
-        await client.aclose()
+    """A stand-in, not a live client: opening one is past the unit cap."""
+
+    class _Client:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    client = _Client()
+    factory = HistoryReaderFactory(symbols=None)  # type: ignore[arg-type]
+    reader = await factory.create(
+        "Bybit",
+        SimpleNamespace(api_key="k", api_secret="s", passphrase=None),
+        client=client,
+    )
+    assert reader.rest._client is client
+    assert reader.rest._owns_client is False
+    await reader.close()
+    assert client.closed is False
+    row = SimpleNamespace(api_key="k", api_secret="s", passphrase=None)
+    for venue in ("Paper", "Deribit", "Bitget"):
+        try:
+            await factory.create(venue, row)
+        except NoHistoryReaderError:
+            continue
+        raise AssertionError(f"{venue} should have no history reader")
 
 
 async def test_the_executor_hands_the_pool_client_to_the_factory() -> None:
