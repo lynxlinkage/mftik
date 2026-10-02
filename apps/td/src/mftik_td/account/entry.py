@@ -23,6 +23,7 @@ import uvloop
 from mftik import configure_logging
 from mftik.broker import Broker
 from mftik.broker.handler import serve
+from mftik.clock import SystemClock
 from mftik.exchange.paper.remote import PaperRemotePrivateClient
 from mftik.exchange.venues import UnknownVenueError, require
 from mftik.protocol import STS_ORDER_SUBMIT, TD_OMS_VIEW, Envelope, Topics
@@ -118,6 +119,7 @@ async def run(argv: list[str] | None = None) -> int:
                 cancel_on_disconnect=row.cancel_on_disconnect,
                 private=private,
                 session=session,
+                clock=SystemClock(),
             )
             try:
                 await worker.resident.start()

@@ -6,8 +6,9 @@ and refcount in the old session manager, and the lifecycle half of
 where they are; this package is how an account worker holds them.
 Paper order entry is B4-05. The TD process spawns
 ``python -m mftik_td.account`` and does not import this package.
-``cancel_session``, settled ``oms.view``, ``oms.order``, keepalive,
-backfill, the broadcast and the dead-man's switch stay B6.
+The warm HTTP pool and its keepalive are the resident layer (B6-01).
+``cancel_session``, settled ``oms.view``, ``oms.order``, backfill,
+the broadcast and the dead-man's switch stay later B6 tickets.
 
 **State authority (§3.3).** One writer each.
 
@@ -101,7 +102,7 @@ from mftik_td.account.handlers import (
     OmsHandler,
     OrderHandler,
 )
-from mftik_td.account.resident import Keepalive, ResidentLayer
+from mftik_td.account.resident import Keepalive, ResidentLayer, RestPool
 from mftik_td.account.trading import TradingLayer
 from mftik_td.account.worker import AccountWorker
 
@@ -128,6 +129,7 @@ __all__ = [
     "OrderHandler",
     "PaperDeadMan",
     "ResidentLayer",
+    "RestPool",
     "StateBroadcast",
     "TradingLayer",
     "deadman_for",
