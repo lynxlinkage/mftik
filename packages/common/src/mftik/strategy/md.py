@@ -42,9 +42,10 @@ is a cache a strategy should fold into its own picture.
   printed in an hour is ``live``; whether its last print is too old is
   ``event.age``'s question.
 
-IF-06 defines the surface and returns null data. The ingress that fills it in
-lands in B5-05 (feed state) and B9 (universe, ``current``); the runtime
-subscribe lands in B8-05.
+:meth:`StrategyMd.state` is filled by the session worker from ``md.w.*``.
+``None`` until the first broadcast (and until silence can be inferred) means
+unknown, not down. Universe and ``current`` stay empty until B9. Runtime
+subscribe stays unimplemented until B8-05.
 """
 
 from __future__ import annotations
@@ -83,15 +84,23 @@ class StrategyMd:
         ``feed`` is a feed key as declared in ``strategy.yml`` —
         ``ticker.Deribit_Perp_BTCUSD``, ``kline_1m.Paper_Spot_BTCUSDT``.
 
-        None means this session has no such subscription, which is a different
-        answer from ``"down"`` and worth telling apart: a typo in a feed key
-        would otherwise read as a feed that is merely having a bad day.
+        None means either this session has no such subscription, or the feed
+        is held but still unknown: no broadcast has arrived and the silence
+        timer is not armed. That is a different answer from ``"down"``. A
+        typo in a feed key would otherwise read as a feed that is merely
+        having a bad day, and a feed that has not spoken yet is not one that
+        has failed.
 
         The push side of the same fact is ``on_md_update``. Use that to react
         to a change and this to ask at a moment of the strategy's choosing —
         in a timer, or before sizing an order that needs two books.
         """
-        return None
+        strategy = self._strategy
+        session = getattr(strategy, "session", None) if strategy is not None else None
+        reader = getattr(session, "feed_state", None) if session is not None else None
+        if reader is None:
+            return None
+        return reader(feed)
 
     def universe(self, name: str) -> frozenset[UniversalTicker]:
         """The contracts currently selected by the ``select:`` block ``name``.

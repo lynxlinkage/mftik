@@ -8,8 +8,9 @@ One row of the table, as data. The mode names are IF-07's.
   A closed bar is its own key, so the next bar does not drop it.
 * trade, aggtrade, liquidation — ``all``. One bounded queue per feed.
   Drop the oldest, warn, and count it.
-* TD, ``feed_end``, RPC reply — ``all``, and not overridable. Do not
-  drop. Fail the session.
+* TD, ``feed_end``, RPC reply, and the availability notices
+  (``on_md_update``, ``on_td_update``, ``on_resync``) — ``all``, and
+  not overridable. Do not drop. Fail the session.
 
 ``latest`` and ``kline`` replace an event in its slot. The replaced
 event is marked :attr:`~mftik_sts.session_worker.events.LogMark.SUPERSEDED`
@@ -21,14 +22,15 @@ recorded: there is no gap hook and no gap list (F23). A gap on an
 
 A feed's ``delivery:`` override (``strategy.yml``, already parsed by
 IF-07) replaces the default for that feed. It does not replace the
-must-deliver row. TD, ``feed_end`` and RPC replies stay ``all`` and
-fail on overflow no matter what string is passed.
+must-deliver row. TD, ``feed_end``, RPC replies and availability
+notices stay ``all`` and fail on overflow no matter what string is
+passed.
 
 ``capacity`` is the bound of one queue. The plan does not give a
 number, so the caller passes it and this module does not pick one.
-Whether the three must-deliver kinds share one queue or each have
-their own is also not decided: every contract test overflows a single
-kind, which is the same either way.
+Whether the must-deliver kinds share one queue or each have their own
+is also not decided: every contract test overflows a single kind,
+which is the same either way.
 
 Klines are handed to :meth:`Delivery.take` in increasing ``bar_open``.
 The plan doesn't say. A closed bar has to come out before the bar that
@@ -57,9 +59,17 @@ from mftik_sts.session_worker.events import Inbound, LogMark, LogRecord, StreamK
 
 #: Kinds that are ``all``, that ignore a delivery override, and that
 #: fail the session instead of dropping. Not feeds, so ``strategy.yml``
-#: has nowhere to write an override for them.
+#: has nowhere to write an override for them. Availability notices are
+#: in this set so the temporary buffer cannot drop one (B5-05).
 MUST_DELIVER = frozenset(
-    {StreamKind.TD, StreamKind.FEED_END, StreamKind.RPC_REPLY}
+    {
+        StreamKind.TD,
+        StreamKind.FEED_END,
+        StreamKind.RPC_REPLY,
+        StreamKind.MD_NOTICE,
+        StreamKind.TD_NOTICE,
+        StreamKind.RESYNC,
+    }
 )
 
 #: The §5.3 default per kind, before a feed override.
@@ -77,6 +87,9 @@ DEFAULT_DELIVERY: dict[StreamKind, str] = {
     StreamKind.TD: DELIVERY_ALL,
     StreamKind.FEED_END: DELIVERY_ALL,
     StreamKind.RPC_REPLY: DELIVERY_ALL,
+    StreamKind.MD_NOTICE: DELIVERY_ALL,
+    StreamKind.TD_NOTICE: DELIVERY_ALL,
+    StreamKind.RESYNC: DELIVERY_ALL,
 }
 
 _TOPIC_KIND: dict[str, StreamKind] = {

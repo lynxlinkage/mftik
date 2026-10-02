@@ -64,9 +64,17 @@ from mftik.strategy.eventlog import EventLog
 from mftik.symbols import SymbolClient
 
 from mftik_sts.exit_codes import STRATEGY_EXCEPTION
+from mftik_sts.session_worker.availability import (
+    Availability,
+    MdUpdate,
+    Resync,
+    TdUpdate,
+    notice_text,
+    read_oms_view,
+)
 from mftik_sts.session_worker.budget import ON_READY_LIMIT_S, ON_STOP_LIMIT_S
 from mftik_sts.session_worker.delivery import kind_of_topic
-from mftik_sts.session_worker.dispatch import dispatch_md, dispatch_td
+from mftik_sts.session_worker.dispatch import dispatch_md, dispatch_notice, dispatch_td
 from mftik_sts.session_worker.events import Inbound, StreamKind
 from mftik_sts.session_worker.ingress import Ingress
 from mftik_sts.session_worker.limits import HEARTBEAT_PERIOD_S, TEMP_BUFFER_CAPACITY
@@ -171,6 +179,7 @@ class WorkerSession:
         self.st_paras = dict(request.st_paras or {})
         self.order_phase = "boot"
         self.strategy: Strategy | None = None
+        self.availability: Availability | None = None
         self._exit = threading.Event()
         self.exit_reason: str | None = None
         self.exit_failed = False
@@ -199,6 +208,20 @@ class WorkerSession:
                 f"got {list(self.td)}"
             )
         return next(iter(self.td.values())).api_id
+
+    def feed_state(self, feed: str) -> str | None:
+        """``md.state``. ``None`` until a broadcast decides the feed."""
+        tracker = self.availability
+        if tracker is None:
+            return None
+        return tracker.md_state(feed)
+
+    def account_state(self, api_id: int) -> str | None:
+        """``td.state``. ``None`` until a broadcast decides the account."""
+        tracker = self.availability
+        if tracker is None:
+            return None
+        return tracker.td_state(api_id)
 
     def request_exit(
         self, reason: str = "strategy_exit", *, failed: bool = False
@@ -421,6 +444,8 @@ async def amain(
         return ingress.exit_code or 1
 
     feeds_box: list[FeedReady | None] = [None]
+    availability_box: list[Availability | None] = [None]
+    ingress_flags = {"down": False}
 
     hb_stop = asyncio.Event()
 
@@ -446,6 +471,9 @@ async def amain(
         while not ingress_stop.is_set():
             now = clock.monotonic()
             pending.expire(now)
+            tracker = availability_box[0]
+            if tracker is not None:
+                _emit(tracker.tick(now))
             name = hooks.breached(now)
             if name is not None and name != reported:
                 reported = name
@@ -485,6 +513,7 @@ async def amain(
             clock=clock,
             progress=progress,
             feeds=feeds_box[0],
+            availability=availability_box[0],
         )
         snapshot = StsSessionStatus(
             session_id=request.session_id,
@@ -579,6 +608,7 @@ async def amain(
                     clock=clock,
                     progress=progress,
                     feeds=feeds_box[0],
+                    availability=availability_box[0],
                 ),
             )
             return Envelope[StsSessionStatus].wrap(
@@ -618,10 +648,123 @@ async def amain(
         if not topics:
             ready.set()
             return
-        async for topic, raw in ingress_broker.iter_raw(
-            topics, stop=ingress_stop, ready=ready
-        ):
+        # A wildcard is a pattern (``md.w.*.*``). Fan-out topics refuse
+        # ``*``; patterns are the subscription that allows one per segment.
+        if any("*" in topic or ">" in topic for topic in topics):
+            stream = ingress_broker.iter_patterns(
+                topics, stop=ingress_stop, ready=ready
+            )
+        else:
+            stream = ingress_broker.iter_raw(
+                topics, stop=ingress_stop, ready=ready
+            )
+        async for topic, raw in stream:
             on_message(topic, raw)
+
+    def _notice_event(effect: MdUpdate | TdUpdate) -> Inbound:
+        assert clock is not None
+        if isinstance(effect, MdUpdate):
+            payload: dict[str, Any] = {
+                "feed": effect.feed,
+                "state": effect.state,
+                "reason": effect.reason,
+                "token": effect.token,
+            }
+            kind = StreamKind.MD_NOTICE
+            feed = effect.feed
+        else:
+            payload = {
+                "api_id": effect.api_id,
+                "state": effect.state,
+                "reason": effect.reason,
+                "token": effect.token,
+            }
+            kind = StreamKind.TD_NOTICE
+            feed = f"td.{effect.api_id}"
+        return Inbound(
+            kind=kind,
+            feed=feed,
+            recv_ts=clock.now(),
+            body=json.dumps(payload).encode(),
+            event_id=uuid.uuid4().hex,
+        )
+
+    def _emit(effects: list[Any]) -> None:
+        """Queue notices. A resync reads ``oms.view`` before its event."""
+        running = asyncio.get_running_loop()
+        for effect in effects:
+            if isinstance(effect, Resync):
+                running.create_task(_deliver_resync(effect))
+                continue
+            ingress.offer(_notice_event(effect))
+            running.create_task(_log(notice_text(effect), level="warning"))
+
+    async def _deliver_resync(effect: Resync) -> None:
+        assert clock is not None
+        view = await read_oms_view(
+            ingress_broker,
+            api_id=effect.api_id,
+            session_id=request.session_id,
+            timeout=ingress_broker.config.request_timeout,
+        )
+        if view is None:
+            logger.warning(
+                "on_resync skipped api_id=%s cause=%s",
+                effect.api_id,
+                effect.cause,
+            )
+        else:
+            payload = {
+                "api_id": effect.api_id,
+                "cause": effect.cause,
+                "view": view.model_dump(mode="json"),
+            }
+            ingress.offer(
+                Inbound(
+                    kind=StreamKind.RESYNC,
+                    feed=f"td.{effect.api_id}",
+                    recv_ts=clock.now(),
+                    body=json.dumps(payload).encode(),
+                    event_id=uuid.uuid4().hex,
+                )
+            )
+        if effect.then_td is not None:
+            ingress.offer(_notice_event(effect.then_td))
+            await _log(notice_text(effect.then_td), level="warning")
+
+    def bind_availability(tracker: Availability) -> None:
+        availability_box[0] = tracker
+        if not ingress_flags["down"]:
+            return
+
+        def _down() -> None:
+            _emit(tracker.ingress_disconnected())
+
+        loop.call_soon_threadsafe(_down)
+
+    async def _nats_down() -> None:
+        # Closing the broker at teardown also drops the socket. That is
+        # not an ingress reconnect the strategy still has to hear.
+        if ingress_stop.is_set() or finished.is_set():
+            return
+        ingress_flags["down"] = True
+        tracker = availability_box[0]
+        if tracker is not None:
+            _emit(tracker.ingress_disconnected())
+
+    async def _nats_up() -> None:
+        if ingress_stop.is_set() or finished.is_set():
+            return
+        ingress_flags["down"] = False
+        tracker = availability_box[0]
+        if tracker is None or clock is None:
+            return
+        _emit(tracker.ingress_reconnected(clock.monotonic()))
+
+    ingress_broker.set_reconnect_handlers(
+        disconnected=_nats_down,
+        reconnected=_nats_up,
+    )
 
     inbox_ready = asyncio.Event()
     tasks: list[asyncio.Task[Any]] = [
@@ -716,6 +859,8 @@ async def amain(
                     wake_strategy=wake_strategy,
                     start_pump=start_pump,
                     log=_log,
+                    emit=_emit,
+                    bind_availability=bind_availability,
                 )
             )
         except Exception:
@@ -788,11 +933,20 @@ def _conditions(
     clock: Clock,
     progress: _Progress,
     feeds: FeedReady | None,
+    availability: Availability | None = None,
 ) -> dict[str, str]:
     out = {"phase": status}
     if phase is Phase.ON_START and progress.on_start_at is not None:
         elapsed = clock.monotonic() - progress.on_start_at
         out["on_start"] = f"running {elapsed:.0f}s"
+    if phase in (Phase.RUNNING, Phase.STOPPING) and availability is not None:
+        ready, total = availability.md_ready_counts()
+        if total:
+            out["MdReady"] = f"{ready}/{total}"
+        td_ready, td_total = availability.td_ready_counts()
+        if td_total:
+            out["TdReady"] = f"{td_ready}/{td_total}"
+        return out
     if feeds is not None:
         ready, total = feeds.counts()
         if total:
@@ -826,6 +980,8 @@ async def _strategy(
         [list[str], Callable[[str, str], None]], concurrent.futures.Future[None]
     ],
     log: Callable[..., Any],
+    emit: Callable[[list[Any]], None],
+    bind_availability: Callable[[Availability], None],
 ) -> int:
     loop = asyncio.get_running_loop()
     strategy_loop[0] = loop
@@ -882,6 +1038,8 @@ async def _strategy(
             start_pump=start_pump,
             log=log,
             broker=broker,
+            emit=emit,
+            bind_availability=bind_availability,
         )
     finally:
         if runner is not None and runner.alive:
@@ -918,8 +1076,19 @@ async def _run(
     ],
     log: Callable[..., Any],
     broker: CrossThreadBroker,
+    emit: Callable[[list[Any]], None],
+    bind_availability: Callable[[Availability], None],
 ) -> int:
     resolved, missing = resolve_feeds(list(session.md_ids))
+    tracker = Availability(
+        feeds={
+            feed.feed: frozenset(atom.atom_id for atom in feed.atoms)
+            for feed in resolved
+        },
+        accounts=session.td_api_ids,
+    )
+    session.availability = tracker
+    bind_availability(tracker)
     feeds = FeedReady(resolved, missing)
     feeds_box[0] = feeds
     topics: list[str] = []
@@ -936,6 +1105,10 @@ async def _run(
                 topics.append(atom.subject)
 
     def _on_md(topic: str, raw: str) -> None:
+        if topic.startswith("md.w."):
+            if _pv_ok(raw):
+                emit(tracker.apply_md(topic, raw, clock.monotonic()))
+            return
         if not _pv_ok(raw):
             return
         feed = feeds.note_event(topic) or subject_feed.get(topic) or topic
@@ -948,6 +1121,9 @@ async def _run(
 
     if topics:
         await asyncio.wrap_future(start_pump(topics, _on_md))
+        await asyncio.wrap_future(
+            start_pump([Topics.md_worker_pattern()], _on_md)
+        )
         for atom_id in silent:
             feeds.note_subscribed(atom_id)
 
@@ -989,6 +1165,10 @@ async def _run(
         def _on_td(topic: str, raw: str) -> None:
             if not _pv_ok(raw):
                 return
+            effects = tracker.apply_td_global(raw, clock.monotonic())
+            if effects is not None:
+                emit(effects)
+                return
             api_id = _api_id_from_td_topic(topic)
             event = _inbound(
                 raw,
@@ -1000,6 +1180,14 @@ async def _run(
                 ingress.offer(event)
 
         await asyncio.wrap_future(start_pump(td_topics, _on_td))
+
+        def _on_td_state(_topic: str, raw: str) -> None:
+            if not _pv_ok(raw):
+                return
+            emit(tracker.apply_td_state(raw, clock.monotonic()))
+
+        state_topics = [Topics.td_account_state(api_id) for api_id in api_ids]
+        await asyncio.wrap_future(start_pump(state_topics, _on_td_state))
 
     deadline = clock.monotonic() + DEFAULT_READY_TIMEOUT_S
     td_ok = await _td_ready(
@@ -1321,6 +1509,13 @@ async def _td_ready(
 
 
 async def _dispatch(strategy: Strategy, event_log: EventLog, event: Inbound) -> None:
+    if event.kind in (
+        StreamKind.MD_NOTICE,
+        StreamKind.TD_NOTICE,
+        StreamKind.RESYNC,
+    ):
+        await dispatch_notice(strategy, event_log, event, swallow=False)
+        return
     env = UntypedEnvelope.from_json(event.body.decode())
     if event.kind is StreamKind.TD:
         api_text = event.feed.split(".", 1)[1]

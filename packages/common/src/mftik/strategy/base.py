@@ -79,15 +79,16 @@ class Strategy:
         slice_deadline pacing: hand over the whole computation rather than
         cutting it into slices.
 
-    Availability, not content (interface only — IF-06, lands in B5-05):
+    Availability, not content (the session worker delivers these):
         on_md_update(feed, state, reason) — "live" | "down"
         on_td_update(api_id, state, reason) — "ready" | "degraded" |
         "unavailable"
         self.md.state(feed) / self.td.state(api_id) — ask at any moment
         Losing a feed or an account does not fail the session; the platform
         notifies and the strategy decides. An ``unavailable`` account refuses
-        submits locally. These are not market-data or order events: prices
-        arrive on on_ticker and friends, orders on on_order_update.
+        submits and cancels locally. These hooks carry connection and
+        availability only: prices arrive on on_ticker and friends, orders
+        on on_order_update.
 
     Selector universes (interface only — IF-06, lands in B9):
         on_universe_change(name, change) — change.added / removed / epoch, and
@@ -106,11 +107,12 @@ class Strategy:
         Contract strategies also call ledger.ensure_leverage(ticker) so TD
         caches per-symbol leverage for perp pre-locks (notional / leverage).
 
-    Gaps in the event stream (interface only — IF-06, lands in B5-05):
+    Gaps in the event stream (the session worker delivers ``on_resync``):
         on_resync(api_id, cause, view) — the platform reconciled because the
-        stream may have a hole in it (NATS reconnected, or the account worker
-        rebuilt its book from the venue). ``view`` is the settled book; correct
-        whatever was accumulated from events against it.
+        stream may have a hole in it (the session's own NATS connection
+        reconnected, or the account worker rebuilt its book from the venue).
+        ``view`` is that worker's ``oms.view``. Correct whatever was
+        accumulated from events against it. ``settled=True`` is a later read.
         await self.oms.view(settled=True) — the same convergence on demand,
         for a strategy that needs UNKNOWN orders resolved before it acts.
         Strategies do not reconcile themselves: there is no send_recon.
@@ -371,8 +373,12 @@ class Strategy:
     ) -> None:
         """Handle a feed becoming ``"live"`` or ``"down"``.
 
-        ``reason`` is a sentence — the venue dropped the socket, the connection
-        worker changed incarnation, the session's own broker reconnected.
+        Connectivity only. This hook does not carry a book, a trade, or any
+        other market-data print — those stay on their own hooks.
+
+        ``reason`` is why the feed moved: the venue dropped the socket, the
+        connection worker changed incarnation, the broadcasts went silent,
+        the session's own broker reconnected.
 
         There is no gap notification (F23). A strategy that needs to know what
         it missed records the ``down`` and works it out from the ``live`` that
@@ -388,6 +394,9 @@ class Strategy:
     ) -> None:
         """Handle an account becoming ``"ready"``, ``"degraded"`` or
         ``"unavailable"``.
+
+        Availability only. Fills, rejects and order updates stay on their own
+        hooks; this one does not carry them.
 
         ``degraded`` means orders can still be sent but confirmations will be
         late — submits are not refused, because a strategy that has to flatten
@@ -417,9 +426,10 @@ class Strategy:
             The TD account worker changed incarnation and rebuilt its book from
             the venue.
 
-        ``view`` is the settled book. Anything the strategy accumulated from
-        events should be corrected against it rather than trusted: a chase that
-        missed a fill will otherwise re-send an order for size it already has.
+        ``view`` is the account worker's ``oms.view``, read off the strategy
+        thread. Anything the strategy accumulated from events should be
+        corrected against it rather than trusted: a chase that missed a fill
+        will otherwise re-send an order for size it already has.
 
         TD's own reconcile after a venue reconnect does not arrive here. Its
         findings reach the strategy as ordinary order updates.
