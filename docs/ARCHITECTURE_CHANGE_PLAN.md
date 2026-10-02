@@ -637,7 +637,17 @@ TD 帳號 worker 對每個啟用帳號常駐（F35），所以 TD 平面固定�
 3. TD 不需要修改：它照常回覆到 `msg.reply`。
 4. ack 由 ingress 收下，記進 event log，timeout 以真實時間判斷，再以 `call_soon_threadsafe` 交回策略的 future。跨 thread 只發生在回程。
 5. 送單之前，必須先在共用的 pending 表登記 future，避免回覆比登記先到。
-6. 需要驗證：NATS 的 no-responders（503）在 `reply` 不屬於送出連線時是否照常送達。
+6. **no-responders 留在送出連線上（B4-04 實測）。** nats-server 2.11.17（compose 與 CI 的 `nats:2.11-alpine`，`-m 8222`、沒有 config；nats-py 2.15.0）把 503 寫進送出連線自己的訂閱，不把 503 路由到 `reply`。送出連線訂了 inbox wildcard、而且 CONNECT 同時帶 `headers` 與 `no_responders` 時，收到的是 headers-only 的 `NATS/1.0 503`（body 空，同連線約 0.01 秒）。另一條連線即使也訂了同一個 wildcard，讀到的是空的。送出連線有 `headers` 但 `no_responders` 為 false 時，server 不寫 503。`no_responders` 沒有 `headers` 時連線被拒（no responders requires headers support）。看的是送出連線的旗標。server INFO 的 `headers: true` 讓 nats-py 2.15 在 `NatsTransport.connect`（沒有另傳 no_responders）上兩邊都廣告這兩個旗標；策略的送出連線沒有訂閱 ingress inbox，所以 server 不寫 503。`publish_with_reply` 走 `publish`，不會因此升起 `NoRespondersError`。對一個沒有 TD worker 的 api 跑真實 `amain` 的 `submit_order`：`accepted` 為 false、耗時 2.005 秒（`ORDER_ACK_TIMEOUT_S`）、`RejectCode.TD_NO_ACK`（108）、reason 為 `no ack from TD`、沒有例外、進程 exit 0。503 沒有進 ingress。
+
+   ack 回程的 hop 是 ingress `iter_core` yield（呼叫 `pending.complete` 之前）到策略 future 的 done callback，也就是 `call_soon_threadsafe` 那一跳。idle 與 MD 各 3000 筆，CPU hook 400 筆，warmup 30 筆不計，線性排名。機器：Intel Xeon，family 6 model 207，4 cores，2400 MHz；Python 3.12.3；uvloop 0.22.1。重現：`uv run --all-packages python scripts/b4_04_measure.py --gil-s 30 --hops 3000`。
+
+   | 條件 | hop p50 | hop p99 | hop max | 同時看到的 |
+   |---|---|---|---|---|
+   | idle | 0.013 ms | 0.021 ms | 0.41 ms | lag p50 0.074 ms；wall p50 0.18 ms；timeout 0 |
+   | ingress 同時消化 MD，4953 筆/秒（目標 8000；送出 4459、讀到 4405） | 0.014 ms | 0.14 ms | 0.29 ms | lag p50 0.092 ms、p99 0.29 ms；wall p50 0.22 ms；timeout 0 |
+   | 策略 loop 純 Python hook 100 ms | 62 ms | 89 ms | 94 ms | ingress 在 hook 開始後 p50 38 ms（p99 63 ms）讀到回覆；callback 在 hook 結束後 p99 0.042 ms 才跑；timeout 0 |
+
+   hook 佔住策略 loop 時，future 要等 hook 回到 loop 才完成，所以 hop 約是 hook 剩下的時間。timeout 在 ingress 讀到 bytes 時用 ingress 的時鐘判斷；這 100 ms 的 hook 裡讀得到，2 秒的 ack timeout 還有餘裕。paper 帳號 worker 上 `submit_order` 的牆鐘（n=100，含 TD 與 paper engine，第一筆 warmup 不計；B6-02 之後先把 `td.account.trading` 設成 active，否則同一筆單立刻以 107 拒絕、牆鐘約 0.4 ms，不是成交）：min 203.2 ms、p50 204.5 ms、p99 206.0 ms、max 206.2 ms，沒有拒絕。上面的 hop 是 0.01 ms 這個量級，這約 205 ms 是 paper 路徑的牆鐘。
 
 **ingress thread 的生命週期：與進程同生共死，也就是與 session 同生共死。**
 
@@ -693,7 +703,15 @@ TD 訂閱延後到 `on_start` 之後的原因：帳號事件是整個帳號的�
 - 純 Python 的 CPU-bound hook 每過 switch interval（預設 5 ms）會被迫釋放 GIL，ingress 仍然讀得到 socket。numpy、torch 本身就會釋放 GIL。
 - ingress 只搬 bytes、不解碼，把它需要的 GIL 時間壓到最低。
 - 長時間持有 GIL 的 C 擴充仍然會餓死 ingress，這類運算應該交給 `offload` 的 process 模式（§5.5）。
-- switch interval 是否調小，B4 實測後再決定。
+- **switch interval 維持預設 5 ms（B4-04 實測；程式沒有改）。** 30 秒純 Python CPU hook，ingress 跑 `heartbeat_loop`（週期 1 秒）並每 50 ms 讀一筆 ping。回覆晚 0.3 秒送出，所以落在 hook 裡。三個 interval 的 ack 都在 hook 開始後約 0.30–0.32 秒被 ingress 讀到，策略端 `ack_ok`，沒有撞上 2 秒 ack timeout。heartbeat 樣本 30 筆。
+
+  | interval | heartbeat overrun p50 / p99 / max | inbox 延遲 p50 / p99 / max | hook 與 ingress 同時跑 | 單獨跑 |
+  |---|---|---|---|---|
+  | 5 ms（預設） | 5.3 / 34 / 38 ms | 22 / 50 / 54 ms | 2.73 萬次/秒 | 16.9 萬次/秒 |
+  | 1 ms | 1.3 / 3.6 / 3.9 ms | 4.6 / 7.4 / 9.2 ms | 2.76 萬次/秒 | 16.9 萬次/秒 |
+  | 0.5 ms | 0.60 / 1.3 / 1.4 ms | 2.6 / 3.8 / 4.7 ms | 2.76 萬次/秒 | 16.9 萬次/秒 |
+
+  5 ms 時 heartbeat 間隔最大 1.038 秒（週期 1 秒），離 shim 的 `SESSION_HB_TIMEOUT_S` 3 秒很遠；inbox 最大 54 ms，離 2 秒 ack timeout 很遠。調到 0.5 ms 可以把這兩個 jitter 再壓低，這台機器上的吞吐幾乎一樣。沒有觀測到需要改預設的風險，建議維持 5 ms。要不要改由 Yi Te 決定。同一條指令，機器同上。
 
 **其他：**
 
