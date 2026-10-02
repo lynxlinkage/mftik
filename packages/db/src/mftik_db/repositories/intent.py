@@ -151,6 +151,34 @@ class IntentRepository:
         )
         return result.scalars().all()
 
+    async def unreleased_td(self, api_ids: Sequence[int]) -> Sequence[TdIntent]:
+        """Unreleased ``td_intents`` rows whose ``api_id`` is in ``api_ids``.
+
+        Read only. The TD process calls this once after a restart, with
+        the accounts bound to its instance, and seeds the in-memory book
+        before it publishes the trading bit (P5). A released row is not
+        a held intent. An empty ``api_ids`` is no rows, not every row.
+        Order is ``session_id``, then ``api_id``.
+        """
+        ids: list[int] = []
+        seen: set[int] = set()
+        for api_id in api_ids:
+            if type(api_id) is not int or api_id < 1:
+                raise ValueError(f"api_id must be a positive int, got {api_id!r}")
+            if api_id in seen:
+                continue
+            seen.add(api_id)
+            ids.append(api_id)
+        if not ids:
+            return ()
+        result = await self.session.execute(
+            select(TdIntent)
+            .where(TdIntent.released_at.is_(None))
+            .where(TdIntent.api_id.in_(ids))
+            .order_by(TdIntent.session_id, TdIntent.api_id)
+        )
+        return result.scalars().all()
+
     async def put(self, message: _Put, *, at: datetime | None = None) -> None:
         """Register ``message``. Idempotent (P-1).
 

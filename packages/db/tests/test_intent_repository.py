@@ -66,6 +66,33 @@ async def db(database_url):
         yield session
 
 
+async def test_unreleased_td_is_the_live_rows_for_those_accounts(db) -> None:
+    """Restart seed reads this. Released rows and other accounts stay out."""
+    repo = IntentRepository(db)
+    await repo.put(_td([1, 2]), at=AT)
+    await repo.put(_td([1], session_id=OTHER), at=AT)
+    await repo.put(_td([3], session_id="sess-3"), at=AT)
+    await repo.delete(
+        TdIntentDelete(session_id=SID, owner=_owner(), api_ids=[1]),
+        at=AT_LATER,
+    )
+
+    rows = await repo.unreleased_td([2, 1, 1])
+    assert [(row.session_id, row.api_id) for row in rows] == [
+        (SID, 2),
+        (OTHER, 1),
+    ]
+    assert all(row.released_at is None for row in rows)
+    assert await repo.unreleased_td(()) == ()
+
+
+async def test_unreleased_td_rejects_an_api_id_that_is_not_a_positive_int(
+    db,
+) -> None:
+    with pytest.raises(ValueError):
+        await IntentRepository(db).unreleased_td([0])
+
+
 async def test_td_put_inserts_one_row_per_api_id(db) -> None:
     repo = IntentRepository(db)
     await repo.put(_td([1, 2]), at=AT)

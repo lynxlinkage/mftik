@@ -209,6 +209,8 @@ class TdOrchestrator:
         accounts: Sequence[BoundAccount],
         intents: Sequence[TdIntentPut],
         views: Sequence[AccountView],
+        *,
+        publish: bool = True,
     ) -> tuple[OrchestratorAction, ...]:
         """Name worker actions and trading pushes for one pass (§7.2).
 
@@ -233,6 +235,11 @@ class TdOrchestrator:
         ``SPAWN``, ``STOP`` and ``RELEASE``, and delivers
         ``PUSH_TRADING`` as ``td.account.trading``. The action stays in
         this tuple either way.
+
+        ``publish`` false names no trading push (P5). The process
+        passes false until it has seeded the book from ``td_intents``.
+        An empty book with ``publish`` true is a seeded book: there
+        really is no unreleased intent, and the bit is false.
         """
         if isinstance(accounts, str) or not isinstance(accounts, Sequence):
             raise TypeError("accounts must be a sequence of BoundAccount")
@@ -262,7 +269,7 @@ class TdOrchestrator:
             if step is not None:
                 actions.append(step)
         for push in trading_pushes(
-            publish=True, accounts=wanted, intents=intents
+            publish=publish, accounts=wanted, intents=intents
         ):
             actions.append(
                 OrchestratorAction(

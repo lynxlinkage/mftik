@@ -198,6 +198,23 @@ def test_an_absent_controller_pushes_nothing_and_the_last_desired_stands() -> No
     assert TradingDesired(api_id=7, active=False) not in pushes
 
 
+def test_reconcile_publishes_nothing_until_the_book_is_seeded(tmp_path: Path) -> None:
+    """An empty book is not a deactivate. ``publish`` false names no push (P5).
+
+    ``publish`` true with that same empty book is a seed that found no
+    unreleased intent, and the bit is false.
+    """
+    view = _view(observed=ObservedWorker.RUNNING, pid_gone=False, incarnation=1)
+    held = _orch(tmp_path).reconcile((_account(),), (), (view,), publish=False)
+    assert all(action.kind is not ActionKind.PUSH_TRADING for action in held)
+    seeded = _orch(tmp_path).reconcile((_account(),), (), (view,), publish=True)
+    assert [
+        action for action in seeded if action.kind is ActionKind.PUSH_TRADING
+    ] == [
+        OrchestratorAction(kind=ActionKind.PUSH_TRADING, api_id=7, active=False),
+    ]
+
+
 def test_close_does_not_push_a_trading_change() -> None:
     """DETACH leaves workers running. STOP signals them through the
     supervisor, not through a trading bit. Neither mode deactivates."""
