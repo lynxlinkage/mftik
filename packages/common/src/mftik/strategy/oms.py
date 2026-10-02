@@ -596,6 +596,10 @@ class StrategyOms:
         """
         session = self._require_session()
         _refuse_if_before_on_ready(session)
+        if _account_unavailable(self._strategy, api_id):
+            cid = self._next_client_order_id()
+            self._refuse_unavailable(session, api_id, cid, remember=True)
+            return False
         cid = self._next_client_order_id()
         accepted = await self._request_ack(
             api_id,
@@ -648,6 +652,9 @@ class StrategyOms:
         bound = self._strategy.session if self._strategy is not None else None
         if bound is not None:
             _refuse_if_before_on_ready(bound)
+            if _account_unavailable(self._strategy, api_id):
+                self._refuse_unavailable(bound, api_id, cid, remember=False)
+                return False
         if cid in self._inflight:
             self._last_reason = (
                 "order is inflight; it cannot be cancelled from that state"
@@ -776,6 +783,50 @@ class StrategyOms:
         if self._strategy is None or self._strategy.session is None:
             raise RuntimeError("strategy OMS is not bound to a session")
         return self._strategy.session
+
+    def _refuse_unavailable(
+        self,
+        session: Any,
+        api_id: int,
+        cid: str,
+        *,
+        remember: bool,
+    ) -> None:
+        """Local refusal. Nothing is sent and the cid is not marked inflight.
+
+        A refused submit still mints an id (``remember``) so
+        ``last_client_order_id`` is not the previous live order. A strategy
+        that cancels "the id that just failed" must not cancel that order.
+        """
+        if remember:
+            self._last_cid = cid
+        self._last_reason = "td_unavailable"
+        self._last_code = RejectCode.TD_UNAVAILABLE
+        session.event_log.record(
+            "order",
+            "td_unavailable",
+            dir="self",
+            api_id=api_id,
+            cid=cid,
+            reason="td_unavailable",
+            code=RejectCode.TD_UNAVAILABLE,
+        )
+        logger.warning(
+            "order refused locally api_id=%s cid=%s reason=td_unavailable",
+            api_id,
+            cid,
+        )
+
+
+def _account_unavailable(strategy: Strategy | None, api_id: int) -> bool:
+    """True only when the session has heard ``unavailable``.
+
+    No reader, or ``None`` from one, is unknown. Unknown is not a local
+    refusal: TD's ``TD_VENUE_NOT_CONNECTED`` is still the gate.
+    """
+    if strategy is None:
+        return False
+    return strategy.td.state(api_id) == "unavailable"
 
 
 def _refuse_if_before_on_ready(session: object) -> None:

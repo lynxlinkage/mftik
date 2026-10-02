@@ -12,6 +12,7 @@ The worker passes ``False``. A strategy exception there is class A —
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -31,7 +32,7 @@ from mftik.exchange.models import (
     Ticker,
     Trade,
 )
-from mftik.exchange.oms import Position
+from mftik.exchange.oms import OmsView, Position
 from mftik.protocol import (
     MD_AGG_TRADE,
     MD_BEST_QUOTE,
@@ -57,6 +58,8 @@ from mftik.protocol import (
 from mftik.strategy import Strategy
 from mftik.strategy.eventlog import EventLog
 from pydantic import BaseModel
+
+from mftik_sts.session_worker.events import Inbound, StreamKind
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +203,92 @@ async def dispatch_td(
                 payload if isinstance(payload, Order) else None,
             )
     return True
+
+
+async def dispatch_notice(
+    strategy: Strategy,
+    event_log: EventLog,
+    event: Inbound,
+    *,
+    swallow: bool = True,
+) -> None:
+    """Deliver one availability notice or ``on_resync``.
+
+    The body is the small JSON the ingress wrote, not a venue envelope.
+    The state is committed on this thread immediately before the hook,
+    so a deferred ``ready`` becomes visible only once ``on_resync`` has
+    already been pulled ahead of it. A token older than the feed's
+    current one is dropped: the newer notice already owns the answer.
+
+    ``on_md_update`` and ``on_td_update`` carry connection and
+    availability only. Market data and order events stay on their own
+    hooks.
+    """
+    try:
+        body = json.loads(event.body.decode())
+    except Exception as exc:
+        event_log.record(
+            "error",
+            "payload_invalid",
+            dir="self",
+            hook=_notice_hook(event.kind),
+            error=repr(exc),
+        )
+        logger.exception("invalid availability notice kind=%s", event.kind)
+        return
+    if not isinstance(body, dict):
+        event_log.record(
+            "error",
+            "payload_invalid",
+            dir="self",
+            hook=_notice_hook(event.kind),
+            error="notice body is not an object",
+        )
+        return
+    session = getattr(strategy, "session", None)
+    tracker = getattr(session, "availability", None) if session is not None else None
+    hook = _notice_hook(event.kind)
+    event_log.record("notice", hook, dir="in", payload=body)
+    try:
+        if event.kind is StreamKind.MD_NOTICE:
+            if tracker is not None and not tracker.commit_md(
+                str(body["feed"]), str(body["state"]), int(body["token"])
+            ):
+                return
+            await strategy.on_md_update(
+                str(body["feed"]), str(body["state"]), str(body["reason"])
+            )
+            return
+        if event.kind is StreamKind.TD_NOTICE:
+            if tracker is not None and not tracker.commit_td(
+                int(body["api_id"]), str(body["state"]), int(body["token"])
+            ):
+                return
+            await strategy.on_td_update(
+                int(body["api_id"]), str(body["state"]), str(body["reason"])
+            )
+            return
+        view = OmsView.model_validate(body["view"])
+        await strategy.on_resync(int(body["api_id"]), str(body["cause"]), view)
+    except Exception as exc:
+        event_log.record(
+            "error",
+            "hook_failed",
+            dir="self",
+            hook=hook,
+            error=repr(exc),
+        )
+        logger.exception("strategy %s failed", hook)
+        if not swallow:
+            raise
+
+
+def _notice_hook(kind: StreamKind) -> str:
+    if kind is StreamKind.MD_NOTICE:
+        return "on_md_update"
+    if kind is StreamKind.TD_NOTICE:
+        return "on_td_update"
+    return "on_resync"
 
 
 def _record_in(

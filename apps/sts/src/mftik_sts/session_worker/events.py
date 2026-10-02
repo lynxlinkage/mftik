@@ -48,8 +48,8 @@ class StreamKind(StrEnum):
     (:mod:`mftik.exchange.atoms`). ``funding`` and ``OI`` in the plan's
     table are ``funding_rate`` and ``open_interest`` here, because that
     is what a feed key says. ``kline_1m`` and the other intervals are
-    :attr:`KLINE`, not one member each. The last three are not feeds:
-    nothing in ``strategy.yml`` overrides them.
+    :attr:`KLINE`, not one member each. Members after the market topics
+    are not feeds: nothing in ``strategy.yml`` overrides them.
     """
 
     TICKER = TOPIC_TICKER
@@ -65,6 +65,9 @@ class StreamKind(StrEnum):
     TD = "td"
     FEED_END = "feed_end"
     RPC_REPLY = "rpc_reply"
+    MD_NOTICE = "md_notice"
+    TD_NOTICE = "td_notice"
+    RESYNC = "resync"
 
 
 class LogMark(StrEnum):

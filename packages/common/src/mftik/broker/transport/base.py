@@ -95,11 +95,17 @@ class BrokerTransport(ABC):
 
     @abstractmethod
     def psubscribe(
-        self, patterns: Sequence[str], *, stop: asyncio.Event | None
+        self,
+        patterns: Sequence[str],
+        *,
+        stop: asyncio.Event | None,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[tuple[str, str]]:
         """Yield ``(topic, raw)`` for topics matching ``patterns``.
 
         Patterns use one wildcard per segment — ``log.*.*``, never ``log.*``.
+        ``ready`` is set once the SUBs have been written, before the first
+        yield. Callers that do not pass it behave as before.
         """
 
     @abstractmethod

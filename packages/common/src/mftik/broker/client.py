@@ -59,6 +59,25 @@ class Broker:
         await self._transport.connect()
         logger.info("Connected to %s", self._transport.describe())
 
+    def set_reconnect_handlers(
+        self,
+        *,
+        disconnected: Callable[[], Awaitable[None]] | None = None,
+        reconnected: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        """Tell the transport when its connection drops and comes back.
+
+        A transport without this hook ignores the call. The callbacks run
+        on the connection's loop. They must not wait on a request on that
+        same connection: schedule the work and return. The session ingress
+        uses this to hear its own NATS reconnect (F13) without reaching
+        into the client.
+        """
+        method = getattr(self._transport, "set_reconnect_handlers", None)
+        if method is None:
+            return
+        method(disconnected=disconnected, reconnected=reconnected)
+
     async def close(self) -> None:
         await self._transport.close()
 
@@ -190,8 +209,32 @@ class Broker:
         pattern_list = (patterns,) if isinstance(patterns, str) else tuple(patterns)
         if not pattern_list:
             raise ValueError("psubscribe requires at least one pattern")
-        async for topic, raw in self._transport.psubscribe(pattern_list, stop=stop):
+        async for topic, raw in self._transport.psubscribe(
+            pattern_list, stop=stop
+        ):
             yield topic, UntypedEnvelope.from_json(raw)
+
+    async def iter_patterns(
+        self,
+        patterns: str | Sequence[str],
+        *,
+        stop: asyncio.Event | None = None,
+        ready: asyncio.Event | None = None,
+    ) -> AsyncIterator[tuple[str, str]]:
+        """Yield ``(topic, raw)`` for fan-out patterns, without parsing.
+
+        Same bytes as :meth:`iter_raw`. Patterns are the one place a
+        subject may contain ``*`` — one wildcard per segment, as in
+        ``md.w.*.*``. A plain topic still goes through :meth:`iter_raw`,
+        which refuses a wildcard.
+        """
+        pattern_list = (patterns,) if isinstance(patterns, str) else tuple(patterns)
+        if not pattern_list:
+            raise ValueError("iter_patterns requires at least one pattern")
+        async for item in self._transport.psubscribe(
+            pattern_list, stop=stop, ready=ready
+        ):
+            yield item
 
     async def request(
         self,

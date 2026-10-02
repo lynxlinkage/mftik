@@ -41,8 +41,12 @@ have been rebuilt from the venue — that arrives as ``on_resync`` with
   the session keeps its accounts — this is a worker that went away, not a
   deployment that changed.
 
-IF-06 defines the surface and returns null data. The ingress that fills it in,
-and the local refusal that reads it, land in B5-05.
+:meth:`StrategyTd.state` is filled by the session worker from
+``td.account.state.{api_id}``. ``None`` until the first broadcast means
+unknown, not ``unavailable``, and order entry is not refused locally while
+it is unknown. The local refusal of an ``unavailable`` account lives on
+:meth:`~mftik.strategy.oms.StrategyOms.submit_order` and
+:meth:`~mftik.strategy.oms.StrategyOms.cancel_order`.
 """
 
 from __future__ import annotations
@@ -82,8 +86,17 @@ class StrategyTd:
     def state(self, api_id: int) -> AccountState | None:
         """``"ready"``, ``"degraded"`` or ``"unavailable"``, or None.
 
-        None means this session is not using ``api_id`` at all, which is a
-        different answer from ``"unavailable"``: one is a configuration
-        mistake and the other is an account having a bad minute.
+        None means either this session is not using ``api_id``, or the
+        account has not broadcast yet. Both are different from
+        ``"unavailable"``: unknown does not refuse orders locally. TD's own
+        ``TD_VENUE_NOT_CONNECTED`` is still the gate until a broadcast arms
+        the silence timer.
         """
-        return None
+        strategy = self._strategy
+        session = getattr(strategy, "session", None) if strategy is not None else None
+        reader = (
+            getattr(session, "account_state", None) if session is not None else None
+        )
+        if reader is None:
+            return None
+        return reader(api_id)
