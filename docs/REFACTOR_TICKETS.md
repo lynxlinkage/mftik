@@ -1,12 +1,12 @@
 # REFACTOR_TICKETS — 平面進程化重構的工作票
 
-> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.30。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
+> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.31。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
 >
 > 每張票都有描述、範圍、驗收、依賴。驗收寫成別人能檢查的事：測試名稱、grep 結果、量測數字、文件章節。
 
 ## 怎麼用這份文件
 
-**編號：** `<批次>-<序號>`。每張票都已開成 GitHub issue（#154 到 #253，以及後來加的 #275 到 #277，label 為 `refactor` 和 `batch:<批次>`），標題後的括號是 issue 編號。批次依序是 B0、B1、RM、B2、IF、B3 到 B10（計畫 §11）。依賴只列直接依賴。
+**編號：** `<批次>-<序號>`。每張票都已開成 GitHub issue（#154 到 #253，以及後來加的 #275 到 #277、#363，label 為 `refactor` 和 `batch:<批次>`），標題後的括號是 issue 編號。批次依序是 B0、B1、RM、B2、IF、B3 到 B10（計畫 §11）。依賴只列直接依賴。
 
 **RM（清場）的共同驗收：**
 
@@ -33,7 +33,7 @@
 | B2 測試 | 5 | 測試標準、`FakeClock`、共用 NATS 連線、tier 與 CI 閘門 |
 | IF 介面 | 16 | 新抽象層只定義介面，回傳 null data，附 xfail 契約測試 |
 | B3 procman | 7 | shim、Supervisor、reattach、報告、准入、Strategon 實機驗證 |
-| B4 骨架 | 9 | paper 上跑通 deploy → 下單 → 成交 → end |
+| B4 骨架 | 10 | paper 上跑通 deploy → 下單 → 成交 → end；`pv` 的 deploy 比對與 transport 檢查 |
 | B5 STS | 11 | 交付策略、event log、offload、hook 預算、失聯通知、crash 與重啟、策略測試改寫、策略樹版本釘住、主機磁碟的 operator 路徑 |
 | B6 TD | 8 | 常駐層、交易層、`cancel_session`、drain-replace、backfill、狀態廣播、cancel-on-disconnect |
 | B7 MD atom | 11 | atom 模型、各 venue adapter、通用 join、tape、fetch worker |
@@ -648,6 +648,26 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
   - 超過預算的 start 被拒。
 - **依賴：** B4-03 到 B4-08、B3-05
 
+### B4-10 `pv` 檢查：deploy 時比對與 NATS header（#363）
+
+- **描述：** #282 的定案（F41）。`pv` 從 envelope 搬到 NATS header，由 transport 在解碼之前擋；另在 deploy 時先比對 session 會用到的 controller 與 worker，讓執行中的丟棄只是最後一道防線。
+- **範圍：**
+  - transport（`broker/transport/nats.py`）：`publish`、`publish_with_reply`、`request` 一律蓋上 header `Mftik-Pv`。每個入站 frame（`subscribe`、`subscribe_core`、`serve` 收到的 request、`request` 收到的 reply）在 decode 之前檢查 header；缺少或不符就丟棄，記 log（依 subject 與 `pv` 限流），以 `(subject, pv)` 計數，並記下每個 subject 最近一次被丟棄的 `pv`，給 deploy 時的比對用
+  - `request` 收到 `pv` 不符的 reply 時，對呼叫端拋出本地錯誤（暫名 `ProtocolMismatch`），不等 timeout；線上不送任何錯誤
+  - 刪除 `Envelope.pv`、`reject_if_pv_mismatch`、STS ingress 的 `_pv_ok`、`_on_ctl` 與 `procman_reports.py` 裡的 `pv` 比對；API orchestrate 改接 transport 的本地錯誤，回 `protocol_mismatch`。`_on_md` 每個 frame 只剩一次 `json.loads`（F8）
+  - `WorkerSpec` 加 `pv`：spawn 時填入 controller 的常數，跟著 spec 持久化，reattach 後不變；`ProcmanWorker` 帶出 `pv`；controller 自己的丟棄計數放進 `procman.report`
+  - API start：把 `PROTOCOL_VERSION` 和目標 STS controller、session 會用到的 MD / TD controller、session 的 TD 帳號 worker（依 `api_id`）比對。任何一個不符，就以 `protocol_mismatch` 拒絕，訊息指出是哪個元件、它的 `pv`；不 spawn worker、不寫 intent
+  - `scripts/` 裡直接用 `nats` 的腳本改走 transport，或自己蓋 header
+- **驗收：**
+  - `git grep` 在 `apps/`、`packages/` 找不到 `Envelope` 的 `pv` 欄位、`reject_if_pv_mismatch`、`_pv_ok`
+  - integration：對 `md.a.*`、一個 `serve` subject、一個 request 的 reply 各送一則不帶 header 和一則 `pv` 不同的 frame；都沒有進到 handler、線上沒有錯誤回覆，計數各加一；同一個 subject 與 `pv` 在限流窗內只記一行 log
+  - integration：request 收到 `pv` 不符的 reply 時，呼叫端在 timeout 之前拿到本地錯誤
+  - API：目標 STS controller、MD / TD controller、TD 帳號 worker 任何一個 `pv` 不同時，start 回 `protocol_mismatch`，沒有新 intent、Supervisor 沒有新 worker；controller 的報告因 `pv` 被丟棄時同樣回 `protocol_mismatch`，不是 `unavailable`
+  - reattach 之後，`procman.report` 裡每個 worker 的 `pv` 仍是 spawn 它的那個版本
+  - IF-01（#179）留下的 `protocol_mismatch` 契約測試改寫成上面的行為
+- **依賴：** B4-01、B3-04、B4-07、B4-08
+- **決策：** F26、F41
+
 ---
 
 ## B5 STS 補齊
@@ -841,9 +861,9 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 ### B8-02 placement 與連線 worker 的生命週期（#239）
 
-- **驗收：** 容量不夠時才開新連線；atom 一旦放上去就不搬（F22）；連線上沒有 atom 時 worker 結束。
-- **依賴：** B8-01
-- **決策：** F17、F22
+- **驗收：** 容量不夠時才開新連線；atom 一旦放上去就不搬（F22）；連線上沒有 atom 時 worker 結束；新 atom 只放到 `pv` 和 controller 相同的連線 worker 上，沒有就開新的（F41）。
+- **依賴：** B8-01、B4-10
+- **決策：** F17、F22、F41
 
 ### B8-03 reconciler 完整版（#240）
 

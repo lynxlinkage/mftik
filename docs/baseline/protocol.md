@@ -335,7 +335,7 @@ TD 的 `rpc/router.py:32`–`:36` 只掛三個型別（health、attach、detach�
 7. **`status.sts`：** 見 5.4 第 1 項。
 8. **`sys.heartbeat` 與型別 `"heartbeat"`：** 沒有訂閱者（4.2）。建議刪除。
 9. **`"td.global.keepalive"`：** 沒有 handler（3.7）。建議刪除。
-10. **錯誤型別 `sts.error` / `td.error` / `md.error` / `sym.error` / `paper.error`：** F26 要求不同 `pv` 一律以 `protocol_mismatch` 拒絕，但沒說這個拒絕用哪個型別表達。建議：沿用各平面的 error 型別，`RpcError.code` 填 `protocol_mismatch`。
+10. **錯誤型別 `sts.error` / `td.error` / `md.error` / `sym.error` / `paper.error`：** F26 要求不同 `pv` 一律以 `protocol_mismatch` 拒絕，但沒說這個拒絕用哪個型別表達。建議：沿用各平面的 error 型別，`RpcError.code` 填 `protocol_mismatch`。 **→ 已定案（v0.31）：** F41。執行中不回任何錯誤型別：`pv` 改放 NATS header，transport 丟棄不符的 frame 並計數；`protocol_mismatch` 只出現在 deploy 時 API 的回應，以及 request 收到不符 reply 時呼叫端的本地錯誤。實作見 B4-10（#363）。
 11. **SYM 與 paper 平面的全部協定：** `sym.*` 五個、`paper.*` 十六個。兩者都不是本次重構的平面，計畫也沒列它們。建議：整批保留。
 
 ### 5.4 計畫與代碼不符之處

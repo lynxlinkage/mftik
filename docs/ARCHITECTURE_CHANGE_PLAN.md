@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.30（2026-10-02）**。§12 的待決事項已全部定案（F1 到 F40）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.31（2026-10-02）**。§12 的待決事項已全部定案（F1 到 F41）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
 > **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。**RM 清場已完成**，所以描述現況的章節（§1、§5 到 §8、附錄 A、B）說的是 `a0cbfb2`，不是分支上的代碼；清場後還剩什麼見 `docs/baseline/remaining.md`（RM-10，#173）。
+>
+> **v0.31（#282，`pv` 在哪一層擋）：** 新增 F41：`pv` 從 envelope 搬到 NATS header `Mftik-Pv`，由 transport 在解碼之前檢查，不符就丟棄並計數，不回錯誤；另在 deploy 時先比對 session 會用到的 controller 與 worker。§3.3、§3.4、§4.6、§8.3、§11 的 B4 列隨之更新；新票 B4-10（#363）。
 >
 > **v0.30（RM-10 留下的兩題）：** 新增 F39、F40 與 §5.7：「worker 跑哪一份代碼」分成平台 release、策略樹 digest、extras generation 三個軸，session 在 start 時釘住後兩者；STS controller 服務 operator 對主機磁碟的所有路徑（registry、extras、artifacts、event log），不 import 策略代碼。§3.3、§3.4、§4.3、§4.6、§5.1、§8.4 隨之更新；新票 IF-16（#275）、B5-10（#276）、B5-11（#277）。
 >
@@ -43,7 +45,7 @@
 | F23 | 不提供 `on_feed_gap`：漏收由策略自己記錄，平台不替策略記 | MD 斷線、連線 worker 重啟、STS ingress 重連一律只以 `on_md_update` 的 down → live 通知（§5.3、§5.6）；`all` 類 feed 佇列溢出時，策略以 `event.seq` 自己偵測（F25） |
 | F24 | 既有 MD 連線 worker 換版只靠人工逐條 `restart`；平台不自動重啟舊版連線，也不為了換版打斷運行中的策略 | 升版時才知道需不需要換，而且換版本身可能有相容問題（§4.6）。另提供列出「仍在跑舊版代碼的 worker」的指令 |
 | F25 | MD 事件帶 per-atom 的 `event.seq`，漏收由策略自己偵測 | `seq` 在同一個連線 worker incarnation 內連續，`on_md_update` 收到 `live` 之後重新起算；`all` 類跳號代表漏收，`latest` 類跳號是設計上的覆蓋（§5.3） |
-| F26 | 跨版本只靠版號：每則 NATS 訊息帶 `pv`，格式一改就升版，不同 `pv` 一律以 `protocol_mismatch` 拒絕；不做版內相容，也不做 schema 比對 | 停止不依賴協定（SIGTERM），任何版本組合都停得掉。升版順序見 §4.6 |
+| F26 | 跨版本只靠版號：每則 NATS 訊息帶 `pv`，格式一改就升版，不同 `pv` 一律拒絕；不做版內相容，也不做 schema 比對 | 停止不依賴協定（SIGTERM），任何版本組合都停得掉。升版順序見 §4.6；在哪一層擋、怎麼擋見 F41 |
 | F27 | TD 帳號 worker 換版後由人工逐帳號觸發 drain-replace，平台不自動換版 | 理由同 F24（§4.6） |
 | F28 | `docs/Deployment.md` 不封存，依現況重寫；venue 實測表（`Deribit`、`BitgetUta`）封存到 `docs/archive/` | B1 依現況重寫 Deployment，B10 依新架構更新（§10） |
 | F29 | shim 用 Python | 只用標準庫，不 import pydantic、nats 等第三方套件，以壓低每個 shim 的 RSS（實測見 §4.7），這部分算進 §4.7 的預算 |
@@ -58,6 +60,7 @@
 | F38 | intent 兼任歷史：session 結束時 intent 列不刪、改記 `released_at`；`md_sessions` / `td_sessions` 從 B10 起停寫、保留唯讀；前端 MD/TD 頁改成顯示 worker 與 intent | §8.4；前端資料來自 procman 回報和 worker 狀態廣播 |
 | F39 | 「worker 跑哪一份代碼」分成三個軸：平台 release（`code_ref`）、策略樹 `strategy_digest`、extras `env_generation`。策略樹與 extras 的目錄權威維持在 API；session 在 start 時釘住 `(strategy_digest, env_generation)`，重新掛起沿用；Supervisor 記錄 worker 實際跑的版本；STS 磁碟副本改以 digest 定址，被釘住的版本不被覆蓋或回收；STS controller 不 import 策略代碼 | §3.3、§5.7；IF-16（#275）、B5-10（#276） |
 | F40 | STS controller 服務 operator 對主機磁碟的所有路徑：registry 副本、extras、artifact 的 list / read / 上傳 / 刪除、event log 讀取、未完成上傳的清理；不另開 files worker。策略仍在自己的 worker 裡直接讀寫 artifact，而且可以寫任何 key（全域寫入，刻意保留） | §5.7；B5-11（#277） |
+| F41 | `pv` 在兩個地方擋。**deploy 時：** API 把自己的 `pv` 和 session 會用到的 STS controller、MD / TD controller、TD 帳號 worker 比對，不符就以 `protocol_mismatch` 拒絕，不 spawn worker、不寫 intent；`WorkerSpec` 記下 worker 的 `pv`，經 `procman.report` 帶出；MD placement 不把新 atom 放到 `pv` 不同的連線 worker 上。**執行中：** `pv` 改放 NATS header `Mftik-Pv`，由 transport 蓋上、在任何解碼之前檢查；header 缺少或不符的 frame 直接丟棄，記 log（依 subject 與 `pv` 限流）並計數，不回錯誤。request 收到不符的 reply 時，transport 對呼叫端拋出本地錯誤。envelope 的 `pv` 欄位刪除 | body 裡的 `pv` 有預設值，解碼之後就分不出「缺少」和「相符」，所以檢查只能在解碼之前，而所有訊息都會經過、又還沒解碼的地方只有 transport。丟棄而不回錯誤，`mftik.broker.handler` 的 H5、H6 不變，fan-out 也一併涵蓋。代價是送錯版本的 request 會 timeout、廣播只被計數，所以要靠 deploy 時的比對先擋（§4.6）；B4-10（#363）、B8-02（#239） |
 
 ## 0. 摘要
 
@@ -258,7 +261,7 @@
 
 | 狀態 | 權威 | 存放 | 讀取者 | 收斂 |
 |---|---|---|---|---|
-| 協定版本 `pv` | 代碼常數 | envelope | 每個收件者 | 不符就以 `protocol_mismatch` 拒絕（F26） |
+| 協定版本 `pv` | 代碼常數 | NATS header `Mftik-Pv`；worker 的 `pv` 記在 `WorkerSpec`，經 `procman.report` 帶出 | 每個進程的 transport；API（deploy 時） | deploy 時比對，不符以 `protocol_mismatch` 拒絕；執行中收到不符的 frame 由 transport 丟棄並計數（F26、F41） |
 
 ### 3.4 新增的抽象層
 
@@ -269,7 +272,7 @@
 | 時間 | `mftik.clock` | `Clock`（`now`、`monotonic`、`sleep`）、`FakeClock` | 散落的 `time.time()`、`asyncio.sleep` |
 | 進程管理 | `mftik.procman` | `WorkerSpec`、`Supervisor`、shim 與它的 NDJSON 協定、`procman.report` | `spawn.py` 與 `worker.py` 的 lifeline、各平面的 reaper |
 | 訊息處理 | `mftik.broker.handler` | `Handler`：收到解碼後的訊息 → 回覆與副作用；`serve(broker, subject, handler)` | rpc 模組裡傳輸和邏輯混寫的做法（F31） |
-| 協定 v2 | `mftik.protocol` | envelope 的 `pv`、intent、`md.a.*`、`md.w.*`、`md.universe.*`、`td.account.state.*`、`td.account.reset`、`td.order.cancel_session`、`procman.report.*` | lease、attach、per-session fan-out |
+| 協定 v2 | `mftik.protocol` | `Mftik-Pv` header（transport 蓋上與檢查，F41）、intent、`md.a.*`、`md.w.*`、`md.universe.*`、`td.account.state.*`、`td.account.reset`、`td.order.cancel_session`、`procman.report.*` | lease、attach、per-session fan-out |
 | STS controller | `mftik_sts.controller` | `StsOrchestrator`：SessionSpec 與 worker status 的 reconcile；crash 分類與重啟策略 | `session/manager.py` |
 | STS session worker | `mftik_sts.session_worker` | `Ingress`、`StrategyRunner`、交付策略、event log、offload pool | `session/session.py`、`worker.py` |
 | SDK | `mftik.strategy` | 新 hook（`on_ready(ready)`、`on_md_update`、`on_td_update`、`on_resync`、`on_universe_change`）、`offload`、`offload_pool`、`oms.view(settled)`、`md.state / universe / current / subscribe`、`td.state`、`StrategyHarness` | rebuild、recon、`breathe` 相關 API |
@@ -462,11 +465,13 @@ MD/TD 用 readiness 區分初始化失敗和運行中崩潰（prototype §4）�
 
 **跨版本（F26）：** 切換之後新舊版本的 worker 會並存，但不做版內相容，規則只有三條：
 
-1. NATS 上的每則訊息都帶 `pv`（協定版號，整數）。線上格式一有變動就升版。
-2. 收到不同 `pv` 的訊息一律以 `protocol_mismatch` 明確拒絕，不嘗試解析。session 啟動時，若它的 `pv` 和要用到的 MD/TD worker 不同，同樣拒絕。
+1. NATS 上的每則訊息都在 header `Mftik-Pv` 帶 `pv`（協定版號，整數），由 transport 蓋上；envelope 本身不帶。線上格式一有變動就升版。
+2. 版本不符在兩個地方擋（F41）：
+   - **deploy 時：** API 在 start 時把自己的 `pv` 和 session 會用到的 STS controller、MD / TD controller、TD 帳號 worker 比對，不符就以 `protocol_mismatch` 拒絕，不 spawn worker、不寫 intent。worker 的 `pv` 是 spawn 它的 controller 的常數，記在 `WorkerSpec`（reattach 之後仍然知道），經 `procman.report` 帶出。controller 自己的報告若因 `pv` 不符被丟棄，transport 留下的紀錄同樣讓 start 回 `protocol_mismatch`，而不是 `unavailable`。MD placement 只把新 atom 放到 `pv` 相同的連線 worker 上，沒有就開新的；舊連線上的 atom 不搬（F22）。
+   - **執行中：** transport 在任何解碼之前檢查 header；缺少或不符的 frame 直接丟棄，記 log（依 subject 與 `pv` 限流）並計數。不回錯誤，所以 `mftik.broker.handler` 的 H5、H6 不變，`md.a.*`、`md.w.*` 這類不經過 `serve` 的 fan-out 也一併涵蓋；同一個 atom subject 上新舊連線 worker 並存時，收件端只會收到同版的 frame。送錯版本的 request 會在呼叫端 timeout；request 收到 `pv` 不符的 reply 時，transport 直接對呼叫端拋出本地錯誤，不等 timeout。
 3. 停止不依賴協定：Supervisor 以 SIGTERM 停 worker，走 shim 或直接對 host PID 送訊號（`oci_host_pid`），任何版本組合都停得掉。
 
-升 `pv` 的順序：先停掉舊 `pv` 的 STS session，讓 `on_stop` 的撤單還送得到同版的 TD；再人工重啟 TD 帳號（F27）和 MD 連線（F24）；最後才開新 session。`on_stop` 沒撤乾淨的單，由 controller 發出的 `cancel_session`（F10）補上。
+升 `pv` 的順序：先停掉舊 `pv` 的 STS session，讓 `on_stop` 的撤單還送得到同版的 TD；再人工重啟 TD 帳號（F27）和 MD 連線（F24）；最後才開新 session。`on_stop` 沒撤乾淨的單，由 controller 發出的 `cancel_session`（F10）補上。這個順序走完之前，用到舊 `pv` worker 的 start 會在 deploy 時被擋下（F41），不會等 session 跑起來才發現收不到行情或回報。
 
 ### 4.7 記憶體防護（F7）
 
@@ -1144,7 +1149,7 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 | —（新增） | `md.universe.{session_id}`：selector 的變更事件，帶 name、added、removed、current、epoch（§6.4） |
 | `health.*`、instance subject | 保留 |
 
-依 F1，舊協定不保留相容層，切換時一次換掉。切換之後依 F26：每則訊息帶 `pv`，格式一改就升版，不做版內相容；收到不同 `pv` 的訊息一律以 `protocol_mismatch` 拒絕。
+依 F1，舊協定不保留相容層，切換時一次換掉。切換之後依 F26 與 F41：每則訊息在 header `Mftik-Pv` 帶 `pv`，格式一改就升版，不做版內相容；deploy 時比對，不符以 `protocol_mismatch` 拒絕；執行中收到不同 `pv` 的 frame 由 transport 丟棄並計數。
 
 ### 8.4 持久化
 
@@ -1251,7 +1256,7 @@ B1（獨立）                                               ├─▶ B6 TD ─
 | **IF 介面** | 新抽象層只定義介面，回傳 null data | §3.4 的每一層：型別、函式簽名、寫明不變式的 docstring；附 `xfail(strict=True)` 的契約測試當作之後的驗收 | 每個介面都能 import、`ruff` 通過；契約測試以 xfail 存在；B3 以後的每張票都能指到對應的介面 | — |
 | **B2 測試重置** | 建立測試標準 | 附錄 A 的測試已在 RM 隨代碼刪除；寫 `TESTING.md`；加入 `Clock` / `FakeClock`、每個 xdist worker 共用一條 NATS 連線的 fixture、handler 與傳輸分開的規範（F31）、tier marker、`pytest-xdist`、`pytest-timeout`、耗時閘門；`just test` / `just test-int`；CI 拆分 | 剩下的測試在 `just test` 下少於 120 秒；CI 的 integration tier 全綠 | — |
 | **B3 procman** | Supervisor、shim；以 strategon#60 為前提 | mftik：`mftik.procman`（以你的 prototype 為底）、shim、Spec / 狀態機 / 重啟策略、reattach、`procman.report.*`（含 worker RSS）、shim 套用 `oom_score_adj` 和 `RLIMIT_DATA`。Strategon 端由 #60 完成：`oci_host_pid`、release GC 檢查 in-use rootfs、agent unit `KillMode=process` | integration：controller 以 detach 結束後 worker 存活，新 controller 能 reattach；殺掉 shim 後 worker 自行 graceful stop；新舊版本的 worker 能並存；在 cp 和 yite 上以 `oci_host_pid` 實際滾動一次；GC 不刪仍在使用的 rootfs；重啟 agent 不影響任何 strategy；`/proc/<pid>/oom_score_adj` 符合 §4.7 的分級 | — |
-| **B4 端到端骨架** | 新協定與三種 worker 跑通一條路徑 | 協定 v2（§8.3）：envelope 帶 `pv` 並在不符時拒絕（F26）；intent、owner GC、存活報告，不再有 lease；API start/end（§8.1）；STS session worker 的雙 thread 模型、`on_start` 獨佔、readiness gate；TD 帳號 worker；MD 連線 worker；**只接 paper venue**；平面以純進程執行；三個 orchestrator 的准入控制 | paper 上 deploy → `on_start` → `on_ready` → 下單 → 成交回報 → end 全程走新路徑；三個 controller 各自滾動都不中斷；一個 30 秒 CPU-bound 的 hook 不會讓 session fail、不會讓 NATS 斷線、不會造成假 ack timeout；送單不跨 thread、ack 回程的跨 thread 延遲已量測；no-responders 在跨連線 reply 時的行為已驗證；各 kind 的 RSS 已量測，§4.7 的初始值據此調整；超過預算的 start 以 `capacity_exceeded` 拒絕 | — |
+| **B4 端到端骨架** | 新協定與三種 worker 跑通一條路徑 | 協定 v2（§8.3）：`pv` 放在 NATS header，deploy 時比對、transport 丟棄不符的 frame（F26、F41）；intent、owner GC、存活報告，不再有 lease；API start/end（§8.1）；STS session worker 的雙 thread 模型、`on_start` 獨佔、readiness gate；TD 帳號 worker；MD 連線 worker；**只接 paper venue**；平面以純進程執行；三個 orchestrator 的准入控制 | paper 上 deploy → `on_start` → `on_ready` → 下單 → 成交回報 → end 全程走新路徑；三個 controller 各自滾動都不中斷；一個 30 秒 CPU-bound 的 hook 不會讓 session fail、不會讓 NATS 斷線、不會造成假 ack timeout；送單不跨 thread、ack 回程的跨 thread 延遲已量測；no-responders 在跨連線 reply 時的行為已驗證；各 kind 的 RSS 已量測，§4.7 的初始值據此調整；超過預算的 start 以 `capacity_exceeded` 拒絕 | — |
 | **B5 STS 補齊** | SDK 功能完整，取消 rebuild；crash 與重新掛起（F10） | artifacts、tape、event log、fetch、timer 搬到新 worker；交付策略（`latest` / `all`）；`offload` / `offload_pool`（§5.5）；hook 時間預算的量測與處理（F15）；`on_md_update` / `on_td_update`（§5.6）；crash 分類、平台清場、`restart` / `max_restarts` / `window`、alert（§5.2）；worker 端所有 DB 存取移除；刪除 §5.4 的清單；`StrategyHarness` 和策略測試改寫 | 所有內建策略在 `StrategyHarness` 上測試全綠；A、B、C 三類 crash 都能清場；`on_failure` 能從 `on_start` 重新掛起，且 R1 到 R4 成立；STS worker 不持有任何 DB 連線；process 模式的 offload 在 stop 時被 terminate、子進程 OOM 時 session 收到 `OffloadWorkerLost` 但不會跟著死；舊的 session 機制代碼全部刪除 | — |
 | **B6 TD 補齊** | 所有 venue 的帳號 worker | 各 venue 的帳號 worker：常駐層（溫熱的 HTTP 連線池、backfill）與隨 intent 開關的交易層（F35）；私有連線、OMS、ledger、recon；`td.order.cancel_session`；Supervisor 的 PID fence（F36）；drain-replace；cancel-on-disconnect 的倒數刷新（F37） | 殺掉帳號 worker 後能重啟、recon，`TdReady` 經歷 false 再回到 true；drain-replace 期間沒有遺失或重複的單；交易層隨 intent 開關時，常駐層和連線池不受影響；沒有 session 的帳號也能 backfill | — |
 | **B7 MD atom 模型** | 所有 venue 改成 atom | adapter 提供 `atoms_for`、`decode`、`capacity`、`join_policy`；per-atom subject；`TickerStats` 與 STS 端的 join（F19）；tape 改以 `atom_id` 為 key，加錄 `liquidation`（F20） | 所有 venue 現有的 product topic 都改由 atom 提供 | — |
