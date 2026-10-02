@@ -14,9 +14,11 @@ until it runs out of patience — see ``mftik_sts.app.schema_is_current``.
 Two revisions are load-bearing. ``0034_strategy_type_key`` made
 ``sts_sessions.type`` the only strategy identity: before it, a row keeps its
 short name in the dropped ``strategy`` column, which this ORM does not
-select. ``0035_plane_schema`` is the floor (``MIN_STS_REVISION``). It adds
-the Spec/Status columns this ORM selects. A database still at 0034 has
-already dropped ``strategy`` and is still too old.
+select. ``0036_session_code_identity`` is the floor (``MIN_STS_REVISION``).
+It adds ``strategy_digest`` and ``env_generation``, which this ORM selects.
+``0035_plane_schema`` added the Spec/Status columns underneath those.
+A database still at 0034 has already dropped ``strategy`` and is still too
+old; a database at 0035 is one revision short of the pins.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from mftik_db.session import get_engine
 
 #: The oldest schema STS may serve. Named, not numbered, because this is the
 #: string ``alembic upgrade`` takes.
-MIN_STS_REVISION = "0035_plane_schema"
+MIN_STS_REVISION = "0036_session_code_identity"
 #: Named in the refusal that keys off the dropped ``strategy`` column. That
 #: column can still be present on a database that recorded no revision.
 _STRATEGY_IDENTITY_REVISION = "0034_strategy_type_key"

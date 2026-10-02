@@ -32,6 +32,8 @@ from mftik.protocol.strategy_yml import (
 )
 from mftik_sts.controller import (
     FIRST_INCARNATION,
+    LABEL_ENV_GENERATION,
+    LABEL_STRATEGY_DIGEST,
     SESSION_KIND,
     STS_MAX_RESTARTS,
     STS_MIN_BACKOFF_S,
@@ -134,14 +136,30 @@ def test_a_spec_defaults_to_never_and_rejects_rebuild() -> None:
         _spec(start_timeout_s=MAX_START_TIMEOUT_S + 1)
 
 
-def test_the_spec_has_no_code_identity_pins() -> None:
-    """``strategy_digest`` and ``env_generation`` are IF-16."""
-    names = {item.name for item in fields(SessionSpec)}
-    names |= {item.name for item in fields(SessionStatus)}
-    names |= {item.name for item in fields(OrchestratorAction)}
-    assert "strategy_digest" not in names
-    assert "env_generation" not in names
-    assert "st_facts" not in names
+def test_the_spec_pins_code_identity_and_status_does_not() -> None:
+    """F39 puts the pins on the spec. Status and actions do not carry them."""
+    assert "strategy_digest" in {item.name for item in fields(SessionSpec)}
+    assert "env_generation" in {item.name for item in fields(SessionSpec)}
+    bare = _spec()
+    assert bare.strategy_digest is None
+    assert bare.env_generation is None
+    digest = "sha256:" + "ab" * 32
+    pinned = _spec(strategy_digest=digest, env_generation=4)
+    assert pinned.strategy_digest == digest
+    assert len(digest) == 71
+    assert pinned.env_generation == 4
+    _spec(env_generation=0)
+    with pytest.raises(ValueError, match="sha256"):
+        _spec(strategy_digest="sha256:abcd")
+    with pytest.raises(ValueError):
+        _spec(env_generation=True)
+    with pytest.raises(ValueError):
+        _spec(env_generation=-1)
+    for model in (SessionStatus, OrchestratorAction):
+        names = {item.name for item in fields(model)}
+        assert "strategy_digest" not in names
+        assert "env_generation" not in names
+        assert "st_facts" not in names
 
 
 def test_session_worker_spec_never_asks_procman_to_restart() -> None:
@@ -158,10 +176,25 @@ def test_session_worker_spec_never_asks_procman_to_restart() -> None:
     assert worker.incarnation == 1
     assert worker.code_ref == "v1"
     assert dict(worker.labels) == {}
-    assert "strategy_digest" not in worker.labels
-    assert "env_generation" not in worker.labels
+    assert LABEL_STRATEGY_DIGEST not in worker.labels
+    assert LABEL_ENV_GENERATION not in worker.labels
     assert worker.oom_score_adj == OOM_SCORE_ADJ[("sts", "session")]
     assert worker.hb_timeout_s is None
+
+
+def test_session_worker_spec_labels_carry_the_pins() -> None:
+    """Procman does not grow fields. The pins ride in ``labels`` as strings."""
+    digest = "sha256:" + "cd" * 32
+    spec = _spec(strategy_digest=digest, env_generation=7)
+    worker = _worker(spec)
+    assert worker.labels[LABEL_STRATEGY_DIGEST] == digest
+    assert worker.labels[LABEL_ENV_GENERATION] == "7"
+    digest_only = _worker(_spec(strategy_digest=digest))
+    assert digest_only.labels[LABEL_STRATEGY_DIGEST] == digest
+    assert LABEL_ENV_GENERATION not in digest_only.labels
+    env_only = _worker(_spec(env_generation=0))
+    assert env_only.labels[LABEL_ENV_GENERATION] == "0"
+    assert LABEL_STRATEGY_DIGEST not in env_only.labels
 
 
 def test_decisions_raise_if_04() -> None:

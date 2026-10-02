@@ -36,7 +36,7 @@ def test_the_dropped_column_is_what_says_the_migration_ran() -> None:
 
 
 def test_0034_dropped_strategy_and_is_still_behind_spec_status() -> None:
-    """0034 is no longer enough: this build selects the 0035 columns."""
+    """0034 is no longer enough: this build selects the pins from 0036."""
     behind = describe_too_old(SchemaState("0034_strategy_type_key", _AFTER))
     assert behind is not None
     assert "below" in behind

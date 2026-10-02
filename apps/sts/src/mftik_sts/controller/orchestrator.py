@@ -1,8 +1,9 @@
 """``StsOrchestrator`` — one reconcile per session (§5.1).
 
 The running STS process does not construct this. B4-02 wires it. B5-06
-fills in crash and rehang. Registry, extras, artifacts and event-log
-reads are IF-16 (F40). This module does not import strategy code (F39).
+fills in crash and rehang. Registry and env handler signatures are
+IF-16 and raise until B5-10. Artifact and event-log reads are B5-11
+(F40). This module does not import strategy code (F39).
 """
 
 from __future__ import annotations
@@ -38,8 +39,10 @@ class StsOrchestrator:
       crash.
     * Does not hold strategy state. A rehang starts at ``on_start`` with
       none of it (F10). There is no rebuild.
-    * Does not import strategy code, and does not serve the operator's
-      host-disk paths (F39, F40, IF-16).
+    * Does not import strategy code (F39). Registry sync, registry reload,
+      and env sync have signatures on :mod:`mftik_sts.controller.handlers`
+      and raise until B5-10. This class does not register them. Artifact
+      and event-log reads are B5-11 (F40).
 
     **How a restart is driven through procman.**
 
