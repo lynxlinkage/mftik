@@ -6,6 +6,16 @@ stdout 和 PR 留言只留 pass/fail、耗時、列數。不要貼 dump、列值
 
 `<scratch-url>` 是同步 URL，驅動程式用 `postgresql+psycopg`。`<db>` 必須等於 URL 裡的資料庫名稱。腳本拒絕從 `DATABASE_URL`、`DATABASE_URL_SYNC` 或 `.env` 讀位址。
 
+## 部署順序
+
+下面第 6 步是在拋棄的還原庫上升級。正式環境要換到 `0037_drop_rebuild_facts` 時，順序不同：API、STS、TD、MD **全部先**換成含本 PR ORM 的 build，**然後**才把資料庫升到 0037。
+
+`rebuild_count` 與 `st_facts` 是這張 PR 才從 ORM 拿掉的。`0036_session_code_identity` 以及更早的 build 仍會 SELECT 這兩欄，不是只有 0036 之前。`refactor/process-planes` 的 `83ae7e2` 模型裡還有這兩欄。欄位刪掉之後，那些 build 對 `sts_sessions` 的讀寫會全部失敗。
+
+正式環境的 compose 在 API 主機上一次性跑 migrate（`scripts/deploy_prod_compose.sh` 的 `--profile tools run --rm migrate`，也就是 `alembic upgrade head`）。STS、TD、MD 是 plane，不在這個 compose 裡，要另外套用，而且各 plane 在其他主機上。那一次 migrate 不會換成那些 plane process。站台表裡 jp 的 plane 與 compose 宣告在同一台機器、tw 的 plane 在另一台；不論是否同一台，compose 都不會更新 plane。所以不能把部署 API 當成四個程序都換完：腳本會先升級資料庫，舊 ORM 的 plane 立刻讀寫不了 `sts_sessions`。
+
+順序：含本 PR ORM 的 build 先套上 API、STS、TD、MD，最後才讓 API 主機上的 migrate 升到 `0037_drop_rebuild_facts`。正式切換步驟是 B10-04。
+
 ## 1. 事前
 
 - 一台不是正式環境的 Postgres 16。
@@ -171,7 +181,7 @@ UPDATE sts_sessions AS s
 
 `scripts/deploy_prod_compose.sh` 的 `rollback` 只把 compose 備份放回去、把 `MFTIK_VERSION` 改回舊 tag，然後 `docker compose up -d`。它不執行 `alembic downgrade`。
 
-這支 revision 跑過之後，`main` 的 image 選不到已經不存在的 `rebuild_count` 與 `st_facts`，在資料庫降回 `0034_strategy_type_key` 之前無法讀 `sts_sessions`。image tag 退回不夠。正式切換與回滾手順是 B10-04，不在這張票。
+這支 revision 跑過之後，`main` 的 image 選不到已經不存在的 `rebuild_count` 與 `st_facts`，在資料庫降回 `0034_strategy_type_key` 之前無法讀 `sts_sessions`。image tag 退回不夠。正式切換要先把 API、STS、TD、MD 換成含本 PR ORM 的 build，再升資料庫，見上面「部署順序」。回滾手順是 B10-04，不在這張票。
 
 ## 10. 再升級
 
