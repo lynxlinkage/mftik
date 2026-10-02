@@ -38,7 +38,10 @@ The default is the process clock. Tests pass a
 A new incarnation's ``/proc`` fence (F36) is inside :meth:`spawn`, after
 the per-id reservation. The previous worker pid and its ``/proc/<pid>/stat``
 start time are recorded in ``supervisor.json``. ``spawn`` refuses while
-that process is still alive, including over ``LOST``.
+that process is still alive, including over ``LOST``. A socket that still
+answers ``status`` for this id, with no exit, is the same refusal when
+neither the slot nor the file has a live pid. The spec is written, phase
+``STARTING`` and pids null, before the shim is spawned.
 
 ``rss_bytes`` is the Pss of the worker's process tree, measured when a
 report is built, not on the status poll. It is not the shim and not
@@ -1113,19 +1116,93 @@ def _spawn_noted(spec: WorkerSpec, work_dir: Path) -> tuple[SpawnedShim, int | N
     return spawned, _proc_start_ticks(spawned.pid)
 
 
+def _live_socket_pid(work_dir: Path, worker_id: str) -> int | None:
+    """Pid from ``status`` when that socket still has a live worker.
+
+    A crash before ``supervisor.json`` is written leaves the socket and
+    no row. The id has to match, and both exit fields have to be empty:
+    a shim that has already reaped the worker does not block the next
+    incarnation.
+    """
+    try:
+        status = ShimClient(socket_path(work_dir, worker_id)).status()
+    except (OSError, MessageError):
+        return None
+    if status.id != worker_id:
+        return None
+    if status.exit_code is not None or status.signal is not None:
+        return None
+    if status.pid is None or status.pid <= 1:
+        return None
+    return status.pid
+
+
 def _fence_pid(work_dir: Path, worker_id: str, retiring: _Slot | None) -> int | None:
     """The live worker pid that blocks ``worker_id``, or ``None``.
 
     The held slot wins. With no slot, ``supervisor.json`` is the record a
     supervisor that has not called :meth:`Supervisor.start` still has to
-    honour, so a second controller cannot spawn a duplicate.
+    honour. When neither has a live pid, the socket's ``status`` is the
+    last fence: a worker can be up before its pid is recorded.
     """
     if retiring is not None:
-        return _blocking_pid(retiring.pid, retiring.worker_start_ticks)
-    for record in load_supervisor_state(work_dir):
-        if record.spec.id == worker_id:
-            return _blocking_pid(record.worker_pid, record.worker_start_ticks)
-    return None
+        blocked = _blocking_pid(retiring.pid, retiring.worker_start_ticks)
+        if blocked is not None:
+            return blocked
+    else:
+        for record in load_supervisor_state(work_dir):
+            if record.spec.id != worker_id:
+                continue
+            blocked = _blocking_pid(record.worker_pid, record.worker_start_ticks)
+            if blocked is not None:
+                return blocked
+            break
+    return _live_socket_pid(work_dir, worker_id)
+
+
+def _merge_spawn_intent(work_dir: Path, spec: WorkerSpec, since_s: float) -> None:
+    """Record ``spec`` before the shim exists.
+
+    A controller that dies after this write and before ``spawn_shim``
+    still leaves the id, the full spec and phase ``STARTING``. Pids are
+    null until the shim is observed. Other rows in the file stay.
+    """
+    previous = load_supervisor_state(work_dir)
+    others = tuple(row for row in previous if row.spec.id != spec.id)
+    intent = SupervisorRecord(
+        spec=spec,
+        phase=WorkerPhase.STARTING,
+        worker_pid=None,
+        worker_start_ticks=None,
+        shim_pid=None,
+        shim_start_ticks=None,
+        since_s=since_s,
+    )
+    _write_state(work_dir, (*others, intent))
+
+
+def _write_slots(
+    work_dir: Path,
+    records: tuple[SupervisorRecord, ...],
+    keep: tuple[str, ...],
+) -> None:
+    """Write ``records``, retaining rows whose ids are still being spawned.
+
+    ``keep`` is the ids :meth:`Supervisor.spawn` has reserved that are not
+    in ``records`` yet. Their on-disk row is the spec written before
+    ``spawn_shim``. A snapshot that omitted them must not delete it.
+    """
+    if keep:
+        wanted = set(keep)
+        retained = tuple(
+            row
+            for row in load_supervisor_state(work_dir)
+            if row.spec.id in wanted
+        )
+        records = tuple(
+            sorted((*records, *retained), key=lambda row: row.spec.id)
+        )
+    _write_state(work_dir, records)
 
 
 def _record_from_slot(slot: _Slot) -> SupervisorRecord:
@@ -1442,9 +1519,11 @@ class Supervisor:
         Control subjects stay dark until this returns; serving them is the
         controller's. Workers keep running throughout (P1).
 
-        The last call is :meth:`allow_reports`. Until then :meth:`report`
+        The last call is :meth:`allow_reports`, unless :meth:`close` has
+        already paused publication. Until reports are open, :meth:`report`
         refuses, so a rolling controller does not publish a partial set.
-        ``_generation`` is not reset.
+        ``allow_reports`` does nothing once the gate is closed, so a close
+        during this scan cannot reopen them. ``_generation`` is not reset.
         """
         self._check_failure()
         self._check_open()
@@ -1476,7 +1555,11 @@ class Supervisor:
                 if _needs_poll(slot):
                     self._ensure_driver_locked()
         found = tuple(observations)
-        self.allow_reports()
+        # ``close`` sets the gate to closed before ``_closed``. Skip when
+        # this scan already lost the race, and let ``allow_reports`` ignore
+        # a gate that closed between the check and the call.
+        if not self._closed:
+            self.allow_reports()
         return found
 
     async def close(self, mode: CloseMode) -> None:
@@ -1559,7 +1642,13 @@ class Supervisor:
 
         The check is the recorded ``(pid, start time)`` from the held slot,
         or from ``supervisor.json`` when this supervisor has not held the
-        id. ``oci_host_pid`` is what makes host ``/proc`` that pid (§4.5).
+        id. When neither has a live pid, the socket's ``status`` is the
+        last fence: a reply whose ``id`` matches, and whose ``exit_code``
+        and ``signal`` are both empty, refuses with that ``pid``. Before
+        ``spawn_shim``, the full spec is written with phase ``STARTING``
+        and null pids, so a crash in between still leaves a row
+        :meth:`start` can hold. ``oci_host_pid`` is what makes host
+        ``/proc`` that pid (§4.5).
         """
         self._check_failure()
         self._check_open()
@@ -1614,6 +1703,7 @@ class Supervisor:
         try:
             if must_retire and retiring is not None:
                 await asyncio.to_thread(_wait_retired, retiring)
+            await self._write_spawn_intent(spec)
             spawned, shim_ticks = await asyncio.to_thread(
                 _spawn_noted, spec, self.work_dir
             )
@@ -1738,8 +1828,12 @@ class Supervisor:
         """Open publication. B3-03's ``start`` calls this after reconciliation.
 
         Until this runs, :meth:`report` raises :class:`ProcmanError`
-        instead of returning a partial set.
+        instead of returning a partial set. A gate :meth:`pause_reports`
+        has already closed stays closed: :meth:`close` can run while
+        :meth:`start` is still scanning, and this must not reopen it.
         """
+        if self._report_gate is _ReportGate.CLOSED:
+            return
         self._report_gate = _ReportGate.OPEN
 
     def pause_reports(self) -> None:
@@ -1879,6 +1973,14 @@ class Supervisor:
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
 
+    async def _write_spawn_intent(self, spec: WorkerSpec) -> None:
+        """Record ``spec`` before ``spawn_shim``, merged with the other rows."""
+        since_s = self._clock.monotonic()
+        async with self._persist_lock:
+            await _await_blocking(
+                _merge_spawn_intent, self.work_dir, spec, since_s
+            )
+
     async def _persist(self) -> None:
         async with self._persist_lock:
             async with self._lock:
@@ -1888,11 +1990,15 @@ class Supervisor:
                         self._slots.values(), key=lambda item: item.spec.id
                     )
                 )
+                held = {record.spec.id for record in records}
+                keep = tuple(sorted(self._spawning - held))
             # Finish the write before releasing the lock. Cancelling the
             # driver (``close``) must not let a second snapshot rename over
             # this one, and must not drop the lock while the thread still
-            # holds the temp file.
-            await _await_blocking(_write_state, self.work_dir, records)
+            # holds the temp file. An id reserved by :meth:`spawn` and not
+            # yet in a slot keeps the row already on disk: that is the
+            # spec written before ``spawn_shim``.
+            await _await_blocking(_write_slots, self.work_dir, records, keep)
 
     async def _stop_held_workers(self) -> None:
         async with self._lock:

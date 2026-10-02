@@ -165,6 +165,32 @@ async def test_report_opens_after_start_and_closes_with_the_supervisor(
     assert supervisor._generation == 1
 
 
+async def test_start_does_not_reopen_reports_closed_during_the_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``close`` during ``start`` pauses first. The scan must not reopen."""
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    loop = asyncio.get_running_loop()
+
+    def _close_during_scan(_work_dir: Path) -> dict[str, Path]:
+        asyncio.run_coroutine_threadsafe(
+            supervisor.close(CloseMode.DETACH), loop
+        ).result(timeout=5)
+        return {}
+
+    monkeypatch.setattr(
+        "mftik.procman.supervisor._scan_sockets", _close_during_scan
+    )
+    await supervisor.start()
+    assert supervisor.reports_closed()
+    assert not supervisor.reports_open()
+    supervisor.allow_reports()
+    assert supervisor.reports_closed()
+    with pytest.raises(ProcmanError, match="closed"):
+        await supervisor.report()
+    assert supervisor._generation == 0
+
+
 async def test_close_pauses_and_an_unknown_mode_does_not(tmp_path: Path) -> None:
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
     supervisor.allow_reports()

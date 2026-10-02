@@ -1284,6 +1284,37 @@ async def test_spawn_replaces_a_lost_slot_whose_pid_is_gone(
     await supervisor.close(CloseMode.DETACH)
 
 
+async def test_spawn_writes_the_spec_before_the_shim_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row exists before ``spawn_shim``. A crash there still leaves a spec."""
+    supervisor = Supervisor(tmp_path, plane="td", instance="td", clock=FakeClock())
+    spec = _spec(labels={"desk": "a"})
+    seen: list[tuple[SupervisorRecord, ...]] = []
+
+    def fake(launched: WorkerSpec, *, work_dir: Path) -> SpawnedShim:
+        del launched
+        seen.append(load_supervisor_state(work_dir))
+        raise ProcmanError("shim not started")
+
+    monkeypatch.setattr("mftik.procman.supervisor.spawn_shim", fake)
+    with pytest.raises(ProcmanError, match="shim not started"):
+        await supervisor.spawn(spec)
+    assert len(seen) == 1
+    row = seen[0][0]
+    assert row.spec.id == spec.id
+    assert row.spec.incarnation == spec.incarnation
+    assert row.spec.code_ref == "v1"
+    assert dict(row.spec.labels) == {"desk": "a"}
+    assert row.phase is WorkerPhase.STARTING
+    assert row.worker_pid is None
+    assert row.worker_start_ticks is None
+    assert row.shim_pid is None
+    assert row.shim_start_ticks is None
+    assert spec.id not in supervisor._spawning
+    assert await supervisor.status(spec.id) is None
+
+
 def _wait_until(predicate, timeout: float = 3.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1558,4 +1589,77 @@ async def test_spawn_without_start_refuses_a_worker_still_recorded_alive(
         if second is not None:
             await _cleanup(second)
         await _cleanup(first)
+
+
+@pytest.mark.integration
+async def test_spawn_refuses_a_live_socket_when_the_record_has_no_pid(
+    tmp_path: Path,
+) -> None:
+    """F36 fences a worker that has a socket and no live recorded pid.
+
+    Deleting ``supervisor.json`` is the crash before the pre-shim write.
+    Putting the spec back with null pids is that write. Either way the
+    next ``spawn`` is refused and names the pid, and ``start`` holds the
+    slot and reports ``RUNNING`` with the spec.
+    """
+    spec = _spec(
+        _argv(_READY_SLEEP),
+        hb_timeout_s=None,
+        start_timeout_s=30,
+        labels={"desk": "a"},
+    )
+    first = Supervisor(tmp_path, plane="td", instance="td")
+    second: Supervisor | None = None
+    third: Supervisor | None = None
+    try:
+        await first.spawn(spec)
+        await _until(
+            first,
+            spec.id,
+            lambda item: item is not None
+            and item.phase is WorkerPhase.RUNNING
+            and item.pid is not None,
+        )
+        pid = (await first.status(spec.id)).pid
+        assert pid is not None
+        await first.close(CloseMode.DETACH)
+
+        supervisor_state_path(tmp_path).unlink()
+        second = Supervisor(tmp_path, plane="td", instance="td")
+        with pytest.raises(ProcmanError, match=f"worker pid {pid} is still alive"):
+            await second.spawn(
+                _spec(
+                    _argv(_SLEEP),
+                    incarnation=2,
+                    hb_timeout_s=None,
+                    start_timeout_s=30,
+                )
+            )
+        assert not supervisor_state_path(tmp_path).exists()
+        assert _pid_running(pid)
+        shims, workers = _ps_family(tmp_path)
+        assert workers == {pid}
+        assert len(shims) == 1
+
+        _save_record(tmp_path, _record(spec, WorkerPhase.STARTING))
+        third = Supervisor(tmp_path, plane="td", instance="td")
+        found = await third.start()
+        assert [item.id for item in found] == [spec.id]
+        assert found[0].observed is ObservedWorker.RUNNING
+        assert found[0].spec is not None
+        assert found[0].spec.id == spec.id
+        assert found[0].spec.code_ref == "v1"
+        assert dict(found[0].spec.labels) == {"desk": "a"}
+        assert found[0].status is not None and found[0].status.pid == pid
+        held = await third.status(spec.id)
+        assert held is not None
+        assert held.pid == pid
+        assert held.phase is WorkerPhase.RUNNING
+    finally:
+        if third is not None:
+            await _cleanup(third)
+        if second is not None:
+            await _cleanup(second)
+        await _cleanup(first)
+    _wait_until(lambda: _ps_family(tmp_path) == (set(), set()))
 
