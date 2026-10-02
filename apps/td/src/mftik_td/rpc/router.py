@@ -1,16 +1,22 @@
-"""Dispatch API→TD control-plane requests by Envelope.type."""
+"""Dispatch API→TD control-plane requests by Envelope.type.
+
+A handler's whole input is the decoded envelope and its whole output is
+the reply (H1). :func:`mftik.broker.handler.serve` is the loop. The
+order path is not on this subject: ``td.order.{api_id}`` is the account
+worker's (§7.1).
+"""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 
-from mftik.broker import IncomingRequest
+from mftik.broker.handler import Reply
 from mftik.protocol import (
     TD_ERROR,
     TD_HEALTH,
     RpcError,
     RpcErrorEnvelope,
+    UntypedEnvelope,
 )
 
 from mftik_td.controller import INTENT_TYPES, intent_book, intent_handler
@@ -18,39 +24,17 @@ from mftik_td.rpc.health import handle_health
 
 logger = logging.getLogger(__name__)
 
-Handler = Callable[..., Awaitable[None]]
 
-_HANDLERS: dict[str, Handler] = {
-    TD_HEALTH: handle_health,
-}
-
-
-async def dispatch(req: IncomingRequest) -> None:
-    """Route a request to its handler, or reply with ``td.error``."""
-    if req.envelope.type in INTENT_TYPES:
-        # Put and delete return the reply. The rest of this router still
-        # writes through the request handle; converting that loop is B4-05.
-        reply = await intent_handler(intent_book())(req.envelope)
-        if reply is not None:
-            await req.reply(reply)
-        return
-    handler = _HANDLERS.get(req.envelope.type)
-    if handler is None:
-        logger.warning(
-            "unknown td rpc type=%s id=%s",
-            req.envelope.type,
-            req.envelope.id,
-        )
-        await req.reply(
-            RpcErrorEnvelope.wrap(
-                RpcError(
-                    code="unknown_type",
-                    message=f"unknown type: {req.envelope.type}",
-                ),
-                type=TD_ERROR,
-                source="td",
-                session_id=req.envelope.session_id,
-            )
-        )
-        return
-    await handler(req)
+async def dispatch(message: UntypedEnvelope) -> Reply | None:
+    """Route one control-plane message, or answer ``td.error``."""
+    if message.type in INTENT_TYPES:
+        return await intent_handler(intent_book())(message)
+    if message.type == TD_HEALTH:
+        return await handle_health(message)
+    logger.warning("unknown td rpc type=%s id=%s", message.type, message.id)
+    return RpcErrorEnvelope.wrap(
+        RpcError(code="unknown_type", message=f"unknown type: {message.type}"),
+        type=TD_ERROR,
+        source="td",
+        session_id=message.session_id,
+    )

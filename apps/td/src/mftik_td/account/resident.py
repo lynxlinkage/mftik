@@ -23,18 +23,25 @@ what is actually resting.
   time, or whatever that venue can answer cheaply). The interval is
   B6-01's. It is not chosen here.
 
-Null until B6-01 and B6-05. :attr:`pool` is ``None``, :attr:`started`
-is false, and every action raises ``NotImplementedError("IF-11")``.
+Paper has no HTTP pool to warm (B4-05). :meth:`start` and
+:meth:`close` for ``Paper`` are the connector's ``connect`` and
+``close``. :attr:`pool` stays ``None``: the warm HTTP client is
+B6-01. :meth:`keepalive_once` and :meth:`handle_backfill` still raise
+``NotImplementedError("IF-11")``. Any other venue does too, including
+:meth:`start`.
 """
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mftik.broker.handler import Reply
 from mftik.protocol import UntypedEnvelope
 
 from mftik_td.account._ticket import TICKET
+
+if TYPE_CHECKING:
+    from mftik_td.account.session import TradingConnector
 
 
 class Keepalive(Protocol):
@@ -51,8 +58,8 @@ class Keepalive(Protocol):
 class ResidentLayer:
     """The half of an account worker that does not follow intent (F35).
 
-    Constructing it does not open a connection. :meth:`start` is what
-    will, and it raises until B6-01.
+    Constructing it does not open a connection. :meth:`start` does, for
+    paper. Other venues still raise until B6-01.
     """
 
     def __init__(
@@ -61,45 +68,64 @@ class ResidentLayer:
         *,
         venue: str,
         keepalive: Keepalive | None = None,
+        connector: TradingConnector | None = None,
     ) -> None:
         self.api_id = api_id
         self.venue = venue
         self.keepalive = keepalive
+        #: The paper connector, when this account is paper. Not an HTTP
+        #: pool. B6-01 owns the pool; this stays ``None`` there.
+        self._connector = connector
+        self._started = False
 
     @property
     def started(self) -> bool:
-        """Whether :meth:`start` has brought the pool up.
+        """Whether :meth:`start` has connected this account.
 
-        False until B6-01. A trading-layer toggle does not change this
+        False until paper :meth:`start` returns, and until B6-01 for
+        every other venue. A trading-layer toggle does not change this
         (R2).
         """
-        return False
+        return self._started
 
     @property
     def pool(self) -> object | None:
         """The warm HTTP client, or ``None`` until B6-01 builds it.
 
-        Identity is stable across trading-layer ``activate`` and
-        ``deactivate`` (R2). Callers compare with ``is``.
+        Paper has no pool. Identity, once B6-01 sets it, is stable
+        across trading-layer ``activate`` and ``deactivate`` (R2).
+        Callers compare with ``is``.
         """
         return None
 
     async def start(self) -> None:
-        """Open the pool and start the keepalive. B6-01.
+        """Connect the paper connector. Other venues are B6-01.
 
-        Does not start the trading layer. An account with no session
-        still starts (R1).
+        Does not start the trading layer, and does not open an HTTP
+        pool. An account with no session still starts (R1). A second
+        call is a no-op once this layer is up.
         """
-        raise NotImplementedError(TICKET)
+        if self.venue != "Paper" or self._connector is None:
+            raise NotImplementedError(TICKET)
+        if self._started:
+            return
+        await self._connector.connect()
+        self._started = True
 
     async def close(self) -> None:
-        """Close the pool. The trading layer is already down by then.
+        """Close the paper connector. Other venues are B6-01.
 
         Not a substitute for :meth:`TradingLayer.deactivate`: closing
         the resident layer is the account worker exiting, not an intent
-        going away.
+        going away. If the trading layer already closed the connector,
+        this only marks the layer down.
         """
-        raise NotImplementedError(TICKET)
+        if not self._started:
+            raise NotImplementedError(TICKET)
+        connector = self._connector
+        if connector is not None and getattr(connector, "connected", False):
+            await connector.close()
+        self._started = False
 
     async def keepalive_once(self) -> None:
         """Send :attr:`keepalive` on the pool, once. B6-01."""

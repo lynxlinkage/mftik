@@ -1,11 +1,11 @@
 """``td.intent.put`` / ``td.intent.delete`` as one handler (IF-02, B4-07).
 
 Registered on the running process, on ``td.{instance}``. The held set is
-a :class:`TdIntentBook`, not a :class:`~mftik_td.controller.TdOrchestrator`:
-constructing the orchestrator needs a
-:class:`~mftik.procman.RestartIntensity`, and those numbers are not
-chosen (issue #286). The process therefore does not construct one and
-does not call :meth:`~mftik_td.controller.TdOrchestrator.reconcile`.
+a :class:`TdIntentBook`. The process also constructs a
+:class:`~mftik_td.controller.TdOrchestrator` with the provisional
+intensity from :mod:`mftik_td.controller.defaults` (issue #286) and
+reconciles from :mod:`mftik_td.app`. This handler does not. It does
+not deliver ``PUSH_TRADING``.
 
 A handler's whole input is the decoded envelope and its whole output is
 the reply (H1). A bad payload is an error envelope, not an exception:

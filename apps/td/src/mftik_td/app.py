@@ -1,10 +1,13 @@
-"""TD process bootstrap — RPC, backfill, heartbeat."""
+"""TD process bootstrap — RPC, account workers, backfill, heartbeat."""
 
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import logging
+import os
 import signal
+from pathlib import Path
 
 import uvloop
 from mftik import (
@@ -18,7 +21,10 @@ from mftik import (
     serve_health,
 )
 from mftik.broker import Broker
+from mftik.broker.handler import serve
+from mftik.clock import SystemClock
 from mftik.intent_gc import watch_sts_reports
+from mftik.procman import CloseMode, Supervisor, publish_reports
 from mftik.symbols import SymbolClient
 
 from mftik_td import db as td_db
@@ -27,8 +33,15 @@ from mftik_td.backfill import (
     BackfillSession,
     HistoryReaderFactory,
 )
-from mftik_td.controller import intent_book
+from mftik_td.controller import TdOrchestrator, intent_book
+from mftik_td.controller.defaults import ACCOUNT_RECONCILE_PERIOD_S
 from mftik_td.rpc import dispatch
+from mftik_td.supervise import (
+    account_restart_intensity,
+    account_views,
+    apply_reconcile,
+    load_accounts,
+)
 
 SOURCE = "td"
 #: Which TD this process is. ``MFTIK_INSTANCE``, defaulting to the
@@ -44,11 +57,15 @@ INSTANCE = instance_name(SOURCE)
 ROLE = instance_role(SOURCE)
 logger = logging.getLogger(SOURCE)
 
-#: How long a serve loop waits before rebuilding itself after an exception it
-#: did not expect. ``Broker.serve`` already survives what it knows how to
-#: survive, so this only paces the failures nothing has a name for yet.
-RPC_RESTART_DELAY_SECONDS = 1.0
 
+def _work_dir() -> Path:
+    """``${WORK_DIR}/td/<instance>``, or ``./td/<instance>`` when unset."""
+    root = os.environ.get("WORK_DIR") or os.getcwd()
+    return Path(root) / SOURCE / INSTANCE
+
+
+def _code_ref() -> str:
+    return importlib.metadata.version("mftik")
 
 
 async def run_rpc(
@@ -64,33 +81,44 @@ async def run_rpc(
     reason to stop answering on the other.
     """
     logger.info("TD RPC listening on subject=%s", subject)
+    await serve(broker, subject, dispatch, stop=stop)
+
+
+async def _reconcile_once(
+    supervisor: Supervisor,
+    orchestrator: TdOrchestrator,
+    observations,
+) -> None:
+    """Read bindings, name actions, apply spawn, stop and release."""
+    accounts, flags = await load_accounts(INSTANCE)
+    views = await account_views(supervisor, observations, accounts)
+    actions = orchestrator.reconcile(accounts, intent_book().rows(), views)
+    await apply_reconcile(
+        supervisor,
+        actions,
+        accounts,
+        code_ref=orchestrator.code_ref,
+        cancel_on_disconnect=flags,
+    )
+
+
+async def _reconcile_loop(
+    supervisor: Supervisor,
+    orchestrator: TdOrchestrator,
+    observations,
+    stop: asyncio.Event,
+) -> None:
+    """Later passes. The boot pass already ran, before the subjects opened."""
     while not stop.is_set():
         try:
-            async for req in broker.serve(subject, stop=stop):
-                try:
-                    await dispatch(req)
-                except Exception:
-                    logger.exception(
-                        "TD RPC handler failed type=%s id=%s",
-                        req.envelope.type,
-                        req.envelope.id,
-                    )
-        except asyncio.CancelledError:
-            raise
+            await asyncio.wait_for(stop.wait(), timeout=ACCOUNT_RECONCILE_PERIOD_S)
+            return
+        except TimeoutError:
+            pass
+        try:
+            await _reconcile_once(supervisor, orchestrator, observations)
         except Exception:
-            # Reaching here means something ``serve`` does not already handle,
-            # and the answer is still to serve. This coroutine returning leaves
-            # the process alive, the subject silent, and no line anywhere
-            # saying so.
-            logger.exception(
-                "TD RPC serve loop failed subject=%s — restarting", subject
-            )
-            try:
-                await asyncio.wait_for(
-                    stop.wait(), timeout=RPC_RESTART_DELAY_SECONDS
-                )
-            except TimeoutError:
-                continue
+            logger.exception("TD reconcile pass failed")
 
 
 async def amain() -> bool:
@@ -122,74 +150,108 @@ async def amain() -> bool:
             instance=INSTANCE,
         )
         await backfill.start()
-        logger.info("TD started instance=%s", INSTANCE)
-        subjects = control_subjects(SOURCE, INSTANCE, ROLE)
-        if not subjects:
-            logger.warning(
-                "TD is %s and serves no control subject — it holds what it "
-                "has and takes nothing new",
-                ROLE.value,
-            )
-        # One held set for every subject this process serves. A lower
-        # ``procman.report`` generation is a new STS publisher and resets
-        # that instance before the sample; see
-        # :func:`mftik.intent_gc.watch_sts_reports`.
-        intents = intent_book()
-        rpc_tasks = [
-            asyncio.create_task(
-                run_rpc(broker, stop, subject=subject),
-                name=f"td-rpc-{subject}",
-            )
-            for subject in subjects
-        ]
-        gc_task = asyncio.create_task(
-            watch_sts_reports(
-                broker,
-                held=intents.owners,
-                release=intents.release_owners,
-                stop=stop,
-                states=intents.gc_states,
-            ),
-            name="td-intent-gc",
+        supervisor = Supervisor(
+            _work_dir(),
+            plane="td",
+            instance=INSTANCE,
+            budget=None,
         )
-        hb_task = asyncio.create_task(
-            broker.heartbeat_loop(
-                SOURCE,
-                interval=5.0,
-                stop=stop,
-                on_tick=lambda: logger.debug("heartbeat"),
-            ),
-            name="td-heartbeat",
-        )
-        health_task = asyncio.create_task(
-            serve_health(
-                broker,
-                domain=SOURCE,
-                instance=INSTANCE,
-                stop=stop,
-            ),
-            name="td-health",
-        )
+        booted = False
+        clean = False
         try:
-            clean = await run_until_stopped(
-                stop,
+            observations = await supervisor.start()
+            booted = True
+            orchestrator = TdOrchestrator(
+                supervisor,
+                intensity=account_restart_intensity(),
+                code_ref=_code_ref(),
+            )
+            # One held set for every subject this process serves. A lower
+            # ``procman.report`` generation is a new STS publisher and resets
+            # that instance before the sample; see
+            # :func:`mftik.intent_gc.watch_sts_reports`.
+            intents = intent_book()
+            try:
+                await _reconcile_once(supervisor, orchestrator, observations)
+            except Exception:
+                logger.exception("TD reconcile pass failed")
+            logger.info("TD started instance=%s", INSTANCE)
+            subjects = control_subjects(SOURCE, INSTANCE, ROLE)
+            if not subjects:
+                logger.warning(
+                    "TD is %s and serves no control subject — it holds what it "
+                    "has and takes nothing new",
+                    ROLE.value,
+                )
+            rpc_tasks = [
+                asyncio.create_task(
+                    run_rpc(broker, stop, subject=subject),
+                    name=f"td-rpc-{subject}",
+                )
+                for subject in subjects
+            ]
+            gc_task = asyncio.create_task(
+                watch_sts_reports(
+                    broker,
+                    held=intents.owners,
+                    release=intents.release_owners,
+                    stop=stop,
+                    states=intents.gc_states,
+                ),
+                name="td-intent-gc",
+            )
+            reconcile_task = asyncio.create_task(
+                _reconcile_loop(supervisor, orchestrator, observations, stop),
+                name="td-reconcile",
+            )
+            report_task = asyncio.create_task(
+                publish_reports(
+                    supervisor,
+                    plane=SOURCE,
+                    instance=INSTANCE,
+                    publish=lambda subject, envelope: broker.publish(
+                        subject, envelope
+                    ),
+                    clock=SystemClock(),
+                ),
+                name="td-procman-report",
+            )
+            hb_task = asyncio.create_task(
+                broker.heartbeat_loop(
+                    SOURCE,
+                    interval=5.0,
+                    stop=stop,
+                    on_tick=lambda: logger.debug("heartbeat"),
+                ),
+                name="td-heartbeat",
+            )
+            health_task = asyncio.create_task(
+                serve_health(
+                    broker,
+                    domain=SOURCE,
+                    instance=INSTANCE,
+                    stop=stop,
+                ),
+                name="td-health",
+            )
+            tasks = (
                 *rpc_tasks,
                 gc_task,
+                reconcile_task,
+                report_task,
                 hb_task,
                 health_task,
-                logger=logger,
             )
+            try:
+                clean = await run_until_stopped(stop, *tasks, logger=logger)
+            finally:
+                stop.set()
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
         finally:
-            stop.set()
-            for task in (*rpc_tasks, gc_task, hb_task, health_task):
-                task.cancel()
-            await asyncio.gather(
-                *rpc_tasks,
-                gc_task,
-                hb_task,
-                health_task,
-                return_exceptions=True,
-            )
+            if booted:
+                await supervisor.close(CloseMode.DETACH)
             # The cron is the guarantee. Asking after we have stopped serving
             # the subject would always fail, and a successor looking at the
             # cursors is strictly better than being told.

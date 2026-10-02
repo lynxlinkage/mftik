@@ -1,9 +1,12 @@
 """``TdOrchestrator`` — desired accounts, the trading bit, drain-replace.
 
-The running TD process does not construct this and does not call
-:meth:`TdOrchestrator.reconcile`. Answering ``td.intent.put`` and
-``td.intent.delete`` does not need a supervisor or a restart intensity,
-and issue #286 has not chosen those numbers. The held intents live on
+The running TD process constructs this
+(:func:`mftik_td.supervise.account_restart_intensity`, the numbers in
+:mod:`mftik_td.controller.defaults`, provisional, pending issue #286)
+and calls
+:meth:`TdOrchestrator.reconcile`. :mod:`mftik_td.supervise` applies
+``SPAWN``, ``STOP`` and ``RELEASE``. ``PUSH_TRADING`` is named and not
+delivered: there is no wire type yet (B6-02). The held intents live on
 :class:`~mftik_td.controller.TdIntentBook`. B6-04 fills in
 drain-replace. ``pid_gone`` is :func:`mftik.procman.previous_worker_gone`.
 ``MARK_FAILED``, and ``NONE`` while the shim is still waiting, name
@@ -226,8 +229,9 @@ class TdOrchestrator:
         :func:`mftik_td.controller.td_reattach`, which is procman's
         table (B3-03).
 
-        B4-07 names the actions. It does not apply them, and the running
-        process does not call this.
+        B4-07 names the actions. :mod:`mftik_td.supervise` applies
+        ``SPAWN``, ``STOP`` and ``RELEASE``. ``PUSH_TRADING`` stays in
+        the tuple and is not delivered.
         """
         if isinstance(accounts, str) or not isinstance(accounts, Sequence):
             raise TypeError("accounts must be a sequence of BoundAccount")
