@@ -49,9 +49,9 @@ from mftik_sts.controller._ticket import unimplemented
 from mftik_sts.controller.defaults import (
     FIRST_INCARNATION,
     SESSION_HB_TIMEOUT_S,
-    SESSION_START_TIMEOUT_S,
     SESSION_STOP_GRACE_S,
 )
+from mftik_sts.controller.env import forwarded_env
 from mftik_sts.controller.spawn import session_worker_argv, write_session_request
 from mftik_sts.controller.status import (
     StatusStore,
@@ -68,7 +68,10 @@ from mftik_sts.controller.types import (
     SessionStatus,
     session_worker_id,
 )
-from mftik_sts.controller.worker import session_worker_spec
+from mftik_sts.controller.worker import (
+    procman_start_timeout_s,
+    session_worker_spec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -579,7 +582,14 @@ class StsOrchestrator:
                 return
             await self._refresh(held)
             if self._died(held):
-                await self._fail(held, self._death_reason(held))
+                # Exit 0 while the session is still desired running is a
+                # strategy that finished. Non-zero stays ``failed``. The
+                # controller cannot see the worker log, so a clean exit
+                # is recorded as ``worker_exited:0``.
+                if held.exit_code == 0:
+                    await self._finish_clean(held)
+                else:
+                    await self._fail(held, self._death_reason(held))
                 return
             actions = self.reconcile(held.spec, self._observed(held))
             if not actions:
@@ -673,9 +683,10 @@ class StsOrchestrator:
             incarnation=incarnation,
             argv=tuple(self._argv_for(path)),
             code_ref=self._release_name(),
-            start_timeout_s=SESSION_START_TIMEOUT_S,
+            start_timeout_s=procman_start_timeout_s(held.spec),
             hb_timeout_s=SESSION_HB_TIMEOUT_S,
             stop_grace_s=SESSION_STOP_GRACE_S,
+            env=forwarded_env(),
         )
         held.spawn_started = True
         try:
@@ -718,6 +729,27 @@ class StsOrchestrator:
         held.conditions = {"phase": phase.value}
         if held.finished_at is None:
             held.finished_at = self._clock.now()
+
+    async def _finish_clean(self, held: _Held) -> None:
+        """A worker exited 0 while desired was still ``running``.
+
+        That is ``done``, not ``failed``. Crash class, cleanup and rehang
+        stay B5-06. Who releases intents for a session that ended itself
+        stays #314.
+        """
+        if _terminal(held.phase):
+            return
+        held.phase = SessionPhase.DONE
+        held.column = column_status_for(SessionPhase.DONE)
+        held.reason = "worker_exited:0"
+        held.conditions = {"phase": SessionPhase.DONE.value}
+        held.exit_recorded = True
+        held.pid_gone = True
+        held.pid = None
+        if held.finished_at is None:
+            held.finished_at = self._clock.now()
+        await self._commit(held)
+        await self._release_quiet(session_worker_id(held.spec.session_id))
 
     async def _fail(self, held: _Held, reason: str) -> None:
         if _terminal(held.phase):

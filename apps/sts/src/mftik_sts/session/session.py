@@ -8,52 +8,17 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mftik.broker import Broker, RequestTimeoutError
-from mftik.exchange.models import (
-    AggTrade,
-    Balance,
-    BestQuote,
-    FeedEnd,
-    Fill,
-    FundingRate,
-    Greeks,
-    Kline,
-    Liquidation,
-    OpenInterest,
-    Order,
-    OrderBook,
-    Ticker,
-    Trade,
-)
-from mftik.exchange.oms import Position
 from mftik.protocol import (
     ANY_INSTANCE,
-    MD_AGG_TRADE,
-    MD_BEST_QUOTE,
     MD_BESTQUOTE_RESULT,
-    MD_FEED_END,
     MD_FUNDING_HISTORY_RESULT,
-    MD_FUNDING_RATE,
-    MD_GREEKS,
     MD_INTENT_DELETE,
-    MD_KLINE,
     MD_KLINES_RESULT,
-    MD_LIQUIDATION,
-    MD_OPEN_INTEREST,
     MD_OPEN_INTEREST_RESULT,
-    MD_ORDERBOOK,
     MD_ORDERBOOK_RESULT,
-    MD_TICKER,
-    MD_TRADE,
     ON_STOP_TIMEOUT_S,
-    TD_BALANCE_UPDATE,
-    TD_CANCEL_REJECT,
-    TD_FILL,
     TD_INTENT_DELETE,
-    TD_ORDER_REJECT,
-    TD_ORDER_UPDATE,
-    TD_POSITION_UPDATE,
     TD_RECON_DONE,
-    CancelReject,
     IntentOwner,
     MdBestQuoteResult,
     MdFundingHistoryResult,
@@ -62,7 +27,6 @@ from mftik.protocol import (
     MdKlinesResult,
     MdOpenInterestResult,
     MdOrderBookResult,
-    OrderReject,
     ReconDone,
     TdAccountRef,
     TdIntentDelete,
@@ -81,28 +45,13 @@ from mftik.strategy.eventlog import EventLog
 from mftik.symbols import SymbolClient
 from pydantic import BaseModel
 
+from mftik_sts.session_worker.dispatch import MD_HANDLERS, dispatch_md, dispatch_td
+
 logger = logging.getLogger(__name__)
 
 #: ``(session_id, reason, failed)`` — the manager tears the session down and
 #: records the terminal status.
 ExitHandler = Callable[[str, str, bool], Awaitable[None]]
-
-#: MD message type → (strategy hook, payload model). Feed topics plus
-#: control events MD publishes on ``md.{session_id}`` (``md.feed.end``);
-#: anything else on that stream is logged and dropped.
-MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
-    MD_TICKER: ("on_ticker", Ticker),
-    MD_ORDERBOOK: ("on_order_book", OrderBook),
-    MD_KLINE: ("on_kline", Kline),
-    MD_TRADE: ("on_trade", Trade),
-    MD_AGG_TRADE: ("on_agg_trade", AggTrade),
-    MD_BEST_QUOTE: ("on_best_quote", BestQuote),
-    MD_LIQUIDATION: ("on_liquidation", Liquidation),
-    MD_FUNDING_RATE: ("on_funding_rate", FundingRate),
-    MD_OPEN_INTEREST: ("on_open_interest", OpenInterest),
-    MD_GREEKS: ("on_greeks", Greeks),
-    MD_FEED_END: ("on_feed_end", FeedEnd),
-}
 
 #: Query result type → (strategy hook, payload model). Separate from
 #: :data:`MD_HANDLERS` and from the feed channel: these arrive on the session's
@@ -121,23 +70,6 @@ MD_FETCH_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
         MdOpenInterestResult,
     ),
 }
-
-#: TD global message type → (strategy hook, payload model).
-TD_GLOBAL_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
-    TD_ORDER_UPDATE: ("on_order_update", Order),
-    TD_FILL: ("on_fill", Fill),
-    TD_ORDER_REJECT: ("on_order_reject", OrderReject),
-    TD_CANCEL_REJECT: ("on_cancel_reject", CancelReject),
-    TD_BALANCE_UPDATE: ("on_balance_update", Balance),
-    TD_POSITION_UPDATE: ("on_position_update", Position),
-}
-
-#: Fan-out types that can change a watched cid's readiness. After the
-#: strategy hook returns, these wake :meth:`StrategyOms.wait_cids`.
-_OMS_WAIT_TYPES = frozenset(
-    {TD_ORDER_UPDATE, TD_FILL, TD_ORDER_REJECT, TD_CANCEL_REJECT}
-)
-
 
 #: ``api_id`` → the TD instance allowed to use that credential.
 TdInstanceLookup = Callable[[int], Awaitable[str | None]]
@@ -688,41 +620,10 @@ class StsSession:
             )
 
     async def _on_market_data(self, env: UntypedEnvelope) -> None:
-        name, model = MD_HANDLERS[env.type]
-        # The wire dict, not the model built from it. It is what arrived, it
-        # costs nothing to record — the parse has already happened, upstream —
-        # and a payload that fails validation below is exactly the one worth
-        # having on disk in the shape it came in.
-        self._record_in("md", env, hook=name)
-        try:
-            payload = model.model_validate(env.payload)
-        except Exception as exc:
-            self.event_log.record(
-                "error",
-                "payload_invalid",
-                dir="self",
-                hook=name,
-                type=env.type,
-                env_id=env.id,
-                error=repr(exc),
-            )
-            logger.exception(
-                "invalid md payload session=%s type=%s",
-                self.session_id,
-                env.type,
-            )
-            return
-        handler = getattr(self.strategy, name)
-        try:
-            await handler(payload)
-        except Exception as exc:
-            self._record_hook_failed(name, env, exc)
-            logger.exception(
-                "strategy %s failed session=%s type=%s",
-                name,
-                self.session_id,
-                env.type,
-            )
+        # Decode and the hook live with the session worker. This shell
+        # swallows a hook exception so the event log can record it and
+        # the session continues; the worker does not.
+        await dispatch_md(self.strategy, self.event_log, env, swallow=True)
 
     async def _pump_td_session(self, api_id: int) -> None:
         topic = Topics.td_session(api_id, self.session_id)
@@ -758,71 +659,12 @@ class StsSession:
             )
 
     async def _on_td_global(self, api_id: int, env: UntypedEnvelope) -> None:
-        entry = TD_GLOBAL_HANDLERS.get(env.type)
-        if entry is None:
+        # Same dispatch as the session worker. ``False`` is a type no
+        # hook claims; the shell still logs that on its own channel.
+        if not await dispatch_td(
+            self.strategy, self.event_log, api_id, env, swallow=True
+        ):
             self._on_message(f"global-{api_id}", env)
-            return
-        name, model = entry
-        # Recorded before ``owns`` has a say — that filter belongs to the
-        # strategy, and an audit trail that only kept this session's own fills
-        # could not show the account moving underneath it.
-        self._record_in("td", env, hook=name, api_id=api_id)
-        try:
-            payload = model.model_validate(env.payload)
-        except Exception as exc:
-            self.event_log.record(
-                "error",
-                "payload_invalid",
-                dir="self",
-                hook=name,
-                type=env.type,
-                env_id=env.id,
-                api_id=api_id,
-                error=repr(exc),
-            )
-            logger.exception(
-                "invalid td global payload session=%s api_id=%s type=%s",
-                self.session_id,
-                api_id,
-                env.type,
-            )
-            return
-        handler = getattr(self.strategy, name)
-        # Inflight tracking is session-owned: submit marks the cid, and
-        # these events are the only thing that can clear it. The strategy
-        # hook still sees the same payload; it must not be the sole writer.
-        if name == "on_order_update":
-            self.strategy.oms.note_order(payload)
-        elif name == "on_order_reject":
-            self.strategy.oms.note_reject(
-                getattr(payload, "error_code", None),
-                getattr(payload, "client_order_id", None),
-            )
-        elif name == "on_cancel_reject":
-            self.strategy.oms.note_gone(
-                getattr(payload, "client_order_id", None)
-            )
-        try:
-            await handler(api_id, payload)
-        except Exception as exc:
-            self._record_hook_failed(name, env, exc, api_id=api_id)
-            logger.exception(
-                "strategy %s failed session=%s api_id=%s type=%s",
-                name,
-                self.session_id,
-                api_id,
-                env.type,
-            )
-        finally:
-            # After the hook: a fill's hedge runs before on_stop's waiter
-            # proceeds to cancel. Still signal if the hook raised — a
-            # wedged strategy must not strand wait_cids until its timeout.
-            if env.type in _OMS_WAIT_TYPES:
-                self.strategy.oms.signal(
-                    api_id,
-                    getattr(payload, "client_order_id", None),
-                    payload if isinstance(payload, Order) else None,
-                )
 
     async def _on_recon_done(self, env: UntypedEnvelope) -> None:
         self._record_in("recon", env, hook="on_recon_done")

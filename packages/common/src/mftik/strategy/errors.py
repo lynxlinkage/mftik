@@ -19,8 +19,9 @@ phase :class:`NotReady` is raised from belongs to the STS session worker, and
 the pool :class:`OffloadWorkerLost` reports on belongs to the session worker
 too — the SDK only reads both.
 
-IF-06 defines these. Nothing raises them yet: the order-entry gate lands with
-the session worker (B4, B5-01) and ``offload`` lands in B5-03.
+IF-06 defines these. :class:`NotReady` is raised by the order-entry gate
+when the session worker's ``order_phase`` is still before ``on_ready``.
+:class:`OffloadWorkerLost` waits for ``offload`` (B5-03).
 """
 
 from __future__ import annotations

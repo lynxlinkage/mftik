@@ -35,6 +35,7 @@ from mftik.protocol import (
 )
 from mftik.protocol.reject_codes import describe
 from mftik.strategy.client_order_id import ClientOrderIdFactory
+from mftik.strategy.errors import NotReady
 from mftik.strategy.eventlog import session_log
 
 if TYPE_CHECKING:
@@ -46,6 +47,12 @@ logger = logging.getLogger(__name__)
 #: about one broker round-trip. Generous enough to ride out a GC pause without
 #: leaving a strategy blocked for long.
 ORDER_ACK_TIMEOUT_S = 2.0
+
+#: ``order_phase`` values on the session worker before ``on_ready`` has
+#: been called. A session that does not carry the attribute — the older
+#: shell, a test double — is not gated. The worker sets the attribute;
+#: this module does not import it.
+_BEFORE_ON_READY = frozenset({"boot", "load", "on_start"})
 
 #: Reject codes where the venue outcome is unknown. The cid stays inflight
 #: so a cancel is still refused — the order may be resting.
@@ -548,8 +555,13 @@ class StrategyOms:
         (``TD_REDUCE_ONLY_UNSUPPORTED``) rather than dropping the flag, so a
         caller is never told True for an order it believes is protected and
         is not.
+
+        Raises :class:`~mftik.strategy.errors.NotReady` when the session
+        worker has not called ``on_ready`` yet. Nothing is minted and
+        nothing reaches TD.
         """
         session = self._require_session()
+        _refuse_if_before_on_ready(session)
         cid = self._next_client_order_id()
         accepted = await self._request_ack(
             api_id,
@@ -591,15 +603,24 @@ class StrategyOms:
 
         Refuses locally when the cid is still inflight — same outcome as
         TD's ``TD_NOT_CANCELABLE``, without the round-trip or the warn.
+
+        Raises :class:`~mftik.strategy.errors.NotReady` on the same gate
+        as :meth:`submit_order`. A bound session is checked before the
+        inflight short-circuit, so a cancel during ``on_start`` is
+        ``NotReady`` rather than a local refusal. An OMS with no session
+        still refuses an inflight cid locally: that path never reached TD.
         """
         cid = str(client_order_id)
+        bound = self._strategy.session if self._strategy is not None else None
+        if bound is not None:
+            _refuse_if_before_on_ready(bound)
         if cid in self._inflight:
             self._last_reason = (
                 "order is inflight; it cannot be cancelled from that state"
             )
             self._last_code = RejectCode.TD_NOT_CANCELABLE
             return False
-        session = self._require_session()
+        session = bound if bound is not None else self._require_session()
         # Before the await: TD publishes PENDING_CANCEL before the ack, and
         # a concurrent cancel must see us. `_done` is the submit episode;
         # this cancel is a new one, so `_mark_inflight` would no-op.
@@ -721,6 +742,19 @@ class StrategyOms:
         if self._strategy is None or self._strategy.session is None:
             raise RuntimeError("strategy OMS is not bound to a session")
         return self._strategy.session
+
+
+def _refuse_if_before_on_ready(session: object) -> None:
+    """Raise :class:`NotReady` when the worker has not called ``on_ready``.
+
+    The attribute is the worker's. A session that does not have it is
+    the shell or a test double, and order entry stays as it was.
+    """
+    phase = getattr(session, "order_phase", None)
+    if phase in _BEFORE_ON_READY:
+        raise NotReady(
+            f"order entry is refused before on_ready (phase {phase})"
+        )
 
 
 def _cid_list(cids: str | int | Iterable[str | int]) -> list[str]:
