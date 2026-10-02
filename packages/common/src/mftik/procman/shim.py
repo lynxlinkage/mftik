@@ -1,10 +1,10 @@
 """The shim process (B3-01, F29, §4.1, §4.2).
 
 The supervisor starts a short-lived intermediate with ``subprocess.Popen``
-(never ``asyncio.create_subprocess_exec``). The intermediate forks a
-subreaper, ``setsid``s it, and exits, so the subreaper is adopted by host
-init and is not in the supervisor's process group. That subreaper forks
-the shim. The shim is the worker's parent: it sets
+(never ``asyncio.create_subprocess_exec``). That intermediate double-forks
+and ``setsid``s, then both parents exit, so the shim is adopted by host
+init or the nearest subreaper and is not in the supervisor's process
+group (S1). The shim is the worker's parent: it sets
 ``PR_SET_CHILD_SUBREAPER``, applies ``oom_score_adj`` and ``RLIMIT_DATA``
 between fork and exec, holds the worker's stdio and the status pipe, and
 speaks the NDJSON socket in :mod:`mftik.procman.messages`.
@@ -17,12 +17,12 @@ standard library (F29).
 ``ShimStatus.rss_bytes`` stays ``None``. The worker's process-tree RSS is
 B3-04.
 
-S2's contract kills the shim with ``SIGKILL`` and still expects
-``<id>.exit.json``. A dead shim cannot reap the worker or write that file
-(S3). The subreaper parent stays up for that case: if the shim dies first
-it adopts the worker, reaps it, and writes the record. The shim's parent
-is that subreaper for the shim's whole life, not init. The numbers for
-log rotation are named below; the plan does not give them.
+S2 kills the shim with ``SIGKILL``. The worker then stops on
+``PDEATHSIG`` or a status-pipe ``EPIPE``. Nothing writes
+``<id>.exit.json``: the shim is already dead, and no parent is left
+behind to reap the worker (S3 is only the case where the shim itself
+reaps). Log rotation limits are :data:`LOG_MAX_BYTES` and
+:data:`LOG_BACKUP_COUNT`.
 """
 
 from __future__ import annotations
@@ -69,9 +69,8 @@ from mftik.procman.messages import (
 )
 from mftik.procman.spec import SHIM_OOM_SCORE_ADJ, WorkerSpec
 
-#: S4. The plan names neither a size nor how many old files to keep.
-#: 256 KiB and one backup bound a stuck writer; a multi-megabyte stdio
-#: burst still finishes because the shim is the reader. Confirm these.
+#: S4. 256 KiB and one backup. A multi-megabyte stdio burst still
+#: finishes because the shim is the reader; nothing else tails the file.
 LOG_MAX_BYTES = 256 * 1024
 LOG_BACKUP_COUNT = 1
 
@@ -233,10 +232,12 @@ def spawn_shim(spec: WorkerSpec, *, work_dir: Path) -> SpawnedShim:
         stderr=subprocess.PIPE,
         close_fds=True,
     )
-    witness: int | None = None
+    shim_pid: int | None = None
     try:
         deadline = time.monotonic() + spec.start_timeout_s
-        witness = _read_witness_pid(proc, deadline)
+        # The session leader reports the shim, then exits. The socket peer
+        # is the same process; ``SpawnedShim.pid`` comes from the socket.
+        shim_pid = _read_spawn_pid(proc, deadline)
         peer = _wait_for_peer(socket_path(work_dir, spec.id), deadline)
         rc = proc.wait(timeout=5)
         if rc != 0:
@@ -247,7 +248,7 @@ def spawn_shim(spec: WorkerSpec, *, work_dir: Path) -> SpawnedShim:
             pid=peer,
         )
     except Exception:
-        _abort(proc, witness, work_dir, spec.id)
+        _abort(proc, shim_pid, work_dir, spec.id)
         raise
     finally:
         _close_captured(proc)
@@ -257,8 +258,9 @@ def spawn_shim(spec: WorkerSpec, *, work_dir: Path) -> SpawnedShim:
 def main(argv: list[str] | None = None) -> None:
     """Process entry for one shim (F29).
 
-    The supervisor's ``Popen`` is this process. It forks the subreaper and
-    exits; the subreaper forks the shim. Call it only from the bootstrap
+    The supervisor's ``Popen`` is this process. It double-forks and
+    ``setsid``s, and both parents exit, so the shim is adopted by host
+    init or the nearest subreaper (S1). Call it only from the bootstrap
     that has not imported :mod:`mftik`.
     """
     args = list(sys.argv[1:] if argv is None else argv)
@@ -272,22 +274,10 @@ def main(argv: list[str] | None = None) -> None:
         sys.stderr.write(f"mftik-shim: {exc}\n")
         os._exit(2)
     spec_path.unlink(missing_ok=True)
-    witness = os.fork()
-    if witness > 0:
-        os.write(1, f"{witness}\n".encode())
-        os._exit(0)
-    _detach_stdio()
-    os.setsid()
-    _prctl(_PR_SET_CHILD_SUBREAPER, 1)
-    shim = os.fork()
-    if shim == 0:
-        try:
-            _serve(work_dir, spec)
-        except Exception:
-            os._exit(1)
-        os._exit(0)
-    _witness(work_dir, spec, shim)
-    os._exit(0)
+    try:
+        _daemonize(work_dir, spec)
+    except Exception:
+        os._exit(1)
 
 
 def _prctl(option: int, arg: int) -> None:
@@ -384,7 +374,12 @@ def _peer_pid(path: Path) -> int:
     return pid
 
 
-def _read_witness_pid(proc: subprocess.Popen[bytes], deadline: float) -> int:
+def _read_spawn_pid(proc: subprocess.Popen[bytes], deadline: float) -> int:
+    """Pid the session leader writes before it exits.
+
+    Used to kill a shim that never opens its socket. The handle returned
+    to the supervisor is the socket peer, not this line.
+    """
     stdout = proc.stdout
     if stdout is None:
         raise ProcmanError("shim intermediate has no stdout")
@@ -438,21 +433,19 @@ def _close_captured(proc: subprocess.Popen[bytes]) -> None:
 
 def _abort(
     proc: subprocess.Popen[bytes],
-    witness: int | None,
+    shim_pid: int | None,
     work_dir: Path,
     worker_id: str,
 ) -> None:
-    live = _read_live(_live_path(work_dir, worker_id))
-    if live is not None:
-        _kill(live[0])
-    if witness is not None:
-        _kill_group(witness)
+    if shim_pid is not None:
+        _kill_pid_tree(shim_pid)
     if proc.poll() is None:
         proc.kill()
     try:
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
         pass
+    _unlink_socket(work_dir, worker_id)
 
 
 def _kill(pid: int) -> None:
@@ -464,40 +457,27 @@ def _kill(pid: int) -> None:
         pass
 
 
-def _kill_group(pid: int) -> None:
+def _kill_pid_tree(pid: int) -> None:
     if pid <= 1:
         return
+    for child in _proc_children(pid):
+        _kill_pid_tree(child)
+    _kill(pid)
+
+
+def _proc_children(pid: int) -> list[int]:
+    path = Path(f"/proc/{pid}/task/{pid}/children")
     try:
-        os.killpg(pid, signal.SIGKILL)
+        text = path.read_text()
     except OSError:
-        _kill(pid)
-
-
-def _live_path(work_dir: Path, worker_id: str) -> Path:
-    """Pid and ``ready`` the subreaper reads if the shim cannot."""
-    final = exit_record_path(work_dir, worker_id)
-    return final.with_name(final.name.removesuffix(".exit.json") + ".live.json")
-
-
-def _write_live(path: Path, pid: int, ready: bool) -> None:
-    payload = json.dumps({"pid": pid, "ready": ready}, sort_keys=True).encode()
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(payload + b"\n")
-    os.replace(tmp, path)
-
-
-def _read_live(path: Path) -> tuple[int, bool] | None:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        pid = raw["pid"]
-        ready = raw["ready"]
-    except (OSError, json.JSONDecodeError, KeyError, TypeError):
-        return None
-    if type(pid) is bool or not isinstance(pid, int) or pid <= 0:
-        return None
-    if type(ready) is not bool:
-        return None
-    return pid, ready
+        return []
+    found: list[int] = []
+    for part in text.split():
+        try:
+            found.append(int(part))
+        except ValueError:
+            continue
+    return found
 
 
 def _publish_exit(
@@ -524,7 +504,6 @@ def _publish_exit(
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp, final)
-    _live_path(work_dir, spec.id).unlink(missing_ok=True)
 
 
 def _unlink_socket(work_dir: Path, worker_id: str) -> None:
@@ -552,54 +531,47 @@ def _decode_wait(status: int) -> tuple[int | None, int | None]:
     return None, None
 
 
-def _witness(work_dir: Path, spec: WorkerSpec, shim_pid: int) -> None:
-    """Adopt the worker if the shim is killed before it can write the record.
+def _daemonize(work_dir: Path, spec: WorkerSpec) -> None:
+    """Double-fork and ``setsid`` so the shim's parent is init (§4.2 S1).
 
-    S3 says the shim writes ``<id>.exit.json`` after it reaps the worker.
-    S2 kills that shim with ``SIGKILL`` and still requires the file. This
-    process is the shim's parent and a child subreaper, so the worker is
-    reparented here and the exit status is still observable.
+    The first parent is the ``Popen`` intermediate and exits at once. The
+    second parent is the session leader: it waits until the shim has
+    recorded that pid, reports the shim on stdout, and exits. The shim
+    then waits until it has been reparented before it serves.
     """
-    reaped: dict[int, tuple[int | None, int | None]] = {}
-    shim_dead = False
-    while True:
+    ack_r, ack_w = os.pipe()
+    first = os.fork()
+    if first > 0:
+        os.close(ack_r)
+        os.close(ack_w)
+        os._exit(0)
+    os.setsid()
+    shim = os.fork()
+    if shim > 0:
+        os.close(ack_w)
         try:
-            wpid, status = os.waitpid(-1, 0)
-        except InterruptedError:
-            continue
-        except ChildProcessError:
-            break
-        if wpid == shim_pid:
-            shim_dead = True
-        else:
-            reaped[wpid] = _decode_wait(status)
-        if not shim_dead:
-            continue
-        if exit_record_path(work_dir, spec.id).exists():
-            break
-        live = _read_live(_live_path(work_dir, spec.id))
-        if live is None:
-            break
-        worker_pid, ready = live
-        if worker_pid not in reaped:
-            continue
-        code, sig = reaped[worker_pid]
-        if code is None and sig is None:
-            continue
-        try:
-            _publish_exit(
-                work_dir,
-                spec,
-                pid=worker_pid,
-                exit_code=code,
-                sig=sig,
-                ready=ready,
-            )
-        except (OSError, MessageError):
-            pass
-        break
-    _live_path(work_dir, spec.id).unlink(missing_ok=True)
-    _unlink_socket(work_dir, spec.id)
+            got = os.read(ack_r, 1)
+        except OSError:
+            got = b""
+        os.close(ack_r)
+        if got:
+            os.write(1, f"{shim}\n".encode())
+        os._exit(0 if got else 1)
+    os.close(ack_r)
+    leader = os.getppid()
+    os.write(ack_w, b"x")
+    os.close(ack_w)
+    deadline = time.monotonic() + 2.0
+    while os.getppid() == leader:
+        if time.monotonic() >= deadline:
+            os._exit(1)
+        time.sleep(0)
+    _detach_stdio()
+    try:
+        _serve(work_dir, spec)
+    except Exception:
+        os._exit(1)
+    os._exit(0)
 
 
 class _Rotating:
@@ -730,7 +702,6 @@ class _Server:
         except OSError:
             pass
         self.state.pid = worker
-        _write_live(_live_path(work_dir, spec.id), worker, False)
         wake_r, wake_w = os.pipe()
         os.set_blocking(wake_r, False)
         os.set_blocking(wake_w, False)
@@ -817,12 +788,6 @@ class _Server:
         if ready == self.state.ready or not self.state.alive:
             return
         self.state.ready = ready
-        if self.state.pid is not None:
-            _write_live(
-                _live_path(self.work_dir, self.spec.id),
-                self.state.pid,
-                ready,
-            )
         self._fanout()
 
     def _drain_wake(self) -> None:

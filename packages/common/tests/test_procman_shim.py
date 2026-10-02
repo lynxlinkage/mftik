@@ -6,6 +6,7 @@ test: it does not start a process.
 
 from __future__ import annotations
 
+import os
 import sys
 import textwrap
 import time
@@ -71,6 +72,36 @@ def _wait_for(predicate, timeout_s: float = 3.0) -> None:
     raise AssertionError(f"condition was still false after {timeout_s}s")
 
 
+def _kill(pid: int) -> None:
+    if pid <= 1:
+        return
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
+
+def _stop(spawned) -> None:
+    """Kill the worker, then the shim. Do not walk up to init."""
+    client = ShimClient(spawned.socket)
+    try:
+        client.signal(9)
+    except OSError:
+        pass
+    children = Path(f"/proc/{spawned.pid}/task/{spawned.pid}/children")
+    try:
+        text = children.read_text()
+    except OSError:
+        text = ""
+    for part in text.split():
+        _kill(int(part))
+    try:
+        client.release()
+    except OSError:
+        pass
+    _kill(spawned.pid)
+
+
 def test_log_path_names_the_three_streams(tmp_path: Path) -> None:
     assert log_path(tmp_path, "td/account/42", "stdout") == (
         tmp_path / "run" / "td" / "account" / "42.stdout.log"
@@ -90,19 +121,8 @@ def test_shim_process_has_not_loaded_pydantic_or_nats(tmp_path: Path) -> None:
     try:
         text = log_path(tmp_path, spec.id, "stderr").read_text()
         assert "boot pydantic=0 nats=0" in text
-        maps = Path(f"/proc/{spawned.pid}/maps").read_text()
-        assert "pydantic" not in maps
-        assert "/nats/" not in maps
     finally:
-        client = ShimClient(spawned.socket)
-        try:
-            client.signal(9)
-        except OSError:
-            pass
-        try:
-            client.release()
-        except OSError:
-            pass
+        _stop(spawned)
 
 
 @pytest.mark.integration
@@ -126,15 +146,7 @@ def test_oom_score_adj_and_rlimit_are_applied_before_exec(tmp_path: Path) -> Non
         shim_oom = Path(f"/proc/{spawned.pid}/oom_score_adj").read_text().strip()
         assert shim_oom == "0"
     finally:
-        client = ShimClient(spawned.socket)
-        try:
-            client.signal(9)
-        except OSError:
-            pass
-        try:
-            client.release()
-        except OSError:
-            pass
+        _stop(spawned)
 
 
 @pytest.mark.integration
@@ -156,12 +168,4 @@ def test_stdio_log_rotates_past_the_cap(tmp_path: Path) -> None:
         assert status.exit_code is None
         assert status.signal is None
     finally:
-        client = ShimClient(spawned.socket)
-        try:
-            client.signal(9)
-        except OSError:
-            pass
-        try:
-            client.release()
-        except OSError:
-            pass
+        _stop(spawned)

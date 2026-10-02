@@ -488,7 +488,7 @@ shim fork 出 worker 之後、`exec` 之前，由子進程寫自己的 `/proc/se
 
 MD 連線 worker 是一條 websocket 一個進程（F17），worker 數等於使用中的連線數。以每個 60–90 MB 估計（B4 實測），10 條連線就是 0.6–0.9 GB，已經超過現行整個 MD 平面的 768 MB，MD 的 `memory_budget_mb` 要依此設定。
 
-每個 worker 另外有一個 Python shim（F29），也要算進各平面的預算。B3-01 實測（Python 3.12.3，worker 執行 `time.sleep`、shim 阻塞在 `poll`，讀 `/proc/<pid>/status` 的 `VmRSS`）：負責 unix socket 的 shim 進程為 14648 kB（約 14.3 MiB）。同一次量測裡，為了在 shim 被 `SIGKILL` 之後仍能收屍並寫 `<id>.exit.json`（S2、S3）而留下的 subreaper 父進程，其 `VmRSS` 為 13260 kB；它自己被 init 收養。兩者的 `Pss`（`/proc/<pid>/smaps_rollup`）分別為 6370 kB 與 6088 kB，共享頁在 `VmRSS` 裡各算一次。Prototype 的約 10–15 MB 對到的是 shim 自己的 `VmRSS`。
+每個 worker 另外有一個 Python shim（F29），也要算進各平面的預算。B3-01 實測（Python 3.12.3，worker 執行 `time.sleep`、shim 阻塞在 `poll`，讀 `/proc/<pid>/status` 的 `VmRSS`）：shim 自己是 14576 kB（約 14.2 MiB）。Prototype 的約 10–15 MB 由這個實測取代。
 
 TD 帳號 worker 對每個啟用帳號常駐（F35），所以 TD 平面固定佔用「啟用帳號數 ×（worker 加 shim）」，和有沒有 session 無關。
 

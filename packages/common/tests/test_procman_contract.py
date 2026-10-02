@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 import textwrap
 import threading
@@ -23,7 +24,6 @@ import pytest
 from mftik.procman import (
     CloseMode,
     DesiredSlot,
-    ExitRecord,
     FailureCause,
     ObservedWorker,
     ReattachAction,
@@ -31,6 +31,7 @@ from mftik.procman import (
     ShimClient,
     SpawnedShim,
     Supervisor,
+    Trigger,
     WorkerHeartbeat,
     WorkerPhase,
     WorkerSpec,
@@ -38,11 +39,13 @@ from mftik.procman import (
     count_restarts_in_window,
     decode_exit,
     exit_record_path,
+    exit_record_tmp_path,
     observe_heartbeat,
     plan_restart,
     reattach_action,
     socket_path,
     spawn_shim,
+    transition,
 )
 
 _INTENSITY = RestartIntensity(max_restarts=5, window_s=600, min_backoff_s=1)
@@ -123,20 +126,72 @@ def _kill_tree(pid: int) -> None:
         pass
 
 
-def _cleanup(spawned: SpawnedShim) -> None:
-    witness: int | None = None
-    if _alive(spawned.pid):
+def _ancestors(pid: int) -> set[int]:
+    found: set[int] = set()
+    while pid > 0 and pid not in found:
+        found.add(pid)
+        if pid == 1:
+            break
         try:
-            witness = _ppid(spawned.pid)
+            pid = _ppid(pid)
         except OSError:
-            witness = None
+            break
+    found.add(1)
+    return found
+
+
+def _adopter() -> int:
+    """Who adopts an orphan of this process: pid 1 or the nearest subreaper.
+
+    ``prctl(PR_GET_CHILD_SUBREAPER)`` reports only the calling process, so
+    an ancestor's flag is not readable from here. Orphan a grandchild and
+    record its new parent. That is the same rule the kernel applies to
+    the shim after the double-fork (§4.2 S1), including inside a
+    container whose init is not the host's pid 1.
+    """
+    # A fresh interpreter, not this process: pytest's timeout hook is
+    # already multi-threaded, and forking here deadlocks.
+    script = (
+        "import os, time\n"
+        "grand = os.fork()\n"
+        "if grand > 0:\n"
+        "    os._exit(0)\n"
+        "parent = os.getppid()\n"
+        "deadline = time.monotonic() + 2.0\n"
+        "while os.getppid() == parent and time.monotonic() < deadline:\n"
+        "    time.sleep(0)\n"
+        "print(os.getppid(), flush=True)\n"
+        "os._exit(0)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return int(proc.stdout.strip())
+
+
+def _socket_refuses(path: Path) -> bool:
+    """True when nothing accepts on ``path`` (S2: the shim is gone)."""
+    if not path.exists() and not path.is_symlink():
+        return True
+    try:
+        ShimClient(path).status()
+    except OSError:
+        return True
+    return False
+
+
+def _cleanup(spawned: SpawnedShim) -> None:
     client = ShimClient(spawned.socket)
     try:
         client.signal(signal.SIGKILL)
     except Exception:
         pass
-    # A setsid grandchild is not in the worker's group, so killpg misses it.
-    # It is the shim's child once the intermediate has exited.
+    # A setsid grandchild is not in the worker's group, so killpg misses
+    # it. It is the shim's child once the intermediate has exited. Do not
+    # walk up to the shim's parent: that is init or the host subreaper.
     for child in _children(spawned.pid):
         _kill_tree(child)
     try:
@@ -144,8 +199,6 @@ def _cleanup(spawned: SpawnedShim) -> None:
     except Exception:
         pass
     _kill_tree(spawned.pid)
-    if witness is not None:
-        _kill_tree(witness)
 
 
 @contextmanager
@@ -256,11 +309,20 @@ def test_s1_shim_is_the_only_parent_and_reaps_descendants(tmp_path: Path) -> Non
         assert status.incarnation == spec.incarnation
         assert status.pid is not None
         assert _ppid(status.pid) == spawned.pid
-        assert _ppid(spawned.pid) != os.getpid()
-        _wait_for(marker.exists)
-        grandchild_pid, grandchild_ppid = (
-            int(part) for part in marker.read_text().split()
-        )
+        adopter = _adopter()
+        assert adopter in _ancestors(os.getpid())
+        assert _ppid(spawned.pid) == adopter
+
+        def _grandchild() -> list[str]:
+            try:
+                parts = marker.read_text().split()
+            except OSError:
+                return []
+            return parts if len(parts) == 2 else []
+
+        # ``open`` creates the file before the write is visible.
+        _wait_for(lambda: len(_grandchild()) == 2)
+        grandchild_pid, grandchild_ppid = (int(part) for part in _grandchild())
         assert grandchild_ppid == spawned.pid
         os.kill(grandchild_pid, signal.SIGKILL)
 
@@ -268,29 +330,36 @@ def test_s1_shim_is_the_only_parent_and_reaps_descendants(tmp_path: Path) -> Non
 @pytest.mark.integration
 def test_s2_killing_the_shim_stops_the_worker_gracefully(tmp_path: Path) -> None:
     """S2: PDEATHSIG is SIGTERM (or the status pipe's EPIPE, whichever is
-    first). The worker gets a chance to exit on its own; it is not SIGKILL."""
+    first). The worker exits on its own. The dead shim leaves no exit
+    record, so reattach reads the slot as LOST (§4.4)."""
     marker = tmp_path / "caught"
     ready = tmp_path / "ready"
     spec = _spec(_argv(_CATCH_TERM, str(marker), str(ready)))
     spawned = spawn_shim(spec, work_dir=tmp_path)
+    worker_pid: int | None = None
     try:
         _wait_for(ready.exists)
+        status = ShimClient(spawned.socket).status()
+        worker_pid = status.pid
+        assert worker_pid is not None
         os.kill(spawned.pid, signal.SIGKILL)
         _wait_for(marker.exists)
         assert marker.read_text() == "sigterm"
-        record_path = exit_record_path(tmp_path, spec.id)
-        _wait_for(record_path.exists)
-        record = decode_exit(record_path.read_bytes())
-        assert record == ExitRecord(
-            id=spec.id,
-            incarnation=spec.incarnation,
-            pid=record.pid,
-            exit_code=0,
-            signal=None,
-            ready=record.ready,
-        )
-        assert record.signal != signal.SIGKILL
+        _wait_for(lambda: not _alive(worker_pid), timeout_s=spec.stop_grace_s)
+        assert not exit_record_path(tmp_path, spec.id).exists()
+        assert not exit_record_tmp_path(tmp_path, spec.id).exists()
+        assert _socket_refuses(spawned.socket)
+        # state.py: reattach reads LOST only when the socket and the exit
+        # file are both gone. That observation is Trigger.SHIM_LOST.
+        for phase in (
+            WorkerPhase.STARTING,
+            WorkerPhase.RUNNING,
+            WorkerPhase.STOPPING,
+        ):
+            assert transition(phase, Trigger.SHIM_LOST) is WorkerPhase.LOST
     finally:
+        if worker_pid is not None:
+            _kill_tree(worker_pid)
         _cleanup(spawned)
 
 
