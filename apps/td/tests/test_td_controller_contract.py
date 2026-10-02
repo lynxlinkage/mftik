@@ -1,10 +1,10 @@
-"""What the TD controller will do, written down before it does it (IF-12).
+"""What the TD controller does (IF-12, B4-07).
 
-Each test is ``xfail(strict=True)``. It describes behaviour §7.1 and
-§7.2 already settle, and it fails today because the decisions raise
-``NotImplementedError("IF-12")``. ``strict`` is the point: the ticket
-that implements one of these cannot merge while the marker is still on
-it.
+The account set, the trading level, the spawn gate and restart planning
+answer. What is still ``xfail(strict=True)`` is the §4.4 table (B3-03,
+``NotImplementedError("IF-03")`` inside reconcile) and drain-replace
+(B6-04). ``strict`` is the point: the ticket that implements one of
+those cannot merge while the marker is still on it.
 
 Nothing here starts a process or opens ``/proc``. The pid fence is the
 supervisor's observation on :class:`~mftik_td.controller.AccountView`,
@@ -47,10 +47,8 @@ from mftik_td.controller import (
 )
 
 _ACCOUNTS = "B4-07: desired accounts and the trading level"
-_P5 = "B4-07 publishes the level only while the controller is up (P5)"
 _F36 = "B3-03 fences the pid; B4-07 names a spawn only after it is gone (F36)"
 _REATTACH = "B4-07 delegates to reattach_action; B3-03 implements the table"
-_RESTART = "B3-02 plans the restart from the caller's intensity"
 _DRAIN = "B6-04 drain-replaces one account (F27)"
 
 
@@ -108,7 +106,6 @@ def _view(
 # --- desired accounts (F35, F36) -------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_ACCOUNTS)
 def test_desired_accounts_are_this_instances_bindings_in_input_order() -> None:
     """No intent is required. Another instance's account is absent (W1, W2)."""
     other = _account(8, instance="td-jp")
@@ -120,7 +117,6 @@ def test_desired_accounts_are_this_instances_bindings_in_input_order() -> None:
 # --- intent → trading level (F35) ------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_ACCOUNTS)
 def test_a_second_put_replaces_that_owners_accounts() -> None:
     """The put is the whole set (L1). It does not add a count."""
     held = apply_put((), _put("abc", 7, 8))
@@ -129,7 +125,6 @@ def test_a_second_put_replaces_that_owners_accounts() -> None:
     assert trading_active(8, held) is True
 
 
-@pytest.mark.xfail(strict=True, reason=_ACCOUNTS)
 def test_one_owner_leaving_leaves_an_account_another_still_holds() -> None:
     held = apply_put((), _put("abc", 7))
     held = apply_put(held, _put("def", 7))
@@ -137,7 +132,6 @@ def test_one_owner_leaving_leaves_an_account_another_still_holds() -> None:
     assert trading_active(7, held) is True
 
 
-@pytest.mark.xfail(strict=True, reason=_ACCOUNTS)
 def test_delete_without_api_ids_releases_that_owner() -> None:
     held = apply_put((), _put("abc", 7, 8))
     held = apply_delete(held, _delete("abc"))
@@ -146,7 +140,6 @@ def test_delete_without_api_ids_releases_that_owner() -> None:
     assert trading_active(8, held) is False
 
 
-@pytest.mark.xfail(strict=True, reason=_ACCOUNTS)
 def test_delete_of_one_account_leaves_the_rest() -> None:
     held = apply_put((), _put("abc", 7, 8))
     held = apply_delete(held, _delete("abc", 7))
@@ -154,14 +147,12 @@ def test_delete_of_one_account_leaves_the_rest() -> None:
     assert trading_active(8, held) is True
 
 
-@pytest.mark.xfail(strict=True, reason=_ACCOUNTS)
 def test_delete_of_an_absent_owner_keeps_the_held_set() -> None:
     held = apply_put((), _put("abc", 7))
     assert apply_delete(held, _delete("def")) == held
     assert apply_delete(held, _delete("abc", 9)) == held
 
 
-@pytest.mark.xfail(strict=True, reason=_ACCOUNTS)
 def test_duplicate_api_ids_are_still_just_on() -> None:
     """Membership, not a refcount. Dropping the id once turns the bit off."""
     held = apply_put((), _put("abc", 7, 7))
@@ -170,7 +161,6 @@ def test_duplicate_api_ids_are_still_just_on() -> None:
     assert trading_active(7, held) is False
 
 
-@pytest.mark.xfail(strict=True, reason=_ACCOUNTS)
 def test_a_published_level_names_every_desired_account() -> None:
     """One bit per account, in the account order, from membership (L1, L2)."""
     pushes = trading_pushes(
@@ -192,7 +182,6 @@ def test_a_published_level_names_every_desired_account() -> None:
 # --- P5 --------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_P5)
 def test_an_absent_controller_pushes_nothing_and_the_last_desired_stands() -> None:
     """Silence is not a deactivate. The worker keeps the bit it already has."""
     previous = TradingDesired(api_id=7, active=True)
@@ -202,7 +191,6 @@ def test_an_absent_controller_pushes_nothing_and_the_last_desired_stands() -> No
     assert TradingDesired(api_id=7, active=False) not in pushes
 
 
-@pytest.mark.xfail(strict=True, reason=_P5)
 def test_close_does_not_push_a_trading_change() -> None:
     """DETACH leaves workers running. STOP signals them through the
     supervisor, not through a trading bit. Neither mode deactivates."""
@@ -213,7 +201,6 @@ def test_close_does_not_push_a_trading_change() -> None:
 # --- F36 and reattach ------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_F36)
 def test_spawn_allowed_requires_the_old_pid_to_be_gone() -> None:
     """The first incarnation does not wait. A later one waits for the pid."""
     assert spawn_allowed(previous=True, pid_gone=False) is False
@@ -300,7 +287,6 @@ def test_an_account_that_is_no_longer_desired_is_stopped(tmp_path: Path) -> None
     assert all(action.kind is not ActionKind.SPAWN for action in actions)
 
 
-@pytest.mark.xfail(strict=True, reason=_ACCOUNTS)
 def test_reconcile_does_not_spawn_another_instances_account(tmp_path: Path) -> None:
     actions = _orch(tmp_path).reconcile((_account(8, instance="td-jp"),), (), ())
     assert all(action.kind is not ActionKind.SPAWN for action in actions)
@@ -331,7 +317,6 @@ def test_reconcile_pushes_the_trading_level_for_desired_accounts(
 # --- restart intensity (issue #286) ----------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_RESTART)
 def test_account_restart_uses_the_callers_intensity(tmp_path: Path) -> None:
     """``on_failure``, and the intensity this orchestrator was given. No other."""
     intensity = RestartIntensity(max_restarts=2, window_s=30, min_backoff_s=0.5)

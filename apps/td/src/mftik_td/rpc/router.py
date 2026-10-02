@@ -13,6 +13,7 @@ from mftik.protocol import (
     RpcErrorEnvelope,
 )
 
+from mftik_td.controller import INTENT_TYPES, intent_book, intent_handler
 from mftik_td.rpc.health import handle_health
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,13 @@ _HANDLERS: dict[str, Handler] = {
 
 async def dispatch(req: IncomingRequest) -> None:
     """Route a request to its handler, or reply with ``td.error``."""
+    if req.envelope.type in INTENT_TYPES:
+        # Put and delete return the reply. The rest of this router still
+        # writes through the request handle; converting that loop is B4-05.
+        reply = await intent_handler(intent_book())(req.envelope)
+        if reply is not None:
+            await req.reply(reply)
+        return
     handler = _HANDLERS.get(req.envelope.type)
     if handler is None:
         logger.warning(

@@ -1,14 +1,21 @@
 """TD controller: desired accounts, the trading-layer bit, drain-replace.
 
 This is the layer §3.4 names ``mftik_td.controller``. It replaces the
-lease and refcount half of ``session/manager.py``. The functions that
-would decide, spawn, or reply raise ``NotImplementedError("IF-12")``.
-What is real is the shape: the account binding, the trading bit, the
-action names, and the :class:`~mftik.procman.WorkerSpec` procman is
-allowed to see.
+lease and refcount half of ``session/manager.py``. The account set, the
+trading level, the spawn gate and the intent reply are real (B4-07).
+Drain-replace still raises ``NotImplementedError("IF-12")``.
+:func:`td_reattach` calls procman's table, which raises
+``NotImplementedError("IF-03")`` until B3-03. What was already real is
+the shape: the account binding, the trading bit, the action names, and
+the :class:`~mftik.procman.WorkerSpec` procman is allowed to see.
 
-Not wired into the TD process. B4-07 does that for reconcile and
-intents. B6-04 does drain-replace. The pid fence is
+The running process registers :func:`intent_handler` on
+``td.{instance}`` and subscribes to ``procman.report.sts.*``. It does
+not construct :class:`TdOrchestrator`: that needs a
+:class:`~mftik.procman.RestartIntensity`, and those numbers are not
+chosen (issue #286). Held intents are a :class:`TdIntentBook`. Nothing
+is delivered to an account worker from that book (P5). B6-04 does
+drain-replace. The pid fence is
 :meth:`mftik.procman.Supervisor.spawn` (B3-03, F36). This package does
 not import strategy code and does not carry ``strategy_digest`` or
 ``env_generation`` (F39, IF-16).
@@ -71,7 +78,13 @@ from mftik_td.controller.decisions import (
     trading_active,
     trading_pushes,
 )
-from mftik_td.controller.handlers import INTENT_TYPES, control_subject, intent_handler
+from mftik_td.controller.handlers import (
+    INTENT_TYPES,
+    TdIntentBook,
+    control_subject,
+    intent_book,
+    intent_handler,
+)
 from mftik_td.controller.orchestrator import TdOrchestrator
 from mftik_td.controller.types import (
     ACCOUNT_KIND,
@@ -94,6 +107,7 @@ __all__ = [
     "ActionKind",
     "BoundAccount",
     "OrchestratorAction",
+    "TdIntentBook",
     "TdOrchestrator",
     "TradingDesired",
     "account_worker_id",
@@ -103,6 +117,7 @@ __all__ = [
     "close_actions",
     "control_subject",
     "desired_accounts",
+    "intent_book",
     "intent_handler",
     "plan_account_restart",
     "spawn_allowed",

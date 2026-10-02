@@ -1,15 +1,16 @@
 """MD controller: the types that are real now, and the decisions B8 owes.
 
-IF-09 defines this layer and returns null data. The tests split in two:
+IF-09 defines this layer. Owner GC answers (B4-07). ``desired_atoms``,
+``place`` and ``expire`` still return null data. The tests split in two:
 
 * What is real now — a generation orders lexicographically, a placement
   cannot describe an atom on two connections, an owner set can hold a
-  session and a standing subscription together, and every function that
-  would decide something refuses with the ticket number.
+  session and a standing subscription together, owner GC follows §8.2,
+  and the functions B8 still owns refuse with the ticket number.
 * What B8 will make true — ``xfail(strict=True)``, one per case the
-  ticket's acceptance names plus the owner and expiry rules the module
-  states. ``strict`` is the point: the implementation cannot land
-  without deleting the marker.
+  ticket's acceptance names plus the owner-set and expiry rules the
+  module states. ``strict`` is the point: the implementation cannot
+  land without deleting the marker.
 """
 
 from __future__ import annotations
@@ -207,23 +208,9 @@ def test_the_stubs_refuse_with_the_ticket_number() -> None:
         lambda: desired_atoms(demands),
         lambda: place(frozenset({atom("a")}), (), {}),
         lambda: expire({}, (), now),
-        lambda: gc_owners(
-            frozenset({session}),
-            frozenset(),
-            None,
-            report=None,
-            report_generation=None,
-        ),
         lambda: orchestrator.desired(demands),
         lambda: orchestrator.place(frozenset({atom("a")}), (), {}),
         lambda: orchestrator.expire({}, (), now),
-        lambda: orchestrator.gc_owners(
-            frozenset({session}),
-            frozenset(),
-            None,
-            report=None,
-            report_generation=None,
-        ),
     )
     for call in calls:
         with pytest.raises(NotImplementedError, match="IF-09"):
@@ -406,7 +393,6 @@ def test_an_atoms_owners_are_everyone_who_demands_it() -> None:
     assert set(owned) == {shared, book}
 
 
-@pytest.mark.xfail(strict=True, reason="B8-01 releases an owner absent twice, not once")
 def test_one_missed_report_does_not_release_an_owner() -> None:
     session = owner("s1")
     other = owner("s2")
@@ -422,7 +408,6 @@ def test_one_missed_report_does_not_release_an_owner() -> None:
     assert result.generation == 1
 
 
-@pytest.mark.xfail(strict=True, reason="B8-01 does not count a replayed report twice")
 def test_a_replayed_report_is_not_a_second_sample() -> None:
     """The generation is how two publications are told apart (§8.2)."""
     session = owner("s1")
@@ -439,7 +424,6 @@ def test_a_replayed_report_is_not_a_second_sample() -> None:
     assert result.generation == 1
 
 
-@pytest.mark.xfail(strict=True, reason="B8-01 releases an owner absent twice, not once")
 def test_a_second_missed_report_releases_the_owner() -> None:
     session = owner("s1")
     other = owner("s2")
@@ -455,7 +439,6 @@ def test_a_second_missed_report_releases_the_owner() -> None:
     assert result.generation == 2
 
 
-@pytest.mark.xfail(strict=True, reason="B8-01 keeps an owner who is in the report")
 def test_an_owner_who_reappears_is_kept() -> None:
     """A session STS included because it is restarting is simply present (R4)."""
     session = owner("s1")
@@ -471,7 +454,6 @@ def test_an_owner_who_reappears_is_kept() -> None:
     assert result.generation == 2
 
 
-@pytest.mark.xfail(strict=True, reason="B8-01 releases nothing when the report stops")
 def test_a_stopped_report_releases_nothing() -> None:
     """F32. The absence streak across the gap is deliberately not asserted."""
     session = owner("s1")

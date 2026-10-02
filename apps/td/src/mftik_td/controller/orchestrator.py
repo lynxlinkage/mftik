@@ -1,8 +1,12 @@
 """``TdOrchestrator`` — desired accounts, the trading bit, drain-replace.
 
-The running TD process does not construct this. B4-07 wires reconcile
-and the intent handler. B6-04 fills in drain-replace. B3-03 is the pid
-fence inside :meth:`mftik.procman.Supervisor.spawn`.
+The running TD process does not construct this and does not call
+:meth:`TdOrchestrator.reconcile`. Answering ``td.intent.put`` and
+``td.intent.delete`` does not need a supervisor or a restart intensity,
+and issue #286 has not chosen those numbers. The held intents live on
+:class:`~mftik_td.controller.TdIntentBook`. B6-04 fills in
+drain-replace. B3-03 is the pid fence inside
+:meth:`mftik.procman.Supervisor.spawn`.
 """
 
 from __future__ import annotations
@@ -10,6 +14,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from mftik.procman import (
+    DesiredSlot,
+    ObservedWorker,
+    ReattachAction,
     RestartDecision,
     RestartIntensity,
     Supervisor,
@@ -18,12 +25,59 @@ from mftik.procman import (
 from mftik.protocol import TdIntentPut
 
 from mftik_td.controller._ticket import unimplemented
-from mftik_td.controller.decisions import plan_account_restart
+from mftik_td.controller.decisions import (
+    desired_accounts,
+    plan_account_restart,
+    spawn_allowed,
+    td_reattach,
+    trading_pushes,
+)
 from mftik_td.controller.types import (
+    FIRST_INCARNATION,
     AccountView,
+    ActionKind,
     BoundAccount,
     OrchestratorAction,
 )
+
+
+def _worker_step(
+    api_id: int,
+    slot: DesiredSlot,
+    view: AccountView | None,
+) -> OrchestratorAction | None:
+    """The spawn or stop :func:`td_reattach` names for one account.
+
+    ``ADOPT``, ``NONE`` and ``MARK_FAILED`` name nothing. ``APPLY_RESTART``
+    names ``SPAWN`` only when :func:`spawn_allowed` is true. The
+    incarnation is :data:`FIRST_INCARNATION` when the supervisor holds
+    none, otherwise the held one plus one.
+    """
+    if view is None:
+        observed = ObservedWorker.ABSENT
+        previous = False
+        pid_gone = True
+        incarnation = None
+    else:
+        observed = view.observed
+        previous = view.incarnation is not None
+        pid_gone = view.pid_gone
+        incarnation = view.incarnation
+    cell = td_reattach(desired=slot, observed=observed)
+    if cell is ReattachAction.APPLY_RESTART and spawn_allowed(
+        previous=previous, pid_gone=pid_gone
+    ):
+        next_incarnation = (
+            FIRST_INCARNATION if incarnation is None else incarnation + 1
+        )
+        return OrchestratorAction(
+            kind=ActionKind.SPAWN,
+            api_id=api_id,
+            incarnation=next_incarnation,
+        )
+    if cell is ReattachAction.STOP_AND_RELEASE:
+        return OrchestratorAction(kind=ActionKind.STOP, api_id=api_id)
+    return None
 
 
 def _views(views: object) -> Sequence[AccountView]:
@@ -139,11 +193,14 @@ class TdOrchestrator:
 
         The actions come back with spawns only where
         :func:`mftik_td.controller.spawn_allowed` is true (F36), then
-        the trading pushes for the desired accounts. Empty is not an
-        answer this method returns today; it raises, so a caller cannot
-        mistake "not implemented" for "nothing to do".
+        stops for accounts this instance no longer wants, then the
+        trading pushes for the desired accounts. Empty is the answer
+        when this instance has no accounts and no views. A desired
+        account, or a view, asks :func:`mftik_td.controller.td_reattach`,
+        which is procman's table (B3-03).
 
-        Not implemented (IF-12). B4-07 fills this in.
+        B4-07 names the actions. It does not apply them, and the running
+        process does not call this.
         """
         if isinstance(accounts, str) or not isinstance(accounts, Sequence):
             raise TypeError("accounts must be a sequence of BoundAccount")
@@ -155,8 +212,34 @@ class TdOrchestrator:
         for intent in intents:
             if not isinstance(intent, TdIntentPut):
                 raise TypeError("intents must be a sequence of TdIntentPut")
-        _views(views)
-        unimplemented()
+        observed = _views(views)
+        wanted = desired_accounts(accounts, instance=self.supervisor.instance)
+        by_id = {view.api_id: view for view in observed}
+        wanted_ids = {account.api_id for account in wanted}
+        actions: list[OrchestratorAction] = []
+        for account in wanted:
+            step = _worker_step(
+                account.api_id, DesiredSlot.PRESENT, by_id.get(account.api_id)
+            )
+            if step is not None:
+                actions.append(step)
+        for view in observed:
+            if view.api_id in wanted_ids:
+                continue
+            step = _worker_step(view.api_id, DesiredSlot.ABSENT, view)
+            if step is not None:
+                actions.append(step)
+        for push in trading_pushes(
+            publish=True, accounts=wanted, intents=intents
+        ):
+            actions.append(
+                OrchestratorAction(
+                    kind=ActionKind.PUSH_TRADING,
+                    api_id=push.api_id,
+                    active=push.active,
+                )
+            )
+        return tuple(actions)
 
     def drain_replace(
         self,

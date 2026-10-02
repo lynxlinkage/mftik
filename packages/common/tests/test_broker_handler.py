@@ -560,11 +560,26 @@ def test_the_three_planes_answer_through_this_layer() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the plane routers are rewritten by B4-02 (STS), B4-05 (TD) and B4-07 (MD)",
+@pytest.mark.parametrize(
+    "plane",
+    [
+        pytest.param(
+            "sts",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="B4-02 rewrites the STS router onto this layer",
+            ),
+        ),
+        "md",
+        pytest.param(
+            "td",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="B4-05 rewrites the TD router onto this layer",
+            ),
+        ),
+    ],
 )
-@pytest.mark.parametrize("plane", ["sts", "md", "td"])
 async def test_a_plane_s_health_type_is_answered_by_a_handler(plane: str) -> None:
     """The per-plane form of H1, on the smallest RPC each plane has.
 

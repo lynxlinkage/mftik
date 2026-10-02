@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from mftik.broker import IncomingRequest
 from mftik.protocol import (
     MD_ERROR,
     MD_TAPE_TAIL,
@@ -15,11 +14,14 @@ from mftik.protocol import (
     MdTapeTailRequest,
     RpcError,
     RpcErrorEnvelope,
+    UntypedEnvelope,
 )
 
 from mftik_md.tape_store import decode_tape_gaps
 
 if TYPE_CHECKING:
+    from mftik.broker.handler import Reply
+
     from mftik_md.tape_store import TapeStore
 
 logger = logging.getLogger(__name__)
@@ -40,11 +42,11 @@ def _int_or_none(raw: str | None) -> int | None:
 
 
 async def handle_tape_tail(
-    req: IncomingRequest,
+    message: UntypedEnvelope,
     *,
     store: TapeStore | None = None,
     chunk: int = TAPE_RPC_CHUNK,
-) -> None:
+) -> Reply:
     """Answer ``md.tape.tail`` from this process's Redis.
 
     An empty slice is the honest answer when recording is off, this
@@ -52,14 +54,12 @@ async def handle_tape_tail(
     There is no fallback to another region's disk.
     """
     try:
-        payload = MdTapeTailRequest.model_validate(req.envelope.payload or {})
+        payload = MdTapeTailRequest.model_validate(message.payload or {})
     except Exception as exc:
-        await _error(req, "invalid_payload", str(exc))
-        return
+        return _error(message, "invalid_payload", str(exc))
 
     if store is None:
-        await req.reply(_empty_chunk(payload.feed))
-        return
+        return _empty_chunk(payload.feed)
 
     try:
         coverage = await store.coverage(payload.feed)
@@ -71,26 +71,23 @@ async def handle_tape_tail(
         )
     except Exception as exc:
         logger.exception("md.tape.tail failed feed=%s", payload.feed)
-        await _error(req, "tape_failed", str(exc))
-        return
+        return _error(message, "tape_failed", str(exc))
 
     records = [MdTapeRecord(ms=ms, fields=fields) for _id, ms, fields in page]
     before = page[0][0] if page else ""
-    await req.reply(
-        MdTapeTailChunkEnvelope.wrap(
-            MdTapeTailChunk(
-                feed=payload.feed,
-                records=records,
-                before=before,
-                more=more,
-                continuous_since_ms=_int_or_none(coverage.get("continuous_since_ms")),
-                recording=coverage.get("recording") == "1",
-                gaps=decode_tape_gaps(coverage.get("gaps")),
-            ),
-            type=MD_TAPE_TAIL,
-            source="md",
-            session_id=req.envelope.session_id,
-        )
+    return MdTapeTailChunkEnvelope.wrap(
+        MdTapeTailChunk(
+            feed=payload.feed,
+            records=records,
+            before=before,
+            more=more,
+            continuous_since_ms=_int_or_none(coverage.get("continuous_since_ms")),
+            recording=coverage.get("recording") == "1",
+            gaps=decode_tape_gaps(coverage.get("gaps")),
+        ),
+        type=MD_TAPE_TAIL,
+        source="md",
+        session_id=message.session_id,
     )
 
 
@@ -102,12 +99,10 @@ def _empty_chunk(feed: str) -> MdTapeTailChunkEnvelope:
     )
 
 
-async def _error(req: IncomingRequest, code: str, message: str) -> None:
-    await req.reply(
-        RpcErrorEnvelope.wrap(
-            RpcError(code=code, message=message),
-            type=MD_ERROR,
-            source="md",
-            session_id=req.envelope.session_id,
-        )
+def _error(message: UntypedEnvelope, code: str, text: str) -> RpcErrorEnvelope:
+    return RpcErrorEnvelope.wrap(
+        RpcError(code=code, message=text),
+        type=MD_ERROR,
+        source="md",
+        session_id=message.session_id,
     )

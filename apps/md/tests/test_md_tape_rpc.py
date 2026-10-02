@@ -48,7 +48,9 @@ async def _serve(
 ) -> None:
     async for req in broker.serve(Topics.md("md-jp"), stop=stop):
         if req.envelope.type == MD_TAPE_TAIL:
-            await handle_tape_tail(req, store=store, chunk=chunk)
+            await req.reply(
+                await handle_tape_tail(req.envelope, store=store, chunk=chunk)
+            )
 
 
 async def _record(store: TapeStore, trade_id: str, *, ms: int | None = None) -> None:

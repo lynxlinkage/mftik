@@ -79,14 +79,33 @@ stubs do not guess:
 * ``Capacity.max_messages_per_second`` is a second ceiling (§6.1), but
   nothing in ``place``'s inputs says how many messages one atom costs.
   The tests cover ``max_atoms`` and stickiness only.
-* A gap where the whole procman report stops releases nothing (C8).
-  Whether that gap clears the absence streak — so a miss before a
-  controller roll and a miss on the first report after it would *not*
-  be the two consecutive samples — is not specified.
 * Where the database keeps ``controller_epoch``.
 
-Null data until B8: :func:`desired_atoms`, :func:`place`, :func:`expire`
-and :func:`gc_owners` raise ``NotImplementedError("IF-09")``. The types
+**Pooled ``md`` subject.** A declaration ``md: {"*": …}`` is put on
+:data:`mftik.protocol.Topics.MD`. Whichever MD instance answers that
+put holds the owner's feeds and selects in its own memory. A delete
+that lands on an instance that does not hold the owner still succeeds;
+delete is idempotent. The copy on the other instance is released by
+that instance's report GC (§8.2 rule 3). Holding the declaration is
+B4-07. Resolving feeds is not: :class:`~mftik.protocol.v2.MdIntentPutResult`
+``atoms`` stays empty until paper ``atoms_for`` (B7-02g). This layer
+does not read or write ``md_intents``. A release drops the owner from
+memory only. Rebuilding that memory from the database after a restart
+is B8-01, and until then nothing is pushed to a connection worker from
+an empty held set (P5).
+
+**Owner GC is B4-07.** :func:`gc_owners` is
+:func:`mftik.intent_gc.gc_owners`, re-exported here so the import path
+does not move. A generation that goes backwards is still refused.
+The subscription (:func:`mftik.intent_gc.on_sts_report`) treats a lower
+generation as a new publisher and resets that instance's cursor before
+calling, so a controller roll starts the two-report count again
+(B3-04). A stopped report is not a sample: nobody is released, and the
+absence streak is left as it was. The contract does not say whether a
+gap should clear the streak; leaving it is what "not a sample" means.
+
+Null data until a later ticket: :func:`desired_atoms`, :func:`place`
+and :func:`expire` raise ``NotImplementedError("IF-09")``. The types
 around them are real, the way an atom's identity is real while its
 venue adapter is not.
 
@@ -107,6 +126,8 @@ from datetime import datetime
 
 from mftik.exchange.atoms import Atom, Capacity
 from mftik.exchange.tickers import UniversalTicker
+from mftik.intent_gc import IntentGcError, OwnerGc
+from mftik.intent_gc import gc_owners as _gc_owners
 from mftik.protocol import IntentOwner
 
 from mftik_md.conn import ConnId, Desired, Generation
@@ -388,25 +409,6 @@ class Expiry:
     notices: tuple[ExpiryNotice, ...]
 
 
-@dataclass(frozen=True)
-class OwnerGc:
-    """What one procman report did to the session owners we hold (C8).
-
-    ``release`` is who to drop now. ``absent`` is who was missing from
-    this report and is not yet released, handed back as
-    ``previous_absent`` next time. ``generation`` is the report
-    generation this result consumed, so a replay is recognisable.
-
-    ``release`` is an output. Feeding a previous result's ``release``
-    back in is not how the next call learns anything; ``absent`` and
-    ``generation`` are.
-    """
-
-    release: frozenset[IntentOwner]
-    absent: frozenset[IntentOwner]
-    generation: int | None
-
-
 def desired_atoms(
     demands: Sequence[Demand],
 ) -> Mapping[Atom, frozenset[Owner]]:
@@ -493,34 +495,29 @@ def gc_owners(
     * An owner who is in the report is not released, and is not absent,
       even if the previous report missed them.
     * ``report is None`` means the publication stopped. Release nothing
-      (F32, C8). Whether ``absent`` is cleared by that gap is not
-      specified; the contract test only asserts that nobody is released.
+      (F32, C8). This is not a sample: ``absent`` and ``generation``
+      come back unchanged. The contract test only asserts that nobody
+      is released. The subscription does not call this when no report
+      arrived, which leaves the cursor where it was.
 
     A generation that goes backwards, or a report that arrives without
-    one, is refused. A stopped report has no generation.
+    one, is refused (:class:`ControllerError`). A stopped report has
+    no generation. :func:`mftik.intent_gc.on_sts_report` resets a lower
+    generation before calling, because a new STS process starts its
+    counter again (B3-04).
 
-    B8-01.
+    B4-07. The body is :func:`mftik.intent_gc.gc_owners`.
     """
-    if report is None:
-        if report_generation is not None:
-            raise ControllerError(
-                "a stopped report has no generation; "
-                "pass report_generation=None"
-            )
-    elif report_generation is None:
-        raise ControllerError("a report needs its generation")
-    else:
-        _counter("report_generation", report_generation)
-    if previous_generation is not None:
-        _counter("previous_generation", previous_generation)
-        if (
-            report_generation is not None
-            and report_generation < previous_generation
-        ):
-            raise ControllerError(
-                "report generation went backwards; publications only increase"
-            )
-    raise NotImplementedError(f"{_TICKET}: owner GC is B8-01")
+    try:
+        return _gc_owners(
+            held,
+            previous_absent,
+            previous_generation,
+            report=report,
+            report_generation=report_generation,
+        )
+    except IntentGcError as exc:
+        raise ControllerError(str(exc)) from exc
 
 
 class MdOrchestrator:
@@ -528,9 +525,10 @@ class MdOrchestrator:
 
     Constructing one records the epoch this process was started with and
     nothing else. It does not read the database, publish a generation,
-    or keep the sequence counter (C6). Every method that would decide
-    something raises ``NotImplementedError("IF-09")``; :meth:`generation`
-    only builds the pair.
+    or keep the sequence counter (C6). :meth:`gc_owners` answers (B4-07).
+    :meth:`desired`, :meth:`place` and :meth:`expire` still raise
+    ``NotImplementedError("IF-09")``. :meth:`generation` only builds
+    the pair.
     """
 
     def __init__(self, controller_epoch: int) -> None:

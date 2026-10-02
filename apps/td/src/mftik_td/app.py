@@ -18,6 +18,7 @@ from mftik import (
     serve_health,
 )
 from mftik.broker import Broker
+from mftik.intent_gc import watch_sts_reports
 from mftik.symbols import SymbolClient
 
 from mftik_td import db as td_db
@@ -26,6 +27,7 @@ from mftik_td.backfill import (
     BackfillSession,
     HistoryReaderFactory,
 )
+from mftik_td.controller import intent_book
 from mftik_td.rpc import dispatch
 
 SOURCE = "td"
@@ -128,6 +130,11 @@ async def amain() -> bool:
                 "has and takes nothing new",
                 ROLE.value,
             )
+        # One held set for every subject this process serves. A lower
+        # ``procman.report`` generation is a new STS publisher and resets
+        # that instance before the sample; see
+        # :func:`mftik.intent_gc.watch_sts_reports`.
+        intents = intent_book()
         rpc_tasks = [
             asyncio.create_task(
                 run_rpc(broker, stop, subject=subject),
@@ -135,6 +142,16 @@ async def amain() -> bool:
             )
             for subject in subjects
         ]
+        gc_task = asyncio.create_task(
+            watch_sts_reports(
+                broker,
+                held=intents.owners,
+                release=intents.release_owners,
+                stop=stop,
+                states=intents.gc_states,
+            ),
+            name="td-intent-gc",
+        )
         hb_task = asyncio.create_task(
             broker.heartbeat_loop(
                 SOURCE,
@@ -157,16 +174,18 @@ async def amain() -> bool:
             clean = await run_until_stopped(
                 stop,
                 *rpc_tasks,
+                gc_task,
                 hb_task,
                 health_task,
                 logger=logger,
             )
         finally:
             stop.set()
-            for task in (*rpc_tasks, hb_task, health_task):
+            for task in (*rpc_tasks, gc_task, hb_task, health_task):
                 task.cancel()
             await asyncio.gather(
                 *rpc_tasks,
+                gc_task,
                 hb_task,
                 health_task,
                 return_exceptions=True,
