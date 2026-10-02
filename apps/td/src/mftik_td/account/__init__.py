@@ -7,9 +7,9 @@ where they are; this package is how an account worker holds them.
 Paper order entry is B4-05. ``cancel_session`` is B6-03. The TD
 process spawns ``python -m mftik_td.account`` and does not import
 this package. The warm HTTP pool and its keepalive are the resident
-layer (B6-01). Backfill on that pool is B6-05. Settled
-``oms.view``, ``oms.order``, the broadcast and the dead-man's switch
-stay later B6 tickets.
+layer (B6-01). Backfill on that pool is B6-05. Settled ``oms.view``
+waits for UNKNOWN orders (B6-08). ``oms.order``, the broadcast and
+the dead-man's switch stay later B6 tickets.
 
 **State authority (§3.3).** One writer each.
 
@@ -72,10 +72,11 @@ Subjects the handlers serve are ``td.order.{api_id}`` and
 remain fan-out. See :mod:`mftik_td.account.handlers`.
 
 Null data: reads that have no value yet return ``None`` or an empty
-collection, and ``active`` and ``started`` stay false until paper
+collection, and ``active`` and ``started`` stay false until
 :meth:`ResidentLayer.start` and :meth:`TradingLayer.activate`.
-Actions this ticket does not implement still raise
-``NotImplementedError("IF-11")``.
+A settled ``oms.view`` while the trading layer is down is an error,
+not that empty book. Actions this ticket does not implement still
+raise ``NotImplementedError("IF-11")``.
 """
 
 from mftik_td.account._ticket import TICKET

@@ -358,10 +358,24 @@ async def test_cancel_session_timeout_lists_what_did_not_confirm() -> None:
     assert CID_OTHER in worker.trading.oms.view().orders
 
 
+def _live(oms: Oms, private: object) -> AccountWorker:
+    """A worker whose trading layer is up, on the book ``oms`` already holds.
+
+    The contract tests call the handler directly. A settled read refuses
+    a layer that is not up, so these two mark the session started and
+    the layer active without a venue ``start`` (that path sleeps).
+    """
+    worker = _worker(oms, private)
+    session = worker.trading.session
+    assert session is not None
+    session._started = True
+    worker.trading._active = True
+    return worker
+
+
 # --- settled view (F13) ----------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="B6-08 waits for UNKNOWN on settled=True")
 async def test_settled_view_waits_until_unknown_converges() -> None:
     """``settled=True`` does not answer while an UNKNOWN order is on the book.
 
@@ -374,18 +388,15 @@ async def test_settled_view_waits_until_unknown_converges() -> None:
 
     async def release() -> None:
         nonlocal released
-        await asyncio.sleep(0.05)
         released = True
         gate.set()
 
-    worker = AccountWorker(
-        API,
-        venue="Paper",
-        oms=_book(
+    worker = _live(
+        _book(
             _order(CID_RESTING, OrderStatus.NEW),
             _order(CID_UNKNOWN, OrderStatus.UNKNOWN),
         ),
-        private=_ChaseWhenReleased(gate),
+        _ChaseWhenReleased(gate),
     )
     task = asyncio.create_task(release())
     try:
@@ -397,6 +408,12 @@ async def test_settled_view_waits_until_unknown_converges() -> None:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        session = worker.trading.session
+        chase = None if session is None else session._resolve_all_task
+        if chase is not None and not chase.done():
+            chase.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await chase
 
     assert released
     assert all(
@@ -405,15 +422,10 @@ async def test_settled_view_waits_until_unknown_converges() -> None:
     assert CID_RESTING in view.orders
 
 
-@pytest.mark.xfail(strict=True, reason="B6-08 answers a clean settled view immediately")
 async def test_settled_view_of_a_clean_book_does_not_wait() -> None:
     """No UNKNOWN means no venue pass and no pause (V2)."""
-    worker = AccountWorker(
-        API,
-        venue="Paper",
-        oms=_book(_order(CID_RESTING, OrderStatus.NEW)),
-        private=_ResolvingVenue(),
-    )
+    venue = _ResolvingVenue()
+    worker = _live(_book(_order(CID_RESTING, OrderStatus.NEW)), venue)
     started = time.monotonic()
     view = await worker.oms.view(
         TdOmsViewRequest(api_id=API, settled=True), timeout=1.0
@@ -421,6 +433,7 @@ async def test_settled_view_of_a_clean_book_does_not_wait() -> None:
     assert time.monotonic() - started < 0.2
     assert CID_RESTING in view.orders
     assert view.orders[CID_RESTING].status is OrderStatus.NEW
+    assert venue.fetched == []
 
 
 # --- which countdowns exist (F37) ------------------------------------------

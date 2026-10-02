@@ -127,9 +127,12 @@ async def test_an_offload_pool_call_is_not_implemented_yet() -> None:
     assert await pool.close() is None
 
 
-async def test_a_settled_oms_view_is_not_implemented_yet() -> None:
-    """``view()`` still reads the live book; only the settled read is pending."""
-    with pytest.raises(NotImplementedError, match="IF-06"):
+async def test_a_settled_oms_view_needs_a_session() -> None:
+    """The settled read is real. An unbound OMS has nothing to ask.
+
+    It must not answer an empty book, and it is no longer the IF-06 stub.
+    """
+    with pytest.raises(RuntimeError, match="not bound"):
         await sdk.oms.StrategyOms().view(1, settled=True)
 
 

@@ -1,11 +1,12 @@
 """The account-worker interface IF-11 defines, and that it only returns null.
 
 The shape is real: two layers, the handlers, the broadcast subjects, one
-dead-man's-switch slot per venue. Paper submit, cancel, unsettled
-``oms.view`` and ``ledger.view`` answer. An unwired worker refuses an
-order with ``TD_VENUE_NOT_CONNECTED`` and returns an empty book.
-Starting without a connector, settled ``oms.view``, ``oms.order``,
-keepalive, the broadcast and the dead-man's switch still raise
+dead-man's-switch slot per venue. Paper submit, cancel, ``oms.view``
+and ``ledger.view`` answer. An unwired worker refuses an order with
+``TD_VENUE_NOT_CONNECTED`` and returns an empty unsettled book. A
+settled read on that same worker is the same refusal, not an empty
+book. Starting without a connector, ``oms.order``, keepalive, the
+broadcast and the dead-man's switch still raise
 ``NotImplementedError("IF-11")``. Backfill answers: a payload that is
 not a ``TdBackfill`` is refused, it does not raise. ``cancel_session``
 is B6-03:
@@ -145,7 +146,14 @@ def test_subjects_stay_where_topics_already_put_them() -> None:
 
 
 def test_the_wait_budget_is_the_one_the_settled_read_already_uses() -> None:
+    """TD's wait, the helper's wait, and the SDK's timeout with its margin.
+
+    The SDK must not import this package, so 35 is a literal there.
+    """
+    from mftik.strategy.oms import SETTLED_VIEW_TIMEOUT_S
+
     assert WAIT_TIMEOUT_S == SETTLED_WAIT_TIMEOUT_S == 30.0
+    assert SETTLED_VIEW_TIMEOUT_S == WAIT_TIMEOUT_S + 5
 
 
 def test_an_oms_view_request_without_settled_stays_unsettled() -> None:
@@ -239,6 +247,8 @@ async def test_actions_raise_the_ticket_number() -> None:
     assert backfill is not None
     assert backfill.type == TD_BACKFILL_RESULT
     assert TdBackfillResult.model_validate(backfill.payload).ok is False
+    with pytest.raises(RuntimeError, match="venue is not connected"):
+        await worker.oms.view(TdOmsViewRequest(api_id=API, settled=True))
     calls = [
         worker.resident.start(),
         worker.resident.close(),
@@ -246,7 +256,6 @@ async def test_actions_raise_the_ticket_number() -> None:
         worker.trading.activate(),
         worker.trading.deactivate(),
         worker.oms(message),
-        worker.oms.view(TdOmsViewRequest(api_id=API, settled=True)),
         worker.oms.order(TdOmsOrderRequest(api_id=API, client_order_id="1")),
         worker.ledger(message),
         worker.broadcast.publish("ready"),

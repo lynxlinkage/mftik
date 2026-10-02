@@ -167,8 +167,9 @@ async def test_serve_sends_back_what_the_handler_returned(broker: Broker) -> Non
 async def test_serve_answers_one_message_at_a_time(broker: Broker) -> None:
     """H3. The next message waits until this one has been answered.
 
-    A handler that must not hold the subject starts its own task and returns.
-    This layer does not add concurrency on top of that.
+    A handler that returns a reply is still one message at a time.
+    :class:`~mftik.broker.handler.Detached` is the only opt-in, and this
+    handler does not use it.
     """
     stop = asyncio.Event()
     started = asyncio.Event()

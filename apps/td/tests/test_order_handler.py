@@ -39,7 +39,7 @@ from mftik.protocol import (
     UntypedEnvelope,
 )
 from mftik.strategy.client_order_id import format_client_order_id
-from mftik_td.account import TICKET, AccountWorker
+from mftik_td.account import AccountWorker
 from mftik_td.account.session import Session
 from mftik_td.oms import Oms
 
@@ -187,8 +187,13 @@ async def test_paper_submit_cancel_refusal_and_the_book_after_a_fill() -> None:
 
         ledger = await worker.ledger.view(TdLedgerViewRequest(api_id=API))
         assert ledger.api_id == API
-        with pytest.raises(NotImplementedError, match=TICKET):
-            await worker.oms.view(TdOmsViewRequest(api_id=API, settled=True))
+        settled = await worker.oms.view(
+            TdOmsViewRequest(api_id=API, settled=True), timeout=0
+        )
+        assert all(
+            order.status is not OrderStatus.UNKNOWN
+            for order in settled.orders.values()
+        )
     finally:
         await _stop(worker, exchange)
 

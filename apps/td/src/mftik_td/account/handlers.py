@@ -90,13 +90,23 @@ it.
 * **V3.** ``settled=True`` with ``UNKNOWN`` orders waits until they
   converge or :data:`WAIT_TIMEOUT_S` elapses, then answers with the
   book as it stands. That wait is
-  :func:`mftik_td.session.settled.view_when_settled`, which B6-08
-  points at this handler. A late answer is the book including whatever
-  ``UNKNOWN`` is left, not an error.
+  :func:`mftik_td.session.settled.view_when_settled`. A late answer is
+  the book including whatever ``UNKNOWN`` is left, not an error. The
+  wait does not run on the account subject's serve loop: ``settled=True``
+  returns :class:`~mftik.broker.handler.Detached`, and
+  :func:`mftik.broker.handler.serve` sends that reply from a task.
+  Every other type on ``td.account.{api_id}`` stays sequential.
 
-Paper submit, cancel, unsettled ``oms.view``, ``ledger.view`` and
-``cancel_session`` (B6-03) answer. ``oms.order`` (B6-02) and
-``settled=True`` (B6-08) still raise ``NotImplementedError("IF-11")``.
+The trading layer being down is not an empty book. ``settled=True``
+while :attr:`~mftik_td.account.trading.TradingLayer.active` is false,
+the session is missing, not started, or destroyed, answers
+``TD_VENUE_NOT_CONNECTED`` — the same refusal a submit gets there —
+as a :class:`~mftik.protocol.RpcError` envelope. A strategy must not
+read "no orders" off an account that is simply closed.
+
+Paper submit, cancel, ``oms.view`` (settled and not), ``ledger.view``
+and ``cancel_session`` (B6-03) answer. ``oms.order`` still raises
+``NotImplementedError("IF-11")``.
 """
 
 from __future__ import annotations
@@ -108,7 +118,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mftik.broker.handler import Handler, Reply
+from mftik.broker.handler import Detached, Handler, Reply
 from mftik.clock import Clock, SystemClock
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.models import Order, OrderStatus, PlaceOrderRequest
@@ -148,6 +158,7 @@ from pydantic import ValidationError
 from mftik_td.account._ticket import TICKET
 from mftik_td.account.session import UNKNOWN_RESOLVE_TIMEOUT_S
 from mftik_td.errors import is_unfilled_immediate, normalize
+from mftik_td.session.settled import view_when_settled
 
 logger = logging.getLogger(__name__)
 
@@ -158,13 +169,30 @@ if TYPE_CHECKING:
 #: How long ``cancel_session`` and ``settled=True`` wait.
 #:
 #: The plan says both time out and answer with what is left; it does
-#: not name a duration. The settled read already waits 30 seconds
-#: (:data:`~mftik_td.session.settled.SETTLED_WAIT_TIMEOUT_S`). This is
-#: that same budget, copied so this package does not import
-#: :mod:`mftik_td.session`. B6-08 will call into that helper from here,
-#: and an import the other way would cycle. A test locks the two
-#: numbers together. B6 can split them if a measurement says they differ.
+#: not name a duration. The settled helper's own default is the same
+#: 30 seconds (:data:`~mftik_td.session.settled.SETTLED_WAIT_TIMEOUT_S`).
+#: :meth:`OmsHandler.view` passes this budget into that helper, so the
+#: two waits share one number here. A test locks them together. B6 can
+#: split them if a measurement says they differ.
 WAIT_TIMEOUT_S = 30.0
+
+#: ``RpcError.code`` when a settled read is refused because the private
+#: book is not up. The same refusal a submit gets
+#: (:attr:`~mftik.protocol.RejectCode.TD_VENUE_NOT_CONNECTED`).
+#: :class:`~mftik.protocol.RpcError.code` is a string, so the int is
+#: rendered rather than sent as a number.
+_VENUE_OFF = str(int(RejectCode.TD_VENUE_NOT_CONNECTED))
+
+
+class TradingClosed(RuntimeError):
+    """A settled read was asked while the private book is not up.
+
+    The answer is an error, not an empty snapshot. An empty snapshot
+    would tell a strategy it holds nothing on an account that is closed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("venue is not connected")
 
 
 def _timeout(timeout: float) -> float:
@@ -1062,11 +1090,13 @@ class OmsHandler:
         """The request subject. Not ``td.oms.{api_id}``, which is fan-out."""
         return Topics.td_account(api_id)
 
-    async def __call__(self, message: UntypedEnvelope) -> Reply | None:
+    async def __call__(self, message: UntypedEnvelope) -> Reply | Detached | None:
         """Dispatch one OMS read.
 
-        Unsettled ``oms.view`` answers from memory. ``oms.order`` is
-        B6-02 and ``settled=True`` is B6-08; both still raise.
+        Unsettled ``oms.view`` answers from memory, on the subject
+        loop. ``settled=True`` returns :class:`Detached` so the wait
+        does not hold ``td.account.{api_id}``. ``oms.order`` is still
+        ``NotImplementedError("IF-11")``.
         """
         if message.type == TD_OMS_ORDER:
             raise NotImplementedError(TICKET)
@@ -1076,13 +1106,41 @@ class OmsHandler:
             request = TdOmsViewRequest.model_validate(message.payload or {})
         except ValidationError as exc:
             return _error(message, "invalid_payload", str(exc))
-        view = await self.view(request)
-        return Envelope[OmsView].wrap(
-            view,
-            type=TD_OMS_VIEW,
-            source="td",
-            session_id=message.session_id,
-        )
+        if not request.settled:
+            return _oms_reply(message, await self.view(request))
+        try:
+            self._require_trading()
+        except TradingClosed as exc:
+            return _venue_off(message, exc)
+        return Detached(self._settled_reply(message, request))
+
+    async def _settled_reply(
+        self, message: UntypedEnvelope, request: TdOmsViewRequest
+    ) -> Reply:
+        """The settled snapshot, or the venue-off error if the book closed."""
+        try:
+            view = await self.view(request)
+        except TradingClosed as exc:
+            return _venue_off(message, exc)
+        return _oms_reply(message, view)
+
+    def _require_trading(self) -> None:
+        """Refuse a settled read that would describe a closed account.
+
+        ``active`` is false until :meth:`Session.start` has returned,
+        and false again after deactivate. A missing, unstarted or
+        destroyed session is the same refusal: there is no live book
+        to call settled.
+        """
+        trading = self._worker.trading
+        session = trading.session
+        if (
+            not trading.active
+            or session is None
+            or session.destroyed
+            or not session.started
+        ):
+            raise TradingClosed()
 
     async def view(
         self,
@@ -1093,14 +1151,24 @@ class OmsHandler:
         """The live book. ``request.settled`` selects V1 or V2/V3.
 
         ``timeout`` bounds the settled wait only. A non-settled read
-        ignores it and does not touch the venue (V1).
+        ignores it and does not touch the venue (V1). A settled read
+        of a book that is not up raises :class:`TradingClosed` rather
+        than returning whatever is in memory.
         """
         if not isinstance(request, TdOmsViewRequest):
             raise TypeError("view expects TdOmsViewRequest")
         _timeout(timeout)
-        if request.settled:
-            raise NotImplementedError(TICKET)
-        return self._worker.trading.oms.view()
+        if not request.settled:
+            return self._worker.trading.oms.view()
+        self._require_trading()
+        session = self._worker.trading.session
+        # ``_require_trading`` just rejected a missing session.
+        assert session is not None
+        view = await view_when_settled(session, timeout=timeout)
+        # Deactivate can land while the wait is parked. The snapshot
+        # taken after that is not a settled read of a live account.
+        self._require_trading()
+        return view
 
     async def order(self, request: TdOmsOrderRequest) -> Order | None:
         """One live order by ``client_order_id``, or ``None`` if it is gone.
@@ -1157,10 +1225,23 @@ class LedgerHandler:
         return LedgerView(api_id=self._worker.api_id, balances=balances)
 
 
+def _oms_reply(message: UntypedEnvelope, view: OmsView) -> Reply:
+    return Envelope[OmsView].wrap(
+        view,
+        type=TD_OMS_VIEW,
+        source="td",
+        session_id=message.session_id,
+    )
+
+
+def _venue_off(message: UntypedEnvelope, exc: TradingClosed) -> Reply:
+    return _error(message, _VENUE_OFF, str(exc))
+
+
 def account_subject_handler(worker: AccountWorker) -> Handler:
     """``td.account.{api_id}``: OMS, the ledger, backfill, the trading bit."""
 
-    async def handle(message: UntypedEnvelope) -> Reply | None:
+    async def handle(message: UntypedEnvelope) -> Reply | Detached | None:
         if message.type == TD_ACCOUNT_TRADING:
             return await worker.trading.handle(message)
         if message.type == TD_BACKFILL:

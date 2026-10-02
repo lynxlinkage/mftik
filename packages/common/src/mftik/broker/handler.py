@@ -39,10 +39,14 @@ anything, which is why there is no class to instantiate.
   worth answering (:func:`~mftik.protocol.probe_is_stale`), a message whose
   requester has gone, a fan-out message that was never a question. Each of
   those is a handler returning ``None``, and :func:`serve` sends nothing.
-* **H3 — one message at a time, in arrival order.** :func:`serve` awaits the
-  handler before reading the next message, which is what every plane's loop
-  does today. A handler that must not hold up its subject starts a task and
-  returns; it does not get concurrency from this layer.
+* **H3 — one message at a time, in arrival order, unless the handler
+  opts out.** :func:`serve` awaits the handler before reading the next
+  message. A handler that must not hold its subject returns
+  :class:`Detached`; :func:`serve` then sends that one reply from a task
+  and keeps reading. The cap on those tasks is
+  :data:`SETTLED_MAX_CONCURRENT`. A handler that returns a reply or
+  ``None`` stays strictly sequential, and nothing here turns the opt-in
+  on by itself.
 * **H4 — only ``stop`` or cancellation ends the loop.** Every other failure is
   logged and the loop is rebuilt, because a process whose control subject went
   silent keeps trading with nothing able to stop it.
@@ -67,6 +71,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mftik.protocol import Envelope, UntypedEnvelope
@@ -85,9 +90,37 @@ logger = logging.getLogger(__name__)
 #: subject nobody is answering costs more than a reconnect attempt does.
 RESTART_DELAY_SECONDS = 1.0
 
+# provisional, pending Yi Te (#286)
+#: How many :class:`Detached` replies :func:`serve` may run at once.
+#:
+#: The account subject's settled OMS read is the caller this exists for:
+#: that wait is up to 30 seconds, and the same subject also carries the
+#: trading bit, the ledger and the unsettled book. The plan does not
+#: name the cap. A handler that does not return :class:`Detached` never
+#: uses it — the sequential path is what :func:`serve` does unless asked.
+SETTLED_MAX_CONCURRENT = 8
+
 #: What a handler answers with. Untyped in the signature because every reply has
 #: a different payload model, and the handler is the one that knows which.
 Reply = Envelope[Any]
+
+
+class Detached:
+    """A reply :func:`serve` should send from a task.
+
+    The handler builds ``work`` and returns this instead of awaiting it.
+    :func:`serve` keeps reading the subject and sends whatever ``work``
+    produces when it finishes. A handler that returns a :data:`Reply` or
+    ``None`` does not take this path, so the opt-in is off by default.
+
+    ``work`` must not touch the transport (H1). The reply it produces is
+    what :func:`serve` sends.
+    """
+
+    __slots__ = ("work",)
+
+    def __init__(self, work: Awaitable[Reply | None]) -> None:
+        self.work = work
 
 
 class Handler(Protocol):
@@ -105,8 +138,12 @@ class Handler(Protocol):
     controller (F40); that handler's signature is IF-16, not this module.
     """
 
-    async def __call__(self, message: UntypedEnvelope) -> Reply | None:
-        """Answer ``message``, or return ``None`` to send nothing (H2)."""
+    async def __call__(self, message: UntypedEnvelope) -> Reply | Detached | None:
+        """Answer ``message``, or return ``None`` to send nothing (H2).
+
+        :class:`Detached` is the opt-in for a reply that must not hold
+        the subject (H3). The default, a reply or ``None``, is sequential.
+        """
 
 
 async def serve(
@@ -116,6 +153,7 @@ async def serve(
     *,
     stop: asyncio.Event | None = None,
     restart_delay: float = RESTART_DELAY_SECONDS,
+    detached_limit: int = SETTLED_MAX_CONCURRENT,
 ) -> None:
     """Run ``handler`` on every request to ``subject`` until ``stop``.
 
@@ -129,19 +167,43 @@ async def serve(
     what a worker whose shutdown is a signal wants; a plane that stops by
     setting an event should pass it, so the loop ends where the event does
     rather than where the cancellation lands.
+
+    ``detached_limit`` caps how many :class:`Detached` replies run at once.
+    It does nothing until a handler returns one. Extra detached replies wait
+    for a slot inside their own task, so the subject loop is not the thing
+    that waits.
     """
-    while stop is None or not stop.is_set():
+    if type(detached_limit) is bool or not isinstance(detached_limit, int):
+        raise TypeError(
+            f"detached_limit must be an int >= 1, got {detached_limit!r}"
+        )
+    if detached_limit < 1:
+        raise ValueError(
+            f"detached_limit must be an int >= 1, got {detached_limit!r}"
+        )
+    pending: set[asyncio.Task[None]] = set()
+    slots = asyncio.Semaphore(detached_limit)
+
+    async def _run_detached(request: Any, work: Awaitable[Reply | None]) -> None:
         try:
-            async for request in broker.serve(subject, stop=stop):
-                reply = await _answer(handler, subject, request.envelope)
+            async with slots:
+                try:
+                    reply = await work
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "handler failed subject=%s type=%s id=%s",
+                        subject,
+                        request.envelope.type,
+                        request.envelope.id,
+                    )
+                    return
                 if reply is None:
-                    continue
+                    return
                 try:
                     await request.reply(reply)
                 except Exception:
-                    # The answer is built and the requester may still be
-                    # waiting for it, but one undeliverable reply is not a
-                    # reason to stop answering the rest.
                     logger.exception(
                         "reply failed subject=%s type=%s id=%s",
                         subject,
@@ -150,26 +212,62 @@ async def serve(
                     )
         except asyncio.CancelledError:
             raise
-        except Exception:
-            # Reaching here means something ``Broker.serve`` does not already
-            # handle, and the answer is still to serve: this coroutine
-            # returning is how a plane ends up alive with its control subject
-            # silent and no line anywhere saying so.
-            logger.exception(
-                "serve loop failed subject=%s — restarting", subject
-            )
-            if stop is None:
-                await asyncio.sleep(restart_delay)
-                continue
+
+    try:
+        while stop is None or not stop.is_set():
             try:
-                await asyncio.wait_for(stop.wait(), timeout=restart_delay)
-            except TimeoutError:
-                continue
+                async for request in broker.serve(subject, stop=stop):
+                    outcome = await _answer(handler, subject, request.envelope)
+                    if isinstance(outcome, Detached):
+                        task = asyncio.create_task(
+                            _run_detached(request, outcome.work),
+                            name=f"serve-detached-{subject}",
+                        )
+                        pending.add(task)
+                        task.add_done_callback(pending.discard)
+                        continue
+                    reply = outcome
+                    if reply is None:
+                        continue
+                    try:
+                        await request.reply(reply)
+                    except Exception:
+                        # The answer is built and the requester may still be
+                        # waiting for it, but one undeliverable reply is not a
+                        # reason to stop answering the rest.
+                        logger.exception(
+                            "reply failed subject=%s type=%s id=%s",
+                            subject,
+                            request.envelope.type,
+                            request.envelope.id,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Reaching here means something ``Broker.serve`` does not already
+                # handle, and the answer is still to serve: this coroutine
+                # returning is how a plane ends up alive with its control subject
+                # silent and no line anywhere saying so.
+                logger.exception(
+                    "serve loop failed subject=%s — restarting", subject
+                )
+                if stop is None:
+                    await asyncio.sleep(restart_delay)
+                    continue
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=restart_delay)
+                except TimeoutError:
+                    continue
+    finally:
+        for task in list(pending):
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def _answer(
     handler: Handler, subject: str, message: UntypedEnvelope
-) -> Reply | None:
+) -> Reply | Detached | None:
     """``handler(message)``, with its failures kept off the loop (H5)."""
     try:
         return await handler(message)
@@ -185,6 +283,8 @@ async def _answer(
 
 __all__ = [
     "RESTART_DELAY_SECONDS",
+    "SETTLED_MAX_CONCURRENT",
+    "Detached",
     "Handler",
     "Reply",
     "serve",
