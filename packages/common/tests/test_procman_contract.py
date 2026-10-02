@@ -343,8 +343,8 @@ def test_s2_killing_the_shim_stops_the_worker_gracefully(tmp_path: Path) -> None
         worker_pid = status.pid
         assert worker_pid is not None
         os.kill(spawned.pid, signal.SIGKILL)
-        _wait_for(marker.exists)
-        assert marker.read_text() == "sigterm"
+        # ``open`` creates the file before the write is visible.
+        _wait_for(lambda: marker.is_file() and marker.read_text() == "sigterm")
         _wait_for(lambda: not _alive(worker_pid), timeout_s=spec.stop_grace_s)
         assert not exit_record_path(tmp_path, spec.id).exists()
         assert not exit_record_tmp_path(tmp_path, spec.id).exists()
@@ -429,9 +429,13 @@ def test_s5_signal_reaches_the_workers_process_group(tmp_path: Path) -> None:
     with _running(spec, tmp_path) as spawned:
         _wait_for(ready.exists)
         ShimClient(spawned.socket).signal(signal.SIGTERM)
-        _wait_for(lambda: parent_marker.exists() and child_marker.exists())
-        assert parent_marker.read_text() == "sigterm"
-        assert child_marker.read_text() == "sigterm"
+        # ``open`` creates the file before the write is visible.
+        _wait_for(
+            lambda: parent_marker.is_file()
+            and child_marker.is_file()
+            and parent_marker.read_text() == "sigterm"
+            and child_marker.read_text() == "sigterm"
+        )
 
 
 @pytest.mark.integration
@@ -502,8 +506,8 @@ def test_s7_sigterm_to_the_shim_is_forwarded_and_the_shim_stays(
     try:
         _wait_for(ready.exists)
         os.kill(spawned.pid, signal.SIGTERM)
-        _wait_for(marker.exists)
-        assert marker.read_text() == "sigterm"
+        # ``open`` creates the file before the write is visible.
+        _wait_for(lambda: marker.is_file() and marker.read_text() == "sigterm")
         assert _alive(spawned.pid)
         status = ShimClient(spawned.socket).status()
         assert status.exit_code == 0
