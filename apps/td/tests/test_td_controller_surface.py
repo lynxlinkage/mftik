@@ -2,10 +2,9 @@
 
 The shape is real: an account binding, a trading bit, an action, and the
 worker spec procman is allowed to see (``restart`` is ``on_failure``).
-The account set, the trading level, the spawn gate and intent put /
-delete answer (B4-07). Drain-replace still raises
-``NotImplementedError("IF-12")``. Reconcile of an account this instance
-owns asks procman's table, which is B3-03.
+The account set, the trading level, the spawn gate, reconcile and
+intent put / delete answer (B4-07, B3-03). Drain-replace still raises
+``NotImplementedError("IF-12")``.
 
 What B3 and B6-04 still have to make true is in
 ``test_td_controller_contract.py``, as xfail.
@@ -348,7 +347,7 @@ def test_a_bad_argument_is_refused_before_the_stub() -> None:
 def test_reconcile_of_another_instance_is_empty_and_drain_still_raises(
     tmp_path: Path,
 ) -> None:
-    """A view of this instance asks the procman table (B3-03). Drain is B6-04."""
+    """Another instance is not spawned here. Drain-replace is still B6-04."""
     orch = _orch(tmp_path)
     view = AccountView(
         api_id=7,

@@ -1,10 +1,10 @@
 """What the TD controller does (IF-12, B4-07).
 
-The account set, the trading level, the spawn gate and restart planning
-answer. What is still ``xfail(strict=True)`` is the §4.4 table (B3-03,
-``NotImplementedError("IF-03")`` inside reconcile) and drain-replace
-(B6-04). ``strict`` is the point: the ticket that implements one of
-those cannot merge while the marker is still on it.
+The account set, the trading level, the spawn gate, restart planning
+and reconcile answer. Reconcile uses procman's §4.4 table (B3-03).
+What is still ``xfail(strict=True)`` is drain-replace (B6-04).
+``strict`` is the point: that ticket cannot merge while the marker is
+still on it.
 
 Nothing here starts a process or opens ``/proc``. The pid fence is the
 supervisor's observation on :class:`~mftik_td.controller.AccountView`,
@@ -46,9 +46,6 @@ from mftik_td.controller import (
     trading_pushes,
 )
 
-_ACCOUNTS = "B4-07: desired accounts and the trading level"
-_F36 = "B3-03 fences the pid; B4-07 names a spawn only after it is gone (F36)"
-_REATTACH = "B4-07 delegates to reattach_action; B3-03 implements the table"
 _DRAIN = "B6-04 drain-replaces one account (F27)"
 
 
@@ -209,7 +206,6 @@ def test_spawn_allowed_requires_the_old_pid_to_be_gone() -> None:
     assert spawn_allowed(previous=False, pid_gone=True) is True
 
 
-@pytest.mark.xfail(strict=True, reason=_REATTACH)
 @pytest.mark.parametrize(
     ("desired", "observed"),
     [
@@ -231,7 +227,6 @@ def test_td_reattach_is_the_procman_table(
     )
 
 
-@pytest.mark.xfail(strict=True, reason=_F36)
 def test_the_first_incarnation_does_not_wait_for_a_pid(tmp_path: Path) -> None:
     actions = _orch(tmp_path).reconcile((_account(),), (), ())
     spawns = [action for action in actions if action.kind is ActionKind.SPAWN]
@@ -242,7 +237,6 @@ def test_the_first_incarnation_does_not_wait_for_a_pid(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.xfail(strict=True, reason=_F36)
 def test_a_new_incarnation_is_not_named_while_the_old_pid_is_alive(
     tmp_path: Path,
 ) -> None:
@@ -251,7 +245,6 @@ def test_a_new_incarnation_is_not_named_while_the_old_pid_is_alive(
     assert all(action.kind is not ActionKind.SPAWN for action in actions)
 
 
-@pytest.mark.xfail(strict=True, reason=_F36)
 def test_a_new_incarnation_is_named_once_the_old_pid_is_gone(tmp_path: Path) -> None:
     view = _view(observed=ObservedWorker.EXITED, pid_gone=True, incarnation=1)
     actions = _orch(tmp_path).reconcile((_account(),), (), (view,))
@@ -261,14 +254,12 @@ def test_a_new_incarnation_is_named_once_the_old_pid_is_gone(tmp_path: Path) -> 
     ]
 
 
-@pytest.mark.xfail(strict=True, reason=_F36)
 def test_a_lost_worker_is_not_replaced_while_its_pid_is_alive(tmp_path: Path) -> None:
     view = _view(observed=ObservedWorker.LOST, pid_gone=False, incarnation=2)
     actions = _orch(tmp_path).reconcile((_account(),), (), (view,))
     assert all(action.kind is not ActionKind.SPAWN for action in actions)
 
 
-@pytest.mark.xfail(strict=True, reason=_F36)
 def test_a_running_account_is_not_spawned_beside_itself(tmp_path: Path) -> None:
     """ADOPT. The live pid is the incarnation (P4, F36)."""
     view = _view(observed=ObservedWorker.RUNNING, pid_gone=False, incarnation=4)
@@ -277,7 +268,6 @@ def test_a_running_account_is_not_spawned_beside_itself(tmp_path: Path) -> None:
     assert all(action.kind is not ActionKind.STOP for action in actions)
 
 
-@pytest.mark.xfail(strict=True, reason=_F36)
 def test_an_account_that_is_no_longer_desired_is_stopped(tmp_path: Path) -> None:
     view = _view(observed=ObservedWorker.RUNNING, pid_gone=False, incarnation=4)
     actions = _orch(tmp_path).reconcile((), (), (view,))
@@ -293,7 +283,6 @@ def test_reconcile_does_not_spawn_another_instances_account(tmp_path: Path) -> N
     assert all(action.api_id != 8 for action in actions)
 
 
-@pytest.mark.xfail(strict=True, reason=_ACCOUNTS)
 def test_reconcile_pushes_the_trading_level_for_desired_accounts(
     tmp_path: Path,
 ) -> None:
