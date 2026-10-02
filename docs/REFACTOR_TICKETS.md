@@ -611,7 +611,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
   - 拿掉 `apps/`、`packages/` 裡所有 `pending Yi Te` 與指向 #286 的「待決」標記；註解改成說明這個值的依據（量測、交易所文件、或「預設值，依量測調整」）
   - 在計畫附錄 D 填一張表：常數名稱、值、位置、用途、依據
   - F42 要改值的常數（重啟曲線、TD 帳號與 MD 連線的 heartbeat timeout）由 B3-08、B6-09、B8-02 改；這張票只記錄現值，不改值
-  - 例外（#296）：`MUST_DELIVER_CAPACITY` 不再等於 `ALL_QUEUE_CAPACITY`，改為 8192。行情佇列溢位只丟最舊的，must-deliver 溢位會讓 session fail，兩者不該共用同一個數字
+  - 例外（#296）：`MUST_DELIVER_CAPACITY` 不再等於 `ALL_QUEUE_CAPACITY`，改為 8192；`Delivery` 與 `Ingress` 改收兩個上限（現在只有一個 `capacity`）。行情佇列溢位只丟最舊的，must-deliver 溢位會讓 session fail，兩者不該共用同一個數字
   - `scripts/` 或 CI 加一個檢查：`pending Yi Te` 不得出現在 `apps/`、`packages/`
 - **驗收：** `git grep -n "pending Yi Te"` 在 `apps/`、`packages/` 沒有結果；附錄 D 列出的常數和代碼一致；CI 檢查在加回標記時會失敗。
 - **依賴：** —
