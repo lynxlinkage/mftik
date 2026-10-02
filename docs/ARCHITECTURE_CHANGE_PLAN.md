@@ -647,7 +647,7 @@ TD 帳號 worker 對每個啟用帳號常駐（F35），所以 TD 平面固定�
    | ingress 同時消化 MD，4953 筆/秒（目標 8000；送出 4459、讀到 4405） | 0.014 ms | 0.14 ms | 0.29 ms | lag p50 0.092 ms、p99 0.29 ms；wall p50 0.22 ms；timeout 0 |
    | 策略 loop 純 Python hook 100 ms | 62 ms | 89 ms | 94 ms | ingress 在 hook 開始後 p50 38 ms（p99 63 ms）讀到回覆；callback 在 hook 結束後 p99 0.042 ms 才跑；timeout 0 |
 
-   hook 佔住策略 loop 時，future 要等 hook 回到 loop 才完成，所以 hop 約是 hook 剩下的時間。timeout 在 ingress 讀到 bytes 時用 ingress 的時鐘判斷；這 100 ms 的 hook 裡讀得到，2 秒的 ack timeout 還有餘裕。paper 帳號 worker 上 `submit_order` 的牆鐘（n=100，含 TD 與 paper engine，第一筆 warmup 不計）：p50 205 ms、p99 206 ms、max 206 ms，沒有拒絕。上面的 hop 是 0.01 ms 這個量級，這 205 ms 是 paper 路徑的牆鐘。
+   hook 佔住策略 loop 時，future 要等 hook 回到 loop 才完成，所以 hop 約是 hook 剩下的時間。timeout 在 ingress 讀到 bytes 時用 ingress 的時鐘判斷；這 100 ms 的 hook 裡讀得到，2 秒的 ack timeout 還有餘裕。paper 帳號 worker 上 `submit_order` 的牆鐘（n=100，含 TD 與 paper engine，第一筆 warmup 不計；B6-02 之後先把 `td.account.trading` 設成 active，否則同一筆單立刻以 107 拒絕、牆鐘約 0.4 ms，不是成交）：min 203.2 ms、p50 204.5 ms、p99 206.0 ms、max 206.2 ms，沒有拒絕。上面的 hop 是 0.01 ms 這個量級，這約 205 ms 是 paper 路徑的牆鐘。
 
 **ingress thread 的生命週期：與進程同生共死，也就是與 session 同生共死。**
 

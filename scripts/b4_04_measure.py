@@ -1351,6 +1351,7 @@ async def measure_paper(*, n: int, timeout_s: float = 2.0) -> dict[str, Any]:
     from mftik.exchange import PaperExchange
     from mftik.exchange.models import OrderType, Side
     from mftik.procman import CloseMode, Supervisor, WorkerPhase, log_path
+    from mftik.protocol import TD_ACCOUNT_TRADING, TdAccountTrading
     from mftik.strategy import Strategy
     from mftik.strategy.eventlog import EventLog
     from mftik_db.models import Base
@@ -1464,6 +1465,24 @@ async def measure_paper(*, n: int, timeout_s: float = 2.0) -> dict[str, Any]:
         if not ready:
             logs = _worker_logs(work, api_id, log_path, account_worker_id)
             raise RuntimeError(f"paper worker not ready phase={phase}\n{logs}")
+        # B6-02: the trading layer stays down until this bit is pushed.
+        # An order before that is TD_VENUE_NOT_CONNECTED, not a paper fill.
+        trading = await paper_broker.request(
+            Topics.td_account(api_id),
+            Envelope[TdAccountTrading].wrap(
+                TdAccountTrading(api_id=api_id, active=True),
+                type=TD_ACCOUNT_TRADING,
+                source="b404",
+            ),
+            timeout=8,
+        )
+        if trading.type != TD_ACCOUNT_TRADING:
+            logs = _worker_logs(work, api_id, log_path, account_worker_id)
+            raise RuntimeError(f"trading not armed type={trading.type}\n{logs}")
+        armed = TdAccountTrading.model_validate(trading.payload)
+        if not armed.active:
+            logs = _worker_logs(work, api_id, log_path, account_worker_id)
+            raise RuntimeError(f"trading stayed down\n{logs}")
         await harness.start()
 
         async def _submit() -> None:
