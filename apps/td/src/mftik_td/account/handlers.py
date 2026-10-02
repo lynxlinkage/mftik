@@ -59,10 +59,12 @@ B4-05. ``cancel_session`` (B6-03), ``oms.order`` (B6-02) and
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from mftik.broker.handler import Handler, Reply
-from mftik.exchange.models import Order, PlaceOrderRequest
+from mftik.exchange.errors import ExchangeError
+from mftik.exchange.models import Order, OrderStatus, PlaceOrderRequest
 from mftik.exchange.oms import LedgerView, OmsView
 from mftik.exchange.order_check import REDUCE_ONLY, VENUE, classify
 from mftik.exchange.tickers import InvalidTickerError, UniversalTicker
@@ -95,6 +97,8 @@ from pydantic import ValidationError
 
 from mftik_td.account._ticket import TICKET
 from mftik_td.errors import is_unfilled_immediate, normalize
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from mftik_td.account.session import Session
@@ -233,8 +237,10 @@ class OrderHandler:
         await session.record_pending_new(order, session_id=request.session_id)
         try:
             placed = await session.private.place_order(order)
-        except Exception as exc:
+        except ExchangeError as exc:
             return await self._submit_failed(session, request, exc)
+        except Exception as exc:
+            return await self._submit_ambiguous(session, request, exc)
         await session.accept_venue_order(placed)
         return OrderAck(
             api_id=request.api_id,
@@ -262,9 +268,11 @@ class OrderHandler:
             cancelled = await session.private.cancel_by_client_order_id(
                 request.client_order_id
             )
-        except Exception as exc:
+        except ExchangeError as exc:
             await session.revert_pending_cancel(request.client_order_id)
             return await self._cancel_failed(session, request, exc)
+        except Exception as exc:
+            return await self._cancel_ambiguous(session, request, exc)
         await session.accept_venue_order(cancelled)
         return OrderAck(
             api_id=request.api_id,
@@ -392,6 +400,76 @@ class OrderHandler:
             reason=str(exc),
             client_order_id=request.client_order_id,
             error_code=code,
+        )
+        return OrderAck(
+            api_id=request.api_id,
+            client_order_id=request.client_order_id,
+            accepted=True,
+        )
+
+    async def _submit_ambiguous(
+        self, session: Session, request: OrderSubmit, exc: BaseException
+    ) -> OrderAck:
+        """The send failed. The order may already be resting.
+
+        An :class:`~mftik.exchange.errors.ExchangeError` is the venue
+        saying no, and that path rejects. Anything else is the transport
+        (RM-06): mark ``UNKNOWN`` and ask the venue. Publish
+        ``TD_SEND_FAILED`` only when that lookup proves the order never
+        landed. No answer leaves the order ``UNKNOWN`` for recon.
+        """
+        logger.exception(
+            "TD order submit failed api_id=%s cid=%s",
+            request.api_id,
+            request.client_order_id,
+        )
+        settled = await session.mark_unknown_and_resolve(
+            request.client_order_id,
+            if_missing=OrderStatus.REJECTED,
+        )
+        if settled is not None and settled.status is OrderStatus.REJECTED:
+            await session.publish_order_reject(
+                reason=str(exc),
+                client_order_id=request.client_order_id,
+                universal_ticker=request.universal_ticker,
+                error_code=RejectCode.TD_SEND_FAILED,
+            )
+        elif settled is None:
+            logger.warning(
+                "order UNKNOWN api_id=%s cid=%s "
+                "(send failed, resolve deferred): %s",
+                request.api_id,
+                request.client_order_id,
+                exc,
+            )
+        return OrderAck(
+            api_id=request.api_id,
+            client_order_id=request.client_order_id,
+            accepted=True,
+        )
+
+    async def _cancel_ambiguous(
+        self, session: Session, request: OrderCancel, exc: BaseException
+    ) -> OrderAck:
+        """The cancel send failed. Do not put the order back to working.
+
+        The cancel may already have landed. Tell STS the attempt is
+        ambiguous, then mark ``UNKNOWN``. ``if_missing=CANCELED`` is
+        used only when the venue can say the order is gone.
+        """
+        logger.exception(
+            "TD order cancel failed api_id=%s cid=%s",
+            request.api_id,
+            request.client_order_id,
+        )
+        await session.publish_cancel_reject(
+            reason=str(exc),
+            client_order_id=request.client_order_id,
+            error_code=RejectCode.TD_SEND_FAILED,
+        )
+        await session.mark_unknown_and_resolve(
+            request.client_order_id,
+            if_missing=OrderStatus.CANCELED,
         )
         return OrderAck(
             api_id=request.api_id,
