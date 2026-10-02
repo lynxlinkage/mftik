@@ -8,8 +8,8 @@ The exit file is what the shim leaves on disk after it reaps the worker,
 before it waits for ``release`` (S3).
 
 Framing is real. Opening a socket or writing the file is
-:mod:`mftik.procman.shim`, which raises until B3-01. Types here use the
-standard library only (F29).
+:mod:`mftik.procman.shim` (B3-01). Types here use the standard library
+only (F29).
 """
 
 from __future__ import annotations
@@ -52,6 +52,24 @@ def socket_path(work_dir: Path, worker_id: str) -> Path:
     trailing NUL); B3 keeps ``WORK_DIR`` short enough for the longest id.
     """
     return run_dir(work_dir) / f"{validate_worker_id(worker_id)}.sock"
+
+
+_LOG_STREAMS = frozenset({"stdout", "stderr", "status"})
+
+
+def log_path(work_dir: Path, worker_id: str, stream: str) -> Path:
+    """``${WORK_DIR}/run/<worker_id>.<stream>.log`` (S4).
+
+    ``stream`` is ``stdout``, ``stderr`` or ``status``. The shim holds
+    the worker's stdio and the status pipe and writes them here, rotating
+    when a file outgrows the shim's limit. The backup names are the
+    shim's; this helper is the live file.
+    """
+    if stream not in _LOG_STREAMS:
+        raise ValueError(
+            f"log stream {stream!r} is not one of {', '.join(sorted(_LOG_STREAMS))}"
+        )
+    return run_dir(work_dir) / f"{validate_worker_id(worker_id)}.{stream}.log"
 
 
 def exit_record_path(work_dir: Path, worker_id: str) -> Path:

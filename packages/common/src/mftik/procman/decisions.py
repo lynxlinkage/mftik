@@ -1,4 +1,7 @@
-"""Decisions the supervisor will make. Each one raises until B3.
+"""Decisions the supervisor will make.
+
+``observe_heartbeat`` is the S6 rule and is real (B3-01). Restart,
+failure classification and reattach still raise until B3-02 and B3-03.
 
 The state machine's edges are :data:`~mftik.procman.state.TRANSITIONS`.
 These functions choose an edge from an observation. They are pure: no
@@ -202,5 +205,6 @@ def observe_heartbeat(
     full: the previous observation stands. A beat replaces it wholesale,
     because every message carries the full snapshot rather than a delta.
     """
-    del previous_ready, beat
-    raise NotImplementedError(TICKET)
+    if beat is None:
+        return previous_ready
+    return beat.ready
