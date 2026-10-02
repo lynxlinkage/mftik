@@ -318,7 +318,7 @@ def test_a_bad_argument_is_refused_before_the_stub() -> None:
         apply_put((), object())  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         trading_active(0, ())
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError):
         trading_pushes(publish="yes", accounts=(), intents=())  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         td_reattach(desired="somewhere", observed=ObservedWorker.RUNNING)  # type: ignore[arg-type]
