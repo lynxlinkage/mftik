@@ -932,3 +932,64 @@ async def test_another_sessions_paper_recon_does_not_hide_a_live_order() -> None
     assert result_a.unconfirmed == []
     assert cid_a in venue.cancelled
     assert cid_a not in worker.trading.oms.view().orders
+
+
+class _LateIndex(_Venue):
+    """The ack landed. The by-cid lookup does not see the order yet."""
+
+    def __init__(self, *, cancel_error: BaseException | None = None) -> None:
+        super().__init__()
+        self.cancelled_ids: list[str] = []
+        self.cancel_by_id_error = cancel_error
+
+    async def fetch_order_by_client_order_id(
+        self, client_order_id: str, *, ticker: object = None
+    ) -> None:
+        del ticker
+        self.fetched.append(client_order_id)
+        return None
+
+    async def cancel_order(self, order_id: str) -> Order:
+        self.cancelled_ids.append(order_id)
+        if self.cancel_by_id_error is not None:
+            raise self.cancel_by_id_error
+        return _resting(order_id.removeprefix("v-"), OrderStatus.CANCELED)
+
+
+@pytest.mark.component
+async def test_an_acked_pending_new_is_not_rejected_when_the_lookup_misses() -> None:
+    """A venue id on ``PENDING_NEW`` means the venue already accepted it.
+
+    OKX, Bybit, Bitget, and sometimes Deribit return that from
+    ``place_order``. The by-cid lookup can still miss. Marking the
+    order ``REJECTED`` would make ``cancel_session`` answer ``ok``
+    while the order rests. Cancel by the venue id instead. If that
+    cancel does not confirm, the cid is ``unconfirmed`` and the book
+    stays ``PENDING_NEW``.
+    """
+    clock = FakeClock()
+    cid = _cid(SESSION_A, 1)
+    order = _resting(cid, OrderStatus.PENDING_NEW)
+    venue = _LateIndex()
+    worker, _session = _with_session(venue, _oms(order), clock=clock)
+    result = await worker.orders.cancel_session(
+        TdCancelSessionRequest(session_id=SESSION_A), timeout=1.0
+    )
+    assert result.ok is True
+    assert result.unconfirmed == []
+    assert venue.cancelled_ids == [order.order_id]
+    assert venue.cancelled == []
+    assert cid not in worker.trading.oms.view().orders
+
+    missed = _LateIndex(cancel_error=OrderError("not indexed"))
+    worker, _session = _with_session(
+        missed, _oms(_resting(cid, OrderStatus.PENDING_NEW)), clock=clock
+    )
+    result = await worker.orders.cancel_session(
+        TdCancelSessionRequest(session_id=SESSION_A), timeout=1.0
+    )
+    booked = worker.trading.oms.view().orders[cid]
+    assert booked.status is OrderStatus.PENDING_NEW
+    assert result.ok is False
+    assert result.unconfirmed == [cid]
+    assert missed.cancelled_ids == [order.order_id]
