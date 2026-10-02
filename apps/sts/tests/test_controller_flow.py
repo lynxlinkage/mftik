@@ -13,7 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 from mftik.clock import FakeClock
-from mftik.procman import WorkerPhase
+from mftik.intent_gc import owners_in_report
+from mftik.procman import CapacityExceeded, WorkerPhase
 from mftik.protocol import (
     STS_ERROR,
     STS_REASON_OPERATOR_STOP,
@@ -22,8 +23,10 @@ from mftik.protocol import (
     STS_SESSION_START,
     STS_SESSION_STATUS,
     Envelope,
+    IntentOwner,
     ListSessionsRequest,
     ListSessionsResult,
+    ProcmanWorker,
     RpcError,
     StsCreateSessionRequest,
     StsCreateSessionResult,
@@ -42,6 +45,7 @@ from mftik_sts.controller import (
     start_handler,
 )
 from mftik_sts.controller.spawn import write_session_request
+from mftik_sts.rpc.router import control_handler
 
 
 class FakeSupervisor:
@@ -96,6 +100,28 @@ class FakeSupervisor:
 
     async def start(self) -> tuple[object, ...]:
         return ()
+
+    def listed(self) -> list[ProcmanWorker]:
+        """What :meth:`Supervisor.report` would contribute for this slot."""
+        if self.phase not in (
+            WorkerPhase.STARTING,
+            WorkerPhase.RUNNING,
+            WorkerPhase.STOPPING,
+        ):
+            return []
+        if not self.spawned:
+            return []
+        spec = self.spawned[-1]
+        return [
+            ProcmanWorker(
+                id=spec.id,  # type: ignore[attr-defined]
+                code_ref=spec.code_ref,  # type: ignore[attr-defined]
+                rss_bytes=None,
+                phase=self.phase.value,
+                ready=self.ready,
+                incarnation=spec.incarnation,  # type: ignore[attr-defined]
+            )
+        ]
 
 
 def _request(session_id: str = "abc123", *, created_by: int = 1) -> object:
@@ -184,6 +210,60 @@ async def test_an_omitted_code_ref_is_the_current_release(
     await start_handler(orch)(_request())
     await orch.converge("abc123")
     assert supervisor.spawned[0].code_ref == "rel-9"  # type: ignore[attr-defined]
+
+
+def _published(
+    supervisor: FakeSupervisor, orchestrator: StsOrchestrator
+) -> list[ProcmanWorker]:
+    """One publication: supervisor live slots, then pending extras."""
+    listed = supervisor.listed()
+    have = {worker.id for worker in listed}
+    extras = orchestrator.extra_workers()
+    assert all(worker.id not in have for worker in extras)
+    return [*listed, *extras]
+
+
+async def test_an_accepted_session_is_on_the_next_report(tmp_path: Path) -> None:
+    """B4-07 drops an owner missing from two reports. The accept is listed
+    before spawn, and STARTING replaces that extra without a second id."""
+    orch, supervisor = _orch(tmp_path)
+    await start_handler(orch)(_request())
+    before = _published(supervisor, orch)
+    assert [worker.id for worker in before] == ["sts/session/abc123"]
+    assert before[0].phase == "starting"
+    assert owners_in_report("sts", before) == frozenset(
+        {IntentOwner(sts_instance="sts", session_id="abc123")}
+    )
+
+    await orch.converge("abc123")
+    after = _published(supervisor, orch)
+    assert [worker.id for worker in after] == ["sts/session/abc123"]
+    assert orch.extra_workers() == ()
+    assert after[0].phase == "starting"
+    assert owners_in_report("sts", after) == owners_in_report("sts", before)
+
+
+async def test_capacity_exceeded_is_the_start_reply(tmp_path: Path) -> None:
+    class _Refuse(FakeSupervisor):
+        async def spawn(self, spec: object) -> None:
+            del spec
+            raise CapacityExceeded("max_workers 1")
+
+    supervisor = _Refuse(tmp_path)
+    orch = StsOrchestrator(
+        supervisor,  # type: ignore[arg-type]
+        clock=FakeClock(),
+        code_ref="test",
+        argv_for=lambda path: ("stand-in", str(path)),
+    )
+    reply = await control_handler(None, orch)(_request())  # type: ignore[arg-type]
+    assert reply is not None
+    assert reply.type == STS_ERROR
+    error = RpcError.model_validate(reply.payload)
+    assert error.code == "capacity_exceeded"
+    assert "max_workers" in error.message
+    assert orch.extra_workers() == ()
+    assert supervisor.spawned == []
 
 
 async def test_converge_spawns_once_and_observe_publishes_running(

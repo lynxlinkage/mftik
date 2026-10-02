@@ -8,7 +8,6 @@ IF-16 and B5-11 own those. ``sts.ctl.{session_id}`` is not registered.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
@@ -99,24 +98,17 @@ _HANDLERS: dict[str, Handler] = {
     STS_SESSION_FORCE_STOP: handle_session_force_stop,
 }
 
-_background: set[asyncio.Task[None]] = set()
 
-
-def _schedule_converge(orchestrator: StsOrchestrator, reply: Reply | None) -> None:
-    """Spawn after the accept is built, so the reply does not wait (F12)."""
+def _accepted_session_id(reply: Reply | None) -> str | None:
+    """The session a ``starting`` accept named, or ``None``."""
     if reply is None or reply.type != STS_SESSION_START:
-        return
+        return None
     payload = reply.payload
     status = getattr(payload, "status", None)
     session_id = getattr(payload, "session_id", None)
     if status != "starting" or not isinstance(session_id, str) or not session_id:
-        return
-    task = asyncio.create_task(
-        orchestrator.converge(session_id),
-        name=f"sts-converge-{session_id}",
-    )
-    _background.add(task)
-    task.add_done_callback(_background.discard)
+        return None
+    return session_id
 
 
 def _not_ready(message: UntypedEnvelope) -> Reply:
@@ -163,7 +155,20 @@ def control_handler(
             return _not_ready(message)
         if kind == STS_SESSION_START and start is not None and orchestrator is not None:
             reply = await start(message)
-            _schedule_converge(orchestrator, reply)
+            session_id = _accepted_session_id(reply)
+            if session_id is not None:
+                # Spawn before the reply. A capacity refusal is this
+                # reply; the process is not left accepted. ``on_start``
+                # has not run. Until spawn is entered the session is on
+                # the report via extra_workers (B4-07).
+                refusal = await orchestrator.finish_start(session_id)
+                if refusal is not None:
+                    return RpcErrorEnvelope.wrap(
+                        RpcError(code=refusal.code, message=refusal.message),
+                        type=STS_ERROR,
+                        source="sts",
+                        session_id=message.session_id,
+                    )
             return reply
         if kind == STS_SESSION_END and end is not None:
             return await end(message)

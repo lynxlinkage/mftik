@@ -5,8 +5,11 @@ the reply (H1). B4-02 serves all three on ``sts.{instance}`` (#298).
 ``sts.ctl.{session_id}`` stays the worker's subject; nothing here
 registers on it.
 
-The reply does not spawn. The router schedules converge after a start
-accept, so the accept returns before the process exists (F12).
+``start_handler`` records the session and does not spawn, so the
+contract tests stay free of a process. The router then awaits spawn
+before it sends that reply: ``CapacityExceeded`` is the start refusal,
+and until spawn is entered the session is on ``procman.report`` via
+``extra_workers`` (B4-07). ``on_start`` has not run (F12).
 
 Registry and env (IF-16, §5.7) are the same shape: a signature here, and
 ``NotImplementedError("IF-16")`` until B5-10. The running process still
@@ -64,7 +67,9 @@ def start_handler(orchestrator: StsOrchestrator) -> Handler:
     The reply is an accept: :class:`~mftik.protocol.messages.StsCreateSessionResult`
     with ``status="starting"`` and the request's ``session_id``. ``on_start``
     has not run. Later progress is ``sts.session.status``, not a second
-    field on the reply. This function does not spawn.
+    field on the reply. This function does not spawn. The router awaits
+    :meth:`~mftik_sts.controller.StsOrchestrator.finish_start` before
+    sending the reply, so a capacity refusal replaces it.
 
     Served on ``Topics.sts(instance)``. The subject is bound by the process,
     not by this function.

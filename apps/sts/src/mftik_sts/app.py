@@ -4,7 +4,9 @@ B4-02 runs one :class:`~mftik.procman.Supervisor` for this instance.
 ``start`` applies reattach before the control subject is served.
 ``SIGTERM`` closes with ``detach``, so the session workers keep running
 (§4.6). Reports are :func:`mftik.procman.publish_reports` with no phase
-filter and no ``extra_workers`` (restarting sessions are B5-06).
+filter. ``extra_workers`` lists a session that has been accepted and
+not yet spawned, so the next report still names it (B4-07). A
+``restarting`` session with no process is B5-06 and is not added.
 """
 
 from __future__ import annotations
@@ -324,6 +326,7 @@ async def amain() -> bool:
                 instance=INSTANCE,
                 publish=_publish,
                 clock=SystemClock(),
+                extra_workers=orchestrator.extra_workers,
             ),
             name="sts-procman-report",
         )

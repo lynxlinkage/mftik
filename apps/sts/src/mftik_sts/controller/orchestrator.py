@@ -35,6 +35,7 @@ from mftik.protocol import (
     Envelope,
     ListSessionsRequest,
     ListSessionsResult,
+    ProcmanWorker,
     SessionInfo,
     StsCreateSessionRequest,
     StsCreateSessionResult,
@@ -124,6 +125,11 @@ class _Held:
     observed_generation: int | None
     conditions: dict[str, str]
     published: tuple[object, ...] | None = None
+    #: True once :meth:`Supervisor.spawn` has been entered. The pending
+    #: report entry stops there: the slot, if admitted, is ``STARTING``.
+    spawn_started: bool = False
+    #: Set when that spawn refused with ``capacity_exceeded``.
+    refusal: CallError | None = None
 
 
 def _terminal(phase: SessionPhase) -> bool:
@@ -201,8 +207,13 @@ class StsOrchestrator:
     * Does not own MD or TD intents and does not set ``released_at``.
       A session that ends by itself is recorded terminal; who releases
       that intent is B5 (#314). The API releases after a successful end
-      reply.
+      reply. MD and TD drop an owner after it is missing from two
+      ``procman.report.sts`` publications (B4-07). A session accepted
+      but not yet spawned is on that report via :meth:`extra_workers`.
+      Once the slot is ``STARTING``, the supervisor lists it itself.
     * Does not import strategy code (F39). Crash and rehang are B5-06.
+      ``CapacityExceeded`` on the first spawn is the start refusal
+      (``capacity_exceeded``), not a later snapshot.
 
     ``reconcile`` is pure. Idle is an empty tuple. A crash-shaped status
     still raises ``NotImplementedError("IF-04")``.
@@ -317,8 +328,8 @@ class StsOrchestrator:
     ) -> StsCreateSessionResult | CallError:
         """Record the session and reply ``starting``. Does not spawn.
 
-        The router schedules :meth:`converge` after the reply is built
-        (F12). A second start of a session that is not terminal replies
+        The router awaits :meth:`finish_start` before sending the reply.
+        A second start of a session that is not terminal replies
         ``starting`` again and does not reset it. A start of a terminal
         session is ``session_ended``.
         """
@@ -339,6 +350,56 @@ class StsOrchestrator:
         return StsCreateSessionResult(
             session_id=spec.session_id, status="starting"
         )
+
+    def extra_workers(self) -> tuple[ProcmanWorker, ...]:
+        """Sessions accepted but not yet handed to :meth:`Supervisor.spawn`.
+
+        ``STARTING``, ``RUNNING`` and ``STOPPING`` are already on
+        :meth:`Supervisor.report`. The gap before spawn is not. MD and TD
+        release an owner missing from two consecutive
+        ``procman.report.sts`` publications (B4-07), so that gap is
+        filled here. The id is ``sts/session/<session_id>``. Restarting
+        with no process is B5-06 and is not included. Entries do not
+        repeat an id the supervisor already lists: this stops when spawn
+        is entered.
+        """
+        chosen: list[str] = []
+        for session_id in sorted(self._sessions):
+            held = self._sessions[session_id]
+            if held.spec.desired is not DesiredPhase.RUNNING:
+                continue
+            if held.spawn_started or held.phase is not SessionPhase.PENDING:
+                continue
+            if held.worker_incarnation != 0:
+                continue
+            chosen.append(session_id)
+        if not chosen:
+            return ()
+        code_ref = self._release_name()
+        return tuple(
+            ProcmanWorker(
+                id=session_worker_id(session_id),
+                code_ref=code_ref,
+                rss_bytes=None,
+                phase=WorkerPhase.STARTING.value,
+                ready=False,
+                incarnation=FIRST_INCARNATION,
+            )
+            for session_id in chosen
+        )
+
+    async def finish_start(self, session_id: str) -> CallError | None:
+        """Spawn an accepted session before the start reply is sent.
+
+        :class:`~mftik.procman.CapacityExceeded` becomes the refusal the
+        handler returns. Any other failure stays on the snapshot; the
+        reply is still ``starting``. ``on_start`` has not run.
+        """
+        await self.converge(session_id)
+        held = self._sessions.get(session_id)
+        if held is None:
+            return None
+        return held.refusal
 
     async def end_session(
         self, request: StsSessionEndRequest
@@ -616,13 +677,16 @@ class StsOrchestrator:
             hb_timeout_s=SESSION_HB_TIMEOUT_S,
             stop_grace_s=SESSION_STOP_GRACE_S,
         )
+        held.spawn_started = True
         try:
             await self.supervisor.spawn(worker)
         except CapacityExceeded as exc:
-            # F12 has already replied ``starting``. The refusal is the
-            # failed row and the snapshot, code ``capacity_exceeded``.
+            held.refusal = CallError(exc.code, str(exc))
             await self._fail(held, exc.code)
             return
+        except Exception:
+            held.spawn_started = False
+            raise
         held.worker_incarnation = incarnation
         held.phase = SessionPhase.STARTING
         held.column = column_status_for(SessionPhase.STARTING)
