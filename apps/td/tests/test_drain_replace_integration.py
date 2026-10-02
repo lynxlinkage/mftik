@@ -512,20 +512,38 @@ async def test_drain_replace_keeps_a_resting_order_and_refuses_the_rest(
                 )
             )
             chaos_stop = asyncio.Event()
+            # The busy counter covers a call inside the order handler.
+            # A request NATS has already accepted is not in that count, so
+            # the stop can land while the client is still waiting and the
+            # only answer is a timeout. The order never reached the venue.
+            # This client's submits and cancels stay out of that window:
+            # Supervisor.stop waits until the one in flight has a reply.
+            # A timeout is still a failed cid.
+            client_idle = asyncio.Lock()
+            original_stop = supervisor.stop
+
+            async def stop_when_the_client_is_idle(worker_id: str) -> None:
+                async with client_idle:
+                    await original_stop(worker_id)
+
+            supervisor.stop = stop_when_the_client_is_idle  # type: ignore[method-assign]
 
             async def _chaos() -> None:
                 n = 0
                 accepted: list[str] = []
                 while not chaos_stop.is_set():
-                    n += 1
-                    cid = f"c{n:04d}"
-                    outcomes[cid] = await _submit(
-                        broker, api_id, cid, ticker=TICKER
-                    )
-                    if outcomes[cid] == "accepted":
-                        accepted.append(cid)
-                        if len(accepted) % 2 == 0:
-                            await _cancel(broker, api_id, accepted[-1])
+                    async with client_idle:
+                        if chaos_stop.is_set():
+                            return
+                        n += 1
+                        cid = f"c{n:04d}"
+                        outcomes[cid] = await _submit(
+                            broker, api_id, cid, ticker=TICKER
+                        )
+                        if outcomes[cid] == "accepted":
+                            accepted.append(cid)
+                            if len(accepted) % 2 == 0:
+                                await _cancel(broker, api_id, accepted[-1])
 
             chaos = asyncio.create_task(_chaos(), name="chaos")
             await asyncio.sleep(0.05)
@@ -560,6 +578,12 @@ async def test_drain_replace_keeps_a_resting_order_and_refuses_the_rest(
             bad = {cid: kind for cid, kind in outcomes.items() if kind not in allowed}
             assert not bad, f"{bad}\n{_logs(work, api_id)}"
             assert outcomes, "the client submitted nothing during the replace"
+            overlapped = {
+                "td_draining",
+                "td_venue_not_connected",
+                "no_responders",
+            }
+            assert overlapped & set(outcomes.values()), outcomes
     finally:
         if chaos is not None:
             chaos.cancel()
