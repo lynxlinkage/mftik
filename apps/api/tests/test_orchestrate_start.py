@@ -1,4 +1,4 @@
-"""§8.1 start / end. A failed start is not rolled back (F12, IF-13)."""
+"""§8.1 start / end. A refused accept is failed and released (IF-13)."""
 
 from __future__ import annotations
 
@@ -7,14 +7,16 @@ from types import SimpleNamespace
 
 import pytest
 from db_harness import a_database, an_instance, an_owner
+from fanout_harness import patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.broker import Broker
 from mftik.broker.config import BrokerConfig
-from mftik.broker.errors import NoRespondersError
+from mftik.broker.errors import NoRespondersError, RequestTimeoutError
 from mftik.protocol import (
     MD_INTENT_DELETE,
     MD_INTENT_PUT,
     PROTOCOL_VERSION,
+    STS_REGISTRY_SYNC,
     STS_SESSION_END,
     STS_SESSION_START,
     TD_INTENT_DELETE,
@@ -22,13 +24,18 @@ from mftik.protocol import (
     Envelope,
     IntentOwner,
     MdIntentPut,
+    StsRegistrySyncResult,
+    StsRegistrySyncResultEnvelope,
     Topics,
     parse_strategy_yml,
 )
+from mftik.registry import RegistryStore, qualify
 from mftik_api import orchestrate
 from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.orchestrate import end, end_subject, start
+from mftik_api.routes import registry as registry_routes
 from mftik_api.routes import sts as sts_routes
+from mftik_api.routes.registry import delete_strategy
 from mftik_api.schemas import StrategyDeployBody
 from mftik_db.models.account import Account
 from mftik_db.models.api import Api
@@ -68,6 +75,7 @@ class ScriptedTransport:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str, float]] = []
         self.fail_on: set[str] = set()
+        self.fail_timeout: set[str] = set()
         self.replies_pv: int | None = PROTOCOL_VERSION
         self.probes = 0
 
@@ -89,6 +97,8 @@ class ScriptedTransport:
         body = json.loads(raw)
         if body["type"] in self.fail_on:
             raise NoRespondersError(subject, request_id, timeout)
+        if body["type"] in self.fail_timeout:
+            raise RequestTimeoutError(subject, request_id, timeout)
         return _reply(body, pv=self.replies_pv)
 
     async def probe(
@@ -352,7 +362,16 @@ async def test_an_unnamed_deploy_stores_a_null_instance_and_addresses_the_derive
     assert owner["sts_instance"] == "sts-jp"
 
 
+def _kinds(transport: ScriptedTransport) -> list[str]:
+    return [json.loads(raw)["type"] for _subject, raw, _timeout in transport.sent]
+
+
 async def test_a_failed_start_is_not_rolled_back(world) -> None:
+    """No responders on start: the worker was not created, so no end.
+
+    The puts were sent, so their deletes follow. The row stays, failed,
+    and the intents are released.
+    """
     transport = ScriptedTransport()
     transport.fail_on.add(STS_SESSION_START)
     with pytest.raises(DomainRpcError) as exc:
@@ -360,40 +379,151 @@ async def test_a_failed_start_is_not_rolled_back(world) -> None:
     assert exc.value.code == "timeout"
     assert exc.value.no_responders is True
 
-    kinds = [json.loads(raw)["type"] for _subject, raw, _timeout in transport.sent]
-    assert STS_SESSION_END not in kinds
-    assert MD_INTENT_DELETE not in kinds
-    assert TD_INTENT_DELETE not in kinds
-    assert kinds == [TD_INTENT_PUT, MD_INTENT_PUT, STS_SESSION_START]
+    assert _kinds(transport) == [
+        TD_INTENT_PUT,
+        MD_INTENT_PUT,
+        STS_SESSION_START,
+        MD_INTENT_DELETE,
+        TD_INTENT_DELETE,
+    ]
+    assert transport.sent[-2][0] == Topics.md("md-jp")
+    assert transport.sent[-1][0] == Topics.td("td-jp")
 
     async with world.scope() as db:
         rows = (await db.execute(select(StsSessionRow))).scalars().all()
         assert len(rows) == 1
-        assert rows[0].status == SessionStatus.LIVE.value
-        md = (await db.execute(select(MdIntent))).scalars().all()
-        td = (await db.execute(select(TdIntent))).scalars().all()
-        assert len(md) == 1 and md[0].released_at is None
-        assert len(td) == 1 and td[0].released_at is None
+        assert rows[0].status == SessionStatus.FAILED.value
+        assert rows[0].reason == (
+            f"start not accepted: timeout: {exc.value.message}"
+        )
+        md = (await db.execute(select(MdIntent))).scalars().one()
+        td = (await db.execute(select(TdIntent))).scalars().one()
+        assert md.released_at is not None
+        assert td.released_at is not None
 
 
 async def test_a_reply_with_the_wrong_pv_is_not_an_accept_and_is_not_rolled_back(
     world,
 ) -> None:
+    """A definite refusal deletes only the put that was sent. No end."""
     transport = ScriptedTransport()
     transport.replies_pv = 1
     with pytest.raises(DomainRpcError) as exc:
         await _accepted(world, transport)
     assert exc.value.code == "protocol_mismatch"
 
-    kinds = [json.loads(raw)["type"] for _subject, raw, _timeout in transport.sent]
-    assert kinds == [TD_INTENT_PUT]
+    assert _kinds(transport) == [TD_INTENT_PUT, TD_INTENT_DELETE]
+    assert transport.sent[-1][0] == Topics.td("td-jp")
     async with world.scope() as db:
         rows = (await db.execute(select(StsSessionRow))).scalars().all()
         assert len(rows) == 1
+        assert rows[0].status == SessionStatus.FAILED.value
+        assert rows[0].reason is not None
+        assert rows[0].reason.startswith(
+            "start not accepted: protocol_mismatch: "
+        )
         td = (await db.execute(select(TdIntent))).scalars().one()
         md = (await db.execute(select(MdIntent))).scalars().one()
-        assert td.released_at is None
-        assert md.released_at is None
+        assert td.released_at is not None
+        assert md.released_at is not None
+
+
+async def test_an_unclear_start_timeout_sends_end_before_the_deletes(
+    world,
+) -> None:
+    """Somebody accepted ``sts.session.start`` and did not answer.
+
+    End goes to the session control subject. A failed end notify does
+    not skip the deletes or the failed row.
+    """
+    transport = ScriptedTransport()
+    transport.fail_timeout.add(STS_SESSION_START)
+    transport.fail_on.add(STS_SESSION_END)
+    with pytest.raises(DomainRpcError) as exc:
+        await _accepted(world, transport)
+    assert exc.value.code == "timeout"
+    assert exc.value.no_responders is False
+
+    assert _kinds(transport) == [
+        TD_INTENT_PUT,
+        MD_INTENT_PUT,
+        STS_SESSION_START,
+        STS_SESSION_END,
+        MD_INTENT_DELETE,
+        TD_INTENT_DELETE,
+    ]
+    session_id = json.loads(transport.sent[2][1])["payload"]["session_id"]
+    assert transport.sent[3][0] == end_subject(session_id)
+    async with world.scope() as db:
+        row = await StsSessionRepository(db).get_by_session_id(session_id)
+        assert row is not None
+        assert row.status == SessionStatus.FAILED.value
+        assert row.reason is not None
+        assert row.reason.startswith("start not accepted: timeout: ")
+
+
+_TINY = """\
+from mftik.strategy import Strategy
+
+class Tiny(Strategy):
+    name = "Tiny"
+"""
+
+
+class _RegistryBroker:
+    def __init__(self, store: RegistryStore) -> None:
+        self.store = store
+
+    async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
+        del subject, timeout
+        assert envelope.type == STS_REGISTRY_SYNC
+        return StsRegistrySyncResultEnvelope.wrap(
+            StsRegistrySyncResult(
+                loaded=[
+                    qualify(rec.origin, rec.type)
+                    for rec in self.store.list_all()
+                ]
+            ),
+            type=STS_REGISTRY_SYNC,
+            source="sts",
+        )
+
+
+async def test_a_refused_start_does_not_block_registry_delete(
+    world, monkeypatch, tmp_path
+) -> None:
+    transport = ScriptedTransport()
+    transport.fail_on.add(STS_SESSION_START)
+    with pytest.raises(DomainRpcError):
+        spec = parse_strategy_yml(YAML)
+        await start(
+            spec,
+            broker=_broker(transport),
+            strategy_type="private::Tiny",
+            yaml_text=YAML,
+            created_by=1,
+            instance="sts-jp",
+        )
+
+    async with world.scope() as db:
+        live = await StsSessionRepository(db).list_live_for_origin("private")
+        assert list(live) == []
+        held = (await db.execute(select(StsSessionRow))).scalars().one()
+        assert held.status == SessionStatus.FAILED.value
+        assert held.type == "private::Tiny"
+
+    patch_authoritative_anycast(monkeypatch)
+    monkeypatch.setattr(registry_routes, "session_scope", world.scope)
+    store = RegistryStore(tmp_path)
+    store.add({"strategy.py": _TINY}, origin="private")
+    removed = await delete_strategy(
+        "Tiny",
+        store=store,  # type: ignore[arg-type]
+        broker=_RegistryBroker(store),  # type: ignore[arg-type]
+        origin="private",
+    )
+    assert removed.name == "Tiny"
+    assert store.list_private() == []
 
 
 async def test_an_unknown_account_is_404_and_writes_nothing(world) -> None:

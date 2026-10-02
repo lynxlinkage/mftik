@@ -2,9 +2,10 @@
 
 The synchronous create → MD attach → TD attach sequence and its rollback
 (``_detach_md``, ``_fail_sts``) are gone (RM-08). :func:`start` validates,
-writes the session spec, registers intents, asks STS to accept, and
-returns. :func:`end` asks the session to stop and then releases intents.
-Neither one rolls a partial start back.
+writes the session spec, registers intents, and asks STS to accept. A
+refusal before that accept marks the row failed and releases the intents
+(§8.1). :func:`end` asks a session that was accepted to stop, and then
+releases intents.
 
 **State authority (§3.3).**
 
@@ -12,26 +13,33 @@ Neither one rolls a partial start back.
   document — is this module's. It is written with
   :meth:`StsSessionRepository.create_live`. ``restart`` defaults to
   ``never`` there (F11).
-* Session status — phase, conditions, incarnation, ``restart_count``,
-  the failure reason — is the STS controller's. ``create_live`` still
-  stores ``live``, which is the column's historical insert, not a phase
-  this module decided. The accept body says ``starting``. Progress on
-  that body is null: the ingress has not reported a hook.
+* Session status after an accept — phase, conditions, incarnation,
+  ``restart_count``, the failure reason — is the STS controller's.
+  ``create_live`` stores ``live``, the column's historical insert.
+  A refusal before the accept is this module's to record: the
+  supervisor never received the session, and a ``live`` row would
+  have no one to clear it. The accept body says ``starting``.
+  Progress on that body is null: the ingress has not reported a hook.
 * MD and TD intent rows are written here at start, and by the STS
   controller when it heals. :meth:`IntentRepository.release` sets
-  ``released_at`` and does not delete (F38). Who writes that timestamp
-  when an owner is reclaimed from a liveness report is not decided
-  (§8.2 rule 3); this module does not.
+  ``released_at`` and does not delete (F38). A session that exits on
+  its own is released by the B5 STS orchestrator. §8.2 rule 3
+  (B3-04) reclaims from the liveness report as the fallback. This
+  module does not.
 * ``strategy_digest`` and ``env_generation`` are columns (IF-16,
   migration ``0036``). This module does not resolve or write them.
   Pinning them at start is B5-10. ``create_live`` leaves both null.
 
 **Invariants.**
 
-* **F12** A failed start is not rolled back. Rows written before a
-  plane refuses the accept stay written. There is no compensating
-  delete. The supervisor is who records a failure after the accept;
-  this module does not write that status.
+* **F12** After the accept (HTTP 202), a failure is the supervisor's
+  to record (§5.2). This module does not roll that back. A refusal
+  before the accept is §8.1: the rollback of a start that was not
+  accepted. :func:`start` best-effort sends ``sts.session.end`` when
+  the start reply is an unclear timeout, best-effort deletes the
+  intents it already put, then ``mark_failed`` and ``release``. The
+  row stays. It is ``failed``, with a reason, so registry delete and
+  the board do not treat it as running.
 * **P-1** Intent puts are idempotent. The repository replaces the set.
   It does not refcount.
 * **§8.1** End is ``sts.session.end``, then ``md.intent.delete`` and
@@ -290,6 +298,18 @@ _ERROR_TYPES = frozenset({STS_ERROR, TD_ERROR, MD_ERROR})
 _MdDecl = tuple[str, list[str], list[Any]]
 
 
+class _AcceptSent:
+    """Which accept RPCs were handed to the transport.
+
+    Recorded before the reply, so a timeout still counts as sent.
+    """
+
+    def __init__(self) -> None:
+        self.td: list[tuple[str, list[int]]] = []
+        self.md: list[str] = []
+        self.start: bool = False
+
+
 def end_subject(session_id: str) -> str:
     """Subject :func:`end` publishes :data:`STS_SESSION_END` on.
 
@@ -487,15 +507,17 @@ async def _publish_start(
     td_groups: dict[str, list[int]],
     declarations: Sequence[_MdDecl],
     spec: StrategySpec,
+    sent: _AcceptSent,
 ) -> None:
     """``td.intent.put``, ``md.intent.put``, then ``sts.session.start``.
 
-    The rows are already committed. A refusal here is not rolled back
-    (F12). Atom maps on the MD reply are MD's to store; this does not
-    write ``atoms``.
+    The rows are already committed. ``sent`` records each call before
+    it is made, so a refusal knows which planes were asked. Atom maps
+    on the MD reply are MD's to store; this does not write ``atoms``.
     """
     owner = IntentOwner(sts_instance=target, session_id=session_id)
     for td_instance, api_ids in td_groups.items():
+        sent.td.append((td_instance, list(api_ids)))
         await _request_v2(
             broker,
             Topics.td(td_instance),
@@ -512,6 +534,7 @@ async def _publish_start(
             result_type=TdIntentPutResult,
         )
     for name, feeds, selects in declarations:
+        sent.md.append(name)
         await _request_v2(
             broker,
             _md_subject(name),
@@ -528,6 +551,7 @@ async def _publish_start(
             ),
             result_type=MdIntentPutResult,
         )
+    sent.start = True
     await _request_v2(
         broker,
         Topics.sts(target),
@@ -550,6 +574,110 @@ async def _publish_start(
         ),
         result_type=StsCreateSessionResult,
     )
+
+
+def _refused_reason(exc: DomainRpcError) -> str:
+    return f"start not accepted: {exc.code}: {exc.message}"
+
+
+async def _best_effort_v2(
+    broker: Broker,
+    subject: str,
+    envelope: Envelope[Any],
+    *,
+    result_type: type[BaseModel],
+    session_id: str,
+) -> None:
+    """One abandon notify. A failure is logged and does not propagate."""
+    try:
+        await _request_v2(
+            broker, subject, envelope, result_type=result_type
+        )
+    except DomainRpcError as exc:
+        logger.error(
+            "unaccepted start notify failed session=%s subject=%s: %s",
+            session_id,
+            subject,
+            exc,
+        )
+
+
+async def _abandon_unaccepted(
+    broker: Broker,
+    *,
+    session_id: str,
+    target: str,
+    sent: _AcceptSent,
+    exc: DomainRpcError,
+) -> None:
+    """§8.1 rollback of a start the planes did not accept.
+
+    An unclear ``sts.session.start`` — timed out, and somebody was
+    subscribed — may have created a worker. That case sends
+    ``sts.session.end`` on :func:`end_subject` of this session. A
+    ``no_responders`` miss and any definite refusal do not: nothing
+    accepted the start. Deletes go only to instances whose put was
+    sent, MD then TD, the same order as :func:`end`.
+
+    The row is then ``failed`` and every intent is released. Neither
+    is deleted.
+    """
+    reason = _refused_reason(exc)
+    owner = IntentOwner(sts_instance=target, session_id=session_id)
+    unclear = (
+        sent.start and exc.code == "timeout" and not exc.no_responders
+    )
+    if unclear:
+        await _best_effort_v2(
+            broker,
+            end_subject(session_id),
+            Envelope[StsSessionEndRequest].wrap(
+                StsSessionEndRequest(session_id=session_id, reason=reason),
+                type=STS_SESSION_END,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=StsSessionEndResult,
+            session_id=session_id,
+        )
+    for md_instance in sent.md:
+        await _best_effort_v2(
+            broker,
+            _md_subject(md_instance),
+            Envelope[MdIntentDelete].wrap(
+                MdIntentDelete(
+                    session_id=session_id,
+                    owner=owner,
+                    reason=reason,
+                ),
+                type=MD_INTENT_DELETE,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=MdIntentDeleteResult,
+            session_id=session_id,
+        )
+    for td_instance, api_ids in sent.td:
+        await _best_effort_v2(
+            broker,
+            Topics.td(td_instance),
+            Envelope[TdIntentDelete].wrap(
+                TdIntentDelete(
+                    session_id=session_id,
+                    owner=owner,
+                    api_ids=api_ids,
+                    reason=reason,
+                ),
+                type=TD_INTENT_DELETE,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=TdIntentDeleteResult,
+            session_id=session_id,
+        )
+    async with session_scope() as db:
+        await StsSessionRepository(db).mark_failed(session_id, reason)
+        await IntentRepository(db).release(session_id)
 
 
 async def start(
@@ -584,9 +712,11 @@ async def start(
     :class:`StsCreateSessionRequest` does not carry them. Pinning the
     pair is B5-10.
 
-    A plane that then refuses the accept leaves the rows in place
-    (F12). This function does not release them and does not mark the
-    session failed.
+    A plane that refuses the accept does not leave a ``live`` row.
+    :func:`_abandon_unaccepted` notifies what was already sent, marks
+    the row failed, releases the intents, and the original
+    :class:`DomainRpcError` is raised again. The HTTP mapping is that
+    error's.
     """
     if not isinstance(spec, StrategySpec):
         raise TypeError("spec must be a StrategySpec")
@@ -609,6 +739,7 @@ async def start(
         target=target,
         declarations=declarations,
     )
+    sent = _AcceptSent()
     try:
         await _publish_start(
             broker,
@@ -622,14 +753,27 @@ async def start(
             td_groups=td_groups,
             declarations=declarations,
             spec=spec,
+            sent=sent,
         )
     except DomainRpcError as exc:
         logger.error(
-            "start was not accepted; the spec and intents are left in "
-            "place session=%s: %s",
+            "start was not accepted session=%s: %s",
             session_id,
             exc,
         )
+        try:
+            await _abandon_unaccepted(
+                broker,
+                session_id=session_id,
+                target=target,
+                sent=sent,
+                exc=exc,
+            )
+        except Exception:
+            logger.exception(
+                "refused start was not fully recorded session=%s",
+                session_id,
+            )
         raise
 
     return DeployResponse(
@@ -650,12 +794,17 @@ async def end(session_id: str, reason: str, *, broker: Broker) -> None:
     told to those planes; a notify that fails is not undone.
 
     There is no spec column for desired ``stopped``. An ``end`` whose
-    reply never comes is not visible on the session row, and this
-    function does not add one (issue: the controller being offline; a
-    new column would collide with IF-16's migration ``0036``).
+    reply never comes is an error for the caller to retry. This
+    function does not add a column.
 
-    A session that exits on its own does not pass through here. This
-    function does not reclaim those intents.
+    A session that exits on its own does not pass through here. The
+    B5 STS orchestrator writes ``released_at`` for that exit. §8.2
+    rule 3 (B3-04) reclaims an owner from the liveness report as the
+    fallback.
+
+    An unnamed deploy leaves ``sts_sessions.instance`` null. The owner
+    used for the deletes is that column when it is set, and otherwise
+    :func:`_sts_target` on the row's accounts.
     """
     if not isinstance(session_id, str) or not session_id:
         raise ValueError("session_id is required")
