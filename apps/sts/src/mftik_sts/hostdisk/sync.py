@@ -11,6 +11,11 @@ and bound, then left in place. They are the API ``RegistryStore`` when
 ``strategy_digest`` is still null rehangs by reading them. This module
 does not delete them. Removing them is the B10 cutover, when the API
 moves its own store.
+
+``adopt_legacy`` and ``materialize_legacy_digest`` take
+:data:`mftik_sts.hostdisk.replica.TREES_LOCK` for the whole call, the
+same lock as :meth:`TreeReplica.put` and :meth:`TreeReplica.gc`. They
+call :meth:`TreeReplica._put_locked` while holding it.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ from mftik_sts.hostdisk.probe import REASON_ABSENT, probe
 from mftik_sts.hostdisk.replica import (
     INDEX_NAME,
     TREES_DIRNAME,
+    TREES_LOCK,
     TreeReplica,
     require_digest,
 )
@@ -63,7 +69,15 @@ def adopt_legacy(replica: TreeReplica) -> bool:
 
     False when any candidate directory is not a strategy tree. The
     directory stays either way. Nothing in this process deletes it.
+    Holds :data:`TREES_LOCK` across the copies so a :meth:`TreeReplica.gc`
+    cannot delete a temp directory this is still writing.
     """
+    with TREES_LOCK:
+        return _adopt_locked(replica)
+
+
+def _adopt_locked(replica: TreeReplica) -> bool:
+    """Copy legacy trees. Caller holds :data:`TREES_LOCK`."""
     ok = True
     for origin, name, path in _legacy_trees(replica):
         try:
@@ -83,13 +97,23 @@ def materialize_legacy_digest(replica: TreeReplica, digest: str) -> bool:
     the API store on a shared ``MFTIK_DATA``, or a tree nobody has synced
     into the digest layout yet. This does not bind the name, so an index
     that already points at a newer digest stays there, and it does not
-    delete the directory.
+    delete the directory. A ``trees/<digest>`` that exists but does not
+    hash to ``digest`` is rewritten from the name directory.
+
+    Holds :data:`TREES_LOCK` for the copy. Callers on the event loop use
+    ``asyncio.to_thread`` so they do not wait on the lock there.
     """
+    with TREES_LOCK:
+        return _materialize_locked(replica, digest)
+
+
+def _materialize_locked(replica: TreeReplica, digest: str) -> bool:
+    """Copy one digest. Caller holds :data:`TREES_LOCK`."""
     try:
         require_digest(digest)
     except ValueError:
         return False
-    if replica.path_of(digest) is not None:
+    if replica._matches(digest):
         return True
     for _origin, _name, path in _legacy_trees(replica):
         try:
@@ -99,10 +123,10 @@ def materialize_legacy_digest(replica: TreeReplica, digest: str) -> bool:
         if digest_files(normalised) != digest:
             continue
         try:
-            replica.put(digest, normalised)
+            replica._put_locked(digest, normalised)
         except (RegistryError, OSError):
             return False
-        return replica.path_of(digest) is not None
+        return replica._matches(digest)
     return False
 
 
@@ -228,7 +252,7 @@ def _child_trees(root: Path, origin: str) -> list[tuple[str, str, Path]]:
 def _copy_legacy(replica: TreeReplica, origin: str, name: str, path: Path) -> None:
     normalised = normalize_files(read_tree(path))
     digest = digest_files(normalised)
-    replica.put(digest, normalised)
+    replica._put_locked(digest, normalised)
     replica.bind(qualify(origin, name), digest)
 
 

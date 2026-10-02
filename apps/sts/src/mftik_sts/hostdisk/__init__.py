@@ -29,9 +29,12 @@ stay B5-11.
 
 **Invariants.**
 
-* A new digest does not overwrite a tree that is already stored. The
-  index moves; a pinned older digest stays until nothing pins it and it
-  is not the index's current version.
+* A verified tree is not overwritten. The index moves; a pinned older
+  digest stays until nothing pins it and it is not the index's current
+  version. ``put``, ``gc``, ``adopt_legacy``, and
+  ``materialize_legacy_digest`` share one process lock. ``put`` renames
+  its temp directory into place only after that directory hashes to the
+  digest.
 * :func:`gc_env` keeps pinned generations and the stamp's current
   generation. It calls :meth:`NodeEnv._prune_generations`, and so does
   :meth:`NodeEnv.commit`. Both also keep ``env/pinned-generations.json``.
