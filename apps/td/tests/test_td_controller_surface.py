@@ -6,7 +6,7 @@ Choosing the account set, the trading level, a spawn, a drain, and
 answering intent put / delete raise ``NotImplementedError("IF-12")``.
 
 What B4-07, B3 and B6-04 have to make true is in
-``test_controller_contract.py``, as xfail.
+``test_td_controller_contract.py``, as xfail.
 """
 
 from __future__ import annotations
