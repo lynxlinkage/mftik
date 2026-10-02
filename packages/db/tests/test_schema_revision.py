@@ -57,6 +57,16 @@ def test_a_later_revision_serves() -> None:
     assert describe_too_old(SchemaState("0041_something", _AFTER)) is None
 
 
+def test_0036_and_0037_both_serve() -> None:
+    """0037 drops columns this ORM no longer selects, so the floor stays 0036."""
+    assert (
+        describe_too_old(SchemaState("0036_session_code_identity", _AFTER)) is None
+    )
+    assert (
+        describe_too_old(SchemaState("0037_drop_rebuild_facts", _AFTER)) is None
+    )
+
+
 def test_a_database_with_no_sts_sessions_table_is_not_servable() -> None:
     """Nothing has migrated it yet, and this read cannot tell why.
 

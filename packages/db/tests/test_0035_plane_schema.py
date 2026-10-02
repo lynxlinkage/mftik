@@ -329,8 +329,6 @@ async def test_a_new_session_row_uses_the_f11_defaults(database_url: str) -> Non
         assert row.observed_generation is None
         assert row.worker_incarnation is None
         assert row.conditions == {}
-        assert row.rebuild_count == 0
-        assert row.st_facts == {}
 
         row.restart = "on_failure"
         await db.flush()

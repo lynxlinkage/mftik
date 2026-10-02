@@ -297,8 +297,13 @@ async def test_a_gapped_book_resubscribes_instead_of_publishing(
         await bybit_public.push(
             "orderbook.50.BTCUSDT", _book(99, [["2", "1"]], []), kind="delta"
         )
+        # The resubscribe is its own task: the subscribe frame goes out only
+        # after the unsubscribe ack, so both have to be present before we look.
         for _ in range(200):
-            if bybit_public.frames_for("unsubscribe"):
+            if (
+                bybit_public.frames_for("unsubscribe")
+                and len(bybit_public.frames_for("subscribe")) == 2
+            ):
                 break
             await asyncio.sleep(0.01)
 

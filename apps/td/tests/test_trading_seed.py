@@ -160,7 +160,6 @@ async def _rows(
                 td={},
                 md_ids={},
                 st_paras={},
-                st_facts={},
             )
         )
         session.add(
@@ -171,7 +170,6 @@ async def _rows(
                 td={},
                 md_ids={},
                 st_paras={},
-                st_facts={},
             )
         )
         released = None if hold else datetime.now(UTC)
@@ -230,7 +228,6 @@ async def _null_owner_accounts(
                 td={"trader": {"api_id": trader.id}},
                 md_ids={},
                 st_paras={},
-                st_facts={},
             )
         )
         session.add(TdIntent(session_id="sess-null", api_id=trader.id))

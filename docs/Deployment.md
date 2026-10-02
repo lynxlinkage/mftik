@@ -380,7 +380,22 @@ artifact 版本沒變就不用帶 `--binary`；config 改了才帶 `--config`，
 **回滾（只在主機上）：** image 還在 GHCR，所以把 `.env` 的 `MFTIK_VERSION` 改成舊
 tag 再 `docker compose up -d` 就夠；要連 compose 檔一起退，就把對應的
 `docker-compose.bak.<sha>.yml` 複製回 `docker-compose.yml`。那台機器上已經累積了大量
-`.env.bak-*` 和 `docker-compose.bak.*.yml`，沒有任何清理機制。
+`.env.bak-*` 和 `docker-compose.bak.*.yml`，沒有任何清理機制。這個回滾不執行
+`alembic downgrade`。
+
+**0037 的順序：** `0037_drop_rebuild_facts`（B10-01）從 `sts_sessions` 刪掉
+`rebuild_count` 與 `st_facts`，並從 ORM 拿掉這兩欄。API、STS、TD、MD 要全部先換成
+含這個 ORM 的 build，然後才把資料庫升到 0037。0036 以及更早的 build 仍會 SELECT
+這兩欄（`0036_session_code_identity` 的模型還有它們，不是只有 0036 之前）。欄位
+刪掉之後，那些 build 對 `sts_sessions` 的讀寫會全部失敗。
+
+正式環境的 compose 在 API 主機上一次性跑 migrate（上面的 `--profile tools run --rm
+migrate`）。各 plane 在其他主機上，不在這個 compose 裡，要另外套用；那一次 migrate
+不會換成那些 process。站台表裡 jp 的 plane 與 compose 宣告在同一台機器、tw 的
+plane 在另一台，但 compose 都不會更新 plane。所以部署 API 會先改資料庫，舊 ORM 的
+STS、TD、MD 立刻讀寫不了 `sts_sessions`。順序是先套含本 PR ORM 的 build，最後才讓
+API 主機上的 migrate 升到 0037。演練與降版限制見
+`docs/baseline/b10-01-rehearsal.md`。正式切換是 B10-04。
 
 ## 現況（2026-10-01）
 

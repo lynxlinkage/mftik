@@ -59,9 +59,19 @@ def test_rewrite_json_walks_keys_and_values() -> None:
 
 
 def _upgrade(conn: sa.Connection) -> None:
+    # 0029 rewrites ``st_facts``. B10-01 dropped that column from the model,
+    # so the harness schema no longer has it. Put it back for this upgrade
+    # only; the shared schema has to match the model again afterwards.
     ops = Operations(MigrationContext.configure(conn))
     with Operations.context(ops.migration_context):
+        ops.add_column(
+            "sts_sessions",
+            sa.Column(
+                "st_facts", sa.JSON(), nullable=False, server_default="{}"
+            ),
+        )
         _migration().upgrade()
+        ops.drop_column("sts_sessions", "st_facts")
 
 
 @pytest.fixture
